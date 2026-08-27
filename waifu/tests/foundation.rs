@@ -26,7 +26,7 @@
 use std::io::Write;
 
 use waifu::flint::{functional as F, DType, Device, Tensor};
-use waifu::{Embedding, IniConfig, Linear, RmsNorm, VarBuilder, ZipFile};
+use waifu::{Embedding, IniConfig, Linear, Nvfp4Linear, RmsNorm, VarBuilder, ZipFile};
 
 /// Writes a zip holding `entries`, stored rather than compressed, as a model package is.
 fn write_package(path: &std::path::Path, entries: &[(&str, &[u8])]) {
@@ -122,6 +122,39 @@ fn write_params(tensors: &[(&str, &[i32], &[f32])]) -> Vec<u8> {
 fn cpu_builder(tensors: &[(&str, &[i32], &[f32])]) -> VarBuilder {
     let params = write_params(tensors);
     VarBuilder::from_reader(&mut &params[..], Device::Cpu, DType::Float).unwrap()
+}
+
+fn cuda_half_builder(tensors: &[(&str, &[i32], &[f32])]) -> VarBuilder {
+    let params = write_params(tensors);
+    VarBuilder::from_reader(&mut &params[..], Device::Cuda, DType::Float16).unwrap()
+}
+
+/// Values that look like weights rather than a pattern, without pulling in a random number
+/// generator: quantization error depends on the spread within each block of 16.
+fn spread(count: usize, seed: u32) -> Vec<f32> {
+    let mut state = seed | 1;
+    (0..count)
+        .map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / (1 << 24) as f32) * 2.0 - 1.0
+        })
+        .collect()
+}
+
+/// Root mean square of the difference, over the root mean square of the reference.
+fn relative_rmse(x: &Tensor, reference: &Tensor) -> f32 {
+    let a = x.to_vec_f32().unwrap();
+    let b = reference.to_vec_f32().unwrap();
+    assert_eq!(a.len(), b.len());
+
+    let error: f64 = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+        .sum();
+    let scale: f64 = b.iter().map(|y| (*y as f64).powi(2)).sum();
+
+    (error / scale).sqrt() as f32
 }
 
 #[test]
@@ -269,6 +302,106 @@ fn builds_and_runs_the_layers() {
     // Weights the model does not expect mean the two disagree about what the layer is.
     let error = Linear::build(2, 2, false, &vb.with_name("proj")).unwrap_err();
     assert!(error.to_string().contains("bias"), "{error}");
+}
+
+#[test]
+fn refuses_a_layer_the_nvfp4_kernel_cannot_take() {
+    // Both of these are settled before anything reaches a device, so they hold whether or not
+    // this machine has the tensor cores.
+    let vb = cpu_builder(&[("proj.weight", &[8, 24], &[0.0; 192])]);
+
+    let error = Nvfp4Linear::build(24, 8, false, &vb.with_name("proj")).unwrap_err();
+    assert!(error.to_string().contains("multiple of 32"), "{error}");
+
+    let error = Nvfp4Linear::build(32, 12, false, &vb.with_name("proj")).unwrap_err();
+    assert!(error.to_string().contains("multiple of 8"), "{error}");
+}
+
+#[test]
+fn refuses_a_weight_that_is_not_on_the_device_instead_of_ending_the_process() {
+    if !Nvfp4Linear::is_available() {
+        return;
+    }
+
+    // The kernels asserts their preconditions with something that aborts, so the boundary has to
+    // catch a host side weight before it gets that far.
+    let vb = cpu_builder(&[("proj.weight", &[8, 32], &[0.0; 256])]);
+    let error = Nvfp4Linear::build(32, 8, false, &vb.with_name("proj")).unwrap_err();
+    assert!(error.to_string().contains("CUDA"), "{error}");
+}
+
+#[test]
+fn builds_and_runs_an_nvfp4_linear() {
+    if !Nvfp4Linear::is_available() {
+        return;
+    }
+
+    const IN_DIM: i32 = 64;
+    const OUT_DIM: i32 = 16;
+    const ROWS: i32 = 6;
+
+    let weight = spread((IN_DIM * OUT_DIM) as usize, 7);
+    let bias = spread(OUT_DIM as usize, 11);
+    let vb = cuda_half_builder(&[
+        ("proj.weight", &[OUT_DIM, IN_DIM], &weight),
+        ("proj.bias", &[OUT_DIM], &bias),
+    ]);
+
+    let layer = Nvfp4Linear::build(IN_DIM, OUT_DIM, true, &vb.with_name("proj")).unwrap();
+
+    let input_values = spread((ROWS * IN_DIM) as usize, 13);
+    let input = Tensor::from_f32(&[ROWS, IN_DIM], &input_values)
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap()
+        .cast(DType::Float16)
+        .unwrap();
+
+    let out = layer.forward(&input).unwrap();
+    assert_eq!(out.shape(), vec![ROWS, OUT_DIM]);
+
+    // The weight as the multiply sees it, put through the float16 path, is the reference: what is
+    // left between the two is the activation's own quantization and the accumulation order.
+    let dequantized = layer.dequantized_weight().unwrap();
+    let reference = F::add(
+        &F::matmul(&input, &dequantized.transpose(0, 1).unwrap()).unwrap(),
+        &vb.with_name("proj").get("bias", &[OUT_DIM]).unwrap(),
+    )
+    .unwrap();
+
+    let out_cpu = out
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap();
+    let reference_cpu = reference
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap();
+    let rmse = relative_rmse(&out_cpu, &reference_cpu);
+    assert!(
+        rmse < 0.2,
+        "nvfp4 linear drifted from its own dequantized weight by {rmse}"
+    );
+
+    // Leading batch axes survive the multiply.
+    let batched = Tensor::from_f32(&[2, 3, IN_DIM], &spread((6 * IN_DIM) as usize, 17))
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap()
+        .cast(DType::Float16)
+        .unwrap();
+    assert_eq!(
+        layer.forward(&batched).unwrap().shape(),
+        vec![2, 3, OUT_DIM]
+    );
+
+    // A 1-D input is not a linear layer's input, whatever the precision.
+    let error = layer
+        .forward(&Tensor::from_f32(&[IN_DIM], &spread(IN_DIM as usize, 19)).unwrap())
+        .unwrap_err();
+    assert!(error.to_string().contains("2-D"), "{error}");
 }
 
 #[test]

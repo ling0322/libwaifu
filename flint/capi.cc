@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <string>
@@ -31,6 +32,10 @@
 #include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
+#ifdef LIBWAIFU_CUTLASS_ENABLED
+#include "flint/cuda/gemm_nvfp4_cutlass.h"
+#include "flint/cuda/nvfp4.h"
+#endif
 #include "flint/tensor.h"
 #include "lutil/error.h"
 
@@ -428,6 +433,134 @@ int32_t fl_rms_norm(fl_tensor_t input, fl_tensor_t weight, float eps, fl_tensor_
 int32_t fl_matmul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::matmul(deref(a), deref(b)), out); });
 }
+
+#ifdef LIBWAIFU_CUTLASS_ENABLED
+
+namespace {
+
+/// The kernels assert their preconditions with CHECK, which aborts, and nothing may abort across
+/// this boundary. Whatever a caller could get wrong is checked here first.
+void checkNvfp4Half(const fl::Tensor &x, const char *what) {
+  if (x.getDevice().getType() != fl::Device::kCuda) {
+    throw lut::InvalidArgError(std::string(what) + " is not on a CUDA device");
+  }
+  if (x.getDType() != fl::DType::kFloat16) {
+    throw lut::InvalidArgError(std::string(what) + " is not <float16>");
+  }
+  if (!x.isContiguous()) {
+    throw lut::InvalidArgError(std::string(what) + " is not contiguous");
+  }
+  if (x.getDim() < 2) {
+    throw lut::InvalidArgError(std::string(what) + " has fewer than two dimensions");
+  }
+  if (x.getShape(-1) % 32 != 0) {
+    throw lut::InvalidArgError(std::string(what) + ": the last dimension is not a multiple of 32");
+  }
+}
+
+}  // namespace
+
+int32_t fl_nvfp4_available(int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = fl::op::cuda::isNvfp4GemmAvailable() ? 1 : 0;
+    return clearError();
+  });
+}
+
+int32_t fl_nvfp4_quantize(
+    fl_tensor_t x,
+    fl_tensor_t *data,
+    fl_tensor_t *block_scale,
+    fl_tensor_t *global_scale) {
+  return guard([&]() {
+    if (!data || !block_scale || !global_scale) throw lut::InvalidArgError("out is null");
+
+    checkNvfp4Half(deref(x), "the tensor to quantize");
+    if (deref(x).getDim() != 2) {
+      throw lut::InvalidArgError("the tensor to quantize is not two dimensional");
+    }
+
+    fl::op::cuda::Nvfp4Operand operand = fl::op::cuda::quantizeNvfp4(deref(x));
+
+    // Three handles have to appear together or not at all, and publish() is what allocates, so
+    // they are made here and only handed over once all three exist.
+    std::unique_ptr<fl::Tensor> ownedData{new fl::Tensor(std::move(operand.data))};
+    std::unique_ptr<fl::Tensor> ownedScale{new fl::Tensor(std::move(operand.blockScale))};
+    std::unique_ptr<fl::Tensor> ownedGlobal{new fl::Tensor(std::move(operand.globalScale))};
+
+    *data = reinterpret_cast<fl_tensor_t>(ownedData.release());
+    *block_scale = reinterpret_cast<fl_tensor_t>(ownedScale.release());
+    *global_scale = reinterpret_cast<fl_tensor_t>(ownedGlobal.release());
+    return clearError();
+  });
+}
+
+int32_t fl_nvfp4_dequantize(
+    fl_tensor_t data,
+    fl_tensor_t block_scale,
+    fl_tensor_t global_scale,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::op::cuda::Nvfp4Operand operand = fl::op::cuda::makeNvfp4Operand(
+        deref(data),
+        deref(block_scale),
+        deref(global_scale));
+    return publish(fl::op::cuda::dequantNvfp4ToHalf(operand), out);
+  });
+}
+
+int32_t fl_nvfp4_matmul(
+    fl_tensor_t a,
+    fl_tensor_t data,
+    fl_tensor_t block_scale,
+    fl_tensor_t global_scale,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::op::cuda::Nvfp4Operand operand = fl::op::cuda::makeNvfp4Operand(
+        deref(data),
+        deref(block_scale),
+        deref(global_scale));
+
+    checkNvfp4Half(deref(a), "the left operand");
+    if (deref(a).getShape(-1) != operand.k) {
+      throw lut::InvalidArgError("the two operands disagree about k");
+    }
+    if (operand.rows % 8 != 0) {
+      throw lut::InvalidArgError("the nvfp4 operand's row count is not a multiple of 8");
+    }
+
+    return publish(fl::op::cuda::gemmNvfp4(deref(a), operand), out);
+  });
+}
+
+#else
+
+int32_t fl_nvfp4_available(int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = 0;
+    return clearError();
+  });
+}
+
+static int32_t nvfp4Unavailable() {
+  return setError(FL_ERROR_ABORTED, "this build has no NVFP4 support (needs WITH_CUTLASS=ON)");
+}
+
+int32_t fl_nvfp4_quantize(fl_tensor_t, fl_tensor_t *, fl_tensor_t *, fl_tensor_t *) {
+  return nvfp4Unavailable();
+}
+
+int32_t fl_nvfp4_dequantize(fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t *) {
+  return nvfp4Unavailable();
+}
+
+int32_t fl_nvfp4_matmul(fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t *) {
+  return nvfp4Unavailable();
+}
+
+#endif  // LIBWAIFU_CUTLASS_ENABLED
 
 int32_t fl_mul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::mul(deref(a), deref(b)), out); });

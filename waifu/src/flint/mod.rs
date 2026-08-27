@@ -36,6 +36,9 @@
 
 mod ffi;
 pub mod functional;
+mod nvfp4;
+
+pub use nvfp4::Nvfp4Tensor;
 
 use std::ffi::CStr;
 use std::fmt;

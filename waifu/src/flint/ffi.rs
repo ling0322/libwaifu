@@ -113,6 +113,26 @@ extern "C" {
     ) -> i32;
     pub fn fl_rms_norm(input: FlTensor, weight: FlTensor, eps: f32, out: *mut FlTensor) -> i32;
     pub fn fl_matmul(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_nvfp4_available(out: *mut i32) -> i32;
+    pub fn fl_nvfp4_quantize(
+        x: FlTensor,
+        data: *mut FlTensor,
+        block_scale: *mut FlTensor,
+        global_scale: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_nvfp4_dequantize(
+        data: FlTensor,
+        block_scale: FlTensor,
+        global_scale: FlTensor,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_nvfp4_matmul(
+        a: FlTensor,
+        data: FlTensor,
+        block_scale: FlTensor,
+        global_scale: FlTensor,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_mul(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_div(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_add(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;

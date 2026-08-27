@@ -25,7 +25,7 @@
 //! # Ok::<(), waifu::flint::Error>(())
 //! ```
 
-use super::{check, ffi, init, DType, Device, Result, Tensor};
+use super::{check, ffi, init, DType, Device, Nvfp4Tensor, Result, Tensor};
 
 /// Reduce over the last dimension, the default of [`sum`] and [`max`].
 pub const LAST_DIM: i32 = -1;
@@ -93,6 +93,21 @@ pub fn rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
 /// Matrix multiplication, batched over the leading dimensions.
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_matmul(a.raw, b.raw, out) })
+}
+
+/// `a` `<float16>(..., k)` times the transpose of an NVFP4 `weight` `(rows, k)`, as
+/// `<float16>(..., rows)`. `a` is quantized on the way in, because the block scaled tensor cores
+/// take no other kind of operand; `rows` has to be a multiple of 8.
+pub fn nvfp4_matmul(a: &Tensor, weight: &Nvfp4Tensor) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe {
+        ffi::fl_nvfp4_matmul(
+            a.raw,
+            weight.data.raw,
+            weight.block_scale.raw,
+            weight.global_scale.raw,
+            out,
+        )
+    })
 }
 
 /// Element-wise `a * b`, broadcasting `b` over the leading dimensions of `a`.

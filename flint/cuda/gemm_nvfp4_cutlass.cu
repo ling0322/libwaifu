@@ -412,6 +412,38 @@ Tensor dequantNvfp4ToHalf(const Nvfp4Operand &operand) {
   return x;
 }
 
+Nvfp4Operand makeNvfp4Operand(
+    const Tensor &data,
+    const Tensor &blockScale,
+    const Tensor &globalScale) {
+  // This one is reached from outside the library, where a CHECK would take the process down with
+  // it, so what a caller could get wrong is thrown rather than asserted.
+  if (data.getDType() != DType::kFp4E2M0x2 || data.getDim() != 2) {
+    throw lut::InvalidArgError("nvfp4 operand: data is not <fp4>(rows, k / 2)");
+  }
+  if (blockScale.getDType() != DType::kUInt8 || blockScale.getDim() != 1) {
+    throw lut::InvalidArgError("nvfp4 operand: block scale is not <uint8>(n)");
+  }
+  if (globalScale.getDType() != DType::kFloat || globalScale.getNumEl() != 1) {
+    throw lut::InvalidArgError("nvfp4 operand: global scale is not a single <float>");
+  }
+
+  Nvfp4Operand operand;
+  operand.data = data;
+  operand.blockScale = blockScale;
+  operand.globalScale = globalScale;
+  operand.rows = data.getShape(0);
+  operand.k = data.getShape(1) * 2;
+
+  int paddedRows = roundUp(operand.rows, kSfBlockMN);
+  int paddedNumBlock = roundUp(divUp(operand.k, kSfVecSize), kSfBlockK);
+  if (blockScale.getShape(0) != paddedRows * paddedNumBlock) {
+    throw lut::InvalidArgError("nvfp4 operand: block scale does not match the data it scales");
+  }
+
+  return operand;
+}
+
 Tensor nvfp4Alpha(const Nvfp4Operand &A, const Nvfp4Operand &B) {
   Tensor alpha = createCudaTensorFloat({2});
   alphaKernel<<<1, 1>>>(

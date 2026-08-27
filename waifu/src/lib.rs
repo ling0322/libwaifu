@@ -65,7 +65,7 @@ mod zip_file;
 pub use bpe::{BpeConfig, BpeEncoder, BpeModel, INVALID_TOKEN};
 /// The tensor types a caller of this crate needs to name, re-exported so that the common case
 /// does not have to reach into [`flint`].
-pub use flint::{DType, Device};
+pub use flint::{DType, Device, Nvfp4Tensor};
 
 pub use engine::{Engine, RequestInput};
 pub use engine_config::EngineConfig;
@@ -73,7 +73,7 @@ pub use error::{Error, Result};
 pub use forward_batch::{ForwardBatch, PreparedBatch};
 pub use ini::{IniConfig, IniSection};
 pub use kv_cache::{KVCacheManager, KVCacheSpec};
-pub use layers::{Embedding, Linear, RmsNorm};
+pub use layers::{Embedding, Linear, Nvfp4Linear, RmsNorm};
 pub use llama::{LlamaConfig, LlamaForGeneration, LlamaModel};
 pub use model::ModelForGeneration;
 pub use prompt::{Message, Prompt, PromptBlock};

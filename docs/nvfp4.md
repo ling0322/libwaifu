@@ -12,6 +12,28 @@ Tensor y = gemmNvfp4(xFp16, w);               // per layer: half in, half out
 Requires `WITH_CUTLASS=ON`, CUDA 12.8 or newer, and an sm_120a target. `isNvfp4GemmAvailable()`
 reports whether this build and this GPU can run it.
 
+## From Rust
+
+`Nvfp4Linear` is the projection layer built on it. It reads a float16 weight from the package and
+quantizes it once while the model loads, so nothing new has to be stored:
+
+```rust
+let proj = Nvfp4Linear::build(in_dim, out_dim, has_bias, &vb.with_name("proj"))?;
+let y = proj.forward(&x)?;   // float16 in, float16 out
+```
+
+`Nvfp4Linear::is_available()` answers whether this build and this GPU can run it, and `build`
+refuses an `in_dim` that 32 does not divide or an `out_dim` that 8 does not divide, naming the
+layer, rather than leaving the kernel to complain about a shape.
+
+Underneath, `flint::Nvfp4Tensor` holds the three pieces a quantized operand is made of and
+`functional::nvfp4_matmul` multiplies by one. The C interface is `fl_nvfp4_available`,
+`fl_nvfp4_quantize`, `fl_nvfp4_dequantize` and `fl_nvfp4_matmul`.
+
+The kernels asserts their preconditions with `CHECK`, which aborts, so the C interface checks
+device, type, contiguity and shape itself first: a host side weight comes back as an error rather
+than as a dead process.
+
 ## Why the activation has to be quantized
 
 The block scaled instruction takes no other kind of operand. Disassembling the two kernels says it
@@ -165,7 +187,9 @@ Two things cost time getting cuBLASLt to run, recorded in case anyone tries agai
 - The output is half, so the next layer quantizes it again. Folding the quantization into the
   preceding operator's epilogue, so that an RMS norm emits NVFP4 directly, would remove a full
   activation round trip per layer.
-- Nothing is wired into `Operators` or `MatMul`, and there is no path for storing NVFP4 weights in
-  a `.llmpkg`. Both are needed before a model can run on this.
+- Weights are quantized at load rather than stored quantized, so a package holds float16 and the
+  memory saving only starts once the weight is on the device. Storing NVFP4 in a `.llmpkg` would
+  also cut the file size and the load time.
+- No model is built out of `Nvfp4Linear` yet; `LlamaModel` still builds `Linear` throughout.
 - `n` must be a multiple of 8, which is how wide the epilogue writes. The row count is free and
   `k` must be a multiple of 32.

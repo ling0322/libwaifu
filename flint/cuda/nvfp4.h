@@ -46,6 +46,14 @@ struct Nvfp4Operand {
 /// @param x <half>(rows, k), contiguous, k a multiple of 32.
 Nvfp4Operand quantizeNvfp4(const Tensor &x);
 
+/// @brief Rebuild an operand from the three tensors the prologue produced. A caller that keeps
+///        them apart, as anything crossing a language boundary has to, hands them back this way;
+///        the shape comes from the packed data rather than being carried alongside it.
+Nvfp4Operand makeNvfp4Operand(
+    const Tensor &data,
+    const Tensor &blockScale,
+    const Tensor &globalScale);
+
 /// @brief The scalars an epilogue has to multiply by: globalScaleA * globalScaleB, and a zero
 ///        beta next to it. Both global scales come off the device, so the product is formed there
 ///        rather than costing a synchronization, and cuBLASLt's device pointer mode wants beta on
