@@ -1,0 +1,82 @@
+// The MIT License (MIT)
+//
+// Copyright (c) 2024 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+#include "flint/cpu/normalizations.h"
+
+#include <cmath>
+
+#include "flint/cpu/accessor.h"
+#include "flint/cpu/common.h"
+#include "flint/cpu/tensor.h"
+#include "flint/tensor.h"
+
+namespace fl {
+namespace op {
+namespace cpu {
+
+template<typename T>
+Tensor rmsNormKernel(const Tensor &tensor, const Tensor &weight, float eps) {
+  CHECK(weight.getDim() == 1);
+  CHECK(tensor.getShape(-1) == weight.getShape(0));
+
+  Tensor C = tensorLike(tensor);
+
+  TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(tensor);
+  TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
+  CHECK(vA.getLength() == vC.getLength());
+
+  TensorAccessor<const T, 1> w = weight;
+
+  int numRows = vA.getLength();
+#pragma omp parallel for schedule(dynamic, 1)
+  for (int j = 0; j < numRows; ++j) {
+    TensorAccessor<const T, 1> a = vA.getTensor(j);
+    TensorAccessor<T, 1> c = vC.getTensor(j);
+
+    float sum = 0.0;
+    for (int i = 0; i < a.getShape(0); ++i) {
+      float va = a[i];
+      sum += va * va;
+    }
+    float mean = sum / a.getShape(0);
+    float rms = std::sqrt(mean + eps);
+
+    // compute rms-norm
+    for (int i = 0; i < a.getShape(0); ++i) {
+      float va = a[i];
+      float vw = w[i];
+      c[i] = static_cast<T>(a[i] * w[i] / rms);
+    }
+  }
+
+  return C;
+}
+
+Tensor rmsNorm(Tensor tensor, Tensor weight, float eps) {
+  if (tensor.getDType() == DType::kFloat) return rmsNormKernel<float>(tensor, weight, eps);
+#if LUT_CPU_ARCH == LUT_AARCH64
+  if (tensor.getDType() == DType::kFloat16) return rmsNormKernel<Float16>(tensor, weight, eps);
+#endif
+
+  NOT_IMPL();
+}
+
+}  // namespace cpu
+}  // namespace op
+}  // namespace fl
