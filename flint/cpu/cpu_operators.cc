@@ -45,7 +45,7 @@
 #include "flint/cpu/reduce.h"
 #include "flint/cpu/repetition_penalty.h"
 #include "flint/cpu/softmax.h"
-#include "flint/cpu/swiglu.h"
+#include "flint/cpu/glu.h"
 #include "flint/cpu/tensor.h"
 #include "flint/cpu/transform.h"
 #include "flint/cpu/unary.h"
@@ -287,6 +287,18 @@ Tensor CPUOperators::silu(Tensor input) {
   return cpu::unaryOp(input, cpu::UnaryOp::SILU);
 }
 
+Tensor CPUOperators::sin(Tensor input) {
+  return cpu::unaryOp(input, cpu::UnaryOp::SIN);
+}
+
+Tensor CPUOperators::cos(Tensor input) {
+  return cpu::unaryOp(input, cpu::UnaryOp::COS);
+}
+
+Tensor CPUOperators::quickGelu(Tensor input) {
+  return cpu::unaryOp(input, cpu::UnaryOp::QUICK_GELU);
+}
+
 Tensor CPUOperators::div(Tensor input, float other) {
   return op::cpu::transform(input, 1.0f / other, 0.0f);
 }
@@ -413,6 +425,10 @@ void CPUOperators::copy(Tensor src, Tensor dest) {
 
 Tensor CPUOperators::swiglu(Tensor A) {
   return cpu::swiglu(A);
+}
+
+Tensor CPUOperators::geglu(Tensor input) {
+  return cpu::geglu(input);
 }
 
 Tensor CPUOperators::to(Device device, Tensor tensor) {

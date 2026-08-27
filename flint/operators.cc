@@ -73,6 +73,39 @@ Tensor Operators::matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor s
   NOT_IMPL();
 }
 
+Tensor Operators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
+  THROW(NotImplemented, "layerNorm is only available on the CUDA device");
+  return Tensor();
+}
+
+Tensor Operators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
+  THROW(NotImplemented, "groupNorm is only available on the CUDA device");
+  return Tensor();
+}
+
+Tensor Operators::upsampleNearest2d(Tensor input, int scale) {
+  THROW(NotImplemented, "upsampleNearest2d is only available on the CUDA device");
+  return Tensor();
+}
+
+Tensor Operators::geglu(Tensor input) {
+  NOT_IMPL();
+}
+
+Tensor Operators::conv2d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  // A device that has no convolution is something a caller can work around, so it is told rather
+  // than killed. NOT_IMPL() aborts, which is right for a case nobody can act on and wrong here.
+  THROW(NotImplemented, "conv2d is only available on the CUDA device, in a build with cuDNN");
+  return Tensor();
+}
+
 Tensor Operators::gatedDeltaNetPrefill(
     Tensor q,
     Tensor k,
@@ -195,6 +228,16 @@ Tensor Operators::gelu(Tensor input) {
 }
 
 Tensor Operators::silu(Tensor input) {
+  NOT_IMPL();
+}
+
+Tensor Operators::sin(Tensor input) {
+  NOT_IMPL();
+}
+Tensor Operators::cos(Tensor input) {
+  NOT_IMPL();
+}
+Tensor Operators::quickGelu(Tensor input) {
   NOT_IMPL();
 }
 

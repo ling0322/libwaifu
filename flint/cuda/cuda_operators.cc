@@ -27,6 +27,9 @@
 #include "flint/cpu/all_close.h"
 #include "flint/cuda/cast.h"
 #include "flint/cuda/causal_mask.h"
+#include "flint/cuda/conv2d.h"
+#include "flint/cuda/norm.h"
+#include "flint/cuda/upsample.h"
 #include "flint/cuda/copy.h"
 #include "flint/cuda/fill.h"
 #include "flint/cuda/gated_delta_net.h"
@@ -37,12 +40,11 @@
 #include "flint/cuda/rand.h"
 #include "flint/cuda/reduce.h"
 #include "flint/cuda/repetition_penalty.h"
-#include "flint/cuda/rms_norm.h"
 #include "flint/cuda/rotary_embedding.h"
 #include "flint/cuda/sampling.h"
 #include "flint/cuda/softmax.h"
 #include "flint/cuda/store_kv_cache.h"
-#include "flint/cuda/swiglu.h"
+#include "flint/cuda/glu.h"
 #include "flint/cuda/to_device.h"
 #include "flint/cuda/unary.h"
 #include "flint/functional.h"
@@ -155,6 +157,18 @@ Tensor CudaOperators::silu(Tensor input) {
   return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SILU, input);
 }
 
+Tensor CudaOperators::sin(Tensor input) {
+  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SIN, input);
+}
+
+Tensor CudaOperators::cos(Tensor input) {
+  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::COS, input);
+}
+
+Tensor CudaOperators::quickGelu(Tensor input) {
+  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::QUICK_GELU, input);
+}
+
 Tensor CudaOperators::subFloat(Tensor input, float other) {
   return op::cuda::applyBinaryScalarOp(BinaryScalarOp::SUB, input, other);
 }
@@ -208,6 +222,33 @@ Tensor CudaOperators::matmul(Tensor a, Tensor b) {
 
 Tensor CudaOperators::matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB) {
   return _matmul->applyNarrowPrecision(A, sfA, B, sfB);
+}
+
+Tensor CudaOperators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
+  return cuda::layerNorm(input, weight, bias, eps);
+}
+
+Tensor CudaOperators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
+  return cuda::groupNorm(input, weight, bias, groups, eps);
+}
+
+Tensor CudaOperators::upsampleNearest2d(Tensor input, int scale) {
+  return cuda::upsampleNearest2d(input, scale);
+}
+
+Tensor CudaOperators::geglu(Tensor input) {
+  return cuda::geglu(input);
+}
+
+Tensor CudaOperators::conv2d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  return cuda::conv2d(input, weight, bias, {stride, padding, dilation, groups});
 }
 
 Tensor CudaOperators::gatedDeltaNetPrefill(

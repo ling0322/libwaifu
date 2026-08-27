@@ -17,56 +17,20 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "flint/cpu/swiglu.h"
+#pragma once
 
-#include <cmath>
-
-#include "lutil/thread_pool.h"
-#include "flint/cpu/accessor.h"
-#include "flint/cpu/tensor.h"
+#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-template<typename T>
-Tensor swigluKernel(const Tensor &A) {
-  std::vector<int> shapeC = A.getShape();
-  shapeC.back() /= 2;
-  Tensor C = tensor(shapeC, DType::getType<T>());
+Tensor swiglu(const Tensor &A);
 
-  TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
-  TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
-  CHECK(vA.getLength() == vC.getLength());
-
-  int numRows = vA.getLength();
-#pragma omp parallel for schedule(dynamic, 1)
-  for (int j = 0; j < numRows; ++j) {
-    TensorAccessor<const T, 1> a = vA.getTensor(j);
-    TensorAccessor<T, 1> c = vC.getTensor(j);
-
-    int n = c.getShape(0);
-    for (int i = 0; i < n; ++i) {
-      T x = a[i];
-      x *= 1.0f / (1 + expf(-x));
-      x *= a[i + n];
-      c[i] = x;
-    }
-  }
-
-  return C;
-}
-
-Tensor swiglu(const Tensor &A) {
-  CHECK(A.getShape(-1) % 2 == 0);
-
-  if (A.getDType() == DType::kFloat) return swigluKernel<float>(A);
-#if LUT_CPU_ARCH == LUT_AARCH64
-  if (A.getDType() == DType::kFloat16) return swigluKernel<Float16>(A);
-#endif
-
-  NOT_IMPL();
-}
+/// The same gating with a GELU. As in swiglu the first half of the last dimension is the gate and
+/// the second is the value.
+Tensor geglu(const Tensor &A);
+Tensor swigluFp32(const Tensor &A);
 
 }  // namespace cpu
 }  // namespace op

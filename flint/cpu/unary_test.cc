@@ -76,6 +76,12 @@ CATCH_TEST_CASE("test CPU unary operators", "[core][nn][operators]") {
       F::gelu(x),
       [](float v) { return v * 0.5f * (1.0f + std::erf(v * 0.70710678118654752f)); },
       "gelu");
+  checkAgainst(F::sin(x), [](float v) { return std::sin(v); }, "sin");
+  checkAgainst(F::cos(x), [](float v) { return std::cos(v); }, "cos");
+  checkAgainst(
+      F::quickGelu(x),
+      [](float v) { return v / (1.0f + std::exp(-1.702f * v)); },
+      "quickGelu");
 }
 
 CATCH_TEST_CASE("test CPU unary operators (positive domain)", "[core][nn][operators]") {

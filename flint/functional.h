@@ -65,6 +65,20 @@ Tensor rmsNorm(Tensor input, Tensor weight, float eps);
 //   <float>(<batch-dims>, M): matrix multiplication result of A and B.
 Tensor matmul(Tensor A, Tensor B);
 
+// 2-D convolution of `input` <float16|float>(N, C, H, W) by `weight` (K, C / groups, R, S), with
+// an optional per-channel `bias` (K); pass an empty tensor for no bias. The stride, padding and
+// dilation are square. Only the CUDA device has this, and only a build with cuDNN.
+// Returns:
+//   <float16|float>(N, K, outH, outW).
+Tensor conv2d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride = 1,
+    int padding = 0,
+    int dilation = 1,
+    int groups = 1);
+
 // Element wise multiply input and other.
 Tensor mul(Tensor input, float other);
 Tensor mul(Tensor input, Tensor other);
@@ -100,6 +114,14 @@ Tensor gelu(Tensor input);
 /// The sigmoid linear unit, x * sigmoid(x). This is the activation swiglu applies to its gate
 /// half; here it is available on its own.
 Tensor silu(Tensor input);
+
+// Element-wise sine and cosine, which a diffusion model needs for its timestep embedding.
+Tensor sin(Tensor input);
+Tensor cos(Tensor input);
+
+// x * sigmoid(1.702 * x). OpenAI's CLIP text encoder uses this in place of GELU, and the two are
+// close enough that the difference only shows up in what the model was trained against.
+Tensor quickGelu(Tensor input);
 
 // return input + other.
 Tensor add(Tensor input, Tensor other);
@@ -263,6 +285,27 @@ Tensor gatedDeltaNetPrefill(
 // Returns:
 //   <float>(..., D / 2): the output tensor.
 Tensor swiglu(Tensor input);
+
+// The same gating with a GELU, which is what a diffusion U-Net's feed forward uses. As in swiglu
+// the first half of the last dimension is the gate and the second is the value.
+// Args:
+//   input <float>(..., D): the input (D % 2 == 0).
+// Returns:
+//   <float>(..., D / 2).
+Tensor geglu(Tensor input);
+
+// Normalize the last dimension of `input` to zero mean and unit variance, then scale by `weight`
+// and shift by `bias`. Unlike an RMS norm this subtracts the mean. Pass an empty tensor for either
+// of `weight` and `bias` to leave that step out.
+Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps);
+
+// Normalize `input` <float16>(N, C, H, W) over each group of channels together with the space it
+// covers, then scale and shift per channel. `weight` and `bias` are (C), and either may be empty.
+Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps);
+
+// Repeat each pixel of `input` <float16>(N, C, H, W) `scale` times along both spatial axes, which
+// is the upsampling a diffusion U-Net does before the convolution that follows it.
+Tensor upsampleNearest2d(Tensor input, int scale);
 
 /// @brief fill tensor with value.
 /// @param tensor the tensor to fill.

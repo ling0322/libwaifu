@@ -57,6 +57,12 @@ __forceinline__ __device__ T applyUnaryOp(T x) {
     return static_cast<T>(v * 0.5f * (1.0f + erff(v * 0.70710678118654752f)));
   } else if constexpr (OP == UnaryOp::SILU) {
     return static_cast<T>(v / (1.0f + expf(-v)));
+  } else if constexpr (OP == UnaryOp::SIN) {
+    return static_cast<T>(sinf(v));
+  } else if constexpr (OP == UnaryOp::COS) {
+    return static_cast<T>(cosf(v));
+  } else if constexpr (OP == UnaryOp::QUICK_GELU) {
+    return static_cast<T>(v / (1.0f + expf(-1.702f * v)));
   } else {
     __trap();
   }
@@ -143,6 +149,9 @@ Tensor applyUnaryOp(UnaryOp op, const Tensor &tensor) {
   LL_DISPATCH_UNARY(RELU)
   LL_DISPATCH_UNARY(GELU)
   LL_DISPATCH_UNARY(SILU)
+  LL_DISPATCH_UNARY(SIN)
+  LL_DISPATCH_UNARY(COS)
+  LL_DISPATCH_UNARY(QUICK_GELU)
 #undef LL_DISPATCH_UNARY
 
   NOT_IMPL();

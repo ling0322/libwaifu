@@ -38,7 +38,33 @@ class Operators {
   virtual Tensor lookup(Tensor table, Tensor indices);
   virtual void rotaryEmbedding(Tensor positions, Tensor query, Tensor key, Tensor rotaryCache);
   virtual Tensor rmsNorm(Tensor input, Tensor weight, float eps);
+
+  /// Normalize the last dimension of `input` to zero mean and unit variance, then scale by
+  /// `weight` and shift by `bias`; either may be empty.
+  virtual Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps);
+
+  /// Normalize `input` <float16>(N, C, H, W) over each group of channels and the space it covers,
+  /// then scale and shift per channel. `weight` and `bias` are (C), and either may be empty.
+  virtual Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps);
+
+  /// Repeat each pixel of `input` <float16>(N, C, H, W) `scale` times along both spatial axes.
+  virtual Tensor upsampleNearest2d(Tensor input, int scale);
+
+  /// The gated linear unit of `swiglu` with a GELU in place of the SiLU.
+  virtual Tensor geglu(Tensor input);
+
   virtual Tensor matmul(Tensor A, Tensor B);
+
+  /// 2-D convolution of `input` <float16|float>(N, C, H, W) by `weight` (K, C / groups, R, S),
+  /// with an optional per-channel `bias` (K). Square stride, padding and dilation throughout.
+  virtual Tensor conv2d(
+      Tensor input,
+      Tensor weight,
+      Tensor bias,
+      int stride,
+      int padding,
+      int dilation,
+      int groups);
   virtual Tensor matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB);
 
   /// Solve the lower triangular systems L X = B. l is <float>(..., N, N) and b is
@@ -105,6 +131,9 @@ class Operators {
   virtual Tensor relu(Tensor input);
   virtual Tensor gelu(Tensor input);
   virtual Tensor silu(Tensor input);
+  virtual Tensor sin(Tensor input);
+  virtual Tensor cos(Tensor input);
+  virtual Tensor quickGelu(Tensor input);
   virtual void fill(Tensor input, float value);
   virtual Tensor tensor(lut::Span<const int> shape, DType dtype);
   virtual Tensor tensorLike(Tensor input);

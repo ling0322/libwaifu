@@ -25,7 +25,11 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor rmsNorm(const Tensor &tensor, const Tensor &weight, float eps);
+Tensor swiglu(const Tensor &tensor);
+
+/// The same gating with a GELU, which is what a diffusion U-Net's feed forward uses. As in swiglu
+/// the first half of the last dimension is the gate and the second is the value.
+Tensor geglu(const Tensor &tensor);
 
 }  // namespace cuda
 }  // namespace op

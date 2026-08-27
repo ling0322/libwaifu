@@ -39,6 +39,11 @@ enum class UnaryOp {
   RELU,
   GELU,
   SILU,
+  SIN,
+  COS,
+
+  // x * sigmoid(1.702 * x), which is what OpenAI's CLIP text encoder uses in place of GELU.
+  QUICK_GELU,
 };
 
 /// apply C <- UnaryOp(A)

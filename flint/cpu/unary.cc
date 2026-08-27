@@ -61,6 +61,12 @@ inline float applyUnaryOpFloat(float x, UnaryOp op) {
       return x * 0.5f * (1.0f + erff(x * 0.70710678118654752f));
     case UnaryOp::SILU:
       return x / (1.0f + expf(-x));
+    case UnaryOp::SIN:
+      return sinf(x);
+    case UnaryOp::COS:
+      return cosf(x);
+    case UnaryOp::QUICK_GELU:
+      return x / (1.0f + expf(-1.702f * x));
     default:
       NOT_IMPL();
   }

@@ -35,6 +35,7 @@ class SharedLibrary::Impl {
   ~Impl();
 
   static std::unique_ptr<Impl> open(const std::string &name);
+  static std::unique_ptr<Impl> openFile(const std::string &filename);
   void *getFuncPtr(const std::string &filename);
 
  private:
@@ -54,8 +55,12 @@ SharedLibrary::Impl::~Impl() {
 }
 
 std::unique_ptr<SharedLibrary::Impl> SharedLibrary::Impl::open(const std::string &name) {
+  return openFile(std::string(name) + ".dll");
+}
+
+std::unique_ptr<SharedLibrary::Impl> SharedLibrary::Impl::openFile(const std::string &name) {
   std::unique_ptr<Impl> impl{new Impl()};
-  Path filename = std::string(name) + ".dll";
+  Path filename = name;
 
   // first try to load the dll from same folder as current module
   Path modulePath = Path::currentModulePath();
@@ -97,6 +102,12 @@ SharedLibrary::~SharedLibrary() {
 std::unique_ptr<SharedLibrary> SharedLibrary::open(const std::string &name) {
   std::unique_ptr<SharedLibrary> library{new SharedLibrary()};
   library->_impl = Impl::open(name);
+  return library;
+}
+
+std::unique_ptr<SharedLibrary> SharedLibrary::openFile(const std::string &filename) {
+  std::unique_ptr<SharedLibrary> library{new SharedLibrary()};
+  library->_impl = Impl::openFile(filename);
   return library;
 }
 void *SharedLibrary::getFuncPtr(const std::string &name) {

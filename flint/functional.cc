@@ -60,6 +60,39 @@ Tensor matmul(Tensor A, Tensor B) {
   return getOperators(A.getDevice().getType())->matmul(A, B);
 }
 
+Tensor geglu(Tensor input) {
+  return getOperators(input.getDevice().getType())->geglu(input);
+}
+
+Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
+  return getOperators(input.getDevice().getType())->layerNorm(input, weight, bias, eps);
+}
+
+Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
+  return getOperators(input.getDevice().getType())->groupNorm(input, weight, bias, groups, eps);
+}
+
+Tensor upsampleNearest2d(Tensor input, int scale) {
+  return getOperators(input.getDevice().getType())->upsampleNearest2d(input, scale);
+}
+
+Tensor conv2d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  CHECK(!input.empty());
+  CHECK(!weight.empty());
+  CHECK(input.getDevice().getType() == weight.getDevice().getType());
+  CHECK(bias.empty() || bias.getDevice().getType() == input.getDevice().getType());
+
+  return getOperators(input.getDevice().getType())
+      ->conv2d(input, weight, bias, stride, padding, dilation, groups);
+}
+
 Tensor mul(Tensor input, float other) {
   return getOperators(input.getDevice().getType())->mul(input, other);
 }
@@ -118,6 +151,18 @@ Tensor gelu(Tensor input) {
 
 Tensor silu(Tensor input) {
   return getOperators(input.getDevice().getType())->silu(input);
+}
+
+Tensor sin(Tensor input) {
+  return getOperators(input.getDevice().getType())->sin(input);
+}
+
+Tensor cos(Tensor input) {
+  return getOperators(input.getDevice().getType())->cos(input);
+}
+
+Tensor quickGelu(Tensor input) {
+  return getOperators(input.getDevice().getType())->quickGelu(input);
 }
 
 Tensor square(Tensor input) {

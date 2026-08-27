@@ -173,6 +173,25 @@ cmake -S . -B build \
 cmake --build build --parallel
 ```
 
+### Conv2d, through cuDNN
+
+`Conv2d` is the one operator that needs a library the CUDA Toolkit does not carry, so it is opt
+in. Point `CUDNN_ROOT` at a directory holding `include/cudnn.h`:
+
+```bash
+cmake -S . -B build \
+	-DWITH_CUDA=ON \
+	-DWITH_CUDNN=ON \
+	-DCUDNN_ROOT=/path/to/cudnn
+```
+
+Only the headers are needed to build. The library itself is resolved by name on first use, as
+`libcudnn.so` and then `libcudnn.so.9`, so a build with cuDNN still runs where there is none --
+`F::conv2d` reports that it is unavailable rather than failing to load. A `pip install
+nvidia-cudnn-cu12` puts a usable `CUDNN_ROOT` under
+`<venv>/lib/pythonX.Y/site-packages/nvidia/cudnn`, and ships only the versioned library, so its
+`lib` directory has to be on `LD_LIBRARY_PATH` at run time.
+
 `CUDA_ARCH_NATIVE=ON` builds only for GPUs installed in the current machine. Omit it when
 building an artifact intended for several GPU generations. If CMake cannot find the intended
 CUDA installation, add:

@@ -76,6 +76,9 @@ class CPUOperators : public Operators {
   Tensor relu(Tensor input) override;
   Tensor gelu(Tensor input) override;
   Tensor silu(Tensor input) override;
+  Tensor sin(Tensor input) override;
+  Tensor cos(Tensor input) override;
+  Tensor quickGelu(Tensor input) override;
   Tensor arangeLong(LongType begin, LongType end, LongType step) override;
   Tensor randNormal(lut::Span<const int> shape) override;
   Tensor div(Tensor input, float other) override;
@@ -94,6 +97,7 @@ class CPUOperators : public Operators {
   Tensor softmax(Tensor input) override;
   Tensor sum(Tensor inputs, int dim) override;
   Tensor swiglu(Tensor A) override;
+  Tensor geglu(Tensor input) override;
   Tensor tensor(lut::Span<const int> shape, DType dtype) override;
   Tensor tensorLike(Tensor input) override;
   Tensor to(Device device, Tensor tensor) override;

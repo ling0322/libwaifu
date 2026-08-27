@@ -56,6 +56,18 @@ class CudaOperators : public Operators {
   void rotaryEmbedding(Tensor positions, Tensor query, Tensor key, Tensor rotaryCache) override;
   Tensor matmul(Tensor a, Tensor b) override;
   Tensor matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB) override;
+  Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) override;
+  Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) override;
+  Tensor upsampleNearest2d(Tensor input, int scale) override;
+  Tensor geglu(Tensor input) override;
+  Tensor conv2d(
+      Tensor input,
+      Tensor weight,
+      Tensor bias,
+      int stride,
+      int padding,
+      int dilation,
+      int groups) override;
   Tensor gatedDeltaNetPrefill(
       Tensor q,
       Tensor k,
@@ -78,6 +90,9 @@ class CudaOperators : public Operators {
   Tensor relu(Tensor input) override;
   Tensor gelu(Tensor input) override;
   Tensor silu(Tensor input) override;
+  Tensor sin(Tensor input) override;
+  Tensor cos(Tensor input) override;
+  Tensor quickGelu(Tensor input) override;
   Tensor subFloat(Tensor input, float other) override;
   bool allClose(Tensor A, Tensor B, float rtol, float atol) override;
   Tensor mul(Tensor input, float other) override;

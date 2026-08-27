@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 //
-// Copyright (c) 2023 Xiaoyang Chen
+// Copyright (c) 2026 Xiaoyang Chen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 // and associated documentation files (the "Software"), to deal in the Software without
@@ -23,11 +23,15 @@
 
 namespace fl {
 namespace op {
-namespace cpu {
+namespace cuda {
 
-Tensor swiglu(const Tensor &A);
-Tensor swigluFp32(const Tensor &A);
+/// @brief Repeat each pixel `scale` times along both spatial axes. This is the upsampling a
+///        diffusion U-Net and its VAE decoder do before the convolution that follows, and nearest
+///        is what they ask for: no interpolation, each output pixel is a copy of one input pixel.
+/// @param input <half>(N, C, H, W), contiguous.
+/// @return <half>(N, C, H * scale, W * scale).
+Tensor upsampleNearest2d(const Tensor &input, int scale);
 
-}  // namespace cpu
+}  // namespace cuda
 }  // namespace op
 }  // namespace fl

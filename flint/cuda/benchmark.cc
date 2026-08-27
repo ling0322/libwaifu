@@ -10,6 +10,7 @@
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
 #include "flint/cuda/common.h"
+#include "flint/cuda/conv2d.h"
 #include "flint/cuda/cuda_operators.h"
 #include "flint/cuda/gated_delta_net.h"
 #ifdef LIBWAIFU_CUTLASS_ENABLED
@@ -156,6 +157,32 @@ void reportNvfp4Accuracy(
       relativeRmse(nvfp4, fp16));
 }
 #endif
+
+void benchmarkConv2d(
+    const std::shared_ptr<Operators> &operators,
+    const std::string &name,
+    int batch,
+    int inChannel,
+    int outChannel,
+    int size,
+    int kernel,
+    int stride) {
+  int padding = kernel / 2;
+  Tensor input = randHalf(operators, {batch, inChannel, size, size});
+  Tensor weight = randHalf(operators, {outChannel, inChannel, kernel, kernel});
+  Tensor bias = randHalf(operators, {outChannel});
+
+  float milliseconds = benchmarkCuda(
+      [&] { op::cuda::conv2d(input, weight, bias, {stride, padding, 1, 1}); });
+
+  int outSize = (size + 2 * padding - kernel) / stride + 1;
+  double flop = 2.0 * batch * outChannel * outSize * outSize * inChannel * kernel * kernel;
+  std::printf(
+      "%-44s %10.3f us  %8.2f TFLOP/s\n",
+      name.c_str(),
+      milliseconds * 1000.0f,
+      flop / (milliseconds * 1.0e9));
+}
 
 void benchmarkRmsNorm(const std::shared_ptr<Operators> &operators, int sequenceLength) {
   Tensor input = randHalf(operators, {BatchSize, sequenceLength, HiddenSize});
@@ -474,6 +501,20 @@ CATCH_TEST_CASE("Llama 3.2 3B benchmarks", "[benchmark][cuda][llama32-3b]") {
     reportNvfp4Accuracy(operators, "decode qkv_proj (1,5120,3072)", 1, QkvSize, HiddenSize);
   }
 #endif
+
+  if (op::cuda::isConv2dAvailable()) {
+    // SDXL shapes at a 1024 by 1024 image, whose latent is 128 by 128, plus one convolution small
+    // enough that what it measures is the per-call descriptor and heuristic work rather than the
+    // arithmetic.
+    std::printf("\nSDXL convolution benchmarks (FP16, cuDNN)\n");
+    benchmarkConv2d(operators, "unet 128x128x320 3x3", 1, 320, 320, 128, 3, 1);
+    benchmarkConv2d(operators, "unet 64x64x640 3x3", 1, 640, 640, 64, 3, 1);
+    benchmarkConv2d(operators, "unet 32x32x1280 3x3", 1, 1280, 1280, 32, 3, 1);
+    benchmarkConv2d(operators, "unet 128x128x320 downsample 3x3/2", 1, 320, 320, 128, 3, 2);
+    benchmarkConv2d(operators, "unet 64x64x640 1x1", 1, 640, 640, 64, 1, 1);
+    benchmarkConv2d(operators, "vae 512x512x256 3x3", 1, 256, 256, 512, 3, 1);
+    benchmarkConv2d(operators, "call overhead 1x1x1 1x1", 1, 1, 1, 1, 1, 1);
+  }
 
   std::printf("\nLlama 3.2 3B normalization and elementwise benchmarks (FP16)\n");
   for (int sequenceLength : {1, 128, 512}) {

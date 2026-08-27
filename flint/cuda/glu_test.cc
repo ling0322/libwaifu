@@ -50,6 +50,20 @@ CATCH_TEST_CASE("test CUDA swiglu", "[op][cuda]") {
   }
 }
 
+CATCH_TEST_CASE("test CUDA geglu", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The same gating with a GELU, which shares every kernel with swiglu but the activation.
+  for (int lastDim : {150, 152}) {
+    Tensor a = F::rand({2, 5, lastDim}, DType::kFloat);
+    CATCH_REQUIRE(F::allClose(toCpu(F::geglu(toCuda(a))), F::geglu(a), 5e-3));
+  }
+
+  // The gate is the whole difference between the two, so one is not the other.
+  Tensor a = F::rand({2, 5, 152}, DType::kFloat);
+  CATCH_REQUIRE(!F::allClose(F::geglu(a), F::swiglu(a), 5e-3));
+}
+
 CATCH_TEST_CASE("test CUDA swiglu (strided)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 

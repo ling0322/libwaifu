@@ -59,6 +59,9 @@ const std::vector<Case> &allUnary() {
       {"relu", F::relu},
       {"gelu", F::gelu},
       {"silu", F::silu},
+      {"sin", F::sin},
+      {"cos", F::cos},
+      {"quickGelu", F::quickGelu},
   };
   return cases;
 }

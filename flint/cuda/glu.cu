@@ -20,14 +20,29 @@
 #include <cuda_fp16.h>
 
 #include "flint/cuda/common.h"
-#include "flint/cuda/swiglu.h"
+#include "flint/cuda/glu.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-template<bool VECTORIZED>
-__global__ void swigluContiguousKernel(
+/// Which activation the gate half goes through. The two halves are used the same way either way:
+/// the first is the gate, the second is the value, and the result is the value times the
+/// activated gate.
+enum class GateOp { SILU, GELU };
+
+template<GateOp OP>
+__forceinline__ __device__ float applyGate(float x) {
+  if constexpr (OP == GateOp::SILU) {
+    return x / (1.0f + expf(-x));
+  } else {
+    // The exact GELU, so that this matches torch.nn.GELU() rather than its tanh approximation.
+    return x * 0.5f * (1.0f + erff(x * 0.70710678118654752f));
+  }
+}
+
+template<bool VECTORIZED, GateOp OP>
+__global__ void gatedLinearContiguousKernel(
     const half *__restrict__ input,
     half *__restrict__ output,
     int inputWidth,
@@ -45,21 +60,20 @@ __global__ void swigluContiguousKernel(
     float2 value =
         __half22float2(*reinterpret_cast<const half2 *>(input + inputOffset + outputWidth));
     *reinterpret_cast<half2 *>(output + outputOffset) = __floats2half2_rn(
-        value.x * gate.x / (1.0f + expf(-gate.x)),
-        value.y * gate.y / (1.0f + expf(-gate.y)));
+        value.x * applyGate<OP>(gate.x),
+        value.y * applyGate<OP>(gate.y));
   } else {
     if (x >= outputWidth) return;
 
     int inputOffset = row * inputWidth + x;
     float gate = __half2float(input[inputOffset]);
     float value = __half2float(input[inputOffset + outputWidth]);
-    output[row * outputWidth + x] =
-        __float2half(value * gate / (1.0f + expf(-gate)));
+    output[row * outputWidth + x] = __float2half(value * applyGate<OP>(gate));
   }
 }
 
-template<bool VECTORIZED>
-__global__ void swigluStridedKernel(
+template<bool VECTORIZED, GateOp OP>
+__global__ void gatedLinearStridedKernel(
     const half *__restrict__ input,
     half *__restrict__ output,
     int inputStride0,
@@ -81,20 +95,20 @@ __global__ void swigluStridedKernel(
     float2 value = __half22float2(
         *reinterpret_cast<const half2 *>(input + inputOffset + outputWidth + x2));
     *reinterpret_cast<half2 *>(output + outputOffset + x2) = __floats2half2_rn(
-        value.x * gate.x / (1.0f + expf(-gate.x)),
-        value.y * gate.y / (1.0f + expf(-gate.y)));
+        value.x * applyGate<OP>(gate.x),
+        value.y * applyGate<OP>(gate.y));
   } else {
     if (x >= outputWidth) return;
 
     int gateOffset = inputOffset + x * inputStride2;
     float gate = __half2float(input[gateOffset]);
     float value = __half2float(input[gateOffset + outputWidth * inputStride2]);
-    output[outputOffset + x] =
-        __float2half(value * gate / (1.0f + expf(-gate)));
+    output[outputOffset + x] = __float2half(value * applyGate<OP>(gate));
   }
 }
 
-Tensor swiglu3D(const Tensor &tensor) {
+template<GateOp OP>
+Tensor gatedLinear3D(const Tensor &tensor) {
   std::vector<Tensor::ShapeType> shapeC = tensor.getShape();
   shapeC.back() /= 2;
 
@@ -114,10 +128,12 @@ Tensor swiglu3D(const Tensor &tensor) {
                     reinterpret_cast<uintptr_t>(output) % alignof(half2) == 0;
     if (useHalf2) {
       d.x = (outputWidth / 2 + blockSize - 1) / blockSize;
-      swigluContiguousKernel<true><<<d, blockSize>>>(input, output, inputWidth, outputWidth);
+      gatedLinearContiguousKernel<true, OP>
+          <<<d, blockSize>>>(input, output, inputWidth, outputWidth);
     } else {
       d.x = (outputWidth + blockSize - 1) / blockSize;
-      swigluContiguousKernel<false><<<d, blockSize>>>(input, output, inputWidth, outputWidth);
+      gatedLinearContiguousKernel<false, OP>
+          <<<d, blockSize>>>(input, output, inputWidth, outputWidth);
     }
   } else {
     const half *input = getDataPtrCuda<half>(tensor);
@@ -132,11 +148,11 @@ Tensor swiglu3D(const Tensor &tensor) {
                     reinterpret_cast<uintptr_t>(output) % alignof(half2) == 0;
     if (useHalf2) {
       d.x = (outputWidth / 2 + blockSize - 1) / blockSize;
-      swigluStridedKernel<true><<<d, blockSize>>>(
+      gatedLinearStridedKernel<true, OP><<<d, blockSize>>>(
           input, output, inputStride0, inputStride1, inputStride2, outputWidth);
     } else {
       d.x = (outputWidth + blockSize - 1) / blockSize;
-      swigluStridedKernel<false><<<d, blockSize>>>(
+      gatedLinearStridedKernel<false, OP><<<d, blockSize>>>(
           input, output, inputStride0, inputStride1, inputStride2, outputWidth);
     }
   }
@@ -145,16 +161,25 @@ Tensor swiglu3D(const Tensor &tensor) {
   return C;
 }
 
-Tensor swiglu(const Tensor &tensor) {
+template<GateOp OP>
+Tensor gatedLinear(const Tensor &tensor) {
   CHECK(tensor.getDevice().getType() == Device::kCuda);
   CHECK(tensor.getShape(-1) % 2 == 0);
 
-  if (tensor.getDim() == 3) return swiglu3D(tensor);
+  if (tensor.getDim() == 3) return gatedLinear3D<OP>(tensor);
 
   // a packed batch is 2D, the kernels index it as a 3D tensor with one leading row.
-  if (tensor.getDim() == 2) return swiglu3D(tensor.unsqueeze(0)).subtensor(0);
+  if (tensor.getDim() == 2) return gatedLinear3D<OP>(tensor.unsqueeze(0)).subtensor(0);
 
   NOT_IMPL();
+}
+
+Tensor swiglu(const Tensor &tensor) {
+  return gatedLinear<GateOp::SILU>(tensor);
+}
+
+Tensor geglu(const Tensor &tensor) {
+  return gatedLinear<GateOp::GELU>(tensor);
 }
 
 }  // namespace cuda

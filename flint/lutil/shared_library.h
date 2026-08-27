@@ -44,6 +44,11 @@ class SharedLibrary : private NonCopyable {
   // library name would be `name`.dll. In Linux, it would be lib`name`.so
   static std::unique_ptr<SharedLibrary> open(const std::string &name);
 
+  // load a library by its exact filename, decorating nothing. This is what a library that ships
+  // only under a versioned soname needs -- pip's cuDNN, for one, has libcudnn.so.9 and no
+  // libcudnn.so beside it. The search is the same: the caller's directory, then the system.
+  static std::unique_ptr<SharedLibrary> openFile(const std::string &filename);
+
   // get function by name. return nullptr if function not found
   template<typename T>
   T getFunc(const std::string &name) {

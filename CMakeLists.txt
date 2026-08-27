@@ -11,6 +11,7 @@ option(WITH_CUDA_MALLOC_ASYNC "Use the CUDA stream-ordered memory allocator." ON
 option(WITH_MKL "MKL support (only for reference)." OFF)
 option(WITH_OPENMP "Build with OpenMP." ON)
 option(WITH_CUTLASS "build MatMul operators with CUTLASS." OFF)
+option(WITH_CUDNN "build the Conv2d operator with cuDNN." OFF)
 option(WITH_FLASH_ATTN "Link the prebuilt FlashAttention forward kernels." ${WITH_CUDA})
 option(CUDA_ARCH_NATIVE "Build CUDA kernels only for the GPUs in this machine." OFF)
 option(MKL_PREFIX "Prefix for MKL headers and libraries." "/opt/intel/mkl")
@@ -66,6 +67,27 @@ if(WITH_CUTLASS)
           "${CUTLASS_ROOT}/include/cutlass/blas3.h, please "
           "call install_cutlass.sh in third_party first.")
     endif()
+endif()
+
+if(WITH_CUDNN)
+    if(NOT WITH_CUDA)
+        message(FATAL_ERROR "WITH_CUDNN requires WITH_CUDA=ON")
+    endif()
+
+    # Only the headers are needed to build: the library itself is loaded by name at run time, the
+    # same way cuBLAS is, so a build with cuDNN still runs on a machine without it.
+    if(NOT CUDNN_ROOT)
+        message(FATAL_ERROR
+          "WITH_CUDNN=ON needs CUDNN_ROOT set to a directory holding include/cudnn.h. "
+          "A pip install of nvidia-cudnn-cu12 puts one under "
+          "<venv>/lib/pythonX.Y/site-packages/nvidia/cudnn.")
+    endif()
+    if(NOT EXISTS "${CUDNN_ROOT}/include/cudnn.h")
+        message(FATAL_ERROR "unable to find \"${CUDNN_ROOT}/include/cudnn.h\"")
+    endif()
+
+    add_definitions("-DLIBWAIFU_CUDNN_ENABLED")
+    include_directories("${CUDNN_ROOT}/include")
 endif()
 
 if(WITH_MKL)
