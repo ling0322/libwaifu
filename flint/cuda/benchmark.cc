@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 
+#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -11,6 +12,9 @@
 #include "flint/cuda/common.h"
 #include "flint/cuda/cuda_operators.h"
 #include "flint/cuda/gated_delta_net.h"
+#ifdef LIBWAIFU_CUTLASS_ENABLED
+#include "flint/cuda/gemm_nvfp4_cutlass.h"
+#endif
 #include "flint/functional.h"
 #include "flint/tensor.h"
 
@@ -83,6 +87,75 @@ void benchmarkMatmul(
   float milliseconds = benchmarkCuda([&] { operators->matmul(input, weight); });
   printMatmul(name, milliseconds, m, n, k);
 }
+
+#ifdef LIBWAIFU_CUTLASS_ENABLED
+// NVFP4 on the block scaled tensor cores. The prologue is timed separately because a weight is
+// quantized once but an activation is quantized on every layer, so only the second number is what
+// a projection actually pays.
+void benchmarkMatmulNvfp4(
+    const std::shared_ptr<Operators> &operators, const std::string &name, int m, int n, int k) {
+  Tensor input = randHalf(operators, {m, k});
+  op::cuda::Nvfp4Operand weight = op::cuda::quantizeNvfp4(randHalf(operators, {n, k}));
+  op::cuda::Nvfp4Operand activation = op::cuda::quantizeNvfp4(input);
+
+  float gemmMs = benchmarkCuda([&] { op::cuda::gemmNvfp4(activation, weight); });
+  float totalMs = benchmarkCuda([&] { op::cuda::gemmNvfp4(input, weight); });
+
+  printMatmul(name + " gemm", gemmMs, m, n, k);
+  printMatmul(name + " gemm+prologue", totalMs, m, n, k);
+}
+
+Tensor toCudaHalf(const Tensor &x) {
+  return F::cast(F::to(Device::getCuda(), x), DType::kFloat16);
+}
+
+/// @brief Root mean square error against a reference, divided by the reference's own root mean
+///        square, so the numbers are comparable across shapes.
+double relativeRmse(const Tensor &x, const Tensor &reference) {
+  Tensor a = F::to(Device::getCpu(), F::cast(x, DType::kFloat));
+  Tensor b = F::to(Device::getCpu(), F::cast(reference, DType::kFloat));
+  CATCH_REQUIRE(a.getNumEl() == b.getNumEl());
+
+  const float *pa = a.getInternalData()->getData<float>(a.getInternalOffset());
+  const float *pb = b.getInternalData()->getData<float>(b.getInternalOffset());
+
+  double squaredError = 0.0;
+  double squaredReference = 0.0;
+  for (int64_t i = 0; i < a.getNumEl(); ++i) {
+    double diff = double(pa[i]) - double(pb[i]);
+    squaredError += diff * diff;
+    squaredReference += double(pb[i]) * double(pb[i]);
+  }
+
+  return std::sqrt(squaredError / squaredReference);
+}
+
+/// @brief What the precision costs. The FP16 GEMM is measured against an FP32 one on the CPU, to
+///        say how much of the error is FP16's own, and the NVFP4 path against the FP16 GEMM,
+///        which is the thing it replaces. NVFP4 quantizes the activation in the prologue -- the
+///        block scaled instruction (OMMA, E2M1 x E2M1) takes no other kind of operand -- so its
+///        column is the cost of quantizing both operands.
+void reportNvfp4Accuracy(
+    const std::shared_ptr<Operators> &operators, const std::string &name, int m, int n, int k) {
+  Tensor xCpu = F::randn({m, k});
+  Tensor wCpu = F::randn({n, k});
+  Tensor referenceFp32 = F::matmul(xCpu, wCpu.transpose(0, 1));
+
+  Tensor x = toCudaHalf(xCpu);
+  Tensor w = toCudaHalf(wCpu);
+  Tensor fp16 = operators->matmul(x, w.transpose(0, 1));
+
+  // The half activation goes in whole; the prologue inside quantizes it.
+  op::cuda::Nvfp4Operand weight = op::cuda::quantizeNvfp4(w);
+  Tensor nvfp4 = op::cuda::gemmNvfp4(x, weight);
+
+  std::printf(
+      "%-30s %13.2e %13.2e\n",
+      name.c_str(),
+      relativeRmse(fp16, referenceFp32),
+      relativeRmse(nvfp4, fp16));
+}
+#endif
 
 void benchmarkRmsNorm(const std::shared_ptr<Operators> &operators, int sequenceLength) {
   Tensor input = randHalf(operators, {BatchSize, sequenceLength, HiddenSize});
@@ -375,6 +448,32 @@ CATCH_TEST_CASE("Llama 3.2 3B benchmarks", "[benchmark][cuda][llama32-3b]") {
     benchmarkMatmul(operators, (prefix + " down_proj").c_str(), m, HiddenSize, IntermediateSize);
   }
   benchmarkMatmul(operators, "decode-1 lm_head", 1, VocabSize, HiddenSize);
+
+#ifdef LIBWAIFU_CUTLASS_ENABLED
+  if (op::cuda::isNvfp4GemmAvailable()) {
+    std::printf("\nLlama 3.2 3B projection benchmarks (NVFP4 x NVFP4)\n");
+    for (int sequenceLength : {1, 128, 512}) {
+      int m = BatchSize * sequenceLength;
+      std::string prefix = sequenceLength == 1 ? "decode" : "prefill";
+      prefix += "-" + std::to_string(sequenceLength);
+      benchmarkMatmulNvfp4(operators, prefix + " qkv_proj", m, QkvSize, HiddenSize);
+      benchmarkMatmulNvfp4(operators, prefix + " out_proj", m, HiddenSize, HiddenSize);
+      benchmarkMatmulNvfp4(
+          operators, prefix + " gate_up_proj", m, 2 * IntermediateSize, HiddenSize);
+      benchmarkMatmulNvfp4(operators, prefix + " down_proj", m, HiddenSize, IntermediateSize);
+    }
+    benchmarkMatmulNvfp4(operators, "decode-1 lm_head", 1, VocabSize, HiddenSize);
+
+    std::printf("\nNVFP4 accuracy, relative RMSE\n");
+    std::printf("%-30s %13s %13s\n", "shape (m,n,k)", "fp16/fp32", "nvfp4/fp16");
+    reportNvfp4Accuracy(operators, "qkv_proj (512,5120,3072)", 512, QkvSize, HiddenSize);
+    reportNvfp4Accuracy(operators, "out_proj (512,3072,3072)", 512, HiddenSize, HiddenSize);
+    reportNvfp4Accuracy(
+        operators, "gate_up_proj (512,16384,3072)", 512, 2 * IntermediateSize, HiddenSize);
+    reportNvfp4Accuracy(operators, "down_proj (512,3072,8192)", 512, HiddenSize, IntermediateSize);
+    reportNvfp4Accuracy(operators, "decode qkv_proj (1,5120,3072)", 1, QkvSize, HiddenSize);
+  }
+#endif
 
   std::printf("\nLlama 3.2 3B normalization and elementwise benchmarks (FP16)\n");
   for (int sequenceLength : {1, 128, 512}) {

@@ -135,8 +135,11 @@ if (WITH_CUDA)
 
     if (WITH_CUTLASS)
         set(flint_SOURCES ${flint_SOURCES}
-            "cuda/gemm_cutlass.cu")
-        set(flint_test_SOURCES ${flint_test_SOURCES} "cuda/gemm_cutlass_test.cc")
+            "cuda/gemm_cutlass.cu"
+            "cuda/gemm_nvfp4_cutlass.cu")
+        set(flint_test_SOURCES ${flint_test_SOURCES}
+            "cuda/gemm_cutlass_test.cc"
+            "cuda/gemm_nvfp4_cutlass_test.cc")
         set(flint_INCDIR ${flint_INCDIR}
             "../third_party/cutlass/include"
             "../third_party/cutlass/tools/util/include")
