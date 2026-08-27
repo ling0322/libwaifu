@@ -89,34 +89,5 @@ class LogWrapperkFATAL : public LogWrapper {
   }
 };
 
-/// The failure path of CHECK. It gathers a message the way a log line does, and throws it on the
-/// way out instead of ending the process: a broken invariant deep inside an operator has to reach
-/// whatever called in, which may be another language, and a caller that can turn it into an error
-/// is better served than a caller that is simply gone.
-class CheckFailure {
- public:
-  CheckFailure(const char *source_file, int source_line, const char *condition);
-
-  /// Throws, which is why it cannot be the implicitly noexcept destructor the language wants. The
-  /// one case it does not throw in is an exception already on its way out, where throwing again
-  /// would end the process rather than reach anybody.
-  ~CheckFailure() noexcept(false);
-
-  CheckFailure(CheckFailure &) = delete;
-  CheckFailure &operator=(CheckFailure &) = delete;
-
-  template<typename T>
-  CheckFailure &operator<<(const T &value) {
-    os_ << value;
-    return *this;
-  }
-
- private:
-  std::ostringstream os_;
-  const char *source_file_;
-  int source_line_;
-  const char *condition_;
-};
-
 }  // namespace internal
 }  // namespace lut

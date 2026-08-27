@@ -30,9 +30,9 @@ Underneath, `flint::Nvfp4Tensor` holds the three pieces a quantized operand is m
 `functional::nvfp4_matmul` multiplies by one. The C interface is `fl_nvfp4_available`,
 `fl_nvfp4_quantize`, `fl_nvfp4_dequantize` and `fl_nvfp4_matmul`.
 
-The C interface checks device, type, contiguity and shape itself before calling in, so a host side
-weight is reported as a bad argument described in the caller's terms rather than as the internal
-condition a failed `CHECK` names.
+The kernels assert their preconditions with `CHECK`, which aborts, so the C interface checks
+device, type, contiguity and shape itself first: a host side weight comes back as an error rather
+than as a dead process.
 
 ## Why the activation has to be quantized
 

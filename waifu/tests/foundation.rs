@@ -305,16 +305,21 @@ fn builds_and_runs_the_layers() {
 }
 
 #[test]
-fn reports_a_broken_invariant_as_an_error_rather_than_ending_the_process() {
-    // Nothing here checks the shape on the Rust side: six elements cannot be viewed as sixteen,
-    // and the tensor library is what notices. A failed check inside it has to come back as an
-    // error, because the alternative is taking the whole process down over a recoverable mistake.
+fn reports_a_shape_it_cannot_take_as_an_error_rather_than_ending_the_process() {
+    // Nothing here checks the shapes on the Rust side; the tensor library is what notices. Asking
+    // for something impossible is a mistake a caller can recover from, so it has to come back as
+    // an error rather than take the whole process down.
     let x = Tensor::from_f32(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
+    // Six elements cannot be seen as sixteen.
     let error = x.view(&[4, 4]).unwrap_err();
     assert!(error.to_string().contains("view"), "{error}");
 
-    // And the tensor it was asked about is still usable afterwards.
+    // Nor can a slice reach past the dimension it is taken from, or a subtensor past the rows.
+    assert!(x.slice(0, 1, 9).is_err());
+    assert!(x.subtensor(7).is_err());
+
+    // And the tensor they were asked about is still usable afterwards.
     assert_eq!(x.view(&[3, 2]).unwrap().shape(), vec![3, 2]);
 }
 

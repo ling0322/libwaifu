@@ -21,6 +21,9 @@
 
 #include <algorithm>
 
+#include "lutil/error.h"
+#include "lutil/strings.h"
+
 namespace fl {
 namespace op {
 namespace cpu {
@@ -32,7 +35,7 @@ std::vector<Tensor::ShapeType> getRealShape(int64_t numEl, lut::Span<const int> 
   int64_t viewNumEl = 1;
   for (; it != shape.end(); ++it) {
     if (*it < 0) {
-      CHECK(inferDim == shape.end()) << "more than 1 inferred dim";
+      if (inferDim != shape.end()) THROW(InvalidArg, "a view infers more than one dimension");
       inferDim = it;
     } else {
       viewNumEl *= *it;
@@ -41,10 +44,18 @@ std::vector<Tensor::ShapeType> getRealShape(int64_t numEl, lut::Span<const int> 
 
   // handle -1 shape
   if (inferDim != shape.end()) {
-    CHECK(numEl % viewNumEl == 0) << "inferred shape is not a integer";
+    if (viewNumEl == 0 || numEl % viewNumEl != 0) {
+      THROW(
+          InvalidArg,
+          lut::sprintf("a view of %d elements cannot infer a dimension of %d", numEl, viewNumEl));
+    }
     *inferDim = static_cast<Tensor::ShapeType>(numEl / viewNumEl);
   } else {
-    CHECK(numEl == viewNumEl) << "invalid view (element number mismatch)";
+    if (numEl != viewNumEl) {
+      THROW(
+          InvalidArg,
+          lut::sprintf("invalid view: %d elements cannot be seen as %d", numEl, viewNumEl));
+    }
   }
 
   return shape;
@@ -53,7 +64,9 @@ std::vector<Tensor::ShapeType> getRealShape(int64_t numEl, lut::Span<const int> 
 std::vector<TensorShape::Elem> mergeContigShape(const Tensor &src) {
   std::vector<TensorShape::Elem> mergedShape;
   for (int d = src.getDim() - 1; d >= 0; --d) {
-    CHECK(src.getStride(d) != 0) << "unable to change view of expanded tensor.";
+    if (src.getStride(d) == 0) {
+      THROW(InvalidArg, "unable to change the view of an expanded tensor");
+    }
 
     if (d == src.getDim() - 1) {
       TensorShape::Elem s;
@@ -92,7 +105,7 @@ std::vector<TensorShape::Elem> getViewShapeStride(const Tensor &src, lut::Span<c
       ++vi;
     }
 
-    CHECK(numel == ms.shape) << "unable to get view of tensor.";
+    if (numel != ms.shape) THROW(InvalidArg, "unable to get this view of the tensor");
   }
 
   std::reverse(viewShape.begin(), viewShape.end());

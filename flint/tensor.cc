@@ -45,7 +45,11 @@ Tensor Tensor::create(std::initializer_list<int> shape, lut::Span<const T> data)
   tensor._offset = 0;
 
   // fill data
-  CHECK(numel == data.size()) << "data size and shape mismatch";
+  if (numel != static_cast<int64_t>(data.size())) {
+    THROW(
+        InvalidArg,
+        lut::sprintf("a shape of %d elements was given %d", numel, int(data.size())));
+  }
   std::copy(data.begin(), data.end(), op::cpu::getDataPtrCpu<T>(tensor));
 
   return tensor;
@@ -156,7 +160,9 @@ Tensor Tensor::slice(int dim, std::pair<int, int> range) const {
   CHECK(!getDType().isQuantized());
 
   dim = _shape->getRealDim(dim);
-  CHECK(dim >= 0 && dim < this->getDim());
+  if (dim < 0 || dim >= this->getDim()) {
+    THROW(InvalidArg, lut::sprintf("slice: no dimension %d in a %d-D tensor", dim, getDim()));
+  }
 
   int begin = range.first;
   int end = range.second;
@@ -166,7 +172,15 @@ Tensor Tensor::slice(int dim, std::pair<int, int> range) const {
 
   begin = _shape->getRealIndex(dim, begin);
   end = _shape->getRealIndex(dim, end);
-  CHECK(begin >= 0 && begin < end && end <= getShape(dim));
+  if (begin < 0 || begin >= end || end > getShape(dim)) {
+    THROW(
+        InvalidArg,
+        lut::sprintf(
+            "slice: [%d, %d) is not within a dimension of %d",
+            begin,
+            end,
+            getShape(dim)));
+  }
 
   Tensor tensor;
   tensor._data = _data;
@@ -189,7 +203,11 @@ Tensor Tensor::subtensor(int index) const {
   CHECK(!getDType().isQuantized());
 
   index = _shape->getRealIndex(0, index);
-  CHECK(index >= 0 && index < getShape(0));
+  if (index < 0 || index >= getShape(0)) {
+    THROW(
+        InvalidArg,
+        lut::sprintf("subtensor: %d is not within a dimension of %d", index, getShape(0)));
+  }
 
   Tensor tensor;
   tensor._data = _data;
@@ -430,7 +448,9 @@ int TensorShape::getRealDim(int d) const {
     d = rank + d;
   }
 
-  CHECK(d >= 0 && d < rank);
+  if (d < 0 || d >= rank) {
+    THROW(InvalidArg, lut::sprintf("no dimension %d in a %d-D tensor", d, rank));
+  }
   return d;
 }
 
@@ -441,7 +461,9 @@ int TensorShape::getRealIndex(int dim, int index) const {
   int shape = _data[dim].shape;
   index = index >= 0 ? index : shape + index;
 
-  CHECK(index >= 0 && index <= shape);
+  if (index < 0 || index > shape) {
+    THROW(InvalidArg, lut::sprintf("index %d is outside a dimension of %d", index, shape));
+  }
   return index;
 }
 
@@ -487,7 +509,14 @@ std::shared_ptr<TensorShape> TensorShape::expand(lut::Span<const int> shape) con
   int dim = getDim();
   for (int d = 0; d < dim; ++d) {
     if (shape[d] != getShape(d)) {
-      CHECK(getShape(d) == 1) << "unable to expand a non-singleton dimension (size > 1).";
+      if (getShape(d) != 1) {
+        THROW(
+            InvalidArg,
+            lut::sprintf(
+                "expand: dimension %d holds %d elements, and only a single one can grow",
+                d,
+                getShape(d)));
+      }
       view->_data[d].shape = shape[d];
       view->_data[d].stride = 0;
     }

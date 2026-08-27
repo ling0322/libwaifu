@@ -43,13 +43,16 @@
 
 // CHECK macro conflicts with catch2
 //
-// A failed check throws rather than ending the process, so that an operator called from the C
-// interface, or from Rust through it, reports what went wrong instead of taking its caller down
-// with it. LOG(FATAL) still aborts; it is for the cases with nothing left to report to.
+// CHECK is for what must never happen: a broken invariant, where the process has nothing sensible
+// left to do and a stack trace at the point of failure is the only thing worth having. It aborts.
+//
+// A caller getting an argument wrong is not that. Those are recoverable, and the caller -- which
+// through the C interface may be another language -- has to be able to hear about it, so they are
+// thrown with THROW(InvalidArg, ...) instead of asserted.
 #define CHECK(cond) \
   if (cond) {       \
   } else            \
-    lut::internal::CheckFailure(__FILE__, __LINE__, #cond)
+    LOG(FATAL).DefaultMessage("Check " #cond " failed.")
 
 namespace lut {
 
