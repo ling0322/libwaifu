@@ -305,6 +305,20 @@ fn builds_and_runs_the_layers() {
 }
 
 #[test]
+fn reports_a_broken_invariant_as_an_error_rather_than_ending_the_process() {
+    // Nothing here checks the shape on the Rust side: six elements cannot be viewed as sixteen,
+    // and the tensor library is what notices. A failed check inside it has to come back as an
+    // error, because the alternative is taking the whole process down over a recoverable mistake.
+    let x = Tensor::from_f32(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+
+    let error = x.view(&[4, 4]).unwrap_err();
+    assert!(error.to_string().contains("view"), "{error}");
+
+    // And the tensor it was asked about is still usable afterwards.
+    assert_eq!(x.view(&[3, 2]).unwrap().shape(), vec![3, 2]);
+}
+
+#[test]
 fn refuses_a_layer_the_nvfp4_kernel_cannot_take() {
     // Both of these are settled before anything reaches a device, so they hold whether or not
     // this machine has the tensor cores.
@@ -323,8 +337,8 @@ fn refuses_a_weight_that_is_not_on_the_device_instead_of_ending_the_process() {
         return;
     }
 
-    // The kernels asserts their preconditions with something that aborts, so the boundary has to
-    // catch a host side weight before it gets that far.
+    // A host side weight is the mistake most worth naming, so the boundary catches it before the
+    // kernels report it as an internal condition.
     let vb = cpu_builder(&[("proj.weight", &[8, 32], &[0.0; 256])]);
     let error = Nvfp4Linear::build(32, 8, false, &vb.with_name("proj")).unwrap_err();
     assert!(error.to_string().contains("CUDA"), "{error}");
@@ -409,7 +423,8 @@ fn reports_a_wrongly_shaped_input_instead_of_ending_the_process() {
     let vb = cpu_builder(&[("embd.weight", &[3, 2], &[0.0, 0.1, 1.0, 1.1, 2.0, 2.1])]);
     let embedding = Embedding::build(2, 3, &vb.with_name("embd")).unwrap();
 
-    // Packed token ids are 1-D. The tensor library would abort on this, so it is caught here.
+    // Packed token ids are 1-D. The layer says so itself, rather than leaving the tensor library
+    // to report a condition the caller never wrote.
     let tokens = Tensor::from_i64(&[1, 2], &[2, 0]).unwrap();
     let error = embedding.forward(&tokens).unwrap_err();
     assert!(error.to_string().contains("2-D"), "{error}");

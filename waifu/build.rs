@@ -34,6 +34,13 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=LIBWAIFU_LIB_DIR");
     println!("cargo:rerun-if-changed={}", flags_path.display());
+
+    // Without this, a rebuilt archive with the same link flags leaves cargo believing the last
+    // link is still good, and a `cargo test` after a C++ change quietly tests the old library.
+    println!(
+        "cargo:rerun-if-changed={}",
+        lib_dir.join("libflint.a").display()
+    );
     for line in flags.lines().filter(|l| !l.trim().is_empty()) {
         println!("{line}");
     }

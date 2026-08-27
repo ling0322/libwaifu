@@ -19,6 +19,7 @@ set(lut_test_SOURCES
     "asio_test.cc"
     "blocking_queue_test.cc"
     "cancellation_token_test.cc"
+    "log_test.cc"
     "path_test.cc"
     "strings_test.cc")
 

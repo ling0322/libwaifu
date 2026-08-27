@@ -24,8 +24,11 @@
 #include <string.h>
 
 #include <ctime>
+#include <exception>
 #include <string>
 
+#include "lutil/error.h"
+#include "lutil/log.h"
 #include "lutil/platform.h"
 
 namespace lut {
@@ -88,6 +91,30 @@ const char *LogWrapper::Severity() const {
 LogWrapper &LogWrapper::DefaultMessage(const char *message) {
   default_message_ = message;
   return *this;
+}
+
+CheckFailure::CheckFailure(const char *source_file, int source_line, const char *condition)
+    : source_file_(source_file),
+      source_line_(source_line),
+      condition_(condition) {
+}
+
+CheckFailure::~CheckFailure() noexcept(false) {
+  std::string message = std::string(source_file_) + ":" + std::to_string(source_line_) +
+                        "] Check " + condition_ + " failed";
+
+  std::string detail = os_.str();
+  if (!detail.empty()) message += ": " + detail;
+
+  // Throwing while another exception is on its way out ends the process, which is the outcome
+  // this whole class exists to avoid. That happens when a destructor runs a CHECK during
+  // unwinding, and there the message is all that can be salvaged.
+  if (std::uncaught_exceptions() > 0) {
+    LOG(ERROR) << message << " (during unwinding, so it is reported rather than thrown)";
+    return;
+  }
+
+  throw lut::AbortedError(message);
 }
 
 }  // namespace internal

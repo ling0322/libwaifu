@@ -416,8 +416,8 @@ Nvfp4Operand makeNvfp4Operand(
     const Tensor &data,
     const Tensor &blockScale,
     const Tensor &globalScale) {
-  // This one is reached from outside the library, where a CHECK would take the process down with
-  // it, so what a caller could get wrong is thrown rather than asserted.
+  // Reached from outside the library, so what a caller could get wrong is reported as a bad
+  // argument rather than as the aborted-operation a failed CHECK reads as.
   if (data.getDType() != DType::kFp4E2M0x2 || data.getDim() != 2) {
     throw lut::InvalidArgError("nvfp4 operand: data is not <fp4>(rows, k / 2)");
   }

@@ -438,8 +438,9 @@ int32_t fl_matmul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
 
 namespace {
 
-/// The kernels assert their preconditions with CHECK, which aborts, and nothing may abort across
-/// this boundary. Whatever a caller could get wrong is checked here first.
+/// The kernels asserts their preconditions with CHECK, which reports an aborted operation and
+/// names an internal condition. What a caller could plausibly get wrong is worth catching here
+/// first, where it can be named as a bad argument and described in the caller's terms.
 void checkNvfp4Half(const fl::Tensor &x, const char *what) {
   if (x.getDevice().getType() != fl::Device::kCuda) {
     throw lut::InvalidArgError(std::string(what) + " is not on a CUDA device");
