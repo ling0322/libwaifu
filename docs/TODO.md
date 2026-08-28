@@ -301,4 +301,19 @@ says, so `zeros(shape, DType::kFloat)` hands back a `<half>` and the next operat
 aborts on a dtype check. Found while writing the gated DeltaNet benchmark, which now builds its
 FP32 state on the host and copies it over instead. `op::cuda::fill` is half-only, which is
 presumably why it was written this way, so fixing it means giving `fill` the other types first.
+## The CLIP tokenizer does not normalize text the way ftfy does
 
+`CLIPTokenizer` runs its input through `ftfy.fix_text` before matching its pattern, and libwaifu
+does not. Diffed over 1600 texts (2026-08-27): all 1271 ASCII ones agree exactly, and all 137 that
+disagree are exactly the 137 that ftfy rewrites -- ligatures such as `ﬁ` expanded to `fi`,
+fullwidth `ｆｕｌｌ` folded to `full`, `ǅ` put into NFC. None is a disagreement about how to merge,
+which is what the diff was written to find out.
+
+This only shows up on text that is not already normalized, which a danbooru style prompt never is
+not. Closing most of the gap would take an NFC pass; closing all of it would take ftfy, which is a
+mojibake repair library and not something to reimplement.
+
+Worth knowing: `CLIPTokenizer` itself falls back to a `BasicTokenizer` when ftfy is absent, and
+that one puts spaces between CJK characters, so huggingface's own output for `霧雨魔理沙` depends
+on what is installed beside it. The reference above was generated with ftfy present, which is what
+CLIP itself does.

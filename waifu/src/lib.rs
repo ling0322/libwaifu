@@ -62,7 +62,7 @@ mod tokenizer;
 mod var_builder;
 mod zip_file;
 
-pub use bpe::{BpeConfig, BpeEncoder, BpeModel, INVALID_TOKEN};
+pub use bpe::{BpeConfig, BpeEncoder, BpeModel, PreTokenizer, INVALID_TOKEN};
 /// The tensor types a caller of this crate needs to name, re-exported so that the common case
 /// does not have to reach into [`flint`].
 pub use flint::{DType, Device, Nvfp4Tensor};

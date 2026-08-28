@@ -28,6 +28,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::io::Read;
+use std::str::FromStr;
 
 use crate::error::{Error, Result};
 use crate::ini::IniSection;
@@ -45,6 +46,33 @@ mod flags {
     pub const UNUSED: i8 = 8;
 }
 
+/// How the text is broken up before any merging happens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreTokenizer {
+    /// The whole text is one merge domain, which is what a sentencepiece vocabulary expects: the
+    /// space is a piece like any other and merges run straight through it.
+    Whole,
+
+    /// What CLIP's simple_tokenizer.py does. The text is lowercased and cut into words, each word
+    /// is merged on its own so that no token ever spans two of them, and the last byte of a word
+    /// carries the `</w>` marker the vocabulary is built around. Whitespace is dropped rather than
+    /// tokenized, which is why the marker exists at all: it is what tells a word's end from its
+    /// middle once the spaces are gone.
+    ClipWord,
+}
+
+impl FromStr for PreTokenizer {
+    type Err = Error;
+
+    fn from_str(name: &str) -> Result<PreTokenizer> {
+        match name {
+            "whole" => Ok(PreTokenizer::Whole),
+            "clip_word" => Ok(PreTokenizer::ClipWord),
+            _ => Err(Error::model(format!("{name:?} is not a pre-tokenizer"))),
+        }
+    }
+}
+
 /// How a model wants its text prepared before it is encoded.
 #[derive(Clone, Debug)]
 pub struct BpeConfig {
@@ -55,6 +83,8 @@ pub struct BpeConfig {
     pub add_prefix_space: bool,
     /// Whether the initial symbols are characters rather than bytes.
     pub split_by_unicode: bool,
+    /// How the text is cut up before merging.
+    pub pre_tokenizer: PreTokenizer,
 }
 
 impl Default for BpeConfig {
@@ -63,6 +93,7 @@ impl Default for BpeConfig {
             model_file: String::new(),
             add_prefix_space: true,
             split_by_unicode: true,
+            pre_tokenizer: PreTokenizer::Whole,
         }
     }
 }
@@ -73,6 +104,8 @@ impl BpeConfig {
             model_file: section.get_str("model_file")?.to_string(),
             add_prefix_space: section.get_bool("add_prefix_space")?,
             split_by_unicode: section.get_bool("split_by_unicode")?,
+            // A package written before this key existed is a sentencepiece one.
+            pre_tokenizer: section.get_or("pre_tokenizer", PreTokenizer::Whole)?,
         })
     }
 }
@@ -340,6 +373,81 @@ impl Symbol {
     }
 }
 
+/// The marker CLIP's vocabulary puts on the last byte of a word.
+const WORD_END: &[u8] = b"</w>";
+
+/// The contractions CLIP's pattern lists before its character classes, so that `don't` comes apart
+/// as `don` and `'t` rather than as `don` and `'` and `t`.
+const CONTRACTIONS: [&str; 7] = ["'s", "'t", "'re", "'ve", "'m", "'ll", "'d"];
+
+/// The two names CLIP's pattern matches ahead of everything else, so that a prompt that spells one
+/// out gets the token rather than the punctuation it is written with.
+const SPECIAL_WORDS: [&str; 2] = ["<|startoftext|>", "<|endoftext|>"];
+
+/// The words of `text`, as CLIP's pattern finds them:
+///
+/// ```text
+/// 's|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+
+/// ```
+///
+/// Written out instead of compiled because this crate carries no regex, and because the pattern is
+/// four cases once the alternation is read in order: a contraction, a run of letters, a single
+/// digit, or a run of anything that is neither whitespace nor letter nor digit. Whitespace is what
+/// separates words and never appears inside one, so collapsing runs of it -- which CLIP does
+/// before matching -- cannot change the answer, and it is simply skipped here.
+fn clip_words(text: &str) -> Vec<String> {
+    let lowered = text.to_lowercase();
+    let chars: Vec<char> = lowered.chars().collect();
+
+    let mut words = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        let rest: String = chars[i..].iter().collect();
+
+        // The two special names come first in the pattern, ahead of the contractions.
+        if let Some(special) = SPECIAL_WORDS.iter().find(|name| rest.starts_with(**name)) {
+            words.push((*special).to_string());
+            i += special.chars().count();
+            continue;
+        }
+
+        // Then the contractions, which win over the classes below.
+        if let Some(contraction) = CONTRACTIONS.iter().find(|c| rest.starts_with(**c)) {
+            words.push((*contraction).to_string());
+            i += contraction.chars().count();
+            continue;
+        }
+
+        let start = i;
+        if chars[i].is_alphabetic() {
+            while i < chars.len() && chars[i].is_alphabetic() {
+                i += 1;
+            }
+        } else if chars[i].is_numeric() {
+            // One digit at a time: the pattern has no repetition on its number class, so 2024 is
+            // four words rather than one.
+            i += 1;
+        } else {
+            while i < chars.len()
+                && !chars[i].is_whitespace()
+                && !chars[i].is_alphabetic()
+                && !chars[i].is_numeric()
+            {
+                i += 1;
+            }
+        }
+
+        words.push(chars[start..i].iter().collect());
+    }
+
+    words
+}
+
 /// A merge waiting to happen.
 #[derive(Clone, Copy, Debug)]
 struct Bigram {
@@ -399,9 +507,28 @@ impl<'a> BpeEncoder<'a> {
 
     /// The token ids of `text`.
     pub fn encode(&mut self, text: &str) -> Vec<i32> {
-        self.init_symbol_list(text);
-        self.init_queue();
+        match self.config.pre_tokenizer {
+            PreTokenizer::Whole => {
+                self.init_symbol_list(text);
+                self.merge_all();
+                self.token_ids()
+            }
+            PreTokenizer::ClipWord => {
+                // Each word merges on its own, so a token can never span two of them, and the
+                // results are laid end to end.
+                let mut ids = Vec::new();
+                for word in clip_words(text) {
+                    self.init_word_symbol_list(&word);
+                    self.merge_all();
+                    ids.append(&mut self.token_ids());
+                }
+                ids
+            }
+        }
+    }
 
+    /// Merges until the queue is empty, which is when nothing adjacent is left to join.
+    fn merge_all(&mut self) {
         while let Some(bigram) = self.queue.pop() {
             // Either side may have been merged into something else since this was queued.
             if self.symbols[bigram.left].valid() && self.symbols[bigram.right].valid() {
@@ -410,16 +537,43 @@ impl<'a> BpeEncoder<'a> {
                 self.add_bigram_if_exists(Some(merged), self.symbols[merged].next);
             }
         }
-
-        self.token_ids()
     }
 
-    fn init_symbol_list(&mut self, text: &str) {
+    /// One word's symbols: a byte each, except the last, which carries the word-end marker. That
+    /// marker is why CLIP can drop whitespace and still tell `in` at the end of a word from the
+    /// `in` that starts one.
+    fn init_word_symbol_list(&mut self, word: &str) {
+        self.begin_symbol_list();
+
+        // A word that names a control token is that token, not the punctuation it is spelled with.
+        if let Ok(token_id) = self.model.find_control_token(word) {
+            self.append_token(self.header, token_id);
+            return;
+        }
+
+        let mut pieces: Vec<Vec<u8>> = word.bytes().map(|byte| vec![byte]).collect();
+        if let Some(last) = pieces.last_mut() {
+            last.extend_from_slice(WORD_END);
+        }
+
+        let mut tail = self.header;
+        for piece in pieces {
+            tail = self.append_token(tail, self.model.find_token(&piece));
+        }
+
+        self.init_queue();
+    }
+
+    fn begin_symbol_list(&mut self) {
         self.symbols.clear();
         self.queue.clear();
 
         self.header = self.alloc(INVALID_TOKEN);
         self.symbols[self.header].prev = None;
+    }
+
+    fn init_symbol_list(&mut self, text: &str) {
+        self.begin_symbol_list();
         let mut tail = self.header;
 
         if self.config.add_prefix_space {
@@ -442,6 +596,8 @@ impl<'a> BpeEncoder<'a> {
                 tail = self.append_token(tail, token_id);
             }
         }
+
+        self.init_queue();
     }
 
     /// The initial symbols: characters, or bytes for a model that was trained on them.

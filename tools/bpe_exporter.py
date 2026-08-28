@@ -86,9 +86,13 @@ class Token:
 class TokenizerConfig:
     def __init__(self,
                  add_prefix_space: bool,
-                 split_by_unicode: bool) -> None:
+                 split_by_unicode: bool,
+                 pre_tokenizer: str = "whole") -> None:
         self.add_prefix_space = add_prefix_space
         self.split_by_unicode = split_by_unicode
+        # How the text is cut up before merging. "whole" is the sentencepiece behaviour, where the
+        # text is one merge domain; "clip_word" is what CLIP's simple_tokenizer.py does.
+        self.pre_tokenizer = pre_tokenizer
         self.model_file = None
 
     def to_ini(self, model_file: str) -> None:
@@ -100,6 +104,7 @@ class TokenizerConfig:
         config[section]["model_file"] = model_file
         config[section]["add_prefix_space"] = str(self.add_prefix_space).lower()
         config[section]["split_by_unicode"] = str(self.split_by_unicode).lower()
+        config[section]["pre_tokenizer"] = self.pre_tokenizer
 
         return config
 
@@ -193,6 +198,81 @@ class SentencePieceModelReader:
     
     def encode_as_pieces(self, s: str) -> List[str]:
         return self._sp.EncodeAsPieces(s)
+
+class ClipModelReader:
+    """model reader for CLIP's tokenizer, the one simple_tokenizer.py implements.
+
+    CLIP's vocabulary is a byte level BPE like GPT-2's, so the pieces and the merge ranks are read
+    the same way. What differs is the shape of the text it expects: lowercased, cut into words by
+    a pattern, and every word ending in a `</w>` marker. That marker is part of the vocabulary as
+    four ordinary bytes, so nothing here has to know about it -- only the encoder does, which is
+    what pre_tokenizer=clip_word selects.
+    """
+
+    def __init__(self, tokenizer) -> None:
+        self._bpe = tokenizer
+
+    def _byte_decoder(self):
+        # CLIPTokenizer names it without the underscore that GPT2Tokenizer uses.
+        for name in ("byte_decoder", "_byte_decoder"):
+            table = getattr(self._bpe, name, None)
+            if table is not None:
+                return table
+        raise Exception("tokenizer has no byte decoder, so it is not a byte level BPE")
+
+    def _to_byte(self, s: str) -> bytes:
+        byte_decoder = self._byte_decoder()
+        b = b''
+        for ch in s:
+            assert ch in byte_decoder, f"character {ch!r} is not in the byte decoder"
+            b += byte_decoder[ch].to_bytes(1, 'little')
+        return b
+
+    def to_libwaifu_model(self) -> LibwaifuTokenizer:
+        pieces: Dict[str, Token] = {}
+        for piece, piece_id in self._bpe.encoder.items():
+            b_piece = self._to_byte(piece)
+            pieces[piece] = Token(piece_id, 0, b_piece, Util.piece_to_display(b_piece))
+
+        # The rank of the merge that produces a token becomes its weight, negated so that the
+        # lowest rank is the best merge. This is the same shape the tiktoken reader writes.
+        for piece_pair, rank in self._bpe.bpe_ranks.items():
+            piece = piece_pair[0] + piece_pair[1]
+            if piece not in pieces:
+                print(f"merge produces {piece!r}, which the vocabulary does not hold")
+                continue
+            pieces[piece].weight = -rank
+
+        vocab: List[Token] = [Token.unused(i) for i in range(len(self._bpe.encoder))]
+        for token in pieces.values():
+            if not vocab[token.token_id].is_unused():
+                raise Exception(f"duplicated token id {token.token_id}")
+            vocab[token.token_id] = token
+
+        # <|startoftext|> and <|endoftext|>, which the encoder never merges into anything.
+        for token_id, piece in zip(self._bpe.all_special_ids, self._bpe.all_special_tokens):
+            while token_id >= len(vocab):
+                vocab.append(Token.unused(token_id))
+            vocab[token_id] = Token(
+                token_id,
+                Token.FLAG_CONTROL,
+                piece=b"",
+                piece_display=piece,
+                weight=0)
+
+        libwaifu_model = LibwaifuTokenizer()
+        for token in vocab:
+            if token.weight is None:
+                token.weight = 0
+            libwaifu_model.add_token(token)
+
+        # CLIP drops whitespace rather than tokenizing it, so there is no prefix space to add, and
+        # its symbols are bytes rather than characters.
+        libwaifu_model.config.add_prefix_space = False
+        libwaifu_model.config.split_by_unicode = False
+        libwaifu_model.config.pre_tokenizer = "clip_word"
+        return libwaifu_model
+
 
 class TiktokenModelReader:
     """model reader for the BPE tokenizer from transformers"""
@@ -420,6 +500,23 @@ def read_transformers_fast_bpe_model(model_path_or_name: str) -> LibwaifuTokeniz
     tokenizer = AutoTokenizer.from_pretrained(model_path_or_name)
     fast_bpe_model = TransformersFastBpeModelReader(tokenizer)
     libwaifu_model = fast_bpe_model.to_libwaifu_model()
+    print(f"vocab_size={len(libwaifu_model.get_vocab())}")
+    return libwaifu_model
+
+def read_clip_model(model_path_or_name: str, subfolder: str = None) -> LibwaifuTokenizer:
+    """Read CLIP's tokenizer, as it ships beside a Stable Diffusion checkpoint.
+
+    A single file SDXL checkpoint carries no tokenizer, so this reads it from the base model the
+    checkpoint was fine tuned from -- every SDXL derivative shares the same one. In such a
+    repository the tokenizer sits in a subfolder rather than at the top.
+    """
+    from transformers import CLIPTokenizer
+    print("read CLIP tokenizer from " + model_path_or_name)
+    if subfolder:
+        tokenizer = CLIPTokenizer.from_pretrained(model_path_or_name, subfolder=subfolder)
+    else:
+        tokenizer = CLIPTokenizer.from_pretrained(model_path_or_name)
+    libwaifu_model = ClipModelReader(tokenizer).to_libwaifu_model()
     print(f"vocab_size={len(libwaifu_model.get_vocab())}")
     return libwaifu_model
 
