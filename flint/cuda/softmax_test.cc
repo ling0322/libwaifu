@@ -40,6 +40,12 @@ Tensor toCpu(const Tensor &a) {
   return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
+/// A float tensor moved to the device as it stands. The autoencoder's attention softmaxes in
+/// float32, and that arm has no half2 fast path to fall into.
+Tensor toCudaFloat(const Tensor &a) {
+  return F::to(Device::getCuda(), a);
+}
+
 }  // namespace
 
 CATCH_TEST_CASE("test CUDA softmax", "[op][cuda]") {
@@ -167,6 +173,36 @@ CATCH_TEST_CASE("test CUDA softmax (large logits do not overflow)", "[op][cuda]"
     CATCH_INFO("i = " << i);
     CATCH_REQUIRE(!std::isnan(data[i]));
   }
+}
+
+CATCH_TEST_CASE("test CUDA softmax (float)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Both entry points, at an even width and an odd one: the even one is where the half arm would
+  // have vectorized, and the float arm has to answer the same whatever the width.
+  for (int width : {1, 2, 255, 256, 257, 1024}) {
+    Tensor a = F::rand({3, width}, DType::kFloat);
+    CATCH_INFO("width = " << width);
+    Tensor x = F::softmax(toCudaFloat(a));
+    CATCH_REQUIRE(x.getDType() == DType::kFloat);
+    CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), x), F::softmax(a), 1e-5f));
+  }
+
+  // Not contiguous, which is the strided kernel.
+  Tensor a = F::rand({2, 3, 5}, DType::kFloat);
+  Tensor strided = F::softmax(toCudaFloat(a).transpose(1, 2));
+  CATCH_REQUIRE(F::allClose(
+      F::to(Device::getCpu(), strided),
+      F::softmax(a.transpose(1, 2)),
+      1e-5f));
+
+  // Scores a half softmax could not take: the shift by the row maximum keeps the exponentials in
+  // range, but the input itself has to survive being read.
+  Tensor wide = Tensor::create<float>({1, 3}, {70000.0f, 69999.0f, -70000.0f});
+  CATCH_REQUIRE(F::allClose(
+      F::to(Device::getCpu(), F::softmax(toCudaFloat(wide))),
+      F::softmax(wide),
+      1e-5f));
 }
 
 }  // namespace fl

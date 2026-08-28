@@ -21,6 +21,8 @@
 #include <cub/block/block_reduce.cuh>
 #include <math.h>
 
+#include <type_traits>
+
 #include "flint/cuda/accessor.h"
 #include "flint/cuda/common.h"
 #include "flint/functional.h"
@@ -35,10 +37,13 @@ struct MaxFloat {
   }
 };
 
-template<int BLOCK_SIZE, bool VECTORIZED>
+/// One block per row. VECTORIZED reads and writes a half2 at a time, which needs an even width,
+/// operands aligned for it, and a half tensor: two elements to a machine word is a half's own
+/// arrangement, so it is never instantiated for float.
+template<typename T, int BLOCK_SIZE, bool VECTORIZED>
 __global__ void softmaxFusedKernel(
-    const half *__restrict__ input,
-    half *__restrict__ output,
+    const T *__restrict__ input,
+    T *__restrict__ output,
     int width) {
   int rowOffset = blockIdx.x * width;
   float threadMax = -INFINITY;
@@ -52,7 +57,7 @@ __global__ void softmaxFusedKernel(
     }
   } else {
     for (int i = threadIdx.x; i < width; i += BLOCK_SIZE) {
-      threadMax = fmaxf(threadMax, __half2float(input[rowOffset + i]));
+      threadMax = fmaxf(threadMax, static_cast<float>(input[rowOffset + i]));
     }
   }
 
@@ -74,7 +79,7 @@ __global__ void softmaxFusedKernel(
     }
   } else {
     for (int i = threadIdx.x; i < width; i += BLOCK_SIZE) {
-      threadSum += expf(__half2float(input[rowOffset + i]) - rowMax);
+      threadSum += expf(static_cast<float>(input[rowOffset + i]) - rowMax);
     }
   }
 
@@ -95,22 +100,22 @@ __global__ void softmaxFusedKernel(
   } else {
     for (int i = threadIdx.x; i < width; i += BLOCK_SIZE) {
       output[rowOffset + i] =
-          __float2half(expf(__half2float(input[rowOffset + i]) - rowMax) * invSum);
+          static_cast<T>(expf(static_cast<float>(input[rowOffset + i]) - rowMax) * invSum);
     }
   }
 }
 
-template<int BLOCK_SIZE>
+template<typename T, int BLOCK_SIZE>
 __global__ void softmaxStridedKernel(
-    PackedTensorAccessor<const half, 3> input,
-    PackedTensorAccessor<half, 3> output) {
+    PackedTensorAccessor<const T, 3> input,
+    PackedTensorAccessor<T, 3> output) {
   int width = input.getShape(2);
   int y = blockIdx.x % input.getShape(1);
   int z = blockIdx.x / input.getShape(1);
 
   float threadMax = -INFINITY;
   for (int x = threadIdx.x; x < width; x += BLOCK_SIZE) {
-    threadMax = fmaxf(threadMax, __half2float(input[z][y][x]));
+    threadMax = fmaxf(threadMax, static_cast<float>(input[z][y][x]));
   }
 
   using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
@@ -123,7 +128,7 @@ __global__ void softmaxStridedKernel(
 
   float threadSum = 0.0f;
   for (int x = threadIdx.x; x < width; x += BLOCK_SIZE) {
-    threadSum += expf(__half2float(input[z][y][x]) - rowMax);
+    threadSum += expf(static_cast<float>(input[z][y][x]) - rowMax);
   }
 
   threadSum = BlockReduce(tempStorage).Sum(threadSum);
@@ -131,67 +136,72 @@ __global__ void softmaxStridedKernel(
   __syncthreads();
 
   for (int x = threadIdx.x; x < width; x += BLOCK_SIZE) {
-    output[z][y][x] =
-        __float2half(expf(__half2float(input[z][y][x]) - rowMax) * invSum);
+    output[z][y][x] = static_cast<T>(expf(static_cast<float>(input[z][y][x]) - rowMax) * invSum);
   }
 }
 
-Tensor softmaxHalfStrided3D(Tensor A) {
-  CHECK(A.getDType() == DType::kFloat16);
+template<typename T>
+Tensor softmaxStrided3D(Tensor A) {
+  CHECK(A.getDType() == DType::getType<T>());
   CHECK(A.getDim() == 3);
 
-  Tensor C = createCudaTensorHalf(A.getShape());
+  Tensor C = createCudaTensor<T>(A.getShape());
 
   constexpr int blockSize = 256;
   int rows = A.getShape(0) * A.getShape(1);
-  softmaxStridedKernel<blockSize><<<rows, blockSize>>>(A, C);
+  softmaxStridedKernel<T, blockSize><<<rows, blockSize>>>(A, C);
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
   return C;
 }
 
-Tensor softmaxHalf1D(Tensor A) {
+template<typename T>
+Tensor softmax1D(Tensor A) {
   Tensor xA = A.view({1, 1, A.getShape(0)});
-  Tensor C = softmaxHalfStrided3D(xA);
+  Tensor C = softmaxStrided3D<T>(xA);
 
   return C.view({C.getShape(2)});
 }
 
-Tensor softmaxHalf2D(Tensor A) {
+template<typename T>
+Tensor softmax2D(Tensor A) {
   Tensor xA = A.view({1, A.getShape(0), A.getShape(1)});
-  Tensor C = softmaxHalfStrided3D(xA);
+  Tensor C = softmaxStrided3D<T>(xA);
 
   return C.view({C.getShape(1), C.getShape(2)});
 }
 
-Tensor softmaxHalf4D(Tensor A) {
+template<typename T>
+Tensor softmax4D(Tensor A) {
   std::vector<int> shape = A.getShape();
 
   Tensor xA = A.view({-1, A.getShape(2), A.getShape(3)});
-  Tensor C = softmaxHalfStrided3D(xA);
+  Tensor C = softmaxStrided3D<T>(xA);
 
   return C.view(shape);
 }
 
-Tensor softmaxHalfContiguous(Tensor A) {
+template<typename T>
+Tensor softmaxContiguous(Tensor A) {
   int width = A.getShape(-1);
   int64_t numel = A.getNumEl();
   CHECK(numel < std::numeric_limits<int>::max());
   int rows = static_cast<int>(numel / width);
 
-  Tensor C = createCudaTensorHalf(A.getShape());
-  const half *input = getDataPtrCuda<half>(A);
-  half *output = getDataPtrCuda<half>(C);
+  Tensor C = createCudaTensor<T>(A.getShape());
+  const T *input = getDataPtrCuda<T>(A);
+  T *output = getDataPtrCuda<T>(C);
 
   constexpr int blockSize = 256;
-  bool useHalf2 = width % 2 == 0 &&
+  bool useHalf2 = std::is_same<T, half>::value && width % 2 == 0 &&
                   reinterpret_cast<uintptr_t>(input) % alignof(half2) == 0 &&
                   reinterpret_cast<uintptr_t>(output) % alignof(half2) == 0;
   if (useHalf2) {
-    softmaxFusedKernel<blockSize, true><<<rows, blockSize>>>(input, output, width);
+    softmaxFusedKernel<T, blockSize, std::is_same<T, half>::value>
+        <<<rows, blockSize>>>(input, output, width);
   } else {
-    softmaxFusedKernel<blockSize, false><<<rows, blockSize>>>(input, output, width);
+    softmaxFusedKernel<T, blockSize, false><<<rows, blockSize>>>(input, output, width);
   }
 
   LL_CUDA_SYNCHRONIZE();
@@ -199,18 +209,20 @@ Tensor softmaxHalfContiguous(Tensor A) {
   return C;
 }
 
-Tensor softmaxHalf(Tensor A) {
-  if (A.isContiguous()) return softmaxHalfContiguous(A);
-  if (A.getDim() == 1) return softmaxHalf1D(A);
-  if (A.getDim() == 2) return softmaxHalf2D(A);
-  if (A.getDim() == 3) return softmaxHalfStrided3D(A);
-  if (A.getDim() == 4) return softmaxHalf4D(A);
+template<typename T>
+Tensor softmaxImpl(Tensor A) {
+  if (A.isContiguous()) return softmaxContiguous<T>(A);
+  if (A.getDim() == 1) return softmax1D<T>(A);
+  if (A.getDim() == 2) return softmax2D<T>(A);
+  if (A.getDim() == 3) return softmaxStrided3D<T>(A);
+  if (A.getDim() == 4) return softmax4D<T>(A);
 
   NOT_IMPL();
 }
 
 Tensor softmax(Tensor A) {
-  if (A.getDType() == DType::kFloat16) return softmaxHalf(A);
+  if (A.getDType() == DType::kFloat16) return softmaxImpl<half>(A);
+  if (A.getDType() == DType::kFloat) return softmaxImpl<float>(A);
 
   NOT_IMPL();
 }

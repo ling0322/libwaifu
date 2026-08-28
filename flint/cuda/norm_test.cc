@@ -69,6 +69,12 @@ Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &valu
   return Tensor::create<float>(shape, lut::makeConstSpan(values));
 }
 
+/// The same values left in float and moved to the device as they stand. SDXL's autoencoder
+/// normalizes in float32, and its groupNorm is the first thing every one of its blocks does.
+Tensor cudaFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
+  return F::to(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
+}
+
 }  // namespace
 
 CATCH_TEST_CASE("test rmsNorm", "[op][cuda]") {
@@ -302,6 +308,107 @@ CATCH_TEST_CASE("test groupNorm (one group, and one per channel)", "[op][cuda]")
 
   // A channel count that does not divide is a caller's mistake, not a reason to stop.
   CATCH_REQUIRE_THROWS(F::groupNorm(input, Tensor(), Tensor(), 3, 1e-5f));
+}
+
+CATCH_TEST_CASE("test groupNorm (float)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The same arithmetic as the half case, written out on the host, but with values a half could
+  // not hold: the autoencoder's last up block normalizes activations in the thousands and its
+  // output reaches past 65504, which is the whole reason this arm exists.
+  constexpr int kBatch = 2;
+  constexpr int kChannel = 8;
+  constexpr int kHeight = 3;
+  constexpr int kWidth = 5;
+  constexpr int kGroups = 4;
+  constexpr float kEps = 1e-6f;
+  constexpr int kSpatial = kHeight * kWidth;
+  constexpr int kChannelPerGroup = kChannel / kGroups;
+  constexpr float kScale = 20000.0f;
+
+  std::vector<float> x = spread(kBatch * kChannel * kSpatial, 13);
+  for (float &value : x) value *= kScale;
+  std::vector<float> weight = spread(kChannel, 17);
+  std::vector<float> bias = spread(kChannel, 19);
+
+  std::vector<float> expected(x.size());
+  for (int n = 0; n < kBatch; ++n) {
+    for (int g = 0; g < kGroups; ++g) {
+      double sum = 0.0;
+      double sumSquare = 0.0;
+      for (int c = 0; c < kChannelPerGroup; ++c) {
+        for (int p = 0; p < kSpatial; ++p) {
+          double value = x[((size_t(n) * kChannel + g * kChannelPerGroup + c) * kSpatial) + p];
+          sum += value;
+          sumSquare += value * value;
+        }
+      }
+
+      int count = kChannelPerGroup * kSpatial;
+      double mean = sum / count;
+      double invStd = 1.0 / std::sqrt(sumSquare / count - mean * mean + kEps);
+
+      for (int c = 0; c < kChannelPerGroup; ++c) {
+        int channel = g * kChannelPerGroup + c;
+        for (int p = 0; p < kSpatial; ++p) {
+          size_t index = (size_t(n) * kChannel + channel) * kSpatial + p;
+          expected[index] =
+              float((x[index] - mean) * invStd * weight[channel] + bias[channel]);
+        }
+      }
+    }
+  }
+
+  Tensor out = F::groupNorm(
+      cudaFloat({kBatch, kChannel, kHeight, kWidth}, x),
+      cudaFloat({kChannel}, weight),
+      cudaFloat({kChannel}, bias),
+      kGroups,
+      kEps);
+  CATCH_REQUIRE(out.getDType() == DType::kFloat);
+  CATCH_REQUIRE(F::allClose(
+      F::to(Device::getCpu(), out),
+      cpuFloat({kBatch, kChannel, kHeight, kWidth}, expected),
+      1e-4f));
+
+  // A half weight against a float input is a caller's mistake rather than something to convert
+  // on the way past, since the two would then disagree about what the norm is in.
+  CATCH_REQUIRE_THROWS(F::groupNorm(
+      cudaFloat({kBatch, kChannel, kHeight, kWidth}, x),
+      cudaHalf({kChannel}, weight),
+      cudaFloat({kChannel}, bias),
+      kGroups,
+      kEps));
+}
+
+CATCH_TEST_CASE("test layerNorm and rmsNorm (float)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Neither is on the autoencoder's path, but both share every kernel with groupNorm, so the
+  // element type reaches them too. An odd width is the case the half arm cannot vectorize; in
+  // float neither width can, and both have to answer the same.
+  for (int lastDim : {10, 11}) {
+    Tensor a = F::rand({2, 5, lastDim}, DType::kFloat);
+    Tensor w = F::rand({lastDim}, DType::kFloat);
+    Tensor b = F::rand({lastDim}, DType::kFloat);
+    CATCH_INFO("lastDim = " << lastDim);
+
+    Tensor rms = F::rmsNorm(F::to(Device::getCuda(), a), F::to(Device::getCuda(), w), 1e-5f);
+    CATCH_REQUIRE(rms.getDType() == DType::kFloat);
+    CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), rms), F::rmsNorm(a, w, 1e-5f), 1e-5f));
+
+    Tensor layer = F::layerNorm(
+        F::to(Device::getCuda(), a),
+        F::to(Device::getCuda(), w),
+        F::to(Device::getCuda(), b),
+        1e-5f);
+    CATCH_REQUIRE(layer.getDType() == DType::kFloat);
+
+    // Against the half arm on the same values, which is what says the two agree rather than that
+    // one of them agrees with itself.
+    Tensor half = F::layerNorm(toCudaHalf(a), toCudaHalf(w), toCudaHalf(b), 1e-5f);
+    CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), layer), toCpuFloat(half), 5e-3f));
+  }
 }
 
 }  // namespace fl

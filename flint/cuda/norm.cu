@@ -26,6 +26,8 @@
 #include <cuda_fp16.h>
 #include <cub/block/block_reduce.cuh>
 
+#include <type_traits>
+
 #include "lutil/error.h"
 #include "lutil/strings.h"
 #include "flint/cuda/accessor.h"
@@ -77,13 +79,14 @@ reduceMoments(float sum, float sumSquare, int64_t count, float eps) {
 }
 
 /// One block per row of a contiguous tensor. VECTORIZED reads and writes a half2 at a time, which
-/// needs an even width and operands aligned for it.
-template<int BLOCK_SIZE, bool SUBTRACT_MEAN, bool VECTORIZED>
+/// needs an even width, operands aligned for it, and a half tensor: it is the only case where two
+/// elements fit one machine word, so it is never instantiated for float.
+template<typename T, int BLOCK_SIZE, bool SUBTRACT_MEAN, bool VECTORIZED>
 __global__ void normRowKernel(
-    const half *__restrict__ input,
-    const half *__restrict__ weight,
-    const half *__restrict__ bias,
-    half *__restrict__ output,
+    const T *__restrict__ input,
+    const T *__restrict__ weight,
+    const T *__restrict__ bias,
+    T *__restrict__ output,
     int hiddenSize,
     int weightStride,
     int biasStride,
@@ -102,7 +105,7 @@ __global__ void normRowKernel(
     }
   } else {
     for (int i = threadIdx.x; i < hiddenSize; i += BLOCK_SIZE) {
-      float value = __half2float(input[rowOffset + i]);
+      float value = static_cast<float>(input[rowOffset + i]);
       sumSquare += value * value;
       if constexpr (SUBTRACT_MEAN) sum += value;
     }
@@ -135,22 +138,22 @@ __global__ void normRowKernel(
     }
   } else {
     for (int i = threadIdx.x; i < hiddenSize; i += BLOCK_SIZE) {
-      float value = (__half2float(input[rowOffset + i]) - moments.mean) * moments.invStd;
-      if (weight) value *= __half2float(weight[i * weightStride]);
-      if (bias) value += __half2float(bias[i * biasStride]);
+      float value = (static_cast<float>(input[rowOffset + i]) - moments.mean) * moments.invStd;
+      if (weight) value *= static_cast<float>(weight[i * weightStride]);
+      if (bias) value += static_cast<float>(bias[i * biasStride]);
 
-      output[rowOffset + i] = __float2half(value);
+      output[rowOffset + i] = static_cast<T>(value);
     }
   }
 }
 
 /// The same, for a tensor whose rows are not packed, read through its strides.
-template<int BLOCK_SIZE, bool SUBTRACT_MEAN>
+template<typename T, int BLOCK_SIZE, bool SUBTRACT_MEAN>
 __global__ void normRowStridedKernel(
-    PackedTensorAccessor<const half, 3> inputTensor,
-    const half *__restrict__ weight,
-    const half *__restrict__ bias,
-    PackedTensorAccessor<half, 3> outputTensor,
+    PackedTensorAccessor<const T, 3> inputTensor,
+    const T *__restrict__ weight,
+    const T *__restrict__ bias,
+    PackedTensorAccessor<T, 3> outputTensor,
     int weightStride,
     int biasStride,
     float eps) {
@@ -161,7 +164,7 @@ __global__ void normRowStridedKernel(
   float sum = 0.0f;
   float sumSquare = 0.0f;
   for (int x = threadIdx.x; x < hiddenSize; x += BLOCK_SIZE) {
-    float value = __half2float(inputTensor[z][y][x]);
+    float value = static_cast<float>(inputTensor[z][y][x]);
     sumSquare += value * value;
     if constexpr (SUBTRACT_MEAN) sum += value;
   }
@@ -169,22 +172,22 @@ __global__ void normRowStridedKernel(
   Moments moments = reduceMoments<BLOCK_SIZE, SUBTRACT_MEAN>(sum, sumSquare, hiddenSize, eps);
 
   for (int x = threadIdx.x; x < hiddenSize; x += BLOCK_SIZE) {
-    float value = (__half2float(inputTensor[z][y][x]) - moments.mean) * moments.invStd;
-    if (weight) value *= __half2float(weight[x * weightStride]);
-    if (bias) value += __half2float(bias[x * biasStride]);
+    float value = (static_cast<float>(inputTensor[z][y][x]) - moments.mean) * moments.invStd;
+    if (weight) value *= static_cast<float>(weight[x * weightStride]);
+    if (bias) value += static_cast<float>(bias[x * biasStride]);
 
-    outputTensor[z][y][x] = __float2half(value);
+    outputTensor[z][y][x] = static_cast<T>(value);
   }
 }
 
 /// One block per (image, group). A group covers `channelPerGroup` channels of `spatial` pixels
 /// each, and they are contiguous, so the whole group is one run of memory.
-template<int BLOCK_SIZE>
+template<typename T, int BLOCK_SIZE>
 __global__ void groupNormKernel(
-    const half *__restrict__ input,
-    const half *__restrict__ weight,
-    const half *__restrict__ bias,
-    half *__restrict__ output,
+    const T *__restrict__ input,
+    const T *__restrict__ weight,
+    const T *__restrict__ bias,
+    T *__restrict__ output,
     int channelPerGroup,
     int spatial,
     int groups,
@@ -196,7 +199,7 @@ __global__ void groupNormKernel(
   float sum = 0.0f;
   float sumSquare = 0.0f;
   for (int64_t i = threadIdx.x; i < groupSize; i += BLOCK_SIZE) {
-    float value = __half2float(input[offset + i]);
+    float value = static_cast<float>(input[offset + i]);
     sum += value;
     sumSquare += value * value;
   }
@@ -206,20 +209,22 @@ __global__ void groupNormKernel(
   // The scale and the shift are per channel, not per group, so the channel this element belongs
   // to has to be recovered from where it sits inside the group.
   for (int64_t i = threadIdx.x; i < groupSize; i += BLOCK_SIZE) {
-    float value = (__half2float(input[offset + i]) - moments.mean) * moments.invStd;
+    float value = (static_cast<float>(input[offset + i]) - moments.mean) * moments.invStd;
     int channel = group * channelPerGroup + static_cast<int>(i / spatial);
-    if (weight) value *= __half2float(weight[channel]);
-    if (bias) value += __half2float(bias[channel]);
+    if (weight) value *= static_cast<float>(weight[channel]);
+    if (bias) value += static_cast<float>(bias[channel]);
 
-    output[offset + i] = __float2half(value);
+    output[offset + i] = static_cast<T>(value);
   }
 }
 
-void checkNormOperand(const Tensor &x, const char *what, int expected) {
+/// The weight and the bias are read in the input's own type rather than converted, so a norm is
+/// asked for in one precision throughout.
+void checkNormOperand(const Tensor &x, const char *what, int expected, DType dtype) {
   if (x.empty()) return;
 
-  if (x.getDType() != DType::kFloat16) {
-    THROW(InvalidArg, lut::sprintf("%s is not <half>", what));
+  if (x.getDType() != dtype) {
+    THROW(InvalidArg, lut::sprintf("%s is not %s", what, dtype.toString()));
   }
   if (x.getDim() != 1) {
     THROW(InvalidArg, lut::sprintf("%s is not one dimensional", what));
@@ -238,31 +243,35 @@ int strideOf(const Tensor &x) {
   return x.empty() ? 1 : x.getStride(0);
 }
 
-const half *dataOrNull(const Tensor &x) {
-  return x.empty() ? nullptr : getDataPtrCuda<half>(x);
+template<typename T>
+const T *dataOrNull(const Tensor &x) {
+  return x.empty() ? nullptr : getDataPtrCuda<T>(x);
 }
 
-bool isHalf2Aligned(const half *p) {
+template<typename T>
+bool isHalf2Aligned(const T *p) {
   return reinterpret_cast<uintptr_t>(p) % alignof(half2) == 0;
 }
 
 /// Normalize over the last dimension, which is what layerNorm and rmsNorm both do.
-template<bool SUBTRACT_MEAN>
-Tensor normOverLastDim(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps) {
-  if (input.getDType() != DType::kFloat16) THROW(InvalidArg, "this norm takes a <half> input");
-  if (input.getDim() < 1) THROW(InvalidArg, "this norm takes an input of at least one dimension");
-
+template<typename T, bool SUBTRACT_MEAN>
+Tensor normOverLastDimImpl(
+    const Tensor &input,
+    const Tensor &weight,
+    const Tensor &bias,
+    float eps) {
+  DType dtype = DType::getType<T>();
   int hiddenSize = input.getShape(-1);
-  checkNormOperand(weight, "the norm weight", hiddenSize);
-  checkNormOperand(bias, "the norm bias", hiddenSize);
+  checkNormOperand(weight, "the norm weight", hiddenSize, dtype);
+  checkNormOperand(bias, "the norm bias", hiddenSize, dtype);
 
   int64_t numRow64 = input.getNumEl() / hiddenSize;
   if (numRow64 > std::numeric_limits<int32_t>::max()) THROW(InvalidArg, "this norm: too many rows");
   int numRow = static_cast<int>(numRow64);
 
-  Tensor output = createCudaTensorHalf(input.getShape());
-  const half *weightData = dataOrNull(weight);
-  const half *biasData = dataOrNull(bias);
+  Tensor output = createCudaTensor<T>(input.getShape());
+  const T *weightData = dataOrNull<T>(weight);
+  const T *biasData = dataOrNull<T>(bias);
 
   int weightStride = strideOf(weight);
   int biasStride = strideOf(bias);
@@ -273,7 +282,7 @@ Tensor normOverLastDim(const Tensor &input, const Tensor &weight, const Tensor &
     Tensor output3D = output.getDim() == 3 ? output : output.unsqueeze(0);
     if (input3D.getDim() != 3) THROW(InvalidArg, "this norm: an input of this rank is not strided");
 
-    normRowStridedKernel<kBlockSize, SUBTRACT_MEAN><<<numRow, kBlockSize>>>(
+    normRowStridedKernel<T, kBlockSize, SUBTRACT_MEAN><<<numRow, kBlockSize>>>(
         input3D,
         weightData,
         biasData,
@@ -282,21 +291,77 @@ Tensor normOverLastDim(const Tensor &input, const Tensor &weight, const Tensor &
         biasStride,
         eps);
   } else {
-    const half *inputData = getDataPtrCuda<half>(input);
-    half *outputData = getDataPtrCuda<half>(output);
-    bool vectorized = hiddenSize % 2 == 0 && weightStride == 1 && biasStride == 1 &&
-                      isHalf2Aligned(inputData) && isHalf2Aligned(outputData) &&
-                      (!weightData || isHalf2Aligned(weightData)) &&
+    const T *inputData = getDataPtrCuda<T>(input);
+    T *outputData = getDataPtrCuda<T>(output);
+
+    // Two elements to a machine word is a half's own arrangement; a float row is read one at a
+    // time whatever it is aligned to.
+    bool vectorized = std::is_same<T, half>::value && hiddenSize % 2 == 0 && weightStride == 1 &&
+                      biasStride == 1 && isHalf2Aligned(inputData) &&
+                      isHalf2Aligned(outputData) && (!weightData || isHalf2Aligned(weightData)) &&
                       (!biasData || isHalf2Aligned(biasData));
 
     if (vectorized) {
-      normRowKernel<kBlockSize, SUBTRACT_MEAN, true><<<numRow, kBlockSize>>>(
-          inputData, weightData, biasData, outputData, hiddenSize, 1, 1, eps);
+      normRowKernel<T, kBlockSize, SUBTRACT_MEAN, std::is_same<T, half>::value>
+          <<<numRow, kBlockSize>>>(
+              inputData, weightData, biasData, outputData, hiddenSize, 1, 1, eps);
     } else {
-      normRowKernel<kBlockSize, SUBTRACT_MEAN, false><<<numRow, kBlockSize>>>(
+      normRowKernel<T, kBlockSize, SUBTRACT_MEAN, false><<<numRow, kBlockSize>>>(
           inputData, weightData, biasData, outputData, hiddenSize, weightStride, biasStride, eps);
     }
   }
+
+  LL_CUDA_SYNCHRONIZE();
+  LL_CHECK_CUDA_STATUS(cudaGetLastError());
+
+  return output;
+}
+
+template<bool SUBTRACT_MEAN>
+Tensor normOverLastDim(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps) {
+  if (input.getDim() < 1) THROW(InvalidArg, "this norm takes an input of at least one dimension");
+
+  if (input.getDType() == DType::kFloat16) {
+    return normOverLastDimImpl<half, SUBTRACT_MEAN>(input, weight, bias, eps);
+  }
+  if (input.getDType() == DType::kFloat) {
+    return normOverLastDimImpl<float, SUBTRACT_MEAN>(input, weight, bias, eps);
+  }
+
+  THROW(InvalidArg, "this norm takes a <half> or <float> input");
+}
+
+template<typename T>
+Tensor groupNormImpl(
+    const Tensor &input,
+    const Tensor &weight,
+    const Tensor &bias,
+    int groups,
+    float eps) {
+  int batch = input.getShape(0);
+  int channel = input.getShape(1);
+  if (groups < 1 || channel % groups != 0) {
+    THROW(
+        InvalidArg,
+        lut::sprintf("groupNorm: %d channels do not divide into %d groups", channel, groups));
+  }
+
+  DType dtype = DType::getType<T>();
+  checkNormOperand(weight, "the groupNorm weight", channel, dtype);
+  checkNormOperand(bias, "the groupNorm bias", channel, dtype);
+
+  int spatial = input.getShape(2) * input.getShape(3);
+  Tensor output = createCudaTensor<T>(input.getShape());
+
+  groupNormKernel<T, kBlockSize><<<batch * groups, kBlockSize>>>(
+      getDataPtrCuda<T>(input),
+      dataOrNull<T>(weight),
+      dataOrNull<T>(bias),
+      getDataPtrCuda<T>(output),
+      channel / groups,
+      spatial,
+      groups,
+      eps);
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
@@ -322,38 +387,17 @@ Tensor groupNorm(
     const Tensor &bias,
     int groups,
     float eps) {
-  if (input.getDType() != DType::kFloat16) THROW(InvalidArg, "groupNorm takes a <half> input");
   if (input.getDim() != 4) THROW(InvalidArg, "groupNorm takes a 4-D input, as (N, C, H, W)");
   LL_CHECK_CONTIGUOUS(input);
 
-  int batch = input.getShape(0);
-  int channel = input.getShape(1);
-  if (groups < 1 || channel % groups != 0) {
-    THROW(
-        InvalidArg,
-        lut::sprintf("groupNorm: %d channels do not divide into %d groups", channel, groups));
+  if (input.getDType() == DType::kFloat16) {
+    return groupNormImpl<half>(input, weight, bias, groups, eps);
+  }
+  if (input.getDType() == DType::kFloat) {
+    return groupNormImpl<float>(input, weight, bias, groups, eps);
   }
 
-  checkNormOperand(weight, "the groupNorm weight", channel);
-  checkNormOperand(bias, "the groupNorm bias", channel);
-
-  int spatial = input.getShape(2) * input.getShape(3);
-  Tensor output = createCudaTensorHalf(input.getShape());
-
-  groupNormKernel<kBlockSize><<<batch * groups, kBlockSize>>>(
-      getDataPtrCuda<half>(input),
-      dataOrNull(weight),
-      dataOrNull(bias),
-      getDataPtrCuda<half>(output),
-      channel / groups,
-      spatial,
-      groups,
-      eps);
-
-  LL_CUDA_SYNCHRONIZE();
-  LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return output;
+  THROW(InvalidArg, "groupNorm takes a <half> or <float> input");
 }
 
 }  // namespace cuda
