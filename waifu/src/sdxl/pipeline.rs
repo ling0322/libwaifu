@@ -227,7 +227,13 @@ impl Sdxl {
             text_encoder: ClipTextEncoder::build(config.text, &vb.with_name("text_encoder"))?,
             text_encoder2: ClipTextEncoder::build(config.text2, &vb.with_name("text_encoder2"))?,
             unet: Unet::build(config.unet.clone(), &vb.with_name("unet"))?,
-            vae: VaeDecoder::build(config.vae.clone(), &vb.with_name("vae"))?,
+            // The autoencoder alone is read in float32. It is marked force_upcast and really
+            // does need it -- see VaeDecoder::forward -- and the exporter writes its weights
+            // that way, so this is the file's own precision rather than a widening of it.
+            vae: VaeDecoder::build(
+                config.vae.clone(),
+                &vb.with_name("vae").with_float_type(DType::Float),
+            )?,
             tokenizer: Tokenizer::from_package(package)?,
             config,
             device,
@@ -348,31 +354,16 @@ impl Sdxl {
         Ok(latent)
     }
 
-    /// The image a latent stands for, as `(1, 3, H * 8, W * 8)` in roughly `[-1, 1]`.
+    /// The image a latent stands for, as `<float>(1, 3, H * 8, W * 8)` in roughly `[-1, 1]`.
     ///
-    /// SDXL's autoencoder does not fit in half precision, which is not a guess: its own config
-    /// carries `force_upcast`, and diffusers reads that flag and runs it in float32 no matter what
-    /// the rest of the pipeline is in. A denoised latent overflows one convolution of the last up
-    /// block and everything after it is a NaN, so that is reported here rather than handed back as
-    /// a black picture. `docs/TODO.md` has what closing it takes.
+    /// The autoencoder runs in float32 while everything before it runs in half, so the image is
+    /// the one tensor a run hands back in a wider type than the model was loaded in. The latent
+    /// is cast on the way in by the decoder itself.
     pub fn decode(&self, latent: &Tensor) -> Result<Tensor> {
-        let image = self.vae.forward(latent)?;
-
-        let values = image
-            .to_device(Device::Cpu)?
-            .cast(DType::Float)?
-            .to_vec_f32()?;
-        if !values.iter().all(|value| value.is_finite()) {
-            return Err(Error::model(
-                "the autoencoder overflowed half precision, which SDXL's does on a denoised \
-                 latent: it is marked force_upcast and needs float32",
-            ));
-        }
-
-        Ok(image)
+        self.vae.forward(latent)
     }
 
-    /// An image for `prompt`, as `(1, 3, height, width)` in roughly `[-1, 1]`.
+    /// An image for `prompt`, as `<float>(1, 3, height, width)` in roughly `[-1, 1]`.
     pub fn generate(&self, prompt: &str, options: &GenerationOptions) -> Result<Tensor> {
         let latent = self.generate_latent(prompt, options)?;
         self.decode(&latent)

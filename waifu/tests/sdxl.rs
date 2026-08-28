@@ -26,7 +26,7 @@
 use std::path::PathBuf;
 
 use waifu::flint::Tensor;
-use waifu::{DType, Device, GenerationOptions, Sdxl, VarBuilder, ZipFile};
+use waifu::{to_rgb8, DType, Device, GenerationOptions, Sdxl, VarBuilder, ZipFile};
 
 /// What the reference denoising run in the exporter was written for.
 const PROMPT: &str = "a photo of an astronaut riding a horse on mars";
@@ -200,26 +200,72 @@ fn generates_a_latent_from_a_prompt() {
 
 #[test]
 #[ignore = "needs the sdxl package"]
-fn decoding_a_denoised_latent_reports_the_overflow() {
-    // SDXL's autoencoder is marked force_upcast and really does need float32: a denoised latent
-    // overflows one convolution of its last up block in half precision. What is checked here is
-    // that this is reported rather than handed back as a black picture. When the decoder can run
-    // in float32 this is the test that should change.
+fn decodes_a_denoised_latent_into_an_image() {
+    // The latent the sampler really hands over, which is the case the autoencoder needs float32
+    // for: in half its last up block passes 65504 and everything after it is a NaN. The decoder
+    // is built in float32 and the half latent is cast on the way in, so this is also what says
+    // the two precisions meet where they are supposed to.
     let cases = cases();
     let model = model();
 
-    // The reference's own denoised latent, so this says something about the model rather than
-    // about the runtime.
     let denoised = to_cuda(&cases.get_unchecked("test_case.denoised").unwrap());
-    let error = model.decode(&denoised).unwrap_err();
+    let image = model.decode(&denoised).unwrap();
+    assert_eq!(image.shape(), vec![1, 3, SIZE, SIZE]);
+    assert_eq!(image.dtype(), DType::Float);
+
+    let values = image
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
     assert!(
-        error.to_string().contains("float32"),
-        "the overflow was reported as {error}"
+        values.iter().all(|x| x.is_finite()),
+        "the decoder produced a NaN or an infinity"
     );
 
-    // Pure noise still decodes, which is what sdxl_vae.rs compares against the reference.
-    let latent = to_cuda(&cases.get_unchecked("test_case.latent").unwrap());
-    assert!(model.decode(&latent).is_ok());
+    // A decoder ends in roughly [-1, 1]. Four steps is not enough for a good picture, but one
+    // that had gone wrong somewhere would be flat or far outside that range rather than merely
+    // ugly, and either would survive a check that only asked for finite numbers.
+    let extreme = values.iter().filter(|x| x.abs() > 1.5).count();
+    assert!(
+        extreme * 100 < values.len(),
+        "{extreme} of {} pixels are far outside [-1, 1]",
+        values.len()
+    );
+
+    let largest = values.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+    assert!(
+        largest > 0.5,
+        "the image is flat: it reaches only {largest}"
+    );
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn generates_an_image_from_a_prompt() {
+    // The whole of it, from a string to pixels: tokenizer, both encoders, the sampler walking the
+    // U-Net, and the autoencoder. Every piece is checked against its own reference elsewhere, so
+    // what this adds is that they are wired together and that the last step now runs.
+    let model = model();
+    let mut options = options();
+    options.seed = Some(7);
+
+    let image = model.generate(PROMPT, &options).unwrap();
+    assert_eq!(image.shape(), vec![1, 3, SIZE, SIZE]);
+
+    let pixels = to_rgb8(&image).unwrap();
+    assert_eq!(pixels.len(), (SIZE * SIZE * 3) as usize);
+
+    // Three bytes a pixel of one value would be a black or a white rectangle, which is what a
+    // decoder that had overflowed or a latent that never moved would give.
+    let smallest = *pixels.iter().min().unwrap();
+    let largest = *pixels.iter().max().unwrap();
+    assert!(
+        largest - smallest > 32,
+        "the image covers only {smallest}..{largest}"
+    );
 }
 
 #[test]

@@ -32,12 +32,15 @@ fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
 }
 
+/// The decoder is built in float32, which is what SDXL's autoencoder needs and what the exporter
+/// writes its weights as: read at DType::Float16 the file would be narrowed on the way in and the
+/// last up block would overflow.
 fn weights() -> VarBuilder {
     let package = ZipFile::open(models_dir().join("sdxl-base.llmpkg")).unwrap();
     VarBuilder::from_reader(
         &mut package.open_entry("model.bin").unwrap(),
         Device::Cuda,
-        DType::Float16,
+        DType::Float,
     )
     .unwrap()
 }

@@ -318,36 +318,35 @@ that one puts spaces between CJK characters, so huggingface's own output for `éœ
 on what is installed beside it. The reference above was generated with ftfy present, which is what
 CLIP itself does.
 
-## The SDXL VAE decoder overflows in half precision
+## ~~The SDXL VAE decoder overflows in half precision~~ (fixed 2026-08-28)
 
-Only on latents an encoder would never produce: sliced corners of a real latent decode fine at
-every size tried, but `rand`, which is uniform over `[0, 1)` and so has a large DC offset once the
-scaling factor is divided out, reaches infinity somewhere in the up blocks and comes back as NaN.
-This is the same overflow that `madebyollin/sdxl-vae-fp16-fix` exists to work around, and the fix
-there is retrained weights rather than anything in the code.
+Two entries stood here, one about latents an encoder would never produce and one about the
+latents the sampler really hands over. Both were the same thing and both are closed by running
+the decoder in float32, which is what it is now built in.
 
-Nothing to do while the sampler hands over real latents. If it ever shows up on one, the answer is
-either those weights or running the decoder in float32, which the exporter can already write.
+What was measured, on the reference's own four step latent: the activations grow through the
+decoder -- about 84 at the mid block, then 570, then 4046 -- and one convolution of the last up
+block passes 65504, which is as far as half goes. Everything after it was a NaN. It is a range
+problem and not a precision one, which is why accumulating in float did not help: the value
+overflowed as it was stored. `rand`, which is uniform over `[0, 1)` and so has a large DC offset
+once the scaling factor is divided out, reached infinity the same way and for the same reason.
 
-## The SDXL autoencoder needs float32, and flint's CUDA backend is half only
+The autoencoder's own config says all of this: `force_upcast` is true, and diffusers reads that
+flag and runs the decoder in float32 whatever the rest of the pipeline is in.
+`madebyollin/sdxl-vae-fp16-fix` exists because the alternative is retrained weights.
 
-Not the same thing as the overflow noted above, which is about latents no encoder would produce.
-This one is about the latents the sampler really hands over: measured on the reference's own four
-step result, the activations grow through the decoder -- 84 at the mid block, 570, 4046 -- and one
-convolution of the last up block passes 65504. Everything after it is a NaN. The autoencoder's own
-config says so: `force_upcast` is true, and diffusers reads that flag and runs the decoder in
-float32 whatever the rest of the pipeline is in.
+Closing it took the float arm of five CUDA operators that were written against `half`:
+`groupNorm` and the two norms it shares its kernels with (norm.cu), `softmax` (softmax.cu),
+`matmul` by way of `sgemm` and `sgemmArray` on the cuBLAS backend (matmul.cc, gemm_cublas.cc),
+`copy` (copy.cu), and `upsampleNearest2d` (upsample.cu). `conv2d` already took float32 and the
+unary and binary operators already dispatched on it, so `attention` -- which is matmul, softmax
+and the copies behind `cat` -- followed once those were in. `CudaOperators::tensor` and
+`tensorLike` had to learn the type as well, since `cat` and `contiguous` allocate through them.
 
-`Sdxl::decode` reports this rather than handing back a black picture, so a prompt currently gets
-as far as a latent and no further. Closing it means running the decoder in float32, which needs
-five CUDA kernels that are written against `half` today:
+Only the autoencoder is in float32; the U-Net and both text encoders are still half. `VarBuilder`
+grew `with_float_type` for that, and the exporter already wrote the VAE's weights unnarrowed.
+The decode drifts 1.0e-3 from the reference image, against 2.1e-2 for the half decoder that
+worked only on noise.
 
-  - `group_norm` (norm.cu), which already accumulates in float and only writes half
-  - `softmax` (softmax.cu), whose fast arm is half2 and would need a scalar float one
-  - `matmul` (matmul.cc), which needs the cuBLAS float path alongside the half one
-  - `copy` (copy.cu), where the float instantiations of `copyND` are four missing lines
-  - `upsample_nearest2d` (upsample.cu), a gather that only needs templating
-
-`conv2d` already takes float32, and the unary and binary operators already dispatch on it, so
-`attention` follows once matmul and softmax do. bfloat16 would close it too and more cheaply at
-run time, but flint has no bfloat16 at all today, which is the larger change of the two.
+bfloat16 would have closed it too and more cheaply at run time, but flint has no bfloat16 at all,
+which is the larger change of the two and is still worth having for its own sake.

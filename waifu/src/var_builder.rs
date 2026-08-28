@@ -102,6 +102,17 @@ impl VarBuilder {
         child
     }
 
+    /// The same builder, handing out float tensors in `float_type` instead.
+    ///
+    /// One model does not have to be in one precision. SDXL's autoencoder is the case this exists
+    /// for: it is marked `force_upcast` and overflows half, so it is built from a float32 view of
+    /// the same file the rest of the model is read from in half.
+    pub fn with_float_type(&self, float_type: DType) -> VarBuilder {
+        let mut child = self.clone();
+        child.float_type = float_type;
+        child
+    }
+
     /// The tensor called `name` here, checked against the shape the caller expects.
     pub fn get(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
         let tensor = self.get_unchecked(name)?;

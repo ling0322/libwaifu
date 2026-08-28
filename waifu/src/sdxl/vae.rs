@@ -25,7 +25,7 @@
 //! never asks for it.
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, Tensor};
+use crate::flint::{functional as F, DType, Tensor};
 use crate::layers::{Conv2d, GroupNorm};
 use crate::var_builder::VarBuilder;
 
@@ -255,6 +255,8 @@ pub struct VaeConfig {
 #[derive(Debug)]
 pub struct VaeDecoder {
     config: VaeConfig,
+    /// What its weights are in, which for SDXL is float32 whatever the rest of the model is in.
+    dtype: DType,
     post_quant_conv: Conv2d,
     conv_in: Conv2d,
     mid_resnet0: ResnetBlock,
@@ -321,6 +323,7 @@ impl VaeDecoder {
                 &vb.with_name("conv_norm_out"),
             )?,
             conv_out: Conv2d::build(narrowest, 3, 3, 1, 1, &vb.with_name("conv_out"))?,
+            dtype: vb.float_type(),
             config,
         })
     }
@@ -329,15 +332,27 @@ impl VaeDecoder {
         &self.config
     }
 
+    /// What this decoder computes in. A latent of any float type is cast to it on the way in.
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
     /// The image a latent stands for, as `(1, 3, H * 8, W * 8)` in roughly `[-1, 1]`.
     ///
     /// `latent` is `(1, C, H, W)` as the sampler leaves it, still scaled the way the model was
-    /// trained; dividing that back out is the first thing done here.
+    /// trained; dividing that back out is the first thing done here. It is cast to whatever this
+    /// decoder was built in, so a half latent from the sampler is read by a float32 decoder
+    /// without the caller arranging it.
+    ///
+    /// SDXL's autoencoder has to be built in float32. Its own config says so with `force_upcast`,
+    /// and it is not a matter of precision but of range: the activations grow through the up
+    /// blocks -- about 84 at the mid block, 570, then 4046 -- and one convolution of the last one
+    /// passes 65504, which is as far as half goes. Everything after that would be a NaN.
     pub fn forward(&self, latent: &Tensor) -> Result<Tensor> {
         let dim = latent.dim()?;
         if dim != 4 {
             return Err(Error::model(format!(
-                "a latent is <float16>(N, C, H, W), got a {dim}-D tensor"
+                "a latent is (N, C, H, W), got a {dim}-D tensor"
             )));
         }
 
@@ -349,7 +364,8 @@ impl VaeDecoder {
             )));
         }
 
-        let x = F::div_scalar(latent, self.config.scaling_factor)?;
+        let latent = latent.cast(self.dtype)?;
+        let x = F::div_scalar(&latent, self.config.scaling_factor)?;
         let x = self.post_quant_conv.forward(&x)?;
         let x = self.conv_in.forward(&x)?;
 
