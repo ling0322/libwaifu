@@ -82,7 +82,7 @@ pub use reader::BinaryRead;
 pub use request::{FinishReason, GenerationConfig, Request, RequestOutput, RequestStatus};
 pub use sampling_batch::{PreparedSampling, SamplingBatch};
 pub use scheduler::Scheduler;
-pub use sdxl::{ClipTextConfig, ClipTextEncoder, ClipTextOutput};
+pub use sdxl::{ClipTextConfig, ClipTextEncoder, ClipTextOutput, VaeConfig, VaeDecoder};
 pub use tokenizer::Tokenizer;
 pub use var_builder::VarBuilder;
 pub use zip_file::ZipFile;

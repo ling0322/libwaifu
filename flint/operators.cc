@@ -142,6 +142,10 @@ Tensor Operators::softmax(Tensor input) {
   NOT_IMPL();
 }
 
+/// How many score elements one block of queries may hold at once. 4M of them is 8MB in half,
+/// which fits the caches of the parts this runs on and bounds what a long sequence costs.
+constexpr int64_t kAttentionScoreLimit = 4 * 1024 * 1024;
+
 Tensor Operators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
   CHECK(q.getDim() == 4 && k.getDim() == 4 && v.getDim() == 4);
 
@@ -159,16 +163,40 @@ Tensor Operators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
 
   // Scaling both q and k keeps the scores in range for half precision.
   float scale = sqrtf(1.0f / sqrtf(1.0f * headDim));
-  Tensor scores = matmul(mul(q, scale), mul(k, scale).transpose(-2, -1));
+  Tensor scaledK = mul(k, scale).transpose(-2, -1);
 
-  // A single query attends to the whole history, so it needs no mask.
-  if (causal && queryLength > 1) {
-    Tensor mask =
-        causalMask(keyValueLength).slice(0, {keyValueLength - queryLength, keyValueLength});
-    scores = add(scores, mask);
+  // The score matrix is the whole cost of doing it this way: a VAE decoding a 1024 by 1024 image
+  // attends over 16384 positions, and holding all of that at once is half a gigabyte per head
+  // before the softmax needs a second copy. Since each output row depends only on its own row of
+  // scores, the queries are taken a block at a time instead. The answer is the same to the bit --
+  // no running maximum is needed, because a block still sees every key -- and the block is small
+  // enough to stay in cache, so the round trip the scores make is a cheaper one.
+  int blockSize = queryLength;
+  if (static_cast<int64_t>(queryLength) * keyValueLength > kAttentionScoreLimit) {
+    blockSize = std::max(1, static_cast<int>(kAttentionScoreLimit / keyValueLength));
   }
 
-  return matmul(softmax(scores), v);
+  Tensor output;
+  for (int begin = 0; begin < queryLength; begin += blockSize) {
+    int end = std::min(begin + blockSize, queryLength);
+    Tensor blockQ = begin == 0 && end == queryLength ? q : q.slice(-2, {begin, end});
+
+    Tensor scores = matmul(mul(blockQ, scale), scaledK);
+
+    // A single query attends to the whole history, so it needs no mask. A block of them is masked
+    // against where it sits, not where the whole query is.
+    if (causal && queryLength > 1) {
+      Tensor mask = causalMask(keyValueLength)
+                        .slice(0, {keyValueLength - queryLength + begin,
+                                   keyValueLength - queryLength + end});
+      scores = add(scores, mask);
+    }
+
+    Tensor blockOutput = matmul(softmax(scores), v);
+    output = output.empty() ? blockOutput : F::cat(output, blockOutput, -2);
+  }
+
+  return output;
 }
 
 Tensor Operators::sum(Tensor input, int dim) {

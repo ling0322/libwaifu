@@ -121,6 +121,25 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_quick_gelu(input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_conv2d(
+        input: FlTensor,
+        weight: FlTensor,
+        bias: FlTensor,
+        stride: i32,
+        padding: i32,
+        dilation: i32,
+        groups: i32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_group_norm(
+        input: FlTensor,
+        weight: FlTensor,
+        bias: FlTensor,
+        groups: i32,
+        eps: f32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_upsample_nearest2d(input: FlTensor, scale: i32, out: *mut FlTensor) -> i32;
     pub fn fl_nvfp4_available(out: *mut i32) -> i32;
     pub fn fl_nvfp4_quantize(
         x: FlTensor,

@@ -467,6 +467,17 @@ def export_test_cases(pipeline, fp) -> None:
         writer.write_tensor(
             ctx.with_subname("pooled2"), out2.text_embeds, preserve_dtype=True)
 
+        # A latent and what the VAE decoder makes of it. Small on purpose: a 32 by 32 latent is a
+        # 256 by 256 image, which is enough to say the decoder is right and cheap to carry.
+        generator = torch.Generator().manual_seed(11)
+        latent = torch.randn(1, 4, 32, 32, generator=generator)
+        writer.write_tensor(ctx.with_subname("latent"), latent, preserve_dtype=True)
+
+        with torch.no_grad():
+            decoded = pipeline.vae.decode(
+                latent / pipeline.vae.config.scaling_factor).sample
+        writer.write_tensor(ctx.with_subname("decoded"), decoded, preserve_dtype=True)
+
 
 def load_pipeline(checkpoint: str, base_model: str, variant: str = None):
     """Read a checkpoint, whichever of the two shapes it comes in."""

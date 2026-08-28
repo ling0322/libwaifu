@@ -430,6 +430,45 @@ int32_t fl_rms_norm(fl_tensor_t input, fl_tensor_t weight, float eps, fl_tensor_
   return guard([&]() { return publish(fl::F::rmsNorm(deref(input), deref(weight), eps), out); });
 }
 
+int32_t fl_conv2d(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::Tensor emptyTensor;
+    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
+
+    return publish(
+        fl::F::conv2d(deref(input), deref(weight), b, stride, padding, dilation, groups),
+        out);
+  });
+}
+
+int32_t fl_group_norm(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t groups,
+    float eps,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::Tensor emptyTensor;
+    const fl::Tensor &w = weight ? deref(weight) : emptyTensor;
+    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
+
+    return publish(fl::F::groupNorm(deref(input), w, b, groups, eps), out);
+  });
+}
+
+int32_t fl_upsample_nearest2d(fl_tensor_t input, int32_t scale, fl_tensor_t *out) {
+  return guard([&]() { return publish(fl::F::upsampleNearest2d(deref(input), scale), out); });
+}
+
 int32_t fl_layer_norm(
     fl_tensor_t input,
     fl_tensor_t weight,

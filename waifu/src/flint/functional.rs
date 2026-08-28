@@ -111,6 +111,42 @@ pub fn quick_gelu(input: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_quick_gelu(input.raw, out) })
 }
 
+/// A 2-D convolution of `input` `(N, C, H, W)` by `weight` `(K, C / groups, R, S)`, with an
+/// optional per-channel bias. The stride, padding and dilation are square.
+pub fn conv2d(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    stride: i32,
+    padding: i32,
+    dilation: i32,
+    groups: i32,
+) -> Result<Tensor> {
+    let bias = bias.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+    Tensor::produce(|out| unsafe {
+        ffi::fl_conv2d(input.raw, weight.raw, bias, stride, padding, dilation, groups, out)
+    })
+}
+
+/// Normalize `input` `(N, C, H, W)` over each group of channels together with the space it covers,
+/// then scale and shift per channel.
+pub fn group_norm(
+    input: &Tensor,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    groups: i32,
+    eps: f32,
+) -> Result<Tensor> {
+    let weight = weight.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+    let bias = bias.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+    Tensor::produce(|out| unsafe { ffi::fl_group_norm(input.raw, weight, bias, groups, eps, out) })
+}
+
+/// Repeat each pixel of `input` `(N, C, H, W)` `scale` times along both spatial axes.
+pub fn upsample_nearest2d(input: &Tensor, scale: i32) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe { ffi::fl_upsample_nearest2d(input.raw, scale, out) })
+}
+
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_matmul(a.raw, b.raw, out) })
 }

@@ -109,6 +109,57 @@ bool runAttentionCase(
 
 }  // namespace
 
+/// Attention written out, with no blocking anywhere: the reference the blocked fallback has to
+/// reproduce. Kept small enough that the whole score matrix is affordable here.
+Tensor wholeAttention(const Tensor &q, const Tensor &k, const Tensor &v, bool causal) {
+  int headDim = q.getShape(3);
+  int queryLength = q.getShape(2);
+  int keyValueLength = k.getShape(2);
+
+  float scale = sqrtf(1.0f / sqrtf(1.0f * headDim));
+  Tensor scores = F::matmul(F::mul(q, scale), F::mul(k, scale).transpose(-2, -1));
+  if (causal && queryLength > 1) {
+    Tensor mask = F::causalMask(keyValueLength, q.getDevice())
+                      .slice(0, {keyValueLength - queryLength, keyValueLength});
+    scores = F::add(scores, mask);
+  }
+
+  return F::matmul(F::softmax(scores), v);
+}
+
+CATCH_TEST_CASE("test CUDA attention (blocked over the queries)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // A head of 512 is what a VAE's own attention uses, and what the compiled FlashAttention
+  // kernels will not take, so this is the fallback. Past four million score elements it takes the
+  // queries a block at a time rather than holding the whole matrix, and the answer may not change
+  // for it: each output row sees every key either way, so there is nothing to approximate.
+  for (int seqLen : {2048, 4096}) {
+    CATCH_INFO("sequence length = " << seqLen);
+    Tensor q = toCuda(F::rand({1, 1, seqLen, 512}, DType::kFloat));
+    Tensor k = toCuda(F::rand({1, 1, seqLen, 512}, DType::kFloat));
+    Tensor v = toCuda(F::rand({1, 1, seqLen, 512}, DType::kFloat));
+
+    Tensor actual = F::attention(q, k, v, false);
+    CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, 1, seqLen, 512});
+    CATCH_REQUIRE(F::allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, false)), 5e-3));
+  }
+}
+
+CATCH_TEST_CASE("test CUDA attention (blocked and causal)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Blocking moves where a block of queries sits in the sequence, so the mask has to move with
+  // it. Getting that wrong lets a position see what follows it, which is the one thing the mask
+  // exists to prevent and which no shape check would catch.
+  Tensor q = toCuda(F::rand({1, 1, 3000, 512}, DType::kFloat));
+  Tensor k = toCuda(F::rand({1, 1, 3000, 512}, DType::kFloat));
+  Tensor v = toCuda(F::rand({1, 1, 3000, 512}, DType::kFloat));
+
+  Tensor actual = F::attention(q, k, v, true);
+  CATCH_REQUIRE(F::allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, true)), 5e-3));
+}
+
 CATCH_TEST_CASE("test CUDA attention (head dims)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 

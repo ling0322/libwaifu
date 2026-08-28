@@ -253,6 +253,31 @@ FLAPI int32_t fl_layer_norm(
     float eps,
     fl_tensor_t *out);
 
+/// 2-D convolution of `input` <float16|float>(N, C, H, W) by `weight` (K, C / groups, R, S), with
+/// an optional per-channel `bias` (K) that may be null. Square stride, padding and dilation.
+FLAPI int32_t fl_conv2d(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups,
+    fl_tensor_t *out);
+
+/// Normalize `input` <float16>(N, C, H, W) over each group of channels and the space it covers,
+/// then scale and shift per channel. `weight` and `bias` are (C) and either may be null.
+FLAPI int32_t fl_group_norm(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t groups,
+    float eps,
+    fl_tensor_t *out);
+
+/// Repeat each pixel of `input` <float16>(N, C, H, W) `scale` times along both spatial axes.
+FLAPI int32_t fl_upsample_nearest2d(fl_tensor_t input, int32_t scale, fl_tensor_t *out);
+
 /// Matrix multiplication, batched over the leading dimensions.
 FLAPI int32_t fl_matmul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 

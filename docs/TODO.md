@@ -317,3 +317,14 @@ Worth knowing: `CLIPTokenizer` itself falls back to a `BasicTokenizer` when ftfy
 that one puts spaces between CJK characters, so huggingface's own output for `霧雨魔理沙` depends
 on what is installed beside it. The reference above was generated with ftfy present, which is what
 CLIP itself does.
+
+## The SDXL VAE decoder overflows in half precision
+
+Only on latents an encoder would never produce: sliced corners of a real latent decode fine at
+every size tried, but `rand`, which is uniform over `[0, 1)` and so has a large DC offset once the
+scaling factor is divided out, reaches infinity somewhere in the up blocks and comes back as NaN.
+This is the same overflow that `madebyollin/sdxl-vae-fp16-fix` exists to work around, and the fix
+there is retrained weights rather than anything in the code.
+
+Nothing to do while the sampler hands over real latents. If it ever shows up on one, the answer is
+either those weights or running the decoder in float32, which the exporter can already write.
