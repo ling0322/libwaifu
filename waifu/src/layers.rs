@@ -109,6 +109,90 @@ impl Embedding {
     }
 }
 
+/// A two dimensional convolution, with a bias, as every convolution in a diffusion model has one.
+///
+/// Only what those models ask for: a square kernel, one group, and no dilation.
+#[derive(Debug)]
+pub struct Conv2d {
+    weight: Tensor,
+    bias: Tensor,
+    stride: i32,
+    padding: i32,
+}
+
+impl Conv2d {
+    pub fn build(
+        in_channels: i32,
+        out_channels: i32,
+        kernel: i32,
+        stride: i32,
+        padding: i32,
+        vb: &VarBuilder,
+    ) -> Result<Conv2d> {
+        Ok(Conv2d {
+            weight: vb.get("weight", &[out_channels, in_channels, kernel, kernel])?,
+            bias: vb.get("bias", &[out_channels])?,
+            stride,
+            padding,
+        })
+    }
+
+    /// `input` is `(N, C, H, W)`, and so is what comes back.
+    pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        Ok(F::conv2d(
+            input,
+            &self.weight,
+            Some(&self.bias),
+            self.stride,
+            self.padding,
+            1,
+            1,
+        )?)
+    }
+}
+
+/// Normalization over a group of channels and all of the space they cover.
+///
+/// This is what a diffusion model normalizes with. A batch of one image says nothing about its
+/// own statistics, which is why the mean and variance are taken this way rather than over the
+/// batch.
+#[derive(Debug)]
+pub struct GroupNorm {
+    weight: Tensor,
+    bias: Tensor,
+    groups: i32,
+    eps: f32,
+}
+
+impl GroupNorm {
+    pub fn build(channels: i32, groups: i32, eps: f32, vb: &VarBuilder) -> Result<GroupNorm> {
+        if groups <= 0 || channels % groups != 0 {
+            return Err(Error::model(format!(
+                "module {:?}: {channels} channels do not divide into {groups} groups",
+                vb.name()
+            )));
+        }
+
+        Ok(GroupNorm {
+            weight: vb.get("weight", &[channels])?,
+            bias: vb.get("bias", &[channels])?,
+            groups,
+            eps,
+        })
+    }
+
+    /// `input` is `(N, C, H, W)`, and so is what comes back.
+    pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        Ok(F::group_norm(
+            input,
+            Some(&self.weight),
+            Some(&self.bias),
+            self.groups,
+            self.eps,
+        )?)
+    }
+}
+
 /// A fully connected layer, with an optional bias.
 #[derive(Debug)]
 pub struct Linear {

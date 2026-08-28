@@ -297,8 +297,13 @@ class SdxlExporter(ModelExporter):
 
         section["unet_block_out_channels"] = ",".join(str(c) for c in unet.block_out_channels)
         section["unet_layers_per_block"] = str(unet.layers_per_block)
+        # Zero where a resolution has no attention at all. diffusers says that in the block type
+        # rather than the layer count, which carries a 1 for a block that never uses it, and one
+        # number saying both is less to get wrong on the way back in.
         section["unet_transformer_layers_per_block"] = ",".join(
-            str(n) for n in unet.transformer_layers_per_block)
+            str(n if "CrossAttn" in block_type else 0)
+            for n, block_type in zip(
+                unet.transformer_layers_per_block, unet.down_block_types))
         section["unet_attention_head_dim"] = ",".join(
             str(n) for n in unet.attention_head_dim) if isinstance(
                 unet.attention_head_dim, (list, tuple)) else str(unet.attention_head_dim)
@@ -432,9 +437,10 @@ def tokenizer_corpus(tokenizer) -> str:
 def export_test_cases(pipeline, fp) -> None:
     """Write what huggingface produces for one prompt, so the runtime can be checked against it.
 
-    Only the text encoders: their output is what everything downstream is conditioned on, it is
-    cheap to compute, and getting it right is most of getting the prompt right. The U-Net and the
-    VAE need the sampler to be meaningful and are worth their own cases later.
+    Everything but the sampler, which has no weights and is checked against a schedule instead:
+    what both text encoders make of one prompt, what the VAE decoder makes of one latent, and what
+    one U-Net step makes of the two together. All of it on a 32 by 32 latent, which is a 256 by
+    256 image -- large enough to exercise every block and small enough to carry in the repository.
     """
     ctx = Context("test_case")
     with TensorWriter(fp) as writer:
@@ -477,6 +483,40 @@ def export_test_cases(pipeline, fp) -> None:
             decoded = pipeline.vae.decode(
                 latent / pipeline.vae.config.scaling_factor).sample
         writer.write_tensor(ctx.with_subname("decoded"), decoded, preserve_dtype=True)
+
+        # One U-Net step on that same latent. The conditioning is what the pipeline would build
+        # for a 256 by 256 image with nothing cropped: the two hidden states side by side, the
+        # pooled vector of the second, and the sizes SDXL was trained to be told about.
+        context = torch.cat((out.hidden_states[-2], out2.hidden_states[-2]), dim=-1)
+        time_ids = torch.tensor([[256.0, 256.0, 0.0, 0.0, 256.0, 256.0]])
+        timestep = torch.tensor(981, dtype=torch.int64)
+
+        writer.write_tensor(ctx.with_subname("time_ids"), time_ids, preserve_dtype=True)
+        writer.write_tensor(
+            ctx.with_subname("timestep"), timestep.reshape(1).to(torch.int64))
+
+        with torch.no_grad():
+            noise = pipeline.unet(
+                latent,
+                timestep,
+                encoder_hidden_states=context,
+                added_cond_kwargs={
+                    "text_embeds": out2.text_embeds,
+                    "time_ids": time_ids,
+                }).sample
+        writer.write_tensor(ctx.with_subname("noise"), noise, preserve_dtype=True)
+
+        # The timestep embedding on its own, before either linear layer sees it. It is the one
+        # part of the U-Net computed from a formula rather than read from the checkpoint, so a
+        # mistake in it is worth catching where it happens.
+        from diffusers.models.embeddings import get_timestep_embedding
+
+        sinusoid = get_timestep_embedding(
+            timestep.reshape(1),
+            pipeline.unet.config.block_out_channels[0],
+            flip_sin_to_cos=pipeline.unet.config.flip_sin_to_cos,
+            downscale_freq_shift=pipeline.unet.config.freq_shift)
+        writer.write_tensor(ctx.with_subname("time_sinusoid"), sinusoid, preserve_dtype=True)
 
 
 def load_pipeline(checkpoint: str, base_model: str, variant: str = None):

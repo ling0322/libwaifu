@@ -707,6 +707,10 @@ int32_t fl_swiglu(fl_tensor_t input, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::swiglu(deref(input)), out); });
 }
 
+int32_t fl_geglu(fl_tensor_t input, fl_tensor_t *out) {
+  return guard([&]() { return publish(fl::F::geglu(deref(input)), out); });
+}
+
 int32_t fl_sum(fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::sum(deref(input), dim), out); });
 }

@@ -74,7 +74,7 @@ pub use error::{Error, Result};
 pub use forward_batch::{ForwardBatch, PreparedBatch};
 pub use ini::{IniConfig, IniSection};
 pub use kv_cache::{KVCacheManager, KVCacheSpec};
-pub use layers::{Embedding, LayerNorm, Linear, Nvfp4Linear, RmsNorm};
+pub use layers::{Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Nvfp4Linear, RmsNorm};
 pub use llama::{LlamaConfig, LlamaForGeneration, LlamaModel};
 pub use model::ModelForGeneration;
 pub use prompt::{Message, Prompt, PromptBlock};
@@ -82,7 +82,10 @@ pub use reader::BinaryRead;
 pub use request::{FinishReason, GenerationConfig, Request, RequestOutput, RequestStatus};
 pub use sampling_batch::{PreparedSampling, SamplingBatch};
 pub use scheduler::Scheduler;
-pub use sdxl::{ClipTextConfig, ClipTextEncoder, ClipTextOutput, VaeConfig, VaeDecoder};
+pub use sdxl::{
+    ClipTextConfig, ClipTextEncoder, ClipTextOutput, Unet, UnetCondition, UnetConfig, VaeConfig,
+    VaeDecoder,
+};
 pub use tokenizer::Tokenizer;
 pub use var_builder::VarBuilder;
 pub use zip_file::ZipFile;

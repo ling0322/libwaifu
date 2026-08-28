@@ -181,6 +181,7 @@ extern "C" {
     pub fn fl_silu(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_softmax(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_swiglu(input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_geglu(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_sum(input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
     pub fn fl_max(input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
     pub fn fl_min(input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;

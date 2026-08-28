@@ -378,6 +378,9 @@ FLAPI int32_t fl_softmax(fl_tensor_t input, fl_tensor_t *out);
 /// and which the result halves.
 FLAPI int32_t fl_swiglu(fl_tensor_t input, fl_tensor_t *out);
 
+/// The same gating with a GELU, which is what a diffusion U-Net's feed forward uses.
+FLAPI int32_t fl_geglu(fl_tensor_t input, fl_tensor_t *out);
+
 /// Sum over dimension `dim`, which may be negative to count from the back and which the result
 /// drops.
 FLAPI int32_t fl_sum(fl_tensor_t input, int32_t dim, fl_tensor_t *out);

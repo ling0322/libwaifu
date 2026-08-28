@@ -272,6 +272,13 @@ pub fn swiglu(input: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_swiglu(input.raw, out) })
 }
 
+/// The same gating with a GELU: `geglu(x) = gelu(x[..D / 2]) * x[D / 2..]`. A diffusion U-Net's
+/// feed forward is written the other way round, with the gate second, so the exporter swaps the
+/// two halves of the projection on the way out.
+pub fn geglu(input: &Tensor) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe { ffi::fl_geglu(input.raw, out) })
+}
+
 /// Sum over dimension `dim`, which may be negative to count from the back and which the result
 /// drops. Pass [`LAST_DIM`] for the common case.
 pub fn sum(input: &Tensor, dim: i32) -> Result<Tensor> {

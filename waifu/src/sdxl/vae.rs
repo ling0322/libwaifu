@@ -26,77 +26,8 @@
 
 use crate::error::{Error, Result};
 use crate::flint::{functional as F, Tensor};
+use crate::layers::{Conv2d, GroupNorm};
 use crate::var_builder::VarBuilder;
-
-/// A convolution and its bias, read from one namespace.
-#[derive(Debug)]
-struct Conv2d {
-    weight: Tensor,
-    bias: Tensor,
-    stride: i32,
-    padding: i32,
-}
-
-impl Conv2d {
-    fn build(
-        in_channels: i32,
-        out_channels: i32,
-        kernel: i32,
-        stride: i32,
-        padding: i32,
-        vb: &VarBuilder,
-    ) -> Result<Conv2d> {
-        Ok(Conv2d {
-            weight: vb.get("weight", &[out_channels, in_channels, kernel, kernel])?,
-            bias: vb.get("bias", &[out_channels])?,
-            stride,
-            padding,
-        })
-    }
-
-    fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        Ok(F::conv2d(
-            input,
-            &self.weight,
-            Some(&self.bias),
-            self.stride,
-            self.padding,
-            1,
-            1,
-        )?)
-    }
-}
-
-/// The normalization every block here starts with. A batch of one image says nothing about its
-/// own statistics, which is why this normalizes over channels and space instead.
-#[derive(Debug)]
-struct GroupNorm {
-    weight: Tensor,
-    bias: Tensor,
-    groups: i32,
-    eps: f32,
-}
-
-impl GroupNorm {
-    fn build(channels: i32, groups: i32, eps: f32, vb: &VarBuilder) -> Result<GroupNorm> {
-        Ok(GroupNorm {
-            weight: vb.get("weight", &[channels])?,
-            bias: vb.get("bias", &[channels])?,
-            groups,
-            eps,
-        })
-    }
-
-    fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        Ok(F::group_norm(
-            input,
-            Some(&self.weight),
-            Some(&self.bias),
-            self.groups,
-            self.eps,
-        )?)
-    }
-}
 
 /// Two convolutions around a normalization and an activation, added back to what came in. Where
 /// the channel count changes, the shortcut is a 1x1 convolution rather than the input itself.
