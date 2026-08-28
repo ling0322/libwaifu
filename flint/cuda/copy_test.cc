@@ -39,6 +39,23 @@ Tensor toCpu(const Tensor &a) {
   return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
+/// A float tensor moved to the device as it stands. The autoencoder runs in float32, so the
+/// strided copies behind `contiguous` and `cat` have to take that type as well as half.
+Tensor toCudaFloat(const Tensor &a) {
+  return F::to(Device::getCuda(), a);
+}
+
+/// A copy moves the bits it was given, so its result is exact rather than close. `F::allClose`
+/// cannot say that -- it compares with a strict `<`, so a tolerance of zero rejects even an
+/// identical pair -- which is why these two compare the elements themselves.
+bool equalFloat(Tensor a, Tensor b) {
+  a.throwIfInvalidShape(b.getShape(), "equalFloat");
+
+  const float *pa = a.getInternalData()->getData<float>(a.getInternalOffset());
+  const float *pb = b.getInternalData()->getData<float>(b.getInternalOffset());
+  return std::equal(pa, pa + a.getNumEl(), pb);
+}
+
 bool equalLong(Tensor a, Tensor b) {
   a.throwIfInvalidShape(b.getShape(), "equalLong");
 
@@ -63,6 +80,31 @@ CATCH_TEST_CASE("test CUDA copy", "[op][cuda]") {
     dest = toCpu(dest);
     if (transpose) dest = dest.transpose(1, 0);
     return F::allClose(a, dest);
+  };
+
+  CATCH_REQUIRE(runCase({10, 50}, true));
+  CATCH_REQUIRE(runCase({2, 10, 50}, false));
+  CATCH_REQUIRE(runCase({2, 10, 50}, true));
+  CATCH_REQUIRE(runCase({2, 3, 10, 50}, true));
+}
+
+CATCH_TEST_CASE("test CUDA copy (float)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The same shapes as the half case. A float copy moves the bits it was given, so the result is
+  // exact rather than close: anything else means an element went to the wrong place.
+  auto runCase = [](std::initializer_list<int> shape, bool transpose) {
+    Tensor a = F::rand(shape, DType::kFloat);
+
+    Tensor x = toCudaFloat(a);
+    if (transpose) x = x.transpose(1, 0);
+    Tensor dest = F::tensorLike(x);
+    CATCH_REQUIRE(dest.getDType() == DType::kFloat);
+    F::copy(x, dest);
+
+    dest = F::to(Device::getCpu(), dest);
+    if (transpose) dest = F::contiguous(dest.transpose(1, 0));
+    return equalFloat(a, dest);
   };
 
   CATCH_REQUIRE(runCase({10, 50}, true));

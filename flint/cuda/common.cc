@@ -84,6 +84,7 @@ Tensor tensorLike(const Tensor &tensor) {
   CHECK(tensor.getDevice().getType() == Device::kCuda);
 
   if (tensor.getDType() == DType::kFloat16) return createCudaTensorHalf(tensor.getShape());
+  if (tensor.getDType() == DType::kFloat) return createCudaTensorFloat(tensor.getShape());
   if (tensor.getDType() == DType::kUInt8) return createCudaTensorUInt8(tensor.getShape());
   if (tensor.getDType() == DType::kLong) return createCudaTensorLong(tensor.getShape());
 

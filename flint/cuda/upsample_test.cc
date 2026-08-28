@@ -23,6 +23,7 @@
 // The nearest-neighbour upsample a diffusion U-Net and its VAE decoder run before the convolution
 // that follows them.
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -48,6 +49,20 @@ Tensor toCpuFloat(const Tensor &x) {
 
 Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
   return Tensor::create<float>(shape, lut::makeConstSpan(values));
+}
+
+/// The same values left in float and moved to the device as they stand, which is what the
+/// autoencoder hands this operator.
+Tensor cudaFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
+  return F::to(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
+}
+
+/// An upsample only ever copies a pixel, so in float its result is exact. `F::allClose` compares
+/// with a strict `<` and so cannot be asked for that; these compare the elements themselves.
+bool equalsOnHost(const Tensor &device, const std::vector<float> &expected) {
+  Tensor host = F::to(Device::getCpu(), device);
+  const float *p = host.getInternalData()->getData<float>(host.getInternalOffset());
+  return std::equal(p, p + host.getNumEl(), expected.begin());
 }
 
 }  // namespace
@@ -104,6 +119,40 @@ CATCH_TEST_CASE("test upsampleNearest2d", "[op][cuda]") {
       cpuFloat({1, 1, 3, 6}, {5, 5, 5, 6, 6, 6, 5, 5, 5, 6, 6, 6, 5, 5, 5, 6, 6, 6}),
       1e-6f,
       1e-6f));
+}
+
+CATCH_TEST_CASE("test upsampleNearest2d (float)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // SDXL's autoencoder runs in float32, and this operator sits between two of its up blocks. It
+  // only ever copies a pixel, so the float result has to be exact and the shape has to be the
+  // same one the half arm produces.
+  constexpr int kHeight = 3;
+  constexpr int kWidth = 4;
+  constexpr int kScale = 2;
+
+  std::vector<float> x;
+  for (int i = 0; i < kHeight * kWidth; ++i) x.push_back(float(i) + 0.5f);
+
+  int outH = kHeight * kScale;
+  int outW = kWidth * kScale;
+  std::vector<float> expected(size_t(outH) * outW);
+  for (int y = 0; y < outH; ++y) {
+    for (int x2 = 0; x2 < outW; ++x2) {
+      expected[size_t(y) * outW + x2] = x[size_t(y / kScale) * kWidth + x2 / kScale];
+    }
+  }
+
+  Tensor out = F::upsampleNearest2d(cudaFloat({1, 1, kHeight, kWidth}, x), kScale);
+  CATCH_REQUIRE(out.getDType() == DType::kFloat);
+  CATCH_REQUIRE(out.getShape() == std::vector<int>{1, 1, outH, outW});
+  CATCH_REQUIRE(equalsOnHost(out, expected));
+
+  // A value half cannot hold at all, which is the whole reason this arm exists.
+  Tensor huge = F::upsampleNearest2d(cudaFloat({1, 1, 1, 2}, {1e20f, -3e5f}), 2);
+  CATCH_REQUIRE(equalsOnHost(
+      huge,
+      {1e20f, 1e20f, -3e5f, -3e5f, 1e20f, 1e20f, -3e5f, -3e5f}));
 }
 
 }  // namespace fl

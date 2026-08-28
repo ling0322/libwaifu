@@ -66,6 +66,10 @@ void copy(const Tensor &src, Tensor &dest) {
   if (src.getDType() == DType::kFloat16 && src.getDim() == 4) return copyND<half, 4>(src, dest);
   if (src.getDType() == DType::kFloat16 && src.getDim() == 3) return copyND<half, 3>(src, dest);
   if (src.getDType() == DType::kFloat16 && src.getDim() == 2) return copyND<half, 2>(src, dest);
+  if (src.getDType() == DType::kFloat && src.getDim() == 5) return copyND<float, 5>(src, dest);
+  if (src.getDType() == DType::kFloat && src.getDim() == 4) return copyND<float, 4>(src, dest);
+  if (src.getDType() == DType::kFloat && src.getDim() == 3) return copyND<float, 3>(src, dest);
+  if (src.getDType() == DType::kFloat && src.getDim() == 2) return copyND<float, 2>(src, dest);
   if (src.getDType() == DType::kUInt8 && src.getDim() == 5) return copyND<UInt8, 5>(src, dest);
   if (src.getDType() == DType::kUInt8 && src.getDim() == 4) return copyND<UInt8, 4>(src, dest);
   if (src.getDType() == DType::kUInt8 && src.getDim() == 3) return copyND<UInt8, 3>(src, dest);

@@ -37,9 +37,10 @@ namespace {
 /// each division becomes a multiply-high plus a shift instead of the integer divide the hardware
 /// has no unit for. Both divisors are loop-invariant, but nvcc cannot strength-reduce them on its
 /// own since it only learns their values at launch.
+template<typename T>
 __global__ void upsampleNearest2dKernel(
-    const half *__restrict__ input,
-    half *__restrict__ output,
+    const T *__restrict__ input,
+    T *__restrict__ output,
     int inputW,
     FastDivmod outputWDivmod,
     FastDivmod scaleDivmod,
@@ -62,24 +63,16 @@ __global__ void upsampleNearest2dKernel(
   }
 }
 
-}  // namespace
-
-Tensor upsampleNearest2d(const Tensor &input, int scale) {
-  if (input.getDType() != DType::kFloat16) {
-    THROW(InvalidArg, "upsampleNearest2d takes a <half> input");
-  }
-  if (input.getDim() != 4) {
-    THROW(InvalidArg, "upsampleNearest2d takes a 4-D input, as (N, C, H, W)");
-  }
-  if (scale < 1) THROW(InvalidArg, "upsampleNearest2d: the scale is below one");
-  LL_CHECK_CONTIGUOUS(input);
-
+/// The pixel is only ever copied, never arithmetic on, so the element type is carried through
+/// rather than converted at either end.
+template<typename T>
+Tensor upsampleNearest2dImpl(const Tensor &input, int scale) {
   int inputH = input.getShape(2);
   int inputW = input.getShape(3);
   int outputH = inputH * scale;
   int outputW = inputW * scale;
 
-  Tensor output = createCudaTensorHalf({input.getShape(0), input.getShape(1), outputH, outputW});
+  Tensor output = createCudaTensor<T>({input.getShape(0), input.getShape(1), outputH, outputW});
   int64_t numel = output.getNumEl();
   if (numel > std::numeric_limits<int32_t>::max()) {
     THROW(InvalidArg, "upsampleNearest2d: the result is too large");
@@ -87,9 +80,9 @@ Tensor upsampleNearest2d(const Tensor &input, int scale) {
 
   constexpr int kBlockSize = 256;
   dim3 grid = getGrid1D(static_cast<int>(numel), kBlockSize);
-  upsampleNearest2dKernel<<<grid, kBlockSize>>>(
-      getDataPtrCuda<half>(input),
-      getDataPtrCuda<half>(output),
+  upsampleNearest2dKernel<T><<<grid, kBlockSize>>>(
+      getDataPtrCuda<T>(input),
+      getDataPtrCuda<T>(output),
       inputW,
       FastDivmod(outputW),
       FastDivmod(scale),
@@ -99,6 +92,21 @@ Tensor upsampleNearest2d(const Tensor &input, int scale) {
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
   return output;
+}
+
+}  // namespace
+
+Tensor upsampleNearest2d(const Tensor &input, int scale) {
+  if (input.getDim() != 4) {
+    THROW(InvalidArg, "upsampleNearest2d takes a 4-D input, as (N, C, H, W)");
+  }
+  if (scale < 1) THROW(InvalidArg, "upsampleNearest2d: the scale is below one");
+  LL_CHECK_CONTIGUOUS(input);
+
+  if (input.getDType() == DType::kFloat16) return upsampleNearest2dImpl<half>(input, scale);
+  if (input.getDType() == DType::kFloat) return upsampleNearest2dImpl<float>(input, scale);
+
+  THROW(InvalidArg, "upsampleNearest2d takes a <half> or <float> input");
 }
 
 }  // namespace cuda
