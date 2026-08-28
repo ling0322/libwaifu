@@ -57,6 +57,12 @@ TOKENIZER_INI = "tokenizer.ini"
 # How many steps the reference schedule is written for, which is what SDXL is usually run at.
 TEST_STEPS = 50
 
+# What the reference denoising run does. Four steps is nowhere near enough for an image and is
+# not meant to be: it is enough to say the loop around the U-Net is the same loop.
+TEST_DENOISE_STEPS = 4
+TEST_GUIDANCE = 5.0
+TEST_IMAGE_SIZE = 256
+
 # Where the tokenizer comes from when the checkpoint has none, which is the usual case.
 BASE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
 
@@ -573,6 +579,22 @@ def export_test_cases(pipeline, fp) -> None:
             ctx.with_subname("stepped"),
             scheduler.step(noise, first, latent).prev_sample,
             preserve_dtype=True)
+
+        # And the whole of it put together: the same latent denoised by the pipeline itself, so
+        # that the runtime's assembly can be compared against the reference assembly rather than
+        # only its pieces against the reference pieces. Few steps, because every one of them is
+        # two U-Net passes on the CPU.
+        with torch.no_grad():
+            denoised = pipeline(
+                prompt=TEST_PROMPT,
+                negative_prompt="",
+                height=TEST_IMAGE_SIZE,
+                width=TEST_IMAGE_SIZE,
+                num_inference_steps=TEST_DENOISE_STEPS,
+                guidance_scale=TEST_GUIDANCE,
+                latents=latent,
+                output_type="latent").images
+        writer.write_tensor(ctx.with_subname("denoised"), denoised, preserve_dtype=True)
 
 
 def load_pipeline(checkpoint: str, base_model: str, variant: str = None):
