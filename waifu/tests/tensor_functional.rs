@@ -189,8 +189,15 @@ fn penalizes_repeated_tokens() {
     assert!(values[3] < 4.0, "a repeated token loses ground: {values:?}");
 }
 
+/// The device's generator is one object, shared by `rand` and by sampling alike, and cargo runs
+/// the tests in a file on several threads at once. Every test that draws from it takes this first,
+/// so that a draw cannot land between another test's seed and its own draw.
+static GENERATOR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn samples_greedily_at_temperature_zero() {
+    let _generator = GENERATOR.lock().unwrap();
+
     let logits = cpu_f32(&[2, 3], &[1.0, 9.0, 1.0, 5.0, 1.0, 1.0]);
     let temperatures = cpu_f32(&[2], &[0.0, 0.0]);
     let top_ks = Tensor::from_i32(&[2], &[0, 0]).unwrap();
@@ -203,6 +210,8 @@ fn samples_greedily_at_temperature_zero() {
 
 #[test]
 fn sampling_with_top_k_of_one_ignores_the_temperature() {
+    let _generator = GENERATOR.lock().unwrap();
+
     let logits = cpu_f32(&[1, 3], &[1.0, 1.0, 9.0]);
     let temperatures = cpu_f32(&[1], &[10.0]);
     let top_ks = Tensor::from_i32(&[1], &[1]).unwrap();
@@ -214,8 +223,10 @@ fn sampling_with_top_k_of_one_ignores_the_temperature() {
 
 #[test]
 fn draws_reproducible_random_numbers() {
-    // The generator is shared by everything on the device, so this has to stay the only test in
-    // the file that draws from it, or another one running alongside will move it between the draws.
+    // Sampling draws from this same generator without looking like it does, so holding the lock
+    // is what keeps another test from moving it between the seed below and the draw after it.
+    let _generator = GENERATOR.lock().unwrap();
+
     F::manual_seed(Device::Cpu, 42).unwrap();
     let first = F::rand(&[8], DType::Float, Device::Cpu).unwrap();
 

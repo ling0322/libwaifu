@@ -3,36 +3,30 @@
 Known issues and deferred work. Each entry says what was observed, not what it might be, so
 whoever picks it up starts from evidence rather than from a guess.
 
-## `tensor_functional` failed once and did not reproduce
+## ~~`tensor_functional` failed once and did not reproduce~~ (fixed 2026-08-27)
 
-Seen once during `cargo test` on the branch that folded `flint-rs` into `waifu` (2026-08-25).
-One test in `waifu/tests/tensor_functional.rs` failed:
+Seen once during `cargo test` on the branch that folded `flint-rs` into `waifu` (2026-08-25), and
+again on 2026-08-27, which is when the name was finally captured:
 
 ```
-test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
-error: test failed, to rerun pass `-p waifu --test tensor_functional`
+test draws_reproducible_random_numbers ... FAILED
 ```
 
-The failing test's name and its panic output were not captured, which is the first thing to fix
-if it happens again — run the suite so the failure output is kept rather than re-running to try
-to reproduce it.
+It never reproduced on its own -- ten runs of `--test tensor_functional` in a row all passed --
+because it needs two tests running at once.
 
-It did not reproduce in 8 runs of `cargo test -p waifu --test tensor_functional` alone, nor in 6
-runs of the full `cargo test`. So it is rare, and running that binary on its own may not be
-enough to trigger it.
+The cause: a device has one generator, and `CPUOperators::sample` draws from it at
+`cpu_operators.cc:194` with no short circuit for a greedy or top-k-of-one sample. The two sampling
+tests in that file therefore draw from the same generator as `draws_reproducible_random_numbers`,
+and cargo runs the tests in a file on several threads. A draw landing between that test's second
+`manual_seed` and its second `rand` makes the two halves disagree.
 
-Unknown so far:
+The test had a comment saying it must stay the only one in the file that draws, which was true and
+was quietly broken by the sampling tests: `grep F::rand` does not find them.
 
-- whether it predates the `flint-rs` merge. Nothing in that merge changed the binding code
-  itself, only the paths it is reached by, so a pre-existing flake is the more likely reading —
-  but that has not been checked against `main`.
-- whether it depends on other test binaries having run first. Both times the suite was run in
-  full; the isolated runs that passed were of that one binary.
+Fixed by giving the three tests a mutex to share. The library is documented as single threaded per
+device, so the tests were the ones out of contract, not the generator.
 
-Worth knowing while investigating: tests inside one binary run on several threads by default,
-and a flint `Tensor` is deliberately neither `Send` nor `Sync` because the operators keep
-per-device state. `init()` is guarded by a `Once`. That makes ordering and startup races the
-first place to look.
 
 ## The mma path's recurrent branch has a reproducible hump at 13 to 15 tokens
 
@@ -307,3 +301,4 @@ says, so `zeros(shape, DType::kFloat)` hands back a `<half>` and the next operat
 aborts on a dtype check. Found while writing the gated DeltaNet benchmark, which now builds its
 FP32 state on the host and copies it over instead. `op::cuda::fill` is half-only, which is
 presumably why it was written this way, so fixing it means giving `fill` the other types first.
+
