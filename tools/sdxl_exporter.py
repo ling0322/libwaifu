@@ -54,6 +54,9 @@ MODEL_INI = "model.ini"
 TOKENIZER_BIN = "tokenizer.bin"
 TOKENIZER_INI = "tokenizer.ini"
 
+# How many steps the reference schedule is written for, which is what SDXL is usually run at.
+TEST_STEPS = 50
+
 # Where the tokenizer comes from when the checkpoint has none, which is the usual case.
 BASE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
 
@@ -284,6 +287,25 @@ class SdxlExporter(ModelExporter):
         vae = pipeline.vae.config
         text = pipeline.text_encoder.config
         text2 = pipeline.text_encoder_2.config
+        scheduler = pipeline.scheduler.config
+
+        # The runtime builds one schedule and only one. A checkpoint asking for another would
+        # otherwise be exported as if it had asked for this one, and the only sign would be
+        # slightly wrong images.
+        expected = {
+            "beta_schedule": "scaled_linear",
+            "timestep_spacing": "leading",
+            "interpolation_type": "linear",
+            "prediction_type": "epsilon",
+            "use_karras_sigmas": False,
+        }
+        for key, want in expected.items():
+            got = scheduler.get(key)
+            if got != want:
+                raise ValueError(
+                    f"the scheduler wants {key}={got!r}, and the runtime only builds {want!r}")
+        if scheduler.get("trained_betas") is not None:
+            raise ValueError("the scheduler carries its own betas, which are not exported")
 
         config = configparser.ConfigParser()
         config["sdxl"] = {}
@@ -312,6 +334,13 @@ class SdxlExporter(ModelExporter):
         section["unet_addition_time_embed_dim"] = str(unet.addition_time_embed_dim)
         section["unet_projection_class_embeddings_input_dim"] = str(
             unet.projection_class_embeddings_input_dim)
+
+        # The noise schedule. Only the one shape of it is written, and anything else is refused
+        # above rather than silently exported as something it is not.
+        section["scheduler_num_train_timesteps"] = str(scheduler.num_train_timesteps)
+        section["scheduler_beta_start"] = str(scheduler.beta_start)
+        section["scheduler_beta_end"] = str(scheduler.beta_end)
+        section["scheduler_steps_offset"] = str(scheduler.steps_offset)
 
         # The two encoders differ in more than their width: the first activates with the
         # sigmoid approximation OpenAI's CLIP uses, the second with the ordinary GELU.
@@ -517,6 +546,33 @@ def export_test_cases(pipeline, fp) -> None:
             flip_sin_to_cos=pipeline.unet.config.flip_sin_to_cos,
             downscale_freq_shift=pipeline.unet.config.freq_shift)
         writer.write_tensor(ctx.with_subname("time_sinusoid"), sinusoid, preserve_dtype=True)
+
+        # The schedule itself, which is arithmetic on the betas and has no weights behind it, and
+        # one step taken along it. The sample stepped is the same latent, and the noise is what
+        # the U-Net said about it above, so this needs nothing the runtime cannot reproduce.
+        scheduler = pipeline.scheduler
+        scheduler.set_timesteps(TEST_STEPS)
+
+        writer.write_tensor(
+            ctx.with_subname("sigmas"), scheduler.sigmas.to(torch.float32), preserve_dtype=True)
+        writer.write_tensor(
+            ctx.with_subname("timesteps"),
+            scheduler.timesteps.to(torch.float32),
+            preserve_dtype=True)
+        writer.write_tensor(
+            ctx.with_subname("init_noise_sigma"),
+            torch.tensor([float(scheduler.init_noise_sigma)]),
+            preserve_dtype=True)
+
+        first = scheduler.timesteps[0]
+        writer.write_tensor(
+            ctx.with_subname("scaled"),
+            scheduler.scale_model_input(latent, first),
+            preserve_dtype=True)
+        writer.write_tensor(
+            ctx.with_subname("stepped"),
+            scheduler.step(noise, first, latent).prev_sample,
+            preserve_dtype=True)
 
 
 def load_pipeline(checkpoint: str, base_model: str, variant: str = None):

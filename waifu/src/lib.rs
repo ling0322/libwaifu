@@ -83,8 +83,8 @@ pub use request::{FinishReason, GenerationConfig, Request, RequestOutput, Reques
 pub use sampling_batch::{PreparedSampling, SamplingBatch};
 pub use scheduler::Scheduler;
 pub use sdxl::{
-    ClipTextConfig, ClipTextEncoder, ClipTextOutput, Unet, UnetCondition, UnetConfig, VaeConfig,
-    VaeDecoder,
+    ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler, SamplerConfig, Unet,
+    UnetCondition, UnetConfig, VaeConfig, VaeDecoder,
 };
 pub use tokenizer::Tokenizer;
 pub use var_builder::VarBuilder;

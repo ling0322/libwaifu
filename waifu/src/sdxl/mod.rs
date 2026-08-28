@@ -19,10 +19,12 @@
 
 //! SDXL, which turns a prompt into an image rather than into more text.
 
+mod sampler;
 mod text_encoder;
 mod unet;
 mod vae;
 
 pub use text_encoder::{ClipTextConfig, ClipTextEncoder, ClipTextOutput};
+pub use sampler::{EulerSampler, SamplerConfig};
 pub use unet::{Unet, UnetCondition, UnetConfig};
 pub use vae::{VaeConfig, VaeDecoder};
