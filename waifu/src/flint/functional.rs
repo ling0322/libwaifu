@@ -91,6 +91,26 @@ pub fn rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
 }
 
 /// Matrix multiplication, batched over the leading dimensions.
+/// Normalize the last dimension of `input` to zero mean and unit variance, then scale by `weight`
+/// and shift by `bias`. Unlike an RMS norm this subtracts the mean, which is what CLIP and a
+/// diffusion U-Net both do.
+pub fn layer_norm(
+    input: &Tensor,
+    weight: Option<&Tensor>,
+    bias: Option<&Tensor>,
+    eps: f32,
+) -> Result<Tensor> {
+    let weight = weight.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+    let bias = bias.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+
+    Tensor::produce(|out| unsafe { ffi::fl_layer_norm(input.raw, weight, bias, eps, out) })
+}
+
+/// x * sigmoid(1.702 * x), which OpenAI's CLIP uses in place of GELU.
+pub fn quick_gelu(input: &Tensor) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe { ffi::fl_quick_gelu(input.raw, out) })
+}
+
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_matmul(a.raw, b.raw, out) })
 }

@@ -244,6 +244,15 @@ FLAPI int32_t fl_rotary_embedding(
 /// <float>(D).
 FLAPI int32_t fl_rms_norm(fl_tensor_t input, fl_tensor_t weight, float eps, fl_tensor_t *out);
 
+/// Normalize the last dimension of `input` to zero mean and unit variance, then scale by
+/// `weight` and shift by `bias`; either may be null.
+FLAPI int32_t fl_layer_norm(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    float eps,
+    fl_tensor_t *out);
+
 /// Matrix multiplication, batched over the leading dimensions.
 FLAPI int32_t fl_matmul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
@@ -276,6 +285,9 @@ FLAPI int32_t fl_nvfp4_matmul(
     fl_tensor_t block_scale,
     fl_tensor_t global_scale,
     fl_tensor_t *out);
+
+/// Element-wise x * sigmoid(1.702 * x), the activation OpenAI's CLIP uses in place of GELU.
+FLAPI int32_t fl_quick_gelu(fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise `a` * `b`, broadcasting `b` over the leading dimensions of `a`.
 FLAPI int32_t fl_mul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);

@@ -113,6 +113,14 @@ extern "C" {
     ) -> i32;
     pub fn fl_rms_norm(input: FlTensor, weight: FlTensor, eps: f32, out: *mut FlTensor) -> i32;
     pub fn fl_matmul(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_layer_norm(
+        input: FlTensor,
+        weight: FlTensor,
+        bias: FlTensor,
+        eps: f32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_quick_gelu(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_nvfp4_available(out: *mut i32) -> i32;
     pub fn fl_nvfp4_quantize(
         x: FlTensor,

@@ -308,12 +308,15 @@ class SdxlExporter(ModelExporter):
         section["unet_projection_class_embeddings_input_dim"] = str(
             unet.projection_class_embeddings_input_dim)
 
-        section["text_hidden_size"] = str(text.hidden_size)
-        section["text_num_layers"] = str(text.num_hidden_layers)
-        section["text_num_heads"] = str(text.num_attention_heads)
-        section["text2_hidden_size"] = str(text2.hidden_size)
-        section["text2_num_layers"] = str(text2.num_hidden_layers)
-        section["text2_num_heads"] = str(text2.num_attention_heads)
+        # The two encoders differ in more than their width: the first activates with the
+        # sigmoid approximation OpenAI's CLIP uses, the second with the ordinary GELU.
+        for prefix, cfg in (("text", text), ("text2", text2)):
+            section[f"{prefix}_hidden_size"] = str(cfg.hidden_size)
+            section[f"{prefix}_intermediate_size"] = str(cfg.intermediate_size)
+            section[f"{prefix}_num_layers"] = str(cfg.num_hidden_layers)
+            section[f"{prefix}_num_heads"] = str(cfg.num_attention_heads)
+            section[f"{prefix}_hidden_act"] = str(cfg.hidden_act)
+            section[f"{prefix}_norm_eps"] = str(cfg.layer_norm_eps)
 
         # Both encoders share one vocabulary, and both stop at 77 because that is how many
         # positions their embedding table holds.

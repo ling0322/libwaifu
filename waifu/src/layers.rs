@@ -50,6 +50,37 @@ impl RmsNorm {
     }
 }
 
+/// Normalization over the last dimension that keeps the mean, as everything outside the Llama
+/// lineage uses: subtract the mean, divide by the standard deviation, scale and shift.
+#[derive(Debug)]
+pub struct LayerNorm {
+    weight: Tensor,
+    bias: Tensor,
+    eps: f32,
+}
+
+impl LayerNorm {
+    pub const WEIGHT: &'static str = "weight";
+    pub const BIAS: &'static str = "bias";
+
+    pub fn build(d_model: i32, eps: f32, vb: &VarBuilder) -> Result<LayerNorm> {
+        Ok(LayerNorm {
+            weight: vb.get(Self::WEIGHT, &[d_model])?,
+            bias: vb.get(Self::BIAS, &[d_model])?,
+            eps,
+        })
+    }
+
+    pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
+        Ok(F::layer_norm(
+            input,
+            Some(&self.weight),
+            Some(&self.bias),
+            self.eps,
+        )?)
+    }
+}
+
 /// A table of word embeddings, read by token id.
 #[derive(Debug)]
 pub struct Embedding {

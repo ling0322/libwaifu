@@ -430,6 +430,27 @@ int32_t fl_rms_norm(fl_tensor_t input, fl_tensor_t weight, float eps, fl_tensor_
   return guard([&]() { return publish(fl::F::rmsNorm(deref(input), deref(weight), eps), out); });
 }
 
+int32_t fl_layer_norm(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    float eps,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    // An absent weight or bias is a null handle rather than an empty tensor, which is what a
+    // caller with nothing to pass has.
+    fl::Tensor emptyTensor;
+    const fl::Tensor &w = weight ? deref(weight) : emptyTensor;
+    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
+
+    return publish(fl::F::layerNorm(deref(input), w, b, eps), out);
+  });
+}
+
+int32_t fl_quick_gelu(fl_tensor_t input, fl_tensor_t *out) {
+  return guard([&]() { return publish(fl::F::quickGelu(deref(input)), out); });
+}
+
 int32_t fl_matmul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::matmul(deref(a), deref(b)), out); });
 }
