@@ -45,6 +45,21 @@ class CublasGemm : public Gemm {
       __half *C,
       int ldc) override;
 
+  void sgemm(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const float *A,
+      int lda,
+      const float *B,
+      int ldb,
+      float beta,
+      float *C,
+      int ldc) override;
+
   void hgemmArray(
       bool transA,
       bool transB,
@@ -58,6 +73,22 @@ class CublasGemm : public Gemm {
       int ldb,
       __half beta,
       __half *const *arrayC,
+      int ldc,
+      int batchSize) override;
+
+  void sgemmArray(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const float *const *arrayA,
+      int lda,
+      const float *const *arrayB,
+      int ldb,
+      float beta,
+      float *const *arrayC,
       int ldc,
       int batchSize) override;
 

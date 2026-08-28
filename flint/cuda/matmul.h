@@ -48,19 +48,26 @@ class MatMul {
  protected:
   std::shared_ptr<Gemm> _gemm;
 
-  Tensor gemmHalf(Tensor A, Tensor B);
-  Tensor bmmHalf(Tensor A, Tensor B);
+  // The float paths, in `T`, which is <half> or <float>. The two differ only in which cuBLAS
+  // call they end at and in the vector kernel, which exists for half alone; everything about the
+  // shapes is the same, so they are one body rather than two. Defined in matmul.cc and used only
+  // there.
+  template<typename T>
+  Tensor gemm(Tensor A, Tensor B);
+  template<typename T>
+  Tensor bmm(Tensor A, Tensor B);
+  template<typename T>
+  Tensor matmulFloat(const Tensor &A, const Tensor &B);
+  template<typename T>
+  Tensor bmmToGemm(const Tensor &A, const Tensor &B);
+  template<typename T>
+  std::vector<const T *> getBatch(const Tensor &A, int nBatchDim);
 
   Tensor matmulQ4(const Tensor &A, const Tensor &B);
   Tensor gemmQ4(const Tensor &A, const Tensor &B);
   Tensor bmmToGemmQ4(const Tensor &A, const Tensor &B);
 
-  Tensor matmulHalf(const Tensor &A, const Tensor &B);
-  Tensor bmmToGemmHalf(const Tensor &A, const Tensor &B);
-
   Tensor matmulMxfp4(const Tensor &A, const Tensor &sfA, const Tensor &B, const Tensor &sfB);
-
-  std::vector<const half *> getBatch(const Tensor &A, int nBatchDim);
 };
 
 }  // namespace cuda

@@ -38,6 +38,12 @@ Tensor toCpu(const Tensor &a) {
   return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
+/// A float tensor moved to the device as it stands, which is what the autoencoder's attention
+/// multiplies. It goes to cuBLAS through sgemm rather than hgemm, and never to the vector kernel.
+Tensor toCudaFloat(const Tensor &a) {
+  return F::to(Device::getCuda(), a);
+}
+
 }  // namespace
 
 CATCH_TEST_CASE("test CUDA matmul", "[op][cuda]") {
@@ -154,6 +160,69 @@ CATCH_TEST_CASE("test CUDA matmul (strided operands)", "[op][cuda]") {
       toCpu(F::matmul(strided, toCuda(b))),
       F::matmul(a.slice(1, {1, 5}), b),
       5e-2));
+}
+
+CATCH_TEST_CASE("test CUDA matmul (float)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The same three dispatches the half arm has -- a plain GEMM, a batched left operand folded
+  // into one, and both operands batched -- with the transposed slice that makes the strides
+  // interesting. Float against the host in float is nearly exact, so the tolerance is tight
+  // enough to catch an operand swapped rather than merely a slower kernel.
+  auto runCase = [](std::initializer_list<int> shapeA, std::initializer_list<int> shapeB) {
+    Tensor a = F::rand(shapeA, DType::kFloat);
+    Tensor b = F::rand(shapeB, DType::kFloat);
+    Tensor expected = F::matmul(a, b.slice(-1, {8, 32}).transpose(-1, -2));
+
+    Tensor y = toCudaFloat(b).slice(-1, {8, 32}).transpose(-1, -2);
+    Tensor x = F::matmul(toCudaFloat(a), y);
+    CATCH_REQUIRE(x.getDType() == DType::kFloat);
+
+    return F::allClose(F::to(Device::getCpu(), x), expected, 1e-4f);
+  };
+
+  CATCH_REQUIRE(runCase({10, 24}, {40, 64}));
+  CATCH_REQUIRE(runCase({5, 10, 24}, {40, 64}));
+  CATCH_REQUIRE(runCase({5, 10, 5, 24}, {10, 40, 64}));
+}
+
+CATCH_TEST_CASE("test CUDA matmul (float takes the shapes gemv would)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // A single row against a transposed weight is the layout the vector kernel exists for, and
+  // that kernel is half only. The float arm has to answer the same through the GEMM instead of
+  // dispatching to something that cannot read its operands.
+  constexpr int K = 64;
+  constexpr int N = 40;
+  Tensor x = F::rand({1, K}, DType::kFloat);
+  Tensor w = F::rand({N, K}, DType::kFloat);
+
+  Tensor wT = toCudaFloat(w).transpose(0, 1);
+  CATCH_REQUIRE(wT.getStride(0) == 1);
+
+  Tensor actual = F::matmul(toCudaFloat(x), wT);
+  CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, N});
+  CATCH_REQUIRE(F::allClose(
+      F::to(Device::getCpu(), actual),
+      F::matmul(x, w.transpose(0, 1)),
+      1e-4f));
+}
+
+CATCH_TEST_CASE("test CUDA matmul (float carries what half cannot)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The point of the float arm: a product half would return as infinity. 300 * 300 * 4 is
+  // 360000, which is past 65504.
+  Tensor a = F::rand({2, 4}, DType::kFloat);
+  Tensor b = F::rand({4, 3}, DType::kFloat);
+  a = F::mul(a, 300.0f);
+  b = F::mul(b, 300.0f);
+
+  Tensor x = F::to(Device::getCpu(), F::matmul(toCudaFloat(a), toCudaFloat(b)));
+  CATCH_REQUIRE(F::allClose(x, F::matmul(a, b), 1e-4f));
+
+  Tensor asHalf = toCpu(F::matmul(toCuda(a), toCuda(b)));
+  CATCH_REQUIRE(!F::allClose(asHalf, F::matmul(a, b), 1e-4f));
 }
 
 }  // namespace fl

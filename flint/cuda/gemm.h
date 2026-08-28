@@ -52,6 +52,23 @@ class Gemm {
     NOT_IMPL();
   }
 
+  virtual void sgemm(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const float *A,
+      int lda,
+      const float *B,
+      int ldb,
+      float beta,
+      float *C,
+      int ldc) {
+    NOT_IMPL();
+  }
+
   virtual void gemmMxfp4Bf16(
       int m,
       int n,
@@ -78,6 +95,24 @@ class Gemm {
       int ldb,
       __half beta,
       __half *const *arrayC,
+      int ldc,
+      int batchSize) {
+    NOT_IMPL();
+  }
+
+  virtual void sgemmArray(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const float *const *arrayA,
+      int lda,
+      const float *const *arrayB,
+      int ldb,
+      float beta,
+      float *const *arrayC,
       int ldc,
       int batchSize) {
     NOT_IMPL();
