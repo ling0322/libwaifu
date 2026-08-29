@@ -145,7 +145,12 @@ pub fn print_options() {
     eprintln!(
         "  -device string\n    \tinference device, either cpu, cuda or auto (default \"auto\")"
     );
-    eprintln!("  -m value\n    \tthe libwaifu model file, which has the suffix \".waifupkg\".");
+    eprintln!(
+        "  -m value\n    \tthe model to draw with: either a package file, which has the suffix \
+         \".waifupkg\", or the name of a published model, which is fetched on first use. The \
+         names are: {}.",
+        crate::cli::hub::names().join(", ")
+    );
 }
 
 #[cfg(test)]

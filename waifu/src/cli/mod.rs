@@ -26,6 +26,7 @@
 mod args;
 mod draw;
 mod field;
+mod hub;
 mod png;
 
 use std::process::ExitCode;

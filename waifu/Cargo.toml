@@ -20,13 +20,25 @@ required-features = ["cli"]
 [features]
 # The command line tool. Off by default so that using this crate as a library stays
 # dependency-free; the binary needs a terminal library to draw with.
-cli = ["dep:ratatui"]
+cli = ["dep:ratatui", "dep:ureq"]
 
 [dependencies]
-# The terminal the draw command runs in, and the only dependency this crate has -- the library
-# itself has none. Trimmed to the crossterm backend: the default set also builds the termwiz and
-# termina ones, which is two more terminal stacks than a program that runs in one terminal needs.
+# What the command line tool needs, and all this crate depends on -- the library itself has
+# nothing.
+#
+# The terminal the draw command runs in. Trimmed to the crossterm backend: the default set also
+# builds the termwiz and termina ones, which is two more terminal stacks than a program that runs
+# in one terminal needs.
 ratatui = { version = "0.29", default-features = false, features = [
     "crossterm",
     "underline-color",
+], optional = true }
+
+# Fetching a model that was asked for by name. Rust has no HTTP in its standard library, so this
+# is the one thing the tool cannot do on its own. Held to the rustls backend: the native-tls
+# default would link the system OpenSSL, and a dynamic library on the far side of the build is
+# exactly what this crate does not want.
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
 ], optional = true }

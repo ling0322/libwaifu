@@ -10,9 +10,23 @@ API.
 
 ## Getting a model
 
-There is nothing to download: an SDXL checkpoint becomes a package with the exporter in `tools/`.
-Any SDXL fine tune works -- Illustrious, WAI, or anything else that ships as a single
-safetensors file:
+Ask for one by name and it is fetched on first use:
+
+```bash
+$ waifu draw -m sdxl:base
+```
+
+`sdxl:base` is SDXL 1.0 base, published as
+[libwaifu-sdxl-base-1.0](https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0). It follows
+whatever the current release is; `sdxl:base:v1` names that release and keeps meaning it. What is
+fetched lands in `~/.cache/libwaifu/models` (`%LOCALAPPDATA%\libwaifu\models` on Windows, or
+wherever `WAIFU_CACHE` points), so it is downloaded once and read from disk after that. An
+interrupted download resumes where it stopped rather than starting over.
+
+### Making one yourself
+
+Any SDXL checkpoint becomes a package with the exporter in `tools/`. Any fine tune works --
+Illustrious, WAI, or anything else that ships as a single safetensors file:
 
 ```bash
 python3 -m venv .venv
@@ -51,8 +65,11 @@ and can be read and checked alone.
 An SDXL package draws rather than talks, and `waifu draw` opens a terminal for it:
 
 ```bash
+$ waifu draw -m sdxl:base
 $ waifu draw -m sdxl.waifupkg
 ```
+
+`-m` takes either a published name or a package of your own.
 
 The screen holds the prompt, what to steer away from, and the four numbers a run takes: how many
 steps, how hard to push away from the unprompted answer, what size, and which seed.
@@ -78,6 +95,7 @@ Drawing needs `Conv2d`, which either cuDNN or CUTLASS can answer -- see the buil
 
 ## Recent updates
 
+- [2026-08-29] Ask for a model by name: `waifu draw -m sdxl:base` fetches it on first use.
 - [2026-08-28] Draw pictures from a terminal.
 - [2026-08-28] SDXL: a prompt in, an image out.
 
