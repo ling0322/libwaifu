@@ -74,4 +74,35 @@ CATCH_TEST_CASE("test matmul bmm (cutlass)", "[fl][op][cuda][cutlass]") {
   CATCH_REQUIRE(F::allClose(x, xr, 5e-3f));
 }
 
+CATCH_TEST_CASE("test matmul gemm accumulates in float (cutlass)", "[fl][op][cuda][cutlass]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // What the two cases above cannot see. At a K of 128 a half accumulator still holds the running
+  // sum well enough to pass a loose comparison; at 2048 -- which is what SDXL's cross attention
+  // contracts over -- the sum reaches a magnitude where half's step is larger than the products
+  // being added to it, and most of each one is lost. The difference between accumulating in half
+  // and in float is around thirty times at this shape, so the tolerance sits between them rather
+  // than being tight for its own sake.
+  constexpr int kM = 64;
+  constexpr int kK = 2048;
+  constexpr int kN = 128;
+
+  std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
+
+  Tensor a = F::rand({kM, kK}, DType::kFloat);
+  Tensor b = F::rand({kK, kN}, DType::kFloat);
+
+  // The reference is computed from the half values, not the float ones, so what this measures is
+  // the accumulation rather than the rounding of the inputs.
+  Tensor halfA = F::cast(F::cast(a, DType::kFloat16), DType::kFloat);
+  Tensor halfB = F::cast(F::cast(b, DType::kFloat16), DType::kFloat);
+  Tensor expected = F::matmul(halfA, halfB);
+
+  Tensor x = F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  Tensor y = F::cast(F::to(Device::getCuda(), b), DType::kFloat16);
+  Tensor actual = F::to(Device::getCpu(), F::cast(mm->apply(x, y), DType::kFloat));
+
+  CATCH_REQUIRE(F::allClose(actual, expected, 2e-3f));
+}
+
 }  // namespace fl

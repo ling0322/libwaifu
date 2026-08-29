@@ -58,6 +58,22 @@ using namespace cute;
 using cutlass::layout::ColumnMajor;
 using cutlass::layout::RowMajor;
 
+/// Half in, half out, accumulated in float.
+///
+/// The accumulator is the seventh argument and it matters more than anything else here. It was
+/// `half_t`, which is a mistake: a K of a few thousand walks the running sum up to a magnitude
+/// where half's step is larger than the products still being added to it, and most of each one is
+/// lost. Nothing here disagreed -- the batched path below has always accumulated in float, and
+/// cuBLAS runs these with CUBLAS_COMPUTE_32F -- so it was this one instantiation on its own.
+///
+/// What it cost, measured rather than reasoned about. On a 64 by 2048 by 128 GEMM against the
+/// same half inputs multiplied out in float, the largest error was 3.01 against a mean magnitude
+/// of 512, which is 5.9e-3; in float it is 5.0e-4, twelve times smaller. On SDXL, four denoising
+/// steps went from 2.1e-2 away from the reference pipeline to 4.5e-2, and the first text
+/// encoder's hidden state from 7.3e-4 to 2.0e-3 -- both far enough to fail the tests that stand
+/// on them. cuBLAS on the same runs gives 2.1e-2 and 4.1e-4.
+///
+/// `gemm_cutlass_test.cc` has a case at that shape, and the tolerance in it sits between the two.
 template<class LayoutA, class LayoutB>
 struct Sm80Gemm {
   using Gemm = cutlass::gemm::device::Gemm<
@@ -67,14 +83,13 @@ struct Sm80Gemm {
       LayoutB,
       cutlass::half_t,
       cutlass::layout::RowMajor,
-      cutlass::half_t,
+      float,
       cutlass::arch::OpClassTensorOp,
       cutlass::arch::Sm80,
       cutlass::gemm::GemmShape<128, 128, 32>,
       cutlass::gemm::GemmShape<64, 64, 32>,
       cutlass::gemm::GemmShape<16, 8, 16>,
-      cutlass::epilogue::thread::
-          LinearCombination<cutlass::half_t, 8, cutlass::half_t, cutlass::half_t>,
+      cutlass::epilogue::thread::LinearCombination<cutlass::half_t, 8, float, float>,
       cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>>;
 };
 
@@ -94,7 +109,14 @@ void hgemmT(
   using Gemm = typename Sm80Gemm<LayoutA, LayoutB>::Gemm;
   Gemm gemmOperator;
 
-  typename Gemm::Arguments args{{m, n, k}, {A, lda}, {B, ldb}, {C, ldc}, {C, ldc}, {alpha, beta}};
+  // The epilogue computes in float now, so the scalars go in as float.
+  typename Gemm::Arguments args{
+      {m, n, k},
+      {A, lda},
+      {B, ldb},
+      {C, ldc},
+      {C, ldc},
+      {float(alpha), float(beta)}};
 
   CUTLASS_CHECK(gemmOperator(args));
 }
