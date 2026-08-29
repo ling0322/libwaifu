@@ -319,6 +319,150 @@ void cutlassHgemmArray(
   }
 }
 
+/// Float in, float out, on the SIMT pipeline.
+///
+/// The autoencoder is the only thing here that runs in float32, and it is the only reason this
+/// exists: without it a model loaded on this backend aborts the moment it reaches the decoder,
+/// which is what kept cuBLAS from being optional rather than preferred.
+///
+/// SIMT rather than a tensor core path, which is a deliberate trade. A float GEMM on tensor cores
+/// means TF32, whose eight exponent bits carry the range the autoencoder needs but whose ten
+/// mantissa bits do not carry what float32 carries -- so it would answer a slightly different
+/// question and the decoder's agreement with the reference would have to be established again.
+/// SIMT is the same arithmetic cuBLAS does under CUBLAS_COMPUTE_32F, and what it costs is not
+/// worth arguing about: the four GEMMs the decoder runs are 0.58 TFLOP of an image's 270, and a
+/// float GEMM has no tensor cores to leave on the table in the first place.
+template<class LayoutA, class LayoutB>
+struct Sm80SimtGemm {
+  using Gemm = cutlass::gemm::device::Gemm<
+      float,
+      LayoutA,
+      float,
+      LayoutB,
+      float,
+      cutlass::layout::RowMajor,
+      float,
+      cutlass::arch::OpClassSimt,
+      cutlass::arch::Sm80,
+      cutlass::gemm::GemmShape<128, 128, 8>,
+      cutlass::gemm::GemmShape<32, 64, 8>,
+      cutlass::gemm::GemmShape<1, 1, 1>,
+      cutlass::epilogue::thread::LinearCombination<float, 1, float, float>,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      2,
+      1,
+      1,
+      true>;
+};
+
+template<class LayoutA, class LayoutB>
+void sgemmT(
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float *A,
+    int lda,
+    const float *B,
+    int ldb,
+    float beta,
+    float *C,
+    int ldc) {
+  using Gemm = typename Sm80SimtGemm<LayoutA, LayoutB>::Gemm;
+  Gemm gemmOperator;
+
+  // The same tile as the half path, so the same rule says how to split it.
+  typename Gemm::Arguments args{
+      {m, n, k},
+      {A, lda},
+      {B, ldb},
+      {C, ldc},
+      {C, ldc},
+      {alpha, beta},
+      splitKSlices(m, n, k)};
+
+  size_t workspaceSize = Gemm::get_workspace_size(args);
+  CUTLASS_CHECK(gemmOperator.initialize(args, splitKWorkspace(workspaceSize)));
+  CUTLASS_CHECK(gemmOperator());
+}
+
+void cutlassSgemm(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float *A,
+    int lda,
+    const float *B,
+    int ldb,
+    float beta,
+    float *C,
+    int ldc) {
+  if (!transA && !transB) {
+    return sgemmT<RowMajor, RowMajor>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  } else if (transA && !transB) {
+    return sgemmT<ColumnMajor, RowMajor>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  } else if (!transA && transB) {
+    return sgemmT<RowMajor, ColumnMajor>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  } else {
+    return sgemmT<ColumnMajor, ColumnMajor>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  }
+}
+
+template<class LayoutA, class LayoutB>
+void sgemmArrayT(
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float *const *A,
+    int lda,
+    const float *const *B,
+    int ldb,
+    float beta,
+    float *const *C,
+    int ldc,
+    int batchSize) {
+  using Gemm = cutlass::gemm::device::
+      GemmArray<float, LayoutA, float, LayoutB, float, RowMajor, float>;
+  Gemm gemmOperator;
+
+  typename Gemm::Arguments
+      args({m, n, k}, A, lda, B, ldb, C, ldc, C, ldc, {alpha, beta}, batchSize);
+  CUTLASS_CHECK(gemmOperator(args));
+}
+
+void cutlassSgemmArray(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float *const *A,
+    int lda,
+    const float *const *B,
+    int ldb,
+    float beta,
+    float *const *C,
+    int ldc,
+    int batchSize) {
+  if (!transA && !transB) {
+    return sgemmArrayT<RowMajor, RowMajor>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, batchSize);
+  } else if (transA && !transB) {
+    return sgemmArrayT<ColumnMajor, RowMajor>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, batchSize);
+  } else if (!transA && transB) {
+    return sgemmArrayT<RowMajor, ColumnMajor>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, batchSize);
+  } else {
+    return sgemmArrayT<ColumnMajor, ColumnMajor>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, batchSize);
+  }
+}
+
 void CutlassGemm::hgemm(
     bool transA,
     bool transB,
@@ -388,6 +532,42 @@ void CutlassGemm::hgemmArray(
 std::shared_ptr<Gemm> CutlassGemm::create() {
   std::shared_ptr<CutlassGemm> mm = std::make_shared<CutlassGemm>();
   return mm;
+}
+
+void CutlassGemm::sgemm(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float *A,
+    int lda,
+    const float *B,
+    int ldb,
+    float beta,
+    float *C,
+    int ldc) {
+  cutlassSgemm(transA, transB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+void CutlassGemm::sgemmArray(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const float *const *arrayA,
+    int lda,
+    const float *const *arrayB,
+    int ldb,
+    float beta,
+    float *const *arrayC,
+    int ldc,
+    int batchSize) {
+  cutlassSgemmArray(
+      transA, transB, m, n, k, alpha, arrayA, lda, arrayB, ldb, beta, arrayC, ldc, batchSize);
 }
 
 }  // namespace cuda

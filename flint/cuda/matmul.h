@@ -22,8 +22,6 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
-#include <type_traits>
-
 #include "lutil/shared_library.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/gemm.h"
@@ -49,22 +47,6 @@ class MatMul {
 
  protected:
   std::shared_ptr<Gemm> _gemm;
-
-  /// Where a float GEMM goes when `_gemm` has no float arm.
-  ///
-  /// CUTLASS is instantiated here for half and nothing else, which is the precision a diffusion
-  /// model spends its time in. The autoencoder runs in float32 though, so without somewhere for
-  /// those to go the model would not load at all -- and comparing the two backends is about which
-  /// kernel the half GEMMs reach, so sending the float ones to the same place either way is what
-  /// keeps the comparison about that.
-  std::shared_ptr<Gemm> _floatGemm;
-
-  /// The backend a GEMM in `T` should go to.
-  template<typename T>
-  Gemm *backendFor() const {
-    if (std::is_same<T, float>::value && _floatGemm) return _floatGemm.get();
-    return _gemm.get();
-  }
 
   // The float paths, in `T`, which is <half> or <float>. The two differ only in which cuBLAS
   // call they end at and in the vector kernel, which exists for half alone; everything about the

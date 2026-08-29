@@ -377,3 +377,7 @@ What is left, and it is not much: the remaining shapes where CUTLASS is behind c
 with 77 rows, and a 64 by 64 tile for those alone -- dispatched on M, kept off everything else --
 measured 26.5 and 23.4 TFLOP/s against cuBLAS at 23.0 and 18.0. They are 2.5% of a step's GEMM
 time, so winning all of it is worth about 0.3% of an image. It has not been written.
+
+The backend is now complete rather than half of one: CUTLASS answers float as well as half, so
+`LIBWAIFU_GEMM=cutlass` runs the whole model including the autoencoder and cuBLAS is no longer
+reached at all. It stays the default, since `MatMul::create` still tries it first.
