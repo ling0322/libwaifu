@@ -22,10 +22,18 @@ required-features = ["cli"]
 
 [features]
 # The command line tool. Off by default so that using this crate as a library stays
-# dependency-free; the binary needs an HTTPS client to fetch models.
-cli = ["dep:ureq"]
+# dependency-free; the binary needs an HTTPS client to fetch models and a terminal library to
+# draw with.
+cli = ["dep:ureq", "dep:ratatui"]
 
 [dependencies]
+# The terminal UI the draw command runs in, and only for the CLI. Trimmed to the crossterm
+# backend: the default set also builds the termwiz and termina ones, which is two more terminal
+# stacks than a program that runs in one terminal needs.
+ratatui = { version = "0.29", default-features = false, features = [
+    "crossterm",
+    "underline-color",
+], optional = true }
 # Only for downloading models, and only for the CLI. The library itself has no dependencies; an
 # HTTPS client is the one thing here that is not worth writing by hand.
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }

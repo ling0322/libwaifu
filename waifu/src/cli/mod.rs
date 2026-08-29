@@ -25,6 +25,9 @@
 mod args;
 mod chat;
 mod download;
+mod draw;
+mod field;
+mod png;
 
 use std::process::ExitCode;
 
@@ -33,6 +36,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Commands:");
     eprintln!("    chat           Chat with your waifu");
+    eprintln!("    draw           Draw a picture with your waifu");
     eprintln!("    download       Download model to local");
     eprintln!();
     eprintln!("Run 'waifu COMMAND -h' for more information on a command.");
@@ -49,6 +53,7 @@ pub fn run() -> ExitCode {
     let rest = &arguments[1..];
     let result = match command.as_str() {
         "chat" => chat::main(rest),
+        "draw" => draw::main(rest),
         "download" => download::main(rest),
         other => {
             eprintln!("Invalid command \"{other}\"\n");

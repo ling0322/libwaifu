@@ -21,6 +21,8 @@
 
 use std::fmt;
 
+use crate::Device;
+
 /// What went wrong with what the user typed. Reported rather than exiting, so that the caller
 /// prints the usage that goes with the command they were running.
 #[derive(Debug)]
@@ -41,6 +43,23 @@ pub enum DeviceOption {
     Auto,
     Cpu,
     Cuda,
+}
+
+impl DeviceOption {
+    /// The device this actually means, which is the one question `auto` leaves open.
+    pub fn resolve(self) -> Device {
+        match self {
+            DeviceOption::Cpu => Device::Cpu,
+            DeviceOption::Cuda => Device::Cuda,
+            DeviceOption::Auto => {
+                if Device::Cuda.is_available() {
+                    Device::Cuda
+                } else {
+                    Device::Cpu
+                }
+            }
+        }
+    }
 }
 
 /// The flags a command was given.
@@ -182,6 +201,12 @@ mod tests {
         // A flag at the end with nothing after it would otherwise take the next flag as its value.
         let error = args(&["-m"]).unwrap_err().to_string();
         assert!(error.contains("needs an argument"), "{error}");
+    }
+
+    #[test]
+    fn a_named_device_is_the_one_that_is_used() {
+        assert_eq!(DeviceOption::Cpu.resolve(), Device::Cpu);
+        assert_eq!(DeviceOption::Cuda.resolve(), Device::Cuda);
     }
 
     #[test]

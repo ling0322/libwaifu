@@ -25,8 +25,10 @@ mod text_encoder;
 mod unet;
 mod vae;
 
-pub use text_encoder::{ClipTextConfig, ClipTextEncoder, ClipTextOutput};
-pub use pipeline::{to_rgb8, GenerationOptions, PromptEmbedding, Sdxl, SdxlConfig, VAE_SCALE};
+pub use pipeline::{
+    to_rgb8, GenerationOptions, GenerationProgress, PromptEmbedding, Sdxl, SdxlConfig, VAE_SCALE,
+};
 pub use sampler::{EulerSampler, SamplerConfig};
+pub use text_encoder::{ClipTextConfig, ClipTextEncoder, ClipTextOutput};
 pub use unet::{Unet, UnetCondition, UnetConfig};
 pub use vae::{VaeConfig, VaeDecoder};

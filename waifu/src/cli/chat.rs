@@ -142,17 +142,7 @@ fn load(
     model_path: &std::path::Path,
     device: DeviceOption,
 ) -> Result<(Engine, Receiver<Chunk>), Error> {
-    let device = match device {
-        DeviceOption::Cpu => Device::Cpu,
-        DeviceOption::Cuda => Device::Cuda,
-        DeviceOption::Auto => {
-            if Device::Cuda.is_available() {
-                Device::Cuda
-            } else {
-                Device::Cpu
-            }
-        }
-    };
+    let device = device.resolve();
 
     // The attention this model needs has CUDA kernels only, and a missing kernel ends the process
     // rather than reporting anything, so it is worth saying now.

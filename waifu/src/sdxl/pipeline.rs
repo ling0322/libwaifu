@@ -25,6 +25,8 @@
 //! free guidance: every step is run twice, once with the prompt and once without, and the answer
 //! is pushed away from the one that ignored it.
 
+use std::ops::ControlFlow;
+
 use crate::error::{Error, Result};
 use crate::flint::{functional as F, DType, Device, Tensor};
 use crate::ini::IniSection;
@@ -187,6 +189,26 @@ impl Default for GenerationOptions {
     }
 }
 
+/// How far along a run is, as the reporter given to [`Sdxl::generate_reporting`] is told.
+///
+/// The three are not the same size: encoding costs about as much as one step, a step is a step,
+/// and the decode at the end is several. A bar drawn from the step count alone will sit at the
+/// end for a while, which is the honest thing for it to do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenerationProgress {
+    /// Reading the prompt, which happens once before the first step.
+    Encoding,
+    /// The denoising step that just finished, out of how many there are.
+    Step { done: i32, total: i32 },
+    /// Turning the finished latent into pixels.
+    Decoding,
+}
+
+/// The reporter a run that nobody is watching gets.
+fn unwatched(_: GenerationProgress) -> ControlFlow<()> {
+    ControlFlow::Continue(())
+}
+
 /// What a prompt becomes once both encoders have read it.
 pub struct PromptEmbedding {
     /// `(1, L, 2048)`: the two encoders side by side, which is what cross attention reads.
@@ -302,6 +324,20 @@ impl Sdxl {
         negative: &PromptEmbedding,
         options: &GenerationOptions,
     ) -> Result<Tensor> {
+        let denoised = self.denoise_reporting(latent, prompt, negative, options, &mut unwatched)?;
+        Ok(denoised.expect("a run nothing asked to stop runs to the end"))
+    }
+
+    /// [`Sdxl::denoise`], telling `report` after every step and giving up where it stands if
+    /// `report` says to -- in which case there is no latent to hand back.
+    fn denoise_reporting(
+        &self,
+        latent: &Tensor,
+        prompt: &PromptEmbedding,
+        negative: &PromptEmbedding,
+        options: &GenerationOptions,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Tensor>> {
         let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
 
         // The size the image was asked for, which SDXL is told directly: it was trained on
@@ -349,9 +385,17 @@ impl Sdxl {
             };
 
             latent = sampler.step(&noise, &latent, index)?;
+
+            let progress = GenerationProgress::Step {
+                done: index as i32 + 1,
+                total: sampler.len() as i32,
+            };
+            if report(progress).is_break() {
+                return Ok(None);
+            }
         }
 
-        Ok(latent)
+        Ok(Some(latent))
     }
 
     /// The image a latent stands for, as `<float>(1, 3, H * 8, W * 8)` in roughly `[-1, 1]`.
@@ -365,8 +409,30 @@ impl Sdxl {
 
     /// An image for `prompt`, as `<float>(1, 3, height, width)` in roughly `[-1, 1]`.
     pub fn generate(&self, prompt: &str, options: &GenerationOptions) -> Result<Tensor> {
-        let latent = self.generate_latent(prompt, options)?;
-        self.decode(&latent)
+        let image = self.generate_reporting(prompt, options, &mut unwatched)?;
+        Ok(image.expect("a run nothing asked to stop runs to the end"))
+    }
+
+    /// [`Sdxl::generate`] for a caller who wants to watch it happen.
+    ///
+    /// `report` hears about each part of the run as it is reached: the prompt before it is read,
+    /// every step as it finishes, and the decode before it begins. It can end the run by
+    /// returning [`ControlFlow::Break`], which is the only way to stop one -- a step, once
+    /// started, runs to the end of itself. A run that stopped early hands back no image.
+    pub fn generate_reporting(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Tensor>> {
+        let Some(latent) = self.generate_latent_reporting(prompt, options, report)? else {
+            return Ok(None);
+        };
+
+        if report(GenerationProgress::Decoding).is_break() {
+            return Ok(None);
+        }
+        self.decode(&latent).map(Some)
     }
 
     /// The latent [`Sdxl::generate`] would decode: everything but the last step.
@@ -375,6 +441,17 @@ impl Sdxl {
     /// visible -- and because it is what to hold on to when generating several sizes of the same
     /// image or when the decoder is being worked on.
     pub fn generate_latent(&self, prompt: &str, options: &GenerationOptions) -> Result<Tensor> {
+        let latent = self.generate_latent_reporting(prompt, options, &mut unwatched)?;
+        Ok(latent.expect("a run nothing asked to stop runs to the end"))
+    }
+
+    /// [`Sdxl::generate_latent`], reporting to and interruptible by `report`.
+    fn generate_latent_reporting(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Tensor>> {
         // Every resolution the U-Net works at halves the one before it, on top of the eight the
         // VAE already stands for.
         let alignment = VAE_SCALE * (1 << (self.config.unet.block_out_channels.len() - 1));
@@ -404,10 +481,13 @@ impl Sdxl {
         )?
         .cast(self.dtype)?;
 
+        if report(GenerationProgress::Encoding).is_break() {
+            return Ok(None);
+        }
         let prompt = self.encode_prompt(prompt)?;
         let negative = self.encode_prompt(&options.negative_prompt)?;
 
-        self.denoise(&latent, &prompt, &negative, options)
+        self.denoise_reporting(&latent, &prompt, &negative, options, report)
     }
 }
 

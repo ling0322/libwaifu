@@ -64,6 +64,28 @@ How can I assist you today?
 >
 ```
 
+## Drawing pictures
+
+An SDXL package draws rather than talks, and `waifu draw` opens a terminal for it:
+
+```bash
+$ waifu draw -m models/sdxl-base.llmpkg
+```
+
+The screen holds the prompt, what to steer away from, and the four numbers a run takes: how many
+steps, how hard to push away from the unprompted answer, what size, and which seed.
+
+```text
+ tab move  enter draw  esc stop or quit
+```
+
+`tab` moves between the boxes, the arrows turn whichever number is under the cursor, `enter`
+starts a run and `esc` stops one where it stands. Every finished picture is written into the
+current directory as `waifu-0001.png` and listed on screen -- a terminal is no place to look at
+one, so the file name is what comes back.
+
+Drawing needs `Conv2d`, and `Conv2d` needs cuDNN -- see the build section below.
+
 ## Rust example
 
 The Rust API can load a model package and stream generated text through an `Engine` callback:
