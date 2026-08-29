@@ -15,8 +15,36 @@ Any SDXL fine tune works -- Illustrious, WAI, or anything else that ships as a s
 safetensors file:
 
 ```bash
-python tools/sdxl_exporter.py -checkpoint /path/to/checkpoint.safetensors -output sdxl.waifupkg
+python3 -m venv .venv
+.venv/bin/pip install -r tools/requirements.txt
+.venv/bin/python tools/sdxl_exporter.py -checkpoint /path/to/checkpoint.safetensors -output sdxl.waifupkg
 ```
+
+### Models too large for one file
+
+A package is about seven gigabytes, which is an awkward size to publish and an awkward one to
+fetch: it cannot be downloaded in parallel, and a failed transfer starts over. Pass a limit and
+the model is written as several packages instead:
+
+```bash
+.venv/bin/python tools/sdxl_exporter.py ... -output sdxl.waifupkg -part-size 4GB
+```
+
+A package that is already written can be split without exporting it again, which copies the
+tensors byte for byte:
+
+```bash
+.venv/bin/python tools/split_package.py sdxl.waifupkg -part-size 4GB
+```
+
+Either way you get `sdxl-00001-of-00002.waifupkg` and `sdxl-00002-of-00002.waifupkg`. Point
+`waifu draw` at the first and it reads the rest: it holds the configuration and names the others.
+Keep them in one directory -- the first names its neighbours by file name and will not follow a
+path anywhere else -- and the picture they draw is identical, to the byte, to the one the whole
+package draws.
+
+The split is between tensors, never inside one, so each part is a parameter file in its own right
+and can be read and checked alone.
 
 ## Drawing pictures
 

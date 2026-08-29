@@ -24,10 +24,14 @@ if TYPE_CHECKING:
     from torch import nn
 
 import binascii
+import io
+import os
 import struct
 import torch
 import math
 import sys
+import zipfile
+from os import path
 import numpy as np
 from enum import Enum
 import torch.nn.functional as F
@@ -123,6 +127,128 @@ class Quantization:
         qweights = cls._pack_uint8_to_uint4x2(qweights)
 
         return qweights, scales.type(torch.float16), zeros.type(torch.float16)
+
+MODEL_INI = "model.ini"
+
+# The key in model.ini that lists the parts of a model written as several files, and what the
+# runtime looks for. A package without it is the whole model.
+PARTS_KEY = "model_parts"
+
+PACKAGE_SUFFIX = ".waifupkg"
+
+
+def parse_size(text: str) -> int:
+    """A size as a number of bytes, written plainly or with a unit: 4GB, 512MB, 2000000000."""
+    units = {"": 1, "K": 1000, "KB": 1000, "M": 1000**2, "MB": 1000**2, "MIB": 1 << 20,
+             "G": 1000**3, "GB": 1000**3, "GI": 1 << 30, "GIB": 1 << 30}
+    text = text.strip().upper()
+    digits = text.rstrip("ABGIKM")
+    unit = text[len(digits):]
+    if not digits or unit not in units:
+        raise ValueError(f"{text!r} is not a size")
+    return int(float(digits) * units[unit])
+
+
+def part_names(stem: str, count: int) -> list:
+    """What the parts of a model split `count` ways are called.
+
+    A model that fits in one file keeps the name it was asked for; there is no `-00001-of-00001`,
+    since a suffix saying "one of one" only invites the question of where the others are.
+    """
+    if count == 1:
+        return [stem + PACKAGE_SUFFIX]
+    return [f"{stem}-{i + 1:05d}-of-{count:05d}{PACKAGE_SUFFIX}" for i in range(count)]
+
+
+class _CountingWriter:
+    """Passes writes through and remembers how many bytes went by."""
+
+    def __init__(self, fp) -> None:
+        self._fp = fp
+        self.written = 0
+
+    def write(self, data) -> int:
+        self.written += len(data)
+        return self._fp.write(data)
+
+    def close(self) -> None:
+        self._fp.close()
+
+
+class PackageWriter:
+    """Writes a model as one package, or as several if a size limit is given.
+
+    Seven gigabytes is an awkward size to publish and an awkward one to fetch: it cannot be
+    downloaded in parallel, and a failed transfer starts over. Given `part_size` this rolls over
+    to a new package whenever the current one reaches it, always between tensors and never inside
+    one, so that each part is a whole parameter file in its own right -- its own header, its own
+    records, its own end -- and can be read and checked alone.
+
+    How many parts there will be is not known until the last tensor has been written, so they are
+    written under temporary names and renamed at the end, when the count is finally known.
+
+    The first part carries everything that is not parameters -- the configuration, the tokenizer
+    -- and names the others. It is reopened to take them, since by then it has been closed.
+    """
+
+    def __init__(self, output: str, model_file: str, part_size=None) -> None:
+        self._model_file = model_file
+        self._part_size = part_size
+        self._directory = path.dirname(path.abspath(output))
+        name = path.basename(output)
+        self._stem = name[: -len(PACKAGE_SUFFIX)] if name.endswith(PACKAGE_SUFFIX) else name
+
+        self._temporary = []
+        self._zip = None
+        self._writer = None
+        self._counter = None
+        self._begin_part()
+
+    def _begin_part(self) -> None:
+        temporary = path.join(self._directory, f"{self._stem}-{len(self._temporary):05d}.part")
+        self._zip = zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_STORED)
+        entry = self._zip.open(self._model_file, "w", force_zip64=True)
+        self._counter = _CountingWriter(entry)
+        self._writer = TensorWriter(self._counter)
+        self._temporary.append(temporary)
+
+    def _end_part(self) -> None:
+        # TensorWriter closes what it was given, which closes the entry but not the archive.
+        self._writer.__exit__(None, None, None)
+        self._zip.close()
+
+    def write_tensor(self, ctx, tensor, preserve_dtype=False) -> None:
+        """What the exporter writes through. Rolls over first if this part has had enough."""
+        if self._part_size is not None and self._counter.written >= self._part_size:
+            self._end_part()
+            self._begin_part()
+        self._writer.write_tensor(ctx, tensor, preserve_dtype=preserve_dtype)
+
+    def finish(self, config, extras=None) -> list:
+        """Close the parts, name them, and put what is not parameters into the first.
+
+        `config` is the model.ini to write, which is told about the parts when there is more than
+        one of them. `extras` is called with the first part open for appending, for the entries
+        that are neither the parameters nor the configuration.
+        """
+        self._end_part()
+
+        names = part_names(self._stem, len(self._temporary))
+        for temporary, name in zip(self._temporary, names):
+            os.replace(temporary, path.join(self._directory, name))
+
+        if len(names) > 1:
+            config["model"][PARTS_KEY] = ",".join(names)
+
+        first = path.join(self._directory, names[0])
+        with zipfile.ZipFile(first, "a", compression=zipfile.ZIP_STORED) as package:
+            with package.open(MODEL_INI, "w", force_zip64=True) as fp:
+                config.write(io.TextIOWrapper(fp))
+            if extras is not None:
+                extras(package)
+
+        return names
+
 
 class TensorWriter:
     """write tensor to file with llyn tensor format."""

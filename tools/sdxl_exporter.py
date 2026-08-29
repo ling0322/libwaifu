@@ -45,12 +45,12 @@ import torch
 from torch import nn
 
 from bpe_exporter import read_clip_model
-from model_exporter import Context, ModelExporter, Quant, TensorWriter
+from model_exporter import (
+    Context, MODEL_INI, ModelExporter, PackageWriter, Quant, TensorWriter, parse_size)
 
 MODEL_BIN = "model.bin"
 TEST_CASE_BIN = "test_case.bin"
 TOKENIZER_CORPUS = "tokenizer_corpus.tsv"
-MODEL_INI = "model.ini"
 TOKENIZER_BIN = "tokenizer.bin"
 TOKENIZER_INI = "tokenizer.ini"
 
@@ -377,10 +377,14 @@ class SdxlExporter(ModelExporter):
         return config
 
     @classmethod
-    def export(cls, pipeline, tokenizer, fp) -> configparser.ConfigParser:
-        ctx = Context("sdxl")
-        with TensorWriter(fp) as writer:
-            SdxlExporter(writer)._export(ctx, pipeline)
+    def export(cls, pipeline, tokenizer, writer) -> configparser.ConfigParser:
+        """Write every parameter through `writer`, and say what a reader needs to know.
+
+        `writer` is whatever takes the tensors -- one package, or a PackageWriter spreading them
+        over several. Which it is makes no difference here: this walks the model in one order and
+        writes each tensor once.
+        """
+        SdxlExporter(writer)._export(Context("sdxl"), pipeline)
 
         config = cls.generate_config(pipeline, tokenizer)
         config["model"] = {}
@@ -640,6 +644,14 @@ if __name__ == "__main__":
         help="where the tokenizer comes from when the checkpoint has none.")
     parser.add_argument("-output", type=str, default="sdxl.waifupkg", help="output file name.")
     parser.add_argument(
+        "-part-size",
+        dest="part_size",
+        type=parse_size,
+        default=None,
+        help="split the model into parts no larger than this, as 4GB or 512MB. A package is "
+             "about seven gigabytes, which is an awkward size to publish and to fetch. Left out, "
+             "the model is written as the single file it always was.")
+    parser.add_argument(
         "-test_output",
         type=str,
         default=None,
@@ -660,22 +672,19 @@ if __name__ == "__main__":
             file=sys.stderr)
         sys.exit(1)
 
-    with zipfile.ZipFile(args.output, "w", compression=zipfile.ZIP_STORED) as package:
-        libwaifu_tokenizer = read_clip_model(args.base_model, subfolder="tokenizer")
+    libwaifu_tokenizer = read_clip_model(args.base_model, subfolder="tokenizer")
 
-        with package.open(MODEL_BIN, "w", force_zip64=True) as fp:
-            config = SdxlExporter.export(pipeline, pipeline.tokenizer, fp)
-
-        with package.open(MODEL_INI, "w", force_zip64=True) as fp:
-            config.write(io.TextIOWrapper(fp))
-
+    def write_tokenizer(package):
         with package.open(TOKENIZER_BIN, "w", force_zip64=True) as fp:
             libwaifu_tokenizer.save(fp)
 
         with package.open(TOKENIZER_INI, "w", force_zip64=True) as fp:
             libwaifu_tokenizer.get_config().to_ini(TOKENIZER_BIN).write(io.TextIOWrapper(fp))
 
-    print(f"wrote {args.output}")
+    writer = PackageWriter(args.output, MODEL_BIN, args.part_size)
+    config = SdxlExporter.export(pipeline, pipeline.tokenizer, writer)
+    for name in writer.finish(config, write_tokenizer):
+        print(f"wrote {name}")
 
     if args.test_output:
         with zipfile.ZipFile(args.test_output, "w", compression=zipfile.ZIP_STORED) as package:
