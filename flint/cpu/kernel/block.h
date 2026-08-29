@@ -22,6 +22,7 @@
 #include "lutil/log.h"
 #include "lutil/time.h"
 #include "flint/cpu/kernel/abstract.h"
+#include "flint/cpu/kernel/util.h"
 
 namespace fl {
 namespace op {
@@ -40,7 +41,11 @@ struct Block {
   constexpr Block<T> sliceRow(int row, int nr) const;
   constexpr Block<T> sliceCol(int col, int nc) const;
   constexpr Block<T> slice(int row, int col, int nr, int nc) const;
-  inline void copyTo(Block<T> tgt);
+
+  // copy this block to tgt, converting each element to Tt on the way. Tt may differ from T, that
+  // is how a fp16 weight block becomes a fp32 packed block.
+  template<typename Tt>
+  inline void copyTo(Block<Tt> tgt) const;
   constexpr Block<T> t();
   constexpr void fillZero();
 };
@@ -55,24 +60,27 @@ struct PackedBlock {
   constexpr Block<T> block(int i) const;
 };
 
-template<typename T, Mode MODE>
-PackedBlock<T> Pack(Block<T> src, Block<T> buf, int pack_size) {
+// pack src into pack_size wide panels stored in buf. Ts is the type in the source matrix, Tt the
+// type the micro-kernel wants: with Ts=Float16 and Tt=float the packing loop is also the fp16 ->
+// fp32 conversion, so no separate dequantized copy of the matrix is needed.
+template<typename Ts, typename Tt, Mode MODE>
+PackedBlock<Tt> Pack(Block<Ts> src, Block<Tt> buf, int pack_size) {
   int numBlock = src.numCols / pack_size;
   int kc = src.numRows;
-  PackedBlock<T> tgt{buf.data, pack_size, kc, numBlock};
+  PackedBlock<Tt> tgt{buf.data, pack_size, kc, numBlock};
   CHECK(pack_size * numBlock * kc <= buf.numCols * buf.numRows);
 
 #pragma omp parallel for if (MODE == Mode::OMP) schedule(dynamic, 1)
   for (int b = 0; b < numBlock; ++b) {
-    Block<T> srcBlock = src.sliceCol(b * pack_size, pack_size);
-    Block<T> tgtBlock = tgt.block(b);
+    Block<Ts> srcBlock = src.sliceCol(b * pack_size, pack_size);
+    Block<Tt> tgtBlock = tgt.block(b);
     srcBlock.copyTo(tgtBlock);
   }
 
   int nc = src.numCols % pack_size;
   if (nc) {
-    Block<T> srcBlock = src.sliceCol(numBlock * pack_size, nc);
-    Block<T> tgtBlock = tgt.block(numBlock);
+    Block<Ts> srcBlock = src.sliceCol(numBlock * pack_size, nc);
+    Block<Tt> tgtBlock = tgt.block(numBlock);
     tgtBlock.fillZero();
 
     tgtBlock = tgtBlock.sliceCol(0, nc);
@@ -103,7 +111,8 @@ constexpr Block<T> Block<T>::slice(int row, int col, int nr, int nc) const {
 }
 
 template<typename T>
-inline void Block<T>::copyTo(Block<T> tgt) {
+template<typename Tt>
+inline void Block<T>::copyTo(Block<Tt> tgt) const {
   CHECK(numRows == tgt.numRows);
   CHECK(numCols == tgt.numCols);
 
@@ -112,21 +121,21 @@ inline void Block<T>::copyTo(Block<T> tgt) {
       int tgtOffset = r * tgt.stride;
       int srcOffset = r * stride;
       for (int c = 0; c < numCols; ++c) {
-        tgt.data[tgtOffset + c] = data[srcOffset + c];
+        tgt.data[tgtOffset + c] = cvtf<Tt>(data[srcOffset + c]);
       }
     }
   } else if (transposed && (!tgt.transposed)) {
     for (int r = 0; r < numRows; ++r) {
       int tgtOffset = r * tgt.stride;
       for (int c = 0; c < numCols; ++c) {
-        tgt.data[tgtOffset + c] = data[r + c * stride];
+        tgt.data[tgtOffset + c] = cvtf<Tt>(data[r + c * stride]);
       }
     }
   } else if ((!transposed) && tgt.transposed) {
     for (int r = 0; r < numRows; ++r) {
       int srcOffset = r * stride;
       for (int c = 0; c < numCols; ++c) {
-        tgt.data[r + c * tgt.stride] = data[srcOffset + c];
+        tgt.data[r + c * tgt.stride] = cvtf<Tt>(data[srcOffset + c]);
       }
     }
   } else if (transposed && tgt.transposed) {
@@ -134,7 +143,7 @@ inline void Block<T>::copyTo(Block<T> tgt) {
       int srcOffset = c * stride;
       int tgtOffset = c * tgt.stride;
       for (int r = 0; r < numRows; ++r) {
-        tgt.data[r + tgtOffset] = data[r + srcOffset];
+        tgt.data[r + tgtOffset] = cvtf<Tt>(data[r + srcOffset]);
       }
     }
   }

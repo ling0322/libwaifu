@@ -31,18 +31,32 @@ namespace op {
 namespace cpu {
 namespace kernel {
 
-template<int MC, int KC, int NC, int MR, int NR, typename T, CpuMathBackend TYPE, Mode MODE>
+// GEMM over the packed-block algorithm. TComp is the type the micro-kernel computes in, TA and TB
+// are the types A and B are stored in; when they differ from TComp the conversion happens in
+// Pack(), so a fp16 weight is turned into fp32 one KC x NC panel at a time rather than as a whole
+// matrix.
+template<
+    int MC,
+    int KC,
+    int NC,
+    int MR,
+    int NR,
+    typename TComp,
+    CpuMathBackend TYPE,
+    Mode MODE,
+    typename TA = TComp,
+    typename TB = TComp>
 class Gemm {
  public:
   Gemm() {
-    int packedSize = (MC * KC + KC * NC) * sizeof(T);
-    _packedBuffer = (T *)malloc(packedSize);
+    int packedSize = (MC * KC + KC * NC) * sizeof(TComp);
+    _packedBuffer = (TComp *)malloc(packedSize);
 
-    T *A = _packedBuffer;
-    T *B = A + MC * KC;
+    TComp *A = _packedBuffer;
+    TComp *B = A + MC * KC;
 
-    _bufferA = Block<T>{A, MR, (MC / MR) * KC, MR, false};
-    _bufferB = Block<T>{B, NR, (NC / NR) * KC, NR, false};
+    _bufferA = Block<TComp>{A, MR, (MC / MR) * KC, MR, false};
+    _bufferB = Block<TComp>{B, NR, (NC / NR) * KC, NR, false};
   }
 
   ~Gemm() {
@@ -50,81 +64,81 @@ class Gemm {
     _packedBuffer = nullptr;
   }
 
-  void apply(const GemmArgs<T, T, T> &args) {
-    _inputA = Block<T>{(T *)args.A, args.lda, args.M, args.K, args.transA};
-    _inputB = Block<T>{(T *)args.B, args.ldb, args.K, args.N, args.transB};
-    _inputC = Block<T>{(T *)args.C, args.ldc, args.M, args.N, false};
+  void apply(const GemmArgs<TA, TB, TComp> &args) {
+    _inputA = Block<TA>{(TA *)args.A, args.lda, args.M, args.K, args.transA};
+    _inputB = Block<TB>{(TB *)args.B, args.ldb, args.K, args.N, args.transB};
+    _inputC = Block<TComp>{(TComp *)args.C, args.ldc, args.M, args.N, false};
 
     split0ByNC();
   }
 
  private:
-  T *_packedBuffer;
+  TComp *_packedBuffer;
 
-  Block<T> _bufferA;
-  Block<T> _bufferB;
+  Block<TComp> _bufferA;
+  Block<TComp> _bufferB;
 
-  Block<T> _inputA;
-  Block<T> _inputB;
-  Block<T> _inputC;
+  Block<TA> _inputA;
+  Block<TB> _inputB;
+  Block<TComp> _inputC;
 
   void split0ByNC() {
     int nb = _inputB.numCols / NC;
     int nc = _inputB.numCols % NC;
 
     for (int i = 0; i < nb; ++i) {
-      Block<T> Bn = _inputB.sliceCol(i * NC, NC);
-      Block<T> Cj = _inputC.sliceCol(i * NC, NC);
+      Block<TB> Bn = _inputB.sliceCol(i * NC, NC);
+      Block<TComp> Cj = _inputC.sliceCol(i * NC, NC);
       split1ByKC(Bn, Cj);
     }
 
     if (nc) {
-      Block<T> Bn = _inputB.sliceCol(nb * NC, nc);
-      Block<T> Cj = _inputC.sliceCol(nb * NC, nc);
+      Block<TB> Bn = _inputB.sliceCol(nb * NC, nc);
+      Block<TComp> Cj = _inputC.sliceCol(nb * NC, nc);
       split1ByKC(Bn, Cj);
     }
   }
 
-  void split1ByKC(Block<T> Bn, Block<T> Cj) {
+  void split1ByKC(Block<TB> Bn, Block<TComp> Cj) {
     int kb = Bn.numRows / KC;
     int kc = Bn.numRows % KC;
 
     for (int i = 0; i < kb; ++i) {
-      Block<T> Bkn = Bn.sliceRow(i * KC, KC);
-      Block<T> Ak = _inputA.sliceCol(i * KC, KC);
-      PackedBlock<T> Bp = Pack<T, MODE>(Bkn, _bufferB, NR);
+      Block<TB> Bkn = Bn.sliceRow(i * KC, KC);
+      Block<TA> Ak = _inputA.sliceCol(i * KC, KC);
+      PackedBlock<TComp> Bp = Pack<TB, TComp, MODE>(Bkn, _bufferB, NR);
       split2ByMC(Ak, Bp, Cj);
     }
 
     if (kc) {
-      Block<T> Bkn = Bn.sliceRow(kb * KC, kc);
-      Block<T> Ak = _inputA.sliceCol(kb * KC, kc);
-      PackedBlock<T> Bp = Pack<T, MODE>(Bkn, _bufferB, NR);
+      Block<TB> Bkn = Bn.sliceRow(kb * KC, kc);
+      Block<TA> Ak = _inputA.sliceCol(kb * KC, kc);
+      PackedBlock<TComp> Bp = Pack<TB, TComp, MODE>(Bkn, _bufferB, NR);
       split2ByMC(Ak, Bp, Cj);
     }
   }
 
-  void split2ByMC(Block<T> Ak, PackedBlock<T> Bp, Block<T> Cj) {
+  void split2ByMC(Block<TA> Ak, PackedBlock<TComp> Bp, Block<TComp> Cj) {
     int mb = Ak.numRows / MC;
     int mc = Ak.numRows % MC;
 
     for (int i = 0; i < mb; ++i) {
-      Block<T> Amk = Ak.sliceRow(i * MC, MC);
-      Block<T> Cij = Cj.sliceRow(i * MC, MC);
-      PackedBlock<T> Ap = Pack<T, MODE>(Amk.t(), _bufferA, MR);
+      Block<TA> Amk = Ak.sliceRow(i * MC, MC);
+      Block<TComp> Cij = Cj.sliceRow(i * MC, MC);
+      PackedBlock<TComp> Ap = Pack<TA, TComp, MODE>(Amk.t(), _bufferA, MR);
       macroKernel(Ap, Bp, Cij);
     }
 
     if (mc) {
-      Block<T> Amk = Ak.sliceRow(mb * MC, mc);
-      Block<T> Cij = Cj.sliceRow(mb * MC, mc);
-      PackedBlock<T> Ap = Pack<T, MODE>(Amk.t(), _bufferA, MR);
+      Block<TA> Amk = Ak.sliceRow(mb * MC, mc);
+      Block<TComp> Cij = Cj.sliceRow(mb * MC, mc);
+      PackedBlock<TComp> Ap = Pack<TA, TComp, MODE>(Amk.t(), _bufferA, MR);
       macroKernel(Ap, Bp, Cij);
     }
   }
 
   // GEMM macro-kernel: A(packed: MC, KC) DOT B(packed: KC, NC) -> C(MC, NC)
-  void macroKernel(PackedBlock<T> A, PackedBlock<T> B, Block<T> C) {
+  void macroKernel(PackedBlock<TComp> A, PackedBlock<TComp> B, Block<TComp> C) {
     int np = (C.numCols + NR - 1) / NR;
     int mp = (C.numRows + MR - 1) / MR;
     int lastNr = C.numCols % NR;
@@ -136,29 +150,29 @@ class Gemm {
         int nr = (i != np - 1 || lastNr == 0) ? NR : lastNr;
         int mr = (j != mp - 1 || lastMr == 0) ? MR : lastMr;
 
-        Block<T> Aj = A.block(j);
-        Block<T> Bi = B.block(i);
-        Block<T> Cji = C.slice(j * MR, i * NR, mr, nr);
+        Block<TComp> Aj = A.block(j);
+        Block<TComp> Bi = B.block(i);
+        Block<TComp> Cji = C.slice(j * MR, i * NR, mr, nr);
 
         microKernel(Aj, Bi, Cji);
       }
     }
   }
 
-  void microKernel(Block<T> A, Block<T> B, Block<T> C) {
-    T dataCb[MR * NR];
+  void microKernel(Block<TComp> A, Block<TComp> B, Block<TComp> C) {
+    TComp dataCb[MR * NR];
 
     if (C.numRows < MR || C.numCols < NR) {
-      Block<T> Cb{dataCb, NR, MR, NR, false};
+      Block<TComp> Cb{dataCb, NR, MR, NR, false};
       Cb.fillZero();
 
-      Block<T> Cbs = Cb.slice(0, 0, C.numRows, C.numCols);
+      Block<TComp> Cbs = Cb.slice(0, 0, C.numRows, C.numCols);
       C.copyTo(Cbs);
 
-      gemmKernel<T, T, T, MR, NR, TYPE>(A.numRows, A.data, B.data, Cb.data, Cb.stride);
+      gemmKernel<TComp, TComp, TComp, MR, NR, TYPE>(A.numRows, A.data, B.data, Cb.data, Cb.stride);
       Cbs.copyTo(C);
     } else {
-      gemmKernel<T, T, T, MR, NR, TYPE>(A.numRows, A.data, B.data, C.data, C.stride);
+      gemmKernel<TComp, TComp, TComp, MR, NR, TYPE>(A.numRows, A.data, B.data, C.data, C.stride);
     }
   }
 };
@@ -202,7 +216,8 @@ void gemm(const GemmArgs<T, T, T> &args) {
   }
 }
 
-/// @brief Provides quantized GEMM interface with dispatcher for GEMM/GEMV.
+/// @brief GEMM with A (activation) in T and B (weight) in TW, computed in T. TW is converted to T
+///        while packing, so B is never materialized as a whole T matrix.
 template<
     int MC,
     int KC,
@@ -210,15 +225,15 @@ template<
     int MR,
     int NR,
     typename T,
-    typename TQ,
+    typename TW,
     CpuMathBackend TYPE,
     Mode MODE>
-void qgemm(const GemmArgs<T, TQ, T> &args) {
+void wgemm(const GemmArgs<T, TW, T> &args) {
   if (args.M == 1) {
     // fill C with zero.
     std::fill(args.C, args.C + args.N, 0.0f);
 
-    gemv<TQ, T, T, TYPE, MODE>(GemvArgs<TQ, T, T>{
+    gemv<TW, T, T, TYPE, MODE>(GemvArgs<TW, T, T>{
         !args.transB,
         args.transB ? args.N : args.K,
         args.transB ? args.K : args.N,
@@ -229,25 +244,7 @@ void qgemm(const GemmArgs<T, TQ, T> &args) {
         args.C,
         1});
   } else {
-    int numelB = args.K * args.N;
-    lut::c_ptr<T> B = alignedAlloc<T>(numelB);
-    cvt<TQ, T, TYPE, MODE>(numelB, args.B, 0, B.get(), 0);
-
-    int ldb = args.transB ? args.K : args.N;
-
-    GemmArgs<T, T, T> gemmArgs{
-        args.transA,
-        args.transB,
-        args.M,
-        args.N,
-        args.K,
-        args.A,
-        args.lda,
-        B.get(),
-        ldb,
-        args.C,
-        args.ldc};
-    Gemm<MC, KC, NC, MR, NR, T, TYPE, MODE>().apply(gemmArgs);
+    Gemm<MC, KC, NC, MR, NR, T, TYPE, MODE, T, TW>().apply(args);
   }
 }
 
