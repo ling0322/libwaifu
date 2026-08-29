@@ -45,7 +45,6 @@ set(flint_test_SOURCES
     "capi_test.cc"
     "cpu/fill_test.cc"
     "cpu/gated_delta_net_test.cc"
-    "cpu/kernel/benchmark.cc"
     "cpu/kernel/interface_test.cc"
     "cpu/lookup_test.cc"
     "cpu/matmul_test.cc"
@@ -56,7 +55,8 @@ set(flint_test_SOURCES
     "tensor_test.cc")
 
 set(flint_benchmark_SOURCES
-    "cpu/benchmark.cc")
+    "cpu/benchmark.cc"
+    "cpu/kernel/benchmark.cc")
 
 set(flint_INCDIR "." ".." "../third_party")
 
