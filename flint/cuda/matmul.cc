@@ -75,6 +75,15 @@ std::shared_ptr<MatMul> MatMul::createCutlass() {
 
 #ifdef LIBWAIFU_CUTLASS_ENABLED
   mm->_gemm = CutlassGemm::create();
+
+  // The CUTLASS backend is a half GEMM and nothing else, so the float ones need somewhere to go.
+  // Failing to find cuBLAS is not fatal here: a half-only model still runs, and a float one gets
+  // the NOT_IMPL it would have got anyway.
+  try {
+    mm->_floatGemm = CublasGemm::create();
+  } catch (const lut::Error &e) {
+    LOG(DEBUG) << "no cuBLAS to send float GEMMs to: " << e.what();
+  }
 #else
   throw lut::AbortedError("Cutlass MatMul operator not enabled.");
 #endif
@@ -356,7 +365,7 @@ Tensor MatMul::bmm(Tensor A, Tensor B) {
   LL_CHECK_CUDA_STATUS(cudaMemcpy(arrayC.get(), batchC.data(), nc, cudaMemcpyHostToDevice));
 
   callGemmArray<T>(
-      _gemm.get(),
+      backendFor<T>(),
       gemmArgs.transA,
       gemmArgs.transB,
       gemmArgs.M,
@@ -383,7 +392,7 @@ Tensor MatMul::gemm(Tensor A, Tensor B) {
 
   op::cpu::GEMMArgs gemmArgs = op::cpu::generateGemmArgs(A, B, C);
   callGemm<T>(
-      _gemm.get(),
+      backendFor<T>(),
       gemmArgs.transA,
       gemmArgs.transB,
       gemmArgs.M,
