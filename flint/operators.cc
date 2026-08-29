@@ -31,7 +31,6 @@
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
-#include "lutil/thread_pool.h"
 #include "flint/cpu/cpu_operators.h"
 #include "flint/cpu/kernel/interface.h"
 #include "flint/cuda/cuda_operators.h"

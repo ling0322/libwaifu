@@ -12,7 +12,6 @@ set(lutil_SOURCES
     "reader.cc"
     "strings.cc"
     "time.cc"
-    "thread_pool.cc"
     "zip_file.cc")
 
 set(lut_test_SOURCES

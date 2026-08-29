@@ -23,7 +23,6 @@
 
 #include <math.h>
 
-#include "lutil/thread_pool.h"
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/tensor.h"
 

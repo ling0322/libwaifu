@@ -22,7 +22,6 @@
 #include <stdint.h>
 
 #include "lutil/random.h"
-#include "lutil/thread_pool.h"
 #include "flint/device.h"
 #include "flint/memory.h"
 #include "flint/tensor.h"
