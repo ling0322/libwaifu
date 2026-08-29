@@ -22,7 +22,10 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#include "lutil/error.h"
+#include "lutil/log.h"
 #include "lutil/shared_library.h"
+#include "lutil/strings.h"
 
 #define LL_CHECK_CUBLAS_STATUS(x)                                                          \
   {                                                                                        \
@@ -56,6 +59,10 @@ typedef CUBLASAPI cublasStatus_t CUBLASWINAPI (*cublasGemmBatchedExFunc_t)(
     int batchCount,
     cublasComputeType_t computeType,
     cublasGemmAlgo_t algo);
+
+typedef CUBLASAPI cublasStatus_t CUBLASWINAPI (*cublasGetPropertyFunc_t)(
+    libraryPropertyType type,
+    int *value);
 
 typedef CUBLASAPI cublasStatus_t CUBLASWINAPI (*cublasGemmExFunc_t)(
     cublasHandle_t handle,
@@ -109,6 +116,15 @@ const char *cublasGetErrorString(cublasStatus_t error) {
   }
 }
 
+/// The oldest cuBLAS this may call, which is the one CUDA 11 shipped.
+///
+/// Not caution. `cublasGemmEx` took a `cudaDataType` for its compute type until CUDA 11, where it
+/// became a `cublasComputeType_t` -- the same symbol, a different meaning for the same argument.
+/// An older library loads and resolves every name this asks for, and then gets handed
+/// CUBLAS_COMPUTE_32F where it expects a data type. cuBLAS's major version follows CUDA's, so
+/// this is the version test for it.
+constexpr int kMinimumMajorVersion = 11;
+
 class CublasGemm::Impl {
  public:
   cublasGemmBatchedExFunc_t _cublasGemmBatchedEx;
@@ -121,6 +137,25 @@ class CublasGemm::Impl {
     std::unique_ptr<Impl> impl = std::make_unique<Impl>();
 
     impl->_libCublas = lut::SharedLibrary::open("cublas");
+
+    // Asked before anything is called, so that a library too old to mean what this means is
+    // refused rather than driven with arguments it will read as something else.
+    cublasGetPropertyFunc_t getProperty = impl->_libCublas->getFunc<cublasGetPropertyFunc_t>(
+        "cublasGetProperty");
+    int major = 0;
+    int minor = 0;
+    LL_CHECK_CUBLAS_STATUS(getProperty(MAJOR_VERSION, &major));
+    LL_CHECK_CUBLAS_STATUS(getProperty(MINOR_VERSION, &minor));
+    if (major < kMinimumMajorVersion) {
+      throw lut::AbortedError(lut::sprintf(
+          "cuBLAS is %d.%d, and %d.0 is the oldest that reads cublasGemmEx's compute type the "
+          "way this calls it",
+          major,
+          minor,
+          kMinimumMajorVersion));
+    }
+    LOG(INFO) << "cuBLAS " << major << "." << minor;
+
     impl->_cublasGemmBatchedEx = impl->_libCublas->getFunc<cublasGemmBatchedExFunc_t>(
         "cublasGemmBatchedEx");
     impl->_cublasGemmEx = impl->_libCublas->getFunc<cublasGemmExFunc_t>("cublasGemmEx");

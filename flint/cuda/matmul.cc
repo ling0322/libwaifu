@@ -42,12 +42,16 @@ std::shared_ptr<MatMul> MatMul::create() {
   std::shared_ptr<MatMul> mm;
   std::string err0, err1;
 
+  // cuBLAS first wherever it can be had: it picks among many kernels per shape where the CUTLASS
+  // backend has one of each, and on the shapes SDXL runs the two measure the same. Falling back
+  // changes which kernels the whole model goes through, so say so rather than leaving it to
+  // whoever thinks to turn debug logging on.
   try {
     mm = createCublas();
     LOG(INFO) << "Use GEMM from cuBLAS.";
     return mm;
   } catch (const lut::Error &e) {
-    LOG(DEBUG) << "Load cublas extension failed with message: " << e.what();
+    LOG(WARN) << "cuBLAS is not usable, falling back to CUTLASS: " << e.what();
     err0 = e.what();
   }
 
@@ -56,7 +60,7 @@ std::shared_ptr<MatMul> MatMul::create() {
     LOG(INFO) << "Use GEMM from cutlass.";
     return mm;
   } catch (const lut::Error &e) {
-    LOG(DEBUG) << "Load cublas extension failed with message: " << e.what();
+    LOG(DEBUG) << "Load cutlass extension failed with message: " << e.what();
     err1 = e.what();
   }
 
