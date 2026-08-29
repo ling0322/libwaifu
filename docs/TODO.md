@@ -409,3 +409,71 @@ Where the 3% would go, in order:
   aligned kernel, on a 128 by 128 tile that has one useful column of four.
 - The permute itself is a tiled transpose reaching something over 900 GB/s where the library's
   generic strided copy manages 146, so it is not the obvious thing to improve next.
+
+## `CUDA_ARCH_NATIVE=ON` does not build on an RTX 50 series card
+
+The CUDA build README recommends fails on sm_120, in ptxas, sixteen times over:
+
+```
+cmake -S . -B build -DWITH_CUDA=ON -DCUDA_ARCH_NATIVE=ON -DWITH_CUTLASS=ON
+...
+ptxas .../dequant.ptx, line 348; error: Instruction 'cvt with .e2m1x2' not supported
+                                        on .target 'sm_120'
+```
+
+Two things have to line up for it, and both are worth fixing separately.
+
+**The architecture the native build asks for.** `CMAKE_CUDA_ARCHITECTURES native` resolves an
+RTX 5090 to plain `120`. The default build does not go through that path and asks for `120a-real`,
+with the comment `# 120a (not 120): the mxfp4 kernels use sm_120a-only PTX` next to it — so the
+requirement is known, and only the native branch misses it. CMake leaves what it detected in
+`CMAKE_CUDA_ARCHITECTURES_NATIVE` after `enable_language(CUDA)`, so rewriting `120` to `120a`
+there is possible, but it means deciding the architecture after `enable_language` rather than
+before it, which is not the order the file has now.
+
+**The guard on the kernels.** `flint/cuda/dequant.cu` gates all four mxfp4 entry points on
+`#if __CUDA_ARCH__ >= 1200`. That asks whether the compute capability is at least 12.0, but what
+`cvtFp32x8ToFp4`'s inline PTX needs is whether the e2m1 conversion is available, and those two
+answers differ on exactly one target:
+
+| target | `__CUDA_ARCH__ >= 1200` | e2m1 available |
+|---|---|---|
+| sm_80, sm_90, sm_100 | no | no |
+| sm_120a | yes | yes |
+| **sm_120** | **yes** | **no** |
+
+So the guard admits the one target the asm cannot be assembled for. `__CUDA_ARCH_FEAT_SM120_ALL`
+is the predicate that matches — it is what `cuda_fp4.hpp` gates its own copy of this instruction
+on. Compiling the same asm behind `#if defined(__CUDA_ARCH_FEAT_SM120_ALL)` (2026-08-29):
+
+```
+sm_80    compiles, 0 F2FP.E2M1 in the SASS
+sm_90    compiles, 0
+sm_100   compiles, 0
+sm_120   compiles, 0
+sm_120a  compiles, 4
+```
+
+which is the intent the `>= 1200` guard was written with.
+
+Note that a software fallback is the wrong answer here even though CUDA ships one:
+`__nv_cvt_float2_to_fp4x2` compiles on sm_120 by falling back through `__nv_cvt_double_to_fp4`,
+and the kernel goes from 24 SASS instructions to 152, `F2F.F64` and `DADD` among them. sm_120 and
+sm_120a are the same silicon, so that path would emulate in double on a card whose hardware does
+the conversion in one instruction — it turns a loud build failure into a quiet slowdown.
+
+Worked around while building on this machine by passing the architecture explicitly, which skips
+the whole `if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)` block:
+
+```bash
+cmake -S . -B build -DWITH_CUDA=ON -DWITH_CUTLASS=ON -DCMAKE_CUDA_ARCHITECTURES=120a-real
+```
+
+That builds and runs, but produces cubins for sm_120a only.
+
+### Unverified, found while reading the same file
+
+`quantHalfToMxfp4` and `dequandMxfp4ToHalf` are host functions, and both are wrapped in
+`#if __CUDA_ARCH__ >= 1200` with `NOT_IMPL()` in the `#else`. `__CUDA_ARCH__` is not defined in
+the host pass, so on the face of it the condition is always false and both entry points always
+abort. Nothing was run to confirm this.
