@@ -39,12 +39,12 @@ fn models_dir() -> PathBuf {
 }
 
 fn model() -> Sdxl {
-    let package = ZipFile::open(models_dir().join("sdxl-base.llmpkg")).unwrap();
+    let package = ZipFile::open(models_dir().join("sdxl-base.waifupkg")).unwrap();
     Sdxl::from_package(Device::Cuda, &package).unwrap()
 }
 
 fn cases() -> VarBuilder {
-    let package = ZipFile::open(models_dir().join("sdxl-base_test.llmpkg")).unwrap();
+    let package = ZipFile::open(models_dir().join("sdxl-base_test.waifupkg")).unwrap();
     VarBuilder::from_reader(
         &mut package.open_entry("test_case.bin").unwrap(),
         Device::Cpu,

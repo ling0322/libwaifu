@@ -128,7 +128,7 @@ fn cpu_builder(tensors: &[(&str, &[i32], &[f32])]) -> VarBuilder {
 fn reads_a_stored_package() {
     let dir = std::env::temp_dir().join(format!("waifu-package-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("model.llmpkg");
+    let path = dir.join("model.waifupkg");
 
     write_package(
         &path,

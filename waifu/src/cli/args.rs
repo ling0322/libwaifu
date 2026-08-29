@@ -145,7 +145,7 @@ pub fn print_options() {
     eprintln!(
         "  -device string\n    \tinference device, either cpu, cuda or auto (default \"auto\")"
     );
-    eprintln!("  -m value\n    \tthe libwaifu model file, which has the suffix \".llmpkg\".");
+    eprintln!("  -m value\n    \tthe libwaifu model file, which has the suffix \".waifupkg\".");
 }
 
 #[cfg(test)]
@@ -159,15 +159,15 @@ mod tests {
     #[test]
     fn reads_a_flag_in_either_form() {
         assert_eq!(
-            args(&["-m", "sdxl-base.llmpkg"]).unwrap().model().unwrap(),
-            "sdxl-base.llmpkg"
+            args(&["-m", "sdxl-base.waifupkg"]).unwrap().model().unwrap(),
+            "sdxl-base.waifupkg"
         );
         assert_eq!(
-            args(&["-m=sdxl-base.llmpkg"]).unwrap().model().unwrap(),
-            "sdxl-base.llmpkg"
+            args(&["-m=sdxl-base.waifupkg"]).unwrap().model().unwrap(),
+            "sdxl-base.waifupkg"
         );
         assert_eq!(
-            args(&["-m", "x.llmpkg", "-device", "cuda"])
+            args(&["-m", "x.waifupkg", "-device", "cuda"])
                 .unwrap()
                 .device()
                 .unwrap(),
@@ -190,7 +190,7 @@ mod tests {
         assert!(args(&[]).unwrap().model().is_err());
 
         // Two -m flags usually means a comma crept into one of them.
-        let two = args(&["-m", "a.llmpkg", "-m", "b.llmpkg"]).unwrap();
+        let two = args(&["-m", "a.waifupkg", "-m", "b.waifupkg"]).unwrap();
         let error = two.model().unwrap_err().to_string();
         assert!(error.contains("only 1 model"), "{error}");
     }

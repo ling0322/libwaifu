@@ -15,7 +15,7 @@ Any SDXL fine tune works -- Illustrious, WAI, or anything else that ships as a s
 safetensors file:
 
 ```bash
-python tools/sdxl_exporter.py -checkpoint /path/to/checkpoint.safetensors -output sdxl.llmpkg
+python tools/sdxl_exporter.py -checkpoint /path/to/checkpoint.safetensors -output sdxl.waifupkg
 ```
 
 ## Drawing pictures
@@ -23,7 +23,7 @@ python tools/sdxl_exporter.py -checkpoint /path/to/checkpoint.safetensors -outpu
 An SDXL package draws rather than talks, and `waifu draw` opens a terminal for it:
 
 ```bash
-$ waifu draw -m sdxl.llmpkg
+$ waifu draw -m sdxl.waifupkg
 ```
 
 The screen holds the prompt, what to steer away from, and the four numbers a run takes: how many
@@ -61,7 +61,7 @@ The Rust API reads a package and hands back an image:
 use waifu::{to_rgb8, Device, GenerationOptions, Sdxl, ZipFile};
 
 fn main() -> Result<(), waifu::Error> {
-	let package = ZipFile::open("sdxl.llmpkg")?;
+	let package = ZipFile::open("sdxl.waifupkg")?;
 	let model = Sdxl::from_package(Device::Cuda, &package)?;
 
 	let options = GenerationOptions {
@@ -89,7 +89,7 @@ After completing the build steps below, run the complete example with:
 
 ```bash
 cargo run --release -p waifu --example generate -- \
-	sdxl.llmpkg \
+	sdxl.waifupkg \
 	"a photo of an astronaut riding a horse on mars"
 ```
 

@@ -21,7 +21,7 @@
 //! parameter file stores.
 //!
 //! ```text
-//! cargo run --release --example inspect -- models/sdxl-base.llmpkg
+//! cargo run --release --example inspect -- models/sdxl-base.waifupkg
 //! ```
 
 use waifu::flint::{functional as F, Device};
@@ -30,7 +30,7 @@ fn main() -> Result<(), waifu::Error> {
     let path = match std::env::args().nth(1) {
         Some(path) => path,
         None => {
-            eprintln!("usage: inspect <package.llmpkg>");
+            eprintln!("usage: inspect <package.waifupkg>");
             std::process::exit(2);
         }
     };

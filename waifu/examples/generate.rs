@@ -20,7 +20,7 @@
 //! Draws one picture and writes it out as a PPM, which is a header and the pixels.
 //!
 //! ```text
-//! cargo run --release --example generate -- sdxl.llmpkg "an astronaut riding a horse on mars"
+//! cargo run --release --example generate -- sdxl.waifupkg "an astronaut riding a horse on mars"
 //! ```
 //!
 //! The `draw` command in the CLI is this with a screen around it: the same pipeline, reported on
@@ -33,7 +33,7 @@ use waifu::{to_rgb8, Device, GenerationOptions, Sdxl, ZipFile};
 fn main() -> Result<(), waifu::Error> {
     let mut arguments = std::env::args().skip(1);
     let (Some(package_path), Some(prompt)) = (arguments.next(), arguments.next()) else {
-        eprintln!("usage: generate MODEL.llmpkg PROMPT");
+        eprintln!("usage: generate MODEL.waifupkg PROMPT");
         std::process::exit(1);
     };
 

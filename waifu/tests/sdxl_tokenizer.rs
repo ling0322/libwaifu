@@ -42,12 +42,12 @@ fn models_dir() -> PathBuf {
 }
 
 fn tokenizer() -> Tokenizer {
-    let package = ZipFile::open(models_dir().join("sdxl-base.llmpkg")).unwrap();
+    let package = ZipFile::open(models_dir().join("sdxl-base.waifupkg")).unwrap();
     Tokenizer::from_package(&package).unwrap()
 }
 
 fn test_package() -> ZipFile {
-    ZipFile::open(models_dir().join("sdxl-base_test.llmpkg")).unwrap()
+    ZipFile::open(models_dir().join("sdxl-base_test.waifupkg")).unwrap()
 }
 
 #[test]

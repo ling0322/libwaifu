@@ -187,7 +187,7 @@ Two things cost time getting cuBLASLt to run, recorded in case anyone tries agai
   preceding operator's epilogue, so that an RMS norm emits NVFP4 directly, would remove a full
   activation round trip per layer.
 - Weights are quantized at load rather than stored quantized, so a package holds float16 and the
-  memory saving only starts once the weight is on the device. Storing NVFP4 in a `.llmpkg` would
+  memory saving only starts once the weight is on the device. Storing NVFP4 in a `.waifupkg` would
   also cut the file size and the load time.
 - Nothing is built out of it yet: the diffusion model this crate runs is float16 throughout, and
   the layer that wrapped this went with the language model runtime.

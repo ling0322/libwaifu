@@ -38,7 +38,7 @@ fn device() -> Device {
 }
 
 fn weights() -> VarBuilder {
-    let package = ZipFile::open(models_dir().join("sdxl-base.llmpkg")).unwrap();
+    let package = ZipFile::open(models_dir().join("sdxl-base.waifupkg")).unwrap();
     VarBuilder::from_reader(
         &mut package.open_entry("model.bin").unwrap(),
         device(),
@@ -48,7 +48,7 @@ fn weights() -> VarBuilder {
 }
 
 fn cases() -> VarBuilder {
-    let package = ZipFile::open(models_dir().join("sdxl-base_test.llmpkg")).unwrap();
+    let package = ZipFile::open(models_dir().join("sdxl-base_test.waifupkg")).unwrap();
     VarBuilder::from_reader(
         &mut package.open_entry("test_case.bin").unwrap(),
         Device::Cpu,

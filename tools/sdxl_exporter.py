@@ -29,7 +29,7 @@ The tokenizer is not in the checkpoint. Every SDXL derivative shares the base mo
 its text encoders share one vocabulary of 49408, so one is read from the base repository and
 written once.
 
-    python sdxl_exporter.py -checkpoint waiIllustriousSDXL_v170.safetensors -output wai-v17.llmpkg
+    python sdxl_exporter.py -checkpoint waiIllustriousSDXL_v170.safetensors -output wai-v17.waifupkg
 """
 
 from __future__ import annotations
@@ -638,7 +638,7 @@ if __name__ == "__main__":
         type=str,
         default=BASE_MODEL,
         help="where the tokenizer comes from when the checkpoint has none.")
-    parser.add_argument("-output", type=str, default="sdxl.llmpkg", help="output file name.")
+    parser.add_argument("-output", type=str, default="sdxl.waifupkg", help="output file name.")
     parser.add_argument(
         "-test_output",
         type=str,

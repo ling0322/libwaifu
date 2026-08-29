@@ -34,7 +34,7 @@ const STEPS: i32 = 50;
 
 fn cases() -> VarBuilder {
     let package = ZipFile::open(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/sdxl-base_test.llmpkg"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/sdxl-base_test.waifupkg"),
     )
     .unwrap();
     VarBuilder::from_reader(

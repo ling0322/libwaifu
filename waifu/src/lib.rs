@@ -26,7 +26,7 @@
 //! ```no_run
 //! use waifu::{DType, Device, VarBuilder, ZipFile};
 //!
-//! let mut package = ZipFile::open("model.llmpkg")?;
+//! let mut package = ZipFile::open("model.waifupkg")?;
 //! let config = waifu::IniConfig::parse(&package.read_to_string(waifu::MODEL_CONFIG)?)?;
 //! let mut params = package.open_entry(config.section("model")?.get_str("model_file")?)?;
 //! let vb = VarBuilder::from_reader(&mut params, Device::Cpu, DType::Float)?;
