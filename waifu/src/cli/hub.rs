@@ -60,17 +60,24 @@ struct Published {
 }
 
 /// Every model this build knows by name.
-const CATALOG: &[Published] = &[Published {
-    name: "sdxl:base:v1",
-    repo: "ling0322/libwaifu-sdxl-base-1.0",
-    first_part: "sdxl-base-1.0-00001-of-00004.waifupkg",
-}];
+const CATALOG: &[Published] = &[
+    Published {
+        name: "sdxl:base:v1",
+        repo: "ling0322/libwaifu-sdxl-base-1.0",
+        first_part: "sdxl-base-1.0-00001-of-00004.waifupkg",
+    },
+    Published {
+        name: "sdxl:wai:v17",
+        repo: "ling0322/libwaifu-wai-illustrious-v17",
+        first_part: "wai-illustrious-v17-00001-of-00004.waifupkg",
+    },
+];
 
 /// Names that follow whatever is current rather than naming a version.
 ///
 /// `sdxl:base` is what someone types when they want the base model and do not care which release
 /// of it; it keeps working when a v2 arrives, and `sdxl:base:v1` keeps meaning what it says.
-const ALIASES: &[(&str, &str)] = &[("sdxl:base", "sdxl:base:v1")];
+const ALIASES: &[(&str, &str)] = &[("sdxl:base", "sdxl:base:v1"), ("sdxl:wai", "sdxl:wai:v17")];
 
 /// The published model a name refers to, following an alias if it is one.
 fn published(name: &str) -> Option<&'static Published> {
@@ -361,6 +368,33 @@ mod tests {
         let names = names();
         assert!(names.contains(&"sdxl:base"));
         assert!(names.contains(&"sdxl:base:v1"));
+        assert!(names.contains(&"sdxl:wai"));
+        assert!(names.contains(&"sdxl:wai:v17"));
+    }
+
+    #[test]
+    fn two_models_are_told_apart() {
+        let base = published("sdxl:base").expect("the base model");
+        let wai = published("sdxl:wai").expect("the fine tune");
+        assert_ne!(base.repo, wai.repo);
+        assert_ne!(base.first_part, wai.first_part);
+    }
+
+    #[test]
+    fn every_model_is_named_the_way_the_others_are() {
+        // A name is `sdxl:<model>:<version>`, and the first package of every one of them is a
+        // package. Cheap to check, and it is the sort of thing a copied table entry gets wrong.
+        for model in CATALOG {
+            let fields: Vec<&str> = model.name.split(':').collect();
+            assert_eq!(fields.len(), 3, "{} is not sdxl:model:version", model.name);
+            assert_eq!(fields[0], "sdxl", "{} is not an sdxl model", model.name);
+            assert!(model.repo.contains('/'), "{} has no namespace", model.repo);
+            assert!(
+                model.first_part.ends_with(PACKAGE_SUFFIX),
+                "{} is not a package",
+                model.first_part
+            );
+        }
     }
 
     #[test]

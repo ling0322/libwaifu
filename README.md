@@ -14,14 +14,23 @@ Ask for one by name and it is fetched on first use:
 
 ```bash
 $ waifu draw -m sdxl:base
+$ waifu draw -m sdxl:wai
 ```
 
-`sdxl:base` is SDXL 1.0 base, published as
-[libwaifu-sdxl-base-1.0](https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0). It follows
-whatever the current release is; `sdxl:base:v1` names that release and keeps meaning it. What is
-fetched lands in `~/.cache/libwaifu/models` (`%LOCALAPPDATA%\libwaifu\models` on Windows, or
-wherever `WAIFU_CACHE` points), so it is downloaded once and read from disk after that. An
-interrupted download resumes where it stopped rather than starting over.
+The models `waifu` knows by name:
+
+| name | model | published as |
+|---|---|---|
+| `sdxl:base` | SDXL 1.0 base, prompted with sentences | [libwaifu-sdxl-base-1.0](https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0) |
+| `sdxl:wai` | WAI Illustrious v17.0, an anime fine tune prompted with danbooru tags | [libwaifu-wai-illustrious-v17](https://huggingface.co/ling0322/libwaifu-wai-illustrious-v17) |
+
+A name without a version follows whatever the current release is, so `sdxl:wai` keeps working
+when a v18 arrives. `sdxl:base:v1` and `sdxl:wai:v17` name a release and keep meaning it. `waifu
+draw -h` lists what this build knows.
+
+What is fetched lands in `~/.cache/libwaifu/models` (`%LOCALAPPDATA%\libwaifu\models` on
+Windows, or wherever `WAIFU_CACHE` points), so it is downloaded once and read from disk after
+that. An interrupted download resumes where it stopped rather than starting over.
 
 ### Making one yourself
 
@@ -65,11 +74,11 @@ and can be read and checked alone.
 An SDXL package draws rather than talks, and `waifu draw` opens a terminal for it:
 
 ```bash
-$ waifu draw -m sdxl:base
+$ waifu draw -m sdxl:wai
 $ waifu draw -m sdxl.waifupkg
 ```
 
-`-m` takes either a published name or a package of your own.
+`-m` takes either a published name from the table above or a package of your own.
 
 The screen holds the prompt, what to steer away from, and the four numbers a run takes: how many
 steps, how hard to push away from the unprompted answer, what size, and which seed.
@@ -95,6 +104,7 @@ Drawing needs `Conv2d`, which either cuDNN or CUTLASS can answer -- see the buil
 
 ## Recent updates
 
+- [2026-08-29] WAI Illustrious v17.0 is published too, as `sdxl:wai`.
 - [2026-08-29] Ask for a model by name: `waifu draw -m sdxl:base` fetches it on first use.
 - [2026-08-28] Draw pictures from a terminal.
 - [2026-08-28] SDXL: a prompt in, an image out.
