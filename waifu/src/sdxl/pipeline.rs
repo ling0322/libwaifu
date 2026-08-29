@@ -232,7 +232,14 @@ impl Sdxl {
     /// The section of `model.ini` that says what the package holds.
     pub const MODEL_SECTION: &'static str = "model";
 
+    /// What `model.ini` calls the list of packages a model too large for one file is split over.
+    pub const SHARDS_KEY: &'static str = "model_parts";
+
     /// Read the whole model out of `package`, onto `device`.
+    ///
+    /// A model may be written as several packages beside each other, in which case this one holds
+    /// the configuration and names the rest. Which package a tensor was written to is not
+    /// something the model has to know: they are read in order into one namespace.
     pub fn from_package(device: Device, package: &ZipFile) -> Result<Sdxl> {
         let ini = crate::ini::IniConfig::parse(&package.read_to_string(crate::MODEL_CONFIG)?)?;
         let model_section = ini.section(Self::MODEL_SECTION)?;
@@ -241,8 +248,29 @@ impl Sdxl {
 
         let config = SdxlConfig::from_section(ini.section(&model_type)?)?;
 
+        // The parts hold nothing but parameters, so each is opened only long enough to start
+        // reading its stream: an entry reader carries its own handle and does not borrow the
+        // package it came from.
+        let mut readers = Vec::new();
+        match model_section.get_str(Self::SHARDS_KEY) {
+            Ok(parts) => {
+                for part in parts.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                    readers.push(package.sibling(part)?.open_entry(&model_file)?);
+                }
+                if readers.is_empty() {
+                    return Err(Error::model(format!(
+                        "{} is empty, so this model has no parameters to read",
+                        Self::SHARDS_KEY
+                    )));
+                }
+            }
+            // No list means the model is the one file it was opened from, which is what a package
+            // small enough not to need splitting looks like.
+            Err(_) => readers.push(package.open_entry(&model_file)?),
+        }
+
         let dtype = F::default_float_type(device)?;
-        let vb = VarBuilder::from_reader(&mut package.open_entry(&model_file)?, device, dtype)?;
+        let vb = VarBuilder::from_readers(readers, device, dtype)?;
         let vb = vb.with_name(&model_type);
 
         Ok(Sdxl {

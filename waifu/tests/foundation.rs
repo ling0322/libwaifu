@@ -277,3 +277,77 @@ fn reports_a_shape_it_cannot_take_as_an_error_rather_than_ending_the_process() {
     // And the tensor they were asked about is still usable afterwards.
     assert_eq!(x.view(&[3, 2]).unwrap().shape(), vec![3, 2]);
 }
+
+#[test]
+fn reads_a_model_written_as_several_files() {
+    // A model too large for one file is written as several beside each other. Each is a whole
+    // parameter file in its own right, and which one a tensor was written to is not something the
+    // model has to know: they read into one namespace.
+    let dir = std::env::temp_dir().join(format!("waifu-parts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let first = write_params(&[("a", &[2], &[1.0, 2.0])]);
+    let second = write_params(&[("b", &[2], &[3.0, 4.0])]);
+
+    let builder =
+        VarBuilder::from_readers([&first[..], &second[..]], Device::Cpu, DType::Float).unwrap();
+    assert_eq!(builder.names(), vec!["a", "b"]);
+    assert_eq!(
+        builder.get("a", &[2]).unwrap().to_vec_f32().unwrap(),
+        vec![1.0, 2.0]
+    );
+    assert_eq!(
+        builder.get("b", &[2]).unwrap().to_vec_f32().unwrap(),
+        vec![3.0, 4.0]
+    );
+}
+
+#[test]
+fn refuses_a_tensor_that_is_in_two_parts_at_once() {
+    // Which part won would otherwise depend on the order they were listed in, and a model that
+    // loads differently depending on that is worse than one that refuses to load.
+    let first = write_params(&[("a", &[2], &[1.0, 2.0])]);
+    let second = write_params(&[("a", &[2], &[3.0, 4.0])]);
+
+    let error = VarBuilder::from_readers([&first[..], &second[..]], Device::Cpu, DType::Float)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("more than one part"), "reported as {error}");
+}
+
+#[test]
+fn a_package_may_only_name_a_neighbour() {
+    // The list of parts comes out of the package, so it decides which files get opened. It may
+    // name a file beside itself and nothing else -- not a path, not a parent.
+    let dir = std::env::temp_dir().join(format!("waifu-neighbour-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.waifupkg");
+    write_package(&path, &[("model.ini", b"[model]\ntype = sdxl\n")]);
+
+    let package = ZipFile::open(&path).unwrap();
+    for name in [
+        "",
+        ".",
+        "..",
+        "../model.waifupkg",
+        "sub/model.waifupkg",
+        "/etc/passwd",
+    ] {
+        assert!(
+            package.sibling(name).is_err(),
+            "{name:?} was accepted as a neighbour"
+        );
+    }
+
+    // A plain file name beside it is what the list really holds, and is opened.
+    let beside = dir.join("other.waifupkg");
+    write_package(&beside, &[("model.bin", &[7, 7])]);
+    assert_eq!(
+        package
+            .sibling("other.waifupkg")
+            .unwrap()
+            .read("model.bin")
+            .unwrap(),
+        vec![7, 7]
+    );
+}

@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::reader::BinaryRead;
@@ -49,6 +49,7 @@ struct Entry {
 
 /// A model package, opened for reading.
 pub struct ZipFile {
+    path: PathBuf,
     file: File,
     entries: BTreeMap<String, Entry>,
 }
@@ -56,9 +57,40 @@ pub struct ZipFile {
 impl ZipFile {
     /// Open the package at `path` and index what it holds.
     pub fn open(path: impl AsRef<Path>) -> Result<ZipFile> {
-        let mut file = File::open(path)?;
+        let path = path.as_ref().to_path_buf();
+        let mut file = File::open(&path)?;
         let entries = index(&mut file)?;
-        Ok(ZipFile { file, entries })
+        Ok(ZipFile {
+            path,
+            file,
+            entries,
+        })
+    }
+
+    /// Where this package was opened from.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Another package in the same directory as this one.
+    ///
+    /// A model too large to sit in one file is written as several, and the first names the rest.
+    /// `name` is a file name and nothing more: a package says which of its neighbours to read, not
+    /// where on the disk to read from, so anything with a directory in it is refused rather than
+    /// followed.
+    pub fn sibling(&self, name: &str) -> Result<ZipFile> {
+        let looks_like_a_path = name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\');
+        if looks_like_a_path {
+            return Err(Error::format(format!(
+                "{name:?} is not a file name, and a package may only name a neighbour of its own"
+            )));
+        }
+
+        ZipFile::open(self.path.parent().unwrap_or(Path::new(".")).join(name))
     }
 
     /// The names of every entry, in order.

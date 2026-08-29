@@ -67,24 +67,23 @@ impl VarBuilder {
         device: Device,
         float_type: DType,
     ) -> Result<VarBuilder> {
+        VarBuilder::from_readers([reader], device, float_type)
+    }
+
+    /// The same, over a model written as several files rather than one.
+    ///
+    /// Each reader is a whole parameter file in its own right -- its own header, its own records,
+    /// its own end -- holding a part of the model. They are read in order and their tensors put
+    /// into one namespace, so which part a tensor was written to is not something the model has to
+    /// know. A name appearing in two of them is refused: it would otherwise depend on the order.
+    pub fn from_readers<R: Read>(
+        readers: impl IntoIterator<Item = R>,
+        device: Device,
+        float_type: DType,
+    ) -> Result<VarBuilder> {
         let mut params = HashMap::new();
-
-        reader.expect_tag(MAGIC)?;
-        reader.expect_tag("<d> ")?;
-
-        let mut tag = reader.read_string(4)?;
-        while tag != "</d>" {
-            if tag != "<r> " {
-                return Err(Error::format(format!(
-                    "expected a record or the end of the parameters, got {tag:?}"
-                )));
-            }
-
-            let (name, tensor) = read_named_tensor(reader)?;
-            params.insert(name, tensor);
-
-            reader.expect_tag("</r>")?;
-            tag = reader.read_string(4)?;
+        for mut reader in readers {
+            read_params(&mut reader, &mut params)?;
         }
 
         Ok(VarBuilder {
@@ -199,6 +198,33 @@ impl fmt::Debug for VarBuilder {
             .field("float_type", &self.float_type)
             .finish()
     }
+}
+
+/// Reads one whole parameter file into `params`.
+fn read_params(reader: &mut impl Read, params: &mut HashMap<String, Tensor>) -> Result<()> {
+    reader.expect_tag(MAGIC)?;
+    reader.expect_tag("<d> ")?;
+
+    let mut tag = reader.read_string(4)?;
+    while tag != "</d>" {
+        if tag != "<r> " {
+            return Err(Error::format(format!(
+                "expected a record or the end of the parameters, got {tag:?}"
+            )));
+        }
+
+        let (name, tensor) = read_named_tensor(reader)?;
+        if params.insert(name.clone(), tensor).is_some() {
+            return Err(Error::format(format!(
+                "tensor {name:?} is in more than one part of this model"
+            )));
+        }
+
+        reader.expect_tag("</r>")?;
+        tag = reader.read_string(4)?;
+    }
+
+    Ok(())
 }
 
 /// Reads one `name -> tensor` record.
