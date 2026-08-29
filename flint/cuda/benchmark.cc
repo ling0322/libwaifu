@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include <chrono>
+
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
 #include "flint/cuda/common.h"
@@ -470,6 +472,12 @@ CATCH_TEST_CASE("SDXL GEMM benchmarks", "[benchmark][cuda][sdxl]") {
   // autoencoder's are float32 besides, so they go to cuBLAS whichever backend is chosen.
   //
   // Run against either backend with LIBWAIFU_GEMM=cublas or =cutlass.
+  //
+  // Read what it says with care: it runs one shape fifty times over, so a weight stays in L2 from
+  // one iteration to the next, which a real run never gets. That flatters whatever moves the
+  // least data per multiply-add, and it flattered a 64 by 64 CUTLASS tile into looking faster
+  // than the 128 by 128 one it is a percent slower than on a whole image. Use it to see where a
+  // shape stands, and a whole image to decide anything.
   std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
 
   struct Shape {
