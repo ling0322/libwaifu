@@ -1,0 +1,28 @@
+# What the exporters need. Nothing here is needed to build or run libwaifu -- only to turn a
+# checkpoint into a package.
+#
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r tools/requirements.txt
+#
+# The two pins are not caution, they are requirements:
+#
+#   - transformers 5.x removed `bytes_to_unicode` from `transformers.models.gpt2`, which
+#     bpe_exporter.py imports to build the byte level alphabet CLIP's tokenizer is written in.
+#   - diffusers 0.40 needs a transformers new enough to have dropped it, so the two have to move
+#     together. 0.31 is the last that reads SDXL with transformers 4.46.
+#
+# torch is unpinned: any build that matches the machine's CUDA will do, and the exporter runs on
+# the CPU anyway.
+torch
+diffusers==0.31.0
+transformers==4.46.3
+huggingface-hub==0.26.2
+tokenizers==0.20.3
+accelerate
+safetensors
+omegaconf
+
+# CLIPTokenizer normalizes with ftfy before it matches its pattern, and the reference token ids in
+# the test package were generated with it present. Without it huggingface falls back to a
+# tokenizer that spaces CJK characters apart, so the reference would not be the same reference.
+ftfy
