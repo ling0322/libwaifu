@@ -118,12 +118,12 @@ bool skipUnavailable() {
   return !op::cuda::isConv2dAvailable();
 }
 
-/// Runs one convolution both ways and says whether they agree.
-/// Whether the operator has been pointed at CUTLASS with LIBWAIFU_CONV, which convolves in one
-/// group and no more. The cases below that ask for several are cuDNN's to answer.
+/// Whether this run convolves on CUTLASS, which does one group and no more. The cases below that
+/// ask for several are cuDNN's to answer. Asked of the operator rather than of LIBWAIFU_CONV: a
+/// build without cuDNN, or a machine that has not got the library, is on CUTLASS without anyone
+/// having asked for it.
 bool convolvesOnCutlass() {
-  const char *choice = std::getenv("LIBWAIFU_CONV");
-  return choice && std::string(choice) == "cutlass";
+  return op::cuda::convolvesOnCutlass();
 }
 
 /// Which implementation to check. cuDNN is what the operator reaches for; CUTLASS is what it
@@ -135,6 +135,7 @@ using Conv2dFn = Tensor (*)(
     const Tensor &,
     const op::cuda::Conv2dOptions &);
 
+/// Runs one convolution both ways and says whether they agree.
 bool matchesReference(
     Shape4 in,
     Shape4 filter,

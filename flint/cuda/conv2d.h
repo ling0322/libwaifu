@@ -39,6 +39,13 @@ struct Conv2dOptions {
 ///        the first call, so a build with cuDNN still runs where there is none.
 bool isConv2dAvailable();
 
+/// @brief Return true if a convolution goes through CUTLASS rather than cuDNN. That is the case
+///        three ways: `LIBWAIFU_CONV=cutlass` asks for it, a build without cuDNN has nothing
+///        else, and a build with cuDNN falls back to it where the library is not on the machine.
+///        CUTLASS convolves in one group and no more, so this is what to ask before handing a
+///        convolution several.
+bool convolvesOnCutlass();
+
 /// @brief A 2-D convolution, through cuDNN.
 /// @param input <half|float>(N, C, H, W), contiguous.
 /// @param weight <half|float>(K, C / groups, R, S), contiguous and of the same type as `input`.

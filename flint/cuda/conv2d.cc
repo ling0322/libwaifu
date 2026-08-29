@@ -442,6 +442,14 @@ bool wantsCutlass() {
   return wanted;
 }
 
+bool convolvesOnCutlass() {
+  // The same question conv2d asks itself below, and it has to stay the same question: a caller
+  // that guards a grouped convolution on this has to be told what will actually run, not what
+  // was asked for. Being pointed at CUTLASS is only one of the two ways of getting it; the other
+  // is cuDNN not loading, which no environment variable says.
+  return wantsCutlass() || Cudnn::get() == nullptr;
+}
+
 Tensor conv2d(
     const Tensor &input,
     const Tensor &weight,
@@ -562,6 +570,11 @@ Tensor conv2d(
 
 bool isConv2dAvailable() {
   return isConv2dCutlassAvailable();
+}
+
+bool convolvesOnCutlass() {
+  // Nothing else was built, so whatever convolves here is CUTLASS.
+  return true;
 }
 
 Tensor conv2d(
