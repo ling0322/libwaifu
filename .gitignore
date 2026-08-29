@@ -7,6 +7,7 @@ transformers
 /models
 /third_party/ffmpeg
 /third_party/cutlass
+/third_party/libunwind
 /third_party/flash-attention/build
 /third_party/flash-attention/csrc/cutlass
 
