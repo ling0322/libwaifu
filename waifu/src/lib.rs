@@ -17,12 +17,11 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! Language model inference on top of the flint tensor library.
+//! Diffusion image generation on top of the flint tensor library.
 //!
-//! This is a port of the original C++ model runtime to Rust. It reads a model package, builds the
-//! model it
-//! describes, and runs it; the tensor operations themselves are the ones [`flint`] binds, and
-//! that module is the safe wrapper over the native `libflint.a` this crate links.
+//! It reads a model package, builds the model it describes, and runs it; the tensor operations
+//! themselves are the ones [`flint`] binds, and that module is the safe wrapper over the native
+//! `libflint.a` this crate links.
 //!
 //! ```no_run
 //! use waifu::{DType, Device, VarBuilder, ZipFile};
@@ -40,24 +39,13 @@
 //! A [`flint::Tensor`] stays on the thread that made it, so everything built out of one does too.
 
 mod bpe;
-pub mod capi;
 #[cfg(feature = "cli")]
 pub mod cli;
-mod engine;
-mod engine_config;
 mod error;
 pub mod flint;
-mod forward_batch;
 mod ini;
-mod kv_cache;
 mod layers;
-mod llama;
-mod model;
-mod prompt;
 mod reader;
-mod request;
-mod sampling_batch;
-mod scheduler;
 mod sdxl;
 mod tokenizer;
 mod var_builder;
@@ -68,20 +56,10 @@ pub use bpe::{BpeConfig, BpeEncoder, BpeModel, PreTokenizer, INVALID_TOKEN};
 /// does not have to reach into [`flint`].
 pub use flint::{DType, Device, Nvfp4Tensor};
 
-pub use engine::{Engine, RequestInput};
-pub use engine_config::EngineConfig;
 pub use error::{Error, Result};
-pub use forward_batch::{ForwardBatch, PreparedBatch};
 pub use ini::{IniConfig, IniSection};
-pub use kv_cache::{KVCacheManager, KVCacheSpec};
-pub use layers::{Conv2d, Embedding, GroupNorm, LayerNorm, Linear, Nvfp4Linear, RmsNorm};
-pub use llama::{LlamaConfig, LlamaForGeneration, LlamaModel};
-pub use model::ModelForGeneration;
-pub use prompt::{Message, Prompt, PromptBlock};
+pub use layers::{Conv2d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use reader::BinaryRead;
-pub use request::{FinishReason, GenerationConfig, Request, RequestOutput, RequestStatus};
-pub use sampling_batch::{PreparedSampling, SamplingBatch};
-pub use scheduler::Scheduler;
 pub use sdxl::{
     to_rgb8, ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler, GenerationOptions,
     GenerationProgress, PromptEmbedding, SamplerConfig, Sdxl, SdxlConfig, Unet, UnetCondition,

@@ -108,7 +108,8 @@ impl Args {
         self.help
     }
 
-    /// The one model to work with. Several `-m` flags is usually a stray comma in one of them.
+    /// The one model file to work with. Several `-m` flags is usually a stray comma in one of
+    /// them.
     pub fn model(&self) -> Result<&str, ArgError> {
         match self.models.len() {
             0 => Err(ArgError("model name (-m) is empty.".to_string())),
@@ -144,10 +145,7 @@ pub fn print_options() {
     eprintln!(
         "  -device string\n    \tinference device, either cpu, cuda or auto (default \"auto\")"
     );
-    eprintln!(
-        "  -m value\n    \tthe libwaifu model, it could be model name or model file, model files \
-         are with suffix \".llmpkg\"."
-    );
+    eprintln!("  -m value\n    \tthe libwaifu model file, which has the suffix \".llmpkg\".");
 }
 
 #[cfg(test)]
@@ -161,10 +159,13 @@ mod tests {
     #[test]
     fn reads_a_flag_in_either_form() {
         assert_eq!(
-            args(&["-m", "llama3.2"]).unwrap().model().unwrap(),
-            "llama3.2"
+            args(&["-m", "sdxl-base.llmpkg"]).unwrap().model().unwrap(),
+            "sdxl-base.llmpkg"
         );
-        assert_eq!(args(&["-m=llama3.2"]).unwrap().model().unwrap(), "llama3.2");
+        assert_eq!(
+            args(&["-m=sdxl-base.llmpkg"]).unwrap().model().unwrap(),
+            "sdxl-base.llmpkg"
+        );
         assert_eq!(
             args(&["-m", "x.llmpkg", "-device", "cuda"])
                 .unwrap()

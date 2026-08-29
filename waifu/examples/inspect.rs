@@ -21,7 +21,7 @@
 //! parameter file stores.
 //!
 //! ```text
-//! cargo run --release --example inspect -- models/llama3.2-3b-instruct-fp16.llmpkg
+//! cargo run --release --example inspect -- models/sdxl-base.llmpkg
 //! ```
 
 use waifu::flint::{functional as F, Device};

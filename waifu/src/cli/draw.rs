@@ -45,7 +45,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::Args;
 use crate::cli::field::TextField;
-use crate::cli::{download, png};
+use crate::cli::png;
 use crate::flint::Tensor;
 use crate::{to_rgb8, Device, GenerationOptions, GenerationProgress, Sdxl, ZipFile};
 
@@ -99,9 +99,11 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         return Ok(());
     }
 
-    let model_name = with_usage(args.model())?;
+    let model_path = PathBuf::from(with_usage(args.model())?);
     let device = with_usage(args.device())?.resolve();
-    let model_path = download::model_path_or_download(model_name)?;
+    if !model_path.exists() {
+        return Err(format!("model file \"{}\" does not exist", model_path.display()).into());
+    }
 
     // Set while a run is in flight to ask it to stop between steps, which is the only place it
     // can be asked: a step, once started, is a kernel launch that nothing here can call back.

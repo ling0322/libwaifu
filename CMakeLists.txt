@@ -246,7 +246,7 @@ file(GENERATE
 # the build directory was configured, matching what waifu/build.rs falls back to on its own.
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 # `--features cli` is what builds the `waifu` binary: it is off by default so that using the crate
-# as a library does not drag in an HTTPS client.
+# as a library does not drag in a terminal library.
 add_custom_target(waifu-cli ALL
     COMMAND ${CMAKE_COMMAND} -E env "LIBWAIFU_LIB_DIR=${CMAKE_BINARY_DIR}"
             ${CARGO_EXECUTABLE} build -p waifu --features cli --release

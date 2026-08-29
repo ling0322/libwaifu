@@ -23,35 +23,13 @@
 //! layer to the weights stored for it, and each checks the shape of what it reads so that a
 //! mismatched model package is caught while it loads rather than part way through a forward pass.
 
-use crate::flint::{functional as F, Nvfp4Tensor, Tensor};
+use crate::flint::{functional as F, Tensor};
 
 use crate::error::{Error, Result};
 use crate::var_builder::VarBuilder;
 
-/// Root mean square layer normalization over the last dimension.
-#[derive(Debug)]
-pub struct RmsNorm {
-    weight: Tensor,
-    eps: f32,
-}
-
-impl RmsNorm {
-    pub const WEIGHT: &'static str = "weight";
-
-    pub fn build(d_model: i32, eps: f32, vb: &VarBuilder) -> Result<RmsNorm> {
-        Ok(RmsNorm {
-            weight: vb.get(Self::WEIGHT, &[d_model])?,
-            eps,
-        })
-    }
-
-    pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        Ok(F::rms_norm(input, &self.weight, self.eps)?)
-    }
-}
-
-/// Normalization over the last dimension that keeps the mean, as everything outside the Llama
-/// lineage uses: subtract the mean, divide by the standard deviation, scale and shift.
+/// Normalization over the last dimension: subtract the mean, divide by the standard deviation,
+/// scale and shift.
 #[derive(Debug)]
 pub struct LayerNorm {
     weight: Tensor,
@@ -239,110 +217,6 @@ impl Linear {
         }
 
         let x = F::matmul(input, &self.weight.transpose(0, 1)?)?;
-        match &self.bias {
-            Some(bias) => Ok(F::add(&x, bias)?),
-            None => Ok(x),
-        }
-    }
-}
-
-/// A fully connected layer whose weight is held in NVFP4 and multiplied on the block scaled
-/// tensor cores.
-///
-/// The weight is read as float16 and quantized once while the model loads, so a package needs
-/// nothing new stored in it. The activation is quantized on every call, inside the multiply,
-/// because the tensor core instruction takes no wider operand -- which is also why this trades
-/// accuracy for speed rather than only saving memory. On the projection shapes of a 3B model it
-/// runs prefill five to six times faster than the float16 layer, gains much less on a decode step
-/// where reading the weight is what costs, and carries around 1.3e-1 of relative RMSE against the
-/// float16 result. `docs/nvfp4.md` has the measurements.
-///
-/// [`Nvfp4Linear::is_available`] reports whether this build and this GPU can run it at all.
-#[derive(Debug)]
-pub struct Nvfp4Linear {
-    weight: Nvfp4Tensor,
-    bias: Option<Tensor>,
-}
-
-impl Nvfp4Linear {
-    pub const WEIGHT: &'static str = "weight";
-    pub const BIAS: &'static str = "bias";
-
-    /// Whether the NVFP4 tensor cores are there to run this.
-    pub fn is_available() -> bool {
-        Nvfp4Tensor::is_available()
-    }
-
-    pub fn build(
-        in_dim: i32,
-        out_dim: i32,
-        has_bias: bool,
-        vb: &VarBuilder,
-    ) -> Result<Nvfp4Linear> {
-        if in_dim <= 0 || out_dim <= 0 {
-            return Err(Error::model(format!(
-                "linear layer {:?} has an invalid shape ({in_dim}, {out_dim})",
-                vb.name()
-            )));
-        }
-
-        // The scale blocks are 16 elements wide and the tensor cores read 32 at a time, and the
-        // epilogue writes 8 outputs at a time. A layer the kernel cannot take is worth saying so
-        // here, where the name of the layer is still at hand.
-        if in_dim % 32 != 0 {
-            return Err(Error::model(format!(
-                "nvfp4 linear layer {:?}: input dimension {in_dim} is not a multiple of 32",
-                vb.name()
-            )));
-        }
-        if out_dim % 8 != 0 {
-            return Err(Error::model(format!(
-                "nvfp4 linear layer {:?}: output dimension {out_dim} is not a multiple of 8",
-                vb.name()
-            )));
-        }
-
-        let weight = vb.get(Self::WEIGHT, &[out_dim, in_dim])?;
-        let bias = if has_bias {
-            Some(vb.get(Self::BIAS, &[out_dim])?)
-        } else {
-            if vb.has(Self::BIAS) {
-                return Err(Error::model(format!(
-                    "module {:?}: has_bias is false but the model holds a bias",
-                    vb.name()
-                )));
-            }
-            None
-        };
-
-        Ok(Nvfp4Linear {
-            weight: Nvfp4Tensor::quantize(&weight)?,
-            bias,
-        })
-    }
-
-    /// Build from a weight already in memory, for a caller that has one without a package.
-    pub fn from_weight(weight: &Tensor, bias: Option<Tensor>) -> Result<Nvfp4Linear> {
-        Ok(Nvfp4Linear {
-            weight: Nvfp4Tensor::quantize(weight)?,
-            bias,
-        })
-    }
-
-    /// The weight as it comes back out of NVFP4, which is what the multiply actually sees.
-    pub fn dequantized_weight(&self) -> Result<Tensor> {
-        Ok(self.weight.dequantize()?)
-    }
-
-    pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let dim = input.dim()?;
-        if dim < 2 {
-            return Err(Error::model(format!(
-                "linear layer takes at least a 2-D input, got a {dim}-D tensor"
-            )));
-        }
-
-        let x = F::nvfp4_matmul(input, &self.weight)?;
         match &self.bias {
             Some(bias) => Ok(F::add(&x, bias)?),
             None => Ok(x),

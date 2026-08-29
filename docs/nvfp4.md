@@ -14,21 +14,20 @@ reports whether this build and this GPU can run it.
 
 ## From Rust
 
-`Nvfp4Linear` is the projection layer built on it. It reads a float16 weight from the package and
-quantizes it once while the model loads, so nothing new has to be stored:
+`flint::Nvfp4Tensor` holds the three pieces a quantized operand is made of, and
+`functional::nvfp4_matmul` multiplies by one:
 
 ```rust
-let proj = Nvfp4Linear::build(in_dim, out_dim, has_bias, &vb.with_name("proj"))?;
-let y = proj.forward(&x)?;   // float16 in, float16 out
+let weight = Nvfp4Tensor::quantize(&float16_weight)?;
+let y = F::nvfp4_matmul(&x, &weight)?;   // float16 in, float16 out
 ```
 
-`Nvfp4Linear::is_available()` answers whether this build and this GPU can run it, and `build`
-refuses an `in_dim` that 32 does not divide or an `out_dim` that 8 does not divide, naming the
-layer, rather than leaving the kernel to complain about a shape.
+`Nvfp4Tensor::is_available()` answers whether this build and this GPU can run it. `k` -- the
+dimension the two share -- has to be a multiple of 32 and the weight's row count a multiple of 8,
+which the quantizer checks rather than leaving to the kernel.
 
-Underneath, `flint::Nvfp4Tensor` holds the three pieces a quantized operand is made of and
-`functional::nvfp4_matmul` multiplies by one. The C interface is `fl_nvfp4_available`,
-`fl_nvfp4_quantize`, `fl_nvfp4_dequantize` and `fl_nvfp4_matmul`.
+The C interface is `fl_nvfp4_available`, `fl_nvfp4_quantize`, `fl_nvfp4_dequantize` and
+`fl_nvfp4_matmul`.
 
 The kernels assert their preconditions with `CHECK`, which aborts, so the C interface checks
 device, type, contiguity and shape itself first: a host side weight comes back as an error rather
@@ -190,6 +189,7 @@ Two things cost time getting cuBLASLt to run, recorded in case anyone tries agai
 - Weights are quantized at load rather than stored quantized, so a package holds float16 and the
   memory saving only starts once the weight is on the device. Storing NVFP4 in a `.llmpkg` would
   also cut the file size and the load time.
-- No model is built out of `Nvfp4Linear` yet; `LlamaModel` still builds `Linear` throughout.
+- Nothing is built out of it yet: the diffusion model this crate runs is float16 throughout, and
+  the layer that wrapped this went with the language model runtime.
 - `n` must be a multiple of 8, which is how wide the epilogue writes. The row count is free and
   `k` must be a multiple of 32.

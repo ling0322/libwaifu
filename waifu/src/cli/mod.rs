@@ -17,14 +17,13 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The libwaifu command line tool: chat with a model, or fetch one.
+//! The libwaifu command line tool: draw a picture with a model.
 //!
-//! Behind the `cli` feature, because it is the only thing in this crate that needs an HTTPS
-//! client. The `waifu` binary is a shim over [`run`]; everything else here is its implementation.
+//! Behind the `cli` feature, because it is the only thing in this crate that needs a terminal
+//! library. The `waifu` binary is a shim over [`run`]; everything else here is its
+//! implementation.
 
 mod args;
-mod chat;
-mod download;
 mod draw;
 mod field;
 mod png;
@@ -35,9 +34,7 @@ fn print_usage() {
     eprintln!("Usage: waifu COMMAND");
     eprintln!();
     eprintln!("Commands:");
-    eprintln!("    chat           Chat with your waifu");
     eprintln!("    draw           Draw a picture with your waifu");
-    eprintln!("    download       Download model to local");
     eprintln!();
     eprintln!("Run 'waifu COMMAND -h' for more information on a command.");
 }
@@ -52,9 +49,7 @@ pub fn run() -> ExitCode {
 
     let rest = &arguments[1..];
     let result = match command.as_str() {
-        "chat" => chat::main(rest),
         "draw" => draw::main(rest),
-        "download" => download::main(rest),
         other => {
             eprintln!("Invalid command \"{other}\"\n");
             print_usage();

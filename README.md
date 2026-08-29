@@ -1,67 +1,21 @@
 # libwaifu: your local AI waifu
 
-libwaifu runs your waifu on your own machine. No API key, no cloud, no one else reading the
-conversation -- she lives in your GPU (or just your CPU) and answers as fast as the hardware
-allows.
+libwaifu draws your waifu on your own machine. No API key, no cloud, no one else seeing what you
+asked for -- she is painted by your own GPU, as fast as the hardware allows.
 
-Underneath the character is a serious engine: a Rust runtime over optimized C++17/CUDA kernels,
-with vLLM-style serving features including continuous batching, paged KV cache, chunked prefill,
-request preemption, and per-request sampling. Chat with her from the `waifu` CLI, or embed the
-same engine in your own app through the Rust or C API.
+Underneath is a Rust runtime over optimized C++17/CUDA kernels: SDXL's two text encoders, its
+U-Net and its autoencoder, the Euler schedule that walks between them, and classifier free
+guidance. Draw from the `waifu` CLI, or embed the same pipeline in your own app through the Rust
+API.
 
-## Model download:
+## Getting a model
 
-| Model       | Download       |  waifu Command  |
-|-------------|----------------|---------------|
-| Llama3.2-3B-Instruct | [🤗[HF](https://huggingface.co/ling0322/llama3.2-libllm/resolve/main/llama3.2-3b-instruct-fp16.llmpkg)] | waifu chat -m llama3.2 |
-
-`HF` = HuggingFace
-
-## Kernel support matrix
-
-| OS       |  Platform | CUDA       |  avx2  |  avx512 | asimdhp |
-|----------|-----------|------------|--------|---------|---------|
-| Linux    | x64       | ✅         | ✅     | ✅       |         |
-| Windows  | x64       | ✅         | ✅     | ✅       |         |
-| macOS    | arm64     |            |        |         | ✅      |
-
-## Recent updates
-
-- [2024-09-28] Support Llama3.2 models.
-
-## Quickstart
-
-To run and chat with Llama 3.2 3B Instruct:
+There is nothing to download: an SDXL checkpoint becomes a package with the exporter in `tools/`.
+Any SDXL fine tune works -- Illustrious, WAI, or anything else that ships as a single
+safetensors file:
 
 ```bash
-$ waifu chat -m llama3.2
-```
-
-It will automatically download the model from Huggingface and drop you straight into the chat
-CLI. Use `:sys <system_prompt>` in the session to give her a personality and `:new` to start
-the conversation over.
-
-## waifu command line
-
-```text
-$ ./waifu chat -m ../tools/llama.llmpkg
-INFO 2026-08-18T06:24:41Z interface.cc:67] ISA support: AVX2=1 F16C=1 AVX512F=1
-INFO 2026-08-18T06:24:41Z interface.cc:71] Use Avx512 backend.
-INFO 2026-08-18T06:24:41Z matmul.cc:45] Use GEMM from cuBLAS.
-INFO 2026-08-18T06:24:41Z cuda_operators.cc:86] cuda numDevices = 1
-INFO 2026-08-18T06:24:41Z cuda_operators.cc:87] cuda:0 maxThreadsPerMultiProcessor = 1536
-INFO 2026-08-18T06:24:41Z cuda_operators.cc:89] cuda:0 multiProcessorCount = 36
-INFO 2026-08-18T06:24:41Z mp_openmp.cc:36] OMP max_threads = 32
-INFO 2026-08-18T06:24:41Z model_for_generation.cc:41] model_type = llama
-INFO 2026-08-18T06:24:41Z model_for_generation.cc:42] device = cuda
-INFO 2026-08-18T06:24:45Z state_map.cc:66] 172 tensors read.
-Please input your question.
-	Type ':new' to start a new session (clean history).
-	Type ':sys <system_prompt>' to set the system prompt and start a new session .
-> hi
-How can I assist you today?
-(7 tokens, time=0.27s, 38.53ms per token)
->
+python tools/sdxl_exporter.py -checkpoint /path/to/checkpoint.safetensors -output sdxl.llmpkg
 ```
 
 ## Drawing pictures
@@ -69,7 +23,7 @@ How can I assist you today?
 An SDXL package draws rather than talks, and `waifu draw` opens a terminal for it:
 
 ```bash
-$ waifu draw -m models/sdxl-base.llmpkg
+$ waifu draw -m sdxl.llmpkg
 ```
 
 The screen holds the prompt, what to steer away from, and the four numbers a run takes: how many
@@ -86,64 +40,60 @@ one, so the file name is what comes back.
 
 Drawing needs `Conv2d`, and `Conv2d` needs cuDNN -- see the build section below.
 
+## Kernel support matrix
+
+| OS       |  Platform | CUDA       |  avx2  |  avx512 | asimdhp |
+|----------|-----------|------------|--------|---------|---------|
+| Linux    | x64       | ✅         | ✅     | ✅       |         |
+| Windows  | x64       | ✅         | ✅     | ✅       |         |
+| macOS    | arm64     |            |        |         | ✅      |
+
+## Recent updates
+
+- [2026-08-28] Draw pictures from a terminal.
+- [2026-08-28] SDXL: a prompt in, an image out.
+
 ## Rust example
 
-The Rust API can load a model package and stream generated text through an `Engine` callback:
+The Rust API reads a package and hands back an image:
 
 ```rust
-use std::io::Write;
-use std::sync::mpsc::channel;
-
-use waifu::{
-	Device, Engine, EngineConfig, GenerationConfig, KVCacheManager, LlamaForGeneration,
-	Message, RequestInput, RequestOutput, ZipFile,
-};
+use waifu::{to_rgb8, Device, GenerationOptions, Sdxl, ZipFile};
 
 fn main() -> Result<(), waifu::Error> {
-	let device = Device::Cuda;
-	let model_path = "models/llama3.2-3b-instruct-fp16.llmpkg";
-	let config = EngineConfig::default();
-	let (finished_tx, finished_rx) = channel();
+	let package = ZipFile::open("sdxl.llmpkg")?;
+	let model = Sdxl::from_package(Device::Cuda, &package)?;
 
-	let engine = Engine::new(
-		move || {
-			let package = ZipFile::open(model_path)?;
-			let model = LlamaForGeneration::from_package(device, &package)?;
-			let cache = KVCacheManager::for_model(&model, &config)?;
-			Ok((model, cache))
-		},
-		config.max_num_batched_tokens,
-		move |outputs: &[RequestOutput]| {
-			for output in outputs {
-				print!("{}", output.text);
-				let _ = std::io::stdout().flush();
-				if output.finished {
-					let _ = finished_tx.send(());
-				}
-			}
-		},
-	)?;
+	let options = GenerationOptions {
+		width: 1024,
+		height: 1024,
+		num_steps: 30,
+		guidance_scale: 5.0,
+		negative_prompt: String::new(),
+		seed: Some(7),
+	};
 
-	engine.add_request_input(
-		"example",
-		RequestInput::Messages(vec![Message::new("user", "Why is the sky blue?")]),
-		GenerationConfig::default(),
-	)?;
+	let image = model.generate("a photo of an astronaut riding a horse on mars", &options)?;
 
-	let _ = finished_rx.recv();
-	engine.shutdown()
+	// Three bytes a pixel, row by row, ready for whatever writes the file.
+	let pixels = to_rgb8(&image)?;
+	println!("{} bytes, {} by {}", pixels.len(), options.width, options.height);
+	Ok(())
 }
 ```
+
+`Sdxl::generate_reporting` is the same run with a reporter that hears how far along it is and can
+stop it between steps, which is what the `draw` command is built on.
 
 After completing the build steps below, run the complete example with:
 
 ```bash
-cargo run --release -p waifu --example chat -- \
-	models/llama3.2-3b-instruct-fp16.llmpkg \
-	"Why is the sky blue?"
+cargo run --release -p waifu --example generate -- \
+	sdxl.llmpkg \
+	"a photo of an astronaut riding a horse on mars"
 ```
 
-See [waifu/examples/chat.rs](waifu/examples/chat.rs) for the complete source.
+See [waifu/examples/generate.rs](waifu/examples/generate.rs) for the complete source.
 
 ## Build
 
