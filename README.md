@@ -66,7 +66,7 @@ starts a run and `esc` stops one where it stands. Every finished picture is writ
 current directory as `waifu-0001.png` and listed on screen -- a terminal is no place to look at
 one, so the file name is what comes back.
 
-Drawing needs `Conv2d`, and `Conv2d` needs cuDNN -- see the build section below.
+Drawing needs `Conv2d`, which either cuDNN or CUTLASS can answer -- see the build section below.
 
 ## Kernel support matrix
 
@@ -173,10 +173,20 @@ cmake -S . -B build \
 cmake --build build --parallel
 ```
 
-### Conv2d, through cuDNN
+### Conv2d, through cuDNN or CUTLASS
 
-`Conv2d` is the one operator that needs a library the CUDA Toolkit does not carry, so it is opt
-in. Point `CUDNN_ROOT` at a directory holding `include/cudnn.h`:
+`Conv2d` has two implementations and needs one of them. cuDNN is preferred where it is there;
+`WITH_CUTLASS=ON` answers it too, and is enough on its own -- there is nothing to download for
+it, since CUTLASS is a header library already in `third_party`. Convolving on CUTLASS costs about
+3% on a whole image, which is what the layout costs: CUTLASS convolves in NHWC and the rest of
+the library is NCHW, so the activations are permuted in and out around the kernel. What it does
+not do is a grouped convolution, which nothing here asks for and which it refuses rather than
+answers wrongly.
+
+Set `LIBWAIFU_CONV=cudnn` or `=cutlass` to pick one for a run, whichever the build has.
+
+cuDNN is the one library the CUDA Toolkit does not carry, so it is opt in. Point `CUDNN_ROOT` at
+a directory holding `include/cudnn.h`:
 
 ```bash
 cmake -S . -B build \

@@ -139,6 +139,7 @@ if (WITH_CUDA)
 
     if (WITH_CUTLASS)
         set(flint_SOURCES ${flint_SOURCES}
+            "cuda/conv2d_cutlass.cu"
             "cuda/gemm_cutlass.cu"
             "cuda/gemm_nvfp4_cutlass.cu")
         set(flint_test_SOURCES ${flint_test_SOURCES}

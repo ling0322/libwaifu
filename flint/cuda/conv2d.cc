@@ -25,7 +25,12 @@
 // API is where to go when this stops being true or when fusing the surrounding normalization and
 // activation starts to matter.
 
+#include <cstdlib>
+#include <string>
+
 #include "flint/cuda/conv2d.h"
+
+#include "flint/cuda/conv2d_cutlass.h"
 
 #include <cuda_runtime.h>
 
@@ -411,8 +416,30 @@ const Plan &getPlan(Cudnn *cudnn, const PlanKey &key) {
 }  // namespace
 
 bool isConv2dAvailable() {
-  static const bool available = Cudnn::get() != nullptr;
+  static const bool available = Cudnn::get() != nullptr || isConv2dCutlassAvailable();
   return available;
+}
+
+/// Which library convolves, from LIBWAIFU_CONV. Unset means cuDNN wherever it loaded, which is
+/// what a run that does not ask gets. Asked for once and remembered, so that a run cannot change
+/// its mind partway and be measured as though it had not.
+bool wantsCutlass() {
+  static const bool wanted = [] {
+    const char *choice = std::getenv("LIBWAIFU_CONV");
+    if (!choice) return false;
+
+    std::string name = choice;
+    if (name == "cutlass") {
+      LOG(INFO) << "LIBWAIFU_CONV=cutlass";
+      return true;
+    }
+    if (name == "cudnn") return false;
+
+    throw lut::AbortedError(
+        lut::sprintf("LIBWAIFU_CONV is \"%s\", which is neither cudnn nor cutlass", choice));
+  }();
+
+  return wanted;
 }
 
 Tensor conv2d(
@@ -420,8 +447,22 @@ Tensor conv2d(
     const Tensor &weight,
     const Tensor &bias,
     const Conv2dOptions &options) {
-  Cudnn *cudnn = Cudnn::get();
-  if (!cudnn) throw lut::AbortedError("cuDNN is not available.");
+  Cudnn *cudnn = wantsCutlass() ? nullptr : Cudnn::get();
+
+  // cuDNN is preferred where it is there, and it is looked for by name at the first call, so a
+  // machine without it takes the other path rather than the build having to know. Said once
+  // rather than on every convolution, and at a level that is on by default: which library the
+  // convolutions go through is not a debugging detail.
+  if (!cudnn) {
+    static const bool reported = [] {
+      if (!wantsCutlass()) LOG(WARN) << "cuDNN is not available, convolving on CUTLASS instead";
+      return true;
+    }();
+    (void)reported;
+
+    if (!isConv2dCutlassAvailable()) throw lut::AbortedError("neither cuDNN nor CUTLASS is here");
+    return conv2dCutlass(input, weight, bias, options);
+  }
 
   if (input.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D input, as (N, C, H, W)");
   if (weight.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D weight, as (K, C, R, S)");
@@ -520,11 +561,19 @@ Tensor conv2d(
 #else  // LIBWAIFU_CUDNN_ENABLED
 
 bool isConv2dAvailable() {
-  return false;
+  return isConv2dCutlassAvailable();
 }
 
-Tensor conv2d(const Tensor &, const Tensor &, const Tensor &, const Conv2dOptions &) {
-  throw lut::AbortedError("this build has no Conv2d (needs WITH_CUDNN=ON)");
+Tensor conv2d(
+    const Tensor &input,
+    const Tensor &weight,
+    const Tensor &bias,
+    const Conv2dOptions &options) {
+  if (!isConv2dCutlassAvailable()) {
+    throw lut::AbortedError("this build has no Conv2d (needs WITH_CUDNN=ON or WITH_CUTLASS=ON)");
+  }
+
+  return conv2dCutlass(input, weight, bias, options);
 }
 
 #endif  // LIBWAIFU_CUDNN_ENABLED

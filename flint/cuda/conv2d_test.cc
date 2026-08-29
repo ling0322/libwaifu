@@ -20,11 +20,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
 #include "flint/cuda/conv2d.h"
+#include "flint/cuda/conv2d_cutlass.h"
 #include "flint/device.h"
 #include "flint/functional.h"
 #include "flint/operators.h"
@@ -116,13 +119,30 @@ bool skipUnavailable() {
 }
 
 /// Runs one convolution both ways and says whether they agree.
+/// Whether the operator has been pointed at CUTLASS with LIBWAIFU_CONV, which convolves in one
+/// group and no more. The cases below that ask for several are cuDNN's to answer.
+bool convolvesOnCutlass() {
+  const char *choice = std::getenv("LIBWAIFU_CONV");
+  return choice && std::string(choice) == "cutlass";
+}
+
+/// Which implementation to check. cuDNN is what the operator reaches for; CUTLASS is what it
+/// falls back to, and it is checked against the same written-out reference rather than against
+/// cuDNN, so a mistake the two could share is not a mistake either of them can hide.
+using Conv2dFn = Tensor (*)(
+    const Tensor &,
+    const Tensor &,
+    const Tensor &,
+    const op::cuda::Conv2dOptions &);
+
 bool matchesReference(
     Shape4 in,
     Shape4 filter,
     bool withBias,
     const op::cuda::Conv2dOptions &options,
     DType dtype,
-    float rtol) {
+    float rtol,
+    Conv2dFn convolve = op::cuda::conv2d) {
   std::vector<float> x = spread(in.n * in.c * in.h * in.w, 3);
   std::vector<float> w = spread(filter.n * filter.c * filter.h * filter.w, 5);
   std::vector<float> b = spread(filter.n, 7);
@@ -140,7 +160,7 @@ bool matchesReference(
   Tensor bCuda = withBias ? toCuda(Tensor::create<float>({filter.n}, lut::makeConstSpan(b)), dtype)
                           : Tensor();
 
-  Tensor actual = op::cuda::conv2d(xCuda, wCuda, bCuda, options);
+  Tensor actual = convolve(xCuda, wCuda, bCuda, options);
   if (actual.getShape() != std::vector<int>{out.n, out.c, out.h, out.w}) return false;
 
   Tensor reference = Tensor::create<float>(
@@ -234,20 +254,26 @@ CATCH_TEST_CASE("test conv2d (stride, padding, dilation)", "[fl][op][cuda][cudnn
       {1, 2, 2, 1},
       DType::kFloat16,
       2e-2f));
-  CATCH_REQUIRE(matchesReference(
-      {2, 8, 6, 6},
-      {8, 4, 3, 3},
-      false,
-      {1, 1, 1, 2},
-      DType::kFloat16,
-      2e-2f));
-  CATCH_REQUIRE(matchesReference(
-      {1, 6, 5, 5},
-      {6, 1, 3, 3},
-      false,
-      {1, 1, 1, 6},
-      DType::kFloat16,
-      2e-2f));
+  // Two groups, which is cuDNN's alone: the CUTLASS path refuses them, and the test for that is
+  // with the rest of its cases below.
+  if (!convolvesOnCutlass()) {
+    CATCH_REQUIRE(matchesReference(
+        {2, 8, 6, 6},
+        {8, 4, 3, 3},
+        false,
+        {1, 1, 1, 2},
+        DType::kFloat16,
+        2e-2f));
+
+    // One group per channel, which is the depthwise case.
+    CATCH_REQUIRE(matchesReference(
+        {1, 6, 5, 5},
+        {6, 1, 3, 3},
+        false,
+        {1, 1, 1, 6},
+        DType::kFloat16,
+        2e-2f));
+  }
 }
 
 CATCH_TEST_CASE("test conv2d (bias)", "[fl][op][cuda][cudnn][conv2d]") {
@@ -333,6 +359,70 @@ CATCH_TEST_CASE("test conv2d (through the operator interface)", "[fl][op][cuda][
   Tensor cpuX = F::rand({2, 4, 8, 8}, DType::kFloat);
   Tensor cpuW = F::rand({8, 4, 3, 3}, DType::kFloat);
   CATCH_REQUIRE_THROWS(F::conv2d(cpuX, cpuW, Tensor(), 1, 1, 1, 1));
+}
+
+CATCH_TEST_CASE("test conv2d (cutlass)", "[fl][op][cuda][cutlass][conv2d]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  if (!op::cuda::isConv2dCutlassAvailable()) CATCH_SKIP("this build has no CUTLASS");
+
+  auto cutlass = op::cuda::conv2dCutlass;
+
+  // The three parameter combinations SDXL asks for and nothing else: a 3x3 that keeps its
+  // resolution, a 3x3 that halves it, and the 1x1 that is a matrix multiply rather than a
+  // convolution -- which is a different code path here, so it is not the same test twice.
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {32, 16, 3, 3}, false, {1, 1, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {32, 16, 3, 3}, false, {2, 1, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {32, 16, 1, 1}, false, {1, 0, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+
+  // With a bias, which is added after the convolution rather than by it.
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {32, 16, 3, 3}, true, {1, 1, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {32, 16, 1, 1}, true, {1, 0, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+
+  // Channel counts that eight does not divide, which is the other kernel: SDXL's latent is four
+  // channels deep and its image is three, so both ends of the model land here.
+  CATCH_REQUIRE(matchesReference(
+      {1, 4, 12, 12}, {32, 4, 3, 3}, true, {1, 1, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {4, 16, 3, 3}, true, {1, 1, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+
+  // More than one image, which the permute has to keep apart.
+  CATCH_REQUIRE(matchesReference(
+      {3, 16, 10, 10}, {32, 16, 3, 3}, true, {1, 1, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+
+  // Not square, so that a transposed height and width would show.
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 14, 6}, {32, 16, 3, 3}, false, {1, 1, 1, 1}, DType::kFloat16, 2e-2f, cutlass));
+}
+
+CATCH_TEST_CASE("test conv2d (cutlass refuses what it cannot do)", "[fl][op][cuda][cutlass][conv2d]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  if (!op::cuda::isConv2dCutlassAvailable()) CATCH_SKIP("this build has no CUTLASS");
+
+  // A grouped convolution needs another instantiation and nothing here asks for one, so it is
+  // refused rather than answered wrongly. Nothing else about the operator is narrower than cuDNN.
+  Tensor x = F::cast(F::to(Device::getCuda(), F::rand({2, 8, 6, 6}, DType::kFloat)), DType::kFloat16);
+  Tensor w = F::cast(F::to(Device::getCuda(), F::rand({8, 4, 3, 3}, DType::kFloat)), DType::kFloat16);
+  CATCH_REQUIRE_THROWS(op::cuda::conv2dCutlass(x, w, Tensor(), {1, 1, 1, 2}));
+}
+
+CATCH_TEST_CASE("test conv2d (cutlass, float)", "[fl][op][cuda][cutlass][conv2d]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  if (!op::cuda::isConv2dCutlassAvailable()) CATCH_SKIP("this build has no CUTLASS");
+
+  auto cutlass = op::cuda::conv2dCutlass;
+
+  // The autoencoder runs in float32 and is almost all 3x3, ending on a three channel image.
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {32, 16, 3, 3}, true, {1, 1, 1, 1}, DType::kFloat, 1e-4f, cutlass));
+  CATCH_REQUIRE(matchesReference(
+      {1, 16, 12, 12}, {3, 16, 3, 3}, true, {1, 1, 1, 1}, DType::kFloat, 1e-4f, cutlass));
+  CATCH_REQUIRE(matchesReference(
+      {1, 4, 12, 12}, {16, 4, 1, 1}, true, {1, 0, 1, 1}, DType::kFloat, 1e-4f, cutlass));
 }
 
 }  // namespace fl

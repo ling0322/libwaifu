@@ -381,3 +381,31 @@ time, so winning all of it is worth about 0.3% of an image. It has not been writ
 The backend is now complete rather than half of one: CUTLASS answers float as well as half, so
 `LIBWAIFU_GEMM=cutlass` runs the whole model including the autoencoder and cuBLAS is no longer
 reached at all. It stays the default, since `MatMul::create` still tries it first.
+
+## The CUTLASS convolution does not do groups, and costs 3% for the layout
+
+`WITH_CUTLASS=ON` now answers `Conv2d`, so cuDNN is preferred rather than required, and
+`LIBWAIFU_CONV=cutlass` runs the whole of SDXL through it. Two things are left in it.
+
+The first is grouped convolution, which it refuses. CUTLASS can do them -- `GroupMode` on the
+fprop kernel -- but it is another instantiation and nothing in this repository convolves in
+groups: SDXL's 138 convolutions are all one group, one dilation, a 1x1 or a 3x3, and one of three
+stride and padding pairs. There is a test standing on the refusal rather than on the answer.
+
+The second is the layout, and it is the 3%. A whole 1024 image is 12.990 s on cuDNN and 13.382 s
+on CUTLASS. The kernel itself is not the problem -- measured shape by shape on what the U-Net
+runs, the NHWC kernel beats cuDNN's NCHW one by 7% to 17%, because NHWC is what the tensor cores
+want. What it pays back is the permute on either side, and the two convolutions at each end of
+each model, where a four channel latent or a three channel image leaves a 128 wide tile mostly
+empty and the analytic iterator is slow.
+
+Where the 3% would go, in order:
+
+- Keep the activations in NHWC between consecutive convolutions. Everything between them in a
+  ResNet block -- the group norm, the SiLU, the residual add -- is elementwise or per channel and
+  would read either layout, so a block could permute once at each end instead of twice per
+  convolution. This is most of the 3% and it is also the change that reaches furthest.
+- A narrower tile for the shapes at the ends. 320 to 4 measured 1.18 TFLOP/s against 40 for the
+  aligned kernel, on a 128 by 128 tile that has one useful column of four.
+- The permute itself is a tiled transpose reaching something over 900 GB/s where the library's
+  generic strided copy manages 146, so it is not the obvious thing to improve next.
