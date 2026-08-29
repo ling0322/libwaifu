@@ -350,3 +350,45 @@ worked only on noise.
 
 bfloat16 would have closed it too and more cheaply at run time, but flint has no bfloat16 at all,
 which is the larger change of the two and is still worth having for its own sake.
+
+## CUTLASS is 12% behind cuBLAS on SDXL's GEMM mix, and it is one tile shape
+
+`LIBWAIFU_GEMM=cutlass` now runs the same model as `=cublas`, so the two can be compared. On an
+RTX 5060 Ti at 1024 by 1024, per denoising step over the ten shapes that are 99.6% of a step's
+multiply-adds (`./build/benchmark "[sdxl]"`), in TFLOP/s:
+
+```
+  shape                        cuBLAS   CUTLASS
+  ff.gate   1024x10240x1280     48.04     48.93
+  ff.gate   4096x5120x640       47.12     48.60
+  attn qkv  1024x3840x1280      47.56     46.73
+  attn qkv  4096x1920x640       46.27     46.47
+  ff.out    4096x640x2560       48.34     43.84
+  attn proj 4096x640x640        45.11     42.24
+  ff.out    1024x1280x5120      48.68     36.62
+  attn proj 1024x1280x1280      46.44     35.35
+  cross kv  77x2560x2048        22.99     15.93
+  cross kv  77x1280x2048        18.00      8.01
+
+  one step                      47.02     42.06     185.2 ms against 207.1 ms
+```
+
+Which lines up end to end: thirty steps of GEMM is 5.56 s against 6.21 s, a difference of 0.66 s,
+and a whole 30 step 1024 image measures 12.98 s against 13.55 s -- 0.55 s. So the gap is the GEMM
+and nothing else, and GEMM is about 43% of a run.
+
+The shape of the loss says what it is. CUTLASS matches or beats cuBLAS wherever N is large --
+10240, 5120, 3840, 1920 -- and loses wherever the output is small next to K. There is one
+instantiation here, `GemmShape<128, 128, 32>` with three stages and no split-K, so the tile count
+is the CTA count: a 1024 by 1280 output is 8 by 10 tiles, 80 CTAs against 36 SMs, which is 2.2
+waves with a ragged second one. A 77 by 1280 output is 1 by 10 tiles -- ten CTAs, so 26 of the 36
+SMs sit idle, and that is the shape where it loses 55%. cuBLAS picks among many kernels per shape
+and can split K to fill the machine; this cannot.
+
+Worth trying, in order: a second instantiation with a smaller tile for the small-M shapes and
+dispatching on the shape, and `SplitKSerial` for the large-K ones. Neither is much code. What
+would settle it is whether one extra tile shape covers the four losing shapes, since every
+instantiation costs compile time.
+
+Not a reason to switch: cuBLAS is the default and stays it. This exists so the comparison can be
+made again after a change.

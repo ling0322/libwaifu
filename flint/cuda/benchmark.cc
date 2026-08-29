@@ -459,6 +459,56 @@ CATCH_TEST_CASE("CUDA rotary embedding benchmarks", "[benchmark][cuda][rope]") {
   }
 }
 
+CATCH_TEST_CASE("SDXL GEMM benchmarks", "[benchmark][cuda][sdxl]") {
+  // Every GEMM the U-Net runs at 1024 by 1024, in the proportion it runs them. The counts are per
+  // denoising step and already include both passes classifier free guidance makes, and they were
+  // counted rather than derived: the same run was dumped at one step and at three, and the
+  // difference divided out. These ten shapes are 99.6% of a step's multiply-adds.
+  //
+  // The text encoders and the autoencoder are left out. They run once an image rather than once a
+  // step, and together they are 0.8 TFLOP against the U-Net's 261 over thirty steps -- 0.3%. The
+  // autoencoder's are float32 besides, so they go to cuBLAS whichever backend is chosen.
+  //
+  // Run against either backend with LIBWAIFU_GEMM=cublas or =cutlass.
+  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
+
+  struct Shape {
+    const char *what;
+    int m, n, k, perStep;
+  };
+
+  const Shape shapes[] = {
+      {"ff.gate      1024x10240x1280", 1024, 10240, 1280, 120},
+      {"ff.out       1024x1280x5120", 1024, 1280, 5120, 120},
+      {"attn proj    1024x1280x1280", 1024, 1280, 1280, 384},
+      {"attn qkv     1024x3840x1280", 1024, 3840, 1280, 120},
+      {"ff.gate      4096x5120x640", 4096, 5120, 640, 20},
+      {"ff.out       4096x640x2560", 4096, 640, 2560, 20},
+      {"attn proj    4096x640x640", 4096, 640, 640, 80},
+      {"attn qkv     4096x1920x640", 4096, 1920, 640, 20},
+      {"cross kv     77x2560x2048", 77, 2560, 2048, 120},
+      {"cross kv     77x1280x2048", 77, 1280, 2048, 20},
+  };
+
+  double totalUs = 0.0;
+  double totalFlop = 0.0;
+  for (const Shape &shape : shapes) {
+    Tensor input = randHalf(operators, {shape.m, shape.k});
+    Tensor weight = randHalf(operators, {shape.n, shape.k}).transpose(0, 1);
+    float milliseconds = benchmarkCuda([&] { operators->matmul(input, weight); });
+    printMatmul(shape.what, milliseconds, shape.m, shape.n, shape.k);
+    totalUs += milliseconds * 1000.0 * shape.perStep;
+    totalFlop += 2.0 * shape.m * shape.n * shape.k * shape.perStep;
+  }
+
+  std::printf(
+      "%-44s %10.3f us  %8.2f TFLOP/s\n",
+      "one denoising step",
+      totalUs,
+      totalFlop / (totalUs * 1.0e6));
+  std::printf("%-44s %10.3f s\n", "thirty steps", totalUs * 30 / 1.0e6);
+}
+
 CATCH_TEST_CASE("Llama 3.2 3B benchmarks", "[benchmark][cuda][llama32-3b]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
   std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
