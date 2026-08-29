@@ -20,6 +20,9 @@
 #define CUTLASS_DEBUG_TRACE_LEVEL 2
 
 #include <cuda_fp16.h>
+
+#include <algorithm>
+
 #include <cutlass/cutlass.h>
 #include <cutlass/gemm/device/gemm.h>
 #include <cutlass/gemm/device/gemm_array.h>
@@ -58,22 +61,36 @@ using namespace cute;
 using cutlass::layout::ColumnMajor;
 using cutlass::layout::RowMajor;
 
-/// Half in, half out, accumulated in float.
+/// Half in, half out, accumulated in float, over a 128 by 128 tile that may split K.
 ///
-/// The accumulator is the seventh argument and it matters more than anything else here. It was
-/// `half_t`, which is a mistake: a K of a few thousand walks the running sum up to a magnitude
-/// where half's step is larger than the products still being added to it, and most of each one is
-/// lost. Nothing here disagreed -- the batched path below has always accumulated in float, and
-/// cuBLAS runs these with CUBLAS_COMPUTE_32F -- so it was this one instantiation on its own.
+/// The accumulator is the seventh argument and it was `half_t`, which is a mistake: a K of a few
+/// thousand walks the running sum up to a magnitude where half's step is larger than the products
+/// still being added to it. Nothing here disagreed -- the batched path below has always
+/// accumulated in float, and cuBLAS runs these with CUBLAS_COMPUTE_32F -- so it was this one
+/// instantiation on its own, and it was enough to fail the tests SDXL stands on.
 ///
-/// What it cost, measured rather than reasoned about. On a 64 by 2048 by 128 GEMM against the
-/// same half inputs multiplied out in float, the largest error was 3.01 against a mean magnitude
-/// of 512, which is 5.9e-3; in float it is 5.0e-4, twelve times smaller. On SDXL, four denoising
-/// steps went from 2.1e-2 away from the reference pipeline to 4.5e-2, and the first text
-/// encoder's hidden state from 7.3e-4 to 2.0e-3 -- both far enough to fail the tests that stand
-/// on them. cuBLAS on the same runs gives 2.1e-2 and 4.1e-4.
+/// SplitKSerial is on rather than a second instantiation. Asked for one slice it measures the
+/// same as an instantiation that cannot split at all, to within the noise, so the capability
+/// costs nothing where it is not used and there is one kernel here rather than two. What splits,
+/// and by how much, is decided per call in `splitKSlices` below.
 ///
-/// `gemm_cutlass_test.cc` has a case at that shape, and the tolerance in it sits between the two.
+/// The tile stayed at 128 by 128, and a 64 by 64 one was tried. It makes four times the CTAs and
+/// wins the GEMM benchmark in this repository -- 47.56 TFLOP/s a step against 47.40 -- and does
+/// not win the model. Median of a whole 1024 image, thirty steps, in seconds:
+///
+///     cuBLAS                   12.985   (seven runs, 12.878 to 13.147)
+///     128 by 128, split K      13.050   (three runs, 12.912 to 13.278)
+///     64 by 64, split K        13.170   (three runs, 13.165 to 13.178)
+///
+/// The spread is as large as the differences, so the first two are the same speed as far as this
+/// can tell and the third is about a percent behind. What is worth keeping is the direction: the
+/// benchmark prefers the tile the model does not, so do not tune this against the benchmark
+/// alone. Two reasons it is misled, and it hides both. The smaller tile halves the arithmetic
+/// intensity -- 32 FLOP per element loaded against 64 -- which only shows once the weights are
+/// cold rather than left in L2 by the previous iteration of the same shape. And it fills the
+/// machine well enough on its own that the rule below almost never splits: at 64 by 64 a split
+/// covers 2.5% of a step's GEMM time, at 128 by 128 it covers 35.4%. So the two tiles were never
+/// really being compared -- one of them was being compared with split K and the other without.
 template<class LayoutA, class LayoutB>
 struct Sm80Gemm {
   using Gemm = cutlass::gemm::device::Gemm<
@@ -90,8 +107,80 @@ struct Sm80Gemm {
       cutlass::gemm::GemmShape<64, 64, 32>,
       cutlass::gemm::GemmShape<16, 8, 16>,
       cutlass::epilogue::thread::LinearCombination<cutlass::half_t, 8, float, float>,
-      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>>;
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      3,
+      8,
+      8,
+      true>;
 };
+
+constexpr int kTileM = 128;
+constexpr int kTileN = 128;
+
+/// Somewhere for a split to keep its semaphores, kept between calls rather than asked for on
+/// every one.
+///
+/// It is a few hundred bytes -- one counter per tile -- so what it costs is the asking rather
+/// than the memory: on the two shapes that split, keeping it took a step's GEMMs from 47.40
+/// TFLOP/s to 47.57. Grown and never shrunk, and not thread safe, which matches what the library
+/// says about a device having one of everything.
+uint8_t *splitKWorkspace(size_t bytes) {
+  static lut::c_ptr<uint8_t> buffer;
+  static size_t capacity = 0;
+
+  if (bytes == 0) return nullptr;
+  if (bytes > capacity) {
+    buffer = llynCudaAlloc<uint8_t>(bytes);
+    capacity = bytes;
+  }
+  return buffer.get();
+}
+
+/// How many ways to split K, which is how a GEMM too small to fill the machine fills it anyway.
+///
+/// The tile count is the CTA count, so a small output leaves most of the card idle however fast
+/// the kernel is: splitting K multiplies the CTAs by the number of slices and reduces the partial
+/// sums afterwards. That reduction is not free, which is why this only splits when there is a
+/// reason to -- below four waves -- and only up to what fills about nine.
+///
+/// The thresholds are in waves rather than in CTAs, and the SM count is read rather than written
+/// down, so they mean the same thing on a card with a different number of them.
+///
+/// What it decides for the ten shapes SDXL's U-Net runs at 1024 by 1024, on a 36 SM part, next to
+/// the share of a step's GEMM time each of them is:
+///
+///     1024x10240x1280   36.2%    640 CTAs   1 slice
+///     1024x1280x5120    17.9%     80 CTAs   4 slices
+///     1024x1280x1280    15.0%     80 CTAs   4 slices
+///     1024x3840x1280    13.7%    240 CTAs   1 slice
+///     4096x5120x640      6.2%   1280 CTAs   1 slice
+///     4096x640x640       3.2%    160 CTAs   1 slice
+///     4096x640x2560      3.0%    160 CTAs   1 slice
+///     4096x1920x640      2.3%    480 CTAs   1 slice
+///     77x2560x2048       2.3%     20 CTAs   8 slices
+///     77x1280x2048       0.2%     10 CTAs   8 slices
+///
+/// So a third of the time splits and two thirds does not, and the four that split are exactly the
+/// four that were behind cuBLAS before this: by 25% and 24% at 1024 by 1280, and by 31% and 55%
+/// where there are 77 rows. Sweeping one, two, four and eight slices per shape agrees with what
+/// the rule picks for each.
+int splitKSlices(int m, int n, int k) {
+  constexpr int kEnoughWaves = 4;
+  constexpr int kTargetWaves = 9;
+  constexpr int kMaxSlices = 8;
+
+  // A slice that is too short spends more time being reduced than it saves.
+  constexpr int kMinKPerSlice = 128;
+
+  int multiprocessors = getCudaDeviceAttribute(cudaDevAttrMultiProcessorCount);
+  int ctas = ((m + kTileM - 1) / kTileM) * ((n + kTileN - 1) / kTileN);
+  if (ctas >= kEnoughWaves * multiprocessors) return 1;
+
+  int slices = std::min(kMaxSlices, std::max(1, kTargetWaves * multiprocessors / ctas));
+  while (slices > 1 && k / slices < kMinKPerSlice) slices /= 2;
+
+  return slices;
+}
 
 template<class LayoutA, class LayoutB, class ArchTag>
 void hgemmT(
@@ -116,9 +205,14 @@ void hgemmT(
       {B, ldb},
       {C, ldc},
       {C, ldc},
-      {float(alpha), float(beta)}};
+      {float(alpha), float(beta)},
+      splitKSlices(m, n, k)};
 
-  CUTLASS_CHECK(gemmOperator(args));
+  // Only a split needs anywhere to put its partial sums; at one slice this is zero bytes and
+  // nothing is asked for. CUTLASS zeroes what it is given, so nothing here has to.
+  size_t workspaceSize = Gemm::get_workspace_size(args);
+  CUTLASS_CHECK(gemmOperator.initialize(args, splitKWorkspace(workspaceSize)));
+  CUTLASS_CHECK(gemmOperator());
 }
 
 template<class ArchTag>
