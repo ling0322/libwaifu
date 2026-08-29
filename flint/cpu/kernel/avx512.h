@@ -70,6 +70,24 @@ inline void axpyKernel<float, float, float, CpuMathBackend::AVX512>(
   return saxpyAvx2Kernel(n, a, x + offsetX, y);
 }
 
+template<>
+inline float dotKernel<float, float, Float16, CpuMathBackend::AVX512>(
+    int64_t n,
+    const float *x,
+    const Float16 *y,
+    int64_t offsetY) {
+  return shdotAvx2Kernel(n, x, y + offsetY);
+}
+template<>
+inline void axpyKernel<float, Float16, float, CpuMathBackend::AVX512>(
+    int64_t n,
+    float a,
+    const Float16 *x,
+    int64_t offsetX,
+    float *y) {
+  return hsaxpyAvx2Kernel(n, a, x + offsetX, y);
+}
+
 }  // namespace kernel
 }  // namespace cpu
 }  // namespace op

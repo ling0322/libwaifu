@@ -73,6 +73,23 @@ void gemmHalf(
     Mode mode,
     CpuMathBackend backendType = CpuMathBackend::DEFAULT);
 
+/// @brief C(fp32) = A(fp32) x B(fp16). B is converted to fp32 inside the packing loop, so it is
+///        never materialized as a whole fp32 matrix.
+void gemmHalfWeightFloat(
+    bool transA,
+    bool transB,
+    int M,
+    int N,
+    int K,
+    const float *A,
+    int lda,
+    const Float16 *B,
+    int ldb,
+    float *C,
+    int ldc,
+    Mode mode,
+    CpuMathBackend backendType = CpuMathBackend::DEFAULT);
+
 void convertHalfToFloat(
     int n,
     const Float16 *x,

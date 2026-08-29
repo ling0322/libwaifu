@@ -33,6 +33,8 @@ void hscvtAvx2Kernel(int64_t n, const Float16 *x, float *y);
 void sgemm6x16Avx2Kernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c);
 float sdotAvx2Kernel(int64_t n, const float *x, const float *y);
 void saxpyAvx2Kernel(int64_t n, float a, const float *x, float *y);
+float shdotAvx2Kernel(int64_t n, const float *x, const Float16 *y);
+void hsaxpyAvx2Kernel(int64_t n, float a, const Float16 *x, float *y);
 
 template<>
 inline void cvtKernel<Float16, float, CpuMathBackend::AVX2>(
@@ -69,6 +71,24 @@ inline void axpyKernel<float, float, float, CpuMathBackend::AVX2>(
     int64_t offsetX,
     float *y) {
   return saxpyAvx2Kernel(n, a, x + offsetX, y);
+}
+
+template<>
+inline float dotKernel<float, float, Float16, CpuMathBackend::AVX2>(
+    int64_t n,
+    const float *x,
+    const Float16 *y,
+    int64_t offsetY) {
+  return shdotAvx2Kernel(n, x, y + offsetY);
+}
+template<>
+inline void axpyKernel<float, Float16, float, CpuMathBackend::AVX2>(
+    int64_t n,
+    float a,
+    const Float16 *x,
+    int64_t offsetX,
+    float *y) {
+  return hsaxpyAvx2Kernel(n, a, x + offsetX, y);
 }
 
 }  // namespace kernel

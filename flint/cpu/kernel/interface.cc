@@ -201,6 +201,50 @@ void gemmHalf(
   }
 }
 
+void gemmHalfWeightFloat(
+    bool transA,
+    bool transB,
+    int M,
+    int N,
+    int K,
+    const float *A,
+    int lda,
+    const Float16 *B,
+    int ldb,
+    float *C,
+    int ldc,
+    Mode mode,
+    CpuMathBackend backendType) {
+  GemmArgs<float, Float16, float> args;
+  args.transA = transA;
+  args.transB = transB;
+  args.M = M;
+  args.N = N;
+  args.K = K;
+  args.A = A;
+  args.lda = lda;
+  args.B = B;
+  args.ldb = ldb;
+  args.C = C;
+  args.ldc = ldc;
+
+  backendType = getCpuMathBackend(backendType);
+  if (false) {
+#if LUT_CPU_ARCH == LUT_AMD64
+  } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::OMP) {
+    wgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::AVX2, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::SingleThread) {
+    wgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::AVX2, Mode::SingleThread>(args);
+  } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::OMP) {
+    wgemm<576, 512, 4096, 12, 32, float, Float16, CpuMathBackend::AVX512, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::SingleThread) {
+    wgemm<576, 512, 4096, 12, 32, float, Float16, CpuMathBackend::AVX512, Mode::SingleThread>(args);
+#endif
+  } else {
+    NOT_IMPL();
+  }
+}
+
 void convertHalfToFloat(int n, const Float16 *x, float *y, Mode mode, CpuMathBackend backendType) {
   backendType = getCpuMathBackend(backendType);
 

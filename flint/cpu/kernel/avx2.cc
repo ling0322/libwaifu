@@ -203,6 +203,58 @@ LIBWAIFU_KERNEL_FORCE_INLINE float half2float(Float16 half) {
 #endif
 }
 
+// dot of a fp32 x with a fp16 y. This is the w16a32 GEMV path: x is the activation, y a row of
+// the fp16 weight, converted eight at a time on the way into the FMA.
+float shdotAvx2Kernel(int64_t n, const float *x, const Float16 *y) {
+  __m256 a00 = _mm256_setzero_ps();
+
+  int64_t nb = n / 8;
+  int64_t nr = n % 8;
+
+  const float *px = x;
+  const Float16 *py = y;
+  for (int64_t i = 0; i < nb; ++i) {
+    __m256 x00 = _mm256_loadu_ps(px);
+    __m256 y00 = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(py)));
+    a00 = _mm256_fmadd_ps(x00, y00, a00);
+
+    px += 8;
+    py += 8;
+  }
+
+  float sum = hsum(a00);
+  for (int64_t i = 0; i < nr; ++i) {
+    sum += *px++ * half2float(*py++);
+  }
+
+  return sum;
+}
+
+// y (fp32) += a * x (fp16). The transposed half of the w16a32 GEMV path.
+void hsaxpyAvx2Kernel(int64_t n, float a, const Float16 *x, float *y) {
+  __m256 a00 = _mm256_broadcast_ss(&a);
+
+  int64_t nb = n / 8;
+  int64_t nr = n % 8;
+
+  const Float16 *px = x;
+  float *py = y;
+  for (int64_t i = 0; i < nb; ++i) {
+    __m256 x00 = _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(px)));
+    __m256 y00 = _mm256_loadu_ps(py);
+
+    y00 = _mm256_fmadd_ps(a00, x00, y00);
+    _mm256_storeu_ps(py, y00);
+
+    px += 8;
+    py += 8;
+  }
+
+  for (int64_t i = 0; i < nr; ++i) {
+    *py++ += a * half2float(*px++);
+  }
+}
+
 void hscvtAvx2Kernel(int64_t n, const Float16 *x, float *y) {
   int nb = n / 8;
   for (int i = 0; i < nb; ++i) {
