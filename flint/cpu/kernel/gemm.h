@@ -106,14 +106,14 @@ class Gemm {
     for (int i = 0; i < kb; ++i) {
       Block<TB> Bkn = Bn.sliceRow(i * KC, KC);
       Block<TA> Ak = _inputA.sliceCol(i * KC, KC);
-      PackedBlock<TComp> Bp = Pack<TB, TComp, MODE>(Bkn, _bufferB, NR);
+      PackedBlock<TComp> Bp = Pack<TB, TComp, TYPE, MODE>(Bkn, _bufferB, NR);
       split2ByMC(Ak, Bp, Cj);
     }
 
     if (kc) {
       Block<TB> Bkn = Bn.sliceRow(kb * KC, kc);
       Block<TA> Ak = _inputA.sliceCol(kb * KC, kc);
-      PackedBlock<TComp> Bp = Pack<TB, TComp, MODE>(Bkn, _bufferB, NR);
+      PackedBlock<TComp> Bp = Pack<TB, TComp, TYPE, MODE>(Bkn, _bufferB, NR);
       split2ByMC(Ak, Bp, Cj);
     }
   }
@@ -125,14 +125,14 @@ class Gemm {
     for (int i = 0; i < mb; ++i) {
       Block<TA> Amk = Ak.sliceRow(i * MC, MC);
       Block<TComp> Cij = Cj.sliceRow(i * MC, MC);
-      PackedBlock<TComp> Ap = Pack<TA, TComp, MODE>(Amk.t(), _bufferA, MR);
+      PackedBlock<TComp> Ap = Pack<TA, TComp, TYPE, MODE>(Amk.t(), _bufferA, MR);
       macroKernel(Ap, Bp, Cij);
     }
 
     if (mc) {
       Block<TA> Amk = Ak.sliceRow(mb * MC, mc);
       Block<TComp> Cij = Cj.sliceRow(mb * MC, mc);
-      PackedBlock<TComp> Ap = Pack<TA, TComp, MODE>(Amk.t(), _bufferA, MR);
+      PackedBlock<TComp> Ap = Pack<TA, TComp, TYPE, MODE>(Amk.t(), _bufferA, MR);
       macroKernel(Ap, Bp, Cij);
     }
   }

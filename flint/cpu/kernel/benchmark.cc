@@ -53,7 +53,7 @@ void benchmarkPack(Block<float> A, Block<float> Ap, int KC) {
   for (int i = 0; i < kb; ++i) {
     int kc = (i != kb - 1 || lastKc == 0) ? KC : lastKc;
     Block<float> Ai = A.sliceRow(i * KC, kc);
-    Pack<float, float, Mode::OMP>(Ai, Ap, Ap.stride);
+    Pack<float, float, CpuMathBackend::DEFAULT, Mode::OMP>(Ai, Ap, Ap.stride);
   }
   LOG(INFO) << lut::sprintf(
       "pack (%d, %d) stride=%d KC=%d T=%d: %f",

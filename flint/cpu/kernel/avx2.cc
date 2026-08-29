@@ -255,6 +255,127 @@ void hsaxpyAvx2Kernel(int64_t n, float a, const Float16 *x, float *y) {
   }
 }
 
+// transpose the 8x8 block held in v0..v7 in place: on return v[i] holds what was element i of
+// each of the eight inputs.
+LIBWAIFU_KERNEL_FORCE_INLINE void transpose8x8Avx2(__m256 *v) {
+  __m256 t0 = _mm256_unpacklo_ps(v[0], v[1]);
+  __m256 t1 = _mm256_unpackhi_ps(v[0], v[1]);
+  __m256 t2 = _mm256_unpacklo_ps(v[2], v[3]);
+  __m256 t3 = _mm256_unpackhi_ps(v[2], v[3]);
+  __m256 t4 = _mm256_unpacklo_ps(v[4], v[5]);
+  __m256 t5 = _mm256_unpackhi_ps(v[4], v[5]);
+  __m256 t6 = _mm256_unpacklo_ps(v[6], v[7]);
+  __m256 t7 = _mm256_unpackhi_ps(v[6], v[7]);
+
+  __m256 s0 = _mm256_shuffle_ps(t0, t2, 0x44);
+  __m256 s1 = _mm256_shuffle_ps(t0, t2, 0xee);
+  __m256 s2 = _mm256_shuffle_ps(t1, t3, 0x44);
+  __m256 s3 = _mm256_shuffle_ps(t1, t3, 0xee);
+  __m256 s4 = _mm256_shuffle_ps(t4, t6, 0x44);
+  __m256 s5 = _mm256_shuffle_ps(t4, t6, 0xee);
+  __m256 s6 = _mm256_shuffle_ps(t5, t7, 0x44);
+  __m256 s7 = _mm256_shuffle_ps(t5, t7, 0xee);
+
+  v[0] = _mm256_permute2f128_ps(s0, s4, 0x20);
+  v[1] = _mm256_permute2f128_ps(s1, s5, 0x20);
+  v[2] = _mm256_permute2f128_ps(s2, s6, 0x20);
+  v[3] = _mm256_permute2f128_ps(s3, s7, 0x20);
+  v[4] = _mm256_permute2f128_ps(s0, s4, 0x31);
+  v[5] = _mm256_permute2f128_ps(s1, s5, 0x31);
+  v[6] = _mm256_permute2f128_ps(s2, s6, 0x31);
+  v[7] = _mm256_permute2f128_ps(s3, s7, 0x31);
+}
+
+// tgt[r * tgtStride + c] = float(src[r + c * srcStride]).
+//
+// This is the packing loop for a transposed source, which is what both the A and the B pack hit
+// in the layouts a Linear uses. Read that way, the source is numCols rows of numRows contiguous
+// elements and the target is their transpose, so it is an ordinary out-of-place transpose with
+// the conversion, if any, folded in. Doing it eight by eight keeps both sides at vector width:
+// eight loads, an 8x8 transpose in registers, eight 32 byte stores. The element at a time version
+// cannot vectorize the strided load at all, and for fp16 calls out to a software half_to_float
+// for every element on top of that.
+//
+// load reads eight consecutive source elements as floats, cvtOne reads one. r is the outer loop,
+// so the target is written straight through, eight rows at a time.
+template<typename Ts, typename Load, typename CvtOne>
+LIBWAIFU_KERNEL_FORCE_INLINE void packTransposeAvx2(
+    int numRows,
+    int numCols,
+    const Ts *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride,
+    Load load,
+    CvtOne cvtOne) {
+  int nr8 = numRows & ~7;
+  int nc8 = numCols & ~7;
+
+  for (int r0 = 0; r0 < nr8; r0 += 8) {
+    for (int c0 = 0; c0 < nc8; c0 += 8) {
+      const Ts *ps = src + r0 + static_cast<int64_t>(c0) * srcStride;
+
+      // v[j] holds rows r0..r0+7 of column c0+j; after the transpose, v[i] holds row r0+i.
+      __m256 v[8];
+      for (int j = 0; j < 8; ++j) v[j] = load(ps + j * srcStride);
+      transpose8x8Avx2(v);
+
+      float *pt = tgt + static_cast<int64_t>(r0) * tgtStride + c0;
+      for (int i = 0; i < 8; ++i) _mm256_storeu_ps(pt + i * tgtStride, v[i]);
+    }
+  }
+
+  // the columns no whole tile covered, then the rows. MR is 12, so the column tail is real.
+  for (int r = 0; r < nr8; ++r) {
+    for (int c = nc8; c < numCols; ++c) {
+      tgt[r * tgtStride + c] = cvtOne(src[r + c * srcStride]);
+    }
+  }
+  for (int r = nr8; r < numRows; ++r) {
+    for (int c = 0; c < numCols; ++c) {
+      tgt[r * tgtStride + c] = cvtOne(src[r + c * srcStride]);
+    }
+  }
+}
+
+void hspackTransposeAvx2Kernel(
+    int numRows,
+    int numCols,
+    const Float16 *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride) {
+  packTransposeAvx2(
+      numRows,
+      numCols,
+      src,
+      srcStride,
+      tgt,
+      tgtStride,
+      [](const Float16 *p) {
+        return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(p)));
+      },
+      [](Float16 v) { return half2float(v); });
+}
+
+void spackTransposeAvx2Kernel(
+    int numRows,
+    int numCols,
+    const float *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride) {
+  packTransposeAvx2(
+      numRows,
+      numCols,
+      src,
+      srcStride,
+      tgt,
+      tgtStride,
+      [](const float *p) { return _mm256_loadu_ps(p); },
+      [](float v) { return v; });
+}
+
 void hscvtAvx2Kernel(int64_t n, const Float16 *x, float *y) {
   int nb = n / 8;
   for (int i = 0; i < nb; ++i) {

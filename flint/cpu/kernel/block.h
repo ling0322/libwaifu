@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <type_traits>
+
 #include "lutil/log.h"
 #include "lutil/time.h"
 #include "flint/cpu/kernel/abstract.h"
@@ -43,8 +45,9 @@ struct Block {
   constexpr Block<T> slice(int row, int col, int nr, int nc) const;
 
   // copy this block to tgt, converting each element to Tt on the way. Tt may differ from T, that
-  // is how a fp16 weight block becomes a fp32 packed block.
-  template<typename Tt>
+  // is how a fp16 weight block becomes a fp32 packed block. TYPE only selects a faster kernel for
+  // the conversions that have one; the rest go element at a time.
+  template<typename Tt, CpuMathBackend TYPE = CpuMathBackend::UNKNOWN>
   inline void copyTo(Block<Tt> tgt) const;
   constexpr Block<T> t();
   constexpr void fillZero();
@@ -63,7 +66,7 @@ struct PackedBlock {
 // pack src into pack_size wide panels stored in buf. Ts is the type in the source matrix, Tt the
 // type the micro-kernel wants: with Ts=Float16 and Tt=float the packing loop is also the fp16 ->
 // fp32 conversion, so no separate dequantized copy of the matrix is needed.
-template<typename Ts, typename Tt, Mode MODE>
+template<typename Ts, typename Tt, CpuMathBackend TYPE, Mode MODE>
 PackedBlock<Tt> Pack(Block<Ts> src, Block<Tt> buf, int pack_size) {
   int numBlock = src.numCols / pack_size;
   int kc = src.numRows;
@@ -74,7 +77,7 @@ PackedBlock<Tt> Pack(Block<Ts> src, Block<Tt> buf, int pack_size) {
   for (int b = 0; b < numBlock; ++b) {
     Block<Ts> srcBlock = src.sliceCol(b * pack_size, pack_size);
     Block<Tt> tgtBlock = tgt.block(b);
-    srcBlock.copyTo(tgtBlock);
+    srcBlock.template copyTo<Tt, TYPE>(tgtBlock);
   }
 
   int nc = src.numCols % pack_size;
@@ -84,7 +87,7 @@ PackedBlock<Tt> Pack(Block<Ts> src, Block<Tt> buf, int pack_size) {
     tgtBlock.fillZero();
 
     tgtBlock = tgtBlock.sliceCol(0, nc);
-    srcBlock.copyTo(tgtBlock);
+    srcBlock.template copyTo<Tt, TYPE>(tgtBlock);
     ++tgt.numBlocks;
   }
 
@@ -111,10 +114,26 @@ constexpr Block<T> Block<T>::slice(int row, int col, int nr, int nc) const {
 }
 
 template<typename T>
-template<typename Tt>
+template<typename Tt, CpuMathBackend TYPE>
 inline void Block<T>::copyTo(Block<Tt> tgt) const {
   CHECK(numRows == tgt.numRows);
   CHECK(numCols == tgt.numCols);
+
+  // a transposed source packed into a contiguous target is what both the A and the B pack do. The
+  // generic loop below cannot vectorize its strided load, and for fp16 calls a software
+  // half_to_float on top of that, so both element types are worth a kernel. Anything else -- any
+  // other backend, fp16 targets, transposed targets -- keeps the generic loop.
+  constexpr bool kPackElement = std::is_same<Tt, float>::value &&
+                                (std::is_same<T, Float16>::value || std::is_same<T, float>::value);
+  constexpr bool kPackBackend = TYPE == CpuMathBackend::AVX2 || TYPE == CpuMathBackend::AVX512;
+  constexpr bool kUsePackKernel = kPackElement && kPackBackend;
+
+  if constexpr (kUsePackKernel) {
+    if (transposed && (!tgt.transposed)) {
+      packTransposeKernel<T, Tt, TYPE>(numRows, numCols, data, stride, tgt.data, tgt.stride);
+      return;
+    }
+  }
 
   if ((!transposed) && (!tgt.transposed)) {
     for (int r = 0; r < numRows; ++r) {

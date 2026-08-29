@@ -33,6 +33,28 @@ namespace kernel {
 void sgemm12x32Avx512Kernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c);
 
 template<>
+inline void packTransposeKernel<float, float, CpuMathBackend::AVX512>(
+    int numRows,
+    int numCols,
+    const float *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride) {
+  return spackTransposeAvx2Kernel(numRows, numCols, src, srcStride, tgt, tgtStride);
+}
+
+template<>
+inline void packTransposeKernel<Float16, float, CpuMathBackend::AVX512>(
+    int numRows,
+    int numCols,
+    const Float16 *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride) {
+  return hspackTransposeAvx2Kernel(numRows, numCols, src, srcStride, tgt, tgtStride);
+}
+
+template<>
 inline void cvtKernel<Float16, float, CpuMathBackend::AVX512>(
     int n,
     const Float16 *x,

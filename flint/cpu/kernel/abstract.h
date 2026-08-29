@@ -43,6 +43,18 @@ constexpr int DequantMinElemPerThread = 1024;
 template<typename ElementA, typename ElementC, CpuMathBackend TYPE>
 void cvtKernel(int n, const ElementA *x, int64_t offsetX, ElementC *y, int64_t offsetY);
 
+// tgt[r * tgtStride + c] = ElementC(src[r + c * srcStride]): pack a transposed source block into
+// a contiguous one, converting on the way. Only specialized where it beats the element at a time
+// loop in Block::copyTo, which falls back to that loop otherwise.
+template<typename ElementA, typename ElementC, CpuMathBackend TYPE>
+void packTransposeKernel(
+    int numRows,
+    int numCols,
+    const ElementA *src,
+    int64_t srcStride,
+    ElementC *tgt,
+    int64_t tgtStride);
+
 template<typename ElementA, typename ElementX, typename ElementY, CpuMathBackend TYPE>
 ElementA dotKernel(int64_t n, const ElementX *x, const ElementY *y, int64_t offsetY);
 
