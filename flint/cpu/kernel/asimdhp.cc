@@ -293,31 +293,33 @@ Float16 hdotAsimdhpKernel(int64_t n, const Float16 *x, const Float16 *y) {
   c##m##3 = vcvt_f32_f16(vget_high_f16(h01));      \
   pc += rs_c;
 
-// fmlal widens as it multiplies, so b stays in half and only the four sums it lands in are
-// float. Each instruction covers four columns, which is why sixteen takes four of them.
-#define LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(m, v, lane)   \
-  c##m##0 = vfmlalq_lane_low_f16(c##m##0, b00, v, lane);        \
-  c##m##1 = vfmlalq_lane_high_f16(c##m##1, b00, v, lane);       \
-  c##m##2 = vfmlalq_lane_low_f16(c##m##2, b01, v, lane);        \
-  c##m##3 = vfmlalq_lane_high_f16(c##m##3, b01, v, lane);
+#define LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(m, v, lane) \
+  a00 = vdupq_laneq_f32(v, lane);                             \
+  c##m##0 = vfmaq_f32(c##m##0, a00, b00);                     \
+  c##m##1 = vfmaq_f32(c##m##1, a00, b01);                     \
+  c##m##2 = vfmaq_f32(c##m##2, a00, b02);                     \
+  c##m##3 = vfmaq_f32(c##m##3, a00, b03);
 
 #define LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(m)                                \
   vst1q_f16(pc, vcombine_f16(vcvt_f16_f32(c##m##0), vcvt_f16_f32(c##m##1)));     \
   vst1q_f16(pc + 8, vcombine_f16(vcvt_f16_f32(c##m##2), vcvt_f16_f32(c##m##3))); \
   pc += rs_c;
 
-/// Half in and half out, multiplied in half, summed in float.
+/// Half in and half out, but the running sum is float.
 ///
 /// Half has eleven bits of significand, so a sum of a few hundred terms stops being able to see
-/// what it is still adding: past a point the total is large enough that each new product rounds
-/// to nothing. kc reaches 512 here, and a convolution reduces over its whole filter and channel
-/// depth at once, which is exactly that regime.
+/// the ones it is still adding: past a certain point the total is large enough that each new
+/// product rounds to nothing. kc reaches 512 here, and a convolution feeding this reduces over
+/// its whole filter and channel depth at once, which is exactly the regime where that shows up.
 ///
-/// The products stay in half -- fmlal takes half operands and widens them itself -- so nothing
-/// is given up on the multiply. What costs is the accumulator: four floats to a register where
-/// eight halves fit, so an instruction retires four sums rather than eight, and the tile that
-/// fits in the register file is half as tall. Six rows of sixteen columns is 24 accumulators;
-/// with the two b vectors and the two a lanes that is 28 of the 32.
+/// This is the version for a machine with no fmlal, so both operands are widened before they are
+/// multiplied. A machine that has it runs hgemm6x16AsimdfhmKernel instead, which is this with the
+/// conversions folded into the multiply and is about a quarter faster where the shape is compute
+/// bound.
+///
+/// Six rows rather than the twelve a half accumulator allowed: sixteen columns of float take four
+/// vectors, so six rows is 24 accumulators, and with the four b vectors and the broadcast a that
+/// is 29 of the 32 registers. Twelve rows would need 48 and spill.
 void hgemm6x16AsimdhpKernel(
     int64_t kc,
     const Float16 *a,
@@ -330,8 +332,8 @@ void hgemm6x16AsimdhpKernel(
   // C: MR x NR (6 x 4 float32x4_t)
   float32x4_t c00, c01, c02, c03, c10, c11, c12, c13, c20, c21, c22, c23, c30, c31, c32, c33,
       c40, c41, c42, c43, c50, c51, c52, c53;
-  float16x8_t h00, h01, b00, b01;
-  float16x4_t av0, av1;
+  float32x4_t a00, b00, b01, b02, b03, av0, av1;
+  float16x8_t h00, h01;
 
   __fp16 *pc = reinterpret_cast<__fp16 *>(c);
   LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(0);
@@ -344,13 +346,17 @@ void hgemm6x16AsimdhpKernel(
   const __fp16 *pa = reinterpret_cast<const __fp16 *>(a);
   const __fp16 *pb = reinterpret_cast<const __fp16 *>(b);
   for (int64_t k = 0; k < kc; ++k) {
-    b00 = vld1q_f16(pb);
-    b01 = vld1q_f16(pb + 8);
+    h00 = vld1q_f16(pb);
+    h01 = vld1q_f16(pb + 8);
+    b00 = vcvt_f32_f16(vget_low_f16(h00));
+    b01 = vcvt_f32_f16(vget_high_f16(h00));
+    b02 = vcvt_f32_f16(vget_low_f16(h01));
+    b03 = vcvt_f32_f16(vget_high_f16(h01));
 
     // Two overlapping four-lane loads rather than one of eight: the row of A is six wide, and
     // reading eight would run off the end of the panel on the last pass.
-    av0 = vld1_f16(pa);
-    av1 = vld1_f16(pa + 2);
+    av0 = vcvt_f32_f16(vld1_f16(pa));
+    av1 = vcvt_f32_f16(vld1_f16(pa + 2));
 
     LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(0, av0, 0);
     LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(1, av0, 1);

@@ -17,6 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include "flint/cpu/kernel/asimdfhm.h"
 #include "flint/cpu/kernel/asimdhp.h"
 
 #include <math.h>
@@ -161,6 +162,21 @@ CATCH_TEST_CASE("test saxpyAsimdhpKernel", "[cpu_kernel][kernel][asimdhp]") {
   tester.test(17);
   tester.test(128);
   tester.test(2001);
+}
+
+CATCH_TEST_CASE("test hgemm6x16AsimdfhmKernel", "[cpu_kernel][kernel][asimdhp]") {
+  // Both half kernels are held to the same float-summing reference, so this says the fmlal one
+  // agrees with the widen-then-multiply one as well as with FALLBACK.
+  GemmMicroKernelTester<Float16, Float16, Float16, 6, 16, CpuMathBackend::ASIMDFHM> tester;
+  tester.test(1);
+  tester.test(8);
+  tester.test(17);
+  tester.test(64);
+  tester.test(100);
+  tester.test(256);
+  tester.test(500);
+  tester.test(2047);
+  tester.test(2048);
 }
 
 }  // namespace kernel

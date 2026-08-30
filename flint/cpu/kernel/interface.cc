@@ -29,6 +29,7 @@
 #include "lutil/platform.h"
 #include "lutil/strings.h"
 #include "flint/cpu/kernel/abstract.h"
+#include "flint/cpu/kernel/asimdfhm.h"
 #include "flint/cpu/kernel/asimdhp.h"
 #include "flint/cpu/kernel/avx2.h"
 #include "flint/cpu/kernel/avx512.h"
@@ -77,6 +78,18 @@ CpuMathBackend findBestCpuMathBackend() {
     return CpuMathBackend::AVX2;
   }
 #elif LUT_CPU_ARCH == LUT_AARCH64
+  bool isaAsimdhp = ruapu_supports("asimdhp") > 0;
+  bool isaAsimdfhm = ruapu_supports("asimdfhm") > 0;
+
+  LOG(INFO) << lut::sprintf("ISA support: ASIMDHP=%d ASIMDFHM=%d", isaAsimdhp, isaAsimdfhm);
+
+  // FEAT_FHM is optional in ARMv8.2 and a good many parts do without it, so the half GEMM has a
+  // kernel either way; this is only about which one.
+  if (isaAsimdfhm) {
+    LOG(INFO) << "Use asimdfhm backend.";
+    return CpuMathBackend::ASIMDFHM;
+  }
+
   LOG(INFO) << "Use asimdhp backend.";
   return CpuMathBackend::ASIMDHP;
 #else
@@ -154,6 +167,10 @@ void gemmFloat(
     gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
     gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::ASIMDHP, Mode::SingleThread>(args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::OMP) {
+    gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::ASIMDFHM, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::SingleThread) {
+    gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::ASIMDFHM, Mode::SingleThread>(args);
 #endif
   } else {
     NOT_IMPL();
@@ -194,6 +211,10 @@ void gemmHalf(
     gemm<288, 512, 4096, 6, 16, Float16, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
     gemm<288, 512, 4096, 6, 16, Float16, CpuMathBackend::ASIMDHP, Mode::SingleThread>(args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::OMP) {
+    gemm<288, 512, 4096, 6, 16, Float16, CpuMathBackend::ASIMDFHM, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::SingleThread) {
+    gemm<288, 512, 4096, 6, 16, Float16, CpuMathBackend::ASIMDFHM, Mode::SingleThread>(args);
 #endif
   } else {
     NOT_IMPL();
@@ -244,6 +265,11 @@ void gemmHalfWeightFloat(
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
     wgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::ASIMDHP, Mode::SingleThread>(
         args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::OMP) {
+    wgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::ASIMDFHM, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::SingleThread) {
+    wgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::ASIMDFHM, Mode::SingleThread>(
+        args);
 #endif
   } else {
     NOT_IMPL();
@@ -257,6 +283,8 @@ void convertHalfToFloat(int n, const Float16 *x, float *y, Mode mode, CpuMathBac
 #if LUT_CPU_ARCH == LUT_AARCH64
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
     cvt<Float16, float, CpuMathBackend::ASIMDHP, Mode::OMP>(n, x, 0, y, 0);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::OMP) {
+    cvt<Float16, float, CpuMathBackend::ASIMDFHM, Mode::OMP>(n, x, 0, y, 0);
 #elif LUT_CPU_ARCH == LUT_AMD64
   } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::OMP) {
     cvt<Float16, float, CpuMathBackend::AVX2, Mode::OMP>(n, x, 0, y, 0);
@@ -275,6 +303,8 @@ void convertFloatToHalf(int n, const float *x, Float16 *y, Mode mode, CpuMathBac
 #if LUT_CPU_ARCH == LUT_AARCH64
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
     cvt<float, Float16, CpuMathBackend::ASIMDHP, Mode::OMP>(n, x, 0, y, 0);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::OMP) {
+    cvt<float, Float16, CpuMathBackend::ASIMDFHM, Mode::OMP>(n, x, 0, y, 0);
 #elif LUT_CPU_ARCH == LUT_AMD64
   } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::OMP) {
     cvt<float, Float16, CpuMathBackend::FALLBACK, Mode::OMP>(n, x, 0, y, 0);

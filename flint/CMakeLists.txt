@@ -217,7 +217,7 @@ if(LIBWAIFU_KERNEL_X86_64)
 endif()
 
 if(LIBWAIFU_KERNEL_AARCH64)
-    set(flint_SOURCES ${flint_SOURCES} "cpu/kernel/asimdhp.cc")
+    set(flint_SOURCES ${flint_SOURCES} "cpu/kernel/asimdhp.cc" "cpu/kernel/asimdfhm.cc")
     set(flint_test_SOURCES 
         ${flint_test_SOURCES}
         "cpu/test_float16.cc"
