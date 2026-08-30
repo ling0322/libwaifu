@@ -31,7 +31,7 @@ namespace kernel {
 
 void hscvtAsimdhpKernel(int64_t n, const Float16 *x, float *y);
 void shcvtAsimdhpKernel(int64_t n, const float *x, Float16 *y);
-void hgemm12x16AsimdhpKernel(
+void hgemm6x16AsimdhpKernel(
     int64_t kc,
     const Float16 *a,
     const Float16 *b,
@@ -41,6 +41,8 @@ Float16 hdotAsimdhpKernel(int64_t n, const Float16 *x, const Float16 *y);
 void hsaxpyAsimdhpKernel(int64_t n, Float16 a, const Float16 *x, float *y);
 void sgemm6x16AsimdhpKernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c);
 float shdotAsimdhpKernel(int64_t n, const float *x, const Float16 *y);
+float sdotAsimdhpKernel(int64_t n, const float *x, const float *y);
+void saxpyAsimdhpKernel(int64_t n, float a, const float *x, float *y);
 void hsaxpyFloatAsimdhpKernel(int64_t n, float a, const Float16 *x, float *y);
 
 template<>
@@ -62,13 +64,13 @@ inline void cvtKernel<float, Float16, CpuMathBackend::ASIMDHP>(
   return shcvtAsimdhpKernel(n, x + offsetX, y + offsetY);
 }
 template<>
-inline void gemmKernel<Float16, Float16, Float16, 12, 16, CpuMathBackend::ASIMDHP>(
+inline void gemmKernel<Float16, Float16, Float16, 6, 16, CpuMathBackend::ASIMDHP>(
     int64_t kc,
     const Float16 *a,
     const Float16 *b,
     Float16 *c,
     int64_t rs_c) {
-  return hgemm12x16AsimdhpKernel(kc, a, b, c, rs_c);
+  return hgemm6x16AsimdhpKernel(kc, a, b, c, rs_c);
 }
 
 template<>
@@ -100,6 +102,25 @@ inline void gemmKernel<float, float, float, 6, 16, CpuMathBackend::ASIMDHP>(
     float *c,
     int64_t rs_c) {
   return sgemm6x16AsimdhpKernel(kc, a, b, c, rs_c);
+}
+
+template<>
+inline float dotKernel<float, float, float, CpuMathBackend::ASIMDHP>(
+    int64_t n,
+    const float *x,
+    const float *y,
+    int64_t offsetY) {
+  return sdotAsimdhpKernel(n, x, y + offsetY);
+}
+
+template<>
+inline void axpyKernel<float, float, float, CpuMathBackend::ASIMDHP>(
+    int64_t n,
+    float a,
+    const float *x,
+    int64_t offsetX,
+    float *y) {
+  return saxpyAsimdhpKernel(n, a, x + offsetX, y);
 }
 
 template<>

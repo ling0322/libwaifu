@@ -34,6 +34,12 @@ void hscvtFallbackKernel(int64_t n, const Float16 *x, float *y);
 void shcvtFallbackKernel(int64_t n, const float *x, Float16 *y);
 void sgemm6x16DefaultKernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c);
 void sgemm12x32DefaultKernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c);
+void hgemm6x16FallbackKernel(
+    int64_t kc,
+    const Float16 *a,
+    const Float16 *b,
+    Float16 *c,
+    int64_t rs_c);
 void hgemm12x16FallbackKernel(
     int64_t kc,
     const Float16 *a,
@@ -83,6 +89,16 @@ inline void gemmKernel<float, float, float, 12, 32, CpuMathBackend::FALLBACK>(
     int64_t rs_c) {
   return sgemm12x32DefaultKernel(kc, a, b, c, rs_c);
 }
+template<>
+inline void gemmKernel<Float16, Float16, Float16, 6, 16, CpuMathBackend::FALLBACK>(
+    int64_t kc,
+    const Float16 *a,
+    const Float16 *b,
+    Float16 *c,
+    int64_t rs_c) {
+  return hgemm6x16FallbackKernel(kc, a, b, c, rs_c);
+}
+
 template<>
 inline void gemmKernel<Float16, Float16, Float16, 12, 16, CpuMathBackend::FALLBACK>(
     int64_t kc,

@@ -124,6 +124,15 @@ void sgemm12x32DefaultKernel(int64_t kc, const float *a, const float *b, float *
   return gemmFallbackKernel<float, 12, 32>(kc, a, b, c, rs_c);
 }
 
+void hgemm6x16FallbackKernel(
+    int64_t kc,
+    const Float16 *a,
+    const Float16 *b,
+    Float16 *c,
+    int64_t rs_c) {
+  return gemmFallbackKernel<Float16, 6, 16>(kc, a, b, c, rs_c);
+}
+
 void hgemm12x16FallbackKernel(
     int64_t kc,
     const Float16 *a,
