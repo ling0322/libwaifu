@@ -99,6 +99,53 @@ void sgemm6x16AsimdhpKernel(int64_t kc, const float *a, const float *b, float *c
   LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(5);
 }
 
+float sdotAsimdhpKernel(int64_t n, const float *x, const float *y) {
+  float32x4_t sum0 = vdupq_n_f32(0), sum1 = vdupq_n_f32(0);
+
+  int64_t nb = n / 8;
+  int64_t nr = n % 8;
+
+  const float *px = x;
+  const float *py = y;
+  for (int64_t i = 0; i < nb; ++i) {
+    sum0 = vfmaq_f32(sum0, vld1q_f32(px), vld1q_f32(py));
+    sum1 = vfmaq_f32(sum1, vld1q_f32(px + 4), vld1q_f32(py + 4));
+
+    px += 8;
+    py += 8;
+  }
+
+  float sum = vaddvq_f32(vaddq_f32(sum0, sum1));
+  for (int64_t i = 0; i < nr; ++i) {
+    sum += *px * *py;
+    ++px;
+    ++py;
+  }
+
+  return sum;
+}
+
+void saxpyAsimdhpKernel(int64_t n, float a, const float *x, float *y) {
+  float32x4_t a00 = vdupq_n_f32(a);
+
+  int64_t nb = n / 4;
+  int64_t nr = n % 4;
+
+  const float *px = x;
+  float *py = y;
+  for (int64_t i = 0; i < nb; ++i) {
+    vst1q_f32(py, vfmaq_f32(vld1q_f32(py), vld1q_f32(px), a00));
+    px += 4;
+    py += 4;
+  }
+
+  for (int64_t i = 0; i < nr; ++i) {
+    *py += a * *px;
+    ++px;
+    ++py;
+  }
+}
+
 /// A float activation against a half weight, accumulated in float. The weight is widened as it is
 /// loaded rather than beforehand, so the row of B is only ever read at its stored size.
 float shdotAsimdhpKernel(int64_t n, const float *x, const Float16 *y) {
@@ -237,20 +284,41 @@ Float16 hdotAsimdhpKernel(int64_t n, const Float16 *x, const Float16 *y) {
   return vget_lane_f16(vcvt_f16_f32(vsetq_lane_f32(sum0, vdupq_n_f32(0), 0)), 0);
 }
 
-#define LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(m, r, rl) \
-  c##m##0 = vfmaq_lane_f16(c##m##0, b00, ra0##r, rl);        \
-  c##m##1 = vfmaq_lane_f16(c##m##1, b01, ra0##r, rl);
-
-#define LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(m) \
-  a00 = vld1q_f16(pc);                             \
-  c##m##0 = vaddq_f16(a00, c##m##0);               \
-  vst1q_f16(pc, c##m##0);                          \
-  a00 = vld1q_f16(pc + 8);                         \
-  c##m##1 = vaddq_f16(a00, c##m##1);               \
-  vst1q_f16(pc + 8, c##m##1);                      \
+#define LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(m)  \
+  h00 = vld1q_f16(pc);                             \
+  h01 = vld1q_f16(pc + 8);                         \
+  c##m##0 = vcvt_f32_f16(vget_low_f16(h00));       \
+  c##m##1 = vcvt_f32_f16(vget_high_f16(h00));      \
+  c##m##2 = vcvt_f32_f16(vget_low_f16(h01));       \
+  c##m##3 = vcvt_f32_f16(vget_high_f16(h01));      \
   pc += rs_c;
 
-void hgemm12x16AsimdhpKernel(
+// fmlal widens as it multiplies, so b stays in half and only the four sums it lands in are
+// float. Each instruction covers four columns, which is why sixteen takes four of them.
+#define LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(m, v, lane)   \
+  c##m##0 = vfmlalq_lane_low_f16(c##m##0, b00, v, lane);        \
+  c##m##1 = vfmlalq_lane_high_f16(c##m##1, b00, v, lane);       \
+  c##m##2 = vfmlalq_lane_low_f16(c##m##2, b01, v, lane);        \
+  c##m##3 = vfmlalq_lane_high_f16(c##m##3, b01, v, lane);
+
+#define LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(m)                                \
+  vst1q_f16(pc, vcombine_f16(vcvt_f16_f32(c##m##0), vcvt_f16_f32(c##m##1)));     \
+  vst1q_f16(pc + 8, vcombine_f16(vcvt_f16_f32(c##m##2), vcvt_f16_f32(c##m##3))); \
+  pc += rs_c;
+
+/// Half in and half out, multiplied in half, summed in float.
+///
+/// Half has eleven bits of significand, so a sum of a few hundred terms stops being able to see
+/// what it is still adding: past a point the total is large enough that each new product rounds
+/// to nothing. kc reaches 512 here, and a convolution reduces over its whole filter and channel
+/// depth at once, which is exactly that regime.
+///
+/// The products stay in half -- fmlal takes half operands and widens them itself -- so nothing
+/// is given up on the multiply. What costs is the accumulator: four floats to a register where
+/// eight halves fit, so an instruction retires four sums rather than eight, and the tile that
+/// fits in the register file is half as tall. Six rows of sixteen columns is 24 accumulators;
+/// with the two b vectors and the two a lanes that is 28 of the 32.
+void hgemm6x16AsimdhpKernel(
     int64_t kc,
     const Float16 *a,
     const Float16 *b,
@@ -259,62 +327,49 @@ void hgemm12x16AsimdhpKernel(
   // a: kc x MR
   // b: kc x NR
 
-  // C: MR x NR
-  float16x8_t c00 = vdupq_n_f16(0), c01 = vdupq_n_f16(0), c10 = vdupq_n_f16(0),
-              c11 = vdupq_n_f16(0), c20 = vdupq_n_f16(0), c21 = vdupq_n_f16(0),
-              c30 = vdupq_n_f16(0), c31 = vdupq_n_f16(0), c40 = vdupq_n_f16(0),
-              c41 = vdupq_n_f16(0), c50 = vdupq_n_f16(0), c51 = vdupq_n_f16(0),
-              c60 = vdupq_n_f16(0), c61 = vdupq_n_f16(0), c70 = vdupq_n_f16(0),
-              c71 = vdupq_n_f16(0), c80 = vdupq_n_f16(0), c81 = vdupq_n_f16(0),
-              c90 = vdupq_n_f16(0), c91 = vdupq_n_f16(0), ca0 = vdupq_n_f16(0),
-              ca1 = vdupq_n_f16(0), cb0 = vdupq_n_f16(0), cb1 = vdupq_n_f16(0);
-  float16x8_t a00, b00, b01;
-  float16x4_t ra00, ra01, ra02;
+  // C: MR x NR (6 x 4 float32x4_t)
+  float32x4_t c00, c01, c02, c03, c10, c11, c12, c13, c20, c21, c22, c23, c30, c31, c32, c33,
+      c40, c41, c42, c43, c50, c51, c52, c53;
+  float16x8_t h00, h01, b00, b01;
+  float16x4_t av0, av1;
+
+  __fp16 *pc = reinterpret_cast<__fp16 *>(c);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(0);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(1);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(2);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(3);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(4);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_LdC(5);
 
   const __fp16 *pa = reinterpret_cast<const __fp16 *>(a);
   const __fp16 *pb = reinterpret_cast<const __fp16 *>(b);
-
   for (int64_t k = 0; k < kc; ++k) {
-    ra00 = vld1_f16(pa);
-    pa += 4;
-    ra01 = vld1_f16(pa);
-    pa += 4;
-    ra02 = vld1_f16(pa);
-    pa += 4;
-
     b00 = vld1q_f16(pb);
-    pb += 8;
-    b01 = vld1q_f16(pb);
-    pb += 8;
+    b01 = vld1q_f16(pb + 8);
 
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(0, 0, 0);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(1, 0, 1);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(2, 0, 2);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(3, 0, 3);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(4, 1, 0);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(5, 1, 1);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(6, 1, 2);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(7, 1, 3);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(8, 2, 0);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(9, 2, 1);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(a, 2, 2);
-    LIBWAIFU_GemmHalf12x16AsimdhpKernel_FmaBlock(b, 2, 3);
+    // Two overlapping four-lane loads rather than one of eight: the row of A is six wide, and
+    // reading eight would run off the end of the panel on the last pass.
+    av0 = vld1_f16(pa);
+    av1 = vld1_f16(pa + 2);
+
+    LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(0, av0, 0);
+    LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(1, av0, 1);
+    LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(2, av0, 2);
+    LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(3, av0, 3);
+    LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(4, av1, 2);
+    LIBWAIFU_GemmHalf6x16AsimdhpKernel_FmaRow(5, av1, 3);
+
+    pa += 6;
+    pb += 16;
   }
 
-  __fp16 *pc = reinterpret_cast<__fp16 *>(c);
-
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(0);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(1);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(2);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(3);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(4);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(5);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(6);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(7);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(8);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(9);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(a);
-  LIBWAIFU_GemmHalf12x16AsimdhpKernel_LdStC(b);
+  pc = reinterpret_cast<__fp16 *>(c);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(0);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(1);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(2);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(3);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(4);
+  LIBWAIFU_GemmHalf6x16AsimdhpKernel_StC(5);
 }
 
 #define LIBWAIFU_CvtHalfToFloatAsimdhpKernel_CvtBlock \

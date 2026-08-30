@@ -150,11 +150,10 @@ void gemmFloat(
   } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::SingleThread) {
     gemm<576, 512, 4096, 12, 32, float, CpuMathBackend::AVX512, Mode::SingleThread>(args);
 #elif LUT_CPU_ARCH == LUT_AARCH64
-  } else if (gAllowSlowKernel && backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
-    gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::FALLBACK, Mode::OMP>(args);
-  } else if (
-      gAllowSlowKernel && backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
-    gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::FALLBACK, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
+    gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
+    gemm<288, 512, 4096, 6, 16, float, CpuMathBackend::ASIMDHP, Mode::SingleThread>(args);
 #endif
   } else {
     NOT_IMPL();
@@ -192,9 +191,9 @@ void gemmHalf(
   if (false) {
 #if LUT_CPU_ARCH == LUT_AARCH64
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
-    gemm<576, 512, 4096, 12, 16, Float16, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
+    gemm<288, 512, 4096, 6, 16, Float16, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
-    gemm<576, 512, 4096, 12, 16, Float16, CpuMathBackend::ASIMDHP, Mode::SingleThread>(args);
+    gemm<288, 512, 4096, 6, 16, Float16, CpuMathBackend::ASIMDHP, Mode::SingleThread>(args);
 #endif
   } else {
     NOT_IMPL();
