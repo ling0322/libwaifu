@@ -29,6 +29,135 @@ namespace op {
 namespace cpu {
 namespace kernel {
 
+#define LIBWAIFU_GemmFloat6x16AsimdhpKernel_LdC(m) \
+  c##m##0 = vld1q_f32(pc);                         \
+  c##m##1 = vld1q_f32(pc + 4);                     \
+  c##m##2 = vld1q_f32(pc + 8);                     \
+  c##m##3 = vld1q_f32(pc + 12);                    \
+  pc += rs_c;
+
+#define LIBWAIFU_GemmFloat6x16AsimdhpKernel_FmaRow(m)  \
+  a00 = vdupq_n_f32(pa[m]);                            \
+  c##m##0 = vfmaq_f32(c##m##0, a00, b00);              \
+  c##m##1 = vfmaq_f32(c##m##1, a00, b01);              \
+  c##m##2 = vfmaq_f32(c##m##2, a00, b02);              \
+  c##m##3 = vfmaq_f32(c##m##3, a00, b03);
+
+#define LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(m) \
+  vst1q_f32(pc, c##m##0);                          \
+  vst1q_f32(pc + 4, c##m##1);                      \
+  vst1q_f32(pc + 8, c##m##2);                      \
+  vst1q_f32(pc + 12, c##m##3);                     \
+  pc += rs_c;
+
+/// The float counterpart of hgemm12x16: 6 rows of 16 columns, which is 24 accumulators of four
+/// floats. With the four b vectors and the broadcast a that is 29 of the 32 vector registers,
+/// so nothing spills. 12 rows would not fit, which is why this is 6 wide where the half kernel
+/// is 12.
+void sgemm6x16AsimdhpKernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c) {
+  // a: kc x MR
+  // b: kc x NR
+
+  // C: MR x NR (6 x 4 float32x4_t)
+  float32x4_t c00, c01, c02, c03, c10, c11, c12, c13, c20, c21, c22, c23, c30, c31, c32, c33,
+      c40, c41, c42, c43, c50, c51, c52, c53;
+  float32x4_t a00, b00, b01, b02, b03;
+
+  float *pc = c;
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_LdC(0);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_LdC(1);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_LdC(2);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_LdC(3);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_LdC(4);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_LdC(5);
+
+  const float *pa = a;
+  const float *pb = b;
+  for (int64_t k = 0; k < kc; ++k) {
+    b00 = vld1q_f32(pb);
+    b01 = vld1q_f32(pb + 4);
+    b02 = vld1q_f32(pb + 8);
+    b03 = vld1q_f32(pb + 12);
+
+    LIBWAIFU_GemmFloat6x16AsimdhpKernel_FmaRow(0);
+    LIBWAIFU_GemmFloat6x16AsimdhpKernel_FmaRow(1);
+    LIBWAIFU_GemmFloat6x16AsimdhpKernel_FmaRow(2);
+    LIBWAIFU_GemmFloat6x16AsimdhpKernel_FmaRow(3);
+    LIBWAIFU_GemmFloat6x16AsimdhpKernel_FmaRow(4);
+    LIBWAIFU_GemmFloat6x16AsimdhpKernel_FmaRow(5);
+
+    pa += 6;
+    pb += 16;
+  }
+
+  pc = c;
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(0);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(1);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(2);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(3);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(4);
+  LIBWAIFU_GemmFloat6x16AsimdhpKernel_StC(5);
+}
+
+/// A float activation against a half weight, accumulated in float. The weight is widened as it is
+/// loaded rather than beforehand, so the row of B is only ever read at its stored size.
+float shdotAsimdhpKernel(int64_t n, const float *x, const Float16 *y) {
+  float32x4_t sum0 = vdupq_n_f32(0), sum1 = vdupq_n_f32(0);
+  float16x8_t y00;
+
+  int64_t nb = n / 8;
+  int64_t nr = n % 8;
+
+  const float *px = x;
+  const __fp16 *py = reinterpret_cast<const __fp16 *>(y);
+  for (int64_t i = 0; i < nb; ++i) {
+    y00 = vld1q_f16(py);
+    sum0 = vfmaq_f32(sum0, vld1q_f32(px), vcvt_f32_f16(vget_low_f16(y00)));
+    sum1 = vfmaq_f32(sum1, vld1q_f32(px + 4), vcvt_f32_f16(vget_high_f16(y00)));
+
+    px += 8;
+    py += 8;
+  }
+
+  float sum = vaddvq_f32(vaddq_f32(sum0, sum1));
+  for (int64_t i = 0; i < nr; ++i) {
+    sum += *px * static_cast<float>(*py);
+    ++px;
+    ++py;
+  }
+
+  return sum;
+}
+
+/// As hsaxpyAsimdhpKernel, but the scalar arrives in float and stays there. Rounding it to half
+/// first would throw away precision the caller has, for nothing.
+void hsaxpyFloatAsimdhpKernel(int64_t n, float a, const Float16 *x, float *y) {
+  float32x4_t a00 = vdupq_n_f32(a);
+  float32x4_t x00, y00;
+
+  int64_t nb = n / 4;
+  int64_t nr = n % 4;
+
+  const __fp16 *px = reinterpret_cast<const __fp16 *>(x);
+  float *py = y;
+  for (int64_t i = 0; i < nb; ++i) {
+    x00 = vcvt_f32_f16(vld1_f16(px));
+    y00 = vld1q_f32(py);
+
+    y00 = vfmaq_f32(y00, x00, a00);
+    vst1q_f32(py, y00);
+
+    px += 4;
+    py += 4;
+  }
+
+  for (int64_t i = 0; i < nr; ++i) {
+    *py += a * static_cast<float>(*px);
+    ++px;
+    ++py;
+  }
+}
+
 void hsaxpyAsimdhpKernel(int64_t n, Float16 a, const Float16 *x, float *y) {
   float32x4_t a00 = vcvt_f32_f16(vld1_dup_f16(reinterpret_cast<__fp16 *>(&a)));
   float32x4_t x00, y00;

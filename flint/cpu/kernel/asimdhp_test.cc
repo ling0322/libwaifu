@@ -104,6 +104,42 @@ CATCH_TEST_CASE("test hdotAsimdhpKernel", "[cpu_kernel][kernel][asimdhp]") {
   tester.test(20000);
 }
 
+CATCH_TEST_CASE("test sgemm6x16AsimdhpKernel", "[cpu_kernel][kernel][asimdhp]") {
+  GemmMicroKernelTester<float, float, float, 6, 16, CpuMathBackend::ASIMDHP> tester;
+  tester.test(1);
+  tester.test(8);
+  tester.test(17);
+  tester.test(64);
+  tester.test(100);
+  tester.test(256);
+  tester.test(500);
+  tester.test(2047);
+  tester.test(2048);
+}
+
+CATCH_TEST_CASE("test shdotAsimdhpKernel", "[cpu_kernel][kernel][asimdhp]") {
+  DotKernelTester<float, float, Float16, CpuMathBackend::ASIMDHP> tester;
+  tester.test(1);
+  tester.test(8);
+  tester.test(16);
+  tester.test(17);
+  tester.test(128);
+  tester.test(160);
+  tester.test(1500);
+  tester.test(2001);
+  tester.test(20000);
+}
+
+CATCH_TEST_CASE("test hsaxpyFloatAsimdhpKernel", "[cpu_kernel][kernel][asimdhp]") {
+  AxpyKernelTester<float, Float16, float, CpuMathBackend::ASIMDHP> tester;
+  tester.test(1);
+  tester.test(8);
+  tester.test(16);
+  tester.test(17);
+  tester.test(128);
+  tester.test(2001);
+}
+
 }  // namespace kernel
 }  // namespace cpu
 }  // namespace op

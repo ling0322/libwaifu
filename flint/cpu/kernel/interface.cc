@@ -239,6 +239,12 @@ void gemmHalfWeightFloat(
     wgemm<576, 512, 4096, 12, 32, float, Float16, CpuMathBackend::AVX512, Mode::OMP>(args);
   } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::SingleThread) {
     wgemm<576, 512, 4096, 12, 32, float, Float16, CpuMathBackend::AVX512, Mode::SingleThread>(args);
+#elif LUT_CPU_ARCH == LUT_AARCH64
+  } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
+    wgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
+    wgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::ASIMDHP, Mode::SingleThread>(
+        args);
 #endif
   } else {
     NOT_IMPL();

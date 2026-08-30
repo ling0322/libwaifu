@@ -44,6 +44,8 @@ float sdotFallbackKernel(int64_t n, const float *x, const float *y);
 Float16 hdotFallbackKernel(int64_t n, const Float16 *x, const Float16 *y);
 void haxpyFallbackKernel(int64_t n, Float16 a, const Float16 *x, float *y);
 void saxpyFallbackKernel(int64_t n, float a, const float *x, float *y);
+float shdotFallbackKernel(int64_t n, const float *x, const Float16 *y);
+void hsaxpyFloatFallbackKernel(int64_t n, float a, const Float16 *x, float *y);
 
 template<>
 inline void cvtKernel<Float16, float, CpuMathBackend::FALLBACK>(
@@ -125,6 +127,25 @@ inline void axpyKernel<Float16, Float16, float, CpuMathBackend::FALLBACK>(
     int64_t offsetX,
     float *y) {
   return haxpyFallbackKernel(n, a, x + offsetX, y);
+}
+
+template<>
+inline float dotKernel<float, float, Float16, CpuMathBackend::FALLBACK>(
+    int64_t n,
+    const float *x,
+    const Float16 *y,
+    int64_t offsetY) {
+  return shdotFallbackKernel(n, x, y + offsetY);
+}
+
+template<>
+inline void axpyKernel<float, Float16, float, CpuMathBackend::FALLBACK>(
+    int64_t n,
+    float a,
+    const Float16 *x,
+    int64_t offsetX,
+    float *y) {
+  return hsaxpyFloatFallbackKernel(n, a, x + offsetX, y);
 }
 
 }  // namespace kernel
