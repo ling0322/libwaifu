@@ -93,6 +93,9 @@ class CPUOperators : public Operators {
   Tensor rand(lut::Span<const int> shape, DType dtype) override;
   void repetitionPenalty(Tensor logits, Tensor history, float weight) override;
   Tensor rmsNorm(Tensor input, Tensor weight, float eps) override;
+  Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) override;
+  Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) override;
+  Tensor upsampleNearest2d(Tensor input, int scale) override;
   Tensor sample(Tensor logits, Tensor temperatures, Tensor topKs, Tensor topPs) override;
   Tensor softmax(Tensor input) override;
   Tensor sum(Tensor inputs, int dim) override;

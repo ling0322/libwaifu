@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 //
-// Copyright (c) 2024 Xiaoyang Chen
+// Copyright (c) 2026 Xiaoyang Chen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 // and associated documentation files (the "Software"), to deal in the Software without
@@ -25,17 +25,12 @@ namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor rmsNorm(Tensor tensor, Tensor weight, float eps);
-
-/// @brief Normalize over the last dimension, subtracting the mean as well as dividing by the
-///        spread. `weight` and `bias` are one value per position and either may be empty.
-/// @param tensor <float>(..., hiddenSize), or <float16> where the CPU has it natively.
-Tensor layerNorm(Tensor tensor, Tensor weight, Tensor bias, float eps);
-
-/// @brief Normalize each image's group of channels over the channels and the space they cover,
-///        which is what a diffusion model normalizes with.
-/// @param tensor <float>(N, C, H, W), contiguous. `weight` and `bias` are one value per channel.
-Tensor groupNorm(Tensor tensor, Tensor weight, Tensor bias, int groups, float eps);
+/// @brief Repeat each pixel `scale` times along both spatial axes. No interpolation: each output
+///        pixel is a copy of one input pixel, which is what a diffusion U-Net and its decoder ask
+///        for before the convolution that follows.
+/// @param input <float>(N, C, H, W), contiguous, or <float16> where the CPU has it natively.
+/// @return the same type, (N, C, H * scale, W * scale).
+Tensor upsampleNearest2d(const Tensor &input, int scale);
 
 }  // namespace cpu
 }  // namespace op

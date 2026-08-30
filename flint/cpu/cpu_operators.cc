@@ -40,6 +40,7 @@
 #include "flint/cpu/lookup.h"
 #include "flint/cpu/matmul.h"
 #include "flint/cpu/normalizations.h"
+#include "flint/cpu/upsample.h"
 #include "flint/cpu/print.h"
 #include "flint/cpu/rand.h"
 #include "flint/cpu/reduce.h"
@@ -413,6 +414,18 @@ Tensor CPUOperators::rmsNorm(Tensor input, Tensor weight, float eps) {
   CHECK(input.getDType() == weight.getDType());
 
   return cpu::rmsNorm(input, weight, eps);
+}
+
+Tensor CPUOperators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
+  return cpu::layerNorm(input, weight, bias, eps);
+}
+
+Tensor CPUOperators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
+  return cpu::groupNorm(input, weight, bias, groups, eps);
+}
+
+Tensor CPUOperators::upsampleNearest2d(Tensor input, int scale) {
+  return cpu::upsampleNearest2d(input, scale);
 }
 
 Tensor CPUOperators::causalMask(int max_len) {
