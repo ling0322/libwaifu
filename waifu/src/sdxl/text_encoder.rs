@@ -163,7 +163,7 @@ impl ClipTextEncoder {
                 config.vocab_size,
                 &vb.with_name("token_embd"),
             )?,
-            position_embedding: vb.get(
+            position_embedding: vb.get_widened(
                 "position_embd.weight",
                 &[config.context_length, config.hidden_size],
             )?,

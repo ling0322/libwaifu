@@ -23,7 +23,7 @@
 //! layer to the weights stored for it, and each checks the shape of what it reads so that a
 //! mismatched model package is caught while it loads rather than part way through a forward pass.
 
-use crate::flint::{functional as F, Tensor};
+use crate::flint::{functional as F, DType, Tensor};
 
 use crate::error::{Error, Result};
 use crate::var_builder::VarBuilder;
@@ -63,6 +63,8 @@ impl LayerNorm {
 #[derive(Debug)]
 pub struct Embedding {
     weight: Tensor,
+    /// What the rows are handed back as, which is not what the table is held as.
+    dtype: DType,
 }
 
 impl Embedding {
@@ -71,6 +73,7 @@ impl Embedding {
     pub fn build(d_model: i32, vocab_size: i32, vb: &VarBuilder) -> Result<Embedding> {
         Ok(Embedding {
             weight: vb.get(Self::WEIGHT, &[vocab_size, d_model])?,
+            dtype: vb.float_type(),
         })
     }
 
@@ -83,7 +86,11 @@ impl Embedding {
             )));
         }
 
-        Ok(F::lookup(&self.weight, input)?)
+        // A lookup copies rows out of the table, so what comes back is whatever the table is
+        // held as -- half, on a machine that stores its weights that way. The layer converts,
+        // rather than the operator: the table is the large thing and stays where it is, and this
+        // is a handful of rows.
+        Ok(F::lookup(&self.weight, input)?.cast(self.dtype)?)
     }
 }
 

@@ -85,9 +85,12 @@ a step, and the model takes what it does on disk -- 6.96 GB.
 It took 13.74 GB, and 19.46 during the load, until the weights were left at the precision the
 file holds them in. x64 has no half arithmetic, so they used to be widened as they were read,
 which is the doubling; and `VarBuilder` holds the file's copy while the model builds its own, so
-both were live at once, which is the rest. A weight is now handed over as it was stored and the
-kernels take it there: `gemmHalfWeightFloat` was already written and only needed reaching, and
-the convolution, the lookup and the elementwise operators learned the mixed pair.
+both were live at once, which is the rest. A weight is now handed over as it was stored, and only
+two operators learned to take a mixed pair: the matrix multiply, where `gemmHalfWeightFloat` was
+already written and only needed reaching, and the convolution, which uses the same kernel. Those
+are the two where widening would cost something, because there the narrow operand is the weight.
+Everywhere else the layer converts -- an embedding widens the rows that came out of the table
+rather than the table -- so the operators still take one type at a time.
 
 It bought no speed -- 151.8 s against 150 -- which says this workload is bound by arithmetic
 rather than by memory at 32 threads, and it cost no accuracy, since the arithmetic was float32

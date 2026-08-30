@@ -23,7 +23,6 @@
 
 #include "lutil/attributes.h"
 #include "flint/cpu/accessor.h"
-#include "flint/cpu/cast.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/tensor.h"
 #include "flint/tensor.h"
@@ -73,18 +72,6 @@ Tensor binaryOpKernel(const Tensor &A, const Tensor &B, BinaryOp op) {
 
 // apply C <- BinaryOp(A, B)
 Tensor binaryOp(const Tensor &A, const Tensor &B, BinaryOp op) {
-  // A float tensor against a half one, which is what a model held at the file's precision hands
-  // over: what flows between the layers is float and a parameter stored as half stays that way.
-  //
-  // The half side is widened into a copy rather than element by element, because on x64 `Float16`
-  // is a pair of bytes with no arithmetic on it and the only converter here works on runs. The
-  // copy is of the parameter and not of the activation, and a parameter that reaches this
-  // operator is small by construction: the large ones are weights, and a weight goes to the
-  // matrix multiply or the convolution, both of which take a half operand without widening it.
-  if (A.getDType() == DType::kFloat && B.getDType() == DType::kFloat16) {
-    return binaryOpKernel<float>(A, cast(B, DType::kFloat), op);
-  }
-
   if (A.getDType() == DType::kFloat) return binaryOpKernel<float>(A, B, op);
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16) return binaryOpKernel<Float16>(A, B, op);

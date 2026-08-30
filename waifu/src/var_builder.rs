@@ -112,6 +112,21 @@ impl VarBuilder {
         child
     }
 
+    /// The same, in this builder's float type whatever the file held it as.
+    ///
+    /// [`VarBuilder::get`] leaves a matrix as it was stored, since a model is mostly matrices and
+    /// widening them is what doubles it. That is the wrong answer for a parameter small enough
+    /// not to matter and awkward enough to leave narrow -- a position embedding is added to what
+    /// comes out of the token table, and an addition would rather have two of the same thing.
+    pub fn get_widened(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
+        let tensor = self.get(name, shape)?;
+        if tensor.dtype() == DType::Float || tensor.dtype() == DType::Float16 {
+            Ok(tensor.cast(self.float_type)?)
+        } else {
+            Ok(tensor)
+        }
+    }
+
     /// The tensor called `name` here, checked against the shape the caller expects.
     pub fn get(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
         let tensor = self.get_unchecked(name)?;
