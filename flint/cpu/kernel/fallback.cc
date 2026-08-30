@@ -46,6 +46,23 @@ void saxpyFallbackKernel(int64_t n, float a, const float *x, float *y) {
   }
 }
 
+/// A float vector against a half one, accumulated in float. This is the reference the AVX2,
+/// AVX512 and ASIMDHP versions are held to; it exists so those have something to be compared
+/// against, since a half weight against a float activation has no other plain implementation.
+float shdotFallbackKernel(int64_t n, const float *x, const Float16 *y) {
+  float sum = 0.0f;
+  for (int64_t i = 0; i < n; ++i) {
+    sum += x[i] * cvtf<float>(y[i]);
+  }
+  return sum;
+}
+
+void hsaxpyFloatFallbackKernel(int64_t n, float a, const Float16 *x, float *y) {
+  for (int64_t i = 0; i < n; ++i) {
+    y[i] += a * cvtf<float>(x[i]);
+  }
+}
+
 float sdotFallbackKernel(int64_t n, const float *x, const float *y) {
   float sum = 0;
   for (int64_t i = 0; i < n; ++i) {

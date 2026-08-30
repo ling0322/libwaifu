@@ -39,6 +39,9 @@ void hgemm12x16AsimdhpKernel(
     int64_t rs_c);
 Float16 hdotAsimdhpKernel(int64_t n, const Float16 *x, const Float16 *y);
 void hsaxpyAsimdhpKernel(int64_t n, Float16 a, const Float16 *x, float *y);
+void sgemm6x16AsimdhpKernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c);
+float shdotAsimdhpKernel(int64_t n, const float *x, const Float16 *y);
+void hsaxpyFloatAsimdhpKernel(int64_t n, float a, const Float16 *x, float *y);
 
 template<>
 inline void cvtKernel<Float16, float, CpuMathBackend::ASIMDHP>(
@@ -85,6 +88,37 @@ inline void axpyKernel<Float16, Float16, float, CpuMathBackend::ASIMDHP>(
     int64_t offsetX,
     float *y) {
   return hsaxpyAsimdhpKernel(n, a, x + offsetX, y);
+}
+
+/// What a half weight against a float activation needs: the float microkernel the packed blocks
+/// run through, and the two vector primitives the M == 1 shortcut takes instead.
+template<>
+inline void gemmKernel<float, float, float, 6, 16, CpuMathBackend::ASIMDHP>(
+    int64_t kc,
+    const float *a,
+    const float *b,
+    float *c,
+    int64_t rs_c) {
+  return sgemm6x16AsimdhpKernel(kc, a, b, c, rs_c);
+}
+
+template<>
+inline float dotKernel<float, float, Float16, CpuMathBackend::ASIMDHP>(
+    int64_t n,
+    const float *x,
+    const Float16 *y,
+    int64_t offsetY) {
+  return shdotAsimdhpKernel(n, x, y + offsetY);
+}
+
+template<>
+inline void axpyKernel<float, Float16, float, CpuMathBackend::ASIMDHP>(
+    int64_t n,
+    float a,
+    const Float16 *x,
+    int64_t offsetX,
+    float *y) {
+  return hsaxpyFloatAsimdhpKernel(n, a, x + offsetX, y);
 }
 
 }  // namespace kernel
