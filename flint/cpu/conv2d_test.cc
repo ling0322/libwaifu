@@ -232,6 +232,60 @@ CATCH_TEST_CASE("test conv2d on the CPU (half weight)", "[core][nn][operators]")
   }
 }
 
+#if LUT_CPU_ARCH == LUT_AARCH64
+CATCH_TEST_CASE("test conv2d on the CPU (half throughout)", "[core][nn][operators]") {
+  // Half is the default float type on this architecture, so this is the path the U-Net takes.
+  // The reference is the longhand convolution in float, and the tolerance is what half can hold
+  // rather than what the kernel can: the GEMM sums in float, so what is left is the rounding of
+  // the inputs and of the result.
+  struct Case {
+    Shape4 in;
+    Shape4 filter;
+    Options options;
+  };
+
+  const Case cases[] = {
+      {{2, 8, 7, 5}, {4, 8, 3, 3}, {1, 1, 1, 1}},
+      {{1, 8, 8, 8}, {16, 8, 3, 3}, {2, 1, 1, 1}},
+      {{2, 8, 7, 5}, {4, 8, 1, 1}, {1, 0, 1, 1}},
+      {{2, 8, 6, 6}, {8, 4, 3, 3}, {1, 1, 1, 2}},
+      {{1, 64, 40, 40}, {32, 64, 3, 3}, {1, 1, 1, 1}},
+  };
+
+  for (const Case &c : cases) {
+    std::vector<float> x = spread(c.in.n * c.in.c * c.in.h * c.in.w, 3);
+    std::vector<float> w = spread(c.filter.n * c.filter.c * c.filter.h * c.filter.w, 5);
+    std::vector<float> b = spread(c.filter.n, 7);
+
+    Shape4 out{};
+    std::vector<float> expected = reference(x, c.in, w, c.filter, &b, c.options, out);
+
+    Tensor xT = F::cast(
+        Tensor::create<float>({c.in.n, c.in.c, c.in.h, c.in.w}, lut::makeConstSpan(x)),
+        DType::kFloat16);
+    Tensor wT = F::cast(
+        Tensor::create<float>(
+            {c.filter.n, c.filter.c, c.filter.h, c.filter.w},
+            lut::makeConstSpan(w)),
+        DType::kFloat16);
+    Tensor bT =
+        F::cast(Tensor::create<float>({c.filter.n}, lut::makeConstSpan(b)), DType::kFloat16);
+
+    Tensor actual = F::conv2d(
+        xT, wT, bT, c.options.stride, c.options.padding, c.options.dilation, c.options.groups);
+
+    CATCH_REQUIRE(actual.getDType() == DType::kFloat16);
+    CATCH_REQUIRE(actual.getShape() == std::vector<int>{out.n, out.c, out.h, out.w});
+    CATCH_REQUIRE(
+        F::allClose(
+            F::cast(actual, DType::kFloat),
+            Tensor::create<float>({out.n, out.c, out.h, out.w}, lut::makeConstSpan(expected)),
+            5e-3f,
+            5e-3f));
+  }
+}
+#endif  // LUT_CPU_ARCH == LUT_AARCH64
+
 }  // namespace cpu
 }  // namespace op
 }  // namespace fl

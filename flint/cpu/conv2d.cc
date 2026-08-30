@@ -33,6 +33,7 @@
 #include "flint/cpu/conv2d.h"
 
 #include <algorithm>
+#include <type_traits>
 #include <vector>
 
 #include "lutil/error.h"
@@ -109,37 +110,40 @@ void im2col(
   }
 }
 
-/// A float activation against a weight of either type.
+/// An activation in T against a weight in T, or a float activation against a half weight.
 ///
 /// The mixed micro-kernel takes its float operand first and its half one second, and a convolution
 /// wants the weight first, so that case is computed as its transpose -- `(count, filters)` from
 /// `col' * weight'` -- which is what puts `col` in the slot the kernel keeps for a float. The
 /// block that comes back is then read down its columns rather than along its rows on the way into
-/// the image, which is a strided read of something small enough to stay in cache.
+/// the image, which is a strided read of something small enough to stay in cache. The two matched
+/// cases have no such trouble and are computed the way they read.
+template<typename T>
 Tensor conv2dImpl(
     const Tensor &input,
     const Tensor &weight,
     const Tensor &bias,
     const Problem &p) {
-  bool halfWeight = weight.getDType() == DType::kFloat16;
+  // Only a float activation is ever handed a weight of the other type.
+  bool halfWeight = std::is_same<T, float>::value && weight.getDType() == DType::kFloat16;
   Tensor output = tensor({p.batch, p.outChannels, p.outH, p.outW}, input.getDType());
 
-  const float *in = input.getInternalData()->getData<float>(input.getInternalOffset());
+  const T *in = input.getInternalData()->getData<T>(input.getInternalOffset());
   const void *w = halfWeight
                       ? static_cast<const void *>(
                             weight.getInternalData()->getData<Float16>(weight.getInternalOffset()))
                       : static_cast<const void *>(
-                            weight.getInternalData()->getData<float>(weight.getInternalOffset()));
-  float *out = output.getInternalData()->getData<float>(output.getInternalOffset());
-  const float *biasData =
-      bias.empty() ? nullptr : bias.getInternalData()->getData<float>(bias.getInternalOffset());
+                            weight.getInternalData()->getData<T>(weight.getInternalOffset()));
+  T *out = output.getInternalData()->getData<T>(output.getInternalOffset());
+  const T *biasData =
+      bias.empty() ? nullptr : bias.getInternalData()->getData<T>(bias.getInternalOffset());
 
   int channelsPerGroup = p.inChannels / p.groups;
   int filtersPerGroup = p.outChannels / p.groups;
   int64_t columnHeight = static_cast<int64_t>(channelsPerGroup) * p.filterH * p.filterW;
   int64_t outSpatial = static_cast<int64_t>(p.outH) * p.outW;
 
-  int blockPixels = static_cast<int>(kBlockBytes / (columnHeight * sizeof(float)));
+  int blockPixels = static_cast<int>(kBlockBytes / (columnHeight * sizeof(T)));
   blockPixels = std::max(kMinBlockPixels, blockPixels);
   blockPixels = static_cast<int>(std::min<int64_t>(blockPixels, outSpatial));
 
@@ -150,8 +154,8 @@ Tensor conv2dImpl(
   {
     // One buffer per thread rather than per block: the shapes do not change between blocks, and
     // this is the allocation that would otherwise happen thousands of times an image.
-    std::vector<float> col(columnHeight * blockPixels);
-    std::vector<float> product(static_cast<int64_t>(filtersPerGroup) * blockPixels);
+    std::vector<T> col(columnHeight * blockPixels);
+    std::vector<T> product(static_cast<int64_t>(filtersPerGroup) * blockPixels);
 
 #pragma omp for schedule(dynamic, 1)
     for (int64_t block = 0; block < totalBlocks; ++block) {
@@ -163,9 +167,9 @@ Tensor conv2dImpl(
       int first = static_cast<int>(within * blockPixels);
       int count = static_cast<int>(std::min<int64_t>(blockPixels, outSpatial - first));
 
-      const float *imageData =
+      const T *imageData =
           in + static_cast<int64_t>(image) * p.inChannels * p.inH * p.inW;
-      im2col<float>(
+      im2col<T>(
           imageData,
           p,
           group * channelsPerGroup,
@@ -178,37 +182,53 @@ Tensor conv2dImpl(
       // zeroed C for exactly this reason -- and this buffer is reused for every block the thread
       // takes, so it has to start at zero each time.
       std::fill(product.begin(), product.begin() + static_cast<int64_t>(filtersPerGroup) * count,
-                0.0f);
+                T(0.0f));
 
       // (filters, columnHeight) by (columnHeight, count). The weight of one group is already
       // contiguous, so it is read where it lies rather than gathered.
 int64_t groupOffset = static_cast<int64_t>(group) * filtersPerGroup * columnHeight;
-      if (halfWeight) {
-        kernel::gemmHalfWeightFloat(
-            true,
-            true,
-            count,
-            filtersPerGroup,
-            static_cast<int>(columnHeight),
-            col.data(),
-            count,
-            reinterpret_cast<const kernel::Float16 *>(w) + groupOffset,
-            static_cast<int>(columnHeight),
-            product.data(),
-            filtersPerGroup,
-            kernel::Mode::SingleThread);
+      if constexpr (std::is_same<T, float>::value) {
+        if (halfWeight) {
+          kernel::gemmHalfWeightFloat(
+              true,
+              true,
+              count,
+              filtersPerGroup,
+              static_cast<int>(columnHeight),
+              reinterpret_cast<const float *>(col.data()),
+              count,
+              reinterpret_cast<const kernel::Float16 *>(w) + groupOffset,
+              static_cast<int>(columnHeight),
+              reinterpret_cast<float *>(product.data()),
+              filtersPerGroup,
+              kernel::Mode::SingleThread);
+        } else {
+          kernel::gemmFloat(
+              false,
+              false,
+              filtersPerGroup,
+              count,
+              static_cast<int>(columnHeight),
+              static_cast<const float *>(w) + groupOffset,
+              static_cast<int>(columnHeight),
+              reinterpret_cast<const float *>(col.data()),
+              count,
+              reinterpret_cast<float *>(product.data()),
+              count,
+              kernel::Mode::SingleThread);
+        }
       } else {
-        kernel::gemmFloat(
+        kernel::gemmHalf(
             false,
             false,
             filtersPerGroup,
             count,
             static_cast<int>(columnHeight),
-            static_cast<const float *>(w) + groupOffset,
+            static_cast<const kernel::Float16 *>(w) + groupOffset,
             static_cast<int>(columnHeight),
-            col.data(),
+            reinterpret_cast<const kernel::Float16 *>(col.data()),
             count,
-            product.data(),
+            reinterpret_cast<kernel::Float16 *>(product.data()),
             count,
             kernel::Mode::SingleThread);
       }
@@ -217,14 +237,14 @@ int64_t groupOffset = static_cast<int64_t>(group) * filtersPerGroup * columnHeig
       // each row lands at its own offset rather than the whole block being one run.
       for (int f = 0; f < filtersPerGroup; ++f) {
         int channel = group * filtersPerGroup + f;
-        float *destination =
+        T *destination =
             out + (static_cast<int64_t>(image) * p.outChannels + channel) * outSpatial + first;
-        const float *source = product.data() + static_cast<int64_t>(f) * count;
+        const T *source = product.data() + static_cast<int64_t>(f) * count;
 
-        float b = biasData ? biasData[channel] : 0.0f;
+        T b = biasData ? biasData[channel] : T(0.0f);
         if (halfWeight) {
           // The block is (count, filters) there, so this filter's values are a column of it.
-          const float *column = product.data() + f;
+          const T *column = product.data() + f;
           for (int i = 0; i < count; ++i) destination[i] = column[i * filtersPerGroup] + b;
         } else if (biasData) {
           for (int i = 0; i < count; ++i) destination[i] = source[i] + b;
@@ -304,7 +324,12 @@ Tensor conv2d(
     THROW(InvalidArg, "conv2d: the input is smaller than the kernel reaches");
   }
 
-  if (input.getDType() == DType::kFloat) return conv2dImpl(input, weight, bias, p);
+  if (input.getDType() == DType::kFloat) return conv2dImpl<float>(input, weight, bias, p);
+#if LUT_CPU_ARCH == LUT_AARCH64
+  // Half throughout, which is what the default float type is on this architecture. The GEMM sums
+  // in float, so the reduction over the filter and the channel depth is no worse for it.
+  if (input.getDType() == DType::kFloat16) return conv2dImpl<Float16>(input, weight, bias, p);
+#endif
 
   NOT_IMPL();
 }
