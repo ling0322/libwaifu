@@ -110,8 +110,24 @@ a float32 reference lands at 1.28e-4, which leaves room for a threshold two orde
 the model code it exercises -- the U-Net, the sampler, the assembly -- is the same code either
 device runs. Only a CUDA kernel's own mistake could hide from it.
 
-Neither test is written that way yet. The CUDA one asserts 3e-2, chosen by hand, and there is no
-CPU denoising test at all; four steps at 256 by 256 costs 16 s there, which is affordable for one.
+Both are written that way now. The CUDA one is held to torch's own half precision gap rather than
+to a number chosen by hand, and there is a CPU denoising test beside it at 1e-3.
+
+What the difference is worth, measured by putting a fault in and seeing which one notices. The
+sampler's step was multiplied by a constant slightly over one, which is the shape of mistake this
+is meant to catch -- small enough to leave the picture looking fine:
+
+```
+  step error      CUDA (bar 2.87e-2)      CPU (bar 1e-3)
+  none            2.10e-2   passes        9.1e-5   passes
+  0.02%           2.12e-2   passes        6.8e-4   passes
+  0.10%           2.24e-2   passes        3.4e-3   FAILS
+  0.50%           2.96e-2   FAILS         1.65e-2  FAILS
+```
+
+So the CPU test catches a fault five times smaller, which is the ratio the baselines already
+implied: the CUDA one starts 2.1e-2 from its reference and a fault has to grow past that before
+it shows, while the CPU one starts at 9.1e-5 and has nothing to hide behind.
 
 ## Operators worth adding next
 

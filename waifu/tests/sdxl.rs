@@ -34,6 +34,23 @@ const STEPS: i32 = 4;
 const GUIDANCE: f32 = 5.0;
 const SIZE: i32 = 256;
 
+/// How far torch's own half precision run lands from its float32 one, on this very case:
+/// measured at 2.87e-2 by running `StableDiffusionXLPipeline` twice, once at each precision, with
+/// TF32 turned off so that the float32 side really is float32.
+///
+/// This is the bar rather than a number chosen by hand. The reference is float32 and this runs in
+/// half, so most of the distance between them is what half costs and not what the implementation
+/// does; the question a test can answer is whether we are further from float32 than the reference
+/// implementation is at the same precision. Comparing against a half reference instead would not
+/// help: ours is 2.80e-2 from torch's half, which is as far as torch's half is from its own
+/// float32, so at that precision the kernels' own differences are already the size of the
+/// rounding. `docs/TODO.md` has the table.
+const TORCH_HALF_GAP: f32 = 2.87e-2;
+
+/// What the same walk costs in float32 against a float32 reference, which is what the CPU runs.
+/// It measured 9.1e-5, so this leaves an order of magnitude and is the sensitive test of the two.
+const FLOAT32_TOLERANCE: f32 = 1e-3;
+
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
 }
@@ -166,8 +183,44 @@ fn denoising_matches_the_reference_pipeline() {
         &denoised,
         &cases.get_unchecked("test_case.denoised").unwrap(),
     );
-    println!("denoise rmse = {rmse}");
-    assert!(rmse < 3e-2, "four steps drifted by {rmse}");
+    println!("denoise rmse = {rmse} (torch's own half precision is {TORCH_HALF_GAP} from float32)");
+    assert!(
+        rmse < TORCH_HALF_GAP,
+        "four steps drifted by {rmse}, which is further from float32 than torch's own half \
+         precision run gets ({TORCH_HALF_GAP})"
+    );
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn denoising_on_the_cpu_matches_the_reference_pipeline() {
+    // The same walk on the host, which is the sensitive version of the test above. The CPU is in
+    // float32 throughout on x64 -- it has no half kernels -- and the reference was made in
+    // float32, so the two are doing the same arithmetic and what is left is the implementation.
+    // That is 9.1e-5 against the 2.1e-2 the CUDA run lives with, which is what makes this the one
+    // that would catch a mistake in the model rather than in the precision.
+    //
+    // It is the same model code either way: the U-Net, the sampler and the assembly do not know
+    // which device they are on, so only a CUDA kernel's own mistake can hide from this.
+    let cases = cases();
+    let package = ZipFile::open(models_dir().join("sdxl-base.waifupkg")).unwrap();
+    let model = Sdxl::from_package(Device::Cpu, &package).unwrap();
+
+    let latent = cases.get_unchecked("test_case.latent").unwrap();
+    let prompt = model.encode_prompt(PROMPT).unwrap();
+    let negative = model.encode_prompt("").unwrap();
+
+    let denoised = model
+        .denoise(&latent, &prompt, &negative, &options())
+        .unwrap();
+    assert_eq!(denoised.shape(), latent.shape());
+
+    let rmse = relative_rmse(
+        &denoised,
+        &cases.get_unchecked("test_case.denoised").unwrap(),
+    );
+    println!("cpu denoise rmse = {rmse}");
+    assert!(rmse < FLOAT32_TOLERANCE, "four steps drifted by {rmse}");
 }
 
 #[test]
