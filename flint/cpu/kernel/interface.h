@@ -37,7 +37,7 @@ struct Float16 {
 #endif
 
 enum class Mode { OMP, SingleThread };
-enum class CpuMathBackend { DEFAULT, AVX2, AVX512, ASIMDHP, FALLBACK, UNKNOWN };
+enum class CpuMathBackend { DEFAULT, AVX2, AVX512, ASIMDHP, ASIMDFHM, FALLBACK, UNKNOWN };
 
 void init();
 void destroy();

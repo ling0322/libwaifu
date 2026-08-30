@@ -185,6 +185,35 @@ CATCH_TEST_CASE("test hgemm", "[cpu_kernel][interface][hgemm]") {
   }
 }
 
+/// The two aarch64 half kernels are picked between at startup, so only one of them runs on any
+/// given machine. Asking for each by name is what says the other one is still right.
+CATCH_TEST_CASE("test hgemm agrees between asimdhp and asimdfhm", "[cpu_kernel][interface][hgemm]") {
+  for (int (*pshape)[3] = &gemmTestShapes[0]; **pshape != 0; ++pshape) {
+    int m = (*pshape)[0];
+    int k = (*pshape)[1];
+    int n = (*pshape)[2];
+
+    std::vector<Float16> A(m * k);
+    std::vector<Float16> B(k * n);
+    std::vector<Float16> Chp(m * n);
+    std::vector<Float16> Cfhm(m * n);
+
+    lut::Random random(MagicNumber);
+    fillRandom(&random, lut::makeSpan<Float16>(A));
+    fillRandom(&random, lut::makeSpan<Float16>(B));
+
+    gemmHalf(
+        false, true, m, n, k, A.data(), k, B.data(), k, Chp.data(), n, Mode::OMP,
+        CpuMathBackend::ASIMDHP);
+    gemmHalf(
+        false, true, m, n, k, A.data(), k, B.data(), k, Cfhm.data(), n, Mode::OMP,
+        CpuMathBackend::ASIMDFHM);
+
+    CATCH_INFO("shape (" << m << ", " << k << ", " << n << ")");
+    CATCH_REQUIRE(isClose<Float16>(Chp, Cfhm, 1e-2, 1e-2));
+  }
+}
+
 #endif  // LUT_ARCH_AARCH64
 
 }  // namespace kernel
