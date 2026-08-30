@@ -44,11 +44,13 @@ endif()
 
 add_library(lutil STATIC ${lutil_SOURCES})
 set_target_properties(lutil PROPERTIES CXX_VISIBILITY_PRESET hidden)
-target_include_directories(lutil PRIVATE
-    ".."
-    ${LIBDWARF_INCLUDE_DIR}
-    "${UNWIND_ROOT}/build/include"
-    "${UNWIND_ROOT}/include")
+target_include_directories(lutil PRIVATE ".." ${LIBDWARF_INCLUDE_DIR})
+if(NOT APPLE)
+    # On macOS <libunwind.h> comes from the SDK; everywhere else from the vendored build.
+    target_include_directories(lutil PRIVATE
+        "${UNWIND_ROOT}/build/include"
+        "${UNWIND_ROOT}/include")
+endif()
 
 add_library(lutil_test OBJECT ${lut_test_SOURCES})
 target_include_directories(lutil_test PRIVATE "..")

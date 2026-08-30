@@ -16,6 +16,34 @@ option(WITH_FLASH_ATTN "Link the prebuilt FlashAttention forward kernels." ${WIT
 option(CUDA_ARCH_NATIVE "Build CUDA kernels only for the GPUs in this machine." OFF)
 option(MKL_PREFIX "Prefix for MKL headers and libraries." "/opt/intel/mkl")
 
+# AppleClang implements the OpenMP pragmas but ships neither omp.h nor a runtime, so
+# FindOpenMP always comes up empty here. Point it at Homebrew's libomp, and at the static
+# archive specifically: a binary that needs a Homebrew dylib beside it is not one you can
+# hand to anybody else.
+if(APPLE AND WITH_OPENMP AND NOT DEFINED OpenMP_CXX_FLAGS)
+    if(NOT LIBOMP_ROOT)
+        find_program(BREW_EXECUTABLE brew)
+        if(BREW_EXECUTABLE)
+            execute_process(COMMAND "${BREW_EXECUTABLE}" --prefix libomp
+                            OUTPUT_VARIABLE LIBOMP_ROOT
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET)
+        endif()
+    endif()
+    if(EXISTS "${LIBOMP_ROOT}/lib/libomp.a")
+        set(OpenMP_C_FLAGS "-Xclang -fopenmp -I${LIBOMP_ROOT}/include")
+        set(OpenMP_CXX_FLAGS "-Xclang -fopenmp -I${LIBOMP_ROOT}/include")
+        set(OpenMP_C_LIB_NAMES omp)
+        set(OpenMP_CXX_LIB_NAMES omp)
+        set(OpenMP_omp_LIBRARY "${LIBOMP_ROOT}/lib/libomp.a")
+    else()
+        message(FATAL_ERROR
+          "WITH_OPENMP=ON needs libomp on macOS: run 'brew install libomp', or point "
+          "LIBOMP_ROOT at a prefix that has lib/libomp.a, or configure with "
+          "-DWITH_OPENMP=OFF.")
+    endif()
+endif()
+
 find_package(OpenMP)
 
 set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
@@ -119,24 +147,28 @@ if(UNIX)
 endif(UNIX)
 
 
+# printStackTrace() is the only thing that wants libunwind. macOS already ships one in
+# libSystem, and its header covers the handful of unw_* calls that code makes, so there is
+# nothing to find and nothing to link there. Everywhere else it comes from the vendored
+# NonGNU build -- which is ELF-only and cannot be built on Darwin at all, hence the split.
 set(UNWIND_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libunwind/libunwind-1.6.2")
 set(UNWIND_ARCH_LIB_NAME "")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-  set(UNWIND_ARCH_LIB_NAME unwind-x86_64)
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-  set(UNWIND_ARCH_LIB_NAME unwind-aarch64)
-else()
-  message(FATAL_ERROR "Unknown arch '${CMAKE_SYSTEM_PROCESSOR}', will try generic libunwind only.")
+if(NOT APPLE)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    set(UNWIND_ARCH_LIB_NAME unwind-x86_64)
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(UNWIND_ARCH_LIB_NAME unwind-aarch64)
+  else()
+    message(FATAL_ERROR "Unknown arch '${CMAKE_SYSTEM_PROCESSOR}', will try generic libunwind only.")
+  endif()
+  find_library(UNWIND_LIB NAMES libunwind.a REQUIRED PATHS "${UNWIND_ROOT}/build/src/.libs/"
+               NO_DEFAULT_PATH)
+  find_library(UNWIND_ARCH_LIB NAMES lib${UNWIND_ARCH_LIB_NAME}.a REQUIRED PATHS "${UNWIND_ROOT}/build/src/.libs/"
+               NO_DEFAULT_PATH)
+
+  message("UNWIND_LIB=" ${UNWIND_LIB})
+  message("UNWIND_ARCH_LIB=" ${UNWIND_ARCH_LIB})
 endif()
-find_library(UNWIND_LIB NAMES libunwind.a REQUIRED PATHS "${UNWIND_ROOT}/build/src/.libs/"
-             NO_DEFAULT_PATH)
-find_library(UNWIND_ARCH_LIB NAMES lib${UNWIND_ARCH_LIB_NAME}.a REQUIRED PATHS "${UNWIND_ROOT}/build/src/.libs/"
-             NO_DEFAULT_PATH)
-
-
-
-message("UNWIND_LIB=" ${UNWIND_LIB})
-message("UNWIND_ARCH_LIB=" ${UNWIND_ARCH_LIB})
 
 message("CMAKE_HOST_SYSTEM_PROCESSOR=" ${CMAKE_HOST_SYSTEM_PROCESSOR})
 
@@ -200,13 +232,17 @@ add_library(flint STATIC $<TARGET_OBJECTS:flint_static> $<TARGET_OBJECTS:lutil>)
 # A static archive carries no record of what it still needs, and Cargo cannot read CMake's
 # dependency graph, so write the rest of the link line out as cargo directives for the flint
 # crate's build script to echo. Order matters: dependents come before what they depend on.
-get_filename_component(flint_UNWIND_DIR "${UNWIND_LIB}" DIRECTORY)
 set(flint_CARGO_FLAGS
     "cargo:rustc-link-search=native=${CMAKE_BINARY_DIR}"
-    "cargo:rustc-link-lib=static=flint"
-    "cargo:rustc-link-search=native=${flint_UNWIND_DIR}"
-    "cargo:rustc-link-lib=static=${UNWIND_ARCH_LIB_NAME}"
-    "cargo:rustc-link-lib=static=unwind")
+    "cargo:rustc-link-lib=static=flint")
+
+if(NOT APPLE)
+    get_filename_component(flint_UNWIND_DIR "${UNWIND_LIB}" DIRECTORY)
+    list(APPEND flint_CARGO_FLAGS
+        "cargo:rustc-link-search=native=${flint_UNWIND_DIR}"
+        "cargo:rustc-link-lib=static=${UNWIND_ARCH_LIB_NAME}"
+        "cargo:rustc-link-lib=static=unwind")
+endif()
 
 if(WITH_FLASH_ATTN)
     get_filename_component(flint_FLASH_ATTN_DIR "${FLASH_ATTN_LIB}" DIRECTORY)
@@ -224,17 +260,30 @@ if(WITH_CUDA)
 endif()
 
 if(WITH_OPENMP)
-    foreach(flint_OMP_LIB ${OpenMP_CXX_LIB_NAMES})
-        list(APPEND flint_CARGO_FLAGS "cargo:rustc-link-lib=dylib=${flint_OMP_LIB}")
-    endforeach()
+    if(APPLE)
+        # Static, so the binary carries its own OpenMP runtime rather than depending on a
+        # Homebrew dylib that only exists on the machine that built it.
+        list(APPEND flint_CARGO_FLAGS
+            "cargo:rustc-link-search=native=${LIBOMP_ROOT}/lib"
+            "cargo:rustc-link-lib=static=omp")
+    else()
+        foreach(flint_OMP_LIB ${OpenMP_CXX_LIB_NAMES})
+            list(APPEND flint_CARGO_FLAGS "cargo:rustc-link-lib=dylib=${flint_OMP_LIB}")
+        endforeach()
+    endif()
 endif()
 
 # The C++ runtime last: everything above draws on it.
-list(APPEND flint_CARGO_FLAGS
-    "cargo:rustc-link-lib=dylib=stdc++"
-    "cargo:rustc-link-lib=dylib=dl"
-    "cargo:rustc-link-lib=dylib=rt"
-    "cargo:rustc-link-lib=dylib=m")
+if(APPLE)
+    # libSystem already provides dl, rt and m, and the C++ runtime here is libc++.
+    list(APPEND flint_CARGO_FLAGS "cargo:rustc-link-lib=dylib=c++")
+else()
+    list(APPEND flint_CARGO_FLAGS
+        "cargo:rustc-link-lib=dylib=stdc++"
+        "cargo:rustc-link-lib=dylib=dl"
+        "cargo:rustc-link-lib=dylib=rt"
+        "cargo:rustc-link-lib=dylib=m")
+endif()
 
 string(REPLACE ";" "\n" flint_CARGO_FLAGS_TEXT "${flint_CARGO_FLAGS}")
 file(GENERATE

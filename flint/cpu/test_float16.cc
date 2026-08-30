@@ -68,9 +68,9 @@ CATCH_TEST_CASE("test CPU fp16 matmul operators", "[op][cpu][float16]") {
   auto runCase = [](std::initializer_list<int> shapeA, std::initializer_list<int> shapeB) {
     Tensor a = F::rand(shapeA, DType::kFloat);
     Tensor b = F::rand(shapeB, DType::kFloat);
-    Tensor xr = F::matmul(a, b.slice(-1, {8, 32}).transpose(-1, -2));
+    Tensor xr = F::matmul(a, b.slice(-1, {8, 28}).transpose(-1, -2));
 
-    Tensor y = toFp16(b).slice(-1, {8, 32}).transpose(-1, -2);
+    Tensor y = toFp16(b).slice(-1, {8, 28}).transpose(-1, -2);
     Tensor x = F::matmul(toFp16(a), y);
 
     return F::allClose(toFp32(x), xr, 5e-2);
