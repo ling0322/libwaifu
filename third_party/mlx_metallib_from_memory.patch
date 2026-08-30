@@ -1,0 +1,107 @@
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index 2f25f89..d220de6 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -3,6 +3,8 @@
+ #include <cstdlib>
+ #include <sstream>
+ 
++#include <dispatch/dispatch.h>
++
+ #include <fmt/format.h>
+ 
+ #define NS_PRIVATE_IMPLEMENTATION
+@@ -192,7 +194,38 @@ std::pair<MTL::Library*, NS::Error*> load_swiftpm_library(
+   return {nullptr, nullptr};
+ }
+ 
++// An embedded metallib wins over every on-disk lookup: a binary that carries
++// its own kernels should never silently pick up a stray copy from the disk.
++MTL::Library* load_embedded_library(MTL::Device* device) {
++  auto [data, size] = get_metallib_data();
++  if (data == nullptr) {
++    return nullptr;
++  }
++
++  // A non-null destructor is what makes this a borrow rather than a copy: the
++  // default one tells libdispatch to duplicate the whole buffer, and an
++  // embedded metallib is far too big to want a second copy of. The buffer
++  // outlives the process, so the destructor has nothing to do.
++  auto owned = dispatch_data_create(data, size, nullptr, ^{
++                                    });
++  NS::Error* error;
++  auto lib = device->newLibrary(owned, &error);
++  dispatch_release(owned);
++
++  if (!lib) {
++    throw std::runtime_error(
++        fmt::format(
++            "Can not load the embedded metallib: {}.",
++            error->localizedDescription()->utf8String()));
++  }
++  return lib;
++}
++
+ MTL::Library* load_default_library(MTL::Device* device) {
++  if (auto lib = load_embedded_library(device); lib) {
++    return lib;
++  }
++
+   // Check override path before automatic lookup
+   if (!get_metallib_path().empty()) {
+     auto [lib, error] =
+diff --git a/mlx/backend/metal/metal.cpp b/mlx/backend/metal/metal.cpp
+index e95b6f0..8244949 100644
+--- a/mlx/backend/metal/metal.cpp
++++ b/mlx/backend/metal/metal.cpp
+@@ -10,6 +10,8 @@ namespace mlx::core::metal {
+ namespace {
+ 
+ std::string g_metallib_path;
++const void* g_metallib_data = nullptr;
++size_t g_metallib_size = 0;
+ 
+ } // namespace
+ 
+@@ -60,4 +62,13 @@ const std::string& get_metallib_path() {
+   return g_metallib_path;
+ }
+ 
++void set_metallib_data(const void* data, size_t size) {
++  g_metallib_data = data;
++  g_metallib_size = size;
++}
++
++std::pair<const void*, size_t> get_metallib_data() {
++  return {g_metallib_data, g_metallib_size};
++}
++
+ } // namespace mlx::core::metal
+diff --git a/mlx/backend/metal/metal.h b/mlx/backend/metal/metal.h
+index d686c29..48af841 100644
+--- a/mlx/backend/metal/metal.h
++++ b/mlx/backend/metal/metal.h
+@@ -2,8 +2,10 @@
+ 
+ #pragma once
+ 
++#include <cstddef>
+ #include <string>
+ #include <unordered_map>
++#include <utility>
+ #include <variant>
+ 
+ #include "mlx/api.h"
+@@ -27,4 +29,12 @@ MLX_API const
+ MLX_API void set_metallib_path(const std::string& path);
+ MLX_API const std::string& get_metallib_path();
+ 
++/* Set an in-memory mlx.metallib, for binaries that embed it rather than ship
++ * it alongside. `data` is borrowed, not copied: it must stay valid and
++ * unchanged for the lifetime of the process. Takes precedence over the path
++ * set by set_metallib_path. Must be called before any MLX operation.
++ */
++MLX_API void set_metallib_data(const void* data, size_t size);
++MLX_API std::pair<const void*, size_t> get_metallib_data();
++
+ } // namespace mlx::core::metal
