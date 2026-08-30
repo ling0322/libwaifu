@@ -66,50 +66,52 @@ that with 36 bytes of spill stores and 92 of spill loads, which is the worse tra
 applied. Nothing measures D=32: the benchmarks are all at the Qwen3.5 head dimension, and it is
 reached only by the tests. Whether the lost CTA costs anything there is unmeasured.
 
-## Raise or remove the llama test's token cap
+## ~~Operators the CPU backend still does not implement~~ (the ones a model needs, 2026-08-30)
 
-`waifu/tests/llama.rs` skips reference cases longer than `MAX_TOKENS_PER_CASE`, which currently
-means the 1271-token case never runs. That case took ~100s of the ~117s the test spent, and it
-is the only one that spans more than one paged-attention block, so the cap trades away real
-coverage for speed.
+SDXL runs on the CPU now, end to end: the two text encoders, the U-Net, the sampler and the
+autoencoder. `layerNorm`, `groupNorm`, `upsampleNearest2d` and `conv2d` were what stood in the
+way, and each is checked against its definition written out in the test rather than against the
+CUDA kernel.
 
-The cost is not the forward pass — it is comparing every position's logits, `num_tokens * 128256`
-floats against two reference tensors of ~650MB each. Sampling a subset of positions instead
-would keep the long-sequence coverage without the bill.
+Four operators are still declared on `Operators` and still abort on the CPU -- `rotaryEmbedding`,
+`pagedAttention`, `storeKVCache` and `matmulNarrowPrecision`. All four are the language model's,
+and the language model was deleted; nothing reachable calls them on either device. They are dead
+declarations rather than missing implementations, and the thing to do with them is probably to
+take them out.
 
-The constant's doc comment carries the same note next to the code.
+What the CPU costs, on a 32 thread machine: 512 by 512 at 20 steps is 2m30s, 256 by 256 is 4.0 s
+a step, and the model takes 13.74 GB rather than 6.97 because x64 has no half kernels -- the
+weights are widened to float32 as they are read. On arm64 `DefaultFloatType` is already Float16
+and asimdhp has the kernels, so neither of those applies there.
 
-## `llama.rs` says it is `#[ignore]`d but is not
+## The CUDA tests cannot be tightened, and the CPU ones can
 
-The module comment in `waifu/tests/llama.rs` reads:
+Measured on the reference denoising case, four steps at 256 by 256, relative RMSE:
 
 ```
-//! CUDA, so this is `#[ignore]`d: run it with `cargo test --test llama -- --ignored`
+                        vs torch fp32    vs torch fp16
+  torch fp16               2.87e-2          0
+  ours, CUDA (fp16)        2.10e-2          2.80e-2
+  ours, CPU (float32)      1.28e-4          2.87e-2
 ```
 
-Neither test in the file actually carries `#[ignore]`, so both run under a plain `cargo test` and
-both need the model packages under `models/`, which are not in the repository. Either restore the
-attribute or correct the comment — right now a checkout without those packages fails the default
-test run for a reason the comment says should not apply.
+The first column says the 2.1e-2 the CUDA test lives with is the price of half precision and not
+a fault in the implementation: torch's own fp16 is further from its fp32 than we are.
 
-## Operators the CPU backend still does not implement
+The second column is the one that settles how to test. Our fp16 is as far from torch's fp16 as
+torch's fp16 is from float32 -- at that precision the kernels' own differences, the accumulation
+order and the attention blocking, are already the size of the rounding. So generating a second
+reference in fp16 would buy nothing: its threshold would have to be 3e-2 as well. It would also
+not be reproducible, since it depends on which kernels torch picked on the machine that made it.
 
-Found while filling in the element-wise operators. Each of these is declared on `Operators`, is
-reachable through `flint/functional.h`, and aborts with `NOT_IMPL()` when the tensor is on the CPU,
-because `CPUOperators` does not override it and the base method has no fallback:
+So the CUDA test can only ever be a loose bound, and the right one to hold it to is torch's own
+fp16 gap rather than a number chosen by hand. The sensitive test is the CPU one: float32 against
+a float32 reference lands at 1.28e-4, which leaves room for a threshold two orders tighter, and
+the model code it exercises -- the U-Net, the sampler, the assembly -- is the same code either
+device runs. Only a CUDA kernel's own mistake could hide from it.
 
-- `rotaryEmbedding`
-- `pagedAttention`
-- `storeKVCache`
-- `matmulNarrowPrecision` (the mxfp4 path)
-
-These are the paged-KV-cache and quantised kernels, so unlike the ones already filled in they need
-real CPU implementations rather than a few lines of glue. `attention` is not on the list: it has a
-working default on `Operators` built out of matmul and softmax, so the CPU gets it for free.
-
-Nothing in the Rust runtime hits these on CPU today — the model runs on CUDA — so this only matters
-for running a model on CPU, or for testing a CUDA kernel against a CPU reference the way the
-element-wise tests now do.
+Neither test is written that way yet. The CUDA one asserts 3e-2, chosen by hand, and there is no
+CPU denoising test at all; four steps at 256 by 256 costs 16 s there, which is affordable for one.
 
 ## Operators worth adding next
 

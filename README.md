@@ -172,6 +172,12 @@ Requirements:
 
 ### CPU build
 
+A CPU build draws too, which it did not until the convolution and the two normalizations were
+written for it. On a 32 thread machine 512 by 512 at 20 steps takes two and a half minutes, and
+the model wants 13.7 GB rather than the 6.97 GB it is on disk: x64 has no half kernels, so the
+weights are widened to float32 as they are read. That is also why it is the more accurate of the
+two -- float32 throughout, against a float32 reference, is 1.3e-4 where the half path is 2.1e-2.
+
 ```bash
 cmake -S . -B build -DWITH_CUDA=OFF
 cmake --build build --parallel
