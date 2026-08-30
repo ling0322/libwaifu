@@ -109,15 +109,27 @@ void im2col(
   }
 }
 
-Tensor conv2dFloat(
+/// A float activation against a weight of either type.
+///
+/// The mixed micro-kernel takes its float operand first and its half one second, and a convolution
+/// wants the weight first, so that case is computed as its transpose -- `(count, filters)` from
+/// `col' * weight'` -- which is what puts `col` in the slot the kernel keeps for a float. The
+/// block that comes back is then read down its columns rather than along its rows on the way into
+/// the image, which is a strided read of something small enough to stay in cache.
+Tensor conv2dImpl(
     const Tensor &input,
     const Tensor &weight,
     const Tensor &bias,
     const Problem &p) {
+  bool halfWeight = weight.getDType() == DType::kFloat16;
   Tensor output = tensor({p.batch, p.outChannels, p.outH, p.outW}, input.getDType());
 
   const float *in = input.getInternalData()->getData<float>(input.getInternalOffset());
-  const float *w = weight.getInternalData()->getData<float>(weight.getInternalOffset());
+  const void *w = halfWeight
+                      ? static_cast<const void *>(
+                            weight.getInternalData()->getData<Float16>(weight.getInternalOffset()))
+                      : static_cast<const void *>(
+                            weight.getInternalData()->getData<float>(weight.getInternalOffset()));
   float *out = output.getInternalData()->getData<float>(output.getInternalOffset());
   const float *biasData =
       bias.empty() ? nullptr : bias.getInternalData()->getData<float>(bias.getInternalOffset());
@@ -170,23 +182,36 @@ Tensor conv2dFloat(
 
       // (filters, columnHeight) by (columnHeight, count). The weight of one group is already
       // contiguous, so it is read where it lies rather than gathered.
-      kernel::gemmFloat(
-          false,
-          false,
-          filtersPerGroup,
-          count,
-          static_cast<int>(columnHeight),
-          w + static_cast<int64_t>(group) * filtersPerGroup * columnHeight,
-          static_cast<int>(columnHeight),
-          col.data(),
-          count,
-          product.data(),
-          count,
-          // Single threaded on purpose: the loop around this is already spread over the threads,
-          // one block each. The GEMM will thread itself if asked, and asking here would nest one
-          // parallel region inside another -- which OpenMP turns off by default, so it would
-          // happen to behave, for a reason nothing in this file controls.
-          kernel::Mode::SingleThread);
+int64_t groupOffset = static_cast<int64_t>(group) * filtersPerGroup * columnHeight;
+      if (halfWeight) {
+        kernel::gemmHalfWeightFloat(
+            true,
+            true,
+            count,
+            filtersPerGroup,
+            static_cast<int>(columnHeight),
+            col.data(),
+            count,
+            reinterpret_cast<const kernel::Float16 *>(w) + groupOffset,
+            static_cast<int>(columnHeight),
+            product.data(),
+            filtersPerGroup,
+            kernel::Mode::SingleThread);
+      } else {
+        kernel::gemmFloat(
+            false,
+            false,
+            filtersPerGroup,
+            count,
+            static_cast<int>(columnHeight),
+            static_cast<const float *>(w) + groupOffset,
+            static_cast<int>(columnHeight),
+            col.data(),
+            count,
+            product.data(),
+            count,
+            kernel::Mode::SingleThread);
+      }
 
       // The product is (filters, count) and the output row it belongs in is outSpatial long, so
       // each row lands at its own offset rather than the whole block being one run.
@@ -196,8 +221,12 @@ Tensor conv2dFloat(
             out + (static_cast<int64_t>(image) * p.outChannels + channel) * outSpatial + first;
         const float *source = product.data() + static_cast<int64_t>(f) * count;
 
-        if (biasData) {
-          float b = biasData[channel];
+        float b = biasData ? biasData[channel] : 0.0f;
+        if (halfWeight) {
+          // The block is (count, filters) there, so this filter's values are a column of it.
+          const float *column = product.data() + f;
+          for (int i = 0; i < count; ++i) destination[i] = column[i * filtersPerGroup] + b;
+        } else if (biasData) {
           for (int i = 0; i < count; ++i) destination[i] = source[i] + b;
         } else {
           std::copy(source, source + count, destination);
@@ -221,7 +250,9 @@ Tensor conv2d(
     int groups) {
   if (input.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D input, as (N, C, H, W)");
   if (weight.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D weight, as (K, C, R, S)");
-  if (input.getDType() != weight.getDType()) {
+  // A float activation may be multiplied by a half weight, which is how a model is held here.
+  if (input.getDType() != weight.getDType() &&
+      !(input.getDType() == DType::kFloat && weight.getDType() == DType::kFloat16)) {
     THROW(InvalidArg, "conv2d: the input and the weight are of different types");
   }
   if (groups < 1) THROW(InvalidArg, "conv2d: the group count is below one");
@@ -273,7 +304,7 @@ Tensor conv2d(
     THROW(InvalidArg, "conv2d: the input is smaller than the kernel reaches");
   }
 
-  if (input.getDType() == DType::kFloat) return conv2dFloat(input, weight, bias, p);
+  if (input.getDType() == DType::kFloat) return conv2dImpl(input, weight, bias, p);
 
   NOT_IMPL();
 }

@@ -187,6 +187,51 @@ CATCH_TEST_CASE("test conv2d on the CPU (a shape it cannot take)", "[core][nn][o
   CATCH_REQUIRE_THROWS(F::conv2d(x, w, F::rand({4}, DType::kFloat), 1, 1, 1, 1));
 }
 
+CATCH_TEST_CASE("test conv2d on the CPU (half weight)", "[core][nn][operators]") {
+  // A float activation against a half weight, which is how a model is held on the host: x64 has
+  // no half arithmetic, so widening the weights as they are read would double the model. The
+  // micro-kernel converts the weight as it packs it and the arithmetic is the float32 it would
+  // have been either way, so what this compares is the two kernels rather than the rounding --
+  // both are given the same weight, one holding it as half and one as that half widened again.
+  struct Case {
+    Shape4 in;
+    Shape4 filter;
+    Options options;
+  };
+
+  const Case cases[] = {
+      {{2, 8, 7, 5}, {4, 8, 3, 3}, {1, 1, 1, 1}},
+      {{1, 8, 8, 8}, {16, 8, 3, 3}, {2, 1, 1, 1}},
+      {{2, 8, 7, 5}, {4, 8, 1, 1}, {1, 0, 1, 1}},
+      {{2, 8, 6, 6}, {8, 4, 3, 3}, {1, 1, 1, 2}},
+      {{1, 64, 40, 40}, {32, 64, 3, 3}, {1, 1, 1, 1}},
+  };
+
+  for (const Case &c : cases) {
+    std::vector<float> x = spread(c.in.n * c.in.c * c.in.h * c.in.w, 3);
+    std::vector<float> w = spread(c.filter.n * c.filter.c * c.filter.h * c.filter.w, 5);
+    std::vector<float> b = spread(c.filter.n, 7);
+
+    Tensor xT = Tensor::create<float>({c.in.n, c.in.c, c.in.h, c.in.w}, lut::makeConstSpan(x));
+    Tensor wT = Tensor::create<float>(
+        {c.filter.n, c.filter.c, c.filter.h, c.filter.w},
+        lut::makeConstSpan(w));
+    Tensor bT = Tensor::create<float>({c.filter.n}, lut::makeConstSpan(b));
+
+    Tensor half = F::cast(wT, DType::kFloat16);
+    Tensor widened = F::cast(half, DType::kFloat);
+
+    Tensor expected = F::conv2d(
+        xT, widened, bT, c.options.stride, c.options.padding, c.options.dilation, c.options.groups);
+    Tensor actual = F::conv2d(
+        xT, half, bT, c.options.stride, c.options.padding, c.options.dilation, c.options.groups);
+
+    CATCH_REQUIRE(actual.getShape() == expected.getShape());
+    CATCH_REQUIRE(actual.getDType() == DType::kFloat);
+    CATCH_REQUIRE(F::allClose(actual, expected, 1e-5f));
+  }
+}
+
 }  // namespace cpu
 }  // namespace op
 }  // namespace fl

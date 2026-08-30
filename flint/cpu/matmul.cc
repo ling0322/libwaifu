@@ -176,6 +176,54 @@ Tensor gemm(const Tensor &A, const Tensor &B) {
   return C;
 }
 
+/// A float activation against a half weight, which is how a model is held on the CPU: the weight
+/// is left as the file stored it and only what flows between the layers is widened.
+///
+/// x64 has no half arithmetic to speak of, so the alternative is widening the weights as they are
+/// read, which doubles the model -- 13.74 GB against 6.97 for SDXL. The micro-kernel converts the
+/// weight as it packs it, so nothing is widened in memory and the arithmetic is the float32 it
+/// would have been anyway.
+Tensor gemmHalfWeight(const Tensor &A, const Tensor &B) {
+  CHECK(A.getDim() == 2 && B.getDim() == 2);
+  CHECK(A.getDType() == DType::kFloat && B.getDType() == DType::kFloat16);
+
+  Tensor C = op::cpu::zeros({A.getShape(0), B.getShape(1)}, DType::kFloat);
+
+  GEMMArgs gemmArgs = generateGemmArgs(A, B, C);
+  kernel::gemmHalfWeightFloat(
+      gemmArgs.transA,
+      gemmArgs.transB,
+      gemmArgs.M,
+      gemmArgs.N,
+      gemmArgs.K,
+      getDataPtrCpu<float>(A),
+      gemmArgs.lda,
+      reinterpret_cast<const kernel::Float16 *>(getDataPtrCpu<Float16>(B)),
+      gemmArgs.ldb,
+      getDataPtrCpu<float>(C),
+      gemmArgs.ldc,
+      kernel::Mode::OMP);
+
+  return C;
+}
+
+/// The same for an activation of any rank against a two dimensional weight, which is what a
+/// linear layer hands over: everything but the last axis is one long batch of rows.
+Tensor matmulHalfWeight(const Tensor &A, const Tensor &B) {
+  if (A.getDim() == 2) return gemmHalfWeight(A, B);
+
+  if (A.getDim() > 2 && B.getDim() == 2 && A.isContiguous()) {
+    std::vector<int> shape = A.getShape();
+    Tensor xC = gemmHalfWeight(A.view({-1, A.getShape(-1)}), B);
+    shape.back() = B.getShape(1);
+    return xC.view(shape);
+  }
+
+  // Two batched operands are two activations -- attention's scores by its values -- and neither
+  // of those is a weight, so there is nothing here for a half one to be.
+  NOT_IMPL();
+}
+
 template<typename T>
 Tensor bmmNx2(const Tensor &A, const Tensor &B) {
   std::vector<int> shape = A.getShape();
@@ -250,6 +298,7 @@ Tensor matmul(const Tensor &A, const Tensor &B) {
   DType typeB = B.getDType();
 
   if (typeA == DType::kFloat && typeB == DType::kFloat) return matmulFloat<float>(A, B);
+  if (typeA == DType::kFloat && typeB == DType::kFloat16) return matmulHalfWeight(A, B);
 
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (typeA == DType::kFloat16 && typeB == DType::kFloat16) return matmulFloat<Float16>(A, B);

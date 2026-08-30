@@ -80,9 +80,18 @@ declarations rather than missing implementations, and the thing to do with them 
 take them out.
 
 What the CPU costs, on a 32 thread machine: 512 by 512 at 20 steps is 2m30s, 256 by 256 is 4.0 s
-a step, and the model takes 13.74 GB rather than 6.97 because x64 has no half kernels -- the
-weights are widened to float32 as they are read. On arm64 `DefaultFloatType` is already Float16
-and asimdhp has the kernels, so neither of those applies there.
+a step, and the model takes what it does on disk -- 6.96 GB.
+
+It took 13.74 GB, and 19.46 during the load, until the weights were left at the precision the
+file holds them in. x64 has no half arithmetic, so they used to be widened as they were read,
+which is the doubling; and `VarBuilder` holds the file's copy while the model builds its own, so
+both were live at once, which is the rest. A weight is now handed over as it was stored and the
+kernels take it there: `gemmHalfWeightFloat` was already written and only needed reaching, and
+the convolution, the lookup and the elementwise operators learned the mixed pair.
+
+It bought no speed -- 151.8 s against 150 -- which says this workload is bound by arithmetic
+rather than by memory at 32 threads, and it cost no accuracy, since the arithmetic was float32
+either way and the widened copy was only ever a copy.
 
 ## The CUDA tests cannot be tightened, and the CPU ones can
 

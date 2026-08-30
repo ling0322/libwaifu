@@ -135,10 +135,27 @@ impl VarBuilder {
             .ok_or_else(|| Error::model(format!("tensor {full_name:?} not found in model")))?;
 
         let tensor = tensor.to_device(self.device)?;
-        if tensor.dtype() == DType::Float || tensor.dtype() == DType::Float16 {
-            Ok(tensor.cast(self.float_type)?)
-        } else {
+        if tensor.dtype() != DType::Float && tensor.dtype() != DType::Float16 {
+            return Ok(tensor);
+        }
+
+        // A matrix or a convolution kernel is left as the file stored it; everything else is
+        // widened to what this builder was asked for.
+        //
+        // The two are not the same kind of thing. A rank of two or more is a weight, and weights
+        // are the model: 6.964 GB of SDXL's 6.969, over 803 tensors. The rest is a bias or a
+        // norm's scale, one value per channel, 1340 of them and 5 MB between them.
+        //
+        // So the weights stay where they are and the small things widen. On a device whose float
+        // type is already the file's this changes nothing; on one whose is not -- x64, which has
+        // no half arithmetic and would otherwise read a 6.97 GB model as 13.74 -- it is the
+        // difference between holding the model once and holding it twice. What multiplies them
+        // takes a half weight against a float activation and converts as it packs, so the
+        // arithmetic is the same either way.
+        if tensor.dim()? >= 2 {
             Ok(tensor)
+        } else {
+            Ok(tensor.cast(self.float_type)?)
         }
     }
 

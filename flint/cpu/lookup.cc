@@ -105,12 +105,71 @@ Tensor lookupQuantizedKernel2D(const Tensor &table, const Tensor &indices) {
   return xC;
 }
 
+/// A half table read into a float result, which is how a model is held on a machine with no half
+/// arithmetic: the table is a weight and stays as the file wrote it, and what comes out of it
+/// flows on as float like everything else. One row at a time, widened as it is copied.
+template<int DIM>
+Tensor lookupHalfTable(const Tensor &table, const Tensor &indices);
+
+template<>
+Tensor lookupHalfTable<1>(const Tensor &table, const Tensor &indices) {
+  int vocabSize = table.getShape(0);
+  int embdDim = table.getShape(1);
+  int d0 = indices.getShape(0);
+
+  Tensor xC = tensor(lut::makeConstSpan({d0, embdDim}), DType::kFloat);
+  TensorAccessor<const Float16, 2> A = table;
+  TensorAccessor<const LongType, 1> B = indices;
+  TensorAccessor<float, 2> C = xC;
+
+  for (int i = 0; i < d0; ++i) {
+    int64_t index = B[i];
+    CHECK(index < vocabSize) << "indices out of range";
+    kernel::convertHalfToFloat(
+        embdDim,
+        reinterpret_cast<const kernel::Float16 *>(A[index].getData()),
+        C[i].getData(),
+        kernel::Mode::OMP);
+  }
+
+  return xC;
+}
+
+template<>
+Tensor lookupHalfTable<2>(const Tensor &table, const Tensor &indices) {
+  int vocabSize = table.getShape(0);
+  int embdDim = table.getShape(1);
+  int d0 = indices.getShape(0);
+  int d1 = indices.getShape(1);
+
+  Tensor xC = tensor(lut::makeConstSpan({d0, d1, embdDim}), DType::kFloat);
+  TensorAccessor<const Float16, 2> A = table;
+  TensorAccessor<const LongType, 2> B = indices;
+  TensorAccessor<float, 3> C = xC;
+
+  for (int i = 0; i < d0; ++i) {
+    for (int j = 0; j < d1; ++j) {
+      int64_t index = B[i][j];
+      CHECK(index < vocabSize) << "indices out of range";
+      kernel::convertHalfToFloat(
+          embdDim,
+          reinterpret_cast<const kernel::Float16 *>(A[index].getData()),
+          C[i][j].getData(),
+          kernel::Mode::OMP);
+    }
+  }
+
+  return xC;
+}
+
 Tensor lookup(const Tensor &table, const Tensor &indices) {
   // a packed batch of ids is 1D, one embedding row comes out per id.
   if (indices.getDim() == 1) {
     if (table.getDType() == DType::kFloat) return lookupKernel1D<float>(table, indices);
 #if LUT_CPU_ARCH == LUT_AARCH64
     if (table.getDType() == DType::kFloat16) return lookupKernel1D<Float16>(table, indices);
+#else
+    if (table.getDType() == DType::kFloat16) return lookupHalfTable<1>(table, indices);
 #endif
     NOT_IMPL();
   }
@@ -118,6 +177,8 @@ Tensor lookup(const Tensor &table, const Tensor &indices) {
   if (table.getDType() == DType::kFloat) return lookupKernel2D<float>(table, indices);
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (table.getDType() == DType::kFloat16) return lookupKernel2D<Float16>(table, indices);
+#else
+  if (table.getDType() == DType::kFloat16) return lookupHalfTable<2>(table, indices);
 #endif
   NOT_IMPL();
 }
