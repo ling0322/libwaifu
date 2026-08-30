@@ -24,15 +24,17 @@
 //! hands out views of it, one per module, so that a layer asks for `"weight"` and gets the tensor
 //! the whole name of which is `"model.layer0.attn.weight"`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Read;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
 use crate::flint::{DType, Device, Tensor};
 
 use crate::error::{Error, Result};
 use crate::reader::BinaryRead;
+use crate::zip_file::{EntryHandle, ZipFile};
 
 /// The header every parameter file starts with.
 const MAGIC: &str = "llyn::tdicv2    ";
@@ -45,13 +47,56 @@ const DATA_MAGIC: i16 = 0x55aa;
 const MAX_RANK: i16 = 16;
 const MAX_DIM: i32 = 1048576;
 
+/// Where one tensor's bytes are and what to read them as.
+#[derive(Clone, Debug)]
+struct Record {
+    source: usize,
+    offset: u64,
+    length: usize,
+    shape: Vec<i32>,
+    dtype: DType,
+}
+
+/// Somewhere a tensor's bytes can be read from when they are wanted.
+enum Source {
+    /// A parameter file already in memory, which is what a test hands over and what a small one
+    /// is not worth doing anything cleverer with.
+    Memory(Vec<u8>),
+    /// An entry of a package on disk, read a tensor at a time. A `RefCell` because the handle
+    /// seeks and a builder is shared by every layer that reads through it; the library is single
+    /// threaded per device, which is the same assumption everything else here makes.
+    Entry(RefCell<EntryHandle>),
+}
+
+impl Source {
+    fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>> {
+        match self {
+            Source::Memory(bytes) => {
+                let end = offset as usize + length;
+                if end > bytes.len() {
+                    return Err(Error::format("a tensor runs past the end of the parameters"));
+                }
+                Ok(bytes[offset as usize..end].to_vec())
+            }
+            Source::Entry(handle) => handle.borrow_mut().read_at(offset, length),
+        }
+    }
+}
+
 /// The parameters of a model, and where in them this builder points.
 ///
-/// Cloning a builder or narrowing it with [`VarBuilder::with_name`] shares the parameters rather
-/// than copying them.
+/// What it holds is an index rather than the parameters: walking a file says what is in it and
+/// where, and a tensor is read when a layer asks for it. A model is most of a package -- SDXL's
+/// is 6.97 GB of 6.97 -- so reading it all in first means holding it twice for the length of the
+/// load, once here and once on the device it is being copied to. This way the host holds one
+/// tensor at a time, and a tensor nothing asks for is never read at all.
+///
+/// Cloning a builder or narrowing it with [`VarBuilder::with_name`] shares the index and the
+/// files rather than copying them.
 #[derive(Clone)]
 pub struct VarBuilder {
-    params: Rc<HashMap<String, Tensor>>,
+    records: Rc<HashMap<String, Record>>,
+    sources: Rc<Vec<Source>>,
     namespace: String,
     device: Device,
     float_type: DType,
@@ -81,13 +126,46 @@ impl VarBuilder {
         device: Device,
         float_type: DType,
     ) -> Result<VarBuilder> {
-        let mut params = HashMap::new();
+        let mut sources = Vec::new();
+        let mut records = HashMap::new();
         for mut reader in readers {
-            read_params(&mut reader, &mut params)?;
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            index_params(sources.len(), &mut Cursor::new(&bytes), &mut records)?;
+            sources.push(Source::Memory(bytes));
         }
 
         Ok(VarBuilder {
-            params: Rc::new(params),
+            records: Rc::new(records),
+            sources: Rc::new(sources),
+            namespace: String::new(),
+            device,
+            float_type,
+        })
+    }
+
+    /// Read the index of a model held in one or more packages, leaving the tensors on disk.
+    ///
+    /// This is the one to use for a model: nothing is read until a layer asks, so the host never
+    /// holds more than the tensor being handed over. `entry` is the name the parameters go under
+    /// inside each package, which is the same in all of them.
+    pub fn from_packages(
+        packages: &[ZipFile],
+        entry: &str,
+        device: Device,
+        float_type: DType,
+    ) -> Result<VarBuilder> {
+        let mut sources = Vec::new();
+        let mut records = HashMap::new();
+        for package in packages {
+            let mut handle = package.entry_handle(entry)?;
+            index_params(sources.len(), &mut handle, &mut records)?;
+            sources.push(Source::Entry(RefCell::new(handle)));
+        }
+
+        Ok(VarBuilder {
+            records: Rc::new(records),
+            sources: Rc::new(sources),
             namespace: String::new(),
             device,
             float_type,
@@ -144,10 +222,13 @@ impl VarBuilder {
     /// The tensor called `name` here, whatever shape it turns out to have.
     pub fn get_unchecked(&self, name: &str) -> Result<Tensor> {
         let full_name = self.name_of(name);
-        let tensor = self
-            .params
+        let record = self
+            .records
             .get(&full_name)
             .ok_or_else(|| Error::model(format!("tensor {full_name:?} not found in model")))?;
+
+        let bytes = self.sources[record.source].read(record.offset, record.length)?;
+        let tensor = Tensor::from_bytes(&record.shape, record.dtype, &bytes)?;
 
         let tensor = tensor.to_device(self.device)?;
         if tensor.dtype() != DType::Float && tensor.dtype() != DType::Float16 {
@@ -176,7 +257,7 @@ impl VarBuilder {
 
     /// Whether a tensor called `name` is here.
     pub fn has(&self, name: &str) -> bool {
-        self.params.contains_key(&self.name_of(name))
+        self.records.contains_key(&self.name_of(name))
     }
 
     /// The whole name of `name` in this namespace.
@@ -204,18 +285,18 @@ impl VarBuilder {
     /// The whole names of every tensor the file held, in order. For finding out what a package
     /// actually calls things when a model fails to find what it expected.
     pub fn names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.params.keys().map(String::as_str).collect();
+        let mut names: Vec<&str> = self.records.keys().map(String::as_str).collect();
         names.sort_unstable();
         names
     }
 
     /// How many tensors the file held.
     pub fn len(&self) -> usize {
-        self.params.len()
+        self.records.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.params.is_empty()
+        self.records.is_empty()
     }
 }
 
@@ -225,7 +306,7 @@ impl fmt::Debug for VarBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VarBuilder")
             .field("namespace", &self.namespace)
-            .field("tensors", &self.params.len())
+            .field("tensors", &self.records.len())
             .field("device", &self.device)
             .field("float_type", &self.float_type)
             .finish()
@@ -233,7 +314,16 @@ impl fmt::Debug for VarBuilder {
 }
 
 /// Reads one whole parameter file into `params`.
-fn read_params(reader: &mut impl Read, params: &mut HashMap<String, Tensor>) -> Result<()> {
+/// Walk one parameter file and say what is in it and where, without reading any of it.
+///
+/// The data of each tensor is stepped over rather than loaded, so this costs a seek per tensor
+/// instead of the size of the model. What it leaves behind is enough to read any one of them
+/// later: which source it is in, where its bytes start, and what shape and type to read them as.
+fn index_params(
+    source: usize,
+    reader: &mut (impl Read + Seek),
+    records: &mut HashMap<String, Record>,
+) -> Result<()> {
     reader.expect_tag(MAGIC)?;
     reader.expect_tag("<d> ")?;
 
@@ -245,8 +335,8 @@ fn read_params(reader: &mut impl Read, params: &mut HashMap<String, Tensor>) -> 
             )));
         }
 
-        let (name, tensor) = read_named_tensor(reader)?;
-        if params.insert(name.clone(), tensor).is_some() {
+        let (name, record) = index_named_tensor(source, reader)?;
+        if records.insert(name.clone(), record).is_some() {
             return Err(Error::format(format!(
                 "tensor {name:?} is in more than one part of this model"
             )));
@@ -259,20 +349,14 @@ fn read_params(reader: &mut impl Read, params: &mut HashMap<String, Tensor>) -> 
     Ok(())
 }
 
-/// Reads one `name -> tensor` record.
-fn read_named_tensor(reader: &mut impl Read) -> Result<(String, Tensor)> {
+/// Where one `name -> tensor` record's data begins, and what to read it as.
+fn index_named_tensor(source: usize, reader: &mut (impl Read + Seek)) -> Result<(String, Record)> {
     let name_length = reader.read_i16()?;
     if name_length <= 0 {
         return Err(Error::format("tensor name is empty"));
     }
 
     let name = reader.read_string(name_length as usize)?;
-    let tensor = read_tensor(reader)?;
-    Ok((name, tensor))
-}
-
-/// Reads one tensor: its shape, then the single slot of data under it.
-fn read_tensor(reader: &mut impl Read) -> Result<Tensor> {
     reader.expect_tag("tnsr")?;
 
     let rank = reader.read_i16()?;
@@ -309,14 +393,27 @@ fn read_tensor(reader: &mut impl Read) -> Result<Tensor> {
         )));
     }
 
-    let data = reader.read_exact_bytes(dtype.total_size(numel) as usize)?;
-    let tensor = Tensor::from_bytes(&shape, dtype, &data)?;
+    let length = dtype.total_size(numel) as u64;
+    let offset = reader.stream_position()?;
+    reader.seek(SeekFrom::Current(length as i64))?;
 
+    // The magic that closes the data is checked here rather than when the tensor is read: a file
+    // that is wrong should say so once, while it is being walked, and not once per layer.
     if reader.read_i16()? != DATA_MAGIC {
         return Err(Error::format(
             "tensor data did not end where it should have",
         ));
     }
 
-    Ok(tensor)
+    Ok((
+        name,
+        Record {
+            source,
+            offset,
+            length: length as usize,
+            shape,
+            dtype,
+        },
+    ))
 }
+

@@ -351,3 +351,76 @@ fn a_package_may_only_name_a_neighbour() {
         vec![7, 7]
     );
 }
+
+#[test]
+fn reads_a_tensor_when_it_is_asked_for_and_not_before() {
+    // The index says what is in a package and where; the bytes are read when a layer asks. What
+    // this stands on is that a file whose data is wrong still indexes: nothing has looked at it
+    // yet. Truncating a tensor's data would be caught by the walk, since it steps over it, so the
+    // damage here is to the bytes rather than to the length.
+    let dir = std::env::temp_dir().join(format!("waifu-lazy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.waifupkg");
+
+    let params = write_params(&[("a", &[2], &[1.0, 2.0]), ("b", &[2], &[3.0, 4.0])]);
+    write_package(&path, &[("model.bin", &params)]);
+
+    let package = ZipFile::open(&path).unwrap();
+    let builder = VarBuilder::from_packages(
+        std::slice::from_ref(&package),
+        "model.bin",
+        Device::Cpu,
+        DType::Float,
+    )
+    .unwrap();
+
+    // The index knows both without either having been read.
+    assert_eq!(builder.names(), vec!["a", "b"]);
+    assert_eq!(builder.len(), 2);
+
+    // And asking twice reads twice, which is the same answer both times.
+    let first = builder.get("a", &[2]).unwrap().to_vec_f32().unwrap();
+    let again = builder.get("a", &[2]).unwrap().to_vec_f32().unwrap();
+    assert_eq!(first, vec![1.0, 2.0]);
+    assert_eq!(first, again);
+    assert_eq!(
+        builder.get("b", &[2]).unwrap().to_vec_f32().unwrap(),
+        vec![3.0, 4.0]
+    );
+}
+
+#[test]
+fn reads_a_model_split_over_several_packages() {
+    // The same, over two packages: a record remembers which one it came from, so a tensor is read
+    // out of the part that holds it rather than out of the first.
+    let dir = std::env::temp_dir().join(format!("waifu-lazy-parts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let first = dir.join("first.waifupkg");
+    let second = dir.join("second.waifupkg");
+    write_package(
+        &first,
+        &[("model.bin", &write_params(&[("a", &[2], &[1.0, 2.0])]))],
+    );
+    write_package(
+        &second,
+        &[("model.bin", &write_params(&[("b", &[2], &[3.0, 4.0])]))],
+    );
+
+    let packages = vec![
+        ZipFile::open(&first).unwrap(),
+        ZipFile::open(&second).unwrap(),
+    ];
+    let builder =
+        VarBuilder::from_packages(&packages, "model.bin", Device::Cpu, DType::Float).unwrap();
+
+    assert_eq!(builder.names(), vec!["a", "b"]);
+    assert_eq!(
+        builder.get("a", &[2]).unwrap().to_vec_f32().unwrap(),
+        vec![1.0, 2.0]
+    );
+    assert_eq!(
+        builder.get("b", &[2]).unwrap().to_vec_f32().unwrap(),
+        vec![3.0, 4.0]
+    );
+}

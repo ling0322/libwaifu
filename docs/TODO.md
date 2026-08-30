@@ -92,6 +92,13 @@ are the two where widening would cost something, because there the narrow operan
 Everywhere else the layer converts -- an embedding widens the rows that came out of the table
 rather than the table -- so the operators still take one type at a time.
 
+The parameters are also read when a layer asks for one rather than all at once. `VarBuilder`
+walks a package to find out what is in it and where, stepping over the data rather than loading
+it, and reads a tensor when it is wanted. That is what the host holds on CUDA now -- 0.54 GB at
+its peak against 6.97, since the model goes to the device a tensor at a time and nothing keeps
+the copy it came from -- and loading is 2.6 s against 4.3. On the CPU it changes only when the
+reading happens, because there the model does have to stay.
+
 It bought no speed -- 151.8 s against 150 -- which says this workload is bound by arithmetic
 rather than by memory at 32 threads, and it cost no accuracy, since the arithmetic was float32
 either way and the widened copy was only ever a copy.

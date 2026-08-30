@@ -121,6 +121,30 @@ impl ZipFile {
         })
     }
 
+    /// A handle on one entry, positioned at its start and able to move within it.
+    ///
+    /// What [`ZipFile::open_entry`] gives back reads forwards and no other way, which is right for
+    /// something parsed once from beginning to end. A parameter file is not that: it is walked
+    /// once to find out what is in it and where, and then read out of order, a tensor at a time,
+    /// as the layers ask. The handle is its own -- the archive's is not moved by it -- so several
+    /// may be open at once.
+    pub fn entry_handle(&self, name: &str) -> Result<EntryHandle> {
+        let entry = *self
+            .entries
+            .get(name)
+            .ok_or_else(|| Error::format(format!("{name:?} is not in the package")))?;
+
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(entry.offset))?;
+        Ok(EntryHandle {
+            file,
+            base: entry.offset,
+            size: entry.size,
+            position: 0,
+            file_position: entry.offset,
+        })
+    }
+
     /// Read the whole of one entry, for the small ones that are parsed as a unit.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
@@ -132,6 +156,95 @@ impl ZipFile {
     pub fn read_to_string(&self, name: &str) -> Result<String> {
         let bytes = self.read(name)?;
         String::from_utf8(bytes).map_err(|_| Error::format(format!("{name:?} is not valid UTF-8")))
+    }
+}
+
+/// One entry of an archive, read from wherever in it the caller asks.
+///
+/// The offsets it takes are within the entry, so nothing outside knows where the archive put it,
+/// and a read that would run past the end is refused rather than returning the next entry's bytes.
+pub struct EntryHandle {
+    file: File,
+    base: u64,
+    size: u64,
+    /// Where the next sequential read starts, within the entry.
+    position: u64,
+    /// Where the file itself is, so that reading forwards costs no seek.
+    file_position: u64,
+}
+
+impl EntryHandle {
+    /// How many bytes the entry holds.
+    pub fn len(&self) -> u64 {
+        self.size
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    /// The `length` bytes at `offset` within this entry, wherever the handle happens to be.
+    pub fn read_at(&mut self, offset: u64, length: usize) -> Result<Vec<u8>> {
+        if offset + length as u64 > self.size {
+            return Err(Error::format(format!(
+                "a read of {length} bytes at {offset} runs past the end of a {} byte entry",
+                self.size
+            )));
+        }
+
+        self.seek_file(self.base + offset)?;
+        let mut bytes = vec![0u8; length];
+        self.file.read_exact(&mut bytes)?;
+        self.file_position += length as u64;
+        Ok(bytes)
+    }
+
+    /// Move the file only when it is not already where it is wanted, so that walking an entry
+    /// from one end to the other costs one seek rather than one per read.
+    fn seek_file(&mut self, to: u64) -> Result<()> {
+        if self.file_position != to {
+            self.file.seek(SeekFrom::Start(to))?;
+            self.file_position = to;
+        }
+        Ok(())
+    }
+}
+
+impl Read for EntryHandle {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let remaining = (self.size - self.position) as usize;
+        let wanted = buffer.len().min(remaining);
+        if wanted == 0 {
+            return Ok(0);
+        }
+
+        self.seek_file(self.base + self.position)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let read = self.file.read(&mut buffer[..wanted])?;
+        self.position += read as u64;
+        self.file_position += read as u64;
+        Ok(read)
+    }
+}
+
+impl Seek for EntryHandle {
+    /// Positions are within the entry, so nothing outside it is reachable by seeking.
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let to = match from {
+            SeekFrom::Start(offset) => offset as i64,
+            SeekFrom::Current(delta) => self.position as i64 + delta,
+            SeekFrom::End(delta) => self.size as i64 + delta,
+        };
+
+        if to < 0 || to as u64 > self.size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a seek left the entry",
+            ));
+        }
+
+        self.position = to as u64;
+        Ok(self.position)
     }
 }
 

@@ -248,16 +248,16 @@ impl Sdxl {
 
         let config = SdxlConfig::from_section(ini.section(&model_type)?)?;
 
-        // The parts hold nothing but parameters, so each is opened only long enough to start
-        // reading its stream: an entry reader carries its own handle and does not borrow the
-        // package it came from.
-        let mut readers = Vec::new();
+        // The parts are opened and then only walked: what a layer asks for is read when it asks,
+        // so the packages stay open for as long as the builder does and the host never holds more
+        // than the tensor being handed over.
+        let mut parts = Vec::new();
         match model_section.get_str(Self::SHARDS_KEY) {
-            Ok(parts) => {
-                for part in parts.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-                    readers.push(package.sibling(part)?.open_entry(&model_file)?);
+            Ok(names) => {
+                for part in names.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                    parts.push(package.sibling(part)?);
                 }
-                if readers.is_empty() {
+                if parts.is_empty() {
                     return Err(Error::model(format!(
                         "{} is empty, so this model has no parameters to read",
                         Self::SHARDS_KEY
@@ -266,11 +266,11 @@ impl Sdxl {
             }
             // No list means the model is the one file it was opened from, which is what a package
             // small enough not to need splitting looks like.
-            Err(_) => readers.push(package.open_entry(&model_file)?),
+            Err(_) => parts.push(ZipFile::open(package.path())?),
         }
 
         let dtype = F::default_float_type(device)?;
-        let vb = VarBuilder::from_readers(readers, device, dtype)?;
+        let vb = VarBuilder::from_packages(&parts, &model_file, device, dtype)?;
         let vb = vb.with_name(&model_type);
 
         Ok(Sdxl {
