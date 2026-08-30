@@ -165,6 +165,12 @@ if (WITH_CUDA)
     endif(WITH_CUTLASS)
 endif()
 
+if(WITH_MLX)
+    set(flint_INCDIR ${flint_INCDIR} ${MLX_INCDIRS})
+    set(flint_SOURCES ${flint_SOURCES} "metal/metallib.cc")
+    set(flint_test_SOURCES ${flint_test_SOURCES} "metal/metallib_test.cc")
+endif()
+
 # CPU specific code
 if(LIBWAIFU_KERNEL_X86_64)
     set(flint_SOURCES

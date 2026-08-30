@@ -13,6 +13,7 @@ option(WITH_OPENMP "Build with OpenMP." ON)
 option(WITH_CUTLASS "build MatMul operators with CUTLASS." OFF)
 option(WITH_CUDNN "build the Conv2d operator with cuDNN." OFF)
 option(WITH_FLASH_ATTN "Link the prebuilt FlashAttention forward kernels." ${WITH_CUDA})
+option(WITH_MLX "Metal compute support, through MLX." OFF)
 option(CUDA_ARCH_NATIVE "Build CUDA kernels only for the GPUs in this machine." OFF)
 option(MKL_PREFIX "Prefix for MKL headers and libraries." "/opt/intel/mkl")
 
@@ -207,12 +208,67 @@ if(WITH_FLASH_ATTN)
         INTERFACE_INCLUDE_DIRECTORIES "${FLASH_ATTN_ROOT}/csrc/flash_attn/src")
 endif()
 
+if(WITH_MLX)
+    if(NOT APPLE)
+        message(FATAL_ERROR "WITH_MLX requires macOS: MLX's Metal backend has no other host")
+    endif()
+
+    set(MLX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx")
+    set(MLX_BUILD_ROOT "${MLX_ROOT}/build")
+    set(MLX_LIB "${MLX_BUILD_ROOT}/libmlx.a")
+    set(MLX_METALLIB "${MLX_BUILD_ROOT}/mlx/backend/metal/kernels/mlx.metallib")
+    if(NOT EXISTS "${MLX_LIB}" OR NOT EXISTS "${MLX_METALLIB}")
+        message(FATAL_ERROR
+          "unable to find \"${MLX_LIB}\" and \"${MLX_METALLIB}\", please "
+          "call install_mlx.sh in third_party first.")
+    endif()
+
+    add_definitions("-DLIBWAIFU_MLX_ENABLED")
+
+    # MLX fetches these two at configure time and leaves them beside libmlx.a rather than
+    # folding them in, so a consumer of the static build has to name them itself.
+    add_library(mlx_jaccl STATIC IMPORTED)
+    set_target_properties(mlx_jaccl PROPERTIES
+        IMPORTED_LOCATION "${MLX_BUILD_ROOT}/jaccl/libjaccl.a")
+    add_library(mlx_gguflib STATIC IMPORTED)
+    set_target_properties(mlx_gguflib PROPERTIES
+        IMPORTED_LOCATION "${MLX_BUILD_ROOT}/mlx/io/libgguflib.a")
+
+    # fmt, json and metal-cpp are header-only here, but MLX's own headers include them, so
+    # anything that includes mlx/mlx.h needs them on the search path too.
+    set(MLX_INCDIRS
+        "${MLX_ROOT}"
+        "${MLX_BUILD_ROOT}/_deps/fmt-src/include"
+        "${MLX_BUILD_ROOT}/_deps/json-src/single_include"
+        "${MLX_BUILD_ROOT}/_deps/metal_cpp-src")
+
+    add_library(mlx STATIC IMPORTED)
+    set_target_properties(mlx PROPERTIES
+        IMPORTED_LOCATION "${MLX_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${MLX_INCDIRS}"
+        INTERFACE_LINK_LIBRARIES
+            "mlx_jaccl;mlx_gguflib;-framework Metal;-framework Foundation;-framework QuartzCore;-framework Accelerate")
+
+    # Carry the Metal kernels inside the binary, the way a CUDA build carries its fatbin,
+    # instead of leaving them as a file that has to be found at run time. Metal has no
+    # toolchain support for this, so it takes two halves: a Mach-O section put in here, and
+    # fl::metal::useEmbeddedMetallib() handing it to MLX at startup. As an INTERFACE option
+    # on the imported target, every executable that links MLX gets the section for free.
+    set(MLX_METALLIB_LINK_OPTION "-Wl,-sectcreate,__TEXT,__metallib,${MLX_METALLIB}")
+    set_property(TARGET mlx APPEND PROPERTY
+        INTERFACE_LINK_OPTIONS "${MLX_METALLIB_LINK_OPTION}")
+endif()
+
 add_subdirectory("flint")
 
 set(libwaifu_LIBADD lutil flint_static ${CMAKE_DL_LIBS} ${UNWIND_ARCH_LIB} ${UNWIND_LIB} )
 
 if(WITH_FLASH_ATTN)
     set(libwaifu_LIBADD ${libwaifu_LIBADD} flash_attn)
+endif()
+
+if(WITH_MLX)
+    set(libwaifu_LIBADD ${libwaifu_LIBADD} mlx)
 endif()
 
 if(WITH_OPENMP)
@@ -257,6 +313,24 @@ if(WITH_CUDA)
         "cargo:rustc-link-lib=static=curand_static"
         "cargo:rustc-link-lib=static=cudart_static"
         "cargo:rustc-link-lib=static=culibos")
+endif()
+
+if(WITH_MLX)
+    # The metallib section is a property of the final link, which for the `waifu` binary is
+    # rustc's, so it has to be passed through as a link arg rather than inherited from the
+    # `mlx` target the way the CMake executables inherit it.
+    list(APPEND flint_CARGO_FLAGS
+        "cargo:rustc-link-search=native=${MLX_BUILD_ROOT}"
+        "cargo:rustc-link-lib=static=mlx"
+        "cargo:rustc-link-search=native=${MLX_BUILD_ROOT}/jaccl"
+        "cargo:rustc-link-lib=static=jaccl"
+        "cargo:rustc-link-search=native=${MLX_BUILD_ROOT}/mlx/io"
+        "cargo:rustc-link-lib=static=gguflib"
+        "cargo:rustc-link-lib=framework=Metal"
+        "cargo:rustc-link-lib=framework=Foundation"
+        "cargo:rustc-link-lib=framework=QuartzCore"
+        "cargo:rustc-link-lib=framework=Accelerate"
+        "cargo:rustc-link-arg=${MLX_METALLIB_LINK_OPTION}")
 endif()
 
 if(WITH_OPENMP)
