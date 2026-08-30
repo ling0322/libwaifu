@@ -19,51 +19,23 @@
 
 #pragma once
 
-#include <string>
+#include "flint/device.h"
+#include "flint/tensor.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-// storage device for tensor data.
-// Note: once the Device type is increased, we should also change the initialization of
-// gOperatorsForDevice.
-class Device {
- public:
-  enum Type {
-    kCpu,
-    kCuda,
-    kMetal,
-    NumDeviceType,  // number of device types
-    kUnknown
-  };
+/// @brief Move `tensor` onto `device`, which has to be the CPU or Metal.
+///
+/// Both sides address the same unified memory, so this is a memcpy rather than the staged
+/// transfer a discrete GPU needs. It still copies: the two devices own their buffers separately,
+/// and sharing one would make a CPU write visible to a tensor nobody expected to change.
+Tensor toDevice(Device device, const Tensor &tensor);
 
-  /// @brief Return true if cuda device is available.
-  /// @return availability of cuda device.
-  static bool isCudaAvailable();
+Tensor toCpu(const Tensor &tensor);
+Tensor toMetal(const Tensor &tensor);
 
-  /// @brief Return true if the Metal device is available, which needs both a build with MLX and
-  ///        a machine with a Metal GPU.
-  /// @return availability of the Metal device.
-  static bool isMetalAvailable();
-
-  static Device getCpu();
-  static Device getCuda();
-  static Device getMetal();
-
-  // construct device by device type
-  Device();
-  Device(Type type);
-
-  // get type of the device
-  Type getType() const {
-    return _type;
-  }
-
-  /// @brief Get the name of device.
-  /// @return name of the device.
-  std::string getName() const;
-
- private:
-  Type _type;
-};
-
+}  // namespace metal
+}  // namespace op
 }  // namespace fl

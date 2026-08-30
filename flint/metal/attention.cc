@@ -17,53 +17,33 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#pragma once
+#include <math.h>
 
-#include <string>
+#include "lutil/error.h"
+#include "lutil/log.h"
+#include "flint/metal/common.h"
+#include "flint/metal/ops.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-// storage device for tensor data.
-// Note: once the Device type is increased, we should also change the initialization of
-// gOperatorsForDevice.
-class Device {
- public:
-  enum Type {
-    kCpu,
-    kCuda,
-    kMetal,
-    NumDeviceType,  // number of device types
-    kUnknown
-  };
+Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, bool causal) {
+  CHECK(q.getDim() == 4) << "attention expects (batch, numHeads, length, headDim)";
 
-  /// @brief Return true if cuda device is available.
-  /// @return availability of cuda device.
-  static bool isCudaAvailable();
+  // MLX takes the same [batch, heads, length, headDim] layout flint documents, and handles
+  // grouped-query attention by broadcasting the key and value heads, so no expansion here.
+  float scale = 1.0f / sqrtf(static_cast<float>(q.getShape(-1)));
 
-  /// @brief Return true if the Metal device is available, which needs both a build with MLX and
-  ///        a machine with a Metal GPU.
-  /// @return availability of the Metal device.
-  static bool isMetalAvailable();
+  return fromMlxArray(
+      mlx::core::fast::scaled_dot_product_attention(
+          toMlxArray(q),
+          toMlxArray(k),
+          toMlxArray(v),
+          scale,
+          causal ? "causal" : ""));
+}
 
-  static Device getCpu();
-  static Device getCuda();
-  static Device getMetal();
-
-  // construct device by device type
-  Device();
-  Device(Type type);
-
-  // get type of the device
-  Type getType() const {
-    return _type;
-  }
-
-  /// @brief Get the name of device.
-  /// @return name of the device.
-  std::string getName() const;
-
- private:
-  Type _type;
-};
-
+}  // namespace metal
+}  // namespace op
 }  // namespace fl

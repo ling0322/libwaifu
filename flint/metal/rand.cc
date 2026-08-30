@@ -17,53 +17,38 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#pragma once
-
-#include <string>
+#include "flint/metal/common.h"
+#include "flint/metal/ops.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-// storage device for tensor data.
-// Note: once the Device type is increased, we should also change the initialization of
-// gOperatorsForDevice.
-class Device {
- public:
-  enum Type {
-    kCpu,
-    kCuda,
-    kMetal,
-    NumDeviceType,  // number of device types
-    kUnknown
-  };
+namespace {
 
-  /// @brief Return true if cuda device is available.
-  /// @return availability of cuda device.
-  static bool isCudaAvailable();
-
-  /// @brief Return true if the Metal device is available, which needs both a build with MLX and
-  ///        a machine with a Metal GPU.
-  /// @return availability of the Metal device.
-  static bool isMetalAvailable();
-
-  static Device getCpu();
-  static Device getCuda();
-  static Device getMetal();
-
-  // construct device by device type
-  Device();
-  Device(Type type);
-
-  // get type of the device
-  Type getType() const {
-    return _type;
+mlx::core::Shape toMlxShape(lut::Span<const int> shape) {
+  mlx::core::Shape result;
+  for (int dim : shape) {
+    result.push_back(dim);
   }
+  return result;
+}
 
-  /// @brief Get the name of device.
-  /// @return name of the device.
-  std::string getName() const;
+}  // namespace
 
- private:
-  Type _type;
-};
+Tensor rand(lut::Span<const int> shape, DType dtype) {
+  return fromMlxArray(mlx::core::random::uniform(toMlxShape(shape), toMlxDtype(dtype)));
+}
 
+Tensor randNormal(lut::Span<const int> shape) {
+  return fromMlxArray(
+      mlx::core::random::normal(toMlxShape(shape), mlx::core::float32, 0.0f, 1.0f));
+}
+
+void manualSeed(uint64_t seed) {
+  mlx::core::random::seed(seed);
+}
+
+}  // namespace metal
+}  // namespace op
 }  // namespace fl

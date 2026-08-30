@@ -253,6 +253,10 @@ void copy(Tensor src, Tensor dest) {
       CHECK(dest.getDevice().getType() == Device::kCuda);
       getOperators(Device::kCuda)->copy(src, dest);
       break;
+    case Device::kMetal:
+      CHECK(dest.getDevice().getType() == Device::kMetal);
+      getOperators(Device::kMetal)->copy(src, dest);
+      break;
     default:
       NOT_IMPL();
   }
@@ -334,8 +338,12 @@ Tensor to(Device device, Tensor tensor) {
   Device srcDevice = tensor.getDevice();
   if (srcDevice.getType() == device.getType()) return tensor;
 
+  // A transfer is owned by the accelerator on whichever end of it is not the CPU: that is the
+  // side that knows how to allocate, and the CPU operators only ever hand tensors to themselves.
   if (srcDevice.getType() == Device::kCuda || device.getType() == Device::kCuda)
     return getOperators(Device::kCuda)->to(device, tensor);
+  else if (srcDevice.getType() == Device::kMetal || device.getType() == Device::kMetal)
+    return getOperators(Device::kMetal)->to(device, tensor);
   else
     NOT_IMPL();
 }

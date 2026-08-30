@@ -68,6 +68,7 @@ typedef enum fl_dtype_t {
 typedef enum fl_device_type_t {
   FL_DEVICE_CPU = 0,
   FL_DEVICE_CUDA = 1,
+  FL_DEVICE_METAL = 2,
   FL_DEVICE_UNKNOWN = 3,
 } fl_device_type_t;
 

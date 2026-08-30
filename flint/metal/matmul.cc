@@ -17,53 +17,19 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#pragma once
-
-#include <string>
+#include "flint/metal/common.h"
+#include "flint/metal/ops.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-// storage device for tensor data.
-// Note: once the Device type is increased, we should also change the initialization of
-// gOperatorsForDevice.
-class Device {
- public:
-  enum Type {
-    kCpu,
-    kCuda,
-    kMetal,
-    NumDeviceType,  // number of device types
-    kUnknown
-  };
+Tensor matmul(const Tensor &a, const Tensor &b) {
+  // mlx::core::matmul broadcasts the batch dimensions the same way flint does, so a 4-D activation
+  // against a 2-D weight needs no reshaping here.
+  return fromMlxArray(mlx::core::matmul(toMlxArray(a), toMlxArray(b)));
+}
 
-  /// @brief Return true if cuda device is available.
-  /// @return availability of cuda device.
-  static bool isCudaAvailable();
-
-  /// @brief Return true if the Metal device is available, which needs both a build with MLX and
-  ///        a machine with a Metal GPU.
-  /// @return availability of the Metal device.
-  static bool isMetalAvailable();
-
-  static Device getCpu();
-  static Device getCuda();
-  static Device getMetal();
-
-  // construct device by device type
-  Device();
-  Device(Type type);
-
-  // get type of the device
-  Type getType() const {
-    return _type;
-  }
-
-  /// @brief Get the name of device.
-  /// @return name of the device.
-  std::string getName() const;
-
- private:
-  Type _type;
-};
-
+}  // namespace metal
+}  // namespace op
 }  // namespace fl

@@ -21,6 +21,9 @@
 
 #include "lutil/log.h"
 #include "flint/cuda/cuda_operators.h"
+#ifdef LIBWAIFU_MLX_ENABLED
+#include "flint/metal/metal_operators.h"
+#endif
 
 namespace fl {
 
@@ -39,9 +42,21 @@ Device Device::getCuda() {
   return Device(Type::kCuda);
 }
 
+Device Device::getMetal() {
+  return Device(Type::kMetal);
+}
+
 bool Device::isCudaAvailable() {
 #ifdef LIBWAIFU_CUDA_ENABLED
   return op::cuda::CudaOperators::isAvailable();
+#else
+  return false;
+#endif
+}
+
+bool Device::isMetalAvailable() {
+#ifdef LIBWAIFU_MLX_ENABLED
+  return op::metal::MetalOperators::isAvailable();
 #else
   return false;
 #endif
@@ -53,6 +68,8 @@ std::string Device::getName() const {
       return "cpu";
     case kCuda:
       return "cuda";
+    case kMetal:
+      return "metal";
     default:
       NOT_IMPL();
   }

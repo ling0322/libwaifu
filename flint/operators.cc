@@ -36,6 +36,9 @@
 #include "flint/cpu/cpu_operators.h"
 #include "flint/cpu/kernel/interface.h"
 #include "flint/cuda/cuda_operators.h"
+#ifdef LIBWAIFU_MLX_ENABLED
+#include "flint/metal/metal_operators.h"
+#endif
 
 namespace fl {
 
@@ -400,7 +403,10 @@ Tensor Operators::randNormal(lut::Span<const int> shape) {
   NOT_IMPL();
 }
 
-std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {nullptr, nullptr};
+std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {
+    nullptr,
+    nullptr,
+    nullptr};
 
 static std::atomic<bool> gInitialized{false};
 
@@ -450,6 +456,14 @@ void initOperators() {
     CHECK(!gOperatorsForDevice[Device::kCuda]);
     gOperatorsForDevice[Device::kCuda] =
         op::cuda::CudaOperators::create(gemmOptionsFromEnvironment());
+#endif
+#ifdef LIBWAIFU_MLX_ENABLED
+    // Unlike CUDA, a build with MLX still has to cope with there being no GPU to talk to, so
+    // the operators are only registered when MLX can actually reach one.
+    if (op::metal::MetalOperators::isAvailable()) {
+      CHECK(!gOperatorsForDevice[Device::kMetal]);
+      gOperatorsForDevice[Device::kMetal] = op::metal::MetalOperators::create();
+    }
 #endif
   }
 }

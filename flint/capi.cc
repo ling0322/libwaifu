@@ -80,6 +80,8 @@ fl::Device toDevice(fl_device_type_t device) {
       return fl::Device(fl::Device::kCpu);
     case FL_DEVICE_CUDA:
       return fl::Device(fl::Device::kCuda);
+    case FL_DEVICE_METAL:
+      return fl::Device(fl::Device::kMetal);
     default:
       throw lut::InvalidArgError("invalid device");
   }
@@ -91,6 +93,8 @@ fl_device_type_t fromDevice(fl::Device device) {
       return FL_DEVICE_CPU;
     case fl::Device::kCuda:
       return FL_DEVICE_CUDA;
+    case fl::Device::kMetal:
+      return FL_DEVICE_METAL;
     default:
       return FL_DEVICE_UNKNOWN;
   }

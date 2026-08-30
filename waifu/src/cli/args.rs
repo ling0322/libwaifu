@@ -39,10 +39,11 @@ impl std::error::Error for ArgError {}
 /// Where the model should run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceOption {
-    /// CUDA when there is a device for it, the CPU otherwise.
+    /// The first accelerator there is a device for -- CUDA, then Metal -- and the CPU otherwise.
     Auto,
     Cpu,
     Cuda,
+    Metal,
 }
 
 impl DeviceOption {
@@ -51,9 +52,14 @@ impl DeviceOption {
         match self {
             DeviceOption::Cpu => Device::Cpu,
             DeviceOption::Cuda => Device::Cuda,
+            DeviceOption::Metal => Device::Metal,
             DeviceOption::Auto => {
+                // At most one of the two is ever built, so the order between them only decides
+                // which check runs first, not which machine gets which accelerator.
                 if Device::Cuda.is_available() {
                     Device::Cuda
+                } else if Device::Metal.is_available() {
+                    Device::Metal
                 } else {
                     Device::Cpu
                 }
@@ -136,8 +142,10 @@ impl Args {
             "auto" => Ok(DeviceOption::Auto),
             "cpu" => Ok(DeviceOption::Cpu),
             "cuda" => Ok(DeviceOption::Cuda),
+            "metal" => Ok(DeviceOption::Metal),
             _ => Err(ArgError(
-                "invalid device name: must be one of \"cpu\", \"cuda\" or \"auto\"".to_string(),
+                "invalid device name: must be one of \"cpu\", \"cuda\", \"metal\" or \"auto\""
+                    .to_string(),
             )),
         }
     }
@@ -146,7 +154,7 @@ impl Args {
 /// The flags every command prints under `Options:`.
 pub fn print_options() {
     eprintln!(
-        "  -device string\n    \tinference device, either cpu, cuda or auto (default \"auto\")"
+        "  -device string\n    \tinference device, one of cpu, cuda, metal or auto (default \"auto\")"
     );
     eprintln!(
         "  -m value\n    \tthe model to draw with: either a package file, which has the suffix \
