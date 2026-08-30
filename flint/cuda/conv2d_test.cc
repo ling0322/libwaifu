@@ -356,10 +356,16 @@ CATCH_TEST_CASE("test conv2d (through the operator interface)", "[fl][op][cuda][
   CATCH_REQUIRE(viaOperators.getShape() == std::vector<int>{2, 8, 8, 8});
   CATCH_REQUIRE(F::allClose(toCpuFloat(viaOperators), toCpuFloat(direct), 1e-6f, 1e-6f));
 
-  // A convolution has no meaning on the host, and saying so is not the same as ending the process.
-  Tensor cpuX = F::rand({2, 4, 8, 8}, DType::kFloat);
-  Tensor cpuW = F::rand({8, 4, 3, 3}, DType::kFloat);
-  CATCH_REQUIRE_THROWS(F::conv2d(cpuX, cpuW, Tensor(), 1, 1, 1, 1));
+  // The host has its own convolution now, so the operator answers there rather than refusing.
+  // What it gets is checked against a written-out reference in cpu/conv2d_test.cc; here it is
+  // enough that the two devices agree, since each has been checked against that definition
+  // separately.
+  Tensor cpuX = F::to(Device::getCpu(), F::cast(x, DType::kFloat));
+  Tensor cpuW = F::to(Device::getCpu(), F::cast(w, DType::kFloat));
+  Tensor cpuB = F::to(Device::getCpu(), F::cast(b, DType::kFloat));
+  Tensor onHost = F::conv2d(cpuX, cpuW, cpuB, 1, 1, 1, 1);
+  CATCH_REQUIRE(onHost.getShape() == std::vector<int>{2, 8, 8, 8});
+  CATCH_REQUIRE(F::allClose(onHost, toCpuFloat(direct), 2e-2f));
 }
 
 CATCH_TEST_CASE("test conv2d (cutlass)", "[fl][op][cuda][cutlass][conv2d]") {

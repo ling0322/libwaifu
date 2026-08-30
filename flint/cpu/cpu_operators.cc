@@ -40,6 +40,7 @@
 #include "flint/cpu/lookup.h"
 #include "flint/cpu/matmul.h"
 #include "flint/cpu/normalizations.h"
+#include "flint/cpu/conv2d.h"
 #include "flint/cpu/upsample.h"
 #include "flint/cpu/print.h"
 #include "flint/cpu/rand.h"
@@ -426,6 +427,17 @@ Tensor CPUOperators::groupNorm(Tensor input, Tensor weight, Tensor bias, int gro
 
 Tensor CPUOperators::upsampleNearest2d(Tensor input, int scale) {
   return cpu::upsampleNearest2d(input, scale);
+}
+
+Tensor CPUOperators::conv2d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  return cpu::conv2d(input, weight, bias, stride, padding, dilation, groups);
 }
 
 Tensor CPUOperators::causalMask(int max_len) {
