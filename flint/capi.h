@@ -79,6 +79,7 @@ typedef enum fl_device_type_t {
   /// Host memory page-locked by the CUDA driver. The CPU may read and write it, but it carries no
   /// operators: it is where weights wait to be copied to the GPU, not somewhere to compute.
   FL_DEVICE_CUDA_HOST = 2,
+  FL_DEVICE_METAL = 3,
   FL_DEVICE_UNKNOWN = 3,
 } fl_device_type_t;
 

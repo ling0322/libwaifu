@@ -41,6 +41,7 @@ class Device {
     /// the CPU's, which would be right for the arithmetic and wrong about which device this
     /// memory belongs to.
     kCudaHost,
+    kMetal,
     NumDeviceType,  // number of device types
     kUnknown
   };
@@ -49,9 +50,15 @@ class Device {
   /// @return availability of cuda device.
   static bool isCudaAvailable();
 
+  /// @brief Return true if the Metal device is available, which needs both a build with MLX and
+  ///        a machine with a Metal GPU.
+  /// @return availability of the Metal device.
+  static bool isMetalAvailable();
+
   static Device getCpu();
   static Device getCuda();
   static Device getCudaHost();
+  static Device getMetal();
 
   // construct device by device type
   Device();

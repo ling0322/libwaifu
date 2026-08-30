@@ -17,68 +17,25 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "flint/device.h"
+#pragma once
 
-#include "lutil/log.h"
-#include "flint/cuda/cuda_operators.h"
-#ifdef LIBWAIFU_MLX_ENABLED
-#include "flint/metal/metal_operators.h"
-#endif
+#include "flint/device.h"
+#include "flint/tensor.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-Device::Device()
-    : _type(Type::kUnknown) {
-}
-Device::Device(Type type)
-    : _type(type) {
-}
+/// @brief Move `tensor` onto `device`, which has to be the CPU or Metal.
+///
+/// Both sides address the same unified memory, so this is a memcpy rather than the staged
+/// transfer a discrete GPU needs. It still copies: the two devices own their buffers separately,
+/// and sharing one would make a CPU write visible to a tensor nobody expected to change.
+Tensor toDevice(Device device, const Tensor &tensor);
 
-Device Device::getCpu() {
-  return Device(Type::kCpu);
-}
+Tensor toCpu(const Tensor &tensor);
+Tensor toMetal(const Tensor &tensor);
 
-Device Device::getCuda() {
-  return Device(Type::kCuda);
-}
-
-Device Device::getCudaHost() {
-  return Device(Type::kCudaHost);
-}
-
-Device Device::getMetal() {
-  return Device(Type::kMetal);
-}
-
-bool Device::isCudaAvailable() {
-#ifdef LIBWAIFU_CUDA_ENABLED
-  return op::cuda::CudaOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-bool Device::isMetalAvailable() {
-#ifdef LIBWAIFU_MLX_ENABLED
-  return op::metal::MetalOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-std::string Device::getName() const {
-  switch (_type) {
-    case kCpu:
-      return "cpu";
-    case kCuda:
-      return "cuda";
-    case kCudaHost:
-      return "cuda-host";
-    case kMetal:
-      return "metal";
-    default:
-      NOT_IMPL();
-  }
-}
-
+}  // namespace metal
+}  // namespace op
 }  // namespace fl

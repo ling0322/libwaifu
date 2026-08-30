@@ -17,68 +17,38 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "flint/device.h"
-
-#include "lutil/log.h"
-#include "flint/cuda/cuda_operators.h"
-#ifdef LIBWAIFU_MLX_ENABLED
-#include "flint/metal/metal_operators.h"
-#endif
+#include "flint/metal/common.h"
+#include "flint/metal/ops.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-Device::Device()
-    : _type(Type::kUnknown) {
-}
-Device::Device(Type type)
-    : _type(type) {
-}
+namespace {
 
-Device Device::getCpu() {
-  return Device(Type::kCpu);
-}
-
-Device Device::getCuda() {
-  return Device(Type::kCuda);
-}
-
-Device Device::getCudaHost() {
-  return Device(Type::kCudaHost);
-}
-
-Device Device::getMetal() {
-  return Device(Type::kMetal);
-}
-
-bool Device::isCudaAvailable() {
-#ifdef LIBWAIFU_CUDA_ENABLED
-  return op::cuda::CudaOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-bool Device::isMetalAvailable() {
-#ifdef LIBWAIFU_MLX_ENABLED
-  return op::metal::MetalOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-std::string Device::getName() const {
-  switch (_type) {
-    case kCpu:
-      return "cpu";
-    case kCuda:
-      return "cuda";
-    case kCudaHost:
-      return "cuda-host";
-    case kMetal:
-      return "metal";
-    default:
-      NOT_IMPL();
+mlx::core::Shape toMlxShape(lut::Span<const int> shape) {
+  mlx::core::Shape result;
+  for (int dim : shape) {
+    result.push_back(dim);
   }
+  return result;
 }
 
+}  // namespace
+
+Tensor rand(lut::Span<const int> shape, DType dtype) {
+  return fromMlxArray(mlx::core::random::uniform(toMlxShape(shape), toMlxDtype(dtype)));
+}
+
+Tensor randNormal(lut::Span<const int> shape) {
+  return fromMlxArray(
+      mlx::core::random::normal(toMlxShape(shape), mlx::core::float32, 0.0f, 1.0f));
+}
+
+void manualSeed(uint64_t seed) {
+  mlx::core::random::seed(seed);
+}
+
+}  // namespace metal
+}  // namespace op
 }  // namespace fl

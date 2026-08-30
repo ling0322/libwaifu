@@ -167,8 +167,25 @@ endif()
 
 if(WITH_MLX)
     set(flint_INCDIR ${flint_INCDIR} ${MLX_INCDIRS})
-    set(flint_SOURCES ${flint_SOURCES} "metal/metallib.cc")
-    set(flint_test_SOURCES ${flint_test_SOURCES} "metal/metallib_test.cc")
+    set(flint_SOURCES
+        ${flint_SOURCES}
+        "metal/attention.cc"
+        "metal/common.cc"
+        "metal/conv2d.cc"
+        "metal/elementwise.cc"
+        "metal/matmul.cc"
+        "metal/metal_operators.cc"
+        "metal/metal_tensor_data.cc"
+        "metal/metallib.cc"
+        "metal/norm.cc"
+        "metal/rand.cc"
+        "metal/reduce.cc"
+        "metal/shape.cc"
+        "metal/to_device.cc")
+    set(flint_test_SOURCES
+        ${flint_test_SOURCES}
+        "metal/metallib_test.cc"
+        "metal/operators_test.cc")
 endif()
 
 # CPU specific code

@@ -17,68 +17,19 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "flint/device.h"
-
-#include "lutil/log.h"
-#include "flint/cuda/cuda_operators.h"
-#ifdef LIBWAIFU_MLX_ENABLED
-#include "flint/metal/metal_operators.h"
-#endif
+#include "flint/metal/common.h"
+#include "flint/metal/ops.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-Device::Device()
-    : _type(Type::kUnknown) {
-}
-Device::Device(Type type)
-    : _type(type) {
-}
-
-Device Device::getCpu() {
-  return Device(Type::kCpu);
+Tensor matmul(const Tensor &a, const Tensor &b) {
+  // mlx::core::matmul broadcasts the batch dimensions the same way flint does, so a 4-D activation
+  // against a 2-D weight needs no reshaping here.
+  return fromMlxArray(mlx::core::matmul(toMlxArray(a), toMlxArray(b)));
 }
 
-Device Device::getCuda() {
-  return Device(Type::kCuda);
-}
-
-Device Device::getCudaHost() {
-  return Device(Type::kCudaHost);
-}
-
-Device Device::getMetal() {
-  return Device(Type::kMetal);
-}
-
-bool Device::isCudaAvailable() {
-#ifdef LIBWAIFU_CUDA_ENABLED
-  return op::cuda::CudaOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-bool Device::isMetalAvailable() {
-#ifdef LIBWAIFU_MLX_ENABLED
-  return op::metal::MetalOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-std::string Device::getName() const {
-  switch (_type) {
-    case kCpu:
-      return "cpu";
-    case kCuda:
-      return "cuda";
-    case kCudaHost:
-      return "cuda-host";
-    case kMetal:
-      return "metal";
-    default:
-      NOT_IMPL();
-  }
-}
-
+}  // namespace metal
+}  // namespace op
 }  // namespace fl

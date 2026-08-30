@@ -257,6 +257,9 @@ void copy(Tensor src, Tensor dest) {
   } else if (src.getDevice().getType() == Device::kCuda &&
              dest.getDevice().getType() == Device::kCuda) {
     getOperators(Device::kCuda)->copy(src, dest);
+  } else if (src.getDevice().getType() == Device::kMetal &&
+             dest.getDevice().getType() == Device::kMetal) {
+    getOperators(Device::kMetal)->copy(src, dest);
   } else {
     NOT_IMPL();
   }
@@ -335,6 +338,8 @@ Tensor toDevice(Device device, Tensor tensor) {
   Device srcDevice = tensor.getDevice();
   if (srcDevice.getType() == device.getType()) return tensor;
 
+  // A transfer is owned by the accelerator on whichever end of it is not the CPU: that is the
+  // side that knows how to allocate, and the CPU operators only ever hand tensors to themselves.
   // Anything with a CUDA end -- the device itself, or the page-locked host memory it hands out --
   // is the CUDA operators' to move, including the cuda-host to cpu copy that never touches the
   // bus. They are the only ones that know how either was allocated.
@@ -344,6 +349,8 @@ Tensor toDevice(Device device, Tensor tensor) {
 
   if (isCudaSide(srcDevice.getType()) || isCudaSide(device.getType()))
     return getOperators(Device::kCuda)->toDevice(device, tensor);
+  else if (srcDevice.getType() == Device::kMetal || device.getType() == Device::kMetal)
+    return getOperators(Device::kMetal)->toDevice(device, tensor);
   else
     NOT_IMPL();
 }

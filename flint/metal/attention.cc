@@ -17,68 +17,33 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "flint/device.h"
+#include <math.h>
 
+#include "lutil/error.h"
 #include "lutil/log.h"
-#include "flint/cuda/cuda_operators.h"
-#ifdef LIBWAIFU_MLX_ENABLED
-#include "flint/metal/metal_operators.h"
-#endif
+#include "flint/metal/common.h"
+#include "flint/metal/ops.h"
 
 namespace fl {
+namespace op {
+namespace metal {
 
-Device::Device()
-    : _type(Type::kUnknown) {
-}
-Device::Device(Type type)
-    : _type(type) {
-}
+Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, bool causal) {
+  CHECK(q.getDim() == 4) << "attention expects (batch, numHeads, length, headDim)";
 
-Device Device::getCpu() {
-  return Device(Type::kCpu);
-}
+  // MLX takes the same [batch, heads, length, headDim] layout flint documents, and handles
+  // grouped-query attention by broadcasting the key and value heads, so no expansion here.
+  float scale = 1.0f / sqrtf(static_cast<float>(q.getShape(-1)));
 
-Device Device::getCuda() {
-  return Device(Type::kCuda);
-}
-
-Device Device::getCudaHost() {
-  return Device(Type::kCudaHost);
-}
-
-Device Device::getMetal() {
-  return Device(Type::kMetal);
+  return fromMlxArray(
+      mlx::core::fast::scaled_dot_product_attention(
+          toMlxArray(q),
+          toMlxArray(k),
+          toMlxArray(v),
+          scale,
+          causal ? "causal" : ""));
 }
 
-bool Device::isCudaAvailable() {
-#ifdef LIBWAIFU_CUDA_ENABLED
-  return op::cuda::CudaOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-bool Device::isMetalAvailable() {
-#ifdef LIBWAIFU_MLX_ENABLED
-  return op::metal::MetalOperators::isAvailable();
-#else
-  return false;
-#endif
-}
-
-std::string Device::getName() const {
-  switch (_type) {
-    case kCpu:
-      return "cpu";
-    case kCuda:
-      return "cuda";
-    case kCudaHost:
-      return "cuda-host";
-    case kMetal:
-      return "metal";
-    default:
-      NOT_IMPL();
-  }
-}
-
+}  // namespace metal
+}  // namespace op
 }  // namespace fl
