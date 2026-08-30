@@ -23,6 +23,9 @@
 //! cargo run --release --example generate -- sdxl.waifupkg "an astronaut riding a horse on mars"
 //! ```
 //!
+//! A third argument names the device -- cpu, cuda or metal. Left out, it takes the first
+//! accelerator this build can reach.
+//!
 //! The `draw` command in the CLI is this with a screen around it: the same pipeline, reported on
 //! as it goes and interruptible between steps.
 
@@ -33,12 +36,33 @@ use waifu::{to_rgb8, Device, GenerationOptions, Sdxl, ZipFile};
 fn main() -> Result<(), waifu::Error> {
     let mut arguments = std::env::args().skip(1);
     let (Some(package_path), Some(prompt)) = (arguments.next(), arguments.next()) else {
-        eprintln!("usage: generate MODEL.waifupkg PROMPT");
+        eprintln!("usage: generate MODEL.waifupkg PROMPT [cpu|cuda|metal]");
         std::process::exit(1);
     };
 
+    let device = match arguments.next().as_deref() {
+        Some("cpu") => Device::Cpu,
+        Some("cuda") => Device::Cuda,
+        Some("metal") => Device::Metal,
+        None => {
+            // At most one accelerator is ever built in, so this asks rather than assumes.
+            if Device::Cuda.is_available() {
+                Device::Cuda
+            } else if Device::Metal.is_available() {
+                Device::Metal
+            } else {
+                Device::Cpu
+            }
+        }
+        Some(other) => {
+            eprintln!("unknown device {other}: expected cpu, cuda or metal");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("drawing on {device:?}");
+
     let package = ZipFile::open(&package_path)?;
-    let model = Sdxl::from_package(Device::Cuda, &package)?;
+    let model = Sdxl::from_package(device, &package)?;
 
     let options = GenerationOptions {
         width: 1024,
