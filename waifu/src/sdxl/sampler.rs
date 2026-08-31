@@ -29,7 +29,7 @@
 //! about.
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, Tensor};
+use crate::flint::{functional as F, DType, Tensor};
 
 /// The noise schedule a model was trained on. The default is what every SDXL checkpoint carries.
 #[derive(Clone, Copy, Debug)]
@@ -147,11 +147,21 @@ impl EulerSampler {
     /// subtract outright, which is what makes this Euler's method: the step taken along it is the
     /// gap between the two noise levels, and the gap is what a smaller number of steps makes
     /// larger and cruder.
+    ///
+    /// Taken in float32 whatever the model ran in, which is what the reference implementation
+    /// does and for the same reason. A step adds a small correction to a large sample, and in
+    /// half precision the correction loses its low bits to the addition -- the more steps, the
+    /// more of them lost. The latent is four channels of a small grid, so widening it for one
+    /// addition costs nothing worth measuring.
     pub fn step(&self, noise: &Tensor, sample: &Tensor, index: usize) -> Result<Tensor> {
         let sigma = self.sigma(index)?;
         let next = self.sigmas[index + 1];
 
-        Ok(F::add(sample, &F::mul_scalar(noise, next - sigma)?)?)
+        let stepped = F::add(
+            &sample.cast(DType::Float)?,
+            &F::mul_scalar(&noise.cast(DType::Float)?, next - sigma)?,
+        )?;
+        Ok(stepped.cast(noise.dtype())?)
     }
 
     fn sigma(&self, index: usize) -> Result<f32> {

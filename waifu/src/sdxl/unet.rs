@@ -118,6 +118,18 @@ fn time_ids_embedding(time_ids: &[f32], dim: i32) -> Result<Tensor> {
     Ok(out)
 }
 
+/// `rows` copies of a one-row tensor, stacked.
+///
+/// The timestep and the numbers about the image are the same for every latent in a batch -- only
+/// the prompt differs -- so they are built once and handed a row to each.
+fn repeat_rows(row: &Tensor, rows: i32) -> Result<Tensor> {
+    let mut out = row.clone();
+    for _ in 1..rows {
+        out = F::cat(&out, row, 0)?;
+    }
+    Ok(out)
+}
+
 /// Two convolutions, a normalization before each, and the timestep added in between.
 ///
 /// The timestep is how the block is told how much noise it is looking at. It arrives as one
@@ -178,7 +190,8 @@ impl ResnetBlock {
         // The activation comes before the projection here, not after, which is what the reference
         // does and what the weights were trained for.
         let t = self.time_proj.forward(&F::silu(temb)?)?;
-        let x = F::add(&x, &t.view(&[1, self.out_channels, 1, 1])?)?;
+        let batch = t.shape_at(0)?;
+        let x = F::add(&x, &t.view(&[batch, self.out_channels, 1, 1])?)?;
 
         let x = self.norm2.forward(&x)?;
         let x = F::silu(&x)?;
@@ -248,17 +261,19 @@ impl Attention {
 
     /// `(1, L, D)` to `(1, H, L, Dh)`, which is the shape the attention takes.
     fn split_heads(&self, input: &Tensor) -> Result<Tensor> {
+        let batch = input.shape_at(0)?;
         let length = input.shape_at(1)?;
         Ok(input
             .contiguous()?
-            .view(&[1, length, self.num_heads, self.head_dim])?
+            .view(&[batch, length, self.num_heads, self.head_dim])?
             .transpose(1, 2)?
             .contiguous()?)
     }
 
-    /// `input` is `(1, L, D)`. `context` is what the keys and values come from, which is `input`
+    /// `input` is `(N, L, D)`. `context` is what the keys and values come from, which is `input`
     /// itself when this is self attention.
     fn forward(&self, input: &Tensor, context: Option<&Tensor>) -> Result<Tensor> {
+        let batch = input.shape_at(0)?;
         let length = input.shape_at(1)?;
         let channels = self.num_heads * self.head_dim;
 
@@ -299,7 +314,7 @@ impl Attention {
         let x = x
             .transpose(1, 2)?
             .contiguous()?
-            .view(&[1, length, channels])?;
+            .view(&[batch, length, channels])?;
 
         self.out_proj.forward(&x)
     }
@@ -410,14 +425,14 @@ impl Transformer {
 
     fn forward(&self, input: &Tensor, context: &Tensor) -> Result<Tensor> {
         let shape = input.shape();
-        let (height, width) = (shape[2], shape[3]);
+        let (batch, height, width) = (shape[0], shape[2], shape[3]);
         let positions = height * width;
 
         let x = self.norm.forward(input)?;
 
-        // (1, C, H, W) to (1, H * W, C): a pixel is a position, and its channels are its vector.
+        // (N, C, H, W) to (N, H * W, C): a pixel is a position, and its channels are its vector.
         let x = x
-            .view(&[1, self.channels, positions])?
+            .view(&[batch, self.channels, positions])?
             .transpose(1, 2)?
             .contiguous()?;
 
@@ -430,7 +445,7 @@ impl Transformer {
         let x = x
             .transpose(1, 2)?
             .contiguous()?
-            .view(&[1, self.channels, height, width])?;
+            .view(&[batch, self.channels, height, width])?;
 
         Ok(F::add(input, &x)?)
     }
@@ -627,9 +642,12 @@ impl UpBlock {
 
 /// What one step of sampling is conditioned on, beside the latent itself.
 pub struct UnetCondition<'a> {
-    /// `(1, L, cross_attention_dim)`: the two text encoders side by side.
+    /// `(N, L, cross_attention_dim)`: the two text encoders side by side.
+    ///
+    /// One row per latent in the batch. Guidance sends the prompt and its absence through
+    /// together, so N is two there and the rows must be in the same order as the latents.
     pub context: &'a Tensor,
-    /// `(1, 1280)`: the pooled vector of the second encoder.
+    /// `(N, 1280)`: the pooled vector of the second encoder, a row per latent.
     pub pooled: &'a Tensor,
     /// The size SDXL is told about: the original height and width, the top and left it was
     /// cropped at, and the height and width being asked for.
@@ -781,12 +799,14 @@ impl Unet {
     fn conditioning(&self, timestep: f32, condition: &UnetCondition<'_>) -> Result<Tensor> {
         let device = condition.pooled.device();
         let dtype = condition.pooled.dtype();
+        let batch = condition.pooled.shape_at(0)?;
 
         let sinusoid = timestep_embedding(timestep as f64, self.config.block_out_channels[0])?
             .to_device(device)?
             .cast(dtype)?;
         let temb = self.time_linear1.forward(&sinusoid)?;
         let temb = self.time_linear2.forward(&F::silu(&temb)?)?;
+        let temb = repeat_rows(&temb, batch)?;
 
         // The pooled prompt and the six numbers about the image, side by side.
         let sizes = time_ids_embedding(&condition.time_ids, self.config.addition_time_embed_dim)?
@@ -795,8 +815,8 @@ impl Unet {
         let added = F::cat(
             &condition
                 .pooled
-                .view(&[1, condition.pooled.numel() as i32])?,
-            &sizes,
+                .view(&[batch, (condition.pooled.numel() / batch as i64) as i32])?,
+            &repeat_rows(&sizes, batch)?,
             -1,
         )?;
 

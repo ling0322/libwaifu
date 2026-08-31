@@ -299,6 +299,11 @@ impl Sdxl {
         self.device
     }
 
+    /// The U-Net alone, for a caller that wants to ask it something the pipeline does not.
+    pub fn unet(&self) -> &Unet {
+        &self.unet
+    }
+
     /// The ids one encoder reads: the prompt between its two markers, padded out to the context
     /// length. A prompt too long for that is cut rather than refused, which is what every other
     /// implementation does and what a prompt of a hundred tags will hit.
@@ -378,38 +383,55 @@ impl Sdxl {
             options.height as f32,
             options.width as f32,
         ];
-        fn condition<'a>(embedding: &'a PromptEmbedding, time_ids: [f32; 6]) -> UnetCondition<'a> {
-            UnetCondition {
-                context: &embedding.context,
-                pooled: &embedding.pooled,
-                time_ids,
-            }
+        // Classifier free guidance asks the model two questions: what it makes of this latent
+        // having read the prompt, and what it makes of it having read the negative one instead.
+        // Neither answer depends on the other, so the two go through as one batch of two rather
+        // than as two passes -- the same arithmetic over one pass of the weights instead of two,
+        // which is most of what a step costs on a machine whose memory is the slow part.
+        //
+        // The unprompted row comes first, and the latents below are stacked in the same order.
+        let guided = options.guidance_scale != 1.0;
+        let (context, pooled);
+        if guided {
+            context = F::cat(&negative.context, &prompt.context, 0)?;
+            pooled = F::cat(&negative.pooled, &prompt.pooled, 0)?;
+        } else {
+            context = prompt.context.clone();
+            pooled = prompt.pooled.clone();
         }
+        let condition = UnetCondition {
+            context: &context,
+            pooled: &pooled,
+            time_ids,
+        };
 
         let mut latent = F::mul_scalar(latent, sampler.init_noise_sigma())?;
         for index in 0..sampler.len() {
             let timestep = sampler.timesteps()[index];
             let scaled = sampler.scale_model_input(&latent, index)?;
 
-            let noise = self
-                .unet
-                .forward(&scaled, timestep, &condition(prompt, time_ids))?;
+            // The same latent to both rows: what differs between them is the prompt alone.
+            let batched = if guided {
+                F::cat(&scaled, &scaled, 0)?
+            } else {
+                scaled
+            };
+            let answer = self.unet.forward(&batched, timestep, &condition)?;
 
-            // Classifier free guidance: what the model says about this latent without having
-            // read the prompt is what it would say about anything, and the difference between
-            // the two answers is the part the prompt is responsible for. Amplifying it is what
-            // makes a generated image look like what was asked for.
-            let noise = if options.guidance_scale != 1.0 {
-                let unprompted =
-                    self.unet
-                        .forward(&scaled, timestep, &condition(negative, time_ids))?;
-                let difference = F::sub(&noise, &unprompted)?;
+            // What the model says about this latent without having read the prompt is what it
+            // would say about anything, and the difference between the two answers is the part
+            // the prompt is responsible for. Amplifying it is what makes a generated image look
+            // like what was asked for.
+            let noise = if guided {
+                let unprompted = answer.slice(0, 0, 1)?;
+                let prompted = answer.slice(0, 1, 2)?;
+                let difference = F::sub(&prompted, &unprompted)?;
                 F::add(
                     &unprompted,
                     &F::mul_scalar(&difference, options.guidance_scale)?,
                 )?
             } else {
-                noise
+                answer
             };
 
             latent = sampler.step(&noise, &latent, index)?;
