@@ -79,6 +79,74 @@ const CATALOG: &[Published] = &[
 /// of it; it keeps working when a v2 arrives, and `sdxl:base:v1` keeps meaning what it says.
 const ALIASES: &[(&str, &str)] = &[("sdxl:base", "sdxl:base:v1"), ("sdxl:wai", "sdxl:wai:v17")];
 
+/// What a fetch has to say for itself while it runs.
+///
+/// A download is minutes long and the caller decides how to show it: the command line prints a
+/// line that rewrites itself, and the screen draws a bar. Neither belongs in here.
+pub enum Progress<'a> {
+    /// Bytes of `file` fetched so far, and how many there are when the server said.
+    Fetching {
+        file: &'a str,
+        done: u64,
+        total: Option<u64>,
+    },
+    /// `file` is whole and in the cache.
+    Fetched { file: &'a str, bytes: u64 },
+}
+
+/// Whether every package of a published model is already in the cache.
+///
+/// A model is several packages and the first names the rest, so a model that was interrupted
+/// partway has its first part and not its others. That reads as not cached, which is what makes
+/// the answer worth asking for rather than guessing from one file.
+pub fn is_cached(name: &str) -> bool {
+    match (published(name), cache_directory()) {
+        (Some(published), Ok(cache)) => is_cached_in(published, &cache),
+        _ => false,
+    }
+}
+
+/// How much of a cached model is on disk, for a screen that offers to fetch one.
+pub fn cached_bytes(name: &str) -> u64 {
+    match (published(name), cache_directory()) {
+        (Some(published), Ok(cache)) => cached_bytes_in(published, &cache),
+        _ => 0,
+    }
+}
+
+fn is_cached_in(published: &Published, cache: &Path) -> bool {
+    let directory = cache.join(published.repo.replace('/', "--"));
+    let first = directory.join(published.first_part);
+    if !first.exists() {
+        return false;
+    }
+
+    // A first part that cannot be read for what it names is not a model anyone can draw with,
+    // whatever is on disk beside it, so it counts as not there.
+    match parts_named_by(&first) {
+        Ok(parts) => parts.iter().all(|part| directory.join(part).exists()),
+        Err(_) => false,
+    }
+}
+
+fn cached_bytes_in(published: &Published, cache: &Path) -> u64 {
+    let directory = cache.join(published.repo.replace('/', "--"));
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return 0;
+    };
+
+    // Everything in the model's own directory, `.part` files included: what this answers is "how
+    // much of this is already here", and a resumed fetch does start from what is in the `.part`.
+    entries
+        .flatten()
+        // Followed rather than read off the entry, so that a cache someone has pointed at models
+        // with symbolic links measures the models rather than the links.
+        .filter_map(|entry| fs::metadata(entry.path()).ok())
+        .filter(|meta| meta.is_file())
+        .map(|meta| meta.len())
+        .sum()
+}
+
 /// The published model a name refers to, following an alias if it is one.
 fn published(name: &str) -> Option<&'static Published> {
     let name = ALIASES
@@ -117,8 +185,16 @@ fn reads_as_a_name(model: &str) -> bool {
 /// is the first package of the model -- the one that holds the configuration and names the rest,
 /// which is what [`crate::Sdxl::from_package`] expects to be handed.
 pub fn resolve(model: &str) -> Result<PathBuf, Error> {
+    resolve_reporting(model, &mut print_progress)
+}
+
+/// The same, telling `report` how it is getting on rather than printing.
+pub fn resolve_reporting(
+    model: &str,
+    report: &mut dyn FnMut(Progress),
+) -> Result<PathBuf, Error> {
     if let Some(published) = published(model) {
-        return fetch(published);
+        return fetch(published, report);
     }
 
     let path = PathBuf::from(model);
@@ -137,17 +213,17 @@ pub fn resolve(model: &str) -> Result<PathBuf, Error> {
 }
 
 /// Make sure every package of `published` is in the cache, and say where the first one is.
-fn fetch(published: &Published) -> Result<PathBuf, Error> {
+fn fetch(published: &Published, report: &mut dyn FnMut(Progress)) -> Result<PathBuf, Error> {
     // One directory per repository, so that the parts of a model sit beside each other: the first
     // package names its neighbours by file name and reads them from its own directory.
     let directory = cache_directory()?.join(published.repo.replace('/', "--"));
     fs::create_dir_all(&directory)?;
 
     let first = directory.join(published.first_part);
-    download(published.repo, published.first_part, &first)?;
+    download(published.repo, published.first_part, &first, report)?;
 
     for part in parts_named_by(&first)? {
-        download(published.repo, &part, &directory.join(&part))?;
+        download(published.repo, &part, &directory.join(&part), report)?;
     }
     Ok(first)
 }
@@ -224,7 +300,14 @@ fn cache_directory() -> Result<PathBuf, Error> {
 /// The download goes to a `.part` beside it and is renamed once it is whole, so an interrupted
 /// fetch is never mistaken for a model: a half written package would otherwise be opened on the
 /// next run and fail as a corrupt one. A `.part` left behind is resumed rather than restarted.
-fn download(repo: &str, file: &str, destination: &Path) -> Result<(), Error> {
+fn download(
+    repo: &str,
+    file: &str,
+    destination: &Path,
+    report: &mut dyn FnMut(Progress),
+) -> Result<(), Error> {
+    // Already fetched, and nothing to say about it: a caller that draws a bar would rather see
+    // the bar start at the first file that is actually being fetched.
     if destination.exists() {
         return Ok(());
     }
@@ -259,7 +342,7 @@ fn download(repo: &str, file: &str, destination: &Path) -> Result<(), Error> {
 
     let start = if resuming { have } else { 0 };
     let mut reader = response.into_body().into_reader();
-    let written = copy_reporting(&mut reader, &mut writer, file, start, total)?;
+    let written = copy_reporting(&mut reader, &mut writer, file, start, total, report)?;
     writer.sync_all()?;
     drop(writer);
 
@@ -289,6 +372,7 @@ fn copy_reporting(
     name: &str,
     start: u64,
     total: Option<u64>,
+    report: &mut dyn FnMut(Progress),
 ) -> io::Result<u64> {
     let mut buffer = vec![0u8; DOWNLOAD_BUFFER];
     let mut done = start;
@@ -302,26 +386,45 @@ fn copy_reporting(
         writer.write_all(&buffer[..read])?;
         done += read as u64;
 
-        // A line per megabyte would scroll past; a line per percent, or per ten megabytes when
-        // the length is unknown, is enough to show that something is happening.
+        // Once a percent, or once every ten megabytes when the length is unknown. A caller that
+        // draws would redraw for nothing at every buffer, and one that prints would scroll.
         let mark = match total {
             Some(total) if total > 0 => done * 100 / total,
             _ => done / (10 * DOWNLOAD_BUFFER as u64),
         };
         if mark != reported {
             reported = mark;
-            match total {
-                Some(total) if total > 0 => {
-                    eprint!("\rfetching {name}: {mark}% of {}", megabytes(total))
-                }
-                _ => eprint!("\rfetching {name}: {}", megabytes(done)),
-            }
-            let _ = io::stderr().flush();
+            report(Progress::Fetching {
+                file: name,
+                done,
+                total,
+            });
         }
     }
 
-    eprintln!("\rfetching {name}: done ({})    ", megabytes(done));
+    report(Progress::Fetched {
+        file: name,
+        bytes: done,
+    });
     Ok(done)
+}
+
+/// What the command line does with a fetch's progress: one line that rewrites itself.
+fn print_progress(progress: Progress) {
+    match progress {
+        Progress::Fetching { file, done, total } => {
+            match total {
+                Some(total) if total > 0 => {
+                    eprint!("\rfetching {file}: {}% of {}", done * 100 / total, megabytes(total))
+                }
+                _ => eprint!("\rfetching {file}: {}", megabytes(done)),
+            }
+            let _ = io::stderr().flush();
+        }
+        Progress::Fetched { file, bytes } => {
+            eprintln!("\rfetching {file}: done ({})    ", megabytes(bytes));
+        }
+    }
 }
 
 fn megabytes(bytes: u64) -> String {
@@ -413,6 +516,33 @@ mod tests {
         let error = resolve("sdxl:nope").unwrap_err().to_string();
         assert!(error.contains("no model called"), "{error}");
         assert!(error.contains("sdxl:base"), "{error}");
+    }
+
+    #[test]
+    fn a_model_that_is_not_on_disk_is_not_cached() {
+        let cache = std::env::temp_dir().join(format!("waifu-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+        let model = published("sdxl:base").expect("the base model");
+
+        // Nothing there at all.
+        assert!(!is_cached_in(model, &cache));
+        assert_eq!(cached_bytes_in(model, &cache), 0);
+
+        // A first part that is not a package it can read. Half a download looks like this, and it
+        // must not read as a model that is ready to draw with -- though the bytes still count,
+        // because a resumed fetch starts from them.
+        let directory = cache.join(model.repo.replace('/', "--"));
+        fs::create_dir_all(&directory).expect("a directory to put it in");
+        fs::write(directory.join(model.first_part), b"not a zip").expect("a first part");
+
+        assert!(!is_cached_in(model, &cache));
+        assert_eq!(cached_bytes_in(model, &cache), 9);
+
+        // And a name nobody published is not cached either, rather than a panic.
+        assert!(!is_cached("sdxl:nope"));
+        assert_eq!(cached_bytes("sdxl:nope"), 0);
+
+        let _ = fs::remove_dir_all(&cache);
     }
 
     #[test]

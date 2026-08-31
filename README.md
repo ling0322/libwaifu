@@ -10,9 +10,11 @@ API.
 
 ## Getting a model
 
-Ask for one by name and it is fetched on first use:
+Run `waifu draw` with no model and it offers the ones it knows, marking what is already on disk;
+pick one and it is fetched. Ask for one by name to skip the list:
 
 ```bash
+$ waifu draw
 $ waifu draw -m sdxl:base
 $ waifu draw -m sdxl:wai
 ```
@@ -74,11 +76,13 @@ and can be read and checked alone.
 An SDXL package draws rather than talks, and `waifu draw` opens a terminal for it:
 
 ```bash
+$ waifu draw
 $ waifu draw -m sdxl:wai
 $ waifu draw -m sdxl.waifupkg
 ```
 
-`-m` takes either a published name from the table above or a package of your own.
+`-m` takes either a published name from the table above or a package of your own. Left out, the
+screen opens on the list of published models and fetches whichever one is picked.
 
 The screen holds the prompt, what to steer away from, and the four numbers a run takes: how many
 steps, how hard to push away from the unprompted answer, what size, and which seed.
@@ -104,6 +108,7 @@ Drawing needs `Conv2d`, which either cuDNN or CUTLASS can answer -- see the buil
 
 ## Recent updates
 
+- [2026-08-30] Pick a model on screen: `waifu draw` with no `-m` lists them and fetches one.
 - [2026-08-29] WAI Illustrious v17.0 is published too, as `sdxl:wai`.
 - [2026-08-29] Ask for a model by name: `waifu draw -m sdxl:base` fetches it on first use.
 - [2026-08-28] Draw pictures from a terminal.

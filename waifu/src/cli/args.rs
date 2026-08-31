@@ -108,12 +108,15 @@ impl Args {
         self.help
     }
 
-    /// The one model file to work with. Several `-m` flags is usually a stray comma in one of
-    /// them.
-    pub fn model(&self) -> Result<&str, ArgError> {
+    /// The one model file to work with, if one was named.
+    ///
+    /// None is not an error: without `-m` the screen offers the published models and fetches the
+    /// one that is picked. Several `-m` flags is usually a stray comma in one of them, and that
+    /// is an error, because guessing which of the two was meant is worse than saying so.
+    pub fn model(&self) -> Result<Option<&str>, ArgError> {
         match self.models.len() {
-            0 => Err(ArgError("model name (-m) is empty.".to_string())),
-            1 => Ok(&self.models[0]),
+            0 => Ok(None),
+            1 => Ok(Some(&self.models[0])),
             _ => Err(ArgError(
                 "only 1 model (-m) is expected, please check if there is any unexpected comma \
                  \",\" in model arg (-m)."
@@ -147,8 +150,8 @@ pub fn print_options() {
     );
     eprintln!(
         "  -m value\n    \tthe model to draw with: either a package file, which has the suffix \
-         \".waifupkg\", or the name of a published model, which is fetched on first use. The \
-         names are: {}.",
+         \".waifupkg\", or the name of a published model, which is fetched on first use. Left \
+         out, the screen offers the published ones to pick from. The names are: {}.",
         crate::cli::hub::names().join(", ")
     );
 }
@@ -165,11 +168,11 @@ mod tests {
     fn reads_a_flag_in_either_form() {
         assert_eq!(
             args(&["-m", "sdxl-base.waifupkg"]).unwrap().model().unwrap(),
-            "sdxl-base.waifupkg"
+            Some("sdxl-base.waifupkg")
         );
         assert_eq!(
             args(&["-m=sdxl-base.waifupkg"]).unwrap().model().unwrap(),
-            "sdxl-base.waifupkg"
+            Some("sdxl-base.waifupkg")
         );
         assert_eq!(
             args(&["-m", "x.waifupkg", "-device", "cuda"])
@@ -191,8 +194,9 @@ mod tests {
     }
 
     #[test]
-    fn insists_on_exactly_one_model() {
-        assert!(args(&[]).unwrap().model().is_err());
+    fn takes_at_most_one_model() {
+        // No -m at all is a picker rather than a mistake.
+        assert_eq!(args(&[]).unwrap().model().unwrap(), None);
 
         // Two -m flags usually means a comma crept into one of them.
         let two = args(&["-m", "a.waifupkg", "-m", "b.waifupkg"]).unwrap();
