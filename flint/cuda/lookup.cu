@@ -60,7 +60,7 @@ Tensor lookup2D(const Tensor &embdTable, const Tensor &input) {
   PackedTensorAccessor<T, 3> sC(dst);
 
   lookupKernel2D<<<d, blockSize>>>(sA, sB, sC);
-  cudaDeviceSynchronize();
+  LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
   return dst;
@@ -97,7 +97,7 @@ Tensor lookup1D(const Tensor &embdTable, const Tensor &input) {
   PackedTensorAccessor<T, 2> sC(dst);
 
   lookupKernel1D<<<d, blockSize>>>(sA, sB, sC);
-  cudaDeviceSynchronize();
+  LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
   return dst;
