@@ -35,6 +35,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::{IniConfig, Sdxl, ZipFile};
 
@@ -48,6 +49,20 @@ const CACHE_ENV: &str = "WAIFU_CACHE";
 
 /// How much is read from the network at a time.
 const DOWNLOAD_BUFFER: usize = 1 << 20;
+
+/// How often a fetch says where it has got to. Short enough that the screen looks alive, long
+/// enough that it is not redrawing for a bar that has not moved.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Which package of a model a fetch is on. Carried as one thing because it travels as one, down
+/// through the download and into every word it says.
+#[derive(Clone, Copy)]
+struct Part {
+    /// Counting from one.
+    at: usize,
+    /// How many there are in all, or zero while that is still unknown.
+    of: usize,
+}
 
 /// A model that has a name, and where it is published.
 struct Published {
@@ -84,14 +99,24 @@ const ALIASES: &[(&str, &str)] = &[("sdxl:base", "sdxl:base:v1"), ("sdxl:wai", "
 /// A download is minutes long and the caller decides how to show it: the command line prints a
 /// line that rewrites itself, and the screen draws a bar. Neither belongs in here.
 pub enum Progress<'a> {
-    /// Bytes of `file` fetched so far, and how many there are when the server said.
+    /// Bytes of `file` fetched so far, and how many there are when the server said. `part` says
+    /// which package of the model this is, counting from one, and `parts` how many there are in
+    /// all -- zero while that is still unknown, which it is until the first package has been read
+    /// and named its neighbours.
     Fetching {
         file: &'a str,
         done: u64,
         total: Option<u64>,
+        part: usize,
+        parts: usize,
     },
     /// `file` is whole and in the cache.
-    Fetched { file: &'a str, bytes: u64 },
+    Fetched {
+        file: &'a str,
+        bytes: u64,
+        part: usize,
+        parts: usize,
+    },
 }
 
 /// Whether every package of a published model is already in the cache.
@@ -219,11 +244,21 @@ fn fetch(published: &Published, report: &mut dyn FnMut(Progress)) -> Result<Path
     let directory = cache_directory()?.join(published.repo.replace('/', "--"));
     fs::create_dir_all(&directory)?;
 
+    // How many packages there are is not known until the first one has been read, so the first is
+    // fetched without a count. Saying "part 1" of an unsaid number beats saying nothing: it is
+    // what tells someone watching that more will follow.
     let first = directory.join(published.first_part);
-    download(published.repo, published.first_part, &first, report)?;
+    download(published.repo, published.first_part, &first, Part { at: 1, of: 0 }, report)?;
 
-    for part in parts_named_by(&first)? {
-        download(published.repo, &part, &directory.join(&part), report)?;
+    let rest = parts_named_by(&first)?;
+    let parts = rest.len() + 1;
+    for (index, part) in rest.iter().enumerate() {
+        let at = directory.join(part);
+        let which = Part {
+            at: index + 2,
+            of: parts,
+        };
+        download(published.repo, part, &at, which, report)?;
     }
     Ok(first)
 }
@@ -304,6 +339,7 @@ fn download(
     repo: &str,
     file: &str,
     destination: &Path,
+    part: Part,
     report: &mut dyn FnMut(Progress),
 ) -> Result<(), Error> {
     // Already fetched, and nothing to say about it: a caller that draws a bar would rather see
@@ -342,7 +378,7 @@ fn download(
 
     let start = if resuming { have } else { 0 };
     let mut reader = response.into_body().into_reader();
-    let written = copy_reporting(&mut reader, &mut writer, file, start, total, report)?;
+    let written = copy_reporting(&mut reader, &mut writer, file, start, total, part, report)?;
     writer.sync_all()?;
     drop(writer);
 
@@ -372,11 +408,23 @@ fn copy_reporting(
     name: &str,
     start: u64,
     total: Option<u64>,
+    part: Part,
     report: &mut dyn FnMut(Progress),
 ) -> io::Result<u64> {
     let mut buffer = vec![0u8; DOWNLOAD_BUFFER];
     let mut done = start;
-    let mut reported = u64::MAX;
+
+    // Said before the first byte, because the gap between one package finishing and the next
+    // showing a number is a stretch where the screen would otherwise hold a full bar and look
+    // hung. This is what moves it to the new file at nothing.
+    report(Progress::Fetching {
+        file: name,
+        done,
+        total,
+        part: part.at,
+        parts: part.of,
+    });
+    let mut said = Instant::now();
 
     loop {
         let read = reader.read(&mut buffer)?;
@@ -386,18 +434,18 @@ fn copy_reporting(
         writer.write_all(&buffer[..read])?;
         done += read as u64;
 
-        // Once a percent, or once every ten megabytes when the length is unknown. A caller that
-        // draws would redraw for nothing at every buffer, and one that prints would scroll.
-        let mark = match total {
-            Some(total) if total > 0 => done * 100 / total,
-            _ => done / (10 * DOWNLOAD_BUFFER as u64),
-        };
-        if mark != reported {
-            reported = mark;
+        // On a clock rather than on a fraction of the file. A percent of two gigabytes is twenty
+        // megabytes, which is seconds of silence on an ordinary line and reads as a hang; and on
+        // a fast one it is several redraws a second for a bar that moved a pixel. Time is what
+        // the watcher actually measures the wait in.
+        if said.elapsed() >= PROGRESS_INTERVAL {
+            said = Instant::now();
             report(Progress::Fetching {
                 file: name,
                 done,
                 total,
+                part: part.at,
+                parts: part.of,
             });
         }
     }
@@ -405,6 +453,8 @@ fn copy_reporting(
     report(Progress::Fetched {
         file: name,
         bytes: done,
+        part: part.at,
+        parts: part.of,
     });
     Ok(done)
 }
@@ -412,16 +462,29 @@ fn copy_reporting(
 /// What the command line does with a fetch's progress: one line that rewrites itself.
 fn print_progress(progress: Progress) {
     match progress {
-        Progress::Fetching { file, done, total } => {
+        Progress::Fetching {
+            file,
+            done,
+            total,
+            part,
+            parts,
+        } => {
+            let of = if parts > 0 {
+                format!(" (part {part} of {parts})")
+            } else {
+                String::new()
+            };
             match total {
-                Some(total) if total > 0 => {
-                    eprint!("\rfetching {file}: {}% of {}", done * 100 / total, megabytes(total))
-                }
-                _ => eprint!("\rfetching {file}: {}", megabytes(done)),
+                Some(total) if total > 0 => eprint!(
+                    "\rfetching {file}{of}: {}% of {}",
+                    done * 100 / total,
+                    megabytes(total)
+                ),
+                _ => eprint!("\rfetching {file}{of}: {}", megabytes(done)),
             }
             let _ = io::stderr().flush();
         }
-        Progress::Fetched { file, bytes } => {
+        Progress::Fetched { file, bytes, .. } => {
             eprintln!("\rfetching {file}: done ({})    ", megabytes(bytes));
         }
     }

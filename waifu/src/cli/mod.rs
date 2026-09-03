@@ -32,6 +32,26 @@ mod png;
 
 use std::process::ExitCode;
 
+use ratatui::style::{Color, Style, Stylize};
+use ratatui::text::{Line, Span};
+
+/// The commit this was built from, stamped in by build.rs. "unknown" when it was built from a
+/// copy of the source with no git around it, which is a thing that has to keep working.
+const REVISION: &str = env!("WAIFU_REVISION");
+
+/// What built this, as every screen says it.
+///
+/// On both of them rather than one: whichever is on screen when something goes wrong is the one
+/// that ends up in a screenshot, and a screenshot that cannot say which code it came from is
+/// worth much less than one that can.
+fn built_from() -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" libwaifu").bold(),
+        Span::raw("  "),
+        Span::styled(REVISION, Style::new().fg(Color::DarkGray)),
+    ])
+}
+
 fn print_usage() {
     eprintln!("Usage: waifu COMMAND");
     eprintln!();
