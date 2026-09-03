@@ -144,6 +144,11 @@ if (WITH_CUDA)
         "cuda/upsample_test.cc"
         "cuda/unary_test.cc")
     set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "cuda/benchmark.cc")
+    # cuDNN convolves nothing in the library any more. It is here as the reference the CUTLASS
+    # convolution is measured against, so it is built into the benchmark and nowhere else.
+    if (WITH_CUDNN)
+        set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "cuda/conv2d_cudnn.cc")
+    endif()
 
     if (WITH_CUTLASS)
         set(flint_SOURCES ${flint_SOURCES}
