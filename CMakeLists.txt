@@ -367,12 +367,22 @@ file(GENERATE
 # CMake drives the Rust build too, so a plain `cmake --build build` is the whole build: no
 # separate `cargo build` step. LIBWAIFU_LIB_DIR is set explicitly so this works regardless of where
 # the build directory was configured, matching what waifu/build.rs falls back to on its own.
+#
+# CARGO_TARGET_DIR points inside the build directory as well, so that a build writes nothing
+# outside it and two build directories configured differently do not fight over one cache. Cargo
+# still puts the binary under a profile directory of its own, so the last step copies it up beside
+# the C++ executables, where someone who built in `build` expects to find it.
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
+set(waifu_CARGO_DIR "${CMAKE_BINARY_DIR}/cargo")
+set(waifu_CLI "${waifu_CARGO_DIR}/release/waifu${CMAKE_EXECUTABLE_SUFFIX}")
 # `--features cli` is what builds the `waifu` binary: it is off by default so that using the crate
 # as a library does not drag in a terminal library.
 add_custom_target(waifu-cli ALL
     COMMAND ${CMAKE_COMMAND} -E env "LIBWAIFU_LIB_DIR=${CMAKE_BINARY_DIR}"
+            "CARGO_TARGET_DIR=${waifu_CARGO_DIR}"
             ${CARGO_EXECUTABLE} build -p waifu --features cli --release
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${waifu_CLI}" "${CMAKE_BINARY_DIR}/waifu${CMAKE_EXECUTABLE_SUFFIX}"
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     DEPENDS flint "${CMAKE_BINARY_DIR}/flint_link_flags.txt"
     COMMENT "cargo build -p waifu --features cli --release"

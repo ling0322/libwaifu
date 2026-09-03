@@ -191,7 +191,7 @@ cmake --build build --parallel
 The command-line executable is written to:
 
 ```text
-target/release/waifu
+build/waifu
 ```
 
 ### CUDA build
