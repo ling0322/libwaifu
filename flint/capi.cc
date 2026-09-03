@@ -32,6 +32,10 @@
 #include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
+#ifdef LIBWAIFU_CUDA_ENABLED
+#include "flint/cuda/future_tensor.h"
+#endif  // LIBWAIFU_CUDA_ENABLED
+
 #ifdef LIBWAIFU_CUTLASS_ENABLED
 #include "flint/cuda/gemm_nvfp4_cutlass.h"
 #include "flint/cuda/nvfp4.h"
@@ -80,6 +84,8 @@ fl::Device toDevice(fl_device_type_t device) {
       return fl::Device(fl::Device::kCpu);
     case FL_DEVICE_CUDA:
       return fl::Device(fl::Device::kCuda);
+    case FL_DEVICE_CUDA_HOST:
+      return fl::Device(fl::Device::kCudaHost);
     default:
       throw lut::InvalidArgError("invalid device");
   }
@@ -91,6 +97,8 @@ fl_device_type_t fromDevice(fl::Device device) {
       return FL_DEVICE_CPU;
     case fl::Device::kCuda:
       return FL_DEVICE_CUDA;
+    case fl::Device::kCudaHost:
+      return FL_DEVICE_CUDA_HOST;
     default:
       return FL_DEVICE_UNKNOWN;
   }
@@ -113,6 +121,13 @@ fl::Tensor &deref(fl_tensor_t tensor) {
   if (!tensor) throw lut::InvalidArgError("tensor is null");
   return *reinterpret_cast<fl::Tensor *>(tensor);
 }
+
+#ifdef LIBWAIFU_CUDA_ENABLED
+fl::FutureTensor &deref(fl_future_tensor_t future) {
+  if (!future) throw lut::InvalidArgError("future is null");
+  return *reinterpret_cast<fl::FutureTensor *>(future);
+}
+#endif  // LIBWAIFU_CUDA_ENABLED
 
 /// Number of bytes the elements of `tensor` occupy once packed together.
 int64_t getPackedSize(const fl::Tensor &tensor) {
@@ -333,8 +348,64 @@ int32_t fl_tensor_contiguous(fl_tensor_t tensor, fl_tensor_t *out) {
 }
 
 int32_t fl_tensor_to_device(fl_tensor_t tensor, fl_device_type_t device, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::to(toDevice(device), deref(tensor)), out); });
+  return guard([&]() { return publish(fl::F::toDevice(toDevice(device), deref(tensor)), out); });
 }
+
+#ifdef LIBWAIFU_CUDA_ENABLED
+
+int32_t fl_tensor_to_device_async(
+    fl_tensor_t tensor,
+    fl_device_type_t device,
+    fl_future_tensor_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+
+    fl::FutureTensor future = fl::F::toDeviceAsync(toDevice(device), deref(tensor));
+    *out = reinterpret_cast<fl_future_tensor_t>(new fl::FutureTensor(std::move(future)));
+    return clearError();
+  });
+}
+
+int32_t fl_future_tensor_take(fl_future_tensor_t future, fl_tensor_t *out) {
+  return guard([&]() { return publish(deref(future).take(), out); });
+}
+
+int32_t fl_future_tensor_take_sync(fl_future_tensor_t future, fl_tensor_t *out) {
+  return guard([&]() { return publish(deref(future).takeSync(), out); });
+}
+
+void fl_future_tensor_destroy(fl_future_tensor_t future) {
+  delete reinterpret_cast<fl::FutureTensor *>(future);
+}
+
+#else  // LIBWAIFU_CUDA_ENABLED
+
+namespace {
+
+/// The one thing every entry point below has to say. Kept in one place so that a build without
+/// CUDA says it the same way each time.
+int32_t noCuda() {
+  return setError(FL_ERROR_ABORTED, "this build has no CUDA support (needs WITH_CUDA=ON)");
+}
+
+}  // namespace
+
+int32_t fl_tensor_to_device_async(fl_tensor_t, fl_device_type_t, fl_future_tensor_t *) {
+  return noCuda();
+}
+
+int32_t fl_future_tensor_take(fl_future_tensor_t, fl_tensor_t *) {
+  return noCuda();
+}
+
+int32_t fl_future_tensor_take_sync(fl_future_tensor_t, fl_tensor_t *) {
+  return noCuda();
+}
+
+void fl_future_tensor_destroy(fl_future_tensor_t) {
+}
+
+#endif  // LIBWAIFU_CUDA_ENABLED
 
 int32_t fl_tensor_cast(fl_tensor_t tensor, fl_dtype_t dtype, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::cast(deref(tensor), toDType(dtype)), out); });
@@ -362,7 +433,7 @@ int32_t fl_tensor_copy_to_host(fl_tensor_t tensor, void *buffer, int64_t buffer_
 
     // Both steps copy, so do the device transfer first and pack the smaller result on the host.
     if (source.getDevice().getType() != fl::Device::kCpu) {
-      source = fl::F::to(fl::Device::getCpu(), source);
+      source = fl::F::toDevice(fl::Device::getCpu(), source);
     }
     if (!source.isContiguous()) source = fl::F::contiguous(source);
 

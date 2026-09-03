@@ -39,15 +39,15 @@ CATCH_TEST_CASE("test matmul gemm (cutlass)", "[fl][op][cuda][cutlass]") {
   Tensor b = F::rand({40, 256}, DType::kFloat);
   Tensor xr = F::matmul(a, b.slice(1, {128, 256}).transpose(1, 0));
 
-  Tensor x = F::to(Device::getCuda(), a);
-  Tensor y = F::to(Device::getCuda(), b);
+  Tensor x = F::toDevice(Device::getCuda(), a);
+  Tensor y = F::toDevice(Device::getCuda(), b);
   x = F::cast(x, DType::kFloat16);
   y = F::cast(y, DType::kFloat16);
   y = y.slice(1, {128, 256});
   y = y.transpose(1, 0);
   x = mm->apply(x, y);
   x = F::cast(x, DType::kFloat);
-  x = F::to(Device::getCpu(), x);
+  x = F::toDevice(Device::getCpu(), x);
 
   CATCH_REQUIRE(F::allClose(x, xr, 1e-2f));
 }
@@ -61,15 +61,15 @@ CATCH_TEST_CASE("test matmul bmm (cutlass)", "[fl][op][cuda][cutlass]") {
   Tensor b = F::rand({10, 64, 24}, DType::kFloat);
   Tensor xr = F::matmul(a, b.slice(1, {8, 32}).transpose(-1, -2));
 
-  Tensor x = F::to(Device::getCuda(), a);
-  Tensor y = F::to(Device::getCuda(), b);
+  Tensor x = F::toDevice(Device::getCuda(), a);
+  Tensor y = F::toDevice(Device::getCuda(), b);
   x = F::cast(x, DType::kFloat16);
   y = F::cast(y, DType::kFloat16);
   y = y.slice(1, {8, 32});
   y = y.transpose(-1, -2);
   x = mm->apply(x, y);
   x = F::cast(x, DType::kFloat);
-  x = F::to(Device::getCpu(), x);
+  x = F::toDevice(Device::getCpu(), x);
 
   CATCH_REQUIRE(F::allClose(x, xr, 5e-3f));
 }
@@ -98,9 +98,9 @@ CATCH_TEST_CASE("test matmul gemm accumulates in float (cutlass)", "[fl][op][cud
   Tensor halfB = F::cast(F::cast(b, DType::kFloat16), DType::kFloat);
   Tensor expected = F::matmul(halfA, halfB);
 
-  Tensor x = F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
-  Tensor y = F::cast(F::to(Device::getCuda(), b), DType::kFloat16);
-  Tensor actual = F::to(Device::getCpu(), F::cast(mm->apply(x, y), DType::kFloat));
+  Tensor x = F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  Tensor y = F::cast(F::toDevice(Device::getCuda(), b), DType::kFloat16);
+  Tensor actual = F::toDevice(Device::getCpu(), F::cast(mm->apply(x, y), DType::kFloat));
 
   CATCH_REQUIRE(F::allClose(actual, expected, 2e-3f));
 }

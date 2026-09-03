@@ -36,8 +36,8 @@ CATCH_TEST_CASE("test gemv", "[fl][op][cuda]") {
   Tensor w = F::rand({8000, 4096}, DType::kFloat, Device::kCpu);
   Tensor x = F::rand({1, 4096}, DType::kFloat, Device::kCpu);
 
-  w = F::cast(F::to(Device::getCuda(), w), DType::kFloat16);
-  x = F::cast(F::to(Device::getCuda(), x), DType::kFloat16);
+  w = F::cast(F::toDevice(Device::getCuda(), w), DType::kFloat16);
+  x = F::cast(F::toDevice(Device::getCuda(), x), DType::kFloat16);
 
   // the layout Linear::forward feeds to matmul: a transposed weight, so getStride(0) == 1.
   Tensor wT = w.transpose(0, 1);
@@ -45,8 +45,8 @@ CATCH_TEST_CASE("test gemv", "[fl][op][cuda]") {
   Tensor xr = F::matmul(x, F::contiguous(wT));
   Tensor xv = op::cuda::gemvHalf(x.subtensor(0), wT);
 
-  xr = F::to(Device::getCpu(), F::cast(xr, DType::kFloat));
-  xv = F::to(Device::getCpu(), F::cast(xv, DType::kFloat));
+  xr = F::toDevice(Device::getCpu(), F::cast(xr, DType::kFloat));
+  xv = F::toDevice(Device::getCpu(), F::cast(xv, DType::kFloat));
 
   CATCH_REQUIRE(F::allClose(xr, xv, 5e-3f));
 }
@@ -61,8 +61,8 @@ CATCH_TEST_CASE("test gemv (shapes)", "[fl][op][cuda]") {
     Tensor w = F::rand({d, n}, DType::kFloat, Device::kCpu);
     Tensor x = F::rand({1, n}, DType::kFloat, Device::kCpu);
 
-    w = F::cast(F::to(Device::getCuda(), w), DType::kFloat16);
-    x = F::cast(F::to(Device::getCuda(), x), DType::kFloat16);
+    w = F::cast(F::toDevice(Device::getCuda(), w), DType::kFloat16);
+    x = F::cast(F::toDevice(Device::getCuda(), x), DType::kFloat16);
 
     Tensor wT = w.transpose(0, 1);
     Tensor expected = F::matmul(x, F::contiguous(wT));
@@ -71,8 +71,8 @@ CATCH_TEST_CASE("test gemv (shapes)", "[fl][op][cuda]") {
     CATCH_INFO("n = " << n << ", d = " << d);
     CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, d});
     return F::allClose(
-        F::to(Device::getCpu(), F::cast(expected, DType::kFloat)),
-        F::to(Device::getCpu(), F::cast(actual, DType::kFloat)),
+        F::toDevice(Device::getCpu(), F::cast(expected, DType::kFloat)),
+        F::toDevice(Device::getCpu(), F::cast(actual, DType::kFloat)),
         5e-3f);
   };
 

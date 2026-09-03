@@ -28,6 +28,7 @@
 #include "flint/cuda/cast.h"
 #include "flint/cuda/causal_mask.h"
 #include "flint/cuda/conv2d.h"
+#include "flint/cuda/cuda_host_tensor_data.h"
 #include "flint/cuda/norm.h"
 #include "flint/cuda/upsample.h"
 #include "flint/cuda/copy.h"
@@ -358,6 +359,10 @@ Tensor CudaOperators::tensor(lut::Span<const int> shape, DType dtype) {
   NOT_IMPL();
 }
 
+Tensor CudaOperators::hostTensor(lut::Span<const int> shape, DType dtype) {
+  return op::cuda::createCudaHostTensor(shape, dtype);
+}
+
 Tensor CudaOperators::tensorLike(Tensor input) {
   return op::cuda::tensorLike(input);
 }
@@ -427,7 +432,7 @@ Tensor CudaOperators::sample(
   return op::cuda::sample(logits, uniformNoise, temperatures, topKs, topPs);
 }
 
-Tensor CudaOperators::to(Device device, Tensor tensor) {
+Tensor CudaOperators::toDevice(Device device, Tensor tensor) {
   return cuda::toDevice(device, tensor);
 }
 

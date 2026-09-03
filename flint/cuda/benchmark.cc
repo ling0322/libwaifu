@@ -109,14 +109,14 @@ void benchmarkMatmulNvfp4(
 }
 
 Tensor toCudaHalf(const Tensor &x) {
-  return F::cast(F::to(Device::getCuda(), x), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), x), DType::kFloat16);
 }
 
 /// @brief Root mean square error against a reference, divided by the reference's own root mean
 ///        square, so the numbers are comparable across shapes.
 double relativeRmse(const Tensor &x, const Tensor &reference) {
-  Tensor a = F::to(Device::getCpu(), F::cast(x, DType::kFloat));
-  Tensor b = F::to(Device::getCpu(), F::cast(reference, DType::kFloat));
+  Tensor a = F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
+  Tensor b = F::toDevice(Device::getCpu(), F::cast(reference, DType::kFloat));
   CATCH_REQUIRE(a.getNumEl() == b.getNumEl());
 
   const float *pa = a.getInternalData()->getData<float>(a.getInternalOffset());
@@ -230,14 +230,14 @@ Tensor createTokenIds(const std::shared_ptr<Operators> &operators, int sequenceL
   std::vector<LongType> values(sequenceLength);
   for (int i = 0; i < sequenceLength; ++i) values[i] = i % VocabSize;
   Tensor cpuIds = Tensor::create<LongType>({BatchSize, sequenceLength}, values);
-  return operators->to(Device::getCuda(), cpuIds);
+  return operators->toDevice(Device::getCuda(), cpuIds);
 }
 
 Tensor createPositions(const std::shared_ptr<Operators> &operators, int numTokens) {
   std::vector<LongType> values(numTokens);
   for (int i = 0; i < numTokens; ++i) values[i] = i;
   Tensor cpuPositions = Tensor::create<LongType>({numTokens}, values);
-  return operators->to(Device::getCuda(), cpuPositions);
+  return operators->toDevice(Device::getCuda(), cpuPositions);
 }
 
 Tensor applyRotaryEmbeddingBaseline(
@@ -316,11 +316,11 @@ void benchmarkLookup(const std::shared_ptr<Operators> &operators, int sequenceLe
 
 void benchmarkSampling(const std::shared_ptr<Operators> &operators) {
   Tensor logits = randHalf(operators, {BatchSize, VocabSize});
-  Tensor temperatures = operators->to(
+  Tensor temperatures = operators->toDevice(
     Device::getCuda(), Tensor::create<float>({BatchSize}, {1.0f}));
-  Tensor topKs = operators->to(
+  Tensor topKs = operators->toDevice(
     Device::getCuda(), Tensor::create<IntType>({BatchSize}, {50}));
-  Tensor topPs = operators->to(
+  Tensor topPs = operators->toDevice(
     Device::getCuda(), Tensor::create<float>({BatchSize}, {0.9f}));
   float milliseconds = benchmarkCuda(
     [&] { operators->sample(logits, temperatures, topKs, topPs); });
@@ -357,7 +357,7 @@ void benchmarkGatedDeltaNetSeqlens(
   std::vector<float> stateData(
       static_cast<size_t>(numSeq) * DeltaNetValueHeads * DeltaNetHeadDim * DeltaNetHeadDim,
       0.0f);
-  Tensor state = F::to(
+  Tensor state = F::toDevice(
       Device::getCuda(),
       Tensor::create<float>(
           {numSeq, DeltaNetValueHeads, DeltaNetHeadDim, DeltaNetHeadDim},
@@ -369,7 +369,7 @@ void benchmarkGatedDeltaNetSeqlens(
   std::vector<int32_t> lengths;
   lengths.push_back(0);
   for (int len : seqlens) lengths.push_back(lengths.back() + len);
-  Tensor cuSeqlens = F::to(
+  Tensor cuSeqlens = F::toDevice(
       Device::getCuda(),
       Tensor::create<int32_t>({numSeq + 1}, lut::makeConstSpan(lengths)));
 
@@ -378,7 +378,7 @@ void benchmarkGatedDeltaNetSeqlens(
   // being kept comparable here, not the traffic.
   std::vector<int32_t> slots;
   for (int s = 0; s < numSeq; ++s) slots.push_back(s);
-  Tensor stateSlots = F::to(
+  Tensor stateSlots = F::toDevice(
       Device::getCuda(),
       Tensor::create<int32_t>({numSeq}, lut::makeConstSpan(slots)));
 

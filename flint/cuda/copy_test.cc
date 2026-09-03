@@ -32,17 +32,17 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 /// A float tensor moved to the device as it stands. The autoencoder runs in float32, so the
 /// strided copies behind `contiguous` and `cat` have to take that type as well as half.
 Tensor toCudaFloat(const Tensor &a) {
-  return F::to(Device::getCuda(), a);
+  return F::toDevice(Device::getCuda(), a);
 }
 
 /// A copy moves the bits it was given, so its result is exact rather than close. `F::allClose`
@@ -102,7 +102,7 @@ CATCH_TEST_CASE("test CUDA copy (float)", "[op][cuda]") {
     CATCH_REQUIRE(dest.getDType() == DType::kFloat);
     F::copy(x, dest);
 
-    dest = F::to(Device::getCpu(), dest);
+    dest = F::toDevice(Device::getCpu(), dest);
     if (transpose) dest = F::contiguous(dest.transpose(1, 0));
     return equalFloat(a, dest);
   };
@@ -118,10 +118,10 @@ CATCH_TEST_CASE("test CUDA copy (long)", "[op][cuda]") {
 
   Tensor a = Tensor::create<LongType>({2, 5}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 0});
 
-  Tensor x = F::to(Device::getCuda(), a);
+  Tensor x = F::toDevice(Device::getCuda(), a);
   Tensor dest = F::tensorLike(x);
   F::copy(x, dest);
-  dest = F::to(Device::getCpu(), dest);
+  dest = F::toDevice(Device::getCpu(), dest);
 
   CATCH_REQUIRE(equalLong(dest, a));
 }

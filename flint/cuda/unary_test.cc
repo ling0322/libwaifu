@@ -32,11 +32,11 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 using UnaryFn = Tensor (*)(Tensor);
@@ -125,14 +125,14 @@ CATCH_TEST_CASE("test CUDA unary operators (float tensors)", "[op][cuda]") {
 
   // The kernels are instantiated for float as well as half; moving without a cast selects it.
   Tensor a = F::rand({3, 8}, DType::kFloat);
-  Tensor x = F::to(Device::getCuda(), a);
+  Tensor x = F::toDevice(Device::getCuda(), a);
   CATCH_REQUIRE(x.getDType() == DType::kFloat);
 
   for (const Case &c : allUnary()) {
     Tensor actual = c.fn(x);
     CATCH_INFO("op = " << c.name);
     CATCH_REQUIRE(actual.getDType() == DType::kFloat);
-    CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), actual), c.fn(a), 1e-4, 1e-5));
+    CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), actual), c.fn(a), 1e-4, 1e-5));
   }
 }
 

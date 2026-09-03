@@ -31,11 +31,11 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 }  // namespace
@@ -47,14 +47,14 @@ CATCH_TEST_CASE("test CUDA lookup", "[op][cuda]") {
   Tensor ids = Tensor::create<LongType>({2, 3}, {1, 2, 3, 4, 5, 6});
   Tensor xr = F::lookup(embd, ids);
 
-  Tensor x = F::lookup(toCuda(embd), F::to(Device::getCuda(), ids));
+  Tensor x = F::lookup(toCuda(embd), F::toDevice(Device::getCuda(), ids));
 
   CATCH_REQUIRE(F::allClose(toCpu(x), xr));
 
   // packed indices are 1D and give one embedding row per index.
   Tensor packedIds = Tensor::create<LongType>({3}, {1, 2, 3});
   Tensor packedRef = F::lookup(embd, packedIds);
-  Tensor packed = F::lookup(toCuda(embd), F::to(Device::getCuda(), packedIds));
+  Tensor packed = F::lookup(toCuda(embd), F::toDevice(Device::getCuda(), packedIds));
 
   CATCH_REQUIRE(packed.getShape() == std::vector<int>{3, 32});
   CATCH_REQUIRE(F::allClose(toCpu(packed), packedRef));
@@ -69,7 +69,7 @@ CATCH_TEST_CASE("test CUDA lookup (embedding widths)", "[op][cuda]") {
     Tensor embd = F::rand({6, width}, DType::kFloat);
     Tensor ids = Tensor::create<LongType>({2, 3}, {0, 1, 2, 3, 4, 5});
 
-    Tensor x = F::lookup(toCuda(embd), F::to(Device::getCuda(), ids));
+    Tensor x = F::lookup(toCuda(embd), F::toDevice(Device::getCuda(), ids));
     CATCH_INFO("width = " << width);
     CATCH_REQUIRE(x.getShape() == std::vector<int>{2, 3, width});
     CATCH_REQUIRE(F::allClose(toCpu(x), F::lookup(embd, ids), 5e-3));
@@ -84,13 +84,13 @@ CATCH_TEST_CASE("test CUDA lookup (index edges)", "[op][cuda]") {
   Tensor embd = F::rand({5, 8}, DType::kFloat);
   Tensor ids = Tensor::create<LongType>({2, 3}, {0, 4, 0, 4, 2, 2});
 
-  Tensor x = F::lookup(toCuda(embd), F::to(Device::getCuda(), ids));
+  Tensor x = F::lookup(toCuda(embd), F::toDevice(Device::getCuda(), ids));
   CATCH_REQUIRE(F::allClose(toCpu(x), F::lookup(embd, ids), 5e-3));
 
   // a table with a single row, so every index has to resolve to it.
   Tensor single = F::rand({1, 8}, DType::kFloat);
   Tensor zeros = Tensor::create<LongType>({3}, {0, 0, 0});
-  Tensor y = F::lookup(toCuda(single), F::to(Device::getCuda(), zeros));
+  Tensor y = F::lookup(toCuda(single), F::toDevice(Device::getCuda(), zeros));
   CATCH_REQUIRE(y.getShape() == std::vector<int>{3, 8});
   CATCH_REQUIRE(F::allClose(toCpu(y), F::lookup(single, zeros), 5e-3));
 }
@@ -103,18 +103,18 @@ CATCH_TEST_CASE("test CUDA lookup (float table)", "[op][cuda]") {
   Tensor embd = F::rand({6, 16}, DType::kFloat);
   Tensor ids = Tensor::create<LongType>({2, 2}, {0, 5, 3, 1});
 
-  Tensor table = F::to(Device::getCuda(), embd);
+  Tensor table = F::toDevice(Device::getCuda(), embd);
   CATCH_REQUIRE(table.getDType() == DType::kFloat);
 
-  Tensor x = F::lookup(table, F::to(Device::getCuda(), ids));
+  Tensor x = F::lookup(table, F::toDevice(Device::getCuda(), ids));
   CATCH_REQUIRE(x.getDType() == DType::kFloat);
-  CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), x), F::lookup(embd, ids)));
+  CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), x), F::lookup(embd, ids)));
 
   // and the packed 1D form of the same table.
   Tensor packedIds = Tensor::create<LongType>({2}, {4, 2});
-  Tensor packed = F::lookup(table, F::to(Device::getCuda(), packedIds));
+  Tensor packed = F::lookup(table, F::toDevice(Device::getCuda(), packedIds));
   CATCH_REQUIRE(packed.getShape() == std::vector<int>{2, 16});
-  CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), packed), F::lookup(embd, packedIds)));
+  CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), packed), F::lookup(embd, packedIds)));
 }
 
 }  // namespace fl

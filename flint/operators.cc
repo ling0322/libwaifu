@@ -298,6 +298,10 @@ Tensor Operators::tensor(lut::Span<const int> shape, DType dtype) {
   NOT_IMPL();
 }
 
+Tensor Operators::hostTensor(lut::Span<const int> shape, DType dtype) {
+  NOT_IMPL();
+}
+
 Tensor Operators::tensorLike(Tensor input) {
   NOT_IMPL();
 }
@@ -372,7 +376,7 @@ Tensor Operators::swiglu(Tensor A) {
   NOT_IMPL();
 }
 
-Tensor Operators::to(Device device, Tensor tensor) {
+Tensor Operators::toDevice(Device device, Tensor tensor) {
   NOT_IMPL();
 }
 
@@ -400,7 +404,9 @@ Tensor Operators::randNormal(lut::Span<const int> shape) {
   NOT_IMPL();
 }
 
-std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {nullptr, nullptr};
+// One per Device::Type, and cuda-host is deliberately left empty: it names memory rather than a
+// processor, so every operator asked for on it should report that it is not implemented.
+std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {nullptr, nullptr, nullptr};
 
 static std::atomic<bool> gInitialized{false};
 

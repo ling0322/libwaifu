@@ -120,17 +120,17 @@ Tensor CPUOperators::sample(
     Tensor temperatures,
     Tensor topKs,
     Tensor topPs) {
-  CHECK(logits.getDevice().getType() == Device::kCpu && logits.getDim() == 2);
+  CHECK(logits.getDevice().isHost() && logits.getDim() == 2);
   CHECK(logits.isContiguous());
   int rows = logits.getShape(0);
   int vocabSize = logits.getShape(1);
-  CHECK(temperatures.getDevice().getType() == Device::kCpu &&
+  CHECK(temperatures.getDevice().isHost() &&
         temperatures.getDType() == DType::kFloat && temperatures.isContiguous() &&
         temperatures.getShape() == std::vector<int>{rows});
-  CHECK(topKs.getDevice().getType() == Device::kCpu &&
+  CHECK(topKs.getDevice().isHost() &&
         topKs.getDType() == DType::kInt32 && topKs.isContiguous() &&
         topKs.getShape() == std::vector<int>{rows});
-  CHECK(topPs.getDevice().getType() == Device::kCpu &&
+  CHECK(topPs.getDevice().isHost() &&
         topPs.getDType() == DType::kFloat && topPs.isContiguous() &&
         topPs.getShape() == std::vector<int>{rows});
 
@@ -456,7 +456,7 @@ Tensor CPUOperators::geglu(Tensor input) {
   return cpu::geglu(input);
 }
 
-Tensor CPUOperators::to(Device device, Tensor tensor) {
+Tensor CPUOperators::toDevice(Device device, Tensor tensor) {
   if (device.getType() == Device::kCpu) return tensor;
 
   NOT_IMPL();

@@ -113,17 +113,25 @@ static_assert(sizeof(PackedOWORD<half2>) == 16, "invalid size of PackedOWORD<hal
 template<typename T>
 using auto_handle = lut::c_ptr<typename std::remove_pointer<T>::type>;
 
-inline cudaError_t llynCudaMalloc(void **ptr, size_t size) {
+/// Allocate in `stream`'s order. The pointer comes back at once and is final, but the memory
+/// behind it becomes the caller's only where `stream` has reached this call: the block may still
+/// belong to work that was enqueued before it was freed. So whoever writes it first has to be on
+/// `stream`, or has to wait for it. Writing it from another stream reads and writes memory that
+/// another kernel still owns, and nothing reports that.
+inline cudaError_t llynCudaMalloc(void **ptr, size_t size, cudaStream_t stream = 0) {
 #ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
-  return cudaMallocAsync(ptr, size, 0);
+  return cudaMallocAsync(ptr, size, stream);
 #else
   return cudaMalloc(ptr, size);
 #endif
 }
 
-inline void llynCudaFree(void *ptr) {
+/// Give the memory back in `stream`'s order, which has to be a stream the last use of it was on.
+/// The block does not become reusable until `stream` reaches here, so freeing on the wrong stream
+/// hands it to the next allocation while the right stream is still reading it.
+inline void llynCudaFree(void *ptr, cudaStream_t stream = 0) {
 #ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
-  cudaError_t err = cudaFreeAsync(ptr, 0);
+  cudaError_t err = cudaFreeAsync(ptr, stream);
 #else
   cudaError_t err = cudaFree(ptr);
 #endif
@@ -138,7 +146,7 @@ template<typename T>
 lut::c_ptr<T> llynCudaAlloc(int64_t n) {
   T *p = nullptr;
   LL_CHECK_CUDA_STATUS(llynCudaMalloc(reinterpret_cast<void **>(&p), n * sizeof(T)));
-  return {p, llynCudaFree};
+  return {p, [](void *ptr) { llynCudaFree(ptr); }};
 }
 
 Tensor createCudaTensorHalf(lut::Span<const int> shape);

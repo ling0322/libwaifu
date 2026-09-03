@@ -39,6 +39,10 @@ Device Device::getCuda() {
   return Device(Type::kCuda);
 }
 
+Device Device::getCudaHost() {
+  return Device(Type::kCudaHost);
+}
+
 bool Device::isCudaAvailable() {
 #ifdef LIBWAIFU_CUDA_ENABLED
   return op::cuda::CudaOperators::isAvailable();
@@ -53,6 +57,8 @@ std::string Device::getName() const {
       return "cpu";
     case kCuda:
       return "cuda";
+    case kCudaHost:
+      return "cuda-host";
     default:
       NOT_IMPL();
   }

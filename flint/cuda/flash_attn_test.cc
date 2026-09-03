@@ -29,11 +29,11 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 /// One sequence of a packed batch, and the blocks it owns.
@@ -118,9 +118,9 @@ bool runCase(
       toCuda(query),
       toCuda(keyPool),
       toCuda(valuePool),
-      F::to(Device::getCuda(), blockTable),
-      F::to(Device::getCuda(), cuSeqlensQ),
-      F::to(Device::getCuda(), seqlensK),
+      F::toDevice(Device::getCuda(), blockTable),
+      F::toDevice(Device::getCuda(), cuSeqlensQ),
+      F::toDevice(Device::getCuda(), seqlensK),
       maxQueryLength,
       maxKeyLength,
       causal);

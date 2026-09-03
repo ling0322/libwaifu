@@ -36,11 +36,11 @@ namespace fl {
 namespace {
 
 Tensor toCudaHalf(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 /// allClose compares magnitudes, and a NaN is not larger than anything, so it slips through the

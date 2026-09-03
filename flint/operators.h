@@ -135,6 +135,14 @@ class Operators {
   virtual Tensor quickGelu(Tensor input);
   virtual void fill(Tensor input, float value);
   virtual Tensor tensor(lut::Span<const int> shape, DType dtype);
+
+  /// @brief Create an uninitialized tensor in host memory that this device can read directly,
+  /// without the driver staging it through a buffer of its own.
+  ///
+  /// It belongs here rather than on the host's own operators because it is this device that
+  /// decides what "directly" costs and which calls arrange it. Only the CUDA operators implement
+  /// it; on the CPU there is nothing to arrange.
+  virtual Tensor hostTensor(lut::Span<const int> shape, DType dtype);
   virtual Tensor tensorLike(Tensor input);
   virtual Tensor zeros(lut::Span<const int> shape, DType dtype);
   virtual bool all(Tensor A);
@@ -143,7 +151,8 @@ class Operators {
   virtual Tensor causalMask(int max_len);
   virtual void copy(Tensor src, Tensor dest);
   virtual Tensor swiglu(Tensor A);
-  virtual Tensor to(Device device, Tensor tensor);
+  virtual Tensor toDevice(Device device, Tensor tensor);
+
   virtual float elem(Tensor tensor);
   virtual bool elemBool(Tensor tensor);
   virtual void repetitionPenalty(Tensor logits, Tensor history, float weight);

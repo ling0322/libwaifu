@@ -182,6 +182,11 @@ Tensor mod(Tensor input, LongType other) {
 }
 
 Tensor tensor(lut::Span<const int> shape, DType dtype, Device device) {
+  // Page-locked host memory is made by the device that reads it, not by the host it sits on, so
+  // this one question goes to the CUDA operators rather than to the device named.
+  if (device.getType() == Device::kCudaHost)
+    return getOperators(Device::kCuda)->hostTensor(shape, dtype);
+
   return getOperators(device.getType())->tensor(shape, dtype);
 }
 
@@ -244,17 +249,16 @@ void copy(Tensor src, Tensor dest) {
   CHECK(src.getDType() == dest.getDType());
   src.throwIfInvalidShape(dest.getShape(), "F::copy");
 
-  switch (src.getDevice().getType()) {
-    case Device::kCpu:
-      CHECK(dest.getDevice().getType() == Device::kCpu);
-      getOperators(Device::kCpu)->copy(src, dest);
-      break;
-    case Device::kCuda:
-      CHECK(dest.getDevice().getType() == Device::kCuda);
-      getOperators(Device::kCuda)->copy(src, dest);
-      break;
-    default:
-      NOT_IMPL();
+  // Host memory is host memory whoever page-locked it, so a copy with host at both ends is the
+  // CPU's to make whether either end is cuda-host or not. What this may not do is cross the bus;
+  // that is F::toDevice.
+  if (src.getDevice().isHost() && dest.getDevice().isHost()) {
+    getOperators(Device::kCpu)->copy(src, dest);
+  } else if (src.getDevice().getType() == Device::kCuda &&
+             dest.getDevice().getType() == Device::kCuda) {
+    getOperators(Device::kCuda)->copy(src, dest);
+  } else {
+    NOT_IMPL();
   }
 }
 
@@ -327,15 +331,19 @@ void storeKVCache(Tensor k, Tensor v, Tensor keyCache, Tensor valueCache, Tensor
 Tensor swiglu(Tensor inputs) {
   return getOperators(inputs.getDevice().getType())->swiglu(inputs);
 }
-Tensor to(Device device, Tensor tensor) {
-  Device::Type src = tensor.getDevice().getType();
-  Device::Type tgt = device.getType();
-
+Tensor toDevice(Device device, Tensor tensor) {
   Device srcDevice = tensor.getDevice();
   if (srcDevice.getType() == device.getType()) return tensor;
 
-  if (srcDevice.getType() == Device::kCuda || device.getType() == Device::kCuda)
-    return getOperators(Device::kCuda)->to(device, tensor);
+  // Anything with a CUDA end -- the device itself, or the page-locked host memory it hands out --
+  // is the CUDA operators' to move, including the cuda-host to cpu copy that never touches the
+  // bus. They are the only ones that know how either was allocated.
+  auto isCudaSide = [](Device::Type type) {
+    return type == Device::kCuda || type == Device::kCudaHost;
+  };
+
+  if (isCudaSide(srcDevice.getType()) || isCudaSide(device.getType()))
+    return getOperators(Device::kCuda)->toDevice(device, tensor);
   else
     NOT_IMPL();
 }

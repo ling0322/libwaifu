@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 //
-// Copyright (c) 2023 Xiaoyang Chen
+// Copyright (c) 2026 Xiaoyang Chen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 // and associated documentation files (the "Software"), to deal in the Software without
@@ -17,13 +17,12 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "flint/cuda/cuda_tensor_data.h"
+#include "flint/cuda/cuda_host_tensor_data.h"
 
 #include <cuda_runtime.h>
 
 #include "lutil/error.h"
-#include "lutil/platform.h"
-#include "lutil/span.h"
+#include "lutil/log.h"
 #include "lutil/strings.h"
 #include "flint/cuda/common.h"
 #include "flint/device.h"
@@ -33,56 +32,58 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-std::shared_ptr<TensorData> CudaTensorData::create(
-    int64_t numel,
-    DType dtype,
-    cudaStream_t stream) {
-  auto tensorData = std::make_shared<CudaTensorData>();
+std::shared_ptr<TensorData> CudaHostTensorData::create(int64_t numel, DType dtype) {
+  auto tensorData = std::make_shared<CudaHostTensorData>();
 
   CHECK(numel > 0);
   int64_t size = dtype.getTotalSize(numel);
   void *data = nullptr;
-  cudaError_t err = llynCudaMalloc(&data, size, stream);
+
+  // cudaHostAllocDefault rather than WriteCombined: write-combining would speed the copy engine's
+  // read a little and make the CPU's read of the same memory an order of magnitude slower, and
+  // this memory is meant to stay readable by both.
+  cudaError_t err = cudaHostAlloc(&data, size, cudaHostAllocDefault);
   if (err != cudaSuccess) {
-    throw lut::AbortedError(cudaGetErrorString(err));
+    throw lut::AbortedError(lut::sprintf(
+        "could not page-lock %lld bytes of host memory: %s",
+        static_cast<long long>(size),
+        cudaGetErrorString(err)));
   }
 
   tensorData->_data = data;
-  data = nullptr;
-
-  tensorData->_stream = stream;
   tensorData->_numel = numel;
   tensorData->_dtype = dtype;
 
   return tensorData;
 }
 
-CudaTensorData::CudaTensorData()
-    : _data(nullptr),
-      _stream(nullptr) {
+CudaHostTensorData::CudaHostTensorData()
+    : _data(nullptr) {
 }
 
-CudaTensorData::~CudaTensorData() {
+CudaHostTensorData::~CudaHostTensorData() {
   if (_data) {
-    // Given back in the order of the stream that last owned these bytes, which `_stream` tracks
-    // for exactly this. Neither case needs the host to wait: a fetch nobody wanted is freed in
-    // the copy stream, where the copy that may still be writing it runs, and one that was taken
-    // is freed in the compute stream, which is ordered after that copy.
-    llynCudaFree(_data, _stream);
+    cudaError_t err = cudaFreeHost(_data);
+    if (err != cudaSuccess) {
+      LOG(ERROR) << "Error while freeing page-locked host memory: " << cudaGetErrorString(err);
+    }
     _data = nullptr;
   }
 }
 
-void CudaTensorData::setOwningStream(cudaStream_t stream) {
-  _stream = stream;
+Device CudaHostTensorData::getDevice() const {
+  return Device(Device::Type::kCudaHost);
 }
 
-Device CudaTensorData::getDevice() const {
-  return Device(Device::Type::kCuda);
-}
-
-std::byte *CudaTensorData::getRawData() const {
+std::byte *CudaHostTensorData::getRawData() const {
   return reinterpret_cast<std::byte *>(_data);
+}
+
+Tensor createCudaHostTensor(lut::Span<const int> shape, DType dtype) {
+  auto tensorShape = std::make_shared<TensorShape>(shape);
+  auto data = CudaHostTensorData::create(tensorShape->getNumEl(), dtype);
+
+  return Tensor::create(tensorShape, data);
 }
 
 }  // namespace cuda

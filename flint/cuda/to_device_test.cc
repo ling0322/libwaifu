@@ -32,11 +32,11 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 }  // namespace
@@ -46,7 +46,7 @@ CATCH_TEST_CASE("test CUDA to and cast", "[op][cuda]") {
 
   Tensor a = F::rand({100, 200}, DType::kFloat);
 
-  Tensor roundTrip = F::to(Device::getCpu(), F::to(Device::getCuda(), a));
+  Tensor roundTrip = F::toDevice(Device::getCpu(), F::toDevice(Device::getCuda(), a));
   CATCH_REQUIRE(F::allClose(roundTrip, a));
 
   CATCH_REQUIRE(F::allClose(toCpu(toCuda(a)), a));
@@ -64,7 +64,7 @@ CATCH_TEST_CASE("test CUDA to (rank and dtype)", "[op][cuda]") {
            {2, 3, 4},
            {2, 3, 4, 5}}) {
     Tensor a = F::rand(shape, DType::kFloat);
-    Tensor roundTrip = F::to(Device::getCpu(), F::to(Device::getCuda(), a));
+    Tensor roundTrip = F::toDevice(Device::getCpu(), F::toDevice(Device::getCuda(), a));
     CATCH_INFO("shape rank = " << shape.size());
     CATCH_REQUIRE(roundTrip.getShape() == shape);
     CATCH_REQUIRE(F::allClose(roundTrip, a));
@@ -73,7 +73,7 @@ CATCH_TEST_CASE("test CUDA to (rank and dtype)", "[op][cuda]") {
   // long tensors travel the same path but are never cast, so values that do not survive a float
   // round trip must come back exactly.
   Tensor ids = Tensor::create<LongType>({2, 3}, {-1, 0, 1, 2, 3, LongType{1} << 40});
-  Tensor idsRoundTrip = F::to(Device::getCpu(), F::to(Device::getCuda(), ids));
+  Tensor idsRoundTrip = F::toDevice(Device::getCpu(), F::toDevice(Device::getCuda(), ids));
   const LongType *data = idsRoundTrip.getInternalData()->getData<LongType>(
       idsRoundTrip.getInternalOffset());
   CATCH_REQUIRE(data[0] == -1);
@@ -83,7 +83,7 @@ CATCH_TEST_CASE("test CUDA to (rank and dtype)", "[op][cuda]") {
 CATCH_TEST_CASE("test CUDA cast is a no-op for the same dtype", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::to(Device::getCuda(), F::rand({4, 8}, DType::kFloat));
+  Tensor a = F::toDevice(Device::getCuda(), F::rand({4, 8}, DType::kFloat));
   Tensor same = F::cast(a, DType::kFloat);
 
   // the same dtype short-circuits, so no copy is made and the storage is shared.

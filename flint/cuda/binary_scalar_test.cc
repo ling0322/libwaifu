@@ -33,11 +33,11 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 bool equalLong(Tensor a, Tensor b) {
@@ -58,7 +58,7 @@ CATCH_TEST_CASE("test CUDA scalar operators", "[op][cuda]") {
   CATCH_REQUIRE(F::allClose(toCpu(F::square(toCuda(a))), F::mul(a, a), 5e-3));
 
   Tensor ids = Tensor::create<LongType>({2, 3}, {0, 1, 2, 3, 4, 5});
-  Tensor mod = F::to(Device::getCpu(), F::mod(F::to(Device::getCuda(), ids), 3));
+  Tensor mod = F::toDevice(Device::getCpu(), F::mod(F::toDevice(Device::getCuda(), ids), 3));
   CATCH_REQUIRE(equalLong(mod, Tensor::create<LongType>({2, 3}, {0, 1, 2, 0, 1, 2})));
 
   CATCH_REQUIRE(F::elem(toCuda(Tensor::create<float>({1}, {1.5f}))) == 1.5f);
@@ -113,12 +113,12 @@ CATCH_TEST_CASE("test CUDA scalar mod", "[op][cuda]") {
 
   // Values on both sides of the divisor, plus exact multiples where the remainder is 0.
   Tensor ids = Tensor::create<LongType>({2, 4}, {0, 3, 4, 5, 7, 8, 99, 100});
-  Tensor mod = F::to(Device::getCpu(), F::mod(F::to(Device::getCuda(), ids), 4));
+  Tensor mod = F::toDevice(Device::getCpu(), F::mod(F::toDevice(Device::getCuda(), ids), 4));
   CATCH_REQUIRE(
       equalLong(mod, Tensor::create<LongType>({2, 4}, {0, 3, 0, 1, 3, 0, 3, 0})));
 
   // a divisor of 1 leaves nothing behind.
-  Tensor one = F::to(Device::getCpu(), F::mod(F::to(Device::getCuda(), ids), 1));
+  Tensor one = F::toDevice(Device::getCpu(), F::mod(F::toDevice(Device::getCuda(), ids), 1));
   CATCH_REQUIRE(equalLong(one, Tensor::create<LongType>({2, 4}, {0, 0, 0, 0, 0, 0, 0, 0})));
 }
 

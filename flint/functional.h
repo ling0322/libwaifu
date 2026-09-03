@@ -26,6 +26,7 @@
 
 namespace fl {
 class Tensor;
+class FutureTensor;
 
 namespace F {
 
@@ -339,7 +340,26 @@ void repetitionPenalty(Tensor logits, Tensor history, float weight);
 /// @param device target device.
 /// @param castFloat if cast the float type.
 /// @return the tensor in device.
-Tensor to(Device device, Tensor tensor);
+Tensor toDevice(Device device, Tensor tensor);
+
+/// @brief Start copying the tensor to `device` and return before it has arrived.
+///
+/// Only from cuda-host to cuda; anything else throws rather than falling back to a synchronous
+/// copy, which would be a name that lies and a cost of more than twice the time with nothing to
+/// say it happened.
+///
+/// What comes back has its memory but not yet its bytes, so it is not a Tensor but a
+/// FutureTensor: the tensor inside can only be had through FutureTensor::take(), which orders
+/// the compute stream after the copy without stopping the host. Take it where the tensor is
+/// about to be used rather than here, since that is where the dependency lands.
+///
+/// The source has to stay unchanged until the copy is done. It is kept alive for as long as the
+/// result needs it, so it cannot be freed underneath the copy engine, but writing to it while the
+/// copy is in flight is a race this cannot see.
+/// @param tensor the source tensor, which must be on cuda-host.
+/// @param device target device, which must be cuda.
+/// @return the tensor in device, held until taken.
+FutureTensor toDeviceAsync(Device device, Tensor tensor);
 
 /// @brief Cast tensor to another data type.
 /// @param tensor Source tensor.
