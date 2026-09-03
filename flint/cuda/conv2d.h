@@ -35,20 +35,16 @@ struct Conv2dOptions {
   int groups = 1;
 };
 
-/// @brief Return true if the build has cuDNN and it loaded. The library is looked up by name at
-///        the first call, so a build with cuDNN still runs where there is none.
+/// @brief Return true if this build can convolve, which it can where CUTLASS is in it.
 bool isConv2dAvailable();
 
-/// @brief Return true if a convolution goes through CUTLASS rather than cuDNN. That is the case
-///        three ways: `LIBWAIFU_CONV=cutlass` asks for it, a build without cuDNN has nothing
-///        else, and a build with cuDNN falls back to it where the library is not on the machine.
-///        CUTLASS convolves in one group and no more, so this is what to ask before handing a
-///        convolution several.
-bool convolvesOnCutlass();
-
-/// @brief A 2-D convolution, through cuDNN.
+/// @brief A 2-D convolution, through CUTLASS.
+///
+/// One group and no more: CUTLASS convolves that way, and the diffusion models this serves ask
+/// for nothing else. Several groups are refused rather than served some other way. cuDNN, which
+/// takes them, is in the benchmark as the reference and is not on this path.
 /// @param input <half|float>(N, C, H, W), contiguous.
-/// @param weight <half|float>(K, C / groups, R, S), contiguous and of the same type as `input`.
+/// @param weight <half|float>(K, C, R, S), contiguous and of the same type as `input`.
 /// @param bias <half|float>(K), or an empty tensor for no bias.
 /// @return <half|float>(N, K, outH, outW), where outH is
 ///         (H + 2 * padding - dilation * (R - 1) - 1) / stride + 1, and outW likewise.

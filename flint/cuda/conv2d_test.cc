@@ -118,17 +118,9 @@ bool skipUnavailable() {
   return !op::cuda::isConv2dAvailable();
 }
 
-/// Whether this run convolves on CUTLASS, which does one group and no more. The cases below that
-/// ask for several are cuDNN's to answer. Asked of the operator rather than of LIBWAIFU_CONV: a
-/// build without cuDNN, or a machine that has not got the library, is on CUTLASS without anyone
-/// having asked for it.
-bool convolvesOnCutlass() {
-  return op::cuda::convolvesOnCutlass();
-}
-
-/// Which implementation to check. cuDNN is what the operator reaches for; CUTLASS is what it
-/// falls back to, and it is checked against the same written-out reference rather than against
-/// cuDNN, so a mistake the two could share is not a mistake either of them can hide.
+/// Which implementation to check. The operator convolves on CUTLASS, and the cases are checked
+/// against a written-out reference rather than against another library, so a mistake the two
+/// could share is not a mistake either of them can hide.
 using Conv2dFn = Tensor (*)(
     const Tensor &,
     const Tensor &,
@@ -173,8 +165,8 @@ bool matchesReference(
 
 }  // namespace
 
-CATCH_TEST_CASE("test conv2d (kernel shapes)", "[fl][op][cuda][cudnn][conv2d]") {
-  if (skipUnavailable()) CATCH_SKIP("cudnn not available");
+CATCH_TEST_CASE("test conv2d (kernel shapes)", "[fl][op][cuda][conv2d]") {
+  if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
   // 1x1, which is a per-pixel matrix multiply, and the 3x3 that keeps its resolution: between
   // them these are almost every convolution in a diffusion U-Net.
@@ -219,8 +211,8 @@ CATCH_TEST_CASE("test conv2d (kernel shapes)", "[fl][op][cuda][cudnn][conv2d]") 
       2e-2f));
 }
 
-CATCH_TEST_CASE("test conv2d (stride, padding, dilation)", "[fl][op][cuda][cudnn][conv2d]") {
-  if (skipUnavailable()) CATCH_SKIP("cudnn not available");
+CATCH_TEST_CASE("test conv2d (stride, padding, dilation)", "[fl][op][cuda][conv2d]") {
+  if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
   // The downsample of a U-Net: 3x3 taken two pixels at a time.
   CATCH_REQUIRE(matchesReference(
@@ -247,7 +239,7 @@ CATCH_TEST_CASE("test conv2d (stride, padding, dilation)", "[fl][op][cuda][cudnn
       DType::kFloat16,
       2e-2f));
 
-  // Dilation, and groups, which split the channels into independent convolutions.
+  // Dilation, which spreads the kernel out over the input without growing it.
   CATCH_REQUIRE(matchesReference(
       {1, 4, 9, 9},
       {4, 4, 3, 3},
@@ -255,30 +247,13 @@ CATCH_TEST_CASE("test conv2d (stride, padding, dilation)", "[fl][op][cuda][cudnn
       {1, 2, 2, 1},
       DType::kFloat16,
       2e-2f));
-  // Two groups, which is cuDNN's alone: the CUTLASS path refuses them, and the test for that is
-  // with the rest of its cases below.
-  if (!convolvesOnCutlass()) {
-    CATCH_REQUIRE(matchesReference(
-        {2, 8, 6, 6},
-        {8, 4, 3, 3},
-        false,
-        {1, 1, 1, 2},
-        DType::kFloat16,
-        2e-2f));
-
-    // One group per channel, which is the depthwise case.
-    CATCH_REQUIRE(matchesReference(
-        {1, 6, 5, 5},
-        {6, 1, 3, 3},
-        false,
-        {1, 1, 1, 6},
-        DType::kFloat16,
-        2e-2f));
-  }
+  // Several groups are nobody's here any more: CUTLASS does one and the operator is CUTLASS, so
+  // what there is to check is that asking is refused. That case is with the rest of its own
+  // below.
 }
 
-CATCH_TEST_CASE("test conv2d (bias)", "[fl][op][cuda][cudnn][conv2d]") {
-  if (skipUnavailable()) CATCH_SKIP("cudnn not available");
+CATCH_TEST_CASE("test conv2d (bias)", "[fl][op][cuda][conv2d]") {
+  if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
   // The bias is one value per output channel, spread over the batch and both spatial axes.
   CATCH_REQUIRE(matchesReference(
@@ -297,8 +272,8 @@ CATCH_TEST_CASE("test conv2d (bias)", "[fl][op][cuda][cudnn][conv2d]") {
       2e-2f));
 }
 
-CATCH_TEST_CASE("test conv2d (float)", "[fl][op][cuda][cudnn][conv2d]") {
-  if (skipUnavailable()) CATCH_SKIP("cudnn not available");
+CATCH_TEST_CASE("test conv2d (float)", "[fl][op][cuda][conv2d]") {
+  if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
   // A VAE decoder is the reason to have this path: it overflows float16 on real weights, so it is
   // run in float, and the tolerance says as much.
@@ -318,8 +293,8 @@ CATCH_TEST_CASE("test conv2d (float)", "[fl][op][cuda][cudnn][conv2d]") {
       1e-5f));
 }
 
-CATCH_TEST_CASE("test conv2d (a shape it cannot take)", "[fl][op][cuda][cudnn][conv2d]") {
-  if (skipUnavailable()) CATCH_SKIP("cudnn not available");
+CATCH_TEST_CASE("test conv2d (a shape it cannot take)", "[fl][op][cuda][conv2d]") {
+  if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
   Tensor x = toCuda(F::rand({1, 4, 8, 8}, DType::kFloat), DType::kFloat16);
   Tensor w = toCuda(F::rand({4, 4, 3, 3}, DType::kFloat), DType::kFloat16);
@@ -342,8 +317,8 @@ CATCH_TEST_CASE("test conv2d (a shape it cannot take)", "[fl][op][cuda][cudnn][c
                 std::vector<int>{1, 4, 8, 8});
 }
 
-CATCH_TEST_CASE("test conv2d (through the operator interface)", "[fl][op][cuda][cudnn][conv2d]") {
-  if (skipUnavailable()) CATCH_SKIP("cudnn not available");
+CATCH_TEST_CASE("test conv2d (through the operator interface)", "[fl][op][cuda][conv2d]") {
+  if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
   // The same convolution reached the way a layer would reach it.
   Tensor x = toCuda(F::rand({2, 4, 8, 8}, DType::kFloat), DType::kFloat16);

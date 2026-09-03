@@ -13,6 +13,9 @@
 #include "lutil/span.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/conv2d.h"
+#ifdef LIBWAIFU_CUDNN_ENABLED
+#include "flint/cuda/conv2d_cudnn.h"
+#endif
 #include "flint/cuda/cuda_operators.h"
 #include "flint/cuda/gated_delta_net.h"
 #ifdef LIBWAIFU_CUTLASS_ENABLED
@@ -180,10 +183,27 @@ void benchmarkConv2d(
   int outSize = (size + 2 * padding - kernel) / stride + 1;
   double flop = 2.0 * batch * outChannel * outSize * outSize * inChannel * kernel * kernel;
   std::printf(
-      "%-44s %10.3f us  %8.2f TFLOP/s\n",
+      "%-44s %10.3f us  %8.2f TFLOP/s",
       name.c_str(),
       milliseconds * 1000.0f,
       flop / (milliseconds * 1.0e9));
+
+#ifdef LIBWAIFU_CUDNN_ENABLED
+  // The same convolution on cuDNN, on the same line, because a number for one implementation says
+  // nothing on its own: what is worth knowing is whether the one that runs is behind the one that
+  // does not. Skipped rather than reported as zero where the library is not on the machine, since
+  // a build having cuDNN and a machine having it are two different things.
+  if (op::cuda::isConv2dCudnnAvailable()) {
+    float reference = benchmarkCuda(
+        [&] { op::cuda::conv2dCudnn(input, weight, bias, {stride, padding, 1, 1}); });
+    std::printf(
+        "   cudnn %8.3f us  %8.2f TFLOP/s",
+        reference * 1000.0f,
+        flop / (reference * 1.0e9));
+  }
+#endif  // LIBWAIFU_CUDNN_ENABLED
+
+  std::printf("\n");
 }
 
 void benchmarkRmsNorm(const std::shared_ptr<Operators> &operators, int sequenceLength) {
@@ -517,6 +537,28 @@ CATCH_TEST_CASE("SDXL GEMM benchmarks", "[benchmark][cuda][sdxl]") {
   std::printf("%-44s %10.3f s\n", "thirty steps", totalUs * 30 / 1.0e6);
 }
 
+CATCH_TEST_CASE("SDXL convolution benchmarks", "[benchmark][cuda][conv2d]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  if (!op::cuda::isConv2dAvailable()) CATCH_SKIP("this build cannot convolve");
+  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
+
+  // SDXL shapes at a 1024 by 1024 image, whose latent is 128 by 128, plus one convolution small
+  // enough that what it measures is the per-call descriptor work rather than the arithmetic.
+  //
+  // The cuDNN column appears beside each one where the library is on the machine, which is what
+  // says whether the kernels that actually run are behind the ones that do not. Its own case
+  // rather than the tail of another, so that it can be run on its own and does not have to pay
+  // for a page of unrelated allocations first.
+  std::printf("\nSDXL convolution benchmarks (FP16, CUTLASS)\n");
+  benchmarkConv2d(operators, "unet 128x128x320 3x3", 1, 320, 320, 128, 3, 1);
+  benchmarkConv2d(operators, "unet 64x64x640 3x3", 1, 640, 640, 64, 3, 1);
+  benchmarkConv2d(operators, "unet 32x32x1280 3x3", 1, 1280, 1280, 32, 3, 1);
+  benchmarkConv2d(operators, "unet 128x128x320 downsample 3x3/2", 1, 320, 320, 128, 3, 2);
+  benchmarkConv2d(operators, "unet 64x64x640 1x1", 1, 640, 640, 64, 1, 1);
+  benchmarkConv2d(operators, "vae 512x512x256 3x3", 1, 256, 256, 512, 3, 1);
+  benchmarkConv2d(operators, "call overhead 1x1x1 1x1", 1, 1, 1, 1, 1, 1);
+}
+
 CATCH_TEST_CASE("Llama 3.2 3B benchmarks", "[benchmark][cuda][llama32-3b]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
   std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
@@ -559,20 +601,6 @@ CATCH_TEST_CASE("Llama 3.2 3B benchmarks", "[benchmark][cuda][llama32-3b]") {
     reportNvfp4Accuracy(operators, "decode qkv_proj (1,5120,3072)", 1, QkvSize, HiddenSize);
   }
 #endif
-
-  if (op::cuda::isConv2dAvailable()) {
-    // SDXL shapes at a 1024 by 1024 image, whose latent is 128 by 128, plus one convolution small
-    // enough that what it measures is the per-call descriptor and heuristic work rather than the
-    // arithmetic.
-    std::printf("\nSDXL convolution benchmarks (FP16, cuDNN)\n");
-    benchmarkConv2d(operators, "unet 128x128x320 3x3", 1, 320, 320, 128, 3, 1);
-    benchmarkConv2d(operators, "unet 64x64x640 3x3", 1, 640, 640, 64, 3, 1);
-    benchmarkConv2d(operators, "unet 32x32x1280 3x3", 1, 1280, 1280, 32, 3, 1);
-    benchmarkConv2d(operators, "unet 128x128x320 downsample 3x3/2", 1, 320, 320, 128, 3, 2);
-    benchmarkConv2d(operators, "unet 64x64x640 1x1", 1, 640, 640, 64, 1, 1);
-    benchmarkConv2d(operators, "vae 512x512x256 3x3", 1, 256, 256, 512, 3, 1);
-    benchmarkConv2d(operators, "call overhead 1x1x1 1x1", 1, 1, 1, 1, 1, 1);
-  }
 
   std::printf("\nLlama 3.2 3B normalization and elementwise benchmarks (FP16)\n");
   for (int sequenceLength : {1, 128, 512}) {
