@@ -31,7 +31,7 @@ namespace fl {
 namespace {
 
 Tensor toCpuFloat(Tensor tensor) {
-  return F::to(Device::getCpu(), F::cast(tensor, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(tensor, DType::kFloat));
 }
 
 Tensor baselineRotaryEmbedding(Tensor input, Tensor roPE) {
@@ -57,7 +57,7 @@ bool runCase(int numQueryHeads, int numKeyHeads, int headDim) {
   int numTokens = static_cast<int>(positionValues.size());
   Device device = Device::getCuda();
 
-  Tensor positions = F::to(
+  Tensor positions = F::toDevice(
       device,
       Tensor::create<LongType>({numTokens}, positionValues));
   Tensor query = F::rand({numTokens, numQueryHeads, headDim}, DType::kFloat16, device);

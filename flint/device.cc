@@ -46,6 +46,10 @@ Device Device::getMetal() {
   return Device(Type::kMetal);
 }
 
+Device Device::getCudaHost() {
+  return Device(Type::kCudaHost);
+}
+
 bool Device::isCudaAvailable() {
 #ifdef LIBWAIFU_CUDA_ENABLED
   return op::cuda::CudaOperators::isAvailable();
@@ -70,6 +74,8 @@ std::string Device::getName() const {
       return "cuda";
     case kMetal:
       return "metal";
+    case kCudaHost:
+      return "cuda-host";
     default:
       NOT_IMPL();
   }

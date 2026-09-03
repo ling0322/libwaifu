@@ -31,17 +31,17 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 /// A float tensor moved to the device as it stands, which is what the autoencoder's attention
 /// multiplies. It goes to cuBLAS through sgemm rather than hgemm, and never to the vector kernel.
 Tensor toCudaFloat(const Tensor &a) {
-  return F::to(Device::getCuda(), a);
+  return F::toDevice(Device::getCuda(), a);
 }
 
 }  // namespace
@@ -178,7 +178,7 @@ CATCH_TEST_CASE("test CUDA matmul (float)", "[op][cuda]") {
     Tensor x = F::matmul(toCudaFloat(a), y);
     CATCH_REQUIRE(x.getDType() == DType::kFloat);
 
-    return F::allClose(F::to(Device::getCpu(), x), expected, 1e-4f);
+    return F::allClose(F::toDevice(Device::getCpu(), x), expected, 1e-4f);
   };
 
   CATCH_REQUIRE(runCase({10, 24}, {40, 64}));
@@ -203,7 +203,7 @@ CATCH_TEST_CASE("test CUDA matmul (float takes the shapes gemv would)", "[op][cu
   Tensor actual = F::matmul(toCudaFloat(x), wT);
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, N});
   CATCH_REQUIRE(F::allClose(
-      F::to(Device::getCpu(), actual),
+      F::toDevice(Device::getCpu(), actual),
       F::matmul(x, w.transpose(0, 1)),
       1e-4f));
 }
@@ -218,7 +218,7 @@ CATCH_TEST_CASE("test CUDA matmul (float carries what half cannot)", "[op][cuda]
   a = F::mul(a, 300.0f);
   b = F::mul(b, 300.0f);
 
-  Tensor x = F::to(Device::getCpu(), F::matmul(toCudaFloat(a), toCudaFloat(b)));
+  Tensor x = F::toDevice(Device::getCpu(), F::matmul(toCudaFloat(a), toCudaFloat(b)));
   CATCH_REQUIRE(F::allClose(x, F::matmul(a, b), 1e-4f));
 
   Tensor asHalf = toCpu(F::matmul(toCuda(a), toCuda(b)));

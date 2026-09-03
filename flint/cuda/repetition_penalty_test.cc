@@ -32,11 +32,11 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 }  // namespace
@@ -48,7 +48,7 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty", "[op][cuda]") {
   Tensor history = Tensor::create<LongType>({2, 4}, {1, 0, 1, 3, 0, 0, 0, 1});
 
   Tensor x = toCuda(a);
-  F::repetitionPenalty(x, F::to(Device::getCuda(), history), 1.5);
+  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.5);
   F::repetitionPenalty(a, history, 1.5);
 
   CATCH_REQUIRE(F::allClose(toCpu(x), a, 1e-3));
@@ -63,7 +63,7 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (packed 1D logits)", "[op][cuda]") 
   Tensor history = Tensor::create<LongType>({3}, {2, 5, 11});
 
   Tensor x = toCuda(a);
-  F::repetitionPenalty(x, F::to(Device::getCuda(), history), 1.5);
+  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.5);
   F::repetitionPenalty(a, history, 1.5);
 
   CATCH_REQUIRE(F::allClose(toCpu(x), a, 5e-3, 5e-3));
@@ -78,7 +78,7 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (sign and known values)", "[op][cud
   Tensor history = Tensor::create<LongType>({1, 3}, {0, 1, 2});
 
   Tensor x = toCuda(a);
-  F::repetitionPenalty(x, F::to(Device::getCuda(), history), 2.0f);
+  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 2.0f);
 
   Tensor host = toCpu(x);
   const float *data = host.getInternalData()->getData<float>(host.getInternalOffset());
@@ -97,7 +97,7 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (weight of one is a no-op)", "[op][
 
   Tensor x = toCuda(a);
   Tensor before = toCpu(x);
-  F::repetitionPenalty(x, F::to(Device::getCuda(), history), 1.0f);
+  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.0f);
 
   CATCH_REQUIRE(F::allClose(toCpu(x), before, 5e-3, 5e-3));
 }
@@ -115,7 +115,7 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (history lengths)", "[op][cuda]") {
     Tensor history = Tensor::create<LongType>({2, length}, ids);
 
     Tensor x = toCuda(a);
-    F::repetitionPenalty(x, F::to(Device::getCuda(), history), 1.5);
+    F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.5);
     F::repetitionPenalty(a, history, 1.5);
 
     // The CUDA side is half and the reference is float, so the comparison has to leave room for

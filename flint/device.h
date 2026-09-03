@@ -32,6 +32,16 @@ class Device {
     kCpu,
     kCuda,
     kMetal,
+    /// @brief Host memory that the CUDA driver allocated and page-locked, so that its copy
+    /// engine can read it directly instead of staging it through a buffer of its own. Named
+    /// after the cudaHost* family of calls that makes it, because that family is what owns it:
+    /// the CPU may read and write it like any other memory, but only the CUDA operators know how
+    /// to create it or move it across the bus.
+    ///
+    /// It carries no operators of its own. Asking for one says so rather than quietly running
+    /// the CPU's, which would be right for the arithmetic and wrong about which device this
+    /// memory belongs to.
+    kCudaHost,
     NumDeviceType,  // number of device types
     kUnknown
   };
@@ -48,6 +58,7 @@ class Device {
   static Device getCpu();
   static Device getCuda();
   static Device getMetal();
+  static Device getCudaHost();
 
   // construct device by device type
   Device();
@@ -56,6 +67,13 @@ class Device {
   // get type of the device
   Type getType() const {
     return _type;
+  }
+
+  /// @brief Whether this device's memory is host memory, which the CPU may address directly.
+  /// True of both the CPU and the page-locked host memory CUDA hands out.
+  /// @return whether the memory lives on the host.
+  bool isHost() const {
+    return _type == kCpu || _type == kCudaHost;
   }
 
   /// @brief Get the name of device.

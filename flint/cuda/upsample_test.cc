@@ -39,12 +39,12 @@ namespace {
 
 Tensor cudaHalf(std::initializer_list<int> shape, const std::vector<float> &values) {
   return F::cast(
-      F::to(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values))),
+      F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values))),
       DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &x) {
-  return F::to(Device::getCpu(), F::cast(x, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
 }
 
 Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
@@ -54,13 +54,13 @@ Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &valu
 /// The same values left in float and moved to the device as they stand, which is what the
 /// autoencoder hands this operator.
 Tensor cudaFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
-  return F::to(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
+  return F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
 }
 
 /// An upsample only ever copies a pixel, so in float its result is exact. `F::allClose` compares
 /// with a strict `<` and so cannot be asked for that; these compare the elements themselves.
 bool equalsOnHost(const Tensor &device, const std::vector<float> &expected) {
-  Tensor host = F::to(Device::getCpu(), device);
+  Tensor host = F::toDevice(Device::getCpu(), device);
   const float *p = host.getInternalData()->getData<float>(host.getInternalOffset());
   return std::equal(p, p + host.getNumEl(), expected.begin());
 }

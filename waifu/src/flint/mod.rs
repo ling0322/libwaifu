@@ -106,6 +106,9 @@ pub enum Device {
     Cpu = 0,
     Cuda = 1,
     Metal = 2,
+    /// Host memory page-locked by the CUDA driver. The CPU may read and write it, but it carries
+    /// no operators: it is where weights wait to be copied to the GPU, not somewhere to compute.
+    CudaHost = 3,
 }
 
 impl Device {
@@ -127,6 +130,7 @@ impl Device {
             0 => Ok(Device::Cpu),
             1 => Ok(Device::Cuda),
             2 => Ok(Device::Metal),
+            3 => Ok(Device::CudaHost),
             other => Err(Error::unsupported(format!("unknown device {other}"))),
         }
     }
@@ -506,6 +510,22 @@ impl Tensor {
         Tensor::produce(|out| unsafe { ffi::fl_tensor_to_device(self.raw, device as i32, out) })
     }
 
+    /// Start copying to `device` and return before the bytes have arrived.
+    ///
+    /// Only from [`Device::CudaHost`] to [`Device::Cuda`]; every other pair is an error rather
+    /// than a synchronous copy under an asynchronous name. The tensor is inside the
+    /// [`FutureTensor`] that comes back and is had by taking it, which is also what sees the copy
+    /// through.
+    pub fn to_device_async(&self, device: Device) -> Result<FutureTensor> {
+        let mut raw: ffi::FlFutureTensor = std::ptr::null_mut();
+        check(unsafe { ffi::fl_tensor_to_device_async(self.raw, device as i32, &mut raw) })?;
+        debug_assert!(!raw.is_null(), "a successful call must produce a handle");
+        Ok(FutureTensor {
+            raw,
+            _not_sync: PhantomData,
+        })
+    }
+
     /// Convert the elements to another data type.
     pub fn cast(&self, dtype: DType) -> Result<Tensor> {
         Tensor::produce(|out| unsafe { ffi::fl_tensor_cast(self.raw, dtype as i32, out) })
@@ -570,6 +590,49 @@ impl Clone for Tensor {
     fn clone(&self) -> Tensor {
         Tensor::produce(|out| unsafe { ffi::fl_tensor_clone(self.raw, out) })
             .expect("cloning a live tensor cannot fail")
+    }
+}
+
+/// A copy that is still on its way, and the tensor it is filling.
+///
+/// Made by [`Tensor::to_device_async`]. The tensor comes out of [`FutureTensor::take`] or
+/// [`FutureTensor::take_sync`] and there is no other way to reach it, so a tensor whose bytes
+/// have not arrived cannot be handed to an operator. Dropping one without taking it is a fetch
+/// that turned out not to be wanted: it costs the bandwidth already spent and nothing else.
+pub struct FutureTensor {
+    raw: ffi::FlFutureTensor,
+    /// Keeps the type off `Send`/`Sync`, since the operators behind it are not ready for either.
+    _not_sync: PhantomData<*const ()>,
+}
+
+impl FutureTensor {
+    /// Order the work that follows behind the copy and hand the tensor over.
+    ///
+    /// The caller does not stop here; what it arranges is that work enqueued from now on runs
+    /// after the copy. Take it where the tensor is about to be used rather than where the copy
+    /// was started, since that is where the dependency lands.
+    pub fn take(&self) -> Result<Tensor> {
+        Tensor::produce(|out| unsafe { ffi::fl_future_tensor_take(self.raw, out) })
+    }
+
+    /// The same, except that it does not return until the copy has finished. For a caller about
+    /// to read the bytes itself rather than enqueue work that reads them.
+    pub fn take_sync(&self) -> Result<Tensor> {
+        Tensor::produce(|out| unsafe { ffi::fl_future_tensor_take_sync(self.raw, out) })
+    }
+}
+
+impl Drop for FutureTensor {
+    fn drop(&mut self) {
+        // Safety: the handle came from a successful C call and is destroyed exactly once, since
+        // FutureTensor is neither Copy nor Clone.
+        unsafe { ffi::fl_future_tensor_destroy(self.raw) };
+    }
+}
+
+impl fmt::Debug for FutureTensor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FutureTensor").finish_non_exhaustive()
     }
 }
 

@@ -33,17 +33,17 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 /// A float tensor moved to the device as it stands. The autoencoder's attention softmaxes in
 /// float32, and that arm has no half2 fast path to fall into.
 Tensor toCudaFloat(const Tensor &a) {
-  return F::to(Device::getCuda(), a);
+  return F::toDevice(Device::getCuda(), a);
 }
 
 }  // namespace
@@ -185,14 +185,14 @@ CATCH_TEST_CASE("test CUDA softmax (float)", "[op][cuda]") {
     CATCH_INFO("width = " << width);
     Tensor x = F::softmax(toCudaFloat(a));
     CATCH_REQUIRE(x.getDType() == DType::kFloat);
-    CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), x), F::softmax(a), 1e-5f));
+    CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), x), F::softmax(a), 1e-5f));
   }
 
   // Not contiguous, which is the strided kernel.
   Tensor a = F::rand({2, 3, 5}, DType::kFloat);
   Tensor strided = F::softmax(toCudaFloat(a).transpose(1, 2));
   CATCH_REQUIRE(F::allClose(
-      F::to(Device::getCpu(), strided),
+      F::toDevice(Device::getCpu(), strided),
       F::softmax(a.transpose(1, 2)),
       1e-5f));
 
@@ -200,7 +200,7 @@ CATCH_TEST_CASE("test CUDA softmax (float)", "[op][cuda]") {
   // range, but the input itself has to survive being read.
   Tensor wide = Tensor::create<float>({1, 3}, {70000.0f, 69999.0f, -70000.0f});
   CATCH_REQUIRE(F::allClose(
-      F::to(Device::getCpu(), F::softmax(toCudaFloat(wide))),
+      F::toDevice(Device::getCpu(), F::softmax(toCudaFloat(wide))),
       F::softmax(wide),
       1e-5f));
 }

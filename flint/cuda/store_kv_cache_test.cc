@@ -31,11 +31,11 @@ namespace fl {
 namespace {
 
 Tensor toCudaHalf(const Tensor &tensor) {
-  return F::cast(F::to(Device::getCuda(), tensor), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), tensor), DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &tensor) {
-  return F::to(Device::getCpu(), F::cast(F::contiguous(tensor), DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(F::contiguous(tensor), DType::kFloat));
 }
 
 Tensor makeInput(
@@ -123,7 +123,7 @@ CATCH_TEST_CASE("test CUDA storeKVCache follows slot mapping", "[op][cuda]") {
       toCudaHalf(v),
       keyCache,
       valueCache,
-      F::to(Device::getCuda(), slotMapping));
+      F::toDevice(Device::getCuda(), slotMapping));
 
   checkStored(keyCache, k, lut::makeConstSpan(slots), BlockSize);
   checkStored(valueCache, v, lut::makeConstSpan(slots), BlockSize);
@@ -161,7 +161,7 @@ CATCH_TEST_CASE("test CUDA storeKVCache handles strided model views", "[op][cuda
       v,
       keyCache,
       valueCache,
-      F::to(Device::getCuda(), slotMapping));
+      F::toDevice(Device::getCuda(), slotMapping));
 
   checkStored(keyCache, expectedK, lut::makeConstSpan(slots), BlockSize);
   checkStored(valueCache, expectedV, lut::makeConstSpan(slots), BlockSize);

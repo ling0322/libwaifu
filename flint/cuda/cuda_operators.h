@@ -125,8 +125,9 @@ class CudaOperators : public Operators {
   Tensor sum(Tensor inputs, int dim) override;
   Tensor swiglu(Tensor A) override;
   Tensor tensor(lut::Span<const int> shape, DType dtype) override;
+  Tensor hostTensor(lut::Span<const int> shape, DType dtype) override;
   Tensor tensorLike(Tensor input) override;
-  Tensor to(Device device, Tensor tensor) override;
+  Tensor toDevice(Device device, Tensor tensor) override;
   Tensor zeros(lut::Span<const int> shape, DType dtype) override;
   Tensor randNormal(lut::Span<const int> shape) override;
   Tensor rand(lut::Span<const int> shape, DType dtype) override;

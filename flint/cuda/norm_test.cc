@@ -52,17 +52,17 @@ std::vector<float> spread(int count, uint32_t seed) {
 
 Tensor cudaHalf(std::initializer_list<int> shape, const std::vector<float> &values) {
   return F::cast(
-      F::to(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values))),
+      F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values))),
       DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &x) {
-  return F::to(Device::getCpu(), F::cast(x, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
 }
 
 /// The counterpart of toCpuFloat, for a tensor that already holds its values.
 Tensor toCudaHalf(const Tensor &x) {
-  return F::cast(F::to(Device::getCuda(), x), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), x), DType::kFloat16);
 }
 
 Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
@@ -72,7 +72,7 @@ Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &valu
 /// The same values left in float and moved to the device as they stand. SDXL's autoencoder
 /// normalizes in float32, and its groupNorm is the first thing every one of its blocks does.
 Tensor cudaFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
-  return F::to(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
+  return F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
 }
 
 }  // namespace
@@ -367,7 +367,7 @@ CATCH_TEST_CASE("test groupNorm (float)", "[op][cuda]") {
       kEps);
   CATCH_REQUIRE(out.getDType() == DType::kFloat);
   CATCH_REQUIRE(F::allClose(
-      F::to(Device::getCpu(), out),
+      F::toDevice(Device::getCpu(), out),
       cpuFloat({kBatch, kChannel, kHeight, kWidth}, expected),
       1e-4f));
 
@@ -393,21 +393,21 @@ CATCH_TEST_CASE("test layerNorm and rmsNorm (float)", "[op][cuda]") {
     Tensor b = F::rand({lastDim}, DType::kFloat);
     CATCH_INFO("lastDim = " << lastDim);
 
-    Tensor rms = F::rmsNorm(F::to(Device::getCuda(), a), F::to(Device::getCuda(), w), 1e-5f);
+    Tensor rms = F::rmsNorm(F::toDevice(Device::getCuda(), a), F::toDevice(Device::getCuda(), w), 1e-5f);
     CATCH_REQUIRE(rms.getDType() == DType::kFloat);
-    CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), rms), F::rmsNorm(a, w, 1e-5f), 1e-5f));
+    CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), rms), F::rmsNorm(a, w, 1e-5f), 1e-5f));
 
     Tensor layer = F::layerNorm(
-        F::to(Device::getCuda(), a),
-        F::to(Device::getCuda(), w),
-        F::to(Device::getCuda(), b),
+        F::toDevice(Device::getCuda(), a),
+        F::toDevice(Device::getCuda(), w),
+        F::toDevice(Device::getCuda(), b),
         1e-5f);
     CATCH_REQUIRE(layer.getDType() == DType::kFloat);
 
     // Against the half arm on the same values, which is what says the two agree rather than that
     // one of them agrees with itself.
     Tensor half = F::layerNorm(toCudaHalf(a), toCudaHalf(w), toCudaHalf(b), 1e-5f);
-    CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), layer), toCpuFloat(half), 5e-3f));
+    CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), layer), toCpuFloat(half), 5e-3f));
   }
 }
 

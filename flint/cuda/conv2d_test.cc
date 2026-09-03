@@ -106,11 +106,11 @@ std::vector<float> referenceConv2d(
 }
 
 Tensor toCuda(const Tensor &x, DType dtype) {
-  return F::cast(F::to(Device::getCuda(), x), dtype);
+  return F::cast(F::toDevice(Device::getCuda(), x), dtype);
 }
 
 Tensor toCpuFloat(const Tensor &x) {
-  return F::to(Device::getCpu(), F::cast(x, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
 }
 
 bool skipUnavailable() {
@@ -360,9 +360,9 @@ CATCH_TEST_CASE("test conv2d (through the operator interface)", "[fl][op][cuda][
   // What it gets is checked against a written-out reference in cpu/conv2d_test.cc; here it is
   // enough that the two devices agree, since each has been checked against that definition
   // separately.
-  Tensor cpuX = F::to(Device::getCpu(), F::cast(x, DType::kFloat));
-  Tensor cpuW = F::to(Device::getCpu(), F::cast(w, DType::kFloat));
-  Tensor cpuB = F::to(Device::getCpu(), F::cast(b, DType::kFloat));
+  Tensor cpuX = F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
+  Tensor cpuW = F::toDevice(Device::getCpu(), F::cast(w, DType::kFloat));
+  Tensor cpuB = F::toDevice(Device::getCpu(), F::cast(b, DType::kFloat));
   Tensor onHost = F::conv2d(cpuX, cpuW, cpuB, 1, 1, 1, 1);
   CATCH_REQUIRE(onHost.getShape() == std::vector<int>{2, 8, 8, 8});
   CATCH_REQUIRE(F::allClose(onHost, toCpuFloat(direct), 2e-2f));
@@ -412,8 +412,8 @@ CATCH_TEST_CASE("test conv2d (cutlass refuses what it cannot do)", "[fl][op][cud
 
   // A grouped convolution needs another instantiation and nothing here asks for one, so it is
   // refused rather than answered wrongly. Nothing else about the operator is narrower than cuDNN.
-  Tensor x = F::cast(F::to(Device::getCuda(), F::rand({2, 8, 6, 6}, DType::kFloat)), DType::kFloat16);
-  Tensor w = F::cast(F::to(Device::getCuda(), F::rand({8, 4, 3, 3}, DType::kFloat)), DType::kFloat16);
+  Tensor x = F::cast(F::toDevice(Device::getCuda(), F::rand({2, 8, 6, 6}, DType::kFloat)), DType::kFloat16);
+  Tensor w = F::cast(F::toDevice(Device::getCuda(), F::rand({8, 4, 3, 3}, DType::kFloat)), DType::kFloat16);
   CATCH_REQUIRE_THROWS(op::cuda::conv2dCutlass(x, w, Tensor(), {1, 1, 1, 2}));
 }
 

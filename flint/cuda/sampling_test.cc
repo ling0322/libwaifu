@@ -42,15 +42,15 @@ std::vector<LongType> sampleOnCuda(
     const std::vector<IntType> &topKs,
     const std::vector<float> &topPs,
     DType logitsType = DType::kFloat) {
-  Tensor cudaLogits = F::to(Device::getCuda(), Tensor::create<float>({rows, vocabSize}, logits));
+  Tensor cudaLogits = F::toDevice(Device::getCuda(), Tensor::create<float>({rows, vocabSize}, logits));
   if (logitsType != DType::kFloat) cudaLogits = F::cast(cudaLogits, logitsType);
 
   Tensor sampled = F::sample(
       cudaLogits,
-      F::to(Device::getCuda(), Tensor::create<float>({rows}, temperatures)),
-      F::to(Device::getCuda(), Tensor::create<IntType>({rows}, topKs)),
-      F::to(Device::getCuda(), Tensor::create<float>({rows}, topPs)));
-  sampled = F::to(Device::getCpu(), sampled);
+      F::toDevice(Device::getCuda(), Tensor::create<float>({rows}, temperatures)),
+      F::toDevice(Device::getCuda(), Tensor::create<IntType>({rows}, topKs)),
+      F::toDevice(Device::getCuda(), Tensor::create<float>({rows}, topPs)));
+  sampled = F::toDevice(Device::getCpu(), sampled);
   const LongType *data = sampled.getInternalData()->getData<LongType>(sampled.getInternalOffset());
   return std::vector<LongType>(data, data + rows);
 }
@@ -125,17 +125,17 @@ CATCH_TEST_CASE("test CUDA batched sampling parameters", "[fl][op][cuda][samplin
   Tensor topKs = Tensor::create<IntType>({4}, {0, 1, 0, 2});
   Tensor topPs = Tensor::create<float>({4}, {1.0f, 1.0f, 0.1f, 0.9f});
 
-  logits = F::to(Device::getCuda(), logits);
-  temperatures = F::to(Device::getCuda(), temperatures);
-  topKs = F::to(Device::getCuda(), topKs);
-  topPs = F::to(Device::getCuda(), topPs);
+  logits = F::toDevice(Device::getCuda(), logits);
+  temperatures = F::toDevice(Device::getCuda(), temperatures);
+  topKs = F::toDevice(Device::getCuda(), topKs);
+  topPs = F::toDevice(Device::getCuda(), topPs);
 
   F::manualSeed(Device::getCuda(), 1234);
   Tensor first = F::sample(logits, temperatures, topKs, topPs);
   F::manualSeed(Device::getCuda(), 1234);
   Tensor second = F::sample(logits, temperatures, topKs, topPs);
-  first = F::to(Device::getCpu(), first);
-  second = F::to(Device::getCpu(), second);
+  first = F::toDevice(Device::getCpu(), first);
+  second = F::toDevice(Device::getCpu(), second);
 
   CATCH_REQUIRE(first.getShape() == std::vector<int>{4});
   const LongType *firstData = first.getInternalData()->getData<LongType>(first.getInternalOffset());
@@ -151,14 +151,14 @@ CATCH_TEST_CASE("test CUDA batched sampling parameters", "[fl][op][cuda][samplin
   std::vector<float> largeLogits(vocabSize, 0.0f);
   largeLogits[123456] = 10.0f;
   Tensor largeLogitsCuda = F::cast(
-      F::to(Device::getCuda(), Tensor::create<float>({1, vocabSize}, largeLogits)),
+      F::toDevice(Device::getCuda(), Tensor::create<float>({1, vocabSize}, largeLogits)),
       DType::kFloat16);
   Tensor largeSample = F::sample(
       largeLogitsCuda,
-      F::to(Device::getCuda(), Tensor::create<float>({1}, {1.0f})),
-      F::to(Device::getCuda(), Tensor::create<IntType>({1}, {2048})),
-      F::to(Device::getCuda(), Tensor::create<float>({1}, {0.8f})));
-  largeSample = F::to(Device::getCpu(), largeSample);
+      F::toDevice(Device::getCuda(), Tensor::create<float>({1}, {1.0f})),
+      F::toDevice(Device::getCuda(), Tensor::create<IntType>({1}, {2048})),
+      F::toDevice(Device::getCuda(), Tensor::create<float>({1}, {0.8f})));
+  largeSample = F::toDevice(Device::getCpu(), largeSample);
   LongType largeToken = largeSample.getInternalData()->getData<LongType>(
       largeSample.getInternalOffset())[0];
   CATCH_REQUIRE(largeToken == 123456);
@@ -174,21 +174,21 @@ CATCH_TEST_CASE("test CUDA sampling threshold ties and top-p", "[fl][op][cuda][s
   std::vector<IntType> topKs(rows, 257);
   std::vector<float> topPs(rows, 1.0f);
   Tensor tiedSamples = F::sample(
-      F::to(Device::getCuda(), Tensor::create<float>({rows, vocabSize}, tiedLogits)),
-      F::to(Device::getCuda(), Tensor::create<float>({rows}, temperatures)),
-      F::to(Device::getCuda(), Tensor::create<IntType>({rows}, topKs)),
-      F::to(Device::getCuda(), Tensor::create<float>({rows}, topPs)));
-  tiedSamples = F::to(Device::getCpu(), tiedSamples);
+      F::toDevice(Device::getCuda(), Tensor::create<float>({rows, vocabSize}, tiedLogits)),
+      F::toDevice(Device::getCuda(), Tensor::create<float>({rows}, temperatures)),
+      F::toDevice(Device::getCuda(), Tensor::create<IntType>({rows}, topKs)),
+      F::toDevice(Device::getCuda(), Tensor::create<float>({rows}, topPs)));
+  tiedSamples = F::toDevice(Device::getCpu(), tiedSamples);
   const LongType *tiedData = tiedSamples.getInternalData()->getData<LongType>(
       tiedSamples.getInternalOffset());
   for (int row = 0; row < rows; ++row) CATCH_REQUIRE(tiedData[row] < 257);
 
   Tensor truncatedSample = F::sample(
-      F::to(Device::getCuda(), Tensor::create<float>({1, 3}, {5.0f, 4.0f, 3.0f})),
-      F::to(Device::getCuda(), Tensor::create<float>({1}, {1.0f})),
-      F::to(Device::getCuda(), Tensor::create<IntType>({1}, {3})),
-      F::to(Device::getCuda(), Tensor::create<float>({1}, {0.5f})));
-  truncatedSample = F::to(Device::getCpu(), truncatedSample);
+      F::toDevice(Device::getCuda(), Tensor::create<float>({1, 3}, {5.0f, 4.0f, 3.0f})),
+      F::toDevice(Device::getCuda(), Tensor::create<float>({1}, {1.0f})),
+      F::toDevice(Device::getCuda(), Tensor::create<IntType>({1}, {3})),
+      F::toDevice(Device::getCuda(), Tensor::create<float>({1}, {0.5f})));
+  truncatedSample = F::toDevice(Device::getCpu(), truncatedSample);
   CATCH_REQUIRE(
       truncatedSample.getInternalData()->getData<LongType>(
           truncatedSample.getInternalOffset())[0] == 0);

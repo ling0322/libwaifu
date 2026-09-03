@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 //
-// Copyright (c) 2023 Xiaoyang Chen
+// Copyright (c) 2026 Xiaoyang Chen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 // and associated documentation files (the "Software"), to deal in the Software without
@@ -17,27 +17,24 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#pragma once
+#include "flint/cuda/copy_stream.h"
 
-#include "flint/cuda/future_tensor.h"
-#include "flint/tensor.h"
+#include "lutil/error.h"
+#include "flint/cuda/common.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor toCpu(const Tensor &tensor);
-Tensor toCuda(const Tensor &tensor);
-Tensor toCudaHost(const Tensor &tensor);
+CopyStream::CopyStream()
+    : _stream(nullptr) {
+  LL_CHECK_CUDA_STATUS(cudaStreamCreateWithFlags(&_stream, cudaStreamNonBlocking));
+}
 
-Tensor toDevice(Device device, const Tensor &tensor);
-
-/// @brief Start a copy from page-locked host memory to the GPU and return before it is done.
-///
-/// What comes back is a tensor whose memory is allocated and whose bytes are on their way. It
-/// is held in a FutureTensor until take() has been called on it, which orders the
-/// compute stream after the copy without stopping the host.
-FutureTensor toDeviceAsync(Device device, const Tensor &tensor);
+CopyStream *CopyStream::getInstance() {
+  static CopyStream *instance = new CopyStream();
+  return instance;
+}
 
 }  // namespace cuda
 }  // namespace op

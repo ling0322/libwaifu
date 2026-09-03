@@ -21,6 +21,14 @@ pub struct FlTensorImpl {
 
 pub type FlTensor = *mut FlTensorImpl;
 
+/// Opaque handle to a copy still on its way. Only ever held behind a pointer.
+#[repr(C)]
+pub struct FlFutureTensorImpl {
+    _private: [u8; 0],
+}
+
+pub type FlFutureTensor = *mut FlFutureTensorImpl;
+
 pub type FlDType = c_int;
 pub type FlDeviceType = c_int;
 
@@ -160,6 +168,14 @@ extern "C" {
         global_scale: FlTensor,
         out: *mut FlTensor,
     ) -> i32;
+    pub fn fl_tensor_to_device_async(
+        tensor: FlTensor,
+        device: FlDeviceType,
+        out: *mut FlFutureTensor,
+    ) -> i32;
+    pub fn fl_future_tensor_take(future: FlFutureTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_future_tensor_take_sync(future: FlFutureTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_future_tensor_destroy(future: FlFutureTensor);
     pub fn fl_mul(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_div(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_add(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;

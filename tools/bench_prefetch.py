@@ -164,8 +164,15 @@ def group_modules(unet, order, limit_bytes):
 class Offload:
     """The weights of one group, held on the host and copied into a slot on the GPU.
 
-    Each group is one flat pinned buffer, so a group is one copy rather than one per tensor: at
-    these sizes the per-copy overhead is what decides whether the bandwidth is the bandwidth.
+    Each group is one flat buffer, so a group is one copy rather than one per tensor: at these
+    sizes the per-copy overhead is what decides whether the bandwidth is the bandwidth.
+
+    Page-locked, unless `pinned` says otherwise. The driver's DMA engine reads physical addresses
+    and cannot have the pages move underneath it, so a copy out of ordinary pageable memory goes
+    through a staging buffer the driver owns -- and it has to fill that buffer before it can
+    return, which is what makes such a copy synchronous however it was asked for. Pinning is
+    therefore not about bandwidth, which barely moves; it is what makes a copy able to overlap
+    with anything at all. `-host pageable` is here to show that rather than assert it.
 
     A group's slot is its index around a ring, and a group's index never changes, so which slot a
     group lands in is fixed. That is worth more than it looks: the parameter views into the slot
@@ -173,29 +180,52 @@ class Offload:
     Python at all beyond issuing the copy.
     """
 
-    def __init__(self, name, module, slot):
+    def __init__(self, name, module, slot, pinned=True):
         self.name = name
         self.module = module
         self.params = list(module.parameters(recurse=True))
-        self.numel = sum(p.numel() for p in self.params)
+        # Remembered here rather than read back off the parameters later. `unbind` replaces
+        # `p.data` with an empty tensor, which takes the shape with it, so a `bind` that asked
+        # `p.shape` after the first unbind would rebuild every parameter as a 1-D nothing.
+        self.shapes = [p.shape for p in self.params]
+        self.numels = [p.numel() for p in self.params]
+        self.numel = sum(self.numels)
         self.nbytes = self.numel * 2
-        self.host = torch.empty(self.numel, dtype=torch.float16, pin_memory=True)
+        self.host = torch.empty(self.numel, dtype=torch.float16, pin_memory=pinned)
 
         at = 0
-        for p in self.params:
-            self.host[at:at + p.numel()].copy_(p.detach().reshape(-1))
-            at += p.numel()
+        for p, numel in zip(self.params, self.numels):
+            self.host[at:at + numel].copy_(p.detach().reshape(-1))
+            at += numel
         self.slot = slot
+        self.empty = torch.empty(0, dtype=torch.float16, device="cuda")
 
     def bind(self, arena):
         """Point the parameters at the slot, and let go of what they held on the GPU."""
         at = 0
+        for p, shape, numel in zip(self.params, self.shapes, self.numels):
+            p.data = arena[at:at + numel].view(shape)
+            at += numel
+
+    def unbind(self):
+        """Point the parameters away, so that the buffer they were on can be given back.
+
+        Needed only when there is no arena. Dropping the last handle to a buffer is not enough
+        while the parameters still point into it -- which is why letting go of the memory costs a
+        second pass over every parameter, on top of the one that bound them.
+        """
         for p in self.params:
-            p.data = arena[at:at + p.numel()].view(p.shape)
-            at += p.numel()
+            p.data = self.empty
 
     def view(self, arena):
         return arena[:self.numel]
+
+    def restore(self, device):
+        """Put the weights back on the GPU as ordinary parameters, undoing everything above."""
+        at = 0
+        for p, shape, numel in zip(self.params, self.shapes, self.numels):
+            p.data = self.host[at:at + numel].view(shape).to(device)
+            at += numel
 
 
 def install(unet, groups, arenas, copy_stream, overlap):
@@ -253,6 +283,85 @@ def install(unet, groups, arenas, copy_stream, overlap):
     def start():
         if overlap:
             for index in range(slots - 1):
+                fetch(index)
+
+    return start, handles
+
+
+def install_without_arena(unet, groups, copy_stream, lookahead, overlap):
+    """The same fetching, but with the memory asked for and given back a group at a time.
+
+    What the arena buys, measured by taking it away. Two things go with it:
+
+      - the allocation itself. The caching allocator usually answers from what it already holds,
+        but it is still a lookup and a stream-ordered handover on the critical path of every
+        group, several hundred times per pass.
+      - the binding. With fixed slots a parameter's view into its slot is built once at load and
+        never touched again; with a fresh buffer every time, every parameter of every group has
+        to be pointed at the new address on every pass. That is a few thousand Python assignments
+        per step, and unlike the fetching they cannot overlap with anything.
+
+    What it does not buy is the bound on the memory, which is worth saying because it is the
+    obvious thing to expect. S slots do cap the footprint by construction, and nothing here does;
+    every call into the GPU is asynchronous, so in principle the host can run the whole forward,
+    allocating for all 420 groups, while the GPU is still near the start. It does not happen: the
+    buffer is handed back in the forward hook, one group after it was taken, and the allocator is
+    free to answer the next group out of the same block. The measured peak without an arena comes
+    out below the peak with one, because a slot has to be as large as the largest group while an
+    allocation is only as large as the group asking.
+
+    The buffers are kept alive in a dict until the group that reads them has run, because letting
+    go earlier would hand the memory back while a copy or a kernel is still using it.
+    """
+    events = [torch.cuda.Event() for _ in groups]
+    live = {}
+    handles = []
+    device = torch.device("cuda")
+
+    def fetch(index):
+        if index >= len(groups) or index in live:
+            return
+        group = groups[index]
+        buffer = torch.empty(group.numel, dtype=torch.float16, device=device)
+        live[index] = buffer
+
+        compute = torch.cuda.current_stream()
+        with torch.cuda.stream(copy_stream):
+            copy_stream.wait_stream(compute)
+            buffer.copy_(group.host, non_blocking=True)
+            events[index].record(copy_stream)
+
+        # The block was taken on the compute stream and is being written on the copy stream, so
+        # the allocator has to be told before it may consider the block idle again.
+        buffer.record_stream(copy_stream)
+
+    def before(index):
+        if overlap:
+            fetch(index)
+            torch.cuda.current_stream().wait_event(events[index])
+            fetch(index + lookahead)
+        else:
+            fetch(index)
+            torch.cuda.current_stream().wait_event(events[index])
+
+        groups[index].bind(live[index])
+
+    def after(index):
+        # The group has run, so the memory may go back -- but only once nothing points at it, and
+        # the parameters still do.
+        groups[index].unbind()
+        live.pop(index, None)
+
+    for index, group in enumerate(groups):
+        handles.append(group.module.register_forward_pre_hook(
+            (lambda i: lambda m, a: before(i))(index)))
+        handles.append(group.module.register_forward_hook(
+            (lambda i: lambda m, a, o: after(i))(index)))
+
+    def start():
+        live.clear()
+        if overlap:
+            for index in range(lookahead):
                 fetch(index)
 
     return start, handles
@@ -338,6 +447,14 @@ def main():
     parser.add_argument("-repeats", type=int, default=5, help="timed forwards per measurement.")
     parser.add_argument("-group-size", dest="group_size", type=str, default="1024,256,64",
                         help="largest weight bytes per group, in MB, comma separated.")
+    parser.add_argument("-arena", type=str, default="on",
+                        help="whether the slots are preallocated and the parameter views built "
+                             "once, as on, off, or both. Off asks for the memory a group at a "
+                             "time and points every parameter at it again on every pass.")
+    parser.add_argument("-host", type=str, default="pinned",
+                        help="where the weights wait, as pinned, pageable, or both. Pageable is "
+                             "there to show what page-locking buys, which is not bandwidth but "
+                             "the ability to overlap at all.")
     parser.add_argument("-slots", type=str, default="2,4,8",
                         help="how many groups fit on the GPU at once, comma separated. S slots "
                              "is S-1 groups of lookahead, and S times the largest group of "
@@ -394,8 +511,8 @@ def sweep(unet, device, size, bandwidth, args):
     with torch.no_grad():
         order = call_order(unet, inputs)
 
-    print(f"{'group MB':>9} {'groups':>7} {'hooks':>8} {'model':>8} {'slots':>6} "
-          f"{'prefetch':>9} {'serial':>8} {'peak MB':>8}")
+    print(f"{'group MB':>9} {'groups':>7} {'hooks':>8} {'model':>8} {'arena':>6} {'host':>9} "
+          f"{'slots':>6} {'prefetch':>9} {'serial':>8} {'peak MB':>8}")
     for limit_mb in [int(x) for x in args.group_size.split(",")]:
         chosen, stranded = group_modules(unet, order, limit_mb * (1 << 20))
         if stranded:
@@ -413,18 +530,30 @@ def sweep(unet, device, size, bandwidth, args):
                        for c, module in zip(compute, modules))
 
         first = True
-        for slots in [int(x) for x in args.slots.split(",")]:
-            groups = [Offload(name, module, index % slots)
+        rounds = [(int(s), h == "pinned", a)
+                  for a in args.arena.split(",")
+                  for h in args.host.split(",")
+                  for s in args.slots.split(",")]
+        for slots, pinned, arena in rounds:
+            groups = [Offload(name, module, index % slots, pinned)
                       for index, (name, module) in enumerate(chosen)]
             arenas = [torch.empty(biggest // 2, dtype=torch.float16, device=device)
-                      for _ in range(slots)]
+                      for _ in range(slots)] if arena == "on" else []
+            # Either way the parameters have to stop pointing at the resident weights, or the
+            # round measures the offloading with the whole model still on the GPU beside it.
+            # Binding does that for an arena; without one there is nothing yet to point at, so
+            # they are pointed at nothing and each group's own hook binds it when its turn comes.
             for group in groups:
-                group.bind(arenas[group.slot])
+                group.bind(arenas[group.slot]) if arena == "on" else group.unbind()
             torch.cuda.empty_cache()
 
             rows = {}
             for overlap in (True, False):
-                start, handles = install(unet, groups, arenas, copy_stream, overlap)
+                if arena == "on":
+                    start, handles = install(unet, groups, arenas, copy_stream, overlap)
+                else:
+                    start, handles = install_without_arena(
+                        unet, groups, copy_stream, slots - 1, overlap)
 
                 def run():
                     start()
@@ -448,16 +577,15 @@ def sweep(unet, device, size, bandwidth, args):
             head = (f"{limit_mb:>9} {len(chosen):>7} {overhead:7.1f}m {modelled:7.1f}m"
                     if first else " " * 34)
             first = False
-            print(f"{head} {slots:>6} {rows[True][0]:8.1f}m {rows[False][0]:7.1f}m "
+            print(f"{head} {arena:>6} "
+                  f"{'pinned' if pinned else 'pageable':>9} {slots:>6} "
+                  f"{rows[True][0]:8.1f}m {rows[False][0]:7.1f}m "
                   f"{megabytes(rows[True][1]):8.0f}")
 
             # Put the weights back where they were, so the next run starts from the model rather
             # than from the last arena.
             for group in groups:
-                at = 0
-                for p in group.params:
-                    p.data = group.host[at:at + p.numel()].view(p.shape).to(device)
-                    at += p.numel()
+                group.restore(device)
             del groups, arenas
             torch.cuda.empty_cache()
 

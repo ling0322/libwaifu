@@ -31,7 +31,7 @@ namespace fl {
 namespace {
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 }  // namespace

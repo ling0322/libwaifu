@@ -32,11 +32,11 @@ namespace fl {
 namespace {
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::to(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 }  // namespace

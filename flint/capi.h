@@ -53,6 +53,14 @@ extern "C" {
 /// A tensor. Holds a shape and a reference to storage that other tensors may share.
 typedef struct fl_tensor_impl_t *fl_tensor_t;
 
+/// A copy that is still on its way, and the tensor it is filling.
+///
+/// Made by fl_tensor_to_device_async(). The tensor inside comes out of fl_future_tensor_take() or
+/// fl_future_tensor_take_sync(), which is also what sees the copy through; there is no other way
+/// to reach it, which is what keeps a tensor whose bytes have not arrived out of every operator.
+/// The handle itself is freed by fl_future_tensor_destroy() either way, taken or not.
+typedef struct fl_future_tensor_impl_t *fl_future_tensor_t;
+
 typedef enum fl_dtype_t {
   FL_DTYPE_UNKNOWN = 0,
   FL_DTYPE_FLOAT = 1,
@@ -69,7 +77,10 @@ typedef enum fl_device_type_t {
   FL_DEVICE_CPU = 0,
   FL_DEVICE_CUDA = 1,
   FL_DEVICE_METAL = 2,
-  FL_DEVICE_UNKNOWN = 3,
+  /// Host memory page-locked by the CUDA driver. The CPU may read and write it, but it carries no
+  /// operators: it is where weights wait to be copied to the GPU, not somewhere to compute.
+  FL_DEVICE_CUDA_HOST = 3,
+  FL_DEVICE_UNKNOWN = 4,
 } fl_device_type_t;
 
 /// Select the operator backends for the machine. Call once before anything else here; later calls
@@ -182,6 +193,30 @@ FLAPI int32_t fl_tensor_to_device(
     fl_tensor_t tensor,
     fl_device_type_t device,
     fl_tensor_t *out);
+
+/// Start copying `tensor` to `device` and return before it has arrived. Only from
+/// FL_DEVICE_CUDA_HOST to FL_DEVICE_CUDA; any other pair is an error rather than a synchronous
+/// copy under an asynchronous name. What comes back is a future rather than a tensor, and the
+/// tensor is had by taking it.
+FLAPI int32_t fl_tensor_to_device_async(
+    fl_tensor_t tensor,
+    fl_device_type_t device,
+    fl_future_tensor_t *out);
+
+/// Order the work that follows behind the copy and hand the tensor over. Does not stop the
+/// caller: what it arranges is that anything enqueued from here on runs after the copy. Call it
+/// where the tensor is about to be used rather than where the copy was started, since that is
+/// where the dependency lands.
+FLAPI int32_t fl_future_tensor_take(fl_future_tensor_t future, fl_tensor_t *out);
+
+/// The same, except that it does not return until the copy has finished. For a caller about to
+/// read the bytes itself rather than enqueue work that reads them.
+FLAPI int32_t fl_future_tensor_take_sync(fl_future_tensor_t future, fl_tensor_t *out);
+
+/// Free the future. Taking does not free it, and a future destroyed without being taken is a
+/// fetch that turned out not to be wanted, which costs the bandwidth already spent and nothing
+/// else. Does nothing when given null.
+FLAPI void fl_future_tensor_destroy(fl_future_tensor_t future);
 
 /// Convert the elements to another data type.
 FLAPI int32_t fl_tensor_cast(fl_tensor_t tensor, fl_dtype_t dtype, fl_tensor_t *out);

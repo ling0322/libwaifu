@@ -111,7 +111,7 @@ class CPUOperators : public Operators {
   Tensor geglu(Tensor input) override;
   Tensor tensor(lut::Span<const int> shape, DType dtype) override;
   Tensor tensorLike(Tensor input) override;
-  Tensor to(Device device, Tensor tensor) override;
+  Tensor toDevice(Device device, Tensor tensor) override;
   Tensor zeros(lut::Span<const int> shape, DType dtype) override;
   void manualSeed(uint64_t seed) override;
 
