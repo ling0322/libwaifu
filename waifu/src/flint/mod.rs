@@ -112,6 +112,14 @@ pub enum Device {
 }
 
 impl Device {
+    /// What this device is called on the command line and on screen.
+    pub fn name(self) -> &'static str {
+        match self {
+            Device::Cpu => "cpu",
+            Device::Cuda => "cuda",
+        }
+    }
+
     /// Whether this build has operators for the device and the machine can run them.
     ///
     /// Worth asking before running anything: the operators a device is missing end the process

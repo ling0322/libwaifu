@@ -45,7 +45,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::Args;
 use crate::cli::field::TextField;
-use crate::cli::hub;
+use crate::cli::{built_from, hub};
 use crate::cli::picker;
 use crate::cli::png;
 use crate::flint::Tensor;
@@ -55,6 +55,11 @@ type Error = Box<dyn std::error::Error>;
 
 /// The sizes on offer, which are the ones SDXL was trained at. Every one of them is a multiple of
 /// the 32 pixels the U-Net's own halvings need.
+/// How tall the prompt boxes are: three rows to type in and a border round them. Long prompts are
+/// the ordinary case here -- a list of tags rather than a sentence -- so the room is worth the two
+/// rows it costs the list of pictures below.
+const TEXT_BOX: u16 = 5;
+
 const SIZES: &[(i32, i32)] = &[
     (512, 512),
     (640, 640),
@@ -102,26 +107,49 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     }
 
     let model = with_usage(args.model())?.map(str::to_string);
-    let device = with_usage(args.device())?.resolve();
+    let mut device = with_usage(args.device())?.resolve();
 
     // Either a path, or a name like "sdxl:base" that is fetched into the cache first. Done here,
     // before the screen is set up, because fetching a model prints as it goes and the terminal is
     // still the terminal at this point. Without a name, the screen goes up early and offers the
     // published models instead -- a fetch there is minutes long and wants a progress bar rather
     // than a scrolling line.
+    // What the screen calls the model. As typed when it was named, because that is what someone
+    // would type again; the file name when a path was given, because the whole path does not fit
+    // and its tail is the part that identifies it.
+    let mut model_name = model.clone().map(|model| match model.rsplit_once('/') {
+        Some((_, file)) if !file.is_empty() => file.to_string(),
+        _ => model,
+    });
+
     let model_path = match model {
         Some(model) => hub::resolve(&model)?,
         None => {
+            // The screen offers the device as well, starting on whatever `-d` resolved to, so
+            // what comes back may not be what went in.
             let mut terminal = ratatui::init();
-            let chosen = picker::choose(&mut terminal);
+            let chosen = picker::choose(&mut terminal, device);
             ratatui::restore();
 
             match chosen? {
-                Some(path) => path,
+                Some(chosen) => {
+                    device = chosen.device;
+                    model_name = Some(chosen.name.to_string());
+                    chosen.path
+                }
                 None => return Ok(()),
             }
         }
     };
+
+    // Before the path goes to the painter, which takes it with it. A path with no name behind it
+    // still has to say something, and its file name is the part that tells one apart from another.
+    let model_name = model_name.unwrap_or_else(|| {
+        model_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "a model".to_string())
+    });
 
     // Set while a run is in flight to ask it to stop between steps, which is the only place it
     // can be asked: a step, once started, is a kernel launch that nothing here can call back.
@@ -146,7 +174,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     }
 
     let terminal = ratatui::init();
-    let outcome = run(terminal, &jobs, &arriving, &cancel);
+    let outcome = run(terminal, model_name, device, &jobs, &arriving, &cancel);
     ratatui::restore();
 
     // The painter is left where it is rather than joined. It may be halfway through the decode,
@@ -162,11 +190,13 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
 /// Draws, reads the keyboard, and passes what the two channels carry between them.
 fn run(
     mut terminal: DefaultTerminal,
+    model: String,
+    device: Device,
     jobs: &Sender<Job>,
     updates: &Receiver<Update>,
     cancel: &AtomicBool,
 ) -> Result<(), Error> {
-    let mut app = App::new();
+    let mut app = App::new(model, device);
 
     while !app.quit {
         terminal.draw(|frame| app.render(frame))?;
@@ -355,11 +385,19 @@ struct App {
     /// The job the loop is about to hand to the painter.
     pending: Option<Job>,
     quit: bool,
+
+    /// What the run was pointed at. Shown rather than kept, because a picture that came out wrong
+    /// is asked about later, and by then which model and which device made it is the first thing
+    /// nobody remembers.
+    model: String,
+    device: Device,
 }
 
 impl App {
-    fn new() -> App {
+    fn new(model: String, device: Device) -> App {
         App {
+            model,
+            device,
             prompt: TextField::default(),
             negative: TextField::default(),
             seed: TextField::default(),
@@ -403,6 +441,12 @@ impl App {
             Update::Progress(reported) => {
                 if let Status::Running { progress, .. } = &mut self.status {
                     *progress = reported;
+
+                    // A refusal shown on the bar's label stands until the run moves, which is a
+                    // step or two: long enough to be read, short enough that the count it is
+                    // standing in front of is not gone for the rest of the run.
+                    self.message.clear();
+                    self.unhappy = false;
                 }
             }
             Update::Done { kept, elapsed } => {
@@ -522,11 +566,15 @@ impl App {
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [prompt, negative, numbers, status, written, keys] = Layout::vertical([
-            Constraint::Length(5),
-            Constraint::Length(4),
+        let [heading, prompt, negative, numbers, status, written, keys] = Layout::vertical([
+            Constraint::Length(1),
+            // The same height, because the two are the same kind of thing: what to draw and what
+            // to keep out of it. One box a row shorter than the other reads as the shorter one
+            // mattering less, which is not what the difference was ever about.
+            Constraint::Length(TEXT_BOX),
+            Constraint::Length(TEXT_BOX),
             Constraint::Length(3),
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(1),
         ])
@@ -534,6 +582,26 @@ impl App {
 
         let quarters = [Constraint::Percentage(25); 4];
         let [steps, guidance, size, seed] = Layout::horizontal(quarters).areas(numbers);
+
+        // What made this picture. A screenshot of a run says nothing about which code drew it,
+        // and that is the first thing worth knowing about one that came out wrong.
+        // The model and the device go to the right, away from what built it: one pair says which
+        // code, the other says what it was pointed at, and neither answers for the other.
+        let pointed = format!("{}  {}  ", self.model, self.device.name());
+        let [built, pointed_at] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(pointed.len() as u16)])
+                .areas(heading);
+
+        frame.render_widget(Paragraph::new(built_from()), built);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(&self.model).bold(),
+                Span::raw("  "),
+                Span::styled(self.device.name(), Style::new().fg(Color::DarkGray)),
+                Span::raw("  "),
+            ])),
+            pointed_at,
+        );
 
         self.render_text(frame, prompt, Field::Prompt, "prompt", &self.prompt);
         self.render_text(
@@ -677,44 +745,58 @@ impl App {
             return;
         }
 
-        let [bar, message] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
-
+        // One row rather than a bar with a line under it. The two never had anything to say at
+        // the same time: while a run is on, the bar's own label says where it is, and the last
+        // thing that happened is only worth reading once there is no bar.
         match &self.status {
-            Status::Ready => frame.render_widget(
-                Paragraph::new(Line::raw("waiting for a prompt").fg(Color::DarkGray)),
-                bar,
-            ),
+            Status::Ready => {
+                let colour = if self.unhappy {
+                    Color::Red
+                } else if self.message.is_empty() {
+                    Color::DarkGray
+                } else {
+                    Color::Gray
+                };
+                let said = if self.message.is_empty() {
+                    "waiting for a prompt"
+                } else {
+                    &self.message
+                };
+                frame.render_widget(
+                    Paragraph::new(said)
+                        .style(Style::new().fg(colour))
+                        .wrap(Wrap { trim: true }),
+                    inner,
+                );
+            }
             Status::Running {
                 progress,
                 steps,
                 started,
             } => {
+                // A message raised while a run is on goes in the label, which is the one place
+                // there is room for it. Turning down a second prompt is the case that matters:
+                // saying nothing would read as the key not having worked.
+                let label = if self.unhappy {
+                    self.message.clone()
+                } else {
+                    format!(
+                        "{} ({:.0}s)",
+                        doing(*progress),
+                        started.elapsed().as_secs_f64()
+                    )
+                };
                 frame.render_widget(
                     Gauge::default()
                         .ratio(fraction(*progress, *steps))
-                        .label(format!(
-                            "{} ({:.0}s)",
-                            doing(*progress),
-                            started.elapsed().as_secs_f64()
-                        ))
-                        .gauge_style(Style::new().fg(Color::Magenta)),
-                    bar,
+                        .label(label)
+                        // Named so that the label reads against the bar: ratatui draws it by
+                        // swapping these two, and there is nothing to swap without a background.
+                        .gauge_style(Style::new().fg(Color::Magenta).bg(Color::Black)),
+                    inner,
                 );
             }
         }
-
-        let colour = if self.unhappy {
-            Color::Red
-        } else {
-            Color::Gray
-        };
-        frame.render_widget(
-            Paragraph::new(self.message.clone())
-                .style(Style::new().fg(colour))
-                .wrap(Wrap { trim: true }),
-            message,
-        );
     }
 
     /// What this session has drawn, which is the only place a finished picture shows up: a
@@ -812,7 +894,7 @@ mod tests {
 
     /// A screen as it is when the model has been read, which is as it starts.
     fn ready() -> App {
-        App::new()
+        App::new("sdxl:wai".to_string(), Device::Cpu)
     }
 
     fn type_in(app: &mut App, text: &str, cancel: &AtomicBool) {
@@ -1068,6 +1150,26 @@ mod tests {
     }
 
     #[test]
+    fn the_screen_says_what_built_it() {
+        let drawn = screen(&ready(), 80, 30);
+
+        // Both halves, because either alone is useless: the name without the revision does not
+        // say which code, and a bare hash on a screenshot does not say what it is a hash of.
+        assert!(drawn.contains("libwaifu"), "{drawn}");
+        assert!(drawn.contains(crate::cli::REVISION), "{drawn}");
+    }
+
+    #[test]
+    fn the_screen_says_what_it_was_pointed_at() {
+        let drawn = screen(&ready(), 80, 30);
+
+        // What made the picture is two questions, not one: which code, and which model on which
+        // device. A screenshot that answers only the first still cannot be reproduced from.
+        assert!(drawn.contains("sdxl:wai"), "{drawn}");
+        assert!(drawn.contains("cpu"), "{drawn}");
+    }
+
+    #[test]
     fn every_part_of_the_screen_is_on_it() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
@@ -1103,6 +1205,55 @@ mod tests {
                 "the screen does not say {wanted:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_two_prompt_boxes_are_the_same_height() {
+        let drawn = screen(&ready(), 80, 30);
+
+        // Counted off the screen rather than off the constant, so that a layout that stops giving
+        // them the same run of rows is caught here rather than looked at.
+        let lines: Vec<String> = (0..30)
+            .map(|row| drawn.chars().skip(row * 80).take(80).collect())
+            .collect();
+        let top = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        let bottom = |from: usize| {
+            lines[from + 1..]
+                .iter()
+                .position(|line| line.starts_with('┗') || line.starts_with('╰'))
+                .unwrap()
+        };
+
+        let prompt = top(" prompt ");
+        let negative = top(" away from ");
+        assert_eq!(bottom(prompt), bottom(negative), "{drawn}");
+    }
+
+    #[test]
+    fn what_it_is_doing_takes_one_row_and_still_says_both_things() {
+        // Idle: the last thing that happened, where the bar would be.
+        let mut app = ready();
+        app.said("written to a.png");
+        let drawn = screen(&app, 80, 30);
+        assert!(drawn.contains("written to a.png"), "{drawn}");
+
+        // Running: the bar, with where it has got to on it.
+        let cancel = AtomicBool::new(false);
+        type_in(&mut app, "a cat", &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+        let drawn = screen(&app, 80, 30);
+        assert!(drawn.contains("reading the prompt"), "{drawn}");
+
+        // Running and turned down: the refusal takes the label, because saying nothing would read
+        // as the key not having worked.
+        app.key(press(KeyCode::Enter), &cancel);
+        let drawn = screen(&app, 80, 30);
+        assert!(drawn.contains("there is already a picture"), "{drawn}");
+
+        // And it gives the label back as soon as the run moves.
+        app.update(Update::Progress(GenerationProgress::Step { done: 1, total: 30 }));
+        let drawn = screen(&app, 80, 30);
+        assert!(drawn.contains("step 1 of 30"), "{drawn}");
     }
 
     #[test]
