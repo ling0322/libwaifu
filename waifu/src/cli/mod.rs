@@ -26,6 +26,7 @@
 mod args;
 mod draw;
 mod field;
+mod files;
 mod hub;
 mod picker;
 

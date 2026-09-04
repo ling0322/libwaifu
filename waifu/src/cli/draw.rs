@@ -45,6 +45,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::Args;
 use crate::cli::field::TextField;
+use crate::cli::files::{FilePicker, Outcome};
 use crate::cli::picker;
 use crate::cli::{built_from, hub};
 use crate::flint::Tensor;
@@ -76,6 +77,9 @@ const DEFAULT_SIZE: usize = 4;
 
 /// How far a run that starts from a picture walks away from it, before anyone says otherwise.
 const DEFAULT_STRENGTH: f32 = 0.8;
+
+/// What the picture picker offers, which is what the image crate is built to read.
+const PICTURES: &[&str] = &["png", "jpg", "jpeg"];
 
 /// Says what was wrong before printing the usage, which is the order the Go tool prints them in.
 fn with_usage<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, E> {
@@ -455,6 +459,12 @@ struct App {
     written: Vec<String>,
     /// The job the loop is about to hand to the painter.
     pending: Option<Job>,
+    /// The file picker, while it is up. Everything else on the screen keeps its state behind it,
+    /// so closing one puts the screen back exactly as it was.
+    browsing: Option<FilePicker>,
+    /// Where the picker was last looking, so that closing it without picking anything and opening
+    /// it again does not walk back to where the program was started from.
+    browsed: Option<PathBuf>,
     quit: bool,
 
     /// What the run was pointed at. Shown rather than kept, because a picture that came out wrong
@@ -485,6 +495,8 @@ impl App {
             unhappy: false,
             written: Vec::new(),
             pending: None,
+            browsing: None,
+            browsed: None,
             quit: false,
         }
     }
@@ -554,6 +566,26 @@ impl App {
     fn key(&mut self, key: KeyEvent, cancel: &AtomicBool) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
 
+        // Ctrl-C still ends the program from inside the picker: it is the key that always means
+        // that, and a box on top of the screen is no reason for it to stop meaning it.
+        if let Some(browsing) = &mut self.browsing {
+            if key.code == KeyCode::Char('c') && control {
+                cancel.store(true, Ordering::Relaxed);
+                self.quit = true;
+                return;
+            }
+
+            let outcome = browsing.key(key);
+            if outcome != Outcome::Open {
+                self.browsed = Some(browsing.directory().to_path_buf());
+                self.browsing = None;
+            }
+            if let Outcome::Picked(path) = outcome {
+                self.from = TextField::new(&path.to_string_lossy());
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('c') if control => {
                 cancel.store(true, Ordering::Relaxed);
@@ -569,6 +601,8 @@ impl App {
                     self.quit = true;
                 }
             }
+            // Enter draws, except in the one box where what it obviously means is "show me".
+            KeyCode::Enter if self.focused() == Field::From => self.browse(),
             KeyCode::Enter => self.start(),
             KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % FIELDS.len(),
             KeyCode::BackTab | KeyCode::Up => {
@@ -624,6 +658,17 @@ impl App {
             seed: self.seed.text().trim().parse().ok(),
             strength: self.strength,
         }
+    }
+
+    /// Opens the picker where the box is already pointing, or in this directory when it is empty.
+    fn browse(&mut self) {
+        // What is in the box wins over where it was left: someone who typed a path there means
+        // that one, and someone who did not is carrying on from where they stopped looking.
+        let start = self
+            .from()
+            .or_else(|| self.browsed.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.browsing = Some(FilePicker::open("a picture to draw from", &start, PICTURES));
     }
 
     /// The picture this run starts from, or None where it starts from noise.
@@ -708,7 +753,18 @@ impl App {
             "away from",
             &self.negative,
         );
-        self.render_text(frame, from, Field::From, "draw from", &self.from);
+        // The one box whose title says what its key does, because a box you type into does not
+        // otherwise look like a box you can also open a list from.
+        self.render_text(
+            frame,
+            from,
+            Field::From,
+            match self.focused() {
+                Field::From => "draw from (enter to browse)",
+                _ => "draw from",
+            },
+            &self.from,
+        );
         self.render_number(frame, steps, Field::Steps, "steps", self.steps.to_string());
         self.render_number(
             frame,
@@ -749,6 +805,15 @@ impl App {
 
         self.render_status(frame, status);
         self.render_written(frame, written);
+
+        // The picker carries its own line of key hints, and while it is up these are not what the
+        // keys do. Two rows saying different things about the same keys is worse than one.
+        if let Some(browsing) = &self.browsing {
+            // Last, so that it is on top of everything above rather than under it.
+            browsing.render(frame, frame.area());
+            return;
+        }
+
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" tab").bold(),
@@ -1106,6 +1171,86 @@ mod tests {
             app.key(press(KeyCode::Backspace), &cancel);
         }
         assert_eq!(app.options().seed, None, "an empty box means any seed");
+    }
+
+    #[test]
+    fn enter_on_the_draw_from_box_opens_the_picker_rather_than_drawing() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+        type_in(&mut app, "a cat", &cancel);
+
+        // The box says what enter does there, and only while the cursor is in it.
+        assert!(!screen(&app, 90, 26).contains("enter to browse"));
+        focus_on(&mut app, Field::From);
+        assert!(screen(&app, 90, 26).contains("enter to browse"));
+
+        app.key(press(KeyCode::Enter), &cancel);
+        assert!(app.browsing.is_some(), "the picker did not open");
+        assert!(app.pending.is_none(), "it started a run instead");
+
+        // And what is on screen is the picker, over everything that was there.
+        let drawn = screen(&app, 90, 26);
+        assert!(drawn.contains("a picture to draw from"), "{drawn}");
+
+        // Esc takes it down again, leaving everything behind it as it was.
+        app.key(press(KeyCode::Esc), &cancel);
+        assert!(app.browsing.is_none(), "esc did not close the picker");
+        assert!(!app.quit, "esc closed the program rather than the picker");
+        assert_eq!(app.prompt.text(), "a cat");
+    }
+
+    #[test]
+    fn what_the_picker_hands_back_goes_into_the_box() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        // A directory of its own with one picture in it, so that what is picked is known.
+        let root = std::env::temp_dir().join("waifu-draw-picker-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("only.png"), b"x").unwrap();
+
+        focus_on(&mut app, Field::From);
+        type_in(&mut app, root.to_str().unwrap(), &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+
+        // Past "..", onto the one picture, and take it.
+        app.key(press(KeyCode::Down), &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+
+        assert!(app.browsing.is_none(), "the picker stayed open");
+        assert_eq!(app.from(), Some(root.join("only.png")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn while_the_picker_is_up_the_keys_behind_it_are_left_alone() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+        type_in(&mut app, "a cat", &cancel);
+
+        focus_on(&mut app, Field::From);
+        app.key(press(KeyCode::Enter), &cancel);
+
+        // Tab would move the cursor and typing would go into a box, were the picker not there.
+        let focus = app.focus;
+        app.key(press(KeyCode::Tab), &cancel);
+        type_in(&mut app, "zzz", &cancel);
+
+        assert_eq!(app.focus, focus, "tab moved the screen behind the picker");
+        assert_eq!(app.from.text(), "", "what was typed went into a box");
+        assert!(app.browsing.is_some());
+
+        // Ctrl-C still means what it always means.
+        app.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cancel,
+        );
+        assert!(
+            app.quit,
+            "ctrl-c did not end the program from inside the picker"
+        );
     }
 
     #[test]
