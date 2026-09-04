@@ -289,7 +289,7 @@ target_link_libraries(unittest ${unittest_LIBADD})
 
 add_executable(benchmark "flint/bin/benchmark.cc")
 target_include_directories(benchmark PRIVATE "." "flint" "third_party")
-target_link_libraries(benchmark flint_benchmark ${libwaifu_LIBADD} catch2)
+target_link_libraries(benchmark flint_benchmark ${libwaifu_LIBADD})
 
 enable_testing()
 add_test(NAME unittest COMMAND $<TARGET_FILE:unittest>)

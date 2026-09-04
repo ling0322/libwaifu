@@ -106,7 +106,10 @@ inline std::string sprintf0(
     type_correct = false;
   }
 
-  ss.setf(default_flags);
+  // flags() and not setf(): setf adds the flags it is given and leaves the rest, so restoring
+  // this way would never clear one. A single "%-8s" used to turn on std::left and leave it on for
+  // every field after it in the same format string, which right-aligned nothing thereafter.
+  ss.flags(default_flags);
   ss.precision(default_precision);
   ss.width(default_width);
   ss.fill(default_fill);
