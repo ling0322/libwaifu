@@ -80,7 +80,8 @@ typedef enum fl_device_type_t {
   /// operators: it is where weights wait to be copied to the GPU, not somewhere to compute.
   FL_DEVICE_CUDA_HOST = 2,
   FL_DEVICE_METAL = 3,
-  FL_DEVICE_UNKNOWN = 3,
+  /// Last, and one past the devices, so that adding one moves this and nothing else.
+  FL_DEVICE_UNKNOWN = 4,
 } fl_device_type_t;
 
 /// Select the operator backends for the machine. Call once before anything else here; later calls

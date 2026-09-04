@@ -105,7 +105,10 @@ impl DType {
 pub enum Device {
     Cpu = 0,
     Cuda = 1,
-    Metal = 2,
+    /// Host memory page-locked by the CUDA driver. Readable by the CPU and carrying no operators
+    /// of its own: it is where weights wait to be copied to the GPU.
+    CudaHost = 2,
+    Metal = 3,
 }
 
 impl Device {
@@ -114,8 +117,8 @@ impl Device {
         match self {
             Device::Cpu => "cpu",
             Device::Cuda => "cuda",
-            Device::Metal => "metal",
             Device::CudaHost => "cuda-host",
+            Device::Metal => "metal",
         }
     }
 
@@ -136,7 +139,8 @@ impl Device {
         match raw {
             0 => Ok(Device::Cpu),
             1 => Ok(Device::Cuda),
-            2 => Ok(Device::Metal),
+            2 => Ok(Device::CudaHost),
+            3 => Ok(Device::Metal),
             other => Err(Error::unsupported(format!("unknown device {other}"))),
         }
     }
