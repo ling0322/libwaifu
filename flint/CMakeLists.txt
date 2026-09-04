@@ -166,7 +166,6 @@ if (WITH_CUDA)
 endif()
 
 if(WITH_MLX)
-    set(flint_INCDIR ${flint_INCDIR} ${MLX_INCDIRS})
     set(flint_SOURCES
         ${flint_SOURCES}
         "metal/attention.cc"
@@ -241,3 +240,11 @@ target_include_directories(flint_test PRIVATE ${flint_INCDIR})
 
 add_library(flint_benchmark OBJECT ${flint_benchmark_SOURCES})
 target_include_directories(flint_benchmark PRIVATE ${flint_INCDIR})
+
+# MLX headers use C++20 features (defaulted comparisons). Mark them as SYSTEM so the compiler
+# does not warn about code this project does not own.
+if(WITH_MLX)
+    target_include_directories(flint_static SYSTEM PRIVATE ${MLX_INCDIRS})
+    target_include_directories(flint_test SYSTEM PRIVATE ${MLX_INCDIRS})
+    target_include_directories(flint_benchmark SYSTEM PRIVATE ${MLX_INCDIRS})
+endif()

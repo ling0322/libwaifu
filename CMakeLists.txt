@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
+
+# Match the deployment target to the running system so that object files built by vendored
+# libraries (MLX in particular) do not trigger linker warnings about a newer macOS version.
+if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    execute_process(COMMAND sw_vers -productVersion
+                    OUTPUT_VARIABLE _macos_ver OUTPUT_STRIP_TRAILING_WHITESPACE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${_macos_ver}" CACHE STRING "macOS deployment target")
+endif()
+
 project(libwaifu LANGUAGES CXX C)
 include(CheckTypeSize)
 
