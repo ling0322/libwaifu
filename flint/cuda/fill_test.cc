@@ -65,6 +65,26 @@ CATCH_TEST_CASE("test CUDA fill (values)", "[op][cuda]") {
   }
 }
 
+CATCH_TEST_CASE("test CUDA zeros (every dtype)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // zeros() used to hand back a half tensor whatever type it was asked for, and nothing said so
+  // at the call: the first sign was something else refusing the tensor for its type, layers away.
+  // It builds the type it was asked for now, which is a type fill has to know.
+  for (DType dtype : {DType::kFloat16, DType::kFloat}) {
+    CATCH_INFO("dtype = " << dtype.toString());
+
+    Tensor zeroed = F::zeros({2, 5, 10}, dtype, Device::getCuda());
+    CATCH_REQUIRE(zeroed.getDType() == dtype);
+    CATCH_REQUIRE(F::allClose(toCpu(zeroed), F::zeros({2, 5, 10}, DType::kFloat)));
+
+    F::fill(zeroed, 3.0f);
+    Tensor expected = F::tensor({2, 5, 10}, DType::kFloat, Device::getCpu());
+    F::fill(expected, 3.0f);
+    CATCH_REQUIRE(F::allClose(toCpu(zeroed), expected));
+  }
+}
+
 CATCH_TEST_CASE("test CUDA fill (strided ranks)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 

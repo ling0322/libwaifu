@@ -246,10 +246,9 @@ impl UpBlock {
 /// encoder's halving takes it from the far side only, which is what the reference does: padding
 /// both sides would start the first window one pixel earlier and move every output pixel with it.
 fn pad_right_bottom(input: &Tensor) -> Result<Tensor> {
-    // The zeros are a slice of the input multiplied by nothing rather than Tensor::zeros, which
-    // takes its shape, its type and its device from the tensor being padded without any of the
-    // three being worked out here -- and which on CUDA hands back a half tensor whatever type it
-    // was asked for.
+    // The zeros are a slice of the input multiplied by nothing rather than Tensor::zeros, so that
+    // the shape, the type and the device all come from the tensor being padded without any of the
+    // three being worked out here.
     let column = F::mul_scalar(&input.slice(3, 0, 1)?.contiguous()?, 0.0)?;
     let widened = F::cat(input, &column, 3)?;
 

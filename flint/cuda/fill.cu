@@ -76,8 +76,13 @@ void fillImpl(Tensor &tensor, T v) {
 void fill(Tensor A, float value) {
   CHECK(A.getDevice().getType() == Device::kCuda);
 
+  // Both float types, so that F::zeros() on this device can honour the dtype it was asked for
+  // rather than only the one it used to assume. The integer types refuse here the way the CPU's
+  // own fillZero() refuses them, rather than being written for a caller that does not exist.
   if (A.getDType() == DType::kFloat16)
     fillImpl<half>(A, __float2half(value));
+  else if (A.getDType() == DType::kFloat)
+    fillImpl<float>(A, value);
   else
     NOT_IMPL();
 }

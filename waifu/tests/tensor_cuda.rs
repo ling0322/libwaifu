@@ -288,3 +288,21 @@ fn stores_and_reads_a_paged_kv_cache() {
         "paged and dense attention disagree"
     );
 }
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn makes_zeros_of_the_type_it_was_asked_for() {
+    // This used to come back as Float16 whatever it was given, and the caller heard nothing about
+    // it: the first sign was an operator refusing the tensor for its type, layers from the call
+    // that made it.
+    for dtype in [DType::Float, DType::Float16] {
+        let zeros = Tensor::zeros(&[2, 3, 4], dtype, Device::Cuda).unwrap();
+        assert_eq!(
+            zeros.dtype(),
+            dtype,
+            "zeros gave the wrong type for {dtype:?}"
+        );
+        assert_eq!(zeros.shape(), vec![2, 3, 4]);
+        assert!(to_host_f32(&zeros).iter().all(|x| *x == 0.0));
+    }
+}

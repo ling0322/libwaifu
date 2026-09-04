@@ -446,10 +446,10 @@ DType CudaOperators::getDefaultFloatType() {
 }
 
 Tensor CudaOperators::zeros(lut::Span<const int> shape, DType dtype) {
-  Tensor tensor = createCudaTensorHalf(shape);
-  op::cuda::fill(tensor, 0.0);
+  Tensor zeroed = tensor(shape, dtype);
+  op::cuda::fill(zeroed, 0.0);
 
-  return tensor;
+  return zeroed;
 }
 
 Tensor CudaOperators::randNormal(lut::Span<const int> shape) {
