@@ -56,7 +56,13 @@
 
 namespace lut {
 
-enum class LogSeverity { kDEBUG = 0, kINFO = 1, kWARN = 2, kERROR = 4, kFATAL = 3 };
+/// @brief How bad a message is, and how much of it a level lets through: LOG(x) prints when the
+///        level set is no higher than x.
+///
+/// In order, which they were not: kERROR used to be 4 and kFATAL 3, so a level of kERROR -- asked
+/// for by someone who wanted errors and nothing else -- was above kFATAL and swallowed the one
+/// message that cannot be missed.
+enum class LogSeverity { kDEBUG = 0, kINFO = 1, kWARN = 2, kERROR = 3, kFATAL = 4 };
 
 void setLogLevel(LogSeverity level);
 
