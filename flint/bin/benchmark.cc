@@ -17,13 +17,13 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "catch2/catch_amalgamated.hpp"
+#include "flint/bench.h"
 #include "flint/operators.h"
 
 int main(int argc, char **argv) {
   fl::initOperators();
 
-  int result = Catch::Session().run(argc, argv);
+  int result = fl::bench::run(argc, argv);
 
   fl::destroyOperators();
   return result;

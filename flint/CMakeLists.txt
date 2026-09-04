@@ -59,6 +59,7 @@ set(flint_test_SOURCES
     "tensor_test.cc")
 
 set(flint_benchmark_SOURCES
+    "bench.cc"
     "cpu/benchmark.cc"
     "cpu/kernel/benchmark.cc")
 

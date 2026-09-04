@@ -76,6 +76,17 @@ CATCH_TEST_CASE("formatNumber works", "[fl][strings]") {
   CATCH_REQUIRE(formatNumber(3LL * 1024 * 1024 * 1024 / 2) == "1.5G");
 }
 
+CATCH_TEST_CASE("a field's flags do not leak into the ones after it", "[fl][strings]") {
+  // Left alignment is a flag on the stream, and restoring the stream between fields has to clear
+  // it rather than merely not set it again.
+  CATCH_REQUIRE(lut::sprintf("%-6s|%6s|", "a", "b") == "a     |     b|");
+  CATCH_REQUIRE(lut::sprintf("%-4d|%4d|", 1, 2) == "1   |   2|");
+
+  // The same for the other flags a field can turn on.
+  CATCH_REQUIRE(lut::sprintf("%+d|%d|", 1, 2) == "+1|2|");
+  CATCH_REQUIRE(lut::sprintf("%x|%d|", 255, 255) == "ff|255|");
+}
+
 CATCH_TEST_CASE("sprintf works", "[fl][strings]") {
   // BVT
   CATCH_REQUIRE(lut::sprintf("%d", 22) == "22");

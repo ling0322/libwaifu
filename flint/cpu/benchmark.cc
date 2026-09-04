@@ -1,6 +1,6 @@
 // The MIT License (MIT)
 //
-// Copyright (c) 2023-2025 Xiaoyang Chen
+// Copyright (c) 2026 Xiaoyang Chen
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 // and associated documentation files (the "Software"), to deal in the Software without
@@ -17,178 +17,206 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include <cstdio>
-#include <memory>
+// The convolutions SDXL runs, on the processor. The GEMM half of the same group is a level down,
+// against the kernels themselves; this one goes through the operator, because a convolution on
+// x64 is a packing and a GEMM and the arrangement around them is most of what there is to measure.
+
+#include <algorithm>
+#include <chrono>
 #include <string>
 #include <vector>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
-
-#include "catch2/catch_amalgamated.hpp"
-#include "lutil/time.h"
+#include "flint/bench.h"
 #include "flint/device.h"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
 namespace {
 
-constexpr int HiddenSize = 3072;
-constexpr int IntermediateSize = 8192;
-constexpr int NumHeads = 24;
-constexpr int NumKeyValueHeads = 8;
-constexpr int HeadDim = 128;
-constexpr int QkvSize = HiddenSize + 2 * NumKeyValueHeads * HeadDim;
-constexpr int VocabSize = 128256;
-constexpr int BatchSize = 1;
+/// How long a batch of runs should take before it is worth timing. Anything shorter and what is
+/// measured is the clock and the thread pool waking up: a norm at half a millisecond came out
+/// four times slower than the same norm on four times the data, which is the shape of noise
+/// rather than of an answer.
+constexpr double kBatchMs = 20.0;
 
-// CPU clocks and OpenMP threads need time to settle, so measure against a time budget instead of
-// a fixed repeat count.
-constexpr double WarmupSeconds = 0.2;
-constexpr double MeasureSeconds = 0.3;
+/// How many batches to take the fastest of. Seven rather than three because on a machine with as
+/// many threads as it has hyperthreads, a batch every so often comes out several times slower --
+/// the parallel region waking up, not the operator -- and the slow ones do not average out with
+/// the fast ones, they only add to them. The fastest of enough tries is the operator on its own,
+/// which is the number a benchmark is for.
+constexpr int kRuns = 7;
 
 template<typename Fn>
-float benchmarkCpu(Fn &&fn) {
-  double warmupBegin = lut::now();
-  do {
-    fn();
-  } while (lut::now() - warmupBegin < WarmupSeconds);
-
-  int numIterations = 0;
-  double elapsed = 0.0;
-  double begin = lut::now();
-  do {
-    fn();
-    ++numIterations;
-    elapsed = lut::now() - begin;
-  } while (elapsed < MeasureSeconds);
-
-  return static_cast<float>(elapsed * 1000.0 / numIterations);}
-
-int getNumThreads() {
-#ifdef _OPENMP
-  return omp_get_max_threads();
-#else
-  return 1;
-#endif
+double onceMs(Fn &&fn) {
+  auto begin = std::chrono::steady_clock::now();
+  fn();
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin)
+      .count();
 }
 
-void printLatency(const std::string &name, float milliseconds) {
-  std::printf("%-44s %10.3f ms\n", name.c_str(), milliseconds);
+/// The fastest of a few batches, per call. The fastest rather than the mean, because on a
+/// processor the slow runs are the machine doing something else and the fast one is the closest
+/// this gets to the operator on its own.
+template<typename Fn>
+double fastestMs(Fn &&fn) {
+  fn();  // warm the caches, and do not time it
+
+  // Doubled until a batch is long enough to time, rather than worked out from one run: that run
+  // is the cold one, and an estimate off it comes out too small exactly where the operator is
+  // fastest and the estimate matters most.
+  int loops = 1;
+  double took = 0.0;
+  while (true) {
+    took = onceMs([&] {
+      for (int i = 0; i < loops; ++i) fn();
+    });
+    if (took >= kBatchMs || loops >= (1 << 20)) break;
+    loops *= 2;
+  }
+
+  double best = took;
+  for (int run = 1; run < kRuns; ++run) {
+    double again = onceMs([&] {
+      for (int i = 0; i < loops; ++i) fn();
+    });
+    if (again < best) best = again;
+  }
+  return best / loops;
 }
 
-void printMatmul(const std::string &name, float milliseconds, int m, int n, int k) {
-  double gflops = 2.0 * m * n * k / (milliseconds * 1.0e6);
-  std::printf("%-44s %10.3f ms  %8.2f GFLOP/s\n", name.c_str(), milliseconds, gflops);
+void benchmarkConv2d(
+    const std::string &name,
+    int batch,
+    int inChannel,
+    int outChannel,
+    int size,
+    int kernel,
+    int stride) {
+  int padding = kernel / 2;
+  Tensor input = F::rand({batch, inChannel, size, size}, DType::kFloat, Device::getCpu());
+  Tensor weight = F::rand({outChannel, inChannel, kernel, kernel}, DType::kFloat, Device::getCpu());
+  Tensor bias = F::rand({outChannel}, DType::kFloat, Device::getCpu());
+
+  double milliseconds =
+      fastestMs([&] { F::conv2d(input, weight, bias, stride, padding, 1, 1); });
+
+  int outSize = (size + 2 * padding - kernel) / stride + 1;
+  double flop = 2.0 * batch * outChannel * outSize * outSize * inChannel * kernel * kernel;
+  bench::print(
+      "%-36s %10.2f ms %10.1f\n", name.c_str(), milliseconds, flop / (milliseconds * 1.0e6));
 }
 
-Tensor randFloat(const std::shared_ptr<Operators> &operators, std::initializer_list<int> shape) {
-  return operators->rand(shape, DType::kFloat);
+/// The bytes an operator has to move at least once: what it reads plus what it writes. A norm or
+/// an activation is held up by memory rather than by the arithmetic, so this over the time is the
+/// number worth reading.
+void printBandwidth(const std::string &name, double milliseconds, double bytes) {
+  bench::print(
+      "%-44s %10.2f ms  %8.1f GB/s\n", name.c_str(), milliseconds, bytes / (milliseconds * 1.0e6));
 }
 
-void benchmarkMatmul(
-    const std::shared_ptr<Operators> &operators, const char *name, int m, int n, int k) {
-  Tensor input = randFloat(operators, {m, k});
-  Tensor weight = randFloat(operators, {n, k}).transpose(0, 1);
-  float milliseconds = benchmarkCpu([&] { operators->matmul(input, weight); });
-  printMatmul(name, milliseconds, m, n, k);
+/// Elements times four, which is what float32 costs. The processor has no half kernels here, so
+/// a CPU run widens the weights as it reads them and works in float throughout.
+double floatBytes(std::initializer_list<int> shape) {
+  double count = 1;
+  for (int extent : shape) count *= extent;
+  return 4.0 * count;
 }
 
-void benchmarkRmsNorm(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor input = randFloat(operators, {BatchSize, sequenceLength, HiddenSize});
-  Tensor weight = randFloat(operators, {HiddenSize});
-  float milliseconds = benchmarkCpu([&] { operators->rmsNorm(input, weight, 1.0e-5f); });
-  printLatency("rms_norm [1," + std::to_string(sequenceLength) + ",3072]", milliseconds);
-}
-
-void benchmarkSwiGlu(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor input = randFloat(operators, {BatchSize, sequenceLength, 2 * IntermediateSize});
-  float milliseconds = benchmarkCpu([&] { operators->swiglu(input); });
-  printLatency("swiglu [1," + std::to_string(sequenceLength) + ",16384]", milliseconds);
-}
-
-void benchmarkResidualAdd(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor input = randFloat(operators, {BatchSize, sequenceLength, HiddenSize});
-  Tensor residual = randFloat(operators, {BatchSize, sequenceLength, HiddenSize});
-  float milliseconds = benchmarkCpu([&] { operators->add(input, residual); });
-  printLatency("residual_add [1," + std::to_string(sequenceLength) + ",3072]", milliseconds);
-}
-
-void benchmarkSoftmax(const std::shared_ptr<Operators> &operators) {
-  Tensor logits = randFloat(operators, {BatchSize, VocabSize});
-  float milliseconds = benchmarkCpu([&] { operators->softmax(logits); });
-  printLatency("softmax [1,128256]", milliseconds);
-}
-
-void benchmarkAttention(
-    const std::shared_ptr<Operators> &operators, int queryLength, int keyValueLength) {
-  Tensor q = randFloat(operators, {BatchSize, NumHeads, queryLength, HeadDim});
-  Tensor k = randFloat(operators, {BatchSize, NumKeyValueHeads, keyValueLength, HeadDim});
-  Tensor v = randFloat(operators, {BatchSize, NumKeyValueHeads, keyValueLength, HeadDim});
-
-  bool causal = queryLength > 1;
-  float milliseconds = benchmarkCpu([&] { operators->attention(q, k, v, causal); });
-  printLatency(
-      "attention [24," + std::to_string(queryLength) + "," + std::to_string(keyValueLength) +
-          ",128]",
-      milliseconds);
-}
-
-Tensor createTokenIds(int sequenceLength) {
-  std::vector<LongType> values(sequenceLength);
-  for (int i = 0; i < sequenceLength; ++i) values[i] = i % VocabSize;
-  return Tensor::create<LongType>({BatchSize, sequenceLength}, values);
-}
-
-void benchmarkLookup(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor embedding = randFloat(operators, {VocabSize, HiddenSize});
-  Tensor ids = createTokenIds(sequenceLength);
-  float milliseconds = benchmarkCpu([&] { operators->lookup(embedding, ids); });
-  printLatency("embedding_lookup [" + std::to_string(sequenceLength) + ",3072]", milliseconds);
+Tensor randFloat(std::initializer_list<int> shape) {
+  return F::rand(shape, DType::kFloat, Device::getCpu());
 }
 
 }  // namespace
 
-CATCH_TEST_CASE("Llama 3.2 3B CPU benchmarks", "[benchmark][cpu][llama32-3b]") {
-  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCpu);
+LL_BENCHMARK(bench::Group::kSdxlCpu, "SDXL elementwise") {
+  // The same set the CUDA group runs, minus attention, which the processor has no operator for.
+  // None of it is much arithmetic; all of it reads a whole tensor and writes one.
+  //
+  // Per call, not per step: how many times a step runs each of these has not been counted the way
+  // the GEMM table's counts were, so these cannot be added up into a step.
+  bench::print("float32, per call\n");
 
-  std::printf("\nLlama 3.2 3B projection benchmarks (FP32, %d threads)\n", getNumThreads());
-  for (int sequenceLength : {1, 128, 512}) {
-    int m = BatchSize * sequenceLength;
-    std::string prefix = sequenceLength == 1 ? "decode" : "prefill";
-    prefix += "-" + std::to_string(sequenceLength);
-    benchmarkMatmul(operators, (prefix + " qkv_proj").c_str(), m, QkvSize, HiddenSize);
-    benchmarkMatmul(operators, (prefix + " out_proj").c_str(), m, HiddenSize, HiddenSize);
-    benchmarkMatmul(
-        operators, (prefix + " gate_up_proj").c_str(), m, 2 * IntermediateSize, HiddenSize);
-    benchmarkMatmul(operators, (prefix + " down_proj").c_str(), m, HiddenSize, IntermediateSize);
+  struct Level {
+    const char *what;
+    int channels;
+    int size;
+  };
+  const Level levels[] = {
+      {"128x128x320", 320, 128},
+      {"64x64x640", 640, 64},
+      {"32x32x1280", 1280, 32},
+  };
+
+  for (const Level &level : levels) {
+    Tensor x = randFloat({1, level.channels, level.size, level.size});
+    Tensor scale = randFloat({level.channels});
+    Tensor shift = randFloat({level.channels});
+    double moved = 2 * floatBytes({1, level.channels, level.size, level.size});
+
+    printBandwidth(
+        std::string("group_norm   ") + level.what,
+        fastestMs([&] { F::groupNorm(x, scale, shift, 32, 1e-5f); }),
+        moved);
+    printBandwidth(
+        std::string("silu         ") + level.what,
+        fastestMs([&] { F::silu(x); }),
+        moved);
+
+    Tensor other = randFloat({1, level.channels, level.size, level.size});
+    printBandwidth(
+        std::string("add          ") + level.what,
+        fastestMs([&] { F::add(x, other); }),
+        1.5 * moved);
   }
-  benchmarkMatmul(operators, "decode-1 lm_head", 1, VocabSize, HiddenSize);
 
-  std::printf("\nLlama 3.2 3B normalization and elementwise benchmarks (FP32)\n");
-  for (int sequenceLength : {1, 128, 512}) {
-    benchmarkRmsNorm(operators, sequenceLength);
-    benchmarkSwiGlu(operators, sequenceLength);
-    benchmarkResidualAdd(operators, sequenceLength);
+  // The transformer levels: SDXL attends at 64 by 64 and at 32 by 32 and not below.
+  struct Block {
+    const char *what;
+    int tokens;
+    int width;
+  };
+  const Block blocks[] = {{"64x64x640", 4096, 640}, {"32x32x1280", 1024, 1280}};
+
+  for (const Block &block : blocks) {
+    Tensor hidden = randFloat({1, block.tokens, block.width});
+    Tensor scale = randFloat({block.width});
+    Tensor shift = randFloat({block.width});
+    printBandwidth(
+        std::string("layer_norm   ") + block.what,
+        fastestMs([&] { F::layerNorm(hidden, scale, shift, 1e-5f); }),
+        2 * floatBytes({1, block.tokens, block.width}));
+
+    int inner = block.width * 4;
+    Tensor gated = randFloat({1, block.tokens, 2 * inner});
+    printBandwidth(
+        std::string("geglu        ") + block.what,
+        fastestMs([&] { F::geglu(gated); }),
+        1.5 * floatBytes({1, block.tokens, 2 * inner}));
   }
 
-  std::printf("\nLlama 3.2 3B attention benchmarks (FP32)\n");
-  benchmarkAttention(operators, 128, 128);
-  benchmarkAttention(operators, 512, 512);
-  benchmarkAttention(operators, 1, 512);
-  benchmarkAttention(operators, 1, 2048);
+  const Level upsampled[] = {{"32x32x1280 to 64x64", 1280, 32}, {"64x64x640 to 128x128", 640, 64}};
+  for (const Level &level : upsampled) {
+    Tensor x = randFloat({1, level.channels, level.size, level.size});
+    printBandwidth(
+        std::string("upsample     ") + level.what,
+        fastestMs([&] { F::upsampleNearest2d(x, 2); }),
+        5 * floatBytes({1, level.channels, level.size, level.size}));
+  }
+}
 
-  std::printf("\nLlama 3.2 3B embedding and generation benchmarks (FP32)\n");
-  benchmarkLookup(operators, 1);
-  benchmarkLookup(operators, 128);
-
-  Tensor logits = randFloat(operators, {BatchSize, VocabSize});
-  Tensor history = createTokenIds(32);
-  float milliseconds = benchmarkCpu([&] { operators->repetitionPenalty(logits, history, 1.1f); });
-  printLatency("repetition_penalty [1,128256] history=32", milliseconds);
-  benchmarkSoftmax(operators);
+LL_BENCHMARK(bench::Group::kSdxlCpu, "SDXL convolution") {
+  // The same shapes the CUDA group runs, so that the two tables can be read against each other.
+  // Float32 rather than half: x64 has no half kernels here, and a CPU run widens the weights as
+  // it reads them.
+  bench::print("float32, one group\n%-36s %13s %10s\n", "shape", "time", "GFLOP/s");
+  benchmarkConv2d("unet 128x128x320 3x3", 1, 320, 320, 128, 3, 1);
+  benchmarkConv2d("unet 64x64x640 3x3", 1, 640, 640, 64, 3, 1);
+  benchmarkConv2d("unet 32x32x1280 3x3", 1, 1280, 1280, 32, 3, 1);
+  benchmarkConv2d("unet 128x128x320 downsample 3x3/2", 1, 320, 320, 128, 3, 2);
+  benchmarkConv2d("unet 64x64x640 1x1", 1, 640, 640, 64, 1, 1);
+  benchmarkConv2d("vae 512x512x256 3x3", 1, 256, 256, 512, 3, 1);
 }
 
 }  // namespace fl

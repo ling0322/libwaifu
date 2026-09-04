@@ -1,0 +1,55 @@
+Running on
+  cpu       Intel(R) Xeon(R) w5-2465X  (32 threads)
+  memory    65.1 GB
+  gpu:0     NVIDIA GeForce RTX 5060 Ti  (sm_120, 36 SMs, 16.6 GB, 448.0 GB/s)
+  cuda      runtime 12.9, driver 13.2
+  build     CUDA, CUTLASS, cuDNN, stream-ordered alloc, OpenMP
+
+SDXL GEMM
+---------
+half precision
+shape                                       cublas    TFLOP/s       cutlass    TFLOP/s
+ff.gate      1024x10240x1280              557.3 us      48.17      548.8 us      48.91
+ff.out       1024x1280x5120               276.1 us      48.61      279.3 us      48.05
+attn proj    1024x1280x1280                72.7 us      46.18       76.4 us      43.93
+attn qkv     1024x3840x1280               211.1 us      47.70      215.5 us      46.72
+ff.gate      4096x5120x640                569.2 us      47.16      552.1 us      48.62
+ff.out       4096x640x2560                279.0 us      48.10      308.1 us      43.57
+attn proj    4096x640x640                  75.0 us      44.73       79.9 us      42.01
+attn qkv     4096x1920x640                217.9 us      46.19      217.7 us      46.24
+cross kv     77x2560x2048                  35.2 us      22.93       37.4 us      21.60
+cross kv     77x1280x2048                  22.6 us      17.84       29.7 us      13.58
+
+SDXL convolution
+----------------
+half precision, one group
+shape                                      cutlass    TFLOP/s         cudnn    TFLOP/s
+unet 128x128x320 3x3                      864.2 us      34.94      877.1 us      34.43
+unet 64x64x640 3x3                        776.3 us      38.90      803.7 us      37.57
+unet 32x32x1280 3x3                      1035.6 us      29.16      972.6 us      31.05
+unet 128x128x320 downsample 3x3/2         255.1 us      29.60      231.6 us      32.59
+unet 64x64x640 1x1                         90.1 us      37.25       94.2 us      35.64
+vae 512x512x256 3x3                      8575.5 us      36.06     8633.2 us      35.82
+
+SDXL elementwise
+----------------
+half precision, per call, warm in cache
+group_norm   128x128x320                        133.162 us     157.5 GB/s
+silu         128x128x320                         13.898 us    1509.0 GB/s
+add          128x128x320                         16.901 us    1861.3 GB/s
+group_norm   64x64x640                           67.467 us     155.4 GB/s
+silu         64x64x640                            7.616 us    1376.8 GB/s
+add          64x64x640                            9.046 us    1738.7 GB/s
+group_norm   32x32x1280                          28.286 us     185.3 GB/s
+silu         32x32x1280                           4.581 us    1144.5 GB/s
+add          32x32x1280                           5.035 us    1561.9 GB/s
+layer_norm   64x64x640                           24.363 us     430.4 GB/s
+self attention 64x64x640                        929.203 us     46.22 TFLOP/s
+cross attention 64x64x640                        37.042 us     21.80 TFLOP/s
+geglu        64x64x640                          137.160 us     458.7 GB/s
+layer_norm   32x32x1280                           8.858 us     591.9 GB/s
+self attention 32x32x1280                       134.603 us     39.89 TFLOP/s
+cross attention 32x32x1280                       22.336 us     18.07 TFLOP/s
+geglu        32x32x1280                          27.366 us    1149.5 GB/s
+upsample     32x32x1280 to 64x64                 18.598 us     704.7 GB/s
+upsample     64x64x640 to 128x128                37.032 us     707.9 GB/s

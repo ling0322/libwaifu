@@ -9,40 +9,23 @@
 
 #include <chrono>
 
-#include "catch2/catch_amalgamated.hpp"
+#include "flint/bench.h"
 #include "lutil/span.h"
+#include "lutil/strings.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/conv2d.h"
 #ifdef LIBWAIFU_CUDNN_ENABLED
 #include "flint/cuda/conv2d_cudnn.h"
 #endif
 #include "flint/cuda/cuda_operators.h"
-#include "flint/cuda/gated_delta_net.h"
-#ifdef LIBWAIFU_CUTLASS_ENABLED
-#include "flint/cuda/gemm_nvfp4_cutlass.h"
-#endif
 #include "flint/functional.h"
 #include "flint/tensor.h"
 
 namespace fl {
 namespace {
 
-constexpr int HiddenSize = 3072;
-constexpr int IntermediateSize = 8192;
-constexpr int NumHeads = 24;
-constexpr int NumKeyValueHeads = 8;
-constexpr int HeadDim = 128;
-constexpr int QkvSize = HiddenSize + 2 * NumKeyValueHeads * HeadDim;
-constexpr int VocabSize = 128256;
-constexpr int BatchSize = 1;
 constexpr int NumWarmup = 5;
 constexpr int NumIterations = 20;
-
-// The Qwen3.5 gated DeltaNet layer: 16 key heads against 48 value heads, both 128 wide. 48 of the
-// model's 64 layers run this rather than the attention the rest of these benchmarks cover.
-constexpr int DeltaNetKeyHeads = 16;
-constexpr int DeltaNetValueHeads = 48;
-constexpr int DeltaNetHeadDim = 128;
 
 class CudaEvent {
  public:
@@ -73,95 +56,32 @@ float benchmarkCuda(Fn &&fn) {
   return totalMs / NumIterations;
 }
 
-void printLatency(const std::string &name, float milliseconds) {
-  std::printf("%-44s %10.3f us\n", name.c_str(), milliseconds * 1000.0f);
-}
-
 void printMatmul(const std::string &name, float milliseconds, int m, int n, int k) {
   double tflops = 2.0 * m * n * k / (milliseconds * 1.0e9);
-  std::printf("%-44s %10.3f us  %8.2f TFLOP/s\n", name.c_str(), milliseconds * 1000.0f, tflops);
+  bench::print("%-44s %10.3f us  %8.2f TFLOP/s\n", name.c_str(), milliseconds * 1000.0f, tflops);
 }
 
 Tensor randHalf(const std::shared_ptr<Operators> &operators, std::initializer_list<int> shape) {
   return operators->rand(shape, DType::kFloat16);
 }
 
-void benchmarkMatmul(
-    const std::shared_ptr<Operators> &operators, const char *name, int m, int n, int k) {
-  Tensor input = randHalf(operators, {m, k});
-  Tensor weight = randHalf(operators, {n, k}).transpose(0, 1);
-  float milliseconds = benchmarkCuda([&] { operators->matmul(input, weight); });
-  printMatmul(name, milliseconds, m, n, k);
-}
-
-#ifdef LIBWAIFU_CUTLASS_ENABLED
-// NVFP4 on the block scaled tensor cores. The prologue is timed separately because a weight is
-// quantized once but an activation is quantized on every layer, so only the second number is what
-// a projection actually pays.
-void benchmarkMatmulNvfp4(
-    const std::shared_ptr<Operators> &operators, const std::string &name, int m, int n, int k) {
-  Tensor input = randHalf(operators, {m, k});
-  op::cuda::Nvfp4Operand weight = op::cuda::quantizeNvfp4(randHalf(operators, {n, k}));
-  op::cuda::Nvfp4Operand activation = op::cuda::quantizeNvfp4(input);
-
-  float gemmMs = benchmarkCuda([&] { op::cuda::gemmNvfp4(activation, weight); });
-  float totalMs = benchmarkCuda([&] { op::cuda::gemmNvfp4(input, weight); });
-
-  printMatmul(name + " gemm", gemmMs, m, n, k);
-  printMatmul(name + " gemm+prologue", totalMs, m, n, k);
-}
-
-Tensor toCudaHalf(const Tensor &x) {
-  return F::cast(F::toDevice(Device::getCuda(), x), DType::kFloat16);
-}
-
-/// @brief Root mean square error against a reference, divided by the reference's own root mean
-///        square, so the numbers are comparable across shapes.
-double relativeRmse(const Tensor &x, const Tensor &reference) {
-  Tensor a = F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
-  Tensor b = F::toDevice(Device::getCpu(), F::cast(reference, DType::kFloat));
-  CATCH_REQUIRE(a.getNumEl() == b.getNumEl());
-
-  const float *pa = a.getInternalData()->getData<float>(a.getInternalOffset());
-  const float *pb = b.getInternalData()->getData<float>(b.getInternalOffset());
-
-  double squaredError = 0.0;
-  double squaredReference = 0.0;
-  for (int64_t i = 0; i < a.getNumEl(); ++i) {
-    double diff = double(pa[i]) - double(pb[i]);
-    squaredError += diff * diff;
-    squaredReference += double(pb[i]) * double(pb[i]);
-  }
-
-  return std::sqrt(squaredError / squaredReference);
-}
-
-/// @brief What the precision costs. The FP16 GEMM is measured against an FP32 one on the CPU, to
-///        say how much of the error is FP16's own, and the NVFP4 path against the FP16 GEMM,
-///        which is the thing it replaces. NVFP4 quantizes the activation in the prologue -- the
-///        block scaled instruction (OMMA, E2M1 x E2M1) takes no other kind of operand -- so its
-///        column is the cost of quantizing both operands.
-void reportNvfp4Accuracy(
-    const std::shared_ptr<Operators> &operators, const std::string &name, int m, int n, int k) {
-  Tensor xCpu = F::randn({m, k});
-  Tensor wCpu = F::randn({n, k});
-  Tensor referenceFp32 = F::matmul(xCpu, wCpu.transpose(0, 1));
-
-  Tensor x = toCudaHalf(xCpu);
-  Tensor w = toCudaHalf(wCpu);
-  Tensor fp16 = operators->matmul(x, w.transpose(0, 1));
-
-  // The half activation goes in whole; the prologue inside quantizes it.
-  op::cuda::Nvfp4Operand weight = op::cuda::quantizeNvfp4(w);
-  Tensor nvfp4 = op::cuda::gemmNvfp4(x, weight);
-
-  std::printf(
-      "%-30s %13.2e %13.2e\n",
+/// The bytes an operator has to move at least once: what it reads plus what it writes. A norm or
+/// an activation is held up by the bus rather than by the arithmetic, so this over the time is
+/// the number worth reading, and the card's peak is what to read it against.
+void printBandwidth(const std::string &name, float milliseconds, double bytes) {
+  bench::print(
+      "%-44s %10.3f us  %8.1f GB/s\n",
       name.c_str(),
-      relativeRmse(fp16, referenceFp32),
-      relativeRmse(nvfp4, fp16));
+      milliseconds * 1000.0f,
+      bytes / (milliseconds * 1.0e6));
 }
-#endif
+
+/// Elements times two, which is what half precision costs.
+double halfBytes(std::initializer_list<int> shape) {
+  double count = 1;
+  for (int extent : shape) count *= extent;
+  return 2.0 * count;
+}
 
 void benchmarkConv2d(
     const std::shared_ptr<Operators> &operators,
@@ -177,454 +97,248 @@ void benchmarkConv2d(
   Tensor weight = randHalf(operators, {outChannel, inChannel, kernel, kernel});
   Tensor bias = randHalf(operators, {outChannel});
 
-  float milliseconds = benchmarkCuda(
-      [&] { op::cuda::conv2d(input, weight, bias, {stride, padding, 1, 1}); });
-
   int outSize = (size + 2 * padding - kernel) / stride + 1;
   double flop = 2.0 * batch * outChannel * outSize * outSize * inChannel * kernel * kernel;
-  std::printf(
-      "%-44s %10.3f us  %8.2f TFLOP/s",
-      name.c_str(),
-      milliseconds * 1000.0f,
-      flop / (milliseconds * 1.0e9));
+
+  float milliseconds = benchmarkCuda(
+      [&] { op::cuda::conv2d(input, weight, bias, {stride, padding, 1, 1}); });
+  std::string line = lut::sprintf("%-36s", name.c_str());
+  line += lut::sprintf(" %10.1f us %10.2f", milliseconds * 1000.0f, flop / (milliseconds * 1.0e9));
 
 #ifdef LIBWAIFU_CUDNN_ENABLED
-  // The same convolution on cuDNN, on the same line, because a number for one implementation says
-  // nothing on its own: what is worth knowing is whether the one that runs is behind the one that
-  // does not. Skipped rather than reported as zero where the library is not on the machine, since
-  // a build having cuDNN and a machine having it are two different things.
+  // The same convolution on cuDNN, in a column of its own, because a number for one
+  // implementation says nothing on its own: what is worth knowing is whether the one that runs is
+  // behind the one that does not. Left out rather than reported as zero where the library is not
+  // on the machine, since a build having cuDNN and a machine having it are two different things.
   if (op::cuda::isConv2dCudnnAvailable()) {
     float reference = benchmarkCuda(
         [&] { op::cuda::conv2dCudnn(input, weight, bias, {stride, padding, 1, 1}); });
-    std::printf(
-        "   cudnn %8.3f us  %8.2f TFLOP/s",
-        reference * 1000.0f,
-        flop / (reference * 1.0e9));
+    line += lut::sprintf(" %10.1f us %10.2f", reference * 1000.0f, flop / (reference * 1.0e9));
   }
 #endif  // LIBWAIFU_CUDNN_ENABLED
 
-  std::printf("\n");
-}
-
-void benchmarkRmsNorm(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor input = randHalf(operators, {BatchSize, sequenceLength, HiddenSize});
-  Tensor weight = randHalf(operators, {HiddenSize});
-  float milliseconds = benchmarkCuda([&] { operators->rmsNorm(input, weight, 1.0e-5f); });
-  printLatency("rms_norm [1," + std::to_string(sequenceLength) + ",3072]", milliseconds);
-}
-
-void benchmarkSwiGlu(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor input = randHalf(operators, {BatchSize, sequenceLength, 2 * IntermediateSize});
-  float milliseconds = benchmarkCuda([&] { operators->swiglu(input); });
-  printLatency("swiglu [1," + std::to_string(sequenceLength) + ",16384]", milliseconds);
-}
-
-void benchmarkResidualAdd(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor input = randHalf(operators, {BatchSize, sequenceLength, HiddenSize});
-  Tensor residual = randHalf(operators, {BatchSize, sequenceLength, HiddenSize});
-  float milliseconds = benchmarkCuda([&] { operators->add(input, residual); });
-  printLatency("residual_add [1," + std::to_string(sequenceLength) + ",3072]", milliseconds);
-}
-
-void benchmarkSoftmax(const std::shared_ptr<Operators> &operators) {
-  Tensor logits = randHalf(operators, {BatchSize, VocabSize});
-  float milliseconds = benchmarkCuda([&] { operators->softmax(logits); });
-  printLatency("softmax [1,128256]", milliseconds);
-}
-
-void benchmarkAttention(
-    const std::shared_ptr<Operators> &operators, int queryLength, int keyValueLength) {
-  Tensor q = randHalf(operators, {BatchSize, NumHeads, queryLength, HeadDim});
-  Tensor k = randHalf(operators, {BatchSize, NumKeyValueHeads, keyValueLength, HeadDim});
-  Tensor v = randHalf(operators, {BatchSize, NumKeyValueHeads, keyValueLength, HeadDim});
-
-  bool causal = queryLength > 1;
-  float milliseconds = benchmarkCuda([&] { operators->attention(q, k, v, causal); });
-  printLatency(
-      "attention [24," + std::to_string(queryLength) + "," + std::to_string(keyValueLength) +
-          ",128]",
-      milliseconds);
-}
-
-Tensor createTokenIds(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  std::vector<LongType> values(sequenceLength);
-  for (int i = 0; i < sequenceLength; ++i) values[i] = i % VocabSize;
-  Tensor cpuIds = Tensor::create<LongType>({BatchSize, sequenceLength}, values);
-  return operators->toDevice(Device::getCuda(), cpuIds);
-}
-
-Tensor createPositions(const std::shared_ptr<Operators> &operators, int numTokens) {
-  std::vector<LongType> values(numTokens);
-  for (int i = 0; i < numTokens; ++i) values[i] = i;
-  Tensor cpuPositions = Tensor::create<LongType>({numTokens}, values);
-  return operators->toDevice(Device::getCuda(), cpuPositions);
-}
-
-Tensor applyRotaryEmbeddingBaseline(
-    const std::shared_ptr<Operators> &operators,
-    Tensor input,
-    Tensor roPE) {
-  Tensor cos = roPE.subtensor(0);
-  Tensor sin = roPE.subtensor(1);
-  cos = cos.expand({cos.getShape(0), input.getShape(1), cos.getShape(2)});
-  sin = sin.expand({sin.getShape(0), input.getShape(1), sin.getShape(2)});
-
-  int halfShape = input.getShape(-1) / 2;
-  Tensor rotated = operators->tensorLike(input);
-  Tensor x1 = input.slice(-1, {0, halfShape});
-  Tensor x2 = operators->mul(input.slice(-1, {halfShape, None}), -1.0f);
-  operators->copy(x1, rotated.slice(-1, {halfShape, None}));
-  operators->copy(x2, rotated.slice(-1, {0, halfShape}));
-
-  return operators->add(
-      operators->mul(input, F::contiguous(cos)),
-      operators->mul(rotated, F::contiguous(sin)));
-}
-
-std::pair<Tensor, Tensor> rotaryEmbeddingBaseline(
-    const std::shared_ptr<Operators> &operators,
-    Tensor positions,
-    Tensor query,
-    Tensor key,
-    Tensor rotaryCache) {
-  int numTokens = positions.getShape(0);
-  Tensor roPE = operators->lookup(rotaryCache, positions);
-  roPE = roPE.view({numTokens, 2, 1, HeadDim}).transpose(0, 1);
-  return {
-      applyRotaryEmbeddingBaseline(operators, query, roPE),
-      applyRotaryEmbeddingBaseline(operators, key, roPE)};
-}
-
-void benchmarkRotaryEmbedding(
-    const std::shared_ptr<Operators> &operators,
-    int numTokens) {
-  constexpr int MaxPositions = 8192;
-  Tensor positions = createPositions(operators, numTokens);
-  Tensor query = randHalf(operators, {numTokens, NumHeads, HeadDim});
-  Tensor key = randHalf(operators, {numTokens, NumKeyValueHeads, HeadDim});
-  Tensor rotaryCache = randHalf(operators, {MaxPositions, 2 * HeadDim});
-
-  float baselineMilliseconds = benchmarkCuda([&] {
-    auto output = rotaryEmbeddingBaseline(operators, positions, query, key, rotaryCache);
-    (void)output;
-  });
-  Tensor fusedQuery = F::contiguous(query);
-  Tensor fusedKey = F::contiguous(key);
-  float fusedMilliseconds = benchmarkCuda([&] {
-    operators->rotaryEmbedding(positions, fusedQuery, fusedKey, rotaryCache);
-  });
-
-  std::string phase = numTokens == 1 ? "decode-1" : "prefill-" + std::to_string(numTokens);
-  printLatency(
-      phase + " rotary_embedding baseline [24/8,128]",
-      baselineMilliseconds);
-  printLatency(
-      phase + " rotary_embedding fused [24/8,128]",
-      fusedMilliseconds);
-  std::printf(
-      "%-44s %10.2fx\n",
-      (phase + " rotary_embedding speedup").c_str(),
-      baselineMilliseconds / fusedMilliseconds);
-}
-
-void benchmarkLookup(const std::shared_ptr<Operators> &operators, int sequenceLength) {
-  Tensor embedding = randHalf(operators, {VocabSize, HiddenSize});
-  Tensor ids = createTokenIds(operators, sequenceLength);
-  float milliseconds = benchmarkCuda([&] { operators->lookup(embedding, ids); });
-  printLatency("embedding_lookup [" + std::to_string(sequenceLength) + ",3072]", milliseconds);
-}
-
-void benchmarkSampling(const std::shared_ptr<Operators> &operators) {
-  Tensor logits = randHalf(operators, {BatchSize, VocabSize});
-  Tensor temperatures = operators->toDevice(
-    Device::getCuda(), Tensor::create<float>({BatchSize}, {1.0f}));
-  Tensor topKs = operators->toDevice(
-    Device::getCuda(), Tensor::create<IntType>({BatchSize}, {50}));
-  Tensor topPs = operators->toDevice(
-    Device::getCuda(), Tensor::create<float>({BatchSize}, {0.9f}));
-  float milliseconds = benchmarkCuda(
-    [&] { operators->sample(logits, temperatures, topKs, topPs); });
-  printLatency("sampling [1,128256] top_k=50 top_p=0.9", milliseconds);
-}
-
-const char *pathName(op::cuda::GatedDeltaNetPath path) {
-  switch (path) {
-    case op::cuda::GatedDeltaNetPath::kTensorCoreMma:
-      return "mma";
-    case op::cuda::GatedDeltaNetPath::kTensorCoreMmaChunkOnly:
-      return "mma-chunk-only";
-    default:
-      return "auto";
-  }
-}
-
-void benchmarkGatedDeltaNetSeqlens(
-    const std::shared_ptr<Operators> &operators,
-    const std::vector<int> &seqlens,
-    const std::string &label,
-    op::cuda::GatedDeltaNetPath path) {
-  int numSeq = static_cast<int>(seqlens.size());
-  int numTokens = 0;
-  for (int len : seqlens) numTokens += len;
-
-  Tensor q = randHalf(operators, {numTokens, DeltaNetKeyHeads, DeltaNetHeadDim});
-  Tensor k = randHalf(operators, {numTokens, DeltaNetKeyHeads, DeltaNetHeadDim});
-  Tensor v = randHalf(operators, {numTokens, DeltaNetValueHeads, DeltaNetHeadDim});
-  Tensor g = operators->rand({numTokens, DeltaNetValueHeads}, DType::kFloat);
-  Tensor beta = operators->rand({numTokens, DeltaNetValueHeads}, DType::kFloat);
-  // CudaOperators::zeros hands back a <half> whatever dtype it is asked for, so the state starts
-  // as a host tensor and is copied over.
-  std::vector<float> stateData(
-      static_cast<size_t>(numSeq) * DeltaNetValueHeads * DeltaNetHeadDim * DeltaNetHeadDim,
-      0.0f);
-  Tensor state = F::toDevice(
-      Device::getCuda(),
-      Tensor::create<float>(
-          {numSeq, DeltaNetValueHeads, DeltaNetHeadDim, DeltaNetHeadDim},
-          lut::makeConstSpan(stateData)));
-
-  // g is a log decay, so it has to be at most zero.
-  g = operators->neg(g);
-
-  std::vector<int32_t> lengths;
-  lengths.push_back(0);
-  for (int len : seqlens) lengths.push_back(lengths.back() + len);
-  Tensor cuSeqlens = F::toDevice(
-      Device::getCuda(),
-      Tensor::create<int32_t>({numSeq + 1}, lut::makeConstSpan(lengths)));
-
-  // The identity mapping: a pool the size of the batch, in batch order. What the mapping costs is
-  // one int load per block, so a scattered pool measures the same; it is the timings that are
-  // being kept comparable here, not the traffic.
-  std::vector<int32_t> slots;
-  for (int s = 0; s < numSeq; ++s) slots.push_back(s);
-  Tensor stateSlots = F::toDevice(
-      Device::getCuda(),
-      Tensor::create<int32_t>({numSeq}, lut::makeConstSpan(slots)));
-
-  float milliseconds = benchmarkCuda([&] {
-    op::cuda::gatedDeltaNetPrefill(q, k, v, g, beta, cuSeqlens, stateSlots, state, path);
-  });
-  printLatency(std::string("gated_delta_net ") + pathName(path) + " " + label, milliseconds);
-}
-
-// The even split, which is what the prefill benchmarks measure: one batch of `numSeq` sequences
-// that between them hold `numTokens`.
-void benchmarkGatedDeltaNet(
-    const std::shared_ptr<Operators> &operators,
-    int numTokens,
-    int numSeq,
-    op::cuda::GatedDeltaNetPath path) {
-  std::vector<int> seqlens(numSeq, numTokens / numSeq);
-  seqlens.back() += numTokens - numSeq * (numTokens / numSeq);
-  benchmarkGatedDeltaNetSeqlens(
-      operators,
-      seqlens,
-      "tokens=" + std::to_string(numTokens) + " seqs=" + std::to_string(numSeq),
-      path);
+  bench::print("%s\n", line.c_str());
 }
 
 }  // namespace
 
-CATCH_TEST_CASE("Qwen3.5 gated DeltaNet benchmarks", "[benchmark][cuda][gated_delta_net]") {
-  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
-  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
-
-  std::printf("\nQwen3.5 gated DeltaNet prefill benchmarks (FP16 in, FP32 state)\n");
-
-  // One CTA per (sequence, value head), so a single sequence gives the kernel only 48 of them
-  // against 36 SMs. Splitting the same token count over several sequences is what a serving batch
-  // looks like, and is what the launch's shape actually turns on.
-  for (int numSeq : {1, 2, 4, 8}) {
-    benchmarkGatedDeltaNet(operators, 4096, numSeq, op::cuda::GatedDeltaNetPath::kTensorCoreMma);
-  }
-
-  for (int numTokens : {256, 1024, 4096}) {
-    benchmarkGatedDeltaNet(operators, numTokens, 1, op::cuda::GatedDeltaNetPath::kAuto);
-  }
-
-  // A decode step, and a decode step with one sequence still prefilling in it. Both are what a
-  // continuously batched server spends most of its launches on, and both are what the mma path's
-  // per-CTA branch is for: mma-chunk-only is the same kernel with that branch turned off, so the
-  // pair of them is the branch's whole cost and benefit.
-  std::printf("\nQwen3.5 gated DeltaNet decode benchmarks\n");
-  for (op::cuda::GatedDeltaNetPath path :
-       {op::cuda::GatedDeltaNetPath::kTensorCoreMma,
-        op::cuda::GatedDeltaNetPath::kTensorCoreMmaChunkOnly}) {
-    for (int numSeq : {1, 8, 32, 128}) {
-      benchmarkGatedDeltaNetSeqlens(
-          operators,
-          std::vector<int>(numSeq, 1),
-          "decode seqs=" + std::to_string(numSeq),
-          path);
-    }
-
-    for (int numSeq : {32, 128}) {
-      std::vector<int> seqlens(numSeq, 1);
-      seqlens.back() = 2048;
-      benchmarkGatedDeltaNetSeqlens(
-          operators,
-          seqlens,
-          "decode seqs=" + std::to_string(numSeq) + " + one 2048 prefill",
-          path);
-    }
-  }
-}
-
-CATCH_TEST_CASE("CUDA rotary embedding benchmarks", "[benchmark][cuda][rope]") {
-  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
-  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
-
-  std::printf("\nLlama 3.2 3B rotary embedding baseline (FP16)\n");
-  for (int numTokens : {1, 256, 2048}) {
-    benchmarkRotaryEmbedding(operators, numTokens);
-  }
-}
-
-CATCH_TEST_CASE("SDXL GEMM benchmarks", "[benchmark][cuda][sdxl]") {
-  // Every GEMM the U-Net runs at 1024 by 1024, in the proportion it runs them. The counts are per
-  // denoising step and already include both passes classifier free guidance makes, and they were
-  // counted rather than derived: the same run was dumped at one step and at three, and the
-  // difference divided out. These ten shapes are 99.6% of a step's multiply-adds.
+LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL GEMM") {
+  // Every GEMM shape the U-Net runs at 1024 by 1024. These ten are 99.6% of a step's
+  // multiply-adds; the text encoders and the autoencoder are left out, being 0.3% of an image and
+  // float32 besides.
   //
-  // The text encoders and the autoencoder are left out. They run once an image rather than once a
-  // step, and together they are 0.8 TFLOP against the U-Net's 261 over thirty steps -- 0.3%. The
-  // autoencoder's are float32 besides, so they go to cuBLAS whichever backend is chosen.
+  // One line per shape and no total. A total would have to be a weighted sum, and a weighted sum
+  // of these alone reads as what a step costs while leaving out the convolutions, the attention
+  // and the norms -- a number wrong in a direction nobody checks.
   //
-  // Run against either backend with LIBWAIFU_GEMM=cublas or =cutlass.
+  // Both backends in the one run, side by side, rather than one per run under LIBWAIFU_GEMM:
+  // which of them is ahead on a shape is the whole question, and two runs minutes apart on a
+  // machine doing other things is a poor way to ask it.
   //
   // Read what it says with care: it runs one shape fifty times over, so a weight stays in L2 from
   // one iteration to the next, which a real run never gets. That flatters whatever moves the
   // least data per multiply-add, and it flattered a 64 by 64 CUTLASS tile into looking faster
   // than the 128 by 128 one it is a percent slower than on a whole image. Use it to see where a
   // shape stands, and a whole image to decide anything.
-  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
+  if (!isOperatorsAvailable(Device::kCuda)) LL_BENCHMARK_SKIP("cuda device not available");
+
+  // Made here rather than taken from getOperatorsSharedPtr, which has already settled on one.
+  // Either may be missing -- a build without CUTLASS, a machine whose cuBLAS will not load -- and
+  // a missing one leaves its column out rather than the benchmark.
+  std::shared_ptr<Operators> cublas;
+  std::shared_ptr<Operators> cutlass;
+  try {
+    cublas = op::cuda::CudaOperators::create(op::cuda::CudaOperators::OPT_CUBLAS_GEMM);
+  } catch (const lut::Error &error) {
+    bench::print("cuBLAS is not usable here: %s\n", error.what());
+  }
+  try {
+    cutlass = op::cuda::CudaOperators::create(op::cuda::CudaOperators::OPT_CUTLASS_GEMM);
+  } catch (const lut::Error &error) {
+    bench::print("CUTLASS is not usable here: %s\n", error.what());
+  }
+  if (!cublas && !cutlass) LL_BENCHMARK_SKIP("neither GEMM backend is usable");
+
+  std::shared_ptr<Operators> operators = cublas ? cublas : cutlass;
+
+  std::string header = lut::sprintf("%-36s", "shape");
+  if (cublas) header += lut::sprintf(" %13s %10s", "cublas", "TFLOP/s");
+  if (cutlass) header += lut::sprintf(" %13s %10s", "cutlass", "TFLOP/s");
+  bench::print("half precision\n%s\n", header.c_str());
 
   struct Shape {
     const char *what;
-    int m, n, k, perStep;
+    int m, n, k;
   };
 
   const Shape shapes[] = {
-      {"ff.gate      1024x10240x1280", 1024, 10240, 1280, 120},
-      {"ff.out       1024x1280x5120", 1024, 1280, 5120, 120},
-      {"attn proj    1024x1280x1280", 1024, 1280, 1280, 384},
-      {"attn qkv     1024x3840x1280", 1024, 3840, 1280, 120},
-      {"ff.gate      4096x5120x640", 4096, 5120, 640, 20},
-      {"ff.out       4096x640x2560", 4096, 640, 2560, 20},
-      {"attn proj    4096x640x640", 4096, 640, 640, 80},
-      {"attn qkv     4096x1920x640", 4096, 1920, 640, 20},
-      {"cross kv     77x2560x2048", 77, 2560, 2048, 120},
-      {"cross kv     77x1280x2048", 77, 1280, 2048, 20},
+      {"ff.gate      1024x10240x1280", 1024, 10240, 1280},
+      {"ff.out       1024x1280x5120", 1024, 1280, 5120},
+      {"attn proj    1024x1280x1280", 1024, 1280, 1280},
+      {"attn qkv     1024x3840x1280", 1024, 3840, 1280},
+      {"ff.gate      4096x5120x640", 4096, 5120, 640},
+      {"ff.out       4096x640x2560", 4096, 640, 2560},
+      {"attn proj    4096x640x640", 4096, 640, 640},
+      {"attn qkv     4096x1920x640", 4096, 1920, 640},
+      {"cross kv     77x2560x2048", 77, 2560, 2048},
+      {"cross kv     77x1280x2048", 77, 1280, 2048},
   };
 
-  double totalUs = 0.0;
-  double totalFlop = 0.0;
   for (const Shape &shape : shapes) {
     Tensor input = randHalf(operators, {shape.m, shape.k});
     Tensor weight = randHalf(operators, {shape.n, shape.k}).transpose(0, 1);
-    float milliseconds = benchmarkCuda([&] { operators->matmul(input, weight); });
-    printMatmul(shape.what, milliseconds, shape.m, shape.n, shape.k);
-    totalUs += milliseconds * 1000.0 * shape.perStep;
-    totalFlop += 2.0 * shape.m * shape.n * shape.k * shape.perStep;
-  }
+    double flop = 2.0 * shape.m * shape.n * shape.k;
 
-  std::printf(
-      "%-44s %10.3f us  %8.2f TFLOP/s\n",
-      "one denoising step",
-      totalUs,
-      totalFlop / (totalUs * 1.0e6));
-  std::printf("%-44s %10.3f s\n", "thirty steps", totalUs * 30 / 1.0e6);
+    std::string line = lut::sprintf("%-36s", shape.what);
+    for (const std::shared_ptr<Operators> &backend : {cublas, cutlass}) {
+      if (!backend) continue;
+
+      float milliseconds = benchmarkCuda([&] { backend->matmul(input, weight); });
+      line += lut::sprintf(
+          " %10.1f us %10.2f",
+          milliseconds * 1000.0f,
+          flop / (milliseconds * 1.0e9));
+    }
+    bench::print("%s\n", line.c_str());
+  }
 }
 
-CATCH_TEST_CASE("SDXL convolution benchmarks", "[benchmark][cuda][conv2d]") {
-  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
-  if (!op::cuda::isConv2dAvailable()) CATCH_SKIP("this build cannot convolve");
+LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
+  if (!isOperatorsAvailable(Device::kCuda)) LL_BENCHMARK_SKIP("cuda device not available");
   std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
 
-  // SDXL shapes at a 1024 by 1024 image, whose latent is 128 by 128, plus one convolution small
-  // enough that what it measures is the per-call descriptor work rather than the arithmetic.
+  // Everything a step runs that is not a GEMM or a convolution. None of it is much arithmetic --
+  // the GEMMs are 99.6% of the multiply-adds -- and all of it reads a whole tensor and writes
+  // one, which on this card is 448 GB/s away from free. What the column says is how close to the
+  // bus each of them gets.
+  //
+  // Per call, not per step: how many times a step runs each of these has not been counted the way
+  // the GEMM table's counts were, so these cannot be added up into a step.
+  // The same tensors twenty times over, so after the first pass they are in L2 and the column
+  // reads above what the bus can do. Take it as a ceiling and a way of telling these apart from
+  // each other, not as what they get on a whole image.
+  bench::print("half precision, per call, warm in cache\n");
+
+  // The three resolutions the U-Net works at, at a 1024 by 1024 image.
+  struct Level {
+    const char *what;
+    int channels;
+    int size;
+  };
+  const Level levels[] = {
+      {"128x128x320", 320, 128},
+      {"64x64x640", 640, 64},
+      {"32x32x1280", 1280, 32},
+  };
+
+  for (const Level &level : levels) {
+    Tensor x = randHalf(operators, {1, level.channels, level.size, level.size});
+    Tensor scale = randHalf(operators, {level.channels});
+    Tensor shift = randHalf(operators, {level.channels});
+    double moved = 2 * halfBytes({1, level.channels, level.size, level.size});
+
+    printBandwidth(
+        std::string("group_norm   ") + level.what,
+        benchmarkCuda([&] { F::groupNorm(x, scale, shift, 32, 1e-5f); }),
+        moved);
+    printBandwidth(
+        std::string("silu         ") + level.what,
+        benchmarkCuda([&] { F::silu(x); }),
+        moved);
+
+    // Three tensors rather than two: a residual reads both of its inputs.
+    Tensor other = randHalf(operators, {1, level.channels, level.size, level.size});
+    printBandwidth(
+        std::string("add          ") + level.what,
+        benchmarkCuda([&] { F::add(x, other); }),
+        1.5 * moved);
+  }
+
+  // The transformer levels. SDXL attends at 64 by 64 and at 32 by 32 and not below, and a head is
+  // 64 wide throughout, so the head count is the channel count over 64.
+  struct Attention {
+    const char *what;
+    int tokens;
+    int heads;
+  };
+  const Attention attentions[] = {{"64x64x640", 4096, 10}, {"32x32x1280", 1024, 20}};
+
+  for (const Attention &attention : attentions) {
+    int width = attention.heads * 64;
+    Tensor hidden = randHalf(operators, {1, attention.tokens, width});
+    Tensor scale = randHalf(operators, {width});
+    Tensor shift = randHalf(operators, {width});
+    printBandwidth(
+        std::string("layer_norm   ") + attention.what,
+        benchmarkCuda([&] { F::layerNorm(hidden, scale, shift, 1e-5f); }),
+        2 * halfBytes({1, attention.tokens, width}));
+
+    Tensor q = randHalf(operators, {1, attention.heads, attention.tokens, 64});
+    Tensor k = randHalf(operators, {1, attention.heads, attention.tokens, 64});
+    Tensor v = randHalf(operators, {1, attention.heads, attention.tokens, 64});
+    double flop = 4.0 * attention.heads * attention.tokens * attention.tokens * 64;
+    float milliseconds = benchmarkCuda([&] { F::attention(q, k, v, false); });
+    bench::print(
+        "%-44s %10.3f us  %8.2f TFLOP/s\n",
+        (std::string("self attention ") + attention.what).c_str(),
+        milliseconds * 1000.0f,
+        flop / (milliseconds * 1.0e9));
+
+    // Cross attention reads the prompt, which is 77 tokens however big the picture is.
+    Tensor ck = randHalf(operators, {1, attention.heads, 77, 64});
+    Tensor cv = randHalf(operators, {1, attention.heads, 77, 64});
+    double crossFlop = 4.0 * attention.heads * attention.tokens * 77 * 64;
+    milliseconds = benchmarkCuda([&] { F::attention(q, ck, cv, false); });
+    bench::print(
+        "%-44s %10.3f us  %8.2f TFLOP/s\n",
+        (std::string("cross attention ") + attention.what).c_str(),
+        milliseconds * 1000.0f,
+        crossFlop / (milliseconds * 1.0e9));
+
+    // The feed-forward gate, which halves what it reads.
+    int inner = width * 4;
+    Tensor gated = randHalf(operators, {1, attention.tokens, 2 * inner});
+    printBandwidth(
+        std::string("geglu        ") + attention.what,
+        benchmarkCuda([&] { F::geglu(gated); }),
+        1.5 * halfBytes({1, attention.tokens, 2 * inner}));
+  }
+
+  // Upsampling, which reads one pixel and writes four.
+  const Level upsampled[] = {{"32x32x1280 to 64x64", 1280, 32}, {"64x64x640 to 128x128", 640, 64}};
+  for (const Level &level : upsampled) {
+    Tensor x = randHalf(operators, {1, level.channels, level.size, level.size});
+    printBandwidth(
+        std::string("upsample     ") + level.what,
+        benchmarkCuda([&] { F::upsampleNearest2d(x, 2); }),
+        5 * halfBytes({1, level.channels, level.size, level.size}));
+  }
+}
+
+LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL convolution") {
+  if (!isOperatorsAvailable(Device::kCuda)) LL_BENCHMARK_SKIP("cuda device not available");
+  if (!op::cuda::isConv2dAvailable()) LL_BENCHMARK_SKIP("this build cannot convolve");
+  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
+
+  // SDXL shapes at a 1024 by 1024 image, whose latent is 128 by 128.
   //
   // The cuDNN column appears beside each one where the library is on the machine, which is what
   // says whether the kernels that actually run are behind the ones that do not. Its own case
   // rather than the tail of another, so that it can be run on its own and does not have to pay
   // for a page of unrelated allocations first.
-  std::printf("\nSDXL convolution benchmarks (FP16, CUTLASS)\n");
+  std::string header = lut::sprintf("%-36s %13s %10s", "shape", "cutlass", "TFLOP/s");
+#ifdef LIBWAIFU_CUDNN_ENABLED
+  if (op::cuda::isConv2dCudnnAvailable()) {
+    header += lut::sprintf(" %13s %10s", "cudnn", "TFLOP/s");
+  }
+#endif  // LIBWAIFU_CUDNN_ENABLED
+  bench::print("half precision, one group\n%s\n", header.c_str());
   benchmarkConv2d(operators, "unet 128x128x320 3x3", 1, 320, 320, 128, 3, 1);
   benchmarkConv2d(operators, "unet 64x64x640 3x3", 1, 640, 640, 64, 3, 1);
   benchmarkConv2d(operators, "unet 32x32x1280 3x3", 1, 1280, 1280, 32, 3, 1);
   benchmarkConv2d(operators, "unet 128x128x320 downsample 3x3/2", 1, 320, 320, 128, 3, 2);
   benchmarkConv2d(operators, "unet 64x64x640 1x1", 1, 640, 640, 64, 1, 1);
   benchmarkConv2d(operators, "vae 512x512x256 3x3", 1, 256, 256, 512, 3, 1);
-  benchmarkConv2d(operators, "call overhead 1x1x1 1x1", 1, 1, 1, 1, 1, 1);
-}
-
-CATCH_TEST_CASE("Llama 3.2 3B benchmarks", "[benchmark][cuda][llama32-3b]") {
-  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
-  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
-
-  std::printf("\nLlama 3.2 3B projection benchmarks (FP16)\n");
-  for (int sequenceLength : {1, 128, 512}) {
-    int m = BatchSize * sequenceLength;
-    std::string prefix = sequenceLength == 1 ? "decode" : "prefill";
-    prefix += "-" + std::to_string(sequenceLength);
-    benchmarkMatmul(operators, (prefix + " qkv_proj").c_str(), m, QkvSize, HiddenSize);
-    benchmarkMatmul(operators, (prefix + " out_proj").c_str(), m, HiddenSize, HiddenSize);
-    benchmarkMatmul(
-        operators, (prefix + " gate_up_proj").c_str(), m, 2 * IntermediateSize, HiddenSize);
-    benchmarkMatmul(operators, (prefix + " down_proj").c_str(), m, HiddenSize, IntermediateSize);
-  }
-  benchmarkMatmul(operators, "decode-1 lm_head", 1, VocabSize, HiddenSize);
-
-#ifdef LIBWAIFU_CUTLASS_ENABLED
-  if (op::cuda::isNvfp4GemmAvailable()) {
-    std::printf("\nLlama 3.2 3B projection benchmarks (NVFP4 x NVFP4)\n");
-    for (int sequenceLength : {1, 128, 512}) {
-      int m = BatchSize * sequenceLength;
-      std::string prefix = sequenceLength == 1 ? "decode" : "prefill";
-      prefix += "-" + std::to_string(sequenceLength);
-      benchmarkMatmulNvfp4(operators, prefix + " qkv_proj", m, QkvSize, HiddenSize);
-      benchmarkMatmulNvfp4(operators, prefix + " out_proj", m, HiddenSize, HiddenSize);
-      benchmarkMatmulNvfp4(
-          operators, prefix + " gate_up_proj", m, 2 * IntermediateSize, HiddenSize);
-      benchmarkMatmulNvfp4(operators, prefix + " down_proj", m, HiddenSize, IntermediateSize);
-    }
-    benchmarkMatmulNvfp4(operators, "decode-1 lm_head", 1, VocabSize, HiddenSize);
-
-    std::printf("\nNVFP4 accuracy, relative RMSE\n");
-    std::printf("%-30s %13s %13s\n", "shape (m,n,k)", "fp16/fp32", "nvfp4/fp16");
-    reportNvfp4Accuracy(operators, "qkv_proj (512,5120,3072)", 512, QkvSize, HiddenSize);
-    reportNvfp4Accuracy(operators, "out_proj (512,3072,3072)", 512, HiddenSize, HiddenSize);
-    reportNvfp4Accuracy(
-        operators, "gate_up_proj (512,16384,3072)", 512, 2 * IntermediateSize, HiddenSize);
-    reportNvfp4Accuracy(operators, "down_proj (512,3072,8192)", 512, HiddenSize, IntermediateSize);
-    reportNvfp4Accuracy(operators, "decode qkv_proj (1,5120,3072)", 1, QkvSize, HiddenSize);
-  }
-#endif
-
-  std::printf("\nLlama 3.2 3B normalization and elementwise benchmarks (FP16)\n");
-  for (int sequenceLength : {1, 128, 512}) {
-    benchmarkRmsNorm(operators, sequenceLength);
-    benchmarkSwiGlu(operators, sequenceLength);
-    benchmarkResidualAdd(operators, sequenceLength);
-  }
-
-  std::printf("\nLlama 3.2 3B attention benchmarks (FP16)\n");
-  benchmarkAttention(operators, 128, 128);
-  benchmarkAttention(operators, 512, 512);
-  benchmarkAttention(operators, 1, 512);
-  benchmarkAttention(operators, 1, 2048);
-
-  std::printf("\nLlama 3.2 3B embedding and generation benchmarks (FP16)\n");
-  benchmarkLookup(operators, 1);
-  benchmarkLookup(operators, 128);
-
-  Tensor logits = randHalf(operators, {BatchSize, VocabSize});
-  Tensor history = createTokenIds(operators, 32);
-  float milliseconds = benchmarkCuda([&] { operators->repetitionPenalty(logits, history, 1.1f); });
-  printLatency("repetition_penalty [1,128256] history=32", milliseconds);
-  benchmarkSoftmax(operators);
-  benchmarkSampling(operators);
 }
 
 }  // namespace fl
