@@ -186,6 +186,7 @@ if(WITH_MLX)
         ${flint_test_SOURCES}
         "metal/metallib_test.cc"
         "metal/operators_test.cc")
+    set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal/benchmark.cc")
 endif()
 
 # CPU specific code

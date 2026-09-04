@@ -395,6 +395,9 @@ DType Operators::getDefaultFloatType() {
   NOT_IMPL();
 }
 
+void Operators::synchronize() {
+}
+
 void Operators::manualSeed(uint64_t seed) {
   NOT_IMPL();
 }

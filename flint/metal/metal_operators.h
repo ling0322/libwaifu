@@ -106,6 +106,7 @@ class MetalOperators : public Operators {
   void manualSeed(uint64_t seed) override;
 
   DType getDefaultFloatType() override;
+  void synchronize() override;
 
  private:
   MetalOperators() = default;

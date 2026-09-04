@@ -165,6 +165,10 @@ class Operators {
   virtual void resetPeakMemoryStats();
 
   virtual DType getDefaultFloatType();
+
+  /// Wait until all previously submitted work on this device has finished. A no-op on the CPU,
+  /// where every call already blocks until completion.
+  virtual void synchronize();
 };
 
 Operators *getOperators(Device::Type deviceType);

@@ -35,6 +35,8 @@ enum class Group {
   kSdxlCuda,
   /// The same, on the processor.
   kSdxlCpu,
+  /// The same, on the Metal GPU through MLX.
+  kSdxlMetal,
 };
 
 /// @brief What a group is called on the command line and in a saved file's name.
