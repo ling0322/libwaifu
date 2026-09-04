@@ -175,7 +175,7 @@ pub fn choose(
         return Err("this build knows no models to offer".into());
     }
 
-    let devices: Vec<Choice> = [Device::Cpu, Device::Cuda]
+    let devices: Vec<Choice> = [Device::Cpu, Device::Cuda, Device::Metal]
         .into_iter()
         .map(|device| Choice {
             device,

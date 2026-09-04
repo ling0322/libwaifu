@@ -96,7 +96,7 @@ class MetalOperators : public Operators {
   void fill(Tensor input, float value) override;
   void copy(Tensor src, Tensor dest) override;
   Tensor cast(Tensor tensor, DType dtype) override;
-  Tensor to(Device device, Tensor tensor) override;
+  Tensor toDevice(Device device, Tensor tensor) override;
   void print(Tensor tensor) override;
   float elem(Tensor tensor) override;
   bool elemBool(Tensor tensor) override;
