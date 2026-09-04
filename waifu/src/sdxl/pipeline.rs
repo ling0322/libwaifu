@@ -37,7 +37,7 @@ use crate::zip_file::ZipFile;
 use super::sampler::{EulerSampler, SamplerConfig};
 use super::text_encoder::{ClipTextConfig, ClipTextEncoder};
 use super::unet::{Unet, UnetCondition, UnetConfig};
-use super::vae::{VaeConfig, VaeDecoder};
+use super::vae::{VaeConfig, VaeDecoder, VaeEncoder};
 
 /// The one clip skip these encoders implement: conditioning on the layer before the last.
 const SUPPORTED_CLIP_SKIP: i32 = 2;
@@ -174,6 +174,9 @@ pub struct GenerationOptions {
     /// the same as no negative prompt at all -- the model has an opinion about the empty prompt.
     pub negative_prompt: String,
     pub seed: Option<u64>,
+    /// How far to walk away from a picture handed to [`Sdxl::generate_from_image`], between zero
+    /// and one. Read by nothing else: drawing from noise always walks the whole schedule.
+    pub strength: f32,
 }
 
 impl Default for GenerationOptions {
@@ -185,6 +188,7 @@ impl Default for GenerationOptions {
             guidance_scale: 5.0,
             negative_prompt: String::new(),
             seed: None,
+            strength: 0.8,
         }
     }
 }
@@ -196,12 +200,24 @@ impl Default for GenerationOptions {
 /// end for a while, which is the honest thing for it to do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GenerationProgress {
-    /// Reading the prompt, which happens once before the first step.
+    /// Reading the prompt -- and the picture, on a run that starts from one -- which happens
+    /// once before the first step.
     Encoding,
     /// The denoising step that just finished, out of how many there are.
     Step { done: i32, total: i32 },
     /// Turning the finished latent into pixels.
     Decoding,
+}
+
+/// The builder the VAE encoder reads from, or None where the package has no encoder in it.
+///
+/// One tensor is enough to tell the two apart: a package either has the whole half or none of it,
+/// and a package with some of it is a broken file rather than an old one, which the modules below
+/// will say better than a check here could.
+fn encoder_weights(vb: &VarBuilder) -> Option<VarBuilder> {
+    // float32 for the same reason the decoder is -- see VaeDecoder::forward.
+    let weights = vb.with_name("vae.encoder").with_float_type(DType::Float);
+    weights.has("conv_in.weight").then_some(weights)
 }
 
 /// The reporter a run that nobody is watching gets.
@@ -224,6 +240,9 @@ pub struct Sdxl {
     text_encoder2: ClipTextEncoder,
     unet: Unet,
     vae: VaeDecoder,
+    /// The other half of the autoencoder, which only a package exported since image to image was
+    /// added carries. None is not a broken model: it draws from noise like any other.
+    vae_encoder: Option<VaeEncoder>,
     device: Device,
     dtype: DType,
 }
@@ -284,6 +303,13 @@ impl Sdxl {
                 config.vae.clone(),
                 &vb.with_name("vae").with_float_type(DType::Float),
             )?,
+            // Read only where it is. Packages published before image to image hold the decoder
+            // alone, and refusing to load one of those would take text to image away from every
+            // model already on disk to add a mode it was never going to be asked for.
+            vae_encoder: match encoder_weights(&vb) {
+                Some(weights) => Some(VaeEncoder::build(config.vae.clone(), &weights)?),
+                None => None,
+            },
             tokenizer: Tokenizer::from_package(package)?,
             config,
             device,
@@ -357,15 +383,23 @@ impl Sdxl {
         negative: &PromptEmbedding,
         options: &GenerationOptions,
     ) -> Result<Tensor> {
-        let denoised = self.denoise_reporting(latent, prompt, negative, options, &mut unwatched)?;
+        let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
+        let latent = F::mul_scalar(latent, sampler.init_noise_sigma())?;
+        let denoised =
+            self.denoise_reporting(&latent, 0, prompt, negative, options, &mut unwatched)?;
         Ok(denoised.expect("a run nothing asked to stop runs to the end"))
     }
 
     /// [`Sdxl::denoise`], telling `report` after every step and giving up where it stands if
     /// `report` says to -- in which case there is no latent to hand back.
+    ///
+    /// `latent` is already at the noise level of step `start` here, rather than being unit noise:
+    /// what that level is differs between a run from noise and a run from a picture, and both
+    /// callers know it before this does.
     fn denoise_reporting(
         &self,
         latent: &Tensor,
+        start: usize,
         prompt: &PromptEmbedding,
         negative: &PromptEmbedding,
         options: &GenerationOptions,
@@ -405,8 +439,8 @@ impl Sdxl {
             time_ids,
         };
 
-        let mut latent = F::mul_scalar(latent, sampler.init_noise_sigma())?;
-        for index in 0..sampler.len() {
+        let mut latent = latent.clone();
+        for index in start..sampler.len() {
             let timestep = sampler.timesteps()[index];
             let scaled = sampler.scale_model_input(&latent, index)?;
 
@@ -436,9 +470,11 @@ impl Sdxl {
 
             latent = sampler.step(&noise, &latent, index)?;
 
+            // Counted over the steps this run walks rather than over the whole schedule, so
+            // that a run from a picture, which starts partway down, still fills its bar.
             let progress = GenerationProgress::Step {
-                done: index as i32 + 1,
-                total: sampler.len() as i32,
+                done: (index - start) as i32 + 1,
+                total: (sampler.len() - start) as i32,
             };
             if report(progress).is_break() {
                 return Ok(None);
@@ -455,6 +491,22 @@ impl Sdxl {
     /// is cast on the way in by the decoder itself.
     pub fn decode(&self, latent: &Tensor) -> Result<Tensor> {
         self.vae.forward(latent)
+    }
+
+    /// The latent an image stands for, as `(1, C, H / 8, W / 8)`, scaled the way the sampler
+    /// wants it.
+    ///
+    /// `image` is `(1, 3, H, W)` in roughly `[-1, 1]`, which is what [`from_rgb8`] produces and
+    /// what [`Sdxl::decode`] hands back. Fails on a package that holds no encoder.
+    pub fn encode(&self, image: &Tensor) -> Result<Tensor> {
+        let Some(encoder) = &self.vae_encoder else {
+            return Err(Error::model(
+                "this package has no VAE encoder, so it cannot start from a picture. It was \
+                 written before image to image existed; exporting it again adds one",
+            ));
+        };
+
+        encoder.forward(image)
     }
 
     /// An image for `prompt`, as `<float>(1, 3, height, width)` in roughly `[-1, 1]`.
@@ -502,23 +554,8 @@ impl Sdxl {
         options: &GenerationOptions,
         report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
     ) -> Result<Option<Tensor>> {
-        // Every resolution the U-Net works at halves the one before it, on top of the eight the
-        // VAE already stands for.
-        let alignment = VAE_SCALE * (1 << (self.config.unet.block_out_channels.len() - 1));
-        if options.width <= 0
-            || options.height <= 0
-            || options.width % alignment != 0
-            || options.height % alignment != 0
-        {
-            return Err(Error::model(format!(
-                "{} by {} is not a multiple of {alignment}, which is what this model works in",
-                options.width, options.height
-            )));
-        }
-
-        if let Some(seed) = options.seed {
-            F::manual_seed(self.device, seed)?;
-        }
+        self.check_size(options.width, options.height)?;
+        self.seed(options)?;
 
         let latent = F::randn(
             &[
@@ -531,13 +568,138 @@ impl Sdxl {
         )?
         .cast(self.dtype)?;
 
+        let Some((prompt, negative)) = self.read_prompts(prompt, options, report)? else {
+            return Ok(None);
+        };
+
+        // Pure noise, lifted to the level the first step of the whole schedule expects.
+        let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
+        let latent = F::mul_scalar(&latent, sampler.init_noise_sigma())?;
+
+        self.denoise_reporting(&latent, 0, &prompt, &negative, options, report)
+    }
+
+    /// An image for `prompt` that starts from `image` rather than from noise.
+    ///
+    /// `image` is `(1, 3, H, W)` in roughly `[-1, 1]`, which is what [`from_rgb8`] produces, and
+    /// its own size is the size of what comes back -- `options.width` and `options.height` are
+    /// not read here, since the picture already says. `options.strength` is how far to walk away
+    /// from it: around 0.8 rewrites it while keeping its composition, and below about 0.3 there
+    /// is little left for the prompt to do.
+    pub fn generate_from_image(
+        &self,
+        image: &Tensor,
+        prompt: &str,
+        options: &GenerationOptions,
+    ) -> Result<Tensor> {
+        let image = self.generate_from_image_reporting(image, prompt, options, &mut unwatched)?;
+        Ok(image.expect("a run nothing asked to stop runs to the end"))
+    }
+
+    /// [`Sdxl::generate_from_image`], reporting to and interruptible by `report`.
+    pub fn generate_from_image_reporting(
+        &self,
+        image: &Tensor,
+        prompt: &str,
+        options: &GenerationOptions,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Tensor>> {
+        let Some(latent) =
+            self.generate_latent_from_image_reporting(image, prompt, options, report)?
+        else {
+            return Ok(None);
+        };
+
+        if report(GenerationProgress::Decoding).is_break() {
+            return Ok(None);
+        }
+        self.decode(&latent).map(Some)
+    }
+
+    /// The latent [`Sdxl::generate_from_image`] would decode.
+    fn generate_latent_from_image_reporting(
+        &self,
+        image: &Tensor,
+        prompt: &str,
+        options: &GenerationOptions,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Tensor>> {
+        let shape = image.shape();
+        if shape.len() != 4 || shape[0] != 1 || shape[1] != 3 {
+            return Err(Error::model(format!(
+                "a picture to start from is <float>(1, 3, H, W), got {shape:?}"
+            )));
+        }
+        self.check_size(shape[3], shape[2])?;
+
+        // First, because encoding the picture is a decode's worth of work and the screen would
+        // otherwise sit on the last thing it said all the way through it.
+        let Some((prompt, negative)) = self.read_prompts(prompt, options, report)? else {
+            return Ok(None);
+        };
+
+        // Before the draw below rather than after: a caller who asked for a seed wants that draw
+        // to be the one it names.
+        self.seed(options)?;
+
+        // Into the type the walk runs in. The autoencoder is float32 whatever the rest of the
+        // model is -- it has to be -- so what it hands back is wider than the U-Net reads, and
+        // the noise added to it has to match it either way.
+        let encoded = self.encode(image)?.cast(self.dtype)?;
+
+        let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
+        let start = sampler.start_for_strength(options.strength)?;
+
+        // The picture put back at the noise level step `start` expects to see. This is the whole
+        // of what image to image is: the walk from here on is the ordinary one, and what keeps
+        // the picture is that the walk is not long enough to forget it.
+        let noise = F::randn(&encoded.shape(), self.device)?.cast(encoded.dtype())?;
+        let latent = F::add(&encoded, &F::mul_scalar(&noise, sampler.sigmas()[start])?)?;
+
+        self.denoise_reporting(&latent, start, &prompt, &negative, options, report)
+    }
+
+    /// Refuses a size the U-Net cannot work at.
+    ///
+    /// Every resolution it works at halves the one before it, on top of the eight the VAE already
+    /// stands for, so a size that does not divide would be rounded somewhere inside and come back
+    /// as a shape that no longer lines up with the skip connection it has to be added to.
+    fn check_size(&self, width: i32, height: i32) -> Result<()> {
+        let alignment = VAE_SCALE * (1 << (self.config.unet.block_out_channels.len() - 1));
+        if width <= 0 || height <= 0 || width % alignment != 0 || height % alignment != 0 {
+            return Err(Error::model(format!(
+                "{width} by {height} is not a multiple of {alignment}, which is what this model \
+                 works in"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Fixes the draws this run makes, where the caller asked for a seed.
+    fn seed(&self, options: &GenerationOptions) -> Result<()> {
+        if let Some(seed) = options.seed {
+            F::manual_seed(self.device, seed)?;
+        }
+
+        Ok(())
+    }
+
+    /// Both prompts, read once before the walk begins. None where `report` asked to stop.
+    fn read_prompts(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> Result<Option<(PromptEmbedding, PromptEmbedding)>> {
         if report(GenerationProgress::Encoding).is_break() {
             return Ok(None);
         }
+
         let prompt = self.encode_prompt(prompt)?;
         let negative = self.encode_prompt(&options.negative_prompt)?;
 
-        self.denoise_reporting(&latent, &prompt, &negative, options, report)
+        Ok(Some((prompt, negative)))
     }
 }
 
@@ -571,6 +733,41 @@ pub fn to_rgb8(image: &Tensor) -> Result<Vec<u8>> {
     }
 
     Ok(out)
+}
+
+/// A picture read from a file as the tensor a model reads, `<float>(1, 3, height, width)`.
+///
+/// `pixels` is three bytes per pixel, row by row, which is the layout [`to_rgb8`] writes and the
+/// one every image library hands back. This is that function backwards: the bytes are spread into
+/// one plane per channel and mapped from `[0, 255]` onto the `[-1, 1]` the autoencoder was
+/// trained on.
+///
+/// The tensor is on the CPU, in float32. Moving it to the device and narrowing it is the
+/// encoder's business, and it does it on the way in.
+pub fn from_rgb8(width: i32, height: i32, pixels: &[u8]) -> Result<Tensor> {
+    if width <= 0 || height <= 0 {
+        return Err(Error::model(format!(
+            "{width} by {height} is not a size a picture can have"
+        )));
+    }
+
+    let plane = width as usize * height as usize;
+    if pixels.len() != plane * 3 {
+        return Err(Error::model(format!(
+            "{} bytes is not the {} a {width} by {height} picture of three channels has",
+            pixels.len(),
+            plane * 3
+        )));
+    }
+
+    let mut values = vec![0.0f32; plane * 3];
+    for pixel in 0..plane {
+        for channel in 0..3 {
+            values[channel * plane + pixel] = pixels[pixel * 3 + channel] as f32 / 127.5 - 1.0;
+        }
+    }
+
+    Ok(Tensor::from_f32(&[1, 3, height, width], &values)?)
 }
 
 #[cfg(test)]
@@ -722,5 +919,43 @@ clip_skip = 2
 
         let three_d = Tensor::zeros(&[3, 2, 2], DType::Float, Device::Cpu).unwrap();
         assert!(to_rgb8(&three_d).is_err());
+    }
+
+    #[test]
+    fn bytes_become_the_image_they_stood_for() {
+        // The same two pixels the other way round: interleaved bytes spread into one plane per
+        // channel, and [0, 255] mapped onto [-1, 1].
+        let pixels = [0u8, 128, 255, 0, 128, 255];
+        let image = from_rgb8(2, 1, &pixels).unwrap();
+
+        assert_eq!(image.shape(), vec![1, 3, 1, 2]);
+        let values = image.to_vec_f32().unwrap();
+        assert_eq!(values[0], -1.0);
+        assert_eq!(values[1], -1.0);
+        assert!((values[2] - 128.0 / 127.5 + 1.0).abs() < 1e-6);
+        assert_eq!(values[4], 1.0);
+        assert_eq!(values[5], 1.0);
+    }
+
+    #[test]
+    fn a_picture_survives_the_trip_out_and_back() {
+        // Every byte a channel can hold, so that the two mappings are checked against each other
+        // over the whole range rather than at the ends. They are not exact inverses -- 256 values
+        // do not land on 256 of the floats between -1 and 1 -- but rounding is the only thing
+        // allowed to differ, and it cancels.
+        let pixels: Vec<u8> = (0..=255u8).flat_map(|v| [v, 255 - v, v / 2]).collect();
+        let image = from_rgb8(16, 16, &pixels).unwrap();
+
+        assert_eq!(to_rgb8(&image).unwrap(), pixels);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_picture_are_refused() {
+        // One byte short of the picture they claim to be, which is a caller that got its stride
+        // wrong rather than something to read past the end of.
+        assert!(from_rgb8(2, 2, &[0; 11]).is_err());
+        assert!(from_rgb8(2, 2, &[0; 13]).is_err());
+        assert!(from_rgb8(0, 2, &[]).is_err());
+        assert!(from_rgb8(-2, 2, &[]).is_err());
     }
 }

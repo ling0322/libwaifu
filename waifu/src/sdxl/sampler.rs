@@ -131,6 +131,30 @@ impl EulerSampler {
         (largest * largest + 1.0).sqrt()
     }
 
+    /// Which step to start at when the walk begins from an image rather than from noise.
+    ///
+    /// Image to image does not run the whole schedule. It puts the image in at the noise level
+    /// some way down it and walks from there, and `strength` is how far down: one starts at the
+    /// top, which is the walk text to image takes and keeps nothing of the image; zero starts
+    /// past the end and changes nothing. What runs is that share of the steps asked for, rounded
+    /// down, so a low strength over few steps can round to no steps at all -- which is a picture
+    /// that made the round trip through the autoencoder and nothing else, not an error.
+    ///
+    /// The latent to start from is the encoded image plus unit noise times
+    /// `sigmas()[start]`, and the steps to run are `start..len()`.
+    pub fn start_for_strength(&self, strength: f32) -> Result<usize> {
+        if !(0.0..=1.0).contains(&strength) {
+            return Err(Error::model(format!(
+                "a strength of {strength} is not between zero and one"
+            )));
+        }
+
+        let total = self.timesteps.len();
+        let running = (total as f32 * strength) as usize;
+
+        Ok(total - running.min(total))
+    }
+
     /// The latent as the U-Net wants to see it at step `index`.
     ///
     /// The model was trained on a latent of roughly unit variance, and a sample carrying sigma
@@ -254,6 +278,32 @@ mod tests {
         // Past either end it holds rather than running off the array.
         assert_eq!(interpolate(&values, -3.0), 0.0);
         assert_eq!(interpolate(&values, 9.0), 3.0);
+    }
+
+    #[test]
+    fn strength_says_how_much_of_the_schedule_to_walk() {
+        // Rounded down far enough to be nothing at all, which is allowed: it is a picture that
+        // went through the autoencoder and came back, not a mistake to refuse.
+        assert_eq!(sampler(4).start_for_strength(0.2).unwrap(), 4);
+
+        let sampler = sampler(20);
+
+        // The whole walk, and none of it.
+        assert_eq!(sampler.start_for_strength(1.0).unwrap(), 0);
+        assert_eq!(sampler.start_for_strength(0.0).unwrap(), 20);
+
+        // The share of the steps that runs is the strength's, rounded down: 15 steps of 20 at
+        // 0.75, so the walk picks up at index 5.
+        assert_eq!(sampler.start_for_strength(0.75).unwrap(), 5);
+        assert_eq!(sampler.start_for_strength(0.8).unwrap(), 4);
+    }
+
+    #[test]
+    fn refuses_a_strength_outside_the_range() {
+        let sampler = sampler(20);
+        assert!(sampler.start_for_strength(-0.1).is_err());
+        assert!(sampler.start_for_strength(1.1).is_err());
+        assert!(sampler.start_for_strength(f32::NAN).is_err());
     }
 
     #[test]

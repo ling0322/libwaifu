@@ -45,11 +45,10 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::Args;
 use crate::cli::field::TextField;
-use crate::cli::{built_from, hub};
 use crate::cli::picker;
-use crate::cli::png;
+use crate::cli::{built_from, hub};
 use crate::flint::Tensor;
-use crate::{to_rgb8, Device, GenerationOptions, GenerationProgress, Sdxl, ZipFile};
+use crate::{from_rgb8, to_rgb8, Device, GenerationOptions, GenerationProgress, Sdxl, ZipFile};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -74,6 +73,9 @@ const SIZES: &[(i32, i32)] = &[
 
 /// What a fresh screen asks for: the square SDXL is happiest at.
 const DEFAULT_SIZE: usize = 4;
+
+/// How far a run that starts from a picture walks away from it, before anyone says otherwise.
+const DEFAULT_STRENGTH: f32 = 0.8;
 
 /// Says what was wrong before printing the usage, which is the order the Go tool prints them in.
 fn with_usage<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, E> {
@@ -174,7 +176,16 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     }
 
     let terminal = ratatui::init();
-    let outcome = run(terminal, model_name, device, &jobs, &arriving, &cancel);
+    let mut app = App::new(model_name, device);
+
+    // -i only fills the box. Everything about a run is changeable between runs, and a picture
+    // named on the command line is no different -- it is where to start, not what to be stuck
+    // with.
+    if let Some(image) = args.image() {
+        app.from = TextField::new(image);
+    }
+
+    let outcome = run(terminal, app, &jobs, &arriving, &cancel);
     ratatui::restore();
 
     // The painter is left where it is rather than joined. It may be halfway through the decode,
@@ -190,14 +201,11 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
 /// Draws, reads the keyboard, and passes what the two channels carry between them.
 fn run(
     mut terminal: DefaultTerminal,
-    model: String,
-    device: Device,
+    mut app: App,
     jobs: &Sender<Job>,
     updates: &Receiver<Update>,
     cancel: &AtomicBool,
 ) -> Result<(), Error> {
-    let mut app = App::new(model, device);
-
     while !app.quit {
         terminal.draw(|frame| app.render(frame))?;
 
@@ -230,6 +238,10 @@ fn run(
 struct Job {
     prompt: String,
     options: GenerationOptions,
+    /// The picture to start from, where the run is not starting from noise. Handed over as the
+    /// path it was typed as: reading it is minutes of work away and belongs on the thread that
+    /// does the work, not on the one drawing the screen.
+    from: Option<PathBuf>,
 }
 
 /// A finished picture, as the file it was written to.
@@ -286,7 +298,27 @@ fn paint(
             }
         };
 
-        let update = match model.generate_reporting(&job.prompt, &job.options, &mut report) {
+        // A picture to start from is read and scaled here, before the run, so that a path that
+        // is not there is one message rather than a run that fails partway.
+        let started_from = match &job.from {
+            Some(path) => match read_image(path, job.options.width, job.options.height) {
+                Ok(image) => Some(image),
+                Err(error) => {
+                    let _ = updates.send(Update::Failed(format!("{}: {error}", path.display())));
+                    continue;
+                }
+            },
+            None => None,
+        };
+
+        let drawn = match &started_from {
+            Some(image) => {
+                model.generate_from_image_reporting(image, &job.prompt, &job.options, &mut report)
+            }
+            None => model.generate_reporting(&job.prompt, &job.options, &mut report),
+        };
+
+        let update = match drawn {
             // Written here rather than back on the drawing thread: the pixels are three megabytes
             // that nothing on the other side would do anything with but hand to a file.
             Ok(Some(image)) => match keep(&image) {
@@ -311,6 +343,30 @@ fn load(model_path: &Path, device: Device) -> crate::Result<Sdxl> {
     Sdxl::from_package(device, &package)
 }
 
+/// A picture from a file, as the `(1, 3, height, width)` tensor a run can start from.
+///
+/// Scaled to the size the screen asks for rather than kept at its own: the model works at
+/// multiples of 64, and a picture off a camera or a phone is not one. Stretched to it rather than
+/// cropped, so that the whole of what was handed in is what the run sees -- the sizes on offer
+/// include the portrait and landscape ones SDXL was trained at, which is where to say what shape
+/// the picture is.
+///
+/// Lanczos, because this is the direction that loses pixels -- a photograph is larger than
+/// anything SDXL draws -- and a cheaper filter leaves stair steps that the run then faithfully
+/// keeps.
+fn read_image(path: &Path, width: i32, height: i32) -> Result<Tensor, Error> {
+    let opened = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()?;
+    let scaled = opened.resize_exact(
+        width as u32,
+        height as u32,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    Ok(from_rgb8(width, height, scaled.to_rgb8().as_raw())?)
+}
+
 /// Writes the tensor a run ends with into the first `waifu-NNNN.png` here that nothing else has.
 fn keep(image: &Tensor) -> Result<Kept, Error> {
     let pixels = to_rgb8(image)?;
@@ -323,7 +379,13 @@ fn keep(image: &Tensor) -> Result<Kept, Error> {
             continue;
         }
 
-        std::fs::write(&path, png::encode(width as u32, height as u32, &pixels))?;
+        image::save_buffer(
+            &path,
+            &pixels,
+            width as u32,
+            height as u32,
+            image::ColorType::Rgb8,
+        )?;
         return Ok(Kept {
             path,
             width,
@@ -339,18 +401,22 @@ fn keep(image: &Tensor) -> Result<Kept, Error> {
 enum Field {
     Prompt,
     Negative,
+    From,
     Steps,
     Guidance,
     Size,
+    Strength,
     Seed,
 }
 
-const FIELDS: [Field; 6] = [
+const FIELDS: [Field; 8] = [
     Field::Prompt,
     Field::Negative,
+    Field::From,
     Field::Steps,
     Field::Guidance,
     Field::Size,
+    Field::Strength,
     Field::Seed,
 ];
 
@@ -368,11 +434,16 @@ enum Status {
 struct App {
     prompt: TextField,
     negative: TextField,
+    /// The picture to draw from. Empty is the ordinary case: a run that starts from noise.
+    from: TextField,
     /// Empty means a different picture every time; a number means the same one every time.
     seed: TextField,
     steps: i32,
     guidance: f32,
     size: usize,
+    /// How far a run that starts from a picture walks away from it. Read by nothing when the
+    /// box above is empty.
+    strength: f32,
     focus: usize,
 
     status: Status,
@@ -400,10 +471,14 @@ impl App {
             device,
             prompt: TextField::default(),
             negative: TextField::default(),
+            from: TextField::default(),
             seed: TextField::default(),
             steps: 30,
             guidance: 5.0,
             size: DEFAULT_SIZE,
+            // What every image to image interface starts at: enough to redraw the picture in the
+            // style asked for, not so much that its composition is gone.
+            strength: DEFAULT_STRENGTH,
             focus: 0,
             status: Status::Ready,
             message: "type a prompt and press enter".to_string(),
@@ -508,6 +583,7 @@ impl App {
         match self.focused() {
             Field::Prompt => edit_text(&mut self.prompt, code, |_| true),
             Field::Negative => edit_text(&mut self.negative, code, |_| true),
+            Field::From => edit_text(&mut self.from, code, |_| true),
             Field::Seed => edit_text(&mut self.seed, code, char::is_ascii_digit),
             Field::Steps => match code {
                 KeyCode::Left => self.steps = (self.steps - 1).max(1),
@@ -522,6 +598,13 @@ impl App {
             Field::Size => match code {
                 KeyCode::Left => self.size = self.size.saturating_sub(1),
                 KeyCode::Right => self.size = (self.size + 1).min(SIZES.len() - 1),
+                _ => {}
+            },
+            // Down to zero, which keeps the picture and only sends it through the autoencoder,
+            // and up to one, which keeps nothing of it and is the same walk as from noise.
+            Field::Strength => match code {
+                KeyCode::Left => self.strength = (self.strength - 0.05).max(0.0),
+                KeyCode::Right => self.strength = (self.strength + 0.05).min(1.0),
                 _ => {}
             },
         }
@@ -539,7 +622,15 @@ impl App {
             // Nothing in the box means a new picture every time, which is what leaving the seed
             // out asks the model for.
             seed: self.seed.text().trim().parse().ok(),
+            strength: self.strength,
         }
+    }
+
+    /// The picture this run starts from, or None where it starts from noise.
+    fn from(&self) -> Option<PathBuf> {
+        let typed = self.from.text();
+        let typed = typed.trim();
+        (!typed.is_empty()).then(|| PathBuf::from(typed))
     }
 
     /// Hands the prompt over, if there is one and there is nothing already being drawn.
@@ -560,19 +651,25 @@ impl App {
             started: Instant::now(),
         };
         self.said(String::new());
-        self.pending = Some(Job { prompt, options });
+        self.pending = Some(Job {
+            prompt,
+            options,
+            from: self.from(),
+        });
     }
 
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [heading, prompt, negative, numbers, status, written, keys] = Layout::vertical([
+        let [heading, prompt, negative, from, numbers, status, written, keys] = Layout::vertical([
             Constraint::Length(1),
             // The same height, because the two are the same kind of thing: what to draw and what
             // to keep out of it. One box a row shorter than the other reads as the shorter one
             // mattering less, which is not what the difference was ever about.
             Constraint::Length(TEXT_BOX),
             Constraint::Length(TEXT_BOX),
+            // A path is one line however long it is, so this box is the height of its border.
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(0),
@@ -580,8 +677,8 @@ impl App {
         ])
         .areas(frame.area());
 
-        let quarters = [Constraint::Percentage(25); 4];
-        let [steps, guidance, size, seed] = Layout::horizontal(quarters).areas(numbers);
+        let fifths = [Constraint::Ratio(1, 5); 5];
+        let [steps, guidance, size, strength, seed] = Layout::horizontal(fifths).areas(numbers);
 
         // What made this picture. A screenshot of a run says nothing about which code drew it,
         // and that is the first thing worth knowing about one that came out wrong.
@@ -611,6 +708,7 @@ impl App {
             "away from",
             &self.negative,
         );
+        self.render_text(frame, from, Field::From, "draw from", &self.from);
         self.render_number(frame, steps, Field::Steps, "steps", self.steps.to_string());
         self.render_number(
             frame,
@@ -626,6 +724,17 @@ impl App {
             Field::Size,
             "size",
             format!("{width}x{height}"),
+        );
+        // Greyed out where the box above it is empty, since a run from noise never reads it.
+        self.render_number(
+            frame,
+            strength,
+            Field::Strength,
+            "strength",
+            match self.from() {
+                Some(_) => format!("{:.2}", self.strength),
+                None => "-".to_string(),
+            },
         );
         self.render_number(
             frame,
@@ -927,6 +1036,12 @@ mod tests {
         assert_eq!(app.negative.text(), "blurry");
     }
 
+    /// Puts the cursor in a named box, rather than counting tab presses to it: which number a
+    /// box is changes whenever one is added, and the tests are not about the order.
+    fn focus_on(app: &mut App, field: Field) {
+        app.focus = FIELDS.iter().position(|f| *f == field).unwrap();
+    }
+
     #[test]
     fn tab_goes_round_and_back_again() {
         let cancel = AtomicBool::new(false);
@@ -945,8 +1060,7 @@ mod tests {
     fn the_arrows_turn_the_knobs_and_stop_at_their_ends() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
-        app.focus = 2;
-        assert_eq!(app.focused(), Field::Steps);
+        focus_on(&mut app, Field::Steps);
 
         app.key(press(KeyCode::Right), &cancel);
         assert_eq!(app.steps, 31);
@@ -955,22 +1069,34 @@ mod tests {
         }
         assert_eq!(app.steps, 1, "a run of no steps is not a run");
 
-        app.focus = 3;
+        focus_on(&mut app, Field::Guidance);
         app.key(press(KeyCode::Left), &cancel);
         assert_eq!(app.guidance, 4.5);
 
-        app.focus = 4;
+        focus_on(&mut app, Field::Size);
         for _ in 0..SIZES.len() * 2 {
             app.key(press(KeyCode::Right), &cancel);
         }
         assert_eq!(app.size, SIZES.len() - 1);
+
+        // Strength runs the other way round: it has a bottom as well as a top, and both ends are
+        // a run that means something rather than one to stop short of.
+        focus_on(&mut app, Field::Strength);
+        for _ in 0..100 {
+            app.key(press(KeyCode::Right), &cancel);
+        }
+        assert_eq!(app.strength, 1.0);
+        for _ in 0..100 {
+            app.key(press(KeyCode::Left), &cancel);
+        }
+        assert_eq!(app.strength, 0.0);
     }
 
     #[test]
     fn the_seed_takes_digits_and_nothing_else() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
-        app.focus = 5;
+        focus_on(&mut app, Field::Seed);
 
         type_in(&mut app, "12a3", &cancel);
         assert_eq!(app.seed.text(), "123");
@@ -980,6 +1106,93 @@ mod tests {
             app.key(press(KeyCode::Backspace), &cancel);
         }
         assert_eq!(app.options().seed, None, "an empty box means any seed");
+    }
+
+    #[test]
+    fn a_picture_off_the_disk_becomes_a_tensor_at_the_size_asked_for() {
+        // Through a real file rather than a buffer: the point of this one is that what the image
+        // crate decodes, scales and hands back lines up with what from_rgb8 expects, which a
+        // tensor built by hand would not check.
+        let path = std::env::temp_dir().join("waifu-read-image-test.png");
+        let pixels: Vec<u8> = (0..32 * 32)
+            .flat_map(|i| [i as u8, 255 - i as u8, 7])
+            .collect();
+        image::save_buffer(&path, &pixels, 32, 32, image::ColorType::Rgb8).unwrap();
+
+        // A size that is neither the file's nor a whole multiple of it, since the run decides the
+        // size and a picture off a camera never happens to be it.
+        let image = read_image(&path, 192, 128).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(image.shape(), vec![1, 3, 128, 192]);
+
+        // Scaling is allowed to move a value; leaving the range the model reads is not.
+        let values = image.to_vec_f32().unwrap();
+        assert!(
+            values.iter().all(|x| (-1.0..=1.0).contains(x)),
+            "a scaled picture left [-1, 1]"
+        );
+
+        // The third channel was one value everywhere, so scaling cannot have made it anything
+        // else -- which is the check that the planes did not get shuffled on the way through.
+        let plane = 128 * 192;
+        let blue = 7.0 / 127.5 - 1.0;
+        assert!(
+            values[2 * plane..].iter().all(|x| (x - blue).abs() < 1e-3),
+            "the channels came back in the wrong order"
+        );
+    }
+
+    #[test]
+    fn a_picture_that_is_not_there_is_said_so_rather_than_drawn_over() {
+        let missing = std::env::temp_dir().join("waifu-no-such-picture.png");
+        assert!(read_image(&missing, 64, 64).is_err());
+    }
+
+    #[test]
+    fn an_empty_draw_from_box_is_a_run_from_noise() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+        type_in(&mut app, "a cat", &cancel);
+        app.start();
+
+        let job = app.pending.take().unwrap();
+        assert!(
+            job.from.is_none(),
+            "nothing was typed, so there is nothing to draw from"
+        );
+
+        // And the strength box says so rather than showing a number that nothing reads.
+        assert!(
+            screen(&app, 90, 24).contains(" - "),
+            "{}",
+            screen(&app, 90, 24)
+        );
+    }
+
+    #[test]
+    fn a_path_in_the_draw_from_box_is_handed_over_with_the_job() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+        type_in(&mut app, "a cat", &cancel);
+
+        focus_on(&mut app, Field::From);
+        type_in(&mut app, "  cat.png  ", &cancel);
+        focus_on(&mut app, Field::Strength);
+        app.key(press(KeyCode::Left), &cancel);
+        app.start();
+
+        let job = app.pending.take().unwrap();
+        // Trimmed, because a path typed with a space either side is the path.
+        assert_eq!(job.from, Some(PathBuf::from("cat.png")));
+        assert!((job.options.strength - (DEFAULT_STRENGTH - 0.05)).abs() < 1e-6);
+
+        // The number is on the screen now that something reads it.
+        assert!(
+            screen(&app, 90, 24).contains("0.75"),
+            "{}",
+            screen(&app, 90, 24)
+        );
     }
 
     #[test]
@@ -1196,6 +1409,8 @@ mod tests {
             "1024x1024",
             "seed",
             "any",
+            "draw from",
+            "strength",
             "pictures written",
             "waifu-0007.png",
             "tab move",
@@ -1251,7 +1466,10 @@ mod tests {
         assert!(drawn.contains("there is already a picture"), "{drawn}");
 
         // And it gives the label back as soon as the run moves.
-        app.update(Update::Progress(GenerationProgress::Step { done: 1, total: 30 }));
+        app.update(Update::Progress(GenerationProgress::Step {
+            done: 1,
+            total: 30,
+        }));
         let drawn = screen(&app, 80, 30);
         assert!(drawn.contains("step 1 of 30"), "{drawn}");
     }

@@ -556,6 +556,15 @@ def export_test_cases(pipeline, fp) -> None:
             encoded * pipeline.vae.config.scaling_factor,
             preserve_dtype=True)
 
+        # And straight back out again, which is the whole of what an image to image run of no
+        # steps does. An autoencoder is lossy and this one is being asked to encode its own
+        # output, so what comes back is a good way from what went in -- far enough that a bound
+        # picked by hand would be either useless or wrong, and the reference is the only thing
+        # worth comparing against.
+        with torch.no_grad():
+            round_trip = pipeline.vae.decode(encoded).sample
+        writer.write_tensor(ctx.with_subname("round_trip"), round_trip, preserve_dtype=True)
+
         # One U-Net step on that same latent. The conditioning is what the pipeline would build
         # for a 256 by 256 image with nothing cropped: the two hidden states side by side, the
         # pooled vector of the second, and the sizes SDXL was trained to be told about.

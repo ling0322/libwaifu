@@ -71,6 +71,8 @@ fn main() -> Result<(), waifu::Error> {
         guidance_scale: 5.0,
         negative_prompt: String::new(),
         seed: Some(7),
+        // Read only when starting from a picture, which this does not.
+        strength: 0.8,
     };
 
     let image = model.generate(&prompt, &options)?;

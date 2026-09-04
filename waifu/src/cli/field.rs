@@ -33,9 +33,10 @@ pub struct TextField {
 }
 
 impl TextField {
-    /// A field that already has something in it. Only the tests start one that way; a screen
-    /// starts every box empty.
-    #[cfg(test)]
+    /// A field that already has something in it, with the cursor after it.
+    ///
+    /// A screen starts every box empty but one: the picture to draw from, where `-i` names a file
+    /// before there is a screen to type it into.
     pub fn new(text: &str) -> TextField {
         let characters: Vec<char> = text.chars().collect();
         TextField {

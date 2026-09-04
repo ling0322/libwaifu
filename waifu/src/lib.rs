@@ -61,9 +61,9 @@ pub use ini::{IniConfig, IniSection};
 pub use layers::{Conv2d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use reader::BinaryRead;
 pub use sdxl::{
-    to_rgb8, ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler, GenerationOptions,
-    GenerationProgress, PromptEmbedding, SamplerConfig, Sdxl, SdxlConfig, Unet, UnetCondition,
-    UnetConfig, VaeConfig, VaeDecoder, VaeEncoder, VAE_SCALE,
+    from_rgb8, to_rgb8, ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler,
+    GenerationOptions, GenerationProgress, PromptEmbedding, SamplerConfig, Sdxl, SdxlConfig, Unet,
+    UnetCondition, UnetConfig, VaeConfig, VaeDecoder, VaeEncoder, VAE_SCALE,
 };
 pub use tokenizer::Tokenizer;
 pub use var_builder::VarBuilder;

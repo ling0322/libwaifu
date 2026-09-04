@@ -26,15 +26,16 @@
 use std::path::PathBuf;
 
 use waifu::flint::{functional as F, Tensor};
-use waifu::{
-    to_rgb8, DType, Device, GenerationOptions, Sdxl, UnetCondition, VarBuilder, ZipFile,
-};
+use waifu::{to_rgb8, DType, Device, GenerationOptions, Sdxl, UnetCondition, VarBuilder, ZipFile};
 
 /// What the reference denoising run in the exporter was written for.
 const PROMPT: &str = "a photo of an astronaut riding a horse on mars";
 const STEPS: i32 = 4;
 const GUIDANCE: f32 = 5.0;
 const SIZE: i32 = 256;
+
+/// Read only by the runs that start from a picture; the rest walk the whole schedule.
+const STRENGTH: f32 = 0.8;
 
 /// How far torch's own half precision run lands from its float32 one, on this very case:
 /// measured at 2.87e-2 by running `StableDiffusionXLPipeline` twice, once at each precision, with
@@ -102,6 +103,7 @@ fn options() -> GenerationOptions {
         guidance_scale: GUIDANCE,
         negative_prompt: String::new(),
         seed: None,
+        strength: STRENGTH,
     }
 }
 
@@ -244,7 +246,10 @@ fn a_batch_of_two_is_two_batches_of_one() {
             .contiguous()
             .unwrap();
         let rmse = relative_rmse(&row, one);
-        assert!(rmse < 2e-3, "row {index} batched differs by {rmse} from the same row alone");
+        assert!(
+            rmse < 2e-3,
+            "row {index} batched differs by {rmse} from the same row alone"
+        );
     }
 }
 
@@ -475,4 +480,115 @@ fn refuses_a_size_it_cannot_work_in() {
             "{width} by {height} was allowed"
         );
     }
+}
+
+/// The picture the reference decoder made of the reference latent, which is a real image at the
+/// size these tests work at and so the natural thing to hand an encoder.
+fn picture(cases: &VarBuilder) -> Tensor {
+    to_cuda(&cases.get_unchecked("test_case.decoded").unwrap())
+}
+
+#[test]
+#[ignore = "needs the sdxl package with an encoder"]
+fn starting_from_a_picture_gives_a_picture_of_the_same_size() {
+    let cases = cases();
+    let model = model();
+
+    let image = model
+        .generate_from_image(&picture(&cases), PROMPT, &options())
+        .unwrap();
+
+    // The picture's own size, not the one in the options: what was handed in already says.
+    assert_eq!(image.shape(), vec![1, 3, SIZE, SIZE]);
+
+    let values = image
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
+    assert!(
+        values.iter().all(|x| x.is_finite()),
+        "the run produced a NaN or an infinity"
+    );
+}
+
+#[test]
+#[ignore = "needs the sdxl package with an encoder"]
+fn no_strength_is_the_picture_through_the_autoencoder_and_nothing_else() {
+    // A strength of zero runs no steps at all, so the whole of the run is the encoder and the
+    // decoder. That is a long way from the picture it was handed -- an autoencoder is lossy, and
+    // this one is being asked to encode its own output, which puts it 0.226 away -- so what this
+    // compares against is the reference making the same trip, not the picture.
+    let cases = cases();
+    let model = model();
+
+    let mut options = options();
+    options.strength = 0.0;
+
+    let given = picture(&cases);
+    let image = model.generate_from_image(&given, PROMPT, &options).unwrap();
+
+    let rmse = relative_rmse(
+        &image,
+        &cases.get_unchecked("test_case.round_trip").unwrap(),
+    );
+    println!("round trip rmse against the reference = {rmse}");
+    assert!(rmse < 2e-2, "a run of no steps drifted by {rmse}");
+}
+
+#[test]
+#[ignore = "needs the sdxl package with an encoder"]
+fn more_strength_leaves_less_of_the_picture() {
+    // The property the knob is for. Neither number means anything on its own -- what an image to
+    // image run is worth is not something a test can measure -- but the order between them is
+    // what someone turning the knob is asking for, and it is what a start index computed the
+    // wrong way round would get backwards.
+    let cases = cases();
+    let model = model();
+    let given = picture(&cases);
+
+    let mut drift = Vec::new();
+    for strength in [0.25, 0.5, 1.0] {
+        let mut options = options();
+        options.strength = strength;
+        options.num_steps = 8;
+        options.seed = Some(11);
+
+        let image = model.generate_from_image(&given, PROMPT, &options).unwrap();
+        drift.push(relative_rmse(
+            &image,
+            &cases.get_unchecked("test_case.decoded").unwrap(),
+        ));
+    }
+
+    println!("drift from the picture at 0.25, 0.5 and 1.0 strength = {drift:?}");
+    assert!(drift[0] < drift[1], "{drift:?}");
+    assert!(drift[1] < drift[2], "{drift:?}");
+}
+
+#[test]
+#[ignore = "needs the sdxl package with an encoder"]
+fn refuses_a_picture_it_cannot_start_from() {
+    let model = model();
+
+    // Not a picture at all, and a picture at a size the U-Net cannot work in.
+    let latent = F::rand(&[1, 4, 32, 32], DType::Float16, Device::Cuda).unwrap();
+    assert!(model
+        .generate_from_image(&latent, PROMPT, &options())
+        .is_err());
+
+    let ragged = F::rand(&[1, 3, 250, 256], DType::Float16, Device::Cuda).unwrap();
+    assert!(model
+        .generate_from_image(&ragged, PROMPT, &options())
+        .is_err());
+
+    // And a strength that is not a share of the walk.
+    let mut options = options();
+    options.strength = 1.5;
+    let picture = F::rand(&[1, 3, SIZE, SIZE], DType::Float16, Device::Cuda).unwrap();
+    assert!(model
+        .generate_from_image(&picture, PROMPT, &options)
+        .is_err());
 }

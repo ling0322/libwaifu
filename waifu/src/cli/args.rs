@@ -73,6 +73,7 @@ impl DeviceOption {
 pub struct Args {
     models: Vec<String>,
     device: Option<String>,
+    image: Option<String>,
     help: bool,
 }
 
@@ -102,6 +103,7 @@ impl Args {
             match name {
                 "-m" | "--m" => args.models.push(value("-m")?),
                 "-device" | "--device" => args.device = Some(value("-device")?),
+                "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
                 other => return Err(ArgError(format!("flag provided but not defined: {other}"))),
             }
@@ -129,6 +131,14 @@ impl Args {
                     .to_string(),
             )),
         }
+    }
+
+    /// The picture a run should start from, if one was named.
+    ///
+    /// Not opened here: this only fills the box on the screen, which is where it can be changed
+    /// between runs, and the file is read by the thread that owns the model when a run begins.
+    pub fn image(&self) -> Option<&str> {
+        self.image.as_deref()
     }
 
     pub fn device(&self) -> Result<DeviceOption, ArgError> {
@@ -162,6 +172,11 @@ pub fn print_options() {
          out, the screen offers the published ones to pick from. The names are: {}.",
         crate::cli::hub::names().join(", ")
     );
+    eprintln!(
+        "  -i string\n    \ta picture to draw from rather than from noise, as a PNG or a JPEG. \
+         It is scaled to the size on the screen, and how far the run walks away from it is what \
+         the strength box says."
+    );
 }
 
 #[cfg(test)]
@@ -173,9 +188,19 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_picture_to_start_from() {
+        assert_eq!(args(&["-i", "cat.png"]).unwrap().image(), Some("cat.png"));
+        assert_eq!(args(&["--image=cat.png"]).unwrap().image(), Some("cat.png"));
+        assert_eq!(args(&["-m", "x.waifupkg"]).unwrap().image(), None);
+    }
+
+    #[test]
     fn reads_a_flag_in_either_form() {
         assert_eq!(
-            args(&["-m", "sdxl-base.waifupkg"]).unwrap().model().unwrap(),
+            args(&["-m", "sdxl-base.waifupkg"])
+                .unwrap()
+                .model()
+                .unwrap(),
             Some("sdxl-base.waifupkg")
         );
         assert_eq!(

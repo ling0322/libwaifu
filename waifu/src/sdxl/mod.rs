@@ -26,7 +26,8 @@ mod unet;
 mod vae;
 
 pub use pipeline::{
-    to_rgb8, GenerationOptions, GenerationProgress, PromptEmbedding, Sdxl, SdxlConfig, VAE_SCALE,
+    from_rgb8, to_rgb8, GenerationOptions, GenerationProgress, PromptEmbedding, Sdxl, SdxlConfig,
+    VAE_SCALE,
 };
 pub use sampler::{EulerSampler, SamplerConfig};
 pub use text_encoder::{ClipTextConfig, ClipTextEncoder, ClipTextOutput};

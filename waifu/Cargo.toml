@@ -20,7 +20,7 @@ required-features = ["cli"]
 [features]
 # The command line tool. Off by default so that using this crate as a library stays
 # dependency-free; the binary needs a terminal library to draw with.
-cli = ["dep:ratatui", "dep:ureq"]
+cli = ["dep:image", "dep:ratatui", "dep:ureq"]
 
 [dependencies]
 # What the command line tool needs, and all this crate depends on -- the library itself has
@@ -41,4 +41,17 @@ ratatui = { version = "0.29", default-features = false, features = [
 ureq = { version = "3", default-features = false, features = [
     "rustls",
     "gzip",
+], optional = true }
+
+# Reading the picture an image to image run starts from, and writing the one it ends with. The
+# default feature set is a dozen decoders -- avif, exr, tiff, webp and the rest -- behind a good
+# deal of C. Held to the two formats anyone actually hands a diffusion model, which are also the
+# two written in pure Rust.
+#
+# Cargo.lock holds 0.25.9 rather than the newest 0.25: 0.25.10 asks for a rustc a minor version
+# ahead of the one this is built with. Nothing here needs what it added, so the lock is the place
+# that says so rather than a bound in the range.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
 ], optional = true }
