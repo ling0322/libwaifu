@@ -1,5 +1,7 @@
 # libwaifu: your local AI waifu
 
+[![CI](https://github.com/ling0322/libwaifu/actions/workflows/ci.yml/badge.svg)](https://github.com/ling0322/libwaifu/actions/workflows/ci.yml)
+
 libwaifu draws your waifu on your own machine. No API key, no cloud, no one else seeing what you
 asked for -- she is painted by your own GPU, as fast as the hardware allows.
 

@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux-cpu:
+    name: Linux (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libunwind
+        working-directory: third_party
+        run: bash install_unwind.sh
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test (C++)
+        run: ./build/unittest
+
+      - name: Test (Rust)
+        run: cargo test --manifest-path waifu/Cargo.toml
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+  macos-metal:
+    name: macOS (CPU + Metal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libomp
+        run: brew install libomp
+
+      - name: Install MLX
+        working-directory: third_party
+        run: bash install_mlx.sh
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_MLX=ON
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.ncpu)
+
+      - name: Test (C++)
+        run: ./build/unittest
+
+      - name: Test (Rust)
+        run: cargo test --manifest-path waifu/Cargo.toml
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
