@@ -183,8 +183,17 @@ if(WITH_MLX)
         "metal/to_device.cc")
     set(flint_test_SOURCES
         ${flint_test_SOURCES}
+        "metal/attention_test.cc"
+        "metal/conv2d_test.cc"
+        "metal/elementwise_test.cc"
+        "metal/matmul_test.cc"
         "metal/metallib_test.cc"
-        "metal/operators_test.cc")
+        "metal/norm_test.cc"
+        "metal/operators_test.cc"
+        "metal/rand_test.cc"
+        "metal/reduce_test.cc"
+        "metal/shape_test.cc"
+        "metal/to_device_test.cc")
     set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal/benchmark.cc")
 endif()
 
