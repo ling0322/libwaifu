@@ -237,6 +237,19 @@ class SdxlExporter(ModelExporter):
         self._export_group_norm(ctx.with_subname("conv_norm_out"), decoder.conv_norm_out)
         self._export_conv2d(ctx.with_subname("conv_out"), decoder.conv_out)
 
+    def _export_vae_encoder(self, ctx: Context, encoder) -> None:
+        """The same walk backwards: down the rungs, then the mid block rather than before it.
+
+        Its conv_out is twice as deep as a latent because what an encoder produces is a
+        distribution over one, a mean and a log variance side by side.
+        """
+        self._export_conv2d(ctx.with_subname("conv_in"), encoder.conv_in)
+        for index, block in enumerate(encoder.down_blocks):
+            self._export_vae_block(ctx.with_subname(f"down{index}"), block)
+        self._export_vae_block(ctx.with_subname("mid"), encoder.mid_block)
+        self._export_group_norm(ctx.with_subname("conv_norm_out"), encoder.conv_norm_out)
+        self._export_conv2d(ctx.with_subname("conv_out"), encoder.conv_out)
+
     # ---- the text encoders --------------------------------------------------------------
 
     def _export_clip_layer(self, ctx: Context, layer) -> None:
@@ -280,11 +293,18 @@ class SdxlExporter(ModelExporter):
             projection=pipeline.text_encoder_2.text_projection)
         self._export_unet(ctx.with_subname("unet"), pipeline.unet)
 
-        # Only the decoder: turning an image back into a latent is what the encoder is for, and
-        # text to image never does that.
+        # Both halves: the decoder for text to image, and the encoder for image to image, which
+        # starts from a picture rather than from noise.
+        #
+        # The decoder sits directly under vae rather than under vae.decoder, which is where a
+        # reader would look for it now that there are two. It was the only half when those names
+        # were chosen and packages are already written with them, so it keeps the bare prefix and
+        # the encoder takes one of its own.
         self._float32 = True
         self._export_vae_decoder(ctx.with_subname("vae"), pipeline.vae.decoder)
         self._export_conv2d(ctx.with_subname("vae.post_quant_conv"), pipeline.vae.post_quant_conv)
+        self._export_vae_encoder(ctx.with_subname("vae.encoder"), pipeline.vae.encoder)
+        self._export_conv2d(ctx.with_subname("vae.encoder.quant_conv"), pipeline.vae.quant_conv)
         self._float32 = False
 
     @classmethod
@@ -477,9 +497,10 @@ def export_test_cases(pipeline, fp) -> None:
     """Write what huggingface produces for one prompt, so the runtime can be checked against it.
 
     Everything but the sampler, which has no weights and is checked against a schedule instead:
-    what both text encoders make of one prompt, what the VAE decoder makes of one latent, and what
-    one U-Net step makes of the two together. All of it on a 32 by 32 latent, which is a 256 by
-    256 image -- large enough to exercise every block and small enough to carry in the repository.
+    what both text encoders make of one prompt, what the VAE makes of one latent and of the image
+    it decodes to, and what one U-Net step makes of the two together. All of it on a 32 by 32
+    latent, which is a 256 by 256 image -- large enough to exercise every block and small enough
+    to carry in the repository.
     """
     ctx = Context("test_case")
     with TensorWriter(fp) as writer:
@@ -522,6 +543,18 @@ def export_test_cases(pipeline, fp) -> None:
             decoded = pipeline.vae.decode(
                 latent / pipeline.vae.config.scaling_factor).sample
         writer.write_tensor(ctx.with_subname("decoded"), decoded, preserve_dtype=True)
+
+        # And the way back, on that same image rather than on numbers of its own: numbers no
+        # decoder would produce would be exercising the encoder's weights outside the range they
+        # were trained in. What is written is the mean of the distribution rather than a draw from
+        # it, the draw being the one part of an encoder two implementations have no way to agree
+        # on, and it is scaled the way the sampler wants a latent.
+        with torch.no_grad():
+            encoded = pipeline.vae.encode(decoded).latent_dist.mean
+        writer.write_tensor(
+            ctx.with_subname("encoded"),
+            encoded * pipeline.vae.config.scaling_factor,
+            preserve_dtype=True)
 
         # One U-Net step on that same latent. The conditioning is what the pipeline would build
         # for a 256 by 256 image with nothing cropped: the two hidden states side by side, the

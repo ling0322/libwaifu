@@ -31,4 +31,4 @@ pub use pipeline::{
 pub use sampler::{EulerSampler, SamplerConfig};
 pub use text_encoder::{ClipTextConfig, ClipTextEncoder, ClipTextOutput};
 pub use unet::{Unet, UnetCondition, UnetConfig};
-pub use vae::{VaeConfig, VaeDecoder};
+pub use vae::{VaeConfig, VaeDecoder, VaeEncoder};
