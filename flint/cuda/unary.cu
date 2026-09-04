@@ -27,8 +27,6 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-__device__ constexpr float Sqrt2 = 1.4142136f;
-
 /// Evaluated in float whatever the tensor's type is, so a half tensor gets the value the float
 /// one would and is rounded once at the end. flint/cpu/unary.cc computes the same way.
 template<typename T, UnaryOp OP>

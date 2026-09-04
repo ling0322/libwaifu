@@ -112,7 +112,6 @@ constexpr int kNTiles = kChunk / kTileN;   // token tiles across an accumulator
 constexpr int kKBlocks = kChunk / kTileK;  // 16-token blocks of a contraction over the chunk
 
 constexpr int kMaxHeadDim = 128;
-constexpr int kMaxNTilesD = kMaxHeadDim / kTileN;
 
 constexpr int kPad = 8;
 constexpr int kScoreLd = kChunk + kPad;
