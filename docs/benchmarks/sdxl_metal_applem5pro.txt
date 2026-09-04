@@ -1,0 +1,53 @@
+Running on
+  cpu       Apple M5 Pro  (15 threads)
+  memory    25.8 GB
+  build     OpenMP
+
+SDXL GEMM
+---------
+half precision
+shape                                         time    TFLOP/s
+ff.gate      1024x10240x1280               1.27 ms      21.10 TFLOP/s
+ff.out       1024x1280x5120                0.82 ms      16.39 TFLOP/s
+attn proj    1024x1280x1280                0.31 ms      10.75 TFLOP/s
+attn qkv     1024x3840x1280                0.60 ms      16.90 TFLOP/s
+ff.gate      4096x5120x640                 1.34 ms      20.06 TFLOP/s
+ff.out       4096x640x2560                 0.76 ms      17.76 TFLOP/s
+attn proj    4096x640x640                  0.31 ms      10.95 TFLOP/s
+attn qkv     4096x1920x640                 0.65 ms      15.57 TFLOP/s
+cross kv     77x2560x2048                  0.29 ms       2.81 TFLOP/s
+cross kv     77x1280x2048                  0.24 ms       1.67 TFLOP/s
+
+SDXL convolution
+----------------
+half precision, one group
+shape                                         time    GFLOP/s
+unet 128x128x320 3x3                       1.40 ms    21541.2 GFLOP/s
+unet 64x64x640 3x3                         1.56 ms    19382.5 GFLOP/s
+unet 32x32x1280 3x3                        5.81 ms     5195.9 GFLOP/s
+unet 128x128x320 downsample 3x3/2          1.67 ms     4530.6 GFLOP/s
+unet 64x64x640 1x1                         0.88 ms     3818.9 GFLOP/s
+vae 512x512x256 3x3                       11.13 ms    27789.3 GFLOP/s
+
+SDXL elementwise
+----------------
+half precision, per call
+group_norm   128x128x320                           1.27 ms      16.5 GB/s
+silu         128x128x320                           0.35 ms      60.2 GB/s
+add          128x128x320                           0.30 ms     105.4 GB/s
+group_norm   64x64x640                             0.65 ms      16.2 GB/s
+silu         64x64x640                             0.23 ms      45.2 GB/s
+add          64x64x640                             0.18 ms      86.3 GB/s
+group_norm   32x32x1280                            0.35 ms      15.0 GB/s
+silu         32x32x1280                            0.18 ms      29.8 GB/s
+add          32x32x1280                            0.17 ms      47.6 GB/s
+layer_norm   64x64x640                             0.25 ms      41.9 GB/s
+self attention 64x64x640                           1.91 ms     22.48 TFLOP/s
+cross attention 64x64x640                          0.26 ms      3.09 TFLOP/s
+geglu        64x64x640                             1.23 ms      51.3 GB/s
+layer_norm   32x32x1280                            0.17 ms      30.9 GB/s
+self attention 32x32x1280                          0.40 ms     13.50 TFLOP/s
+cross attention 32x32x1280                         0.20 ms      2.03 TFLOP/s
+geglu        32x32x1280                            0.61 ms      51.8 GB/s
+upsample     32x32x1280 to 64x64                   0.28 ms      47.1 GB/s
+upsample     64x64x640 to 128x128                  0.36 ms      73.8 GB/s

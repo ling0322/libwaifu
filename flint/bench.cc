@@ -29,6 +29,11 @@
 #include <thread>
 #include <vector>
 
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
+
 #ifdef LIBWAIFU_CUDA_ENABLED
 #include <cuda_runtime.h>
 #endif
@@ -150,8 +155,30 @@ std::string gpuSlug() {
   return std::string();
 }
 
+/// The chip or processor name, from /proc/cpuinfo on Linux and sysctl on macOS.
+std::string cpuModel() {
+#ifdef __APPLE__
+  char buf[256] = {};
+  size_t len = sizeof(buf);
+  if (sysctlbyname("machdep.cpu.brand_string", buf, &len, nullptr, 0) == 0) return buf;
+#endif
+  return fromProc("/proc/cpuinfo", "model name");
+}
+
+/// Total physical memory in bytes, or zero when it cannot be read.
+double totalMemoryBytes() {
+#ifdef __APPLE__
+  int64_t mem = 0;
+  size_t len = sizeof(mem);
+  if (sysctlbyname("hw.memsize", &mem, &len, nullptr, 0) == 0) return double(mem);
+#endif
+  std::string line = fromProc("/proc/meminfo", "MemTotal");
+  if (!line.empty()) return atof(line.c_str()) * 1024.0;  // /proc reports kilobytes
+  return 0;
+}
+
 std::string cpuSlug() {
-  return slug(fromProc("/proc/cpuinfo", "model name"));
+  return slug(cpuModel());
 }
 
 
@@ -188,7 +215,7 @@ std::string savedName(const char *group, const std::vector<const Entry *> &chose
 }
 
 void reportCpu() {
-  std::string model = fromProc("/proc/cpuinfo", "model name");
+  std::string model = cpuModel();
   unsigned threads = std::thread::hardware_concurrency();
   if (model.empty() && threads == 0) return;
 
@@ -196,13 +223,8 @@ void reportCpu() {
   if (threads > 0) print("  (%u threads)", threads);
   print("\n");
 
-  // MemTotal is in kilobytes, and it is the memory the kernel will hand out rather than what is
-  // installed -- a few tenths short of the number on the box.
-  std::string memory = fromProc("/proc/meminfo", "MemTotal");
-  if (!memory.empty()) {
-    double kilobytes = atof(memory.c_str());
-    if (kilobytes > 0) print("  memory    %.1f GB\n", kilobytes / 1e6);
-  }
+  double mem = totalMemoryBytes();
+  if (mem > 0) print("  memory    %.1f GB\n", mem / 1e9);
 }
 
 void reportGpu() {
@@ -286,7 +308,7 @@ void reportMachine() {
 
 void list() {
   sortEntries();
-  for (Group group : {Group::kSdxlCuda, Group::kSdxlCpu}) {
+  for (Group group : {Group::kSdxlCuda, Group::kSdxlCpu, Group::kSdxlMetal}) {
     print("%s\n", nameOf(group));
     for (const Entry &entry : entries()) {
       if (entry.group == group) print("    %s\n", entry.name.c_str());
@@ -316,6 +338,8 @@ const char *nameOf(Group group) {
       return "sdxl_cuda";
     case Group::kSdxlCpu:
       return "sdxl_cpu";
+    case Group::kSdxlMetal:
+      return "sdxl_metal";
   }
   return "unknown";
 }
@@ -341,7 +365,7 @@ int run(int argc, char **argv) {
     }
     if (argument == "--help" || argument == "-h") {
       print("Usage: benchmark GROUP [--save[=FILE]]\n\n");
-      print("  GROUP       sdxl_cuda or sdxl_cpu\n");
+      print("  GROUP       sdxl_cuda, sdxl_cpu, or sdxl_metal\n");
       print("  --list      print the groups and what is in them, and run nothing\n");
       print("  --save[=F]  keep a copy in a text file, named after the group and the machine\n");
       print("              when no name is given\n");
@@ -364,7 +388,7 @@ int run(int argc, char **argv) {
 
   Group group = Group::kSdxlCuda;
   bool found = false;
-  for (Group candidate : {Group::kSdxlCuda, Group::kSdxlCpu}) {
+  for (Group candidate : {Group::kSdxlCuda, Group::kSdxlCpu, Group::kSdxlMetal}) {
     if (std::string(wanted) == nameOf(candidate)) {
       group = candidate;
       found = true;

@@ -257,6 +257,10 @@ DType MetalOperators::getDefaultFloatType() {
   return DType::kFloat16;
 }
 
+void MetalOperators::synchronize() {
+  mlx::core::synchronize();
+}
+
 }  // namespace metal
 }  // namespace op
 }  // namespace fl
