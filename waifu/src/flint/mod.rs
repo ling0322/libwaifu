@@ -117,6 +117,8 @@ impl Device {
         match self {
             Device::Cpu => "cpu",
             Device::Cuda => "cuda",
+            Device::Metal => "metal",
+            Device::CudaHost => "cuda-host",
         }
     }
 

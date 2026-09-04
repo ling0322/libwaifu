@@ -225,7 +225,7 @@ Tensor MetalOperators::cast(Tensor tensor, DType dtype) {
   return metal::cast(tensor, dtype);
 }
 
-Tensor MetalOperators::to(Device device, Tensor tensor) {
+Tensor MetalOperators::toDevice(Device device, Tensor tensor) {
   return metal::toDevice(device, tensor);
 }
 

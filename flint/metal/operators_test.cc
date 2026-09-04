@@ -34,11 +34,11 @@ namespace {
 // The Metal operators run in float16, the same as CUDA's, so the reference the results are held
 // against is the float32 CPU one and the tolerances are the ones the CUDA tests use.
 Tensor toMetal(const Tensor &a) {
-  return F::cast(F::to(Device::getMetal(), a), DType::kFloat16);
+  return F::cast(F::toDevice(Device::getMetal(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::to(Device::getCpu(), F::cast(a, DType::kFloat));
+  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
 }
 
 /// Read a tensor out as plain floats, so a test can hold a result against a reference worked out
@@ -68,7 +68,7 @@ CATCH_TEST_CASE("test Metal device transfer round trip", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
   Tensor a = F::rand({3, 7, 5}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(F::to(Device::getCpu(), F::to(Device::getMetal(), a)), a));
+  CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), F::toDevice(Device::getMetal(), a)), a));
 
   // Half the point of the backend is that a fp32 tensor can go over, be worked on in fp16 and
   // come back; the round trip through both dtypes is what the operator tests below rely on.
@@ -328,7 +328,7 @@ CATCH_TEST_CASE("test Metal lookup", "[op][metal]") {
 
   CATCH_REQUIRE(
       F::allClose(
-          toCpu(F::lookup(toMetal(table), F::to(Device::getMetal(), indices))),
+          toCpu(F::lookup(toMetal(table), F::toDevice(Device::getMetal(), indices))),
           F::lookup(table, indices),
           5e-3,
           5e-3));
