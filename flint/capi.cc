@@ -32,6 +32,7 @@
 #include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
+#include "lutil/internal/log.h"
 #ifdef LIBWAIFU_CUDA_ENABLED
 #include "flint/cuda/future_tensor.h"
 #endif  // LIBWAIFU_CUDA_ENABLED
@@ -187,6 +188,10 @@ int32_t fl_get_last_error_code() {
 
 const char *fl_get_last_error_message() {
   return gErrorMessage.c_str();
+}
+
+void fl_set_fatal_handler(fl_fatal_handler_t handler) {
+  lut::internal::setFatalHandler(handler);
 }
 
 int32_t fl_tensor_zeros(

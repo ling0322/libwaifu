@@ -26,6 +26,17 @@ namespace internal {
 
 extern LogSeverity gLogLevel;
 
+/// What a fatal log calls just before it takes the process down, or nullptr for none.
+///
+/// A program that has taken the screen over -- a full screen terminal application -- has nowhere
+/// for a message to land until it gives the screen back, and by the time the process is dying it
+/// has no way to be told. This is where it is told. It runs before anything is printed, since the
+/// first line printed is already too late for one.
+typedef void (*FatalHandler)();
+
+/// Sets it, and returns the one that was there.
+FatalHandler setFatalHandler(FatalHandler handler);
+
 class LogWrapper {
  public:
   LogWrapper(LogSeverity severity, const char *source_file, int source_line);

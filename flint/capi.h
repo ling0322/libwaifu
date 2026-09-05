@@ -531,6 +531,21 @@ FLAPI int32_t fl_memory_capture(fl_device_type_t device, fl_memory_snapshot_t *o
 /// what happens from here.
 FLAPI int32_t fl_memory_reset_peak_stats(fl_device_type_t device);
 
+/// What fl_set_fatal_handler() registers.
+typedef void (*fl_fatal_handler_t)(void);
+
+/// Register `handler` to run just before a check that fails ends the process.
+///
+/// Not every failure comes back as an error code: a check that fails inside an operator prints
+/// what went wrong and calls abort(), which is the right thing for a library that has found its
+/// own invariant broken but leaves a caller that owns the screen with the message written over
+/// whatever it had drawn. This runs first, before anything is printed, which is a caller's one
+/// chance to give the screen back.
+///
+/// It runs on whichever thread failed, and the process is going down either way, so it should do
+/// the one thing it is there for and return. Passing NULL clears it.
+FLAPI void fl_set_fatal_handler(fl_fatal_handler_t handler);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

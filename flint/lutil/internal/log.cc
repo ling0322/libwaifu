@@ -33,6 +33,18 @@ namespace internal {
 
 LogSeverity gLogLevel = LogSeverity::kINFO;
 
+/// Read and written from any thread, since a fatal log comes from whichever one hit it. Set once
+/// at startup in practice, which is why a plain pointer rather than anything that would have to be
+/// safe to change while another thread is dying through it.
+FatalHandler gFatalHandler = nullptr;
+
+FatalHandler setFatalHandler(FatalHandler handler) {
+  FatalHandler previous = gFatalHandler;
+  gFatalHandler = handler;
+
+  return previous;
+}
+
 LogWrapper::LogWrapper(LogSeverity severity, const char *source_file, int source_line)
     : severity_(severity),
       source_line_(source_line) {
@@ -51,6 +63,10 @@ LogWrapper::LogWrapper(LogSeverity severity, const char *source_file, int source
 LogWrapper::~LogWrapper() {
   std::string message = os_.str();
   if (message.empty()) message = default_message_;
+
+  // Before the first line is printed rather than after the last: whoever is being given the
+  // screen back needs it before there is anything on it to read, and nothing runs after abort().
+  if (severity_ == LogSeverity::kFATAL && gFatalHandler) gFatalHandler();
 
   printf("%s %s %s:%d] %s\n", Severity(), Time(), source_file_, source_line_, message.c_str());
 

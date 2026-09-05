@@ -250,6 +250,7 @@ extern "C" {
 
     pub fn fl_memory_capture(device: FlDeviceType, out: *mut FlMemorySnapshot) -> i32;
     pub fn fl_memory_reset_peak_stats(device: FlDeviceType) -> i32;
+    pub fn fl_set_fatal_handler(handler: Option<extern "C" fn()>);
 }
 
 /// Mirrors `fl_memory_snapshot_t`.

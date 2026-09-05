@@ -90,6 +90,25 @@ fn with_usage<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, E> {
     result
 }
 
+/// Puts the terminal back the way it was, from inside the tensor library's last breath.
+///
+/// A check that fails there prints what went wrong and calls `abort()`, and the message is worth
+/// nothing written across a screen full of boxes -- which is where it lands, since by then the
+/// alternate screen is up, the cursor is hidden and the terminal is in raw mode. So the last thing
+/// that happens before the message is this.
+///
+/// It runs on whichever thread failed, which may not be the one drawing. Racing a half-finished
+/// frame is not a concern: nothing after this draws another, and a frame torn on the way out is
+/// better than a message nobody can read.
+extern "C" fn give_the_screen_back() {
+    ratatui::restore();
+
+    // And the cursor, which restore() does not do: hiding it is the Terminal's and showing it
+    // again is what its Drop does, and abort() runs no destructors. Without this the shell that
+    // gets the terminal back has no cursor in it.
+    let _ = ratatui::crossterm::execute!(io::stdout(), ratatui::crossterm::cursor::Show);
+}
+
 fn print_usage() {
     eprintln!("Usage: waifu draw [OPTIONS]");
     eprintln!();
@@ -111,6 +130,10 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         print_usage();
         return Ok(());
     }
+
+    // Before the screen goes up, and it stays for the rest of the run: both screens take the
+    // terminal, and a check that fails inside the tensor library can come from either.
+    crate::flint::on_fatal(give_the_screen_back);
 
     let model = with_usage(args.model())?.map(str::to_string);
     let mut device = with_usage(args.device())?.resolve();

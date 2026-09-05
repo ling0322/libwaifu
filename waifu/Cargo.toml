@@ -22,6 +22,11 @@ required-features = ["cli"]
 # dependency-free; the binary needs a terminal library to draw with.
 cli = ["dep:image", "dep:ratatui", "dep:ureq"]
 
+# Needs a terminal to take over before it can show what taking one over costs.
+[[example]]
+name = "fatal_screen"
+required-features = ["cli"]
+
 [dependencies]
 # What the command line tool needs, and all this crate depends on -- the library itself has
 # nothing.
