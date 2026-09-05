@@ -57,14 +57,13 @@ type Error = Box<dyn std::error::Error>;
 
 /// The sizes on offer, which are the ones SDXL was trained at. Every one of them is a multiple of
 /// the 32 pixels the U-Net's own halvings need.
-/// How tall the prompt boxes are: two rows to type in and a border round them.
+/// How tall the prompt boxes are: three rows to type in and a border round them.
 ///
-/// Stacked rather than side by side, and this is why. A prompt here is a list of tags rather than
-/// a sentence, and a long one in a box half the screen wide wraps every few words -- the cursor
-/// ends up somewhere down the middle of a paragraph with no line long enough to find it on. Full
-/// width and two rows is a box a tag list can be steered around in, and it is a row shorter than
-/// the three it used to have.
-const TEXT_BOX: u16 = 4;
+/// Side by side, which halves how much of a tag list fits on a row, so they get the third row
+/// back to make up for it. Stacking them full width was the other way of solving that and cost
+/// five rows; what made the narrow ones hard to steer around was that the cursor was always in
+/// one, which is what the editing mode fixed instead.
+const TEXT_BOX: u16 = 5;
 
 /// How big the button is: a block rather than a stripe, and no wider than it needs to be.
 ///
@@ -487,8 +486,7 @@ const FIELDS: [Field; 9] = [
 /// what is above the row of numbers is the box above it and not the number to its left. The two
 /// lists hold the same boxes, which [`the_grid_and_the_tab_order_hold_the_same_boxes`] checks.
 const ROWS: &[&[Field]] = &[
-    &[Field::Prompt],
-    &[Field::Negative],
+    &[Field::Prompt, Field::Negative],
     &[Field::From],
     &[
         Field::Steps,
@@ -523,6 +521,17 @@ impl Field {
             self,
             Field::Prompt | Field::Negative | Field::From | Field::Seed
         )
+    }
+}
+
+/// What characters a box will take, which is also what typing into it starts editing it.
+///
+/// A letter over the seed box is not the start of anything: nothing it could grow into is a seed,
+/// so the box is not opened for it.
+fn accepts(field: Field) -> fn(&char) -> bool {
+    match field {
+        Field::Seed => char::is_ascii_digit,
+        _ => |_| true,
     }
 }
 
@@ -590,6 +599,13 @@ struct App {
     asking: Option<Asking>,
     /// The box asking whether to leave, while it is up.
     leaving: Option<ask::Confirm>,
+    /// Whether the keys are going into the box the cursor is in rather than moving between boxes.
+    ///
+    /// The cursor sits in a box without being in it, which is what lets the arrows mean the same
+    /// thing everywhere -- along the row, up and down the screen -- instead of meaning that in
+    /// five boxes and "along the text" in four. Enter or the first character typed goes in;
+    /// enter or escape comes back out.
+    editing: bool,
     quit: bool,
 
     /// What the run was pointed at. Shown rather than kept, because a picture that came out wrong
@@ -625,6 +641,7 @@ impl App {
             browsed: None,
             asking: None,
             leaving: None,
+            editing: false,
             quit: false,
         }
     }
@@ -635,11 +652,6 @@ impl App {
 
     fn running(&self) -> bool {
         matches!(self.status, Status::Running { .. })
-    }
-
-    /// Whether a box is up over the screen, which is where the keys are going.
-    fn covered(&self) -> bool {
-        self.browsing.is_some() || self.asking.is_some() || self.leaving.is_some()
     }
 
     fn failed(&mut self, message: impl Into<String>) {
@@ -699,9 +711,10 @@ impl App {
     fn key(&mut self, key: KeyEvent, cancel: &AtomicBool) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Ctrl-C still ends the program from inside any box on top of the screen: it is the key
-        // that always means that, and a box is no reason for it to stop meaning it.
-        if self.covered() && key.code == KeyCode::Char('c') && control {
+        // Before anything else, from anywhere. It is the key that always means this: a box on
+        // top of the screen is no reason for it to stop meaning it, and neither is a cursor
+        // sitting in one, where it would otherwise type a "c".
+        if key.code == KeyCode::Char('c') && control {
             cancel.store(true, Ordering::Relaxed);
             self.quit = true;
             return;
@@ -758,11 +771,24 @@ impl App {
             return;
         }
 
-        match key.code {
-            KeyCode::Char('c') if control => {
-                cancel.store(true, Ordering::Relaxed);
-                self.quit = true;
+        // In a box, the keys are the box's. Only the two that say "done" are not.
+        if self.editing {
+            match key.code {
+                KeyCode::Enter | KeyCode::Esc => self.editing = false,
+                KeyCode::Tab => {
+                    self.editing = false;
+                    self.step_focus(1);
+                }
+                KeyCode::BackTab => {
+                    self.editing = false;
+                    self.step_focus(-1);
+                }
+                code => self.edit(code),
             }
+            return;
+        }
+
+        match key.code {
             KeyCode::Esc => {
                 // While a run is in flight this ends the run rather than the program, so that
                 // one wrong prompt does not cost a reload of the model.
@@ -786,26 +812,36 @@ impl App {
             KeyCode::Up => self.move_row(-1),
             KeyCode::Down => self.move_row(1),
 
-            // Along the row, except where the box has its own use for them.
-            KeyCode::Left if !self.focused().takes_text() => {
-                self.focus_on(along_from(self.focused(), -1));
-            }
-            KeyCode::Right if !self.focused().takes_text() => {
-                self.focus_on(along_from(self.focused(), 1));
+            // Along the row, everywhere: the cursor is in a box without being in it, so there is
+            // nothing else in here for these two to mean.
+            KeyCode::Left => self.focus_on(along_from(self.focused(), -1)),
+            KeyCode::Right => self.focus_on(along_from(self.focused(), 1)),
+
+            // Typing over a box opens it and goes in, which is what someone who has just tabbed
+            // to the prompt and started typing means. The character is not eaten on the way.
+            KeyCode::Char(character)
+                if self.focused().takes_text() && accepts(self.focused())(&character) =>
+            {
+                self.editing = true;
+                self.edit(KeyCode::Char(character));
             }
 
-            code => self.edit(code),
+            _ => {}
         }
     }
 
     /// Moves the cursor `by` boxes along the tab order, round either end.
     fn step_focus(&mut self, by: isize) {
+        self.editing = false;
         let count = FIELDS.len() as isize;
         self.focus = ((self.focus as isize + by).rem_euclid(count)) as usize;
     }
 
     /// Puts the cursor in a named box, and aims up and down at the column it is in.
+    ///
+    /// Leaving a box leaves it: the keys cannot be going into one the cursor is not on.
     fn focus_on(&mut self, field: Field) {
+        self.editing = false;
         self.focus = FIELDS
             .iter()
             .position(|box_| *box_ == field)
@@ -819,6 +855,7 @@ impl App {
     /// takes every column, and a cursor that walked up out of the size box and back down should
     /// land on the size box rather than on the near end of the row.
     fn move_row(&mut self, by: isize) {
+        self.editing = false;
         let column = self.column;
         let (row, _) = self.focused().at();
         let row = (row as isize + by).clamp(0, ROWS.len() as isize - 1) as usize;
@@ -891,10 +928,9 @@ impl App {
             }
             Field::Generate => self.start(),
 
-            // Nothing. A run is minutes long and starts from one place, which is the button --
-            // enter in the box a prompt is being typed into is a key pressed on the way to
-            // something else as often as it is one meant.
-            Field::Prompt | Field::Negative | Field::Seed => {}
+            // Into the box, not off to draw. A run is minutes long and starts from one place,
+            // which is the button; enter here is the other half of what escape undoes.
+            Field::Prompt | Field::Negative | Field::Seed => self.editing = true,
         }
     }
 
@@ -963,13 +999,9 @@ impl App {
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [heading, prompt, negative, from, numbers, generate, status, written, keys] =
+        let [heading, prompts, from, numbers, generate, status, written, keys] =
             Layout::vertical([
                 Constraint::Length(1),
-                // The same height, because the two are the same kind of thing: what to draw and
-                // what to keep out of it. One box shorter than the other reads as the shorter one
-                // mattering less, which is not what the difference was ever about.
-                Constraint::Length(TEXT_BOX),
                 Constraint::Length(TEXT_BOX),
                 // A path is one line however long it is, so this box is the height of its border.
                 Constraint::Length(3),
@@ -980,6 +1012,11 @@ impl App {
                 Constraint::Length(1),
             ])
             .areas(frame.area());
+
+        // The same size, because the two are the same kind of thing: what to draw and what to
+        // keep out of it. One drawn smaller than the other reads as the smaller one mattering
+        // less, which is not what the difference was ever about.
+        let [prompt, negative] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(prompts);
 
         let fifths = [Constraint::Ratio(1, 5); 5];
         let [steps, guidance, size, strength, seed] = Layout::horizontal(fifths).areas(numbers);
@@ -1086,8 +1123,17 @@ impl App {
             return;
         }
 
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
+        let hints = match self.editing {
+            true => vec![
+                Span::raw(" typing goes into "),
+                Span::raw(self.focused_title()).bold(),
+                Span::raw("  "),
+                Span::raw("enter").bold(),
+                Span::raw(" or "),
+                Span::raw("esc").bold(),
+                Span::raw(" done"),
+            ],
+            false => vec![
                 Span::raw(" tab").bold(),
                 Span::raw(" or "),
                 Span::raw("arrows").bold(),
@@ -1096,10 +1142,23 @@ impl App {
                 Span::raw(" open  "),
                 Span::raw("esc").bold(),
                 Span::raw(" stop or leave"),
-            ]))
-            .style(Style::new().fg(Color::DarkGray)),
+            ],
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(hints)).style(Style::new().fg(Color::DarkGray)),
             keys,
         );
+    }
+
+    /// What the box the cursor is in is called, for saying where typing is going.
+    fn focused_title(&self) -> &'static str {
+        match self.focused() {
+            Field::Prompt => "prompt",
+            Field::Negative => "away from",
+            Field::From => "draw from",
+            Field::Seed => "seed",
+            _ => "the box",
+        }
     }
 
     /// The one thing on the screen that is not a box to fill in.
@@ -1138,13 +1197,18 @@ impl App {
         frame.render_widget(Paragraph::new(lines).centered().style(style), area);
     }
 
-    /// The border a box gets, which is where the cursor being in it shows.
+    /// The border a box gets, which is where the cursor being in it -- and being *in* it -- shows.
+    ///
+    /// Three states rather than two, because there are three: the cursor elsewhere, the cursor on
+    /// this box, and the keys going into it. The middle one is the one that is new, and a screen
+    /// that drew it the same as either of the others would be a screen where the same key press
+    /// does two different things with nothing to say which.
     fn box_of(&self, title: &str, field: Field) -> Block<'static> {
         let focused = self.focused() == field;
-        let colour = if focused {
-            Color::Yellow
-        } else {
-            Color::DarkGray
+        let colour = match (focused, self.editing) {
+            (true, true) => Color::LightGreen,
+            (true, false) => Color::Yellow,
+            (false, _) => Color::DarkGray,
         };
 
         Block::bordered()
@@ -1185,7 +1249,9 @@ impl App {
             .collect();
         frame.render_widget(Paragraph::new(shown), inner);
 
-        if self.focused() == field {
+        // Only while the keys are going into it. A cursor blinking in a box that will not take
+        // what is typed at it is the screen saying something that is not so.
+        if self.focused() == field && self.editing {
             frame.set_cursor_position((inner.x + column as u16, inner.y + (row - first) as u16));
         }
     }
@@ -1365,7 +1431,20 @@ mod tests {
         App::new("sdxl:wai".to_string(), Device::Cpu)
     }
 
+    /// Types into the box the cursor is in and comes back out of it.
+    ///
+    /// Which is what someone does: the first character opens the box, and escape leaves it, so a
+    /// test that typed and stopped would be leaving the screen in a state no test after that line
+    /// is about. `typing_into` is the one that stays in.
     fn type_in(app: &mut App, text: &str, cancel: &AtomicBool) {
+        typing_into(app, text, cancel);
+        if app.editing {
+            app.key(press(KeyCode::Esc), cancel);
+        }
+    }
+
+    /// The same, left in the box, for the tests that are about being in one.
+    fn typing_into(app: &mut App, text: &str, cancel: &AtomicBool) {
         for character in text.chars() {
             app.key(press(KeyCode::Char(character)), cancel);
         }
@@ -1450,11 +1529,9 @@ mod tests {
         app.key(press(KeyCode::Down), &cancel);
         assert_eq!(app.focused(), Field::Size);
 
-        // The three boxes above it are stacked, one to a row, so they are walked one at a time
-        // however far along the row below the cursor started.
+        // The two prompts are side by side, so the one above "draw from" is the one over it --
+        // and there is no fourth column up there, so the far ones land on the last.
         focus_on(&mut app, Field::From);
-        app.key(press(KeyCode::Up), &cancel);
-        assert_eq!(app.focused(), Field::Negative);
         app.key(press(KeyCode::Up), &cancel);
         assert_eq!(app.focused(), Field::Prompt);
 
@@ -1470,9 +1547,82 @@ mod tests {
         assert_eq!(app.focused(), Field::Generate, "down walked off the screen");
 
         // And nothing above the top.
-        focus_on(&mut app, Field::Prompt);
+        focus_on(&mut app, Field::Negative);
         app.key(press(KeyCode::Up), &cancel);
-        assert_eq!(app.focused(), Field::Prompt);
+        assert_eq!(app.focused(), Field::Negative);
+    }
+
+    #[test]
+    fn a_box_is_opened_before_it_is_typed_into() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        // The cursor on it is not the cursor in it, and the screen says which: the border, and a
+        // real cursor only where what is typed will land.
+        focus_on(&mut app, Field::Prompt);
+        assert!(!app.editing);
+        assert!(!screen(&app, 90, 30).contains("typing goes into"));
+
+        // Enter opens it, and so does the first character -- which is not eaten on the way in.
+        app.key(press(KeyCode::Enter), &cancel);
+        assert!(app.editing);
+        assert!(
+            screen(&app, 90, 30).contains("typing goes into"),
+            "the foot does not say so"
+        );
+
+        typing_into(&mut app, "a cat", &cancel);
+        assert_eq!(app.prompt.text(), "a cat");
+
+        // And either of the two that say done closes it, leaving what was typed.
+        app.key(press(KeyCode::Esc), &cancel);
+        assert!(!app.editing);
+        assert!(!app.quit, "escape out of a box left the program");
+        assert_eq!(app.prompt.text(), "a cat");
+
+        focus_on(&mut app, Field::Negative);
+        typing_into(&mut app, "blurry", &cancel);
+        assert!(app.editing, "typing did not open the box");
+        assert_eq!(
+            app.negative.text(),
+            "blurry",
+            "the first character was eaten"
+        );
+        app.key(press(KeyCode::Enter), &cancel);
+        assert!(!app.editing);
+    }
+
+    #[test]
+    fn leaving_a_box_by_any_road_leaves_it() {
+        // The keys cannot be going into a box the cursor is not on, so tab out of one closes it.
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        for leave in [KeyCode::Tab, KeyCode::BackTab] {
+            focus_on(&mut app, Field::Prompt);
+            app.key(press(KeyCode::Enter), &cancel);
+            assert!(app.editing);
+
+            app.key(press(leave), &cancel);
+            assert!(!app.editing, "{leave:?} left the box open");
+            assert_ne!(app.focused(), Field::Prompt);
+        }
+    }
+
+    #[test]
+    fn control_c_leaves_from_inside_a_box_rather_than_typing_a_c() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        focus_on(&mut app, Field::Prompt);
+        app.key(press(KeyCode::Enter), &cancel);
+        app.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &cancel,
+        );
+
+        assert!(app.quit);
+        assert_eq!(app.prompt.text(), "", "it typed a c instead");
     }
 
     #[test]
@@ -1501,17 +1651,29 @@ mod tests {
         assert_eq!(app.steps, 30);
         assert_eq!(app.guidance, 5.0);
 
-        // In a box of text there is something else they mean, so they keep meaning it.
+        // Including over a box of text, which is what the cursor sitting in a box without being
+        // in it buys: the same two keys mean the same thing wherever they are pressed.
         focus_on(&mut app, Field::Prompt);
         type_in(&mut app, "cat", &cancel);
+        app.key(press(KeyCode::Right), &cancel);
+        assert_eq!(app.focused(), Field::Negative);
+        assert_eq!(
+            app.prompt.text(),
+            "cat",
+            "the text was touched on the way past"
+        );
+
+        // And inside one they are the cursor's again.
+        focus_on(&mut app, Field::Prompt);
+        app.key(press(KeyCode::Enter), &cancel);
         app.key(press(KeyCode::Left), &cancel);
         app.key(press(KeyCode::Left), &cancel);
         assert_eq!(
             app.focused(),
             Field::Prompt,
-            "left walked out of a text box"
+            "left walked out of an open box"
         );
-        type_in(&mut app, "-", &cancel);
+        typing_into(&mut app, "-", &cancel);
         assert_eq!(app.prompt.text(), "c-at", "left did not move the cursor");
     }
 
@@ -1610,7 +1772,8 @@ mod tests {
         let mut app = ready();
         focus_on(&mut app, Field::Seed);
 
-        type_in(&mut app, "12a3", &cancel);
+        // The letter neither goes in nor opens the box: nothing it could grow into is a seed.
+        typing_into(&mut app, "12a3", &cancel);
         assert_eq!(app.seed.text(), "123");
         assert_eq!(app.options().seed, Some(123));
 
@@ -1659,13 +1822,16 @@ mod tests {
         let here = std::env::current_dir().unwrap();
         assert_eq!(app.browsing.as_ref().unwrap().directory(), here);
 
-        // And a path that is there is the one it opens on.
+        // And a path that is there is the one it opens on. Typed rather than entered: enter on
+        // this box is the picker's, so a character is what opens it for editing.
         app.key(press(KeyCode::Esc), &cancel);
         focus_on(&mut app, Field::From);
+        typing_into(&mut app, "x", &cancel);
         for _ in 0..40 {
             app.key(press(KeyCode::Backspace), &cancel);
         }
-        type_in(&mut app, here.parent().unwrap().to_str().unwrap(), &cancel);
+        typing_into(&mut app, here.parent().unwrap().to_str().unwrap(), &cancel);
+        app.key(press(KeyCode::Esc), &cancel);
         app.key(press(KeyCode::Enter), &cancel);
         assert_eq!(
             app.browsing.as_ref().unwrap().directory(),
@@ -1931,6 +2097,8 @@ mod tests {
             app.key(press(KeyCode::Enter), &cancel);
             assert!(app.pending.is_none(), "enter on {field:?} started a run");
             assert!(!app.running());
+            assert!(app.editing, "enter on {field:?} did not open it");
+            app.key(press(KeyCode::Esc), &cancel);
         }
 
         generate(&mut app, &cancel);
