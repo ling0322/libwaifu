@@ -109,6 +109,24 @@ extern "C" fn give_the_screen_back() {
     let _ = ratatui::crossterm::execute!(io::stdout(), ratatui::crossterm::cursor::Show);
 }
 
+/// Takes the terminal and paints over whatever was on it.
+///
+/// The clear is the whole reason this is a function. ratatui writes only what changed since the
+/// frame before, and the first frame is compared against a blank one, so a cell that is blank in
+/// the drawing is a cell it never writes -- it is relying on the alternate screen it just entered
+/// being empty. Which it is, unless the terminal was already in one: entering it a second time
+/// changes nothing, and then every blank cell shows whatever the last program left there.
+///
+/// That is not a rare shape. It is what a program that took the screen and died without giving it
+/// back leaves behind, which until a moment ago was what a failed check inside the tensor library
+/// did, and one of those can leave every run after it looking corrupted.
+fn take_the_screen() -> Result<DefaultTerminal, Error> {
+    let mut terminal = ratatui::init();
+    terminal.clear()?;
+
+    Ok(terminal)
+}
+
 fn print_usage() {
     eprintln!("Usage: waifu draw [OPTIONS]");
     eprintln!();
@@ -156,7 +174,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         None => {
             // The screen offers the device as well, starting on whatever `-d` resolved to, so
             // what comes back may not be what went in.
-            let mut terminal = ratatui::init();
+            let mut terminal = take_the_screen()?;
             let chosen = picker::choose(&mut terminal, device);
             ratatui::restore();
 
@@ -202,7 +220,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         _ => return Err("the model was never read".into()),
     }
 
-    let terminal = ratatui::init();
+    let terminal = take_the_screen()?;
     let mut app = App::new(model_name, device);
 
     // -i only fills the box. Everything about a run is changeable between runs, and a picture
