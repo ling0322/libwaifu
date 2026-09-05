@@ -1,5 +1,7 @@
 .vscode
-.claude
+# Shared agent skills under .claude/skills are checked in; what one person's machine
+# decides for itself is not.
+.claude/settings.local.json
 .venv
 transformers
 /data

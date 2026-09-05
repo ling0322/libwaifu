@@ -481,3 +481,175 @@ That builds and runs, but produces cubins for sm_120a only.
 `#if __CUDA_ARCH__ >= 1200` with `NOT_IMPL()` in the `#else`. `__CUDA_ARCH__` is not defined in
 the host pass, so on the face of it the condition is always false and both entry points always
 abort. Nothing was run to confirm this.
+
+
+## `WITH_CUDA=ON` on its own does not link, and the README says it needs nothing
+
+A CUDA build without `WITH_CUTLASS` fails at the link, sixteen symbols deep into the benchmark
+and then again into `unittest`:
+
+```
+cmake -S . -B build -DWITH_CUDA=ON -DWITH_FLASH_ATTN=OFF
+...
+flint/CMakeFiles/flint_static.dir/cuda/conv2d.cc.o: in function `fl::op::cuda::conv2d(...)':
+  conv2d.cc:45: undefined reference to `fl::op::cuda::isConv2dCutlassAvailable()'
+  conv2d.cc:49: undefined reference to `fl::op::cuda::conv2dCutlass(...)'
+```
+
+`flint/cuda/conv2d.cc` calls both unconditionally, but `flint/CMakeLists.txt:154` only compiles
+`cuda/conv2d_cutlass.cu` under `WITH_CUTLASS`. The runtime guard just above the call site reads
+
+```cpp
+if (!isConv2dCutlassAvailable()) {
+  throw lut::AbortedError("this build has no Conv2d (needs WITH_CUTLASS=ON)");
+}
+```
+
+which says plainly that a CUTLASS-less CUDA build is meant to be a thing that exists and reports
+itself at runtime. It cannot get past the linker to ever say it. Either the call site wants
+`#ifdef LIBWAIFU_CUTLASS_ENABLED` around it, or `WITH_CUDA` should imply `WITH_CUTLASS` the way it
+already implies `WITH_FLASH_ATTN` at `CMakeLists.txt:24`.
+
+Separately, the README is wrong about where CUTLASS comes from. Under "Conv2d, through cuDNN or
+CUTLASS":
+
+> `WITH_CUTLASS=ON` answers it too, and is enough on its own -- there is nothing to download for
+> it, since CUTLASS is a header library already in `third_party`.
+
+`third_party/cutlass` is not vendored and is gitignored; `third_party/install_cutlass.sh` exists
+precisely to clone v4.1.0 into it. On a fresh clone the configure step fails with
+
+```
+invalid CUTLASS_ROOT ".../third_party/cutlass": unable to find file .../include/cutlass/blas3.h,
+please call install_cutlass.sh in third_party first.
+```
+
+The CUDA build section names `install_flash_attn.sh` but not `install_cutlass.sh`, so a first
+CUDA build hits both of these in turn.
+
+Possibly also stale in the same section: the text presents cuDNN as one of the two things that can
+answer `Conv2d`, but `flint/cuda/conv2d.cc`'s own header comment says cuDNN "now lives:
+conv2d_cudnn.h, built into the benchmark alone", and `flint/CMakeLists.txt:150` only adds
+`cuda/conv2d_cudnn.cc` to `flint_benchmark_SOURCES`. Not verified by building with cuDNN.
+
+
+## `pagedAttention` aborts the process where `attention` beside it falls back
+
+Built with `-DWITH_FLASH_ATTN=OFF`, one Rust test dies with SIGABRT rather than failing:
+
+```
+test stores_and_reads_a_paged_kv_cache ... #0 lut::internal::LogWrapper::~LogWrapper()
+#1 fl::op::cuda::CudaOperators::pagedAttention(...)
+error: test failed, to rerun pass `--test tensor_cuda`
+  process didn't exit successfully: ... (signal: 6, SIGABRT: process abort signal)
+```
+
+The two neighbours in `flint/cuda/cuda_operators.cc` guard FlashAttention identically and then
+part company:
+
+| function | without FlashAttention |
+|---|---|
+| `attention` (`:309`) | falls through to `Operators::attention`, a real block-wise implementation at `operators.cc:153` |
+| `pagedAttention` (`:327`) | bare `NOT_IMPL()` at `:351`, which is `LOG(FATAL)` then `abort()` (`lutil/log.h:30`) |
+
+There is no portable paged attention to fall back to -- `Operators::pagedAttention`
+(`operators.cc:344`) is itself `NOT_IMPL()` -- so aborting is not obviously wrong. What is wrong is
+the *manner*: `conv2d.cc:45` handles the same situation, an operator whose backing library was not
+compiled in, by throwing `lut::AbortedError` with the flag to set. One is catchable and names the
+fix; the other kills the test runner with "not implemented" and a raw backtrace.
+
+The C++ suite does not hit this because `flint/CMakeLists.txt:114` only compiles
+`cuda/flash_attn_test.cc` under `WITH_FLASH_ATTN`, and `cuda/attention_test.cc:23` says why in so
+many words. `waifu/tests/tensor_cuda.rs:223` has no equivalent gate, and cannot easily have one:
+Cargo has no view of the CMake option. An `isPagedAttentionAvailable()` to match
+`isConv2dAvailable()` would give it one.
+
+Low severity -- paged KV cache is the LLM path, nothing SDXL touches, and a build that follows the
+README runs `install_flash_attn.sh` and never sees it.
+
+
+## The Rust suite skips the CLI, and cannot run the SDXL tests in parallel
+
+Two things about `cargo test --manifest-path waifu/Cargo.toml`, which is the command CLAUDE.md and
+`.github/workflows/ci.yml` both give:
+
+**It compiles none of `src/cli/`.** `waifu/Cargo.toml:23` puts the `cli` module behind a feature,
+so every test in `cli/hub.rs`, `cli/args.rs` and `cli/picker.rs` is silently absent -- 153 of them
+against 30 without. A broken model catalog entry passes CI. `--features cli` is the fix, and CI
+does not pass it.
+
+**Its default parallelism cannot work on one GPU.** `cargo test` runs one thread per core, and
+every test in `waifu/tests/sdxl.rs` calls `model()`, which loads a 7 GB package onto the device.
+On 128 cores and a 16 GB card all fourteen fail together:
+
+```
+thread 'no_strength_is_the_picture_through_the_autoencoder_and_nothing_else' panicked at
+waifu/tests/sdxl.rs:85:48: called `Result::unwrap()` on an `Err` value:
+Tensor(Error { code: 258, message: "Aborted: out of memory" })
+```
+
+`nvidia-smi` showed one test process holding 15832 MiB of 16311 MiB. With `-- --test-threads=1`
+the same fourteen pass. The failure is worth noting because of how it reads: pure-validation tests
+like `refuses_a_size_it_cannot_work_in`, which touch no reference data, fail with an out-of-memory
+from a line that only loads the model, and it looks like a broken package rather than a harness
+that asked for too much at once.
+
+Nothing documents either flag. Together the command that actually runs everything is
+
+```bash
+cargo test --manifest-path waifu/Cargo.toml --features cli -- --include-ignored --test-threads=1
+```
+
+
+## The layer-level SDXL tests cannot read a split package
+
+`waifu/tests/sdxl.rs` loads through `Sdxl::from_package`, which reads `model_parts` at
+`sdxl/pipeline.rs:277` and opens all the siblings. The four layer-level files do not:
+
+```rust
+// waifu/tests/sdxl_unet.rs:35, and the same in sdxl_vae.rs:38, sdxl_text_encoder.rs:40,
+// sdxl_tokenizer.rs:45
+let package = ZipFile::open(models_dir().join("sdxl-base.waifupkg")).unwrap();
+VarBuilder::from_reader(&mut package.open_entry("model.bin").unwrap(), ...)
+```
+
+That reads `model.bin` out of the one file it opened, so against a split package they see only
+whatever landed in part one. Pointed at the published four parts (with `sdxl-base.waifupkg` a
+symlink to the first, which `Sdxl::from_package` follows happily) the result splits by where each
+tensor happened to fall:
+
+| part | tensor names | contains |
+|---|---|---|
+| 1 | 730 | both text encoders |
+| 2 | 491 | `sdxl.unet.down2...` |
+| 3 | 474 | |
+| 4 | 552 | the VAE |
+
+so `sdxl_text_encoder` and `sdxl_tokenizer` pass, and `sdxl_unet` fails six for six with
+
+```
+Model("tensor \"sdxl.unet.down2.attn0.block1.ff.gate.proj.bias\" not found in model")
+```
+
+`sdxl_vae` would go the same way. This is why `models/sdxl-base.waifupkg` has to be a whole
+unsplit export rather than the published parts, and it is what stops
+`tools/download_model_and_test_data.sh` from being extended to fetch SDXL the way it fetches
+llama: there is nothing published that those four files can read. Either they learn to follow
+`model_parts` -- a shared helper doing what `pipeline.rs:277` does -- or a 7 GB unsplit package
+gets published alongside the split one purely for them.
+
+The reference tensors themselves are published, at `ling0322/libwaifu_test_data`.
+
+
+## Which mirror to fetch from is decided by asking google.com
+
+`cli/hub.rs` picks between Hugging Face and ModelScope by asking whether
+`https://www.google.com/generate_204` answers within three seconds. It works, and `WAIFU_MIRROR`
+overrides it, but it answers a question next to the one that matters: whether Google is reachable,
+rather than whether Hugging Face is.
+
+The two come apart when there is no network at all. Then the probe says "not reachable", the fetch
+goes to ModelScope, and the user gets a ModelScope error for what is really a missing connection.
+Probing `huggingface.co` instead would cost the same one round trip and answer the real question,
+at the price of no longer being a geography test -- which is the thing the current probe is
+actually good at.

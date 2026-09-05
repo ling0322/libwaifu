@@ -20,8 +20,12 @@
 //! The names a model can be asked for, and fetching what they name.
 //!
 //! `-m` takes either a path to a package or a name like `sdxl:base`. A name is looked up in the
-//! table below, fetched from Hugging Face if it is not in the cache already, and what comes back
-//! is a path -- so everything past [`resolve`] works on a file the same way it always did.
+//! table below, fetched if it is not in the cache already, and what comes back is a path -- so
+//! everything past [`resolve`] works on a file the same way it always did.
+//!
+//! Every model is published twice, to Hugging Face and to ModelScope, under the same repository
+//! name and byte for byte the same files. Which one a fetch uses is [`mirror`]'s to decide, and
+//! `WAIFU_MIRROR` overrides it.
 //!
 //! Only the first package of a model is named in the table. A model split over several packages
 //! already says so in its own configuration, so the rest of the file names are read out of the
@@ -53,6 +57,26 @@ const DOWNLOAD_BUFFER: usize = 1 << 20;
 /// How often a fetch says where it has got to. Short enough that the screen looks alive, long
 /// enough that it is not redrawing for a bar that has not moved.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Which host a model is fetched from, when the environment names one rather than leaving it to
+/// be worked out.
+const MIRROR_ENV: &str = "WAIFU_MIRROR";
+
+/// What is asked for to find out whether Hugging Face is reachable.
+///
+/// `generate_204` is the address Android asks to find out whether it is behind a captive portal:
+/// it answers with a status and no body at all, so this costs one round trip rather than a page.
+/// It is google.com either way, which is the point -- the question is not really about Google but
+/// about whether this machine can reach the part of the internet Hugging Face is on.
+const REACHABILITY_PROBE: &str = "https://www.google.com/generate_204";
+
+/// How long the probe waits before deciding the answer is no.
+///
+/// A blocked address does not refuse, it hangs, so this is a guess at how long is worth spending
+/// to find that out. Long enough that a slow link is not mistaken for a blocked one, short enough
+/// that someone who really is offline is not left staring at nothing before the download they
+/// asked for fails anyway.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Which package of a model a fetch is on. Carried as one thing because it travels as one, down
 /// through the download and into every word it says.
@@ -92,6 +116,88 @@ const CATALOG: &[Published] = &[
         first_part: "noobai-xl-v11-00001-of-00004.waifupkg",
     },
 ];
+
+/// Where a package is fetched from.
+///
+/// The same three models are published to both, under the same repository names and byte for
+/// byte the same files, so which one is used changes only how long it takes to arrive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Mirror {
+    HuggingFace,
+    ModelScope,
+}
+
+impl Mirror {
+    /// What the environment asks for, if it asks for anything.
+    fn named(name: &str) -> Option<Mirror> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "huggingface" | "hf" => Some(Mirror::HuggingFace),
+            "modelscope" | "ms" => Some(Mirror::ModelScope),
+            _ => None,
+        }
+    }
+
+    /// Where one file of `repo` lives.
+    ///
+    /// The two differ by host and by what the main branch is called -- Hugging Face's `main`
+    /// against ModelScope's `master` -- and in nothing else, because the repositories were named
+    /// the same on both.
+    fn url(self, repo: &str, file: &str) -> String {
+        match self {
+            Mirror::HuggingFace => format!("https://huggingface.co/{repo}/resolve/main/{file}"),
+            Mirror::ModelScope => {
+                format!("https://modelscope.cn/models/{repo}/resolve/master/{file}")
+            }
+        }
+    }
+}
+
+/// Which mirror to fetch from, worked out once and then remembered.
+///
+/// Asked for by name in the environment, or decided by whether google.com answers: where it does
+/// not, Hugging Face almost certainly will not either, and ModelScope carries the same files.
+/// Deciding it once matters -- a model is several packages, and probing before each would spend
+/// the timeout again every time the answer is no.
+fn mirror() -> Mirror {
+    static CHOSEN: std::sync::OnceLock<Mirror> = std::sync::OnceLock::new();
+    *CHOSEN.get_or_init(|| {
+        if let Ok(asked) = env::var(MIRROR_ENV) {
+            if let Some(mirror) = Mirror::named(&asked) {
+                return mirror;
+            }
+            // A name nobody knows is worth saying something about rather than quietly ignoring,
+            // since the whole point of setting it was to be sure which one is used.
+            eprintln!(
+                "{MIRROR_ENV}={asked:?} names no mirror -- expected \"huggingface\" or \
+                 \"modelscope\". Working it out instead."
+            );
+        }
+
+        if reaches_the_wider_internet() {
+            Mirror::HuggingFace
+        } else {
+            Mirror::ModelScope
+        }
+    })
+}
+
+/// Whether google.com answers, which is what stands in for "Hugging Face is reachable from here".
+///
+/// It is a guess and not a lookup of where anyone is. Somewhere google.com is blocked and Hugging
+/// Face is not, this sends the fetch to ModelScope, which holds the same files and is no worse
+/// than being right. Somewhere there is no network at all, it also says no -- and the fetch then
+/// fails against ModelScope rather than against Hugging Face, which is the same failure either
+/// way. [`MIRROR_ENV`] is there for both.
+fn reaches_the_wider_internet() -> bool {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(PROBE_TIMEOUT))
+        .build()
+        .new_agent();
+
+    // Any answer at all is the answer: a redirect or an error page still means the packets got
+    // there and came back, which is the whole question. Only nothing coming back is a no.
+    agent.get(REACHABILITY_PROBE).call().is_ok()
+}
 
 /// Names that follow whatever is current rather than naming a version.
 ///
@@ -357,7 +463,7 @@ fn download(
         return Ok(());
     }
 
-    let url = format!("https://huggingface.co/{repo}/resolve/main/{file}");
+    let url = mirror().url(repo, file);
     let partial = PathBuf::from(format!("{}.part", destination.display()));
     let have = fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0);
 
@@ -367,9 +473,35 @@ fn download(
     }
     let response = request.call()?;
 
-    // 206 means the server took the range and is sending the rest; anything else is the whole
-    // file, and what was already fetched is written over rather than appended to.
-    let resuming = response.status().as_u16() == 206 && have > 0;
+    // Whether what is coming back starts where the last attempt stopped, rather than at the
+    // beginning of the file.
+    //
+    // 206 is how a server is meant to say it took the range. ModelScope takes it and answers 200
+    // anyway, with a Content-Range and a body that really does start partway in, so the header is
+    // the thing to believe and the status only the fallback. Reading it from the status alone is
+    // not a slow download but a corrupt one: the tail arrives, is written from the front of a
+    // truncated file, matches the length that came with it, and is renamed into place as whole.
+    let content_range = response
+        .headers()
+        .get("content-range")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let began_at = content_range.as_deref().and_then(range_begins_at);
+
+    // Only ever asked for `bytes={have}-`, so anything else is a server doing something this does
+    // not understand, and guessing at it is how a package gets quietly written wrong.
+    if let Some(began_at) = began_at {
+        if began_at != have {
+            return Err(format!(
+                "{file} came back starting at byte {began_at}, but {have} bytes are already here \
+                 and that is where it was asked to carry on from. The part that arrived before is \
+                 kept: delete it to fetch the file from the beginning."
+            )
+            .into());
+        }
+    }
+
+    let resuming = have > 0 && (began_at == Some(have) || response.status().as_u16() == 206);
     let remaining = response
         .headers()
         .get("content-length")
@@ -405,6 +537,24 @@ fn download(
 
     fs::rename(&partial, destination)?;
     Ok(())
+}
+
+/// Which byte of the whole file a `Content-Range` header says its body begins at.
+///
+/// The header reads `bytes 1000000-1062187849/1062187850`. Only the first number is wanted: the
+/// last says where this piece ends and the one past the slash how long the file is, and both are
+/// already known from elsewhere. `bytes */1234`, which is what a server sends when it is refusing
+/// a range rather than answering one, has no beginning and reads as none.
+fn range_begins_at(header: &str) -> Option<u64> {
+    header
+        .trim()
+        .strip_prefix("bytes")?
+        .trim_start()
+        .split('-')
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Copy the body across, saying how it is going on the way.
@@ -530,6 +680,74 @@ mod tests {
                 "{alias} points at {target}, which is not in the catalog"
             );
         }
+    }
+
+    #[test]
+    fn each_mirror_names_the_same_file_its_own_way() {
+        let model = published("sdxl:base:v1").expect("the catalog has it");
+        let hf = Mirror::HuggingFace.url(model.repo, model.first_part);
+        let ms = Mirror::ModelScope.url(model.repo, model.first_part);
+
+        assert_eq!(
+            hf,
+            "https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0/resolve/main/\
+             sdxl-base-1.0-00001-of-00004.waifupkg"
+        );
+        assert_eq!(
+            ms,
+            "https://modelscope.cn/models/ling0322/libwaifu-sdxl-base-1.0/resolve/master/\
+             sdxl-base-1.0-00001-of-00004.waifupkg"
+        );
+
+        // The branch names differ, which is the easy thing to get wrong when copying one line to
+        // make the other: Hugging Face's main against ModelScope's master.
+        assert!(hf.contains("/resolve/main/"));
+        assert!(ms.contains("/resolve/master/"));
+    }
+
+    #[test]
+    fn every_model_can_be_asked_for_from_either_mirror() {
+        // Both mirrors carry every model under the same repository name, so a catalog entry that
+        // only exists on one side would be a fetch that works for some people and not others.
+        for model in CATALOG {
+            for mirror in [Mirror::HuggingFace, Mirror::ModelScope] {
+                let url = mirror.url(model.repo, model.first_part);
+                assert!(url.starts_with("https://"), "{url}");
+                assert!(url.contains(model.repo), "{url}");
+                assert!(url.ends_with(model.first_part), "{url}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_content_range_says_where_its_body_starts() {
+        // What ModelScope sends, alongside a 200 rather than the 206 it ought to be.
+        assert_eq!(
+            range_begins_at("bytes 1000000-1062187849/1062187850"),
+            Some(1000000)
+        );
+        assert_eq!(range_begins_at("bytes 0-15/16"), Some(0));
+
+        // A server refusing the range rather than answering it has no beginning to give.
+        assert_eq!(range_begins_at("bytes */1062187850"), None);
+
+        // And anything that is not a byte range at all.
+        assert_eq!(range_begins_at("items 1-2/3"), None);
+        assert_eq!(range_begins_at(""), None);
+    }
+
+    #[test]
+    fn a_mirror_can_be_asked_for_by_name() {
+        assert_eq!(Mirror::named("modelscope"), Some(Mirror::ModelScope));
+        assert_eq!(Mirror::named("ModelScope"), Some(Mirror::ModelScope));
+        assert_eq!(Mirror::named("  ms "), Some(Mirror::ModelScope));
+        assert_eq!(Mirror::named("huggingface"), Some(Mirror::HuggingFace));
+        assert_eq!(Mirror::named("HF"), Some(Mirror::HuggingFace));
+
+        // Anything else is not quietly read as one of them.
+        assert_eq!(Mirror::named("hugging face"), None);
+        assert_eq!(Mirror::named(""), None);
+        assert_eq!(Mirror::named("mirror"), None);
     }
 
     #[test]
