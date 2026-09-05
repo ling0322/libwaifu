@@ -57,10 +57,14 @@ type Error = Box<dyn std::error::Error>;
 
 /// The sizes on offer, which are the ones SDXL was trained at. Every one of them is a multiple of
 /// the 32 pixels the U-Net's own halvings need.
-/// How tall the prompt boxes are: three rows to type in and a border round them. Long prompts are
-/// the ordinary case here -- a list of tags rather than a sentence -- so the room is worth the two
-/// rows it costs the list of pictures below.
-const TEXT_BOX: u16 = 5;
+/// How tall the prompt boxes are: two rows to type in and a border round them.
+///
+/// Stacked rather than side by side, and this is why. A prompt here is a list of tags rather than
+/// a sentence, and a long one in a box half the screen wide wraps every few words -- the cursor
+/// ends up somewhere down the middle of a paragraph with no line long enough to find it on. Full
+/// width and two rows is a box a tag list can be steered around in, and it is a row shorter than
+/// the three it used to have.
+const TEXT_BOX: u16 = 4;
 
 /// How big the button is: a block rather than a stripe, and no wider than it needs to be.
 ///
@@ -483,7 +487,8 @@ const FIELDS: [Field; 9] = [
 /// what is above the row of numbers is the box above it and not the number to its left. The two
 /// lists hold the same boxes, which [`the_grid_and_the_tab_order_hold_the_same_boxes`] checks.
 const ROWS: &[&[Field]] = &[
-    &[Field::Prompt, Field::Negative],
+    &[Field::Prompt],
+    &[Field::Negative],
     &[Field::From],
     &[
         Field::Steps,
@@ -583,6 +588,8 @@ struct App {
     browsed: Option<PathBuf>,
     /// The box asking for one value, while it is up.
     asking: Option<Asking>,
+    /// The box asking whether to leave, while it is up.
+    leaving: Option<ask::Confirm>,
     quit: bool,
 
     /// What the run was pointed at. Shown rather than kept, because a picture that came out wrong
@@ -610,13 +617,14 @@ impl App {
             focus: 0,
             column: 0,
             status: Status::Ready,
-            message: "type a prompt and press enter".to_string(),
+            message: "type a prompt, then press enter on generate".to_string(),
             unhappy: false,
             written: Vec::new(),
             pending: None,
             browsing: None,
             browsed: None,
             asking: None,
+            leaving: None,
             quit: false,
         }
     }
@@ -627,6 +635,11 @@ impl App {
 
     fn running(&self) -> bool {
         matches!(self.status, Status::Running { .. })
+    }
+
+    /// Whether a box is up over the screen, which is where the keys are going.
+    fn covered(&self) -> bool {
+        self.browsing.is_some() || self.asking.is_some() || self.leaving.is_some()
     }
 
     fn failed(&mut self, message: impl Into<String>) {
@@ -688,12 +701,21 @@ impl App {
 
         // Ctrl-C still ends the program from inside any box on top of the screen: it is the key
         // that always means that, and a box is no reason for it to stop meaning it.
-        if (self.browsing.is_some() || self.asking.is_some())
-            && key.code == KeyCode::Char('c')
-            && control
-        {
+        if self.covered() && key.code == KeyCode::Char('c') && control {
             cancel.store(true, Ordering::Relaxed);
             self.quit = true;
+            return;
+        }
+
+        if let Some(leaving) = &mut self.leaving {
+            match leaving.key(key) {
+                Answer::Open => {}
+                Answer::Cancelled | Answer::Given(false) => self.leaving = None,
+                Answer::Given(true) => {
+                    cancel.store(true, Ordering::Relaxed);
+                    self.quit = true;
+                }
+            }
             return;
         }
 
@@ -748,7 +770,9 @@ impl App {
                     cancel.store(true, Ordering::Relaxed);
                     self.said("stopping after this step");
                 } else {
-                    self.quit = true;
+                    // Asked rather than done. Leaving costs the minute it takes to read the model
+                    // back in, and escape is the key pressed to get out of everything else here.
+                    self.leaving = Some(ask::Confirm::ask("leave waifu?"));
                 }
             }
             // Enter is what the box the cursor is in does, and for the boxes that do nothing of
@@ -865,9 +889,12 @@ impl App {
                     .collect();
                 self.asking = Some(Asking::Size(ask::Choice::ask("size", sizes, self.size)));
             }
-            // The boxes with nothing of their own to do keep what enter meant before there was a
-            // button: someone who has typed a prompt and pressed enter means draw it.
-            Field::Prompt | Field::Negative | Field::Seed | Field::Generate => self.start(),
+            Field::Generate => self.start(),
+
+            // Nothing. A run is minutes long and starts from one place, which is the button --
+            // enter in the box a prompt is being typed into is a key pressed on the way to
+            // something else as often as it is one meant.
+            Field::Prompt | Field::Negative | Field::Seed => {}
         }
     }
 
@@ -889,12 +916,15 @@ impl App {
 
     /// Opens the picker where the box is already pointing, or in this directory when it is empty.
     fn browse(&mut self) {
-        // What is in the box wins over where it was left: someone who typed a path there means
-        // that one, and someone who did not is carrying on from where they stopped looking.
-        let start = self
-            .from()
-            .or_else(|| self.browsed.clone())
-            .unwrap_or_else(|| PathBuf::from("."));
+        // Somewhere that is there, whatever is in the box. What is typed wins where it exists --
+        // someone who typed a path means that one -- then where the picker was last left, and a
+        // path that is not there at all is not somewhere to open: a typo in the box would
+        // otherwise put a list up that says only that it cannot be read.
+        let start = [self.from(), self.browsed.clone()]
+            .into_iter()
+            .flatten()
+            .find(|path| path.exists())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         self.browsing = Some(FilePicker::open("a picture to draw from", &start, PICTURES));
     }
 
@@ -933,9 +963,13 @@ impl App {
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [heading, prompts, from, numbers, generate, status, written, keys] =
+        let [heading, prompt, negative, from, numbers, generate, status, written, keys] =
             Layout::vertical([
                 Constraint::Length(1),
+                // The same height, because the two are the same kind of thing: what to draw and
+                // what to keep out of it. One box shorter than the other reads as the shorter one
+                // mattering less, which is not what the difference was ever about.
+                Constraint::Length(TEXT_BOX),
                 Constraint::Length(TEXT_BOX),
                 // A path is one line however long it is, so this box is the height of its border.
                 Constraint::Length(3),
@@ -946,12 +980,6 @@ impl App {
                 Constraint::Length(1),
             ])
             .areas(frame.area());
-
-        // Side by side, and the same size: the two are the same kind of thing -- what to draw and
-        // what to keep out of it -- and one of them drawn smaller than the other reads as the
-        // smaller one mattering less, which is not what the difference was ever about. Beside
-        // each other rather than stacked because that is five rows the screen gets back.
-        let [prompt, negative] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(prompts);
 
         let fifths = [Constraint::Ratio(1, 5); 5];
         let [steps, guidance, size, strength, seed] = Layout::horizontal(fifths).areas(numbers);
@@ -1053,6 +1081,10 @@ impl App {
             }
             return;
         }
+        if let Some(leaving) = &self.leaving {
+            leaving.render(frame, frame.area());
+            return;
+        }
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
@@ -1061,9 +1093,9 @@ impl App {
                 Span::raw("arrows").bold(),
                 Span::raw(" move  "),
                 Span::raw("enter").bold(),
-                Span::raw(" set or draw  "),
+                Span::raw(" open  "),
                 Span::raw("esc").bold(),
-                Span::raw(" stop or quit"),
+                Span::raw(" stop or leave"),
             ]))
             .style(Style::new().fg(Color::DarkGray)),
             keys,
@@ -1363,6 +1395,12 @@ mod tests {
         assert_eq!(app.negative.text(), "blurry");
     }
 
+    /// Presses the button, which is the one place a run starts from.
+    fn generate(app: &mut App, cancel: &AtomicBool) {
+        focus_on(app, Field::Generate);
+        app.key(press(KeyCode::Enter), cancel);
+    }
+
     /// Puts the cursor in a named box, rather than counting tab presses to it: which number a
     /// box is changes whenever one is added, and the tests are not about the order.
     ///
@@ -1412,9 +1450,11 @@ mod tests {
         app.key(press(KeyCode::Down), &cancel);
         assert_eq!(app.focused(), Field::Size);
 
-        // The two prompts are side by side, so the one above "draw from" is whichever of them is
-        // over it -- and there is no fourth column up there, so the far ones land on the last.
+        // The three boxes above it are stacked, one to a row, so they are walked one at a time
+        // however far along the row below the cursor started.
         focus_on(&mut app, Field::From);
+        app.key(press(KeyCode::Up), &cancel);
+        assert_eq!(app.focused(), Field::Negative);
         app.key(press(KeyCode::Up), &cancel);
         assert_eq!(app.focused(), Field::Prompt);
 
@@ -1430,9 +1470,9 @@ mod tests {
         assert_eq!(app.focused(), Field::Generate, "down walked off the screen");
 
         // And nothing above the top.
-        focus_on(&mut app, Field::Negative);
+        focus_on(&mut app, Field::Prompt);
         app.key(press(KeyCode::Up), &cancel);
-        assert_eq!(app.focused(), Field::Negative);
+        assert_eq!(app.focused(), Field::Prompt);
     }
 
     #[test]
@@ -1607,6 +1647,33 @@ mod tests {
     }
 
     #[test]
+    fn the_picker_opens_somewhere_that_is_there_whatever_is_in_the_box() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        // A typo in the box would otherwise put up a list saying only that it cannot be read.
+        focus_on(&mut app, Field::From);
+        type_in(&mut app, "/no/such/place/at/all.png", &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(app.browsing.as_ref().unwrap().directory(), here);
+
+        // And a path that is there is the one it opens on.
+        app.key(press(KeyCode::Esc), &cancel);
+        focus_on(&mut app, Field::From);
+        for _ in 0..40 {
+            app.key(press(KeyCode::Backspace), &cancel);
+        }
+        type_in(&mut app, here.parent().unwrap().to_str().unwrap(), &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+        assert_eq!(
+            app.browsing.as_ref().unwrap().directory(),
+            here.parent().unwrap()
+        );
+    }
+
+    #[test]
     fn what_the_picker_hands_back_goes_into_the_box() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
@@ -1751,7 +1818,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
-        app.key(press(KeyCode::Enter), &cancel);
+        generate(&mut app, &cancel);
 
         let job = app.pending.take().expect("a job to draw");
         assert_eq!(job.prompt, "a cat");
@@ -1766,7 +1833,7 @@ mod tests {
         let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
 
-        app.key(press(KeyCode::Enter), &cancel);
+        generate(&mut app, &cancel);
         assert!(app.pending.take().is_some());
 
         // Pressing it again is a mistake rather than a queue: there is one model, and it is busy.
@@ -1781,26 +1848,93 @@ mod tests {
         let mut app = ready();
         type_in(&mut app, "   ", &cancel);
 
-        app.key(press(KeyCode::Enter), &cancel);
+        generate(&mut app, &cancel);
         assert!(app.pending.is_none());
         assert!(app.unhappy);
         assert!(!app.running());
     }
 
     #[test]
-    fn escape_stops_a_run_but_quits_an_idle_one() {
+    fn escape_stops_a_run_but_asks_before_leaving_an_idle_one() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
-        app.key(press(KeyCode::Enter), &cancel);
+        generate(&mut app, &cancel);
 
         app.key(press(KeyCode::Esc), &cancel);
         assert!(cancel.load(Ordering::Relaxed), "the run was asked to stop");
         assert!(!app.quit, "and the program was not");
+        assert!(app.leaving.is_none(), "and it did not ask");
 
+        // Idle, it asks. Escape is the key pressed to get out of everything else on this screen,
+        // and leaving costs the minute it takes to read the model back in.
         app.update(Update::Stopped);
         app.key(press(KeyCode::Esc), &cancel);
+        assert!(!app.quit, "escape left without asking");
+        assert!(app.leaving.is_some());
+
+        let drawn = screen(&app, 90, 30);
+        assert!(drawn.contains("leave waifu?"), "{drawn}");
+    }
+
+    #[test]
+    fn the_question_about_leaving_starts_on_no_and_takes_either_answer() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        // No, by escaping out of the question, which is not an answer of yes.
+        app.key(press(KeyCode::Esc), &cancel);
+        app.key(press(KeyCode::Esc), &cancel);
+        assert!(!app.quit);
+        assert!(app.leaving.is_none());
+
+        // No, by pressing enter on where it starts. What it is asked before cannot be taken back.
+        app.key(press(KeyCode::Esc), &cancel);
+        assert!(!app.leaving.as_ref().unwrap().on_yes());
+        app.key(press(KeyCode::Enter), &cancel);
+        assert!(!app.quit);
+        assert!(app.leaving.is_none());
+
+        // Yes, by walking to it.
+        app.key(press(KeyCode::Esc), &cancel);
+        app.key(press(KeyCode::Left), &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
         assert!(app.quit);
+        assert!(cancel.load(Ordering::Relaxed), "the painter was let go");
+    }
+
+    #[test]
+    fn the_letters_answer_the_question_outright() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        app.key(press(KeyCode::Esc), &cancel);
+        app.key(press(KeyCode::Char('n')), &cancel);
+        assert!(!app.quit);
+        assert!(app.leaving.is_none());
+
+        app.key(press(KeyCode::Esc), &cancel);
+        app.key(press(KeyCode::Char('y')), &cancel);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn enter_draws_from_the_button_and_nowhere_else() {
+        // A run is minutes long and starts from one place. Enter in the box a prompt is being
+        // typed into is a key pressed on the way to something else as often as it is one meant.
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+        type_in(&mut app, "a cat", &cancel);
+
+        for field in [Field::Prompt, Field::Negative, Field::Seed] {
+            focus_on(&mut app, field);
+            app.key(press(KeyCode::Enter), &cancel);
+            assert!(app.pending.is_none(), "enter on {field:?} started a run");
+            assert!(!app.running());
+        }
+
+        generate(&mut app, &cancel);
+        assert!(app.pending.is_some());
     }
 
     #[test]
@@ -2010,7 +2144,7 @@ mod tests {
         // Running: the bar, with where it has got to on it.
         let cancel = AtomicBool::new(false);
         type_in(&mut app, "a cat", &cancel);
-        app.key(press(KeyCode::Enter), &cancel);
+        generate(&mut app, &cancel);
         let drawn = screen(&app, 80, 30);
         assert!(drawn.contains("reading the prompt"), "{drawn}");
 

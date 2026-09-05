@@ -23,9 +23,10 @@
 //! thread. The host keeps one in an `Option`, hands it the keys while it is there, gives it an
 //! area to draw in, and takes the answer out of [`Answer`].
 //!
-//! Two of them, because a value is asked for in one of two ways. [`Number`] is a box to type in,
-//! for a knob whose range is too wide to walk -- a step count, a guidance. [`Choice`] is a short
-//! list to pick from, for one whose values are a handful someone chose in advance.
+//! Three of them, because a value is asked for in one of three ways. [`Number`] is a box to type
+//! in, for a knob whose range is too wide to walk -- a step count, a guidance. [`Choice`] is a
+//! short list to pick from, for one whose values are a handful someone chose in advance. And
+//! [`Confirm`] is the one that is not a value at all but a question with two answers.
 
 use ratatui::crossterm::event::KeyCode;
 use ratatui::crossterm::event::KeyEvent;
@@ -275,6 +276,91 @@ impl Choice {
     }
 }
 
+/// A question with two answers, for something worth being sure about.
+pub struct Confirm {
+    question: String,
+    /// Which answer the cursor is on. Starts on no, since what this is asked before is something
+    /// that cannot be taken back and a key pressed by accident should not do it.
+    yes: bool,
+}
+
+impl Confirm {
+    pub fn ask(question: &str) -> Confirm {
+        Confirm {
+            question: question.to_string(),
+            yes: false,
+        }
+    }
+
+    /// Which answer the cursor is on. Only the tests look; the answer comes back on enter.
+    #[cfg(test)]
+    pub fn on_yes(&self) -> bool {
+        self.yes
+    }
+
+    pub fn key(&mut self, key: KeyEvent) -> Answer<bool> {
+        match key.code {
+            // Escaping out of a question about leaving is not an answer of yes.
+            KeyCode::Esc => return Answer::Cancelled,
+            KeyCode::Enter => return Answer::Given(self.yes),
+
+            // The letters answer it outright, which is what someone who knows the question is
+            // going to type rather than walking to the answer and pressing enter on it.
+            KeyCode::Char('y') | KeyCode::Char('Y') => return Answer::Given(true),
+            KeyCode::Char('n') | KeyCode::Char('N') => return Answer::Given(false),
+
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+                self.yes = !self.yes
+            }
+            _ => {}
+        }
+
+        Answer::Open
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let box_area = centred(area, WIDTH, 4);
+        frame.render_widget(Clear, box_area);
+
+        let frame_ = outline(&self.question);
+        let inner = frame_.inner(box_area);
+        frame.render_widget(frame_, box_area);
+        if inner.height < 2 {
+            return;
+        }
+
+        let [answers, foot] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+
+        let answer = |label: &'static str, on: bool| {
+            Span::styled(
+                format!("  {label}  "),
+                match on {
+                    true => Style::default().fg(Color::Black).bg(Color::Cyan),
+                    false => Style::default(),
+                },
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                answer("yes", self.yes),
+                Span::raw("   "),
+                answer("no", !self.yes),
+            ]))
+            .centered(),
+            answers,
+        );
+
+        frame.render_widget(
+            Paragraph::new(Line::from(
+                "y or n   left/right choose   enter takes it".fg(Color::DarkGray),
+            ))
+            .centered(),
+            foot,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,9 +508,47 @@ mod tests {
     }
 
     #[test]
+    fn a_question_starts_on_no_and_either_key_answers_it() {
+        // What it is asked before cannot be taken back, so a key pressed by accident should not
+        // do it: enter where it starts is no.
+        let mut box_ = Confirm::ask("leave waifu?");
+        assert!(!box_.on_yes());
+        assert_eq!(box_.key(press(KeyCode::Enter)), Answer::Given(false));
+
+        // Walked to, and either arrow walks: there are two answers and they are side by side.
+        let mut box_ = Confirm::ask("leave waifu?");
+        box_.key(press(KeyCode::Left));
+        assert!(box_.on_yes());
+        assert_eq!(box_.key(press(KeyCode::Enter)), Answer::Given(true));
+
+        // Or answered outright, which is what someone who knows the question will do.
+        let mut box_ = Confirm::ask("leave waifu?");
+        assert_eq!(box_.key(press(KeyCode::Char('y'))), Answer::Given(true));
+        let mut box_ = Confirm::ask("leave waifu?");
+        assert_eq!(box_.key(press(KeyCode::Char('n'))), Answer::Given(false));
+
+        // And escaping out of a question about leaving is not an answer of yes.
+        let mut box_ = Confirm::ask("leave waifu?");
+        assert_eq!(box_.key(press(KeyCode::Esc)), Answer::Cancelled);
+    }
+
+    #[test]
+    fn a_question_shows_both_answers_and_how_to_give_one() {
+        let box_ = Confirm::ask("leave waifu?");
+        let screen = drawn(|frame| box_.render(frame, frame.area()));
+
+        assert!(screen.contains("leave waifu?"), "{screen}");
+        assert!(screen.contains("yes"), "{screen}");
+        assert!(screen.contains("no"), "{screen}");
+        assert!(screen.contains("y or n"), "{screen}");
+        assert!(screen.contains("enter takes it"), "{screen}");
+    }
+
+    #[test]
     fn a_box_with_no_room_for_it_still_draws() {
         let number = Number::ask("steps", "30", 1.0, 150.0, true);
         let choice = Choice::ask("size", vec!["512".to_string()], 0);
+        let confirm = Confirm::ask("leave waifu?");
         for (width, height) in [(1u16, 1u16), (6, 2), (20, 3)] {
             let mut terminal = ratatui::Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
@@ -432,6 +556,9 @@ mod tests {
                 .unwrap();
             terminal
                 .draw(|frame| choice.render(frame, frame.area()))
+                .unwrap();
+            terminal
+                .draw(|frame| confirm.render(frame, frame.area()))
                 .unwrap();
         }
     }
