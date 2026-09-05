@@ -39,7 +39,13 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
+
+use hf_hub::progress::{DownloadEvent, Progress as Reported, ProgressEvent, ProgressHandler};
+use hf_hub::HFClientSync;
 
 use crate::{IniConfig, Sdxl, ZipFile};
 
@@ -58,9 +64,25 @@ const DOWNLOAD_BUFFER: usize = 1 << 20;
 /// enough that it is not redrawing for a bar that has not moved.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// The directory a Hugging Face fetch is given to itself, inside the cache directory of the model
+/// it belongs to. On the same filesystem as the package it becomes, so the rename that puts it
+/// there is a rename and not a copy.
+const INCOMING: &str = ".incoming";
+
 /// Which host a model is fetched from, when the environment names one rather than leaving it to
 /// be worked out.
 const MIRROR_ENV: &str = "WAIFU_MIRROR";
+
+/// The Hugging Face host, when something other than Hugging Face itself is standing in for it.
+///
+/// Read here for one reason only: hf-hub reads it, so a fetch goes wherever it points, and a
+/// screen that named huggingface.co regardless would be naming a host the fetch never touches.
+/// Someone behind a Hugging Face mirror sets this and expects to be told about the mirror.
+const HF_ENDPOINT_ENV: &str = "HF_ENDPOINT";
+
+/// Where a Hugging Face fetch goes when [`HF_ENDPOINT_ENV`] does not say. hf-hub's own default,
+/// written out again here because the crate does not offer it to be asked for.
+const HUGGING_FACE: &str = "https://huggingface.co";
 
 /// What is asked for to find out whether Hugging Face is reachable.
 ///
@@ -142,13 +164,33 @@ impl Mirror {
     /// The two differ by host and by what the main branch is called -- Hugging Face's `main`
     /// against ModelScope's `master` -- and in nothing else, because the repositories were named
     /// the same on both.
+    ///
+    /// The Hugging Face address is built to the shape hf-hub asks for and off the same host it
+    /// will use, since hf-hub is what does the asking there now. What it is not is the address
+    /// the bytes arrive from: the hub answers a `resolve` with a redirect into storage, so the
+    /// last hop is a CDN name nobody typed. This is where the file lives, which is the question.
     fn url(self, repo: &str, file: &str) -> String {
         match self {
-            Mirror::HuggingFace => format!("https://huggingface.co/{repo}/resolve/main/{file}"),
+            Mirror::HuggingFace => {
+                let host = hugging_face_endpoint();
+                format!("{host}/{repo}/resolve/main/{file}")
+            }
             Mirror::ModelScope => {
                 format!("https://modelscope.cn/models/{repo}/resolve/master/{file}")
             }
         }
+    }
+}
+
+/// The Hugging Face host a fetch will actually be made against.
+///
+/// A trailing slash is taken off so that joining a path to it does not produce a doubled one: the
+/// value is typed by hand into a shell profile, where `https://hf-mirror.com/` is as likely as
+/// the same thing without one.
+fn hugging_face_endpoint() -> String {
+    match env::var(HF_ENDPOINT_ENV) {
+        Ok(host) if !host.trim().is_empty() => host.trim().trim_end_matches('/').to_string(),
+        _ => HUGGING_FACE.to_string(),
     }
 }
 
@@ -459,9 +501,10 @@ fn cache_directory() -> Result<PathBuf, Error> {
 
 /// Fetch one file of a repository to `destination`, unless it is already there.
 ///
-/// The download goes to a `.part` beside it and is renamed once it is whole, so an interrupted
-/// fetch is never mistaken for a model: a half written package would otherwise be opened on the
-/// next run and fail as a corrupt one. A `.part` left behind is resumed rather than restarted.
+/// Which of the two below does the work is which mirror the machine settled on. Neither writes to
+/// `destination` until it holds a whole file, so an interrupted fetch is never mistaken for a
+/// model: a half written package would otherwise be opened on the next run and fail as a corrupt
+/// one, somewhere that cannot point back at the download that truncated it.
 fn download(
     repo: &str,
     file: &str,
@@ -475,6 +518,147 @@ fn download(
         return Ok(());
     }
 
+    match mirror() {
+        Mirror::HuggingFace => download_from_hugging_face(repo, file, destination, part, report),
+        Mirror::ModelScope => download_over_http(repo, file, destination, part, report),
+    }
+}
+
+/// Fetch one file from Hugging Face, through the client Hugging Face publishes.
+///
+/// Not ureq against a URL built here, which is what this used to be: how that hub answers is a
+/// moving target -- a redirect to a CDN, a file stored in xet rather than behind a plain GET, the
+/// header that says a file has moved -- and hf-hub is where that knowledge is kept up to date.
+///
+/// It downloads to a directory of its own choosing within the cache, not to a name of ours, and
+/// it writes straight to the file it names rather than to anything like a `.part`. So it is given
+/// a directory to itself and what lands there is renamed into place: what is under `destination`
+/// is then either a whole package or nothing, which is the promise the rest of this file is
+/// written against. What is lost against the ModelScope path below is resuming -- an interrupted
+/// fetch starts the package again.
+fn download_from_hugging_face(
+    repo: &str,
+    file: &str,
+    destination: &Path,
+    part: Part,
+    report: &mut dyn FnMut(Progress),
+) -> Result<(), Error> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("{repo} is not an owner and a repository name"))?;
+    let directory = destination
+        .parent()
+        .ok_or_else(|| format!("{} is not in a directory", destination.display()))?;
+    let staging = directory.join(INCOMING);
+
+    // The download runs on a thread of its own and this one watches the counters it keeps, rather
+    // than the other way about: hf-hub hands progress to a handler that has to be shared across
+    // threads, and `report` is a closure belonging to whoever called in here and is not.
+    let counted = Arc::new(Counted::default());
+    let fetching = {
+        let (owner, name, file) = (owner.to_string(), name.to_string(), file.to_string());
+        let (staging, counted) = (staging.clone(), Arc::clone(&counted));
+        thread::spawn(move || -> Result<(), String> {
+            let client = HFClientSync::new().map_err(|failed| failed.to_string())?;
+            client
+                .model(owner, name)
+                .download_file()
+                .filename(file)
+                .local_dir(staging)
+                .progress(Reported::new(Counting(counted)))
+                .send()
+                .map(|_| ())
+                .map_err(|failed| failed.to_string())
+        })
+    };
+
+    // On the same clock the other path draws on, and for the same reasons: see copy_reporting.
+    while !fetching.is_finished() {
+        thread::sleep(PROGRESS_INTERVAL);
+        let total = counted.total.load(Ordering::Relaxed);
+        report(Progress::Fetching {
+            file,
+            done: counted.done.load(Ordering::Relaxed),
+            total: (total > 0).then_some(total),
+            part: part.at,
+            parts: part.of,
+        });
+    }
+    fetching
+        .join()
+        .map_err(|_| format!("the fetch of {file} ended without saying why"))??;
+
+    let arrived = staging.join(file);
+    fs::rename(&arrived, destination)?;
+    // Only ever holds the one file, and only while it is arriving. Left behind if something else
+    // is in there, which is not this function's to throw away.
+    let _ = fs::remove_dir(&staging);
+
+    report(Progress::Fetched {
+        file,
+        bytes: fs::metadata(destination).map(|meta| meta.len()).unwrap_or(0),
+        part: part.at,
+        parts: part.of,
+    });
+    Ok(())
+}
+
+/// How many bytes of the file being fetched have arrived, as the thread fetching it counts them.
+#[derive(Default)]
+struct Counted {
+    done: AtomicU64,
+    total: AtomicU64,
+}
+
+/// Keeps [`Counted`] up to date from what hf-hub says, and does nothing else: drawing anything
+/// from a thread that is not the one drawing the screen is how two writers end up in one terminal.
+struct Counting(Arc<Counted>);
+
+impl ProgressHandler for Counting {
+    fn on_progress(&self, event: &ProgressEvent) {
+        let ProgressEvent::Download(event) = event else {
+            return;
+        };
+        match event {
+            DownloadEvent::Start { total_bytes, .. } => {
+                self.0.total.store(*total_bytes, Ordering::Relaxed);
+            }
+            // One file is asked for at a time, so the last of these is about that file. A total
+            // of zero is hf-hub saying it does not know one, which is not a total.
+            DownloadEvent::Progress { files } => {
+                if let Some(file) = files.last() {
+                    self.0.done.store(file.bytes_completed, Ordering::Relaxed);
+                    if file.total_bytes > 0 {
+                        self.0.total.store(file.total_bytes, Ordering::Relaxed);
+                    }
+                }
+            }
+            // What a file stored in xet reports instead, counted over the batch rather than per
+            // file -- which for one file is the same number.
+            DownloadEvent::AggregateProgress {
+                bytes_completed,
+                total_bytes,
+                ..
+            } => {
+                self.0.done.store(*bytes_completed, Ordering::Relaxed);
+                self.0.total.store(*total_bytes, Ordering::Relaxed);
+            }
+            DownloadEvent::Complete => {}
+        }
+    }
+}
+
+/// Fetch one file over plain HTTP, which is how ModelScope is asked.
+///
+/// The download goes to a `.part` beside the destination and is renamed once it is whole, and a
+/// `.part` left behind is resumed rather than restarted.
+fn download_over_http(
+    repo: &str,
+    file: &str,
+    destination: &Path,
+    part: Part,
+    report: &mut dyn FnMut(Progress),
+) -> Result<(), Error> {
     let url = mirror().url(repo, file);
     let partial = PathBuf::from(format!("{}.part", destination.display()));
     let have = fs::metadata(&partial).map(|meta| meta.len()).unwrap_or(0);
@@ -667,6 +851,8 @@ fn megabytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use hf_hub::progress::{FileProgress, FileStatus};
+
     use super::*;
 
     #[test]
@@ -700,11 +886,15 @@ mod tests {
         let hf = Mirror::HuggingFace.url(model.repo, model.first_part);
         let ms = Mirror::ModelScope.url(model.repo, model.first_part);
 
-        assert_eq!(
-            hf,
-            "https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0/resolve/main/\
-             sdxl-base-1.0-00001-of-00004.waifupkg"
-        );
+        // Written out against the default host, so somewhere HF_ENDPOINT points at a mirror this
+        // is a different string for a good reason; the test below is the one for that case.
+        if env::var_os(HF_ENDPOINT_ENV).is_none() {
+            assert_eq!(
+                hf,
+                "https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0/resolve/main/\
+                 sdxl-base-1.0-00001-of-00004.waifupkg"
+            );
+        }
         assert_eq!(
             ms,
             "https://modelscope.cn/models/ling0322/libwaifu-sdxl-base-1.0/resolve/master/\
@@ -715,6 +905,37 @@ mod tests {
         // make the other: Hugging Face's main against ModelScope's master.
         assert!(hf.contains("/resolve/main/"));
         assert!(ms.contains("/resolve/master/"));
+    }
+
+    #[test]
+    fn the_hugging_face_address_follows_the_hub_the_fetch_will_use() {
+        // hf-hub fetches from HF_ENDPOINT where it is set, so a screen naming huggingface.co
+        // regardless would be naming a host nothing is asked of. Set for this test only.
+        let previous = env::var_os(HF_ENDPOINT_ENV);
+        let model = published("sdxl:base:v1").expect("the catalog has it");
+
+        env::set_var(HF_ENDPOINT_ENV, "https://hf-mirror.com");
+        assert_eq!(
+            Mirror::HuggingFace.url(model.repo, model.first_part),
+            "https://hf-mirror.com/ling0322/libwaifu-sdxl-base-1.0/resolve/main/\
+             sdxl-base-1.0-00001-of-00004.waifupkg"
+        );
+
+        // Typed with the slash a host name invites, and it makes no difference.
+        env::set_var(HF_ENDPOINT_ENV, "https://hf-mirror.com/");
+        assert!(Mirror::HuggingFace
+            .url(model.repo, model.first_part)
+            .starts_with("https://hf-mirror.com/ling0322/"));
+
+        // Set to nothing at all is the same as not set: an emptied variable is someone turning
+        // the mirror off, not asking for a host with no name.
+        env::set_var(HF_ENDPOINT_ENV, "");
+        assert_eq!(hugging_face_endpoint(), HUGGING_FACE);
+
+        match previous {
+            Some(value) => env::set_var(HF_ENDPOINT_ENV, value),
+            None => env::remove_var(HF_ENDPOINT_ENV),
+        }
     }
 
     #[test]
@@ -729,6 +950,84 @@ mod tests {
                 assert!(url.ends_with(model.first_part), "{url}");
             }
         }
+    }
+
+    #[test]
+    fn what_the_hub_says_about_a_fetch_becomes_a_count_of_bytes() {
+        let counted = Arc::new(Counted::default());
+        let counting = Counting(Arc::clone(&counted));
+
+        // The size comes with the start of the fetch, before a byte of the file has.
+        counting.on_progress(&ProgressEvent::Download(DownloadEvent::Start {
+            total_files: 1,
+            total_bytes: 2_020_000_000,
+        }));
+        assert_eq!(counted.done.load(Ordering::Relaxed), 0);
+        assert_eq!(counted.total.load(Ordering::Relaxed), 2_020_000_000);
+
+        counting.on_progress(&ProgressEvent::Download(DownloadEvent::Progress {
+            files: vec![FileProgress {
+                filename: "sdxl-base-1.0-00001-of-00004.waifupkg".to_string(),
+                bytes_completed: 1_010_000_000,
+                total_bytes: 2_020_000_000,
+                status: FileStatus::InProgress,
+            }],
+        }));
+        assert_eq!(counted.done.load(Ordering::Relaxed), 1_010_000_000);
+
+        // A size of zero is hf-hub saying it does not know one, and must not be read as a file
+        // that is zero bytes long: the bar would jump to full and stay there.
+        counting.on_progress(&ProgressEvent::Download(DownloadEvent::Progress {
+            files: vec![FileProgress {
+                filename: "sdxl-base-1.0-00001-of-00004.waifupkg".to_string(),
+                bytes_completed: 1_500_000_000,
+                total_bytes: 0,
+                status: FileStatus::InProgress,
+            }],
+        }));
+        assert_eq!(counted.done.load(Ordering::Relaxed), 1_500_000_000);
+        assert_eq!(counted.total.load(Ordering::Relaxed), 2_020_000_000);
+
+        // What a file kept in xet reports instead, which is counted over the whole batch.
+        counting.on_progress(&ProgressEvent::Download(DownloadEvent::AggregateProgress {
+            bytes_completed: 1_900_000_000,
+            total_bytes: 2_020_000_000,
+            bytes_per_sec: Some(15e6),
+        }));
+        assert_eq!(counted.done.load(Ordering::Relaxed), 1_900_000_000);
+        assert_eq!(counted.total.load(Ordering::Relaxed), 2_020_000_000);
+    }
+
+    /// Ignored because it asks the real Hugging Face for a real file. Run it with
+    /// `cargo test --features cli -- --ignored` after touching the fetch.
+    #[test]
+    #[ignore]
+    fn a_file_fetched_from_hugging_face_lands_where_it_was_asked_for() {
+        let directory = env::temp_dir().join(format!("libwaifu-fetch-{}", std::process::id()));
+        fs::create_dir_all(&directory).expect("somewhere to fetch into");
+        let destination = directory.join("config.json");
+
+        // Something small and public that is not going anywhere, since what is under test is the
+        // plumbing and not the file.
+        let mut finished = false;
+        download_from_hugging_face(
+            "hf-internal-testing/tiny-random-gpt2",
+            "config.json",
+            &destination,
+            Part { at: 1, of: 1 },
+            &mut |progress| finished |= matches!(progress, Progress::Fetched { .. }),
+        )
+        .expect("the file is there and so is the network");
+
+        // Under the name it was asked for, whole, and with nothing left in the way.
+        assert!(destination.exists(), "{}", destination.display());
+        assert!(fs::metadata(&destination).expect("it is a file").len() > 0);
+        assert!(!directory.join(INCOMING).exists(), "the staging is cleared");
+
+        // And it said so when it finished, which is what stops the bar.
+        assert!(finished, "the fetch said nothing about finishing");
+
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]
