@@ -130,20 +130,31 @@ Tensor wholeAttention(const Tensor &q, const Tensor &k, const Tensor &v, bool ca
 CATCH_TEST_CASE("test CUDA attention (blocked over the queries)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  // A head of 512 is what a VAE's own attention uses, and what the compiled FlashAttention
-  // kernels will not take, so this is the fallback. Past four million score elements it takes the
-  // queries a block at a time rather than holding the whole matrix, and the answer may not change
-  // for it: each output row sees every key either way, so there is nothing to approximate.
-  for (int seqLen : {2048, 4096}) {
-    CATCH_INFO("sequence length = " << seqLen);
-    Tensor q = toCuda(F::rand({1, 1, seqLen, 512}, DType::kFloat));
-    Tensor k = toCuda(F::rand({1, 1, seqLen, 512}, DType::kFloat));
-    Tensor v = toCuda(F::rand({1, 1, seqLen, 512}, DType::kFloat));
+  // A head of 32 is one the compiled FlashAttention kernels will not take, so this is the
+  // fallback. Past the operator's score budget it takes the queries a block at a time rather than
+  // holding the whole matrix, and the answer may not change for it: each output row sees every
+  // key either way, so there is nothing to approximate.
+  //
+  // A score matrix is one per head, so the budget is reached here on eight heads of a length that
+  // one head would fit whole -- and reached with a matrix a tenth the size that one head would
+  // need to reach it, which is what keeps this test affordable. The rule that counted only the
+  // query and key lengths took this in a single block and held eight times what it meant to.
+  Tensor q = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor k = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor v = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
 
-    Tensor actual = F::attention(q, k, v, false);
-    CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, 1, seqLen, 512});
-    CATCH_REQUIRE(F::allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, false)), 5e-3));
-  }
+  Tensor actual = F::attention(q, k, v, false);
+  CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, 8, 4200, 32});
+  CATCH_REQUIRE(F::allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, false)), 5e-3));
+
+  // The same length in one head, which stays under the budget and is taken whole.
+  Tensor q1 = toCuda(F::rand({1, 1, 4200, 32}, DType::kFloat));
+  Tensor k1 = toCuda(F::rand({1, 1, 4200, 32}, DType::kFloat));
+  Tensor v1 = toCuda(F::rand({1, 1, 4200, 32}, DType::kFloat));
+
+  Tensor whole = F::attention(q1, k1, v1, false);
+  CATCH_REQUIRE(whole.getShape() == std::vector<int>{1, 1, 4200, 32});
+  CATCH_REQUIRE(F::allClose(toCpu(whole), toCpu(wholeAttention(q1, k1, v1, false)), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA attention (blocked and causal)", "[op][cuda]") {
@@ -151,10 +162,12 @@ CATCH_TEST_CASE("test CUDA attention (blocked and causal)", "[op][cuda]") {
 
   // Blocking moves where a block of queries sits in the sequence, so the mask has to move with
   // it. Getting that wrong lets a position see what follows it, which is the one thing the mask
-  // exists to prevent and which no shape check would catch.
-  Tensor q = toCuda(F::rand({1, 1, 3000, 512}, DType::kFloat));
-  Tensor k = toCuda(F::rand({1, 1, 3000, 512}, DType::kFloat));
-  Tensor v = toCuda(F::rand({1, 1, 3000, 512}, DType::kFloat));
+  // exists to prevent and which no shape check would catch. Eight heads over a length that does
+  // not divide by the block size leaves a short block at the end, where the mask sits furthest
+  // from where it was cut.
+  Tensor q = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor k = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor v = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
 
   Tensor actual = F::attention(q, k, v, true);
   CATCH_REQUIRE(F::allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, true)), 5e-3));

@@ -146,9 +146,16 @@ Tensor Operators::softmax(Tensor input) {
   NOT_IMPL();
 }
 
-/// How many score elements one block of queries may hold at once. 4M of them is 8MB in half,
-/// which fits the caches of the parts this runs on and bounds what a long sequence costs.
-constexpr int64_t kAttentionScoreLimit = 4 * 1024 * 1024;
+/// How many score elements one block of queries may hold at once, counting every head and every
+/// sequence in the batch -- the whole tensor the two matmuls hand each other, not one head's
+/// share of it. 128M of them is 256MB in half, and the softmax needs a second copy of it.
+///
+/// This is a bound on memory and nothing else. Blocking was measured on every shape SDXL runs and
+/// a bigger block was faster every time, cache or no cache: the score matrix is streamed once
+/// either way, and what the block size really moves is which kernel cuBLAS picks for the second
+/// matmul, which is not something to steer by. So the budget is set where it stops an allocation
+/// nobody meant to make, and left clear of everything that runs.
+constexpr int64_t kAttentionScoreLimit = 128 * 1024 * 1024;
 
 Tensor Operators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
   CHECK(q.getDim() == 4 && k.getDim() == 4 && v.getDim() == 4);
@@ -170,21 +177,30 @@ Tensor Operators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
   Tensor scaledK = mul(k, scale).transpose(-2, -1);
 
   // The score matrix is the whole cost of doing it this way: a VAE decoding a 1024 by 1024 image
-  // attends over 16384 positions, and holding all of that at once is half a gigabyte per head
-  // before the softmax needs a second copy. Since each output row depends only on its own row of
-  // scores, the queries are taken a block at a time instead. The answer is the same to the bit --
-  // no running maximum is needed, because a block still sees every key -- and the block is small
-  // enough to stay in cache, so the round trip the scores make is a cheaper one.
+  // attends over 16384 positions, and holding all of that at once is half a gigabyte before the
+  // softmax needs a second copy. Since each output row depends only on its own row of scores, the
+  // queries are taken a block at a time instead once that gets out of hand. The answer is the
+  // same to the bit -- no running maximum is needed, because a block still sees every key.
+  //
+  // What a row of queries costs is a row of scores in every head of every sequence, so that is
+  // what the budget is divided by. Dividing by the key length alone, as this once did, left the
+  // heads out, so the thing it called a limit was not one: ten heads held ten times it, and forty
+  // would have held forty.
+  int64_t scoresPerQuery = static_cast<int64_t>(q.getShape(0)) * numHeads * keyValueLength;
+
+  // What the budget affords is then rounded down to a power of two rather than taken where the
+  // division landed. The second matmul takes its kernel from the number of query rows handed to
+  // it, and the choice is not monotone in that number: 640 rows of scores against the values
+  // measured 837us where 512 measured 219, for a quarter more work. The powers of two were
+  // uniformly among the good ones.
   int blockSize = queryLength;
-  if (static_cast<int64_t>(queryLength) * keyValueLength > kAttentionScoreLimit) {
-    blockSize = std::max(1, static_cast<int>(kAttentionScoreLimit / keyValueLength));
+  if (scoresPerQuery * queryLength > kAttentionScoreLimit) {
+    int64_t budget = kAttentionScoreLimit / scoresPerQuery;
+    blockSize = 1;
+    while (blockSize * 2 <= budget) blockSize *= 2;
   }
 
-  Tensor output;
-  for (int begin = 0; begin < queryLength; begin += blockSize) {
-    int end = std::min(begin + blockSize, queryLength);
-    Tensor blockQ = begin == 0 && end == queryLength ? q : q.slice(-2, {begin, end});
-
+  auto attendBlock = [&](Tensor blockQ, int begin, int end) {
     Tensor scores = matmul(mul(blockQ, scale), scaledK);
 
     // A single query attends to the whole history, so it needs no mask. A block of them is masked
@@ -196,8 +212,20 @@ Tensor Operators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
       scores = add(scores, mask);
     }
 
-    Tensor blockOutput = matmul(softmax(scores), v);
-    output = output.empty() ? blockOutput : F::cat(output, blockOutput, -2);
+    return matmul(softmax(scores), v);
+  };
+
+  if (blockSize >= queryLength) return attendBlock(q, 0, queryLength);
+
+  // The answer is made once and each block written into the rows it belongs to. Joining the
+  // blocks as they arrive copies everything finished so far on every pass, which is quadratic in
+  // the number of blocks: the VAE's 64 of them spent 1.7ms of an 18ms call doing nothing else.
+  Tensor output = tensor({q.getShape(0), numHeads, queryLength, headDim}, q.getDType());
+  for (int begin = 0; begin < queryLength; begin += blockSize) {
+    int end = std::min(begin + blockSize, queryLength);
+    Tensor blockOutput = attendBlock(q.slice(-2, {begin, end}), begin, end);
+    Tensor destination = output.slice(-2, {begin, end});
+    copy(blockOutput, destination);
   }
 
   return output;
