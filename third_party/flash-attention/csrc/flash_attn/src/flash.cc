@@ -52,8 +52,10 @@ bool run_mha_fwd_dtype(Flash_fwd_params &params, cudaStream_t stream, bool force
 }  // namespace
 
 bool run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel) {
+    // Half is the only type with instantiations; see generate_kernels.py. A bfloat16 caller is
+    // turned away here rather than at the link, the same way an unlisted head dimension is.
     if (params.is_bf16) {
-        return run_mha_fwd_dtype<cutlass::bfloat16_t>(params, stream, force_split_kernel);
+        return false;
     }
 
     return run_mha_fwd_dtype<cutlass::half_t>(params, stream, force_split_kernel);

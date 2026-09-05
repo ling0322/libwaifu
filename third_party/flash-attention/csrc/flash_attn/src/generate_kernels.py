@@ -4,12 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+# Half only. The caller in flint/cuda/flash_attn.cc turns away anything that is not half before
+# it fills in the parameters, so bfloat16 instantiations were a kernel per head dimension, per
+# causal, per split that nothing could ever reach -- half the archive and half the build.
 DTYPE_MAP = {
     "fp16": "cutlass::half_t",
-    "bf16": "cutlass::bfloat16_t",
 }
 
 SM = [80]  # Sm80 kernels support up to
+# flash_fwd_launch_template.h carries a launcher for exactly these three, the ones flash.cc
+# dispatches; adding one here means adding a run_mha_fwd_hdim<N> to go with it.
 HEAD_DIMENSIONS = [64, 128, 256]
 IS_CAUSAL = ["false", "true"]
 NAMESPACE_INCLUDE = '#include "namespace_config.h"\n'
