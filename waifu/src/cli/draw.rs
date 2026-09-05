@@ -44,7 +44,8 @@ use ratatui::widgets::{Block, BorderType, Gauge, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::Args;
-use crate::cli::field::TextField;
+use crate::cli::ask::{self, Answer};
+use crate::cli::field::{edit_text, TextField};
 use crate::cli::files::{FilePicker, Outcome};
 use crate::cli::picker;
 use crate::cli::{built_from, hub};
@@ -452,9 +453,11 @@ enum Field {
     Size,
     Strength,
     Seed,
+    /// The one that is not a box to fill in but the thing all of them are for.
+    Generate,
 }
 
-const FIELDS: [Field; 8] = [
+const FIELDS: [Field; 9] = [
     Field::Prompt,
     Field::Negative,
     Field::From,
@@ -463,7 +466,29 @@ const FIELDS: [Field; 8] = [
     Field::Size,
     Field::Strength,
     Field::Seed,
+    Field::Generate,
 ];
+
+impl Field {
+    /// Whether this is a box typed into, which decides what left and right do while in it.
+    ///
+    /// Everywhere else they move between boxes, which is what the row of numbers wants: they sit
+    /// side by side and there is nothing else those two keys could be pointing at. In a box of
+    /// text there is -- the cursor -- so there they keep meaning that, and tab and up and down
+    /// are how to leave.
+    fn takes_text(self) -> bool {
+        matches!(
+            self,
+            Field::Prompt | Field::Negative | Field::From | Field::Seed
+        )
+    }
+}
+
+/// A box on top of the screen asking for one value, and which box the answer goes into.
+enum Asking {
+    Number(Field, ask::Number),
+    Size(ask::Choice),
+}
 
 /// What the screen is waiting for.
 enum Status {
@@ -507,6 +532,8 @@ struct App {
     /// Where the picker was last looking, so that closing it without picking anything and opening
     /// it again does not walk back to where the program was started from.
     browsed: Option<PathBuf>,
+    /// The box asking for one value, while it is up.
+    asking: Option<Asking>,
     quit: bool,
 
     /// What the run was pointed at. Shown rather than kept, because a picture that came out wrong
@@ -539,6 +566,7 @@ impl App {
             pending: None,
             browsing: None,
             browsed: None,
+            asking: None,
             quit: false,
         }
     }
@@ -608,15 +636,45 @@ impl App {
     fn key(&mut self, key: KeyEvent, cancel: &AtomicBool) {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Ctrl-C still ends the program from inside the picker: it is the key that always means
-        // that, and a box on top of the screen is no reason for it to stop meaning it.
-        if let Some(browsing) = &mut self.browsing {
-            if key.code == KeyCode::Char('c') && control {
-                cancel.store(true, Ordering::Relaxed);
-                self.quit = true;
-                return;
-            }
+        // Ctrl-C still ends the program from inside any box on top of the screen: it is the key
+        // that always means that, and a box is no reason for it to stop meaning it.
+        if (self.browsing.is_some() || self.asking.is_some())
+            && key.code == KeyCode::Char('c')
+            && control
+        {
+            cancel.store(true, Ordering::Relaxed);
+            self.quit = true;
+            return;
+        }
 
+        if let Some(asking) = &mut self.asking {
+            match asking {
+                Asking::Number(field, box_) => match box_.key(key) {
+                    Answer::Open => {}
+                    Answer::Cancelled => self.asking = None,
+                    Answer::Given(value) => {
+                        match field {
+                            Field::Steps => self.steps = value as i32,
+                            Field::Guidance => self.guidance = value as f32,
+                            Field::Strength => self.strength = value as f32,
+                            _ => {}
+                        }
+                        self.asking = None;
+                    }
+                },
+                Asking::Size(box_) => match box_.key(key) {
+                    Answer::Open => {}
+                    Answer::Cancelled => self.asking = None,
+                    Answer::Given(index) => {
+                        self.size = index;
+                        self.asking = None;
+                    }
+                },
+            }
+            return;
+        }
+
+        if let Some(browsing) = &mut self.browsing {
             let outcome = browsing.key(key);
             if outcome != Outcome::Open {
                 self.browsed = Some(browsing.directory().to_path_buf());
@@ -643,46 +701,87 @@ impl App {
                     self.quit = true;
                 }
             }
-            // Enter draws, except in the one box where what it obviously means is "show me".
-            KeyCode::Enter if self.focused() == Field::From => self.browse(),
-            KeyCode::Enter => self.start(),
-            KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % FIELDS.len(),
-            KeyCode::BackTab | KeyCode::Up => {
-                self.focus = (self.focus + FIELDS.len() - 1) % FIELDS.len();
-            }
+            // Enter is what the box the cursor is in does, and for the boxes that do nothing of
+            // their own that is still to draw.
+            KeyCode::Enter => self.enter(),
+            KeyCode::Tab | KeyCode::Down => self.step_focus(1),
+            KeyCode::BackTab | KeyCode::Up => self.step_focus(-1),
+
+            // Between the boxes, except where the box has its own use for them.
+            KeyCode::Left if !self.focused().takes_text() => self.step_focus(-1),
+            KeyCode::Right if !self.focused().takes_text() => self.step_focus(1),
+
             code => self.edit(code),
         }
     }
 
+    /// Moves the cursor `by` boxes, round either end.
+    fn step_focus(&mut self, by: isize) {
+        let count = FIELDS.len() as isize;
+        self.focus = ((self.focus as isize + by).rem_euclid(count)) as usize;
+    }
+
     /// The keys that mean something to the box the cursor is in.
+    ///
+    /// Only the boxes typed into have any: a value is changed by opening a box for it, which is
+    /// what enter does, rather than by nudging it one arrow press at a time.
     fn edit(&mut self, code: KeyCode) {
         match self.focused() {
             Field::Prompt => edit_text(&mut self.prompt, code, |_| true),
             Field::Negative => edit_text(&mut self.negative, code, |_| true),
             Field::From => edit_text(&mut self.from, code, |_| true),
             Field::Seed => edit_text(&mut self.seed, code, char::is_ascii_digit),
-            Field::Steps => match code {
-                KeyCode::Left => self.steps = (self.steps - 1).max(1),
-                KeyCode::Right => self.steps = (self.steps + 1).min(150),
-                _ => {}
-            },
-            Field::Guidance => match code {
-                KeyCode::Left => self.guidance = (self.guidance - 0.5).max(1.0),
-                KeyCode::Right => self.guidance = (self.guidance + 0.5).min(20.0),
-                _ => {}
-            },
-            Field::Size => match code {
-                KeyCode::Left => self.size = self.size.saturating_sub(1),
-                KeyCode::Right => self.size = (self.size + 1).min(SIZES.len() - 1),
-                _ => {}
-            },
+            _ => {}
+        }
+    }
+
+    /// What enter does, which is whatever the box the cursor is in is for.
+    fn enter(&mut self) {
+        match self.focused() {
+            Field::From => self.browse(),
+            Field::Steps => {
+                self.asking = Some(Asking::Number(
+                    Field::Steps,
+                    ask::Number::ask("steps", &self.steps.to_string(), 1.0, 150.0, true),
+                ));
+            }
+            Field::Guidance => {
+                self.asking = Some(Asking::Number(
+                    Field::Guidance,
+                    ask::Number::ask(
+                        "guidance",
+                        &format!("{:.1}", self.guidance),
+                        1.0,
+                        20.0,
+                        false,
+                    ),
+                ));
+            }
             // Down to zero, which keeps the picture and only sends it through the autoencoder,
             // and up to one, which keeps nothing of it and is the same walk as from noise.
-            Field::Strength => match code {
-                KeyCode::Left => self.strength = (self.strength - 0.05).max(0.0),
-                KeyCode::Right => self.strength = (self.strength + 0.05).min(1.0),
-                _ => {}
-            },
+            Field::Strength => {
+                self.asking = Some(Asking::Number(
+                    Field::Strength,
+                    ask::Number::ask(
+                        "strength",
+                        &format!("{:.2}", self.strength),
+                        0.0,
+                        1.0,
+                        false,
+                    ),
+                ));
+            }
+            // A handful someone chose in advance rather than a range, so it is a list.
+            Field::Size => {
+                let sizes = SIZES
+                    .iter()
+                    .map(|(width, height)| format!("{width} x {height}"))
+                    .collect();
+                self.asking = Some(Asking::Size(ask::Choice::ask("size", sizes, self.size)));
+            }
+            // The boxes with nothing of their own to do keep what enter meant before there was a
+            // button: someone who has typed a prompt and pressed enter means draw it.
+            Field::Prompt | Field::Negative | Field::Seed | Field::Generate => self.start(),
         }
     }
 
@@ -748,21 +847,25 @@ impl App {
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [heading, prompt, negative, from, numbers, status, written, keys] = Layout::vertical([
-            Constraint::Length(1),
-            // The same height, because the two are the same kind of thing: what to draw and what
-            // to keep out of it. One box a row shorter than the other reads as the shorter one
-            // mattering less, which is not what the difference was ever about.
-            Constraint::Length(TEXT_BOX),
-            Constraint::Length(TEXT_BOX),
-            // A path is one line however long it is, so this box is the height of its border.
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
+        let [heading, prompt, negative, from, numbers, generate, status, written, keys] =
+            Layout::vertical([
+                Constraint::Length(1),
+                // The same height, because the two are the same kind of thing: what to draw and
+                // what to keep out of it. One box a row shorter than the other reads as the
+                // shorter one mattering less, which is not what the difference was ever about.
+                Constraint::Length(TEXT_BOX),
+                Constraint::Length(TEXT_BOX),
+                // A path is one line however long it is, so this box is the height of its border.
+                Constraint::Length(3),
+                Constraint::Length(3),
+                // One row, and no border. A border would make it a box like the ones above it,
+                // and it is the one thing on the screen that is not a box to fill in.
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .areas(frame.area());
 
         let fifths = [Constraint::Ratio(1, 5); 5];
         let [steps, guidance, size, strength, seed] = Layout::horizontal(fifths).areas(numbers);
@@ -845,28 +948,72 @@ impl App {
             },
         );
 
+        self.render_generate(frame, generate);
         self.render_status(frame, status);
         self.render_written(frame, written);
 
-        // The picker carries its own line of key hints, and while it is up these are not what the
-        // keys do. Two rows saying different things about the same keys is worse than one.
+        // A box on top carries its own line of key hints, and while one is up these are not what
+        // the keys do. Two rows saying different things about the same keys is worse than one.
+        //
+        // Last, so that it is on top of everything above rather than under it.
         if let Some(browsing) = &self.browsing {
-            // Last, so that it is on top of everything above rather than under it.
             browsing.render(frame, frame.area());
+            return;
+        }
+        if let Some(asking) = &self.asking {
+            match asking {
+                Asking::Number(_, box_) => box_.render(frame, frame.area()),
+                Asking::Size(box_) => box_.render(frame, frame.area()),
+            }
             return;
         }
 
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(" tab").bold(),
+                Span::raw(" or "),
+                Span::raw("arrows").bold(),
                 Span::raw(" move  "),
                 Span::raw("enter").bold(),
-                Span::raw(" draw  "),
+                Span::raw(" set or draw  "),
                 Span::raw("esc").bold(),
                 Span::raw(" stop or quit"),
             ]))
             .style(Style::new().fg(Color::DarkGray)),
             keys,
+        );
+    }
+
+    /// The one thing on the screen that is not a box to fill in.
+    ///
+    /// Drawn as a bar of colour rather than as another bordered box, because it is not the same
+    /// kind of thing as the boxes above it and should not have to be read to find that out. It is
+    /// still in the order tab walks, so it is reachable the way everything else is, and enter on
+    /// any of the boxes with nothing else to do still starts a run.
+    fn render_generate(&self, frame: &mut Frame, area: Rect) {
+        let focused = self.focused() == Field::Generate;
+        let (label, style) = match (self.running(), focused) {
+            // Nothing to press while one is already being drawn, and the bar says so rather than
+            // sitting there green and inviting a second press that would be refused.
+            (true, _) => (
+                "drawing".to_string(),
+                Style::new().fg(Color::Black).bg(Color::DarkGray),
+            ),
+            (false, true) => (
+                "> generate <".to_string(),
+                Style::new().fg(Color::Black).bg(Color::LightGreen).bold(),
+            ),
+            (false, false) => (
+                "generate".to_string(),
+                Style::new().fg(Color::Black).bg(Color::Green),
+            ),
+        };
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, style)))
+                .centered()
+                .style(style),
+            area,
         );
     }
 
@@ -934,13 +1081,11 @@ impl App {
         let inner = outline.inner(area);
         frame.render_widget(outline, area);
 
-        // The arrows are only worth drawing on the box they would move.
+        // Nothing but the value. There used to be a pair of arrows here saying which keys moved
+        // it, which is not what they do any more; that the border is lit is what says the cursor
+        // is here, and the line at the foot is what says enter opens it.
         let line = if self.focused() == field {
-            Line::from(vec![
-                Span::styled("< ", Style::new().fg(Color::Yellow)),
-                Span::raw(value).bold(),
-                Span::styled(" >", Style::new().fg(Color::Yellow)),
-            ])
+            Line::from(Span::raw(value).bold())
         } else {
             Line::raw(value)
         };
@@ -1058,20 +1203,6 @@ impl App {
     }
 }
 
-/// The keys that edit a box of text, taking only the characters `accepts` allows.
-fn edit_text(field: &mut TextField, code: KeyCode, accepts: fn(&char) -> bool) {
-    match code {
-        KeyCode::Char(character) if accepts(&character) => field.insert(character),
-        KeyCode::Backspace => field.backspace(),
-        KeyCode::Delete => field.delete(),
-        KeyCode::Left => field.left(),
-        KeyCode::Right => field.right(),
-        KeyCode::Home => field.home(),
-        KeyCode::End => field.end(),
-        _ => {}
-    }
-}
-
 /// How far along a run is, as a bar can show it.
 ///
 /// Weighed rather than counted. Reading the prompt costs about a step and turning the finished
@@ -1160,43 +1291,127 @@ mod tests {
         assert_eq!(app.focused(), Field::Prompt, "all the way round");
 
         app.key(press(KeyCode::BackTab), &cancel);
-        assert_eq!(app.focused(), Field::Seed, "and one back off the end");
+        assert_eq!(app.focused(), Field::Generate, "and one back off the end");
     }
 
     #[test]
-    fn the_arrows_turn_the_knobs_and_stop_at_their_ends() {
+    fn the_arrows_move_between_boxes_except_where_a_box_wants_them() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
-        focus_on(&mut app, Field::Steps);
 
-        app.key(press(KeyCode::Right), &cancel);
-        assert_eq!(app.steps, 31);
-        for _ in 0..40 {
-            app.key(press(KeyCode::Left), &cancel);
-        }
-        assert_eq!(app.steps, 1, "a run of no steps is not a run");
-
+        // In the row of numbers, left and right are the only thing they could be pointing at.
         focus_on(&mut app, Field::Guidance);
         app.key(press(KeyCode::Left), &cancel);
-        assert_eq!(app.guidance, 4.5);
+        assert_eq!(app.focused(), Field::Steps);
+        app.key(press(KeyCode::Right), &cancel);
+        app.key(press(KeyCode::Right), &cancel);
+        assert_eq!(app.focused(), Field::Size);
+
+        // And they do not touch the values on the way past, which is what they used to do.
+        assert_eq!(app.steps, 30);
+        assert_eq!(app.guidance, 5.0);
+
+        // In a box of text there is something else they mean, so they keep meaning it.
+        focus_on(&mut app, Field::Prompt);
+        type_in(&mut app, "cat", &cancel);
+        app.key(press(KeyCode::Left), &cancel);
+        app.key(press(KeyCode::Left), &cancel);
+        assert_eq!(
+            app.focused(),
+            Field::Prompt,
+            "left walked out of a text box"
+        );
+        type_in(&mut app, "-", &cancel);
+        assert_eq!(app.prompt.text(), "c-at", "left did not move the cursor");
+    }
+
+    /// Opens the box on `field`, types `text` into it, and presses enter.
+    fn set(app: &mut App, field: Field, text: &str, cancel: &AtomicBool) {
+        focus_on(app, field);
+        app.key(press(KeyCode::Enter), cancel);
+        assert!(
+            app.asking.is_some(),
+            "enter did not open a box for {field:?}"
+        );
+
+        for _ in 0..12 {
+            app.key(press(KeyCode::Backspace), cancel);
+        }
+        type_in(app, text, cancel);
+        app.key(press(KeyCode::Enter), cancel);
+    }
+
+    #[test]
+    fn a_number_is_typed_into_a_box_rather_than_nudged() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        set(&mut app, Field::Steps, "42", &cancel);
+        assert!(app.asking.is_none(), "the box stayed open");
+        assert_eq!(app.steps, 42);
+
+        set(&mut app, Field::Guidance, "7.5", &cancel);
+        assert_eq!(app.guidance, 7.5);
+
+        set(&mut app, Field::Strength, "0.35", &cancel);
+        assert!((app.strength - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_box_starts_on_the_value_it_is_changing() {
+        // So that moving a number by one is two keys and not the whole number again.
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        focus_on(&mut app, Field::Steps);
+        app.key(press(KeyCode::Enter), &cancel);
+        let Some(Asking::Number(_, number)) = &app.asking else {
+            panic!("no number box");
+        };
+        assert_eq!(number.typed(), "30");
+    }
+
+    #[test]
+    fn a_number_outside_the_range_is_refused_and_the_box_stays_open() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        focus_on(&mut app, Field::Steps);
+        app.key(press(KeyCode::Enter), &cancel);
+        for _ in 0..12 {
+            app.key(press(KeyCode::Backspace), &cancel);
+        }
+        type_in(&mut app, "999", &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+
+        assert!(app.asking.is_some(), "999 steps was taken");
+        assert_eq!(app.steps, 30, "and it changed the value anyway");
+
+        // What is wrong with it is on the box, and esc leaves the value alone.
+        let drawn = screen(&app, 90, 28);
+        assert!(drawn.contains("1 to 150"), "{drawn}");
+        app.key(press(KeyCode::Esc), &cancel);
+        assert!(app.asking.is_none());
+        assert_eq!(app.steps, 30);
+    }
+
+    #[test]
+    fn the_size_is_picked_off_a_list_rather_than_typed() {
+        // A handful someone chose in advance is a list, not a range.
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
 
         focus_on(&mut app, Field::Size);
-        for _ in 0..SIZES.len() * 2 {
-            app.key(press(KeyCode::Right), &cancel);
-        }
-        assert_eq!(app.size, SIZES.len() - 1);
+        app.key(press(KeyCode::Enter), &cancel);
+        assert!(matches!(app.asking, Some(Asking::Size(_))));
 
-        // Strength runs the other way round: it has a bottom as well as a top, and both ends are
-        // a run that means something rather than one to stop short of.
-        focus_on(&mut app, Field::Strength);
-        for _ in 0..100 {
-            app.key(press(KeyCode::Right), &cancel);
-        }
-        assert_eq!(app.strength, 1.0);
-        for _ in 0..100 {
-            app.key(press(KeyCode::Left), &cancel);
-        }
-        assert_eq!(app.strength, 0.0);
+        let drawn = screen(&app, 90, 28);
+        assert!(drawn.contains("832 x 1216"), "{drawn}");
+
+        app.key(press(KeyCode::Down), &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+        assert!(app.asking.is_none());
+        assert_eq!(app.size, DEFAULT_SIZE + 1);
     }
 
     #[test]
@@ -1365,20 +1580,19 @@ mod tests {
 
         focus_on(&mut app, Field::From);
         type_in(&mut app, "  cat.png  ", &cancel);
-        focus_on(&mut app, Field::Strength);
-        app.key(press(KeyCode::Left), &cancel);
+        set(&mut app, Field::Strength, "0.75", &cancel);
         app.start();
 
         let job = app.pending.take().unwrap();
         // Trimmed, because a path typed with a space either side is the path.
         assert_eq!(job.from, Some(PathBuf::from("cat.png")));
-        assert!((job.options.strength - (DEFAULT_STRENGTH - 0.05)).abs() < 1e-6);
+        assert!((job.options.strength - 0.75).abs() < 1e-6);
 
         // The number is on the screen now that something reads it.
         assert!(
-            screen(&app, 90, 24).contains("0.75"),
+            screen(&app, 90, 28).contains("0.75"),
             "{}",
-            screen(&app, 90, 24)
+            screen(&app, 90, 28)
         );
     }
 
@@ -1583,7 +1797,10 @@ mod tests {
             elapsed: Duration::from_secs(42),
         });
 
-        let screen = screen(&app, 90, 24);
+        // One row taller than it used to need, which is the button's. A shorter terminal still
+        // draws -- the list of pictures is what gives the row up -- but this is the census, and a
+        // census wants a screen with room for everything on it.
+        let screen = screen(&app, 90, 28);
         for wanted in [
             "prompt",
             "a cat",
@@ -1598,9 +1815,10 @@ mod tests {
             "any",
             "draw from",
             "strength",
+            "generate",
             "pictures written",
             "waifu-0007.png",
-            "tab move",
+            "tab or arrows move",
         ] {
             assert!(
                 screen.contains(wanted),

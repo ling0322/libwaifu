@@ -24,6 +24,7 @@
 //! implementation.
 
 mod args;
+mod ask;
 mod draw;
 mod field;
 mod files;
@@ -32,6 +33,7 @@ mod picker;
 
 use std::process::ExitCode;
 
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 
@@ -50,6 +52,22 @@ fn built_from() -> Line<'static> {
         Span::raw("  "),
         Span::styled(REVISION, Style::new().fg(Color::DarkGray)),
     ])
+}
+
+/// A rectangle of at most `width` by `height`, in the middle of `area`.
+///
+/// Where every box that opens on top of a screen puts itself. Shared rather than written twice
+/// because two of them already want it and the third will.
+fn centred(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
 }
 
 fn print_usage() {

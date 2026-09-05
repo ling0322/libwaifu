@@ -25,6 +25,8 @@
 
 use std::ops::Range;
 
+use ratatui::crossterm::event::KeyCode;
+
 /// Text being edited, held as characters rather than bytes so that a position is a position.
 #[derive(Clone, Debug, Default)]
 pub struct TextField {
@@ -232,5 +234,23 @@ mod tests {
 
         // A box with no room in it still has to say where the cursor went.
         assert_eq!(TextField::new("ab").wrapped(0).1, (2, 0));
+    }
+}
+
+/// The keys that edit a box of text, taking only the characters `accepts` allows.
+///
+/// Left and right move the cursor here rather than moving between boxes, which is the one place
+/// the screens they are on give those two keys away: in a box you type into they cannot mean
+/// anything else.
+pub fn edit_text(field: &mut TextField, code: KeyCode, accepts: fn(&char) -> bool) {
+    match code {
+        KeyCode::Char(character) if accepts(&character) => field.insert(character),
+        KeyCode::Backspace => field.backspace(),
+        KeyCode::Delete => field.delete(),
+        KeyCode::Left => field.left(),
+        KeyCode::Right => field.right(),
+        KeyCode::Home => field.home(),
+        KeyCode::End => field.end(),
+        _ => {}
     }
 }

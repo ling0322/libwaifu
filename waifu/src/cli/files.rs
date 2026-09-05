@@ -40,6 +40,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::cli::centred;
+
 /// The name a parent directory goes by, and the row that walks to it.
 const PARENT: &str = "..";
 
@@ -456,19 +458,6 @@ fn row_style(on: bool, directory: bool) -> Style {
         (true, _) => Style::default().fg(Color::Black).bg(Color::Cyan),
         (false, true) => Style::default().fg(Color::Cyan),
         (false, false) => Style::default(),
-    }
-}
-
-/// A rectangle of at most `width` by `height`, in the middle of `area`.
-fn centred(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-
-    Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
     }
 }
 
