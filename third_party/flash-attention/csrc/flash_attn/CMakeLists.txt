@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(flash_attn LANGUAGES CXX CUDA)
+project(flash_attn LANGUAGES CXX)
 
 find_package(CUDAToolkit REQUIRED)
 
@@ -12,10 +12,17 @@ if(NOT EXISTS "${FLASH_ATTN_CUTLASS_DIR}/include/cutlass/cutlass.h")
         "Run third_party/install_flash_attn.sh.")
 endif()
 
+# Chosen before the CUDA language is enabled, which is why this project takes CUDA through
+# enable_language rather than through project(). Enabling it is what gives
+# CMAKE_CUDA_ARCHITECTURES a default of its own -- 52, on CMake 4 -- and a test for DEFINED made
+# after that never fires: the list below was skipped and the kernels were built for a card from
+# 2014, in fourteen seconds, to no complaint from anything.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     # Real code for every target: sm80 PTX JITs into silently wrong kernels on sm120.
     set(CMAKE_CUDA_ARCHITECTURES 80-real 86-real 89-real 90-real 120-real)
 endif()
+message(STATUS "flash_attn CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+enable_language(CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
