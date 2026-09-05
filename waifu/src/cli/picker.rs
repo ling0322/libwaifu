@@ -28,6 +28,7 @@
 //! a channel, the same shape the drawing screen uses for a run. The screen stays live while it
 //! happens: a download that cannot be watched is indistinguishable from one that has hung.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Gauge, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
+use crate::cli::files::{self, FilePicker};
 use crate::cli::{built_from, hub};
 use crate::Device;
 
@@ -50,24 +52,106 @@ const TICK: Duration = Duration::from_millis(100);
 /// the answer is mostly the buffer size divided by how long one read happened to take.
 const SPEED_WINDOW: Duration = Duration::from_millis(500);
 
+/// What a package file is called, which is what the list offers to look for.
+const PACKAGE_SUFFIX_NAME: &str = "waifupkg";
+
 /// One row of the list.
-struct Entry {
-    name: &'static str,
-    /// Whether every package of it is already in the cache.
-    cached: bool,
-    /// What is on disk for it, which is most of a model for one that was interrupted.
-    bytes: u64,
+enum Entry {
+    /// A model this build knows how to fetch.
+    Published {
+        name: &'static str,
+        /// Whether every package of it is already in the cache.
+        cached: bool,
+        /// What is on disk for it, which is most of a model for one that was interrupted.
+        bytes: u64,
+    },
+    /// Not a model but a way out of the list: a package already somewhere on the disk, which is
+    /// where anything exported here rather than published lives.
+    OnDisk,
 }
 
 impl Entry {
-    fn describe(&self) -> String {
-        if self.cached {
-            format!("on disk, {}", gigabytes(self.bytes))
-        } else if self.bytes > 0 {
-            format!("part fetched, {}", gigabytes(self.bytes))
-        } else {
-            "not fetched".to_string()
+    fn name(&self) -> &str {
+        match self {
+            Entry::Published { name, .. } => name,
+            Entry::OnDisk => "a file...",
         }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Entry::Published {
+                cached: true,
+                bytes,
+                ..
+            } => format!("on disk, {}", gigabytes(*bytes)),
+            Entry::Published { bytes, .. } if *bytes > 0 => {
+                format!("part fetched, {}", gigabytes(*bytes))
+            }
+            Entry::Published { .. } => "not fetched".to_string(),
+            Entry::OnDisk => format!("a .{PACKAGE_SUFFIX_NAME} you exported yourself"),
+        }
+    }
+
+    /// Whether the row reads as ready to use, which is what lights it up.
+    fn ready(&self) -> bool {
+        match self {
+            Entry::Published { cached, .. } => *cached,
+            // Nothing to fetch, so nothing to be waiting for.
+            Entry::OnDisk => true,
+        }
+    }
+}
+
+/// What a package picked off the disk becomes, or why it cannot be used.
+///
+/// It is called by the file it is in rather than by a name from the list. The whole path is too
+/// long for the heading the drawing screen puts it in and its tail is the part that identifies it,
+/// which is the same call the command line makes for a `-m` that names a path.
+fn from_disk(path: PathBuf, device: Device) -> Result<Chosen, String> {
+    if !is_a_first_part(&path) {
+        return Err(format!(
+            "{} is a later part of a model. Open the one numbered 00001: it is the only one \
+             that says what the others are called",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+
+    Ok(Chosen {
+        name: path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+        path,
+        device,
+    })
+}
+
+/// Whether `path` is a package a model can be read from, rather than a later part of one.
+///
+/// A model too large for one file is written as `name-00001-of-00004.waifupkg` and the rest, and
+/// only the first carries the configuration that names the others. Opening any of the others is
+/// the mistake this catches: four files sit beside each other in the cache and nothing about the
+/// names says which one to open.
+fn is_a_first_part(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return true;
+    };
+
+    // "...-00003-of-00004" and nothing else, read from the back, so the count comes first and
+    // the number of this one last. A name that is not split at all is a first part.
+    let mut pieces = stem.rsplit('-');
+    let (Some(of_many), Some("of"), Some(which)) = (pieces.next(), pieces.next(), pieces.next())
+    else {
+        return true;
+    };
+    if which.len() != 5 || of_many.len() != 5 {
+        return true;
+    }
+    match (which.parse::<u32>(), of_many.parse::<u32>()) {
+        (Ok(which), Ok(_)) => which == 1,
+        _ => true,
     }
 }
 
@@ -148,24 +232,23 @@ enum Doing {
 /// Returns where the chosen model is, or `None` if they quit. The terminal is the caller's: this
 /// borrows it and gives it back as it found it.
 /// A model and a device, chosen.
+#[derive(Debug)]
 pub struct Chosen {
     pub path: std::path::PathBuf,
     /// What it was called in the list, which is shorter and steadier than its path and is what
-    /// the drawing screen shows.
-    pub name: &'static str,
+    /// the drawing screen shows. Owned rather than static, since a file off the disk is called
+    /// whatever it is called.
+    pub name: String,
     pub device: Device,
 }
 
-pub fn choose(
-    terminal: &mut DefaultTerminal,
-    device: Device,
-) -> Result<Option<Chosen>, Error> {
+pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<Chosen>, Error> {
     // Versioned names are left out. Someone who wants `sdxl:base:v1` in particular can type it,
     // and a list is for someone who does not yet know what to type.
-    let entries: Vec<Entry> = hub::names()
+    let mut entries: Vec<Entry> = hub::names()
         .into_iter()
         .filter(|name| name.matches(':').count() == 1)
-        .map(|name| Entry {
+        .map(|name| Entry::Published {
             name,
             cached: hub::is_cached(name),
             bytes: hub::cached_bytes(name),
@@ -174,6 +257,10 @@ pub fn choose(
     if entries.is_empty() {
         return Err("this build knows no models to offer".into());
     }
+
+    // Last, under the published ones: it is the answer for someone who already has a package, and
+    // the list above is for someone who does not yet know what to ask for.
+    entries.push(Entry::OnDisk);
 
     let devices: Vec<Choice> = [Device::Cpu, Device::Cuda, Device::Metal]
         .into_iter()
@@ -185,7 +272,10 @@ pub fn choose(
 
     // Something already on disk is the one most likely to be wanted, so start there.
     let mut choices = Choices {
-        selected: entries.iter().position(|entry| entry.cached).unwrap_or(0),
+        selected: entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::Published { cached: true, .. }))
+            .unwrap_or(0),
         entries,
         // Whatever the command line resolved to, so that the box says what would have happened
         // rather than making someone who passed -d set it a second time.
@@ -198,9 +288,15 @@ pub fn choose(
     };
     let mut doing = Doing::Choosing;
     let mut failure: Option<String> = None;
+    let mut browsing: Option<FilePicker> = None;
 
     loop {
-        terminal.draw(|frame| draw(frame, &choices, &doing, failure.as_deref()))?;
+        terminal.draw(|frame| {
+            draw(frame, &choices, &doing, failure.as_deref());
+            if let Some(browsing) = &browsing {
+                browsing.render(frame, frame.area());
+            }
+        })?;
 
         let mut outcome = Outcome::Nothing;
         if let Doing::Fetching {
@@ -272,16 +368,23 @@ pub fn choose(
             Outcome::Done(path) => {
                 return Ok(Some(Chosen {
                     path,
-                    name: choices.entries[choices.selected].name,
+                    name: choices.entries[choices.selected].name().to_string(),
                     device: choices.chosen_device().device,
                 }))
             }
             Outcome::Failed(message) => {
-                failure = Some(message);
+                failure = Some(format!("could not fetch: {message}"));
                 doing = Doing::Choosing;
                 for entry in &mut choices.entries {
-                    entry.cached = hub::is_cached(entry.name);
-                    entry.bytes = hub::cached_bytes(entry.name);
+                    if let Entry::Published {
+                        name,
+                        cached,
+                        bytes,
+                    } = entry
+                    {
+                        *cached = hub::is_cached(name);
+                        *bytes = hub::cached_bytes(name);
+                    }
                 }
             }
         }
@@ -293,6 +396,28 @@ pub fn choose(
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        // While the file picker is up it has the keys, except the one that always ends the
+        // program. Nothing behind it is running -- a fetch and the picker cannot both be on --
+        // so there is nothing else for a key to reach.
+        if let Some(open) = &mut browsing {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(None);
+            }
+
+            match open.key(key) {
+                files::Outcome::Open => {}
+                files::Outcome::Cancelled => browsing = None,
+                files::Outcome::Picked(path) => {
+                    browsing = None;
+                    match from_disk(path, choices.chosen_device().device) {
+                        Ok(chosen) => return Ok(Some(chosen)),
+                        Err(message) => failure = Some(message),
+                    }
+                }
+            }
             continue;
         }
 
@@ -347,8 +472,17 @@ pub fn choose(
                     continue;
                 }
 
-                let name = choices.entries[choices.selected].name;
                 failure = None;
+
+                // The row that is not a model: nothing to fetch, so what opens is the disk.
+                let Entry::Published { name, .. } = choices.entries[choices.selected] else {
+                    browsing = Some(FilePicker::open(
+                        "a model package",
+                        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                        &[PACKAGE_SUFFIX_NAME],
+                    ));
+                    continue;
+                };
 
                 let (say, news) = channel::<Word>();
                 std::thread::spawn(move || {
@@ -432,8 +566,10 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
     frame.render_widget(Paragraph::new(built_from()), built);
     frame.render_widget(
         Paragraph::new(
-            Line::from(" Pick a model and a device. The model is fetched the first time it is used.")
-                .dim(),
+            Line::from(
+                " Pick a model and a device. The model is fetched the first time it is used.",
+            )
+            .dim(),
         ),
         told,
     );
@@ -447,8 +583,8 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
             Line::from(vec![
                 Span::raw(if chosen { "> " } else { "  " }),
                 Span::styled(
-                    format!("{:<14}", entry.name),
-                    row_style(chosen, choices.pane == Pane::Models, entry.cached),
+                    format!("{:<14}", entry.name()),
+                    row_style(chosen, choices.pane == Pane::Models, entry.ready()),
                 ),
                 Span::raw("  "),
                 Span::raw(entry.describe()).dim(),
@@ -487,7 +623,11 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
         devices,
     );
 
-    draw_foot(frame, foot, doing, failure);
+    let enter = match choices.entries.get(choices.selected) {
+        Some(Entry::OnDisk) => "look for one",
+        _ => "fetch and use",
+    };
+    draw_foot(frame, foot, doing, enter, failure);
 }
 
 /// How a row reads: marked when it is the one chosen, and only lit up while its half of the screen
@@ -517,7 +657,12 @@ fn focused(title: &str, focused: bool) -> Block<'_> {
     }
 }
 
-fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, failure: Option<&str>) {
+/// The bar at the foot: the fetch while there is one, and otherwise the keys or what went wrong.
+///
+/// `enter` is what enter does on the row the cursor is on, which is not the same on all of them,
+/// and `failure` is shown as it was given -- whoever set it says what it was, since by the time it
+/// reaches here a fetch that failed and a file that cannot be opened look alike.
+fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, enter: &str, failure: Option<&str>) {
     match doing {
         Doing::Fetching {
             file,
@@ -559,7 +704,10 @@ fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, failure: Option<&str>
                 // is what says whether to wait for it. Both are guesses from the last few seconds
                 // and neither is worth showing to more figures than that supports.
                 if let Some(total) = total {
-                    label.push_str(&format!("   {}", remaining(total.saturating_sub(*done), *rate)));
+                    label.push_str(&format!(
+                        "   {}",
+                        remaining(total.saturating_sub(*done), *rate)
+                    ));
                 }
             }
 
@@ -579,12 +727,14 @@ fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, failure: Option<&str>
         Doing::Choosing => {
             let line = match failure {
                 Some(message) => Line::from(Span::styled(
-                    format!("could not fetch: {message}"),
+                    message.to_string(),
                     Style::default().fg(Color::Red),
                 )),
                 None => Line::from(
-                    " up/down choose   left/right or tab switch   enter fetch and use   esc quit"
-                        .dim(),
+                    format!(
+                        " up/down choose   left/right or tab switch   enter {enter}   esc quit"
+                    )
+                    .dim(),
                 ),
             };
             frame.render_widget(Paragraph::new(line).block(bordered("")), area);
@@ -641,7 +791,7 @@ mod tests {
     fn foot(doing: &Doing) -> String {
         let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 3)).unwrap();
         terminal
-            .draw(|frame| draw_foot(frame, frame.area(), doing, None))
+            .draw(|frame| draw_foot(frame, frame.area(), doing, "fetch and use", None))
             .unwrap();
 
         terminal
@@ -685,11 +835,14 @@ mod tests {
 
     fn choices(pane: Pane) -> Choices {
         Choices {
-            entries: vec![Entry {
-                name: "sdxl:wai",
-                cached: true,
-                bytes: 6_970_000_000,
-            }],
+            entries: vec![
+                Entry::Published {
+                    name: "sdxl:wai",
+                    cached: true,
+                    bytes: 6_970_000_000,
+                },
+                Entry::OnDisk,
+            ],
             selected: 0,
             devices: vec![
                 Choice {
@@ -704,6 +857,149 @@ mod tests {
             device: 0,
             pane,
         }
+    }
+
+    #[test]
+    fn the_list_offers_a_file_off_the_disk_under_the_published_ones() {
+        let drawn = screen(&choices(Pane::Models));
+
+        // The published models first, since the list is for someone who does not yet know what
+        // to ask for, and the way to a file they already have under them.
+        assert!(drawn.contains("sdxl:wai"), "{drawn}");
+        assert!(drawn.contains("a file..."), "{drawn}");
+        assert!(drawn.contains("waifupkg"), "{drawn}");
+
+        let choices = choices(Pane::Models);
+        let names: Vec<&str> = choices.entries.iter().map(Entry::name).collect();
+        assert_eq!(names.last(), Some(&"a file..."));
+    }
+
+    #[test]
+    fn the_foot_says_what_enter_does_on_the_row_the_cursor_is_on() {
+        // The rows do not all do the same thing, and a bar that says "fetch" over a row that
+        // opens a list is worse than no bar at all.
+        let foot = |selected: usize| {
+            let mut choices = choices(Pane::Models);
+            choices.selected = selected;
+
+            let mut terminal = ratatui::Terminal::new(TestBackend::new(90, 18)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, &choices, &Doing::Choosing, None))
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        assert!(foot(0).contains("enter fetch and use"), "{}", foot(0));
+        assert!(foot(1).contains("enter look for one"), "{}", foot(1));
+    }
+
+    #[test]
+    fn what_went_wrong_is_shown_as_it_was_given() {
+        // A fetch that failed and a file that cannot be opened both land here, so the message
+        // says which it was rather than the bar assuming.
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(90, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &choices(Pane::Models),
+                    &Doing::Choosing,
+                    Some("00002-of-00004 is a later part of a model"),
+                )
+            })
+            .unwrap();
+        let drawn: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(drawn.contains("is a later part of a model"), "{drawn}");
+        assert!(!drawn.contains("could not fetch"), "{drawn}");
+    }
+
+    #[test]
+    fn the_row_for_a_file_is_not_waiting_on_a_fetch() {
+        // The other rows are lit up by whether they are on disk yet. This one has nothing to
+        // fetch, so it reads as ready rather than as never fetched.
+        assert!(Entry::OnDisk.ready());
+        assert!(!Entry::Published {
+            name: "sdxl:base",
+            cached: false,
+            bytes: 0,
+        }
+        .ready());
+    }
+
+    #[test]
+    fn a_package_off_the_disk_is_called_by_its_file_name() {
+        let chosen = from_disk(
+            PathBuf::from("/home/someone/models/wai-illustrious-v17.waifupkg"),
+            Device::Cuda,
+        )
+        .unwrap();
+
+        // The name, not the path: the whole path does not fit in the heading it goes into, and
+        // the suffix says nothing that the screen it is on does not already say.
+        assert_eq!(chosen.name, "wai-illustrious-v17");
+        assert_eq!(chosen.device, Device::Cuda);
+        assert_eq!(
+            chosen.path,
+            PathBuf::from("/home/someone/models/wai-illustrious-v17.waifupkg")
+        );
+    }
+
+    #[test]
+    fn a_later_part_is_refused_with_what_to_open_instead() {
+        let error = from_disk(
+            PathBuf::from("/c/wai-illustrious-v17-00003-of-00004.waifupkg"),
+            Device::Cpu,
+        )
+        .unwrap_err();
+
+        // Which file it was, and which one to open instead. Saying only that it failed would
+        // leave four identical-looking files and no way to tell them apart.
+        assert!(error.contains("00003-of-00004"), "{error}");
+        assert!(error.contains("00001"), "{error}");
+
+        // The first part goes through.
+        assert!(from_disk(
+            PathBuf::from("/c/wai-illustrious-v17-00001-of-00004.waifupkg"),
+            Device::Cpu,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_later_part_of_a_split_model_is_not_a_package_to_open() {
+        // Only the first part carries the configuration that names the others, and four of them
+        // sit beside each other in the cache with nothing in the names to say which to open.
+        assert!(is_a_first_part(Path::new(
+            "wai-illustrious-v17-00001-of-00004.waifupkg"
+        )));
+        assert!(!is_a_first_part(Path::new(
+            "wai-illustrious-v17-00002-of-00004.waifupkg"
+        )));
+        assert!(!is_a_first_part(Path::new(
+            "/a/b/sdxl-base-00002-of-00002.waifupkg"
+        )));
+
+        // A model that fits in one file is never numbered, and is a first part by having no
+        // others. So is anything whose name merely looks a bit like the pattern.
+        assert!(is_a_first_part(Path::new("sdxl-base.waifupkg")));
+        assert!(is_a_first_part(Path::new("wai-illustrious-v17.waifupkg")));
+        assert!(is_a_first_part(Path::new("2-of-3.waifupkg")));
+        assert!(is_a_first_part(Path::new("part-2-of-4.waifupkg")));
+        assert!(is_a_first_part(Path::new("model-abcde-of-00004.waifupkg")));
+        assert!(is_a_first_part(Path::new("")));
     }
 
     #[test]
@@ -761,7 +1057,10 @@ mod tests {
 
         // The name is long and the bar is what the eye is on, so one is in the border and the
         // other is not: a label wide enough to cover the bar hides what the bar is for.
-        assert!(drawn.contains("wai-illustrious-v17-00001-of-00004.waifupkg"), "{drawn}");
+        assert!(
+            drawn.contains("wai-illustrious-v17-00001-of-00004.waifupkg"),
+            "{drawn}"
+        );
         assert!(drawn.contains("part 2 of 4"), "{drawn}");
         assert!(drawn.contains("11%"), "{drawn}");
         assert!(drawn.contains("223 MB of 2.02 GB"), "{drawn}");
@@ -772,7 +1071,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 3)).unwrap();
         let doing = fetching(1_240_000_000, Some(1_740_000_000), Some(29e6));
         terminal
-            .draw(|frame| draw_foot(frame, frame.area(), &doing, None))
+            .draw(|frame| draw_foot(frame, frame.area(), &doing, "fetch and use", None))
             .unwrap();
 
         // The first digit of the label, which at 71% is well inside the filled part of the bar.

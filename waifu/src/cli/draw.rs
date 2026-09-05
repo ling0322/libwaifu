@@ -140,7 +140,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
             match chosen? {
                 Some(chosen) => {
                     device = chosen.device;
-                    model_name = Some(chosen.name.to_string());
+                    model_name = Some(chosen.name);
                     chosen.path
                 }
                 None => return Ok(()),
