@@ -105,6 +105,68 @@ __global__ void softmaxFusedKernel(
   }
 }
 
+/// One warp per row, for rows short enough to sit in registers. The block-per-row kernel above
+/// gives a row 256 threads and two block-wide reductions no matter how short it is, which for the
+/// 77-wide rows a text prompt produces leaves seven eighths of the threads idle and spends the
+/// time in cub rather than on memory: 63 GB/s where the part can do 448. A warp needs no shared
+/// memory and no __syncthreads, and reading the row once into registers means the two reductions
+/// and the write cost nothing more to fetch.
+///
+/// PER_THREAD is how much of a row one lane keeps, so this handles widths up to 32 * PER_THREAD.
+/// Rows wider than that stay with the block-per-row kernel, which is already at the memory limit
+/// there and has nowhere better to go.
+/// A warp is 32 lanes, which the full shuffle mask below takes as given.
+constexpr int kWarpSize = 32;
+
+template<typename T, int ROWS_PER_BLOCK, int PER_THREAD>
+__global__ void softmaxWarpKernel(
+    const T *__restrict__ input,
+    T *__restrict__ output,
+    int width,
+    int rows) {
+  // Every lane of a warp shares threadIdx.y, so a warp leaves here whole and the shuffles below
+  // keep a full mask.
+  int row = blockIdx.x * ROWS_PER_BLOCK + threadIdx.y;
+  if (row >= rows) return;
+
+  const T *rowInput = input + static_cast<int64_t>(row) * width;
+  T *rowOutput = output + static_cast<int64_t>(row) * width;
+
+  float held[PER_THREAD];
+  float threadMax = -INFINITY;
+#pragma unroll
+  for (int j = 0; j < PER_THREAD; ++j) {
+    int i = threadIdx.x + j * kWarpSize;
+    held[j] = i < width ? static_cast<float>(rowInput[i]) : -INFINITY;
+    threadMax = fmaxf(threadMax, held[j]);
+  }
+#pragma unroll
+  for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
+    threadMax = fmaxf(threadMax, __shfl_xor_sync(0xffffffff, threadMax, offset));
+  }
+
+  float threadSum = 0.0f;
+#pragma unroll
+  for (int j = 0; j < PER_THREAD; ++j) {
+    int i = threadIdx.x + j * kWarpSize;
+    // The lanes past the end of the row take no part in the sum. Held values are left as they
+    // are, so a row that is genuinely all -INFINITY comes out the same as it does above.
+    held[j] = expf(held[j] - threadMax);
+    if (i < width) threadSum += held[j];
+  }
+#pragma unroll
+  for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
+    threadSum += __shfl_xor_sync(0xffffffff, threadSum, offset);
+  }
+
+  float invSum = 1.0f / threadSum;
+#pragma unroll
+  for (int j = 0; j < PER_THREAD; ++j) {
+    int i = threadIdx.x + j * kWarpSize;
+    if (i < width) rowOutput[i] = static_cast<T>(held[j] * invSum);
+  }
+}
+
 template<typename T, int BLOCK_SIZE>
 __global__ void softmaxStridedKernel(
     PackedTensorAccessor<const T, 3> input,
@@ -192,6 +254,19 @@ Tensor softmaxContiguous(Tensor A) {
   Tensor C = createCudaTensor<T>(A.getShape());
   const T *input = getDataPtrCuda<T>(A);
   T *output = getDataPtrCuda<T>(C);
+
+  // A short row goes to a warp rather than a block. Attention hands softmax rows as short as the
+  // prompt is -- 77 for SDXL -- and a block of 256 spends nine tenths of its time not fetching.
+  constexpr int rowsPerBlock = 4;
+  constexpr int perThread = 4;
+  if (width <= kWarpSize * perThread) {
+    dim3 block(kWarpSize, rowsPerBlock);
+    int blocks = (rows + rowsPerBlock - 1) / rowsPerBlock;
+    softmaxWarpKernel<T, rowsPerBlock, perThread><<<blocks, block>>>(input, output, width, rows);
+    LL_CUDA_SYNCHRONIZE();
+    LL_CHECK_CUDA_STATUS(cudaGetLastError());
+    return C;
+  }
 
   constexpr int blockSize = 256;
   bool useHalf2 = std::is_same<T, half>::value && width % 2 == 0 &&

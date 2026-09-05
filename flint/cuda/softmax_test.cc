@@ -120,9 +120,12 @@ CATCH_TEST_CASE("test CUDA softmax (strided ranks)", "[op][cuda]") {
 CATCH_TEST_CASE("test CUDA softmax (row widths)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  // A row is reduced by a whole 256-thread block, so widths below, at, and well above the block
-  // size take different numbers of loop iterations. Odd widths also disable the half2 path.
-  for (int width : {1, 2, 3, 255, 256, 257, 511, 512, 1024, 2048, 4096}) {
+  // A row up to 128 wide is reduced by one warp holding it in registers, and a wider one by a
+  // whole 256-thread block, so the widths on either side of 128 take different kernels and the
+  // ones below, at, and well above 256 take different numbers of loop iterations. Odd widths also
+  // disable the half2 path, and a width that is not a multiple of 32 leaves a warp part idle.
+  for (int width : {1, 2, 3, 31, 32, 33, 64, 77, 127, 128, 129, 255, 256, 257, 511, 512, 1024,
+                    2048, 4096}) {
     Tensor a = F::rand({2, width}, DType::kFloat);
     CATCH_INFO("width = " << width);
     CATCH_REQUIRE(F::allClose(toCpu(F::softmax(toCuda(a))), F::softmax(a), 5e-3));
