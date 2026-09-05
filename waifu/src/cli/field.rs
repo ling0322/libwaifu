@@ -97,6 +97,22 @@ impl TextField {
         self.cursor = self.characters.len();
     }
 
+    /// The text either side of the cursor, and the character it is sitting on if there is one.
+    ///
+    /// For a box that draws its own cursor rather than asking the terminal for one. Where the
+    /// cursor is has to come out of the middle of the text: a mark stuck on the end says the
+    /// cursor is somewhere it is not, from the first press of left or home onwards.
+    pub fn around_the_cursor(&self) -> (String, Option<char>, String) {
+        let before = self.characters[..self.cursor].iter().collect();
+        let on = self.characters.get(self.cursor).copied();
+        let after = match on {
+            Some(_) => self.characters[self.cursor + 1..].iter().collect(),
+            // Past the last character there is nothing to be on and nothing after it.
+            None => String::new(),
+        };
+        (before, on, after)
+    }
+
     /// Where the lines break when the text is drawn `width` columns wide.
     ///
     /// Every character lands on exactly one line, the spaces a line was broken at included, so
@@ -192,6 +208,37 @@ mod tests {
         assert_eq!(field.text(), "猫");
         field.insert('娘');
         assert_eq!(field.text(), "猫娘");
+    }
+
+    #[test]
+    fn says_what_is_either_side_of_the_cursor() {
+        let mut field = TextField::new("30");
+
+        // Past the end there is no character to be on, which is what a box draws its mark for.
+        assert_eq!(
+            field.around_the_cursor(),
+            ("30".to_string(), None, String::new())
+        );
+
+        field.left();
+        assert_eq!(
+            field.around_the_cursor(),
+            ("3".to_string(), Some('0'), String::new())
+        );
+
+        field.home();
+        assert_eq!(
+            field.around_the_cursor(),
+            (String::new(), Some('3'), "0".to_string())
+        );
+
+        // Every character is accounted for exactly once, wherever the cursor is, so that drawing
+        // the three pieces draws the text.
+        let (before, on, after) = field.around_the_cursor();
+        assert_eq!(
+            format!("{before}{}{after}", on.unwrap_or_default()),
+            field.text()
+        );
     }
 
     #[test]

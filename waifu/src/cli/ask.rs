@@ -58,6 +58,29 @@ pub enum Answer<T> {
     Given(T),
 }
 
+/// A line of typed text with the cursor marked in it.
+///
+/// A box this small draws no real cursor, so the mark is part of the text: the character the
+/// cursor is on, lit up, or a `_` past the end of the text where there is no character to light.
+/// It is drawn where the cursor is and not where the text ends, which are the same place only
+/// until left or home is pressed.
+fn typed_line(field: &TextField) -> Line<'static> {
+    let (before, on, after) = field.around_the_cursor();
+    let cursor = match on {
+        Some(character) => Span::styled(
+            character.to_string(),
+            Style::new().fg(Color::Black).bg(Color::Yellow),
+        ),
+        None => Span::styled("_", Style::new().fg(Color::Yellow)),
+    };
+
+    Line::from(vec![
+        Span::raw(before).bold(),
+        cursor,
+        Span::raw(after).bold(),
+    ])
+}
+
 /// The frame both of them are drawn in.
 fn outline(title: &str) -> Block<'static> {
     Block::bordered()
@@ -167,14 +190,7 @@ impl Number {
         let [typed, foot] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(self.typed.text()).bold(),
-                // Where the next character goes, since a box this small draws no real cursor.
-                Span::styled("_", Style::new().fg(Color::Yellow)),
-            ])),
-            typed,
-        );
+        frame.render_widget(Paragraph::new(typed_line(&self.typed)), typed);
 
         let line = match &self.trouble {
             Some(trouble) => Line::from(Span::styled(
@@ -245,13 +261,7 @@ impl Text {
         let [typed, foot] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
 
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(self.typed.text()).bold(),
-                Span::styled("_", Style::new().fg(Color::Yellow)),
-            ])),
-            typed,
-        );
+        frame.render_widget(Paragraph::new(typed_line(&self.typed)), typed);
         frame.render_widget(
             Paragraph::new(Line::from(
                 format!("{}   enter set   esc close", self.hint).fg(Color::DarkGray),
@@ -481,6 +491,66 @@ mod tests {
         let mut box_ = Number::ask("guidance", "", 1.0, 20.0, false);
         type_in(&mut |key| box_.key(key), "7a.b5x");
         assert_eq!(box_.typed(), "7.5");
+    }
+
+    /// Where the cursor was drawn, as the column it is in and what is under it.
+    ///
+    /// Read off the colours rather than the letters, since the mark is a lit-up character and not
+    /// a character of its own: the cell painted yellow is the cursor, wherever it ended up.
+    fn cursor_cell(render: impl Fn(&mut Frame)) -> (u16, String) {
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(70, 12)).unwrap();
+        terminal.draw(|frame| render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let marked: Vec<(u16, String)> = buffer
+            .content()
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| {
+                cell.bg == Color::Yellow || (cell.symbol() == "_" && cell.fg == Color::Yellow)
+            })
+            .map(|(at, cell)| (at as u16 % buffer.area.width, cell.symbol().to_string()))
+            .collect();
+
+        assert_eq!(marked.len(), 1, "one cursor and one only: {marked:?}");
+        marked[0].clone()
+    }
+
+    #[test]
+    fn the_cursor_is_drawn_where_the_cursor_is() {
+        let mut box_ = Number::ask("steps", "30", 1.0, 150.0, true);
+
+        // Past the end of what is typed there is nothing to light up, so the mark is drawn.
+        let (end, symbol) = cursor_cell(|frame| box_.render(frame, frame.area()));
+        assert_eq!(symbol, "_");
+
+        // And once it has been walked back into the text it is on a character, one column to the
+        // left each time -- which is what a mark stuck to the end of the text got wrong.
+        box_.key(press(KeyCode::Left));
+        let (at, symbol) = cursor_cell(|frame| box_.render(frame, frame.area()));
+        assert_eq!(symbol, "0");
+        assert_eq!(at, end - 1);
+
+        box_.key(press(KeyCode::Home));
+        let (at, symbol) = cursor_cell(|frame| box_.render(frame, frame.area()));
+        assert_eq!(symbol, "3");
+        assert_eq!(at, end - 2);
+
+        // What is typed goes in at the cursor, and the cursor stays on what it was pushing along.
+        box_.key(press(KeyCode::Char('1')));
+        assert_eq!(box_.typed(), "130");
+        let (at, symbol) = cursor_cell(|frame| box_.render(frame, frame.area()));
+        assert_eq!(symbol, "3");
+        assert_eq!(at, end - 1);
+    }
+
+    #[test]
+    fn a_seed_box_marks_its_cursor_the_same_way() {
+        let mut box_ = Text::ask("seed", "42", "empty for a new one", char::is_ascii_digit);
+        box_.key(press(KeyCode::Left));
+
+        let (_, symbol) = cursor_cell(|frame| box_.render(frame, frame.area()));
+        assert_eq!(symbol, "2");
     }
 
     #[test]
