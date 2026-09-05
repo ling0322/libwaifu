@@ -23,10 +23,12 @@
 //! thread. The host keeps one in an `Option`, hands it the keys while it is there, gives it an
 //! area to draw in, and takes the answer out of [`Answer`].
 //!
-//! Three of them, because a value is asked for in one of three ways. [`Number`] is a box to type
-//! in, for a knob whose range is too wide to walk -- a step count, a guidance. [`Choice`] is a
-//! short list to pick from, for one whose values are a handful someone chose in advance. And
-//! [`Confirm`] is the one that is not a value at all but a question with two answers.
+//! Four of them. [`Number`] is a box to type in, for a knob whose range is too wide to walk -- a
+//! step count, a guidance. [`Text`] is the same box for a value that is not a number this can do
+//! arithmetic on: a seed is sixty-four bits and may be nothing at all, and neither survives a
+//! trip through an f64. [`Choice`] is a short list to pick from, for a value whose settings are a
+//! handful someone chose in advance. And [`Confirm`] is the one that is not a value at all but a
+//! question with two answers.
 
 use ratatui::crossterm::event::KeyCode;
 use ratatui::crossterm::event::KeyEvent;
@@ -184,6 +186,78 @@ impl Number {
             }
         };
         frame.render_widget(Paragraph::new(line), foot);
+    }
+}
+
+/// Something typed in that is not a number to do arithmetic on.
+///
+/// A seed is the case this exists for. It is sixty-four bits wide, which is more than an f64
+/// carries exactly, and it may be empty -- neither of those is a thing [`Number`] can hand back,
+/// and both are things a run reads straight off the characters.
+pub struct Text {
+    title: String,
+    typed: TextField,
+    /// What the box will take, which is also all it can be wrong about: whatever is in it when
+    /// enter is pressed is the answer.
+    accepts: fn(&char) -> bool,
+    /// What belongs in it, said under the box.
+    hint: String,
+}
+
+impl Text {
+    pub fn ask(title: &str, now: &str, hint: &str, accepts: fn(&char) -> bool) -> Text {
+        Text {
+            title: title.to_string(),
+            typed: TextField::new(now),
+            accepts,
+            hint: hint.to_string(),
+        }
+    }
+
+    /// What is typed so far. Only the tests look; the box on screen already shows it.
+    #[cfg(test)]
+    pub fn typed(&self) -> String {
+        self.typed.text()
+    }
+
+    pub fn key(&mut self, key: KeyEvent) -> Answer<String> {
+        match key.code {
+            KeyCode::Esc => Answer::Cancelled,
+            KeyCode::Enter => Answer::Given(self.typed.text().trim().to_string()),
+            _ => {
+                edit_text(&mut self.typed, key.code, self.accepts);
+                Answer::Open
+            }
+        }
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let box_area = centred(area, WIDTH, 4);
+        frame.render_widget(Clear, box_area);
+
+        let frame_ = outline(&self.title);
+        let inner = frame_.inner(box_area);
+        frame.render_widget(frame_, box_area);
+        if inner.height < 2 {
+            return;
+        }
+
+        let [typed, foot] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(self.typed.text()).bold(),
+                Span::styled("_", Style::new().fg(Color::Yellow)),
+            ])),
+            typed,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(
+                format!("{}   enter set   esc close", self.hint).fg(Color::DarkGray),
+            )),
+            foot,
+        );
     }
 }
 
@@ -454,6 +528,51 @@ mod tests {
     }
 
     #[test]
+    fn a_text_box_hands_back_what_is_in_it_whatever_that_is() {
+        // Nothing it could be is wrong, which is the difference from Number: a seed is sixty-four
+        // bits and may be empty, and neither survives a trip through an f64.
+        let mut box_ = Text::ask("seed", "", "empty is a new one", char::is_ascii_digit);
+        type_in(&mut |key| box_.key(key), "18446744073709551615");
+        assert_eq!(
+            box_.key(press(KeyCode::Enter)),
+            Answer::Given("18446744073709551615".to_string())
+        );
+        assert_eq!(
+            "18446744073709551615".parse::<u64>().unwrap(),
+            u64::MAX,
+            "which is a number that has to come back whole"
+        );
+
+        // Empty is an answer.
+        let mut box_ = Text::ask("seed", "123", "empty is a new one", char::is_ascii_digit);
+        for _ in 0..4 {
+            box_.key(press(KeyCode::Backspace));
+        }
+        assert_eq!(
+            box_.key(press(KeyCode::Enter)),
+            Answer::Given(String::new())
+        );
+    }
+
+    #[test]
+    fn a_text_box_takes_only_what_it_was_told_to() {
+        let mut box_ = Text::ask("seed", "", "empty is a new one", char::is_ascii_digit);
+        type_in(&mut |key| box_.key(key), "1a2-3.4");
+        assert_eq!(box_.typed(), "1234");
+
+        let screen = drawn(|frame| box_.render(frame, frame.area()));
+        assert!(screen.contains("seed"), "{screen}");
+        assert!(screen.contains("empty is a new one"), "{screen}");
+        assert!(screen.contains("enter set   esc close"), "{screen}");
+    }
+
+    #[test]
+    fn esc_out_of_a_text_box_leaves_the_value_alone() {
+        let mut box_ = Text::ask("seed", "123", "empty is a new one", char::is_ascii_digit);
+        assert_eq!(box_.key(press(KeyCode::Esc)), Answer::Cancelled);
+    }
+
+    #[test]
     fn a_choice_is_picked_off_the_list_and_stops_at_both_ends() {
         let options = vec!["512".to_string(), "768".to_string(), "1024".to_string()];
         let mut box_ = Choice::ask("size", options, 1);
@@ -549,6 +668,7 @@ mod tests {
         let number = Number::ask("steps", "30", 1.0, 150.0, true);
         let choice = Choice::ask("size", vec!["512".to_string()], 0);
         let confirm = Confirm::ask("leave waifu?");
+        let text = Text::ask("seed", "123", "empty is a new one", char::is_ascii_digit);
         for (width, height) in [(1u16, 1u16), (6, 2), (20, 3)] {
             let mut terminal = ratatui::Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
@@ -559,6 +679,9 @@ mod tests {
                 .unwrap();
             terminal
                 .draw(|frame| confirm.render(frame, frame.area()))
+                .unwrap();
+            terminal
+                .draw(|frame| text.render(frame, frame.area()))
                 .unwrap();
         }
     }

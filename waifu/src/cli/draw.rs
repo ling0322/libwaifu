@@ -517,10 +517,7 @@ impl Field {
     /// text there is -- the cursor -- so there they keep meaning that, and tab and up and down
     /// are how to leave.
     fn takes_text(self) -> bool {
-        matches!(
-            self,
-            Field::Prompt | Field::Negative | Field::From | Field::Seed
-        )
+        matches!(self, Field::Prompt | Field::Negative | Field::From)
     }
 }
 
@@ -530,8 +527,13 @@ impl Field {
 /// so the box is not opened for it.
 fn accepts(field: Field) -> fn(&char) -> bool {
     match field {
-        Field::Seed => char::is_ascii_digit,
-        _ => |_| true,
+        Field::Prompt | Field::Negative | Field::From => |_| true,
+        Field::Steps | Field::Seed => char::is_ascii_digit,
+        Field::Guidance | Field::Strength => {
+            |character| character.is_ascii_digit() || *character == '.'
+        }
+        // A list, and a button. Neither is a box anything is typed into.
+        Field::Size | Field::Generate => |_| false,
     }
 }
 
@@ -592,6 +594,7 @@ fn along_from(field: Field, by: isize) -> Field {
 /// A box on top of the screen asking for one value, and which box the answer goes into.
 enum Asking {
     Number(Field, ask::Number),
+    Text(Field, ask::Text),
     Size(ask::Choice),
 }
 
@@ -793,6 +796,16 @@ impl App {
                         self.asking = None;
                     }
                 },
+                Asking::Text(field, box_) => match box_.key(key) {
+                    Answer::Open => {}
+                    Answer::Cancelled => self.asking = None,
+                    Answer::Given(text) => {
+                        if *field == Field::Seed {
+                            self.seed = TextField::new(&text);
+                        }
+                        self.asking = None;
+                    }
+                },
                 Asking::Size(box_) => match box_.key(key) {
                     Answer::Open => {}
                     Answer::Cancelled => self.asking = None,
@@ -871,13 +884,16 @@ impl App {
             KeyCode::Left => self.focus_on(along_from(self.focused(), -1)),
             KeyCode::Right => self.focus_on(along_from(self.focused(), 1)),
 
-            // Typing over a box opens it and goes in, which is what someone who has just tabbed
-            // to the prompt and started typing means. The character is not eaten on the way.
-            KeyCode::Char(character)
-                if self.focused().takes_text() && accepts(self.focused())(&character) =>
-            {
-                self.editing = true;
-                self.edit(KeyCode::Char(character));
+            // Typing over a box opens it, which is what someone who has just tabbed to it and
+            // started typing means. The character is not eaten on the way in, wherever it goes.
+            KeyCode::Char(character) if accepts(self.focused())(&character) => {
+                match self.focused().takes_text() {
+                    true => {
+                        self.editing = true;
+                        self.edit(KeyCode::Char(character));
+                    }
+                    false => self.open_value(self.focused(), Some(character)),
+                }
             }
 
             _ => {}
@@ -957,7 +973,6 @@ impl App {
             Field::Prompt => Some(&self.prompt),
             Field::Negative => Some(&self.negative),
             Field::From => Some(&self.from),
-            Field::Seed => Some(&self.seed),
             _ => None,
         }
     }
@@ -971,7 +986,6 @@ impl App {
             Field::Prompt => edit_text(&mut self.prompt, code, |_| true),
             Field::Negative => edit_text(&mut self.negative, code, |_| true),
             Field::From => edit_text(&mut self.from, code, |_| true),
-            Field::Seed => edit_text(&mut self.seed, code, char::is_ascii_digit),
             _ => {}
         }
     }
@@ -980,52 +994,80 @@ impl App {
     fn enter(&mut self) {
         match self.focused() {
             Field::From => self.browse(),
-            Field::Steps => {
-                self.asking = Some(Asking::Number(
-                    Field::Steps,
-                    ask::Number::ask("steps", &self.steps.to_string(), 1.0, 150.0, true),
-                ));
-            }
-            Field::Guidance => {
-                self.asking = Some(Asking::Number(
-                    Field::Guidance,
-                    ask::Number::ask(
-                        "guidance",
-                        &format!("{:.1}", self.guidance),
-                        1.0,
-                        20.0,
-                        false,
-                    ),
-                ));
-            }
+            Field::Generate => self.start(),
+
+            // Into the box, not off to draw. A run is minutes long and starts from one place,
+            // which is the button; enter here is the other half of what escape undoes.
+            Field::Prompt | Field::Negative => self.editing = true,
+
+            field => self.open_value(field, None),
+        }
+    }
+
+    /// Opens the box that sets `field`, on `with` where something has been typed over it and on
+    /// what it is already set to otherwise.
+    ///
+    /// Starting on the current value is what makes changing a number by one two keys rather than
+    /// the whole number again; starting on what was typed is what makes typing over a box the
+    /// same thing here as it is in a box of text, where the character is not eaten on the way in.
+    fn open_value(&mut self, field: Field, with: Option<char>) {
+        let typed = with.map(String::from);
+        let asking = match field {
+            Field::Steps => Asking::Number(
+                field,
+                ask::Number::ask(
+                    "steps",
+                    &typed.unwrap_or_else(|| self.steps.to_string()),
+                    1.0,
+                    150.0,
+                    true,
+                ),
+            ),
+            Field::Guidance => Asking::Number(
+                field,
+                ask::Number::ask(
+                    "guidance",
+                    &typed.unwrap_or_else(|| format!("{:.1}", self.guidance)),
+                    1.0,
+                    20.0,
+                    false,
+                ),
+            ),
             // Down to zero, which keeps the picture and only sends it through the autoencoder,
             // and up to one, which keeps nothing of it and is the same walk as from noise.
-            Field::Strength => {
-                self.asking = Some(Asking::Number(
-                    Field::Strength,
-                    ask::Number::ask(
-                        "strength",
-                        &format!("{:.2}", self.strength),
-                        0.0,
-                        1.0,
-                        false,
-                    ),
-                ));
-            }
+            Field::Strength => Asking::Number(
+                field,
+                ask::Number::ask(
+                    "strength",
+                    &typed.unwrap_or_else(|| format!("{:.2}", self.strength)),
+                    0.0,
+                    1.0,
+                    false,
+                ),
+            ),
+            // Not a Number, though it is written with digits: a seed is sixty-four bits, which is
+            // more than an f64 carries exactly, and an empty one is an answer of its own.
+            Field::Seed => Asking::Text(
+                field,
+                ask::Text::ask(
+                    "seed",
+                    &typed.unwrap_or_else(|| self.seed.text()),
+                    "empty for a new one",
+                    char::is_ascii_digit,
+                ),
+            ),
             // A handful someone chose in advance rather than a range, so it is a list.
             Field::Size => {
                 let sizes = SIZES
                     .iter()
                     .map(|(width, height)| format!("{width} x {height}"))
                     .collect();
-                self.asking = Some(Asking::Size(ask::Choice::ask("size", sizes, self.size)));
+                Asking::Size(ask::Choice::ask("size", sizes, self.size))
             }
-            Field::Generate => self.start(),
+            _ => return,
+        };
 
-            // Into the box, not off to draw. A run is minutes long and starts from one place,
-            // which is the button; enter here is the other half of what escape undoes.
-            Field::Prompt | Field::Negative | Field::Seed => self.editing = true,
-        }
+        self.asking = Some(asking);
     }
 
     /// What the painter is about to be asked for.
@@ -1211,6 +1253,7 @@ impl App {
         if let Some(asking) = &self.asking {
             match asking {
                 Asking::Number(_, box_) => box_.render(frame, frame.area()),
+                Asking::Text(_, box_) => box_.render(frame, frame.area()),
                 Asking::Size(box_) => box_.render(frame, frame.area()),
             }
             return;
@@ -1912,7 +1955,10 @@ mod tests {
             "enter did not open a box for {field:?}"
         );
 
-        for _ in 0..12 {
+        // Enough to clear the longest value any of these boxes holds, which is a seed of twenty
+        // digits. Backspacing a fixed number of times and hoping is how this last went wrong.
+        app.key(press(KeyCode::End), cancel);
+        for _ in 0..32 {
             app.key(press(KeyCode::Backspace), cancel);
         }
         type_in(app, text, cancel);
@@ -1933,6 +1979,38 @@ mod tests {
 
         set(&mut app, Field::Strength, "0.35", &cancel);
         assert!((app.strength - 0.35).abs() < 1e-6);
+    }
+
+    #[test]
+    fn typing_over_a_value_box_opens_it_on_what_was_typed() {
+        // The same thing typing over a box of text does, which is what makes it one rule rather
+        // than two: the character is not eaten on the way in, wherever it is going.
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        focus_on(&mut app, Field::Steps);
+        typing_into(&mut app, "4", &cancel);
+        let Some(Asking::Number(_, number)) = &app.asking else {
+            panic!("typing did not open the steps box");
+        };
+        assert_eq!(number.typed(), "4", "it opened on 30 and swallowed the 4");
+
+        typing_into(&mut app, "2", &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+        assert_eq!(app.steps, 42);
+
+        // A guidance takes the dot as well, since a guidance has one.
+        focus_on(&mut app, Field::Guidance);
+        typing_into(&mut app, "7.5", &cancel);
+        app.key(press(KeyCode::Enter), &cancel);
+        assert_eq!(app.guidance, 7.5);
+
+        // And nothing is typed over a list or a button.
+        for field in [Field::Size, Field::Generate] {
+            focus_on(&mut app, field);
+            typing_into(&mut app, "5", &cancel);
+            assert!(app.asking.is_none(), "{field:?} took a character");
+        }
     }
 
     #[test]
@@ -1996,17 +2074,31 @@ mod tests {
     fn the_seed_takes_digits_and_nothing_else() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
-        focus_on(&mut app, Field::Seed);
-
         // The letter neither goes in nor opens the box: nothing it could grow into is a seed.
-        typing_into(&mut app, "12a3", &cancel);
+        focus_on(&mut app, Field::Seed);
+        typing_into(&mut app, "a", &cancel);
+        assert!(app.asking.is_none(), "a letter opened the seed box");
+
+        set(&mut app, Field::Seed, "12a3", &cancel);
         assert_eq!(app.seed.text(), "123");
         assert_eq!(app.options().seed, Some(123));
 
-        for _ in 0..3 {
-            app.key(press(KeyCode::Backspace), &cancel);
-        }
+        // Sixty-four bits of it, which is more than an f64 carries exactly -- the box keeps the
+        // characters rather than the number, so the largest seed there is comes back whole.
+        set(&mut app, Field::Seed, "18446744073709551615", &cancel);
+        assert_eq!(app.options().seed, Some(u64::MAX));
+
+        // And empty, which is an answer of its own.
+        set(&mut app, Field::Seed, "", &cancel);
         assert_eq!(app.options().seed, None, "an empty box means any seed");
+
+        // The box says both of those, and says them inside its own border: what the hint is
+        // costs room the key hints beside it need, and neither is worth reading half of.
+        focus_on(&mut app, Field::Seed);
+        app.key(press(KeyCode::Enter), &cancel);
+        let drawn = screen(&app, 100, 30);
+        assert!(drawn.contains("empty for a new one"), "{drawn}");
+        assert!(drawn.contains("esc close"), "the key hints were cut off");
     }
 
     #[test]
@@ -2318,12 +2410,26 @@ mod tests {
         let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
 
-        for field in [Field::Prompt, Field::Negative, Field::Seed] {
+        for field in [Field::Prompt, Field::Negative] {
             focus_on(&mut app, field);
             app.key(press(KeyCode::Enter), &cancel);
             assert!(app.pending.is_none(), "enter on {field:?} started a run");
             assert!(!app.running());
             assert!(app.editing, "enter on {field:?} did not open it");
+            app.key(press(KeyCode::Esc), &cancel);
+        }
+
+        for field in [
+            Field::Steps,
+            Field::Guidance,
+            Field::Size,
+            Field::Strength,
+            Field::Seed,
+        ] {
+            focus_on(&mut app, field);
+            app.key(press(KeyCode::Enter), &cancel);
+            assert!(app.pending.is_none(), "enter on {field:?} started a run");
+            assert!(app.asking.is_some(), "enter on {field:?} opened no box");
             app.key(press(KeyCode::Esc), &cancel);
         }
 
