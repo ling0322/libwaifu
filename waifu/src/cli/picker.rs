@@ -39,6 +39,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
+use crate::cli::ask::{Answer, Confirm};
 use crate::cli::files::{self, FilePicker};
 use crate::cli::{bar, built_from, hub};
 use crate::Device;
@@ -187,6 +188,8 @@ impl Choices {
 
 /// What the fetching thread has to say.
 enum Word {
+    /// Which hub the packages are coming from, said once the fetch has settled it.
+    From(&'static str),
     /// A file, how far into it, how long it is when that is known, and which package of how many
     /// it is -- `parts` being zero until the first package has named the others.
     Fetching {
@@ -214,6 +217,10 @@ enum Doing {
     /// Fetching, with the last word from the thread and the channel it comes down.
     Fetching {
         news: Receiver<Word>,
+        /// Which hub is being asked, once the fetch has said. Unknown for the moment before that:
+        /// it is worked out on the far side of a thread, and a screen that guessed at it would be
+        /// naming a hub while the probe that decides is still out.
+        from: Option<&'static str>,
         file: String,
         done: u64,
         total: Option<u64>,
@@ -289,6 +296,10 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
     let mut doing = Doing::Choosing;
     let mut failure: Option<String> = None;
     let mut browsing: Option<FilePicker> = None;
+    // Which model the question on screen is about, kept beside the question: the cursor can only
+    // be answered where it was asked, and a name is what the answer needs rather than a row that
+    // may have been walked away from.
+    let mut deleting: Option<(&'static str, Confirm)> = None;
 
     loop {
         terminal.draw(|frame| {
@@ -296,11 +307,15 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
             if let Some(browsing) = &browsing {
                 browsing.render(frame, frame.area());
             }
+            if let Some((_, asking)) = &deleting {
+                asking.render(frame, frame.area());
+            }
         })?;
 
         let mut outcome = Outcome::Nothing;
         if let Doing::Fetching {
             news,
+            from,
             file,
             done,
             total,
@@ -315,6 +330,7 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
             // falls further behind the download the longer it runs.
             loop {
                 match news.try_recv() {
+                    Ok(Word::From(hub)) => *from = Some(hub),
                     Ok(Word::Fetching {
                         file: name,
                         done: at,
@@ -375,17 +391,7 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
             Outcome::Failed(message) => {
                 failure = Some(format!("could not fetch: {message}"));
                 doing = Doing::Choosing;
-                for entry in &mut choices.entries {
-                    if let Entry::Published {
-                        name,
-                        cached,
-                        bytes,
-                    } = entry
-                    {
-                        *cached = hub::is_cached(name);
-                        *bytes = hub::cached_bytes(name);
-                    }
-                }
+                read_the_cache_again(&mut choices.entries);
             }
         }
 
@@ -396,6 +402,32 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        // A question on screen has the keys before anything behind it, the file picker included:
+        // it is the thing that was just asked for, and it is answered before anything else is.
+        if let Some((name, asking)) = &mut deleting {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(None);
+            }
+
+            match asking.key(key) {
+                Answer::Open => {}
+                Answer::Cancelled | Answer::Given(false) => deleting = None,
+                Answer::Given(true) => {
+                    let name = *name;
+                    deleting = None;
+                    match hub::remove(name) {
+                        // Read back off the disk rather than assumed: what the row says about a
+                        // model is what is there, and this is the same call that first said it.
+                        Ok(()) => read_the_cache_again(&mut choices.entries),
+                        Err(gone_wrong) => {
+                            failure = Some(format!("could not delete: {gone_wrong}"))
+                        }
+                    }
+                }
+            }
             continue;
         }
 
@@ -450,6 +482,30 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
                 }
                 failure = None;
             }
+            // Delete, or the letter for anyone whose hands are on the vim keys. Nothing is thrown
+            // away on the press: what it opens is the question, and the question starts on no.
+            KeyCode::Delete | KeyCode::Char('d') if choices.pane == Pane::Models => {
+                failure = None;
+                match &choices.entries[choices.selected] {
+                    // Nothing fetched is nothing to delete, and a question about deleting it
+                    // would be a question with no answer worth giving.
+                    Entry::Published { bytes: 0, .. } => {
+                        failure = Some("nothing of that one is on disk yet".to_string());
+                    }
+                    Entry::Published { name, bytes, .. } => {
+                        deleting = Some((
+                            name,
+                            Confirm::ask(&format!("delete {name}? {} on disk", gigabytes(*bytes))),
+                        ));
+                    }
+                    // A package of someone's own, in a directory of their choosing. The list did
+                    // not put it there and has no business taking it away.
+                    Entry::OnDisk => {
+                        failure =
+                            Some("that row is a file of your own, not a fetched model".into());
+                    }
+                }
+            }
             KeyCode::Left | KeyCode::Char('h') => choices.pane = Pane::Models,
             KeyCode::Right | KeyCode::Char('l') => choices.pane = Pane::Devices,
             KeyCode::Tab | KeyCode::BackTab => {
@@ -488,6 +544,7 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
                 std::thread::spawn(move || {
                     let mut report = |progress: hub::Progress| {
                         let word = match progress {
+                            hub::Progress::From { hub } => Word::From(hub),
                             hub::Progress::Fetching {
                                 file,
                                 done,
@@ -526,6 +583,7 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
 
                 doing = Doing::Fetching {
                     news,
+                    from: None,
                     file: name.to_string(),
                     done: 0,
                     total: None,
@@ -541,17 +599,35 @@ pub fn choose(terminal: &mut DefaultTerminal, device: Device) -> Result<Option<C
     }
 }
 
+/// Ask the cache again what it holds, for every row that is a model this build can fetch.
+///
+/// Called after anything that changes what is on disk -- a fetch that stopped partway, a model
+/// deleted -- rather than working the new state out from what just happened: the row says what is
+/// there, and the disk is the only thing that knows.
+fn read_the_cache_again(entries: &mut [Entry]) {
+    for entry in entries {
+        if let Entry::Published {
+            name,
+            cached,
+            bytes,
+        } = entry
+        {
+            *cached = hub::is_cached(name);
+            *bytes = hub::cached_bytes(name);
+        }
+    }
+}
+
 fn quits(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&str>) {
-    let [built, told, middle, source, foot] = Layout::vertical([
+    let [built, told, middle, foot] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(3),
         Constraint::Length(3),
     ])
     .areas(frame.area());
@@ -624,63 +700,11 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
         devices,
     );
 
-    draw_source(frame, source, choices);
-
     let enter = match choices.entries.get(choices.selected) {
         Some(Entry::OnDisk) => "look for one",
         _ => "fetch and use",
     };
     draw_foot(frame, foot, doing, enter, failure);
-}
-
-/// Where the model under the cursor would come from, spelled out in full.
-///
-/// A name like `sdxl:wai` says nothing about who is about to be asked for seven gigabytes, and
-/// "downloading" on its own is not an answer to that. This is the address the fetch uses, read
-/// out of the same place the fetch reads it, so it cannot say one thing and do another.
-fn draw_source(frame: &mut Frame, area: Rect, choices: &Choices) {
-    // Two for the border, one for the space the text starts with, one so the last column is not
-    // written into on a terminal that scrolls when it is.
-    let room = area.width.saturating_sub(4) as usize;
-    let line = match choices.entries.get(choices.selected) {
-        Some(Entry::Published { name, .. }) => match hub::source_url(name) {
-            Some(url) => Line::from(vec![Span::raw(" "), Span::raw(fit(&url, room))]),
-            // A published name the hub does not know is a table this build disagrees with itself
-            // about. Say so plainly rather than showing an empty box.
-            None => {
-                Line::from(Span::raw(" this build does not say where this one comes from").dim())
-            }
-        },
-        // Nothing is fetched for a file that is already here, and saying an address would be a
-        // lie about what enter is going to do.
-        Some(Entry::OnDisk) => Line::from(
-            Span::raw(" a package already on this computer; nothing is downloaded").dim(),
-        ),
-        None => Line::from(""),
-    };
-    frame.render_widget(
-        Paragraph::new(line).block(bordered(" downloaded from ")),
-        area,
-    );
-}
-
-/// An address cut down to `room` columns, if it does not fit in them.
-///
-/// The front is what is kept. A URL is the host and the repository first and the file name last,
-/// and "who is being asked for this" is the question the box is here to answer; the part number
-/// at the end is the part someone can afford to lose on a narrow terminal.
-fn fit(url: &str, room: usize) -> String {
-    if url.chars().count() <= room {
-        return url.to_string();
-    }
-    // No room for the mark and something either side of it, so show what fits and nothing else:
-    // an ellipsis with a fragment in front of it says less than the fragment does.
-    if room == 0 {
-        return String::new();
-    }
-    let mut cut: String = url.chars().take(room - 1).collect();
-    cut.push('\u{2026}');
-    cut
 }
 
 /// How a row reads: marked when it is the one chosen, and only lit up while its half of the screen
@@ -718,6 +742,7 @@ fn focused(title: &str, focused: bool) -> Block<'_> {
 fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, enter: &str, failure: Option<&str>) {
     match doing {
         Doing::Fetching {
+            from,
             file,
             done,
             total,
@@ -739,7 +764,15 @@ fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, enter: &str, failure:
             } else {
                 String::new()
             };
-            let title = format!(" fetching {file}{of}");
+
+            // Which hub, and only which hub: the address it is fetched by is the fetch's business
+            // and nobody watching a bar move needs it read out to them. It appears the moment the
+            // fetch has settled on one, which is a moment after the bar does.
+            let hub = match from {
+                Some(hub) => format!(" from {hub}"),
+                None => String::new(),
+            };
+            let title = format!(" fetching {file}{hub}{of}");
 
             let mut label = match total {
                 Some(total) if *total > 0 => format!(
@@ -778,10 +811,8 @@ fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, enter: &str, failure:
                     Style::default().fg(Color::Red),
                 )),
                 None => Line::from(
-                    format!(
-                        " up/down choose   left/right or tab switch   enter {enter}   esc quit"
-                    )
-                    .dim(),
+                    format!(" up/down choose   tab switch   enter {enter}   d delete   esc quit")
+                        .dim(),
                 ),
             };
             frame.render_widget(Paragraph::new(line).block(bordered("")), area);
@@ -854,6 +885,7 @@ mod tests {
         let (_say, news) = channel::<Word>();
         Doing::Fetching {
             news,
+            from: Some("Hugging Face"),
             file: "wai-illustrious-v17-00001-of-00004.waifupkg".to_string(),
             done,
             total,
@@ -922,36 +954,39 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_says_where_the_model_under_the_cursor_comes_from() {
-        // The whole address, not just the host: which repository is being asked for is half of
-        // what someone checking wants to know.
+    fn the_list_says_nothing_about_where_a_model_would_come_from() {
+        // Which hub answers is settled by a probe on the first fetch, so at this point there is
+        // no true answer to show -- and an address is not what anyone wanted anyway.
         let drawn = screen(&choices(Pane::Models));
-        assert!(drawn.contains("downloaded from"), "{drawn}");
-        assert!(drawn.contains("https://"), "{drawn}");
-        assert!(drawn.contains("libwaifu-wai-illustrious-v17"), "{drawn}");
-
-        // And a file off the disk is not downloaded from anywhere.
-        let mut on_disk = choices(Pane::Models);
-        on_disk.selected = 1;
-        let drawn = screen(&on_disk);
-        assert!(drawn.contains("nothing is downloaded"), "{drawn}");
+        assert!(!drawn.contains("downloaded from"), "{drawn}");
         assert!(!drawn.contains("https://"), "{drawn}");
     }
 
     #[test]
-    fn an_address_too_long_for_the_screen_keeps_the_end_that_names_the_repository() {
-        let url = hub::source_url("sdxl:wai").expect("a published name");
-        assert_eq!(fit(&url, url.chars().count()), url);
+    fn a_fetch_says_which_hub_it_is_talking_to_and_not_which_address() {
+        // The one thing worth knowing about where seven gigabytes is coming from, in the words
+        // the hub is called by, over the bar that shows how it is going.
+        let drawn = foot(&fetching(1_000_000_000, Some(2_000_000_000), None));
+        assert!(drawn.contains("from Hugging Face"), "{drawn}");
+        assert!(!drawn.contains("https://"), "{drawn}");
+        assert!(!drawn.contains("huggingface.co"), "{drawn}");
 
-        // Whose repository this is comes first in a URL and is the answer someone reading this
-        // box is after, so it is the part that survives a narrow terminal.
-        let cut = fit(&url, 40);
-        assert_eq!(cut.chars().count(), 40);
-        assert!(url.starts_with(&cut[..cut.len() - '\u{2026}'.len_utf8()]), "{cut}");
-        assert!(cut.ends_with('\u{2026}'), "{cut}");
-
-        assert_eq!(fit(&url, 1), "\u{2026}");
-        assert_eq!(fit(&url, 0), "");
+        // And before the fetch has settled on one, the bar says everything else and not that.
+        let (_say, news) = channel::<Word>();
+        let waiting = Doing::Fetching {
+            news,
+            from: None,
+            file: "wai-illustrious-v17-00001-of-00004.waifupkg".to_string(),
+            done: 0,
+            total: None,
+            part: 1,
+            parts: 0,
+            speed: None,
+            sample: (Instant::now(), 0),
+        };
+        let drawn = foot(&waiting);
+        assert!(drawn.contains("fetching wai-illustrious"), "{drawn}");
+        assert!(!drawn.contains("from"), "{drawn}");
     }
 
     #[test]

@@ -150,6 +150,14 @@ enum Mirror {
 }
 
 impl Mirror {
+    /// What to call it on screen. Written the way each hub writes its own name.
+    fn name(self) -> &'static str {
+        match self {
+            Mirror::HuggingFace => "Hugging Face",
+            Mirror::ModelScope => "ModelScope",
+        }
+    }
+
     /// What the environment asks for, if it asks for anything.
     fn named(name: &str) -> Option<Mirror> {
         match name.trim().to_ascii_lowercase().as_str() {
@@ -256,6 +264,13 @@ const ALIASES: &[(&str, &str)] = &[
 /// A download is minutes long and the caller decides how to show it: the command line prints a
 /// line that rewrites itself, and the screen draws a bar. Neither belongs in here.
 pub enum Progress<'a> {
+    /// Which hub the packages are coming from, said once, before the first byte of the first one.
+    ///
+    /// It is said here and not asked for from outside because this is where it is settled: which
+    /// hub is reachable is worked out on the first fetch and not before, so anyone asking earlier
+    /// -- a screen drawing a list, say -- would be the one paying for the probe, and would be
+    /// asking a question whose answer is not yet true.
+    From { hub: &'static str },
     /// Bytes of `file` fetched so far, and how many there are when the server said. `part` says
     /// which package of the model this is, counting from one, and `parts` how many there are in
     /// all -- zero while that is still unknown, which it is until the first package has been read
@@ -329,16 +344,30 @@ fn cached_bytes_in(published: &Published, cache: &Path) -> u64 {
         .sum()
 }
 
-/// The address a named model is fetched from, for a screen that says where it comes from.
+/// Throw away what has been fetched of a named model, packages and half-packages alike.
 ///
-/// Through the same mirror the fetch will use, and not a second spelling of the address that
-/// could drift from it: on a machine that has settled on ModelScope, showing a huggingface.co
-/// address would be a guess about what enter is going to do.
+/// The whole directory the model was fetched into, which is its own and holds nothing else: the
+/// packages, any `.part` a stopped fetch left, and the staging directory hf-hub writes through.
+/// A model nothing has been fetched of is not an error to remove -- that is the state being asked
+/// for, and it is already the state.
 ///
-/// This is the first package of the model; the rest come from beside it. `None` for anything that
-/// is not a published name, which is a path and comes from no one.
-pub fn source_url(name: &str) -> Option<String> {
-    published(name).map(|model| mirror().url(model.repo, model.first_part))
+/// What is lost is a download and nothing more. Nothing outside the cache is touched, and a
+/// package someone exported and keeps elsewhere on the disk is not something this can reach.
+pub fn remove(name: &str) -> Result<(), Error> {
+    let Some(published) = published(name) else {
+        return Err(format!("there is no model called \"{name}\"").into());
+    };
+
+    remove_in(published, &cache_directory()?)
+}
+
+fn remove_in(published: &Published, cache: &Path) -> Result<(), Error> {
+    let directory = cache.join(published.repo.replace('/', "--"));
+    match fs::remove_dir_all(&directory) {
+        Ok(()) => Ok(()),
+        Err(failed) if failed.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(failed) => Err(format!("could not delete {}: {failed}", directory.display()).into()),
+    }
 }
 
 /// The published model a name refers to, following an alias if it is one.
@@ -412,6 +441,12 @@ fn fetch(published: &Published, report: &mut dyn FnMut(Progress)) -> Result<Path
     // package names its neighbours by file name and reads them from its own directory.
     let directory = cache_directory()?.join(published.repo.replace('/', "--"));
     fs::create_dir_all(&directory)?;
+
+    // Before anything is asked for, and only here: settling this is what the probe is for, and
+    // doing it now means whoever is watching is told the answer rather than a guess at it.
+    report(Progress::From {
+        hub: mirror().name(),
+    });
 
     // How many packages there are is not known until the first one has been read, so the first is
     // fetched without a count. Saying "part 1" of an unsaid number beats saying nothing: it is
@@ -817,6 +852,8 @@ fn copy_reporting(
 /// What the command line does with a fetch's progress: one line that rewrites itself.
 fn print_progress(progress: Progress) {
     match progress {
+        // On a line of its own, before the one the byte counts rewrite over and over.
+        Progress::From { hub } => eprintln!("fetching from {hub}"),
         Progress::Fetching {
             file,
             done,
@@ -1062,19 +1099,11 @@ mod tests {
     }
 
     #[test]
-    fn a_name_says_where_it_would_be_fetched_from() {
-        let url = source_url("sdxl:wai").expect("a published name has an address");
-        assert!(url.starts_with("https://"), "{url}");
-        assert!(url.contains("libwaifu-wai-illustrious-v17"), "{url}");
-        assert!(url.ends_with(PACKAGE_SUFFIX), "{url}");
-
-        // The address shown and the address fetched are the same string, worked out the same way
-        // -- a screen that named the other mirror would be a guess about what enter will do.
-        let model = published("sdxl:wai").expect("the catalog has it");
-        assert_eq!(url, mirror().url(model.repo, model.first_part));
-
-        // A path comes from nobody.
-        assert!(source_url("some-model.waifupkg").is_none());
+    fn each_hub_is_called_what_it_calls_itself() {
+        // What a fetch says it is talking to. The screen shows this and nothing else about where
+        // the packages come from, so it is the whole of the answer and worth spelling right.
+        assert_eq!(Mirror::HuggingFace.name(), "Hugging Face");
+        assert_eq!(Mirror::ModelScope.name(), "ModelScope");
     }
 
     #[test]
@@ -1144,6 +1173,38 @@ mod tests {
         let error = resolve("sdxl:nope").unwrap_err().to_string();
         assert!(error.contains("no model called"), "{error}");
         assert!(error.contains("sdxl:base"), "{error}");
+    }
+
+    #[test]
+    fn deleting_a_model_takes_the_whole_of_it() {
+        let cache = std::env::temp_dir().join(format!("waifu-delete-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+        let model = published("sdxl:base").expect("the base model");
+        let directory = cache.join(model.repo.replace('/', "--"));
+
+        // A model that was fetched and then stopped partway: whole packages, a `.part` of the one
+        // it was on, and the directory hf-hub stages through. All of it is the model.
+        fs::create_dir_all(directory.join(INCOMING)).expect("somewhere to put it");
+        fs::write(directory.join(model.first_part), b"a package").expect("a first part");
+        fs::write(directory.join("second.waifupkg.part"), b"half of one").expect("a part file");
+        fs::write(directory.join(INCOMING).join("third"), b"staged").expect("something staged");
+
+        remove_in(model, &cache).expect("it goes");
+        assert!(!directory.exists());
+        assert_eq!(cached_bytes_in(model, &cache), 0);
+
+        // The cache itself stays, and the models beside this one with it: what was asked for was
+        // one model, and the directory above it is not this one's to take.
+        assert!(cache.exists());
+
+        // Asked for again, with nothing left to delete. That is the state being asked for and it
+        // is already true, so it is not an error -- a second press of the key says nothing new.
+        remove_in(model, &cache).expect("nothing to do is not a failure");
+
+        // A name nobody published names no directory, and is refused rather than reaching for one.
+        assert!(remove("sdxl:nope").is_err());
+
+        let _ = fs::remove_dir_all(&cache);
     }
 
     #[test]
