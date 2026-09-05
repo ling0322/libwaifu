@@ -51,6 +51,16 @@ impl TextField {
         self.characters.iter().collect()
     }
 
+    /// Whether the cursor is before the first character, with nothing to its left.
+    pub fn at_start(&self) -> bool {
+        self.cursor == 0
+    }
+
+    /// Whether the cursor is after the last one, with nothing to its right.
+    pub fn at_end(&self) -> bool {
+        self.cursor == self.characters.len()
+    }
+
     pub fn insert(&mut self, character: char) {
         self.characters.insert(self.cursor, character);
         self.cursor += 1;

@@ -535,6 +535,52 @@ fn accepts(field: Field) -> fn(&char) -> bool {
     }
 }
 
+/// What the box the cursor is on is for, and what turning it does to the picture.
+///
+/// Two lines each, in the box under the list of pictures. Everything here is a knob whose effect
+/// is invisible until it has been turned a few times and something has come out, which is a slow
+/// way to find out what it was for; this is the fast one.
+fn about(field: Field) -> [&'static str; 2] {
+    match field {
+        Field::Prompt => [
+            "What to draw. A list of tags reads better to these models than a sentence,",
+            "and the earlier a tag comes the more of the picture it tends to decide.",
+        ],
+        Field::Negative => [
+            "What to keep out. Left empty the model is still steered away from the empty",
+            "prompt, which is not the same as steering away from nothing at all.",
+        ],
+        Field::From => [
+            "A picture to start from rather than noise. It is stretched to the size beside",
+            "this, and how far the run walks away from it is what strength says.",
+        ],
+        Field::Steps => [
+            "How many times the model is asked what to take out. More is more detail and",
+            "costs its share of the time; past about forty there is little left to add.",
+        ],
+        Field::Guidance => [
+            "How hard to push towards the prompt. Five to eight is the usual range; higher",
+            "burns the colours out, and one ignores the prompt and runs twice as fast.",
+        ],
+        Field::Size => [
+            "How big, in pixels. These are the shapes SDXL was trained at -- far from them",
+            "it starts drawing a body twice rather than one body larger.",
+        ],
+        Field::Strength => [
+            "How far to walk from the picture above. Around 0.8 redraws it and keeps its",
+            "composition; below about 0.3 there is little left for the prompt to do.",
+        ],
+        Field::Seed => [
+            "Which noise to start from. The same seed with everything else the same draws",
+            "the same picture again; left empty it is a new one every time.",
+        ],
+        Field::Generate => [
+            "Draws it. Minutes rather than seconds, and escape stops a run where it stands",
+            "-- the step it is in the middle of finishes first.",
+        ],
+    }
+}
+
 /// The box `by` places along the row from `field`, stopping at either end of it.
 fn along_from(field: Field, by: isize) -> Field {
     let (row, column) = field.at();
@@ -771,18 +817,26 @@ impl App {
             return;
         }
 
-        // In a box, the keys are the box's. Only the two that say "done" are not.
+        // In a box, the keys are the box's -- except the ones that walk out of it, which are the
+        // two that say "done", the two that move between boxes anyway, and an arrow pressed where
+        // there is nothing left in the box for it to move over.
         if self.editing {
             match key.code {
                 KeyCode::Enter | KeyCode::Esc => self.editing = false,
-                KeyCode::Tab => {
-                    self.editing = false;
-                    self.step_focus(1);
-                }
-                KeyCode::BackTab => {
-                    self.editing = false;
-                    self.step_focus(-1);
-                }
+                KeyCode::Tab => self.step_focus(1),
+                KeyCode::BackTab => self.step_focus(-1),
+
+                // Up and down are never the box's: it holds one run of text, not lines to walk
+                // between, so they mean what they mean everywhere else on the screen.
+                KeyCode::Up => self.move_row(-1),
+                KeyCode::Down => self.move_row(1),
+
+                // And left and right spill over the ends. A cursor at the end of the prompt with
+                // right pressed is asking for the box after it, since there is nothing else that
+                // could be meant by then.
+                KeyCode::Left if self.at_start() => self.spill(-1),
+                KeyCode::Right if self.at_end() => self.spill(1),
+
                 code => self.edit(code),
             }
             return;
@@ -865,7 +919,47 @@ impl App {
             .iter()
             .position(|box_| *box_ == landed)
             .expect("every box is in the tab order");
-        self.column = column;
+
+        // A row with one box on it has no columns, so there is nothing there to have come from:
+        // it forgets, and the next move up or down starts from the left again. Which is what
+        // makes "up out of draw from" the prompt every time rather than whichever of the two
+        // prompts the cursor happened to pass through on the way down.
+        self.column = match ROWS[row].len() {
+            1 => 0,
+            _ => column,
+        };
+    }
+
+    /// Walks out of the open box into the one `by` places along the row, where there is one.
+    ///
+    /// At either end of a row there is not, and then nothing happens at all: an arrow pressed
+    /// against the edge of the screen should not close the box it was pressed in.
+    fn spill(&mut self, by: isize) {
+        let into = along_from(self.focused(), by);
+        if into != self.focused() {
+            self.focus_on(into);
+        }
+    }
+
+    /// Whether the cursor is at the near end of the box it is in, with nothing left of it.
+    fn at_start(&self) -> bool {
+        self.text_box().is_some_and(TextField::at_start)
+    }
+
+    /// The same at the far end.
+    fn at_end(&self) -> bool {
+        self.text_box().is_some_and(TextField::at_end)
+    }
+
+    /// The text being edited, where the box the cursor is in is one that is.
+    fn text_box(&self) -> Option<&TextField> {
+        match self.focused() {
+            Field::Prompt => Some(&self.prompt),
+            Field::Negative => Some(&self.negative),
+            Field::From => Some(&self.from),
+            Field::Seed => Some(&self.seed),
+            _ => None,
+        }
     }
 
     /// The keys that mean something to the box the cursor is in.
@@ -999,7 +1093,7 @@ impl App {
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [heading, prompts, from, numbers, generate, status, written, keys] =
+        let [heading, prompts, from, numbers, generate, status, written, about, keys] =
             Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(TEXT_BOX),
@@ -1009,6 +1103,8 @@ impl App {
                 Constraint::Length(BUTTON),
                 Constraint::Length(3),
                 Constraint::Min(0),
+                // Two lines of it, and a border to say which box they are about.
+                Constraint::Length(4),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
@@ -1102,6 +1198,7 @@ impl App {
         self.render_generate(frame, generate);
         self.render_status(frame, status);
         self.render_written(frame, written);
+        self.render_about(frame, about);
 
         // A box on top carries its own line of key hints, and while one is up these are not what
         // the keys do. Two rows saying different things about the same keys is worse than one.
@@ -1156,9 +1253,35 @@ impl App {
             Field::Prompt => "prompt",
             Field::Negative => "away from",
             Field::From => "draw from",
+            Field::Steps => "steps",
+            Field::Guidance => "guidance",
+            Field::Size => "size",
+            Field::Strength => "strength",
             Field::Seed => "seed",
-            _ => "the box",
+            Field::Generate => "generate",
         }
+    }
+
+    /// What the box the cursor is on is for, under the list of what has been drawn.
+    ///
+    /// It follows the cursor rather than listing everything: a screen with nine explanations on
+    /// it is one nobody reads, and the one that matters is the one being pointed at.
+    fn render_about(&self, frame: &mut Frame, area: Rect) {
+        let outline = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(Color::DarkGray))
+            .title(Span::styled(
+                format!(" {} ", self.focused_title()),
+                Style::new().fg(Color::DarkGray),
+            ));
+        let inner = outline.inner(area);
+        frame.render_widget(outline, area);
+
+        let lines: Vec<Line> = about(self.focused())
+            .into_iter()
+            .map(|line| Line::raw(line).fg(Color::Gray))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     /// The one thing on the screen that is not a box to fill in.
@@ -1525,15 +1648,20 @@ mod tests {
         app.key(press(KeyCode::Up), &cancel);
         assert_eq!(app.focused(), Field::From);
 
-        // And coming back lands on the one it left from, so looking around does not lose it.
+        // And coming back starts from the left, because the row it went through has one box on
+        // it and so no column to have come from. It is what makes "up out of draw from" the
+        // prompt every time rather than whichever prompt the cursor last passed under.
         app.key(press(KeyCode::Down), &cancel);
-        assert_eq!(app.focused(), Field::Size);
+        assert_eq!(app.focused(), Field::Steps);
 
-        // The two prompts are side by side, so the one above "draw from" is the one over it --
-        // and there is no fourth column up there, so the far ones land on the last.
-        focus_on(&mut app, Field::From);
-        app.key(press(KeyCode::Up), &cancel);
-        assert_eq!(app.focused(), Field::Prompt);
+        // Up out of "draw from" is the prompt, wherever the cursor came into it from.
+        for came_from in [Field::Prompt, Field::Negative] {
+            focus_on(&mut app, came_from);
+            app.key(press(KeyCode::Down), &cancel);
+            assert_eq!(app.focused(), Field::From);
+            app.key(press(KeyCode::Up), &cancel);
+            assert_eq!(app.focused(), Field::Prompt, "coming from {came_from:?}");
+        }
 
         focus_on(&mut app, Field::Seed);
         app.key(press(KeyCode::Up), &cancel);
@@ -1590,6 +1718,104 @@ mod tests {
         );
         app.key(press(KeyCode::Enter), &cancel);
         assert!(!app.editing);
+    }
+
+    #[test]
+    fn down_out_of_a_prompt_leaves_it_and_goes_to_the_next_row() {
+        // A box of text holds one run of characters, not lines to walk between, so up and down
+        // in it are never the box's -- they mean what they mean everywhere else on the screen.
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        for prompt in [Field::Prompt, Field::Negative] {
+            focus_on(&mut app, prompt);
+            app.key(press(KeyCode::Enter), &cancel);
+            typing_into(&mut app, "a cat", &cancel);
+
+            app.key(press(KeyCode::Down), &cancel);
+            assert!(!app.editing, "down left the box open");
+            assert_eq!(app.focused(), Field::From, "from {prompt:?}");
+        }
+    }
+
+    #[test]
+    fn an_arrow_at_the_end_of_the_text_walks_out_of_the_box() {
+        // There is nothing left in the box for it to move over, so what else could be meant.
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        focus_on(&mut app, Field::Prompt);
+        app.key(press(KeyCode::Enter), &cancel);
+        typing_into(&mut app, "cat", &cancel);
+
+        // Not at the end yet: the first two lefts are the cursor's.
+        app.key(press(KeyCode::Left), &cancel);
+        app.key(press(KeyCode::Left), &cancel);
+        app.key(press(KeyCode::Left), &cancel);
+        assert_eq!(app.focused(), Field::Prompt);
+        assert!(app.editing);
+
+        // And now there is nothing to its left.
+        app.key(press(KeyCode::Left), &cancel);
+        assert_eq!(app.focused(), Field::Prompt, "there is no box left of it");
+        assert!(app.editing, "and so it stayed where it was");
+
+        // The other way, off the end of the prompt and into the box beside it.
+        app.key(press(KeyCode::End), &cancel);
+        app.key(press(KeyCode::Right), &cancel);
+        assert_eq!(app.focused(), Field::Negative);
+        assert!(!app.editing, "it walked in rather than past");
+        assert_eq!(app.prompt.text(), "cat", "and took a character with it");
+
+        // Back the other way from the start of the box it landed in.
+        app.key(press(KeyCode::Enter), &cancel);
+        app.key(press(KeyCode::Home), &cancel);
+        app.key(press(KeyCode::Left), &cancel);
+        assert_eq!(app.focused(), Field::Prompt);
+        assert!(!app.editing);
+    }
+
+    #[test]
+    fn what_the_box_under_the_cursor_is_for_is_on_the_screen() {
+        // Every knob here is one whose effect is invisible until it has been turned a few times
+        // and something has come out, which is a slow way to find out what it was for.
+        let mut app = ready();
+
+        for (field, wanted) in [
+            (Field::Prompt, "What to draw"),
+            (Field::Negative, "What to keep out"),
+            (Field::From, "A picture to start from"),
+            (Field::Steps, "More is more detail"),
+            (Field::Guidance, "Five to eight"),
+            (Field::Size, "SDXL was trained at"),
+            (Field::Strength, "0.8 redraws it"),
+            (Field::Seed, "the same picture again"),
+            (Field::Generate, "Draws it"),
+        ] {
+            focus_on(&mut app, field);
+            let drawn = screen(&app, 100, 30);
+            assert!(drawn.contains(wanted), "{field:?} does not say {wanted:?}");
+        }
+
+        // And it says which box it is about, since it is the only thing on the screen that moves
+        // when the cursor does without the cursor being on it.
+        focus_on(&mut app, Field::Strength);
+        assert!(screen(&app, 100, 30).contains("strength"), "unnamed");
+    }
+
+    #[test]
+    fn every_line_of_it_fits_the_box_it_is_drawn_in() {
+        // Cut off by its own border it would be explaining half of something. The narrowest
+        // terminal this is drawn for is eighty, less two for the border.
+        for field in FIELDS {
+            for line in about(field) {
+                assert!(
+                    line.chars().count() <= 78,
+                    "{field:?}: {} characters -- {line:?}",
+                    line.chars().count()
+                );
+            }
+        }
     }
 
     #[test]
