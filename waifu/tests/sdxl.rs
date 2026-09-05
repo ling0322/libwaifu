@@ -484,8 +484,12 @@ fn refuses_a_size_it_cannot_work_in() {
 
 /// The picture the reference decoder made of the reference latent, which is a real image at the
 /// size these tests work at and so the natural thing to hand an encoder.
+///
+/// Left on the host, in float32, which is where a picture read off the disk is: `from_rgb8` hands
+/// one back on the CPU whatever the model is on. That is what the draw command passes and so it is
+/// what these tests pass; the one below says a picture already on the device works too.
 fn picture(cases: &VarBuilder) -> Tensor {
-    to_cuda(&cases.get_unchecked("test_case.decoded").unwrap())
+    cases.get_unchecked("test_case.decoded").unwrap()
 }
 
 #[test]
@@ -566,6 +570,35 @@ fn more_strength_leaves_less_of_the_picture() {
     println!("drift from the picture at 0.25, 0.5 and 1.0 strength = {drift:?}");
     assert!(drift[0] < drift[1], "{drift:?}");
     assert!(drift[1] < drift[2], "{drift:?}");
+}
+
+#[test]
+#[ignore = "needs the sdxl package with an encoder"]
+fn a_picture_is_taken_from_wherever_it_already_is() {
+    // The two ends of what a caller might hand over: a picture off the disk, which is float32 on
+    // the host, and one already on the device in the type the model runs in. Getting this wrong
+    // is not a wrong answer but a dead process -- the convolution checks that its input and its
+    // weights are on one device and ends the program where they are not.
+    let cases = cases();
+    let model = model();
+
+    let mut options = options();
+    options.strength = 0.0;
+    options.seed = Some(3);
+
+    let host = picture(&cases);
+    let device = to_cuda(&host);
+
+    let from_host = model.generate_from_image(&host, PROMPT, &options).unwrap();
+    let from_device = model
+        .generate_from_image(&device, PROMPT, &options)
+        .unwrap();
+
+    // Not the same to the last bit -- one went through the encoder in float32 and the other in
+    // half -- but the same picture, which is what "wherever it already is" has to mean.
+    let drift = relative_rmse(&from_host, &from_device);
+    println!("host and device pictures differ by {drift}");
+    assert!(drift < 2e-2, "the two disagree by {drift}");
 }
 
 #[test]

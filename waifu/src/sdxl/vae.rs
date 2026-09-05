@@ -25,7 +25,7 @@
 //! starts from noise and never asks for it.
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Tensor};
+use crate::flint::{functional as F, DType, Device, Tensor};
 use crate::layers::{Conv2d, GroupNorm};
 use crate::var_builder::VarBuilder;
 
@@ -340,6 +340,8 @@ pub struct VaeDecoder {
     config: VaeConfig,
     /// What its weights are in, which for SDXL is float32 whatever the rest of the model is in.
     dtype: DType,
+    /// Where its weights are, which is where a latent has to be brought to meet them.
+    device: Device,
     post_quant_conv: Conv2d,
     conv_in: Conv2d,
     mid_resnet0: ResnetBlock,
@@ -407,6 +409,7 @@ impl VaeDecoder {
             )?,
             conv_out: Conv2d::build(narrowest, 3, 3, 1, 1, &vb.with_name("conv_out"))?,
             dtype: vb.float_type(),
+            device: vb.device(),
             config,
         })
     }
@@ -418,6 +421,11 @@ impl VaeDecoder {
     /// What this decoder computes in. A latent of any float type is cast to it on the way in.
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+
+    /// Where this decoder is. A latent anywhere else is brought here on the way in.
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// The image a latent stands for, as `(1, 3, H * 8, W * 8)` in roughly `[-1, 1]`.
@@ -447,7 +455,7 @@ impl VaeDecoder {
             )));
         }
 
-        let latent = latent.cast(self.dtype)?;
+        let latent = latent.to_device(self.device)?.cast(self.dtype)?;
         let x = F::div_scalar(&latent, self.config.scaling_factor)?;
         let x = self.post_quant_conv.forward(&x)?;
         let x = self.conv_in.forward(&x)?;
@@ -477,6 +485,8 @@ pub struct VaeEncoder {
     config: VaeConfig,
     /// What its weights are in, which for SDXL is float32 whatever the rest of the model is in.
     dtype: DType,
+    /// Where its weights are, which is where a picture has to be brought to meet them.
+    device: Device,
     conv_in: Conv2d,
     down_blocks: Vec<DownBlock>,
     mid_resnet0: ResnetBlock,
@@ -533,6 +543,7 @@ impl VaeEncoder {
             conv_out: Conv2d::build(widest, moments, 3, 1, 1, &vb.with_name("conv_out"))?,
             quant_conv: Conv2d::build(moments, moments, 1, 1, 0, &vb.with_name("quant_conv"))?,
             dtype: vb.float_type(),
+            device: vb.device(),
             config,
         })
     }
@@ -546,6 +557,11 @@ impl VaeEncoder {
         self.dtype
     }
 
+    /// Where this encoder is. An image anywhere else is brought here on the way in.
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
     /// How much smaller than its image a latent is on each axis, which is 8 for SDXL.
     pub fn scale(&self) -> i32 {
         1 << (self.config.block_out_channels.len() - 1)
@@ -556,6 +572,8 @@ impl VaeEncoder {
     ///
     /// `image` is `(1, 3, H, W)` in roughly `[-1, 1]`, which is the range the decoder produces and
     /// the one `to_rgb8` reverses, so an image read from a file has to be brought into it first.
+    /// It may be on any device and in any float type: a picture read off the disk is on the host
+    /// whatever the model is on, and this is where it crosses.
     ///
     /// This takes the mode of the distribution rather than a draw from it. Image to image adds
     /// noise of its own on top of this latent, and enough of it that the posterior's own spread
@@ -597,7 +615,10 @@ impl VaeEncoder {
             )));
         }
 
-        let x = image.cast(self.dtype)?;
+        // Onto the device before the type, so that a narrowing is done where the tensor ends up
+        // rather than a widened copy being carried across the bus. A tensor already here is
+        // handed back as it is, so this costs nothing on the ordinary path.
+        let x = image.to_device(self.device)?.cast(self.dtype)?;
         let mut x = self.conv_in.forward(&x)?;
 
         for block in &self.down_blocks {
