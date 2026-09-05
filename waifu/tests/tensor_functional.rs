@@ -255,7 +255,12 @@ fn compares_within_a_tolerance() {
 
 #[test]
 fn reports_the_default_float_type() {
-    assert_eq!(F::default_float_type(Device::Cpu).unwrap(), DType::Float);
+    let dt = F::default_float_type(Device::Cpu).unwrap();
+    if cfg!(target_arch = "aarch64") {
+        assert_eq!(dt, DType::Float16);
+    } else {
+        assert_eq!(dt, DType::Float);
+    }
 }
 
 #[test]
