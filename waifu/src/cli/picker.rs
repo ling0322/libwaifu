@@ -547,10 +547,11 @@ fn quits(key: &KeyEvent) -> bool {
 }
 
 fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&str>) {
-    let [built, told, middle, foot] = Layout::vertical([
+    let [built, told, middle, source, foot] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
+        Constraint::Length(3),
         Constraint::Length(3),
     ])
     .areas(frame.area());
@@ -623,11 +624,63 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
         devices,
     );
 
+    draw_source(frame, source, choices);
+
     let enter = match choices.entries.get(choices.selected) {
         Some(Entry::OnDisk) => "look for one",
         _ => "fetch and use",
     };
     draw_foot(frame, foot, doing, enter, failure);
+}
+
+/// Where the model under the cursor would come from, spelled out in full.
+///
+/// A name like `sdxl:wai` says nothing about who is about to be asked for seven gigabytes, and
+/// "downloading" on its own is not an answer to that. This is the address the fetch uses, read
+/// out of the same place the fetch reads it, so it cannot say one thing and do another.
+fn draw_source(frame: &mut Frame, area: Rect, choices: &Choices) {
+    // Two for the border, one for the space the text starts with, one so the last column is not
+    // written into on a terminal that scrolls when it is.
+    let room = area.width.saturating_sub(4) as usize;
+    let line = match choices.entries.get(choices.selected) {
+        Some(Entry::Published { name, .. }) => match hub::source_url(name) {
+            Some(url) => Line::from(vec![Span::raw(" "), Span::raw(fit(&url, room))]),
+            // A published name the hub does not know is a table this build disagrees with itself
+            // about. Say so plainly rather than showing an empty box.
+            None => {
+                Line::from(Span::raw(" this build does not say where this one comes from").dim())
+            }
+        },
+        // Nothing is fetched for a file that is already here, and saying an address would be a
+        // lie about what enter is going to do.
+        Some(Entry::OnDisk) => Line::from(
+            Span::raw(" a package already on this computer; nothing is downloaded").dim(),
+        ),
+        None => Line::from(""),
+    };
+    frame.render_widget(
+        Paragraph::new(line).block(bordered(" downloaded from ")),
+        area,
+    );
+}
+
+/// An address cut down to `room` columns, if it does not fit in them.
+///
+/// The front is what is kept. A URL is the host and the repository first and the file name last,
+/// and "who is being asked for this" is the question the box is here to answer; the part number
+/// at the end is the part someone can afford to lose on a narrow terminal.
+fn fit(url: &str, room: usize) -> String {
+    if url.chars().count() <= room {
+        return url.to_string();
+    }
+    // No room for the mark and something either side of it, so show what fits and nothing else:
+    // an ellipsis with a fragment in front of it says less than the fragment does.
+    if room == 0 {
+        return String::new();
+    }
+    let mut cut: String = url.chars().take(room - 1).collect();
+    cut.push('\u{2026}');
+    cut
 }
 
 /// How a row reads: marked when it is the one chosen, and only lit up while its half of the screen
@@ -819,7 +872,7 @@ mod tests {
 
     /// The whole screen, drawn into a buffer, as one long string of what it says.
     fn screen(choices: &Choices) -> String {
-        let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 15)).unwrap();
         terminal
             .draw(|frame| draw(frame, choices, &Doing::Choosing, None))
             .unwrap();
@@ -872,6 +925,39 @@ mod tests {
         let choices = choices(Pane::Models);
         let names: Vec<&str> = choices.entries.iter().map(Entry::name).collect();
         assert_eq!(names.last(), Some(&"a file..."));
+    }
+
+    #[test]
+    fn the_screen_says_where_the_model_under_the_cursor_comes_from() {
+        // The whole address, not just the host: which repository is being asked for is half of
+        // what someone checking wants to know.
+        let drawn = screen(&choices(Pane::Models));
+        assert!(drawn.contains("downloaded from"), "{drawn}");
+        assert!(drawn.contains("https://"), "{drawn}");
+        assert!(drawn.contains("libwaifu-wai-illustrious-v17"), "{drawn}");
+
+        // And a file off the disk is not downloaded from anywhere.
+        let mut on_disk = choices(Pane::Models);
+        on_disk.selected = 1;
+        let drawn = screen(&on_disk);
+        assert!(drawn.contains("nothing is downloaded"), "{drawn}");
+        assert!(!drawn.contains("https://"), "{drawn}");
+    }
+
+    #[test]
+    fn an_address_too_long_for_the_screen_keeps_the_end_that_names_the_repository() {
+        let url = hub::source_url("sdxl:wai").expect("a published name");
+        assert_eq!(fit(&url, url.chars().count()), url);
+
+        // Whose repository this is comes first in a URL and is the answer someone reading this
+        // box is after, so it is the part that survives a narrow terminal.
+        let cut = fit(&url, 40);
+        assert_eq!(cut.chars().count(), 40);
+        assert!(url.starts_with(&cut[..cut.len() - '\u{2026}'.len_utf8()]), "{cut}");
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+
+        assert_eq!(fit(&url, 1), "\u{2026}");
+        assert_eq!(fit(&url, 0), "");
     }
 
     #[test]
@@ -1032,7 +1118,7 @@ mod tests {
         // The marked model row either way, found rather than counted to: the row it lands on is
         // the layout's business and moves whenever the heading does.
         let model_row = |pane| {
-            let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 12)).unwrap();
+            let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 15)).unwrap();
             let choices = choices(pane);
             terminal
                 .draw(|frame| draw(frame, &choices, &Doing::Choosing, None))

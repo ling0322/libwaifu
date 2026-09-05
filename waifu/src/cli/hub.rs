@@ -287,6 +287,18 @@ fn cached_bytes_in(published: &Published, cache: &Path) -> u64 {
         .sum()
 }
 
+/// The address a named model is fetched from, for a screen that says where it comes from.
+///
+/// Through the same mirror the fetch will use, and not a second spelling of the address that
+/// could drift from it: on a machine that has settled on ModelScope, showing a huggingface.co
+/// address would be a guess about what enter is going to do.
+///
+/// This is the first package of the model; the rest come from beside it. `None` for anything that
+/// is not a published name, which is a path and comes from no one.
+pub fn source_url(name: &str) -> Option<String> {
+    published(name).map(|model| mirror().url(model.repo, model.first_part))
+}
+
 /// The published model a name refers to, following an alias if it is one.
 fn published(name: &str) -> Option<&'static Published> {
     let name = ALIASES
@@ -748,6 +760,22 @@ mod tests {
         assert_eq!(Mirror::named("hugging face"), None);
         assert_eq!(Mirror::named(""), None);
         assert_eq!(Mirror::named("mirror"), None);
+    }
+
+    #[test]
+    fn a_name_says_where_it_would_be_fetched_from() {
+        let url = source_url("sdxl:wai").expect("a published name has an address");
+        assert!(url.starts_with("https://"), "{url}");
+        assert!(url.contains("libwaifu-wai-illustrious-v17"), "{url}");
+        assert!(url.ends_with(PACKAGE_SUFFIX), "{url}");
+
+        // The address shown and the address fetched are the same string, worked out the same way
+        // -- a screen that named the other mirror would be a guess about what enter will do.
+        let model = published("sdxl:wai").expect("the catalog has it");
+        assert_eq!(url, mirror().url(model.repo, model.first_part));
+
+        // A path comes from nobody.
+        assert!(source_url("some-model.waifupkg").is_none());
     }
 
     #[test]
