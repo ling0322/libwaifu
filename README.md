@@ -19,6 +19,7 @@ pick one and it is fetched. Ask for one by name to skip the list:
 $ waifu draw
 $ waifu draw -m sdxl:base
 $ waifu draw -m sdxl:wai
+$ waifu draw -m sdxl:noob
 ```
 
 The models `waifu` knows by name:
@@ -27,10 +28,14 @@ The models `waifu` knows by name:
 |---|---|---|
 | `sdxl:base` | SDXL 1.0 base, prompted with sentences | [libwaifu-sdxl-base-1.0](https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0) |
 | `sdxl:wai` | WAI Illustrious v17.0, an anime fine tune prompted with danbooru tags | [libwaifu-wai-illustrious-v17](https://huggingface.co/ling0322/libwaifu-wai-illustrious-v17) |
+| `sdxl:noob` | NoobAI-XL v1.1, an Illustrious fine tune prompted with danbooru tags | [libwaifu-noobai-xl-v11](https://huggingface.co/ling0322/libwaifu-noobai-xl-v11) |
 
 A name without a version follows whatever the current release is, so `sdxl:wai` keeps working
-when a v18 arrives. `sdxl:base:v1` and `sdxl:wai:v17` name a release and keep meaning it. `waifu
-draw -h` lists what this build knows.
+when a v18 arrives. `sdxl:base:v1`, `sdxl:wai:v17` and `sdxl:noob:v11` name a release and keep
+meaning it. `waifu draw -h` lists what this build knows.
+
+The two fine tunes carry the license of the weights they were made from rather than libwaifu's
+own, and NoobAI's forbids commercial use; each model card says which.
 
 What is fetched lands in `~/.cache/libwaifu/models` (`%LOCALAPPDATA%\libwaifu\models` on
 Windows, or wherever `WAIFU_CACHE` points), so it is downloaded once and read from disk after
@@ -110,6 +115,7 @@ Drawing needs `Conv2d`, which either cuDNN or CUTLASS can answer -- see the buil
 
 ## Recent updates
 
+- [2026-09-05] NoobAI-XL v1.1 is published, as `sdxl:noob`.
 - [2026-08-30] Pick a model on screen: `waifu draw` with no `-m` lists them and fetches one.
 - [2026-08-29] WAI Illustrious v17.0 is published too, as `sdxl:wai`.
 - [2026-08-29] Ask for a model by name: `waifu draw -m sdxl:base` fetches it on first use.

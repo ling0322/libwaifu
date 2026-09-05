@@ -86,13 +86,22 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-wai-illustrious-v17",
         first_part: "wai-illustrious-v17-00001-of-00004.waifupkg",
     },
+    Published {
+        name: "sdxl:noob:v11",
+        repo: "ling0322/libwaifu-noobai-xl-v11",
+        first_part: "noobai-xl-v11-00001-of-00004.waifupkg",
+    },
 ];
 
 /// Names that follow whatever is current rather than naming a version.
 ///
 /// `sdxl:base` is what someone types when they want the base model and do not care which release
 /// of it; it keeps working when a v2 arrives, and `sdxl:base:v1` keeps meaning what it says.
-const ALIASES: &[(&str, &str)] = &[("sdxl:base", "sdxl:base:v1"), ("sdxl:wai", "sdxl:wai:v17")];
+const ALIASES: &[(&str, &str)] = &[
+    ("sdxl:base", "sdxl:base:v1"),
+    ("sdxl:wai", "sdxl:wai:v17"),
+    ("sdxl:noob", "sdxl:noob:v11"),
+];
 
 /// What a fetch has to say for itself while it runs.
 ///
@@ -536,14 +545,25 @@ mod tests {
         assert!(names.contains(&"sdxl:base:v1"));
         assert!(names.contains(&"sdxl:wai"));
         assert!(names.contains(&"sdxl:wai:v17"));
+        assert!(names.contains(&"sdxl:noob"));
+        assert!(names.contains(&"sdxl:noob:v11"));
     }
 
     #[test]
-    fn two_models_are_told_apart() {
-        let base = published("sdxl:base").expect("the base model");
-        let wai = published("sdxl:wai").expect("the fine tune");
-        assert_ne!(base.repo, wai.repo);
-        assert_ne!(base.first_part, wai.first_part);
+    fn no_two_models_are_the_same_model() {
+        // A table entry is written by copying the one above it, so the thing to check is that
+        // the copy was finished: no two models share a name, a repository, or a first package.
+        for (index, model) in CATALOG.iter().enumerate() {
+            for other in &CATALOG[index + 1..] {
+                assert_ne!(model.name, other.name);
+                assert_ne!(model.repo, other.repo, "{} and {}", model.name, other.name);
+                assert_ne!(
+                    model.first_part, other.first_part,
+                    "{} and {}",
+                    model.name, other.name
+                );
+            }
+        }
     }
 
     #[test]
