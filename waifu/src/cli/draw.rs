@@ -486,8 +486,9 @@ struct App {
     steps: i32,
     guidance: f32,
     size: usize,
-    /// How far a run that starts from a picture walks away from it. Read by nothing when the
-    /// box above is empty.
+    /// How far a run that starts from a picture walks away from it, by deciding how much noise
+    /// it starts under. Not how many steps run -- that is the box beside it, either way. Read by
+    /// nothing when the box above is empty.
     strength: f32,
     focus: usize,
 

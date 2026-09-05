@@ -55,14 +55,19 @@ impl Default for SamplerConfig {
     }
 }
 
-/// A schedule of noise levels and the timesteps that name them.
+/// A schedule of noise levels and the timesteps that name them, and where in it to begin.
 ///
 /// Built once for a given number of steps. `sigmas` holds one more entry than `timesteps`: the
 /// last is zero, the noise level the image is supposed to end at.
+///
+/// A run from noise walks the whole thing. A run from a picture walks the tail of a longer one --
+/// see [`EulerSampler::from_image`] -- which is what `start` is for: every index below it is a
+/// noise level this run never sees.
 #[derive(Debug)]
 pub struct EulerSampler {
     timesteps: Vec<f32>,
     sigmas: Vec<f32>,
+    start: usize,
 }
 
 impl EulerSampler {
@@ -103,7 +108,76 @@ impl EulerSampler {
         // Where the walk ends, and the reason there is one more noise level than step.
         sigmas.push(0.0);
 
-        Ok(EulerSampler { timesteps, sigmas })
+        Ok(EulerSampler {
+            timesteps,
+            sigmas,
+            start: 0,
+        })
+    }
+
+    /// The schedule for a run of `num_steps` that starts from a picture rather than from noise.
+    ///
+    /// `num_steps` is what it says on every other screen: the steps that will actually run. It is
+    /// `strength` that decides how noisy the picture is when they start, by deciding how long the
+    /// schedule they are the tail of is -- `num_steps / strength` of them, so that the run picks
+    /// up that fraction of the way down.
+    ///
+    /// Which is the other way round from the way diffusers takes the same two numbers: there,
+    /// `num_inference_steps` is the whole schedule and `strength` cuts it down, so asking for
+    /// thirty steps at 0.8 runs twenty-four. The arithmetic is the same and the knob is the same;
+    /// what differs is which of the two numbers is the one you can count on. ComfyUI counts on
+    /// this one, and so does this, because a step count that quietly means something else as soon
+    /// as another box is touched is a step count nobody can read.
+    ///
+    /// The latent to start from is the encoded picture plus unit noise times `sigmas()[start()]`.
+    pub fn from_image(
+        config: &SamplerConfig,
+        num_steps: i32,
+        strength: f32,
+    ) -> Result<EulerSampler> {
+        if !(0.0..=1.0).contains(&strength) {
+            return Err(Error::model(format!(
+                "a strength of {strength} is not between zero and one"
+            )));
+        }
+
+        // No steps at all, which is a picture through the autoencoder and back. There is no
+        // fraction of a schedule to take the tail of, so the schedule is the one that was asked
+        // for and the walk begins past the end of it, where the noise level is zero.
+        if strength == 0.0 {
+            let mut sampler = EulerSampler::new(config, num_steps)?;
+            sampler.start = sampler.timesteps.len();
+
+            return Ok(sampler);
+        }
+
+        // The whole schedule this run is the tail of.
+        //
+        // The strength is read to six places first, which is more than any knob offers and less
+        // than the error being undone: it is a number someone set to 0.8, and the nearest float
+        // to 0.8 divides 20 into 24.9999996, which floors to a schedule one step short of the
+        // twenty-five that was meant. Six places makes it 0.8 again and the division exact.
+        //
+        // Worked out in f64 and checked before it is narrowed: a strength near zero asks for a
+        // schedule of millions of steps, and the number to say that about is the pair that was
+        // asked for rather than the one it came to.
+        let strength = (strength as f64 * 1e6).round() / 1e6;
+        let whole = (num_steps as f64 / strength).floor();
+        if !(1.0..=config.num_train_timesteps as f64).contains(&whole) {
+            return Err(Error::model(format!(
+                "{num_steps} steps at a strength of {strength} is the last {num_steps} of a \
+                 {whole} step schedule, and this model was trained on {}",
+                config.num_train_timesteps
+            )));
+        }
+
+        let mut sampler = EulerSampler::new(config, whole as i32)?;
+        sampler.start = sampler
+            .timesteps
+            .len()
+            .saturating_sub(num_steps.max(0) as usize);
+
+        Ok(sampler)
     }
 
     /// The timesteps to run, noisiest first. One per step.
@@ -120,6 +194,17 @@ impl EulerSampler {
         self.timesteps.len()
     }
 
+    /// The first step this run walks. Zero for a run from noise; further in for one from a
+    /// picture, where everything below it is a noise level the picture stands in for.
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    /// How many steps actually run, which is what a step count on a screen means.
+    pub fn steps_to_run(&self) -> usize {
+        self.timesteps.len() - self.start
+    }
+
     pub fn is_empty(&self) -> bool {
         self.timesteps.is_empty()
     }
@@ -129,30 +214,6 @@ impl EulerSampler {
     pub fn init_noise_sigma(&self) -> f32 {
         let largest = self.sigmas.iter().copied().fold(0.0f32, f32::max);
         (largest * largest + 1.0).sqrt()
-    }
-
-    /// Which step to start at when the walk begins from an image rather than from noise.
-    ///
-    /// Image to image does not run the whole schedule. It puts the image in at the noise level
-    /// some way down it and walks from there, and `strength` is how far down: one starts at the
-    /// top, which is the walk text to image takes and keeps nothing of the image; zero starts
-    /// past the end and changes nothing. What runs is that share of the steps asked for, rounded
-    /// down, so a low strength over few steps can round to no steps at all -- which is a picture
-    /// that made the round trip through the autoencoder and nothing else, not an error.
-    ///
-    /// The latent to start from is the encoded image plus unit noise times
-    /// `sigmas()[start]`, and the steps to run are `start..len()`.
-    pub fn start_for_strength(&self, strength: f32) -> Result<usize> {
-        if !(0.0..=1.0).contains(&strength) {
-            return Err(Error::model(format!(
-                "a strength of {strength} is not between zero and one"
-            )));
-        }
-
-        let total = self.timesteps.len();
-        let running = (total as f32 * strength) as usize;
-
-        Ok(total - running.min(total))
     }
 
     /// The latent as the U-Net wants to see it at step `index`.
@@ -280,30 +341,131 @@ mod tests {
         assert_eq!(interpolate(&values, 9.0), 3.0);
     }
 
+    fn from_image(num_steps: i32, strength: f32) -> EulerSampler {
+        EulerSampler::from_image(&SamplerConfig::default(), num_steps, strength).unwrap()
+    }
+
     #[test]
-    fn strength_says_how_much_of_the_schedule_to_walk() {
-        // Rounded down far enough to be nothing at all, which is allowed: it is a picture that
-        // went through the autoencoder and came back, not a mistake to refuse.
-        assert_eq!(sampler(4).start_for_strength(0.2).unwrap(), 4);
+    fn the_step_count_is_the_steps_that_run_whatever_the_strength() {
+        // The whole point of the shape. Twenty steps is twenty steps at every strength, and what
+        // the strength changes is the schedule they are the tail of.
+        for strength in [1.0, 0.8, 0.5, 0.25] {
+            let sampler = from_image(20, strength);
+            assert_eq!(sampler.steps_to_run(), 20, "at a strength of {strength}");
+            assert_eq!(sampler.len() - sampler.start(), 20);
+        }
+    }
 
+    #[test]
+    fn the_strength_is_how_far_down_the_schedule_the_tail_begins() {
+        // Twenty of forty at a half, twenty of twenty-five at 0.8: the last num_steps of a
+        // schedule num_steps/strength long, which is the arithmetic ComfyUI does.
+        let half = from_image(20, 0.5);
+        assert_eq!(half.len(), 40);
+        assert_eq!(half.start(), 20);
+
+        let most = from_image(20, 0.8);
+        assert_eq!(most.len(), 25);
+        assert_eq!(most.start(), 5);
+
+        // Where the arithmetic is not exact the tail is what is left of the floor, which is what
+        // ComfyUI's int(steps / denoise) gives: 20 / 0.75 is 26 and not 27.
+        let rough = from_image(20, 0.75);
+        assert_eq!(rough.len(), 26);
+        assert_eq!(rough.start(), 6);
+
+        // The whole of it at one, which is the same schedule text to image walks.
+        let all = from_image(20, 1.0);
+        assert_eq!(all.len(), 20);
+        assert_eq!(all.start(), 0);
+        assert_eq!(all.sigmas(), sampler(20).sigmas());
+    }
+
+    #[test]
+    fn the_schedule_is_the_one_comfyui_would_have_built() {
+        // Its KSampler::set_steps, which is where this shape comes from:
+        //
+        //     new_steps = int(steps / denoise)
+        //     sigmas = calculate_sigmas(new_steps)[-(steps + 1):]
+        //
+        // The pairs below are that arithmetic run in python, so a change here that quietly moved
+        // the tail would have to disagree with the tool people are coming from.
+        for (steps, strength, whole) in [
+            (20, 1.0, 20),
+            (20, 0.9, 22),
+            (20, 0.8, 25),
+            (20, 0.75, 26),
+            (20, 0.6, 33),
+            (20, 0.5, 40),
+            (20, 0.25, 80),
+            (30, 0.8, 37),
+        ] {
+            let sampler = from_image(steps, strength);
+            assert_eq!(sampler.len(), whole, "{steps} steps at {strength}");
+            assert_eq!(sampler.start(), whole - steps as usize);
+            assert_eq!(sampler.steps_to_run(), steps as usize);
+        }
+    }
+
+    #[test]
+    fn a_lower_strength_starts_from_less_noise() {
+        // What the knob is for, said in the one number that decides it: the level the picture is
+        // put back at. Every step count agrees, since the tail begins at the same fraction.
+        for steps in [10, 20, 50] {
+            let noise: Vec<f32> = [1.0, 0.8, 0.6, 0.4, 0.2]
+                .iter()
+                .map(|strength| {
+                    let sampler = from_image(steps, *strength);
+                    sampler.sigmas()[sampler.start()]
+                })
+                .collect();
+
+            for pair in noise.windows(2) {
+                assert!(pair[0] > pair[1], "at {steps} steps: {noise:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_strength_runs_no_steps_and_adds_no_noise() {
+        // Allowed rather than refused: it is a picture that went through the autoencoder and came
+        // back. The walk begins past the end, where the schedule's last noise level is zero.
+        let sampler = from_image(20, 0.0);
+        assert_eq!(sampler.steps_to_run(), 0);
+        assert_eq!(sampler.start(), sampler.len());
+        assert_eq!(sampler.sigmas()[sampler.start()], 0.0);
+    }
+
+    #[test]
+    fn a_run_from_noise_starts_at_the_top() {
         let sampler = sampler(20);
-
-        // The whole walk, and none of it.
-        assert_eq!(sampler.start_for_strength(1.0).unwrap(), 0);
-        assert_eq!(sampler.start_for_strength(0.0).unwrap(), 20);
-
-        // The share of the steps that runs is the strength's, rounded down: 15 steps of 20 at
-        // 0.75, so the walk picks up at index 5.
-        assert_eq!(sampler.start_for_strength(0.75).unwrap(), 5);
-        assert_eq!(sampler.start_for_strength(0.8).unwrap(), 4);
+        assert_eq!(sampler.start(), 0);
+        assert_eq!(sampler.steps_to_run(), 20);
     }
 
     #[test]
     fn refuses_a_strength_outside_the_range() {
-        let sampler = sampler(20);
-        assert!(sampler.start_for_strength(-0.1).is_err());
-        assert!(sampler.start_for_strength(1.1).is_err());
-        assert!(sampler.start_for_strength(f32::NAN).is_err());
+        let config = SamplerConfig::default();
+        assert!(EulerSampler::from_image(&config, 20, -0.1).is_err());
+        assert!(EulerSampler::from_image(&config, 20, 1.1).is_err());
+        assert!(EulerSampler::from_image(&config, 20, f32::NAN).is_err());
+    }
+
+    #[test]
+    fn refuses_more_steps_than_the_schedule_they_are_the_tail_of_can_hold() {
+        // Thirty steps at a strength of 0.01 is the last thirty of three thousand, and the model
+        // was trained on one thousand. Said as the pair that was asked for rather than as the
+        // number it came to, which is not one anybody typed.
+        let config = SamplerConfig::default();
+        let error = EulerSampler::from_image(&config, 30, 0.01)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("30 steps"), "{error}");
+        assert!(error.contains("0.01"), "{error}");
+
+        // And the edge that does fit: a thousand steps exactly.
+        assert!(EulerSampler::from_image(&config, 500, 0.5).is_ok());
+        assert!(EulerSampler::from_image(&config, 501, 0.5).is_err());
     }
 
     #[test]

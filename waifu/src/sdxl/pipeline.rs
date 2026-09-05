@@ -176,6 +176,9 @@ pub struct GenerationOptions {
     pub seed: Option<u64>,
     /// How far to walk away from a picture handed to [`Sdxl::generate_from_image`], between zero
     /// and one. Read by nothing else: drawing from noise always walks the whole schedule.
+    ///
+    /// It does not change how many steps run -- `num_steps` is that, either way. What it changes
+    /// is how noisy the picture is when they start. See [`EulerSampler::from_image`].
     pub strength: f32,
 }
 
@@ -386,27 +389,25 @@ impl Sdxl {
         let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
         let latent = F::mul_scalar(latent, sampler.init_noise_sigma())?;
         let denoised =
-            self.denoise_reporting(&latent, 0, prompt, negative, options, &mut unwatched)?;
+            self.denoise_reporting(&latent, &sampler, prompt, negative, options, &mut unwatched)?;
         Ok(denoised.expect("a run nothing asked to stop runs to the end"))
     }
 
     /// [`Sdxl::denoise`], telling `report` after every step and giving up where it stands if
     /// `report` says to -- in which case there is no latent to hand back.
     ///
-    /// `latent` is already at the noise level of step `start` here, rather than being unit noise:
-    /// what that level is differs between a run from noise and a run from a picture, and both
-    /// callers know it before this does.
+    /// `latent` is already at the noise level `sampler` begins at, rather than being unit noise:
+    /// which schedule this is and where in it the walk starts are the two things that differ
+    /// between a run from noise and a run from a picture, and both callers settle them first.
     fn denoise_reporting(
         &self,
         latent: &Tensor,
-        start: usize,
+        sampler: &EulerSampler,
         prompt: &PromptEmbedding,
         negative: &PromptEmbedding,
         options: &GenerationOptions,
         report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
     ) -> Result<Option<Tensor>> {
-        let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
-
         // The size the image was asked for, which SDXL is told directly: it was trained on
         // pictures of many sizes and knows what it is being asked to imitate.
         let time_ids = [
@@ -440,7 +441,7 @@ impl Sdxl {
         };
 
         let mut latent = latent.clone();
-        for index in start..sampler.len() {
+        for index in sampler.start()..sampler.len() {
             let timestep = sampler.timesteps()[index];
             let scaled = sampler.scale_model_input(&latent, index)?;
 
@@ -470,11 +471,11 @@ impl Sdxl {
 
             latent = sampler.step(&noise, &latent, index)?;
 
-            // Counted over the steps this run walks rather than over the whole schedule, so
-            // that a run from a picture, which starts partway down, still fills its bar.
+            // Counted over the steps this run walks rather than over the whole schedule, which
+            // for a run from a picture is the tail of a longer one. Both are options.num_steps.
             let progress = GenerationProgress::Step {
-                done: (index - start) as i32 + 1,
-                total: (sampler.len() - start) as i32,
+                done: (index - sampler.start()) as i32 + 1,
+                total: sampler.steps_to_run() as i32,
             };
             if report(progress).is_break() {
                 return Ok(None);
@@ -576,16 +577,20 @@ impl Sdxl {
         let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
         let latent = F::mul_scalar(&latent, sampler.init_noise_sigma())?;
 
-        self.denoise_reporting(&latent, 0, &prompt, &negative, options, report)
+        self.denoise_reporting(&latent, &sampler, &prompt, &negative, options, report)
     }
 
     /// An image for `prompt` that starts from `image` rather than from noise.
     ///
     /// `image` is `(1, 3, H, W)` in roughly `[-1, 1]`, which is what [`from_rgb8`] produces, and
     /// its own size is the size of what comes back -- `options.width` and `options.height` are
-    /// not read here, since the picture already says. `options.strength` is how far to walk away
-    /// from it: around 0.8 rewrites it while keeping its composition, and below about 0.3 there
-    /// is little left for the prompt to do.
+    /// not read here, since the picture already says.
+    ///
+    /// `options.num_steps` is the steps that run, the same as it is for a run from noise, and
+    /// `options.strength` is how far to walk away from the picture: around 0.8 rewrites it while
+    /// keeping its composition, and below about 0.3 there is little left for the prompt to do. It
+    /// works by deciding how noisy the picture is when those steps begin, not by taking some of
+    /// them away -- see [`EulerSampler::from_image`].
     pub fn generate_from_image(
         &self,
         image: &Tensor,
@@ -647,16 +652,22 @@ impl Sdxl {
         // the noise added to it has to match it either way.
         let encoded = self.encode(image)?.cast(self.dtype)?;
 
-        let sampler = EulerSampler::new(&self.config.sampler, options.num_steps)?;
-        let start = sampler.start_for_strength(options.strength)?;
+        // The tail of a longer schedule: options.num_steps of them run, and the strength decides
+        // how long the schedule they are the tail of is, which is how noisy the picture is when
+        // they start.
+        let sampler =
+            EulerSampler::from_image(&self.config.sampler, options.num_steps, options.strength)?;
 
-        // The picture put back at the noise level step `start` expects to see. This is the whole
-        // of what image to image is: the walk from here on is the ordinary one, and what keeps
-        // the picture is that the walk is not long enough to forget it.
+        // The picture put back at the noise level that step expects to see. This is the whole of
+        // what image to image is: the walk from here on is the ordinary one, and what keeps the
+        // picture is that the walk is not long enough to forget it.
         let noise = F::randn(&encoded.shape(), self.device)?.cast(encoded.dtype())?;
-        let latent = F::add(&encoded, &F::mul_scalar(&noise, sampler.sigmas()[start])?)?;
+        let latent = F::add(
+            &encoded,
+            &F::mul_scalar(&noise, sampler.sigmas()[sampler.start()])?,
+        )?;
 
-        self.denoise_reporting(&latent, start, &prompt, &negative, options, report)
+        self.denoise_reporting(&latent, &sampler, &prompt, &negative, options, report)
     }
 
     /// Refuses a size the U-Net cannot work at.
