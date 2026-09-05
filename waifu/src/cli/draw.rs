@@ -40,12 +40,12 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Gauge, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::Args;
 use crate::cli::ask::{self, Answer};
-use crate::cli::centred;
+use crate::cli::{bar, centred};
 use crate::cli::field::{edit_text, TextField};
 use crate::cli::files::{FilePicker, Outcome};
 use crate::cli::picker;
@@ -1500,15 +1500,7 @@ impl App {
                         started.elapsed().as_secs_f64()
                     )
                 };
-                frame.render_widget(
-                    Gauge::default()
-                        .ratio(fraction(*progress, *steps))
-                        .label(label)
-                        // Named so that the label reads against the bar: ratatui draws it by
-                        // swapping these two, and there is nothing to swap without a background.
-                        .gauge_style(Style::new().fg(Color::Magenta).bg(Color::Black)),
-                    inner,
-                );
+                bar(frame, inner, fraction(*progress, *steps), &label, Color::Magenta);
             }
         }
     }

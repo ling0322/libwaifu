@@ -36,11 +36,11 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Gauge, Paragraph};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::files::{self, FilePicker};
-use crate::cli::{built_from, hub};
+use crate::cli::{bar, built_from, hub};
 use crate::Device;
 
 type Error = Box<dyn std::error::Error>;
@@ -764,18 +764,12 @@ fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, enter: &str, failure:
                 }
             }
 
-            frame.render_widget(
-                Gauge::default()
-                    .block(bordered(&title))
-                    .ratio(ratio)
-                    // Named rather than left to default, because the label sits on top of the bar
-                    // and ratatui draws it by swapping these two: without a colour to swap there
-                    // is nothing to tell the text from the blocks under it. Cyan is what the
-                    // chosen row in the list is marked with, so the two read as one screen.
-                    .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-                    .label(label),
-                area,
-            );
+            // Cyan is what the chosen row in the list is marked with, so the bar and the list
+            // read as one screen.
+            let outline = bordered(&title);
+            let inner = outline.inner(area);
+            frame.render_widget(outline, area);
+            bar(frame, inner, ratio, &label, Color::Cyan);
         }
         Doing::Choosing => {
             let line = match failure {
@@ -1172,6 +1166,28 @@ mod tests {
         let cell = &buffer[(at, row)];
         assert_eq!(cell.fg, Color::Black, "{:?}", cell);
         assert_eq!(cell.bg, Color::Cyan, "{:?}", cell);
+    }
+
+    #[test]
+    fn the_bar_is_painted_rather_than_spelled_out_in_blocks() {
+        let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 3)).unwrap();
+        let doing = fetching(1_240_000_000, Some(1_740_000_000), None);
+        terminal
+            .draw(|frame| draw_foot(frame, frame.area(), &doing, "fetch and use", None))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        // Every cell of the bar is a background colour on a space. A row that is part block glyph
+        // and part coloured space agrees with itself on the grid and not on the screen: the glyph
+        // does not fill its cell in every terminal font, and the bar comes out ribbed.
+        for x in 1..99 {
+            let cell = &buffer[(x, 1)];
+            assert_ne!(cell.symbol(), "\u{2588}", "column {x}");
+        }
+
+        // Filled at the left and empty at the right, at 71% of the way along.
+        assert_eq!(buffer[(1, 1)].bg, Color::Cyan);
+        assert_eq!(buffer[(98, 1)].bg, Color::Black);
     }
 
     #[test]
