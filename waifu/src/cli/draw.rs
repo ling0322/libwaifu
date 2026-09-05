@@ -45,6 +45,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::Args;
 use crate::cli::ask::{self, Answer};
+use crate::cli::centred;
 use crate::cli::field::{edit_text, TextField};
 use crate::cli::files::{FilePicker, Outcome};
 use crate::cli::picker;
@@ -60,6 +61,13 @@ type Error = Box<dyn std::error::Error>;
 /// the ordinary case here -- a list of tags rather than a sentence -- so the room is worth the two
 /// rows it costs the list of pictures below.
 const TEXT_BOX: u16 = 5;
+
+/// How big the button is: a block rather than a stripe, and no wider than it needs to be.
+///
+/// Drawn across the whole screen it read as a rule between two halves of the screen rather than as
+/// something to press, which is the shape a button is supposed to have all of.
+const BUTTON: u16 = 3;
+const BUTTON_WIDTH: u16 = 24;
 
 const SIZES: &[(i32, i32)] = &[
     (512, 512),
@@ -469,7 +477,36 @@ const FIELDS: [Field; 9] = [
     Field::Generate,
 ];
 
+/// The boxes as they sit on the screen, row by row.
+///
+/// Tab walks [`FIELDS`] in order and does not care how they are arranged; up and down do, because
+/// what is above the row of numbers is the box above it and not the number to its left. The two
+/// lists hold the same boxes, which [`the_grid_and_the_tab_order_hold_the_same_boxes`] checks.
+const ROWS: &[&[Field]] = &[
+    &[Field::Prompt, Field::Negative],
+    &[Field::From],
+    &[
+        Field::Steps,
+        Field::Guidance,
+        Field::Size,
+        Field::Strength,
+        Field::Seed,
+    ],
+    &[Field::Generate],
+];
+
 impl Field {
+    /// Which row it is on and how far along, which is where up, down, left and right start from.
+    fn at(self) -> (usize, usize) {
+        for (row, boxes) in ROWS.iter().enumerate() {
+            if let Some(column) = boxes.iter().position(|box_| *box_ == self) {
+                return (row, column);
+            }
+        }
+
+        unreachable!("every box is somewhere on the screen")
+    }
+
     /// Whether this is a box typed into, which decides what left and right do while in it.
     ///
     /// Everywhere else they move between boxes, which is what the row of numbers wants: they sit
@@ -482,6 +519,14 @@ impl Field {
             Field::Prompt | Field::Negative | Field::From | Field::Seed
         )
     }
+}
+
+/// The box `by` places along the row from `field`, stopping at either end of it.
+fn along_from(field: Field, by: isize) -> Field {
+    let (row, column) = field.at();
+    let column = (column as isize + by).clamp(0, ROWS[row].len() as isize - 1) as usize;
+
+    ROWS[row][column]
 }
 
 /// A box on top of the screen asking for one value, and which box the answer goes into.
@@ -516,6 +561,10 @@ struct App {
     /// nothing when the box above is empty.
     strength: f32,
     focus: usize,
+    /// The column up and down aim for, which is not always the column they land in: a row with
+    /// one box in it takes every column, and leaving it again should go back to where it came
+    /// from rather than to the near end. What a text editor remembers for the same two keys.
+    column: usize,
 
     status: Status,
     /// The last thing worth saying, under the bar.
@@ -559,6 +608,7 @@ impl App {
             // style asked for, not so much that its composition is gone.
             strength: DEFAULT_STRENGTH,
             focus: 0,
+            column: 0,
             status: Status::Ready,
             message: "type a prompt and press enter".to_string(),
             unhappy: false,
@@ -704,21 +754,57 @@ impl App {
             // Enter is what the box the cursor is in does, and for the boxes that do nothing of
             // their own that is still to draw.
             KeyCode::Enter => self.enter(),
-            KeyCode::Tab | KeyCode::Down => self.step_focus(1),
-            KeyCode::BackTab | KeyCode::Up => self.step_focus(-1),
 
-            // Between the boxes, except where the box has its own use for them.
-            KeyCode::Left if !self.focused().takes_text() => self.step_focus(-1),
-            KeyCode::Right if !self.focused().takes_text() => self.step_focus(1),
+            // Tab walks every box in order, wherever it is; the arrows walk the screen as it is
+            // laid out, which is what someone looking at it is walking.
+            KeyCode::Tab => self.step_focus(1),
+            KeyCode::BackTab => self.step_focus(-1),
+            KeyCode::Up => self.move_row(-1),
+            KeyCode::Down => self.move_row(1),
+
+            // Along the row, except where the box has its own use for them.
+            KeyCode::Left if !self.focused().takes_text() => {
+                self.focus_on(along_from(self.focused(), -1));
+            }
+            KeyCode::Right if !self.focused().takes_text() => {
+                self.focus_on(along_from(self.focused(), 1));
+            }
 
             code => self.edit(code),
         }
     }
 
-    /// Moves the cursor `by` boxes, round either end.
+    /// Moves the cursor `by` boxes along the tab order, round either end.
     fn step_focus(&mut self, by: isize) {
         let count = FIELDS.len() as isize;
         self.focus = ((self.focus as isize + by).rem_euclid(count)) as usize;
+    }
+
+    /// Puts the cursor in a named box, and aims up and down at the column it is in.
+    fn focus_on(&mut self, field: Field) {
+        self.focus = FIELDS
+            .iter()
+            .position(|box_| *box_ == field)
+            .expect("every box is in the tab order");
+        self.column = field.at().1;
+    }
+
+    /// Moves the cursor `by` rows, as far along the row it lands on as there is room for.
+    ///
+    /// The column it aims for is not read off the box it is leaving: a row with one box in it
+    /// takes every column, and a cursor that walked up out of the size box and back down should
+    /// land on the size box rather than on the near end of the row.
+    fn move_row(&mut self, by: isize) {
+        let column = self.column;
+        let (row, _) = self.focused().at();
+        let row = (row as isize + by).clamp(0, ROWS.len() as isize - 1) as usize;
+
+        let landed = ROWS[row][column.min(ROWS[row].len() - 1)];
+        self.focus = FIELDS
+            .iter()
+            .position(|box_| *box_ == landed)
+            .expect("every box is in the tab order");
+        self.column = column;
     }
 
     /// The keys that mean something to the box the cursor is in.
@@ -847,25 +933,25 @@ impl App {
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [heading, prompt, negative, from, numbers, generate, status, written, keys] =
+        let [heading, prompts, from, numbers, generate, status, written, keys] =
             Layout::vertical([
                 Constraint::Length(1),
-                // The same height, because the two are the same kind of thing: what to draw and
-                // what to keep out of it. One box a row shorter than the other reads as the
-                // shorter one mattering less, which is not what the difference was ever about.
-                Constraint::Length(TEXT_BOX),
                 Constraint::Length(TEXT_BOX),
                 // A path is one line however long it is, so this box is the height of its border.
                 Constraint::Length(3),
                 Constraint::Length(3),
-                // One row, and no border. A border would make it a box like the ones above it,
-                // and it is the one thing on the screen that is not a box to fill in.
-                Constraint::Length(1),
+                Constraint::Length(BUTTON),
                 Constraint::Length(3),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
+
+        // Side by side, and the same size: the two are the same kind of thing -- what to draw and
+        // what to keep out of it -- and one of them drawn smaller than the other reads as the
+        // smaller one mattering less, which is not what the difference was ever about. Beside
+        // each other rather than stacked because that is five rows the screen gets back.
+        let [prompt, negative] = Layout::horizontal([Constraint::Ratio(1, 2); 2]).areas(prompts);
 
         let fifths = [Constraint::Ratio(1, 5); 5];
         let [steps, guidance, size, strength, seed] = Layout::horizontal(fifths).areas(numbers);
@@ -991,6 +1077,7 @@ impl App {
     /// still in the order tab walks, so it is reachable the way everything else is, and enter on
     /// any of the boxes with nothing else to do still starts a run.
     fn render_generate(&self, frame: &mut Frame, area: Rect) {
+        let area = centred(area, BUTTON_WIDTH, area.height);
         let focused = self.focused() == Field::Generate;
         let (label, style) = match (self.running(), focused) {
             // Nothing to press while one is already being drawn, and the bar says so rather than
@@ -1009,12 +1096,14 @@ impl App {
             ),
         };
 
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(label, style)))
-                .centered()
-                .style(style),
-            area,
-        );
+        // The label on the middle row of the block, with a row of colour above and below it, so
+        // that what is on the screen is a button with a word in it rather than a coloured word.
+        let lines = vec![
+            Line::raw(""),
+            Line::from(Span::styled(label, style)),
+            Line::raw(""),
+        ];
+        frame.render_widget(Paragraph::new(lines).centered().style(style), area);
     }
 
     /// The border a box gets, which is where the cursor being in it shows.
@@ -1276,8 +1365,11 @@ mod tests {
 
     /// Puts the cursor in a named box, rather than counting tab presses to it: which number a
     /// box is changes whenever one is added, and the tests are not about the order.
+    ///
+    /// The screen's own, so that a test starts a box the way the keys leave it -- with up and
+    /// down aimed at the column it is in.
     fn focus_on(app: &mut App, field: Field) {
-        app.focus = FIELDS.iter().position(|f| *f == field).unwrap();
+        app.focus_on(field);
     }
 
     #[test]
@@ -1295,6 +1387,55 @@ mod tests {
     }
 
     #[test]
+    fn the_grid_and_the_tab_order_hold_the_same_boxes() {
+        // Two lists of the same boxes, and a box in one and not the other is either unreachable
+        // by tab or nowhere the arrows can go.
+        let mut on_screen: Vec<Field> = ROWS.iter().flat_map(|row| row.iter().copied()).collect();
+        let mut in_order = FIELDS.to_vec();
+        on_screen.sort_by_key(|field| format!("{field:?}"));
+        in_order.sort_by_key(|field| format!("{field:?}"));
+
+        assert_eq!(on_screen, in_order);
+    }
+
+    #[test]
+    fn up_and_down_walk_the_screen_as_it_is_laid_out() {
+        let cancel = AtomicBool::new(false);
+        let mut app = ready();
+
+        // Above the row of numbers is the box above it, not the number to its left.
+        focus_on(&mut app, Field::Size);
+        app.key(press(KeyCode::Up), &cancel);
+        assert_eq!(app.focused(), Field::From);
+
+        // And coming back lands on the one it left from, so looking around does not lose it.
+        app.key(press(KeyCode::Down), &cancel);
+        assert_eq!(app.focused(), Field::Size);
+
+        // The two prompts are side by side, so the one above "draw from" is whichever of them is
+        // over it -- and there is no fourth column up there, so the far ones land on the last.
+        focus_on(&mut app, Field::From);
+        app.key(press(KeyCode::Up), &cancel);
+        assert_eq!(app.focused(), Field::Prompt);
+
+        focus_on(&mut app, Field::Seed);
+        app.key(press(KeyCode::Up), &cancel);
+        assert_eq!(app.focused(), Field::From, "the row above has one box");
+
+        // Below the numbers is the button, and there is nothing below that.
+        focus_on(&mut app, Field::Strength);
+        app.key(press(KeyCode::Down), &cancel);
+        assert_eq!(app.focused(), Field::Generate);
+        app.key(press(KeyCode::Down), &cancel);
+        assert_eq!(app.focused(), Field::Generate, "down walked off the screen");
+
+        // And nothing above the top.
+        focus_on(&mut app, Field::Negative);
+        app.key(press(KeyCode::Up), &cancel);
+        assert_eq!(app.focused(), Field::Negative);
+    }
+
+    #[test]
     fn the_arrows_move_between_boxes_except_where_a_box_wants_them() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
@@ -1306,6 +1447,15 @@ mod tests {
         app.key(press(KeyCode::Right), &cancel);
         app.key(press(KeyCode::Right), &cancel);
         assert_eq!(app.focused(), Field::Size);
+
+        // They stop at the ends of the row rather than wrapping onto another one: a row is a row
+        // and walking off it sideways is not something the screen shows happening.
+        focus_on(&mut app, Field::Steps);
+        app.key(press(KeyCode::Left), &cancel);
+        assert_eq!(app.focused(), Field::Steps);
+        focus_on(&mut app, Field::Seed);
+        app.key(press(KeyCode::Right), &cancel);
+        assert_eq!(app.focused(), Field::Seed);
 
         // And they do not touch the values on the way past, which is what they used to do.
         assert_eq!(app.steps, 30);
