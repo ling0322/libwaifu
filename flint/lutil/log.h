@@ -1,0 +1,71 @@
+// The MIT License (MIT)
+//
+// Copyright (c) 2023 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+#pragma once
+
+#include <sstream>
+
+#include "lutil/time.h"
+
+#define LOG(severity)                                             \
+  if (lut::internal::gLogLevel > lut::LogSeverity::k##severity) { \
+  } else                                                          \
+    lut::internal::LogWrapperk##severity(__FILE__, __LINE__)
+#define NOT_IMPL()                   \
+  {                                  \
+    LOG(FATAL) << "not implemented"; \
+    abort();                         \
+  }
+
+#define LUT_CONCAT2(l, r) l##r
+#define LUT_CONCAT(l, r) LUT_CONCAT2(l, r)
+
+#define LOG_TIME(stmt, message)                 \
+  double LUT_CONCAT(t0, __LINE__) = lut::now(); \
+  stmt;                                         \
+  LOG(INFO) << message << ": " << (lut::now() - LUT_CONCAT(t0, __LINE__)) * 1000 << "ms";
+
+// CHECK macro conflicts with catch2
+//
+// CHECK is for what must never happen: a broken invariant, where the process has nothing sensible
+// left to do and a stack trace at the point of failure is the only thing worth having. It aborts.
+//
+// A caller getting an argument wrong is not that. Those are recoverable, and the caller -- which
+// through the C interface may be another language -- has to be able to hear about it, so they are
+// thrown with THROW(InvalidArg, ...) instead of asserted.
+#define CHECK(cond) \
+  if (cond) {       \
+  } else            \
+    LOG(FATAL).DefaultMessage("Check " #cond " failed.")
+
+namespace lut {
+
+/// @brief How bad a message is, and how much of it a level lets through: LOG(x) prints when the
+///        level set is no higher than x.
+///
+/// In order, which they were not: kERROR used to be 4 and kFATAL 3, so a level of kERROR -- asked
+/// for by someone who wanted errors and nothing else -- was above kFATAL and swallowed the one
+/// message that cannot be missed.
+enum class LogSeverity { kDEBUG = 0, kINFO = 1, kWARN = 2, kERROR = 3, kFATAL = 4 };
+
+void setLogLevel(LogSeverity level);
+
+}  // namespace lut
+
+#include "lutil/internal/log.h"

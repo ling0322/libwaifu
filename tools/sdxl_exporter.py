@@ -1,0 +1,759 @@
+# The MIT License (MIT)
+#
+# Copyright (c) 2026 Xiaoyang Chen
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+# and associated documentation files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies or
+# substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+# BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+# DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+"""Export an SDXL checkpoint to a libwaifu package.
+
+The checkpoints these models ship as -- Illustrious, WAI, and every other SDXL fine tune on
+Civitai -- are single safetensors files in the original LDM naming, with no tokenizer and no
+config beside them. diffusers already knows how to read that layout and hand back a module tree, so
+this walks that tree rather than rewriting several hundred lines of key mapping that would have no
+way to be checked.
+
+The tokenizer is not in the checkpoint. Every SDXL derivative shares the base model's, and both of
+its text encoders share one vocabulary of 49408, so one is read from the base repository and
+written once.
+
+    python sdxl_exporter.py -checkpoint waiIllustriousSDXL_v170.safetensors -output wai-v17.safetensors
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from os import path
+
+import torch
+from torch import nn
+
+from tokenizer_exporter import (
+    DEFAULT_SECTION, read_tokenizer, tokenizer_json)
+from model_exporter import (
+    Context, ModelExporter, Quant, TensorBag, WeightsWriter, open_weights, parse_size,
+    stem_of)
+
+# What the reference tensors a test compares against are written as, and the corpus beside them.
+# A bag of tensors rather than a model, so they have no manifest: the test names the file.
+#
+# The corpus is named after the test package rather than after the model, so the `_test` the test
+# package already carries is not written twice: `sdxl-base_test.safetensors` puts its corpus in
+# `sdxl-base_test_corpus.tsv`, which is the name `waifu/tests/sdxl_tokenizer.rs` opens.
+TOKENIZER_CORPUS_SUFFIX = "_corpus.tsv"
+
+# What the tokenizer is called, after the model. Beside the manifest, which names it.
+TOKENIZER_SUFFIX = ".tokenizer.json"
+
+# How many steps the reference schedule is written for, which is what SDXL is usually run at.
+TEST_STEPS = 50
+
+# What the reference denoising run does. Four steps is nowhere near enough for an image and is
+# not meant to be: it is enough to say the loop around the U-Net is the same loop.
+TEST_DENOISE_STEPS = 4
+TEST_GUIDANCE = 5.0
+TEST_IMAGE_SIZE = 256
+
+# Where the tokenizer comes from when the checkpoint has none, which is the usual case.
+BASE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+
+
+class SdxlExporter(ModelExporter):
+    """Writes the four parts of an SDXL model: two text encoders, the U-Net, and the VAE.
+
+    The names are this exporter's own, chosen to mirror the structure rather than to follow either
+    diffusers or LDM. Nothing else reads them, so they are also the definition of what the runtime
+    side has to look for.
+    """
+
+    def __init__(self, writer: WeightsWriter) -> None:
+        super().__init__(writer)
+        self._float32 = False
+
+    def _write(self, ctx: Context, tensor: torch.Tensor) -> None:
+        # Everything narrows to float16 except what is written while _float32 is set, which is the
+        # VAE: it overflows float16 on real weights, and every implementation runs it wider.
+        self._writer.write_tensor(ctx, tensor, preserve_dtype=self._float32)
+
+    # ---- pieces shared by several parts -------------------------------------------------
+
+    def _export_conv2d(self, ctx: Context, module: nn.Conv2d) -> None:
+        self._write(ctx.with_subname("weight"), module.weight)
+        if module.bias is not None:
+            self._write(ctx.with_subname("bias").with_quant(Quant.NONE), module.bias)
+
+    def _export_group_norm(self, ctx: Context, module: nn.GroupNorm) -> None:
+        self._write(ctx.with_subname("weight").with_quant(Quant.NONE), module.weight)
+        self._write(ctx.with_subname("bias").with_quant(Quant.NONE), module.bias)
+
+    def _export_geglu(self, ctx: Context, module) -> None:
+        """The gated linear unit of a transformer block's feed forward.
+
+        diffusers splits the projection as `value, gate = proj(x).chunk(2)`, and libwaifu's geglu
+        reads the first half as the gate, so the two halves are swapped here. Doing it at export
+        keeps the runtime's swiglu and geglu reading their input the same way.
+        """
+        weight = module.proj.weight
+        bias = module.proj.bias
+        half = weight.shape[0] // 2
+
+        self._write(
+            ctx.with_subname("proj.weight"),
+            torch.cat((weight[half:], weight[:half]), dim=0))
+        self._write(
+            ctx.with_subname("proj.bias").with_quant(Quant.NONE),
+            torch.cat((bias[half:], bias[:half]), dim=0))
+
+    def _export_attention(self, ctx: Context, module) -> None:
+        """One attention block of a U-Net transformer.
+
+        Self attention takes its keys and values from the same tensor as its queries, so all three
+        projections have one input width and fuse into one. Cross attention reads keys and values
+        from the text encoders, which are 2048 wide against the block's own width, so only those
+        two fuse and the query stays on its own.
+        """
+        q = module.to_q.weight
+        k = module.to_k.weight
+        v = module.to_v.weight
+
+        if q.shape[1] == k.shape[1]:
+            self._write(ctx.with_subname("qkv_proj.weight"), torch.cat((q, k, v), dim=0))
+        else:
+            self._write(ctx.with_subname("q_proj.weight"), q)
+            self._write(ctx.with_subname("kv_proj.weight"), torch.cat((k, v), dim=0))
+
+        self._write(ctx.with_subname("out_proj.weight"), module.to_out[0].weight)
+        self._write(
+            ctx.with_subname("out_proj.bias").with_quant(Quant.NONE),
+            module.to_out[0].bias)
+
+    def _export_transformer_block(self, ctx: Context, block) -> None:
+        self.export_layer_norm(ctx.with_subname("norm1"), block.norm1)
+        self._export_attention(ctx.with_subname("attn1"), block.attn1)
+        self.export_layer_norm(ctx.with_subname("norm2"), block.norm2)
+        self._export_attention(ctx.with_subname("attn2"), block.attn2)
+        self.export_layer_norm(ctx.with_subname("norm3"), block.norm3)
+        self._export_geglu(ctx.with_subname("ff.gate"), block.ff.net[0])
+        self.export_linear(ctx.with_subname("ff.out_proj"), block.ff.net[2])
+
+    def _export_transformer(self, ctx: Context, module) -> None:
+        self._export_group_norm(ctx.with_subname("norm"), module.norm)
+        self.export_linear(ctx.with_subname("in_proj"), module.proj_in)
+        for index, block in enumerate(module.transformer_blocks):
+            self._export_transformer_block(ctx.with_subname(f"block{index}"), block)
+        self.export_linear(ctx.with_subname("out_proj"), module.proj_out)
+
+    def _export_resnet(self, ctx: Context, module) -> None:
+        self._export_group_norm(ctx.with_subname("norm1"), module.norm1)
+        self._export_conv2d(ctx.with_subname("conv1"), module.conv1)
+        self.export_linear(ctx.with_subname("time_proj"), module.time_emb_proj)
+        self._export_group_norm(ctx.with_subname("norm2"), module.norm2)
+        self._export_conv2d(ctx.with_subname("conv2"), module.conv2)
+        if module.conv_shortcut is not None:
+            self._export_conv2d(ctx.with_subname("shortcut"), module.conv_shortcut)
+
+    # ---- the U-Net ----------------------------------------------------------------------
+
+    def _export_unet_block(self, ctx: Context, block) -> None:
+        for index, resnet in enumerate(getattr(block, "resnets", [])):
+            self._export_resnet(ctx.with_subname(f"resnet{index}"), resnet)
+        for index, attn in enumerate(getattr(block, "attentions", [])):
+            self._export_transformer(ctx.with_subname(f"attn{index}"), attn)
+
+        for index, sampler in enumerate(getattr(block, "downsamplers", None) or []):
+            self._export_conv2d(ctx.with_subname(f"downsample{index}"), sampler.conv)
+        for index, sampler in enumerate(getattr(block, "upsamplers", None) or []):
+            self._export_conv2d(ctx.with_subname(f"upsample{index}"), sampler.conv)
+
+    def _export_unet(self, ctx: Context, unet) -> None:
+        self._export_conv2d(ctx.with_subname("conv_in"), unet.conv_in)
+
+        # The timestep embedding, and beside it the one SDXL adds for the pooled text embedding
+        # and the size and crop the image was asked for.
+        self.export_linear(ctx.with_subname("time_embd.linear1"), unet.time_embedding.linear_1)
+        self.export_linear(ctx.with_subname("time_embd.linear2"), unet.time_embedding.linear_2)
+        self.export_linear(ctx.with_subname("add_embd.linear1"), unet.add_embedding.linear_1)
+        self.export_linear(ctx.with_subname("add_embd.linear2"), unet.add_embedding.linear_2)
+
+        for index, block in enumerate(unet.down_blocks):
+            self._export_unet_block(ctx.with_subname(f"down{index}"), block)
+        self._export_unet_block(ctx.with_subname("mid"), unet.mid_block)
+        for index, block in enumerate(unet.up_blocks):
+            self._export_unet_block(ctx.with_subname(f"up{index}"), block)
+
+        self._export_group_norm(ctx.with_subname("conv_norm_out"), unet.conv_norm_out)
+        self._export_conv2d(ctx.with_subname("conv_out"), unet.conv_out)
+
+    # ---- the VAE ------------------------------------------------------------------------
+
+    def _export_vae_attention(self, ctx: Context, module) -> None:
+        """The VAE's own attention, which is one head as wide as the whole channel count.
+
+        libwaifu's flash attention only takes a head of 64, 128 or 256, so this one falls back to
+        the written-out form. Its projections are 1x1 convolutions in the checkpoint but linear
+        layers in the diffusers module, which is the shape written here.
+        """
+        self._export_group_norm(ctx.with_subname("norm"), module.group_norm)
+        self._write(
+            ctx.with_subname("qkv_proj.weight"),
+            torch.cat((module.to_q.weight, module.to_k.weight, module.to_v.weight), dim=0))
+        self._write(
+            ctx.with_subname("qkv_proj.bias").with_quant(Quant.NONE),
+            torch.cat((module.to_q.bias, module.to_k.bias, module.to_v.bias), dim=0))
+        self.export_linear(ctx.with_subname("out_proj"), module.to_out[0])
+
+    def _export_vae_block(self, ctx: Context, block) -> None:
+        for index, resnet in enumerate(getattr(block, "resnets", [])):
+            self._export_vae_resnet(ctx.with_subname(f"resnet{index}"), resnet)
+        for index, attn in enumerate(getattr(block, "attentions", None) or []):
+            self._export_vae_attention(ctx.with_subname(f"attn{index}"), attn)
+        for index, sampler in enumerate(getattr(block, "upsamplers", None) or []):
+            self._export_conv2d(ctx.with_subname(f"upsample{index}"), sampler.conv)
+        for index, sampler in enumerate(getattr(block, "downsamplers", None) or []):
+            self._export_conv2d(ctx.with_subname(f"downsample{index}"), sampler.conv)
+
+    def _export_vae_resnet(self, ctx: Context, module) -> None:
+        self._export_group_norm(ctx.with_subname("norm1"), module.norm1)
+        self._export_conv2d(ctx.with_subname("conv1"), module.conv1)
+        self._export_group_norm(ctx.with_subname("norm2"), module.norm2)
+        self._export_conv2d(ctx.with_subname("conv2"), module.conv2)
+        if module.conv_shortcut is not None:
+            self._export_conv2d(ctx.with_subname("shortcut"), module.conv_shortcut)
+
+    def _export_vae_decoder(self, ctx: Context, decoder) -> None:
+        self._export_conv2d(ctx.with_subname("conv_in"), decoder.conv_in)
+        self._export_vae_block(ctx.with_subname("mid"), decoder.mid_block)
+        for index, block in enumerate(decoder.up_blocks):
+            self._export_vae_block(ctx.with_subname(f"up{index}"), block)
+        self._export_group_norm(ctx.with_subname("conv_norm_out"), decoder.conv_norm_out)
+        self._export_conv2d(ctx.with_subname("conv_out"), decoder.conv_out)
+
+    def _export_vae_encoder(self, ctx: Context, encoder) -> None:
+        """The same walk backwards: down the rungs, then the mid block rather than before it.
+
+        Its conv_out is twice as deep as a latent because what an encoder produces is a
+        distribution over one, a mean and a log variance side by side.
+        """
+        self._export_conv2d(ctx.with_subname("conv_in"), encoder.conv_in)
+        for index, block in enumerate(encoder.down_blocks):
+            self._export_vae_block(ctx.with_subname(f"down{index}"), block)
+        self._export_vae_block(ctx.with_subname("mid"), encoder.mid_block)
+        self._export_group_norm(ctx.with_subname("conv_norm_out"), encoder.conv_norm_out)
+        self._export_conv2d(ctx.with_subname("conv_out"), encoder.conv_out)
+
+    # ---- the text encoders --------------------------------------------------------------
+
+    def _export_clip_layer(self, ctx: Context, layer) -> None:
+        attn = layer.self_attn
+        self.export_layer_norm(ctx.with_subname("input_norm"), layer.layer_norm1)
+        self._write(
+            ctx.with_subname("attn.qkv_proj.weight"),
+            torch.cat((attn.q_proj.weight, attn.k_proj.weight, attn.v_proj.weight), dim=0))
+        self._write(
+            ctx.with_subname("attn.qkv_proj.bias").with_quant(Quant.NONE),
+            torch.cat((attn.q_proj.bias, attn.k_proj.bias, attn.v_proj.bias), dim=0))
+        self.export_linear(ctx.with_subname("attn.out_proj"), attn.out_proj)
+
+        self.export_layer_norm(ctx.with_subname("post_attn_norm"), layer.layer_norm2)
+        self.export_linear(ctx.with_subname("mlp.fc1"), layer.mlp.fc1)
+        self.export_linear(ctx.with_subname("mlp.fc2"), layer.mlp.fc2)
+
+    def _export_text_encoder(self, ctx: Context, encoder, projection=None) -> None:
+        model = encoder.text_model
+        self.export_embedding(ctx.with_subname("token_embd"), model.embeddings.token_embedding)
+        self._write(
+            ctx.with_subname("position_embd.weight").with_quant(Quant.NONE),
+            model.embeddings.position_embedding.weight)
+
+        for index, layer in enumerate(model.encoder.layers):
+            self._export_clip_layer(ctx.with_subname(f"block{index}"), layer)
+
+        self.export_layer_norm(ctx.with_subname("final_norm"), model.final_layer_norm)
+
+        # Only the second encoder has one: SDXL takes its pooled conditioning from there.
+        if projection is not None:
+            self._write(ctx.with_subname("text_proj.weight"), projection.weight)
+
+    # ---- the whole thing ----------------------------------------------------------------
+
+    def _export(self, ctx: Context, pipeline) -> None:
+        self._export_text_encoder(ctx.with_subname("text_encoder"), pipeline.text_encoder)
+        self._export_text_encoder(
+            ctx.with_subname("text_encoder2"),
+            pipeline.text_encoder_2,
+            projection=pipeline.text_encoder_2.text_projection)
+        self._export_unet(ctx.with_subname("unet"), pipeline.unet)
+
+        # Both halves: the decoder for text to image, and the encoder for image to image, which
+        # starts from a picture rather than from noise.
+        #
+        # The decoder sits directly under vae rather than under vae.decoder, which is where a
+        # reader would look for it now that there are two. It was the only half when those names
+        # were chosen and packages are already written with them, so it keeps the bare prefix and
+        # the encoder takes one of its own.
+        self._float32 = True
+        self._export_vae_decoder(ctx.with_subname("vae"), pipeline.vae.decoder)
+        self._export_conv2d(ctx.with_subname("vae.post_quant_conv"), pipeline.vae.post_quant_conv)
+        self._export_vae_encoder(ctx.with_subname("vae.encoder"), pipeline.vae.encoder)
+        self._export_conv2d(ctx.with_subname("vae.encoder.quant_conv"), pipeline.vae.quant_conv)
+        self._float32 = False
+
+    @classmethod
+    def generate_config(cls, pipeline, tokenizer) -> dict:
+        unet = pipeline.unet.config
+        vae = pipeline.vae.config
+        text = pipeline.text_encoder.config
+        text2 = pipeline.text_encoder_2.config
+        scheduler = pipeline.scheduler.config
+
+        # The runtime builds one schedule and only one. A checkpoint asking for another would
+        # otherwise be exported as if it had asked for this one, and the only sign would be
+        # slightly wrong images.
+        expected = {
+            "beta_schedule": "scaled_linear",
+            "timestep_spacing": "leading",
+            "interpolation_type": "linear",
+            "prediction_type": "epsilon",
+            "use_karras_sigmas": False,
+        }
+        for key, want in expected.items():
+            got = scheduler.get(key)
+            if got != want:
+                raise ValueError(
+                    f"the scheduler wants {key}={got!r}, and the runtime only builds {want!r}")
+        if scheduler.get("trained_betas") is not None:
+            raise ValueError("the scheduler carries its own betas, which are not exported")
+
+        # A plain dict rather than a ConfigParser: a value here is a number, or a list of them,
+        # and a parser whose values are all strings would flatten the lists back into text.
+        section = {}
+        config = {"sdxl": section}
+
+        section["latent_channels"] = str(vae.latent_channels)
+        section["vae_scaling_factor"] = str(vae.scaling_factor)
+        section["vae_block_out_channels"] = [int(c) for c in vae.block_out_channels]
+        section["vae_layers_per_block"] = str(vae.layers_per_block)
+        section["vae_norm_num_groups"] = str(vae.norm_num_groups)
+
+        section["unet_block_out_channels"] = [int(c) for c in unet.block_out_channels]
+        section["unet_layers_per_block"] = str(unet.layers_per_block)
+        # Zero where a resolution has no attention at all. diffusers says that in the block type
+        # rather than the layer count, which carries a 1 for a block that never uses it, and one
+        # number saying both is less to get wrong on the way back in.
+        section["unet_transformer_layers_per_block"] = [
+            int(n if "CrossAttn" in block_type else 0)
+            for n, block_type in zip(
+                unet.transformer_layers_per_block, unet.down_block_types)]
+        section["unet_attention_head_dim"] = \
+            [int(n) for n in unet.attention_head_dim] if isinstance(
+                unet.attention_head_dim, (list, tuple)) else str(unet.attention_head_dim)
+        section["unet_norm_num_groups"] = str(unet.norm_num_groups)
+        section["unet_cross_attention_dim"] = str(unet.cross_attention_dim)
+        section["unet_addition_time_embed_dim"] = str(unet.addition_time_embed_dim)
+        section["unet_projection_class_embeddings_input_dim"] = str(
+            unet.projection_class_embeddings_input_dim)
+
+        # The noise schedule. Only the one shape of it is written, and anything else is refused
+        # above rather than silently exported as something it is not.
+        section["scheduler_num_train_timesteps"] = str(scheduler.num_train_timesteps)
+        section["scheduler_beta_start"] = str(scheduler.beta_start)
+        section["scheduler_beta_end"] = str(scheduler.beta_end)
+        section["scheduler_steps_offset"] = str(scheduler.steps_offset)
+
+        # The two encoders differ in more than their width: the first activates with the
+        # sigmoid approximation OpenAI's CLIP uses, the second with the ordinary GELU.
+        for prefix, cfg in (("text", text), ("text2", text2)):
+            section[f"{prefix}_hidden_size"] = str(cfg.hidden_size)
+            section[f"{prefix}_intermediate_size"] = str(cfg.intermediate_size)
+            section[f"{prefix}_num_layers"] = str(cfg.num_hidden_layers)
+            section[f"{prefix}_num_heads"] = str(cfg.num_attention_heads)
+            section[f"{prefix}_hidden_act"] = str(cfg.hidden_act)
+            section[f"{prefix}_norm_eps"] = str(cfg.layer_norm_eps)
+
+        # Both encoders share one vocabulary, and both stop at 77 because that is how many
+        # positions their embedding table holds.
+        section["context_length"] = str(tokenizer.model_max_length)
+        section["vocab_size"] = str(tokenizer.vocab_size)
+        section["bot_token_id"] = str(tokenizer.bos_token_id)
+        section["eot_token_id"] = str(tokenizer.eos_token_id)
+
+        # The padding that fills a prompt out to the context length is attended to like any other
+        # position, so which token it is changes what comes out. The two encoders do not have to
+        # agree on it, which is why both are written.
+        section["pad_token_id"] = str(pipeline.tokenizer.pad_token_id)
+        section["pad_token_id2"] = str(pipeline.tokenizer_2.pad_token_id)
+
+        # SDXL conditions on the second to last hidden state of both encoders rather than the last.
+        section["clip_skip"] = "2"
+
+        return config
+
+    @classmethod
+    def export(cls, pipeline, tokenizer, writer) -> dict:
+        """Write every parameter through `writer`, and say what a reader needs to know.
+
+        `writer` is whatever takes the tensors -- one package, or a PackageWriter spreading them
+        over several. Which it is makes no difference here: this walks the model in one order and
+        writes each tensor once.
+        """
+        SdxlExporter(writer)._export(Context("sdxl"), pipeline)
+
+        config = cls.generate_config(pipeline, tokenizer)
+        config["model"] = {"type": "sdxl"}
+
+        # What the package holds its parameters in, and says it does, is the writer's: that is
+        # the half of a package the two versions of the format disagree about.
+        return config
+
+
+# What the reference outputs are computed for. Short, so that the tensors stay small, and fixed so
+# that a change in them is a change in the model rather than in the prompt.
+TEST_PROMPT = "a photo of an astronaut riding a horse on mars"
+
+
+def tokenizer_corpus(tokenizer) -> str:
+    """Texts and the ids CLIP gives them, as one `text<TAB>id id id` line each.
+
+    `tokenizer` is the fast one, which is the one whose `tokenizer.json` the package carries, so
+    the corpus and the package cannot describe two different tokenizers.
+
+    The text is stored as it was generated. It used to be stored as ftfy left it, because the slow
+    `CLIPTokenizer` runs its input through ftfy before matching its pattern and the encoder written
+    here did not -- so the corpus pre-applied it to make the two comparable. The fast tokenizer
+    does not run ftfy either, and it is the one being compared against now, so there is nothing
+    left to pre-apply. `docs/TODO.md` has what the two upstream tokenizers still disagree on.
+    """
+    import random
+
+    random.seed(7)
+    texts = []
+
+    # The tags these models are actually prompted with.
+    tags = [
+        "1girl", "solo", "long_hair", "looking_at_viewer", "blush", "smile", "open_mouth",
+        "bangs", "blue_eyes", "simple_background", "masterpiece", "best_quality",
+        "highly_detailed", "absurdres", "hair_ornament", "school_uniform", "cherry_blossoms"]
+    for _ in range(300):
+        texts.append(", ".join(random.sample(tags, random.randint(1, 8))))
+
+    # Prose, with the contractions the pattern lists ahead of its character classes.
+    words = [
+        "the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog", "don't", "isn't",
+        "we've", "I'll", "she'd", "astronaut", "riding", "horse", "mars", "photograph", "of"]
+    for _ in range(300):
+        text = " ".join(random.choice(words) for _ in range(random.randint(1, 20)))
+        if random.random() < 0.3:
+            text += random.choice(["!", "?", "...", "!!!", ".", ",", "?!"])
+        if random.random() < 0.2:
+            text = text.upper()
+        if random.random() < 0.2:
+            text = text.title()
+        texts.append(text)
+
+    # Numbers, which the pattern takes one digit at a time.
+    for _ in range(150):
+        texts.append(
+            f"{random.randint(0, 999999)} and {random.random():.4f} "
+            f"at {random.randint(1, 12)}:{random.randint(0, 59):02d}")
+
+    # Text that is not ascii, which is where the byte level part of the vocabulary is exercised.
+    unicode_texts = [
+        "東方Project", "初音ミク", "霧雨魔理沙", "中文测试", "한국어", "café", "naïve",
+        "Ünicode", "🐱🐶", "🌸 sakura 🌸", "Ω≈ç√∫", "ß"]
+    for _ in range(250):
+        texts.append(" ".join(
+            random.choice(unicode_texts) for _ in range(random.randint(1, 5))))
+
+    # Runs of punctuation, long words, whitespace, and the two names the pattern matches first.
+    for _ in range(250):
+        texts.append(random.choice([
+            "a" * random.randint(1, 40),
+            "".join(random.choice("!@#$%^&*()[]{}<>?/|-_=+~`\";:.,")
+                    for _ in range(random.randint(1, 20))),
+            "  ".join(["x"] * random.randint(1, 10)),
+            "\t\n  mixed \r\n whitespace  ",
+            "".join(random.choice("abc東🐱1!'") for _ in range(random.randint(1, 30))),
+            "<|endoftext|>",
+            "<|startoftext|> a cat <|endoftext|>",
+            "</w>",
+            "a</w>b",
+        ]))
+
+    encode = encoder(tokenizer)
+
+    lines = []
+    for text in texts:
+        text = text.replace("\t", " ").replace("\n", " ").replace("\r", " ")
+        lines.append(text + "\t" + " ".join(str(i) for i in encode(text)))
+
+    return "\n".join(lines) + "\n"
+
+
+def export_test_cases(pipeline) -> TensorBag:
+    """Write what huggingface produces for one prompt, so the runtime can be checked against it.
+
+    Everything but the sampler, which has no weights and is checked against a schedule instead:
+    what both text encoders make of one prompt, what the VAE makes of one latent and of the image
+    it decodes to, and what one U-Net step makes of the two together. All of it on a 32 by 32
+    latent, which is a 256 by 256 image -- large enough to exercise every block and small enough
+    to carry in the repository.
+    """
+    ctx = Context("test_case")
+    writer = TensorBag()
+    ids = pipeline.tokenizer(
+        TEST_PROMPT,
+        padding="max_length",
+        max_length=pipeline.tokenizer.model_max_length,
+        truncation=True,
+        return_tensors="pt").input_ids
+    ids2 = pipeline.tokenizer_2(
+        TEST_PROMPT,
+        padding="max_length",
+        max_length=pipeline.tokenizer_2.model_max_length,
+        truncation=True,
+        return_tensors="pt").input_ids
+
+    writer.write_tensor(ctx.with_subname("input_ids"), ids.to(torch.int64))
+    writer.write_tensor(ctx.with_subname("input_ids2"), ids2.to(torch.int64))
+
+    with torch.no_grad():
+        out = pipeline.text_encoder(ids, output_hidden_states=True)
+        out2 = pipeline.text_encoder_2(ids2, output_hidden_states=True)
+
+    # SDXL conditions on the second to last hidden state of both, and takes its pooled vector
+    # from the second encoder.
+    writer.write_tensor(
+        ctx.with_subname("hidden"), out.hidden_states[-2], preserve_dtype=True)
+    writer.write_tensor(
+        ctx.with_subname("hidden2"), out2.hidden_states[-2], preserve_dtype=True)
+    writer.write_tensor(
+        ctx.with_subname("pooled2"), out2.text_embeds, preserve_dtype=True)
+
+    # A latent and what the VAE decoder makes of it. Small on purpose: a 32 by 32 latent is a
+    # 256 by 256 image, which is enough to say the decoder is right and cheap to carry.
+    generator = torch.Generator().manual_seed(11)
+    latent = torch.randn(1, 4, 32, 32, generator=generator)
+    writer.write_tensor(ctx.with_subname("latent"), latent, preserve_dtype=True)
+
+    with torch.no_grad():
+        decoded = pipeline.vae.decode(
+            latent / pipeline.vae.config.scaling_factor).sample
+    writer.write_tensor(ctx.with_subname("decoded"), decoded, preserve_dtype=True)
+
+    # And the way back, on that same image rather than on numbers of its own: numbers no
+    # decoder would produce would be exercising the encoder's weights outside the range they
+    # were trained in. What is written is the mean of the distribution rather than a draw from
+    # it, the draw being the one part of an encoder two implementations have no way to agree
+    # on, and it is scaled the way the sampler wants a latent.
+    with torch.no_grad():
+        encoded = pipeline.vae.encode(decoded).latent_dist.mean
+    writer.write_tensor(
+        ctx.with_subname("encoded"),
+        encoded * pipeline.vae.config.scaling_factor,
+        preserve_dtype=True)
+
+    # And straight back out again, which is the whole of what an image to image run of no
+    # steps does. An autoencoder is lossy and this one is being asked to encode its own
+    # output, so what comes back is a good way from what went in -- far enough that a bound
+    # picked by hand would be either useless or wrong, and the reference is the only thing
+    # worth comparing against.
+    with torch.no_grad():
+        round_trip = pipeline.vae.decode(encoded).sample
+    writer.write_tensor(ctx.with_subname("round_trip"), round_trip, preserve_dtype=True)
+
+    # One U-Net step on that same latent. The conditioning is what the pipeline would build
+    # for a 256 by 256 image with nothing cropped: the two hidden states side by side, the
+    # pooled vector of the second, and the sizes SDXL was trained to be told about.
+    context = torch.cat((out.hidden_states[-2], out2.hidden_states[-2]), dim=-1)
+    time_ids = torch.tensor([[256.0, 256.0, 0.0, 0.0, 256.0, 256.0]])
+    timestep = torch.tensor(981, dtype=torch.int64)
+
+    writer.write_tensor(ctx.with_subname("time_ids"), time_ids, preserve_dtype=True)
+    writer.write_tensor(
+        ctx.with_subname("timestep"), timestep.reshape(1).to(torch.int64))
+
+    with torch.no_grad():
+        noise = pipeline.unet(
+            latent,
+            timestep,
+            encoder_hidden_states=context,
+            added_cond_kwargs={
+                "text_embeds": out2.text_embeds,
+                "time_ids": time_ids,
+            }).sample
+    writer.write_tensor(ctx.with_subname("noise"), noise, preserve_dtype=True)
+
+    # The timestep embedding on its own, before either linear layer sees it. It is the one
+    # part of the U-Net computed from a formula rather than read from the checkpoint, so a
+    # mistake in it is worth catching where it happens.
+    from diffusers.models.embeddings import get_timestep_embedding
+
+    sinusoid = get_timestep_embedding(
+        timestep.reshape(1),
+        pipeline.unet.config.block_out_channels[0],
+        flip_sin_to_cos=pipeline.unet.config.flip_sin_to_cos,
+        downscale_freq_shift=pipeline.unet.config.freq_shift)
+    writer.write_tensor(ctx.with_subname("time_sinusoid"), sinusoid, preserve_dtype=True)
+
+    # The schedule itself, which is arithmetic on the betas and has no weights behind it, and
+    # one step taken along it. The sample stepped is the same latent, and the noise is what
+    # the U-Net said about it above, so this needs nothing the runtime cannot reproduce.
+    scheduler = pipeline.scheduler
+    scheduler.set_timesteps(TEST_STEPS)
+
+    writer.write_tensor(
+        ctx.with_subname("sigmas"), scheduler.sigmas.to(torch.float32), preserve_dtype=True)
+    writer.write_tensor(
+        ctx.with_subname("timesteps"),
+        scheduler.timesteps.to(torch.float32),
+        preserve_dtype=True)
+    writer.write_tensor(
+        ctx.with_subname("init_noise_sigma"),
+        torch.tensor([float(scheduler.init_noise_sigma)]),
+        preserve_dtype=True)
+
+    first = scheduler.timesteps[0]
+    writer.write_tensor(
+        ctx.with_subname("scaled"),
+        scheduler.scale_model_input(latent, first),
+        preserve_dtype=True)
+    writer.write_tensor(
+        ctx.with_subname("stepped"),
+        scheduler.step(noise, first, latent).prev_sample,
+        preserve_dtype=True)
+
+    # And the whole of it put together: the same latent denoised by the pipeline itself, so
+    # that the runtime's assembly can be compared against the reference assembly rather than
+    # only its pieces against the reference pieces. Few steps, because every one of them is
+    # two U-Net passes on the CPU.
+    with torch.no_grad():
+        denoised = pipeline(
+            prompt=TEST_PROMPT,
+            negative_prompt="",
+            height=TEST_IMAGE_SIZE,
+            width=TEST_IMAGE_SIZE,
+            num_inference_steps=TEST_DENOISE_STEPS,
+            guidance_scale=TEST_GUIDANCE,
+            latents=latent,
+            output_type="latent").images
+    writer.write_tensor(ctx.with_subname("denoised"), denoised, preserve_dtype=True)
+
+    return writer
+
+
+def load_pipeline(checkpoint: str, base_model: str, variant: str = None):
+    """Read a checkpoint, whichever of the two shapes it comes in."""
+    from diffusers import StableDiffusionXLPipeline
+
+    if checkpoint.endswith(".safetensors") or checkpoint.endswith(".ckpt"):
+        print(f"read single file checkpoint {checkpoint}")
+        # A single file has no tokenizer beside it, so the base model supplies one.
+        return StableDiffusionXLPipeline.from_single_file(
+            checkpoint,
+            torch_dtype=torch.float32,
+            tokenizer=_base_tokenizer(base_model, ""),
+            tokenizer_2=_base_tokenizer(base_model, "_2"))
+
+    # Everything is read as float32 whatever it was stored as, because the exporter decides on
+    # its own what to narrow: the U-Net and the text encoders to float16, the VAE not at all.
+    print(f"read diffusers model {checkpoint}")
+    return StableDiffusionXLPipeline.from_pretrained(
+        checkpoint,
+        torch_dtype=torch.float32,
+        variant=variant)
+
+
+def _base_tokenizer(base_model: str, suffix: str):
+    from transformers import CLIPTokenizerFast
+
+    return CLIPTokenizerFast.from_pretrained(base_model, subfolder=f"tokenizer{suffix}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="export an SDXL model to the libwaifu format.")
+    parser.add_argument(
+        "-checkpoint",
+        type=str,
+        required=True,
+        help="a single file .safetensors checkpoint, or a diffusers model directory or name.")
+    parser.add_argument(
+        "-base_model",
+        type=str,
+        default=BASE_MODEL,
+        help="where the tokenizer comes from when the checkpoint has none.")
+    parser.add_argument("-output", type=str, default="sdxl.safetensors",
+                        help="what to call the model. Names the weights and the manifest beside "
+                             "them.")
+    parser.add_argument(
+        "-part-size",
+        dest="part_size",
+        type=parse_size,
+        default=None,
+        help="split the weights into files no larger than this, as 4GB or 512MB. A model is "
+             "about seven gigabytes, which is an awkward size to publish and to fetch. Left out, "
+             "the weights are written as one file. It also bounds how much is held in memory at "
+             "once, since a safetensors file is written in one go.")
+    parser.add_argument(
+        "-test_output",
+        type=str,
+        default=None,
+        help="where to write the reference outputs, as a .safetensors, if they are wanted.")
+    parser.add_argument(
+        "-variant",
+        type=str,
+        default=None,
+        help='which weights of a diffusers model to read, as in "fp16".')
+    args = parser.parse_args()
+
+    pipeline = load_pipeline(args.checkpoint, args.base_model, args.variant)
+    pipeline = pipeline.to("cpu")
+
+    if pipeline.tokenizer.vocab_size != pipeline.tokenizer_2.vocab_size:
+        print(
+            "the two text encoders do not share a vocabulary, which this exporter assumes",
+            file=sys.stderr)
+        sys.exit(1)
+
+    # The base model's tokenizer rather than the checkpoint's, because a derivative does not
+    # retrain one: both encoders share this vocabulary, which is why the package carries it once.
+    tokenizer = read_tokenizer(args.base_model, subfolder="tokenizer")
+
+    stem = stem_of(args.output)
+    directory = path.dirname(path.abspath(args.output))
+
+    # The model's own `tokenizer.json`, beside the manifest rather than inside an archive, and
+    # named by one line of it.
+    tokenizer_file = stem + TOKENIZER_SUFFIX
+    with open(path.join(directory, tokenizer_file), "wb") as fp:
+        fp.write(tokenizer_json(tokenizer))
+    print(f"wrote {tokenizer_file}")
+
+    writer = open_weights(args.output, args.part_size)
+    config = SdxlExporter.export(pipeline, pipeline.tokenizer, writer)
+
+    for name in writer.finish(config, None, {DEFAULT_SECTION: tokenizer_file}):
+        print(f"wrote {name}")
+
+    if args.test_output:
+        export_test_cases(pipeline).save(args.test_output)
+
+        corpus = tokenizer_corpus(tokenizer)
+        beside = stem_of(args.test_output) + TOKENIZER_CORPUS_SUFFIX
+        with open(path.join(path.dirname(path.abspath(args.test_output)), beside), "w",
+                  encoding="utf-8") as fp:
+            fp.write(corpus)
+        print(f"wrote {beside}: {corpus.count(chr(10))} corpus lines")

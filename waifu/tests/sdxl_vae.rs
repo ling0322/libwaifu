@@ -1,0 +1,368 @@
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+//! The VAE against what huggingface makes of the same latent, and of the same image.
+//!
+//! A decoder is the one part of this whose output can be looked at, which is exactly why it is
+//! compared as numbers instead: an image that is plausible but wrong is the failure mode, and the
+//! eye is no good at telling one from the other.
+
+use std::cell::OnceCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use waifu::flint::{resident, ParamSource, Tensor};
+use waifu::{
+    DType, Device, Manifest, ParamFile, VaeConfig, VaeDecoder, VaeEncoder
+};
+
+fn models_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
+}
+
+/// The decoder is built in float32, which is what SDXL's autoencoder needs and what the exporter
+/// writes its weights as: read at DType::Float16 the file would be narrowed on the way in and the
+/// last up block would overflow.
+/// The whole package on the device, read once for this whole test binary.
+///
+/// `resident` reads the file rather than a model's part of it, so reading it per test would read
+/// seven gigabytes as many times as there are tests here.
+fn weights() -> Rc<dyn ParamSource> {
+    thread_local! {
+        static WEIGHTS: OnceCell<Rc<dyn ParamSource>> = const { OnceCell::new() };
+    }
+
+    WEIGHTS.with(|cell| {
+        Rc::clone(cell.get_or_init(|| {
+            let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
+            let file = params(&manifest);
+
+            let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, Device::Cuda).unwrap());
+            weights
+        }))
+    })
+}
+
+/// The parameters of the model, out of whichever files its manifest names.
+fn params(manifest: &Manifest) -> ParamFile {
+    manifest.params().unwrap()
+}
+
+fn cases() -> ParamFile {
+    ParamFile::open(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
+}
+
+fn config() -> VaeConfig {
+    VaeConfig {
+        latent_channels: 4,
+        block_out_channels: vec![128, 256, 512, 512],
+        layers_per_block: 2,
+        norm_num_groups: 32,
+        norm_eps: 1e-6,
+        scaling_factor: 0.13025
+    }
+}
+
+fn relative_rmse(actual: &Tensor, reference: &Tensor) -> f32 {
+    let a = actual
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
+    let b = reference.to_vec_f32().unwrap();
+    assert_eq!(a.len(), b.len(), "the shapes do not match");
+
+    let error: f64 = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (*x as f64 - *y as f64).powi(2))
+        .sum();
+    let scale: f64 = b.iter().map(|y| (*y as f64).powi(2)).sum();
+    (error / scale).sqrt() as f32
+}
+
+fn latent(cases: &ParamFile) -> Tensor {
+    cases
+        .get_unchecked("test_case.latent")
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap()
+        .cast(DType::Float16)
+        .unwrap()
+}
+
+/// The image the reference decoder made of that latent, which is what the encoder is given back.
+fn image(cases: &ParamFile) -> Tensor {
+    cases
+        .get_unchecked("test_case.decoded")
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap()
+        .cast(DType::Float16)
+        .unwrap()
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn decodes_a_latent_the_way_the_reference_does() {
+    let cases = cases();
+    let decoder =
+        VaeDecoder::build(config(), "sdxl.vae", &weights(), Device::Cuda, DType::Float).unwrap();
+
+    let image = decoder.forward(&latent(&cases)).unwrap();
+
+    // Eight times larger on each axis, and three channels rather than four.
+    assert_eq!(image.shape(), vec![1, 3, 256, 256]);
+
+    let rmse = relative_rmse(&image, &cases.get_unchecked("test_case.decoded").unwrap());
+    println!("vae decode rmse = {rmse}");
+    assert!(rmse < 2e-2, "the decoded image drifted by {rmse}");
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn produces_something_an_image_could_be_made_of() {
+    // A decoder ends in roughly [-1, 1], which is what the conversion to pixels assumes. A result
+    // that is finite but far outside that range would still pass a loose comparison while being
+    // useless, so it is worth saying separately.
+    let cases = cases();
+    let decoder =
+        VaeDecoder::build(config(), "sdxl.vae", &weights(), Device::Cuda, DType::Float).unwrap();
+
+    let image = decoder.forward(&latent(&cases)).unwrap();
+    let values = image
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
+
+    assert!(
+        values.iter().all(|x| x.is_finite()),
+        "the decoder produced a NaN or an infinity"
+    );
+
+    let extreme = values.iter().filter(|x| x.abs() > 1.5).count();
+    assert!(
+        extreme * 100 < values.len(),
+        "{extreme} of {} pixels are far outside [-1, 1]",
+        values.len()
+    );
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn gives_the_same_image_twice() {
+    let cases = cases();
+    let decoder =
+        VaeDecoder::build(config(), "sdxl.vae", &weights(), Device::Cuda, DType::Float).unwrap();
+
+    let latent = latent(&cases);
+    let first = decoder.forward(&latent).unwrap();
+    let second = decoder.forward(&latent).unwrap();
+
+    let cpu_second = second
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap();
+    assert_eq!(relative_rmse(&first, &cpu_second), 0.0);
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn refuses_a_latent_it_cannot_read() {
+    let decoder =
+        VaeDecoder::build(config(), "sdxl.vae", &weights(), Device::Cuda, DType::Float).unwrap();
+
+    // A latent is four dimensional and four channels deep; anything else is a caller's mistake
+    // rather than something to guess at.
+    let three_d = waifu::flint::functional::rand(&[4, 8, 8], DType::Float16, Device::Cuda).unwrap();
+    assert!(decoder.forward(&three_d).is_err());
+
+    let wrong_channels =
+        waifu::flint::functional::rand(&[1, 3, 8, 8], DType::Float16, Device::Cuda).unwrap();
+    assert!(decoder.forward(&wrong_channels).is_err());
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn decodes_a_latent_of_another_size() {
+    // Nothing in a convolutional decoder is tied to one resolution, and SDXL is used at several,
+    // including ones that are not square. A different size also gives the mid-block attention a
+    // different number of positions to attend over, which is the part most likely to have a size
+    // baked into it.
+    //
+    // These are corners of the reference latent rather than random numbers: this decoder is the
+    // one that famously overflows in half precision, and feeding it something no encoder would
+    // ever produce tests that overflow instead of testing the shapes.
+    let cases = cases();
+    let reference = latent(&cases);
+    let decoder =
+        VaeDecoder::build(config(), "sdxl.vae", &weights(), Device::Cuda, DType::Float).unwrap();
+
+    for (height, width) in [(8, 8), (16, 16), (16, 24), (32, 8)] {
+        let corner = reference
+            .slice(2, 0, height)
+            .unwrap()
+            .slice(3, 0, width)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+
+        let image = decoder.forward(&corner).unwrap();
+        assert_eq!(image.shape(), vec![1, 3, height * 8, width * 8]);
+
+        let values = image
+            .to_device(Device::Cpu)
+            .unwrap()
+            .cast(DType::Float)
+            .unwrap()
+            .to_vec_f32()
+            .unwrap();
+        assert!(
+            values.iter().all(|x| x.is_finite()),
+            "a {height} by {width} latent decoded to a NaN"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn encodes_an_image_the_way_the_reference_does() {
+    let cases = cases();
+    let encoder = VaeEncoder::build(
+        config(),
+        "sdxl.vae.encoder",
+        &weights(),
+        Device::Cuda,
+        DType::Float,
+    )
+    .unwrap();
+
+    let latent = encoder.forward(&image(&cases)).unwrap();
+
+    // Eight times smaller on each axis, and four channels rather than three.
+    assert_eq!(latent.shape(), vec![1, 4, 32, 32]);
+
+    let rmse = relative_rmse(&latent, &cases.get_unchecked("test_case.encoded").unwrap());
+    println!("vae encode rmse = {rmse}");
+    assert!(rmse < 2e-2, "the encoded latent drifted by {rmse}");
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn encodes_an_image_of_another_size() {
+    // The halving is where a size can go wrong: it pads on the right and the bottom only, so an
+    // image that is not square is the one that tells a one-sided pad from a centred one. These are
+    // corners of the reference image rather than random numbers, for the same reason the decoder's
+    // own size test uses corners of the reference latent.
+    let cases = cases();
+    let reference = image(&cases);
+    let encoder = VaeEncoder::build(
+        config(),
+        "sdxl.vae.encoder",
+        &weights(),
+        Device::Cuda,
+        DType::Float,
+    )
+    .unwrap();
+
+    for (height, width) in [(64, 64), (128, 128), (128, 192), (256, 64)] {
+        let corner = reference
+            .slice(2, 0, height)
+            .unwrap()
+            .slice(3, 0, width)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+
+        let latent = encoder.forward(&corner).unwrap();
+        assert_eq!(latent.shape(), vec![1, 4, height / 8, width / 8]);
+
+        let values = latent
+            .to_device(Device::Cpu)
+            .unwrap()
+            .cast(DType::Float)
+            .unwrap()
+            .to_vec_f32()
+            .unwrap();
+        assert!(
+            values.iter().all(|x| x.is_finite()),
+            "a {height} by {width} image encoded to a NaN"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn refuses_an_image_it_cannot_read() {
+    let encoder = VaeEncoder::build(
+        config(),
+        "sdxl.vae.encoder",
+        &weights(),
+        Device::Cuda,
+        DType::Float,
+    )
+    .unwrap();
+
+    let three_d =
+        waifu::flint::functional::rand(&[3, 64, 64], DType::Float16, Device::Cuda).unwrap();
+    assert!(encoder.forward(&three_d).is_err());
+
+    let wrong_channels =
+        waifu::flint::functional::rand(&[1, 4, 64, 64], DType::Float16, Device::Cuda).unwrap();
+    assert!(encoder.forward(&wrong_channels).is_err());
+
+    // A size the rungs cannot halve four times would be rounded down into a latent that stands
+    // for a different image than the one handed in, which is worth refusing rather than guessing.
+    let ragged =
+        waifu::flint::functional::rand(&[1, 3, 60, 64], DType::Float16, Device::Cuda).unwrap();
+    assert!(encoder.forward(&ragged).is_err());
+}
+
+#[test]
+#[ignore = "needs the sdxl package"]
+fn gives_the_same_latent_twice() {
+    // The mode of the posterior and not a draw from it, which is the whole reason forward can be
+    // asked this at all.
+    let cases = cases();
+    let encoder = VaeEncoder::build(
+        config(),
+        "sdxl.vae.encoder",
+        &weights(),
+        Device::Cuda,
+        DType::Float,
+    )
+    .unwrap();
+
+    let image = image(&cases);
+    let first = encoder.forward(&image).unwrap();
+    let second = encoder.forward(&image).unwrap();
+
+    let cpu_second = second
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap();
+    assert_eq!(relative_rmse(&first, &cpu_second), 0.0);
+}

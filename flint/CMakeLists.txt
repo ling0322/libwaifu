@@ -1,0 +1,257 @@
+add_subdirectory("lutil")
+
+if (OPENMP_FOUND)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+endif()
+
+set(flint_SOURCES
+    "capi.cc"
+    "cpu/kernel/fallback.cc"
+    "cpu/kernel/interface.cc"
+    "cpu/kernel/util.cc"
+    "cpu/all_close.cc"
+    "cpu/binary_op.cc"
+    "cpu/cast.cc"
+    "cpu/common.cc"
+    "cpu/conv2d.cc"
+    "cpu/copy.cc"
+    "cpu/cpu_operators.cc"
+    "cpu/cpu_tensor_data.cc"
+    "cpu/fill.cc"
+    "cpu/gated_delta_net.cc"
+    "cpu/glu.cc"
+    "cpu/lookup.cc"
+    "cpu/matmul.cc"
+    "cpu/normalizations.cc"
+    "cpu/print.cc"
+    "cpu/rand.cc"
+    "cpu/reduce.cc"
+    "cpu/repetition_penalty.cc"
+    "cpu/softmax.cc"
+    "cpu/tensor.cc"
+    "cpu/transform.cc"
+    "cpu/upsample.cc"
+    "cpu/triangular_solve.cc"
+    "cpu/unary.cc"
+    "cpu/view.cc"
+    "device.cc"
+    "dtype.cc"
+    "functional.cc"
+    "memory.cc"
+    "operators.cc"
+    "tensor.cc"
+    "../third_party/ruapu/ruapu.cc")
+
+set(flint_test_SOURCES
+    "capi_test.cc"
+    "cpu/conv2d_test.cc"
+    "cpu/fill_test.cc"
+    "cpu/gated_delta_net_test.cc"
+    "cpu/kernel/interface_test.cc"
+    "cpu/lookup_test.cc"
+    "cpu/matmul_test.cc"
+    "cpu/normalizations_test.cc"
+    "cpu/reduce_test.cc"
+    "cpu/sampling_test.cc"
+    "cpu/softmax_test.cc"
+    "cpu/unary_test.cc"
+    "tensor_test.cc")
+
+set(flint_benchmark_SOURCES
+    "bench.cc"
+    "cpu/benchmark.cc"
+    "cpu/kernel/benchmark.cc")
+
+set(flint_INCDIR "." ".." "../third_party")
+
+if(WITH_OPENMP)
+    if(NOT OPENMP_FOUND)
+        message(FATAL_ERROR "WITH_OPENMP=ON build OpenMP package not found.")
+    endif()
+    set(flint_INCDIR ${flint_INCDIR} ${OpenMP_CXX_INCLUDE_DIRS})
+endif()
+
+if (WITH_CUDA)
+    set(flint_INCDIR ${flint_INCDIR} ${CUDAToolkit_INCLUDE_DIRS})
+    set(flint_SOURCES
+        ${flint_SOURCES}
+        "cuda/arange.cu"
+        "cuda/binary.cu"
+        "cuda/binary_scalar.cu"
+        "cuda/cast.cu"
+        "cuda/causal_mask.cu"
+        "cuda/copy.cu"
+        "cuda/common.cc"
+        "cuda/conv2d.cc"
+        "cuda/copy_stream.cc"
+        "cuda/cuda_host_tensor_data.cc"
+        "cuda/cuda_operators.cc"
+        "cuda/cuda_tensor_data.cc"
+        "cuda/future_tensor.cc"
+        "cuda/dequant.cu"
+        "cuda/fill.cu"
+        "cuda/gated_delta_net.cu"
+        "cuda/gated_delta_net_mma.cu"
+        "cuda/gemm_cublas.cc"
+        "cuda/glu.cu"
+        "cuda/lookup.cu"
+        "cuda/matmul.cc"
+        "cuda/matvec.cu"
+        "cuda/norm.cu"
+        "cuda/print.cc"
+        "cuda/rand.cu"
+        "cuda/reduce.cu"
+        "cuda/repetition_penalty.cu"
+        "cuda/rotary_embedding.cu"
+        "cuda/sampling.cu"
+        "cuda/softmax.cu"
+        "cuda/store_kv_cache.cu"
+        "cuda/to_device.cc"
+        "cuda/upsample.cu"
+        "cuda/unary.cu")
+
+    if(WITH_FLASH_ATTN)
+        set(flint_SOURCES ${flint_SOURCES} "cuda/flash_attn.cc")
+        set(flint_test_SOURCES ${flint_test_SOURCES} "cuda/flash_attn_test.cc")
+    endif()
+
+    set(flint_test_SOURCES
+        ${flint_test_SOURCES}
+        "cuda/arange_test.cc"
+        "cuda/attention_test.cc"
+        "cuda/binary_scalar_test.cc"
+        "cuda/binary_test.cc"
+        "cuda/causal_mask_test.cc"
+        "cuda/common_test.cc"
+        "cuda/conv2d_test.cc"
+        "cuda/norm_test.cc"
+        "cuda/copy_test.cc"
+        "cuda/cuda_host_test.cc"
+        "cuda/fill_test.cc"
+        "cuda/gated_delta_net_test.cc"
+        "cuda/glu_test.cc"
+        "cuda/lookup_test.cc"
+        "cuda/matmul_test.cc"
+        "cuda/matvec_test.cc"
+        "cuda/rand_test.cc"
+        "cuda/reduce_test.cc"
+        "cuda/repetition_penalty_test.cc"
+        "cuda/rotary_embedding_test.cc"
+        "cuda/sampling_test.cc"
+        "cuda/softmax_test.cc"
+        "cuda/store_kv_cache_test.cc"
+        "cuda/to_device_test.cc"
+        "cuda/upsample_test.cc"
+        "cuda/unary_test.cc")
+    set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "cuda/benchmark.cc")
+    # cuDNN convolves nothing in the library any more. It is here as the reference the CUTLASS
+    # convolution is measured against, so it is built into the benchmark and nowhere else.
+    if (WITH_CUDNN)
+        set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "cuda/conv2d_cudnn.cc")
+    endif()
+
+    set(flint_SOURCES ${flint_SOURCES}
+        "cuda/conv2d_cutlass.cu"
+        "cuda/gemm_cutlass.cu"
+        "cuda/gemm_nvfp4_cutlass.cu")
+    set(flint_test_SOURCES ${flint_test_SOURCES}
+        "cuda/gemm_cutlass_test.cc"
+        "cuda/gemm_nvfp4_cutlass_test.cc")
+    set(flint_INCDIR ${flint_INCDIR}
+        "../third_party/cutlass/include"
+        "../third_party/cutlass/tools/util/include")
+endif()
+
+if(WITH_MLX)
+    set(flint_SOURCES
+        ${flint_SOURCES}
+        "metal/attention.cc"
+        "metal/common.cc"
+        "metal/conv2d.cc"
+        "metal/elementwise.cc"
+        "metal/matmul.cc"
+        "metal/metal_operators.cc"
+        "metal/metal_tensor_data.cc"
+        "metal/metallib.cc"
+        "metal/norm.cc"
+        "metal/rand.cc"
+        "metal/reduce.cc"
+        "metal/shape.cc"
+        "metal/to_device.cc")
+    set(flint_test_SOURCES
+        ${flint_test_SOURCES}
+        "metal/attention_test.cc"
+        "metal/conv2d_test.cc"
+        "metal/elementwise_test.cc"
+        "metal/matmul_test.cc"
+        "metal/metallib_test.cc"
+        "metal/norm_test.cc"
+        "metal/operators_test.cc"
+        "metal/rand_test.cc"
+        "metal/reduce_test.cc"
+        "metal/shape_test.cc"
+        "metal/to_device_test.cc")
+    set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal/benchmark.cc")
+endif()
+
+# CPU specific code
+if(LIBWAIFU_KERNEL_X86_64)
+    set(flint_SOURCES
+        ${flint_SOURCES}
+        "cpu/kernel/avx2.cc"
+        "cpu/kernel/avx512.cc")
+    if(WIN32)
+        set_source_files_properties(
+            "cpu/kernel/avx512.cc"
+            PROPERTIES COMPILE_FLAGS /arch:AVX512)
+        set_source_files_properties(
+            "cpu/kernel/avx2.cc"
+            PROPERTIES COMPILE_FLAGS /arch:AVX2)
+    endif(WIN32)
+    if(UNIX)
+        set_source_files_properties(
+            "cpu/kernel/avx512.cc"
+            PROPERTIES COMPILE_FLAGS "-mavx512f")
+        set_source_files_properties(
+            "cpu/kernel/avx2.cc"
+            PROPERTIES COMPILE_FLAGS "-mavx2 -mfma -mf16c")
+    endif(UNIX)
+    set(flint_test_SOURCES 
+        ${flint_test_SOURCES}
+        "cpu/kernel/avx2_test.cc"
+        "cpu/kernel/avx512_test.cc")
+endif()
+
+if(LIBWAIFU_KERNEL_AARCH64)
+    set(flint_SOURCES ${flint_SOURCES} "cpu/kernel/asimdhp.cc" "cpu/kernel/asimdfhm.cc")
+    set(flint_test_SOURCES 
+        ${flint_test_SOURCES}
+        "cpu/test_float16.cc"
+        "cpu/kernel/asimdhp_test.cc")
+endif()
+
+add_library(flint_static OBJECT ${flint_SOURCES})
+target_compile_options(flint_static PRIVATE "-DLIBWAIFU_EXPORTS")
+target_include_directories(flint_static PRIVATE ${LIBDWARF_INCLUDE_DIRS})
+if(WITH_FLASH_ATTN)
+    target_link_libraries(flint_static PRIVATE flash_attn)
+endif()
+#set_target_properties(flint_static PROPERTIES CXX_VISIBILITY_PRESET hidden)
+#set_target_properties(flint_static PROPERTIES CUDA_VISIBILITY_PRESET hidden)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --use_fast_math")
+target_include_directories(flint_static PRIVATE ${flint_INCDIR})
+
+add_library(flint_test OBJECT ${flint_test_SOURCES})
+target_include_directories(flint_test PRIVATE ${flint_INCDIR})
+
+add_library(flint_benchmark OBJECT ${flint_benchmark_SOURCES})
+target_include_directories(flint_benchmark PRIVATE ${flint_INCDIR})
+
+# MLX headers use C++20 features (defaulted comparisons). Mark them as SYSTEM so the compiler
+# does not warn about code this project does not own.
+if(WITH_MLX)
+    target_include_directories(flint_static SYSTEM PRIVATE ${MLX_INCDIRS})
+    target_include_directories(flint_test SYSTEM PRIVATE ${MLX_INCDIRS})
+    target_include_directories(flint_benchmark SYSTEM PRIVATE ${MLX_INCDIRS})
+endif()

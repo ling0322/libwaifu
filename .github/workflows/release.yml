@@ -1,0 +1,211 @@
+name: Release
+
+# A tag is the trigger, so cutting a release stays something done on purpose. workflow_dispatch
+# is here to rehearse the whole thing without spending a tag on it -- a manual run builds and
+# uploads the artifact, and stops short of touching a release.
+on:
+  push:
+    # Releases are tagged with a leading v -- v0.0.alpha1, v1.2.3 -- and nothing else here
+    # should be able to start a release by accident.
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-cuda-flash-attn:
+    name: Windows (CUDA + FlashAttention)
+    runs-on: windows-2022
+
+    timeout-minutes: 120
+
+    env:
+      # flint compiles against the static MSVC runtime -- CMAKE_MSVC_RUNTIME_LIBRARY asks for
+      # /MT -- and rustc links the dynamic one unless told otherwise. Two runtimes in one binary
+      # is a link error, so cargo is pointed at the one CMake already chose.
+      RUSTFLAGS: -C target-feature=+crt-static
+
+      # Named once, and used to find the FlashAttention archive built against it. This has to
+      # agree with CUDA_VERSION in flash-attn.yml, or the key below names an archive that nobody
+      # has published.
+      CUDA_VERSION: "12.9.1"
+      PREBUILT_TAG: flash-attn-prebuilt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ninja rather than the Visual Studio generator, which is multi-config and would put the
+      # binaries in build/Release/ instead of the build/ the steps below name.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          # 12.8 is the floor, not a preference: flint/cuda/dequant.cu and gemm_nvfp4_cutlass.cu
+          # include <cuda_fp4.h> unconditionally, and NVIDIA first shipped that header in 12.8.
+          # 12.9 is what this is developed against.
+          cuda: "12.9.1"
+          method: network
+          # The _dev halves are the ones that carry the import libraries and headers, so cuBLAS
+          # needs both of its to be linkable. cuRAND is no longer asked for: flint/cuda/rand.cu
+          # carries the Philox that was taken from it, and the archive published below is the
+          # better for it -- cuRAND was the one library with no static form on this host, and its
+          # DLL would have had to travel in the zip for the binary to start at all.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+
+      # WITH_CUDA will not configure without the CUTLASS headers: it is the only Conv2d the
+      # library has, and the GEMM the model runs on.
+      - name: Install CUTLASS
+        working-directory: third_party
+        shell: bash
+        run: bash install_cutlass.sh
+
+      # Downloaded rather than built. FlashAttention is hours of nvcc that does not change
+      # between releases, so flash-attn.yml builds it once per revision and publishes it, and
+      # this asks for the archive belonging to the source in this checkout, by name. An archive
+      # built from anything else carries a different name and cannot be picked up by accident.
+      #
+      # Only the archive is needed. The headers the main build includes are in this repository,
+      # and FlashAttention's pinned CUTLASS is a dependency of building the archive rather than
+      # of anything linking it.
+      - name: Download prebuilt FlashAttention
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          key=$(bash third_party/flash_attn_key.sh "${CUDA_VERSION}")
+          asset="flash_attn-windows-cuda${CUDA_VERSION}-${key}.zip"
+          echo "looking for ${asset}"
+
+          if ! gh release download "${PREBUILT_TAG}" --pattern "${asset}" --dir prebuilt; then
+            echo "::error::No prebuilt FlashAttention published for key ${key}."
+            echo "::error::Run the 'FlashAttention prebuild' workflow on this commit, then tag again."
+            exit 1
+          fi
+
+          mkdir -p third_party/flash-attention/build
+          7z x "prebuilt/${asset}" -othird_party/flash-attention/build -y
+          cat third_party/flash-attention/build/MANIFEST.txt
+          test -f third_party/flash-attention/build/flash_attn.lib
+
+      # Every architecture the toolkit can reach, unlike CI's single one: this is the build
+      # somebody downloads, and it has to run on the card they own rather than the one here.
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DWITH_OPENMP=ON -DWITH_CUDA=ON -DWITH_FLASH_ATTN=ON
+
+      - name: Build
+        run: cmake --build build
+
+      # No NVIDIA card on the runner, so CudaOperators::create returns null and the CUDA cases
+      # take their CATCH_SKIP. This still proves the artifact starts and its CPU half works.
+      - name: Test (C++)
+        run: ./build/unittest.exe
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/waifu.exe dist/
+          cp LICENSE README.md dist/
+          cd dist && 7z a ../waifu-windows-cuda.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waifu-windows-cuda
+          path: waifu-windows-cuda.zip
+
+      # Only a tag has a release to attach to. `create` covers the tag that has no release yet,
+      # `upload` the one that already does -- a second runner, or a re-run, lands in the latter.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/attach_release.sh waifu-windows-cuda.zip
+
+  linux-cuda-flash-attn:
+    name: Linux (CUDA + FlashAttention)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      # Has to agree with CUDA_VERSION in flash-attn.yml, or the key below names an archive that
+      # nobody has published.
+      CUDA_VERSION: "12.9.1"
+      PREBUILT_TAG: flash-attn-prebuilt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CUDA toolkit is several gigabytes and a hosted runner does not have many to spare.
+      # Clearing what this build will never touch is cheaper than finding out mid-download.
+      - name: Make room for CUDA
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h /
+
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: network
+          # Linux names cuBLAS differently from Windows: it is libcublas, and it takes no cuda-
+          # prefix, which is what the second input is for. Unlike the FlashAttention archive,
+          # this build links it, and links CUDA::cudart_static, so the -dev halves that carry the
+          # static libraries are here too.
+          sub-packages: '["nvcc", "cudart", "cudart-dev", "thrust"]'
+          non-cuda-sub-packages: '["libcublas", "libcublas-dev"]'
+
+      - name: Install CUTLASS
+        working-directory: third_party
+        shell: bash
+        run: bash install_cutlass.sh
+
+      - name: Download prebuilt FlashAttention
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/fetch_flash_attn.sh linux libflash_attn.a
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DWITH_OPENMP=ON -DWITH_CUDA=ON -DWITH_FLASH_ATTN=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      # No NVIDIA card here either, so CudaOperators::create returns null and the CUDA cases take
+      # their CATCH_SKIP. This still proves the artifact starts and its CPU half works.
+      - name: Test (C++)
+        run: ./build/unittest
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir -p dist
+          cp build/waifu dist/
+          cp LICENSE README.md dist/
+          tar -czf waifu-linux-cuda.tar.gz -C dist .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waifu-linux-cuda
+          path: waifu-linux-cuda.tar.gz
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/attach_release.sh waifu-linux-cuda.tar.gz

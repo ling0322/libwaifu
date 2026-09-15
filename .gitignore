@@ -1,0 +1,31 @@
+.DS_Store
+.vscode
+# Shared agent skills under .claude/skills are checked in; what one person's machine
+# decides for itself is not.
+.claude/settings.local.json
+.venv
+transformers
+/data
+/build
+/run
+/models
+/third_party/ffmpeg
+/third_party/cutlass
+/third_party/libunwind
+/third_party/mlx
+/third_party/flash-attention/build
+/third_party/flash-attention/csrc/cutlass
+
+__pycache__
+*.model
+*.bin
+*.1
+*.2
+*.egg-info
+*.so
+*.dll
+*.waifupkg
+/tools/*.config
+python/build
+python/dist
+/target

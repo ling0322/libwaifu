@@ -1,0 +1,197 @@
+// The MIT License (MIT)
+//
+// Copyright (c) 2024 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+#pragma once
+
+#include <type_traits>
+
+#include "lutil/log.h"
+#include "lutil/time.h"
+#include "flint/cpu/kernel/abstract.h"
+#include "flint/cpu/kernel/util.h"
+
+namespace fl {
+namespace op {
+namespace cpu {
+namespace kernel {
+
+// block is a sub area of a matrix. Used in implementation of gemm.
+template<typename T>
+struct Block {
+  T *data;
+  int32_t stride;
+  int32_t numRows;
+  int32_t numCols;
+  bool transposed;
+
+  constexpr Block<T> sliceRow(int row, int nr) const;
+  constexpr Block<T> sliceCol(int col, int nc) const;
+  constexpr Block<T> slice(int row, int col, int nr, int nc) const;
+
+  // copy this block to tgt, converting each element to Tt on the way. Tt may differ from T, that
+  // is how a fp16 weight block becomes a fp32 packed block. TYPE only selects a faster kernel for
+  // the conversions that have one; the rest go element at a time.
+  template<typename Tt, CpuMathBackend TYPE = CpuMathBackend::UNKNOWN>
+  inline void copyTo(Block<Tt> tgt) const;
+  constexpr Block<T> t();
+  constexpr void fillZero();
+};
+
+template<typename T>
+struct PackedBlock {
+  T *data;
+  int32_t packSize;
+  int32_t numRows;
+  int32_t numBlocks;
+
+  constexpr Block<T> block(int i) const;
+};
+
+// pack src into pack_size wide panels stored in buf. Ts is the type in the source matrix, Tt the
+// type the micro-kernel wants: with Ts=Float16 and Tt=float the packing loop is also the fp16 ->
+// fp32 conversion, so no separate dequantized copy of the matrix is needed.
+template<typename Ts, typename Tt, CpuMathBackend TYPE, Mode MODE>
+PackedBlock<Tt> Pack(Block<Ts> src, Block<Tt> buf, int pack_size) {
+  int numBlock = src.numCols / pack_size;
+  int kc = src.numRows;
+  PackedBlock<Tt> tgt{buf.data, pack_size, kc, numBlock};
+  CHECK(pack_size * numBlock * kc <= buf.numCols * buf.numRows);
+
+#pragma omp parallel for if (MODE == Mode::OMP) schedule(dynamic, 1)
+  for (int b = 0; b < numBlock; ++b) {
+    Block<Ts> srcBlock = src.sliceCol(b * pack_size, pack_size);
+    Block<Tt> tgtBlock = tgt.block(b);
+    srcBlock.template copyTo<Tt, TYPE>(tgtBlock);
+  }
+
+  int nc = src.numCols % pack_size;
+  if (nc) {
+    Block<Ts> srcBlock = src.sliceCol(numBlock * pack_size, nc);
+    Block<Tt> tgtBlock = tgt.block(numBlock);
+    tgtBlock.fillZero();
+
+    tgtBlock = tgtBlock.sliceCol(0, nc);
+    srcBlock.template copyTo<Tt, TYPE>(tgtBlock);
+    ++tgt.numBlocks;
+  }
+
+  return tgt;
+}
+
+template<typename T>
+constexpr Block<T> Block<T>::sliceRow(int row, int nr) const {
+  return slice(row, 0, nr, numCols);
+}
+template<typename T>
+constexpr Block<T> Block<T>::sliceCol(int col, int nc) const {
+  return slice(0, col, numRows, nc);
+}
+
+template<typename T>
+constexpr Block<T> Block<T>::slice(int row, int col, int nr, int nc) const {
+  return Block{
+      data + (transposed ? row + col * stride : row * stride + col),
+      stride,
+      nr,
+      nc,
+      transposed};
+}
+
+template<typename T>
+template<typename Tt, CpuMathBackend TYPE>
+inline void Block<T>::copyTo(Block<Tt> tgt) const {
+  CHECK(numRows == tgt.numRows);
+  CHECK(numCols == tgt.numCols);
+
+  // a transposed source packed into a contiguous target is what both the A and the B pack do. The
+  // generic loop below cannot vectorize its strided load, and for fp16 calls a software
+  // half_to_float on top of that, so both element types are worth a kernel. Anything else -- any
+  // other backend, fp16 targets, transposed targets -- keeps the generic loop.
+  constexpr bool kPackElement = std::is_same<Tt, float>::value &&
+                                (std::is_same<T, Float16>::value || std::is_same<T, float>::value);
+  constexpr bool kPackBackend = TYPE == CpuMathBackend::AVX2 || TYPE == CpuMathBackend::AVX512;
+  constexpr bool kUsePackKernel = kPackElement && kPackBackend;
+
+  if constexpr (kUsePackKernel) {
+    if (transposed && (!tgt.transposed)) {
+      packTransposeKernel<T, Tt, TYPE>(numRows, numCols, data, stride, tgt.data, tgt.stride);
+      return;
+    }
+  }
+
+  if ((!transposed) && (!tgt.transposed)) {
+    for (int r = 0; r < numRows; ++r) {
+      int tgtOffset = r * tgt.stride;
+      int srcOffset = r * stride;
+      for (int c = 0; c < numCols; ++c) {
+        tgt.data[tgtOffset + c] = cvtf<Tt>(data[srcOffset + c]);
+      }
+    }
+  } else if (transposed && (!tgt.transposed)) {
+    for (int r = 0; r < numRows; ++r) {
+      int tgtOffset = r * tgt.stride;
+      for (int c = 0; c < numCols; ++c) {
+        tgt.data[tgtOffset + c] = cvtf<Tt>(data[r + c * stride]);
+      }
+    }
+  } else if ((!transposed) && tgt.transposed) {
+    for (int r = 0; r < numRows; ++r) {
+      int srcOffset = r * stride;
+      for (int c = 0; c < numCols; ++c) {
+        tgt.data[r + c * tgt.stride] = cvtf<Tt>(data[srcOffset + c]);
+      }
+    }
+  } else if (transposed && tgt.transposed) {
+    for (int c = 0; c < numCols; ++c) {
+      int srcOffset = c * stride;
+      int tgtOffset = c * tgt.stride;
+      for (int r = 0; r < numRows; ++r) {
+        tgt.data[r + tgtOffset] = cvtf<Tt>(data[r + srcOffset]);
+      }
+    }
+  }
+}
+
+template<typename T>
+constexpr Block<T> Block<T>::t() {
+  return Block<T>{data, stride, numCols, numRows, !transposed};
+}
+
+template<typename T>
+constexpr void Block<T>::fillZero() {
+  for (int r = 0; r < numRows; ++r) {
+    for (int c = 0; c < numCols; ++c) {
+      if (transposed) {
+        data[r + c * stride] = 0.0f;
+      } else {
+        data[r * stride + c] = 0.0f;
+      }
+    }
+  }
+}
+
+template<typename T>
+constexpr Block<T> PackedBlock<T>::block(int i) const {
+  return Block<T>{data + packSize * numRows * i, packSize, numRows, packSize, false};
+}
+
+}  // namespace kernel
+}  // namespace cpu
+}  // namespace op
+}  // namespace fl

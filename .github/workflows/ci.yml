@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux-cpu:
+    name: Linux (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test (C++)
+        run: ./build/unittest
+
+      - name: Test (Rust)
+        run: cargo test --manifest-path waifu/Cargo.toml
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+  macos-metal:
+    name: macOS (CPU + Metal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libomp
+        run: brew install libomp
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_MLX=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.ncpu)
+
+      - name: Test (C++)
+        run: ./build/unittest
+
+      - name: Test (Rust)
+        run: cargo test --manifest-path waifu/Cargo.toml
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+  windows-cuda:
+    name: Windows (CUDA)
+    runs-on: windows-2022
+
+    env:
+      # flint compiles against the static MSVC runtime -- CMAKE_MSVC_RUNTIME_LIBRARY asks for
+      # /MT -- and rustc links the dynamic one unless told otherwise. Two runtimes in one binary
+      # is a link error, so cargo is pointed at the one CMake already chose.
+      RUSTFLAGS: -C target-feature=+crt-static
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ninja rather than the Visual Studio generator, which is multi-config and would put the
+      # binaries in build/Release/ instead of the build/ the other two jobs name.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          # 12.8 is the floor, not a preference: flint/cuda/dequant.cu and gemm_nvfp4_cutlass.cu
+          # include <cuda_fp4.h> unconditionally, and NVIDIA first shipped that header in 12.8.
+          # 12.9 is what this is developed against.
+          cuda: "12.9.1"
+          method: network
+          # The _dev halves are the ones that carry the import libraries and headers, so cuBLAS
+          # needs both of its to be linkable. cuRAND is no longer asked for: flint/cuda/rand.cu
+          # carries the Philox that was taken from it, and the Windows binary is the better for
+          # not naming a DLL the loader would have to find before it could start.
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
+
+      # WITH_CUDA will not configure without the CUTLASS headers: it is the only Conv2d the
+      # library has, and the GEMM the model runs on.
+      - name: Install CUTLASS
+        working-directory: third_party
+        shell: bash
+        run: bash install_cutlass.sh
+
+      # One architecture rather than the seven the default spans. This job is here to prove the
+      # code compiles and links under MSVC, and there is no card to run the other six on.
+      #
+      # FlashAttention stays out. It would only cost a download now that flash-attn.yml builds
+      # the archive, but what a push needs to hear about is this code, and tying that to whether
+      # a release asset happens to exist for the current key is a way for CI to fail for reasons
+      # that have nothing to do with the commit. The release workflow links it, and is strict
+      # about it, because that is where linking the wrong thing reaches somebody.
+      #
+      # The cost is real and worth naming: flint/cuda/flash_attn.cc is in the build only when
+      # this is on, so nothing here compiles it.
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DWITH_OPENMP=ON -DWITH_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80-real
+
+      - name: Build
+        run: cmake --build build
+
+      # No NVIDIA card on the runner, so CudaOperators::create returns null and every CUDA case
+      # takes its CATCH_SKIP. What actually runs is the CPU half, against a compiler neither of
+      # the other two jobs exercises.
+      - name: Test (C++)
+        run: ./build/unittest.exe
+
+      - name: Test (Rust)
+        run: cargo test --manifest-path waifu/Cargo.toml
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build

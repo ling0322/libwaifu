@@ -1,0 +1,100 @@
+[package]
+name = "waifu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Your local AI waifu: diffusion image generation on top of the flint tensor library"
+# Declares that this crate links libflint.a, so Cargo runs build.rs and keeps the native library
+# to a single owner in the dependency graph.
+links = "flint"
+
+[lib]
+name = "waifu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "waifu"
+path = "src/bin/waifu.rs"
+required-features = ["cli"]
+
+[features]
+# The command line tool. Off by default: what it pulls in -- a terminal stack, an HTTP client,
+# an image encoder -- is the binary's to need, and nothing the library does asks for any of it.
+cli = ["dep:hf-hub", "dep:image", "dep:ratatui", "dep:ureq"]
+
+# Needs a terminal to take over before it can show what taking one over costs.
+[[example]]
+name = "fatal_screen"
+required-features = ["cli"]
+
+[dependencies]
+# What the command line tool needs.
+#
+# The terminal the draw command runs in. Trimmed to the crossterm backend: the default set also
+# builds the termwiz and termina ones, which is two more terminal stacks than a program that runs
+# in one terminal needs.
+ratatui = { version = "0.29", default-features = false, features = [
+    "crossterm",
+    "underline-color",
+], optional = true }
+
+# Fetching from ModelScope, which hf-hub does not speak, and probing whether the machine can
+# reach the outside at all. Rust has no HTTP in its standard library, so this is the one thing the
+# tool cannot do on its own. Held to the rustls backend: the native-tls default would link the
+# system OpenSSL, and a dynamic library on the far side of the build is exactly what this crate
+# does not want.
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
+], optional = true }
+
+# Fetching from Hugging Face, which is where the models are published and where all but one of
+# the fetches go. Its own client rather than ureq against a URL built here: it is what tracks how
+# that hub actually answers -- redirects to a CDN, xet-backed files that are not a plain GET, the
+# headers that say a file moved -- and none of that is worth rediscovering here one bug report at
+# a time.
+#
+# It is the largest thing in this file by a distance, reqwest and tokio and hf-xet behind it, and
+# that is the price of the above. Held to rustls for the same reason ureq is, and to the blocking
+# feature because nothing else in this crate is async: an executor exists to run one download at
+# a time and no further.
+#
+# The other fetch is ModelScope, which this does not speak. That one stays on ureq, below.
+hf-hub = { version = "1", default-features = false, features = [
+    "blocking",
+    "rustls-tls",
+], optional = true }
+
+# Reading the picture an image to image run starts from, and writing the one it ends with. The
+# default feature set is a dozen decoders -- avif, exr, tiff, webp and the rest -- behind a good
+# deal of C. Held to the two formats anyone actually hands a diffusion model, which are also the
+# two written in pure Rust.
+#
+# Cargo.lock holds 0.25.9 rather than the newest 0.25: 0.25.10 asks for a rustc a minor version
+# ahead of the one this is built with. Nothing here needs what it added, so the lock is the place
+# that says so rather than a bound in the range.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+], optional = true }
+
+# Reading the weights, which are safetensors: the format every other runtime already writes, so a
+# weight can be looked at with torch, with numpy, or with the viewer on the hub. It replaced two
+# layouts of this project's own, and the zip they lived in went with them.
+#
+# No features beyond the default `std`: this reads a header and hands back slices of a buffer.
+safetensors = "0.8"
+
+# Turning a prompt into ids, from the `tokenizer.json` the model's authors published.
+#
+# The vocabulary, the normalizer, the pre-tokenizer and the merge ranks all live in that one file,
+# so a package carries the tokenizer as it was shipped rather than a re-encoding of it, and this
+# is the crate that reads it -- the same code every reference implementation runs.
+#
+# Trimmed to nothing native. The default set is `onig` (oniguruma, a C regex engine), `esaxx_fast`
+# (a C++ suffix array, used only to *train* a vocabulary, which nothing here does) and a progress
+# bar. `fancy-regex` is the pure Rust alternative to the first and the only one of the four that
+# encoding needs; `http` would drag in a second hub client beside the one the cli feature has.
+tokenizers = { version = "0.23", default-features = false, features = [
+    "fancy-regex",
+] }
