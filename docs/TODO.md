@@ -660,3 +660,96 @@ goes to ModelScope, and the user gets a ModelScope error for what is really a mi
 Probing `huggingface.co` instead would cost the same one round trip and answer the real question,
 at the price of no longer being a geography test -- which is the thing the current probe is
 actually good at.
+
+## The CUTLASS half GEMM cannot read an odd leading dimension
+
+`flint/cuda/gemm_cutlass.cu` now picks its instantiation by what the operands are aligned to --
+eight halves, then four, then two -- because Anima's patch embedder contracts over a K of 68 and
+the fixed eight-wide kernel read every second row of it from an address eight bytes off a 16-byte
+boundary. On an RTX 3060 that faults the CUDA context, which takes the process with it -- see the
+entry below for why it now does so without saying anything at all.
+
+Two is the floor rather than a choice: the kernel stages through `cp_async`, which takes 4, 8 or
+16 bytes and nothing else, so `AlignmentA = 1` does not compile. An **odd** leading dimension
+therefore has no instantiation at all, and `Gemm::can_implement` -- which `initialize` does not
+call on its own -- now refuses it by name instead of launching something that kills the process.
+
+Six tests are in that hole, and each one still ends the whole runner without the dispatch above:
+
+```
+flint/cuda/conv2d_test.cc:178    {2, 8, 7, 5} by {4, 8, 1, 1}   H*W = 35
+flint/cuda/conv2d_test.cc:271    {1, 4, 5, 5} by {4, 4, 1, 1}   H*W = 25
+flint/cuda/matmul_test.cc:84     runCase(1, 8, 1)               a one-column B
+flint/cuda/matmul_test.cc:137    a batched case with a stride of 1
+flint/cuda/matmul_test.cc:211    the same, in the float-carries-what-half-cannot case
+flint/cuda/matvec_test.cc:80     runCase(64, 1)                 a one-row output
+```
+
+`compute-sanitizer` says these were already misaligned reads at every one of those shapes, so
+they were never right -- they were unreported. No model reaches any of them: every dimension in
+SDXL and Anima is even.
+
+The fix is to pad. An operand whose leading dimension is odd wants a copy into a buffer one
+column wider, and the output wants the reverse on the way out -- which is a copy that
+`gemm_cutlass.cu` has nowhere to put, since it is handed raw pointers. `flint/cuda/matmul.cc` has
+the tensors and is the place to do it.
+
+
+## cuBLAS is never loaded on Windows, so every GEMM there is CUTLASS
+
+`lut::SharedLibrary::open("cublas")` becomes `cublas.dll` on Windows
+(`flint/lutil/shared_library_windows.cc:58`), and no such file ships: CUDA 12.9 installs
+`cublas64_12.dll`. So `MatMul::create` takes its fallback on every Windows run --
+
+```
+WARNING matmul.cc:54] cuBLAS is not usable, falling back to CUTLASS: Aborted: Load library
+    ...\cublas.dll failed with code 0x7e.
+```
+
+-- which is how the misaligned GEMM above reaches a user at all. Linux is unaffected, because
+there the same call asks for `libcublas.so` and gets it.
+
+`cublas_v2.h` defines `CUBLAS_VER_MAJOR`, so the name is available to build rather than guess at.
+Worth doing, and worth doing *after* the CUTLASS path is right rather than before: it would hide
+that path from the only platform this project tests it on.
+
+## A `CHECK` that fails inside a destructor terminates without a word
+
+`CHECK` throws `lut::AbortedError` since #3, which is right for the call sites that have a caller
+to tell. `llynCudaFree` is not one of them:
+
+```cpp
+// flint/cuda/common.h:142
+inline void llynCudaFree(void *ptr, cudaStream_t stream = 0) {
+  cudaError_t err = cudaFreeAsync(ptr, stream);
+  ...
+  CHECK(err == cudaSuccess);
+}
+```
+
+and its caller is `CudaTensorData::~CudaTensorData` (`flint/cuda/cuda_tensor_data.cc:71`). A
+destructor is implicitly `noexcept`, so the throw does not unwind -- it reaches `std::terminate`.
+
+What that costs is the message. Ending the process was never good, but before #3 this path at
+least said why:
+
+```
+ERROR to_device.cc:77] Error while calling: cudaMemcpy(...): misaligned address
+ERROR common.h:140] Error while freeing CUDA memory: misaligned address
+FATAL common.h:142] Check err == cudaSuccess failed.
+Stack trace: ...
+```
+
+Now the same run exits 127 with **no output whatsoever** -- not the error, not the trace. Verified
+by reverting only `gemm_cutlass.cu` to `main` and running `unittest "test conv2d (kernel shapes)"`:
+zero lines on either stream.
+
+#3's own message names this hazard and fixes it for the logging machinery -- "A destructor that
+threw would end the process whenever a CHECK failed while another exception was unwinding" -- but
+the same hazard lives at every `CHECK` call site that a destructor reaches, and this is one.
+
+Once a CUDA context is dead every later call fails too, so a `CHECK` here can only ever fire on
+the way down from an earlier fault. It has nothing to report to and nothing it can do. The
+`// TODO: remove` already sitting above it is probably the right answer: log at ERROR, which it
+already does, and let the destructor finish.
+
