@@ -26,6 +26,7 @@
 #include <ctime>
 #include <string>
 
+#include "lutil/error.h"
 #include "lutil/platform.h"
 
 namespace lut {
@@ -56,13 +57,12 @@ LogWrapper::LogWrapper(LogSeverity severity, const char *source_file, int source
   if (s) {
     source_file_ = s + 1;
   } else {
-    source_file_ = s;
+    source_file_ = source_file;
   }
 }
 
 LogWrapper::~LogWrapper() {
   std::string message = os_.str();
-  if (message.empty()) message = default_message_;
 
   // Before the first line is printed rather than after the last: whoever is being given the
   // screen back needs it before there is anything on it to read, and nothing runs after abort().
@@ -101,9 +101,25 @@ const char *LogWrapper::Severity() const {
   }
 }
 
-LogWrapper &LogWrapper::DefaultMessage(const char *message) {
-  default_message_ = message;
-  return *this;
+CheckFailure::CheckFailure(const char *source_file, int source_line, const char *condition)
+    : source_file_(source_file),
+      source_line_(source_line),
+      condition_(condition) {
+}
+
+void CheckFailure::raise() const {
+  std::string message = os_.str();
+  if (message.empty()) message = std::string("Check ") + condition_ + " failed.";
+
+  // Gated like any other LOG(ERROR), and silencing it loses nothing: the message is what the
+  // exception carries, and the caller reads it there rather than off the console. The trace is
+  // the part that only exists here, which is why it goes out with the message and not after it.
+  if (gLogLevel <= LogSeverity::kERROR) {
+    LogWrapperkERROR(source_file_, source_line_) << message;
+    printStackTrace();
+  }
+
+  throw lut::AbortedError(message);
 }
 
 }  // namespace internal

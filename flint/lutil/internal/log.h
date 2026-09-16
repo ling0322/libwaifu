@@ -51,13 +51,8 @@ class LogWrapper {
     return *this;
   }
 
-  // set the default message to LogWrapper. If no message appended, it will
-  // log the `message` instead
-  LogWrapper &DefaultMessage(const char *message);
-
  private:
   std::ostringstream os_;
-  const char *default_message_;
 
   LogSeverity severity_;
   const char *source_file_;
@@ -97,6 +92,49 @@ class LogWrapperkFATAL : public LogWrapper {
  public:
   LogWrapperkFATAL(const char *source_file, int source_line)
       : LogWrapper(LogSeverity::kFATAL, source_file, source_line) {
+  }
+};
+
+/// The failure path of CHECK(), built only when the condition did not hold. It collects whatever
+/// is streamed into it, and raise() then reports it and throws it.
+///
+/// The throw is in raise() rather than in the destructor on purpose. A destructor that throws
+/// while another exception is already unwinding ends the process, and a CHECK that fails on the
+/// way out of a frame -- during cleanup after an unrelated error -- is exactly when that would
+/// happen. Not ending the process is the whole point of this class.
+class CheckFailure {
+ public:
+  CheckFailure(const char *source_file, int source_line, const char *condition);
+
+  CheckFailure(CheckFailure &) = delete;
+  CheckFailure &operator=(CheckFailure &) = delete;
+
+  template<typename T>
+  CheckFailure &operator<<(const T &value) {
+    os_ << value;
+    return *this;
+  }
+
+  /// Logs the message and a stack trace at ERROR, then throws lut::AbortedError carrying that
+  /// same message. A CHECK() with nothing streamed into it reports its own condition instead.
+  ///
+  /// Const so that it can be reached through CheckRaiser, which has to bind to the temporary a
+  /// CHECK() with no message appended leaves behind.
+  [[noreturn]] void raise() const;
+
+ private:
+  std::ostringstream os_;
+  const char *source_file_;
+  int source_line_;
+  const char *condition_;
+};
+
+/// Calls CheckFailure::raise() from an operator that binds looser than `<<`, so that it runs once
+/// the streamed message is complete rather than before it starts. It is nothing but somewhere for
+/// that precedence to hang.
+struct CheckRaiser {
+  [[noreturn]] void operator&(const CheckFailure &failure) const {
+    failure.raise();
   }
 };
 

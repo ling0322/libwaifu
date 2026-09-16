@@ -29,9 +29,11 @@ which the quantizer checks rather than leaving to the kernel.
 The C interface is `fl_nvfp4_available`, `fl_nvfp4_quantize`, `fl_nvfp4_dequantize` and
 `fl_nvfp4_matmul`.
 
-The kernels assert their preconditions with `CHECK`, which aborts, so the C interface checks
-device, type, contiguity and shape itself first: a host side weight comes back as an error rather
-than as a dead process.
+The kernels assert their preconditions with `CHECK`, which reports a broken invariant as
+`FL_ERROR_ABORTED`. The C interface checks device, type, contiguity and shape itself first even
+so, because a host side weight is the caller's mistake rather than the library's: it comes back as
+`FL_ERROR_INVALID_ARG`, naming what was wrong with it, instead of as an internal failure with a
+stack trace behind it.
 
 ## Why the activation has to be quantized
 
