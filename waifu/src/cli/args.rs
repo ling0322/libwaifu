@@ -50,7 +50,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Every place a run can go, in the order the screens list them.
+    /// Every place a run can go, in the order the flag's own usage lists them.
     pub const ALL: [Runtime; 4] = [
         Runtime::on(Device::Cpu),
         Runtime::on(Device::Cuda),
@@ -89,24 +89,23 @@ impl Runtime {
         }
     }
 
-    /// Whether this build can run it, which is a question about the device underneath: weights
-    /// waiting on the host need the same cuda driver that weights on the card do.
-    pub fn is_available(self) -> bool {
-        self.device.is_available()
+    /// The one this name spells, which is [`Runtime::name`] read backwards.
+    pub fn named(name: &str) -> Option<Runtime> {
+        Runtime::ALL
+            .into_iter()
+            .find(|runtime| runtime.name() == name.trim())
     }
 
-    /// The words beside the name in the list, for a runtime this build can run.
+    /// The places this build can actually send a run.
     ///
-    /// What it costs rather than what it is, since the name says what it is. Nothing here asks
-    /// whether it is available: that is a call across the C boundary and this is read on every
-    /// redraw, so the caller, which asked once at the start, says so instead.
-    pub fn about(self) -> &'static str {
-        match self.residency {
-            Residency::Device => "ready",
-            // The one row that has to say more than that. It is the slow answer, and the slow
-            // answer picked by someone who was not told is a run that looks broken.
-            Residency::LowVram => "ready, slower",
-        }
+    /// Asked of the machine rather than of what was compiled in: a CUDA build on a machine with
+    /// no card answers the same as a build without CUDA in it, and a list that offered one anyway
+    /// would be offering a load that fails.
+    pub fn available() -> Vec<Runtime> {
+        Runtime::ALL
+            .into_iter()
+            .filter(|runtime| runtime.device().is_available())
+            .collect()
     }
 }
 
@@ -152,6 +151,7 @@ pub struct Args {
     models: Vec<String>,
     device: Option<String>,
     image: Option<String>,
+    port: Option<String>,
     help: bool,
 }
 
@@ -182,6 +182,7 @@ impl Args {
                 "-m" | "--m" => args.models.push(value("-m")?),
                 "-device" | "--device" => args.device = Some(value("-device")?),
                 "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
+                "-port" | "--port" => args.port = Some(value("-port")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
                 other => return Err(ArgError(format!("flag provided but not defined: {other}"))),
             }
@@ -219,6 +220,24 @@ impl Args {
         self.image.as_deref()
     }
 
+    /// The port to serve the page on, if one was named.
+    ///
+    /// None is not an error: without it the tool takes the usual port, or the first free one near
+    /// it. Zero is refused rather than passed on -- the operating system reads it as "any port at
+    /// all", which is a fine thing for a test to ask for and not something anybody types.
+    pub fn port(&self) -> Result<Option<u16>, ArgError> {
+        let Some(port) = &self.port else {
+            return Ok(None);
+        };
+
+        match port.trim().parse::<u16>() {
+            Ok(0) | Err(_) => Err(ArgError(format!(
+                "invalid port \"{port}\": it must be a number between 1 and 65535"
+            ))),
+            Ok(port) => Ok(Some(port)),
+        }
+    }
+
     pub fn device(&self) -> Result<DeviceOption, ArgError> {
         match self
             .device
@@ -234,11 +253,18 @@ impl Args {
             // typed both ways and being told off over the punctuation helps nobody.
             "cuda_cpu_offload" | "cuda-cpu-offload" => Ok(DeviceOption::CudaCpuOffload),
             "metal" => Ok(DeviceOption::Metal),
-            _ => Err(ArgError(
-                "invalid device name: must be one of \"cpu\", \"cuda\", \"cuda_cpu_offload\", \
-                 \"metal\" or \"auto\""
-                    .to_string(),
-            )),
+            // Every name it would have taken, built from the list rather than written out
+            // again: a name refused here is most often a name that was nearly right, and a list
+            // that had drifted from the one above would be the worst possible thing to show
+            // somebody looking for their typo.
+            _ => Err(ArgError(format!(
+                "invalid device name: must be one of {} or \"auto\"",
+                Runtime::ALL
+                    .iter()
+                    .map(|runtime| format!("\"{}\"", runtime.name()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
         }
     }
 }
@@ -254,14 +280,19 @@ pub fn print_options() {
     eprintln!(
         "  -m value\n    \tthe model to draw with: either a manifest file, which has the suffix \
          \".yaml\" and names the packages the weights are in, or the name of a published model, \
-         which is fetched on first use. Left out, the screen offers the published ones to pick \
+         which is fetched on first use. Left out, the page offers the published ones to pick \
          from. The names are: {}.",
         crate::cli::hub::names().join(", ")
     );
     eprintln!(
         "  -i string\n    \ta picture to draw from rather than from noise, as a PNG or a JPEG. \
-         It is scaled to the size on the screen, and how far the run walks away from it is what \
-         the strength box says."
+         It opens in the img2img tab, scaled to the size chosen there, and how far the run walks \
+         away from it is what the denoising strength box says."
+    );
+    eprintln!(
+        "  -port int\n    \tthe port to serve the page on (default 7860). Left out, the first \
+         free port from 7860 upwards is used, so that a second copy of this in another window \
+         still starts. The page is served to this machine and no further."
     );
 }
 
@@ -396,6 +427,24 @@ mod tests {
             DeviceOption::CudaCpuOffload.resolve().device(),
             Device::Cuda
         );
+    }
+
+    #[test]
+    fn reads_the_port_to_serve_on() {
+        // Left out is not an error: the tool has a port it takes when nobody says.
+        assert_eq!(args(&[]).unwrap().port().unwrap(), None);
+        assert_eq!(
+            args(&["-port", "8080"]).unwrap().port().unwrap(),
+            Some(8080)
+        );
+        assert_eq!(args(&["--port=1"]).unwrap().port().unwrap(), Some(1));
+
+        // Zero means "whichever one is free" to the operating system and nothing at all to the
+        // person typing it, and the rest are not numbers a port can be.
+        for typed in ["0", "70000", "-1", "http"] {
+            let error = args(&["-port", typed]).unwrap().port().unwrap_err();
+            assert!(error.to_string().contains("invalid port"), "{typed}");
+        }
     }
 
     #[test]

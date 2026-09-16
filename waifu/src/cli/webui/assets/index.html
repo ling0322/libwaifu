@@ -1,0 +1,33 @@
+<!doctype html>
+<!--
+  The whole of the screen. Served from the binary, so there is no directory of files to find at
+  runtime and no order the program has to be started from.
+
+  What is left in this file is the frame: everything inside the page is drawn by app.js, in React.
+  React, its renderer and htm -- which stands in for JSX, a tagged template the browser parses on
+  its own -- are the three files under assets/vendor/, built into the binary like the rest. So
+  there is still no build step between the source and the thing that runs, and the page still asks
+  for nothing outside this machine: it opens the same with the network unplugged as with it in.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>libwaifu</title>
+    <link rel="stylesheet" href="/style.css" />
+    <!-- A drawn icon rather than a fetched one, for the same reason. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#127912;</text></svg>"
+    />
+  </head>
+
+  <body>
+    <div id="app"></div>
+
+    <script src="/vendor/react.js"></script>
+    <script src="/vendor/react-dom.js"></script>
+    <script src="/vendor/htm.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -346,6 +346,23 @@ pub fn is_cached(name: &str) -> bool {
     }
 }
 
+/// The manifest of a model that is already in the cache, or None where it is not all there.
+///
+/// Nothing is fetched and nothing is opened: this is where the file would be, having checked that
+/// it and everything it names are on the disk. For a screen that wants to say what a model is
+/// before anybody has asked for the model itself.
+pub fn cached_manifest(name: &str) -> Option<PathBuf> {
+    let (published, cache) = (published(name)?, cache_directory().ok()?);
+    match is_cached_in(published, &cache) {
+        true => Some(
+            cache
+                .join(published.repo.replace('/', "--"))
+                .join(published.manifest),
+        ),
+        false => None,
+    }
+}
+
 /// How much of a cached model is on disk, for a screen that offers to fetch one.
 pub fn cached_bytes(name: &str) -> u64 {
     match (published(name), cache_directory()) {
@@ -437,6 +454,33 @@ pub fn full_name(name: &str) -> Option<&'static str> {
         .map(|m| m.full_name)
 }
 
+/// One model a screen can offer, and what is on the disk for it.
+pub struct Listed {
+    pub name: &'static str,
+    pub full_name: &'static str,
+    /// Whether every package of it is already in the cache.
+    pub cached: bool,
+    /// What is on disk for it, which is most of a model for one that was interrupted.
+    pub bytes: u64,
+}
+
+/// The models to offer, in the order a list should show them.
+///
+/// Versioned names are left out. Someone who wants `sdxl:base:v1.0` in particular can ask for it
+/// by name, and a list is for someone who does not yet know what to ask for.
+pub fn listed() -> Vec<Listed> {
+    names()
+        .into_iter()
+        .filter(|name| name.matches(':').count() == 1)
+        .map(|name| Listed {
+            name,
+            full_name: full_name(name).unwrap_or(""),
+            cached: is_cached(name),
+            bytes: cached_bytes(name),
+        })
+        .collect()
+}
+
 pub fn names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = ALIASES
         .iter()
@@ -460,16 +504,15 @@ fn reads_as_a_name(model: &str) -> bool {
         && !model.ends_with(WEIGHTS_SUFFIX)
 }
 
-/// Turn what `-m` was given into a manifest on disk, fetching the model if it is a name.
+/// Turn what `-m` was given into a manifest on disk, fetching the model if it is a name,
+/// telling `report` how it is getting on as it goes.
 ///
 /// A path is taken as it is written. A known name is fetched into the cache, and what comes back
 /// is the model's manifest -- the file that says what it is and names its packages, which is what
 /// [`Manifest::open`] expects to be handed.
-pub fn resolve(model: &str) -> Result<PathBuf, Error> {
-    resolve_reporting(model, &mut print_progress)
-}
-
-/// The same, telling `report` how it is getting on rather than printing.
+///
+/// There is no variant that reports nowhere. A fetch is minutes long, and the one caller there
+/// is has a bar to draw it on; somewhere for it to say so is not optional.
 pub fn resolve_reporting(model: &str, report: &mut dyn FnMut(Progress)) -> Result<PathBuf, Error> {
     if let Some(published) = published(model) {
         return fetch(published, report);
@@ -887,48 +930,17 @@ fn copy_reporting(
     Ok(done)
 }
 
-/// What the command line does with a fetch's progress: one line that rewrites itself.
-fn print_progress(progress: Progress) {
-    match progress {
-        // On a line of its own, before the one the byte counts rewrite over and over.
-        Progress::From { hub } => eprintln!("fetching from {hub}"),
-        Progress::Fetching {
-            file,
-            done,
-            total,
-            part,
-            parts,
-        } => {
-            let of = if parts > 0 {
-                format!(" (part {part} of {parts})")
-            } else {
-                String::new()
-            };
-            match total {
-                Some(total) if total > 0 => eprint!(
-                    "\rfetching {file}{of}: {}% of {}",
-                    done * 100 / total,
-                    megabytes(total)
-                ),
-                _ => eprint!("\rfetching {file}{of}: {}", megabytes(done)),
-            }
-            let _ = io::stderr().flush();
-        }
-        Progress::Fetched { file, bytes, .. } => {
-            eprintln!("\rfetching {file}: done ({})    ", megabytes(bytes));
-        }
-    }
-}
-
-fn megabytes(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
-}
-
 #[cfg(test)]
 mod tests {
     use hf_hub::progress::{FileProgress, FileStatus};
 
     use super::*;
+
+    /// [`resolve_reporting`] with nothing listening, for the tests that are about what it refuses
+    /// rather than about what it fetches.
+    fn quietly(model: &str) -> Result<PathBuf, Error> {
+        resolve_reporting(model, &mut |_| ())
+    }
 
     #[test]
     fn a_name_finds_what_it_names() {
@@ -1243,7 +1255,7 @@ mod tests {
 
     #[test]
     fn an_unknown_name_says_what_the_known_ones_are() {
-        let error = resolve("sdxl:nope").unwrap_err().to_string();
+        let error = quietly("sdxl:nope").unwrap_err().to_string();
         assert!(error.contains("no model called"), "{error}");
         assert!(error.contains("sdxl:base"), "{error}");
     }
@@ -1310,7 +1322,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_reported_as_a_file() {
-        let error = resolve("no-such-model.waifupkg").unwrap_err().to_string();
+        let error = quietly("no-such-model.waifupkg").unwrap_err().to_string();
         assert!(error.contains("does not exist"), "{error}");
     }
 

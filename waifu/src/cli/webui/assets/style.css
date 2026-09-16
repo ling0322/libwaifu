@@ -1,0 +1,743 @@
+/*
+  How the screen looks.
+ 
+  Dark, flat, and close to the tools this borrowed its shape from, because somebody who has used
+  one of those should not have to find anything twice. Dark for the same reason a darkroom is:
+  the only thing on this page worth looking at is a picture, and a page of white around it is a
+  page that decides what the colours in it look like. The one colour with an opinion of its own
+  is the orange on the button that starts a run.
+
+  Every colour on the page is one of these. That is what made this a change of nine values rather
+  than a change of the stylesheet.
+*/
+
+:root {
+  /* `color-scheme` is what makes the browser's own parts dark as well -- the insides of a select,
+     the arrows on a number box, the scrollbars -- which no rule here can reach. */
+  color-scheme: dark;
+
+  --page: #15161a;
+  --card: #1d1f26;
+  --edge: #2f323b;
+  --ink: #e7e8ec;
+  --dim: #979dab;
+  --accent: #6aa3ff;
+  --go: #e8842a;
+  --go-deep: #c96a12;
+  --bad: #ff7a6e;
+  /* The bar, which is a strip of colour with the page's own ink on it: pale enough against the
+     card to read as a fill, dark enough for the words on it to stay legible either side. */
+  --fill: #3b5b8f;
+  --trough: #262931;
+  --radius: 8px;
+  /*
+    One height for everything that sits in a row with something else. A button, a box and a select
+    each have their own idea of how tall they are -- the select takes its from the browser rather
+    than from this file -- so a row of the three lines up only if something says they are equal.
+  */
+  --control: 38px;
+  /* The page's left edge, and how far inside a nav button its word sits. The name at the top is
+     inset by both, so that it starts where the words under it start rather than where their
+     boxes do. */
+  --gutter: 16px;
+  --nudge: 12px;
+  /*
+    How wide the page is allowed to get. A window is as wide as somebody dragged it; a column of
+    settings and the picture beside them are not, and stretched across a desktop monitor they put
+    a foot of empty desk between the box and the button that acts on it.
+  */
+  --wide: 1360px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+  Half the boxes on this page are shown and hidden as the run goes, and every one of them is also
+  a flex box of some kind. A class that says `display` beats the browser's own rule for `hidden`,
+  which is how a hidden box comes out on screen anyway; this says which of the two wins.
+*/
+[hidden] {
+  display: none !important;
+}
+
+/*
+  The bars -- the model at the top, the tabs, the line at the bottom -- run the whole width of the
+  window, because a band of colour that stops short looks like a mistake. What is inside them
+  lines up with the page's one column.
+*/
+.middle {
+  width: 100%;
+  max-width: var(--wide);
+  margin: 0 auto;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+
+/* -- the name, across the top ---------------------------------------------------------------- */
+
+/*
+  Nothing to operate: what it is, which build, and where it came from. The controls are in the
+  column on the left, beside the pages they belong to.
+*/
+.topbar {
+  padding: 12px 16px;
+  background: var(--card);
+  border-bottom: 1px solid var(--edge);
+}
+
+.topbar .middle {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding-left: calc(var(--gutter) + var(--nudge));
+}
+
+.name {
+  font-weight: 600;
+}
+
+.dim {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+a.dim {
+  text-decoration: none;
+}
+
+a.dim:hover {
+  color: var(--accent);
+}
+
+/* -- the column on the left, and the page beside it ------------------------------------------ */
+
+.below {
+  width: 100%;
+  max-width: var(--wide);
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-start;
+}
+
+.side {
+  flex: 0 0 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 0 16px var(--gutter);
+}
+
+/*
+  The three pages, one under the other. A row of tabs across the top was where these were, and
+  the settings they sit above are a column -- so the pages are a column too, and what is chosen
+  reads down the page rather than across it.
+*/
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav button {
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--dim);
+  font: inherit;
+  text-align: left;
+  padding: 8px var(--nudge);
+  cursor: pointer;
+}
+
+.nav button:hover {
+  color: var(--ink);
+}
+
+.nav button.on {
+  background: var(--card);
+  border-color: var(--edge);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* What is loaded, under the box that chooses it. */
+.loaded {
+  color: var(--dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+main {
+  flex: 1;
+  /* Without this a wide picture stretches the flex item rather than scrolling inside it. */
+  min-width: 0;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* -- the two prompt boxes and the button beside them ---------------------------------------- */
+
+.prompts {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.prompt-boxes {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The two of them share the height evenly, whatever either one is asked to start at. */
+.prompt-boxes .field,
+.prompt-boxes textarea {
+  flex: 1;
+}
+
+textarea,
+input,
+select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  width: 100%;
+}
+
+/* Everything that can share a row, at the one height. A slider has its own and a textarea is as
+   tall as it was asked to be. */
+select,
+input:not([type="range"]),
+.plain {
+  height: var(--control);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 48px;
+}
+
+textarea:focus,
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.go {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 224px;
+}
+
+/*
+  A button the size of a button. It used to stretch to the foot of the box beside it, which made
+  the most important thing on the page as tall as whatever somebody had typed next to it.
+*/
+.generate {
+  border: none;
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--go), var(--go-deep));
+  color: #fff;
+  font: 600 17px/1 inherit;
+  cursor: pointer;
+  height: 64px;
+}
+
+.generate:hover {
+  background: linear-gradient(180deg, #f2963c, var(--go));
+}
+
+/* Disabled while something is happening, which is most of what tells somebody it is happening. */
+.generate:disabled {
+  background: var(--trough);
+  color: var(--dim);
+  cursor: default;
+}
+
+.interrupt {
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--bad);
+  font: inherit;
+  padding: 8px;
+  cursor: pointer;
+}
+
+/* Which is most of the time: it stops a run, and most of the time nothing is running. */
+.interrupt:disabled {
+  background: var(--page);
+  color: var(--dim);
+  cursor: default;
+}
+
+/* -- the knobs on the left, the picture on the right ---------------------------------------- */
+
+.panes {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.settings {
+  flex: 1 1 420px;
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.output {
+  flex: 1 1 520px;
+  min-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card-title {
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field.grow {
+  flex: 1;
+}
+
+.field.number {
+  width: 110px;
+}
+
+/* For a name rather than a number: wide enough for `cuda_cpu_offload`. */
+.field.short {
+  width: 168px;
+}
+
+.label {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/*
+  The two ways of saying the same number sit beside each other: the slider is for finding a value
+  and the box is for typing one you already know, and they are the same knob either way. At the
+  height of the box, so that the thumb runs along the middle of it rather than along its foot.
+*/
+.slider {
+  flex: 1;
+  width: auto;
+  padding: 0;
+  border: none;
+  background: none;
+  accent-color: var(--accent);
+  height: var(--control);
+}
+
+.about {
+  margin: 0;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/* The words centred in it whatever height it is told to be, which is how it lines up with a box
+   beside it that centres its own. The exception is the one that stands in for a list -- what it
+   says is a value, and a value starts where the one in the box beside it starts. */
+.plain {
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  padding: 0 var(--nudge);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.plain:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.plain.wide {
+  width: 100%;
+}
+
+.plain.picker {
+  justify-content: flex-start;
+  padding-left: 10px;
+}
+
+/* The one thing to do on a page where nothing else can be done yet. */
+.plain.next {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--page);
+  font-weight: 600;
+  justify-content: center;
+}
+
+.plain.next:hover {
+  background: #86b4ff;
+  border-color: #86b4ff;
+  color: var(--page);
+}
+
+/* -- the picture to draw from --------------------------------------------------------------- */
+
+.dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  border: 1px dashed var(--edge);
+  border-radius: var(--radius);
+  color: var(--dim);
+  text-align: center;
+  padding: 12px;
+  cursor: pointer;
+}
+
+/* Nothing to drop a picture into until there is a model to draw it with. */
+.dropzone.off {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.dropzone.over {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dropzone img {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 4px;
+}
+
+/* -- what a run is doing -------------------------------------------------------------------- */
+
+/*
+  A strip of colour with the words centred on it. The fill is dark and the words are the page's
+  own ink, which is the pair that stays legible on both halves of it: dark words on a saturated
+  fill are a strip of unreadable text for as long as the bar is under half way.
+*/
+.bar {
+  position: relative;
+  height: 26px;
+  border-radius: var(--radius);
+  background: var(--trough);
+  overflow: hidden;
+}
+
+#bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: var(--fill);
+  transition: width 0.2s linear;
+}
+
+/*
+  Reading a model does not know how far along it is -- it is one call into the tensor library
+  that returns when it returns -- so its bar says so by moving without filling, rather than by
+  making a fraction up.
+*/
+.bar.waiting #bar-fill {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(255, 255, 255, 0.18) 0 10px,
+    transparent 10px 20px
+  );
+  animation: crawl 0.8s linear infinite;
+}
+
+@keyframes crawl {
+  to {
+    background-position: 28px 0;
+  }
+}
+
+#bar-words {
+  position: relative;
+  display: block;
+  text-align: center;
+  line-height: 26px;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.note {
+  border: 1px solid var(--edge);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--card);
+  padding: 8px 10px;
+  color: var(--dim);
+}
+
+.note.bad {
+  border-left-color: var(--bad);
+  color: var(--bad);
+}
+
+.canvas {
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+}
+
+.canvas img {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: 4px;
+}
+
+.nothing {
+  color: var(--dim);
+}
+
+/* The one that undoes the run sits apart from the three that keep what it made. */
+.actions .last {
+  margin-left: auto;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.parameters {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.gallery {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gallery img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.gallery img.on {
+  border-color: var(--go);
+}
+
+/* -- the box that chooses a model ------------------------------------------------------------- */
+
+/*
+  Over the page rather than beside it. What the list has to say about each model -- what is on the
+  disk, what it costs to fetch, what can be deleted -- needs the width of the page, and it is read
+  once and then got out of the way.
+*/
+.veil {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.dialog {
+  background: var(--card);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/*
+  Wide enough for a row that says what a model is called and what it costs, and no taller than
+  the window: six of them on a laptop is a list that has to scroll somewhere.
+*/
+.models-dialog {
+  width: 100%;
+  max-width: 820px;
+  max-height: 86vh;
+  overflow-y: auto;
+}
+
+/* The title, and the two buttons that belong to the box rather than to any model in it. */
+.dialog-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dialog-top .card-title {
+  flex: 1;
+}
+
+/* -- the models, and what is on the disk of each --------------------------------------------- */
+
+.models {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/*
+  A row rather than a card of knobs: what it is on the left, what can be done to it on the right.
+  The buttons keep their width and the name gives way, because a name that has been shortened is
+  still readable and a button that has been is not.
+*/
+.model {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-what {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.model-name {
+  font-weight: 600;
+}
+
+.model-id {
+  color: var(--dim);
+  font-weight: 400;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.model-do {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* The one in memory, said once beside its name rather than twice in the row. */
+.badge {
+  font-size: 12px;
+  border: 1px solid var(--go);
+  border-radius: 999px;
+  padding: 1px 9px;
+  color: var(--go-deep);
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+/* Deleting several gigabytes is not the same kind of click as loading them. */
+.plain.away:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+/*
+  A model that is not on the disk has nothing to delete and the one in memory has nothing to
+  load, and a button that does nothing should look like one before it is pressed.
+*/
+.plain:disabled,
+.plain:disabled:hover {
+  background: var(--page);
+  border-color: var(--edge);
+  color: var(--dim);
+  cursor: default;
+}
+
+/* One column once there is no room for two, which is a phone held upright. */
+@media (max-width: 900px) {
+  .panes,
+  .prompts {
+    flex-direction: column;
+  }
+
+  /* The column on the left becomes the band across the top, and the pages a row again. */
+  .below {
+    flex-direction: column;
+  }
+
+  .side {
+    flex: auto;
+    width: 100%;
+    padding: 16px 16px 0;
+  }
+
+  .nav {
+    flex-direction: row;
+  }
+
+  .nav button {
+    flex: 1;
+    text-align: center;
+  }
+
+  .go {
+    width: 100%;
+    flex-direction: row;
+  }
+
+  .generate {
+    height: 48px;
+  }
+
+  .model {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
