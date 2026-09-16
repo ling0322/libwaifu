@@ -479,6 +479,14 @@ impl Sdxl {
         self.vae.forward(latent)
     }
 
+    /// Whether this package carries the other half of the autoencoder.
+    ///
+    /// Asked before a run rather than during one: a screen that offers image to image for a
+    /// package that has no encoder is offering a refusal that arrives after the wait.
+    pub fn draws_from_a_picture(&self) -> bool {
+        self.vae_encoder.is_some()
+    }
+
     /// The latent an image stands for, as `(1, C, H / 8, W / 8)`, scaled the way the sampler
     /// wants it.
     ///

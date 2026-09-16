@@ -17,7 +17,34 @@ No API key, no cloud, no queue, and no one else seeing what you asked for.
 | `sdxl:obsession` | One Obsession v24, an Illustrious fine tune that draws well at few steps | [libwaifu-one-obsession-v24](https://huggingface.co/ling0322/libwaifu-one-obsession-v24) |
 | `anima:turbo` | Anima Turbo v1.1, a Cosmos-Predict2 transformer rather than an SDXL model, distilled for ten steps at no guidance | [libwaifu-anima-turbo-v1.1](https://huggingface.co/ling0322/libwaifu-anima-turbo-v1.1) |
 
-## Kernel support matrix
+
+## Run
+
+`draw` is the only command, and it opens a page in a browser rather than drawing and exiting:
+
+```bash
+$ waifu draw
+waifu is drawing at http://127.0.0.1:7860
+```
+
+![The page: the kind of run down the left, the model and the settings for it in the middle, and the picture it drew on the right](docs/libwaifu-webui.webp)
+
+## Recent updates
+
+- [2026-09-15] The screen is a page in a browser rather than a screenful of terminal: txt2img and
+  img2img, the models to fetch across the top, and the picture where it can actually be looked at.
+- [2026-09-15] Anima Turbo v1.1 is published, as `anima:turbo` -- the first model here that is not
+  an SDXL one.
+- [2026-09-05] NoobAI-XL v1.1 is published, as `sdxl:noob`.
+- [2026-09-04] Draw from a picture rather than from noise: `waifu draw -i photo.png`.
+- [2026-08-30] Metal, through MLX: a macOS build draws on the GPU rather than the CPU.
+- [2026-08-30] Pick a model on screen: `waifu draw` with no `-m` lists them and fetches one.
+- [2026-08-29] WAI Illustrious v17.0 is published too, as `sdxl:wai`.
+- [2026-08-29] Ask for a model by name: `waifu draw -m sdxl:base` fetches it on first use.
+- [2026-08-28] Draw pictures from a terminal.
+- [2026-08-28] SDXL: a prompt in, an image out.
+
+## Supported platforms
 
 | OS       |  Platform | CUDA       | Metal  |  avx2  |  avx512 | asimdhp | asimdfhm |
 |----------|-----------|------------|--------|--------|---------|---------|----------|
@@ -25,7 +52,7 @@ No API key, no cloud, no queue, and no one else seeing what you asked for.
 | Windows  | x64       | ✅         |        | ✅     | ✅       |         |          |
 | macOS    | arm64     |            | ✅     |        |         | ✅      | ✅        |
 
-The GPU column a machine has is the one `waifu draw` picks on its own -- CUDA first, then Metal,
+The GPU column a machine has is the one `waifu` picks on its own -- CUDA first, then Metal,
 and the CPU kernels when there is neither. Metal is compiled in by `-DWITH_MLX=ON` and macOS is
 the only host that configures with it.
 
@@ -33,34 +60,6 @@ The two aarch64 kernels are one choice, not two: FEAT_FHM is optional in ARMv8.2
 GEMM has a kernel whether or not the part has `fmlal`, and the backend is picked at startup by
 which one it finds. The x64 pair works the same way, AVX-512 where the ISA is there and AVX2
 otherwise.
-
-## Run
-
-`draw` is the only command, and it opens a screen rather than drawing and exiting:
-
-```bash
-$ waifu draw
-```
-
-With nothing else said, the screen offers the published models, fetches whichever is picked, and
-draws from noise on the best device this build can reach. The flags each take one of those
-decisions away from it:
-
-| flag | takes | what it does |
-|---|---|---|
-| `-m` | a name or a path | The model to draw with: either a published name, fetched on first use, or a `.yaml` manifest of your own. Left out, the screen offers the published ones. Giving it twice is an error rather than a guess -- usually a stray comma. |
-| `-i`, `-image` | a PNG or JPEG | Draw from that picture rather than from noise. It is scaled to the size on the screen, and how far the run walks away from it is the strength box. |
-| `-device` | a device name | Where to run. Defaults to `auto`; the table below has the rest. |
-| `-h`, `-help` | -- | Print the options and exit. |
-
-Flags are Go-style: one dash or two, and `-m sdxl:wai` or `-m=sdxl:wai` both work.
-
-```bash
-$ waifu draw -m sdxl:wai
-$ waifu draw -m sdxl.yaml
-$ waifu draw -i photo.png
-$ waifu draw -m anima:turbo -device cuda_cpu_offload
-```
 
 ### Devices
 
@@ -74,37 +73,6 @@ $ waifu draw -m anima:turbo -device cuda_cpu_offload
 
 A build only has the devices it was configured with, so `cuda` on a `-DWITH_CUDA=OFF` build is a
 device that is not there. See the matrix above and the build section below.
-
-### Model names
-
-`-m` takes any name in the table above, with or without a version. A name without one follows
-whatever the current release is, so `sdxl:wai` keeps working when a v18 arrives, while
-`sdxl:base:v1.0`, `sdxl:illust:v2.0`, `sdxl:wai:v17`, `sdxl:noob:v1.1`, `sdxl:obsession:v24` and
-`anima:turbo:v1.1` name a release and keep meaning it. Each version is spelled the way its
-publisher spells it, so NoobAI-XL v1.1 is `v1.1` and not `v11` -- the two names that went out in
-the older spelling, `sdxl:base:v1` and `sdxl:noob:v11`, still find their models.
-`waifu draw -h` lists what this build knows.
-
-### Environment
-
-| variable | what it does |
-|---|---|
-| `WAIFU_CACHE` | Where fetched models are kept. Defaults to `~/.cache/libwaifu/models` (`$XDG_CACHE_HOME` where that is set, `%LOCALAPPDATA%\libwaifu\models` on Windows). An interrupted download resumes rather than starting over. |
-| `WAIFU_MIRROR` | `huggingface` (or `hf`) or `modelscope` (or `ms`), to fetch from one rather than the other. Unset, it is worked out once per run by whether the wider internet answers, since ModelScope carries the same files. A name it does not know is said out loud rather than ignored. |
-| `HF_ENDPOINT` | Stands in for `https://huggingface.co`, for someone behind a Hugging Face mirror. |
-
-## Recent updates
-
-- [2026-09-15] Anima Turbo v1.1 is published, as `anima:turbo` -- the first model here that is not
-  an SDXL one.
-- [2026-09-05] NoobAI-XL v1.1 is published, as `sdxl:noob`.
-- [2026-09-04] Draw from a picture rather than from noise: `waifu draw -i photo.png`.
-- [2026-08-30] Metal, through MLX: a macOS build draws on the GPU rather than the CPU.
-- [2026-08-30] Pick a model on screen: `waifu draw` with no `-m` lists them and fetches one.
-- [2026-08-29] WAI Illustrious v17.0 is published too, as `sdxl:wai`.
-- [2026-08-29] Ask for a model by name: `waifu draw -m sdxl:base` fetches it on first use.
-- [2026-08-28] Draw pictures from a terminal.
-- [2026-08-28] SDXL: a prompt in, an image out.
 
 ## Rust example
 
