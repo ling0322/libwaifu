@@ -538,13 +538,17 @@ FLAPI int32_t fl_memory_reset_peak_stats(fl_device_type_t device);
 /// What fl_set_fatal_handler() registers.
 typedef void (*fl_fatal_handler_t)(void);
 
-/// Register `handler` to run just before a check that fails ends the process.
+/// Register `handler` to run just before the library ends the process.
 ///
-/// Not every failure comes back as an error code: a check that fails inside an operator prints
-/// what went wrong and calls abort(), which is the right thing for a library that has found its
-/// own invariant broken but leaves a caller that owns the screen with the message written over
-/// whatever it had drawn. This runs first, before anything is printed, which is a caller's one
-/// chance to give the screen back.
+/// Little does. A check that fails inside an operator -- two tensors on different devices meeting
+/// at a convolution, a shape no kernel was written for -- comes back as FL_ERROR_ABORTED with the
+/// message, so a broken invariant reaches a caller the same way a bad argument does. What is left
+/// is the path with nothing to report to: reaching code that was never written, where there is no
+/// call still standing to return a code to.
+///
+/// That one prints what went wrong and calls abort(), and the message lands on top of whatever a
+/// caller that owns the screen had drawn. This runs first, before anything is printed, which is
+/// that caller's one chance to give the screen back.
 ///
 /// It runs on whichever thread failed, and the process is going down either way, so it should do
 /// the one thing it is there for and return. Passing NULL clears it.

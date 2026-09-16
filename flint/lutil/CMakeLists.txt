@@ -11,6 +11,7 @@ set(lutil_SOURCES
     "time.cc")
 
 set(lut_test_SOURCES
+    "log_test.cc"
     "path_test.cc"
     "strings_test.cc")
 

@@ -167,7 +167,7 @@ order of how often an inference engine wants them:
 
 `Operators::eq` is implemented for `<uint8>` on both backends and nothing else, which is narrow
 enough to be surprising given the name — comparing two `<float>` tensors is the obvious use and it
-aborts. Widening it means picking a rounding policy for float comparison, which is why it was left
+fails the dtype check. Widening it means picking a rounding policy for float comparison, which is why it was left
 as-is rather than extended along with the other element-wise work.
 
 ## Gated DeltaNet prefill is within 10% of FlashInfer
@@ -335,7 +335,7 @@ pool-shaped `initial_state` -- but only on its SM100/SM103 kernel: on sm120 it r
 
 `flint/cuda/cuda_operators.cc` builds the tensor with `createCudaTensorHalf` whatever `dtype`
 says, so `zeros(shape, DType::kFloat)` hands back a `<half>` and the next operator to look at it
-aborts on a dtype check. Found while writing the gated DeltaNet benchmark, which now builds its
+fails a dtype check. Found while writing the gated DeltaNet benchmark, which now builds its
 FP32 state on the host and copies it over instead. `op::cuda::fill` is half-only, which is
 presumably why it was written this way, so fixing it means giving `fill` the other types first.
 ## The slow and fast CLIP tokenizers disagree, and the package follows the fast one

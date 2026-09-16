@@ -41,18 +41,33 @@
   stmt;                                         \
   LOG(INFO) << message << ": " << (lut::now() - LUT_CONCAT(t0, __LINE__)) * 1000 << "ms";
 
-// CHECK macro conflicts with catch2
+// CHECK macro conflicts with catch2, which is what CATCH_CONFIG_PREFIX_ALL in the build is for:
+// catch2's own assertions are all CATCH_-prefixed, so the bare name is this one everywhere,
+// inside test code included.
 //
-// CHECK is for what must never happen: a broken invariant, where the process has nothing sensible
-// left to do and a stack trace at the point of failure is the only thing worth having. It aborts.
+// CHECK is for what must never happen: a broken invariant, where the code that hit it has nothing
+// sensible left to do and a stack trace at the point of failure is the only thing worth having.
+// It logs the message and that trace at ERROR, and then throws lut::AbortedError.
 //
-// A caller getting an argument wrong is not that. Those are recoverable, and the caller -- which
-// through the C interface may be another language -- has to be able to hear about it, so they are
-// thrown with THROW(InvalidArg, ...) instead of asserted.
-#define CHECK(cond) \
-  if (cond) {       \
-  } else            \
-    LOG(FATAL).DefaultMessage("Check " #cond " failed.")
+// It does not end the process. flint runs inside someone else's -- a CLI, a test harness, an
+// application that loaded the shared library -- and aborting takes down the one party who could
+// have done something about it, before it has been told anything. So it is told instead: through
+// the C interface the throw arrives as FL_ERROR_ABORTED carrying the message, and what to do
+// about a library with a broken invariant is the host's call, not ours.
+//
+// A caller getting an argument wrong is not a broken invariant. Those are ordinary and
+// recoverable, and are thrown with THROW(InvalidArg, ...) instead: a code the caller can tell
+// apart, and no stack trace, since there is no bug of ours in one to go looking for.
+//
+// The shape is glog's. `&` binds looser than `<<`, so the streamed message is complete before
+// operator& is reached, and the throw happens there -- inside an ordinary call, which is a place
+// a throw is allowed. A destructor is not: one that throws while another exception is already
+// unwinding ends the process, which is the single thing this must never do.
+#define CHECK(cond)                \
+  if (cond) {                      \
+  } else                           \
+    lut::internal::CheckRaiser() & \
+        lut::internal::CheckFailure(__FILE__, __LINE__, #cond)
 
 namespace lut {
 

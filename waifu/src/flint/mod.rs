@@ -307,17 +307,19 @@ static INIT: Once = Once::new();
 ///
 /// Every constructor calls this, so it is only worth calling directly to get the cost out of the
 /// way at a point of your choosing. Repeated calls do nothing.
-/// Run `handler` just before a check that fails inside the library ends the process.
+/// Run `handler` just before the library ends the process.
 ///
-/// Not every failure comes back as a [`Result`]. A check that fails inside an operator -- two
-/// tensors on different devices meeting at a convolution, a shape no kernel was written for --
-/// prints what went wrong and calls `abort()`. That is the right thing for a library that has
-/// found its own invariant broken, and it is the wrong thing for a caller that owns the screen:
-/// the message lands on top of whatever was drawn there and is unreadable.
+/// Little does. A check that fails inside an operator -- two tensors on different devices meeting
+/// at a convolution, a shape no kernel was written for -- comes back as an `Err`, the same as a
+/// bad argument does, so a broken invariant is something you can handle rather than something
+/// that happens to you. What is left is the path with nothing to return a `Result` to: reaching
+/// code that was never written.
 ///
-/// This is that caller's one chance to put the screen back. It runs before anything is printed,
-/// on whichever thread failed, and nothing runs after it but the message, the stack trace and the
-/// abort -- so it should do the one thing it is there for and return.
+/// That one prints what went wrong and calls `abort()`, and the message lands on top of whatever
+/// a caller that owns the screen had drawn, unreadable. This is that caller's one chance to put
+/// the screen back. It runs before anything is printed, on whichever thread failed, and nothing
+/// runs after it but the message, the stack trace and the abort -- so it should do the one thing
+/// it is there for and return.
 pub fn on_fatal(handler: extern "C" fn()) {
     init();
     unsafe { ffi::fl_set_fatal_handler(Some(handler)) };
