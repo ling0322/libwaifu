@@ -713,7 +713,7 @@ there the same call asks for `libcublas.so` and gets it.
 Worth doing, and worth doing *after* the CUTLASS path is right rather than before: it would hide
 that path from the only platform this project tests it on.
 
-## A `CHECK` that fails inside a destructor terminates without a word
+## ~~A `CHECK` that fails inside a destructor terminates without a word~~ (fixed 2026-09-16)
 
 `CHECK` throws `lut::AbortedError` since #3, which is right for the call sites that have a caller
 to tell. `llynCudaFree` is not one of them:
@@ -749,7 +749,15 @@ threw would end the process whenever a CHECK failed while another exception was 
 the same hazard lives at every `CHECK` call site that a destructor reaches, and this is one.
 
 Once a CUDA context is dead every later call fails too, so a `CHECK` here can only ever fire on
-the way down from an earlier fault. It has nothing to report to and nothing it can do. The
-`// TODO: remove` already sitting above it is probably the right answer: log at ERROR, which it
-already does, and let the destructor finish.
+the way down from an earlier fault. It has nothing to report to and nothing it can do.
+
+Fixed by taking it out, which is what the `// TODO: remove` above it already said. The
+`LOG(ERROR)` stays and is now the whole of it. That is what the other two destructors beside it
+already did -- `CudaHostTensorData`'s on `cudaFreeHost`, and `FutureTensor`'s on
+`cudaEventDestroy`, whose comment has said "a destructor is no place to throw" all along. This
+was the third of the three and the one that did not.
+
+`CHECK`'s own documentation in `flint/lutil/log.h` now carries the rule, since the hazard is not
+this call site's: do not `CHECK` anywhere a destructor can reach. The audit found no others --
+every remaining `CHECK` in `flint/cuda` is in a constructor or a factory.
 
