@@ -168,20 +168,25 @@ class Denoiser:
         return out.squeeze(2)
 
 
-class VaeDecoder:
+class Vae:
     """The Qwen-Image VAE, in the three dimensions it is actually written in.
 
     libwaifu folds every `Conv3d` here onto `W[:, :, -1]` at export time, which is exact when the
-    temporal extent is one. Decoding through the real thing is what makes the exported tensors a
-    check on that folding rather than a restatement of it.
+    temporal extent is one. Running the real thing in both directions is what makes the exported
+    tensors a check on that folding rather than a restatement of it.
+
+    Both halves, because both are in the package: the decoder is what a text to image run ends
+    with, and the encoder is where an image to image run begins. One object rather than two, so
+    that a round trip is the same weights going out and coming back.
     """
 
     def __init__(self, weights: dict, latents_mean, latents_std) -> None:
         import comfy.ldm.wan.vae as wan
         # The Wan 2.1 branch of comfy/sd.py's VAE detection, read off the same keys it reads.
+        self.z_dim = 16
         config = dict(
             dim=weights["decoder.head.0.gamma"].shape[0],
-            z_dim=16,
+            z_dim=self.z_dim,
             dim_mult=[1, 2, 4, 4],
             num_res_blocks=2,
             attn_scales=[],
@@ -194,7 +199,40 @@ class VaeDecoder:
         self.mean = torch.tensor(latents_mean, dtype=torch.float32).view(1, -1, 1, 1)
         self.std = torch.tensor(latents_std, dtype=torch.float32).view(1, -1, 1, 1)
 
-    def __call__(self, latent: torch.Tensor) -> torch.Tensor:
-        """Sixteen channels normalized one at a time, where SDXL has a single factor."""
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        """A `(N, 16, H, W)` latent to a `(N, 3, H * 8, W * 8)` picture.
+
+        Sixteen channels normalized one at a time, where SDXL has a single factor.
+        """
         unscaled = latent.float() * self.std + self.mean
         return self.model.decode(unscaled.unsqueeze(2)).squeeze(2)
+
+    def encode(self, image: torch.Tensor) -> torch.Tensor:
+        """A `(N, 3, H, W)` picture to the `(N, 16, H / 8, W / 8)` latent that stands for it.
+
+        The mean of the distribution rather than a draw from it: the draw is the one part of an
+        encoder that two implementations have no way to agree on, and image to image wants the
+        mean anyway. Scaled into the normalization the sampler works in, which is the decode
+        above run backwards, so `encode(decode(x))` and `x` are comparable numbers.
+
+        One frame, so `WanVAE.encode` runs a single chunk and passes `feat_cache=None` down,
+        and with no cache `Resample`'s `downsample3d` branch never reaches `time_conv` -- which
+        is the branch the folded export assumes, and the reason those weights are not in the
+        package. `encode` returns mu itself upstream, but the shape is checked rather than
+        trusted: a build that handed back the undivided moments would otherwise scale
+        thirty-two channels by sixteen pairs and broadcast its way to a quiet, wrong answer.
+        """
+        moments = self.model.encode(image.float().unsqueeze(2))
+        if isinstance(moments, (tuple, list)):
+            moments = moments[0]
+        moments = moments.squeeze(2)
+
+        channels = moments.shape[1]
+        if channels == 2 * self.z_dim:
+            moments = moments.chunk(2, dim=1)[0]
+        elif channels != self.z_dim:
+            raise SystemExit(
+                f"the VAE encoder returned {channels} channels, which is neither the "
+                f"{self.z_dim} of a latent nor the {2 * self.z_dim} of its moments")
+
+        return (moments - self.mean) / self.std

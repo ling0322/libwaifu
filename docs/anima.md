@@ -269,13 +269,24 @@ swiglu, rotaryEmbedding, gelu, silu and softmax cover the whole of it.
 
 The cost is that the exported VAE is image-only, which for this runtime it always was.
 
+The same argument runs backwards, which is what lets the package carry the **encoder** for image
+to image. `WanVAE.encode` splits its input into temporal chunks and passes `feat_cache=None` when
+there is only one, and with no cache `Resample`'s `downsample3d` branch never calls `time_conv` at
+all -- the whole `if feat_cache is not None` block is skipped. What is left of the encoder is
+`CausalConv3d` over one frame, which folds, and the spatial halving, which is an `nn.Conv2d` with
+an asymmetric `ZeroPad2d((0, 1, 0, 1))` in front of it and needs no folding. Upstream agrees
+rather loudly here: `CausalConv3d.forward` carries a fast path for `x.shape[2] == 1` that pads
+"by truncating the weight", which is the export-time fold written as a run-time optimization.
+
 Three more things the weights do not say on their own:
 
 - **The `time_conv` weights are dead for images.** Both `encoder.downsamples.N.time_conv` and the
   decoder's upsample counterparts are reached only on the `feat_cache` path, and the first chunk
   -- for an image, the only chunk -- takes the branch that caches and skips them. The encoder's is
   stride 2 in time with no causal padding, so at `T = 1` it could not even produce an output. Do
-  not export them.
+  not export them. `tools/causal_conv3d_folding_test.py` now checks that last claim by running
+  it: torch refuses the layer outright, which is why these weights are dropped rather than folded
+  -- there is no 2-D convolution to fold them onto.
 - **`QwenImageRMS_norm` is RMSNorm over the channel axis, not the last one.** It is written as
   `F.normalize(x, dim=1) * dim**0.5 * gamma`, and `x / (||x|| / sqrt(dim))` is exactly
   `x / sqrt(mean(x^2))` -- so it is RMSNorm, but along C of an `(N, C, H, W)` tensor where flint's
@@ -308,7 +319,7 @@ what exists.
 | `waifu/src/anima/text_encoder.rs` | done | 0.0029 |
 | `waifu/src/anima/adapter.rs` | done | 0.0024 |
 | `waifu/src/anima/dit.rs` | done | 0.0028 |
-| `waifu/src/anima/vae.rs` | decoder done; no encoder, so no `draw -image` yet | 0.00072 |
+| `waifu/src/anima/vae.rs` | decoder done. The package carries the encoder's weights and the reference outputs to check one against, but the encoder itself is unwritten, so no `draw -image` yet | 0.00072 |
 | `waifu/src/anima/sampler.rs` | done | -- |
 | the four of them together | draws a 512 by 512 picture in ten steps | -- |
 | tokenizers | done; both in the package | token for token, over 611 texts each |
@@ -331,7 +342,12 @@ frame is exact rather than approximate, so what is left is only the half-precisi
 `4 + 28 x 17 + 3` for the denoiser, `1 + 6 x 16 + 3` for the adapter, `1 + 28 x 8 + 1` for the
 encoder and the VAE's 194 less the eight dead `time_conv` weights. (This file said 989 and
 `6 x 15` until an export was counted: a block of the adapter writes sixteen tensors, not fifteen
--- two attentions of five apiece, four for the biased MLP and three norms.) Projections are fused where
+-- two attentions of five apiece, four for the biased MLP and three norms.) That 194 was always
+both halves of the VAE: the export loop takes the checkpoint as it finds it, so the encoder has
+been in the package since the first one was written, before anything read it. What changed when
+image to image was asked for is not the count but the standing -- `export_vae` now fails on a
+checkpoint that has no encoder in it, where before it would have written a decoder-only package
+that looks whole until the one run that needs the other half. Projections are fused where
 the runtime wants them fused -- `qkv_proj` for both square attentions, `kv_proj` for the cross
 attention that reads a narrower context, `gate_up_proj` for the encoder's SwiGLU, in that order,
 because flint's `swiglu` gates on the first half.
@@ -352,8 +368,20 @@ range, what it would otherwise write is an infinity, and what that draws is nois
 
 `-test_output` writes a second, small package the way `sdxl_exporter.py` does, holding what
 `tools/anima_comfy.py` makes ComfyUI compute for one fixed prompt: the encoder's hidden states, the adapter's
-context before and after padding, the velocity of one denoising step, and one decode. A 16 by 16
+context before and after padding, the velocity of one denoising step, one decode, and then that
+decode's picture encoded again and decoded once more. A 16 by 16
 latent, so 64 patches and a 128 by 128 image -- every block exercised, 2.4 MB to carry.
+
+The last two are the image to image path and they are deliberately a round trip rather than an
+encode of numbers picked here: an image no decoder would produce puts the encoder's weights
+outside the range they were trained in, and says nothing about whether a runtime agrees with the
+reference on the pictures it will actually be handed. `encoded` is the mean of the distribution,
+not a draw from it -- the draw is the one part of an encoder that two implementations have no way
+to agree on -- normalized by the same sixteen pairs the decode undoes, so it is directly
+comparable with `latent`, though it will not equal it. `round_trip` is `encoded` decoded, which
+is the whole of what an image to image run of no steps does. How far it sits from `decoded` is
+the autoencoder's own loss rather than an error, which is why it is written down rather than
+bounded by hand.
 
 The token ids were written into the exporter rather than tokenized at export time, so that the
 reference outputs did not depend on having either tokenizer to hand. Four of the twenty were wrong
