@@ -108,8 +108,12 @@ constexpr int kTileM = 16;
 constexpr int kTileN = 8;
 constexpr int kTileK = 16;
 
-constexpr int kNTiles = kChunk / kTileN;   // token tiles across an accumulator
-constexpr int kKBlocks = kChunk / kTileK;  // 16-token blocks of a contraction over the chunk
+/// Token tiles across an accumulator, and 16-token blocks of a contraction over the chunk. These,
+/// and the mma helpers below carrying the same attribute, are read only from the kernel body, which
+/// sits behind `__CUDA_ARCH__ >= 800`: on the passes for the older architectures this file is also
+/// compiled for, the body goes away and the anonymous namespace is left holding them unreferenced.
+[[maybe_unused]] constexpr int kNTiles = kChunk / kTileN;
+[[maybe_unused]] constexpr int kKBlocks = kChunk / kTileK;
 
 constexpr int kMaxHeadDim = 128;
 
@@ -157,7 +161,7 @@ __device__ inline void loadA(unsigned *r, const half *src, int ld, int lane) {
 /// Two B operands, sixteen columns of them, out of a matrix stored with those columns as its rows
 /// -- which is what every B operand here has, since the contraction of each product runs along the
 /// row of the buffer it reads.
-__device__ inline void loadB(unsigned *r, const half *src, int ld, int lane) {
+[[maybe_unused]] __device__ inline void loadB(unsigned *r, const half *src, int ld, int lane) {
   loadA(r, src, ld, lane);
 }
 
@@ -176,7 +180,11 @@ __device__ inline void loadBTrans(unsigned *r, const half *src, int ld, int lane
 /// registers back as (n 0-7, k 0-7), (n 8-15, k 0-7), (n 0-7, k 8-15), (n 8-15, k 8-15) -- the
 /// halves of the address pattern index k -- so an operand, which needs all sixteen of the
 /// contraction for eight columns, is registers i and i + 2.
-__device__ inline void mmaB(Acc &lo, Acc &hi, const unsigned *a, const unsigned *b4) {
+[[maybe_unused]] __device__ inline void mmaB(
+    Acc &lo,
+    Acc &hi,
+    const unsigned *a,
+    const unsigned *b4) {
   unsigned b[2];
   b[0] = b4[0];
   b[1] = b4[2];
@@ -197,7 +205,7 @@ __device__ inline void mmaBTrans(Acc &lo, Acc &hi, const unsigned *a, const unsi
 
 /// The identity the kernel is built on: the pair of accumulators covering columns [0, 8) and
 /// [8, 16) of the same sixteen rows, cast to half, is the A operand of that 16 by 16 tile.
-__device__ inline void accToOperand(unsigned *a, const Acc &lo, const Acc &hi) {
+[[maybe_unused]] __device__ inline void accToOperand(unsigned *a, const Acc &lo, const Acc &hi) {
   half2 *h = reinterpret_cast<half2 *>(a);
   h[0] = __floats2half2_rn(lo.x[0], lo.x[1]);
   h[1] = __floats2half2_rn(lo.x[2], lo.x[3]);
@@ -205,7 +213,7 @@ __device__ inline void accToOperand(unsigned *a, const Acc &lo, const Acc &hi) {
   h[3] = __floats2half2_rn(hi.x[2], hi.x[3]);
 }
 
-__device__ inline void copyAsync16(half *dst, const half *src, int bytes) {
+[[maybe_unused]] __device__ inline void copyAsync16(half *dst, const half *src, int bytes) {
 #if __CUDA_ARCH__ >= 800
   unsigned addr = static_cast<unsigned>(__cvta_generic_to_shared(dst));
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(addr), "l"(src), "r"(bytes));
@@ -216,26 +224,26 @@ __device__ inline void copyAsync16(half *dst, const half *src, int bytes) {
 #endif
 }
 
-__device__ inline void copyAsyncCommit() {
+[[maybe_unused]] __device__ inline void copyAsyncCommit() {
 #if __CUDA_ARCH__ >= 800
   asm volatile("cp.async.commit_group;\n" ::);
 #endif
 }
 
-__device__ inline void copyAsyncWait() {
+[[maybe_unused]] __device__ inline void copyAsyncWait() {
 #if __CUDA_ARCH__ >= 800
   asm volatile("cp.async.wait_group 0;\n" ::);
 #endif
 }
 
 /// A barrier across the first four warps, which own the inversion the other four walk past.
-__device__ inline void barrierInverseWarps() {
+[[maybe_unused]] __device__ inline void barrierInverseWarps() {
   asm volatile("bar.sync 1, 128;\n" ::);
 }
 
 /// Invert one 16 by 16 unit lower triangular block in place by Gauss-Jordan, a lane to a row. See
 /// the WMMA path for why one pass over the columns is enough.
-__device__ inline void invertUnitLowerTile(half *m, int ld, int lane) {
+[[maybe_unused]] __device__ inline void invertUnitLowerTile(half *m, int ld, int lane) {
   constexpr unsigned kMask = 0xffffu;
   if (lane >= kTileM) return;
 
@@ -268,7 +276,7 @@ __device__ inline void invertUnitLowerTile(half *m, int ld, int lane) {
 
 /// C = A B over one 16 by 16 tile of a lower triangular matrix's own storage, used only by the
 /// inversion's combines.
-__device__ inline void tileGemm(
+[[maybe_unused]] __device__ inline void tileGemm(
     Acc *acc,
     const half *a,
     int lda,
@@ -288,7 +296,12 @@ __device__ inline void tileGemm(
 }
 
 /// Write a 16 by 16 result, held as two accumulators, into a half matrix.
-__device__ inline void storeTile(const Acc *acc, half *dst, int ld, int lane, bool negate) {
+[[maybe_unused]] __device__ inline void storeTile(
+    const Acc *acc,
+    half *dst,
+    int ld,
+    int lane,
+    bool negate) {
   int r = accRow(lane);
   int c = accCol(lane);
 #pragma unroll
