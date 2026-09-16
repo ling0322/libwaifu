@@ -91,7 +91,17 @@ using cutlass::layout::RowMajor;
 /// machine well enough on its own that the rule below almost never splits: at 64 by 64 a split
 /// covers 2.5% of a step's GEMM time, at 128 by 128 it covers 35.4%. So the two tiles were never
 /// really being compared -- one of them was being compared with split K and the other without.
-template<class LayoutA, class LayoutB>
+///
+/// # Alignment
+///
+/// `ALIGNMENT` is how many halves each global access reads at once, and it is a promise about
+/// the operands rather than a preference: at eight the iterators issue 128-bit loads, and an
+/// operand whose leading dimension is not a multiple of eight makes every row after the first
+/// start off a 16-byte boundary. CUTLASS launches it anyway unless it is asked -- see the
+/// `can_implement` in `hgemmT` -- and what comes back from the device is a misaligned access,
+/// reported at whichever unrelated CUDA call next happens to ask for a status. Anima's patch
+/// embedder is a K of 68, which is how this was found; `hgemm` below is what picks.
+template<class LayoutA, class LayoutB, int ALIGNMENT>
 struct Sm80Gemm {
   using Gemm = cutlass::gemm::device::Gemm<
       cutlass::half_t,
@@ -106,13 +116,34 @@ struct Sm80Gemm {
       cutlass::gemm::GemmShape<128, 128, 32>,
       cutlass::gemm::GemmShape<64, 64, 32>,
       cutlass::gemm::GemmShape<16, 8, 16>,
-      cutlass::epilogue::thread::LinearCombination<cutlass::half_t, 8, float, float>,
+      cutlass::epilogue::thread::LinearCombination<cutlass::half_t, ALIGNMENT, float, float>,
       cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
       3,
-      8,
-      8,
+      ALIGNMENT,
+      ALIGNMENT,
       true>;
 };
+
+/// The alignments there is an instantiation for, widest first.
+///
+/// Three rather than one because a leading dimension is whatever the model made it: eight covers
+/// every shape SDXL runs and all but one of Anima's, and four is what that one -- a K of 68 --
+/// needs. Two is the floor and not a choice: this kernel stages through `cp_async`, which takes
+/// 4, 8 or 16 bytes and nothing else, so one half at a time does not compile.
+///
+/// Which leaves an odd leading dimension with no kernel that can read it. See `hgemm` below.
+constexpr int kAlignments[] = {8, 4, 2};
+
+/// Whether `data` and `ld` can be read `alignment` halves at a time.
+///
+/// Both ends are asked. The leading dimension is where this goes wrong in practice -- a
+/// device allocation is 256-byte aligned, so the base of a whole tensor always qualifies -- but a
+/// GEMM may also be handed the middle of one, and a row that starts off the boundary reads as
+/// misaligned whatever the stride says.
+bool isAlignedTo(int alignment, const void *data, int ld) {
+  size_t bytes = static_cast<size_t>(alignment) * sizeof(cutlass::half_t);
+  return reinterpret_cast<uintptr_t>(data) % bytes == 0 && ld % alignment == 0;
+}
 
 constexpr int kTileM = 128;
 constexpr int kTileN = 128;
@@ -182,7 +213,7 @@ int splitKSlices(int m, int n, int k) {
   return slices;
 }
 
-template<class LayoutA, class LayoutB, class ArchTag>
+template<class LayoutA, class LayoutB, class ArchTag, int ALIGNMENT>
 void hgemmT(
     int m,
     int n,
@@ -195,7 +226,7 @@ void hgemmT(
     cutlass::half_t beta,
     cutlass::half_t *C,
     int ldc) {
-  using Gemm = typename Sm80Gemm<LayoutA, LayoutB>::Gemm;
+  using Gemm = typename Sm80Gemm<LayoutA, LayoutB, ALIGNMENT>::Gemm;
   Gemm gemmOperator;
 
   // The epilogue computes in float now, so the scalars go in as float.
@@ -208,11 +239,58 @@ void hgemmT(
       {float(alpha), float(beta)},
       splitKSlices(m, n, k)};
 
+  // Asked rather than assumed. `initialize` does not call this -- it builds the params and
+  // returns success -- so an operand no instantiation can read is otherwise launched anyway, and
+  // what comes back is a misaligned access inside a kernel with no way to report it. On this
+  // hardware that kills the CUDA context, and since every later call then fails too, the first
+  // one to notice is a `cudaFreeAsync` in a tensor destructor -- where the `CHECK` on it throws,
+  // a destructor is `noexcept`, and the process goes to `std::terminate` without printing
+  // anything at all. Refusing it here costs one host-side check per GEMM and names the operand.
+  CUTLASS_CHECK(Gemm::can_implement(args));
+
   // Only a split needs anywhere to put its partial sums; at one slice this is zero bytes and
   // nothing is asked for. CUTLASS zeroes what it is given, so nothing here has to.
   size_t workspaceSize = Gemm::get_workspace_size(args);
   CUTLASS_CHECK(gemmOperator.initialize(args, splitKWorkspace(workspaceSize)));
   CUTLASS_CHECK(gemmOperator());
+}
+
+/// The same call at the widest alignment the three operands can actually be read at.
+template<class LayoutA, class LayoutB, class ArchTag>
+void hgemm(
+    int m,
+    int n,
+    int k,
+    cutlass::half_t alpha,
+    const cutlass::half_t *A,
+    int lda,
+    const cutlass::half_t *B,
+    int ldb,
+    cutlass::half_t beta,
+    cutlass::half_t *C,
+    int ldc) {
+  auto fits = [&](int alignment) {
+    return isAlignedTo(alignment, A, lda) && isAlignedTo(alignment, B, ldb) &&
+           isAlignedTo(alignment, C, ldc);
+  };
+
+  if (fits(kAlignments[0])) {
+    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[0]>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  }
+  if (fits(kAlignments[1])) {
+    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[1]>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  }
+
+  // An odd leading dimension, which no instantiation above can read: every second row starts on
+  // an odd number of halves, and the narrowest access this kernel has is two. The narrowest is
+  // still what to hand it, because `can_implement` inside will then refuse it by name rather than
+  // launch a kernel that faults the context. Reached only by a one-column operand or a stride
+  // like 33 -- no model gets here -- and the fix it is waiting for is to pad the operand, which
+  // is a copy this layer has nowhere to put. See docs/TODO.md.
+  return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[2]>(
+      m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 template<class ArchTag>
@@ -231,13 +309,13 @@ void cutlassHgemmArch(
     cutlass::half_t *C,
     int ldc) {
   if (transA == false && transB == false) {
-    return hgemmT<RowMajor, RowMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+    return hgemm<RowMajor, RowMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   } else if (transA == true && transB == false) {
-    return hgemmT<ColumnMajor, RowMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+    return hgemm<ColumnMajor, RowMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   } else if (transA == false && transB == true) {
-    return hgemmT<RowMajor, ColumnMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+    return hgemm<RowMajor, ColumnMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   } else if (transA == true && transB == true) {
-    return hgemmT<ColumnMajor, ColumnMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+    return hgemm<ColumnMajor, ColumnMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   } else {
     NOT_IMPL();
   }

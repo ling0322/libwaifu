@@ -105,4 +105,32 @@ CATCH_TEST_CASE("test matmul gemm accumulates in float (cutlass)", "[fl][op][cud
   CATCH_REQUIRE(F::allClose(actual, expected, 2e-3f));
 }
 
+/// A leading dimension that is not a multiple of eight, which is what Anima's patch embedder
+/// contracts over: 68 channels in, 2048 out.
+///
+/// The wide kernel reads its operands eight halves at a time, so a row length of 68 puts every
+/// row after the first eight bytes off a 16-byte boundary. CUTLASS does not notice on its own --
+/// `initialize` builds the params and returns success, and only `can_implement` looks at the
+/// strides -- so this used to launch anyway and fault the device, which surfaced as
+/// `misaligned address` from whichever unrelated CUDA call next asked for a status.
+CATCH_TEST_CASE("test matmul gemm (cutlass, unaligned K)", "[fl][op][cuda][cutlass]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  constexpr int kM = 128;
+  constexpr int kK = 68;
+  constexpr int kN = 256;
+
+  std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
+
+  Tensor a = F::rand({kM, kK}, DType::kFloat);
+  Tensor b = F::rand({kK, kN}, DType::kFloat);
+  Tensor expected = F::matmul(a, b);
+
+  Tensor x = F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  Tensor y = F::cast(F::toDevice(Device::getCuda(), b), DType::kFloat16);
+  Tensor actual = F::toDevice(Device::getCpu(), F::cast(mm->apply(x, y), DType::kFloat));
+
+  CATCH_REQUIRE(F::allClose(actual, expected, 1e-2f));
+}
+
 }  // namespace fl

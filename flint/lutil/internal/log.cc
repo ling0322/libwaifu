@@ -71,7 +71,14 @@ LogWrapper::~LogWrapper() {
   printf("%s %s %s:%d] %s\n", Severity(), Time(), source_file_, source_line_, message.c_str());
 
   if (severity_ == LogSeverity::kFATAL) {
+    // Flushed rather than left to exit: abort() runs no atexit handler, so a stdout that is
+    // a pipe or a file -- which is every run that is not a terminal -- loses the line just
+    // printed, and the trace below, which goes to stderr, then arrives on its own with
+    // nothing to say what it is a trace of. The line this call was made to print is the one
+    // that has to survive.
+    fflush(stdout);
     printStackTrace();
+    fflush(stdout);
     abort();
   }
 }

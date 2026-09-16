@@ -63,6 +63,13 @@
 // operator& is reached, and the throw happens there -- inside an ordinary call, which is a place
 // a throw is allowed. A destructor is not: one that throws while another exception is already
 // unwinding ends the process, which is the single thing this must never do.
+//
+// Which is also the one rule for using it: do not CHECK anywhere a destructor can reach. A
+// destructor is implicitly noexcept, so the throw does not unwind out of it -- it goes straight
+// to std::terminate, and takes the message with it, leaving a process that exits with nothing on
+// either stream. That is strictly worse than what a destructor should do with a failure it cannot
+// return, which is to LOG(ERROR) it and carry on; see llynCudaFree and the three tensor
+// destructors in flint/cuda for the shape of it.
 #define CHECK(cond)                \
   if (cond) {                      \
   } else                           \

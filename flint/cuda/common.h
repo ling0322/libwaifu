@@ -129,17 +129,24 @@ inline cudaError_t llynCudaMalloc(void **ptr, size_t size, cudaStream_t stream =
 /// Give the memory back in `stream`'s order, which has to be a stream the last use of it was on.
 /// The block does not become reusable until `stream` reaches here, so freeing on the wrong stream
 /// hands it to the next allocation while the right stream is still reading it.
+///
+/// Reported and not checked, because both callers are destructors -- `CudaTensorData`'s and the
+/// deleter below -- and a destructor is no place to throw. `FutureTensor`'s says the same thing
+/// about `cudaEventDestroy`, and `CudaHostTensorData`'s about `cudaFreeHost`; this is the third
+/// of the three and the one that did not.
+///
+/// There is also nothing a check could be for. A free fails when the context is already gone,
+/// which means an earlier call failed first and has its own report; by the time a tensor is being
+/// torn down there is no caller left to hand a code to and nothing anyone could do with one.
 inline void llynCudaFree(void *ptr, cudaStream_t stream = 0) {
 #ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
   cudaError_t err = cudaFreeAsync(ptr, stream);
 #else
   cudaError_t err = cudaFree(ptr);
 #endif
-  // TODO: remove
   if (err != cudaSuccess) {
     LOG(ERROR) << "Error while freeing CUDA memory: " << cudaGetErrorString(err);
   }
-  CHECK(err == cudaSuccess);
 }
 
 template<typename T>
