@@ -21,8 +21,9 @@
 """Export an Anima checkpoint to safetensors and the manifest that names them.
 
 Anima is not an SDXL fine tune and this is not `sdxl_exporter.py` with different names. It is a
-Cosmos-Predict2 diffusion transformer, a Qwen3-0.6B text encoder and the Qwen-Image VAE, published
-as three separate safetensors files, and the whole of what it is is written down in `docs/anima.md`
+Cosmos-Predict2 diffusion transformer, a Qwen3-0.6B text encoder and the Qwen-Image VAE -- both
+halves of that, so an image can go in as well as come out -- published as three separate
+safetensors files, and the whole of what it is is written down in `docs/anima.md`
 -- read that first, because several of the decisions here only make sense against it.
 
 Unlike the SDXL exporter this one does not walk a diffusers pipeline: there is no diffusers
@@ -48,7 +49,7 @@ import torch
 from safetensors import safe_open
 
 import anima_comfy as reference
-from tokenizer_exporter import read_tokenizer, tokenizer_corpus, tokenizer_json
+from tokenizer_exporter import encoder, read_tokenizer, tokenizer_corpus, tokenizer_json
 from model_exporter import Context, TensorBag, open_weights, parse_size, stem_of
 
 # The two prefixes a published denoiser uses: the official release wraps everything in
@@ -268,19 +269,52 @@ class Converter:
     # ---- the VAE ------------------------------------------------------------------------
 
     def export_vae(self, ctx: Context, weights: dict) -> None:
-        """The Qwen-Image VAE, folded from three dimensions to two.
+        """The Qwen-Image VAE, both halves, folded from three dimensions to two.
 
         Its convolutions are causal in time and its weights are <out, in, kt, kh, kw>. For a
         single frame the causal padding in front is zeros and nothing in the network grows the
         time axis, so each of them is exactly a 2-D convolution over the last temporal slice --
         see tools/causal_conv3d_folding_test.py, which proves it, and docs/anima.md, which says
         why. The time_conv weights are not exported at all: they sit behind a cache branch an
-        image never takes.
+        image never takes, and the encoder's could not run at all over one frame -- it is stride
+        two in time with no causal padding in front of it.
+
+        The loop takes the checkpoint as it finds it, which is how the encoder came to be in the
+        package before anything asked for it. What is new is that it is now required rather than
+        incidental: `draw -image` reads it, so a decoder-only checkpoint has to fail here, where
+        the message can say what is missing, rather than at load time on the one run that wanted
+        it.
         """
+        self._require_both_halves(weights)
+
         for name, tensor in sorted(weights.items()):
             if ".time_conv." in name:
                 continue
             self._write(ctx.with_subname(self._vae_name(name)), self._fold(name, tensor))
+
+    @staticmethod
+    def _require_both_halves(weights: dict) -> None:
+        """Insist the checkpoint holds an encoder as well as a decoder.
+
+        Named tensors rather than a prefix count, because the two halves are what they are: the
+        stem the picture goes in through, the 1x1 that splits the moments after it, and the two
+        the decoder answers them with. A VAE published for decoding only has the first two
+        missing and everything else in place, which reads as a whole file until an image to
+        image run asks it a question it cannot answer.
+        """
+        required = {
+            "encoder.conv1.weight": "the encoder's stem",
+            "conv1.weight": "the moment projection the encoder ends with",
+            "conv2.weight": "the projection the decoder starts from",
+            "decoder.conv1.weight": "the decoder's stem",
+        }
+        missing = [f"{name} ({what})" for name, what in sorted(required.items())
+                   if name not in weights]
+        if missing:
+            raise SystemExit(
+                "this VAE checkpoint is missing " + ", ".join(missing) + ".\n"
+                "Both halves are exported: the decoder for text to image and the encoder for "
+                "image to image. Point -vae at the full qwen_image_vae.safetensors.")
 
     @staticmethod
     def _vae_name(name: str) -> str:
@@ -457,7 +491,9 @@ def export_test_cases(dit: dict, text: dict, vae: dict, qwen_ids, t5_ids) -> Ten
 
     The same idea as `sdxl_exporter.export_test_cases`, against `anima_comfy` -- which is ComfyUI -- rather than
     against diffusers, and covering the path in the order a picture travels it: the encoder's
-    hidden states, the adapter's context, one denoising step, and one decode.
+    hidden states, the adapter's context, one denoising step, one decode, and -- for image to
+    image, which starts where text to image ends -- that decode encoded again and decoded once
+    more.
 
     All of it on a 16 by 16 latent -- a 128 by 128 image, 64 patches -- which is large enough to
     exercise every block and small enough to carry in the repository.
@@ -504,8 +540,24 @@ def export_test_cases(dit: dict, text: dict, vae: dict, qwen_ids, t5_ids) -> Ten
         # the sampler is checked against a schedule rather than against weights.
         put("velocity", denoiser(latent, timestep, padded))
 
-        decoder = reference.VaeDecoder(vae, LATENTS_MEAN, LATENTS_STD)
-        put("decoded", decoder(latent))
+        autoencoder = reference.Vae(vae, LATENTS_MEAN, LATENTS_STD)
+        decoded = autoencoder.decode(latent)
+        put("decoded", decoded)
+
+        # And the way back, on that same picture rather than on numbers of its own: an image no
+        # decoder would produce would be exercising the encoder's weights outside the range they
+        # were trained in. What is written is the mean of the distribution rather than a draw
+        # from it, and it is normalized the way the sampler wants a latent, so it is directly
+        # comparable with `latent` above -- though it will not equal it, because an autoencoder
+        # is lossy and this is a round trip through both halves of one.
+        encoded = autoencoder.encode(decoded)
+        put("encoded", encoded)
+
+        # And straight back out again, which is the whole of what an image to image run of no
+        # steps does. How far `round_trip` sits from `decoded` is the autoencoder's own loss and
+        # not an error, which is exactly why it is written down rather than bounded by hand: the
+        # reference is the only thing worth comparing a runtime's round trip against.
+        put("round_trip", autoencoder.decode(encoded))
 
     return writer
 
@@ -514,7 +566,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-dit", required=True, help="the denoiser safetensors.")
     parser.add_argument("-text", required=True, help="the Qwen3-0.6B text encoder safetensors.")
-    parser.add_argument("-vae", required=True, help="the Qwen-Image VAE safetensors.")
+    parser.add_argument(
+        "-vae", required=True,
+        help="the Qwen-Image VAE safetensors. Both halves are exported: the decoder every "
+             "picture comes out of, and the encoder image to image goes in through.")
     parser.add_argument("-output", default="anima.safetensors",
                         help="what to call the model. Names the weights and the manifest beside "
                              "them.")
