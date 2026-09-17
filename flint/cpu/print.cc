@@ -22,6 +22,7 @@
 #include <inttypes.h>
 
 #include "flint/cpu/accessor.h"
+#include "flint/cpu/kernel/util.h"
 #include "flint/cpu/tensor_printer.h"
 
 namespace fl {
@@ -45,6 +46,12 @@ struct CpuPrinterImpl {
     LongType value = valAcc[index];
     printf("%" PRId64, value);
   }
+
+  static void printValue(accessor_type<const Fp8E4M3, 1> valAcc, int index) {
+    // The code on its own, without whatever scale the tensor beside it carries.
+    kernel::Fp8E4M3 code{valAcc[index].v};
+    printf("%+.4g", kernel::cvt_f8_s(code));
+  }
 #if LUT_CPU_ARCH == LUT_AARCH64
   static void printValue(accessor_type<const Float16, 1> valAcc, int index) {
     float value = valAcc[index];
@@ -65,6 +72,8 @@ void print(const Tensor &tensor) {
   else if (tensor.getDType() == DType::kFloat16)
     printer.print<Float16>(tensor);
 #endif
+  else if (tensor.getDType() == DType::kFp8E4M3)
+    printer.print<Fp8E4M3>(tensor);
   else if (tensor.getDType() == DType::kLong)
     printer.print<LongType>(tensor);
   else

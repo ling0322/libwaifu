@@ -276,6 +276,68 @@ void gemmHalfWeightFloat(
   }
 }
 
+void gemmFp8WeightFloat(
+    bool transA,
+    bool transB,
+    int M,
+    int N,
+    int K,
+    const float *A,
+    int lda,
+    const Fp8E4M3 *B,
+    int ldb,
+    float *C,
+    int ldc,
+    Mode mode,
+    CpuMathBackend backendType) {
+  GemmArgs<float, Fp8E4M3, float> args;
+  args.transA = transA;
+  args.transB = transB;
+  args.M = M;
+  args.N = N;
+  args.K = K;
+  args.A = A;
+  args.lda = lda;
+  args.B = B;
+  args.ldb = ldb;
+  args.C = C;
+  args.ldc = ldc;
+
+  backendType = getCpuMathBackend(backendType);
+  if (false) {
+#if LUT_CPU_ARCH == LUT_AMD64
+  } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::OMP) {
+    wgemm<288, 512, 4096, 6, 16, float, Fp8E4M3, CpuMathBackend::AVX2, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::SingleThread) {
+    wgemm<288, 512, 4096, 6, 16, float, Fp8E4M3, CpuMathBackend::AVX2, Mode::SingleThread>(args);
+  } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::OMP) {
+    wgemm<576, 512, 4096, 12, 32, float, Fp8E4M3, CpuMathBackend::AVX512, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::SingleThread) {
+    wgemm<576, 512, 4096, 12, 32, float, Fp8E4M3, CpuMathBackend::AVX512, Mode::SingleThread>(args);
+#elif LUT_CPU_ARCH == LUT_AARCH64
+  } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
+    wgemm<288, 512, 4096, 6, 16, float, Fp8E4M3, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
+    wgemm<288, 512, 4096, 6, 16, float, Fp8E4M3, CpuMathBackend::ASIMDHP, Mode::SingleThread>(args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::OMP) {
+    wgemm<288, 512, 4096, 6, 16, float, Fp8E4M3, CpuMathBackend::ASIMDFHM, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::ASIMDFHM && mode == Mode::SingleThread) {
+    wgemm<288, 512, 4096, 6, 16, float, Fp8E4M3, CpuMathBackend::ASIMDFHM, Mode::SingleThread>(
+        args);
+#endif
+  } else {
+    NOT_IMPL();
+  }
+}
+
+float convertFp8ToFloat(Fp8E4M3 x) {
+  return cvt_f8_s(x);
+}
+
+Fp8E4M3 convertFloatToFp8(float x) {
+  return cvt_s_f8(x);
+}
+
 void convertHalfToFloat(int n, const Float16 *x, float *y, Mode mode, CpuMathBackend backendType) {
   backendType = getCpuMathBackend(backendType);
 

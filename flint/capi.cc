@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include "flint/cpu/fp8.h"
+#include "flint/fp8.h"
 #include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
@@ -677,90 +679,6 @@ int32_t fl_nvfp4_matmul(
   });
 }
 
-namespace {
-
-/// The same job checkNvfp4Half does, for the operand widths this kernel reads in.
-void checkFp8Half(const fl::Tensor &x, const char *what) {
-  if (x.getDevice().getType() != fl::Device::kCuda) {
-    throw lut::InvalidArgError(std::string(what) + " is not on a CUDA device");
-  }
-  if (x.getDType() != fl::DType::kFloat16) {
-    throw lut::InvalidArgError(std::string(what) + " is not <float16>");
-  }
-  if (!x.isContiguous()) {
-    throw lut::InvalidArgError(std::string(what) + " is not contiguous");
-  }
-  if (x.getDim() < 2) {
-    throw lut::InvalidArgError(std::string(what) + " has fewer than two dimensions");
-  }
-  if (x.getShape(-1) % 16 != 0) {
-    throw lut::InvalidArgError(std::string(what) + ": the last dimension is not a multiple of 16");
-  }
-}
-
-}  // namespace
-
-int32_t fl_fp8_available(int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = fl::op::cuda::isFp8GemmAvailable() ? 1 : 0;
-    return clearError();
-  });
-}
-
-int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_scale) {
-  return guard([&]() {
-    if (!data || !channel_scale) throw lut::InvalidArgError("out is null");
-
-    checkFp8Half(deref(x), "the tensor to quantize");
-    if (deref(x).getDim() != 2) {
-      throw lut::InvalidArgError("the tensor to quantize is not two dimensional");
-    }
-
-    fl::op::cuda::Fp8Operand operand = fl::op::cuda::quantizeFp8(deref(x));
-
-    // Two handles have to appear together or not at all, and publish() is what allocates, so they
-    // are made here and only handed over once both exist.
-    std::unique_ptr<fl::Tensor> ownedData{new fl::Tensor(std::move(operand.data))};
-    std::unique_ptr<fl::Tensor> ownedScale{new fl::Tensor(std::move(operand.channelScale))};
-
-    *data = reinterpret_cast<fl_tensor_t>(ownedData.release());
-    *channel_scale = reinterpret_cast<fl_tensor_t>(ownedScale.release());
-    return clearError();
-  });
-}
-
-int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor_t *out) {
-  return guard([&]() {
-    fl::op::cuda::Fp8Operand operand = fl::op::cuda::makeFp8Operand(
-        deref(data),
-        deref(channel_scale));
-    return publish(fl::op::cuda::dequantFp8ToHalf(operand), out);
-  });
-}
-
-int32_t fl_fp8_matmul(
-    fl_tensor_t a,
-    fl_tensor_t data,
-    fl_tensor_t channel_scale,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    fl::op::cuda::Fp8Operand operand = fl::op::cuda::makeFp8Operand(
-        deref(data),
-        deref(channel_scale));
-
-    checkFp8Half(deref(a), "the left operand");
-    if (deref(a).getShape(-1) != operand.k) {
-      throw lut::InvalidArgError("the two operands disagree about k");
-    }
-    if (operand.rows % 8 != 0) {
-      throw lut::InvalidArgError("the fp8 operand's row count is not a multiple of 8");
-    }
-
-    return publish(fl::op::cuda::gemmFp8(deref(a), operand), out);
-  });
-}
-
 #else
 
 int32_t fl_nvfp4_available(int32_t *out) {
@@ -787,31 +705,150 @@ int32_t fl_nvfp4_matmul(fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_t
   return nvfp4Unavailable();
 }
 
-int32_t fl_fp8_available(int32_t *out) {
+#endif  // LIBWAIFU_CUDA_ENABLED
+
+namespace {
+
+/// Whether `device` has the kernels, asked without touching one. On CUDA `isFp8GemmAvailable()`
+/// reads the card's architecture, which fails where there is no card, and answering that without
+/// failing is this call's whole job.
+bool fp8Available(fl::Device::Type device) {
+  if (!fl::isOperatorsAvailable(device)) return false;
+
+#ifdef LIBWAIFU_CUDA_ENABLED
+  if (device == fl::Device::kCuda) return fl::op::cuda::isFp8GemmAvailable();
+#endif
+
+  // The CPU widens the weight while it packs it, so there is no instruction for it to be missing.
+  return device == fl::Device::kCpu;
+}
+
+/// The kernels assert their preconditions with CHECK, which reports a broken invariant of ours.
+/// What a caller could get wrong is checked here first, where it can be named as a bad argument.
+void checkFp8Activation(const fl::Tensor &x, fl::Device::Type device, const char *what) {
+  if (x.getDevice().getType() != device) {
+    throw lut::InvalidArgError(std::string(what) + " is not on the same device as the weight");
+  }
+  if (!x.isContiguous()) {
+    throw lut::InvalidArgError(std::string(what) + " is not contiguous");
+  }
+  if (x.getDim() < 2) {
+    throw lut::InvalidArgError(std::string(what) + " has fewer than two dimensions");
+  }
+
+  // Each device multiplies in its own float type, and neither narrows the activation on the way
+  // in: only the weight is narrow.
+  fl::DType wanted = device == fl::Device::kCuda ? fl::DType::kFloat16 : fl::DType::kFloat;
+  if (x.getDType() != wanted) {
+    throw lut::InvalidArgError(
+        std::string(what) + " is not <" + wanted.toString() +
+        ">, which is what this device multiplies in");
+  }
+}
+
+}  // namespace
+
+int32_t fl_fp8_available(fl_device_type_t device, int32_t *out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
-    *out = 0;
+    *out = fp8Available(toDevice(device).getType()) ? 1 : 0;
     return clearError();
   });
 }
 
-static int32_t fp8Unavailable() {
-  return setError(FL_ERROR_ABORTED, "this build has no FP8 support (needs WITH_CUDA=ON)");
+int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_scale) {
+  return guard([&]() {
+    if (!data || !channel_scale) throw lut::InvalidArgError("out is null");
+
+    const fl::Tensor &tensor = deref(x);
+    if (!tensor.isContiguous()) {
+      throw lut::InvalidArgError("the tensor to quantize is not contiguous");
+    }
+    if (tensor.getDim() != 2) {
+      throw lut::InvalidArgError("the tensor to quantize is not two dimensional");
+    }
+
+    fl::Fp8Operand operand;
+    if (tensor.getDevice().getType() == fl::Device::kCpu) {
+      if (!tensor.getDType().isFloat()) {
+        throw lut::InvalidArgError("the tensor to quantize is neither <float> nor <float16>");
+      }
+      operand = fl::op::cpu::quantizeFp8(tensor);
+    } else if (tensor.getDevice().getType() == fl::Device::kCuda) {
+#ifdef LIBWAIFU_CUDA_ENABLED
+      if (tensor.getDType() != fl::DType::kFloat16) {
+        throw lut::InvalidArgError("the tensor to quantize is not <float16>");
+      }
+      if (tensor.getShape(-1) % 16 != 0) {
+        throw lut::InvalidArgError("the tensor to quantize: k is not a multiple of 16");
+      }
+      operand = fl::op::cuda::quantizeFp8(tensor);
+#else
+      throw lut::InvalidArgError("this build has no CUDA support (needs WITH_CUDA=ON)");
+#endif
+    } else {
+      throw lut::InvalidArgError("the tensor to quantize is on a device with no FP8 kernels");
+    }
+
+    // Two handles have to appear together or not at all, and publish() is what allocates, so they
+    // are made here and only handed over once both exist.
+    std::unique_ptr<fl::Tensor> ownedData{new fl::Tensor(std::move(operand.data))};
+    std::unique_ptr<fl::Tensor> ownedScale{new fl::Tensor(std::move(operand.channelScale))};
+
+    *data = reinterpret_cast<fl_tensor_t>(ownedData.release());
+    *channel_scale = reinterpret_cast<fl_tensor_t>(ownedScale.release());
+    return clearError();
+  });
 }
 
-int32_t fl_fp8_quantize(fl_tensor_t, fl_tensor_t *, fl_tensor_t *) {
-  return fp8Unavailable();
+int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor_t *out) {
+  return guard([&]() {
+    fl::Fp8Operand operand = fl::makeFp8Operand(deref(data), deref(channel_scale));
+
+    if (operand.data.getDevice().getType() == fl::Device::kCpu) {
+      return publish(fl::op::cpu::dequantFp8ToFloat(operand), out);
+    }
+#ifdef LIBWAIFU_CUDA_ENABLED
+    if (operand.data.getDevice().getType() == fl::Device::kCuda) {
+      return publish(fl::op::cuda::dequantFp8ToHalf(operand), out);
+    }
+#endif
+    throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
+  });
 }
 
-int32_t fl_fp8_dequantize(fl_tensor_t, fl_tensor_t, fl_tensor_t *) {
-  return fp8Unavailable();
-}
+int32_t fl_fp8_matmul(
+    fl_tensor_t a,
+    fl_tensor_t data,
+    fl_tensor_t channel_scale,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::Fp8Operand operand = fl::makeFp8Operand(deref(data), deref(channel_scale));
+    fl::Device::Type device = operand.data.getDevice().getType();
 
-int32_t fl_fp8_matmul(fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t *) {
-  return fp8Unavailable();
-}
+    checkFp8Activation(deref(a), device, "the left operand");
+    if (deref(a).getShape(-1) != operand.k) {
+      throw lut::InvalidArgError("the two operands disagree about k");
+    }
 
-#endif  // LIBWAIFU_CUDA_ENABLED
+    if (device == fl::Device::kCpu) {
+      return publish(fl::op::cpu::gemmFp8(deref(a), operand), out);
+    }
+#ifdef LIBWAIFU_CUDA_ENABLED
+    if (device == fl::Device::kCuda) {
+      // What the CUTLASS instantiation can read, rather than what the format can hold.
+      if (operand.rows % 8 != 0) {
+        throw lut::InvalidArgError("the fp8 operand's row count is not a multiple of 8");
+      }
+      if (operand.k % 16 != 0) {
+        throw lut::InvalidArgError("the fp8 operand's k is not a multiple of 16");
+      }
+      return publish(fl::op::cuda::gemmFp8(deref(a), operand), out);
+    }
+#endif
+    throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
+  });
+}
 
 int32_t fl_mul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::mul(deref(a), deref(b)), out); });

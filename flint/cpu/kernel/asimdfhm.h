@@ -99,6 +99,27 @@ inline float dotKernel<float, float, float, CpuMathBackend::ASIMDFHM>(
 }
 
 template<>
+inline float dotKernel<float, float, Fp8E4M3, CpuMathBackend::ASIMDFHM>(
+    int64_t n,
+    const float *x,
+    const Fp8E4M3 *y,
+    int64_t offsetY) {
+  // Scalar, and the same on all three: E4M3 has no widening instruction on any of them, and what
+  // makes the x64 one fast is a gathered lookup rather than anything architecture specific. The
+  // same table on NEON is the obvious next step and is not written yet.
+  return sf8dotFallbackKernel(n, x, y + offsetY);
+}
+template<>
+inline void axpyKernel<float, Fp8E4M3, float, CpuMathBackend::ASIMDFHM>(
+    int64_t n,
+    float a,
+    const Fp8E4M3 *x,
+    int64_t offsetX,
+    float *y) {
+  return f8saxpyFloatFallbackKernel(n, a, x + offsetX, y);
+}
+
+template<>
 inline float dotKernel<float, float, Float16, CpuMathBackend::ASIMDFHM>(
     int64_t n,
     const float *x,

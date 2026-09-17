@@ -19,18 +19,22 @@
 
 //! A weight held in E4M3 with one scale per output channel.
 
-use super::{check, ffi, init, Result, Tensor};
+use super::{check, ffi, init, Device, Result, Tensor};
 
 /// A tensor quantized to E4M3: one byte per element, and one `float` scale per row. The two
 /// pieces travel together because the multiply needs both, and a row means what it means only
 /// against its own scale.
 ///
 /// Where [`super::Nvfp4Tensor`] narrows both operands and multiplies on the block scaled tensor
-/// cores, this narrows the weight alone: the multiply is the ordinary half one, and the weight is
-/// widened to half on its way from shared memory into the operand registers. So it buys bandwidth
-/// rather than arithmetic -- about twice the speed of the half GEMM where a weight is read once
-/// and multiplied by few rows, and a little slower than it where the rows are many. It costs
-/// about 2.6e-2 of relative RMSE against the half GEMM. See `docs/fp8.md`.
+/// cores, this narrows the weight alone: the multiply is the ordinary one, and the weight is
+/// widened on its way into it. So it buys bandwidth rather than arithmetic -- on CUDA about twice
+/// the speed of the half GEMM where a weight is read once and multiplied by few rows, and a little
+/// slower than it where the rows are many. It costs about 2.6e-2 of relative RMSE. See
+/// `docs/fp8.md`.
+///
+/// Both devices have it. On the CPU there is no FP8 arithmetic to reach for at all, so it buys no
+/// speed there and the weight taking one byte an element rather than two is the whole of it. The
+/// two quantizers agree byte for byte, so a weight means the same thing on either.
 #[derive(Debug)]
 pub struct Fp8Tensor {
     pub(super) data: Tensor,
@@ -38,19 +42,22 @@ pub struct Fp8Tensor {
 }
 
 impl Fp8Tensor {
-    /// Whether this build and this GPU can quantize and multiply in FP8. The kernel is written
-    /// against the sm_80 tensor cores, so unlike NVFP4 this is true wherever CUDA is.
-    pub fn is_available() -> bool {
+    /// Whether `device` can quantize and multiply in FP8. [`Device::Cpu`] always can; the CUDA
+    /// kernel is written against the sm_80 tensor cores, so unlike NVFP4 it needs no more than
+    /// Ampere.
+    pub fn is_available(device: Device) -> bool {
         init();
 
         let mut available: i32 = 0;
-        match check(unsafe { ffi::fl_fp8_available(&mut available) }) {
+        match check(unsafe { ffi::fl_fp8_available(device as ffi::FlDeviceType, &mut available) }) {
             Ok(()) => available != 0,
             Err(_) => false,
         }
     }
 
-    /// Quantize `x`, a contiguous `<float16>(rows, k)` CUDA tensor whose `k` 16 divides.
+    /// Quantize a contiguous two dimensional `x`, in the float type its device computes in:
+    /// `<float16>` on CUDA, where `k` also has to be a multiple of 16, and either `<float>` or
+    /// `<float16>` on the CPU, where nothing has to divide.
     pub fn quantize(x: &Tensor) -> Result<Fp8Tensor> {
         let mut data: ffi::FlTensor = std::ptr::null_mut();
         let mut channel_scale: ffi::FlTensor = std::ptr::null_mut();
@@ -72,8 +79,9 @@ impl Fp8Tensor {
         Ok((self.data.shape_at(0)?, self.data.shape_at(1)?))
     }
 
-    /// Back to `<float16>(rows, k)`, carrying the quantization error with it. Mostly useful for
-    /// seeing how much of that error there is.
+    /// Back to `(rows, k)` in its device's float type -- `<float16>` on CUDA, `<float>` on the
+    /// CPU -- carrying the quantization error with it. Mostly useful for seeing how much of that
+    /// error there is.
     pub fn dequantize(&self) -> Result<Tensor> {
         Tensor::produce(|out| unsafe {
             ffi::fl_fp8_dequantize(self.data.raw, self.channel_scale.raw, out)

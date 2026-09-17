@@ -120,11 +120,14 @@ inline void Block<T>::copyTo(Block<Tt> tgt) const {
   CHECK(numCols == tgt.numCols);
 
   // a transposed source packed into a contiguous target is what both the A and the B pack do. The
-  // generic loop below cannot vectorize its strided load, and for fp16 calls a software
-  // half_to_float on top of that, so both element types are worth a kernel. Anything else -- any
-  // other backend, fp16 targets, transposed targets -- keeps the generic loop.
-  constexpr bool kPackElement = std::is_same<Tt, float>::value &&
-                                (std::is_same<T, Float16>::value || std::is_same<T, float>::value);
+  // generic loop below reads the source a strided element at a time -- a separate cache line for
+  // every element where the stride is large, which a weight's is -- and for fp16 calls a software
+  // half_to_float on top of that. So the three element types are worth a kernel. Anything else --
+  // any other backend, fp16 targets, transposed targets -- keeps the generic loop.
+  constexpr bool kPackElement =
+      std::is_same<Tt, float>::value &&
+      (std::is_same<T, Float16>::value || std::is_same<T, float>::value ||
+       std::is_same<T, Fp8E4M3>::value);
   constexpr bool kPackBackend = TYPE == CpuMathBackend::AVX2 || TYPE == CpuMathBackend::AVX512;
   constexpr bool kUsePackKernel = kPackElement && kPackBackend;
 

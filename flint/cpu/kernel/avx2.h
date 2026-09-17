@@ -35,6 +35,15 @@ float sdotAvx2Kernel(int64_t n, const float *x, const float *y);
 void saxpyAvx2Kernel(int64_t n, float a, const float *x, float *y);
 float shdotAvx2Kernel(int64_t n, const float *x, const Float16 *y);
 void hsaxpyAvx2Kernel(int64_t n, float a, const Float16 *x, float *y);
+float sf8dotAvx2Kernel(int64_t n, const float *x, const Fp8E4M3 *y);
+void f8saxpyAvx2Kernel(int64_t n, float a, const Fp8E4M3 *x, float *y);
+void f8spackTransposeAvx2Kernel(
+    int numRows,
+    int numCols,
+    const Fp8E4M3 *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride);
 void hspackTransposeAvx2Kernel(
     int numRows,
     int numCols,
@@ -59,6 +68,17 @@ inline void packTransposeKernel<float, float, CpuMathBackend::AVX2>(
     float *tgt,
     int64_t tgtStride) {
   return spackTransposeAvx2Kernel(numRows, numCols, src, srcStride, tgt, tgtStride);
+}
+
+template<>
+inline void packTransposeKernel<Fp8E4M3, float, CpuMathBackend::AVX2>(
+    int numRows,
+    int numCols,
+    const Fp8E4M3 *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride) {
+  return f8spackTransposeAvx2Kernel(numRows, numCols, src, srcStride, tgt, tgtStride);
 }
 
 template<>
@@ -107,6 +127,24 @@ inline void axpyKernel<float, float, float, CpuMathBackend::AVX2>(
     int64_t offsetX,
     float *y) {
   return saxpyAvx2Kernel(n, a, x + offsetX, y);
+}
+
+template<>
+inline float dotKernel<float, float, Fp8E4M3, CpuMathBackend::AVX2>(
+    int64_t n,
+    const float *x,
+    const Fp8E4M3 *y,
+    int64_t offsetY) {
+  return sf8dotAvx2Kernel(n, x, y + offsetY);
+}
+template<>
+inline void axpyKernel<float, Fp8E4M3, float, CpuMathBackend::AVX2>(
+    int64_t n,
+    float a,
+    const Fp8E4M3 *x,
+    int64_t offsetX,
+    float *y) {
+  return f8saxpyAvx2Kernel(n, a, x + offsetX, y);
 }
 
 template<>

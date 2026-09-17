@@ -44,6 +44,17 @@ inline void packTransposeKernel<float, float, CpuMathBackend::AVX512>(
 }
 
 template<>
+inline void packTransposeKernel<Fp8E4M3, float, CpuMathBackend::AVX512>(
+    int numRows,
+    int numCols,
+    const Fp8E4M3 *src,
+    int64_t srcStride,
+    float *tgt,
+    int64_t tgtStride) {
+  return f8spackTransposeAvx2Kernel(numRows, numCols, src, srcStride, tgt, tgtStride);
+}
+
+template<>
 inline void packTransposeKernel<Float16, float, CpuMathBackend::AVX512>(
     int numRows,
     int numCols,
@@ -90,6 +101,24 @@ inline void axpyKernel<float, float, float, CpuMathBackend::AVX512>(
     int64_t offsetX,
     float *y) {
   return saxpyAvx2Kernel(n, a, x + offsetX, y);
+}
+
+template<>
+inline float dotKernel<float, float, Fp8E4M3, CpuMathBackend::AVX512>(
+    int64_t n,
+    const float *x,
+    const Fp8E4M3 *y,
+    int64_t offsetY) {
+  return sf8dotAvx2Kernel(n, x, y + offsetY);
+}
+template<>
+inline void axpyKernel<float, Fp8E4M3, float, CpuMathBackend::AVX512>(
+    int64_t n,
+    float a,
+    const Fp8E4M3 *x,
+    int64_t offsetX,
+    float *y) {
+  return f8saxpyAvx2Kernel(n, a, x + offsetX, y);
 }
 
 template<>

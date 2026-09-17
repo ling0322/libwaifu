@@ -168,10 +168,13 @@ pub fn nvfp4_matmul(a: &Tensor, weight: &Nvfp4Tensor) -> Result<Tensor> {
     })
 }
 
-/// `a` `<float16>(..., k)` times the transpose of an FP8 `weight` `(rows, k)`, as
-/// `<float16>(..., rows)`. Unlike [`nvfp4_matmul`] the activation stays half -- the tensor cores
-/// multiply in half either way, and only the weight is narrow. `rows` has to be a multiple of 8
-/// and `k` a multiple of 16.
+/// `a` `(..., k)` times the transpose of an FP8 `weight` `(rows, k)`, as `(..., rows)`, in the
+/// float type the weight's device computes in.
+///
+/// Unlike [`nvfp4_matmul`] the activation is not narrowed: the multiply happens at full width
+/// either way and only the weight is narrow. On CUDA that is `<float16>` in and out, with `rows`
+/// a multiple of 8 and `k` a multiple of 16; on the CPU it is `<float>` in and out, with no such
+/// constraint.
 pub fn fp8_matmul(a: &Tensor, weight: &Fp8Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe {
         ffi::fl_fp8_matmul(a.raw, weight.data.raw, weight.channel_scale.raw, out)

@@ -348,21 +348,25 @@ FLAPI int32_t fl_nvfp4_matmul(
     fl_tensor_t global_scale,
     fl_tensor_t *out);
 
-/// Whether this build and this GPU can run the FP8 matrix multiplication. A build without CUDA,
-/// or a GPU older than sm_80, is reported as zero rather than as an error.
-FLAPI int32_t fl_fp8_available(int32_t *out);
+/// Whether `device` can run the FP8 matrix multiplication. The CPU always can; a GPU older than
+/// sm_80, or a build without CUDA, is reported as zero rather than as an error.
+FLAPI int32_t fl_fp8_available(fl_device_type_t device, int32_t *out);
 
-/// Quantize `x` <float16>(rows, k) to E4M3 with one scale per row, giving the codes as
-/// <fp8e4m3>(rows, k) and the scales as <float>(rows). `x` has to be a contiguous CUDA tensor
-/// with a k that 16 divides.
+/// Quantize `x` (rows, k) to E4M3 with one scale per row, giving the codes as <fp8e4m3>(rows, k)
+/// and the scales as <float>(rows). `x` has to be contiguous, and in the device's own float type:
+/// <float16> on CUDA, <float> or <float16> on the CPU.
 FLAPI int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_scale);
 
-/// The inverse of fl_fp8_quantize, as <float16>(rows, k).
+/// The inverse of fl_fp8_quantize, in the float type the operand's device computes in: <float16>
+/// on CUDA, <float> on the CPU.
 FLAPI int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor_t *out);
 
-/// `a` <float16>(..., k) times the transpose of the FP8 operand named by the other two, as
-/// <float16>(..., rows). `a` stays half: only the weight is narrow. The operand's row count has
-/// to be a multiple of 8.
+/// `a` (..., k) times the transpose of the FP8 operand named by the other two, as (..., rows).
+/// `a` is not narrowed -- only the weight is -- and it must be on the same device as the operand.
+///
+/// On CUDA that is <float16> in and out, the operand's row count has to be a multiple of 8 and
+/// its k a multiple of 16. On the CPU it is <float> in and out and neither has to divide by
+/// anything.
 FLAPI int32_t fl_fp8_matmul(
     fl_tensor_t a,
     fl_tensor_t data,

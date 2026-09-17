@@ -61,10 +61,6 @@ namespace op {
 namespace cuda {
 namespace {
 
-/// E4M3's largest finite magnitude. A row scaled by rowAmax / 448 has its largest element land
-/// exactly on it, so the format's whole range is used and nothing saturates.
-constexpr float kE4m3Max = 448.0f;
-
 /// Eight elements a thread: sixteen bytes in and eight bytes out, which is what makes both ends of
 /// the quantizer a single vector access.
 constexpr int kElementPerThread = 8;
@@ -126,8 +122,14 @@ __global__ void quantizeFp8Kernel(
   if (threadIdx.x == 0) {
     // An all zero row has no scale to speak of. Zero is the one that makes the round trip exact
     // and leaves nothing to divide by later.
-    scale[row] = amax / kE4m3Max;
-    sRcpScale = amax > 0.0f ? kE4m3Max / amax : 0.0f;
+    //
+    // __fdiv_rn rather than `/`, which this file is compiled with --use_fast_math and would
+    // otherwise turn into a reciprocal approximation. One ulp on the scale moves the odd element
+    // that sits on a rounding boundary to the next code, and then a weight quantized here and one
+    // quantized on the processor are not the same bytes. Two of 16896 elements is what it was
+    // costing when the test that compares them was first run.
+    scale[row] = __fdiv_rn(amax, kFp8E4M3Max);
+    sRcpScale = amax > 0.0f ? __fdiv_rn(kFp8E4M3Max, amax) : 0.0f;
   }
   __syncthreads();
   float rcpScale = sRcpScale;
@@ -398,46 +400,6 @@ Fp8Operand quantizeFp8(const Tensor &x) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return operand;
-}
-
-Fp8Operand makeFp8Operand(const Tensor &data, const Tensor &channelScale) {
-  // Reached from outside the library, where what arrives is a caller's mistake rather than a
-  // broken invariant of ours. CHECK would report it as FL_ERROR_ABORTED with a stack trace behind
-  // it; these say which argument was wrong instead.
-  if (data.getDType() != DType::kFp8E4M3 || data.getDim() != 2) {
-    throw lut::InvalidArgError("fp8 operand: data is not <fp8e4m3>(rows, k)");
-  }
-  if (channelScale.getDType() != DType::kFloat || channelScale.getDim() != 1) {
-    throw lut::InvalidArgError("fp8 operand: channel scale is not <float>(rows)");
-  }
-  // A host side tensor would reach the kernel as a pointer it may not touch, and nothing would
-  // say so: `getDataPtrCuda` hands back whatever address the tensor holds.
-  if (data.getDevice().getType() != Device::kCuda ||
-      channelScale.getDevice().getType() != Device::kCuda) {
-    throw lut::InvalidArgError("fp8 operand: not on a CUDA device");
-  }
-  if (!data.isContiguous() || !channelScale.isContiguous()) {
-    throw lut::InvalidArgError("fp8 operand: not contiguous");
-  }
-  if (channelScale.getShape(0) != data.getShape(0)) {
-    throw lut::InvalidArgError("fp8 operand: one scale per row is not what was handed over");
-  }
-  if (data.getShape(1) % 16 != 0) {
-    throw lut::InvalidArgError("fp8 operand: k is not a multiple of 16");
-  }
-  // The kernels index the operand in int, which is two gigabytes of E4M3 and more than any weight
-  // here is. A caller reaching past it would otherwise get a wrapped index rather than an error.
-  if (data.getNumEl() >= std::numeric_limits<int32_t>::max()) {
-    throw lut::InvalidArgError("fp8 operand: more elements than the kernels can index");
-  }
-
-  Fp8Operand operand;
-  operand.data = data;
-  operand.channelScale = channelScale;
-  operand.rows = data.getShape(0);
-  operand.k = data.getShape(1);
 
   return operand;
 }

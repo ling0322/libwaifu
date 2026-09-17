@@ -24,21 +24,31 @@
 
 namespace fl {
 namespace op {
-namespace cuda {
+namespace cpu {
 
-/// @brief Quantize a half tensor to E4M3, one scale per row.
+/// @brief Quantize a tensor to E4M3, one scale per row.
 ///
-/// The scale is `rowAmax / 448` -- E4M3's largest finite magnitude -- so the largest element of
-/// each row lands exactly on the top of the format's range. A row that is all zero gets a zero
-/// scale and quantizes to zeros rather than to NaN.
-/// @param x <half>(rows, k), contiguous, k a multiple of 16.
+/// The same arithmetic the CUDA quantizer does, and the same bytes out: the two conversions were
+/// checked against each other over every float there is.
+/// @param x <float> or <float16>(rows, k), contiguous.
 Fp8Operand quantizeFp8(const Tensor &x);
 
 /// @brief Inverse of quantizeFp8, which is what a caller wants to see the quantization error on
 ///        its own.
-/// @return <half>(rows, k).
-Tensor dequantFp8ToHalf(const Fp8Operand &operand);
+/// @return <float>(rows, k). Float rather than half because float is what this device computes
+///         in; a model on the CPU widens its weights on the way into the arithmetic anyway.
+Tensor dequantFp8ToFloat(const Fp8Operand &operand);
 
-}  // namespace cuda
+/// @brief D = A * transpose(B) in float32, with B read as E4M3 and widened while it is packed.
+///
+/// Unlike the CUDA path this buys no speed -- the CPU has no FP8 arithmetic to reach for, and the
+/// multiply was float32 either way -- so what it is for is the weight being one byte an element
+/// in memory rather than two.
+/// @param A <float>(..., k), contiguous. Leading batch axes are folded into the row count.
+/// @param B the weight, one output channel per row, quantized once at load.
+/// @return <float>(..., B.rows).
+Tensor gemmFp8(const Tensor &A, const Fp8Operand &B);
+
+}  // namespace cpu
 }  // namespace op
 }  // namespace fl

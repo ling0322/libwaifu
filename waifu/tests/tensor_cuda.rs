@@ -315,7 +315,7 @@ fn makes_zeros_of_the_type_it_was_asked_for() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn multiplies_by_an_fp8_weight() {
-    if !Fp8Tensor::is_available() {
+    if !Fp8Tensor::is_available(Device::Cuda) {
         eprintln!("skipped: this build has no FP8 GEMM (needs WITH_CUDA=ON and sm_80 or newer)");
         return;
     }
