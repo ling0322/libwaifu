@@ -38,6 +38,8 @@
 #endif  // LIBWAIFU_CUDA_ENABLED
 
 #ifdef LIBWAIFU_CUDA_ENABLED
+#include "flint/cuda/fp8.h"
+#include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/cuda/gemm_nvfp4_cutlass.h"
 #include "flint/cuda/nvfp4.h"
 #endif  // LIBWAIFU_CUDA_ENABLED
@@ -675,6 +677,90 @@ int32_t fl_nvfp4_matmul(
   });
 }
 
+namespace {
+
+/// The same job checkNvfp4Half does, for the operand widths this kernel reads in.
+void checkFp8Half(const fl::Tensor &x, const char *what) {
+  if (x.getDevice().getType() != fl::Device::kCuda) {
+    throw lut::InvalidArgError(std::string(what) + " is not on a CUDA device");
+  }
+  if (x.getDType() != fl::DType::kFloat16) {
+    throw lut::InvalidArgError(std::string(what) + " is not <float16>");
+  }
+  if (!x.isContiguous()) {
+    throw lut::InvalidArgError(std::string(what) + " is not contiguous");
+  }
+  if (x.getDim() < 2) {
+    throw lut::InvalidArgError(std::string(what) + " has fewer than two dimensions");
+  }
+  if (x.getShape(-1) % 16 != 0) {
+    throw lut::InvalidArgError(std::string(what) + ": the last dimension is not a multiple of 16");
+  }
+}
+
+}  // namespace
+
+int32_t fl_fp8_available(int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = fl::op::cuda::isFp8GemmAvailable() ? 1 : 0;
+    return clearError();
+  });
+}
+
+int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_scale) {
+  return guard([&]() {
+    if (!data || !channel_scale) throw lut::InvalidArgError("out is null");
+
+    checkFp8Half(deref(x), "the tensor to quantize");
+    if (deref(x).getDim() != 2) {
+      throw lut::InvalidArgError("the tensor to quantize is not two dimensional");
+    }
+
+    fl::op::cuda::Fp8Operand operand = fl::op::cuda::quantizeFp8(deref(x));
+
+    // Two handles have to appear together or not at all, and publish() is what allocates, so they
+    // are made here and only handed over once both exist.
+    std::unique_ptr<fl::Tensor> ownedData{new fl::Tensor(std::move(operand.data))};
+    std::unique_ptr<fl::Tensor> ownedScale{new fl::Tensor(std::move(operand.channelScale))};
+
+    *data = reinterpret_cast<fl_tensor_t>(ownedData.release());
+    *channel_scale = reinterpret_cast<fl_tensor_t>(ownedScale.release());
+    return clearError();
+  });
+}
+
+int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor_t *out) {
+  return guard([&]() {
+    fl::op::cuda::Fp8Operand operand = fl::op::cuda::makeFp8Operand(
+        deref(data),
+        deref(channel_scale));
+    return publish(fl::op::cuda::dequantFp8ToHalf(operand), out);
+  });
+}
+
+int32_t fl_fp8_matmul(
+    fl_tensor_t a,
+    fl_tensor_t data,
+    fl_tensor_t channel_scale,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::op::cuda::Fp8Operand operand = fl::op::cuda::makeFp8Operand(
+        deref(data),
+        deref(channel_scale));
+
+    checkFp8Half(deref(a), "the left operand");
+    if (deref(a).getShape(-1) != operand.k) {
+      throw lut::InvalidArgError("the two operands disagree about k");
+    }
+    if (operand.rows % 8 != 0) {
+      throw lut::InvalidArgError("the fp8 operand's row count is not a multiple of 8");
+    }
+
+    return publish(fl::op::cuda::gemmFp8(deref(a), operand), out);
+  });
+}
+
 #else
 
 int32_t fl_nvfp4_available(int32_t *out) {
@@ -699,6 +785,30 @@ int32_t fl_nvfp4_dequantize(fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t *
 
 int32_t fl_nvfp4_matmul(fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t *) {
   return nvfp4Unavailable();
+}
+
+int32_t fl_fp8_available(int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = 0;
+    return clearError();
+  });
+}
+
+static int32_t fp8Unavailable() {
+  return setError(FL_ERROR_ABORTED, "this build has no FP8 support (needs WITH_CUDA=ON)");
+}
+
+int32_t fl_fp8_quantize(fl_tensor_t, fl_tensor_t *, fl_tensor_t *) {
+  return fp8Unavailable();
+}
+
+int32_t fl_fp8_dequantize(fl_tensor_t, fl_tensor_t, fl_tensor_t *) {
+  return fp8Unavailable();
+}
+
+int32_t fl_fp8_matmul(fl_tensor_t, fl_tensor_t, fl_tensor_t, fl_tensor_t *) {
+  return fp8Unavailable();
 }
 
 #endif  // LIBWAIFU_CUDA_ENABLED

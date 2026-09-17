@@ -25,7 +25,7 @@
 //! # Ok::<(), waifu::flint::Error>(())
 //! ```
 
-use super::{check, ffi, init, DType, Device, Nvfp4Tensor, Result, Tensor};
+use super::{check, ffi, init, DType, Device, Fp8Tensor, Nvfp4Tensor, Result, Tensor};
 
 /// Reduce over the last dimension, the default of [`sum`] and [`max`].
 pub const LAST_DIM: i32 = -1;
@@ -165,6 +165,16 @@ pub fn nvfp4_matmul(a: &Tensor, weight: &Nvfp4Tensor) -> Result<Tensor> {
             weight.global_scale.raw,
             out,
         )
+    })
+}
+
+/// `a` `<float16>(..., k)` times the transpose of an FP8 `weight` `(rows, k)`, as
+/// `<float16>(..., rows)`. Unlike [`nvfp4_matmul`] the activation stays half -- the tensor cores
+/// multiply in half either way, and only the weight is narrow. `rows` has to be a multiple of 8
+/// and `k` a multiple of 16.
+pub fn fp8_matmul(a: &Tensor, weight: &Fp8Tensor) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe {
+        ffi::fl_fp8_matmul(a.raw, weight.data.raw, weight.channel_scale.raw, out)
     })
 }
 

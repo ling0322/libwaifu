@@ -20,6 +20,7 @@
 #include "flint/cpu/print.h"
 
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <inttypes.h>
 
@@ -84,6 +85,17 @@ struct CudaPrinterImpl {
     printf("(%+.1f, %+.1f)", e2m1Fp4Values[hvalue.v0], e2m1Fp4Values[hvalue.v1]);
   }
 
+  static void printValue(accessor_type<const Fp8E4M3, 1> valAcc, int index) {
+    Fp8E4M3 hvalue;
+    LL_CHECK_CUDA_STATUS(
+        cudaMemcpy(&hvalue, &valAcc[index], sizeof(Fp8E4M3), cudaMemcpyDeviceToHost));
+
+    // The code on its own, without whatever scale the tensor beside it carries.
+    __half decoded = __half(__nv_cvt_fp8_to_halfraw(hvalue.v, __NV_E4M3));
+    float value = decoded;
+    printf("%+.4g", value);
+  }
+
   static void printValue(accessor_type<const BoolType, 1> valAcc, int index) {
     BoolType v;
     LL_CHECK_CUDA_STATUS(cudaMemcpy(&v, &valAcc[index], sizeof(BoolType), cudaMemcpyDeviceToHost));
@@ -107,6 +119,8 @@ void print(const Tensor &tensor) {
     printer.print<UInt8>(tensor);
   else if (tensor.getDType() == DType::kFp4E2M0x2)
     printer.print<Fp4E2M0x2>(tensor);
+  else if (tensor.getDType() == DType::kFp8E4M3)
+    printer.print<Fp8E4M3>(tensor);
   else if (tensor.getDType() == DType::kLong)
     printer.print<LongType>(tensor);
   else if (tensor.getDType() == DType::kBool)

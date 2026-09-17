@@ -12,6 +12,10 @@ Tensor y = gemmNvfp4(xFp16, w);               // per layer: half in, half out
 Requires `WITH_CUDA=ON`, CUDA 12.8 or newer, and an sm_120a target. `isNvfp4GemmAvailable()`
 reports whether this build and this GPU can run it.
 
+`docs/fp8.md` is the other half of the same idea and the one to reach for on older hardware: it
+narrows the weight alone, leaves the activation in half, and runs on the ordinary half tensor
+cores from sm_80 on. It buys bandwidth where this buys arithmetic.
+
 ## From Rust
 
 `flint::Nvfp4Tensor` holds the three pieces a quantized operand is made of, and

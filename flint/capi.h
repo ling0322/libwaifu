@@ -348,6 +348,27 @@ FLAPI int32_t fl_nvfp4_matmul(
     fl_tensor_t global_scale,
     fl_tensor_t *out);
 
+/// Whether this build and this GPU can run the FP8 matrix multiplication. A build without CUDA,
+/// or a GPU older than sm_80, is reported as zero rather than as an error.
+FLAPI int32_t fl_fp8_available(int32_t *out);
+
+/// Quantize `x` <float16>(rows, k) to E4M3 with one scale per row, giving the codes as
+/// <fp8e4m3>(rows, k) and the scales as <float>(rows). `x` has to be a contiguous CUDA tensor
+/// with a k that 16 divides.
+FLAPI int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_scale);
+
+/// The inverse of fl_fp8_quantize, as <float16>(rows, k).
+FLAPI int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor_t *out);
+
+/// `a` <float16>(..., k) times the transpose of the FP8 operand named by the other two, as
+/// <float16>(..., rows). `a` stays half: only the weight is narrow. The operand's row count has
+/// to be a multiple of 8.
+FLAPI int32_t fl_fp8_matmul(
+    fl_tensor_t a,
+    fl_tensor_t data,
+    fl_tensor_t channel_scale,
+    fl_tensor_t *out);
+
 /// Element-wise x * sigmoid(1.702 * x), the activation OpenAI's CLIP uses in place of GELU.
 FLAPI int32_t fl_quick_gelu(fl_tensor_t input, fl_tensor_t *out);
 

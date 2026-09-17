@@ -169,6 +169,15 @@ extern "C" {
         global_scale: FlTensor,
         out: *mut FlTensor,
     ) -> i32;
+    pub fn fl_fp8_available(out: *mut i32) -> i32;
+    pub fn fl_fp8_quantize(x: FlTensor, data: *mut FlTensor, channel_scale: *mut FlTensor) -> i32;
+    pub fn fl_fp8_dequantize(data: FlTensor, channel_scale: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_fp8_matmul(
+        a: FlTensor,
+        data: FlTensor,
+        channel_scale: FlTensor,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_tensor_to_device_async(
         tensor: FlTensor,
         device: FlDeviceType,
