@@ -857,6 +857,11 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
         )?,
 
         Op::Matmul { lhs, rhs } => F::matmul(get(lhs), get(rhs))?,
+        Op::Fp8Matmul {
+            lhs,
+            weight,
+            channel_scale,
+        } => F::fp8_matmul(get(lhs), get(weight), get(channel_scale))?,
         Op::Lookup { table, indices } => F::lookup(get(table), get(indices))?,
         Op::Conv2d {
             input,

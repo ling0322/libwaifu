@@ -30,7 +30,7 @@ use std::rc::Rc;
 
 use waifu::flint::{functional as F, resident, ParamSource, Tensor};
 use waifu::{
-    ClipTextConfig, ClipTextEncoder, DType, Device, Manifest, ParamFile
+    ClipTextConfig, ClipTextEncoder, DType, Device, Manifest, ParamFile, WeightFormat
 };
 
 fn models_dir() -> PathBuf {
@@ -109,7 +109,8 @@ fn config_l() -> ClipTextConfig {
         vocab_size: 49408,
         quick_gelu: true,
         norm_eps: 1e-5,
-        eot_token_id: 49407
+        eot_token_id: 49407,
+        weight_format: WeightFormat::Float
     }
 }
 
@@ -123,7 +124,8 @@ fn config_big_g() -> ClipTextConfig {
         vocab_size: 49408,
         quick_gelu: false,
         norm_eps: 1e-5,
-        eot_token_id: 49407
+        eot_token_id: 49407,
+        weight_format: WeightFormat::Float
     }
 }
 

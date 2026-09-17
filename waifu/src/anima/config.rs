@@ -26,6 +26,7 @@
 
 use super::sampler::SamplerConfig;
 use crate::error::{Error, Result};
+use crate::flint::WeightFormat;
 use crate::mapping::Mapping;
 
 /// What the denoiser returns at each step, which decides what the sampler does with it.
@@ -84,6 +85,9 @@ pub struct DitConfig {
     /// How wide the cross attention's context is, which is the adapter's width and not this
     /// model's: the denoiser is 2048 across and reads a 1024-wide prompt.
     pub context_dim: i32,
+    /// How the package stored the matrices this multiplies by, which decides what its projections
+    /// are built out of. See [`WeightFormat`].
+    pub weight_format: WeightFormat,
 }
 
 impl DitConfig {
@@ -132,6 +136,9 @@ pub struct AdapterConfig {
     /// Four times the hidden size. The reference fixes the ratio rather than storing it, and no
     /// tensor in the package contradicts it, so it is worked out rather than read.
     pub mlp_size: i32,
+    /// How the package stored the matrices this multiplies by, which decides what its projections
+    /// are built out of. See [`WeightFormat`].
+    pub weight_format: WeightFormat,
 }
 
 /// Qwen3-0.6B, read for its hidden states.
@@ -147,6 +154,9 @@ pub struct TextConfig {
     pub mlp_size: i32,
     pub rope_theta: f32,
     pub norm_eps: f32,
+    /// How the package stored the matrices this multiplies by, which decides what its projections
+    /// are built out of. See [`WeightFormat`].
+    pub weight_format: WeightFormat,
 }
 
 /// The Qwen-Image VAE, as far as the runtime needs to know it.
@@ -192,6 +202,10 @@ impl AnimaConfig {
         let latent_channels: i32 = section.get("latent_channels")?;
         let patch_size: i32 = section.get("patch_size")?;
 
+        // One key for the three halves that have the matrices in them. The autoencoder does not
+        // read it: it is convolutions, and its few projections are not what this is for.
+        let weight_format = section.get_weight_format_or("weight_format", WeightFormat::Float)?;
+
         let dit = DitConfig {
             num_blocks: section.get("num_blocks")?,
             hidden_size: section.get("hidden_size")?,
@@ -207,6 +221,7 @@ impl AnimaConfig {
             rope_w_ratio: section.get("rope_w_extrapolation_ratio")?,
             rope_t_ratio: section.get("rope_t_extrapolation_ratio")?,
             context_dim: section.get("adapter_hidden_size")?,
+            weight_format,
         };
 
         // Every one of these is a silent failure if it is wrong: the tensors still load, the
@@ -260,6 +275,7 @@ impl AnimaConfig {
                 head_dim: adapter_hidden / adapter_heads,
                 vocab_size: section.get("adapter_vocab_size")?,
                 mlp_size: 4 * adapter_hidden,
+                weight_format,
             },
             text: TextConfig {
                 num_layers: section.get("text_num_layers")?,
@@ -271,6 +287,7 @@ impl AnimaConfig {
                 mlp_size: section.get("text_mlp_size")?,
                 rope_theta: section.get("text_rope_theta")?,
                 norm_eps: section.get("text_rms_norm_eps")?,
+                weight_format,
             },
             vae,
             prediction: Prediction::named(section.get_str("prediction")?)?,
@@ -450,6 +467,20 @@ config:
             .expect_err("fifteen is not sixteen")
             .to_string();
         assert!(message.contains("latents_std"), "{message}");
+    }
+
+    /// One key, read by the three halves that have matrices in them, and float when it is absent.
+    #[test]
+    fn a_package_says_whether_it_stored_its_matrices_quantized() {
+        let config = parse(TURBO_V11).unwrap();
+        assert_eq!(config.dit.weight_format, WeightFormat::Float);
+        assert_eq!(config.adapter.weight_format, WeightFormat::Float);
+        assert_eq!(config.text.weight_format, WeightFormat::Float);
+
+        let quantized = parse(&format!("{TURBO_V11}    weight_format: fp8\n")).unwrap();
+        assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8);
+        assert_eq!(quantized.adapter.weight_format, WeightFormat::Fp8);
+        assert_eq!(quantized.text.weight_format, WeightFormat::Fp8);
     }
 
     #[test]

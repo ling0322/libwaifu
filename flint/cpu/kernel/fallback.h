@@ -51,8 +51,6 @@ Float16 hdotFallbackKernel(int64_t n, const Float16 *x, const Float16 *y);
 void haxpyFallbackKernel(int64_t n, Float16 a, const Float16 *x, float *y);
 void saxpyFallbackKernel(int64_t n, float a, const float *x, float *y);
 float shdotFallbackKernel(int64_t n, const float *x, const Float16 *y);
-float sf8dotFallbackKernel(int64_t n, const float *x, const Fp8E4M3 *y);
-void f8saxpyFloatFallbackKernel(int64_t n, float a, const Fp8E4M3 *x, float *y);
 void hsaxpyFloatFallbackKernel(int64_t n, float a, const Float16 *x, float *y);
 
 template<>
@@ -145,27 +143,6 @@ inline void axpyKernel<Float16, Float16, float, CpuMathBackend::FALLBACK>(
     int64_t offsetX,
     float *y) {
   return haxpyFallbackKernel(n, a, x + offsetX, y);
-}
-
-template<>
-inline float dotKernel<float, float, Fp8E4M3, CpuMathBackend::FALLBACK>(
-    int64_t n,
-    const float *x,
-    const Fp8E4M3 *y,
-    int64_t offsetY) {
-  // Scalar, and the same on all three: E4M3 has no widening instruction on any of them, and what
-  // makes the x64 one fast is a gathered lookup rather than anything architecture specific. The
-  // same table on NEON is the obvious next step and is not written yet.
-  return sf8dotFallbackKernel(n, x, y + offsetY);
-}
-template<>
-inline void axpyKernel<float, Fp8E4M3, float, CpuMathBackend::FALLBACK>(
-    int64_t n,
-    float a,
-    const Fp8E4M3 *x,
-    int64_t offsetX,
-    float *y) {
-  return f8saxpyFloatFallbackKernel(n, a, x + offsetX, y);
 }
 
 template<>

@@ -36,12 +36,6 @@ struct Float16 {
 };
 #endif
 
-/// One E4M3 code. The kernel layer keeps its own storage types rather than reaching for
-/// flint/dtype.h, the same way Float16 above does.
-struct Fp8E4M3 {
-  uint8_t v;
-};
-
 enum class Mode { OMP, SingleThread };
 enum class CpuMathBackend { DEFAULT, AVX2, AVX512, ASIMDHP, ASIMDFHM, FALLBACK, UNKNOWN };
 
@@ -95,32 +89,6 @@ void gemmHalfWeightFloat(
     int ldc,
     Mode mode,
     CpuMathBackend backendType = CpuMathBackend::DEFAULT);
-
-/// @brief C(fp32) = A(fp32) x B(E4M3). B is converted to fp32 inside the packing loop, so it is
-///        never materialized as a whole fp32 matrix -- the same arrangement gemmHalfWeightFloat
-///        has, and for the same reason.
-///
-/// No per-channel scale here: one that is constant down a column of C is the caller's to apply
-/// afterwards, which costs a pass over C rather than a change to the micro-kernel.
-void gemmFp8WeightFloat(
-    bool transA,
-    bool transB,
-    int M,
-    int N,
-    int K,
-    const float *A,
-    int lda,
-    const Fp8E4M3 *B,
-    int ldb,
-    float *C,
-    int ldc,
-    Mode mode,
-    CpuMathBackend backendType = CpuMathBackend::DEFAULT);
-
-/// @brief The scalar E4M3 conversions, for a caller outside the kernel layer that has to quantize
-///        or read back one value at a time.
-float convertFp8ToFloat(Fp8E4M3 x);
-Fp8E4M3 convertFloatToFp8(float x);
 
 void convertHalfToFloat(
     int n,

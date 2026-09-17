@@ -56,6 +56,7 @@ use std::rc::Rc;
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, functional as F, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    WeightFormat,
 };
 use crate::layers::{Conv2d, GroupNorm, LayerNorm, Linear};
 
@@ -86,6 +87,9 @@ pub struct UnetConfig {
     pub addition_time_embed_dim: i32,
     /// What the added embedding reads: the pooled text vector and those six numbers embedded.
     pub projection_class_embeddings_input_dim: i32,
+    /// How the package stored the matrices this multiplies by, which decides what its projections
+    /// are built out of. See [`WeightFormat`].
+    pub weight_format: WeightFormat,
 }
 
 impl UnetConfig {
@@ -764,7 +768,7 @@ impl Unet {
     pub fn build(config: UnetConfig, name: &str, weights: &Rc<dyn ParamSource>) -> Result<Unet> {
         check(&config)?;
 
-        let graph = Graph::new();
+        let graph = Graph::with_weights(config.weight_format);
         write(&config, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
@@ -928,6 +932,7 @@ mod tests {
             cross_attention_dim: 2048,
             addition_time_embed_dim: 256,
             projection_class_embeddings_input_dim: 2816,
+            weight_format: WeightFormat::Float,
         }
     }
 

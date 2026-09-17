@@ -21,10 +21,7 @@
 #include <immintrin.h>
 #include <stdint.h>
 
-#include <array>
-
 #include "flint/cpu/kernel/abstract.h"
-#include "flint/cpu/kernel/util.h"
 
 namespace fl {
 namespace op {
@@ -258,81 +255,6 @@ void hsaxpyAvx2Kernel(int64_t n, float a, const Float16 *x, float *y) {
   }
 }
 
-// Every value E4M3 can hold, which is 256 of them and a kilobyte. There is no instruction that
-// widens eight of these to float the way _mm256_cvtph_ps does for half, and the scalar conversion
-// has two branches in it -- subnormals and the NaN code -- which cost about twenty cycles an
-// element in a loop that should be running at one. A gathered lookup is three instructions and
-// has neither branch.
-//
-// It is the scalar conversion tabulated rather than a second implementation of the format, so the
-// two cannot drift.
-const float *fp8E4m3Table() {
-  static const std::array<float, 256> table = [] {
-    std::array<float, 256> t{};
-    for (int i = 0; i < 256; ++i) t[i] = cvt_f8_s(Fp8E4M3{static_cast<uint8_t>(i)});
-    return t;
-  }();
-
-  return table.data();
-}
-
-/// Eight E4M3 codes to eight floats: one eight byte load, a zero extend to eight indices, and a
-/// gather.
-LIBWAIFU_KERNEL_FORCE_INLINE __m256 cvtF8x8Avx2(const float *table, const Fp8E4M3 *p) {
-  __m128i bytes = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(p));
-  return _mm256_i32gather_ps(table, _mm256_cvtepu8_epi32(bytes), 4);
-}
-
-// The w8a32 GEMV path: one row of the weight against the activation.
-float sf8dotAvx2Kernel(int64_t n, const float *x, const Fp8E4M3 *y) {
-  const float *table = fp8E4m3Table();
-  __m256 a00 = _mm256_setzero_ps();
-
-  int64_t nb = n / 8;
-  int64_t nr = n % 8;
-
-  const float *px = x;
-  const Fp8E4M3 *py = y;
-  for (int64_t i = 0; i < nb; ++i) {
-    __m256 x00 = _mm256_loadu_ps(px);
-    a00 = _mm256_fmadd_ps(x00, cvtF8x8Avx2(table, py), a00);
-
-    px += 8;
-    py += 8;
-  }
-
-  float sum = hsum(a00);
-  for (int64_t i = 0; i < nr; ++i) {
-    sum += *px++ * cvt_f8_s(*py++);
-  }
-
-  return sum;
-}
-
-// y (fp32) += a * x (E4M3). The transposed half of the w8a32 GEMV path.
-void f8saxpyAvx2Kernel(int64_t n, float a, const Fp8E4M3 *x, float *y) {
-  const float *table = fp8E4m3Table();
-  __m256 a00 = _mm256_broadcast_ss(&a);
-
-  int64_t nb = n / 8;
-  int64_t nr = n % 8;
-
-  const Fp8E4M3 *px = x;
-  float *py = y;
-  for (int64_t i = 0; i < nb; ++i) {
-    __m256 y00 = _mm256_loadu_ps(py);
-    y00 = _mm256_fmadd_ps(a00, cvtF8x8Avx2(table, px), y00);
-    _mm256_storeu_ps(py, y00);
-
-    px += 8;
-    py += 8;
-  }
-
-  for (int64_t i = 0; i < nr; ++i) {
-    *py++ += a * cvt_f8_s(*px++);
-  }
-}
-
 // transpose the 8x8 block held in v0..v7 in place: on return v[i] holds what was element i of
 // each of the eight inputs.
 LIBWAIFU_KERNEL_FORCE_INLINE void transpose8x8Avx2(__m256 *v) {
@@ -434,29 +356,6 @@ void hspackTransposeAvx2Kernel(
         return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i *>(p)));
       },
       [](Float16 v) { return half2float(v); });
-}
-
-/// The E4M3 pack. The decode is still one element at a time -- there is no instruction that
-/// widens eight of these to float, the way _mm256_cvtph_ps does for half -- but it goes through
-/// the same blocked transpose, which is what the reading pattern needed: a weight held one output
-/// channel per row is read down its columns here, and the element at a time loop in Block::copyTo
-/// touches a separate cache line for every byte it wants.
-void f8spackTransposeAvx2Kernel(
-    int numRows,
-    int numCols,
-    const Fp8E4M3 *src,
-    int64_t srcStride,
-    float *tgt,
-    int64_t tgtStride) {
-  packTransposeAvx2(
-      numRows,
-      numCols,
-      src,
-      srcStride,
-      tgt,
-      tgtStride,
-      [table = fp8E4m3Table()](const Fp8E4M3 *p) { return cvtF8x8Avx2(table, p); },
-      [](Fp8E4M3 v) { return cvt_f8_s(v); });
 }
 
 void spackTransposeAvx2Kernel(

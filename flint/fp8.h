@@ -36,9 +36,10 @@ constexpr float kFp8E4M3Max = 448.0f;
 /// that is constant down a column of the result is one pass over the result, where a finer one
 /// would have to be applied inside the mainloop.
 ///
-/// The same struct on either device. What differs is only which `op::` namespace made it and can
-/// multiply by it; the bytes are the same, and were checked to be the same -- the two quantizers
-/// agree on every one of the 2^32 float inputs.
+/// Not `op::cuda`'s, though `op::cuda` is the only namespace that can multiply by one today. The
+/// bytes mean what they mean without a device -- a package stores them, an exporter writes them on
+/// a processor -- so what holds them together lives here rather than beside the kernels that
+/// happen to read them.
 struct Fp8Operand {
   /// <fp8e4m3>(rows, k), row major.
   Tensor data;

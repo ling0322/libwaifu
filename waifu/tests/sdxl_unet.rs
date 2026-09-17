@@ -29,7 +29,7 @@ use std::rc::Rc;
 
 use waifu::flint::{functional as F, resident, ParamSource, Tensor};
 use waifu::{
-    DType, Device, Manifest, ParamFile, Unet, UnetCondition, UnetConfig
+    DType, Device, Manifest, ParamFile, Unet, UnetCondition, UnetConfig, WeightFormat
 };
 
 fn models_dir() -> PathBuf {
@@ -75,7 +75,8 @@ fn config() -> UnetConfig {
         norm_num_groups: 32,
         cross_attention_dim: 2048,
         addition_time_embed_dim: 256,
-        projection_class_embeddings_input_dim: 2816
+        projection_class_embeddings_input_dim: 2816,
+        weight_format: WeightFormat::Float
     }
 }
 

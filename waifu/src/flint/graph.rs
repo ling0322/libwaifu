@@ -141,6 +141,52 @@ pub struct Graph {
     /// handle has of its own. Empty at the root and one level deeper in every
     /// [`Graph::subgraph`].
     namespace: String,
+    /// How the package holds the matrices this graph multiplies by, which decides what a
+    /// projection is built out of. See [`WeightFormat`].
+    weight_format: WeightFormat,
+}
+
+/// How a package stored the matrices a model multiplies by.
+///
+/// Not a property of the model: a projection is the same projection either way, the weight has the
+/// same name and the same shape, and the pass computes the same thing to within the quantization
+/// error. What changes is which nodes read it -- so this is carried on the [`Graph`] rather than
+/// passed to every layer, reaching each of them the same way the graph itself does.
+///
+/// It comes from the model's configuration, because that is where a package says what is in it. A
+/// graph could instead go looking for the scales beside a weight and decide from that, and it
+/// deliberately does not: then what a model *is* would depend on what a reader found, two packages
+/// with the same configuration could compile to different passes, and a package that lost half its
+/// scales would quietly build a mixture rather than fail.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WeightFormat {
+    /// As the exporter wrote them, which is what every package so far holds: float16 for most
+    /// models, float32 where one needs the width.
+    #[default]
+    Float,
+    /// Quantized to E4M3 with one `<float>` scale per output channel, stored as two tensors --
+    /// `"…weight"` and `"…weight.scale"`. Half the bytes on the device, about 2.6e-2 of relative
+    /// error, and `docs/fp8.md` for the whole of it.
+    Fp8,
+}
+
+impl WeightFormat {
+    /// What a model's configuration calls this, or `None` for a name no configuration may use.
+    pub fn from_name(name: &str) -> Option<WeightFormat> {
+        match name {
+            "float" => Some(WeightFormat::Float),
+            "fp8" => Some(WeightFormat::Fp8),
+            _ => None,
+        }
+    }
+
+    /// The name a configuration writes it under.
+    pub fn name(&self) -> &'static str {
+        match self {
+            WeightFormat::Float => "float",
+            WeightFormat::Fp8 => "fp8",
+        }
+    }
 }
 
 /// What a graph actually holds, which no handle holds a piece of on its own.
@@ -195,8 +241,25 @@ impl fmt::Display for Site {
 }
 
 impl Graph {
+    /// A graph written from a configuration alone, which is what almost all of one is.
     pub fn new() -> Graph {
         Graph::default()
+    }
+
+    /// A graph written for a package that holds its matrices in `weight_format`.
+    ///
+    /// The model's configuration is where that comes from; see [`WeightFormat`] for why it is
+    /// carried here rather than handed to every layer, and why it is read rather than guessed.
+    pub fn with_weights(weight_format: WeightFormat) -> Graph {
+        Graph {
+            weight_format,
+            ..Graph::default()
+        }
+    }
+
+    /// How the package this graph is being written for holds its matrices.
+    pub fn weight_format(&self) -> WeightFormat {
+        self.weight_format
     }
 
     /// The same graph, with weights read out of the `name` sub-namespace of this one.
@@ -213,6 +276,7 @@ impl Graph {
         Graph {
             body: Rc::clone(&self.body),
             namespace: self.name_of(name),
+            weight_format: self.weight_format,
         }
     }
 
@@ -578,6 +642,17 @@ impl Graph {
     #[track_caller]
     pub fn matmul(&self, lhs: Value, rhs: Value) -> Value {
         self.push(Op::Matmul { lhs, rhs })
+    }
+
+    /// `lhs` times the transpose of an FP8 weight, which is the two values it is stored as: the
+    /// `<fp8e4m3>(rows, k)` elements and the `<float>(rows)` scale. See [`Op::Fp8Matmul`].
+    #[track_caller]
+    pub fn fp8_matmul(&self, lhs: Value, weight: Value, channel_scale: Value) -> Value {
+        self.push(Op::Fp8Matmul {
+            lhs,
+            weight,
+            channel_scale,
+        })
     }
 
     #[track_caller]

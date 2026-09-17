@@ -92,8 +92,8 @@ mod ir;
 mod nvfp4;
 mod op;
 
-pub use fp8::Fp8Tensor;
-pub use graph::{Graph, Site};
+pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
+pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{check_parameters, resident, Inst, Ir, ParamSource, Pinned, Residency, RunContext};
 pub use nvfp4::Nvfp4Tensor;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};

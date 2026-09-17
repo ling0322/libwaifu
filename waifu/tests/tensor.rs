@@ -139,42 +139,12 @@ fn debug_shows_the_shape() {
     assert!(text.contains("Float"), "unexpected debug output: {text}");
 }
 
+/// The processor has no FP8 kernels for now, and says so rather than failing further in.
 #[test]
-fn multiplies_by_an_fp8_weight_on_the_cpu() {
-    // No CUDA needed for this one: the CPU widens the weight while it packs it, so there is no
-    // instruction for the machine to be missing.
-    assert!(Fp8Tensor::is_available(Device::Cpu));
+fn has_no_fp8_on_the_processor() {
+    assert!(!Fp8Tensor::is_available(Device::Cpu));
 
-    // Magnitudes E4M3 holds exactly, and each of the four channels a different power of two away
-    // from the next -- so the round trip is exact, and the channels come back right only if each
-    // carried its own scale.
-    const CODES: [f32; 8] = [448.0, -224.0, 112.0, 56.0, 0.0, -1.0, 2.0, -4.0];
-    const SCALES: [f32; 4] = [1.0, 2.0, 16.0, 0.125];
-
-    let data: Vec<f32> = SCALES
-        .iter()
-        .flat_map(|scale| CODES.iter().map(move |code| code * scale))
-        .collect();
-    let weight = Tensor::from_f32(&[4, 8], &data).unwrap();
-
-    let quantized = Fp8Tensor::quantize(&weight).unwrap();
-    assert_eq!(quantized.shape().unwrap(), (4, 8));
-    assert_eq!(quantized.dequantize().unwrap().to_vec_f32().unwrap(), data);
-
-    // One row of ones against it is each channel's own row sum, so a scale applied to the wrong
-    // axis cannot pass.
-    let a = Tensor::from_f32(&[1, 8], &[1.0; 8]).unwrap();
-    let out = F::fp8_matmul(&a, &quantized).unwrap();
-    assert_eq!(out.shape(), vec![1, 4]);
-
-    let expected: Vec<f32> = SCALES
-        .iter()
-        .map(|scale| CODES.iter().sum::<f32>() * scale)
-        .collect();
-    for (got, want) in out.to_vec_f32().unwrap().iter().zip(expected.iter()) {
-        assert!(
-            (got - want).abs() <= want.abs() * 1e-5,
-            "fp8 gave {got}, expected {want}"
-        );
-    }
+    let weight = Tensor::from_f32(&[4, 8], &[1.0; 32]).unwrap();
+    let error = Fp8Tensor::quantize(&weight).unwrap_err();
+    assert!(error.message().contains("no FP8 kernels"), "{error}");
 }

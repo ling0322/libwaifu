@@ -21,30 +21,50 @@
 
 use super::{check, ffi, init, Device, Result, Tensor};
 
-/// A tensor quantized to E4M3: one byte per element, and one `float` scale per row. The two
-/// pieces travel together because the multiply needs both, and a row means what it means only
-/// against its own scale.
+/// What a package calls the scale beside a weight it stored quantized: the elements are
+/// `"…weight"` and the scale is `"…weight.scale"`.
+///
+/// The pairing is a naming convention because safetensors has nowhere else to put it -- a tensor's
+/// header holds a dtype, a shape and two offsets, and the only free text in the format is one
+/// string map for the file as a whole. So the convention is the format, and
+/// [`ParamFile`](crate::ParamFile) enforces it when it reads: an `<fp8e4m3>` tensor with no scale
+/// beside it is refused there rather than found out by a kernel much later.
+pub const CHANNEL_SCALE_SUFFIX: &str = ".scale";
+
+/// A tensor quantized to E4M3: one byte per element, and one `float` scale per row, held together
+/// because quantizing produces both at once and a row means what it means only against its own
+/// scale.
+///
+/// This is what [`Fp8Tensor::quantize`] hands back, and not what an FP8 weight *is*. A package
+/// that stored one quantized holds two ordinary tensors under two ordinary names -- `"…weight"`
+/// and `"…weight.scale"` -- which a graph loads as two ordinary weights and hands to
+/// [`functional::fp8_matmul`](super::functional::fp8_matmul) as two arguments. Nothing below the
+/// C interface has ever taken a pair as one thing either: `fl_fp8_matmul` takes two handles and
+/// puts them together on the other side. So this type is a convenience for the one path that
+/// makes both pieces in the same breath, and [`Fp8Tensor::data`] and
+/// [`Fp8Tensor::channel_scale`] are how they get back out.
 ///
 /// Where [`super::Nvfp4Tensor`] narrows both operands and multiplies on the block scaled tensor
 /// cores, this narrows the weight alone: the multiply is the ordinary one, and the weight is
-/// widened on its way into it. So it buys bandwidth rather than arithmetic -- on CUDA about twice
-/// the speed of the half GEMM where a weight is read once and multiplied by few rows, and a little
+/// widened on its way into it. So it buys bandwidth rather than arithmetic -- about twice the
+/// speed of the half GEMM where a weight is read once and multiplied by few rows, and a little
 /// slower than it where the rows are many. It costs about 2.6e-2 of relative RMSE. See
 /// `docs/fp8.md`.
 ///
-/// Both devices have it. On the CPU there is no FP8 arithmetic to reach for at all, so it buys no
-/// speed there and the weight taking one byte an element rather than two is the whole of it. The
-/// two quantizers agree byte for byte, so a weight means the same thing on either.
+/// CUDA is the only device with the kernels. The format is not the card's -- the bytes would mean
+/// the same on a processor, and a package that stores a weight quantized says nothing about where
+/// it will be multiplied -- but what reads them is, for now.
 #[derive(Debug)]
 pub struct Fp8Tensor {
-    pub(super) data: Tensor,
-    pub(super) channel_scale: Tensor,
+    data: Tensor,
+    channel_scale: Tensor,
 }
 
 impl Fp8Tensor {
-    /// Whether `device` can quantize and multiply in FP8. [`Device::Cpu`] always can; the CUDA
-    /// kernel is written against the sm_80 tensor cores, so unlike NVFP4 it needs no more than
-    /// Ampere.
+    /// Whether `device` can quantize and multiply in FP8, which today is CUDA and nothing else.
+    /// The kernel is written against the sm_80 tensor cores, so unlike NVFP4 it needs no more
+    /// than Ampere -- but a device with no FP8 kernels at all answers no here rather than failing
+    /// further in.
     pub fn is_available(device: Device) -> bool {
         init();
 
@@ -55,9 +75,7 @@ impl Fp8Tensor {
         }
     }
 
-    /// Quantize a contiguous two dimensional `x`, in the float type its device computes in:
-    /// `<float16>` on CUDA, where `k` also has to be a multiple of 16, and either `<float>` or
-    /// `<float16>` on the CPU, where nothing has to divide.
+    /// Quantize a contiguous two dimensional `<float16>` CUDA tensor whose `k` 16 divides.
     pub fn quantize(x: &Tensor) -> Result<Fp8Tensor> {
         let mut data: ffi::FlTensor = std::ptr::null_mut();
         let mut channel_scale: ffi::FlTensor = std::ptr::null_mut();
@@ -74,14 +92,23 @@ impl Fp8Tensor {
         })
     }
 
+    /// The quantized elements, `<fp8e4m3>(rows, k)`.
+    pub fn data(&self) -> &Tensor {
+        &self.data
+    }
+
+    /// The scale each row means itself against, `<float>(rows)`.
+    pub fn channel_scale(&self) -> &Tensor {
+        &self.channel_scale
+    }
+
     /// The `(rows, k)` this was quantized from.
     pub fn shape(&self) -> Result<(i32, i32)> {
         Ok((self.data.shape_at(0)?, self.data.shape_at(1)?))
     }
 
-    /// Back to `(rows, k)` in its device's float type -- `<float16>` on CUDA, `<float>` on the
-    /// CPU -- carrying the quantization error with it. Mostly useful for seeing how much of that
-    /// error there is.
+    /// Back to `<float16>(rows, k)`, carrying the quantization error with it. Mostly useful for
+    /// seeing how much of that error there is.
     pub fn dequantize(&self) -> Result<Tensor> {
         Tensor::produce(|out| unsafe {
             ffi::fl_fp8_dequantize(self.data.raw, self.channel_scale.raw, out)

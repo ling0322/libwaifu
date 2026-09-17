@@ -140,6 +140,51 @@ class Quantization:
 
         return qweights, scales.type(torch.float16), zeros.type(torch.float16)
 
+    @classmethod
+    def quantize_to_fp8(cls, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """A 2D weight to E4M3 elements and one float32 scale per row.
+
+        The same arithmetic the runtime's own quantizer does, and it has to be: a package written
+        here is read by that, and `docs/fp8.md` is one format rather than two only if every
+        producer agrees on the bytes.
+
+            scale[r]   = amax(|x[r]|) / 448          # 448 is E4M3's largest finite magnitude
+            data[r][j] = e4m3(x[r][j] / scale[r])
+
+        so each row's largest element lands exactly on the top of the format's range. A row that is
+        all zero gets a zero scale and quantizes to zeros rather than to a NaN.
+
+        Three details are not free to change:
+
+        - The division is float32 and round to nearest. One ulp moves elements onto the next code:
+          on the CUDA side `--use_fast_math` turning this into a reciprocal approximation moved 2
+          elements in 16896, which is why that kernel divides with `__fdiv_rn`.
+        - The clamp is the saturation `__NV_SATFINITE` does. Without it torch sends what rounds
+          past 448 to NaN, and the row maximum can land a hair above it.
+        - `float8_e4m3fn` is the format: 448 max, no infinities, NaN at 0x7f. That is what
+          `__NV_E4M3` is too.
+        """
+        if tensor.dim() != 2:
+            raise ValueError(f"fp8 takes a matrix, not {tuple(tensor.shape)}")
+
+        weights = tensor.detach().cpu().to(torch.float32)
+        scales = weights.abs().amax(dim=1) / FP8_E4M3_MAX
+
+        # An all zero row has no scale to speak of; dividing by one is what would make a NaN.
+        divisor = torch.where(scales > 0, scales, torch.ones_like(scales))
+        data = weights / divisor.unsqueeze(1)
+        data = data.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+        return data, scales
+
+
+#: E4M3's largest finite magnitude, which is what a row's maximum is scaled onto.
+FP8_E4M3_MAX = 448.0
+
+#: What a package calls the scales beside a weight it stored quantized. The runtime looks for this
+#: name exactly -- `flint::CHANNEL_SCALE_SUFFIX` -- and refuses an E4M3 tensor without one.
+FP8_SCALE_SUFFIX = ".scale"
+
 
 def dtype_code(dtype) -> int:
     """The number a torch element type is written as, which is what DType::from_code reads."""
@@ -550,14 +595,36 @@ class WeightsWriter:
         if tensor.dtype not in (torch.float32, torch.float16, torch.int64):
             raise ValueError(f"{ctx.name}: {tensor.dtype} is not a type the runtime reads")
 
+        self._hold(ctx.name, tensor)
+
+    def write_fp8_tensor(self, ctx, tensor: torch.Tensor) -> None:
+        """A matrix, quantized to E4M3 and written as the two tensors it is then made of.
+
+        `<name>` holds the elements and `<name>.scale` the float32 scale of each row, which is the
+        layout `docs/fp8.md` describes and the only one the runtime reads: safetensors cannot tie
+        two tensors together, so the pair is a naming convention, and the reader refuses elements
+        with no scales beside them.
+
+        Half the file and half the bytes on the device, for about 2.6e-2 of relative error. Whether
+        a model is worth that is the exporter's call, and the package has to say which it made:
+        `weight_format: fp8` in the manifest is what makes the runtime build the quantized
+        multiply, and a package that writes these tensors without it will not load.
+        """
+        data, scales = Quantization.quantize_to_fp8(tensor)
+
+        self._hold(ctx.name, data)
+        self._hold(ctx.name + FP8_SCALE_SUFFIX, scales)
+
+    def _hold(self, name: str, tensor: torch.Tensor) -> None:
+        """Keep one tensor for the part being filled, rolling over to the next when it is full."""
         if self._part_size is not None and self._written >= self._part_size:
             self._flush()
 
-        if ctx.name in self._holding:
-            raise ValueError(f"{ctx.name} is written twice")
+        if name in self._holding:
+            raise ValueError(f"{name} is written twice")
 
-        print(f"write tensor {ctx.name}, shape={tuple(tensor.shape)}")
-        self._holding[ctx.name] = tensor.detach().cpu().contiguous().clone()
+        print(f"write tensor {name}, shape={tuple(tensor.shape)}, dtype={tensor.dtype}")
+        self._holding[name] = tensor.detach().cpu().contiguous().clone()
         self._written += tensor.numel() * tensor.element_size()
 
     def finish(self, config, suggested=None, tokenizers=None) -> list:

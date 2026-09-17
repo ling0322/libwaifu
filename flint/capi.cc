@@ -29,7 +29,6 @@
 #include <utility>
 #include <vector>
 
-#include "flint/cpu/fp8.h"
 #include "flint/fp8.h"
 #include "flint/functional.h"
 #include "flint/memory.h"
@@ -77,6 +76,10 @@ fl::DType toDType(fl_dtype_t dtype) {
     case FL_DTYPE_FP4E2M0X2:
     case FL_DTYPE_BOOL:
     case FL_DTYPE_INT32:
+    // A caller may name this one because a package may hold it: the elements of a weight stored
+    // quantized arrive as bytes and a dtype like any other tensor's, and only the scales beside
+    // them say what they are worth. See fl_fp8_matmul().
+    case FL_DTYPE_FP8E4M3:
       return fl::DType(static_cast<int16_t>(dtype));
     default:
       throw lut::InvalidArgError("invalid dtype");
@@ -712,6 +715,11 @@ namespace {
 /// Whether `device` has the kernels, asked without touching one. On CUDA `isFp8GemmAvailable()`
 /// reads the card's architecture, which fails where there is no card, and answering that without
 /// failing is this call's whole job.
+///
+/// CUDA is the only device that answers yes. Nothing about the format is specific to it -- the
+/// bytes would mean the same on a processor, and `Fp8Operand` is device agnostic for that reason --
+/// but the kernels that read them are the card's, so every other device is asked and says no here
+/// rather than further in.
 bool fp8Available(fl::Device::Type device) {
   if (!fl::isOperatorsAvailable(device)) return false;
 
@@ -719,8 +727,7 @@ bool fp8Available(fl::Device::Type device) {
   if (device == fl::Device::kCuda) return fl::op::cuda::isFp8GemmAvailable();
 #endif
 
-  // The CPU widens the weight while it packs it, so there is no instruction for it to be missing.
-  return device == fl::Device::kCpu;
+  return false;
 }
 
 /// The kernels assert their preconditions with CHECK, which reports a broken invariant of ours.
@@ -736,13 +743,11 @@ void checkFp8Activation(const fl::Tensor &x, fl::Device::Type device, const char
     throw lut::InvalidArgError(std::string(what) + " has fewer than two dimensions");
   }
 
-  // Each device multiplies in its own float type, and neither narrows the activation on the way
-  // in: only the weight is narrow.
-  fl::DType wanted = device == fl::Device::kCuda ? fl::DType::kFloat16 : fl::DType::kFloat;
-  if (x.getDType() != wanted) {
+  // The activation is not narrowed on the way in: only the weight is narrow, and the multiply
+  // happens in what the device computes in.
+  if (x.getDType() != fl::DType::kFloat16) {
     throw lut::InvalidArgError(
-        std::string(what) + " is not <" + wanted.toString() +
-        ">, which is what this device multiplies in");
+        std::string(what) + " is not <float16>, which is what this device multiplies in");
   }
 }
 
@@ -769,12 +774,7 @@ int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_s
     }
 
     fl::Fp8Operand operand;
-    if (tensor.getDevice().getType() == fl::Device::kCpu) {
-      if (!tensor.getDType().isFloat()) {
-        throw lut::InvalidArgError("the tensor to quantize is neither <float> nor <float16>");
-      }
-      operand = fl::op::cpu::quantizeFp8(tensor);
-    } else if (tensor.getDevice().getType() == fl::Device::kCuda) {
+    if (tensor.getDevice().getType() == fl::Device::kCuda) {
 #ifdef LIBWAIFU_CUDA_ENABLED
       if (tensor.getDType() != fl::DType::kFloat16) {
         throw lut::InvalidArgError("the tensor to quantize is not <float16>");
@@ -802,12 +802,11 @@ int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_s
 }
 
 int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor_t *out) {
-  return guard([&]() {
+  // The return type is written down because a build without CUDA has nothing but the throw left
+  // in here, and a lambda that only throws deduces void.
+  return guard([&]() -> int32_t {
     fl::Fp8Operand operand = fl::makeFp8Operand(deref(data), deref(channel_scale));
 
-    if (operand.data.getDevice().getType() == fl::Device::kCpu) {
-      return publish(fl::op::cpu::dequantFp8ToFloat(operand), out);
-    }
 #ifdef LIBWAIFU_CUDA_ENABLED
     if (operand.data.getDevice().getType() == fl::Device::kCuda) {
       return publish(fl::op::cuda::dequantFp8ToHalf(operand), out);
@@ -822,7 +821,8 @@ int32_t fl_fp8_matmul(
     fl_tensor_t data,
     fl_tensor_t channel_scale,
     fl_tensor_t *out) {
-  return guard([&]() {
+  // As in fl_fp8_dequantize: without CUDA every path out of here throws.
+  return guard([&]() -> int32_t {
     fl::Fp8Operand operand = fl::makeFp8Operand(deref(data), deref(channel_scale));
     fl::Device::Type device = operand.data.getDevice().getType();
 
@@ -831,9 +831,6 @@ int32_t fl_fp8_matmul(
       throw lut::InvalidArgError("the two operands disagree about k");
     }
 
-    if (device == fl::Device::kCpu) {
-      return publish(fl::op::cpu::gemmFp8(deref(a), operand), out);
-    }
 #ifdef LIBWAIFU_CUDA_ENABLED
     if (device == fl::Device::kCuda) {
       // What the CUTLASS instantiation can read, rather than what the format can hold.

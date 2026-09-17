@@ -63,20 +63,6 @@ void hsaxpyFloatFallbackKernel(int64_t n, float a, const Float16 *x, float *y) {
   }
 }
 
-float sf8dotFallbackKernel(int64_t n, const float *x, const Fp8E4M3 *y) {
-  float sum = 0.0f;
-  for (int64_t i = 0; i < n; ++i) {
-    sum += x[i] * cvtf<float>(y[i]);
-  }
-  return sum;
-}
-
-void f8saxpyFloatFallbackKernel(int64_t n, float a, const Fp8E4M3 *x, float *y) {
-  for (int64_t i = 0; i < n; ++i) {
-    y[i] += a * cvtf<float>(x[i]);
-  }
-}
-
 float sdotFallbackKernel(int64_t n, const float *x, const float *y) {
   float sum = 0;
   for (int64_t i = 0; i < n; ++i) {

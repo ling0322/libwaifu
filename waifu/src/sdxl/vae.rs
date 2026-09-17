@@ -473,6 +473,9 @@ impl VaeDecoder {
     ) -> Result<VaeDecoder> {
         check(&config)?;
 
+        // Not `with_weights`: an autoencoder is convolutions, its few projections are small, and
+        // SDXL runs this half in float32 where the FP8 multiply on CUDA takes float16. So the
+        // format a package names is for the halves that have the matrices in them.
         let graph = Graph::new();
         write_decoder(&config, float_type, device, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
@@ -573,6 +576,9 @@ impl VaeEncoder {
     ) -> Result<VaeEncoder> {
         check(&config)?;
 
+        // Not `with_weights`: an autoencoder is convolutions, its few projections are small, and
+        // SDXL runs this half in float32 where the FP8 multiply on CUDA takes float16. So the
+        // format a package names is for the halves that have the matrices in them.
         let graph = Graph::new();
         write_encoder(&config, float_type, device, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;

@@ -268,7 +268,7 @@ fn stores_and_reads_a_paged_kv_cache() {
         cu_seqlens_q: &cu_seqlens_q,
         seqlens_k: &seqlens_k,
         max_q_len: NUM_TOKENS,
-        max_k_len: NUM_TOKENS
+        max_k_len: NUM_TOKENS,
     };
     let paged = F::paged_attention(&q, &cache, true).unwrap();
     assert_eq!(paged.shape(), vec![NUM_TOKENS, 1, HEAD_DIM]);
@@ -344,7 +344,7 @@ fn multiplies_by_an_fp8_weight() {
     // One row of ones against it is each channel's own row sum, so a scale applied to the wrong
     // axis cannot pass.
     let a = cuda_f32(&[1, 16], &[1.0; 16]);
-    let out = F::fp8_matmul(&a, &quantized).unwrap();
+    let out = F::fp8_matmul(&a, quantized.data(), quantized.channel_scale()).unwrap();
     assert_eq!(out.shape(), vec![1, 8]);
 
     let expected = to_host_f32(&F::matmul(&a, &weight.transpose(0, 1).unwrap()).unwrap());

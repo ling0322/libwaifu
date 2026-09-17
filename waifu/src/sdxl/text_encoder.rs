@@ -51,6 +51,7 @@ use std::rc::Rc;
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, DType, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    WeightFormat,
 };
 use crate::layers::{Embedding, LayerNorm, Linear};
 
@@ -70,6 +71,9 @@ pub struct ClipTextConfig {
     pub norm_eps: f32,
     /// The id whose position the pooled output is read from.
     pub eot_token_id: i32,
+    /// How the package stored the matrices this multiplies by, which decides what its projections
+    /// are built out of. See [`WeightFormat`].
+    pub weight_format: WeightFormat,
 }
 
 /// What one encoder produces for a prompt.
@@ -234,7 +238,7 @@ impl ClipTextEncoder {
             ));
         }
 
-        let graph = Graph::new();
+        let graph = Graph::with_weights(config.weight_format);
         let has_projection = weights.has(&format!("{name}.text_proj.weight"));
         write(&config, float_type, has_projection, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;

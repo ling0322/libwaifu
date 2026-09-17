@@ -28,7 +28,7 @@
 use std::ops::ControlFlow;
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, ParamSource, Residency, Tensor};
+use crate::flint::{functional as F, DType, Device, ParamSource, Residency, Tensor, WeightFormat};
 use crate::generation::{unwatched, GenerationOptions, GenerationProgress};
 use crate::manifest::Manifest;
 use crate::mapping::Mapping;
@@ -90,6 +90,11 @@ impl SdxlConfig {
         }
 
         let context_length = section.get("context_length")?;
+
+        // One key for the halves that have the matrices in them. The autoencoder does not read it:
+        // it is convolutions, its few projections are small, and this half runs in float32 where
+        // the CUDA FP8 multiply takes float16.
+        let weight_format = section.get_weight_format_or("weight_format", WeightFormat::Float)?;
         let vocab_size = section.get("vocab_size")?;
         let eot_token_id = section.get("eot_token_id")?;
 
@@ -104,6 +109,7 @@ impl SdxlConfig {
                 quick_gelu,
                 norm_eps: section.get(&format!("{prefix}_norm_eps"))?,
                 eot_token_id,
+                weight_format,
             })
         };
 
@@ -137,6 +143,7 @@ impl SdxlConfig {
                 addition_time_embed_dim: section.get("unet_addition_time_embed_dim")?,
                 projection_class_embeddings_input_dim: section
                     .get("unet_projection_class_embeddings_input_dim")?,
+                weight_format,
             },
             vae: VaeConfig {
                 latent_channels: section.get("latent_channels")?,
@@ -845,6 +852,31 @@ config:
         assert_eq!(config.vae.scaling_factor, 0.13025);
         assert_eq!(config.sampler.num_train_timesteps, 1000);
         assert_eq!(config.context_length, 77);
+    }
+
+    /// A package written before any of this says nothing, and nothing is float.
+    #[test]
+    fn a_package_that_does_not_say_holds_its_matrices_in_float() {
+        let config = parse(CONFIG).unwrap();
+
+        assert_eq!(config.unet.weight_format, WeightFormat::Float);
+        assert_eq!(config.text.weight_format, WeightFormat::Float);
+        assert_eq!(config.text2.weight_format, WeightFormat::Float);
+    }
+
+    /// And one key says it for every half that has matrices in it.
+    #[test]
+    fn a_package_may_say_it_stored_its_matrices_quantized() {
+        let config = parse(&format!("{CONFIG}    weight_format: fp8\n")).unwrap();
+
+        assert_eq!(config.unet.weight_format, WeightFormat::Fp8);
+        assert_eq!(config.text.weight_format, WeightFormat::Fp8);
+        assert_eq!(config.text2.weight_format, WeightFormat::Fp8);
+
+        // A name nothing reads is refused where it is read. The alternative is a package that
+        // meant to be quantized, is not, and says nothing about it.
+        let error = parse(&format!("{CONFIG}    weight_format: e4m3\n")).unwrap_err();
+        assert!(error.to_string().contains("\"e4m3\""), "{error}");
     }
 
     #[test]

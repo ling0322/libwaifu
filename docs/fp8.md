@@ -1,56 +1,130 @@
 # FP8 weights
 
 A weight held in E4M3 with one scale per output channel, multiplied by an activation that stays at
-full width. Both devices have it, and it means the same thing on each: the two quantizers produce
-the same bytes.
+full width.
 
 ```cpp
 Fp8Operand w = op::cuda::quantizeFp8(weightFp16);   // once, at load
 Tensor y = op::cuda::gemmFp8(xFp16, w);             // per layer: half in, half out
-
-Fp8Operand w = op::cpu::quantizeFp8(weight);        // the same, on the processor
-Tensor y = op::cpu::gemmFp8(xFloat, w);             // float in, float out
 ```
 
-The CUDA half needs `WITH_CUDA=ON` and an sm_80 or newer device; unlike the NVFP4 path, which
-needs sm_120a exactly, that is everything from Ampere on. `isFp8GemmAvailable()` reports it. The
-CPU half needs nothing: it widens the weight while it packs it, so there is no instruction for a
-machine to be missing.
+Needs `WITH_CUDA=ON` and an sm_80 or newer device; unlike the NVFP4 path, which needs sm_120a
+exactly, that is everything from Ampere on. `isFp8GemmAvailable()` reports it.
 
-What each buys is different, and the difference is the whole of this document:
+**The card is the only device that has it.** Nothing about the format is the card's -- `Fp8Operand`
+and the bytes it holds are device agnostic, and a package that stores a weight quantized says
+nothing about where it will be multiplied -- but the kernels that read those bytes are CUDA's, so
+`fl_fp8_available` answers no everywhere else and the C interface refuses an operand that is not on
+a card. A processor path existed and was taken back out; see "What a processor would need" at the
+end for what it was and what it was worth.
 
-| | what the weight costs | what the multiply costs |
-| --- | --- | --- |
-| CUDA | half the bytes, half the shared memory | the same HMMA, so up to 1.85x at a small row count and 10% behind at a large one |
-| CPU | half the bytes | the same float32 FMA, so within a few percent either way |
+What the narrow weight buys, and does not:
+
+| | |
+| --- | --- |
+| what the weight costs | half the bytes from global memory, half the shared memory |
+| what the multiply costs | the same HMMA, so up to 1.85x at a small row count and 10% behind at a large one |
 
 ## From Rust
 
-`flint::Fp8Tensor` holds the two pieces a quantized weight is made of, and
-`functional::fp8_matmul` multiplies by one, on whichever device the weight is on:
+`functional::fp8_matmul` takes the weight as the two tensors it is made of. `flint::Fp8Tensor` is
+what quantizing hands both back in:
 
 ```rust
-let weight = Fp8Tensor::quantize(&float16_weight)?;   // on CUDA
-let y = F::fp8_matmul(&x, &weight)?;                  // float16 in, float16 out
-
-let weight = Fp8Tensor::quantize(&float_weight)?;     // on the CPU
-let y = F::fp8_matmul(&x, &weight)?;                  // float in, float out
+let w = Fp8Tensor::quantize(&float16_weight)?;              // on CUDA
+let y = F::fp8_matmul(&x, w.data(), w.channel_scale())?;    // float16 in, float16 out
 ```
 
-`Fp8Tensor::is_available(device)` answers whether that device can run it; `Device::Cpu` always
-can. On CUDA `k` has to be a multiple of 16 and the weight's row count a multiple of 8, which the
-C interface checks rather than leaving to the kernel; on the CPU neither has to divide by
-anything.
+Two arguments rather than one pair, because a weight a package stored quantized never becomes a
+pair: it arrives as two ordinary tensors under two ordinary names. See "In a package" below. The
+C interface has always been this shape -- `fl_fp8_matmul` takes two handles and puts them together
+on the other side.
+
+`Fp8Tensor::is_available(device)` answers whether that device can run it, which today is CUDA and
+nothing else. `k` has to be a multiple of 16 and the weight's row count a multiple of 8, which the
+C interface checks rather than leaving to the kernel.
 
 The C interface is `fl_fp8_available`, `fl_fp8_quantize`, `fl_fp8_dequantize` and `fl_fp8_matmul`.
-All four dispatch on the device the tensors are already on, so there is one entry point per
-operation rather than one per backend.
+All four dispatch on the device the tensors are already on -- one entry point per operation rather
+than one per backend, which is the shape to keep whether there is one backend or two.
 
 The kernels assert their preconditions with `CHECK`, which reports a broken invariant as
 `FL_ERROR_ABORTED`. The C interface checks device, type, contiguity and shape itself first even
 so, and `makeFp8Operand` checks what a caller hands back: those are the caller's mistakes rather
 than the library's, so they come back as `FL_ERROR_INVALID_ARG` naming what was wrong, instead of
 as an internal failure with a stack trace behind it.
+
+## In a package
+
+A model whose weights were quantized before they were published stores each one as **two
+tensors**: `"…weight"` as `F8_E4M3` `(out, in)`, and `"…weight.scale"` as `F32` `(out,)`.
+
+```
+proj.weight         F8_E4M3  [2560, 2048]
+proj.weight.scale   F32      [2560]
+```
+
+Two tensors and not one, because that is what the format can say. A safetensors header holds a
+dtype, a shape and two offsets per tensor, and the only free text in the file is one string map for
+the whole of it -- so there is nowhere to write down that these two belong together, and the name
+is the whole of the pairing. `ParamFile` is where that convention is enforced: an `F8_E4M3` tensor
+with no scale beside it, or with one of the wrong shape or type, is refused when the file is read.
+A weight scaled by nothing would otherwise load perfectly well and draw noise.
+
+The reverse is deliberately not checked. A tensor whose name happens to end in `.scale` is an
+ordinary tensor, since this suffix is a convention of this library rather than a word reserved in
+the format.
+
+### What the pass does with them
+
+The graph loads two weights and hands three operands to one node:
+
+```
+%7  = load("proj.weight", [2560, 2048])
+%8  = load("proj.weight.scale", [2560])
+%9  = fp8_matmul(%3, %7, %8)
+```
+
+Two `load`s rather than one composite value, which is the whole point of storing it this way: a
+scale is then an ordinary weight under an ordinary name, and everything that walks loads reaches it
+without being taught that FP8 exists -- `resident` reading the package onto the device, the
+liveness the `free` instructions come from, `Residency::LowVram` putting one weight at a time
+across the bus. The scale costs `4/k` of what the weight costs, which at `k=3072` is 0.13%.
+
+Note also what is *not* there: the `transpose` a float `matmul` needs before it. `fp8_matmul` reads
+the weight in the `(out, in)` a package stores.
+
+### The model says so, the reader does not guess
+
+Which of the two a package holds comes from its manifest:
+
+```yaml
+config:
+  sdxl:
+    weight_format: fp8      # "float" when absent, which is every package so far
+```
+
+`Linear` builds the quantized multiply under `WeightFormat::Fp8` and the ordinary one otherwise.
+A graph could instead go looking for the scales and decide from what it found, and deliberately
+does not: then what a model *is* would depend on what a reader happened to see, two packages with
+the same configuration could compile to different passes, and a package that lost half its scales
+would quietly build a mixture instead of failing. Configuration is where a package says what is in
+it; the tensors are what it says it with.
+
+The autoencoders do not read this. An autoencoder is convolutions, its few projections are small,
+and SDXL runs that half in float32 where the CUDA FP8 multiply takes float16 -- so the format a
+package names is for the halves that have the matrices in them.
+
+### Writing one
+
+`tools/model_writer.py` has `WeightsWriter.write_fp8_tensor`, which quantizes and writes the pair,
+and `Quantization.quantize_to_fp8`, which is the same arithmetic the runtime's own quantizer does.
+It has to be the same: a package written there is read by this, and this is one format rather than
+two only if every producer agrees on the bytes. Three details in it are load bearing -- the
+rounding of the division above is one -- and the docstring says which.
+
+No exporter here writes one yet. What a published package holds is a decision about a published
+package, and this is the machinery for making it rather than the making of it.
 
 ## Why the activation is not narrowed
 
@@ -73,17 +147,16 @@ That is the difference from `docs/nvfp4.md`, and it is the reason both exist. NV
 instruction, so it buys arithmetic and needs both operands narrow; FP8 here keeps the instruction
 and buys traffic, so it needs only the weight narrow and leaves the activation exact.
 
-The processor is the same story with the ceiling lower: x64 and aarch64 have no FP8 arithmetic at
-all, so the weight is widened to float32 between memory and the micro-kernel and the multiply is
-the float32 one it would have been anyway.
+It is the same story on a processor with the ceiling lower, which is worth knowing before wanting
+one: x64 and aarch64 have no FP8 arithmetic at all, so the weight would be widened to float32
+between memory and the micro-kernel and the multiply would be the float32 one it was anyway.
 
 ## The quantizer
 
 One CUDA block owns one row, which makes the scale a block reduction rather than a second launch:
 a row's maximum is known before the same block quantizes it. The row is read twice, once for the
 maximum and once for the elements, which is the cost of keeping it in one launch -- and a weight
-is quantized once at load, so it is not a cost anything pays twice. The CPU one is the same shape,
-one OpenMP iteration per row.
+is quantized once at load, so it is not a cost anything pays twice.
 
 ```
 channelScale[r] = rowAmax[r] / 448      // 448 is E4M3's largest finite magnitude
@@ -93,21 +166,18 @@ data[r][j]      = e4m3(x[r][j] / channelScale[r])
 so the largest element of each row lands exactly on the top of the format's range. A row that is
 all zero gets a zero scale and quantizes to zeros rather than to a NaN.
 
-### The two quantizers give the same bytes
+### The division is round to nearest, on purpose
 
-They have to, or an operand is not one format but two, and a weight quantized where there is a
-card could not be read where there is not. A test compares them element by element.
+`gemm_fp8_cutlass.cu` is compiled with `--use_fast_math`, which turns `448.0f / amax` into a
+reciprocal approximation. One ulp off is enough to move an element onto the next code -- it moved
+two in 16896 -- so those divisions are `__fdiv_rn`.
 
-Getting there took two things. The conversion itself was checked exhaustively against CUDA's --
-all 256 codes through `__nv_cvt_fp8_to_halfraw`, and every one of the 2^32 float bit patterns
-through `__nv_cvt_float_to_fp8(__NV_SATFINITE, __NV_E4M3)` -- so `cvt_s_f8` in
-`cpu/kernel/util.h` is not an approximation of NVIDIA's, it is the same function.
-
-The second was the scale, and it is the one that was actually wrong. `gemm_fp8_cutlass.cu` is
-compiled with `--use_fast_math`, which turns `448.0f / amax` into a reciprocal approximation: one
-ulp off, which moved two elements in 16896 onto the next code. The divisions are `__fdiv_rn` now.
-That is the kind of difference nothing but an exact comparison finds, and it is why the test is an
-exact comparison.
+It matters beyond this kernel. Anything else that produces these bytes has to produce the same
+ones, or a weight is not one format but two: an exporter that writes a package (see "In a package"
+above) is doing this arithmetic in float32 on a processor, and a quantizer written for a processor
+here would be doing it again. A reciprocal approximation in any of them would disagree with the
+others in a few elements per ten thousand, which is exactly the kind of difference nothing but an
+exact comparison finds.
 
 One scale per row rather than one per tensor, because a projection's output channels do not share
 a magnitude: with a single scale, one outlier channel pushes every other channel down into E4M3's
@@ -167,72 +237,6 @@ Two other tile facts, both forced rather than chosen:
 - Two stages does not compile. At two, CUTLASS builds the mainloop out of `MmaPipelined` rather
   than `MmaMultistage`, and the mixed input warp operator has no overload it can call. Three works
   and measures within half a percent of four everywhere.
-
-## On the processor
-
-`op::cpu::gemmFp8` is the same three parts in a different order. No CUTLASS here -- the CPU GEMM
-is this repository's own, in `cpu/kernel/gemm.h` -- and it already had the place for a narrow
-weight: `Gemm` takes the type B is stored in separately from the type the micro-kernel computes
-in, and converts in `Pack()`. That is how the float-activation-by-half-weight
-path already works -- `gemmHalfWeightFloat`, which is what a model on the CPU runs today -- so an
-E4M3 weight is the same arrangement with a narrower B:
-
-- `cvt_f8_s` / `cvt_s_f8` in `cpu/kernel/util.h`, the scalar conversions.
-- `gemmFp8WeightFloat` in `cpu/kernel/interface.cc`, which instantiates `wgemm` with
-  `TB = Fp8E4M3`. Nothing about the micro-kernel changes; it still sees float32.
-- The channel scale afterwards, as a pass over C. On the GPU it is folded into the epilogue
-  because the epilogue is free there; here `M*N` against the multiply's `M*N*K` is not worth a
-  change to the kernel.
-
-Three kernels had to be written even so, and each was worth a measured factor:
-
-| | without | with | on |
-| --- | --- | --- | --- |
-| `packTransposeKernel` | 102.6 ms | 32.2 ms | 1024x10240x1280 |
-| the GEMV path (`dotKernel`, `axpyKernel`) | 5.0 ms | 3.3 ms | 1x5120x3072 |
-| the gathered lookup inside both | 3.3 ms | 0.22 ms | 1x5120x3072 |
-
-The first is a reading pattern rather than arithmetic. A weight is stored one output channel per
-row, so the pack reads it down its columns, and `Block::copyTo`'s generic loop does that one
-strided element at a time -- a separate cache line for every byte it wants, which for a 1280 byte
-stride is 64 bytes moved per byte used. The blocked transpose `Float16` already had reads eight
-consecutive elements at a time instead; E4M3 now goes through it.
-
-The third is the one worth remembering. `cvt_f8_s` has two branches in it, subnormals and the NaN
-code, and eight of them per vector cost about twenty cycles an element in a loop that should run
-at one. There is no `_mm256_cvtph_ps` for 8-bit, so what replaces them is a 256 entry table -- the
-whole format is 256 values -- gathered with `_mm256_i32gather_ps`. Three instructions, no
-branches, and it is the scalar conversion tabulated rather than a second implementation of the
-format, so the two cannot drift.
-
-### What it measures
-
-A 32 thread x64 machine with AVX-512, the fastest of twenty iterations because the mean on a
-shared machine moved by a factor of two between runs. Milliseconds:
-
-| shape (m,n,k) | f32 x f32 | f32 x f16 | f32 x fp8 |
-| --- | --- | --- | --- |
-| 1x5120x3072 | 0.28 | 0.19 | 0.22 |
-| 8x5120x3072 | 1.28 | 0.82 | **0.74** |
-| 77x2560x2048 | 0.69 | 0.66 | 0.67 |
-| 1024x1280x1280 | 2.46 | 2.46 | 2.55 |
-| 1024x10240x1280 | 29.1 | 28.9 | 28.9 |
-| 4096x1920x640 | 6.09 | 6.05 | 6.46 |
-
-So: parity, within a few percent either way, and half the weight in memory. That is the result to
-expect rather than a disappointing one -- the arithmetic is float32 in all three columns, and the
-only thing FP8 changes is how many bytes have to reach it.
-
-Quantizing costs one pass: 6.0 ms for a 5120 by 3072 weight, 0.5 ms for 1920 by 640, paid once at
-load.
-
-### What it is for
-
-Memory. A model that does not fit stops not fitting: SDXL is 6.97 GB on the CPU today, and its
-weights are what nearly all of that is.
-
-Nothing is built out of it yet -- `VarBuilder` hands a layer the weight the file stored, and no
-package stores E4M3 -- so this is the kernel half of that, with the file half still to come.
 
 ## Measurements on the GPU
 
@@ -302,25 +306,83 @@ more accurate than NVFP4 on one operand, and about seventy times less accurate t
 - **No split K.** The SM80 EVT epilogue asserts against it, so a shape with too few n tiles to
   fill the machine has nothing to fall back on. `gemm_cutlass.cu`'s `splitKSlices` is what the
   half path does instead, and it is worth 25% to 55% on the shapes it fires for.
-- **Weights are quantized at load rather than stored quantized**, so a package holds float16 and
-  the memory saving only starts once the weight is on the device. Storing E4M3 in a `.waifupkg`
-  would also halve the file and the load time.
+- **No model is published quantized.** A package *can* store E4M3 now -- see "In a package" above,
+  which is read, checked and built into the pass -- and none of the models this library ships does.
+  Until one does, every weight here is still quantized at load if it is quantized at all, so the
+  file and the load time are what they always were and the saving starts once the weight is on the
+  device.
 - **The quantizer reads each row twice.** One pass would need either a second launch or a scale
   chosen before the data is seen. At 380 us for a 50 MB weight it is a load-time cost only.
 - **Nothing is built out of it yet.** The diffusion model this crate runs is float16 throughout,
-  and at its row counts -- 1024 and 4096 -- the CUDA path is 5% behind cuBLAS rather than ahead.
-  What it is for on that device is a weight read once per token, which is the language model
-  shape. On the CPU what it is for is the weight being half the size, and reaching that needs a
-  package that stores E4M3 rather than a runtime that quantizes at load.
-- **aarch64 converts one element at a time.** The pack kernel and the gathered lookup are x64
-  only, so `ASIMDHP` and `ASIMDFHM` take the scalar path for both: the GEMV kernels fall back to
-  `sf8dotFallbackKernel`, and the pack to the strided loop in `Block::copyTo`. On the x64 side
-  those two were worth 3x and 15x, so the same shapes on Apple silicon should be expected to cost
-  it. A NEON table lookup (`vqtbl4q_u8`, four of them for 256 entries) is the obvious next step
-  and is not written.
+  and at its row counts -- 1024 and 4096 -- this path is 5% behind cuBLAS rather than ahead. What
+  it is for is a weight read once per token, which is the language model shape.
+- **The card is the only device with the kernels**, so a package written with a quantized weight
+  loads nowhere else: `resident` will put the bytes on a processor perfectly well and the multiply
+  is what refuses them. See "What a processor would need" below.
+- **No CI runner exercises the multiply.** What CI can check is the half that needs no kernel --
+  that the file reader takes `F8_E4M3`, that it refuses elements with no scales beside them, and
+  that a quantized projection is built out of two loads -- and it does. Everything past that is
+  `#[ignore]`d for want of a card. This used to be covered on both halves and is the coverage the
+  CPU path took with it.
 - `n` must be a multiple of 8, which is how wide the epilogue writes, and `k` a multiple of 16,
   which is how wide the mainloop reads the weight. The row count is free. Unlike the half GEMM,
   which picks its alignment per call from the operands it is handed, this one is instantiated at
   one alignment and refuses anything narrower by name -- the weight comes from our own quantizer,
   which already insists on a `k` that 16 divides. `can_implement` is asked before every launch
   regardless, since CUTLASS's `initialize` returns success on strides the kernel cannot read.
+
+## What a processor would need
+
+There was a CPU path here and it was taken back out, so this is what it was, what it measured, and
+what bringing it back costs. None of it is lost work: the format is unchanged, and a weight
+quantized for the card is the same bytes a processor would read.
+
+The place for it already exists. `Gemm` in `cpu/kernel/gemm.h` takes the type B is stored in
+separately from the type the micro-kernel computes in and converts in `Pack()` -- which is how
+`gemmHalfWeightFloat`, the float-activation-by-half-weight path a model on the CPU runs today,
+already works. An E4M3 weight is that arrangement with a narrower B, so the GEMM itself is `wgemm`
+instantiated at `TB = Fp8E4M3` and the micro-kernel never learns the format exists. The channel
+scale goes afterwards as a pass over C: on the GPU it is folded into the epilogue because the
+epilogue is free there, but `M*N` against the multiply's `M*N*K` does not justify touching the
+kernel here.
+
+Three kernels beyond that were each worth a measured factor, and are the reason it is not a
+weekend's work to redo:
+
+| | without | with | on |
+| --- | --- | --- | --- |
+| a blocked transpose in the pack | 102.6 ms | 32.2 ms | 1024x10240x1280 |
+| a GEMV path (`dot`, `axpy`) | 5.0 ms | 3.3 ms | 1x5120x3072 |
+| a gathered lookup inside both | 3.3 ms | 0.22 ms | 1x5120x3072 |
+
+The first is a reading pattern rather than arithmetic: a weight is stored one output channel per
+row, so the pack reads it down its columns, and a generic strided loop touches a separate cache
+line for every byte it wants -- at a 1280 byte stride, 64 bytes moved per byte used.
+
+The third is the one worth remembering. A scalar E4M3 to float conversion has two branches in it,
+subnormals and the NaN code, and eight of those per vector cost about twenty cycles an element in a
+loop that should run at one. There is no `_mm256_cvtph_ps` for 8 bits, so what replaces them is a
+256 entry table -- the whole format is 256 values -- gathered with `_mm256_i32gather_ps`. Tabulate
+the scalar conversion rather than writing a second one, and the two cannot drift. aarch64 wants the
+same thing as a NEON table lookup (`vqtbl4q_u8`, four of them for 256 entries) and never got it,
+so it would take the scalar path and pay what the table above says.
+
+What it measured, on a 32 thread AVX-512 machine, fastest of twenty iterations, in milliseconds:
+
+| shape (m,n,k) | f32 x f32 | f32 x f16 | f32 x fp8 |
+| --- | --- | --- | --- |
+| 1x5120x3072 | 0.28 | 0.19 | 0.22 |
+| 8x5120x3072 | 1.28 | 0.82 | **0.74** |
+| 77x2560x2048 | 0.69 | 0.66 | 0.67 |
+| 1024x1280x1280 | 2.46 | 2.46 | 2.55 |
+| 1024x10240x1280 | 29.1 | 28.9 | 28.9 |
+| 4096x1920x640 | 6.09 | 6.05 | 6.46 |
+
+Parity within a few percent either way, and half the weight in memory. That is the result to
+expect rather than a disappointing one: the arithmetic is float32 in all three columns, and the
+only thing FP8 changes is how many bytes have to reach it. Which is also why it was the half to
+take out first -- on the card the narrow weight buys time as well as memory, and here it buys only
+memory.
+
+It would be worth having again for one reason, and it is a good one: a model that does not fit
+stops not fitting. SDXL is 6.97 GB on the processor and its weights are nearly all of that.
