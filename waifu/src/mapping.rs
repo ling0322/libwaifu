@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
+use crate::flint::WeightFormat;
 
 /// One named block of `key: value` settings.
 #[derive(Clone, Debug, Default)]
@@ -116,5 +117,24 @@ impl Mapping {
         } else {
             Ok(default)
         }
+    }
+
+    /// How `key` says the package stored the matrices its model multiplies by, or `default` when
+    /// it does not say -- which every package written so far does not.
+    ///
+    /// Spelled out here rather than left to `FromStr` so that a misspelling reads as one: the
+    /// names are few and this can list them.
+    pub fn get_weight_format_or(&self, key: &str, default: WeightFormat) -> Result<WeightFormat> {
+        if !self.has(key) {
+            return Ok(default);
+        }
+
+        let value = self.get_str(key)?;
+        WeightFormat::from_name(value).ok_or_else(|| {
+            Error::format(format!(
+                "{}: key {key:?} holds {value:?}, which is neither \"float\" nor \"fp8\"",
+                self.name
+            ))
+        })
     }
 }

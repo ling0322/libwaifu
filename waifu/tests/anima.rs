@@ -38,7 +38,7 @@ use waifu::anima::{
     VaeConfig, VaeDecoder
 };
 use waifu::flint::{resident, ParamSource, Tensor};
-use waifu::{DType, Device, Manifest, ParamFile};
+use waifu::{DType, Device, Manifest, ParamFile, WeightFormat};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
@@ -108,7 +108,8 @@ fn config() -> TextConfig {
         head_dim: 128,
         mlp_size: 3072,
         rope_theta: 1e6,
-        norm_eps: 1e-6
+        norm_eps: 1e-6,
+        weight_format: WeightFormat::Float
     }
 }
 
@@ -155,7 +156,8 @@ fn adapter_config() -> AdapterConfig {
         num_heads: 16,
         head_dim: 64,
         vocab_size: 32128,
-        mlp_size: 4096
+        mlp_size: 4096,
+        weight_format: WeightFormat::Float
     }
 }
 
@@ -222,7 +224,8 @@ fn dit_config() -> DitConfig {
         rope_h_ratio: 4.0,
         rope_w_ratio: 4.0,
         rope_t_ratio: 1.0,
-        context_dim: 1024
+        context_dim: 1024,
+        weight_format: WeightFormat::Float
     }
 }
 

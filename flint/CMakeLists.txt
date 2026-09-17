@@ -37,6 +37,7 @@ set(flint_SOURCES
     "cpu/view.cc"
     "device.cc"
     "dtype.cc"
+    "fp8.cc"
     "functional.cc"
     "memory.cc"
     "operators.cc"
@@ -154,9 +155,11 @@ if (WITH_CUDA)
     set(flint_SOURCES ${flint_SOURCES}
         "cuda/conv2d_cutlass.cu"
         "cuda/gemm_cutlass.cu"
+        "cuda/gemm_fp8_cutlass.cu"
         "cuda/gemm_nvfp4_cutlass.cu")
     set(flint_test_SOURCES ${flint_test_SOURCES}
         "cuda/gemm_cutlass_test.cc"
+        "cuda/gemm_fp8_cutlass_test.cc"
         "cuda/gemm_nvfp4_cutlass_test.cc")
     set(flint_INCDIR ${flint_INCDIR}
         "../third_party/cutlass/include"

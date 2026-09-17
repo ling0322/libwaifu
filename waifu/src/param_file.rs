@@ -48,7 +48,7 @@ use std::rc::Rc;
 use safetensors::tensor::{Dtype, SafeTensors};
 
 use crate::error::{Error, Result};
-use crate::flint::{DType, Tensor};
+use crate::flint::{DType, Tensor, CHANNEL_SCALE_SUFFIX};
 
 /// The largest rank and dimension a stored tensor may have, which keep a corrupt file from asking
 /// for an unreasonable allocation.
@@ -89,6 +89,7 @@ impl ParamFile {
             read_into(&bytes, &mut tensors)
                 .map_err(|error| Error::format(format!("{}: {error}", path.display())))?;
         }
+        check_fp8_pairs(&tensors)?;
 
         Ok(ParamFile {
             tensors: Rc::new(tensors),
@@ -99,6 +100,7 @@ impl ParamFile {
     pub fn parse(bytes: &[u8]) -> Result<ParamFile> {
         let mut tensors = Tensors::new();
         read_into(bytes, &mut tensors)?;
+        check_fp8_pairs(&tensors)?;
 
         Ok(ParamFile {
             tensors: Rc::new(tensors),
@@ -183,8 +185,8 @@ fn read_into(bytes: &[u8], tensors: &mut Tensors) -> Result<()> {
         .map_err(|error| Error::format(format!("not a safetensors file: {error}")))?;
 
     for (name, view) in file.tensors() {
-        let tensor = build(&view)
-            .map_err(|error| Error::format(format!("tensor {name:?}: {error}")))?;
+        let tensor =
+            build(&view).map_err(|error| Error::format(format!("tensor {name:?}: {error}")))?;
 
         // A name that is already there is refused rather than replaced: a model whose weights
         // depend on which file was read first is worse than one that will not load.
@@ -215,27 +217,80 @@ fn build(view: &safetensors::tensor::TensorView) -> Result<Tensor> {
         dimensions.push(size as i32);
     }
 
-    Ok(Tensor::from_bytes(&dimensions, dtype(view.dtype())?, view.data())?)
+    Ok(Tensor::from_bytes(
+        &dimensions,
+        dtype(view.dtype())?,
+        view.data(),
+    )?)
 }
 
 /// What a safetensors element type is called here.
 ///
-/// Only the three an exporter writes. A checkpoint straight off the hub is usually bfloat16, which
-/// is not one of them: what this reads is a model exported for it, and the exporter is where the
+/// Only what an exporter writes. A checkpoint straight off the hub is usually bfloat16, which is
+/// not one of them: what this reads is a model exported for it, and the exporter is where the
 /// narrowing to float16 happens. Saying so here beats loading a model whose weights were
 /// reinterpreted as the wrong type and drawing noise.
+///
+/// `F8_E4M3` is the format `docs/fp8.md` describes, and is the one element type here that means
+/// nothing on its own: the tensor beside it holding its scales is what makes it a weight. See
+/// [`check_fp8_pairs`].
 fn dtype(dtype: Dtype) -> Result<DType> {
     match dtype {
         Dtype::F32 => Ok(DType::Float),
         Dtype::F16 => Ok(DType::Float16),
+        Dtype::F8_E4M3 => Ok(DType::Fp8E4M3),
         Dtype::I64 => Ok(DType::Long),
         Dtype::I32 => Ok(DType::Int32),
         Dtype::U8 => Ok(DType::UInt8),
         Dtype::I8 => Ok(DType::Int8),
         Dtype::BOOL => Ok(DType::Bool),
         other => Err(Error::format(format!(
-            "{other:?} is not an element type this reads; the exporter writes float16, float32 \
-             and int64"
+            "{other:?} is not an element type this reads; the exporter writes float16, float32, \
+             float8_e4m3 and int64"
         ))),
     }
+}
+
+/// That every `<fp8e4m3>` tensor has the scales it means itself against beside it.
+///
+/// A quantized weight is two tensors -- `"…weight"` and `"…weight.scale"` -- and the file format
+/// has nowhere to say they belong together, so the name is the whole of the pairing and this is
+/// where it is checked. Without it a package that lost its scales, or an exporter that wrote them
+/// under another name, would load: the elements are a perfectly good tensor on their own, and what
+/// would go wrong is a picture drawn from a weight scaled by nothing, several layers away from
+/// anything that could name the cause.
+///
+/// Run over the whole model rather than over each file, since a weight and its scale may have been
+/// written to different ones.
+///
+/// The other direction is deliberately not checked. A `"…scale"` with no FP8 tensor beside it is
+/// an ordinary tensor with an unlucky name, and refusing one would make a suffix this library
+/// chose into a word no other exporter may use.
+fn check_fp8_pairs(tensors: &Tensors) -> Result<()> {
+    for (name, tensor) in tensors {
+        if tensor.dtype() != DType::Fp8E4M3 {
+            continue;
+        }
+
+        let scale_name = format!("{name}{CHANNEL_SCALE_SUFFIX}");
+        let Some(scale) = tensors.get(&scale_name) else {
+            return Err(Error::format(format!(
+                "tensor {name:?} is float8_e4m3 and there is no {scale_name:?} beside it; a \
+                 quantized weight is the elements and the scales, and the elements alone do not \
+                 say what they are worth"
+            )));
+        };
+
+        let rows = tensor.shape().first().copied().unwrap_or(0);
+        if scale.dtype() != DType::Float || scale.shape() != [rows] {
+            return Err(Error::format(format!(
+                "tensor {scale_name:?} is {:?}{:?}, and the scales of {name:?} have to be \
+                 <float>[{rows}] -- one per row",
+                scale.dtype(),
+                scale.shape(),
+            )));
+        }
+    }
+
+    Ok(())
 }

@@ -5,7 +5,7 @@
 //! run with `cargo test --test cuda -- --ignored`. On a machine without one, the library ends the
 //! process rather than reporting an error, which is why they do not simply detect and skip.
 
-use waifu::flint::{functional as F, DType, Device, Tensor};
+use waifu::flint::{functional as F, DType, Device, Fp8Tensor, Tensor};
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
 fn cuda_float() -> DType {
@@ -268,7 +268,7 @@ fn stores_and_reads_a_paged_kv_cache() {
         cu_seqlens_q: &cu_seqlens_q,
         seqlens_k: &seqlens_k,
         max_q_len: NUM_TOKENS,
-        max_k_len: NUM_TOKENS
+        max_k_len: NUM_TOKENS,
     };
     let paged = F::paged_attention(&q, &cache, true).unwrap();
     assert_eq!(paged.shape(), vec![NUM_TOKENS, 1, HEAD_DIM]);
@@ -309,5 +309,49 @@ fn makes_zeros_of_the_type_it_was_asked_for() {
         );
         assert_eq!(zeros.shape(), vec![2, 3, 4]);
         assert!(to_host_f32(&zeros).iter().all(|x| *x == 0.0));
+    }
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn multiplies_by_an_fp8_weight() {
+    if !Fp8Tensor::is_available(Device::Cuda) {
+        eprintln!("skipped: this build has no FP8 GEMM (needs WITH_CUDA=ON and sm_80 or newer)");
+        return;
+    }
+
+    // Magnitudes E4M3 holds exactly, and each of the eight channels a different power of two away
+    // from the next -- so the round trip is exact, and the channels come back right only if each
+    // carried its own scale. Eight channels because that is how wide the epilogue writes.
+    const CODES: [f32; 16] = [
+        448.0, -224.0, 112.0, 56.0, 28.0, 14.0, 7.0, 3.5, 1.75, 0.875, 0.0, -1.0, 2.0, -4.0, 8.0,
+        -16.0,
+    ];
+    const SCALES: [f32; 8] = [1.0, 2.0, 4.0, 8.0, 16.0, 0.5, 0.25, 0.125];
+
+    let data: Vec<f32> = SCALES
+        .iter()
+        .flat_map(|scale| CODES.iter().map(move |code| code * scale))
+        .collect();
+    let weight = cuda_f32(&[8, 16], &data);
+
+    let quantized = Fp8Tensor::quantize(&weight).unwrap();
+    assert_eq!(quantized.shape().unwrap(), (8, 16));
+
+    // The scale is the row's own largest magnitude over 448, and the codes reach 448 exactly.
+    assert_eq!(to_host_f32(&quantized.dequantize().unwrap()), data);
+
+    // One row of ones against it is each channel's own row sum, so a scale applied to the wrong
+    // axis cannot pass.
+    let a = cuda_f32(&[1, 16], &[1.0; 16]);
+    let out = F::fp8_matmul(&a, quantized.data(), quantized.channel_scale()).unwrap();
+    assert_eq!(out.shape(), vec![1, 8]);
+
+    let expected = to_host_f32(&F::matmul(&a, &weight.transpose(0, 1).unwrap()).unwrap());
+    for (got, want) in to_host_f32(&out).iter().zip(expected.iter()) {
+        assert!(
+            (got - want).abs() <= want.abs() * 1e-2,
+            "fp8 gave {got}, half gave {want}"
+        );
     }
 }

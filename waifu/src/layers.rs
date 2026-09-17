@@ -43,7 +43,7 @@
 //! model asks for a weight in two places, the graph that reads it and the exporter that wrote it,
 //! and those two must not be free to disagree.
 
-use crate::flint::{DType, Graph, Value};
+use crate::flint::{DType, Graph, Value, WeightFormat};
 
 /// Normalization over the last dimension: subtract the mean, divide by the standard deviation,
 /// scale and shift.
@@ -142,15 +142,37 @@ impl Linear {
     pub const WEIGHT: &'static str = "weight";
     pub const BIAS: &'static str = "bias";
 
+    /// The scales of a weight the package stored in FP8, read only under [`WeightFormat::Fp8`].
+    /// See [`Linear::graph`].
+    pub const WEIGHT_SCALE: &'static str = "weight.scale";
+
     /// Written into `g`, which reads its weights out of `g`'s namespace.
     ///
     /// The weight is stored the way the package holds it, `(out_dim, in_dim)`, and transposed
     /// here rather than when it is read: a transpose is a node and costs nothing to run, and the
     /// alternative is a graph that asks for a weight the file does not hold.
+    ///
+    /// # When the package stored the weight quantized
+    ///
+    /// Under [`WeightFormat::Fp8`] the package holds this projection as
+    /// `<fp8e4m3>(out_dim, in_dim)` and a `<float>(out_dim)` scale beside it, which is what
+    /// `docs/fp8.md` describes: half the bytes on the device and about 2.6e-2 of relative error.
+    /// The graph says which, because the model's configuration said so -- see [`WeightFormat`].
+    ///
+    /// Everything around it is unchanged: the same weight under the same name with the same
+    /// shape, the same bias, the same value out. What changes is two nodes -- the scale is a
+    /// second load, and the transpose is gone, because an FP8 multiply already reads the weight in
+    /// the `(out, in)` a package stores.
     #[track_caller]
     pub fn graph(g: &Graph, input: Value, in_dim: i32, out_dim: i32, has_bias: bool) -> Value {
         let weight = g.load(Self::WEIGHT, &[out_dim, in_dim]);
-        let x = g.matmul(input, g.transpose(weight, 0, 1));
+
+        let x = match g.weight_format() {
+            WeightFormat::Fp8 => {
+                g.fp8_matmul(input, weight, g.load(Self::WEIGHT_SCALE, &[out_dim]))
+            }
+            WeightFormat::Float => g.matmul(input, g.transpose(weight, 0, 1)),
+        };
 
         match has_bias {
             true => g.add(x, g.load(Self::BIAS, &[out_dim])),

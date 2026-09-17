@@ -399,6 +399,24 @@ pub enum Op {
         lhs: Value,
         rhs: Value,
     },
+    /// `lhs` times the transpose of a weight held in FP8, which is two values rather than one:
+    /// `weight` is `<fp8e4m3>(rows, k)` and `channel_scale` is `<float>(rows)`, row `r` of the
+    /// weight meaning `weight[r] * channel_scale[r]`.
+    ///
+    /// Two operands and not one composite, because two is what the package holds and two is what
+    /// the operator takes. The gain is that a scale is then an ordinary weight under an ordinary
+    /// name, reached by an ordinary [`Op::Load`]: everything that walks loads -- what
+    /// [`resident`](super::resident) reads, the liveness a `free` comes from,
+    /// [`Residency::LowVram`](super::Residency::LowVram) putting one weight at a time across the
+    /// bus -- reaches the scale without being taught that it exists.
+    ///
+    /// No transpose comes before this the way one comes before a [`Matmul`](Op::Matmul): this
+    /// reads the weight in the `(out, in)` a package stores it in.
+    Fp8Matmul {
+        lhs: Value,
+        weight: Value,
+        channel_scale: Value,
+    },
     /// The rows of `table` named by `indices`.
     Lookup {
         table: Value,
@@ -498,6 +516,7 @@ impl Op {
             Op::RmsNorm { .. } => "rms_norm",
             Op::GroupNorm { .. } => "group_norm",
             Op::Matmul { .. } => "matmul",
+            Op::Fp8Matmul { .. } => "fp8_matmul",
             Op::Lookup { .. } => "lookup",
             Op::Conv2d { .. } => "conv2d",
             Op::UpsampleNearest2d { .. } => "upsample_nearest2d",
@@ -575,6 +594,11 @@ impl Op {
                 vec![*lhs, *rhs]
             }
             Op::Lookup { table, indices } => vec![*table, *indices],
+            Op::Fp8Matmul {
+                lhs,
+                weight,
+                channel_scale,
+            } => vec![*lhs, *weight, *channel_scale],
             Op::RmsNorm { input, weight, .. } => vec![*input, *weight],
 
             Op::LayerNorm {
@@ -710,6 +734,7 @@ impl fmt::Display for Op {
             Op::Unary { .. }
             | Op::Binary { .. }
             | Op::Matmul { .. }
+            | Op::Fp8Matmul { .. }
             | Op::Lookup { .. }
             | Op::Contiguous { .. } => (),
         }

@@ -45,6 +45,13 @@ Tensor createCudaTensorFp4x2(lut::Span<const int> shape) {
   return Tensor::create(tensorShape, data);
 }
 
+Tensor createCudaTensorFp8E4M3(lut::Span<const int> shape) {
+  auto tensorShape = std::make_shared<TensorShape>(shape);
+  auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kFp8E4M3);
+
+  return Tensor::create(tensorShape, data);
+}
+
 Tensor createCudaTensorUInt8(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kUInt8);

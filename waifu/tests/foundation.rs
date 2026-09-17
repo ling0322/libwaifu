@@ -25,7 +25,7 @@
 
 use waifu::flint::{check_parameters, resident, Graph, Ir, ParamSource, Pinned, RunContext};
 use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
-use waifu::{Embedding, Linear, ParamFile};
+use waifu::{Embedding, Linear, ParamFile, WeightFormat};
 
 /// A safetensors file holding `tensors`, each given as a name, a shape, and its elements.
 ///
@@ -62,6 +62,43 @@ fn write_params(tensors: &[(&str, &[i32], &[f32])]) -> Vec<u8> {
 
 fn param_file(tensors: &[(&str, &[i32], &[f32])]) -> ParamFile {
     ParamFile::parse(&write_params(tensors)).unwrap()
+}
+
+/// The same, for a file whose tensors are not all one element type: each is given the name
+/// safetensors knows its type by and the bytes it is stored as.
+///
+/// Which is what a quantized weight needs -- `F8_E4M3` elements and an `F32` scale in one file --
+/// and hand written for the same reason the rest of this is: so that what is under test is the
+/// format rather than one library agreeing with itself.
+fn write_typed(tensors: &[(&str, &str, &[i32], Vec<u8>)]) -> Vec<u8> {
+    let mut entries = Vec::new();
+    let mut data = Vec::new();
+
+    let mut sorted: Vec<_> = tensors.iter().collect();
+    sorted.sort_by_key(|(name, _, _, _)| *name);
+
+    for (name, dtype, shape, bytes) in sorted {
+        let begin = data.len();
+        data.extend_from_slice(bytes);
+
+        let dimensions: Vec<String> = shape.iter().map(|size| size.to_string()).collect();
+        entries.push(format!(
+            "{name:?}:{{\"dtype\":{dtype:?},\"shape\":[{}],\"data_offsets\":[{begin},{}]}}",
+            dimensions.join(","),
+            data.len()
+        ));
+    }
+
+    let header = format!("{{{}}}", entries.join(","));
+    let mut out = (header.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(&data);
+    out
+}
+
+/// The `f32` elements of a tensor, as a file holds them.
+fn f32_bytes(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
 /// Every tensor of several files at once, which is what a model written as several is read as.
@@ -196,6 +233,138 @@ fn writes_reads_and_runs_a_pass_of_layers() {
         &Tensor::from_f32(&[2, 2], &[2.5, 1.6, 0.5, -0.4]).unwrap()
     )
     .unwrap());
+}
+
+/// A projection whose weight the package stored quantized is built out of two loads and one node.
+///
+/// No device runs this one: FP8 is the card's for now, and what a machine without one can still be
+/// held to is the shape of the pass. Which is most of what storing a weight quantized changes --
+/// two tensors in the file become two loads in the graph and three operands at the multiply -- and
+/// it is the half that has nothing to do with a kernel.
+#[test]
+fn builds_a_quantized_projection_out_of_two_loads() {
+    let written = |format| {
+        let g = Graph::with_weights(format);
+        let x = g.input("x");
+        g.output("y", Linear::graph(&g.subgraph("proj"), x, 4, 2, true));
+
+        (g.parameters(), format!("{g}"))
+    };
+
+    // The scale is a weight like any other, so it is named among them and read like them.
+    let (asked, pass) = written(WeightFormat::Fp8);
+    assert_eq!(asked, vec!["proj.weight", "proj.weight.scale", "proj.bias"]);
+    assert!(pass.contains("fp8_matmul("), "{pass}");
+
+    // And no transpose before it: an FP8 multiply reads the weight in the (out, in) a package
+    // stores, where the float one has to be handed the other way round.
+    assert!(!pass.contains("transpose("), "{pass}");
+
+    let (asked, pass) = written(WeightFormat::Float);
+    assert_eq!(asked, vec!["proj.weight", "proj.bias"]);
+    assert!(pass.contains("transpose("), "{pass}");
+    assert!(!pass.contains("fp8_matmul("), "{pass}");
+}
+
+/// And on the only device that has the kernels, it computes what it should.
+///
+/// The whole path: two tensors in the file, across the bus as `<fp8e4m3>` -- something no weight
+/// has ever done here, since FP8 used to be made on the device it was used on -- and into the
+/// CUTLASS mixed input multiply. Every code and every scale is a value E4M3 and float16 both hold
+/// exactly, so what comes back is compared to the arithmetic rather than to a tolerance.
+///
+/// What must not differ is the scales, which stay `<float>`: `resident` narrows a per-channel
+/// vector to what the device computes in, and a scale is the one such vector that would be wrong
+/// to narrow.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn multiplies_by_a_quantized_weight_on_the_card() {
+    const ONE: u8 = 0x38;
+
+    // Eight rows and sixteen columns, which is what the kernel can read: the row count has to be
+    // a multiple of 8 and k a multiple of 16. Every element is a one, so a row is worth its scale.
+    let scales: Vec<f32> = (1..=8).map(|r| r as f32 * 0.5).collect();
+    let file = ParamFile::parse(&write_typed(&[
+        ("proj.weight", "F8_E4M3", &[8, 16], vec![ONE; 8 * 16]),
+        ("proj.weight.scale", "F32", &[8], f32_bytes(&scales)),
+    ]))
+    .unwrap();
+
+    let g = Graph::with_weights(WeightFormat::Fp8);
+    let x = g.input("x");
+    g.output("y", Linear::graph(&g.subgraph("proj"), x, 16, 8, false));
+
+    let weights = resident(&file, Device::Cuda).unwrap();
+    assert_eq!(
+        weights["proj.weight"].dtype(),
+        DType::Fp8E4M3,
+        "the elements crossed as themselves"
+    );
+    assert_eq!(
+        weights["proj.weight.scale"].dtype(),
+        DType::Float,
+        "a scale is not narrowed to what the device computes in"
+    );
+
+    let x = Tensor::from_f32(&[1, 16], &[1.0; 16])
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap()
+        .cast(DType::Float16)
+        .unwrap();
+    let outputs = Ir::compile(&g)
+        .run(&RunContext::new(&weights).input("x", &x))
+        .unwrap();
+
+    // Sixteen ones against a row worth its scale, and every one of these is exact in float16.
+    let expected: Vec<f32> = scales.iter().map(|scale| scale * 16.0).collect();
+    let y = outputs[0].1.cast(DType::Float).unwrap();
+    assert_eq!(to_host(&y), expected);
+}
+
+/// What the graph calls the scales and what the file reader looks for are one name.
+#[test]
+fn the_scale_is_named_the_same_by_both_halves() {
+    assert_eq!(
+        Linear::WEIGHT_SCALE,
+        format!("{}{}", Linear::WEIGHT, waifu::flint::CHANNEL_SCALE_SUFFIX)
+    );
+}
+
+/// Quantized elements with no scales beside them are refused where they are read.
+///
+/// The one thing a file cannot say for itself: safetensors has no way to tie two tensors together,
+/// so the pairing is a name, and a name is only a convention until something checks it.
+#[test]
+fn refuses_quantized_elements_with_no_scales_beside_them() {
+    let error = ParamFile::parse(&write_typed(&[(
+        "proj.weight",
+        "F8_E4M3",
+        &[2, 4],
+        vec![0x38; 8],
+    )]))
+    .unwrap_err();
+    assert!(error.to_string().contains("proj.weight.scale"), "{error}");
+
+    // One per row, and a float: a scale of the wrong shape would be read as the wrong rows'.
+    let error = ParamFile::parse(&write_typed(&[
+        ("proj.weight", "F8_E4M3", &[2, 4], vec![0x38; 8]),
+        ("proj.weight.scale", "F32", &[4], f32_bytes(&[1.0; 4])),
+    ]))
+    .unwrap_err();
+    assert!(error.to_string().contains("one per row"), "{error}");
+
+    let error = ParamFile::parse(&write_typed(&[
+        ("proj.weight", "F8_E4M3", &[2, 4], vec![0x38; 8]),
+        ("proj.weight.scale", "F16", &[2], vec![0; 4]),
+    ]))
+    .unwrap_err();
+    assert!(error.to_string().contains("one per row"), "{error}");
+
+    // A tensor whose name happens to end in the suffix is nobody's scale and stays an ordinary
+    // weight: the suffix is this library's convention, not a word reserved in the format.
+    let file = param_file(&[("gain.scale", &[2], &[1.0, 2.0])]);
+    assert!(file.has("gain.scale"));
 }
 
 /// A weight two layers read is read once.

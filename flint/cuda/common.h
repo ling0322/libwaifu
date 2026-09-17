@@ -161,6 +161,7 @@ Tensor createCudaTensorLong(lut::Span<const int> shape);
 Tensor createCudaTensorInt32(lut::Span<const int> shape);
 Tensor createCudaTensorFloat(lut::Span<const int> shape);
 Tensor createCudaTensorFp4x2(lut::Span<const int> shape);
+Tensor createCudaTensorFp8E4M3(lut::Span<const int> shape);
 Tensor createCudaTensorUInt8(lut::Span<const int> shape);
 Tensor createCudaTensorBool(lut::Span<const int> shape);
 Tensor tensorLike(const Tensor &tensor);
@@ -187,6 +188,10 @@ inline Tensor createCudaTensor<float>(lut::Span<const int> shape) {
 template<>
 inline Tensor createCudaTensor<Fp4E2M0x2>(lut::Span<const int> shape) {
   return createCudaTensorFp4x2(shape);
+}
+template<>
+inline Tensor createCudaTensor<Fp8E4M3>(lut::Span<const int> shape) {
+  return createCudaTensorFp8E4M3(shape);
 }
 template<>
 inline Tensor createCudaTensor<UInt8>(lut::Span<const int> shape) {

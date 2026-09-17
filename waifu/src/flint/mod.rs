@@ -85,13 +85,15 @@
 //! state that is not prepared for concurrent use, so a tensor stays on the thread that made it.
 
 mod ffi;
+mod fp8;
 pub mod functional;
 mod graph;
 mod ir;
 mod nvfp4;
 mod op;
 
-pub use graph::{Graph, Site};
+pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
+pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{check_parameters, resident, Inst, Ir, ParamSource, Pinned, Residency, RunContext};
 pub use nvfp4::Nvfp4Tensor;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
@@ -114,6 +116,7 @@ pub enum DType {
     Fp4E2M0x2 = 7,
     Bool = 8,
     Int32 = 9,
+    Fp8E4M3 = 10,
 }
 
 impl DType {
@@ -136,7 +139,7 @@ impl DType {
             DType::Float | DType::Int32 => 4 * numel,
             DType::Float16 => 2 * numel,
             DType::Long => 8 * numel,
-            DType::UInt8 | DType::Int8 | DType::Bool | DType::Fp4E2M0x2 => numel,
+            DType::UInt8 | DType::Int8 | DType::Bool | DType::Fp4E2M0x2 | DType::Fp8E4M3 => numel,
         }
     }
 
@@ -150,6 +153,7 @@ impl DType {
             7 => Ok(DType::Fp4E2M0x2),
             8 => Ok(DType::Bool),
             9 => Ok(DType::Int32),
+            10 => Ok(DType::Fp8E4M3),
             other => Err(Error::unsupported(format!("unknown dtype {other}"))),
         }
     }

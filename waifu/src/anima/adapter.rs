@@ -279,7 +279,7 @@ impl Adapter {
         weights: &Rc<dyn ParamSource>,
         float_type: DType,
     ) -> Result<Adapter> {
-        let graph = Graph::new();
+        let graph = Graph::with_weights(config.weight_format);
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 

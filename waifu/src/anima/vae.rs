@@ -317,6 +317,8 @@ impl VaeDecoder {
             .and_then(|shape| shape.first().copied())
             .ok_or_else(|| Error::model(format!("{name} has no decoder")))?;
 
+        // Not `with_weights`: an autoencoder is convolutions, and its few projections are not
+        // what a quantized weight is for. See the note in `sdxl::vae`.
         let graph = Graph::new();
 
         write(
