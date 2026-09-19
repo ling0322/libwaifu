@@ -253,6 +253,27 @@ int32_t fl_tensor_from_data(
   });
 }
 
+int32_t fl_tensor_host_data(fl_tensor_t tensor, void **out, int64_t *nbytes) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    if (!nbytes) throw lut::InvalidArgError("nbytes is null");
+
+    const fl::Tensor &x = deref(tensor);
+    if (!x.getDevice().isHost()) {
+      throw lut::InvalidArgError(
+          "the bytes of a tensor on " + x.getDevice().getName() +
+          " have no address the caller may touch");
+    }
+    if (!x.isContiguous()) {
+      throw lut::InvalidArgError("a non-contiguous tensor's bytes are not one run");
+    }
+
+    *out = x.getInternalData()->getData<void>(x.getInternalOffset());
+    *nbytes = getPackedSize(x);
+    return FL_OK;
+  });
+}
+
 int32_t fl_tensor_clone(fl_tensor_t tensor, fl_tensor_t *out) {
   return guard([&]() { return publish(deref(tensor), out); });
 }

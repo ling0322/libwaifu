@@ -40,7 +40,7 @@ use std::rc::Rc;
 use super::config::TextConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Extent, Graph, Held, Ir, ParamSource, RunContext, Tensor, Value,
 };
 use crate::layers::{Embedding, Linear};
 
@@ -243,6 +243,7 @@ fn write(config: &TextConfig, float_type: DType, g: &Graph) {
 pub struct TextEncoder {
     config: TextConfig,
     ir: Ir,
+    held: Held,
     weights: Rc<dyn ParamSource>,
 }
 
@@ -271,9 +272,13 @@ impl TextEncoder {
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
+        let ir = Ir::compile(&graph, weights.residency());
+        let held = ir.load(weights.as_ref())?;
+
         Ok(TextEncoder {
             weights: Rc::clone(weights),
-            ir: Ir::compile(&graph),
+            held,
+            ir,
             config,
         })
     }
@@ -305,7 +310,7 @@ impl TextEncoder {
             .input("rope_cos", &rotary.cos)
             .input("rope_sin", &rotary.sin);
 
-        let outputs = self.ir.run(&run)?;
+        let outputs = self.ir.run(&self.held, &run)?;
 
         outputs
             .iter()

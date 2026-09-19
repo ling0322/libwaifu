@@ -18,7 +18,7 @@
 //! Three probes, kept apart so a failure says which part: the stack, the head on top of it, and
 //! the embeddings in front of it.
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor, Value};
+use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value};
 use waifu::indextts_gpt::{self, Config};
 use waifu::Result;
 
@@ -112,10 +112,21 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
 struct Filled;
 
 impl ParamSource for Filled {
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
+    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
         Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
+    }
+
+    /// Made on the host, which is where these tests run.
+    fn device(&self) -> Device {
+        CPU
+    }
+
+    /// Kept: a weight made out of its name costs nothing to keep and there is no package
+    /// behind it to stream one out of.
+    fn residency(&self) -> Residency {
+        Residency::Device
     }
 
     fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
@@ -170,7 +181,9 @@ fn run(
         context = context.input(name, tensor);
     }
 
-    let outputs = Ir::compile(&g).run(&context).unwrap();
+    let ir = Ir::compile(&g, Residency::Device);
+    let held = ir.load(&filled).unwrap();
+    let outputs = ir.run(&held, &context).unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
     let values = tensor.to_vec_f32().unwrap();
     let indices = probe_indices(values.len(), probe);

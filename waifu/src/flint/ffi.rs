@@ -61,6 +61,12 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_tensor_clone(tensor: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_tensor_host_data(
+        tensor: FlTensor,
+        out: *mut *mut c_void,
+        nbytes: *mut i64,
+    ) -> i32;
+
     pub fn fl_tensor_destroy(tensor: FlTensor);
 
     pub fn fl_tensor_get_dim(tensor: FlTensor, out: *mut i32) -> i32;

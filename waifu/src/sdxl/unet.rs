@@ -55,8 +55,8 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
-    WeightFormat,
+    check_parameters, functional as F, Extent, Graph, Held, Ir, ParamSource, RunContext, Tensor,
+    Value, WeightFormat,
 };
 use crate::layers::{Conv2d, GroupNorm, LayerNorm, Linear};
 
@@ -749,6 +749,7 @@ pub struct UnetCondition<'a> {
 pub struct Unet {
     config: UnetConfig,
     ir: Ir,
+    held: Held,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
     weights: Rc<dyn ParamSource>,
@@ -772,9 +773,13 @@ impl Unet {
         write(&config, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
+        let ir = Ir::compile(&graph, weights.residency());
+        let held = ir.load(weights.as_ref())?;
+
         Ok(Unet {
             weights: Rc::clone(weights),
-            ir: Ir::compile(&graph),
+            held,
+            ir,
             config,
         })
     }
@@ -848,7 +853,7 @@ impl Unet {
             .input("timestep_embedding", &time)
             .input("time_ids_embedding", &sizes);
 
-        let outputs = self.ir.run(&context)?;
+        let outputs = self.ir.run(&self.held, &context)?;
 
         outputs
             .into_iter()

@@ -40,7 +40,9 @@ use std::rc::Rc;
 
 use waifu::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
 use waifu::bigvgan::{BigVgan, BigVganConfig};
-use waifu::flint::{DType, Device, Graph, Ir, ParamSource, RunContext, Tensor};
+use waifu::flint::{
+    resident, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,
+};
 use waifu::ParamFile;
 
 const CPU: Device = Device::Cpu;
@@ -167,8 +169,10 @@ fn run(
     g.output("out", out);
 
     let empty: HashMap<String, Tensor> = HashMap::new();
-    let outputs = Ir::compile(&g)
-        .run(&RunContext::new(&empty).input("x", x))
+    let ir = Ir::compile(&g, Residency::Device);
+    let held = ir.load(&empty).unwrap();
+    let outputs = ir
+        .run(&held, &RunContext::new(&empty).input("x", x))
         .unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 
@@ -406,7 +410,8 @@ fn exported(name: &str) -> ParamFile {
 #[test]
 #[ignore = "needs the exported BigVGAN checkpoint in models/"]
 fn the_released_vocoder_is_the_released_vocoder() {
-    let weights: Rc<dyn ParamSource> = Rc::new(exported("bigvgan-22khz-80band.safetensors"));
+    let file = exported("bigvgan-22khz-80band.safetensors");
+    let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, CPU).unwrap());
     let vocoder = BigVgan::build(
         BigVganConfig::v2_22khz_80band_256x(),
         "",
@@ -467,11 +472,21 @@ impl Reading {
 }
 
 impl ParamSource for Reading {
-    fn load(&self, name: &str, shape: &[i32]) -> waifu::Result<Tensor> {
+    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> waifu::Result<Tensor> {
         self.asked.borrow_mut().push(name.to_string());
         self.check(name, shape)?;
 
         Ok(self.held(name).expect("checked just above"))
+    }
+
+    /// The host, which is where the reference's parameters are made and where these run.
+    fn device(&self) -> Device {
+        CPU
+    }
+
+    /// Kept: what this holds is made when it is asked for, so there is nothing to stream.
+    fn residency(&self) -> Residency {
+        Residency::Device
     }
 
     fn shape_of(&self, name: &str) -> Option<Vec<i32>> {

@@ -23,7 +23,9 @@
 //! The file is written here by hand rather than with the crate that reads it, so that what these
 //! tests say is what safetensors is and not what one library agrees with itself about.
 
-use waifu::flint::{check_parameters, resident, Graph, Ir, ParamSource, Pinned, RunContext};
+use waifu::flint::{
+    check_parameters, resident, Graph, Ir, ParamSource, Residency, RunContext, Weights,
+};
 use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
 use waifu::{Embedding, Linear, ParamFile, WeightFormat};
 
@@ -209,7 +211,9 @@ fn writes_reads_and_runs_a_pass_of_layers() {
 
     let ids = Tensor::from_i64(&[2], &[2, 0]).unwrap();
     let context = RunContext::new(&weights).input("tokens", &ids);
-    let outputs = Ir::compile(&g).run(&context).unwrap();
+    let ir = Ir::compile(&g, Residency::Device);
+    let held = ir.load(&weights).unwrap();
+    let outputs = ir.run(&held, &context).unwrap();
 
     let named = |name: &str| {
         outputs
@@ -296,12 +300,15 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
 
     let weights = resident(&file, Device::Cuda).unwrap();
     assert_eq!(
-        weights["proj.weight"].dtype(),
+        weights.read("proj.weight", &[8, 16], false).unwrap().dtype(),
         DType::Fp8E4M3,
-        "the elements crossed as themselves"
+        "the elements are read as themselves"
     );
     assert_eq!(
-        weights["proj.weight.scale"].dtype(),
+        weights
+            .read("proj.weight.scale", &[8], false)
+            .unwrap()
+            .dtype(),
         DType::Float,
         "a scale is not narrowed to what the device computes in"
     );
@@ -312,8 +319,10 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
-    let outputs = Ir::compile(&g)
-        .run(&RunContext::new(&weights).input("x", &x))
+    let ir = Ir::compile(&g, Residency::Device);
+    let held = ir.load(&weights).unwrap();
+    let outputs = ir
+        .run(&held, &RunContext::new(&weights).input("x", &x))
         .unwrap();
 
     // Sixteen ones against a row worth its scale, and every one of these is exact in float16.
@@ -384,6 +393,17 @@ fn a_weight_read_twice_is_read_once() {
     // Two nodes name it, and it is one weight.
     assert_eq!(g.parameters(), vec!["shared.weight"]);
     assert_eq!(resident(&file, Device::Cpu).unwrap().len(), 1);
+
+    // And it crosses once: the graph holds one `load` for it however many nodes name it, so the
+    // prologue that brings the weights across reads it once and moves it once.
+    let ir = Ir::compile(&g, Residency::Device);
+    let reads = ir
+        .prologue()
+        .iter()
+        .filter(|inst| matches!(inst, waifu::flint::Inst::Read { .. }))
+        .count();
+
+    assert_eq!(reads, 1);
 }
 
 #[test]
@@ -437,24 +457,69 @@ fn refuses_a_tensor_that_is_in_two_parts_at_once() {
 }
 
 #[test]
-fn a_tensor_is_handed_over_rather_than_read_again() {
-    // The parameters are read in one pass, when the file is opened, and what comes out of it
-    // afterwards is what was in it. A tensor is handed over as another handle on the storage the
-    // file holds, so asking for the same one twice is the same answer twice and costs nothing the
-    // second time.
+fn reads_a_weight_each_time_it_is_asked_for_and_reads_the_same_one() {
+    // Opening a file parses its headers and reads no weight. What a name is until it is asked for
+    // is a range of a mapping, so asking twice is two reads -- and what makes that a thing worth
+    // doing rather than a thing to work around is that the second read is off the page cache.
+    //
+    // The tensors that come back are the caller's own, not handles on storage the file holds,
+    // which is what lets a weight be let go of while the package stays open.
     let file = param_file(&[("a", &[2], &[1.0, 2.0]), ("b", &[2], &[3.0, 4.0])]);
 
     assert_eq!(file.names(), vec!["a", "b"]);
     assert_eq!(file.len(), 2);
 
-    let first = file.get("a", &[2]).unwrap().to_vec_f32().unwrap();
-    let again = file.get("a", &[2]).unwrap().to_vec_f32().unwrap();
-    assert_eq!(first, vec![1.0, 2.0]);
-    assert_eq!(first, again);
+    let first = file.get("a", &[2]).unwrap();
+    let again = file.get("a", &[2]).unwrap();
+    assert_eq!(first.to_vec_f32().unwrap(), vec![1.0, 2.0]);
+    assert_eq!(first.to_vec_f32().unwrap(), again.to_vec_f32().unwrap());
+
     assert_eq!(
         file.get("b", &[2]).unwrap().to_vec_f32().unwrap(),
         vec![3.0, 4.0]
     );
+}
+
+#[test]
+fn answers_for_a_shape_without_reading_the_weight() {
+    // Off the header. A model that works out its own architecture by looking for weights asks this
+    // hundreds of times, and a lazily read file would be undone by having to read one to size it.
+    let file = param_file(&[("a", &[2, 3], &[0.0; 6])]);
+
+    assert_eq!(file.shape_of("a"), Some(vec![2, 3]));
+    assert_eq!(file.shape_of("missing"), None);
+    assert!(file.has("a"));
+    assert!(!file.has("missing"));
+}
+
+#[test]
+fn reads_a_weight_into_storage_the_caller_allocated() {
+    // The path a streamed weight takes: the storage is allocated first -- page-locked, where that
+    // is what it is for -- and the read fills it where it lies, rather than reading into a buffer
+    // of the file's own and copying it in afterwards.
+    let file = param_file(&[("a", &[2, 2], &[1.0, 2.0, 3.0, 4.0])]);
+
+    let mut into = Tensor::empty(&[2, 2], DType::Float, Device::Cpu).unwrap();
+    file.read_into("a", &mut into).unwrap();
+
+    assert_eq!(into.to_vec_f32().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn refuses_storage_that_is_not_what_the_weight_needs() {
+    let file = param_file(&[("a", &[2, 2], &[1.0, 2.0, 3.0, 4.0])]);
+
+    let mut wrong_shape = Tensor::empty(&[4], DType::Float, Device::Cpu).unwrap();
+    let error = file.read_into("a", &mut wrong_shape).unwrap_err().to_string();
+    assert!(error.contains("[2, 2]"), "{error}");
+
+    let mut wrong_type = Tensor::empty(&[2, 2], DType::Float16, Device::Cpu).unwrap();
+    let error = file.read_into("a", &mut wrong_type).unwrap_err().to_string();
+    assert!(error.contains("Float16"), "{error}");
+
+    let mut fine = Tensor::empty(&[2, 2], DType::Float, Device::Cpu).unwrap();
+    let error = file.read_into("missing", &mut fine).unwrap_err().to_string();
+    assert!(error.contains("not found"), "{error}");
 }
 
 fn to_host(tensor: &Tensor) -> Vec<f32> {
@@ -475,22 +540,39 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     let x = graph.input("x");
     let weight = graph.load("proj.weight", &[2, 2]);
     graph.output("y", graph.add(x, graph.matmul(x, weight)));
-    let ir = Ir::compile(&graph);
 
     let x = Tensor::from_f32(&[2, 2], &[1.0, -2.0, 0.5, 3.0])
         .unwrap()
         .to_device(Device::Cuda)
         .unwrap();
 
+    // Two compilations of one graph, which is where the modes differ: the kept one brings the
+    // weight across in its prologue, the streamed one in front of the instruction that reads it.
     let on_the_card = resident(&param_file(tensors), Device::Cuda).unwrap();
-    let kept = ir
-        .run(&RunContext::new(&on_the_card).input("x", &x))
+    let kept_ir = Ir::compile(&graph, Residency::Device);
+    let kept_held = kept_ir.load(&on_the_card).unwrap();
+    let kept = kept_ir
+        .run(&kept_held, &RunContext::new(&on_the_card).input("x", &x))
         .unwrap();
 
-    let over_the_bus = Pinned::read(param_file(tensors), Device::Cuda).unwrap();
+    let over_the_bus =
+        Weights::new(param_file(tensors), Device::Cuda, Residency::LowVram).unwrap();
     assert_eq!(over_the_bus.len(), 1);
-    let streamed = ir
-        .run(&RunContext::new(&over_the_bus).input("x", &x))
+
+    let streamed_ir = Ir::compile(&graph, Residency::LowVram);
+    assert!(
+        streamed_ir.prologue().is_empty(),
+        "a low-vram run brings nothing across before it starts"
+    );
+
+    let streamed_held = streamed_ir.load(&over_the_bus).unwrap();
+    assert!(streamed_held.is_empty());
+
+    let streamed = streamed_ir
+        .run(
+            &streamed_held,
+            &RunContext::new(&over_the_bus).input("x", &x),
+        )
         .unwrap();
 
     assert_eq!(to_host(&kept[0].1), to_host(&streamed[0].1));
@@ -498,8 +580,11 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     // Again off the same source, because a low-vram run is the one that reads its weights over and
     // over: twenty sampler steps are twenty copies of the model, and every one of them has to be
     // the same weight.
-    let again = ir
-        .run(&RunContext::new(&over_the_bus).input("x", &x))
+    let again = streamed_ir
+        .run(
+            &streamed_held,
+            &RunContext::new(&over_the_bus).input("x", &x),
+        )
         .unwrap();
     assert_eq!(to_host(&streamed[0].1), to_host(&again[0].1));
 }
@@ -522,30 +607,47 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     let allocated = || MemorySnapshot::capture(Device::Cuda).unwrap().allocated;
 
     let before = allocated();
-    let pinned = Pinned::read(param_file(tensors), Device::Cuda).unwrap();
+    let pinned = Weights::new(param_file(tensors), Device::Cuda, Residency::LowVram).unwrap();
     assert_eq!(
         allocated(),
         before,
-        "reading a package for a low-vram run puts nothing on the card"
+        "opening a package for a low-vram run puts nothing on the card"
     );
 
     // And neither does checking the model against it, which is the whole reason `check` is a
-    // question of its own rather than a `load` whose answer is dropped.
+    // question of its own rather than a read whose answer is dropped.
     check_parameters(&graph, &pinned).unwrap();
     assert_eq!(allocated(), before, "checking a model must not move it");
 
-    // The load is where the bytes cross, and they land on the card.
-    let loaded = pinned.load("big.weight", &[256, 256]).unwrap();
-    assert_eq!(loaded.device(), Device::Cuda);
-    assert!(allocated() - before >= bytes, "the weight is on the card");
+    // Nor does building it. A low-vram IR has an empty prologue, so there is nothing for `load`
+    // to bring across -- which is the thing that lets a model larger than the card be built at
+    // all, and is not something the older form of this could say.
+    let ir = Ir::compile(&graph, Residency::LowVram);
+    let held = ir.load(&pinned).unwrap();
+    assert_eq!(allocated(), before, "building a low-vram model moves nothing");
 
-    // And they are gone again once nothing holds them, which is what the `free` instruction after
-    // each `load` does inside a run.
-    drop(loaded);
-    assert_eq!(allocated(), before);
+    // The pass is where the bytes cross. They land on the card, and they are gone again by the
+    // time it ends: the `free` the compiler put after the weight's last reader is the card taking
+    // them back.
+    let x = Tensor::zeros(&[256, 256], DType::Float, Device::Cuda).unwrap();
+    let out = ir
+        .run(&held, &RunContext::new(&pinned).input("x", &x))
+        .unwrap();
+    drop(out);
+    assert_eq!(allocated() - before, bytes_of(&x), "only the input is left");
 
-    // Against which: reading the same package the resident way does put it there, and keeps it.
-    let kept = resident(&param_file(tensors), Device::Cuda).unwrap();
+    // Against which: the same package compiled to keep its weights does put the model on the card
+    // when it is built, and holds it there.
+    let resident_weights = resident(&param_file(tensors), Device::Cuda).unwrap();
+    let kept = Ir::compile(&graph, Residency::Device)
+        .load(&resident_weights)
+        .unwrap();
+
     assert!(allocated() - before >= bytes);
     drop(kept);
+}
+
+/// How much of the card one tensor is holding, which the input above is and the weights are not.
+fn bytes_of(tensor: &Tensor) -> i64 {
+    tensor.nbytes().unwrap()
 }

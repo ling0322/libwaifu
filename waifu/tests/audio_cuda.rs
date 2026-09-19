@@ -20,7 +20,9 @@ use waifu::audio::{
     conv1d, conv_transpose1d, depthwise_conv1d, hann_window, istft, istft_basis, pad1d, snake,
     stft, stft_basis, window_envelope, Padding,
 };
-use waifu::flint::{functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Value};
+use waifu::flint::{
+    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor, Value,
+};
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
 fn cuda_float() -> DType {
@@ -36,7 +38,9 @@ fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, Vec<f32>
         context = context.input(name, tensor);
     }
 
-    let outputs = Ir::compile(g).run(&context).unwrap();
+    let ir = Ir::compile(g, Residency::Device);
+    let held = ir.load(&weights).unwrap();
+    let outputs = ir.run(&held, &context).unwrap();
     let tensor = outputs[0]
         .1
         .to_device(Device::Cpu)

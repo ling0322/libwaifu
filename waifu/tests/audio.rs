@@ -18,7 +18,7 @@ use waifu::audio::{
     magnitude, mel_filterbank, pad1d, resample, resample_kernel, snake, stft, stft_basis,
     window_envelope, MelScale, Padding,
 };
-use waifu::flint::{DType, Device, Graph, Ir, RunContext, Tensor, Value};
+use waifu::flint::{DType, Device, Graph, Ir, Residency, RunContext, Tensor, Value};
 
 const CPU: Device = Device::Cpu;
 const F32: DType = DType::Float;
@@ -33,7 +33,9 @@ fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> Vec<f32> {
         context = context.input(name, tensor);
     }
 
-    let outputs = Ir::compile(g).run(&context).unwrap();
+    let ir = Ir::compile(g, Residency::Device);
+    let held = ir.load(&weights).unwrap();
+    let outputs = ir.run(&held, &context).unwrap();
     outputs[0].1.to_device(CPU).unwrap().to_vec_f32().unwrap()
 }
 
@@ -47,7 +49,9 @@ fn run_shaped(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, V
         context = context.input(name, tensor);
     }
 
-    let outputs = Ir::compile(g).run(&context).unwrap();
+    let ir = Ir::compile(g, Residency::Device);
+    let held = ir.load(&weights).unwrap();
+    let outputs = ir.run(&held, &context).unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 
     (tensor.shape(), tensor.to_vec_f32().unwrap())
@@ -1021,8 +1025,10 @@ fn the_audio_operators_are_nodes_no_backend_implements_yet() {
             context = context.input(input, tensor);
         }
 
-        let error = Ir::compile(&g)
-            .run(&context)
+        let ir = Ir::compile(&g, Residency::Device);
+        let held = ir.load(&weights).unwrap();
+        let error = ir
+            .run(&held, &context)
             .expect_err("no backend implements this, so running it has to fail");
 
         // The failure has to be the operator saying it has no kernel. Anything else -- an unknown
