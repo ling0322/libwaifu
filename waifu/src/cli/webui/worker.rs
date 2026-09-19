@@ -36,11 +36,12 @@ use std::time::Instant;
 
 use crate::cli::args::Runtime;
 use crate::cli::hub;
-use crate::cli::webui::state::{Chosen, Doing, Fetch, Picture, Run, Shared};
+use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
 use crate::flint::Tensor;
+use crate::wav::{self, Sound};
 use crate::{
     from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2,
-    Manifest, Sdxl,
+    Manifest, Sdxl, SpeechOptions, SpeechProgress, Tones, Voice,
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -69,6 +70,13 @@ const ANIMA_DRAWS_FROM_NO_PICTURE: &str = "Anima cannot start from a picture yet
 const KREA2_DRAWS_FROM_NO_PICTURE: &str = "Krea 2 cannot start from a picture yet: its package \
      carries an image encoder, but the layer that reads one is not written";
 
+/// What the one voice there is, is called where a name is asked for.
+///
+/// A constant rather than a catalogue entry, because it is not published anywhere and cannot be
+/// fetched: it is in the binary. When a voice is published this becomes a row in [`hub`]'s
+/// catalogue like every other model, and this constant is what the page asks for until then.
+pub const VOICE: &str = "tones";
+
 /// How many sizes a model has to name before its list is used instead of the one above.
 ///
 /// One size is not a choice and two is barely one. A model that names fewer has not replaced the
@@ -93,6 +101,25 @@ pub struct Job {
     pub from: Option<Vec<u8>>,
 }
 
+/// A sentence to read out.
+pub struct SayJob {
+    /// The voice to read it with, as it was chosen. There is one to choose from today, and it
+    /// travels with the run anyway for the same reason a model's name does: what was chosen when
+    /// the button was pressed is what this run is of.
+    pub voice: String,
+    pub text: String,
+    /// Always with a seed in it, like a picture's options: a reading asked for without one is
+    /// given a fresh one before it is posted, so that what comes out says which number said it.
+    pub options: SpeechOptions,
+    /// The recording to sound like, as the WAV bytes it arrived as, on a run that has one.
+    ///
+    /// Bytes rather than a path, and for the same reason a picture's are: it was dropped on the
+    /// page and never had a name on this machine. Read here rather than on the request's thread
+    /// so that a file that turns out not to be readable is one message on the bar rather than a
+    /// refusal at the door of a run that would otherwise have worked.
+    pub like: Option<Vec<u8>>,
+}
+
 /// What the requests can ask the worker for.
 pub enum Command {
     /// Fetch this model if it is not on the disk, read it onto the device, and hold it.
@@ -100,6 +127,7 @@ pub enum Command {
     /// Send what is loaded, and everything after it, to another device.
     UseDevice(Runtime),
     Draw(Job),
+    Speak(SayJob),
 }
 
 /// Reads commands and carries them out, until the channel is closed.
@@ -112,6 +140,17 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
     // and the two are compared at each run: this is the name that was opened, not the name that
     // is wanted.
     let mut in_memory: Option<String> = None;
+
+    // What is loaded to speak with.
+    //
+    // Held beside the picture model rather than instead of it, which is right only for as long as
+    // what is behind this holds nothing: [`Tones`] is arithmetic and no weights. The first voice
+    // with a package behind it cannot sit on the card beside a twelve billion parameter picture
+    // model, so the day one lands, this and `model` become one slot that the two take turns in --
+    // the same swap `Command::Draw` already does between one picture model and the next, and it
+    // belongs here beside it.
+    let mut voice: Option<Box<dyn Voice>> = None;
+    let mut speaking: Option<String> = None;
 
     for command in commands {
         match command {
@@ -153,6 +192,25 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                     Some(model) => draw(shared, model, job),
                     // Nothing to say: the read that just failed said why, in the words of
                     // whatever went wrong with it.
+                    None => (),
+                }
+            }
+
+            Command::Speak(job) => {
+                // Read at the first run that needs it, exactly as a picture model is. There is
+                // nothing to fetch today and this costs nothing; what it is, is the place the
+                // fetch goes.
+                if speaking.as_deref() != Some(job.voice.as_str()) {
+                    voice = None;
+                    speaking = None;
+
+                    if read_voice(shared, &job.voice, &mut voice) {
+                        speaking = Some(job.voice.clone());
+                    }
+                }
+
+                match &voice {
+                    Some(voice) => say(shared, voice.as_ref(), job),
                     None => (),
                 }
             }
@@ -210,6 +268,54 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
             false
         }
     }
+}
+
+/// The only voice there is, as the screen describes it.
+///
+/// What [`look_at`] is for a picture model: what can be said about a voice before any of it is
+/// read. It is a name today rather than a choice, because nothing is published to choose between
+/// -- so this constructs the one there is, asks it about itself, and lets it go again. The day
+/// there are two, this takes a name the way `look_at` does and reads a manifest for the rest.
+pub fn look_at_voice() -> Spoken {
+    describe_voice(&Tones::new(), false)
+}
+
+/// What a voice says about itself, in the words the screen shows.
+fn describe_voice(voice: &dyn Voice, in_memory: bool) -> Spoken {
+    Spoken {
+        name: VOICE.to_string(),
+        full_name: voice.name().to_string(),
+        in_memory,
+        defaults: voice.defaults(),
+        rate: voice.rate(),
+        no_likeness_because: voice.no_likeness_because().map(str::to_string),
+        not_a_voice_because: voice.not_a_voice_because().map(str::to_string),
+    }
+}
+
+/// Reads the voice `asked` names into `voice`, and says on screen how it went.
+///
+/// The mirror of [`read_model`], and shaped like it rather than like what it currently does:
+/// there is one voice, it is built into the binary, and constructing it is a struct with two
+/// floats in it. What earns the shape is the seam -- a voice with a package behind it is fetched
+/// and read here, reporting through the same [`Doing::Fetching`] and [`Doing::Reading`] the
+/// picture models already report through, and nothing above this function finds out.
+fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) -> bool {
+    if asked != VOICE {
+        shared.say(format!("there is no voice called \"{asked}\""), true);
+        return false;
+    }
+
+    let read = Tones::new();
+    let described = describe_voice(&read, true);
+    *voice = Some(Box::new(read));
+
+    shared.change(|session| {
+        session.voice = Some(described);
+        session.doing = Doing::Nothing;
+    });
+
+    true
 }
 
 /// What a kind of model implies for the screen before any of its weights are read: what to ask
@@ -526,6 +632,123 @@ fn draw(shared: &Shared, model: &Model, job: Job) {
         session.doing = Doing::Nothing;
         session.note = None;
     });
+}
+
+/// Says one sentence and puts the clip in the list.
+///
+/// The mirror of [`draw`]: the same claim, the same reporter, the same three ways out -- a
+/// waveform, a stop, or a message on the bar.
+fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) {
+    shared.carry_on();
+    let started = Instant::now();
+    shared.change(|session| {
+        session.doing = Doing::Speaking(Say {
+            progress: SpeechProgress::Reading,
+            // Not known until the model has an opinion, which arrives with the first token. The
+            // bar reads it as "no idea yet" and sits at the start, which is where the run is.
+            expected: 0,
+            started,
+        });
+        session.note = None;
+    });
+
+    let mut report = |progress| {
+        shared.change(|session| {
+            if let Doing::Speaking(say) = &mut session.doing {
+                say.progress = progress;
+                // The model's own estimate, taken as it arrives rather than once: a model that
+                // revises it upward mid-reading is a bar that should follow it rather than one
+                // that pins itself to the first guess.
+                if let SpeechProgress::Saying { expected, .. } = progress {
+                    say.expected = expected;
+                }
+            }
+        });
+
+        match shared.interrupted() {
+            true => ControlFlow::Break(()),
+            false => ControlFlow::Continue(()),
+        }
+    };
+
+    // Read before the run, so that a file that is not a recording is one message rather than a
+    // run that fails partway through. The page decodes whatever was dropped on it and posts a
+    // WAV, so anything that fails here came from something that is not the page.
+    let like = match &job.like {
+        Some(bytes) => match wav::read(bytes) {
+            Ok(sound) => Some(sound),
+            Err(error) => {
+                shared.change(|session| session.doing = Doing::Nothing);
+                return shared.say(format!("the recording to sound like: {error}"), true);
+            }
+        },
+        None => None,
+    };
+
+    let said = voice.speak(&job.text, like.as_ref(), &job.options, &mut report);
+
+    let elapsed = started.elapsed();
+    let kept = match said {
+        // Written here rather than handed back, for the same reason the pixels are: a minute of
+        // speech is a couple of megabytes that nothing on the other side would do anything with
+        // but hand to a file.
+        Ok(Some(sound)) => keep_sound(&sound),
+        Ok(None) => {
+            shared.change(|session| session.doing = Doing::Nothing);
+            return shared.say("stopped where it was", false);
+        }
+        Err(error) => Err(error.into()),
+    };
+
+    let (file, seconds) = match kept {
+        Ok(kept) => kept,
+        Err(error) => {
+            shared.change(|session| session.doing = Doing::Nothing);
+            return shared.say(error.to_string(), true);
+        }
+    };
+
+    shared.change(|session| {
+        session.clips.insert(
+            0,
+            Clip {
+                file,
+                text: job.text.clone(),
+                seconds,
+                rate: voice.rate(),
+                speed: job.options.speed,
+                temperature: job.options.temperature,
+                // Always there: a job is given one before it is posted.
+                seed: job.options.seed.unwrap_or_default(),
+                voice: job.voice.clone(),
+                from_a_recording: job.like.is_some(),
+                elapsed,
+            },
+        );
+        session.doing = Doing::Nothing;
+        session.note = None;
+    });
+}
+
+/// Writes the waveform a reading ends with into the first `waifu-NNNN.wav` here that nothing else
+/// has, and says how long it turned out to be.
+///
+/// The same naming as the pictures and beside them, so that what a session made is one run of
+/// numbered files in the directory it was started in rather than two schemes to learn.
+fn keep_sound(sound: &Sound) -> Result<(String, f64), Error> {
+    let bytes = wav::write(sound);
+
+    for number in 1..10_000 {
+        let name = format!("waifu-{number:04}.wav");
+        if Path::new(&name).exists() {
+            continue;
+        }
+
+        std::fs::write(&name, &bytes)?;
+        return Ok((name, sound.seconds()));
+    }
+
+    Err("there are already ten thousand clips in this directory".into())
 }
 
 /// The model a run draws with, whichever kind of package was opened.
