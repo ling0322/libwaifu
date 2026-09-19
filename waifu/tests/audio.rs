@@ -909,3 +909,101 @@ fn depthwise_conv1d_is_conv1d_with_one_group_per_channel() {
         close(&depthwise, &grouped, 1e-5);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// the operators, as opposed to the compositions
+// ---------------------------------------------------------------------------------------------
+
+/// `conv1d`, `conv_transpose1d`, `snake`, `stft` and `istft` are also operators -- named in
+/// `Operators`, dispatched through `F::`, reachable as a single node from a graph -- and no
+/// backend implements any of them.
+///
+/// That combination is easy to get wrong in a way nothing notices, because the whole chain is
+/// declarations: a node no pass recognises and a node whose kernel is missing both do nothing,
+/// and only one of the two is intended. So this asks for the intended failure by name. Each graph
+/// has to compile, print as the call it stands for, and then fail *at the operator layer* when it
+/// runs -- which is five links, from `Graph` through `Op` and `ir` and the C interface down to
+/// `Operators`, every one of which has to be connected for the message to come back.
+///
+/// The bases throw rather than abort, which is what makes this a test at all. `NOT_IMPL()` --
+/// what the other sixty-one unimplemented operators use -- is `LOG(FATAL)` and `abort()`, and an
+/// operator that kills the process cannot be asked whether it is there.
+///
+/// When a backend grows one of these kernels its line here stops failing, and that is the signal
+/// to delete the line rather than a reason to doubt it.
+#[test]
+fn the_audio_operators_are_nodes_no_backend_implements_yet() {
+    let signal = Tensor::from_f32(&[1, 2, 8], &ramp(16, 0.0)).unwrap();
+    let weight = Tensor::from_f32(&[2, 1, 3], &ramp(6, 1.0)).unwrap();
+    let per_channel = Tensor::from_f32(&[2], &[0.7, 1.3]).unwrap();
+    let window = Tensor::from_f32(&[4], &hann_window(4)).unwrap();
+
+    // Each case is what the node should be called, how to build it, and the inputs that graph
+    // declares -- a run is refused anything it did not ask for.
+    type Build = Box<dyn Fn(&Graph) -> Value>;
+    type Case<'a> = (&'a str, Build, Vec<(&'a str, &'a Tensor)>);
+    let cases: Vec<Case> = vec![
+        (
+            "conv1d",
+            Box::new(|g: &Graph| g.conv1d(g.input("x"), g.input("w"), None, 1, 1, 1, 1)),
+            vec![("x", &signal), ("w", &weight)],
+        ),
+        (
+            "conv_transpose1d",
+            Box::new(|g: &Graph| g.conv_transpose1d(g.input("x"), g.input("w"), None, 2, 0, 0, 1)),
+            vec![("x", &signal), ("w", &weight)],
+        ),
+        (
+            "snake",
+            Box::new(|g: &Graph| g.snake(g.input("x"), g.input("a"), None, 1e-6)),
+            vec![("x", &signal), ("a", &per_channel)],
+        ),
+        (
+            "stft",
+            Box::new(|g: &Graph| g.stft(g.input("x"), g.input("win"), 4, 2, false)),
+            vec![("x", &signal), ("win", &window)],
+        ),
+        (
+            "istft",
+            Box::new(|g: &Graph| g.istft(g.input("x"), g.input("win"), 4, 2, false)),
+            vec![("x", &signal), ("win", &window)],
+        ),
+    ];
+
+    for (name, build, inputs) in cases {
+        let g = Graph::new();
+        let out = build(&g);
+        g.output("out", out);
+
+        // It reads as the call it stands for, which is what says `Op::name` and the `Display`
+        // arm were both filled in.
+        let printed = format!("{g}");
+        assert!(
+            printed.contains(&format!("{name}(")),
+            "a {name} graph did not print as one:\n{printed}"
+        );
+
+        let weights: HashMap<String, Tensor> = HashMap::new();
+        let mut context = RunContext::new(&weights);
+        for (input, tensor) in &inputs {
+            context = context.input(input, tensor);
+        }
+
+        let error = Ir::compile(&g)
+            .run(&context)
+            .expect_err("no backend implements this, so running it has to fail");
+
+        // The failure has to be the operator saying it has no kernel. Anything else -- an unknown
+        // node, a shape complaint, a missing input -- would mean the chain is miswired rather
+        // than merely unimplemented.
+        let message = error.to_string();
+        assert!(
+            message.contains("no device has this kernel"),
+            "{name} failed for the wrong reason: {message}"
+        );
+        assert!(
+            message.contains(name) || message.contains("convTranspose1d"),
+            "{name} failed without naming itself: {message}"
+        );
+    }
+}

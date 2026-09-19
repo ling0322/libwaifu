@@ -437,6 +437,50 @@ pub enum Op {
         dilation: i32,
         groups: i32,
     },
+    /// A 1-D convolution. No backend implements this; `crate::audio::conv1d` is what runs today.
+    /// The node exists so that a kernel has a seat -- see `Operators::conv1d`.
+    Conv1d {
+        input: Value,
+        weight: Value,
+        bias: Option<Value>,
+        stride: i32,
+        padding: i32,
+        dilation: i32,
+        groups: i32,
+    },
+    /// A transposed 1-D convolution. No backend implements this either.
+    ConvTranspose1d {
+        input: Value,
+        weight: Value,
+        bias: Option<Value>,
+        stride: i32,
+        padding: i32,
+        output_padding: i32,
+        groups: i32,
+    },
+    /// `x + sin(alpha * x)^2 / (beta + eps)`, per channel. No backend implements this.
+    Snake {
+        input: Value,
+        alpha: Value,
+        beta: Option<Value>,
+        eps: f32,
+    },
+    /// A short time Fourier transform against `window`. No backend implements this.
+    Stft {
+        input: Value,
+        window: Value,
+        n_fft: i32,
+        hop: i32,
+        centered: bool,
+    },
+    /// The inverse of [`Op::Stft`]. No backend implements this.
+    Istft {
+        spectrum: Value,
+        window: Value,
+        n_fft: i32,
+        hop: i32,
+        centered: bool,
+    },
     /// Repeat each pixel `scale` times along both spatial axes.
     UpsampleNearest2d {
         input: Value,
@@ -525,6 +569,11 @@ impl Op {
             Op::Fp8Matmul { .. } => "fp8_matmul",
             Op::Lookup { .. } => "lookup",
             Op::Conv2d { .. } => "conv2d",
+            Op::Conv1d { .. } => "conv1d",
+            Op::ConvTranspose1d { .. } => "conv_transpose1d",
+            Op::Snake { .. } => "snake",
+            Op::Stft { .. } => "stft",
+            Op::Istft { .. } => "istft",
             Op::UpsampleNearest2d { .. } => "upsample_nearest2d",
             Op::Attention { .. } => "attention",
             Op::Cat { .. } => "cat",
@@ -635,6 +684,36 @@ impl Op {
                 operands
             }
 
+            Op::Conv1d {
+                input,
+                weight,
+                bias,
+                ..
+            }
+            | Op::ConvTranspose1d {
+                input,
+                weight,
+                bias,
+                ..
+            } => {
+                let mut operands = vec![*input, *weight];
+                operands.extend(bias.iter());
+                operands
+            }
+
+            Op::Snake {
+                input, alpha, beta, ..
+            } => {
+                let mut operands = vec![*input, *alpha];
+                operands.extend(beta.iter());
+                operands
+            }
+
+            Op::Stft { input, window, .. } => vec![*input, *window],
+            Op::Istft {
+                spectrum, window, ..
+            } => vec![*spectrum, *window],
+
             Op::Attention {
                 query, key, value, ..
             } => vec![*query, *key, *value],
@@ -718,6 +797,47 @@ impl fmt::Display for Op {
                 call.arg(format_args!("groups={groups}"))?;
             }
             Op::UpsampleNearest2d { scale, .. } => call.arg(format_args!("scale={scale}"))?,
+            Op::Conv1d {
+                stride,
+                padding,
+                dilation,
+                groups,
+                ..
+            } => {
+                call.arg(format_args!("stride={stride}"))?;
+                call.arg(format_args!("padding={padding}"))?;
+                call.arg(format_args!("dilation={dilation}"))?;
+                call.arg(format_args!("groups={groups}"))?;
+            }
+            Op::ConvTranspose1d {
+                stride,
+                padding,
+                output_padding,
+                groups,
+                ..
+            } => {
+                call.arg(format_args!("stride={stride}"))?;
+                call.arg(format_args!("padding={padding}"))?;
+                call.arg(format_args!("output_padding={output_padding}"))?;
+                call.arg(format_args!("groups={groups}"))?;
+            }
+            Op::Snake { eps, .. } => call.arg(format_args!("eps={eps}"))?,
+            Op::Stft {
+                n_fft,
+                hop,
+                centered,
+                ..
+            }
+            | Op::Istft {
+                n_fft,
+                hop,
+                centered,
+                ..
+            } => {
+                call.arg(format_args!("n_fft={n_fft}"))?;
+                call.arg(format_args!("hop={hop}"))?;
+                call.arg(format_args!("centered={centered}"))?;
+            }
             Op::Attention { causal, .. } => call.arg(format_args!("causal={causal}"))?,
 
             Op::View { shape, .. } => call.arg(shape_of(shape))?,

@@ -130,6 +130,93 @@ pub fn conv2d(
     })
 }
 
+/// A 1-D convolution of `input` `(N, C, L)` by `weight` `(K, C / groups, R)`.
+///
+/// No device implements this yet, so every call fails; [`crate::audio::conv1d`] is what computes
+/// a 1-D convolution today, out of [`conv2d`]. This is the seat a kernel takes when one is
+/// written. See `Operators::conv1d`.
+pub fn conv1d(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    stride: i32,
+    padding: i32,
+    dilation: i32,
+    groups: i32,
+) -> Result<Tensor> {
+    let bias = bias.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+    Tensor::produce(|out| unsafe {
+        ffi::fl_conv1d(
+            input.raw, weight.raw, bias, stride, padding, dilation, groups, out,
+        )
+    })
+}
+
+/// A transposed 1-D convolution of `input` `(N, C, L)` by `weight` `(C, K / groups, R)`.
+///
+/// No device implements this yet; [`crate::audio::conv_transpose1d`] is what computes one today.
+pub fn conv_transpose1d(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    stride: i32,
+    padding: i32,
+    output_padding: i32,
+    groups: i32,
+) -> Result<Tensor> {
+    let bias = bias.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+    Tensor::produce(|out| unsafe {
+        ffi::fl_conv_transpose1d(
+            input.raw,
+            weight.raw,
+            bias,
+            stride,
+            padding,
+            output_padding,
+            groups,
+            out,
+        )
+    })
+}
+
+/// `x + sin(alpha * x)^2 / (beta + eps)`, per channel of `input` `(N, C, L)`.
+///
+/// No device implements this yet; [`crate::audio::snake`] is what computes one today.
+pub fn snake(input: &Tensor, alpha: &Tensor, beta: Option<&Tensor>, eps: f32) -> Result<Tensor> {
+    let beta = beta.map(|t| t.raw).unwrap_or(std::ptr::null_mut());
+    Tensor::produce(|out| unsafe { ffi::fl_snake(input.raw, alpha.raw, beta, eps, out) })
+}
+
+/// The short time Fourier transform of `input` `(N, 1, L)` against `window` `(n_fft)`.
+///
+/// No device implements this yet; [`crate::audio::stft`] is what computes one today.
+pub fn stft(
+    input: &Tensor,
+    window: &Tensor,
+    n_fft: i32,
+    hop: i32,
+    centered: bool,
+) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe {
+        ffi::fl_stft(input.raw, window.raw, n_fft, hop, centered as i32, out)
+    })
+}
+
+/// The inverse of [`stft`].
+///
+/// No device implements this yet; [`crate::audio::istft`] is what computes one today.
+pub fn istft(
+    spectrum: &Tensor,
+    window: &Tensor,
+    n_fft: i32,
+    hop: i32,
+    centered: bool,
+) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe {
+        ffi::fl_istft(spectrum.raw, window.raw, n_fft, hop, centered as i32, out)
+    })
+}
+
 /// Normalize `input` `(N, C, H, W)` over each group of channels together with the space it covers,
 /// then scale and shift per channel.
 pub fn group_norm(

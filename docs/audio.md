@@ -81,6 +81,48 @@ is the operator this library is built on: `reversal(n)` is the `n` by `n` anti-d
 `x @ reversal(n)` is `x` backwards. The two edge slices are written with constant bounds --
 negative ones count from the back -- so neither needs the graph to know how long the signal is.
 
+## The operators exist even though no backend does
+
+Being a composition is how these are *computed*; it is not what they *are*. The operator set is
+what the library says it can do, and a 1-D convolution should not be invisible there because it
+happens to be assembled in Rust today.
+
+So `conv1d`, `convTranspose1d`, `snake`, `stft` and `istft` are declared in `Operators`, dispatched
+through `F::`, exported by the C interface, and reachable from a graph as a single node:
+
+```rust
+let y = g.conv1d(x, w, Some(bias), 1, padding, dilation, groups);   // one node
+let y = waifu::audio::conv1d(&g, x, w, Some(bias), ..)?;            // the several that work
+```
+
+No backend implements any of them, so the first line fails when the graph runs and the second is
+what a model should call. What the declarations buy is that a backend which writes one of these
+kernels overrides a method rather than restructuring its callers, and that the contract it has to
+meet -- shapes, layouts, what `centered` means, which of `alpha` and `beta` arrives already
+exponentiated -- is written down where the kernel will go.
+
+### They throw rather than abort
+
+The sixty-one unimplemented operators already in `Operators` use `NOT_IMPL()`, which is
+`LOG(FATAL)` followed by `abort()`. That is defensible for an operator some backend implements --
+reaching it means asking the wrong device -- but these five have no implementation anywhere, so
+every call would end the process.
+
+They use `THROW(NotImplemented, ...)` instead. `lut::NotImplementedError` already existed; the C
+interface's `guard` catches it like any other, and what comes back to Rust is an ordinary error
+naming the operator and pointing at the composition that does work. That is also what makes them
+testable: an operator that kills the process cannot be asked whether it is wired up.
+
+### What is not an operator
+
+- **`depthwiseConv1d`** -- depthwise is `conv1d` with `groups == in == out`, and one operation
+  should not have two names at the interface. A backend wanting the specialized path tests
+  `groups` against the channel count. `audio::depthwise_conv1d` stays a Rust composition because
+  that is what it is: a way around the CUDA `conv2d` having no group support.
+- **`mel_filterbank`, `resample`, `pad1d`** -- a constant built on the host and applied with
+  `matmul`; two convolutions back to back; and `cat` against a zeros tensor. Nobody would write a
+  kernel for any of the three.
+
 ## What is checked
 
 `waifu/tests/audio.rs` is fourteen tests on the processor, and none of them compares against a

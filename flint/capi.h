@@ -303,6 +303,70 @@ FLAPI int32_t fl_conv2d(
     int32_t groups,
     fl_tensor_t *out);
 
+/// 1-D convolution of `input` <float16|float>(N, C, L) by `weight` (K, C / groups, R), with an
+/// optional per-channel `bias` (K) that may be null.
+///
+/// No device implements this; see `Operators::conv1d`. It is reachable so that one can.
+FLAPI int32_t fl_conv1d(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups,
+    fl_tensor_t *out);
+
+/// Transposed 1-D convolution of `input` <float16|float>(N, C, L) by `weight` (C, K / groups, R),
+/// with an optional per-channel `bias` (K) that may be null.
+///
+/// No device implements this; see `Operators::convTranspose1d`.
+FLAPI int32_t fl_conv_transpose1d(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t output_padding,
+    int32_t groups,
+    fl_tensor_t *out);
+
+/// `x + sin(alpha * x)^2 / (beta + eps)` per channel of `input` <float16|float>(N, C, L).
+/// `alpha` is (C) and already exponentiated; `beta` is (C) or null, which means beta is alpha.
+///
+/// No device implements this; see `Operators::snake`.
+FLAPI int32_t fl_snake(
+    fl_tensor_t input,
+    fl_tensor_t alpha,
+    fl_tensor_t beta,
+    float eps,
+    fl_tensor_t *out);
+
+/// Short time Fourier transform of `input` <float>(N, 1, L) against `window` (n_fft), as
+/// <float>(N, 2 * (n_fft / 2 + 1), frames): every bin's real part, then every bin's imaginary
+/// part. `centered` is nonzero to pad by half a window at both ends, by reflection.
+///
+/// No device implements this; see `Operators::stft`.
+FLAPI int32_t fl_stft(
+    fl_tensor_t input,
+    fl_tensor_t window,
+    int32_t n_fft,
+    int32_t hop,
+    int32_t centered,
+    fl_tensor_t *out);
+
+/// The inverse of `fl_stft`: `spectrum` <float>(N, 2 * (n_fft / 2 + 1), frames) against `window`
+/// (n_fft), as <float>(N, 1, L).
+///
+/// No device implements this; see `Operators::istft`.
+FLAPI int32_t fl_istft(
+    fl_tensor_t spectrum,
+    fl_tensor_t window,
+    int32_t n_fft,
+    int32_t hop,
+    int32_t centered,
+    fl_tensor_t *out);
+
 /// Normalize `input` <float16>(N, C, H, W) over each group of channels and the space it covers,
 /// then scale and shift per channel. `weight` and `bias` are (C) and either may be null.
 FLAPI int32_t fl_group_norm(

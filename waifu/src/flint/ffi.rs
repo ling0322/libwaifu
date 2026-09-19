@@ -139,6 +139,49 @@ extern "C" {
         groups: i32,
         out: *mut FlTensor,
     ) -> i32;
+    pub fn fl_conv1d(
+        input: FlTensor,
+        weight: FlTensor,
+        bias: FlTensor,
+        stride: i32,
+        padding: i32,
+        dilation: i32,
+        groups: i32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_conv_transpose1d(
+        input: FlTensor,
+        weight: FlTensor,
+        bias: FlTensor,
+        stride: i32,
+        padding: i32,
+        output_padding: i32,
+        groups: i32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_snake(
+        input: FlTensor,
+        alpha: FlTensor,
+        beta: FlTensor,
+        eps: f32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_stft(
+        input: FlTensor,
+        window: FlTensor,
+        n_fft: i32,
+        hop: i32,
+        centered: i32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_istft(
+        spectrum: FlTensor,
+        window: FlTensor,
+        n_fft: i32,
+        hop: i32,
+        centered: i32,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_group_norm(
         input: FlTensor,
         weight: FlTensor,
