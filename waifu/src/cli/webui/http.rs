@@ -34,8 +34,8 @@ use tiny_http::{Header, Method, Request, Response};
 use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::state::{Doing, Shared};
-use crate::cli::webui::worker::{self, Command, Job};
-use crate::GenerationOptions;
+use crate::cli::webui::worker::{self, Command, Job, SayJob};
+use crate::{GenerationOptions, SpeechOptions};
 
 /// The page, built into the binary. There is no directory of files to find at runtime and no
 /// order the program has to be started from: a single executable is the whole of it.
@@ -62,6 +62,14 @@ const VENDOR: [(&str, &str); 3] = [
 /// looks at it, and without a limit "read it all" is as long as whatever is sending it likes.
 const MOST_OF_A_PICTURE: u64 = 64 << 20;
 
+/// And how much of a posted recording.
+///
+/// Smaller than a picture on purpose. What a speech model wants to hear of somebody is seconds,
+/// not minutes -- the page trims to half a minute before it posts -- and what arrives here is
+/// uncompressed samples rather than a compressed file, so the number that is generous for a
+/// recording is smaller than the one that is generous for a photograph.
+const MOST_OF_A_RECORDING: u64 = 16 << 20;
+
 /// What every answer is: bytes, with a type on them. One shape rather than a dozen, because a
 /// route that could answer with any of several would otherwise need them boxed.
 type Reply = Response<Cursor<Vec<u8>>>;
@@ -85,17 +93,29 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         (Method::Post, "/api/device") => use_device(shared, commands, request),
         (Method::Delete, "/api/model") => forget_model(shared, request),
         (Method::Post, "/api/generate") => generate(shared, commands, request),
+        (Method::Post, "/api/speak") => speak(shared, commands, request),
         (Method::Post, "/api/interrupt") => {
             shared.interrupt();
             json(json!({ "ok": true }))
         }
 
         (Method::Delete, "/api/picture") => forget_picture(shared, request),
+        (Method::Delete, "/api/clip") => forget_clip(shared, request),
 
         (Method::Post, "/api/upload") => upload(shared, request),
         (Method::Get, "/api/upload") => held_picture(shared),
         (Method::Delete, "/api/upload") => {
             shared.forget_upload();
+            json(json!({ "ok": true }))
+        }
+
+        // The recording a reading is to sound like. The same three doors the picture has, and
+        // its own box behind them: they are two different runs' inputs, and dropping one should
+        // not throw away the other.
+        (Method::Post, "/api/voice") => hold_recording(shared, request),
+        (Method::Get, "/api/voice") => held_recording(shared),
+        (Method::Delete, "/api/voice") => {
+            shared.forget_recording();
             json(json!({ "ok": true }))
         }
 
@@ -105,9 +125,10 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         // the loopback address is still reachable by anything else running on the machine.
         (Method::Get, path) => match VENDOR.iter().find(|(name, _)| *name == path) {
             Some((_, script)) => page(script, "text/javascript; charset=utf-8"),
-            None => match path.strip_prefix("/picture/") {
-                Some(file) => picture(shared, file),
-                None => refused(404, "no such page"),
+            None => match (path.strip_prefix("/picture/"), path.strip_prefix("/clip/")) {
+                (Some(file), _) => picture(shared, file),
+                (_, Some(file)) => clip(shared, file),
+                _ => refused(404, "no such page"),
             },
         },
 
@@ -308,6 +329,151 @@ fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Requ
     )
 }
 
+/// Starts a reading, if there is anything to read and nothing else is happening.
+///
+/// The mirror of [`generate`], including the order it refuses in: what is wrong with an empty
+/// page is that there is nothing to say, and that is the thing somebody can act on.
+fn speak(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
+    let asked = match body(request) {
+        Ok(body) => body,
+        Err(error) => return refused(400, &error),
+    };
+
+    let text = asked
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if text.trim().is_empty() {
+        return refused(400, "there is nothing to say: type something to read out");
+    }
+
+    // Taken before anything else is asked of the state, for the same reason a picture's run takes
+    // it first: what a second request is told should be what is actually happening.
+    if !shared.claim() {
+        return refused(409, &already(shared));
+    }
+
+    let Some(voice) = shared.session().voice.clone() else {
+        return give_up(shared, 409, "there is no voice to speak with");
+    };
+
+    // Whether this reading is given a recording to sound like. Asked of the request and then of
+    // what is actually held, so that a page left open while the recording was cleared does not
+    // ask for a run from one there is none of.
+    let from_a_recording = asked
+        .get("from_recording")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let like = match from_a_recording {
+        true => match shared.recording() {
+            Some(bytes) => Some(bytes),
+            None => return give_up(shared, 400, "there is no recording to sound like"),
+        },
+        false => None,
+    };
+    if let (true, Some(why)) = (like.is_some(), &voice.no_likeness_because) {
+        return give_up(shared, 409, why);
+    }
+
+    let options = SpeechOptions {
+        speed: decimal(asked.get("speed"), voice.defaults.speed).clamp(0.25, 4.0),
+        temperature: decimal(asked.get("temperature"), voice.defaults.temperature).clamp(0.0, 2.0),
+        // Never left open, for the same reason a picture's is not: what comes out should say
+        // which number said it, so that it can be said again.
+        seed: Some(seed(asked.get("seed"))),
+    };
+
+    post(
+        shared,
+        commands,
+        Command::Speak(SayJob {
+            voice: voice.name,
+            text,
+            options,
+            like,
+        }),
+    )
+}
+
+/// Holds the recording a reading is to sound like.
+///
+/// Posted as the bytes of a WAV file and nothing else. The page decodes whatever was dropped on
+/// it -- the browser has a decoder for every format it will play, and this program has one for
+/// none of them -- so what arrives is samples this program can actually read, whatever the file
+/// on the far side was.
+fn hold_recording(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+    let mut bytes = Vec::new();
+    if let Err(error) = request
+        .as_reader()
+        .take(MOST_OF_A_RECORDING)
+        .read_to_end(&mut bytes)
+    {
+        return refused(400, &format!("the recording did not arrive whole: {error}"));
+    }
+    if bytes.is_empty() {
+        return refused(400, "the recording was empty");
+    }
+
+    // Read here rather than at the run, alone among the things this server is posted. A picture
+    // that is not one is found out about by an image decoder that says so in a sentence; a WAV
+    // that is not one is found out about here, where there is still a request to refuse -- and
+    // refusing at the door is how somebody who dropped the wrong file learns it now rather than
+    // after pressing the button.
+    if let Err(error) = crate::wav::read(&bytes) {
+        return refused(400, &error.to_string());
+    }
+
+    shared.hold_recording(bytes);
+    json(json!({ "ok": true }))
+}
+
+/// Hands back the recording being held, so that a page opening fresh can play what is in the box.
+fn held_recording(shared: &Arc<Shared>) -> Reply {
+    match shared.recording() {
+        Some(bytes) => reply(200, "audio/wav", bytes),
+        None => refused(404, "no recording is being held"),
+    }
+}
+
+/// One of the clips this session said.
+fn clip(shared: &Arc<Shared>, file: &str) -> Reply {
+    let Some(path) = shared.spoke(file) else {
+        return refused(404, "this session did not say that");
+    };
+
+    match std::fs::read(&path) {
+        Ok(bytes) => reply(200, "audio/wav", bytes),
+        Err(error) => refused(410, &format!("{file} can no longer be read: {error}")),
+    }
+}
+
+/// Deletes one of the clips this session said, file and row alike.
+///
+/// The same door as a picture's and the same rule through it: by the name it was written under
+/// and no other.
+fn forget_clip(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+    let asked = match body(request) {
+        Ok(body) => body,
+        Err(error) => return refused(400, &error),
+    };
+    let Some(file) = asked.get("file").and_then(Value::as_str) else {
+        return refused(400, "no clip was named");
+    };
+    let Some(path) = shared.spoke(file) else {
+        return refused(404, "this session did not say that");
+    };
+
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return refused(500, &format!("{file} could not be deleted: {error}")),
+    }
+
+    shared.forget_clip(file);
+    json(json!({ "ok": true }))
+}
+
 /// Deletes one of the pictures this session drew, file and row alike.
 ///
 /// By the name it was written under and no other, like every other way this program is asked for
@@ -416,6 +582,7 @@ fn models() -> Value {
 fn already(shared: &Arc<Shared>) -> String {
     match &shared.session().doing {
         Doing::Drawing(_) => "there is already a picture being drawn".to_string(),
+        Doing::Speaking(_) => "there is already something being said".to_string(),
         Doing::Reading { model } => format!("{model} is still being read"),
         Doing::Fetching(fetch) => format!("{} is still being fetched", fetch.model),
         // Claimed, and not yet picked up -- the moment between a request posting a command and

@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::cli::args::Runtime;
-use crate::{GenerationDefaults, GenerationProgress};
+use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgress};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
 ///
@@ -46,6 +46,14 @@ use crate::{GenerationDefaults, GenerationProgress};
 /// sit there for the slowest part of the run.
 const ENCODING: f64 = 1.0;
 const DECODING: f64 = 3.0;
+
+/// And the same weighing for a run that speaks rather than draws.
+///
+/// Reading the text is a tokenizer and is quick. The vocoder at the end is a pass over the whole
+/// utterance and is not: it is the part of a speech run that a bar drawn from the tokens alone
+/// would sit in front of, saying nothing, for a second or two.
+const TEXT: f64 = 1.0;
+const VOCODER: f64 = 4.0;
 
 /// The model the page is set to draw with, as the screen describes it.
 ///
@@ -87,6 +95,38 @@ pub struct Chosen {
     pub no_picture_because: Option<String>,
 }
 
+/// The voice the page is set to speak with, as the screen describes it.
+///
+/// What [`Chosen`] is for a picture model, and for the same reasons: it is what could be known
+/// before any weights were read, and it is described again out of the voice itself once one is
+/// loaded. There is one of these even before anything has been asked for, because the boxes on
+/// the speech tab are a voice's numbers and have to start somewhere.
+#[derive(Clone)]
+pub struct Spoken {
+    /// What to ask for when the time comes to read it. One name today -- there is no published
+    /// voice to choose between -- and it travels with a run the way a model's name does, so that
+    /// the day there are two, a run is of the one that was chosen when the button was pressed.
+    pub name: String,
+    /// What it is called on screen.
+    pub full_name: String,
+    /// Whether it is read and on the device. What stands in for a voice today holds nothing, so
+    /// this is true from the first run rather than after a fetch.
+    pub in_memory: bool,
+    /// What the boxes start at, which is the voice's to say.
+    pub defaults: SpeechDefaults,
+    /// The rate it writes at, which is a property of the voice and not a setting. On the screen
+    /// because a clip that came out at the wrong pitch is a question about this first.
+    pub rate: u32,
+    /// Why it cannot be handed a recording to sound like, or None where it can.
+    pub no_likeness_because: Option<String>,
+    /// Why what comes out is not speech, for as long as that is true.
+    ///
+    /// The one sentence this whole tab is built around saying. It comes out of the voice itself
+    /// rather than being written on the page, so the day a real model is what is loaded the
+    /// warning goes away on its own rather than by somebody remembering to delete it.
+    pub not_a_voice_because: Option<String>,
+}
+
 /// Which package of a model is being fetched, and how far into it.
 #[derive(Clone)]
 pub struct Fetch {
@@ -112,6 +152,21 @@ pub struct Run {
     pub started: Instant,
 }
 
+/// A reading in flight.
+#[derive(Clone)]
+pub struct Say {
+    pub progress: SpeechProgress,
+    /// How many tokens this reading is expected to take, which the bar needs after the last one
+    /// and before the first.
+    ///
+    /// Unlike a picture's step count this is not known when the run is posted -- it is the
+    /// model's estimate, and it arrives with the first token. Until then it is what the length of
+    /// the text suggests, so that the bar has somewhere to start rather than jumping once the
+    /// model has an opinion.
+    pub expected: i32,
+    pub started: Instant,
+}
+
 /// What the worker is busy with, which is the only thing on the screen that moves on its own.
 #[derive(Clone)]
 pub enum Doing {
@@ -123,6 +178,7 @@ pub enum Doing {
         model: String,
     },
     Drawing(Run),
+    Speaking(Say),
 }
 
 impl Doing {
@@ -144,6 +200,7 @@ impl Doing {
                 .filter(|total| *total > 0)
                 .map(|total| fetch.done as f64 / total as f64),
             Doing::Drawing(run) => Some(drawn(run.progress, run.steps)),
+            Doing::Speaking(say) => Some(spoken(say.progress, say.expected)),
         }
     }
 
@@ -165,6 +222,17 @@ impl Doing {
                 GenerationProgress::Step { done, total } => format!("step {done} of {total}"),
                 GenerationProgress::Decoding => "making the picture".to_string(),
             },
+            Doing::Speaking(say) => match say.progress {
+                SpeechProgress::Reading => "reading the text".to_string(),
+                // "of about", because the number on the right is worked out from the length of
+                // the text rather than known: a model that decides what to say one token at a
+                // time does not know how many there will be until it stops. A bar that said "of"
+                // and then went past it would be a bar that had been lying.
+                SpeechProgress::Saying { done, expected } => {
+                    format!("token {done} of about {expected}")
+                }
+                SpeechProgress::Sounding => "making the sound".to_string(),
+            },
         }
     }
 }
@@ -177,6 +245,39 @@ fn drawn(progress: GenerationProgress, steps: i32) -> f64 {
         GenerationProgress::Step { done, total } => (ENCODING + f64::from(done)) / all(total),
         GenerationProgress::Decoding => (ENCODING + f64::from(steps.max(1))) / all(steps),
     }
+}
+
+/// How far along a reading is, as a bar can show it.
+///
+/// The same weighing the picture bar uses, over the three stages a speech run has. The token
+/// count is an estimate, so `done` can pass `expected` on a reading that runs long; what that has
+/// to not do is run the bar off the end and back round, so it is held at the last token instead
+/// -- which is where a run that is taking longer than expected actually is.
+fn spoken(progress: SpeechProgress, expected: i32) -> f64 {
+    let all = |expected: f64| TEXT + expected + VOCODER;
+    let expected = f64::from(expected.max(1));
+
+    match progress {
+        SpeechProgress::Reading => 0.0,
+        SpeechProgress::Saying { done, .. } => {
+            (TEXT + f64::from(done.max(0)).min(expected)) / all(expected)
+        }
+        SpeechProgress::Sounding => (TEXT + expected) / all(expected),
+    }
+}
+
+/// A setting, as a number a box can hold.
+///
+/// JSON has one kind of number and it is a double, so an `f32` widened into one arrives at the
+/// page as what that `f32` actually was: a temperature of 0.8 is 0.800000011920929, and a box
+/// filled in from it shows fifteen digits of the float's own representation rather than the
+/// setting somebody chose.
+///
+/// Rounded to four places, which is finer than any box here steps and coarser than the error.
+/// What goes back the other way is read as an `f32` again, so nothing is lost that was not
+/// already lost on the way in.
+fn showable(value: f32) -> f64 {
+    (f64::from(value) * 10_000.0).round() / 10_000.0
 }
 
 /// A finished picture: the file it was written to, and what it was asked for.
@@ -230,9 +331,61 @@ impl Picture {
             "negative": self.negative,
             "seed": self.seed,
             "steps": self.steps,
-            "guidance": self.guidance,
+            "guidance": showable(self.guidance),
             "model": self.model,
-            "strength": self.from_image,
+            "strength": self.from_image.map(showable),
+            "seconds": self.elapsed.as_secs_f64(),
+            "parameters": self.parameters(),
+        })
+    }
+}
+
+/// A finished clip: the file it was written to, and what it was asked for.
+///
+/// The same thing beside a clip that [`Picture::parameters`] is beside a picture, and kept for
+/// the same reason: a reading that came out well is asked about later, and by then the seed and
+/// the speed are the first two things nobody remembers.
+pub struct Clip {
+    pub file: String,
+    pub text: String,
+    pub seconds: f64,
+    pub rate: u32,
+    pub speed: f32,
+    pub temperature: f32,
+    pub seed: u64,
+    pub voice: String,
+    /// Whether it was given a recording to sound like. Not the recording itself -- that is
+    /// megabytes, and it is held once where the page can ask for it.
+    pub from_a_recording: bool,
+    pub elapsed: Duration,
+}
+
+impl Clip {
+    /// The line under the clip, in the same shape the line under a picture is in: what was said
+    /// first, and everything it would take to say it again after it.
+    pub fn parameters(&self) -> String {
+        let mut settings = format!(
+            "Speed: {}, Temperature: {}, Seed: {}, Rate: {} Hz, Voice: {}",
+            self.speed, self.temperature, self.seed, self.rate, self.voice,
+        );
+        if self.from_a_recording {
+            settings.push_str(", From a recording: yes");
+        }
+
+        format!("{}\n{settings}", self.text)
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "file": self.file,
+            "text": self.text,
+            "length": self.seconds,
+            "rate": self.rate,
+            "speed": showable(self.speed),
+            "temperature": showable(self.temperature),
+            "seed": self.seed,
+            "voice": self.voice,
+            "from_a_recording": self.from_a_recording,
             "seconds": self.elapsed.as_secs_f64(),
             "parameters": self.parameters(),
         })
@@ -250,12 +403,23 @@ pub struct Note {
 pub struct Session {
     /// What the page is set to draw with, whether or not its weights have been read.
     pub model: Option<Chosen>,
+    /// What the page is set to speak with. Filled in before any page opens, because the boxes on
+    /// the speech tab are a voice's numbers and there is nothing else to fill them from.
+    pub voice: Option<Spoken>,
     pub doing: Doing,
     pub note: Option<Note>,
     /// What has been drawn this session, newest first. The files themselves are on the disk where
     /// the program was started; this is the list of what may be asked for by name, which is also
     /// what keeps a request from asking for a file that was never written here.
     pub gallery: Vec<Picture>,
+    /// What has been said this session, newest first.
+    ///
+    /// Beside the pictures rather than mixed in with them. It is one gallery in the sense that
+    /// matters -- one list of what this session made, and one place that decides which file names
+    /// a request may ask for -- and two lists in the sense that also matters, which is that a
+    /// clip has a length and a picture has a shape and neither has the other. The screen shows
+    /// one kind at a time, so a single list would be a list the page filtered on every draw.
+    pub clips: Vec<Clip>,
     /// Counted up every time anything here changes, so that a browser polling for news can tell
     /// "nothing has happened" from "everything happened and finished" without comparing the whole
     /// of it. A run that starts and ends between two polls still moves this.
@@ -266,9 +430,11 @@ impl Session {
     fn new() -> Session {
         Session {
             model: None,
+            voice: None,
             doing: Doing::Nothing,
             note: None,
             gallery: Vec::new(),
+            clips: Vec::new(),
             revision: 0,
         }
     }
@@ -293,6 +459,18 @@ pub struct Shared {
     /// replaces the first. Behind its own lock, away from the session, because the session is
     /// copied out into JSON several times a second and this is megabytes.
     upload: Mutex<Option<Vec<u8>>>,
+    /// The recording a reading should sound like, as the WAV bytes it arrived as.
+    ///
+    /// Its own lock beside the picture's, for the same reason that one is not in the session: it
+    /// is megabytes and the session is copied into JSON several times a second. Separate from the
+    /// picture rather than one box for both, because they are two different runs' inputs and
+    /// dropping a voice should not throw away the picture somebody is about to redraw.
+    ///
+    /// WAV rather than whatever was dropped on the page. The browser has a decoder for every
+    /// format it will play and this program has one for none of them, so the page decodes what it
+    /// is given and posts the samples -- which means what arrives here is always something
+    /// [`crate::wav::read`] can read.
+    recording: Mutex<Option<Vec<u8>>>,
     /// Where runs go. Named on the command line to begin with and changed from the page after
     /// that, which is why it is behind a lock: a request reads it to describe the program while
     /// the worker is reading it to decide where to put the next model.
@@ -310,6 +488,7 @@ impl Shared {
             cancel: AtomicBool::new(false),
             working: AtomicBool::new(false),
             upload: Mutex::new(None),
+            recording: Mutex::new(None),
             runtime: Mutex::new(runtime),
         }
     }
@@ -395,6 +574,32 @@ impl Shared {
         self.upload.lock().unwrap_or_else(|held| held.into_inner())
     }
 
+    pub fn hold_recording(&self, bytes: Vec<u8>) {
+        *self.recorded() = Some(bytes);
+        self.change(|_| ());
+    }
+
+    /// A copy of the recording being held, for the run that is about to be given it.
+    pub fn recording(&self) -> Option<Vec<u8>> {
+        self.recorded().clone()
+    }
+
+    pub fn forget_recording(&self) {
+        *self.recorded() = None;
+        self.change(|_| ());
+    }
+
+    /// Whether there is a recording to sound like, which is the part of it the page is told.
+    pub fn holding_a_recording(&self) -> bool {
+        self.recorded().is_some()
+    }
+
+    fn recorded(&self) -> MutexGuard<'_, Option<Vec<u8>>> {
+        self.recording
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+    }
+
     pub fn runtime(&self) -> Runtime {
         *self.runtime.lock().unwrap_or_else(|held| held.into_inner())
     }
@@ -431,16 +636,21 @@ impl Shared {
             "revision": session.revision,
             "busy": busy,
             "drawing": matches!(session.doing, Doing::Drawing(_)),
+            // Told apart from drawing, because the two buttons that stop them are on different
+            // tabs and each one is live only while its own kind of run is going.
+            "speaking": matches!(session.doing, Doing::Speaking(_)),
             "fraction": session.doing.fraction(),
             "doing": session.doing.words(),
             "seconds": match &session.doing {
                 Doing::Drawing(run) => Some(run.started.elapsed().as_secs_f64()),
+                Doing::Speaking(say) => Some(say.started.elapsed().as_secs_f64()),
                 _ => None,
             },
             // Only while there is something to stop. The flag stays set between a run that was
             // stopped and the next one that clears it, and a bar saying "stopping" over an idle
             // program would be reporting the flag rather than what is happening.
-            "interrupting": self.interrupted() && matches!(session.doing, Doing::Drawing(_)),
+            "interrupting": self.interrupted()
+                && matches!(session.doing, Doing::Drawing(_) | Doing::Speaking(_)),
         })
     }
 
@@ -456,13 +666,29 @@ impl Shared {
                 "width": model.defaults.width,
                 "height": model.defaults.height,
                 "steps": model.defaults.num_steps,
-                "guidance": model.defaults.guidance_scale,
+                "guidance": showable(model.defaults.guidance_scale),
                 "sampler": model.sampler,
                 "sizes": model.sizes.iter().map(|(w, h)| json!([w, h])).collect::<Vec<_>>(),
                 "prompt": model.suggested_prompt,
                 "avoid": model.suggested_avoid,
                 "draws_from_a_picture": model.no_picture_because.is_none(),
                 "no_picture_because": model.no_picture_because,
+            })
+        });
+
+        let voice = session.voice.as_ref().map(|voice| {
+            json!({
+                "name": voice.name,
+                "full_name": voice.full_name,
+                "in_memory": voice.in_memory,
+                "speed": showable(voice.defaults.speed),
+                "temperature": showable(voice.defaults.temperature),
+                "rate": voice.rate,
+                "takes_a_recording": voice.no_likeness_because.is_none(),
+                "no_likeness_because": voice.no_likeness_because,
+                // The sentence the speech tab is built around. Null for a real model, which is
+                // how the warning on that tab goes away by itself the day there is one.
+                "not_a_voice_because": voice.not_a_voice_because,
             })
         });
 
@@ -477,10 +703,13 @@ impl Shared {
                 .map(|runtime| runtime.name())
                 .collect::<Vec<_>>(),
             "holding_a_picture": self.holding_a_picture(),
+            "holding_a_recording": self.holding_a_recording(),
             "models": models,
             "model": model,
+            "voice": voice,
             "note": session.note.as_ref().map(|note| json!({ "said": note.said, "bad": note.bad })),
             "gallery": session.gallery.iter().map(Picture::json).collect::<Vec<_>>(),
+            "clips": session.clips.iter().map(Clip::json).collect::<Vec<_>>(),
         })
     }
 
@@ -496,6 +725,26 @@ impl Shared {
             .iter()
             .find(|picture| picture.file == file)
             .map(|picture| PathBuf::from(&picture.file))
+    }
+
+    /// Where a clip the browser asks for by name is, if this session said it.
+    ///
+    /// The same door as a picture and the same answer through it: a name that is not in the list
+    /// of what this session made is not a file this program will open, whatever it is a path to.
+    /// Two lists and two doors rather than one of each, so that a request for a picture cannot
+    /// reach a clip and be handed one under the wrong content type.
+    pub fn spoke(&self, file: &str) -> Option<PathBuf> {
+        let session = self.session();
+        session
+            .clips
+            .iter()
+            .find(|clip| clip.file == file)
+            .map(|clip| PathBuf::from(&clip.file))
+    }
+
+    /// Takes a clip out of the list, which is what makes its name unaskable-for again.
+    pub fn forget_clip(&self, file: &str) {
+        self.change(|session| session.clips.retain(|clip| clip.file != file));
     }
 
     /// Takes a picture out of the gallery, which is what makes its name unaskable-for again.
@@ -515,6 +764,21 @@ mod tests {
 
     fn a_session() -> Shared {
         Shared::new(DeviceOption::Cpu.resolve())
+    }
+
+    fn a_clip(seed: u64) -> Clip {
+        Clip {
+            file: format!("waifu-{seed:04}.wav"),
+            text: "hello there".to_string(),
+            seconds: 1.5,
+            rate: 24_000,
+            speed: 1.0,
+            temperature: 0.8,
+            seed,
+            voice: "tones".to_string(),
+            from_a_recording: false,
+            elapsed: Duration::from_millis(120),
+        }
     }
 
     fn a_picture(seed: u64) -> Picture {
@@ -724,6 +988,182 @@ mod tests {
         shared.forget_upload();
         assert!(!shared.holding_a_picture());
         assert_eq!(shared.upload(), None);
+    }
+
+    #[test]
+    fn the_speech_bar_weighs_the_vocoder_at_the_end() {
+        // The same weighing the picture bar has, and for the same reason: a bar drawn from the
+        // tokens alone fills up and then sits there while the vocoder runs.
+        let all_the_tokens = spoken(SpeechProgress::Sounding, 40);
+        assert!(all_the_tokens < 1.0, "{all_the_tokens}");
+        assert!(all_the_tokens > 0.8, "{all_the_tokens}");
+
+        assert_eq!(spoken(SpeechProgress::Reading, 40), 0.0);
+        let half = spoken(
+            SpeechProgress::Saying {
+                done: 20,
+                expected: 40,
+            },
+            40,
+        );
+        assert!(half > 0.4 && half < 0.6, "{half}");
+    }
+
+    #[test]
+    fn a_reading_that_runs_long_does_not_run_the_bar_off_the_end() {
+        // The token count is an estimate, so a reading can pass it -- which is a bar that fills
+        // up and starts again if nothing holds it.
+        let past = spoken(
+            SpeechProgress::Saying {
+                done: 400,
+                expected: 40,
+            },
+            40,
+        );
+        assert!(past <= 1.0, "{past}");
+        assert_eq!(past, spoken(SpeechProgress::Sounding, 40));
+
+        // And a reading with no estimate yet does not divide by one that is not there.
+        for expected in [0, -1] {
+            for progress in [
+                SpeechProgress::Reading,
+                SpeechProgress::Saying {
+                    done: 0,
+                    expected: 0,
+                },
+                SpeechProgress::Sounding,
+            ] {
+                assert!(spoken(progress, expected).is_finite(), "{progress:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_being_said_is_reported_without_claiming_to_know_how_long_it_will_be() {
+        // "of about", because the number on the right is worked out from the text rather than
+        // known. A bar that said "of" and then went past it would have been lying.
+        let saying = Doing::Speaking(Say {
+            progress: SpeechProgress::Saying {
+                done: 3,
+                expected: 40,
+            },
+            expected: 40,
+            started: Instant::now(),
+        });
+
+        assert!(saying.is_busy());
+        let words = saying.words();
+        assert!(words.contains("3 of about 40"), "{words}");
+        assert!(saying.fraction().is_some());
+    }
+
+    #[test]
+    fn what_a_clip_was_asked_for_is_written_where_it_can_be_read_back() {
+        // The same line a picture gets, beside the clip it belongs to: a reading that came out
+        // well is asked about later, and by then the seed is the first thing nobody remembers.
+        let said = a_clip(7).parameters();
+        assert!(said.starts_with("hello there"), "{said}");
+        assert!(said.contains("Seed: 7"), "{said}");
+        assert!(said.contains("Speed: 1"), "{said}");
+        assert!(said.contains("Voice: tones"), "{said}");
+        // Not said where it was not true, rather than written as a "no".
+        assert!(!said.contains("From a recording"), "{said}");
+
+        let mut from_one = a_clip(7);
+        from_one.from_a_recording = true;
+        assert!(from_one.parameters().contains("From a recording: yes"));
+    }
+
+    #[test]
+    fn only_what_this_session_said_can_be_asked_for_by_name_either() {
+        // The same rule the pictures are under, through its own door: a request for a picture
+        // cannot reach a clip and be handed one under the wrong content type.
+        let shared = a_session();
+        shared.change(|session| session.clips.push(a_clip(1)));
+        shared.change(|session| session.gallery.push(a_picture(1)));
+
+        assert!(shared.spoke("waifu-0001.wav").is_some());
+        assert!(shared.spoke("waifu-0002.wav").is_none());
+        assert!(shared.spoke("../../etc/passwd").is_none());
+        assert!(shared.spoke("/etc/passwd").is_none());
+
+        // And neither list is a door into the other.
+        assert!(shared.spoke("waifu-0001.png").is_none());
+        assert!(shared.wrote("waifu-0001.wav").is_none());
+    }
+
+    #[test]
+    fn a_clip_that_has_been_deleted_is_no_longer_one_of_this_session_s() {
+        let shared = a_session();
+        shared.change(|session| session.clips.push(a_clip(1)));
+        shared.change(|session| session.clips.push(a_clip(2)));
+        let before = shared.session().revision;
+
+        shared.forget_clip("waifu-0001.wav");
+        assert!(shared.spoke("waifu-0001.wav").is_none());
+        assert!(shared.spoke("waifu-0002.wav").is_some());
+        assert!(shared.session().revision > before);
+
+        // Deleting what is not there leaves the rest alone rather than failing.
+        shared.forget_clip("waifu-0001.wav");
+        assert_eq!(shared.session().clips.len(), 1);
+    }
+
+    #[test]
+    fn the_recording_and_the_picture_are_two_boxes_rather_than_one() {
+        // They are two different runs' inputs. Dropping a recording should not throw away the
+        // picture somebody is about to redraw, and the other way round.
+        let shared = a_session();
+        assert!(!shared.holding_a_recording());
+
+        shared.hold_upload(vec![1, 2, 3]);
+        shared.hold_recording(vec![4, 5, 6]);
+        assert_eq!(shared.upload(), Some(vec![1, 2, 3]));
+        assert_eq!(shared.recording(), Some(vec![4, 5, 6]));
+        assert_eq!(shared.describe(Value::Null)["holding_a_recording"], true);
+
+        shared.forget_recording();
+        assert!(!shared.holding_a_recording());
+        assert!(shared.holding_a_picture());
+    }
+
+    #[test]
+    fn a_stop_is_reported_while_something_is_being_said_as_well() {
+        // The button is on both tabs and stops whichever kind of run is going.
+        let shared = a_session();
+        shared.interrupt();
+        assert_eq!(shared.progress()["interrupting"], false);
+
+        shared.change(|session| {
+            session.doing = Doing::Speaking(Say {
+                progress: SpeechProgress::Reading,
+                expected: 0,
+                started: Instant::now(),
+            })
+        });
+        assert_eq!(shared.progress()["interrupting"], true);
+        assert_eq!(shared.progress()["speaking"], true);
+        assert_eq!(shared.progress()["drawing"], false);
+    }
+
+    #[test]
+    fn a_setting_reaches_the_page_as_the_number_somebody_chose() {
+        // JSON has one kind of number and it is a double. A temperature of 0.8 widened straight
+        // into one is 0.800000011920929, and a box filled in from that shows the float's own
+        // representation rather than the setting.
+        assert_eq!(showable(0.8), 0.8);
+        assert_eq!(showable(5.3), 5.3);
+        assert_eq!(showable(7.0), 7.0);
+        assert_eq!(showable(0.0), 0.0);
+
+        let described = a_session().describe(Value::Null);
+        assert_eq!(described["voice"], Value::Null);
+
+        let shared = a_session();
+        shared.change(|session| session.clips.push(a_clip(1)));
+        let clip = &shared.describe(Value::Null)["clips"][0];
+        assert_eq!(clip["temperature"], 0.8);
+        assert_eq!(clip["speed"], 1.0);
     }
 
     #[test]

@@ -49,6 +49,98 @@ function room(bytes) {
   return `${(bytes / 1_000).toFixed(0)} kB`;
 }
 
+// -- recordings -----------------------------------------------------------------------------------
+
+/**
+ * How much of a recording is worth keeping, in seconds.
+ *
+ * A speech model listening to somebody wants seconds of them, not minutes -- what it is taking is
+ * how a voice sounds, which a sentence already says. Trimmed here rather than on the far side so
+ * that what crosses the wire is seconds of uncompressed samples rather than a podcast.
+ */
+const RECORDING_SECONDS = 30;
+
+/**
+ * Turns whatever file was dropped into a WAV the program can read.
+ *
+ * The browser has a decoder for every format it will play -- mp3, m4a, ogg, flac, webm -- and the
+ * program has one for none of them: a codec is several thousand lines and a licence to read, and
+ * this crate carries neither. So the decoding happens on the side that already knows how, and
+ * what is posted is samples.
+ *
+ * Down to one channel and to half a minute on the way, which are the two things the far side
+ * would otherwise have to do to a file it did not ask for the size of.
+ */
+async function asWav(file) {
+  const context = new (window.AudioContext || window.webkitAudioContext)();
+  let decoded;
+  try {
+    decoded = await context.decodeAudioData(await file.arrayBuffer());
+  } finally {
+    // Closed whether or not it decoded. A browser allows a handful of these at once, and a page
+    // where somebody has tried six files is a page that has opened six.
+    context.close();
+  }
+
+  const channels = [];
+  for (let channel = 0; channel < decoded.numberOfChannels; channel++) {
+    channels.push(decoded.getChannelData(channel));
+  }
+
+  const length = Math.min(decoded.length, Math.floor(decoded.sampleRate * RECORDING_SECONDS));
+  const mono = new Float32Array(length);
+  for (let at = 0; at < length; at++) {
+    let sum = 0;
+    // The mean rather than the sum: the same thing in two channels added together is that thing
+    // at twice the amplitude, which clips.
+    for (const channel of channels) sum += channel[at];
+    mono[at] = sum / (channels.length || 1);
+  }
+
+  return asWavBytes(mono, decoded.sampleRate);
+}
+
+/** Samples and a rate, as the bytes of a 16-bit mono WAV file. */
+function asWavBytes(samples, rate) {
+  const bytes = new ArrayBuffer(44 + samples.length * 2);
+  const at = new DataView(bytes);
+  const label = (where, said) => {
+    for (let letter = 0; letter < said.length; letter++) {
+      at.setUint8(where + letter, said.charCodeAt(letter));
+    }
+  };
+
+  label(0, "RIFF");
+  at.setUint32(4, 36 + samples.length * 2, true);
+  label(8, "WAVE");
+  label(12, "fmt ");
+  at.setUint32(16, 16, true);
+  at.setUint16(20, 1, true);
+  at.setUint16(22, 1, true);
+  at.setUint32(24, rate, true);
+  at.setUint32(28, rate * 2, true);
+  at.setUint16(32, 2, true);
+  at.setUint16(34, 16, true);
+  label(36, "data");
+  at.setUint32(40, samples.length * 2, true);
+
+  for (let sample = 0; sample < samples.length; sample++) {
+    // Held inside the range before it is scaled, because the top of it wraps to the bottom --
+    // which is a click, and a loud one.
+    const held = Math.max(-1, Math.min(1, samples[sample]));
+    at.setInt16(44 + sample * 2, Math.round(held * 32767), true);
+  }
+
+  return new Blob([bytes], { type: "audio/wav" });
+}
+
+/** How long something is, in the shape a clip's length is read in. */
+function clock(seconds) {
+  const whole = Math.max(0, Math.round(seconds));
+
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
 // -- the small pieces ---------------------------------------------------------------------------
 
 /** A labelled box. Every control on the settings side is one of these; `kind` is how wide it sits
@@ -110,18 +202,22 @@ function TopBar({ state }) {
   `;
 }
 
+/** Which tabs there are, and which of them draw a picture rather than say something. */
+const TABS = ["txt2img", "img2img", "text2speech"];
+const SPEAKS = "text2speech";
+
 /**
- * The two kinds of run, one under the other.
+ * The three kinds of run, one under the other.
  *
- * Neither is ever disabled. Which kind of run comes first and the model second -- and changing
- * the kind un-chooses the model, so a model that cannot start from a picture is not a reason to
- * bar the way to the page that starts from one. What that model cannot do is said on the page
- * it is chosen on, beside the button that would have asked for it.
+ * None of them is ever disabled. Which kind of run comes first and the model second -- and
+ * changing between the two that draw un-chooses the model, so a model that cannot start from a
+ * picture is not a reason to bar the way to the page that starts from one. What that model
+ * cannot do is said on the page it is chosen on, beside the button that would have asked for it.
  */
 function Nav({ tab, onTab }) {
   return html`
     <nav className="nav">
-      ${["txt2img", "img2img"].map(
+      ${TABS.map(
         (page) => html`
           <button
             key=${page}
@@ -242,6 +338,43 @@ function Prompts({ form, change, canDraw, drawing, off, onDraw, onInterrupt }) {
   `;
 }
 
+/**
+ * text2speech: the one box, and the button that reads it out.
+ *
+ * Its own component rather than a second mode of the two-box one above. There is no second box --
+ * nothing here is steered away from anything -- and a screen with one box beside an empty one is
+ * a screen asking to be typed in twice.
+ */
+function SayBox({ form, change, canSpeak, speaking, onSpeak, onInterrupt }) {
+  return html`
+    <section className="prompts">
+      <div className="prompt-boxes">
+        <${Field} label="What to say">
+          <textarea
+            rows="6"
+            placeholder="The text to read out. Punctuation is where it pauses, so a sentence that has commas in it is read with them."
+            value=${form.text}
+            onChange=${(e) => change("text", e.target.value)}
+          ></textarea>
+        <//>
+      </div>
+      <div className="go">
+        <button className="generate" disabled=${!canSpeak} onClick=${onSpeak}>Speak</button>
+        <button
+          className="interrupt"
+          disabled=${!speaking}
+          title=${speaking
+            ? "Stop where it is. Nothing is kept: half a sentence is not a clip"
+            : "Nothing to stop"}
+          onClick=${onInterrupt}
+        >
+          Cancel
+        </button>
+      </div>
+    </section>
+  `;
+}
+
 /** img2img only: what the run starts from instead of noise. */
 function FromPicture({ holding, revision, off, onHold, onClear }) {
   const [over, setOver] = useState(false);
@@ -292,6 +425,234 @@ function FromPicture({ holding, revision, off, onHold, onClear }) {
           Remove the picture
         </button>
       `}
+    </div>
+  `;
+}
+
+/**
+ * What is going to speak, and where -- the head of the settings column on the speech tab.
+ *
+ * Not a button, unlike the model above it, because there is nothing to choose: one voice is built
+ * into the binary and none is published. The day one is, this becomes the same button, opening
+ * the same list.
+ */
+function VoiceAndDevice({ state, progress, onDevice }) {
+  const voice = state?.voice;
+
+  return html`
+    <div className="card">
+      <div className="row">
+        <${Field} label="Voice" kind="grow">
+          ${/* A box rather than a button, because there is nothing behind it to open: one voice
+               is built into the binary and none is published. The day one is, this becomes the
+               same button the model above it is, opening the same list. */ ""}
+          <div className="picker settled">
+            ${voice?.full_name ?? "none"}
+            ${voice?.in_memory && html`<span className="badge">in memory</span>`}
+          </div>
+        <//>
+        <${Field} label="Device" kind="short">
+          <select
+            value=${state?.device ?? ""}
+            disabled=${!!progress.busy}
+            title="Where runs go. Changing it lets go of whatever weights are in memory; the next run reads them again on the device chosen."
+            onChange=${(e) => onDevice(e.target.value)}
+          >
+            ${(state?.devices ?? []).map(
+              (device) => html`<option key=${device} value=${device}>${device}</option>`,
+            )}
+          </select>
+        <//>
+      </div>
+      <p className="about">
+        ${voice
+          ? `${voice.rate} Hz -- ${
+              voice.takes_a_recording ? "takes a recording to sound like" : "takes no recording"
+            }`
+          : "nothing to speak with"}
+      </p>
+    </div>
+  `;
+}
+
+/** text2speech: the recording a reading is to sound like. */
+function FromRecording({ holding, revision, why, onHold, onClear }) {
+  const [over, setOver] = useState(false);
+  const [reading, setReading] = useState(false);
+
+  if (why) {
+    return html`
+      <div className="card">
+        <div className="card-title">This voice cannot be handed a recording</div>
+        <p className="about">${why}.</p>
+      </div>
+    `;
+  }
+
+  const dragged = (event) => {
+    event.preventDefault();
+    setOver(true);
+  };
+  const take = async (file) => {
+    if (!file) return;
+    // Decoding happens here, in the browser, and a long file takes a moment. Without this the
+    // box sits unchanged and the click reads as one that did nothing.
+    setReading(true);
+    try {
+      await onHold(file);
+    } finally {
+      setReading(false);
+    }
+  };
+
+  return html`
+    <div className="card drop">
+      <div className="card-title">Recording to sound like</div>
+      ${/* Above the box rather than inside it, which is where the picture's thumbnail goes. That
+           box is a label around a file input, so everything inside it opens the file chooser when
+           it is clicked -- which is what should happen to a thumbnail and is the opposite of what
+           should happen to a play button. */ ""}
+      ${holding &&
+      html`<audio
+        className="held"
+        controls
+        src=${
+          // With the revision on the end, because the address is the same every time and what is
+          // behind it is not.
+          `/api/voice?${revision}`
+        }
+      ></audio>`}
+      <label
+        className=${`dropzone short${over ? " over" : ""}`}
+        onDragEnter=${dragged}
+        onDragOver=${dragged}
+        onDragLeave=${() => setOver(false)}
+        onDrop=${(event) => {
+          event.preventDefault();
+          setOver(false);
+          take(event.dataTransfer.files[0]);
+        }}
+      >
+        <input
+          type="file"
+          accept="audio/*"
+          hidden
+          onChange=${(event) => take(event.target.files[0])}
+        />
+        ${reading
+          ? html`<span>reading it...</span>`
+          : holding
+            ? html`<span>Drop another one here, or click to choose one</span>`
+            : html`<span>Drop a recording here, or click to choose one</span>`}
+      </label>
+      <p className="about">
+        Any format this browser can play: it is decoded here and the samples are what cross, so
+        the program needs no codec of its own. The first ${RECORDING_SECONDS} seconds are kept.
+      </p>
+      ${holding &&
+      html`
+        <button
+          className="plain wide"
+          onClick=${(event) => {
+            event.preventDefault();
+            onClear();
+          }}
+        >
+          Remove the recording
+        </button>
+      `}
+    </div>
+  `;
+}
+
+/** text2speech: everything a reading is asked for that is not the text itself. */
+function SpeechSettings({ state, progress, form, change, onHold, onClear, onAnySeed, onDevice }) {
+  const voice = state?.voice;
+
+  return html`
+    <div className="settings">
+      <${VoiceAndDevice} state=${state} progress=${progress} onDevice=${onDevice} />
+
+      ${/* The first thing on the tab, above every setting, for as long as it is true. It comes
+           out of the voice itself rather than being written here, so the day a real model is
+           loaded it goes away on its own rather than by somebody remembering to delete it. */ ""}
+      ${voice?.not_a_voice_because &&
+      html`
+        <div className="card warn">
+          <div className="card-title">This is not a voice yet</div>
+          <p className="about">${voice.not_a_voice_because}.</p>
+        </div>
+      `}
+
+      <${FromRecording}
+        holding=${!!state?.holding_a_recording}
+        revision=${state?.revision}
+        why=${voice?.no_likeness_because}
+        onHold=${onHold}
+        onClear=${onClear}
+      />
+
+      <div className="card">
+        <div className="row">
+          <${NumberBox}
+            label="Speed"
+            kind="number"
+            box=${{ min: 0.25, max: 4, step: 0.05 }}
+            value=${form.speed}
+            onChange=${(value) => change("speed", value)}
+          />
+          <${Slider}
+            limits=${{ min: 0.25, max: 4, step: 0.05 }}
+            value=${form.speed}
+            onChange=${(value) => change("speed", value)}
+          />
+        </div>
+        <p className="about">
+          How fast to read it, as a multiple of the voice's own pace. One is whatever the voice
+          does on its own.
+        </p>
+      </div>
+
+      <div className="card">
+        <div className="row">
+          <${NumberBox}
+            label="Temperature"
+            kind="number"
+            box=${{ min: 0, max: 2, step: 0.05 }}
+            value=${form.temperature}
+            onChange=${(value) => change("temperature", value)}
+          />
+          <${Slider}
+            limits=${{ min: 0, max: 2, step: 0.05 }}
+            value=${form.temperature}
+            onChange=${(value) => change("temperature", value)}
+          />
+        </div>
+        <p className="about">
+          How far the voice may wander from the likeliest reading. Zero is the same reading every
+          time, whatever the seed says; high is a reading that surprises itself.
+        </p>
+      </div>
+
+      <div className="card">
+        <div className="row">
+          <${Field} label="Seed" kind="grow">
+            <input
+              type="text"
+              inputMode="numeric"
+              value=${form.seed}
+              onChange=${(e) => change("seed", e.target.value)}
+            />
+          <//>
+          <button className="plain" title="A different reading every time" onClick=${onAnySeed}>
+            🎲
+          </button>
+        </div>
+        <p className="about">
+          Which reading to take. The same seed with everything else the same says it the same way
+          again; minus one is a new one every time.
+        </p>
+      </div>
     </div>
   `;
 }
@@ -702,6 +1063,71 @@ function Output({ state, progress, note, showing, onShow, onSend, onReuse, onDel
   `;
 }
 
+/**
+ * text2speech: what came of it -- the clip in the player, and the ones before it under it.
+ *
+ * The same three parts the picture side has: the bar, the newest thing where it can be looked at
+ * -- listened to, here -- and everything else this session made in a strip below. A clip cannot
+ * be shown the way a picture can, so what the strip holds is the first words of each rather than
+ * a thumbnail of it.
+ */
+function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete }) {
+  const clips = state?.clips ?? [];
+  const clip = clips.find((one) => one.file === showing) ?? clips[0] ?? null;
+
+  return html`
+    <div className="output">
+      <${Bar} progress=${progress} />
+      ${note && html`<div className=${`note${note.bad ? " bad" : ""}`}>${note.said}</div>`}
+
+      <div className="canvas player">
+        ${clip
+          ? html`
+              ${/* Keyed by the file, so that a new clip replaces the player rather than leaving
+                   the old one loaded under a new address -- which is a player that goes on
+                   playing what it had. */ ""}
+              <audio key=${clip.file} controls autoPlay src=${`/clip/${clip.file}`}></audio>
+              <p className="said">${clip.text}</p>
+            `
+          : html`<div className="nothing">Nothing said yet.</div>`}
+      </div>
+
+      ${clip &&
+      html`
+        <div className="actions">
+          <a className="plain" href=${`/clip/${clip.file}`} download=${clip.file}>Save</a>
+          <button className="plain" onClick=${() => onReuse(clip)}>Reuse these settings</button>
+          <button className="plain away last" onClick=${() => onDelete(clip)}>Delete</button>
+        </div>
+        <textarea
+          className="parameters"
+          rows="4"
+          readOnly
+          value=${`${clip.parameters}\nTime taken: ${clip.seconds.toFixed(2)}s -- ${clock(
+            clip.length,
+          )} long -- written to ${clip.file}`}
+        ></textarea>
+      `}
+
+      <div className="clips">
+        ${clips.map(
+          (one) => html`
+            <button
+              key=${one.file}
+              className=${`clip${one.file === (clip?.file ?? null) ? " on" : ""}`}
+              title=${`${one.file} -- ${one.seed}`}
+              onClick=${() => onShow(one.file)}
+            >
+              <span className="clip-said">${one.text}</span>
+              <span className="dim">${clock(one.length)}</span>
+            </button>
+          `,
+        )}
+      </div>
+    </div>
+  `;
+}
+
 // -- the whole of it ----------------------------------------------------------------------------
 
 function App() {
@@ -724,6 +1150,10 @@ function App() {
   /** The picture in the big frame, which is the newest one until somebody clicks another. */
   const [showing, setShowing] = useState(null);
 
+  /** And the clip in the player, kept apart from it: they are two lists and two frames, and a
+   *  name from one of them means nothing in the other. */
+  const [playing, setPlaying] = useState(null);
+
   /** What is in the boxes. Everything here is somebody's typing until it is sent. */
   const [form, setForm] = useState({
     prompt: "",
@@ -734,6 +1164,11 @@ function App() {
     seed: "-1",
     width: 1024,
     height: 1024,
+    // What the speech tab is asked for. In the one form beside the rest, because the seed is
+    // shared between them and a second form would be a second seed to keep in step with it.
+    text: "",
+    speed: 1,
+    temperature: 0.8,
   });
 
   /** Which revision of the state this page has seen, so that a poll can tell news from quiet. */
@@ -818,6 +1253,26 @@ function App() {
     });
   }, [chosen, described, progress.busy]);
 
+  // And the voice's own numbers, the same way: once, into boxes nobody has moved. There is one
+  // voice and it never changes, so unlike a model this happens on the first state the page reads
+  // and not again.
+  const voiceDefaults = state?.voice && `${state.voice.name} ${state.voice.in_memory}`;
+  const tookVoice = useRef(null);
+  useEffect(() => {
+    if (!state?.voice || voiceDefaults === tookVoice.current) return;
+    const again = tookVoice.current !== null;
+    tookVoice.current = voiceDefaults;
+
+    setForm((form) => {
+      const keep = (what, value) => (again && byHand.current.has(what) ? form[what] : value);
+      return {
+        ...form,
+        speed: keep("speed", state.voice.speed),
+        temperature: keep("temperature", state.voice.temperature),
+      };
+    });
+  }, [state, voiceDefaults]);
+
   // A picture named on the command line opens the tab it is for: somebody who passed -i has said
   // which kind of run they came here to do. Once, on the first state this page ever reads.
   const arrived = useRef(false);
@@ -836,6 +1291,10 @@ function App() {
   // the wait does.
   const canDraw =
     !!chosen && !progress.busy && !(tab === "img2img" && chosen.no_picture_because);
+
+  // Nothing to choose on the speech tab, so nothing to be chosen first: what stops the button is
+  // an empty box or something already happening.
+  const canSpeak = !!state?.voice && !progress.busy && !!form.text.trim();
 
   const generate = useCallback(async () => {
     const answer = await ask("POST", "/api/generate", {
@@ -858,13 +1317,29 @@ function App() {
     setProgress({ busy: true, drawing: true, fraction: 0, doing: "starting", seconds: 0 });
   }, [form, tab, state]);
 
+  const speak = useCallback(async () => {
+    const answer = await ask("POST", "/api/speak", {
+      text: form.text,
+      speed: Number(form.speed),
+      temperature: Number(form.temperature),
+      // As a string, for the same reason a picture's is: a seed is sixty-four bits and a JSON
+      // number is a double.
+      seed: String(form.seed).trim(),
+      from_recording: !!state?.holding_a_recording,
+    });
+
+    if (!answer.ok) return setComplaint(answer.error);
+    setProgress({ busy: true, speaking: true, fraction: 0, doing: "starting", seconds: 0 });
+  }, [form, state]);
+
   // Ctrl-enter draws, from wherever the cursor is. The one keystroke every tool of this kind has.
   // Through a box rather than in the listener itself, so that the page is not listened to afresh
   // every time a letter is typed into the prompt.
   const draw = useRef(null);
-  draw.current = canDraw ? generate : null;
+  draw.current = tab === SPEAKS ? (canSpeak ? speak : null) : canDraw ? generate : null;
   useEffect(() => {
     const pressed = (key) => {
+      // The same keystroke on every tab, doing whichever of the two things that tab is for.
       if (key.key === "Enter" && (key.ctrlKey || key.metaKey)) {
         key.preventDefault();
         draw.current?.();
@@ -895,7 +1370,10 @@ function App() {
   const switchTask = useCallback(
     (which) => {
       setTab((tab) => {
-        if (tab !== which) chooseModel(null);
+        // Only between the two that draw. The speech tab picks no model and has no opinion about
+        // which one is chosen, so passing through it is not a reason to throw somebody's choice
+        // away and make them fetch it back.
+        if (tab !== which && tab !== SPEAKS && which !== SPEAKS) chooseModel(null);
         return which;
       });
     },
@@ -937,6 +1415,64 @@ function App() {
     await ask("DELETE", "/api/upload");
     await readState();
   }, [readState]);
+
+  /**
+   * Holds a recording for the voice to sound like.
+   *
+   * Decoded here rather than posted as it is: the browser has a decoder for every format it will
+   * play and the program has one for none of them, so what crosses is samples. A file it cannot
+   * decode is said so here, by name, rather than refused on the far side as "not a WAV file".
+   */
+  const holdRecording = useCallback(
+    async (file) => {
+      if (!file) return;
+
+      let wav;
+      try {
+        wav = await asWav(file);
+      } catch (failed) {
+        return setComplaint(
+          `${file.name} could not be read: this browser has no decoder for it. ` +
+            `Anything it can play will work -- wav, mp3, m4a, ogg, flac`,
+        );
+      }
+
+      const answer = await ask("POST", "/api/voice", wav);
+      if (!answer.ok) return setComplaint(answer.error);
+
+      setComplaint(null);
+      await readState();
+    },
+    [readState],
+  );
+
+  const clearRecording = useCallback(async () => {
+    await ask("DELETE", "/api/voice");
+    await readState();
+  }, [readState]);
+
+  /** Deletes a clip, from the disk and from the page. Asked about first, like a picture. */
+  const deleteClip = useCallback(
+    async (clip) => {
+      if (!confirm(`Delete ${clip.file}? The file itself goes, and nothing keeps a copy.`)) return;
+
+      const answer = await ask("DELETE", "/api/clip", { file: clip.file });
+      if (!answer.ok) return setComplaint(answer.error);
+      await readState();
+    },
+    [readState],
+  );
+
+  /** Puts a clip's own settings back in the boxes, which is how one is said again. */
+  const reuseClip = useCallback((clip) => {
+    setForm((form) => ({
+      ...form,
+      text: clip.text,
+      speed: clip.speed,
+      temperature: clip.temperature,
+      seed: String(clip.seed),
+    }));
+  }, []);
 
   /** Takes a picture that was drawn back round to the box it can be drawn from. */
   const sendToImg2Img = useCallback(async () => {
@@ -995,42 +1531,81 @@ function App() {
         <${Nav} tab=${tab} onTab=${switchTask} />
       </aside>
 
+      ${/* The two halves of the page swap together. Which tab is on top decides what is typed
+           at the top, what the column on the left asks for and what the frame on the right
+           holds -- and a screen showing a prompt box over an audio player would be a screen
+           that had swapped one of the three. */ ""}
       <main>
-        <${Prompts}
-          form=${form}
-          change=${change}
-          canDraw=${canDraw}
-          off=${!chosen}
-          drawing=${!!progress.drawing}
-          onDraw=${generate}
-          onInterrupt=${() => ask("POST", "/api/interrupt")}
-        />
+        ${tab === SPEAKS
+          ? html`
+              <${SayBox}
+                form=${form}
+                change=${change}
+                canSpeak=${canSpeak}
+                speaking=${!!progress.speaking}
+                onSpeak=${speak}
+                onInterrupt=${() => ask("POST", "/api/interrupt")}
+              />
 
-        <section className="panes">
-          <${Settings}
-            state=${state}
-            progress=${progress}
-            tab=${tab}
-            form=${form}
-            change=${change}
-            onHold=${hold}
-            onClear=${clearPicture}
-            onAnySeed=${() => change("seed", "-1")}
-            onLastSeed=${lastSeed}
-            onDevice=${useDevice}
-            onModels=${() => setPicking(true)}
-          />
-          <${Output}
-            state=${state}
-            progress=${progress}
-            note=${note}
-            showing=${showing}
-            onShow=${setShowing}
-            onSend=${sendToImg2Img}
-            onReuse=${reuse}
-            onDelete=${deletePicture}
-          />
-        </section>
+              <section className="panes">
+                <${SpeechSettings}
+                  state=${state}
+                  progress=${progress}
+                  form=${form}
+                  change=${change}
+                  onHold=${holdRecording}
+                  onClear=${clearRecording}
+                  onAnySeed=${() => change("seed", "-1")}
+                  onDevice=${useDevice}
+                />
+                <${ClipOutput}
+                  state=${state}
+                  progress=${progress}
+                  note=${note}
+                  showing=${playing}
+                  onShow=${setPlaying}
+                  onReuse=${reuseClip}
+                  onDelete=${deleteClip}
+                />
+              </section>
+            `
+          : html`
+              <${Prompts}
+                form=${form}
+                change=${change}
+                canDraw=${canDraw}
+                off=${!chosen}
+                drawing=${!!progress.drawing}
+                onDraw=${generate}
+                onInterrupt=${() => ask("POST", "/api/interrupt")}
+              />
+
+              <section className="panes">
+                <${Settings}
+                  state=${state}
+                  progress=${progress}
+                  tab=${tab}
+                  form=${form}
+                  change=${change}
+                  onHold=${hold}
+                  onClear=${clearPicture}
+                  onAnySeed=${() => change("seed", "-1")}
+                  onLastSeed=${lastSeed}
+                  onDevice=${useDevice}
+                  onModels=${() => setPicking(true)}
+                />
+                <${Output}
+                  state=${state}
+                  progress=${progress}
+                  note=${note}
+                  showing=${showing}
+                  onShow=${setShowing}
+                  onSend=${sendToImg2Img}
+                  onReuse=${reuse}
+                  onDelete=${deletePicture}
+                />
+              </section>
+            `}
       </main>
     </div>
 

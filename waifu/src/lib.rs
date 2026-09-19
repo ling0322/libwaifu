@@ -72,10 +72,17 @@ pub mod semantic_codec;
 /// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
 pub mod s2mel;
 mod sdxl;
+/// Turning text into a waveform. [`Voice`] is the shape of the question and [`Tones`] is the one
+/// answer to it there is so far -- a stand-in that makes a noise where the syllables are, so that
+/// the screen and everything under it can be written before there is a model to put behind it.
+pub mod speech;
 mod suggested;
 mod tokenizer;
 /// w2v-bert-2.0: the conformer that reads speech into the features everything else conditions on.
 pub mod w2v_bert;
+/// Reading and writing WAV, which is the one audio format this crate handles itself: a header, a
+/// format chunk and the samples, and no codec to depend on.
+pub mod wav;
 mod yaml;
 
 /// The tensor types a caller of this crate needs to name, re-exported so that the common case
@@ -92,6 +99,7 @@ pub use manifest::Manifest;
 pub use mapping::Mapping;
 pub use param_file::ParamFile;
 pub use reader::BinaryRead;
+pub use speech::{SpeechDefaults, SpeechOptions, SpeechProgress, Tones, Voice};
 pub use sdxl::{
     from_rgb8, to_rgb8, ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler,
     PromptEmbedding, SamplerConfig, Sdxl, SdxlConfig, Unet, UnetCondition, UnetConfig, VaeConfig,
@@ -99,6 +107,7 @@ pub use sdxl::{
 };
 pub use suggested::{Size, Suggestions};
 pub use tokenizer::Tokenizer;
+pub use wav::Sound;
 
 /// The suffix a model's manifest carries, after the model's id: `sdxl-base.yaml`.
 ///
