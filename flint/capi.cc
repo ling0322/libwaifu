@@ -536,6 +536,89 @@ int32_t fl_conv2d(
   });
 }
 
+int32_t fl_conv1d(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::Tensor emptyTensor;
+    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
+
+    return publish(
+        fl::F::conv1d(deref(input), deref(weight), b, stride, padding, dilation, groups),
+        out);
+  });
+}
+
+int32_t fl_conv_transpose1d(
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    fl_tensor_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t output_padding,
+    int32_t groups,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::Tensor emptyTensor;
+    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
+
+    return publish(
+        fl::F::convTranspose1d(
+            deref(input),
+            deref(weight),
+            b,
+            stride,
+            padding,
+            output_padding,
+            groups),
+        out);
+  });
+}
+
+int32_t fl_snake(
+    fl_tensor_t input,
+    fl_tensor_t alpha,
+    fl_tensor_t beta,
+    float eps,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    fl::Tensor emptyTensor;
+    const fl::Tensor &b = beta ? deref(beta) : emptyTensor;
+
+    return publish(fl::F::snake(deref(input), deref(alpha), b, eps), out);
+  });
+}
+
+int32_t fl_stft(
+    fl_tensor_t input,
+    fl_tensor_t window,
+    int32_t n_fft,
+    int32_t hop,
+    int32_t centered,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    return publish(fl::F::stft(deref(input), deref(window), n_fft, hop, centered != 0), out);
+  });
+}
+
+int32_t fl_istft(
+    fl_tensor_t spectrum,
+    fl_tensor_t window,
+    int32_t n_fft,
+    int32_t hop,
+    int32_t centered,
+    fl_tensor_t *out) {
+  return guard([&]() {
+    return publish(fl::F::istft(deref(spectrum), deref(window), n_fft, hop, centered != 0), out);
+  });
+}
+
 int32_t fl_group_norm(
     fl_tensor_t input,
     fl_tensor_t weight,
@@ -921,6 +1004,14 @@ int32_t fl_gelu(fl_tensor_t input, fl_tensor_t *out) {
 
 int32_t fl_silu(fl_tensor_t input, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::silu(deref(input)), out); });
+}
+
+int32_t fl_sin(fl_tensor_t input, fl_tensor_t *out) {
+  return guard([&]() { return publish(fl::F::sin(deref(input)), out); });
+}
+
+int32_t fl_cos(fl_tensor_t input, fl_tensor_t *out) {
+  return guard([&]() { return publish(fl::F::cos(deref(input)), out); });
 }
 
 int32_t fl_softmax(fl_tensor_t input, fl_tensor_t *out) {

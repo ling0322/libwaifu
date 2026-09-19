@@ -297,6 +297,42 @@ Tensor Operators::sin(Tensor input) {
 Tensor Operators::cos(Tensor input) {
   NOT_IMPL();
 }
+
+Tensor Operators::conv1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  THROW(NotImplemented, "conv1d: no device has this kernel; waifu::audio::conv1d composes one");
+}
+
+Tensor Operators::convTranspose1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups) {
+  THROW(
+      NotImplemented,
+      "convTranspose1d: no device has this kernel; waifu::audio::conv_transpose1d composes one");
+}
+
+Tensor Operators::snake(Tensor input, Tensor alpha, Tensor beta, float eps) {
+  THROW(NotImplemented, "snake: no device has this kernel; waifu::audio::snake composes one");
+}
+
+Tensor Operators::stft(Tensor input, Tensor window, int nFft, int hop, bool centered) {
+  THROW(NotImplemented, "stft: no device has this kernel; waifu::audio::stft composes one");
+}
+
+Tensor Operators::istft(Tensor spectrum, Tensor window, int nFft, int hop, bool centered) {
+  THROW(NotImplemented, "istft: no device has this kernel; waifu::audio::istft composes one");
+}
 Tensor Operators::quickGelu(Tensor input) {
   NOT_IMPL();
 }

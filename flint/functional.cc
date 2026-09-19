@@ -93,6 +93,65 @@ Tensor conv2d(
       ->conv2d(input, weight, bias, stride, padding, dilation, groups);
 }
 
+Tensor conv1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  CHECK(!input.empty());
+  CHECK(!weight.empty());
+  CHECK(input.getDevice().getType() == weight.getDevice().getType());
+  CHECK(bias.empty() || bias.getDevice().getType() == input.getDevice().getType());
+
+  return getOperators(input.getDevice().getType())
+      ->conv1d(input, weight, bias, stride, padding, dilation, groups);
+}
+
+Tensor convTranspose1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups) {
+  CHECK(!input.empty());
+  CHECK(!weight.empty());
+  CHECK(input.getDevice().getType() == weight.getDevice().getType());
+  CHECK(bias.empty() || bias.getDevice().getType() == input.getDevice().getType());
+
+  return getOperators(input.getDevice().getType())
+      ->convTranspose1d(input, weight, bias, stride, padding, outputPadding, groups);
+}
+
+Tensor snake(Tensor input, Tensor alpha, Tensor beta, float eps) {
+  CHECK(!input.empty());
+  CHECK(!alpha.empty());
+  CHECK(input.getDevice().getType() == alpha.getDevice().getType());
+  CHECK(beta.empty() || beta.getDevice().getType() == input.getDevice().getType());
+
+  return getOperators(input.getDevice().getType())->snake(input, alpha, beta, eps);
+}
+
+Tensor stft(Tensor input, Tensor window, int nFft, int hop, bool centered) {
+  CHECK(!input.empty());
+  CHECK(!window.empty());
+  CHECK(input.getDevice().getType() == window.getDevice().getType());
+
+  return getOperators(input.getDevice().getType())->stft(input, window, nFft, hop, centered);
+}
+
+Tensor istft(Tensor spectrum, Tensor window, int nFft, int hop, bool centered) {
+  CHECK(!spectrum.empty());
+  CHECK(!window.empty());
+  CHECK(spectrum.getDevice().getType() == window.getDevice().getType());
+
+  return getOperators(spectrum.getDevice().getType())->istft(spectrum, window, nFft, hop, centered);
+}
+
 Tensor mul(Tensor input, float other) {
   return getOperators(input.getDevice().getType())->mul(input, other);
 }

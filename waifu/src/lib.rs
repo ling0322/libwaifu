@@ -39,6 +39,10 @@
 /// architectures name several of the same things -- a VAE configuration, a text configuration --
 /// and they are not the same things.
 pub mod anima;
+/// Audio: convolution along one axis, a Fourier transform, a filterbank and a vocoder's
+/// activation, all composed from the operators [`flint`] already has rather than written as
+/// kernels of their own.
+pub mod audio;
 #[cfg(feature = "cli")]
 pub mod cli;
 mod error;

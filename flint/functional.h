@@ -80,6 +80,62 @@ Tensor conv2d(
     int dilation = 1,
     int groups = 1);
 
+// 1-D convolution of `input` <float16|float>(N, C, L) by `weight` (K, C / groups, R), with an
+// optional per-channel `bias` (K); pass an empty tensor for no bias. `groups == C == K` is the
+// depthwise case, which has no operator of its own.
+//
+// No device has this yet -- see `Operators::conv1d`. `waifu::audio::conv1d` is what computes it
+// today, out of `conv2d` over an image one row tall.
+// Returns:
+//   <float16|float>(N, K, (L + 2 * padding - dilation * (R - 1) - 1) / stride + 1).
+Tensor conv1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride = 1,
+    int padding = 0,
+    int dilation = 1,
+    int groups = 1);
+
+// Transposed 1-D convolution of `input` <float16|float>(N, C, L) by `weight` (C, K / groups, R),
+// with an optional per-channel `bias` (K). What a vocoder upsamples with.
+//
+// No device has this yet -- see `Operators::convTranspose1d`.
+// Returns:
+//   <float16|float>(N, K, (L - 1) * stride - 2 * padding + R + outputPadding).
+Tensor convTranspose1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride = 1,
+    int padding = 0,
+    int outputPadding = 0,
+    int groups = 1);
+
+// `x + sin(alpha * x)^2 / (beta + eps)` per channel of `input` <float16|float>(N, C, L), the
+// activation a BigVGAN is built from. `alpha` and `beta` are (C) and already exponentiated; an
+// empty `beta` means beta is alpha.
+//
+// No device has this yet -- see `Operators::snake`.
+// Returns:
+//   <float16|float>(N, C, L).
+Tensor snake(Tensor input, Tensor alpha, Tensor beta, float eps = 0.0f);
+
+// Short time Fourier transform of `input` <float>(N, 1, L) against `window` (nFft): every bin's
+// real part, then every bin's imaginary part.
+//
+// No device has this yet -- see `Operators::stft`.
+// Returns:
+//   <float>(N, 2 * (nFft / 2 + 1), frames).
+Tensor stft(Tensor input, Tensor window, int nFft, int hop, bool centered = true);
+
+// The inverse of `stft`, overlap-added and divided by the window's own overlap.
+//
+// No device has this yet -- see `Operators::istft`.
+// Returns:
+//   <float>(N, 1, L).
+Tensor istft(Tensor spectrum, Tensor window, int nFft, int hop, bool centered = true);
+
 // Element wise multiply input and other.
 Tensor mul(Tensor input, float other);
 Tensor mul(Tensor input, Tensor other);

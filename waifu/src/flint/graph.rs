@@ -536,6 +536,18 @@ impl Graph {
         self.unary(Unary::Silu, input)
     }
 
+    /// Element-wise sine, in radians.
+    #[track_caller]
+    pub fn sin(&self, input: Value) -> Value {
+        self.unary(Unary::Sin, input)
+    }
+
+    /// Element-wise cosine, in radians.
+    #[track_caller]
+    pub fn cos(&self, input: Value) -> Value {
+        self.unary(Unary::Cos, input)
+    }
+
     #[track_caller]
     pub fn softmax(&self, input: Value) -> Value {
         self.unary(Unary::Softmax, input)
@@ -685,6 +697,100 @@ impl Graph {
     #[track_caller]
     pub fn upsample_nearest2d(&self, input: Value, scale: i32) -> Value {
         self.push(Op::UpsampleNearest2d { input, scale })
+    }
+
+    /// A 1-D convolution as a single node.
+    ///
+    /// No backend implements this, so a graph holding one fails when it runs. What computes a
+    /// 1-D convolution today is [`crate::audio::conv1d`], which writes several nodes instead;
+    /// this is here so that a backend which grows the kernel has something to be reached by.
+    #[track_caller]
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv1d(
+        &self,
+        input: Value,
+        weight: Value,
+        bias: Option<Value>,
+        stride: i32,
+        padding: i32,
+        dilation: i32,
+        groups: i32,
+    ) -> Value {
+        self.push(Op::Conv1d {
+            input,
+            weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            groups,
+        })
+    }
+
+    /// A transposed 1-D convolution as a single node. Unimplemented; see [`Graph::conv1d`].
+    #[track_caller]
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_transpose1d(
+        &self,
+        input: Value,
+        weight: Value,
+        bias: Option<Value>,
+        stride: i32,
+        padding: i32,
+        output_padding: i32,
+        groups: i32,
+    ) -> Value {
+        self.push(Op::ConvTranspose1d {
+            input,
+            weight,
+            bias,
+            stride,
+            padding,
+            output_padding,
+            groups,
+        })
+    }
+
+    /// A snake activation as a single node. Unimplemented; see [`Graph::conv1d`].
+    #[track_caller]
+    pub fn snake(&self, input: Value, alpha: Value, beta: Option<Value>, eps: f32) -> Value {
+        self.push(Op::Snake {
+            input,
+            alpha,
+            beta,
+            eps,
+        })
+    }
+
+    /// A short time Fourier transform as a single node. Unimplemented; see [`Graph::conv1d`].
+    #[track_caller]
+    pub fn stft(&self, input: Value, window: Value, n_fft: i32, hop: i32, centered: bool) -> Value {
+        self.push(Op::Stft {
+            input,
+            window,
+            n_fft,
+            hop,
+            centered,
+        })
+    }
+
+    /// The inverse transform as a single node. Unimplemented; see [`Graph::conv1d`].
+    #[track_caller]
+    pub fn istft(
+        &self,
+        spectrum: Value,
+        window: Value,
+        n_fft: i32,
+        hop: i32,
+        centered: bool,
+    ) -> Value {
+        self.push(Op::Istft {
+            spectrum,
+            window,
+            n_fft,
+            hop,
+            centered,
+        })
     }
 
     #[track_caller]
