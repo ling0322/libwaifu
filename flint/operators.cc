@@ -209,6 +209,14 @@ Tensor Operators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
       Tensor mask = causalMask(keyValueLength)
                         .slice(0, {keyValueLength - queryLength + begin,
                                    keyValueLength - queryLength + end});
+
+      // The mask comes back in the device's *default* float type, which is not always the type
+      // the scores are in: on aarch64 that default is half, and a model running in float32 has
+      // float32 scores. Adding the two without this fails a dtype check inside the accessor
+      // rather than anywhere useful, which is how it was found -- a causal attention in float32
+      // passed on x86, where the default is float32 too, and aborted on a Mac.
+      if (mask.getDType() != scores.getDType()) mask = cast(mask, scores.getDType());
+
       scores = add(scores, mask);
     }
 
