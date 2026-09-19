@@ -4,6 +4,10 @@
 #     python3 -m venv .venv
 #     .venv/bin/pip install -r tools/requirements.txt
 #
+# or, if uv is around, the same thing in a few seconds rather than a few minutes:
+#
+#     uv venv .venv && VIRTUAL_ENV=.venv uv pip install -r tools/requirements.txt
+#
 # The two pins are a pair: diffusers 0.31 is the last that reads SDXL with transformers 4.46, so
 # neither moves without the other.
 #
@@ -39,6 +43,28 @@ omegaconf
 # carrying is what the reference ran.
 sentencepiece
 protobuf
+
+# What BigVGAN's own source asks for, which `tools/bigvgan_exporter.py` imports rather than
+# vendors: `utils.py` imports matplotlib and scipy at module scope for plotting it never does
+# here, and `meldataset.py` imports librosa for the mel spectrogram it does. numpy is for the
+# shortest float32 literal `tools/bigvgan_reference.py` prints. None of it is pinned -- none of it
+# touches a number either script compares.
+librosa
+matplotlib
+scipy
+numpy
+
+# What S2Mel's own source asks for, which `tools/s2mel_reference.py` imports rather than vendors:
+# `commons.py` reads its configuration through munch, and `encodec.py` imports einops at module
+# scope for a rearrange the layers this uses never reach. Neither is pinned and neither has a
+# dependency of its own, so neither can move the pair above -- install them with `--no-deps` and
+# check `transformers.__version__` afterwards if you doubt it.
+#
+# einops also appears in the ComfyUI note below, where it goes into a directory of its own. That
+# is about ComfyUI, not about einops: the package is harmless here, and what must stay out is the
+# transformers ComfyUI drags with it.
+munch
+einops
 
 # ComfyUI is not in here, and must not be installed into this venv.
 #

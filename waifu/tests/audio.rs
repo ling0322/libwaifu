@@ -431,6 +431,38 @@ fn zero_padding_adds_zeros_on_the_sides_it_is_asked_for() {
     );
 }
 
+#[test]
+fn replicate_padding_repeats_the_samples_on_the_ends() {
+    let tensor = Tensor::from_f32(&[1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+
+    let g = Graph::new();
+    let out = pad1d(&g, g.input("x"), 2, 1, Padding::Replicate, F32, CPU).unwrap();
+    let (shape, got) = run_shaped(&g, out, &[("x", &tensor)]);
+
+    assert_eq!(shape, vec![1, 2, 6]);
+    assert_eq!(
+        got,
+        vec![1.0, 1.0, 1.0, 2.0, 3.0, 3.0, 4.0, 4.0, 4.0, 5.0, 6.0, 6.0]
+    );
+}
+
+#[test]
+fn replicate_padding_can_pad_by_more_than_the_signal_is_long() {
+    // Which a reflection cannot: mirroring by five about a signal of three would read past the
+    // far end. The alias-free upsampling in a vocoder pads by five, and a test of it at a length
+    // of three is the case that finds it.
+    let tensor = Tensor::from_f32(&[1, 1, 3], &[7.0, 8.0, 9.0]).unwrap();
+
+    let g = Graph::new();
+    let out = pad1d(&g, g.input("x"), 5, 5, Padding::Replicate, F32, CPU).unwrap();
+    let (shape, got) = run_shaped(&g, out, &[("x", &tensor)]);
+
+    assert_eq!(shape, vec![1, 1, 13]);
+    assert_eq!(&got[..5], &[7.0; 5]);
+    assert_eq!(&got[5..8], &[7.0, 8.0, 9.0]);
+    assert_eq!(&got[8..], &[9.0; 5]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // snake
 // ---------------------------------------------------------------------------------------------

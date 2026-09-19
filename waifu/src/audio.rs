@@ -59,7 +59,7 @@
 //! the reference implementations use, and keeping it means a weight can be read from a package in
 //! the layout its authors stored it in.
 
-use crate::flint::{DType, Device, Extent, Graph, Tensor, Value};
+use crate::flint::{Bound, DType, Device, Extent, Graph, Tensor, Value};
 use crate::Result;
 
 /// How [`pad1d`] fills what it adds.
@@ -75,6 +75,14 @@ pub enum Padding {
     /// A reversal is a matrix multiply by the anti-diagonal here -- see [`reversal`] -- because
     /// there is no operator that reads a dimension backwards and this needs no new one.
     Reflect,
+    /// The first and last samples repeated, which is what the alias-free resampling around a
+    /// BigVGAN's activation pads with -- see [`upsample1d`]. Unlike [`Padding::Reflect`] it can
+    /// pad a signal by more than the signal is long, which that resampling does at the short
+    /// lengths a test uses.
+    ///
+    /// Repeating one sample `n` times is a matrix multiply by a row of ones, for the same reason
+    /// the mirror is one by the anti-diagonal: it is the operator that is already here.
+    Replicate,
 }
 
 /// `left` and `right` more positions on the time axis of `x` `(N, C, L)`.
@@ -138,7 +146,30 @@ pub fn pad1d(
             }
             out
         }
+
+        // The edge sample `left` or `right` times over: `(N, C, 1) @ (1, n)` is that sample
+        // broadcast across `n` positions, and the multiply broadcasts the row over the batch and
+        // the channels the way the mirror above does.
+        Padding::Replicate => {
+            let mut out = x;
+            if left > 0 {
+                let edge = g.slice(x, 2, 0, 1);
+                let spread = g.constant(ones(left)?.to_device(device)?.cast(dtype)?);
+                out = g.cat(g.matmul(edge, spread), out, 2);
+            }
+            if right > 0 {
+                let edge = g.slice(x, 2, -1, Bound::End);
+                let spread = g.constant(ones(right)?.to_device(device)?.cast(dtype)?);
+                out = g.cat(out, g.matmul(edge, spread), 2);
+            }
+            out
+        }
     })
+}
+
+/// A `(1, n)` row of ones, which copies whatever is multiplied by it across `n` positions.
+fn ones(n: i32) -> Result<Tensor> {
+    Ok(Tensor::from_f32(&[1, n], &vec![1.0f32; n as usize])?)
 }
 
 /// The `n` by `n` anti-diagonal, which reverses the last axis of whatever is multiplied by it.
@@ -898,6 +929,221 @@ pub fn resample(
         1,
         dtype,
         device,
+    )
+}
+
+/// The windowed sinc the alias-free resampling in a BigVGAN's activation convolves by, as a
+/// `(1, 1, kernel)` tensor.
+///
+/// `cutoff` is in cycles per sample, so half of the rate being resampled to; `half_width` is how
+/// wide the transition band either side of it is, and it is what picks the Kaiser window's shape
+/// parameter. A BigVGAN asks for `0.5 / ratio` and `0.6 / ratio` at twelve taps, and nothing else.
+///
+/// # This is not [`resample_kernel`]
+///
+/// The two do the same job and are not the same filter. [`resample_kernel`] converts between two
+/// sample rates -- 24 kHz audio to 22.05 kHz -- and is a Hann-windowed sinc at whatever ratio
+/// those two are in. This one is the fixed doubling and halving either side of an activation,
+/// where the window is a Kaiser one whose beta is derived from the transition width, and it is
+/// what `alias_free_activation/torch/filter.py` computes. Using either in the other's place
+/// changes the answer, so both are here.
+///
+/// The taps are normalized to sum to one, which is what keeps a constant input a constant output.
+pub fn kaiser_sinc_filter(cutoff: f64, half_width: f64, kernel: usize) -> Result<Tensor> {
+    assert!(kernel >= 1, "a kernel must be positive");
+    assert!(
+        (0.0..=0.5).contains(&cutoff),
+        "a cutoff is at most half the rate"
+    );
+
+    let half = kernel / 2;
+
+    // The Kaiser design formula: the stopband attenuation a transition this wide buys, and the
+    // window shape that reaches it. Both lines are Oppenheim and Schafer's, and are what
+    // `kaiser_sinc_filter1d` uses.
+    let attenuation = 2.285 * (half as f64 - 1.0) * std::f64::consts::PI * 4.0 * half_width + 7.95;
+    let beta = match attenuation {
+        a if a > 50.0 => 0.1102 * (a - 8.7),
+        a if a >= 21.0 => 0.5842 * (a - 21.0).powf(0.4) + 0.07886 * (a - 21.0),
+        _ => 0.0,
+    };
+
+    let mut values = vec![0.0f32; kernel];
+    if cutoff > 0.0 {
+        let mut taps = vec![0.0f64; kernel];
+        for (i, tap) in taps.iter_mut().enumerate() {
+            // An even kernel has no centre tap, so the positions sit half way between samples;
+            // an odd one is centred on `half`. `torch.kaiser_window(periodic = false)` is the
+            // window, which spans its whole length rather than wrapping around.
+            let time = match kernel % 2 {
+                0 => i as f64 - half as f64 + 0.5,
+                _ => i as f64 - half as f64,
+            };
+
+            // The window's argument runs from -1 to 1 across the whole kernel. A kernel of one
+            // has nowhere to run, and is the one tap in the middle.
+            let window = match kernel {
+                1 => 1.0,
+                _ => {
+                    let at = 2.0 * (i as f64) / (kernel as f64 - 1.0) - 1.0;
+
+                    bessel_i0(beta * (1.0 - at * at).max(0.0).sqrt()) / bessel_i0(beta)
+                }
+            };
+
+            *tap = 2.0 * cutoff * window * sinc(2.0 * cutoff * time);
+        }
+
+        let total: f64 = taps.iter().sum();
+        for (value, tap) in values.iter_mut().zip(&taps) {
+            *value = (tap / total) as f32;
+        }
+    }
+
+    Ok(Tensor::from_f32(&[1, 1, kernel as i32], &values)?)
+}
+
+/// `sin(pi x) / (pi x)`, and one at zero.
+fn sinc(x: f64) -> f64 {
+    match x == 0.0 {
+        true => 1.0,
+        false => (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x),
+    }
+}
+
+/// The modified Bessel function of the first kind, order zero, which is what shapes a Kaiser
+/// window. Its series converges in a dozen terms at the beta a twelve-tap filter asks for.
+fn bessel_i0(x: f64) -> f64 {
+    let quarter_square = x * x / 4.0;
+
+    let mut term = 1.0;
+    let mut total = 1.0;
+    for k in 1..64 {
+        term *= quarter_square / (k as f64 * k as f64);
+        total += term;
+
+        if term < 1e-18 * total {
+            break;
+        }
+    }
+
+    total
+}
+
+/// `x` `(N, C, L)` resampled up by `ratio`, the way the activation in a BigVGAN is.
+///
+/// `filter` is `(1, 1, kernel)` from [`kaiser_sinc_filter`] at `0.5 / ratio` and `0.6 / ratio`,
+/// and what comes back is `(N, C, L * ratio)` -- exactly `ratio` times as long, which is what the
+/// padding and the trimming here are for.
+///
+/// # One filter, every channel
+///
+/// The reference convolves with `groups = C` and the same taps in every group, which is a
+/// depthwise convolution whose kernel does not vary by channel. That is not a grouped convolution
+/// at all: reading `(N, C, L)` as `(N * C, 1, L)` makes each channel its own item in a batch, and
+/// one ungrouped single-channel convolution does all of them at once. So neither this nor
+/// [`downsample1d`] needs the grouped transposed convolution that [`conv_transpose1d`] does not
+/// have.
+///
+/// # Why it pads before it upsamples
+///
+/// A transposed convolution's first and last output positions see only part of the kernel, which
+/// puts a taper on both ends of the signal that is not in the signal. Padding by
+/// `kernel / ratio - 1` samples of the edge value and cutting the result back to length moves
+/// that taper into the padding, where it is thrown away. This is what
+/// `alias_free_activation/torch/resample.py` does, down to which side the odd sample goes on.
+#[track_caller]
+#[allow(clippy::too_many_arguments)]
+pub fn upsample1d(
+    g: &Graph,
+    x: Value,
+    filter: Value,
+    channels: i32,
+    ratio: i32,
+    kernel: i32,
+    dtype: DType,
+    device: Device,
+) -> Result<Value> {
+    assert!(ratio >= 1, "a ratio must be positive");
+    assert!(
+        kernel >= ratio,
+        "a filter shorter than the ratio has nothing to interpolate with"
+    );
+
+    let pad = kernel / ratio - 1;
+    let left = pad * ratio + (kernel - ratio) / 2;
+    let right = pad * ratio + (kernel - ratio + 1) / 2;
+
+    let padded = pad1d(g, x, pad, pad, Padding::Replicate, dtype, device)?;
+    let folded = fold_channels(g, padded);
+
+    // The `ratio` is the amplitude the zeros a transposed convolution interleaves took out, the
+    // same factor `resample_kernel` folds into its taps. Here the filter is shared with
+    // `downsample1d`, which must not have it, so it is applied to the signal instead.
+    let up = conv_transpose1d(
+        g, folded, filter, None, 1, 1, kernel, ratio, 0, dtype, device,
+    )?;
+    let up = g.mul_scalar(up, ratio as f32);
+
+    let trimmed = g.slice(
+        up,
+        2,
+        left,
+        match right {
+            0 => Extent::from(Bound::End),
+            _ => Extent::At(-right),
+        },
+    );
+
+    Ok(unfold_channels(g, trimmed, x, channels))
+}
+
+/// `x` `(N, C, L)` resampled down by `ratio`, which is the other half of what an alias-free
+/// activation does. See [`upsample1d`], whose filter this shares.
+///
+/// What comes back is `(N, C, ceil(L / ratio))`, and for the even `L` an upsampling produced that
+/// is `L / ratio`.
+#[track_caller]
+#[allow(clippy::too_many_arguments)]
+pub fn downsample1d(
+    g: &Graph,
+    x: Value,
+    filter: Value,
+    channels: i32,
+    ratio: i32,
+    kernel: i32,
+    dtype: DType,
+    device: Device,
+) -> Result<Value> {
+    assert!(ratio >= 1, "a ratio must be positive");
+
+    // An even kernel is centred between two samples, so it takes one less on the left than on
+    // the right; an odd one is centred on a sample and takes the same either side.
+    let left = kernel / 2 - i32::from(kernel % 2 == 0);
+    let padded = pad1d(g, x, left, kernel / 2, Padding::Replicate, dtype, device)?;
+
+    let folded = fold_channels(g, padded);
+    let down = conv1d(g, folded, filter, None, ratio, 0, 1, 1, dtype, device)?;
+
+    Ok(unfold_channels(g, down, x, channels))
+}
+
+/// `(N, C, L)` read as `(N * C, 1, L)`, so that a convolution by one channel's worth of taps
+/// covers every channel at once.
+fn fold_channels(g: &Graph, x: Value) -> Value {
+    let x = g.contiguous(x);
+
+    g.view(x, [Extent::prod(x, 0, 2), Extent::At(1), Extent::of(x, 2)])
+}
+
+/// The other way, taking the batch from `like` -- the tensor this started as, which is the only
+/// thing that still knows how many items there were.
+fn unfold_channels(g: &Graph, x: Value, like: Value, channels: i32) -> Value {
+    let x = g.contiguous(x);
+
+    g.view(
+        x,
+        [Extent::of(like, 0), Extent::At(channels), Extent::of(x, 2)],
     )
 }
 

@@ -43,6 +43,9 @@ pub mod anima;
 /// activation, all composed from the operators [`flint`] already has rather than written as
 /// kernels of their own.
 pub mod audio;
+/// BigVGAN, the vocoder that turns a mel spectrogram back into sound. The last thing IndexTTS-2.5
+/// runs, and the only part of it whose output is audio.
+pub mod bigvgan;
 /// CAMPPlus, the speaker encoder IndexTTS-2.5 conditions on: filterbank energies in, one vector
 /// saying whose voice it is out.
 pub mod campplus;
@@ -62,9 +65,9 @@ mod mapping;
 mod param_file;
 mod qwen_vae;
 mod reader;
-mod sdxl;
 /// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
 pub mod s2mel;
+mod sdxl;
 mod suggested;
 mod tokenizer;
 mod yaml;
@@ -78,7 +81,7 @@ pub use anima::Anima;
 pub use error::{Error, Result};
 pub use krea2::Krea2;
 pub use generation::{GenerationDefaults, GenerationOptions, GenerationProgress};
-pub use layers::{Conv2d, Embedding, GroupNorm, LayerNorm, Linear};
+pub use layers::{Conv1d, Conv2d, ConvTranspose1d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use manifest::Manifest;
 pub use mapping::Mapping;
 pub use param_file::ParamFile;
