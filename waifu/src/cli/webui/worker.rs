@@ -39,8 +39,8 @@ use crate::cli::hub;
 use crate::cli::webui::state::{Chosen, Doing, Fetch, Picture, Run, Shared};
 use crate::flint::Tensor;
 use crate::{
-    from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Manifest,
-    Sdxl,
+    from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2,
+    Manifest, Sdxl,
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -62,6 +62,11 @@ pub const SIZES: &[(i32, i32)] = &[
 /// Why Anima cannot be handed a picture to start from. True of the kind rather than of any one
 /// package, which is what lets it be said before a package has been looked at.
 const ANIMA_DRAWS_FROM_NO_PICTURE: &str = "Anima cannot start from a picture yet: its package \
+     carries an image encoder, but the layer that reads one is not written";
+
+/// And why Krea 2 cannot either, which is the same reason: it draws through the same Qwen-Image
+/// autoencoder, and the half of it that reads a picture has no layer to run it.
+const KREA2_DRAWS_FROM_NO_PICTURE: &str = "Krea 2 cannot start from a picture yet: its package \
      carries an image encoder, but the layer that reads one is not written";
 
 /// How many sizes a model has to name before its list is used instead of the one above.
@@ -207,17 +212,44 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
     }
 }
 
+/// What a kind of model implies for the screen before any of its weights are read: what to ask
+/// it for, what walks the noise back, and why it cannot start from a picture.
+///
+/// One table for the three kinds, read twice -- once from a name that has not been fetched yet,
+/// and once from the `type` of a manifest that is already on the disk.
+fn about(kind: &str) -> (GenerationDefaults, &'static str, Option<&'static str>) {
+    match kind {
+        Anima::MODEL_TYPE => (
+            Anima::DEFAULTS,
+            "Flow match Euler",
+            Some(ANIMA_DRAWS_FROM_NO_PICTURE),
+        ),
+        Krea2::MODEL_TYPE => (
+            Krea2::DEFAULTS,
+            "Flow match Euler",
+            Some(KREA2_DRAWS_FROM_NO_PICTURE),
+        ),
+        // Everything else is SDXL, which is what `Model::from_manifest` decides too.
+        _ => (GenerationDefaults::default(), "Euler", None),
+    }
+}
+
 /// What can be said about a model that has not been read, which is what a choice is made from.
 ///
-/// Guessed from the name, and hard-coded: this is answered while somebody is choosing, before
-/// anything has been fetched, and a model that is not on the disk has nothing to read. Guessing
-/// costs nothing here because it is not the last word -- the moment a run reads the package,
+/// Guessed from the name where there is nothing else to go on, and read out of the manifest where
+/// the package is already here. Neither is the last word -- the moment a run reads the package,
 /// [`load`] describes it again out of what is actually in there, wrong guesses included.
 pub fn look_at(asked: &str) -> Chosen {
     // The kinds are told apart by the catalogue's own naming. A package somebody exported
-    // themselves and named by path is taken as the more capable of the two, because the one
-    // thing this decides -- whether image to image is offered -- is a thing SDXL packages do.
-    let anima = asked.starts_with("anima");
+    // themselves and named by path is taken as SDXL until the manifest below says otherwise,
+    // because the one thing this decides -- whether image to image is offered -- is a thing SDXL
+    // packages do.
+    let guessed = match asked {
+        name if name.starts_with("anima") => Anima::MODEL_TYPE,
+        name if name.starts_with("krea") => Krea2::MODEL_TYPE,
+        _ => "",
+    };
+    let (defaults, sampler, no_picture) = about(guessed);
 
     let mut chosen = Chosen {
         name: asked.to_string(),
@@ -231,22 +263,13 @@ pub fn look_at(asked: &str) -> Chosen {
             }),
         on_disk: hub::is_cached(asked),
         in_memory: false,
-        defaults: match anima {
-            true => Anima::DEFAULTS,
-            false => GenerationDefaults::default(),
-        },
+        defaults,
         sizes: SIZES.to_vec(),
-        sampler: match anima {
-            true => "Flow match Euler",
-            false => "Euler",
-        },
+        sampler,
         // Not known until the package is read: what a card suggests be typed is written in it.
         suggested_prompt: None,
         suggested_avoid: None,
-        no_picture_because: match anima {
-            true => Some(ANIMA_DRAWS_FROM_NO_PICTURE.to_string()),
-            false => None,
-        },
+        no_picture_because: no_picture.map(str::to_string),
     };
 
     // And where the package is already here, what it says about itself. The manifest is a few
@@ -262,6 +285,19 @@ pub fn look_at(asked: &str) -> Chosen {
     let Ok(manifest) = Manifest::open(path) else {
         return chosen;
     };
+
+    // What kind it is, which the manifest states and a name only hints at. It matters most for a
+    // package named by its path, which is every package somebody exported themselves: `krea2` is
+    // not in the catalogue at all, so this is the only place its kind is ever read.
+    if let Ok(kind) = manifest
+        .section(Sdxl::MODEL_SECTION)
+        .and_then(|section| section.get_str("type").map(str::to_string))
+    {
+        let (defaults, sampler, no_picture) = about(&kind);
+        chosen.defaults = defaults;
+        chosen.sampler = sampler;
+        chosen.no_picture_because = no_picture.map(str::to_string);
+    }
 
     let suggested = manifest.suggested();
     chosen.defaults = suggested.over(chosen.defaults);
@@ -504,6 +540,7 @@ fn draw(shared: &Shared, model: &Model, job: Job) {
 pub enum Model {
     Sdxl(Sdxl),
     Anima(Anima),
+    Krea2(Krea2),
 }
 
 impl Model {
@@ -531,6 +568,11 @@ impl Model {
                 runtime.residency(),
                 &manifest,
             )?)),
+            Krea2::MODEL_TYPE => Ok(Model::Krea2(Krea2::from_manifest(
+                runtime.device(),
+                runtime.residency(),
+                &manifest,
+            )?)),
             // Everything else goes to SDXL, which says what it makes of it. A model of a kind
             // nobody here has heard of is its complaint to make rather than this one's, since it
             // is the one that knows what it can read.
@@ -549,6 +591,7 @@ impl Model {
         match self {
             Model::Sdxl(_) => GenerationDefaults::default(),
             Model::Anima(_) => Anima::DEFAULTS,
+            Model::Krea2(_) => Krea2::DEFAULTS,
         }
     }
 
@@ -556,7 +599,7 @@ impl Model {
     fn sampler(&self) -> &'static str {
         match self {
             Model::Sdxl(_) => "Euler",
-            Model::Anima(_) => "Flow match Euler",
+            Model::Anima(_) | Model::Krea2(_) => "Flow match Euler",
         }
     }
 
@@ -573,8 +616,10 @@ impl Model {
                  encoder. Deleting it below and fetching it again brings one down",
             ),
             // The weights for one are in the package; the layer that reads them is not written.
-            // See docs/anima.md.
+            // See docs/anima.md and docs/krea2.md -- it is the same autoencoder and the same
+            // missing half.
             Model::Anima(_) => Some(ANIMA_DRAWS_FROM_NO_PICTURE),
+            Model::Krea2(_) => Some(KREA2_DRAWS_FROM_NO_PICTURE),
         }
     }
 
@@ -587,6 +632,7 @@ impl Model {
         match self {
             Model::Sdxl(model) => model.generate_reporting(prompt, options, report),
             Model::Anima(model) => model.generate_reporting(prompt, options, report),
+            Model::Krea2(model) => model.generate_reporting(prompt, options, report),
         }
     }
 
@@ -603,7 +649,7 @@ impl Model {
             }
             // The same sentence the door turns a run away with, for the caller that is not the
             // door: one wording for one refusal.
-            Model::Anima(_) => Err(crate::Error::model(
+            Model::Anima(_) | Model::Krea2(_) => Err(crate::Error::model(
                 self.no_picture_because()
                     .unwrap_or("this model cannot start from a picture"),
             )),

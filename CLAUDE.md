@@ -33,13 +33,23 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test sdxl --test sdxl_unet --test sdxl_vae --test sdxl_text_encoder \
     --test sdxl_tokenizer --test sdxl_sampler -- --ignored --test-threads=1
+
+# waifu/src/krea2/, waifu/src/qwen_vae.rs, waifu/src/flow.rs, tools/krea2_exporter.py
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test krea2 --test krea2_sampler --test krea2_pipeline --test krea2_tokenizer \
+    -- --ignored --test-threads=1
 ```
 
 - Keep `--no-fail-fast` and `--test-threads=1`; each test loads a full model onto the GPU.
 - Do not add `--features cli`.
 - Run only one GPU job at a time. Check `nvidia-smi` before diagnosing OOM or timing failures.
 - No individual test may exceed three minutes. Reuse model fixtures across tests instead of
-  loading a model per test.
+  loading a model per test. The harness gives every test its own thread, so a thread-local
+  fixture is read once per *test* and not once per binary: a package the size of Krea 2's is
+  checked in one test that asks several questions rather than several that each read it.
+- A reference input must be one the model would really be handed -- a latent off a real
+  trajectory, not `torch.randn`. Two implementations agreeing on activations neither was trained
+  to see says nothing about the pictures they draw.
 
 ## Git
 

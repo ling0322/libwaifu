@@ -3,8 +3,8 @@
 [![CI](https://github.com/ling0322/libwaifu/actions/workflows/ci.yml/badge.svg)](https://github.com/ling0322/libwaifu/actions/workflows/ci.yml)
 
 libwaifu is an image generator that runs start to finish on your own machine. A prompt in, a
-picture out -- SDXL or Anima, painted by the GPU you already have, as fast as the hardware allows.
-No API key, no cloud, no queue, and no one else seeing what you asked for.
+picture out -- SDXL, Anima or Krea 2, painted by the GPU you already have, as fast as the
+hardware allows. No API key, no cloud, no queue, and no one else seeing what you asked for.
 
 ## Supported models
 
@@ -16,6 +16,19 @@ No API key, no cloud, no queue, and no one else seeing what you asked for.
 | `sdxl:noob` | NoobAI-XL v1.1, an Illustrious fine tune trained on Danbooru and e621 | [libwaifu-noobai-xl-v1.1](https://huggingface.co/ling0322/libwaifu-noobai-xl-v1.1) |
 | `sdxl:obsession` | One Obsession v24, an Illustrious fine tune that draws well at few steps | [libwaifu-one-obsession-v24](https://huggingface.co/ling0322/libwaifu-one-obsession-v24) |
 | `anima:turbo` | Anima Turbo v1.1, a Cosmos-Predict2 transformer rather than an SDXL model, distilled for ten steps at no guidance | [libwaifu-anima-turbo-v1.1](https://huggingface.co/ling0322/libwaifu-anima-turbo-v1.1) |
+| `krea2:turbo` | Krea 2 Turbo, twelve billion parameters of single-stream MMDiT conditioned on twelve tapped layers of a Qwen3-VL encoder, distilled for eight steps at no guidance | [libwaifu-krea2-turbo](https://huggingface.co/ling0322/libwaifu-krea2-turbo) |
+| `krea2:turbo-fp8` | The same weights with the matrices quantized: half the package and half the card | the same repository |
+
+`krea2:turbo` is 33.8 GB and wants that much card; `krea2:turbo-fp8` is 17.3 GB and wants about
+18. The quantized one is not free -- it costs about four times the error in the text encoder, and
+its eight-step trajectory ends somewhere measurably different -- so take it when the card is the
+constraint rather than by default. [docs/krea2.md](docs/krea2.md) is what the model is, how it
+differs from the two families above it, and what every one of those numbers is measured against.
+
+Krea 2 carries the [Krea 2 Community License](https://krea.ai/krea-2-licensing) rather than this
+repository's MIT: fetching it is agreeing to that, commercial use has a revenue threshold, and a
+deployment is required to carry content filtering. The package here is a converted copy and is
+neither official nor endorsed by Krea.
 
 
 ## Run
@@ -31,6 +44,8 @@ waifu is drawing at http://127.0.0.1:7860
 
 ## Recent updates
 
+- [2026-09-18] Krea 2 Turbo draws here: a third architecture, exported from the gated release
+  rather than published from this repository.
 - [2026-09-15] The screen is a page in a browser rather than a screenful of terminal: txt2img and
   img2img, the models to fetch across the top, and the picture where it can actually be looked at.
 - [2026-09-15] Anima Turbo v1.1 is published, as `anima:turbo` -- the first model here that is not
@@ -103,8 +118,9 @@ fn main() -> Result<(), waifu::Error> {
 }
 ```
 
-`Anima::from_manifest` is the same call for the other family, and `manifest.section("model")` says
-which one a manifest holds, so a reader that handles both asks it first. What differs is the
+`Anima::from_manifest` and `Krea2::from_manifest` are the same call for the other two families,
+and `manifest.section("model")` says which one a manifest holds, so a reader that handles all
+three asks it first. What differs is the
 numbers rather than the code: Anima's turbo release is distilled for few steps at no guidance and
 comes out burnt at the thirty and five SDXL likes, so take a model's own `suggested:` block over
 the defaults where it has one.
@@ -240,6 +256,11 @@ cargo test --release -p waifu --no-fail-fast \
 # Anima
 cargo test --release -p waifu --no-fail-fast \
 	--test anima --test anima_pipeline --test anima_tokenizer -- --ignored --test-threads=1
+
+# Krea 2
+cargo test --release -p waifu --no-fail-fast \
+	--test krea2 --test krea2_sampler --test krea2_pipeline --test krea2_tokenizer \
+	-- --ignored --test-threads=1
 ```
 
 Neither flag is optional. `--test-threads=1` keeps one model on the card at a time, where cargo

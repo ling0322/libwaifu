@@ -166,6 +166,21 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-anima-turbo-v1.1",
         manifest: "anima-turbo-v1.1.yaml",
     },
+    Published {
+        name: "krea2:turbo:v1.0",
+        full_name: "Krea 2 Turbo",
+        repo: "ling0322/libwaifu-krea2-turbo",
+        manifest: "krea2-turbo.yaml",
+    },
+    // The same weights with the matrices quantized, out of the same repository: half the package
+    // and half the card, for about four times the error in the text encoder. A name of its own
+    // rather than a flag, because which one is on the disk is what a run has to be told.
+    Published {
+        name: "krea2:turbo-fp8:v1.0",
+        full_name: "Krea 2 Turbo (fp8)",
+        repo: "ling0322/libwaifu-krea2-turbo",
+        manifest: "krea2-turbo-fp8.yaml",
+    },
 ];
 
 /// Where a package is fetched from.
@@ -289,6 +304,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("sdxl:illust", "sdxl:illust:v2.0"),
     ("sdxl:obsession", "sdxl:obsession:v24"),
     ("anima:turbo", "anima:turbo:v1.1"),
+    ("krea2:turbo", "krea2:turbo:v1.0"),
+    ("krea2:turbo-fp8", "krea2:turbo-fp8:v1.0"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1197,12 +1214,16 @@ mod tests {
 
     #[test]
     fn no_two_models_are_the_same_model() {
-        // A table entry is written by copying the one above it, so the thing to check is that
-        // the copy was finished: no two models share a name, a repository, or a first package.
+        // A table entry is written by copying the one above it, so the thing to check is that the
+        // copy was finished: no two models share a name, and none shares a first package.
+        //
+        // The repository is not on that list, because two entries sharing one is a real thing
+        // rather than a slip: Krea 2 publishes its float package and its quantized one together,
+        // and which of the two a run gets is the manifest it asks for. What must differ is
+        // therefore the manifest, and that is checked whether the repository repeats or not.
         for (index, model) in CATALOG.iter().enumerate() {
             for other in &CATALOG[index + 1..] {
                 assert_ne!(model.name, other.name);
-                assert_ne!(model.repo, other.repo, "{} and {}", model.name, other.name);
                 assert_ne!(
                     model.manifest, other.manifest,
                     "{} and {}",
@@ -1219,8 +1240,8 @@ mod tests {
         //
         // The family is one of the kinds this build can draw with rather than anything at all: a
         // name is what someone types before they have the model, so it should say what they are
-        // about to fetch. Add to this list when the runtime learns a third.
-        const FAMILIES: [&str; 2] = ["sdxl", "anima"];
+        // about to fetch. Add to this list when the runtime learns another.
+        const FAMILIES: [&str; 3] = ["sdxl", "anima", "krea2"];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();

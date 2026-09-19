@@ -17,7 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! Rectified flow, which is what Anima is sampled on and what `waifu::sdxl` cannot do.
+//! Rectified flow, which is what [`Anima`](crate::Anima) and [`Krea2`](crate::Krea2) are sampled
+//! on and what `waifu::sdxl` cannot do.
 //!
 //! The two schedules are not variants of each other. [`EulerSampler`](crate::EulerSampler) builds
 //! sigmas out of `alphas_cumprod` and steps on the epsilon the model returns; this walks a
@@ -27,9 +28,14 @@
 //!
 //! Two numbers come from the package rather than from here. The schedule is bent by a **shift**,
 //! which spends more of the budget at high noise where the picture is decided; and the denoiser is
-//! handed `sigma * multiplier`, where Anima's multiplier is **one**. That last is worth saying
-//! twice: a flow model is usually passed a thousandfold timestep, and passing this one 750 instead
-//! of 0.75 costs nothing at load time and produces noise.
+//! handed `sigma * multiplier`, where both families' multiplier is **one**. That last is worth
+//! saying twice: a flow model is usually passed a thousandfold timestep, and passing this one 750
+//! instead of 0.75 costs nothing at load time and produces noise.
+//!
+//! One schedule, two families, because it is one schedule: Krea 2's reference bends its sigmas
+//! with `exp(mu) / (exp(mu) + (1 / t - 1))` and Anima's with `shift * t / (1 + (shift - 1) * t)`,
+//! and those are the same curve written twice -- a package that wants Krea 2's `mu` writes
+//! `exp(mu)` as its shift. See `docs/krea2.md`.
 
 use crate::error::{Error, Result};
 use crate::flint::{functional as F, Tensor};
