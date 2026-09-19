@@ -65,6 +65,8 @@ mod mapping;
 mod param_file;
 mod qwen_vae;
 mod reader;
+/// The semantic codec: w2v-bert's features in, the discrete tokens the GPT reads out.
+pub mod semantic_codec;
 /// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
 pub mod s2mel;
 mod sdxl;
