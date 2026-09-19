@@ -62,7 +62,7 @@ use std::rc::Rc;
 use super::config::DitConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Held, Ir, ParamSource, RunContext, Tensor,
+    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, Preloaded, RunContext, Tensor,
     Value,
 };
 use crate::layers::Linear;
@@ -575,7 +575,7 @@ pub struct Dit {
     ir: Ir,
     /// The weights that are kept on the card between passes, which under
     /// [`Residency::LowVram`](crate::Residency::LowVram) is none of them.
-    held: Held,
+    preloaded: Preloaded,
     weights: Rc<dyn ParamSource>,
     float_type: DType,
     /// The rotary table for whatever was drawn last. A step is one call and a run is many at the
@@ -603,11 +603,11 @@ impl Dit {
         check_parameters(&graph, weights.as_ref())?;
 
         let ir = Ir::compile(&graph, weights.residency());
-        let held = ir.load(weights.as_ref())?;
+        let preloaded = ir.load(weights.as_ref())?;
 
         Ok(Dit {
             weights: Rc::clone(weights),
-            held,
+            preloaded,
             ir,
             config,
             float_type,
@@ -713,7 +713,7 @@ impl Dit {
         let table = placed.as_ref().expect("it was just built");
 
         let run = RunContext::new(&*self.weights)
-            .held(&self.held)
+            .preloaded(&self.preloaded)
             .input("tokens", &tokens)
             .input("context", context)
             .input("sinusoid", &sinusoid)

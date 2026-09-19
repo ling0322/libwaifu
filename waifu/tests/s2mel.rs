@@ -210,11 +210,11 @@ fn the_denoiser_is_the_reference_denoiser() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&filled).unwrap();
+    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .held(&held)
+                .preloaded(&preloaded)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -271,11 +271,11 @@ fn the_transformer_trunk_is_the_reference_trunk() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&filled).unwrap();
+    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .held(&held)
+                .preloaded(&preloaded)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -329,11 +329,11 @@ fn the_length_regulator_is_the_reference_regulator() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&filled).unwrap();
+    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .held(&held)
+                .preloaded(&preloaded)
                 .input("tokens", &tokens)
                 .input("selection", &selection),
         )
@@ -364,9 +364,13 @@ fn mish_is_the_activation_it_replaces() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&filled).unwrap();
+    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
-        .run(&RunContext::new(&filled).held(&held).input("x", &x))
+        .run(
+            &RunContext::new(&filled)
+                .preloaded(&preloaded)
+                .input("x", &x),
+        )
         .unwrap();
     let got = outputs[0].1.to_device(CPU).unwrap().to_vec_f32().unwrap();
 

@@ -212,8 +212,8 @@ fn writes_reads_and_runs_a_pass_of_layers() {
     let ids = Tensor::from_i64(&[2], &[2, 0]).unwrap();
     let context = RunContext::new(&weights).input("tokens", &ids);
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&weights).unwrap();
-    let outputs = ir.run(&context.held(&held)).unwrap();
+    let preloaded = ir.load(&weights).unwrap();
+    let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
 
     let named = |name: &str| {
         outputs
@@ -320,9 +320,9 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
         .cast(DType::Float16)
         .unwrap();
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&weights).unwrap();
+    let preloaded = ir.load(&weights).unwrap();
     let outputs = ir
-        .run(&RunContext::new(&weights).held(&held).input("x", &x))
+        .run(&RunContext::new(&weights).preloaded(&preloaded).input("x", &x))
         .unwrap();
 
     // Sixteen ones against a row worth its scale, and every one of these is exact in float16.
@@ -550,9 +550,9 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     // weight across in its prologue, the streamed one in front of the instruction that reads it.
     let on_the_card = resident(&param_file(tensors), Device::Cuda).unwrap();
     let kept_ir = Ir::compile(&graph, Residency::Device);
-    let kept_held = kept_ir.load(&on_the_card).unwrap();
+    let kept_preloaded = kept_ir.load(&on_the_card).unwrap();
     let kept = kept_ir
-        .run(&RunContext::new(&on_the_card).held(&kept_held).input("x", &x))
+        .run(&RunContext::new(&on_the_card).preloaded(&kept_preloaded).input("x", &x))
         .unwrap();
 
     let over_the_bus =
@@ -565,13 +565,13 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
         "a low-vram run brings nothing across before it starts"
     );
 
-    let streamed_held = streamed_ir.load(&over_the_bus).unwrap();
-    assert!(streamed_held.is_empty());
+    let streamed_preloaded = streamed_ir.load(&over_the_bus).unwrap();
+    assert!(streamed_preloaded.is_empty());
 
     let streamed = streamed_ir
         .run(
             &RunContext::new(&over_the_bus)
-                .held(&streamed_held)
+                .preloaded(&streamed_preloaded)
                 .input("x", &x),
         )
         .unwrap();
@@ -584,7 +584,7 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     let again = streamed_ir
         .run(
             &RunContext::new(&over_the_bus)
-                .held(&streamed_held)
+                .preloaded(&streamed_preloaded)
                 .input("x", &x),
         )
         .unwrap();
@@ -625,7 +625,7 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     // to bring across -- which is the thing that lets a model larger than the card be built at
     // all, and is not something the older form of this could say.
     let ir = Ir::compile(&graph, Residency::LowVram);
-    let held = ir.load(&pinned).unwrap();
+    let preloaded = ir.load(&pinned).unwrap();
     assert_eq!(allocated(), before, "building a low-vram model moves nothing");
 
     // The pass is where the bytes cross. They land on the card, and they are gone again by the
@@ -633,7 +633,7 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     // them back.
     let x = Tensor::zeros(&[256, 256], DType::Float, Device::Cuda).unwrap();
     let out = ir
-        .run(&RunContext::new(&pinned).held(&held).input("x", &x))
+        .run(&RunContext::new(&pinned).preloaded(&preloaded).input("x", &x))
         .unwrap();
     drop(out);
     assert_eq!(allocated() - before, bytes_of(&x), "only the input is left");

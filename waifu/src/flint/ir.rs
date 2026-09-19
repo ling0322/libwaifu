@@ -348,9 +348,9 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// # g.output("hidden", g.silu(x));
 /// # let ir = Ir::compile(&g, Residency::Device);
 /// # let weights = HashMap::new();
-/// # let held = ir.load(&weights)?;
+/// # let preloaded = ir.load(&weights)?;
 /// # let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
-/// let context = RunContext::new(&weights).held(&held).input("hidden", &hidden);
+/// let context = RunContext::new(&weights).preloaded(&preloaded).input("hidden", &hidden);
 /// let outputs = ir.run(&context)?;
 /// # Ok::<(), waifu::Error>(())
 /// ```
@@ -364,7 +364,7 @@ pub struct RunContext<'a> {
     /// None where there is nothing to start from, which is two cases and not an error in either:
     /// the prologue's own run, which is what *produces* the table, and a pass under
     /// [`Residency::LowVram`], where no weight is kept between runs at all.
-    held: Option<&'a Held>,
+    preloaded: Option<&'a Preloaded>,
     inputs: Vec<(&'a str, &'a Tensor)>,
 }
 
@@ -374,7 +374,7 @@ impl<'a> RunContext<'a> {
     pub fn new(params: &'a dyn ParamSource) -> Self {
         RunContext {
             params,
-            held: None,
+            preloaded: None,
             inputs: Vec::new(),
         }
     }
@@ -384,8 +384,8 @@ impl<'a> RunContext<'a> {
     /// Left off by a caller that has none to give. Under [`Residency::LowVram`] that is every
     /// caller, since the table `load` hands back there is empty -- so saying it or leaving it out
     /// comes to the same run.
-    pub fn held(mut self, held: &'a Held) -> Self {
-        self.held = Some(held);
+    pub fn preloaded(mut self, preloaded: &'a Preloaded) -> Self {
+        self.preloaded = Some(preloaded);
         self
     }
 
@@ -660,9 +660,9 @@ fn retype(tensor: Tensor, computes_in: DType) -> Result<Tensor> {
 pub struct Ir {
     /// The weights that cross once, as the instructions that bring them across.
     ///
-    /// Run by [`Ir::load`] before the first pass and never again; what it produces is a [`Held`],
-    /// which every run of `insts` below starts from. Empty under [`Residency::LowVram`], where no
-    /// weight stays.
+    /// Run by [`Ir::load`] before the first pass and never again; what it produces is a
+    /// [`Preloaded`], which every run of `insts` below starts from. Empty under
+    /// [`Residency::LowVram`], where no weight stays.
     prologue: Vec<Inst>,
     insts: Vec<Inst>,
     /// How many slots a run needs. Every value the graph had -- see the type documentation -- and
@@ -672,21 +672,24 @@ pub struct Ir {
     outputs: Vec<(String, Value)>,
 }
 
-/// The weights an [`Ir`] keeps between runs, which is what its prologue produced.
+/// The weights an [`Ir`] loaded before its first pass, which every pass after it starts from.
 ///
-/// Every run starts from these slots rather than from empty ones, so a weight that crossed once is
+/// Preloaded rather than kept, because the number that matters is how many were brought across
+/// ahead of any work, and under [`Residency::LowVram`] that number is zero: nothing is loaded
+/// early there, and every pass reads what it needs at the instruction that needs it. So an empty
+/// one is not a failure to fill it, it is the whole of what the streaming mode preloads.
+///
+/// A run starts from these slots rather than from empty ones, so a weight that crossed once is
 /// there for the twentieth pass as it was for the first. Cloning the slot table per run is a
 /// handle each and no bytes; what a run then frees is its own handle, and the storage stays
 /// because this still holds one.
-///
-/// Under [`Residency::LowVram`] this is empty and every pass reads what it needs.
 #[derive(Clone, Debug)]
-pub struct Held {
+pub struct Preloaded {
     slots: Vec<Option<Tensor>>,
 }
 
-impl Held {
-    /// How many weights are being held, which is how many the prologue brought across.
+impl Preloaded {
+    /// How many weights were preloaded, which is how many the prologue brought across.
     pub fn len(&self) -> usize {
         self.slots.iter().filter(|slot| slot.is_some()).count()
     }
@@ -760,10 +763,11 @@ impl Ir {
         let mut prologue = Vec::new();
         let mut insts = Vec::new();
 
-        // Which values are weights the prologue brought across. A pass does not free one: it did
-        // not put it there, the `Held` it came from still holds it, and a `free` for a value no
-        // instruction in this list produced is a thing no one reading the list can make sense of.
-        let mut held_here = vec![false; width];
+        // Which values are weights the prologue brought across. A pass does not free one: it
+        // did not put it there, the `Preloaded` it came from still holds it, and a `free` for a
+        // value no instruction in this list produced is a thing no one reading the list can make
+        // sense of.
+        let mut preloaded_here = vec![false; width];
 
         for (value, op) in nodes {
             if !live[value.slot()] {
@@ -810,9 +814,9 @@ impl Ir {
                 if kept {
                     prologue.extend(hops);
                     prologue.extend(also);
-                    held_here[value.slot()] = true;
+                    preloaded_here[value.slot()] = true;
                     for repeat in standing_for {
-                        held_here[repeat.slot()] = true;
+                        preloaded_here[repeat.slot()] = true;
                     }
                 } else {
                     insts.extend(hops);
@@ -821,7 +825,7 @@ impl Ir {
 
                 // A load reads no operand, so there is nothing to count down here. The free for
                 // what it produced is emitted below by whichever instruction reads it last, and
-                // only when the weight is this pass's to free -- see `held_here`.
+                // only when the weight is this pass's to free -- see `preloaded_here`.
                 continue;
             }
 
@@ -836,7 +840,7 @@ impl Ir {
 
             for operand in operands {
                 remaining[operand.slot()] -= 1;
-                if remaining[operand.slot()] == 0 && !held_here[operand.slot()] {
+                if remaining[operand.slot()] == 0 && !preloaded_here[operand.slot()] {
                     insts.push(Inst::Free { value: operand });
                 }
             }
@@ -861,14 +865,14 @@ impl Ir {
     /// Once, when the model is built. Under [`Residency::LowVram`] the prologue is empty and this
     /// reads nothing, which is the point of it: a model too large for the card is not read onto
     /// the card before it is asked to draw.
-    pub fn load(&self, params: &dyn ParamSource) -> Result<Held> {
+    pub fn load(&self, params: &dyn ParamSource) -> Result<Preloaded> {
         let context = RunContext::new(params);
         let mut slots: Vec<Option<Tensor>> = vec![None; self.width];
         for inst in &self.prologue {
             step(inst, &mut slots, &context)?;
         }
 
-        Ok(Held { slots })
+        Ok(Preloaded { slots })
     }
 
     /// Run the instructions, and hand back what the graph named as its outputs.
@@ -889,8 +893,8 @@ impl Ir {
         // that was given none starts from an empty table instead, which `resize` fills out to the
         // width this IR needs -- so the prologue's own run and a low-vram pass take the same path
         // here as any other.
-        let mut slots = match context.held {
-            Some(held) => held.slots.clone(),
+        let mut slots = match context.preloaded {
+            Some(preloaded) => preloaded.slots.clone(),
             None => Vec::new(),
         };
         slots.resize(self.width, None);
@@ -1504,8 +1508,8 @@ mod tests {
         context: RunContext<'_>,
     ) -> Result<Vec<(String, Tensor)>> {
         let ir = Ir::compile(graph, params.residency());
-        let held = ir.load(params)?;
-        ir.run(&context.held(&held))
+        let preloaded = ir.load(params)?;
+        ir.run(&context.preloaded(&preloaded))
     }
 
     /// The instructions as they are printed, which is the readable way to say what an IR is.
@@ -1558,7 +1562,7 @@ mod tests {
         );
 
         // And the pass is the arithmetic alone. `%1` is not freed here: this list did not put it
-        // there and the `Held` it came from still holds it.
+        // there and the `Preloaded` it came from still holds it.
         assert_eq!(
             listing(&ir),
             [
@@ -1749,11 +1753,11 @@ mod tests {
 
         let ir = Ir::compile(&g, Residency::Device);
         let params = state_dict(&[]);
-        let held = ir.load(&params).unwrap();
+        let preloaded = ir.load(&params).unwrap();
         for length in [2, 6] {
             let x = Tensor::from_f32(&[length], &vec![1.0; length as usize]).unwrap();
             let context = RunContext::new(&params).input("x", &x);
-            let outputs = ir.run(&context.held(&held)).unwrap();
+            let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
 
             assert_eq!(outputs[0].1.shape(), [1, length, 1]);
         }
@@ -1811,9 +1815,9 @@ mod tests {
         let params = state_dict(&[]);
         let tensor = Tensor::from_f32(&[1], &[1.0]).unwrap();
 
-        let held = ir.load(&params).unwrap();
+        let preloaded = ir.load(&params).unwrap();
         let missing = ir
-            .run(&RunContext::new(&params).held(&held))
+            .run(&RunContext::new(&params).preloaded(&preloaded))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1824,7 +1828,7 @@ mod tests {
         let stray = ir
             .run(
                 &RunContext::new(&params)
-                    .held(&held)
+                    .preloaded(&preloaded)
                     .input("hidden", &tensor)
                     .input("hidde", &tensor),
             )

@@ -182,8 +182,8 @@ fn run(
     }
 
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&filled).unwrap();
-    let outputs = ir.run(&context.held(&held)).unwrap();
+    let preloaded = ir.load(&filled).unwrap();
+    let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
     let values = tensor.to_vec_f32().unwrap();
     let indices = probe_indices(values.len(), probe);

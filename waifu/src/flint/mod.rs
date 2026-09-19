@@ -70,9 +70,9 @@
 //!
 //! let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
 //! let weights = HashMap::new();
-//! let held = ir.load(&weights)?;
+//! let preloaded = ir.load(&weights)?;
 //!
-//! let context = RunContext::new(&weights).held(&held).input("hidden", &hidden);
+//! let context = RunContext::new(&weights).preloaded(&preloaded).input("hidden", &hidden);
 //! let outputs = ir.run(&context)?;
 //! assert_eq!(outputs[0].0, "hidden");
 //! # Ok::<(), waifu::Error>(())
@@ -97,7 +97,7 @@ mod op;
 pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{
-    check_parameters, resident, Held, Inst, Ir, ParamSource, Residency, RunContext, Weights,
+    check_parameters, resident, Preloaded, Inst, Ir, ParamSource, Residency, RunContext, Weights,
 };
 pub use nvfp4::Nvfp4Tensor;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};

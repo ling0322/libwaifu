@@ -64,7 +64,7 @@ use std::rc::Rc;
 use crate::audio::{downsample1d, kaiser_sinc_filter, snake, upsample1d};
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Graph, Held, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Graph, Ir, ParamSource, Preloaded, RunContext, Tensor, Value,
 };
 use crate::layers::{Conv1d, ConvTranspose1d};
 
@@ -497,7 +497,7 @@ pub struct BigVgan {
     /// Where its weights are, which is where a mel has to be brought to meet them.
     device: Device,
     ir: Ir,
-    held: Held,
+    preloaded: Preloaded,
     weights: Rc<dyn ParamSource>,
 }
 
@@ -528,11 +528,11 @@ impl BigVgan {
         check_parameters(&graph, weights.as_ref())?;
 
         let ir = Ir::compile(&graph, weights.residency());
-        let held = ir.load(weights.as_ref())?;
+        let preloaded = ir.load(weights.as_ref())?;
 
         Ok(BigVgan {
             weights: Rc::clone(weights),
-            held,
+            preloaded,
             ir,
             dtype: float_type,
             device,
@@ -581,7 +581,7 @@ impl BigVgan {
         }
 
         let context = RunContext::new(&*self.weights)
-            .held(&self.held)
+            .preloaded(&self.preloaded)
             .input("mel", mel);
 
         output(&self.ir.run(&context)?, "waveform")

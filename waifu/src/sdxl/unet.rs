@@ -55,8 +55,8 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, Extent, Graph, Held, Ir, ParamSource, RunContext, Tensor,
-    Value, WeightFormat,
+    check_parameters, functional as F, Extent, Graph, Ir, ParamSource, Preloaded, RunContext,
+    Tensor, Value, WeightFormat,
 };
 use crate::layers::{Conv2d, GroupNorm, LayerNorm, Linear};
 
@@ -749,7 +749,7 @@ pub struct UnetCondition<'a> {
 pub struct Unet {
     config: UnetConfig,
     ir: Ir,
-    held: Held,
+    preloaded: Preloaded,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
     weights: Rc<dyn ParamSource>,
@@ -774,11 +774,11 @@ impl Unet {
         check_parameters(&graph, weights.as_ref())?;
 
         let ir = Ir::compile(&graph, weights.residency());
-        let held = ir.load(weights.as_ref())?;
+        let preloaded = ir.load(weights.as_ref())?;
 
         Ok(Unet {
             weights: Rc::clone(weights),
-            held,
+            preloaded,
             ir,
             config,
         })
@@ -847,7 +847,7 @@ impl Unet {
 
         let (time, sizes) = (repeat_rows(&time, batch)?, repeat_rows(&sizes, batch)?);
         let context = RunContext::new(&*self.weights)
-            .held(&self.held)
+            .preloaded(&self.preloaded)
             .input("latent", latent)
             .input("context", condition.context)
             .input("pooled", condition.pooled)

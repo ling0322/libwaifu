@@ -133,9 +133,13 @@ fn encode() -> (Vec<i32>, Vec<f32>) {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let held = ir.load(&filled).unwrap();
+    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
-        .run(&RunContext::new(&filled).held(&held).input("x", &features))
+        .run(
+            &RunContext::new(&filled)
+                .preloaded(&preloaded)
+                .input("x", &features),
+        )
         .unwrap();
 
     let tensor = outputs[0].1.to_device(CPU).unwrap();

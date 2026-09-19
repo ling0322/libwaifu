@@ -39,8 +39,8 @@ fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, Vec<f32>
     }
 
     let ir = Ir::compile(g, Residency::Device);
-    let held = ir.load(&weights).unwrap();
-    let outputs = ir.run(&context.held(&held)).unwrap();
+    let preloaded = ir.load(&weights).unwrap();
+    let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
     let tensor = outputs[0]
         .1
         .to_device(Device::Cpu)
