@@ -718,3 +718,265 @@ pub fn graph(
         device,
     )
 }
+
+// -------------------------------------------------------------------------------------------
+// The length regulator, and the sampler that drives the denoiser
+// -------------------------------------------------------------------------------------------
+
+/// The matrix that resizes a time axis from `from` to `to` by taking the nearest frame.
+///
+/// Nearest-neighbour interpolation picks input frame `floor(i * from / to)` for output frame `i`,
+/// which is a permutation-with-repeats -- a gather, and there is no gather here. As a matrix it
+/// is one-hot per row, and `x @ selection` is that gather.
+///
+/// It costs a GEMM of `channels * from * to` rather than a copy of `channels * to`, which for a
+/// long utterance is not nothing; it is once per utterance and the denoiser after it runs many
+/// times, so it has not been worth a kernel.
+pub fn nearest_selection(from: i32, to: i32, device: Device) -> Result<Tensor> {
+    let mut values = vec![0.0f32; (from * to) as usize];
+
+    for out in 0..to {
+        let source = ((out as i64 * from as i64) / to as i64) as i32;
+        values[(source * to + out) as usize] = 1.0;
+    }
+
+    Ok(Tensor::from_f32(&[from, to], &values)?.to_device(device)?)
+}
+
+/// `x * tanh(softplus(x))`, the activation the length regulator uses between its convolutions.
+///
+/// Written without a logarithm, because there is no logarithm here. With `u = exp(x)`,
+/// `softplus(x) = ln(1 + u)`, so `exp(2 * softplus(x)) = (1 + u)^2` and
+///
+/// ```text
+/// tanh(softplus(x)) = ((1 + u)^2 - 1) / ((1 + u)^2 + 1) = (u^2 + 2u) / (u^2 + 2u + 2)
+/// ```
+///
+/// which is exp, multiply, add and divide. The identity is exact; what is not exact is `exp` of a
+/// large number, which overflows a float32 somewhere above 88 and makes this a NaN rather than
+/// the `x` it tends to. Every call here is on the far side of a group normalization, so the
+/// numbers are a handful of standard deviations and nowhere near it.
+#[track_caller]
+pub fn mish(g: &Graph, x: Value, dtype: DType, device: Device) -> Result<Value> {
+    let two = g.constant(
+        Tensor::from_f32(&[1], &[2.0])?
+            .to_device(device)?
+            .cast(dtype)?,
+    );
+
+    let u = g.exp(x);
+    let quadratic = g.add(g.square(u), g.mul(u, two));
+
+    Ok(g.mul(x, g.div(quadratic, g.add(quadratic, two))))
+}
+
+/// The length regulator: the GPT's semantic tokens, one per token, stretched to one per mel frame.
+///
+/// `x` is `(N, tokens, in_channels)` and what comes back is `(N, frames, channels)` -- the `cond`
+/// the denoiser reads. Between the two: one projection, a nearest-neighbour resize onto the mel's
+/// frame rate, and four convolutions each followed by a group normalization and a [`mish`].
+///
+/// `selection` is [`nearest_selection`] from however many tokens there are to `frames`.
+#[track_caller]
+#[allow(clippy::too_many_arguments)]
+pub fn length_regulator(
+    g: &Graph,
+    x: Value,
+    selection: Value,
+    config: &RegulatorConfig,
+    frames: i32,
+    dtype: DType,
+    device: Device,
+) -> Result<Value> {
+    let channels = config.channels;
+
+    // (N, tokens, in_channels) -> (N, tokens, channels)
+    let projected = Linear::graph(
+        &g.subgraph("content_in_proj"),
+        x,
+        config.in_channels,
+        channels,
+        true,
+    );
+
+    // (N, tokens, C) -> (N, C, tokens) -> (N, C, frames), by the gather written as a matrix.
+    let over_time = g.contiguous(g.transpose(projected, 1, 2));
+    let mut running = g.matmul(over_time, selection);
+
+    let model = g.subgraph("model");
+    for stage in 0..config.stages {
+        // A `Sequential` numbers its children, and each stage is three of them.
+        let sub = model.subgraph(&(stage * 3).to_string());
+        let weight = sub.load("weight", &[channels, channels, 3]);
+        let bias = sub.load("bias", &[channels]);
+        running = conv1d(&sub, running, weight, Some(bias), 1, 1, 1, 1, dtype, device)?;
+
+        // `group_norm` wants four axes. With one group it normalizes over the channels and
+        // everything after them together, so `(N, C, 1, T)` covers the same numbers as the
+        // `(N, C, T)` the reference hands its `GroupNorm`, and the result is the same.
+        let norm = model.subgraph(&(stage * 3 + 1).to_string());
+        running = g.squeeze(
+            g.group_norm(
+                g.unsqueeze(running, 2),
+                Some(norm.load("weight", &[channels])),
+                Some(norm.load("bias", &[channels])),
+                1,
+                1e-5,
+            ),
+            2,
+        );
+
+        running = mish(g, running, dtype, device)?;
+    }
+
+    // And one more that only projects.
+    let sub = model.subgraph(&(config.stages * 3).to_string());
+    let weight = sub.load("weight", &[config.out_channels, channels, 1]);
+    let bias = sub.load("bias", &[config.out_channels]);
+    let out = conv1d(&sub, running, weight, Some(bias), 1, 0, 1, 1, dtype, device)?;
+
+    let _ = frames;
+
+    Ok(g.contiguous(g.transpose(out, 1, 2)))
+}
+
+/// The widths of the length regulator, as `config.yaml` states them.
+#[derive(Clone, Copy, Debug)]
+pub struct RegulatorConfig {
+    /// What the semantic tokens arrive as.
+    pub in_channels: i32,
+    /// What it works in, and what the denoiser reads.
+    pub channels: i32,
+    pub out_channels: i32,
+    /// How many convolution-normalization-activation stages, one per sampling ratio.
+    pub stages: i32,
+}
+
+impl RegulatorConfig {
+    /// What IndexTTS-2.5's `config.yaml` describes: four stages, 1024 in, 512 through and out.
+    pub fn indextts() -> RegulatorConfig {
+        RegulatorConfig {
+            in_channels: 1024,
+            channels: 512,
+            out_channels: 512,
+            stages: 4,
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// The sampler
+// -------------------------------------------------------------------------------------------
+
+/// Walk the trajectory from noise to a mel, calling `evaluate` once or twice per step.
+///
+/// This is the reference's `solve_euler`: `steps` even steps from 0 to 1, moving the mel at each
+/// by `dt` times the direction the network gives back. Three details are what make it more than
+/// that loop.
+///
+/// **The prompt is held, not predicted.** `prompt` is the reference speaker's own mel. It is laid
+/// into a zero tensor the shape of the whole utterance, handed to the network as `prompt_x` every
+/// step, and the frames it covers are forced back to zero in `x` after every step -- so the model
+/// never denoises the part it was given and never drifts away from the voice.
+///
+/// **Guidance is two passes, not one.** With `cfg_rate` above zero the network is evaluated a
+/// second time with its conditioning removed, and the two are combined as
+/// `(1 + rate) * conditioned - rate * unconditioned`. The caller does the removing, because what
+/// has to be zeroed -- the style and the semantic tokens -- is held in the graph the caller
+/// built; `evaluate` is told which of the two passes it is being asked for.
+///
+/// **The direction is not the answer.** What comes back from the network is a velocity, and the
+/// mel is what integrating it produces. A model that returned the mel directly would need a
+/// different loop.
+///
+/// The reference stacks the two passes into one batch of two rather than running the network
+/// twice. That is the same arithmetic -- attention does not mix batch entries -- and two passes
+/// keep the graph at a batch of one, which is what everything else here assumes.
+pub fn solve_euler<F>(
+    z: &Tensor,
+    prompt: &Tensor,
+    prompt_len: i32,
+    steps: i32,
+    cfg_rate: f32,
+    mut evaluate: F,
+) -> Result<Tensor>
+where
+    F: FnMut(&Tensor, &Tensor, f32, bool) -> Result<Tensor>,
+{
+    assert!(steps >= 1, "a trajectory needs at least one step");
+
+    let shape = z.shape();
+    assert!(shape.len() == 3, "the noise is (N, C, T)");
+
+    let (channels, frames) = (shape[1], shape[2]);
+    let prompt_len = prompt_len.min(frames);
+
+    let mut x = z.to_device(Device::Cpu)?.to_vec_f32()?;
+    let prompt_values = prompt.to_device(Device::Cpu)?.to_vec_f32()?;
+    let prompt_frames = prompt.shape()[2];
+
+    // The prompt, laid into a tensor the length of the whole utterance and zero after it.
+    let mut held = vec![0.0f32; x.len()];
+    for row in 0..(shape[0] * channels) as usize {
+        for frame in 0..prompt_len as usize {
+            held[row * frames as usize + frame] =
+                prompt_values[row * prompt_frames as usize + frame];
+        }
+    }
+
+    let zero = |values: &mut Vec<f32>| {
+        for row in 0..(shape[0] * channels) as usize {
+            for frame in 0..prompt_len as usize {
+                values[row * frames as usize + frame] = 0.0;
+            }
+        }
+    };
+
+    zero(&mut x);
+
+    let device = z.device();
+    let dtype = z.dtype();
+    let make = |values: &[f32]| -> Result<Tensor> {
+        Ok(Tensor::from_f32(&shape, values)?
+            .to_device(device)?
+            .cast(dtype)?)
+    };
+
+    let held_tensor = make(&held)?;
+    let empty = make(&vec![0.0f32; x.len()])?;
+
+    let dt = 1.0 / steps as f32;
+    for step in 0..steps {
+        let t = step as f32 * dt;
+        let current = make(&x)?;
+
+        let conditioned = evaluate(&current, &held_tensor, t, true)?
+            .to_device(Device::Cpu)?
+            .cast(DType::Float)?
+            .to_vec_f32()?;
+
+        let direction = match cfg_rate > 0.0 {
+            false => conditioned,
+            true => {
+                let free = evaluate(&current, &empty, t, false)?
+                    .to_device(Device::Cpu)?
+                    .cast(DType::Float)?
+                    .to_vec_f32()?;
+
+                conditioned
+                    .iter()
+                    .zip(&free)
+                    .map(|(a, b)| (1.0 + cfg_rate) * a - cfg_rate * b)
+                    .collect()
+            }
+        };
+
+        for (value, step) in x.iter_mut().zip(&direction) {
+            *value += dt * step;
+        }
+
+        zero(&mut x);
+    }
+
+    make(&x)
+}

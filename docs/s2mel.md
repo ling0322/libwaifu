@@ -14,7 +14,8 @@ let direction = s2mel::graph(
 
 It is a **flow-matching** model, so the network does not produce a mel. It produces one step of a
 trajectory — given a partly denoised mel and a time, the direction to move — and a sampler calls
-it a handful of times. What is implemented here is the network. See *What is missing* below.
+it a handful of times. The network, the sampler that drives it and the length regulator in
+front of it are all here.
 
 ## What it is conditioned on
 
@@ -74,35 +75,74 @@ what the skip connections turn on: half the layers hand one forward to the other
 the end of a list, so which layer receives which is a function of the depth and nothing else. At a
 depth of two there is nothing to get wrong; at thirteen there is an off-by-one in three places.
 
-Two tests, so a failure lands on one side or the other:
+Seven tests. Three compare against the reference, so a failure lands on one side or the other;
+four check arithmetic that has a closed form and needs no reference at all.
 
 | test | what it covers |
 | --- | --- |
 | `the_transformer_trunk_is_the_reference_trunk` | the skips and the rotary convention |
 | `the_denoiser_is_the_reference_denoiser` | end to end, including the WaveNet and the final modulation |
+| `the_length_regulator_is_the_reference_regulator` | nine tokens onto twenty-four frames, a ratio that is not whole |
+| `mish_is_the_activation_it_replaces` | the exp-only identity, against the definition |
+| `the_solver_integrates_a_constant_velocity_exactly` | one unit of time, however many steps it is cut into |
+| `guidance_is_two_passes_combined` | the combination, and which prompt each pass is handed |
+| `no_guidance_is_one_pass` | that a rate of zero costs one pass and not two |
 
 ```bash
 cargo test --manifest-path waifu/Cargo.toml --test s2mel
 .venv/bin/python tools/s2mel_reference.py        # to regenerate the constants
 ```
 
-## What is missing
+## The sampler
 
-**The sampler.** `solve_euler` in the reference is a host-side loop: take `n_timesteps` even
-steps from 0 to 1, call the network at each, and move the mel by `dt` times what comes back. It
-also does classifier-free guidance, running the network a second time with `prompt_x`, `style`
-and `cond` zeroed and combining the two as `(1 + rate) * cond - rate * uncond`; and it holds the
-prompt frames at zero throughout. None of that is written yet. It is perhaps sixty lines of
-orchestration around the graph, and it is the difference between a model and a model you can run.
+`solve_euler` is the loop around the denoiser: `steps` even steps from 0 to 1, moving the mel at
+each by `dt` times the direction the network returns. Three things make it more than that loop.
 
-**The length regulator**, which turns the GPT's token sequence into one vector per mel frame, is
-a separate module and is not written either.
+**The prompt is held, not predicted.** The reference speaker's own mel is laid into a zero tensor
+the length of the whole utterance, handed to the network every step, and the frames it covers are
+forced back to zero in `x` after every step — so the model never denoises the part it was given.
 
-**Padding masks.** The reference builds a mask from `x_lens` and passes it to the attention. For a
-batch of one at full length that mask is all true, which is what this assumes. A batch of several
-utterances of different lengths would need it.
+**Guidance is two passes.** With `cfg_rate` above zero the network runs again with its
+conditioning removed and the two combine as `(1 + rate) * conditioned - rate * unconditioned`.
+The caller does the removing, since what has to be zeroed lives in the graph it built; the
+closure is told which pass it is being asked for. The reference stacks the two into a batch of
+two instead — the same arithmetic, since attention does not mix batch entries, and running twice
+keeps the graph at the batch of one everything else here assumes.
+
+**The direction is not the answer.** What comes back is a velocity; the mel is what integrating
+it produces.
+
+It is tested against an integral that can be done by hand — a constant velocity field over
+`steps` steps of `1 / steps` adds up to exactly one unit of time — rather than against a recorded
+number, so the test says the loop is right and not merely unchanged.
+
+## The length regulator
+
+One vector per semantic token in, one per mel frame out: a projection, a nearest-neighbour resize
+onto the mel's frame rate, and four convolution-normalization-activation stages.
+
+Two pieces of it had to be written around what `flint` has.
+
+**The resize is a matrix.** Nearest-neighbour interpolation to an arbitrary length picks input
+frame `floor(i * from / to)` for output frame `i`, which is a gather, and there is no gather
+here. As a matrix it is one-hot per row and the gather is a `matmul`. It costs a GEMM rather than
+a copy; it runs once per utterance where the denoiser runs many times, so it has not been worth a
+kernel.
+
+**Mish has no logarithm in it.** `x * tanh(softplus(x))` needs `ln`, which `flint` does not have.
+With `u = exp(x)` the identity `tanh(softplus(x)) = (u² + 2u) / (u² + 2u + 2)` is exact and uses
+only exp, multiply, add and divide. What is not exact is `exp` of a large number, which overflows
+a float32 above about 88; every call here is on the far side of a group normalization, so the
+numbers are a few standard deviations and nowhere near it. The test checks the identity against
+the definition over a range either side of zero.
+
+## What is still missing
 
 **The exporter.** There is none yet; `tools/s2mel_reference.py` fetches the reference source but
 never the 415 MB checkpoint. Note for whoever writes it: several layers are wrapped in
 `weight_norm`, which the reference removes when it loads, so the folded weight is what to export
 — the same thing `tools/bigvgan_exporter.py` does.
+
+**Padding masks.** The reference builds a mask from `x_lens` and passes it to the attention. For
+a batch of one at full length that mask is all true, which is what this assumes. A batch of
+several utterances of different lengths would need it.
