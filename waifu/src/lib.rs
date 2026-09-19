@@ -63,6 +63,8 @@ mod param_file;
 mod qwen_vae;
 mod reader;
 mod sdxl;
+/// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
+pub mod s2mel;
 mod suggested;
 mod tokenizer;
 mod yaml;
