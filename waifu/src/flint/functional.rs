@@ -280,6 +280,16 @@ pub fn silu(input: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_silu(input.raw, out) })
 }
 
+/// Element-wise sine, in radians.
+pub fn sin(input: &Tensor) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe { ffi::fl_sin(input.raw, out) })
+}
+
+/// Element-wise cosine, in radians.
+pub fn cos(input: &Tensor) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe { ffi::fl_cos(input.raw, out) })
+}
+
 /// Softmax over the last dimension.
 pub fn softmax(input: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_softmax(input.raw, out) })

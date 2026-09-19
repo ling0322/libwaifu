@@ -536,6 +536,18 @@ impl Graph {
         self.unary(Unary::Silu, input)
     }
 
+    /// Element-wise sine, in radians.
+    #[track_caller]
+    pub fn sin(&self, input: Value) -> Value {
+        self.unary(Unary::Sin, input)
+    }
+
+    /// Element-wise cosine, in radians.
+    #[track_caller]
+    pub fn cos(&self, input: Value) -> Value {
+        self.unary(Unary::Cos, input)
+    }
+
     #[track_caller]
     pub fn softmax(&self, input: Value) -> Value {
         self.unary(Unary::Softmax, input)

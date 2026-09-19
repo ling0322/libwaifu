@@ -184,6 +184,10 @@ pub enum Unary {
     /// `x * sigmoid(1.702 * x)`, which OpenAI's CLIP uses in place of GELU.
     QuickGelu,
     Silu,
+    /// In radians. Here because a snake activation needs one; see `crate::audio`.
+    Sin,
+    /// In radians.
+    Cos,
     /// Over the last dimension.
     Softmax,
     /// Halves the last dimension: `swish(x[..D / 2]) * x[D / 2..]`.
@@ -209,6 +213,8 @@ impl Unary {
             Unary::Gelu => "gelu",
             Unary::QuickGelu => "quick_gelu",
             Unary::Silu => "silu",
+            Unary::Sin => "sin",
+            Unary::Cos => "cos",
             Unary::Softmax => "softmax",
             Unary::Swiglu => "swiglu",
             Unary::Geglu => "geglu",

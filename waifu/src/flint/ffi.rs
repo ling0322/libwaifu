@@ -205,6 +205,8 @@ extern "C" {
     pub fn fl_relu(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_gelu(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_silu(input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_sin(input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_cos(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_softmax(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_swiglu(input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_geglu(input: FlTensor, out: *mut FlTensor) -> i32;

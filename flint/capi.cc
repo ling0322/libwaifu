@@ -923,6 +923,14 @@ int32_t fl_silu(fl_tensor_t input, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::silu(deref(input)), out); });
 }
 
+int32_t fl_sin(fl_tensor_t input, fl_tensor_t *out) {
+  return guard([&]() { return publish(fl::F::sin(deref(input)), out); });
+}
+
+int32_t fl_cos(fl_tensor_t input, fl_tensor_t *out) {
+  return guard([&]() { return publish(fl::F::cos(deref(input)), out); });
+}
+
 int32_t fl_softmax(fl_tensor_t input, fl_tensor_t *out) {
   return guard([&]() { return publish(fl::F::softmax(deref(input)), out); });
 }

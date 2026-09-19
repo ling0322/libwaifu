@@ -798,6 +798,8 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
                 Unary::Gelu => F::gelu(input)?,
                 Unary::QuickGelu => F::quick_gelu(input)?,
                 Unary::Silu => F::silu(input)?,
+                Unary::Sin => F::sin(input)?,
+                Unary::Cos => F::cos(input)?,
                 Unary::Softmax => F::softmax(input)?,
                 Unary::Swiglu => F::swiglu(input)?,
                 Unary::Geglu => F::geglu(input)?,

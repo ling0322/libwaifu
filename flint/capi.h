@@ -432,6 +432,12 @@ FLAPI int32_t fl_gelu(fl_tensor_t input, fl_tensor_t *out);
 /// Element-wise x * sigmoid(x).
 FLAPI int32_t fl_silu(fl_tensor_t input, fl_tensor_t *out);
 
+/// Element-wise sine, in radians.
+FLAPI int32_t fl_sin(fl_tensor_t input, fl_tensor_t *out);
+
+/// Element-wise cosine, in radians.
+FLAPI int32_t fl_cos(fl_tensor_t input, fl_tensor_t *out);
+
 /// Softmax over the last dimension.
 FLAPI int32_t fl_softmax(fl_tensor_t input, fl_tensor_t *out);
 
