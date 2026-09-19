@@ -43,6 +43,9 @@ pub mod anima;
 /// activation, all composed from the operators [`flint`] already has rather than written as
 /// kernels of their own.
 pub mod audio;
+/// CAMPPlus, the speaker encoder IndexTTS-2.5 conditions on: filterbank energies in, one vector
+/// saying whose voice it is out.
+pub mod campplus;
 #[cfg(feature = "cli")]
 pub mod cli;
 mod error;
