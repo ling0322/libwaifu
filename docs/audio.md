@@ -152,7 +152,18 @@ above `depthwise_conv1d` would have to change.
 What remains genuinely unavailable on a card is a group count strictly between one and the
 channel count. Nothing here uses one.
 
-### Who actually needs it
+### What IndexTTS-2.5 does not use
+
+`istft`. Its waveform comes out of BigVGAN, straight from a mel spectrogram, and the semantic
+codec reconstructs w2v-bert features rather than audio -- `infer_v2_5.py` has no inverse transform
+on any path. The forward `stft` is used, for the mel a vocoder is conditioned on.
+
+It stays because an inverse transform is half of what a short time Fourier transform is for, a
+Vocos *head* in some other model is exactly this, and `an_istft_gives_back_the_signal_an_stft_was_taken_of`
+is the test that proves the forward bank is right. But it is not on this model's path, and a
+reader deciding what to port first should know that.
+
+### Who actually needs a group count
 
 A conformer's convolution module, and only that. Checked against the reference implementation
 rather than assumed:
@@ -186,7 +197,7 @@ For IndexTTS-2.5 specifically -- six models and about 5.5 GB -- what remains is 
 | piece | needs |
 | --- | --- |
 | GPT backbone, 1280d × 24L | the attention, RoPE and sampling that are already here, plus a conformer perceiver conditioner |
-| semantic codec, 8192 entries | a Vocos head, which is `istft` |
+| semantic codec, 8192 entries | a Vocos *backbone*, which reconstructs w2v-bert features rather than audio -- no inverse transform |
 | S2Mel, flow-matching DiT 13L × 512d | a WaveNet postnet, which is dilated `conv1d` |
 | BigVGAN vocoder | `conv_transpose1d`, `snake`, and the anti-aliased resampling around them |
 | Qwen3-0.6B emotion model | autoregressive generation; `anima::text_encoder` is the same architecture read a different way |

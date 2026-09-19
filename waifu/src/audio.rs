@@ -463,6 +463,18 @@ pub fn conv_transpose1d(
 /// The channel is moved to the last axis and back because a binary operation broadcasts its right
 /// operand over the leading dimensions of its left, so a per-channel vector has to sit against
 /// the axis it names. Neither transpose moves any data.
+///
+/// # What it costs
+///
+/// Of everything in this module this is the one most likely to want a kernel of its own. It is
+/// elementwise, so it is bound by memory rather than arithmetic, and written this way it is about
+/// six passes over the whole tensor plus a copy to make the result contiguous, where a fused
+/// kernel would read it once and write it once.
+///
+/// That matters because of where it runs. A BigVGAN applies it after every convolution in every
+/// AMP block -- eighteen times per upsampling stage, on the tensors that have already been
+/// upsampled -- so it is the vocoder's bandwidth, not its arithmetic, that this spends. The
+/// convolutions beside it go through `conv2d` and a tuned GEMM; this does not.
 #[track_caller]
 pub fn snake(
     g: &Graph,

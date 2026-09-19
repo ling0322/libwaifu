@@ -297,6 +297,40 @@ Tensor Operators::sin(Tensor input) {
 Tensor Operators::cos(Tensor input) {
   NOT_IMPL();
 }
+
+Tensor Operators::conv1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  NOT_IMPL();
+}
+
+Tensor Operators::convTranspose1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups) {
+  NOT_IMPL();
+}
+
+Tensor Operators::snake(Tensor input, Tensor alpha, Tensor beta, float eps) {
+  NOT_IMPL();
+}
+
+Tensor Operators::stft(Tensor input, Tensor window, int nFft, int hop, bool centered) {
+  NOT_IMPL();
+}
+
+Tensor Operators::istft(Tensor spectrum, Tensor window, int nFft, int hop, bool centered) {
+  NOT_IMPL();
+}
 Tensor Operators::quickGelu(Tensor input) {
   NOT_IMPL();
 }

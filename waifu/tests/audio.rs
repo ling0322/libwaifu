@@ -761,8 +761,13 @@ fn a_mel_spectrogram_is_the_filterbank_times_the_magnitude() {
 // resampling
 // ---------------------------------------------------------------------------------------------
 
-/// A vocoder here writes at 22.05 kHz and the rest of the pipeline works at 24 kHz, so this is
-/// the ratio that actually has to hold: 147 to 160, which is not a small one.
+/// 147 to 160 is not a small ratio, which is the point of checking it: a reduction that went
+/// wrong would most likely still produce a plausible number of samples.
+///
+/// It is also roughly what a speech pipeline asks for. IndexTTS-2.5 resamples its reference audio
+/// twice per synthesis -- to 16 kHz for the semantic encoder and to 22.05 kHz for everything else
+/// -- from whatever rate the file happened to be, so the ratios that turn up are whatever the
+/// input makes them.
 #[test]
 fn a_resampling_kernel_reduces_the_ratio_it_is_given() {
     let (_, up, down) = resample_kernel(22050, 24000, 4).unwrap();

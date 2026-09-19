@@ -66,6 +66,72 @@ class Operators {
       int groups);
   virtual Tensor matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB);
 
+  /// 1-D convolution of `input` <float16|float>(N, C, L) by `weight` (K, C / groups, R), with an
+  /// optional per-channel `bias` (K). The result is (N, K, Lout), Lout being
+  /// (L + 2 * padding - dilation * (R - 1) - 1) / stride + 1.
+  ///
+  /// `groups == C == K` is the depthwise case. It gets no operator of its own -- it is this one
+  /// with every group a single channel -- but it is the case a speech model actually asks for and
+  /// the one a backend has most to gain from specializing.
+  ///
+  /// No backend implements this. `waifu::audio::conv1d` composes it out of `conv2d` over an image
+  /// one row tall, plus the padding a square `conv2d` padding cannot express, and that is what
+  /// runs today; overriding this replaces that path without the caller knowing.
+  virtual Tensor conv1d(
+      Tensor input,
+      Tensor weight,
+      Tensor bias,
+      int stride,
+      int padding,
+      int dilation,
+      int groups);
+
+  /// Transposed 1-D convolution of `input` <float16|float>(N, C, L) by `weight`
+  /// (C, K / groups, R), with an optional per-channel `bias` (K). The result is (N, K, Lout),
+  /// Lout being (L - 1) * stride - 2 * padding + R + outputPadding: input position `l`
+  /// contributes the whole kernel starting at `l * stride`. What a vocoder upsamples with.
+  ///
+  /// No backend implements this. `waifu::audio::conv_transpose1d` composes it as one `matmul`
+  /// and ceil(R / stride) shifted additions, for one group only.
+  virtual Tensor convTranspose1d(
+      Tensor input,
+      Tensor weight,
+      Tensor bias,
+      int stride,
+      int padding,
+      int outputPadding,
+      int groups);
+
+  /// The activation a BigVGAN is built from, per channel of `input` <float16|float>(N, C, L):
+  /// `x + sin(alpha * x)^2 / (beta + eps)`. `alpha` and `beta` are (C) and already exponentiated
+  /// -- a checkpoint trained with `alpha_logscale` stores their logarithm, and raising it belongs
+  /// to whoever reads the weight. An empty `beta` means beta is alpha, the plain snake.
+  ///
+  /// No backend implements this. `waifu::audio::snake` composes it out of the elementwise
+  /// operators, which costs about six passes over the tensor where a fused kernel would cost one.
+  /// Of everything named here this is the one whose kernel would most likely pay for itself: it
+  /// is memory bound and a vocoder applies it eighteen times per upsampling stage.
+  virtual Tensor snake(Tensor input, Tensor alpha, Tensor beta, float eps);
+
+  /// Short time Fourier transform of `input` <float>(N, 1, L) against `window` (nFft), as
+  /// <float>(N, 2 * (nFft / 2 + 1), frames) -- every bin's real part, then every bin's imaginary
+  /// part, because a tensor here holds real numbers. Only half the spectrum: the input is real,
+  /// so the other half is its conjugate. `centered` pads by half a window at both ends, by
+  /// reflection, which is what `torch.stft` does by default.
+  ///
+  /// No backend implements this. `waifu::audio::stft` composes it as a convolution against a bank
+  /// of windowed sinusoids, which is a GEMM of O(nFft^2) per frame where a fast transform would
+  /// be O(nFft log nFft). A backend with an FFT -- cuFFT, vDSP, MLX -- is the reason this is named
+  /// here rather than left a composition forever.
+  virtual Tensor stft(Tensor input, Tensor window, int nFft, int hop, bool centered);
+
+  /// The inverse of `stft`: `spectrum` <float>(N, 2 * (nFft / 2 + 1), frames) against `window`
+  /// (nFft), as <float>(N, 1, L). Overlap-add, divided by the window's own overlap so that the
+  /// inverse of a transform is the signal it was taken of.
+  ///
+  /// No backend implements this. `waifu::audio::istft` composes it out of `conv_transpose1d`.
+  virtual Tensor istft(Tensor spectrum, Tensor window, int nFft, int hop, bool centered);
+
   /// Solve the lower triangular systems L X = B. l is <float>(..., N, N) and b is
   /// <float>(..., N, M) with the same batch dimensions.
   virtual Tensor mul(Tensor input, float other);
