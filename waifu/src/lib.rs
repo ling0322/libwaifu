@@ -72,6 +72,8 @@ pub mod s2mel;
 mod sdxl;
 mod suggested;
 mod tokenizer;
+/// w2v-bert-2.0: the conformer that reads speech into the features everything else conditions on.
+pub mod w2v_bert;
 mod yaml;
 
 /// The tensor types a caller of this crate needs to name, re-exported so that the common case
