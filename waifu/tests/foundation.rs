@@ -213,7 +213,7 @@ fn writes_reads_and_runs_a_pass_of_layers() {
     let context = RunContext::new(&weights).input("tokens", &ids);
     let ir = Ir::compile(&g, Residency::Device);
     let held = ir.load(&weights).unwrap();
-    let outputs = ir.run(&held, &context).unwrap();
+    let outputs = ir.run(&context.held(&held)).unwrap();
 
     let named = |name: &str| {
         outputs
@@ -322,7 +322,7 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
     let ir = Ir::compile(&g, Residency::Device);
     let held = ir.load(&weights).unwrap();
     let outputs = ir
-        .run(&held, &RunContext::new(&weights).input("x", &x))
+        .run(&RunContext::new(&weights).held(&held).input("x", &x))
         .unwrap();
 
     // Sixteen ones against a row worth its scale, and every one of these is exact in float16.
@@ -552,7 +552,7 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     let kept_ir = Ir::compile(&graph, Residency::Device);
     let kept_held = kept_ir.load(&on_the_card).unwrap();
     let kept = kept_ir
-        .run(&kept_held, &RunContext::new(&on_the_card).input("x", &x))
+        .run(&RunContext::new(&on_the_card).held(&kept_held).input("x", &x))
         .unwrap();
 
     let over_the_bus =
@@ -570,8 +570,9 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
 
     let streamed = streamed_ir
         .run(
-            &streamed_held,
-            &RunContext::new(&over_the_bus).input("x", &x),
+            &RunContext::new(&over_the_bus)
+                .held(&streamed_held)
+                .input("x", &x),
         )
         .unwrap();
 
@@ -582,8 +583,9 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     // the same weight.
     let again = streamed_ir
         .run(
-            &streamed_held,
-            &RunContext::new(&over_the_bus).input("x", &x),
+            &RunContext::new(&over_the_bus)
+                .held(&streamed_held)
+                .input("x", &x),
         )
         .unwrap();
     assert_eq!(to_host(&streamed[0].1), to_host(&again[0].1));
@@ -631,7 +633,7 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     // them back.
     let x = Tensor::zeros(&[256, 256], DType::Float, Device::Cuda).unwrap();
     let out = ir
-        .run(&held, &RunContext::new(&pinned).input("x", &x))
+        .run(&RunContext::new(&pinned).held(&held).input("x", &x))
         .unwrap();
     drop(out);
     assert_eq!(allocated() - before, bytes_of(&x), "only the input is left");

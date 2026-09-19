@@ -350,8 +350,8 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// # let weights = HashMap::new();
 /// # let held = ir.load(&weights)?;
 /// # let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
-/// let context = RunContext::new(&weights).input("hidden", &hidden);
-/// let outputs = ir.run(&held, &context)?;
+/// let context = RunContext::new(&weights).held(&held).input("hidden", &hidden);
+/// let outputs = ir.run(&context)?;
 /// # Ok::<(), waifu::Error>(())
 /// ```
 ///
@@ -359,16 +359,34 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// five pairs for the U-Net, against the pass they are handed to.
 pub struct RunContext<'a> {
     params: &'a dyn ParamSource,
+    /// What [`Ir::load`] already brought across, which a pass starts from rather than recomputing.
+    ///
+    /// None where there is nothing to start from, which is two cases and not an error in either:
+    /// the prologue's own run, which is what *produces* the table, and a pass under
+    /// [`Residency::LowVram`], where no weight is kept between runs at all.
+    held: Option<&'a Held>,
     inputs: Vec<(&'a str, &'a Tensor)>,
 }
 
 impl<'a> RunContext<'a> {
-    /// A run that loads every [`Op::Load`]'s weight from `params`, and has no inputs yet.
+    /// A run that loads every [`Op::Load`]'s weight from `params`, with nothing kept and no
+    /// inputs yet.
     pub fn new(params: &'a dyn ParamSource) -> Self {
         RunContext {
             params,
+            held: None,
             inputs: Vec::new(),
         }
+    }
+
+    /// The weights [`Ir::load`] kept for this IR, which the pass starts from.
+    ///
+    /// Left off by a caller that has none to give. Under [`Residency::LowVram`] that is every
+    /// caller, since the table `load` hands back there is empty -- so saying it or leaving it out
+    /// comes to the same run.
+    pub fn held(mut self, held: &'a Held) -> Self {
+        self.held = Some(held);
+        self
     }
 
     /// The tensor the graph's input called `name` stands for.
@@ -863,16 +881,18 @@ impl Ir {
     ///
     /// If the inputs are not exactly the ones the IR asks for, or if an instruction fails -- in
     /// which case the error says which node it was and which line built it.
-    pub fn run(
-        &self,
-        held: &Held,
-        context: &RunContext<'_>,
-    ) -> Result<Vec<(String, Tensor)>> {
+    pub fn run(&self, context: &RunContext<'_>) -> Result<Vec<(String, Tensor)>> {
         self.check_inputs(context.inputs())?;
 
         // The weights that are kept, as this run's handles on them. A clone of the table is a
-        // handle per weight and no bytes, and what this run frees is its own handle.
-        let mut slots = held.slots.clone();
+        // handle per weight and no bytes, and what this run frees is its own handle. A context
+        // that was given none starts from an empty table instead, which `resize` fills out to the
+        // width this IR needs -- so the prologue's own run and a low-vram pass take the same path
+        // here as any other.
+        let mut slots = match context.held {
+            Some(held) => held.slots.clone(),
+            None => Vec::new(),
+        };
         slots.resize(self.width, None);
 
         for inst in &self.insts {
@@ -1475,14 +1495,17 @@ mod tests {
     }
 
     /// Compile, bring the kept weights across, and run: the three calls a caller makes, as one.
+    ///
+    /// The context is taken by value because saying what is kept is a builder call on it, which
+    /// a borrow could not make.
     fn compile_and_run(
         graph: &Graph,
         params: &dyn ParamSource,
-        context: &RunContext<'_>,
+        context: RunContext<'_>,
     ) -> Result<Vec<(String, Tensor)>> {
         let ir = Ir::compile(graph, params.residency());
         let held = ir.load(params)?;
-        ir.run(&held, context)
+        ir.run(&context.held(&held))
     }
 
     /// The instructions as they are printed, which is the readable way to say what an IR is.
@@ -1698,7 +1721,7 @@ mod tests {
         let context = RunContext::new(&params)
             .input("x", &two)
             .input("table", &table);
-        let outputs = compile_and_run(&g, &params, &context).unwrap();
+        let outputs = compile_and_run(&g, &params, context).unwrap();
 
         assert_eq!(outputs[0].1.to_vec_f32().unwrap(), [1.0, 2.0, 3.0, 4.0]);
 
@@ -1707,7 +1730,7 @@ mod tests {
         let context = RunContext::new(&params)
             .input("x", &three)
             .input("table", &table);
-        let outputs = compile_and_run(&g, &params, &context).unwrap();
+        let outputs = compile_and_run(&g, &params, context).unwrap();
 
         assert_eq!(
             outputs[0].1.to_vec_f32().unwrap(),
@@ -1730,7 +1753,7 @@ mod tests {
         for length in [2, 6] {
             let x = Tensor::from_f32(&[length], &vec![1.0; length as usize]).unwrap();
             let context = RunContext::new(&params).input("x", &x);
-            let outputs = ir.run(&held, &context).unwrap();
+            let outputs = ir.run(&context.held(&held)).unwrap();
 
             assert_eq!(outputs[0].1.shape(), [1, length, 1]);
         }
@@ -1743,7 +1766,7 @@ mod tests {
         let weight = params["fc.weight"].clone();
 
         let context = RunContext::new(&params).input("hidden", &hidden);
-        let outputs = compile_and_run(&feed_forward(), &params, &context).unwrap();
+        let outputs = compile_and_run(&feed_forward(), &params, context).unwrap();
 
         // The same calls in the same order, written out. Nothing was reassociated, so this is an
         // equality and not a tolerance.
@@ -1771,7 +1794,7 @@ mod tests {
         let params = state_dict(&[]);
         let context = RunContext::new(&params).input("hidden", &hidden);
 
-        let outputs = compile_and_run(&g, &params, &context).unwrap();
+        let outputs = compile_and_run(&g, &params, context).unwrap();
 
         let names: Vec<&str> = outputs.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["hidden", "pooled"]);
@@ -1790,7 +1813,7 @@ mod tests {
 
         let held = ir.load(&params).unwrap();
         let missing = ir
-            .run(&held, &RunContext::new(&params))
+            .run(&RunContext::new(&params).held(&held))
             .unwrap_err()
             .to_string();
         assert!(
@@ -1800,8 +1823,8 @@ mod tests {
 
         let stray = ir
             .run(
-                &held,
                 &RunContext::new(&params)
+                    .held(&held)
                     .input("hidden", &tensor)
                     .input("hidde", &tensor),
             )
@@ -1857,7 +1880,7 @@ mod tests {
         let outputs = compile_and_run(
             &g,
             &params,
-            &RunContext::new(&params).input("hidden", &hidden),
+            RunContext::new(&params).input("hidden", &hidden),
         )
         .unwrap();
         assert_eq!(outputs[0].1.to_vec_f32().unwrap(), [11.0, 12.0, 13.0, 14.0]);

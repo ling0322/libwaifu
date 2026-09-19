@@ -395,11 +395,12 @@ impl VaeDecoder {
         }
 
         let run = RunContext::new(&*self.weights)
+            .held(&self.held)
             .input("latent", latent)
             .input("latents_mean", &self.mean)
             .input("latents_std", &self.std);
 
-        let outputs = self.ir.run(&self.held, &run)?;
+        let outputs = self.ir.run(&run)?;
 
         outputs
             .iter()

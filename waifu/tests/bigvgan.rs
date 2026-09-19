@@ -172,7 +172,7 @@ fn run(
     let ir = Ir::compile(&g, Residency::Device);
     let held = ir.load(&empty).unwrap();
     let outputs = ir
-        .run(&held, &RunContext::new(&empty).input("x", x))
+        .run(&RunContext::new(&empty).held(&held).input("x", x))
         .unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 

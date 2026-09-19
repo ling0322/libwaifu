@@ -540,9 +540,9 @@ impl VaeDecoder {
             )));
         }
 
-        let context = RunContext::new(&*self.weights).input("latent", latent);
+        let context = RunContext::new(&*self.weights).held(&self.held).input("latent", latent);
 
-        output(&self.ir.run(&self.held, &context)?, "image")
+        output(&self.ir.run(&context)?, "image")
     }
 }
 
@@ -676,8 +676,8 @@ impl VaeEncoder {
             )));
         }
 
-        let context = RunContext::new(&*self.weights).input("image", image);
-        let outputs = self.ir.run(&self.held, &context)?;
+        let context = RunContext::new(&*self.weights).held(&self.held).input("image", image);
+        let outputs = self.ir.run(&context)?;
 
         Ok((output(&outputs, "mean")?, output(&outputs, "logvar")?))
     }

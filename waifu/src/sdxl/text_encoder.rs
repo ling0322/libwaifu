@@ -291,10 +291,11 @@ impl ClipTextEncoder {
         let eot = Tensor::from_i64(&[1], &[eot as i64])?.to_device(input_ids.device())?;
 
         let context = RunContext::new(&*self.weights)
+            .held(&self.held)
             .input("input_ids", input_ids)
             .input("eot", &eot);
 
-        let outputs = self.ir.run(&self.held, &context)?;
+        let outputs = self.ir.run(&context)?;
 
         Ok(ClipTextOutput {
             hidden: output(&outputs, "hidden")?,

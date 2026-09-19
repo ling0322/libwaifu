@@ -72,8 +72,8 @@
 //! let weights = HashMap::new();
 //! let held = ir.load(&weights)?;
 //!
-//! let context = RunContext::new(&weights).input("hidden", &hidden);
-//! let outputs = ir.run(&held, &context)?;
+//! let context = RunContext::new(&weights).held(&held).input("hidden", &hidden);
+//! let outputs = ir.run(&context)?;
 //! assert_eq!(outputs[0].0, "hidden");
 //! # Ok::<(), waifu::Error>(())
 //! ```

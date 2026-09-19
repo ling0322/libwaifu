@@ -180,8 +180,8 @@ fn run(layers: i32) -> (Vec<i32>, Vec<f32>) {
     let held = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
-            &held,
             &RunContext::new(&filled)
+                .held(&held)
                 .input("x", &features)
                 .input("distances", &distances),
         )

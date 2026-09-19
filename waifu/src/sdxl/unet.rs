@@ -847,13 +847,14 @@ impl Unet {
 
         let (time, sizes) = (repeat_rows(&time, batch)?, repeat_rows(&sizes, batch)?);
         let context = RunContext::new(&*self.weights)
+            .held(&self.held)
             .input("latent", latent)
             .input("context", condition.context)
             .input("pooled", condition.pooled)
             .input("timestep_embedding", &time)
             .input("time_ids_embedding", &sizes);
 
-        let outputs = self.ir.run(&self.held, &context)?;
+        let outputs = self.ir.run(&context)?;
 
         outputs
             .into_iter()

@@ -216,7 +216,7 @@ fn run(build: impl FnOnce(&Graph) -> waifu::flint::Value) -> (Vec<i32>, Vec<f32>
     let ir = Ir::compile(&g, Residency::Device);
     let held = ir.load(&filled).unwrap();
     let outputs = ir
-        .run(&held, &RunContext::new(&filled).input("x", &x))
+        .run(&RunContext::new(&filled).held(&held).input("x", &x))
         .unwrap();
 
     let tensor = outputs[0].1.to_device(CPU).unwrap();

@@ -506,13 +506,14 @@ impl Dit {
         let placed = rope_table(&self.config, height / patch, width / patch, device)?;
 
         let run = RunContext::new(&*self.weights)
+            .held(&self.held)
             .input("tokens", &tokens)
             .input("context", context)
             .input("sinusoid", &sinusoid)
             .input("rope_cos", &placed.cos)
             .input("rope_sin", &placed.sin);
 
-        let outputs = self.ir.run(&self.held, &run)?;
+        let outputs = self.ir.run(&run)?;
 
         let velocity = outputs
             .iter()

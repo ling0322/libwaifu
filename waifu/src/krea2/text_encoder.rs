@@ -331,11 +331,12 @@ impl TextEncoder {
         let rotary = Rotary::build(&self.config, length, input_ids.device())?;
 
         let run = RunContext::new(&*self.weights)
+            .held(&self.held)
             .input("input_ids", input_ids)
             .input("rope_cos", &rotary.cos)
             .input("rope_sin", &rotary.sin);
 
-        let outputs = self.ir.run(&self.held, &run)?;
+        let outputs = self.ir.run(&run)?;
 
         outputs
             .iter()

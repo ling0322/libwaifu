@@ -713,13 +713,14 @@ impl Dit {
         let table = placed.as_ref().expect("it was just built");
 
         let run = RunContext::new(&*self.weights)
+            .held(&self.held)
             .input("tokens", &tokens)
             .input("context", context)
             .input("sinusoid", &sinusoid)
             .input("rope_cos", &table.cos)
             .input("rope_sin", &table.sin);
 
-        let outputs = self.ir.run(&self.held, &run)?;
+        let outputs = self.ir.run(&run)?;
 
         let velocity = outputs
             .iter()

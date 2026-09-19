@@ -35,7 +35,7 @@ fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> Vec<f32> {
 
     let ir = Ir::compile(g, Residency::Device);
     let held = ir.load(&weights).unwrap();
-    let outputs = ir.run(&held, &context).unwrap();
+    let outputs = ir.run(&context.held(&held)).unwrap();
     outputs[0].1.to_device(CPU).unwrap().to_vec_f32().unwrap()
 }
 
@@ -51,7 +51,7 @@ fn run_shaped(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, V
 
     let ir = Ir::compile(g, Residency::Device);
     let held = ir.load(&weights).unwrap();
-    let outputs = ir.run(&held, &context).unwrap();
+    let outputs = ir.run(&context.held(&held)).unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 
     (tensor.shape(), tensor.to_vec_f32().unwrap())
@@ -1028,7 +1028,7 @@ fn the_audio_operators_are_nodes_no_backend_implements_yet() {
         let ir = Ir::compile(&g, Residency::Device);
         let held = ir.load(&weights).unwrap();
         let error = ir
-            .run(&held, &context)
+            .run(&context.held(&held))
             .expect_err("no backend implements this, so running it has to fail");
 
         // The failure has to be the operator saying it has no kernel. Anything else -- an unknown

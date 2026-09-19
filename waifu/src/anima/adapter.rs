@@ -336,6 +336,7 @@ impl Adapter {
         };
 
         let run = RunContext::new(&*self.weights)
+            .held(&self.held)
             .input("input_ids", input_ids)
             .input("context", hidden)
             .input("rope_cos", &rotary.cos)
@@ -343,7 +344,7 @@ impl Adapter {
             .input("context_rope_cos", &rotary.context_cos)
             .input("context_rope_sin", &rotary.context_sin);
 
-        let outputs = self.ir.run(&self.held, &run)?;
+        let outputs = self.ir.run(&run)?;
 
         outputs
             .iter()

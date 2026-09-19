@@ -135,7 +135,7 @@ fn encode() -> (Vec<i32>, Vec<f32>) {
     let ir = Ir::compile(&g, Residency::Device);
     let held = ir.load(&filled).unwrap();
     let outputs = ir
-        .run(&held, &RunContext::new(&filled).input("x", &features))
+        .run(&RunContext::new(&filled).held(&held).input("x", &features))
         .unwrap();
 
     let tensor = outputs[0].1.to_device(CPU).unwrap();

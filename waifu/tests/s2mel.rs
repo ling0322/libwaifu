@@ -213,8 +213,8 @@ fn the_denoiser_is_the_reference_denoiser() {
     let held = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
-            &held,
             &RunContext::new(&filled)
+                .held(&held)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -274,8 +274,8 @@ fn the_transformer_trunk_is_the_reference_trunk() {
     let held = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
-            &held,
             &RunContext::new(&filled)
+                .held(&held)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -332,8 +332,8 @@ fn the_length_regulator_is_the_reference_regulator() {
     let held = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
-            &held,
             &RunContext::new(&filled)
+                .held(&held)
                 .input("tokens", &tokens)
                 .input("selection", &selection),
         )
@@ -366,7 +366,7 @@ fn mish_is_the_activation_it_replaces() {
     let ir = Ir::compile(&g, Residency::Device);
     let held = ir.load(&filled).unwrap();
     let outputs = ir
-        .run(&held, &RunContext::new(&filled).input("x", &x))
+        .run(&RunContext::new(&filled).held(&held).input("x", &x))
         .unwrap();
     let got = outputs[0].1.to_device(CPU).unwrap().to_vec_f32().unwrap();
 
