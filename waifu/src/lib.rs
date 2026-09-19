@@ -43,6 +43,12 @@ pub mod anima;
 /// activation, all composed from the operators [`flint`] already has rather than written as
 /// kernels of their own.
 pub mod audio;
+/// BigVGAN, the vocoder that turns a mel spectrogram back into sound. The last thing IndexTTS-2.5
+/// runs, and the only part of it whose output is audio.
+pub mod bigvgan;
+/// CAMPPlus, the speaker encoder IndexTTS-2.5 conditions on: filterbank energies in, one vector
+/// saying whose voice it is out.
+pub mod campplus;
 #[cfg(feature = "cli")]
 pub mod cli;
 mod error;
@@ -59,6 +65,12 @@ mod mapping;
 mod param_file;
 mod qwen_vae;
 mod reader;
+/// IndexTTS-2.5's GPT: text and a voice in, the semantic tokens S2Mel reads out.
+pub mod indextts_gpt;
+/// The semantic codec: w2v-bert's features in, the discrete tokens the GPT reads out.
+pub mod semantic_codec;
+/// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
+pub mod s2mel;
 mod sdxl;
 /// Turning text into a waveform. [`Voice`] is the shape of the question and [`Tones`] is the one
 /// answer to it there is so far -- a stand-in that makes a noise where the syllables are, so that
@@ -66,6 +78,8 @@ mod sdxl;
 pub mod speech;
 mod suggested;
 mod tokenizer;
+/// w2v-bert-2.0: the conformer that reads speech into the features everything else conditions on.
+pub mod w2v_bert;
 /// Reading and writing WAV, which is the one audio format this crate handles itself: a header, a
 /// format chunk and the samples, and no codec to depend on.
 pub mod wav;
@@ -80,7 +94,7 @@ pub use anima::Anima;
 pub use error::{Error, Result};
 pub use krea2::Krea2;
 pub use generation::{GenerationDefaults, GenerationOptions, GenerationProgress};
-pub use layers::{Conv2d, Embedding, GroupNorm, LayerNorm, Linear};
+pub use layers::{Conv1d, Conv2d, ConvTranspose1d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use manifest::Manifest;
 pub use mapping::Mapping;
 pub use param_file::ParamFile;

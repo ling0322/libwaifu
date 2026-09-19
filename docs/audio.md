@@ -30,6 +30,7 @@ irreducible, and each one is written as the operators `flint` already had:
 | `istft` | `conv_transpose1d` against the matching bank, divided by the window's own overlap |
 | `mel_filterbank` | a `matmul` |
 | `resample` | a `conv_transpose1d` that stuffs zeros, a `conv1d` that low-passes, a stride |
+| `upsample1d`, `downsample1d` | the same pair at a fixed ratio, against a Kaiser-windowed sinc |
 | `snake` | arithmetic |
 
 The one thing that was added is `sin` and `cos`, which the CPU and CUDA kernels already
@@ -194,6 +195,18 @@ above `depthwise_conv1d` would have to change.
 What remains genuinely unavailable on a card is a group count strictly between one and the
 channel count. Nothing here uses one.
 
+### The upsampling either side of a snake is not `resample`
+
+`upsample1d` and `downsample1d` are the pair a BigVGAN's anti-aliased activation is built on, and
+they are not `resample` at a ratio of two. The window is a Kaiser one whose shape is derived from
+the transition width rather than a Hann one, the padding is by replication rather than zeros, and
+the trimming is asymmetric -- which is what makes the output exactly `ratio` times as long. All
+three of those are `alias_free_activation/torch/resample.py`, and swapping in the other filter
+changes the audio. Hence two resamplings here rather than one with a window argument.
+
+`Padding::Replicate` arrived with them, and can pad by more than the signal is long, which
+`Padding::Reflect` cannot.
+
 ### What IndexTTS-2.5 does not use
 
 `istft`. Its waveform comes out of BigVGAN, straight from a mel spectrogram, and the semantic
@@ -241,7 +254,7 @@ For IndexTTS-2.5 specifically -- six models and about 5.5 GB -- what remains is 
 | GPT backbone, 1280d × 24L | the attention, RoPE and sampling that are already here, plus a conformer perceiver conditioner |
 | semantic codec, 8192 entries | a Vocos *backbone*, which reconstructs w2v-bert features rather than audio -- no inverse transform |
 | S2Mel, flow-matching DiT 13L × 512d | a WaveNet postnet, which is dilated `conv1d` |
-| BigVGAN vocoder | `conv_transpose1d`, `snake`, and the anti-aliased resampling around them |
+| ~~BigVGAN vocoder~~ | **written** -- `waifu::bigvgan`, and [docs/bigvgan.md](bigvgan.md) is what it is |
 | Qwen3-0.6B emotion model | autoregressive generation; `anima::text_encoder` is the same architecture read a different way |
 | w2v-bert-2.0, CAMPPlus | two encoders that are not even in the model's own repository -- they are fetched at runtime |
 
@@ -250,4 +263,5 @@ four checkpoints, a `.tiktoken` vocabulary the `tokenizers` crate does not read,
 frontend for five languages.
 
 None of that is blocked on a kernel, and since `depthwise_conv1d` none of it is blocked on the
-CUDA convolution either.
+CUDA convolution either. The vocoder is the first of the six to be written, and it needed no
+operator that was not already here -- two compositions, one padding mode, and nothing in `flint`.
