@@ -24,10 +24,11 @@
 //! different numbers. The few that are in no tensor -- the latent normalization, the rotary
 //! bases, what the model predicts -- it states, and they are parsed here like the rest.
 
-use super::sampler::SamplerConfig;
 use crate::error::{Error, Result};
 use crate::flint::WeightFormat;
+use crate::flow::SamplerConfig;
 use crate::mapping::Mapping;
+use crate::qwen_vae::VaeConfig;
 
 /// What the denoiser returns at each step, which decides what the sampler does with it.
 ///
@@ -157,15 +158,6 @@ pub struct TextConfig {
     /// How the package stored the matrices this multiplies by, which decides what its projections
     /// are built out of. See [`WeightFormat`].
     pub weight_format: WeightFormat,
-}
-
-/// The Qwen-Image VAE, as far as the runtime needs to know it.
-#[derive(Clone, Debug)]
-pub struct VaeConfig {
-    pub latent_channels: i32,
-    /// Per channel, not one factor for all of them the way SDXL has it.
-    pub latents_mean: Vec<f32>,
-    pub latents_std: Vec<f32>,
 }
 
 /// The whole of it.

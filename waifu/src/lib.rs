@@ -43,11 +43,17 @@ pub mod anima;
 pub mod cli;
 mod error;
 pub mod flint;
+mod flow;
 mod generation;
+/// Krea 2. A module for the same reason [`anima`] is one, and the third family here: a
+/// single-stream MMDiT over the same sixteen-channel latents, conditioned on twelve tapped layers
+/// of a Qwen3-VL encoder. `docs/krea2.md` is where the whole of it is written down.
+pub mod krea2;
 mod layers;
 mod manifest;
 mod mapping;
 mod param_file;
+mod qwen_vae;
 mod reader;
 mod sdxl;
 mod suggested;
@@ -61,6 +67,7 @@ pub use flint::{DType, Device, Fp8Tensor, Nvfp4Tensor, Residency, WeightFormat};
 
 pub use anima::Anima;
 pub use error::{Error, Result};
+pub use krea2::Krea2;
 pub use generation::{GenerationDefaults, GenerationOptions, GenerationProgress};
 pub use layers::{Conv2d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use manifest::Manifest;

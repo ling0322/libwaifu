@@ -19,6 +19,11 @@
 
 //! The Qwen-Image decoder, which turns a sixteen-channel latent into a picture.
 //!
+//! One decoder for two families. [`Anima`](crate::Anima) and [`Krea2`](crate::Krea2) do not
+//! resemble each other and do not share a denoiser, a text encoder or a tokenizer -- but the
+//! autoencoder they draw through is not a similar one, it is the same one, down to the sixteen
+//! means and deviations below. So it is written once, here, and both families re-export it.
+//!
 //! It is published as a *video* autoencoder: five-dimensional weights, causal in time. flint has
 //! no conv3d and does not need one. For a single frame the causal padding in front is zeros and
 //! nothing in the network grows the time axis, so every convolution is exactly a 2-D one over the
@@ -39,12 +44,26 @@
 use std::fmt;
 use std::rc::Rc;
 
-use super::config::VaeConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
 };
 use crate::layers::{Conv2d, Linear};
+
+/// The epsilon this autoencoder's normalizations use, which is not the one its models use.
+///
+/// Its normalization is written as `F.normalize`, whose default epsilon only ever clamps a norm
+/// that is about to be zero.
+pub(crate) const NORM_EPS: f32 = 1e-12;
+
+/// The Qwen-Image VAE, as far as the runtime needs to know it.
+#[derive(Clone, Debug)]
+pub struct VaeConfig {
+    pub latent_channels: i32,
+    /// Per channel, not one factor for all of them the way SDXL has it.
+    pub latents_mean: Vec<f32>,
+    pub latents_std: Vec<f32>,
+}
 
 /// What the decoder is made of, in the order the package names it.
 ///
@@ -73,7 +92,7 @@ fn channel_norm(g: &Graph, input: Value, channels: i32, name: &str) -> Value {
     // (N, C, H, W) -> (N, H, W, C)
     let x = g.contiguous(g.transpose(g.transpose(input, 1, 2), 2, 3));
     let weight = g.subgraph(name).load(Linear::WEIGHT, &[channels]);
-    let x = g.rms_norm(x, weight, super::VAE_NORM_EPS);
+    let x = g.rms_norm(x, weight, NORM_EPS);
 
     // and back
     let x = g.contiguous(g.transpose(g.transpose(x, 2, 3), 1, 2));

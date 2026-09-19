@@ -29,21 +29,20 @@ mod adapter;
 mod config;
 mod dit;
 mod pipeline;
-mod sampler;
 mod text_encoder;
-mod vae;
 
 /// The epsilon every norm in this model that has one uses.
 pub(crate) const NORM_EPS: f32 = 1e-6;
 
-/// The VAE's is not that one. Its normalization is written as `F.normalize`, whose default
-/// epsilon only ever clamps a norm that is about to be zero.
-pub(crate) const VAE_NORM_EPS: f32 = 1e-12;
-
 pub use adapter::Adapter;
-pub use config::{AdapterConfig, AnimaConfig, DitConfig, Prediction, TextConfig, VaeConfig};
+pub use config::{AdapterConfig, AnimaConfig, DitConfig, Prediction, TextConfig};
 pub use dit::Dit;
 pub use pipeline::{Anima, VAE_SCALE};
-pub use sampler::{FlowSampler, SamplerConfig};
 pub use text_encoder::TextEncoder;
-pub use vae::VaeDecoder;
+
+/// The two halves Anima shares with [`Krea2`](crate::Krea2), re-exported here so that a reader
+/// who has this model in hand finds them where the rest of it is. The autoencoder is the same
+/// Qwen-Image one; the sampler is the same straight line. Neither is Anima's own, and neither is
+/// written twice -- see [`crate::flow`] and [`crate::qwen_vae`].
+pub use crate::flow::{FlowSampler, SamplerConfig};
+pub use crate::qwen_vae::{VaeConfig, VaeDecoder};
