@@ -37,13 +37,23 @@ neither official nor endorsed by Krea.
 
 ```bash
 $ waifu draw
-waifu is drawing at http://127.0.0.1:7860
+waifu is at http://127.0.0.1:7860
 ```
 
 ![The page: the kind of run down the left, the model and the settings for it in the middle, and the picture it drew on the right](docs/libwaifu-webui.webp)
 
+The page has three tabs: txt2img, img2img, and text2speech. The third one is a page ahead of its
+model -- there is no published voice for libwaifu yet, and what reads a sentence out is a stand-in
+built into the binary that makes a pitched tone where each syllable goes. It is not speech and the
+page says so above every setting on that tab. What is real is everything around it: the box, the
+recording to sound like, the settings, the bar, the clip on the disk and the player it comes back
+in. [docs/speech.md](docs/speech.md) is what is a stand-in, what is not, and the five methods a
+speech model implements to take its place.
+
 ## Recent updates
 
+- [2026-09-19] A third tab: type a sentence and get a WAV. The voice behind it is a stand-in until
+  a speech model is published -- see [docs/speech.md](docs/speech.md).
 - [2026-09-18] Krea 2 Turbo draws here: a third architecture, exported from the gated release
   rather than published from this repository.
 - [2026-09-15] The screen is a page in a browser rather than a screenful of terminal: txt2img and

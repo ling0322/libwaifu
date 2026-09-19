@@ -741,3 +741,113 @@ select:focus {
     align-items: stretch;
   }
 }
+
+/* -- the speech tab -------------------------------------------------------------------------- */
+
+/* The card that says what is speaking is not a voice. Coloured, because it is the one thing on
+   that tab somebody has to read before anything else on it means what it looks like it means --
+   and it is a card rather than a banner across the page, because it belongs to the voice and
+   goes away with it. */
+.card.warn {
+  border-color: var(--go-deep);
+}
+.card.warn .card-title {
+  color: var(--go);
+}
+
+/* The voice's name, where the model has a button to open a list with. Shaped like the control
+   beside it -- the same height, the same border -- because it sits in the same row, and a bare
+   line of text there reads as a box that failed to draw. Not a button, because there is nothing
+   behind it to open yet. */
+.picker.settled {
+  display: flex;
+  align-items: center;
+  height: var(--control);
+  padding: 0 10px;
+  background: var(--page);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The recording being held, above the box that would take another. Above rather than inside,
+   because that box is a label around a file input: everything in it opens the file chooser when
+   it is clicked, which is right for a thumbnail and wrong for a play button. */
+audio.held {
+  width: 100%;
+}
+
+/* The dropzone for a recording. Short, unlike the picture's: what goes in it is a line of text
+   rather than a picture, and a box the height of one with a sentence floating in the middle of it
+   is mostly empty box. */
+.dropzone.short {
+  min-height: 64px;
+}
+
+/* The frame the newest clip is in. A column rather than the centred single thing a picture is,
+   because there are two: the player, and the words it is reading. */
+.canvas.player {
+  flex-direction: column;
+  gap: 12px;
+  min-height: 160px;
+}
+.canvas.player audio {
+  width: 100%;
+}
+
+/* What the clip says, under the player. Held to a few lines -- a page of text scrolled inside
+   its own box rather than pushing the clips below it off the screen. */
+.said {
+  margin: 0;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 8em;
+  overflow-y: auto;
+  width: 100%;
+}
+
+/* The strip of everything this session said. A clip cannot be shown the way a picture can, so
+   each one is its first words and how long it is -- which are the two things somebody picks one
+   out by. */
+.clips {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.clip {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px var(--nudge);
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+.clip:hover {
+  border-color: var(--accent);
+}
+.clip.on {
+  border-color: var(--go);
+}
+/* One line of it. The whole of what was read is in the frame above and in the box under it; this
+   is a row in a list, and a row that grows to four lines is a list that cannot be scanned. */
+.clip-said {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clip .dim {
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}

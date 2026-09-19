@@ -55,7 +55,7 @@ struct Task {
 
 static ALL: &[Task] = &[Task {
     name: "draw",
-    about: "Draw a picture with your waifu",
+    about: "Draw a picture, or say something, with your waifu",
     main: webui::main,
 }];
 

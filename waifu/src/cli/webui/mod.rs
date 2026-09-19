@@ -17,7 +17,12 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The draw command: a page in a browser, a diffusion model behind it, and a PNG at the end.
+//! The draw command: a page in a browser, a model behind it, and a file at the end.
+//!
+//! Two kinds of file, since the page grew a third tab: a PNG from a diffusion model, and a WAV
+//! from a voice. Everything below this line is the same for both -- one worker thread, one lock
+//! it reports through, one server -- which is the reason speech went into this page rather than
+//! into a second command with a second copy of all of it.
 //!
 //! A run takes minutes rather than milliseconds, which is what the shape of this is about. The
 //! model sits on a thread of its own -- a tensor never leaves the thread that made it -- and the
@@ -102,6 +107,12 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     let shared = Arc::new(Shared::new(runtime));
     let (commands, waiting) = channel::<Command>();
 
+    // The voice the speech tab reads with, described before any page has opened. The boxes on
+    // that tab are a voice's own numbers and there is nothing else to fill them from -- and
+    // unlike a picture model, there is nothing to choose and nothing to fetch, so saying what it
+    // is costs the same as not saying it.
+    shared.change(|session| session.voice = Some(worker::look_at_voice()));
+
     // A picture named on the command line only fills the box. Everything about a run is
     // changeable between runs, and this is no different: it is where to start, not what to be
     // stuck with. Read now rather than when a run begins, so that a path that is not there is
@@ -136,7 +147,9 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         shared.say("pick a model to begin", false);
     }
 
-    println!("waifu is drawing at http://{address}");
+    // Not "drawing at" any more: the page has a tab that says things rather than draws them, and
+    // a line that names one of the two is a line somebody reads as the whole of what is there.
+    println!("waifu is at http://{address}");
     println!("Press ctrl-c to stop.");
 
     serve(listener, shared, commands)?;
@@ -255,6 +268,11 @@ mod tests {
         let shared = Arc::new(Shared::new(DeviceOption::Cpu.resolve()));
         let (commands, waiting) = channel::<Command>();
 
+        // The same thing `main` does before it opens a browser: there is one voice and it is
+        // described before any page reads the state. A server without it is a server no run of
+        // this program produces.
+        shared.change(|session| session.voice = Some(worker::look_at_voice()));
+
         // Left running for the rest of the test process. There is no way to stop it short of the
         // process ending, which is the same shape the program has. What it answers with is
         // dropped here rather than carried out: an error in it is a box that is not `Send`, and
@@ -271,15 +289,28 @@ mod tests {
     /// Written out rather than asked of a client library, because what is being tested is the
     /// wire -- a client that rewrote the request on the way out would be testing itself.
     fn asked(address: SocketAddr, line: &str, body: &str) -> (u16, String) {
+        posted(address, line, body.as_bytes())
+    }
+
+    /// The same, for a body that is not text.
+    ///
+    /// A WAV file is bytes, and most of them are not characters: sent as a string it arrives as
+    /// whatever the replacement character made of every one that was not valid UTF-8, which is a
+    /// file that no longer parses and a test that was checking the wrong refusal.
+    fn posted(address: SocketAddr, line: &str, body: &[u8]) -> (u16, String) {
         let mut socket = TcpStream::connect(address).expect("the server");
-        let request = format!(
-            "{line} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        let head = format!(
+            "{line} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
-        socket.write_all(request.as_bytes()).expect("to ask");
+        socket.write_all(head.as_bytes()).expect("to ask");
+        socket.write_all(body).expect("to ask");
 
-        let mut answer = String::new();
-        socket.read_to_string(&mut answer).expect("an answer");
+        // Read as bytes, since what comes back can be a file too. Only the status line and a
+        // refusal's JSON are ever looked at, and both are text.
+        let mut whole = Vec::new();
+        socket.read_to_end(&mut whole).expect("an answer");
+        let answer = String::from_utf8_lossy(&whole).to_string();
 
         let status = answer
             .split_whitespace()
@@ -583,6 +614,153 @@ mod tests {
         let (status, body) = asked(address, "GET /nope", "");
         assert_eq!(status, 404);
         assert!(body.contains("\"error\""), "{body}");
+    }
+
+    #[test]
+    fn the_state_says_what_will_speak_and_that_it_is_not_a_voice() {
+        // The one sentence the speech tab is built around. A page that did not get it would be a
+        // page claiming a voice this program has not got.
+        let (address, _commands) = a_server();
+        let state = json(address, "GET /api/state", "");
+        let voice = &state["voice"];
+
+        assert_eq!(voice["name"], "tones");
+        assert_eq!(voice["rate"], 24_000);
+        assert_eq!(voice["takes_a_recording"], true);
+        assert!(
+            voice["not_a_voice_because"]
+                .as_str()
+                .expect("the sentence")
+                .contains("not a speech model"),
+            "{voice}"
+        );
+
+        assert_eq!(state["holding_a_recording"], false);
+        assert_eq!(state["clips"].as_array().expect("the clips").len(), 0);
+    }
+
+    #[test]
+    fn a_reading_with_nothing_to_read_is_refused_with_the_reason() {
+        let (address, _commands) = a_server();
+
+        let (status, body) = asked(address, "POST /api/speak", r#"{"text":"   "}"#);
+        assert_eq!(status, 400);
+        assert!(body.contains("nothing to say"), "{body}");
+
+        let (status, body) = asked(address, "POST /api/speak", "not json at all");
+        assert_eq!(status, 400);
+        assert!(body.contains("not a request"), "{body}");
+    }
+
+    #[test]
+    fn a_reading_is_posted_to_the_worker_once_however_often_it_is_asked_for() {
+        // The same two clicks that used to draw two pictures. Nothing about the speech tab makes
+        // that different: the worker is picked up some time after a command is posted to it.
+        let (address, commands) = a_server();
+
+        let run = r#"{"text":"hello there"}"#;
+        assert_eq!(asked(address, "POST /api/speak", run).0, 200);
+        let (status, body) = asked(address, "POST /api/speak", run);
+        assert_eq!(status, 409);
+        assert!(body.contains("already"), "{body}");
+
+        assert!(matches!(commands.try_recv(), Ok(Command::Speak(_))));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_reading_from_a_recording_there_is_none_of_is_refused_rather_than_run() {
+        // A page left open while the recording was cleared asks for exactly this, and what it
+        // must not do is take the worker and then quietly read without one.
+        let (address, commands) = a_server();
+
+        let (status, body) = asked(
+            address,
+            "POST /api/speak",
+            r#"{"text":"hello","from_recording":true}"#,
+        );
+        assert_eq!(status, 400);
+        assert!(body.contains("no recording"), "{body}");
+        assert!(commands.try_recv().is_err(), "the worker was told anyway");
+
+        // And the worker was handed back, rather than left claimed by a run that never started.
+        assert_eq!(
+            asked(address, "POST /api/speak", r#"{"text":"hello"}"#).0,
+            200
+        );
+    }
+
+    #[test]
+    fn the_recording_to_sound_like_goes_up_and_comes_back_as_it_went() {
+        let (address, _commands) = a_server();
+        assert_eq!(asked(address, "GET /api/voice", "").0, 404);
+
+        // A real WAV file, because this door reads what it is handed rather than holding bytes
+        // that a run would find out about later. Posted as bytes: most of a WAV file is not
+        // characters, and sent as a string it would arrive as something that no longer parses.
+        let wav = crate::wav::write(&crate::Sound::new(vec![0.0; 64], 16_000));
+        assert_eq!(posted(address, "POST /api/voice", &wav).0, 200);
+
+        assert_eq!(asked(address, "GET /api/voice", "").0, 200);
+        assert_eq!(
+            json(address, "GET /api/state", "")["holding_a_recording"],
+            true
+        );
+
+        // And the picture is a different box: clearing one leaves the other alone.
+        assert_eq!(asked(address, "POST /api/upload", "a picture").0, 200);
+        assert_eq!(asked(address, "DELETE /api/voice", "").0, 200);
+        assert_eq!(asked(address, "GET /api/voice", "").0, 404);
+        assert_eq!(asked(address, "GET /api/upload", "").0, 200);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_recording_is_refused_at_the_door() {
+        // Rather than at the run, which is after a button was pressed and a wait. It is the one
+        // thing posted to this server that is checked as it arrives, because it is the one where
+        // the check is a header rather than a decoder.
+        let (address, _commands) = a_server();
+
+        let (status, body) = asked(address, "POST /api/voice", "ID3 this is an mp3");
+        assert_eq!(status, 400);
+        assert!(body.contains("not a WAV file"), "{body}");
+
+        let (status, body) = asked(address, "POST /api/voice", "");
+        assert_eq!(status, 400);
+        assert!(body.contains("empty"), "{body}");
+    }
+
+    #[test]
+    fn a_clip_this_session_did_not_say_cannot_be_read_or_deleted_through_it() {
+        // The same door the pictures have, and it has to be the same door: this server is on the
+        // loopback address, which every other program on the machine can reach.
+        let (address, _commands) = a_server();
+
+        for path in [
+            "/clip/../../../etc/passwd",
+            "/clip//etc/passwd",
+            "/clip/waifu-0001.wav",
+        ] {
+            let (status, body) = asked(address, &format!("GET {path}"), "");
+            assert_eq!(status, 404, "{path}");
+            assert!(body.contains("did not say"), "{path}: {body}");
+        }
+
+        let (status, body) = asked(
+            address,
+            "DELETE /api/clip",
+            r#"{"file":"../../etc/passwd"}"#,
+        );
+        assert_eq!(status, 404);
+        assert!(body.contains("did not say"), "{body}");
+
+        let (status, body) = asked(address, "DELETE /api/clip", r#"{}"#);
+        assert_eq!(status, 400);
+        assert!(body.contains("no clip was named"), "{body}");
+
+        // And a clip is not reachable through the door pictures come out of, which would hand a
+        // WAV back under an image's content type.
+        assert_eq!(asked(address, "GET /picture/waifu-0001.wav", "").0, 404);
     }
 
     #[test]
