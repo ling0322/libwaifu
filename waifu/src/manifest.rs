@@ -88,6 +88,7 @@ pub struct Manifest {
     tokenizers: BTreeMap<String, String>,
     config: BTreeMap<String, Mapping>,
     suggested: Suggestions,
+    explicit: bool,
 }
 
 impl Manifest {
@@ -99,6 +100,7 @@ impl Manifest {
     pub const TOKENIZERS: &'static str = "tokenizers";
     pub const CONFIG: &'static str = "config";
     pub const SUGGESTED: &'static str = "suggested";
+    pub const EXPLICIT: &'static str = "explicit";
 
     /// What a weights file is called.
     pub const WEIGHTS_SUFFIX: &'static str = ".safetensors";
@@ -173,6 +175,15 @@ impl Manifest {
             None => Suggestions::default(),
         };
 
+        // What the model draws, which the catalogue also knows for a published one -- this is the
+        // answer for a manifest handed over by path, which is in no catalogue at all. Missing
+        // reads as false: every manifest written before there was anywhere to say this says
+        // nothing, and a model nobody has labelled is not a model labelled yes.
+        let explicit = top
+            .remove(Self::EXPLICIT)
+            .and_then(|node| node.as_str().map(|said| said.trim() == "true"))
+            .unwrap_or(false);
+
         // A block this build has not heard of is stepped over rather than refused, the way an
         // unknown suggestion always was: a manifest from a newer writer still names the weights
         // and still says what the model is.
@@ -182,6 +193,7 @@ impl Manifest {
             tokenizers,
             config,
             suggested,
+            explicit,
         })
     }
 
@@ -245,6 +257,13 @@ impl Manifest {
     /// What the model suggests being asked for, which for an older model is nothing.
     pub fn suggested(&self) -> &Suggestions {
         &self.suggested
+    }
+
+    /// Whether what it was trained on means it draws explicit pictures readily, asked for them or
+    /// not. False for a manifest that does not say, which is every manifest written before there
+    /// was anywhere to say it.
+    pub fn explicit(&self) -> bool {
+        self.explicit
     }
 
     /// Where each weights file is, in the order the manifest names them.
