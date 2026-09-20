@@ -291,7 +291,7 @@ function ModelAndDevice({ state, progress, onDevice, onModels }) {
 
 // -- what to draw -------------------------------------------------------------------------------
 
-function Prompts({ form, change, canDraw, drawing, off, onDraw, onInterrupt }) {
+function Prompts({ form, change, canDraw, drawing, guided, off, onDraw, onInterrupt }) {
   return html`
     <section className="prompts">
       <div className="prompt-boxes">
@@ -308,15 +308,24 @@ function Prompts({ form, change, canDraw, drawing, off, onDraw, onInterrupt }) {
             onChange=${(e) => change("prompt", e.target.value)}
           ></textarea>
         <//>
-        <${Field} label="Negative prompt">
-          <textarea
-            rows="3"
-            placeholder="What to keep out. Left empty the model is still steered away from the empty prompt, which is not the same as steering away from nothing at all."
-            value=${form.negative}
-            disabled=${off}
-            onChange=${(e) => change("negative", e.target.value)}
-          ></textarea>
-        <//>
+        ${/* And gone entirely for a model that runs one pass. What goes in this box is what the
+             second pass is given, so a model without one has nowhere to put it: the text would be
+             typed, sent, and dropped, and the picture would come back no different. The box left
+             on the screen and greyed out was the other way to say that, and it says it to nobody
+             -- what is off usually comes on again, and this never does while the model is
+             chosen. The one above it fills the height either way. */ ""}
+        ${guided &&
+        html`
+          <${Field} label="Negative prompt">
+            <textarea
+              rows="3"
+              placeholder="What to keep out. Left empty the model is still steered away from the empty prompt, which is not the same as steering away from nothing at all."
+              value=${form.negative}
+              disabled=${off}
+              onChange=${(e) => change("negative", e.target.value)}
+            ></textarea>
+          <//>
+        `}
       </div>
       <div className="go">
         <button className="generate" disabled=${!canDraw} onClick=${onDraw}>Generate</button>
@@ -673,6 +682,13 @@ function Settings({
   const model = state?.model;
   const why = model?.no_picture_because;
 
+  // Whether there is any guidance to ask this one for. A distilled release answers in one pass,
+  // already as though it had been guided; there is no second answer to push away from, so the
+  // dial has no position that means anything and the model would discard the number. Absent --
+  // a page talking to a build older than the key -- reads as yes, which is what every model was
+  // before there was a way to say otherwise.
+  const guided = model ? model.takes_guidance !== false : true;
+
   // Every knob here is a knob for a model. Until one is chosen they are all off, and the button
   // that chooses one is the only thing on this side of the page that does anything.
   const off = !model;
@@ -800,30 +816,33 @@ function Settings({
           </p>
         </div>
 
-        <div className="card">
-          <div className="row">
-            <${NumberBox}
-              label="CFG Scale"
-              kind="number"
-              box=${{ min: 1, max: 30, step: 0.1 }}
-              disabled=${off}
-              value=${form.guidance}
-              onChange=${(value) => change("guidance", value)}
-            />
-            ${/* A tenth at a time: most of the difference is between five and eight, and half a
-                 point across that range is four choices. */ ""}
-            <${Slider}
-              limits=${{ min: 1, max: 30, step: 0.1 }}
-              disabled=${off}
-              value=${form.guidance}
-              onChange=${(value) => change("guidance", value)}
-            />
+        ${guided &&
+        html`
+          <div className="card">
+            <div className="row">
+              <${NumberBox}
+                label="CFG Scale"
+                kind="number"
+                box=${{ min: 1, max: 30, step: 0.1 }}
+                disabled=${off}
+                value=${form.guidance}
+                onChange=${(value) => change("guidance", value)}
+              />
+              ${/* A tenth at a time: most of the difference is between five and eight, and half a
+                   point across that range is four choices. */ ""}
+              <${Slider}
+                limits=${{ min: 1, max: 30, step: 0.1 }}
+                disabled=${off}
+                value=${form.guidance}
+                onChange=${(value) => change("guidance", value)}
+              />
+            </div>
+            <p className="about">
+              How hard to push towards the prompt. Five to eight is the usual range; higher burns the
+              colours out, and one ignores the prompt and runs twice as fast.
+            </p>
           </div>
-          <p className="about">
-            How hard to push towards the prompt. Five to eight is the usual range; higher burns the
-            colours out, and one ignores the prompt and runs twice as fast.
-          </p>
-        </div>
+        `}
 
         ${tab === "img2img" &&
         !why &&
@@ -1297,11 +1316,14 @@ function App() {
   const canSpeak = !!state?.voice && !progress.busy && !!form.text.trim();
 
   const generate = useCallback(async () => {
+    // Both or neither, and neither for a model with no second pass to steer. The server drops
+    // them for such a model anyway; what this saves is a request that said one thing while the
+    // picture it came back with had been drawn from another.
+    const guided = chosen ? chosen.takes_guidance !== false : true;
     const answer = await ask("POST", "/api/generate", {
       prompt: form.prompt,
-      negative: form.negative,
+      ...(guided ? { negative: form.negative, guidance: Number(form.guidance) } : {}),
       steps: Number(form.steps),
-      guidance: Number(form.guidance),
       width: Number(form.width),
       height: Number(form.height),
       // As a string, because a seed is sixty-four bits and a JSON number is a double: the largest
@@ -1574,6 +1596,7 @@ function App() {
                 form=${form}
                 change=${change}
                 canDraw=${canDraw}
+                guided=${chosen ? chosen.takes_guidance !== false : true}
                 off=${!chosen}
                 drawing=${!!progress.drawing}
                 onDraw=${generate}

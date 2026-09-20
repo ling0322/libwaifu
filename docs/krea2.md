@@ -267,6 +267,38 @@ guidance. Every model in libwaifu spells that `uncond + scale * (cond - uncond)`
 meaning none, which is the same formula one apart. So a Krea guidance of 4.5 is a 5.5 here, and
 turbo's 0 is a 1. The pipeline says so where it does it.
 
+For the distilled release that is not a number to start at but the only number there is. It was
+trained to answer as though it had already been guided, so there is no second answer to push away
+from: diffusers gives it blocks of its own with no guider on them and *no negative prompt
+argument at all*, and the classic pipeline documents `negative_prompt` as ignored whenever
+`guidance_scale <= 0`. Handing it either is asking for a picture nobody promised -- guidance on
+top of distilled guidance is the usual burnt, over-contrasted one.
+
+So the package says so, in its `suggested:` block:
+
+```yaml
+suggested:
+  steps: 8
+  guidance: 1.0
+  takes_guidance: "false"
+```
+
+`guidance:` is where a dial would start; `takes_guidance:` says there is no dial. The web UI reads
+it and stops drawing the CFG card and the negative prompt box, and `/api/generate` drops both from
+a request that sends them anyway. It is one key rather than two because it is one fact: guidance
+is the second pass and the negative prompt is what that pass is given, so a model without the one
+has no use for the other.
+
+Quoted, because `model_writer.py` puts quotes round anything YAML would otherwise read as a
+boolean of its own. The reader takes `true/false`, `yes/no`, `on/off` and `1/0` in either case,
+and a word it cannot read is no answer rather than a refusal -- the same as every other key here.
+
+A manifest that says nothing leaves the answer to what the screen already believed about the kind
+of model, which for `krea2` is that it takes no guidance, for the same reason its built-in
+defaults are eight steps: the only release of it this exports is the distilled one. That is what
+makes a package exported before this key existed behave correctly without being rewritten. The day
+there is an undistilled package, its manifest says `takes_guidance: "true"` and gets the dial back.
+
 ## What the exporter writes
 
 `krea2.dit`, `krea2.text` and `krea2.vae`, under the manifest's `krea2:` block.

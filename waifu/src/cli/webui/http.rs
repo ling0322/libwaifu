@@ -33,7 +33,7 @@ use tiny_http::{Header, Method, Request, Response};
 
 use crate::cli::args::Runtime;
 use crate::cli::hub;
-use crate::cli::webui::state::{Doing, Shared};
+use crate::cli::webui::state::{Chosen, Doing, Shared};
 use crate::cli::webui::worker::{self, Command, Job, SayJob};
 use crate::{GenerationOptions, SpeechOptions};
 
@@ -296,17 +296,14 @@ fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Requ
         return give_up(shared, 409, why);
     }
 
+    let (guidance, negative) = steering(&asked, &chosen);
+
     let options = GenerationOptions {
         width: pixels(asked.get("width"), chosen.defaults.width),
         height: pixels(asked.get("height"), chosen.defaults.height),
         num_steps: whole(asked.get("steps"), chosen.defaults.num_steps).clamp(1, 150),
-        guidance_scale: decimal(asked.get("guidance"), chosen.defaults.guidance_scale)
-            .clamp(1.0, 30.0),
-        negative_prompt: asked
-            .get("negative")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        guidance_scale: guidance,
+        negative_prompt: negative,
         // Never left open. A run asked for without a seed is given a fresh one rather than left
         // to whatever the device's generator was last used for, so that what comes out says which
         // number drew it and can be drawn again.
@@ -650,6 +647,31 @@ fn decimal(value: Option<&Value>, whether: f32) -> f32 {
         .unwrap_or(whether)
 }
 
+/// How hard to push towards the prompt and what to push away from, for a run of this model.
+///
+/// Both or neither. Guidance is the second pass through the denoiser and the negative prompt is
+/// what that pass is given, so a model distilled to answer in one has nowhere to put either: what
+/// arrived is dropped, and the run is the plain one the model was trained to do.
+///
+/// Dropped here and not only left off the screen. The page does not show the boxes, but the page
+/// is not the only thing that can post to this, and a run that kept a negative prompt it never
+/// encoded would go on to say so on the card under the picture -- which is the line somebody
+/// reads to find out what drew it.
+fn steering(asked: &Value, chosen: &Chosen) -> (f32, String) {
+    if !chosen.takes_guidance {
+        return (chosen.defaults.guidance_scale, String::new());
+    }
+
+    let guidance = decimal(asked.get("guidance"), chosen.defaults.guidance_scale).clamp(1.0, 30.0);
+    let negative = asked
+        .get("negative")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    (guidance, negative)
+}
+
 /// The seed a run should use: the one that was asked for, or a fresh one.
 ///
 /// Empty, absent, or the minus one every other tool spells "surprise me" all mean the same thing.
@@ -772,6 +794,35 @@ mod tests {
         // reaches the sampler as a guidance scale, and this is where that is checked.
         let enormous: Value = serde_json::from_str("1e400").unwrap_or(Value::Null);
         assert_eq!(decimal(Some(&enormous), 5.0), 5.0);
+    }
+
+    #[test]
+    fn a_model_with_no_second_pass_is_asked_for_neither_of_the_two() {
+        // Both of them in the request, which is what a page talking to an older build would send
+        // and what anything posting here by hand may send at any time.
+        let asked = json!({"guidance": 7.5, "negative": "worst quality, bad hands"});
+
+        // Krea 2 Turbo is distilled: one pass, already as though it had been guided. Whatever
+        // arrived, the run is the plain one -- at the guidance the model itself asked for, which
+        // is this runtime's spelling of the reference's zero.
+        let turbo = worker::look_at("krea2:turbo:v1.0");
+        assert!(!turbo.takes_guidance);
+        let (guidance, negative) = steering(&asked, &turbo);
+        assert_eq!(guidance, turbo.defaults.guidance_scale);
+        assert_eq!(negative, "");
+
+        // And the same request to a model that has a second pass, where both are what was asked
+        // for. This is the half that would still pass if the two were simply never read.
+        let sdxl = worker::look_at("sdxl:base:v1.0");
+        assert!(sdxl.takes_guidance);
+        let (guidance, negative) = steering(&asked, &sdxl);
+        assert_eq!(guidance, 7.5);
+        assert_eq!(negative, "worst quality, bad hands");
+
+        // A request that says neither leaves that model where its own card put it.
+        let (guidance, negative) = steering(&json!({}), &sdxl);
+        assert_eq!(guidance, sdxl.defaults.guidance_scale);
+        assert_eq!(negative, "");
     }
 
     #[test]

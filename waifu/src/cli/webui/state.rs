@@ -93,6 +93,10 @@ pub struct Chosen {
     /// offers what the model will refuse is a refusal someone finds out about after waiting, and
     /// one that is simply greyed out is a screen that cannot be asked why.
     pub no_picture_because: Option<String>,
+    /// Whether to offer guidance and a negative prompt at all. False for a distilled release,
+    /// which has no second pass for either to reach. Guessed from the name like the rest of this
+    /// and answered by the package once it has been read.
+    pub takes_guidance: bool,
 }
 
 /// The voice the page is set to speak with, as the screen describes it.
@@ -667,6 +671,10 @@ impl Shared {
                 "height": model.defaults.height,
                 "steps": model.defaults.num_steps,
                 "guidance": showable(model.defaults.guidance_scale),
+                // Not the number, but whether there is a number to ask for. A distilled model
+                // runs one pass and the second prompt is never encoded, so the box for it would
+                // be a box whose contents go nowhere.
+                "takes_guidance": model.takes_guidance,
                 "sampler": model.sampler,
                 "sizes": model.sizes.iter().map(|(w, h)| json!([w, h])).collect::<Vec<_>>(),
                 "prompt": model.suggested_prompt,
