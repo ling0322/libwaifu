@@ -94,11 +94,9 @@ jobs:
       # One architecture rather than the seven the default spans. This job is here to prove the
       # code compiles and links under MSVC, and there is no card to run the other six on.
       #
-      # FlashAttention stays out. It would only cost a download now that flash-attn.yml builds
-      # the archive, but what a push needs to hear about is this code, and tying that to whether
-      # a release asset happens to exist for the current key is a way for CI to fail for reasons
-      # that have nothing to do with the commit. The release workflow links it, and is strict
-      # about it, because that is where linking the wrong thing reaches somebody.
+      # FlashAttention stays out. Building it is hours of nvcc, which would dwarf everything a
+      # push actually needs to hear about; the release workflow builds and links it, because
+      # that is where it reaches somebody.
       #
       # The cost is real and worth naming: flint/cuda/flash_attn.cc is in the build only when
       # this is on, so nothing here compiles it.
