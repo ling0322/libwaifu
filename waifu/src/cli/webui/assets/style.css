@@ -36,6 +36,12 @@
     than from this file -- so a row of the three lines up only if something says they are equal.
   */
   --control: 38px;
+  /*
+    A field's name and the gap under it. Anything that has to line up with the box rather than
+    with the name above it -- the Generate button beside the prompts -- is pushed down by this
+    much, which is why `.label` is given a line height rather than left to work one out.
+  */
+  --label-row: 21px;
   /* The page's left edge, and how far inside a nav button its word sits. The name at the top is
      inset by both, so that it starts where the words under it start rather than where their
      boxes do. */
@@ -239,11 +245,17 @@ select:focus {
   border-color: var(--accent);
 }
 
+/*
+  Down by a label, so that the button starts where the box beside it starts. Aligned with the top
+  of `.prompt-boxes` it began level with the word "Prompt" instead, which left it looking like it
+  had slipped a line above the thing it acts on.
+*/
 .go {
   display: flex;
   flex-direction: column;
   gap: 8px;
   width: 224px;
+  padding-top: var(--label-row);
 }
 
 /*
@@ -354,6 +366,7 @@ select:focus {
 .label {
   color: var(--dim);
   font-size: 12px;
+  line-height: 17px;
 }
 
 /*
@@ -730,6 +743,7 @@ select:focus {
   .go {
     width: 100%;
     flex-direction: row;
+    padding-top: 0;
   }
 
   .generate {
