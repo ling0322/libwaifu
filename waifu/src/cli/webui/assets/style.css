@@ -682,6 +682,16 @@ select:focus {
   white-space: nowrap;
 }
 
+/*
+  And the ones that are left out of the list until they are asked for. A different colour from the
+  one beside it, because the two say opposite kinds of thing about a row and a reader who has to
+  tell them apart by their words is a reader the colour was no use to.
+*/
+.badge.explicit {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
 /* Deleting several gigabytes is not the same kind of click as loading them. */
 .plain.away:hover {
   border-color: var(--bad);

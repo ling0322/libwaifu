@@ -126,6 +126,11 @@ struct Published {
     repo: &'static str,
     /// The manifest, which is fetched first: it says what the model is and names its packages.
     manifest: &'static str,
+    /// Whether what it was trained on means it draws explicit pictures readily, prompted for them
+    /// or not. A property of the weights rather than of any one run, which is why it is written
+    /// here beside the repository and not worked out from a prompt: the list can say what a model
+    /// is before it is chosen, and a screen can leave it out until somebody asks to see it.
+    explicit: bool,
 }
 
 /// Every model this build knows by name.
@@ -135,42 +140,49 @@ const CATALOG: &[Published] = &[
         full_name: "Stable Diffusion XL Base 1.0",
         repo: "ling0322/libwaifu-sdxl-base-1.0",
         manifest: "sdxl-base-1.0.yaml",
+        explicit: false,
     },
     Published {
         name: "sdxl:wai:v17",
         full_name: "WAI Illustrious v17",
         repo: "ling0322/libwaifu-wai-illustrious-v17",
         manifest: "wai-illustrious-v17.yaml",
+        explicit: true,
     },
     Published {
         name: "sdxl:noob:v1.1",
         full_name: "NoobAI XL v1.1",
         repo: "ling0322/libwaifu-noobai-xl-v1.1",
         manifest: "noobai-xl-v1.1.yaml",
+        explicit: true,
     },
     Published {
         name: "sdxl:illust:v2.0",
         full_name: "Illustrious XL v2.0-STABLE",
         repo: "ling0322/libwaifu-illustrious-xl-v2.0",
         manifest: "illustrious-xl-v2.0.yaml",
+        explicit: true,
     },
     Published {
         name: "sdxl:obsession:v24",
         full_name: "One Obsession v24",
         repo: "ling0322/libwaifu-one-obsession-v24",
         manifest: "one-obsession-v24.yaml",
+        explicit: true,
     },
     Published {
         name: "anima:turbo:v1.1",
         full_name: "Anima Turbo v1.1",
         repo: "ling0322/libwaifu-anima-turbo-v1.1",
         manifest: "anima-turbo-v1.1.yaml",
+        explicit: true,
     },
     Published {
         name: "krea2:turbo:v1.0",
         full_name: "Krea 2 Turbo",
         repo: "ling0322/libwaifu-krea2-turbo",
         manifest: "krea2-turbo.yaml",
+        explicit: false,
     },
     // The same weights with the matrices quantized, out of the same repository: half the package
     // and half the card, for about four times the error in the text encoder. A name of its own
@@ -180,6 +192,7 @@ const CATALOG: &[Published] = &[
         full_name: "Krea 2 Turbo (fp8)",
         repo: "ling0322/libwaifu-krea2-turbo",
         manifest: "krea2-turbo-fp8.yaml",
+        explicit: false,
     },
 ];
 
@@ -479,6 +492,9 @@ pub struct Listed {
     pub cached: bool,
     /// What is on disk for it, which is most of a model for one that was interrupted.
     pub bytes: u64,
+    /// Whether it draws explicit pictures readily. Carried out to the screen rather than acted on
+    /// here: what is offered is every model, and which of them are shown is the screen's to say.
+    pub explicit: bool,
 }
 
 /// The models to offer, in the order a list should show them.
@@ -494,6 +510,7 @@ pub fn listed() -> Vec<Listed> {
             full_name: full_name(name).unwrap_or(""),
             cached: is_cached(name),
             bytes: cached_bytes(name),
+            explicit: published(name).is_some_and(|model| model.explicit),
         })
         .collect()
 }
@@ -1198,6 +1215,32 @@ mod tests {
         // The spellings these replaced are answered but not offered: one name each.
         assert!(!names.contains(&"sdxl:base:v1"));
         assert!(!names.contains(&"sdxl:noob:v11"));
+    }
+
+    #[test]
+    fn what_a_model_draws_travels_out_with_it() {
+        // The list offers the unversioned names, and the label is written beside the versioned
+        // one. A lookup that stopped at the alias would report every model as drawing nothing
+        // explicit, which is a screen that quietly stops hiding anything.
+        let listed = listed();
+        let said = |name: &str| {
+            listed
+                .iter()
+                .find(|model| model.name == name)
+                .unwrap_or_else(|| panic!("{name} is offered"))
+                .explicit
+        };
+
+        assert!(said("sdxl:noob"));
+        assert!(said("sdxl:wai"));
+        assert!(said("sdxl:illust"));
+        assert!(said("sdxl:obsession"));
+        assert!(said("anima:turbo"));
+        assert!(!said("sdxl:base"));
+        assert!(!said("krea2:turbo"));
+
+        // And the two names for one set of weights say the same thing about them.
+        assert_eq!(said("krea2:turbo"), said("krea2:turbo-fp8"));
     }
 
     #[test]

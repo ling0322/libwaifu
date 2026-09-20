@@ -49,6 +49,33 @@ function room(bytes) {
   return `${(bytes / 1_000).toFixed(0)} kB`;
 }
 
+// -- what the browser keeps ---------------------------------------------------------------------
+
+/**
+ * The one answer this page keeps on its own rather than asking the program for.
+ *
+ * A cookie rather than a setting in the program, because it is about who is sitting here and not
+ * about what is being drawn: a machine somebody else can open the page on should not have been
+ * answered on their behalf, and the same person coming back to the same browser should not be
+ * asked twice. A year, because being asked again next week is being asked twice.
+ */
+const KEPT_A_YEAR = 365 * 24 * 60 * 60;
+
+/** What the browser is holding under this name, or an empty string where it holds nothing. */
+function kept(name) {
+  const here = document.cookie.split("; ").find((pair) => pair.startsWith(`${name}=`));
+  return here ? decodeURIComponent(here.slice(name.length + 1)) : "";
+}
+
+/** Keeps an answer under that name, or forgets it -- an empty value is the forgetting. */
+function keep(name, value) {
+  const age = value ? KEPT_A_YEAR : 0;
+  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${age}; SameSite=Lax`;
+}
+
+/** Whether the models that draw explicit pictures are shown in the list rather than left out. */
+const SHOW_EXPLICIT = "waifu_show_explicit";
+
 // -- recordings -----------------------------------------------------------------------------------
 
 /**
@@ -910,10 +937,31 @@ function onDisk(model) {
  * drawn with, and a screen that made somebody leave their prompt to go and change the model would
  * be putting the two the other way round. Choosing reads nothing -- it says which model the next
  * run is of, and the run is what reads it.
+ *
+ * The ones that draw explicit pictures are not in the list until somebody asks for them. Left out
+ * rather than greyed out: a list of names is the one thing on this screen somebody else can read
+ * over a shoulder, and a name greyed out is still a name read. The asking is one click and it is
+ * remembered, so it is asked once and not every time the list is opened.
  */
 function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onClose }) {
   const chosen = state?.model;
   const busy = !!progress.busy;
+
+  /** Whether the explicit ones are in the list. Read from the browser rather than started at no,
+   *  because this box is built again every time it is opened and the answer outlives it. */
+  const [shown, setShown] = useState(() => kept(SHOW_EXPLICIT) === "yes");
+
+  const said = (yes) => {
+    keep(SHOW_EXPLICIT, yes ? "yes" : "");
+    setShown(yes);
+  };
+
+  // The chosen one is in the list whatever it is. A model can be chosen from the command line, and
+  // a list that left the chosen one out would be a list with no "Chosen" in it and no way back to
+  // the model whose numbers are in the boxes.
+  const all = state?.models ?? [];
+  const models = all.filter((model) => shown || !model.explicit || model.name === chosen?.name);
+  const leftOut = all.length - models.length;
 
   return html`
     <div className="veil" onClick=${onClose}>
@@ -935,7 +983,7 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
         ${note?.bad && html`<div className="note bad">${note.said}</div>`}
 
         <div className="models">
-          ${(state?.models ?? []).map((model) => {
+          ${models.map((model) => {
             const here = chosen?.name === model.name;
             return html`
               <div key=${model.name} className="card model">
@@ -945,6 +993,10 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
                     <span className="model-id">${model.name}</span>
                     ${here &&
                     html`<span className="badge">${chosen.in_memory ? "in memory" : "chosen"}</span>`}
+                    ${/* Said on the row as well as at the foot of the list, because once they are
+                         shown they are eight rows among eight and the name alone does not say
+                         which is which. */ ""}
+                    ${model.explicit && html`<span className="badge explicit">explicit</span>`}
                   </div>
                   <p className="about">${onDisk(model)}</p>
                   ${/* What this one will and will not do, as far as it is known before it is
@@ -975,6 +1027,21 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
             `;
           })}
         </div>
+
+        ${/* Under the list rather than over it: what is shown is what somebody came here for, and
+             a question about what is not shown belongs after the answer to that. */ ""}
+        ${leftOut > 0 &&
+        html`
+          <button className="plain wide" onClick=${() => said(true)}>
+            ${`Show ${leftOut} more ${leftOut === 1 ? "model" : "models"} that draw explicit pictures`}
+          </button>
+        `}
+        ${shown &&
+        html`
+          <button className="plain wide" onClick=${() => said(false)}>
+            Leave out the models that draw explicit pictures
+          </button>
+        `}
       </div>
     </div>
   `;
