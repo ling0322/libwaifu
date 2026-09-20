@@ -291,7 +291,15 @@ function ModelAndDevice({ state, progress, onDevice, onModels }) {
 
 // -- what to draw -------------------------------------------------------------------------------
 
-function Prompts({ form, change, canDraw, drawing, off, onDraw, onInterrupt }) {
+/**
+ * What to draw, and the button that draws it.
+ *
+ * Only on the screen once a model has been chosen -- the page above decides that, the same way
+ * the settings below decide it for themselves. Two empty boxes that cannot be typed in are an
+ * invitation to type in them, and somebody who accepts it has written their prompt into a screen
+ * that was never going to take it.
+ */
+function Prompts({ form, change, canDraw, drawing, onDraw, onInterrupt }) {
   return html`
     <section className="prompts">
       <div className="prompt-boxes">
@@ -304,7 +312,6 @@ function Prompts({ form, change, canDraw, drawing, off, onDraw, onInterrupt }) {
             rows="3"
             placeholder="What to draw. A list of tags reads better to these models than a sentence, and the earlier a tag comes the more of the picture it tends to decide."
             value=${form.prompt}
-            disabled=${off}
             onChange=${(e) => change("prompt", e.target.value)}
           ></textarea>
         <//>
@@ -313,7 +320,6 @@ function Prompts({ form, change, canDraw, drawing, off, onDraw, onInterrupt }) {
             rows="3"
             placeholder="What to keep out. Left empty the model is still steered away from the empty prompt, which is not the same as steering away from nothing at all."
             value=${form.negative}
-            disabled=${off}
             onChange=${(e) => change("negative", e.target.value)}
           ></textarea>
         <//>
@@ -1570,15 +1576,18 @@ function App() {
               </section>
             `
           : html`
-              <${Prompts}
+              ${/* Until a model is chosen there is nothing to write a prompt for, so there is no
+                   prompt box and no button under it. What is left on the screen is the one card
+                   that chooses one, which is the only thing that was ever going to work. */ ""}
+              ${!!chosen &&
+              html`<${Prompts}
                 form=${form}
                 change=${change}
                 canDraw=${canDraw}
-                off=${!chosen}
                 drawing=${!!progress.drawing}
                 onDraw=${generate}
                 onInterrupt=${() => ask("POST", "/api/interrupt")}
-              />
+              />`}
 
               <section className="panes">
                 <${Settings}
