@@ -17,12 +17,13 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+
 //! Reading the parameters of a model, which are safetensors files.
 //!
-//! A [`ParamFile`] is a model's tensors read onto the host and handed out by name -- the whole
-//! name, `"model.layer0.attn.weight"` and not `"weight"`. Which namespace is being read is a
-//! [`Graph`](crate::flint::Graph)'s, and where a weight goes and in what precision is
-//! [`resident`](crate::flint::resident)'s: what comes out of here is what the files hold.
+//! A [`ParamFile`] is a model's tensors, named by the whole name --
+//! `"model.layer0.attn.weight"` and not `"weight"`. Which namespace is being read is a
+//! [`Graph`](crate::flint::Graph)'s, and where a weight goes and in what precision is the
+//! [`Ir`](crate::flint::Ir)'s: what comes out of here is what the files hold.
 //!
 //! # One format
 //!
@@ -39,12 +40,34 @@
 //! A model too large for one file is written as several, which a
 //! [`Manifest`](crate::Manifest) names in order. They are read into one namespace, so which file
 //! a tensor was written to is not something the model has to know.
+//!
+//! # What opening one costs
+//!
+//! The headers, and nothing else. Opening maps each file and parses the table at the front of it;
+//! the bytes of a weight are read at the moment something asks for that weight, and not before.
+//!
+//! This is what lets a package be larger than the memory it is read on. The older form of this
+//! file read every byte of every file up front and built every tensor as it went, so a 26 GB model
+//! was 26 GB of ordinary host memory before the first instruction ran -- which is not a slow way
+//! to start such a model so much as no way to start it at all.
+//!
+//! It also moves the decision. When a weight crosses into memory, whether it is page-locked on the
+//! way, and when it is let go of again are things the [`Ir`](crate::flint::Ir) says, one
+//! instruction at a time, and this is the layer that makes them sayable: a name here is a range of
+//! a mapping, so asking for one twice is two reads and asking for none is no reads.
+//!
+//! The mapping is not the cache. The kernel's page cache is -- the pages of a package are touched
+//! once per sampler step in the same order every step, which is the access pattern it is best at
+//! -- so nothing here keeps a copy of what it has already handed out.
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::File;
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 
+use memmap2::Mmap;
 use safetensors::tensor::{Dtype, SafeTensors};
 
 use crate::error::{Error, Result};
@@ -55,55 +78,123 @@ use crate::flint::{DType, Tensor, CHANNEL_SCALE_SUFFIX};
 const MAX_RANK: usize = 16;
 const MAX_DIM: usize = 1048576;
 
-/// The one namespace a model's tensors end up in, whichever files they came out of.
-type Tensors = HashMap<String, Tensor>;
+/// How many bytes a safetensors file spends saying how long its header is.
+const HEADER_LENGTH_BYTES: usize = 8;
 
-/// The parameters of a model, read onto the host.
+/// Where one tensor's bytes are, which is all that is kept about it until it is asked for.
+#[derive(Clone, Debug)]
+struct Entry {
+    /// Which of the model's files holds it, as an index into [`ParamFile::stores`].
+    store: usize,
+    dtype: DType,
+    shape: Vec<i32>,
+    /// The bytes, as a range of that file rather than of its data section: what is recorded is
+    /// what a read is issued against, so that reading one involves no arithmetic to get wrong.
+    range: Range<usize>,
+}
+
+impl Entry {
+    /// How many bytes the tensor is, which is the length of its range.
+    fn nbytes(&self) -> usize {
+        self.range.end - self.range.start
+    }
+}
+
+/// One file of a model, mapped.
 ///
-/// The whole of every file is read when the file is made and every tensor in it is built as it
-/// goes. There is nothing to look up afterwards and nothing left on disk -- a name is a tensor
-/// that is already there.
+/// Either a mapping of a file on disk, or bytes the caller already had. The second is what
+/// [`ParamFile::parse`] is given -- a package read from somewhere that is not a path -- and it
+/// behaves the same way from here on, since what the rest of this wants of either is a slice.
+enum Store {
+    Mapped(Mmap),
+    Held(Vec<u8>),
+}
+
+impl Store {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Store::Mapped(mapping) => mapping,
+            Store::Held(bytes) => bytes,
+        }
+    }
+}
+
+impl fmt::Debug for Store {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, len) = match self {
+            Store::Mapped(mapping) => ("mapped", mapping.len()),
+            Store::Held(bytes) => ("held", bytes.len()),
+        };
+        write!(f, "{kind}({len} bytes)")
+    }
+}
+
+/// The parameters of a model, as the files that hold them.
 ///
-/// Cloning one shares the tensors rather than copying them, and so does [`ParamFile::get`]: what
-/// it hands over is another handle on storage the file holds, which is what makes handing the
-/// same weight to two models cost nothing.
+/// Cloning one shares the mapping rather than making a second, which is what lets the halves of a
+/// model -- SDXL is four passes over one package -- be handed the same file without any of them
+/// having to know that the others were.
+///
+/// What [`ParamFile::get`] hands over is a tensor of its own: the bytes are copied out of the
+/// mapping, because a tensor owns its storage and the mapping is read-only. So two calls for the
+/// same name are two tensors, where the older form of this file would have handed out two handles
+/// on one. Nothing relied on that, and the thing that would have -- a model read once and run
+/// many times -- is served by where a weight comes to rest rather than by this.
 #[derive(Clone)]
 pub struct ParamFile {
-    tensors: Rc<Tensors>,
+    entries: Rc<HashMap<String, Entry>>,
+    stores: Rc<Vec<Store>>,
 }
 
 impl ParamFile {
-    /// Read a model held in one or more safetensors files.
+    /// Read the headers of a model held in one or more safetensors files.
     ///
     /// They are read in order into one namespace, so which file a tensor was written to is not
     /// something the model has to know. A name appearing in two of them is refused: which won
     /// would otherwise depend on the order they were listed in.
+    ///
+    /// Only the headers. The weights themselves are read when they are asked for -- see the note
+    /// on what opening costs at the top of this file.
     pub fn open(paths: &[impl AsRef<Path>]) -> Result<ParamFile> {
-        let mut tensors = Tensors::new();
+        let mut entries = HashMap::new();
+        let mut stores = Vec::with_capacity(paths.len());
 
         for path in paths {
             let path = path.as_ref();
-            let bytes = std::fs::read(path)
+            let blame = |error: Error| Error::format(format!("{}: {}", path.display(), error));
+
+            let file = File::open(path)
                 .map_err(|error| Error::format(format!("{}: {error}", path.display())))?;
 
-            read_into(&bytes, &mut tensors)
+            // Safety: mapping a file is unsound in exactly one way -- something else truncating
+            // or writing it underneath us -- and a package is a read-only artifact that nothing
+            // in this process writes. The same assumption every runtime that mmaps a checkpoint
+            // makes, and the reason this is not offered for a file the caller is still writing.
+            let mapping = unsafe { Mmap::map(&file) }
                 .map_err(|error| Error::format(format!("{}: {error}", path.display())))?;
+
+            index_into(Store::Mapped(mapping), &mut stores, &mut entries).map_err(blame)?;
         }
-        check_fp8_pairs(&tensors)?;
+        check_fp8_pairs(&entries)?;
 
         Ok(ParamFile {
-            tensors: Rc::new(tensors),
+            entries: Rc::new(entries),
+            stores: Rc::new(stores),
         })
     }
 
     /// The same, out of bytes already in hand rather than off the disk.
+    ///
+    /// The bytes are kept, since what is handed out later are ranges of them.
     pub fn parse(bytes: &[u8]) -> Result<ParamFile> {
-        let mut tensors = Tensors::new();
-        read_into(bytes, &mut tensors)?;
-        check_fp8_pairs(&tensors)?;
+        let mut entries = HashMap::new();
+        let mut stores = Vec::with_capacity(1);
+        index_into(Store::Held(bytes.to_vec()), &mut stores, &mut entries)?;
+        check_fp8_pairs(&entries)?;
 
         Ok(ParamFile {
-            tensors: Rc::new(tensors),
+            entries: Rc::new(entries),
+            stores: Rc::new(stores),
         })
     }
 
@@ -111,61 +202,120 @@ impl ParamFile {
     ///
     /// `name` is the whole name, since that is all a file has. What comes back is what was
     /// written: the element type the exporter chose, on the host the bytes were read onto.
-    /// Putting it where the model runs is [`resident`](crate::flint::resident)'s to do.
+    /// Putting it where the model runs is the [`Ir`](crate::flint::Ir)'s to do.
     pub fn get(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let tensor = self.get_unchecked(name)?;
-        if tensor.shape() != shape {
+        let entry = self.entry(name)?;
+        if entry.shape != shape {
             return Err(Error::model(format!(
                 "tensor {name:?} has shape {:?}, expected {shape:?}",
-                tensor.shape(),
+                entry.shape,
             )));
         }
-        Ok(tensor)
+
+        self.build(name, entry)
     }
 
     /// The same, whatever shape it turns out to have.
     pub fn get_unchecked(&self, name: &str) -> Result<Tensor> {
-        self.tensors
-            .get(name)
-            .cloned()
-            .ok_or_else(|| Error::model(format!("tensor {name:?} not found in model")))
+        self.build(name, self.entry(name)?)
+    }
+
+    /// Read `name` into storage the caller has already allocated.
+    ///
+    /// The one way to get a weight into memory that is not ordinary: `destination` may be
+    /// page-locked host memory, and then this is the read that fills it, rather than a read into
+    /// a buffer of this file's choosing followed by a copy into that one. For a model being
+    /// streamed a weight at a time, those two differ by the whole model memcpy'd once per step.
+    ///
+    /// `destination` has to be a host tensor of exactly this weight's shape and element type: what
+    /// is written is the bytes as the file holds them, and nothing here converts anything.
+    pub fn read_into(&self, name: &str, destination: &mut Tensor) -> Result<()> {
+        let entry = self.entry(name)?;
+
+        if destination.shape() != entry.shape {
+            return Err(Error::model(format!(
+                "tensor {name:?} has shape {:?}, but the storage given for it is {:?}",
+                entry.shape,
+                destination.shape(),
+            )));
+        }
+        if destination.dtype() != entry.dtype {
+            return Err(Error::model(format!(
+                "tensor {name:?} is {:?}, but the storage given for it is {:?}",
+                entry.dtype,
+                destination.dtype(),
+            )));
+        }
+
+        let bytes = destination.host_bytes_mut()?;
+        if bytes.len() != entry.nbytes() {
+            return Err(Error::model(format!(
+                "tensor {name:?} is {} bytes, but the storage given for it is {}",
+                entry.nbytes(),
+                bytes.len(),
+            )));
+        }
+
+        bytes.copy_from_slice(self.bytes_of(entry));
+        Ok(())
     }
 
     /// Whether the file holds a tensor called `name`.
     pub fn has(&self, name: &str) -> bool {
-        self.tensors.contains_key(name)
+        self.entries.contains_key(name)
     }
 
-    /// Every tensor the file held, taken out of it.
+    /// What shape the tensor called `name` is, without reading it.
     ///
-    /// For a reader that is going to put the whole file somewhere else and wants to let go of it
-    /// as it goes rather than at the end: taking a tensor out of what comes back drops this file's
-    /// handle on it, so the bytes go once the copy is made. What
-    /// [`Pinned::read`](crate::flint::Pinned::read) is for, where both copies are host memory and
-    /// holding the weights twice is the difference between fitting and not.
-    ///
-    /// A file someone else still has a handle on cannot be emptied, and hands over a map of
-    /// handles instead. That is correct and costs nothing extra -- it is what cloning a file has
-    /// always done -- but the sharer still holds what it holds.
-    pub fn take(self) -> Tensors {
-        Rc::try_unwrap(self.tensors).unwrap_or_else(|shared| (*shared).clone())
+    /// For a model that reads its own architecture out of the package rather than out of a
+    /// configuration -- Anima's autoencoder counts its stages by looking for them. Answered from
+    /// the header, so asking costs nothing: the point of a lazily read file is undone by a caller
+    /// that has to read a weight to find out how big it is.
+    pub fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
+        self.entries.get(name).map(|entry| entry.shape.clone())
     }
 
-    /// The whole names of every tensor the file held, in order. For finding out what a model
+    /// What element type the tensor called `name` is, without reading it.
+    pub fn dtype_of(&self, name: &str) -> Option<DType> {
+        self.entries.get(name).map(|entry| entry.dtype)
+    }
+
+    /// The whole names of every tensor the file holds, in order. For finding out what a model
     /// actually calls things when it fails to find what it expected.
     pub fn names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.tensors.keys().map(String::as_str).collect();
+        let mut names: Vec<&str> = self.entries.keys().map(String::as_str).collect();
         names.sort_unstable();
         names
     }
 
-    /// How many tensors the file held.
+    /// How many tensors the file holds.
     pub fn len(&self) -> usize {
-        self.tensors.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tensors.is_empty()
+        self.entries.is_empty()
+    }
+
+    /// The entry for `name`, or what is wrong with asking for it.
+    fn entry(&self, name: &str) -> Result<&Entry> {
+        self.entries
+            .get(name)
+            .ok_or_else(|| Error::model(format!("tensor {name:?} not found in model")))
+    }
+
+    /// The bytes an entry points at.
+    ///
+    /// The range was checked against the length of its store when the header was read, so this
+    /// does not have to be fallible.
+    fn bytes_of(&self, entry: &Entry) -> &[u8] {
+        &self.stores[entry.store].bytes()[entry.range.clone()]
+    }
+
+    /// One tensor, copied out of the mapping onto the host.
+    fn build(&self, name: &str, entry: &Entry) -> Result<Tensor> {
+        Tensor::from_bytes(&entry.shape, entry.dtype, self.bytes_of(entry))
+            .map_err(|error| Error::format(format!("tensor {name:?}: {error}")))
     }
 }
 
@@ -174,39 +324,77 @@ impl fmt::Debug for ParamFile {
     /// is read in the middle of an error message.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ParamFile")
-            .field("tensors", &self.tensors.len())
+            .field("tensors", &self.entries.len())
+            .field("files", &self.stores.len())
             .finish()
     }
 }
 
-/// Every tensor of one safetensors file, into the namespace they share.
-fn read_into(bytes: &[u8], tensors: &mut Tensors) -> Result<()> {
-    let file = SafeTensors::deserialize(bytes)
+/// Read one file's header and record where each of its tensors is.
+///
+/// The store is pushed whether or not it turns out to hold anything, so that the indices already
+/// handed out to entries stay correct.
+fn index_into(
+    store: Store,
+    stores: &mut Vec<Store>,
+    entries: &mut HashMap<String, Entry>,
+) -> Result<()> {
+    let index = stores.len();
+    let bytes = store.bytes();
+
+    let (header_length, metadata) = SafeTensors::read_metadata(bytes)
         .map_err(|error| Error::format(format!("not a safetensors file: {error}")))?;
 
-    for (name, view) in file.tensors() {
-        let tensor =
-            build(&view).map_err(|error| Error::format(format!("tensor {name:?}: {error}")))?;
+    // Where the data section begins, which the header's offsets are relative to.
+    let base = HEADER_LENGTH_BYTES + header_length;
 
+    let mut found = Vec::with_capacity(metadata.tensors().len());
+    for (name, info) in metadata.tensors() {
+        let blame = |error: Error| Error::format(format!("tensor {name:?}: {error}"));
+
+        let shape = dimensions(&info.shape).map_err(blame)?;
+        let dtype = dtype(info.dtype).map_err(blame)?;
+        let range = base + info.data_offsets.0..base + info.data_offsets.1;
+
+        // `read_metadata` has already checked that the offsets lie inside the file and that they
+        // account for it exactly, so this cannot fail -- but the slice below would panic rather
+        // than fail if it ever did, which is not what a corrupt package should do.
+        if range.end > bytes.len() {
+            return Err(blame(Error::format(
+                "its bytes are not inside the file".to_string(),
+            )));
+        }
+
+        found.push((
+            name.clone(),
+            Entry {
+                store: index,
+                dtype,
+                shape,
+                range,
+            },
+        ));
+    }
+
+    stores.push(store);
+
+    for (name, entry) in found {
         // A name that is already there is refused rather than replaced: a model whose weights
         // depend on which file was read first is worse than one that will not load.
-        if tensors.insert(name.clone(), tensor).is_some() {
+        if entries.insert(name.clone(), entry).is_some() {
             return Err(Error::format(format!(
                 "tensor {name:?} is in more than one file of this model"
             )));
         }
     }
+
     Ok(())
 }
 
-/// One tensor, as the shape and type its header claims.
-fn build(view: &safetensors::tensor::TensorView) -> Result<Tensor> {
-    let shape = view.shape();
+/// The shape a header claims, as the dimensions a tensor is built from.
+fn dimensions(shape: &[usize]) -> Result<Vec<i32>> {
     if shape.len() > MAX_RANK {
-        return Err(Error::format(format!(
-            "rank {} is out of range",
-            shape.len()
-        )));
+        return Err(Error::format(format!("rank {} is out of range", shape.len())));
     }
 
     let mut dimensions = Vec::with_capacity(shape.len());
@@ -217,11 +405,7 @@ fn build(view: &safetensors::tensor::TensorView) -> Result<Tensor> {
         dimensions.push(size as i32);
     }
 
-    Ok(Tensor::from_bytes(
-        &dimensions,
-        dtype(view.dtype())?,
-        view.data(),
-    )?)
+    Ok(dimensions)
 }
 
 /// What a safetensors element type is called here.
@@ -266,14 +450,16 @@ fn dtype(dtype: Dtype) -> Result<DType> {
 /// The other direction is deliberately not checked. A `"…scale"` with no FP8 tensor beside it is
 /// an ordinary tensor with an unlucky name, and refusing one would make a suffix this library
 /// chose into a word no other exporter may use.
-fn check_fp8_pairs(tensors: &Tensors) -> Result<()> {
-    for (name, tensor) in tensors {
-        if tensor.dtype() != DType::Fp8E4M3 {
+/// Asked of the index rather than of the tensors, so that a package is checked without any of it
+/// being read: the header says the type and the shape, which is the whole of the question.
+fn check_fp8_pairs(entries: &HashMap<String, Entry>) -> Result<()> {
+    for (name, entry) in entries {
+        if entry.dtype != DType::Fp8E4M3 {
             continue;
         }
 
         let scale_name = format!("{name}{CHANNEL_SCALE_SUFFIX}");
-        let Some(scale) = tensors.get(&scale_name) else {
+        let Some(scale) = entries.get(&scale_name) else {
             return Err(Error::format(format!(
                 "tensor {name:?} is float8_e4m3 and there is no {scale_name:?} beside it; a \
                  quantized weight is the elements and the scales, and the elements alone do not \
@@ -281,13 +467,12 @@ fn check_fp8_pairs(tensors: &Tensors) -> Result<()> {
             )));
         };
 
-        let rows = tensor.shape().first().copied().unwrap_or(0);
-        if scale.dtype() != DType::Float || scale.shape() != [rows] {
+        let rows = entry.shape.first().copied().unwrap_or(0);
+        if scale.dtype != DType::Float || scale.shape != [rows] {
             return Err(Error::format(format!(
                 "tensor {scale_name:?} is {:?}{:?}, and the scales of {name:?} have to be \
                  <float>[{rows}] -- one per row",
-                scale.dtype(),
-                scale.shape(),
+                scale.dtype, scale.shape,
             )));
         }
     }

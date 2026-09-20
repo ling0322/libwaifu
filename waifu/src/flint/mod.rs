@@ -58,19 +58,21 @@
 //! does not decide: which nodes are worth running, and where each value is finished with.
 //!
 //! ```
-//! # use waifu::flint::{Graph, Ir, RunContext, Tensor};
+//! # use waifu::flint::{Graph, Ir, Residency, RunContext, Tensor};
 //! # use std::collections::HashMap;
 //! # let g = Graph::new();
 //! # let x = g.input("hidden");
 //! # let gated = g.silu(x);
 //! # g.output("hidden", gated);
-//! // The same graph again, and this time run.
-//! let ir = Ir::compile(&g);
+//! // The same graph again, and this time run. Compiling says where the weights are to wait;
+//! // `load` is the prologue that puts the kept ones there, once.
+//! let ir = Ir::compile(&g, Residency::Device);
 //!
 //! let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
 //! let weights = HashMap::new();
+//! let preloaded = ir.load(&weights)?;
 //!
-//! let context = RunContext::new(&weights).input("hidden", &hidden);
+//! let context = RunContext::new(&weights).preloaded(&preloaded).input("hidden", &hidden);
 //! let outputs = ir.run(&context)?;
 //! assert_eq!(outputs[0].0, "hidden");
 //! # Ok::<(), waifu::Error>(())
@@ -94,7 +96,9 @@ mod op;
 
 pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
-pub use ir::{check_parameters, resident, Inst, Ir, ParamSource, Pinned, Residency, RunContext};
+pub use ir::{
+    check_parameters, resident, Preloaded, Inst, Ir, ParamSource, Residency, RunContext, Weights,
+};
 pub use nvfp4::Nvfp4Tensor;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
 
@@ -492,6 +496,32 @@ impl Tensor {
                 out,
             )
         })
+    }
+
+    /// The tensor's own bytes, to be written where they lie.
+    ///
+    /// For storage filled by something that writes into a buffer of the caller's choosing -- a
+    /// file read is the case this exists for -- rather than read into a buffer of its own and
+    /// copied in afterwards. For a model's weights those two differ by the whole model memcpy'd a
+    /// second time, which is the difference between streaming a package and holding it twice.
+    ///
+    /// Only a contiguous tensor on the host, which is the CPU's memory or the page-locked host
+    /// memory CUDA hands out. One on the device is refused: it has no address this side may touch.
+    ///
+    /// # What the borrow does and does not say
+    ///
+    /// The slice borrows `self`, so it cannot outlive this handle, and `&mut self` keeps a second
+    /// borrow from being taken through the same one. It does not make the bytes exclusively this
+    /// handle's: storage is shared between handles, so a tensor cloned beforehand still addresses
+    /// them. What this is for is filling storage that nothing else has seen yet.
+    pub fn host_bytes_mut(&mut self) -> Result<&mut [u8]> {
+        let mut data: *mut c_void = std::ptr::null_mut();
+        let mut nbytes: i64 = 0;
+        check(unsafe { ffi::fl_tensor_host_data(self.raw, &mut data, &mut nbytes) })?;
+
+        // Non-null and as long as it says: the call above refuses every case where it would not
+        // be, and a tensor of no elements is the one that comes back as an empty slice.
+        Ok(unsafe { std::slice::from_raw_parts_mut(data as *mut u8, nbytes as usize) })
     }
 
     /// Number of dimensions.
