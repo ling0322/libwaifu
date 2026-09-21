@@ -589,7 +589,12 @@ fn already(shared: &Arc<Shared>) -> String {
         Doing::Drawing(_) => "there is already a picture being drawn".to_string(),
         Doing::Speaking(_) => "there is already something being said".to_string(),
         Doing::Reading { model } => format!("{model} is still being read"),
-        Doing::Fetching(fetch) => format!("{} is still being fetched", fetch.model),
+        Doing::Fetching(fetch) => {
+            format!(
+                "{} is still being fetched: wait for it, or stop it",
+                fetch.model
+            )
+        }
         // Claimed, and not yet picked up -- the moment between a request posting a command and
         // the worker starting on it.
         Doing::Nothing => "something is already happening: wait for it, or stop it".to_string(),

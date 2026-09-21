@@ -437,7 +437,7 @@ function ModelAndDevice({ state, progress, onDevice, onModels }) {
  * `guided` is the same thought one box further in: a model that answers in a single pass has
  * nowhere to put a negative prompt, so it does not get one to write in either.
  */
-function Prompts({ form, change, canDraw, drawing, guided, onDraw, onInterrupt }) {
+function Prompts({ form, change, canDraw, drawing, fetching, guided, onDraw, onInterrupt }) {
   return html`
     <section className="prompts">
       <div className="prompt-boxes">
@@ -474,13 +474,19 @@ function Prompts({ form, change, canDraw, drawing, guided, onDraw, onInterrupt }
         <button className="generate" disabled=${!canDraw} onClick=${onDraw}>Generate</button>
         ${/* Always under it, rather than appearing only once there is something to stop: a button
              that is not there until the moment it is needed is a button nobody knows about, and
-             its place on the screen moves the thing above it when it arrives. */ ""}
+             its place on the screen moves the thing above it when it arrives.
+
+             One button for the two things there are to stop, because from here they are one
+             thing -- the program is busy and this is how to stop it being busy. What each of
+             them leaves behind is not the same, so it says which one it is about. */ ""}
         <button
           className="interrupt"
-          disabled=${!drawing}
+          disabled=${!drawing && !fetching}
           title=${drawing
             ? "Stop after the step it is on. The model comes off the card with it, so that whatever else wants the card can have it -- and so the next run reads the model again"
-            : "Nothing to stop. A run can be stopped once it is drawing; fetching and reading a model cannot be stopped part way"}
+            : fetching
+              ? "Stop the download. The packages that have come down are kept, and fetching it again carries on from there"
+              : "Nothing to stop. A run can be stopped while it is drawing and a model while it is coming down; reading one onto the card cannot be stopped part way"}
           onClick=${onInterrupt}
         >
           Cancel
@@ -1263,8 +1269,12 @@ function Bar({ progress }) {
   // call into the tensor library that returns when it returns. That bar fills the whole width and
   // says so by moving, rather than by making a fraction up.
   const fraction = progress.fraction;
+
+  // What is being stopped decides what the wait is for: a run is stopped between steps, and a
+  // fetch between whatever it is in the middle of and the next thing it would have asked for.
+  const stopping = progress.fetching ? "stopping the download..." : "stopping after this step...";
   const words = progress.interrupting
-    ? "stopping after this step..."
+    ? stopping
     : [
         progress.doing,
         fraction === null ? null : `${Math.round(fraction * 100)}%`,
@@ -1880,6 +1890,7 @@ function App() {
                 canDraw=${canDraw}
                 guided=${chosen.takes_guidance !== false}
                 drawing=${!!progress.drawing}
+                fetching=${!!progress.fetching}
                 onDraw=${generate}
                 onInterrupt=${() => ask("POST", "/api/interrupt")}
               />`}

@@ -198,6 +198,12 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                 }
 
                 let ran = match &model {
+                    // A stop asked for while the model was coming down is a stop to the run it
+                    // was coming down for: whoever pressed it was waiting for this picture, and
+                    // the picture is what they asked to stop waiting for. Only reachable where
+                    // the read went through -- a fetch that was stopped says so for itself, and
+                    // leaves nothing here to draw with.
+                    Some(_) if shared.interrupted() => Ran::StoppedBeforeItDrew,
                     Some(loaded) => draw(shared, loaded, job),
                     // Nothing to say: the read that just failed said why, in the words of
                     // whatever went wrong with it. And nothing ran, which is not a run that was
@@ -214,11 +220,11 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                 // Only on a stop. A run that finished is a picture somebody is about to ask for
                 // again with one word changed, and taking the model down between two of those
                 // would spend a minute of reading on every prompt.
-                if ran == Ran::Stopped {
+                if let Some(said) = ran.stopped() {
                     model = None;
                     in_memory = None;
                     forget_the_weights(shared);
-                    shared.say("stopped where it was, and the model is off the card", false);
+                    shared.say(said, false);
                     give_the_memory_back(shared);
                 }
             }
@@ -259,11 +265,33 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
 ///
 /// A run that failed is [`Ran::ToTheEnd`] here: what went wrong with it has already been said on
 /// the bar, and the weights it failed with are as good as the weights it would have succeeded
-/// with. What this tells apart is the one ending that is somebody asking for the card back.
-#[derive(Eq, PartialEq)]
+/// with. What this tells apart is the endings that are somebody asking for the card back.
 enum Ran {
     ToTheEnd,
     Stopped,
+    /// Stopped before a step of it was drawn, which is what a stop pressed while the model was
+    /// still coming down amounts to. The weights go down the same way -- they were read for a run
+    /// that is not happening -- and only the sentence differs, because nothing was drawn and
+    /// there is nothing to say was kept.
+    StoppedBeforeItDrew,
+}
+
+impl Ran {
+    /// What to say about an ending that takes the model off the card with it, and `None` for one
+    /// that leaves it where it is.
+    ///
+    /// The words live here rather than where the run ended, for the reason [`draw`] says nothing
+    /// about a stop of its own: what there is to say about one is what the worker does next, and
+    /// the two endings below are the two that are followed by the same thing being done.
+    fn stopped(&self) -> Option<&'static str> {
+        match self {
+            Ran::ToTheEnd => None,
+            Ran::Stopped => Some("stopped where it was, and the model is off the card"),
+            Ran::StoppedBeforeItDrew => {
+                Some("stopped before it drew anything, and the model is off the card")
+            }
+        }
+    }
 }
 
 /// Says on screen that there are no weights in memory, leaving what is chosen chosen.
@@ -332,7 +360,11 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
         }
         Err(error) => {
             shared.change(|session| session.doing = Doing::Nothing);
-            shared.say(error.to_string(), true);
+            // A stop is not a failure. It is the button doing what it says, and what it has to
+            // say for itself -- which package is left on the disk, what the next fetch will not
+            // have to bring down again -- belongs on the bar in the ordinary way rather than as a
+            // complaint about something going wrong.
+            shared.say(error.to_string(), !hub::stopped(&error));
             false
         }
     }
@@ -508,6 +540,11 @@ fn on_disk(asked: &str) -> Option<PathBuf> {
 
 /// Fetches and reads the model `asked` names, saying how it is getting on as it goes.
 fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
+    // A stop asked for before this began is not this fetch's business -- the same rule `draw`
+    // below is written to, and needed here for the same reason: the flag outlives the run that
+    // was stopped, and the next fetch would read it on the way in and stop before it started.
+    shared.carry_on();
+
     // The name the screen shows. As typed when it was named, because that is what someone would
     // type again; the file name when a path was given, because the whole path does not fit and
     // its tail is the part that identifies it.
@@ -528,8 +565,14 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
         })
     });
 
-    let path =
-        hub::resolve_reporting(asked, &mut |progress| report_fetch(shared, &name, progress))?;
+    // Stoppable from here to the last byte of the last package. What follows it is not: reading
+    // the weights onto the device is one call into the tensor library that returns when it
+    // returns, and the screen says which of the two is happening.
+    let path = hub::resolve_reporting(
+        asked,
+        &mut |progress| report_fetch(shared, &name, progress),
+        &|| shared.interrupted(),
+    )?;
 
     shared.change(|session| {
         session.doing = Doing::Reading {
