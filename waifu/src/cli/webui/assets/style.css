@@ -126,8 +126,14 @@ a.dim:hover {
   align-items: flex-start;
 }
 
+/*
+  Wide enough for the longest thing that goes in it, which is no longer a tab's name. "NVIDIA
+  GeForce RTX 5060 Ti" is what a card is called and 168px cut it in half; a column sized to the
+  tabs alone made the panel under them a box of two-line entries. The fifty pixels come off the
+  picture, which has a thousand of them and is the one thing on the page that can spare any.
+*/
 .side {
-  flex: 0 0 168px;
+  flex: 0 0 220px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -165,6 +171,83 @@ a.dim:hover {
   border-color: var(--edge);
   color: var(--ink);
   font-weight: 600;
+}
+
+/*
+  What the machine is, under the tabs.
+
+  Quiet on purpose: it is read once when somebody arrives and glanced at when something has gone
+  wrong, and nothing on it can be clicked. So it is the dim colour and the small size throughout,
+  with the processor's and the card's own names the only things in the page's ink -- those being
+  the two lines anybody actually reads off it.
+*/
+.hardware {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px var(--nudge);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.hardware h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hardware .part {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Without this, a card's name is wider than the column and pushes the whole page along with
+     it: the column is a flex item, and a flex item's floor is the widest thing inside it. */
+  min-width: 0;
+}
+
+.hardware .what,
+.hardware .vram {
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* The gap above "vram", which sits under the card's name rather than at the top of a part. */
+.hardware .vram {
+  margin-top: 4px;
+}
+
+/*
+  The two lines here in the page's own ink, those being the two anybody actually reads off this.
+
+  Wrapped rather than cut short. "NVIDIA GeForce RTX 5060 Ti" is four characters wider than the
+  column, and a card whose name ends in an ellipsis is a card somebody has to hover over to
+  identify -- which is the one thing this panel exists to save them.
+*/
+.hardware .named {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+/* The same trough and fill as the run's own bar, at a third of the height: it says the same kind
+   of thing -- how much of a whole -- and should not say it in a second visual language. */
+.meter {
+  height: 6px;
+  margin-top: 2px;
+  border-radius: 3px;
+  background: var(--trough);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--fill);
+  transition: width 0.4s linear;
 }
 
 /* What is loaded, under the box that chooses it. */
@@ -725,6 +808,26 @@ select:focus {
   .nav button {
     flex: 1;
     text-align: center;
+  }
+
+  /*
+    And the machine reads across rather than down. A column of four rows on a phone is four rows
+    of a screen that has better things to be showing; side by side they are one band under the
+    tabs, and the parts wrap rather than squeeze when there are three of them.
+  */
+  .hardware {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px 20px;
+  }
+
+  .hardware h2 {
+    width: 100%;
+  }
+
+  .hardware .part {
+    flex: 1 1 140px;
   }
 
   .go {

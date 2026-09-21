@@ -20,6 +20,10 @@ const html = htm.bind(React.createElement);
 /** How often to ask what is happening. Short enough that the bar moves, long enough to be free. */
 const TICK = 500;
 
+/** And how often to ask what is left of the machine. Slower, because memory fills over seconds
+ *  rather than over frames and because reading it is a file and, on a card, a driver call. */
+const MACHINE_TICK = 2000;
+
 // -- talking to the program -------------------------------------------------------------------
 
 /** A request, and what it answered. An error is a value here rather than a throw: every one of
@@ -229,6 +233,110 @@ function Nav({ tab, onTab }) {
         `,
       )}
     </nav>
+  `;
+}
+
+/**
+ * What this is running on, under the tabs.
+ *
+ * Three rows and two bars. The processor and how much memory is fitted are what somebody compares
+ * against the machine they read a number on somewhere else; what is *left* of the memory and of
+ * the card is what answers the question that actually gets asked, which is why a run that worked
+ * yesterday now aborts. A card sitting at fifteen of sixteen gigabytes answers it on sight, and
+ * before this the page gave no way to see that at all short of another window with nvidia-smi in
+ * it.
+ *
+ * Every row is drawn only where there is something to put in it. A machine this has not been
+ * taught to read says nothing rather than saying "unknown" four times.
+ */
+function Machine({ machine }) {
+  if (!machine) return null;
+
+  const { cpu, cores, threads, memory, gpu, vram } = machine;
+  const counted = [cores && `${cores} cores`, threads && `${threads} threads`].filter(Boolean);
+
+  return html`
+    <section className="hardware">
+      <h2>this machine</h2>
+
+      ${(cpu || counted.length > 0) &&
+      html`
+        <div className="part">
+          <div className="what">cpu</div>
+          ${/* The full name in the tooltip: the tidying took the trademarks off, and a Xeon's
+               name can still be longer than the column is wide. */ ""}
+          ${cpu && html`<div className="named" title=${cpu}>${cpu}</div>`}
+          ${counted.length > 0 && html`<div className="dim">${counted.join(" · ")}</div>`}
+        </div>
+      `}
+
+      ${memory?.total &&
+      html`
+        <div className="part">
+          <div className="what">memory</div>
+          <${Meter} used=${memory.used} total=${memory.total} />
+        </div>
+      `}
+
+      ${gpu &&
+      html`
+        <div className="part">
+          <div className="what">gpu</div>
+          <div className="named" title=${gpu.name}>${gpu.name}</div>
+          ${/* Apple's card has the machine's memory rather than any of its own, so the bar for
+               it would be the same bar again with the same numbers in it. */ ""}
+          ${gpu.unified
+            ? html`<div className="dim">memory is shared with the cpu</div>`
+            : vram
+              ? html`
+                  <div className="vram">vram</div>
+                  <${Meter} used=${vram.used} total=${vram.total} />
+                  ${/* What of it is this program's, which is the half of the number a size that
+                       aborted is about: the rest is the desktop and whatever else is on the
+                       card. */ ""}
+                  ${vram.ours > 0 && html`<div className="dim">${room(vram.ours)} is ours</div>`}
+                `
+              : html`<div className="dim">${machine.why_no_vram}</div>`}
+        </div>
+      `}
+
+      ${/* What this build can send a run to, which is not the same as what is plugged in: a card
+           in a build without CUDA is a card this page can name and cannot use. Named here as
+           well as offered in the Device box, because the box says which one is chosen and this
+           says whether the card in the line above is a card anything can be asked of. */ ""}
+      <div className="part">
+        <div className="what">accelerators</div>
+        <div className="dim">
+          ${(machine.accelerators ?? []).length > 0
+            ? machine.accelerators.join(" · ")
+            : "none -- runs go to the processor"}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+/** How much of something is gone, as a bar with the two numbers over it.
+ *
+ *  The same trough and fill the run's own bar is drawn from, at a third of the height: it is the
+ *  same thing being said -- how much of a whole -- and a second visual language for it in the
+ *  column beside would be two things to learn. */
+function Meter({ used, total }) {
+  // Only the total is ever certain. What is spare is a figure the system may not offer, and a bar
+  // drawn as empty would be saying the machine has all of its memory free.
+  const known = typeof used === "number" && total > 0;
+  const part = known ? Math.max(0, Math.min(1, used / total)) : 0;
+
+  return html`
+    <${Fragment}>
+      <div className="dim">${known ? `${room(used)} of ${room(total)}` : room(total)}</div>
+      ${known &&
+      html`
+        <div className="meter" title=${`${Math.round(part * 100)}% in use`}>
+          <div className="meter-fill" style=${{ width: `${part * 100}%` }} />
+        </div>
+      `}
+    <//>
   `;
 }
 
@@ -1140,6 +1248,10 @@ function App() {
   /** What this page has to say about the last thing that was clicked, if it went wrong. */
   const [complaint, setComplaint] = useState(null);
 
+  /** What the machine is and how much of it is left. Null until the first answer, which is what
+   *  keeps the column from flashing a row of empty labels while the page opens. */
+  const [machine, setMachine] = useState(null);
+
   /** Which tab is on top. The only thing on this page the program does not know about: it decides
    *  what a run is asked for, not what the program is doing. */
   const [tab, setTab] = useState("txt2img");
@@ -1210,6 +1322,22 @@ function App() {
 
     return () => clearInterval(timer);
   }, [readState]);
+
+  // And what is left of the machine, which nothing this page does decides -- so it is asked for
+  // on a clock of its own rather than when the state changes. A failed read is left alone: the
+  // column keeps the last answer, because a sidebar that empties itself is a worse way to say
+  // "the program has gone" than the bar already says it.
+  useEffect(() => {
+    const read = async () => {
+      const answer = await ask("GET", "/api/machine");
+      if (answer.ok) setMachine(answer.said);
+    };
+
+    read();
+    const timer = setInterval(read, MACHINE_TICK);
+
+    return () => clearInterval(timer);
+  }, []);
 
   // Puts the chosen model's own numbers in the boxes, and its card's suggestions in the prompts
   // -- which is what it asks to be drawn with, not a setting anybody chose.
@@ -1529,6 +1657,10 @@ function App() {
     <div className="below">
       <aside className="side">
         <${Nav} tab=${tab} onTab=${switchTask} />
+        ${/* Under the tabs rather than beside the settings. It is not a setting -- there is
+             nothing on it to change -- and what it is is the ground everything else on the page
+             stands on, which is where the column's other permanent thing already is. */ ""}
+        <${Machine} machine=${machine} />
       </aside>
 
       ${/* The two halves of the page swap together. Which tab is on top decides what is typed
