@@ -245,23 +245,29 @@ is in the file.)
 
 ## What this does not do yet
 
-These are the primitives, not a speech model. What sits on top of them is not written.
+These are the primitives. What sits on top of them is now written, and what joins them up is not.
 
-For IndexTTS-2.5 specifically -- six models and about 5.5 GB -- what remains is roughly:
+All six of IndexTTS-2.5's models -- about 5.5 GB between them -- are here, each with a document of
+its own and a test against the implementation it came from:
 
-| piece | needs |
+| piece | |
 | --- | --- |
-| GPT backbone, 1280d × 24L | the attention, RoPE and sampling that are already here, plus a conformer perceiver conditioner |
-| semantic codec, 8192 entries | a Vocos *backbone*, which reconstructs w2v-bert features rather than audio -- no inverse transform |
-| S2Mel, flow-matching DiT 13L × 512d | a WaveNet postnet, which is dilated `conv1d` |
-| ~~BigVGAN vocoder~~ | **written** -- `waifu::bigvgan`, and [docs/bigvgan.md](bigvgan.md) is what it is |
-| Qwen3-0.6B emotion model | autoregressive generation; `anima::text_encoder` is the same architecture read a different way |
-| w2v-bert-2.0, CAMPPlus | two encoders that are not even in the model's own repository -- they are fetched at runtime |
+| GPT backbone, 1280d × 24L | `waifu::indextts_gpt`, and [indextts_gpt.md](indextts_gpt.md) -- with the generation loop on top of it |
+| semantic codec, 8192 entries | `waifu::semantic_codec`, and [semantic_codec.md](semantic_codec.md) |
+| S2Mel, flow-matching DiT 13L × 512d | `waifu::s2mel`, and [s2mel.md](s2mel.md) |
+| BigVGAN vocoder | `waifu::bigvgan`, and [bigvgan.md](bigvgan.md) |
+| w2v-bert-2.0 | `waifu::w2v_bert`, and [w2v_bert.md](w2v_bert.md) |
+| CAMPPlus | `waifu::campplus`, and [campplus.md](campplus.md) |
 
-And outside the model graph: reading and writing audio files, a `.pth` to safetensors exporter for
-four checkpoints, a `.tiktoken` vocabulary the `tokenizers` crate does not read, and a text
-frontend for five languages.
+What remains is not a model. It is the emotion conformer and perceiver that produce `emo_vec`
+when a recording is not handed one; a `.pth` to safetensors exporter for four of the six, and so
+a package; a `.tiktoken` vocabulary the `tokenizers` crate does not read; a text frontend for five
+languages; and the pipeline that runs the six in order behind a
+[`Voice`](../waifu/src/speech.rs). Until that last one exists, `waifu draw`'s speech tab is still
+the stand-in described in [speech.md](speech.md).
 
-None of that is blocked on a kernel, and since `depthwise_conv1d` none of it is blocked on the
-CUDA convolution either. The vocoder is the first of the six to be written, and it needed no
-operator that was not already here -- two compositions, one padding mode, and nothing in `flint`.
+None of it is blocked on a kernel, and since `depthwise_conv1d` none of it is blocked on the CUDA
+convolution either. Nor was any of the six: the vocoder, which was written first, needed two
+compositions, one padding mode and nothing in `flint`, and the loop on the GPT needed no operator
+that was not already here -- only the causal mask's alignment to the bottom right, which is what
+lets one query read a whole history.
