@@ -319,24 +319,32 @@ fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) 
 }
 
 /// What a kind of model implies for the screen before any of its weights are read: what to ask
-/// it for, what walks the noise back, and why it cannot start from a picture.
+/// it for, what walks the noise back, why it cannot start from a picture, and whether guidance is
+/// a thing to offer at all.
 ///
 /// One table for the three kinds, read twice -- once from a name that has not been fetched yet,
 /// and once from the `type` of a manifest that is already on the disk.
-fn about(kind: &str) -> (GenerationDefaults, &'static str, Option<&'static str>) {
+///
+/// The last of the four is false for Krea 2 for the same reason its defaults are eight steps at a
+/// guidance of one: the only release of it this exports is the distilled one, and the distilled
+/// one has no second pass. A package's own `suggested:` overrides this, so the day there is an
+/// undistilled one it says `takes_guidance: "true"` and gets the dial back.
+fn about(kind: &str) -> (GenerationDefaults, &'static str, Option<&'static str>, bool) {
     match kind {
         Anima::MODEL_TYPE => (
             Anima::DEFAULTS,
             "Flow match Euler",
             Some(ANIMA_DRAWS_FROM_NO_PICTURE),
+            true,
         ),
         Krea2::MODEL_TYPE => (
             Krea2::DEFAULTS,
             "Flow match Euler",
             Some(KREA2_DRAWS_FROM_NO_PICTURE),
+            false,
         ),
         // Everything else is SDXL, which is what `Model::from_manifest` decides too.
-        _ => (GenerationDefaults::default(), "Euler", None),
+        _ => (GenerationDefaults::default(), "Euler", None, true),
     }
 }
 
@@ -355,7 +363,7 @@ pub fn look_at(asked: &str) -> Chosen {
         name if name.starts_with("krea") => Krea2::MODEL_TYPE,
         _ => "",
     };
-    let (defaults, sampler, no_picture) = about(guessed);
+    let (defaults, sampler, no_picture, takes_guidance) = about(guessed);
 
     let mut chosen = Chosen {
         name: asked.to_string(),
@@ -376,6 +384,7 @@ pub fn look_at(asked: &str) -> Chosen {
         suggested_prompt: None,
         suggested_avoid: None,
         no_picture_because: no_picture.map(str::to_string),
+        takes_guidance,
     };
 
     // And where the package is already here, what it says about itself. The manifest is a few
@@ -399,16 +408,20 @@ pub fn look_at(asked: &str) -> Chosen {
         .section(Sdxl::MODEL_SECTION)
         .and_then(|section| section.get_str("type").map(str::to_string))
     {
-        let (defaults, sampler, no_picture) = about(&kind);
+        let (defaults, sampler, no_picture, takes_guidance) = about(&kind);
         chosen.defaults = defaults;
         chosen.sampler = sampler;
         chosen.no_picture_because = no_picture.map(str::to_string);
+        chosen.takes_guidance = takes_guidance;
     }
 
     let suggested = manifest.suggested();
     chosen.defaults = suggested.over(chosen.defaults);
     chosen.suggested_prompt = suggested.prompt.clone();
     chosen.suggested_avoid = suggested.avoid.clone();
+    // Only where it says. A manifest written before there was a key for this is silent, and
+    // silence leaves the line above's answer alone rather than arguing with it.
+    chosen.takes_guidance = suggested.takes_guidance.unwrap_or(chosen.takes_guidance);
     if suggested.sizes.len() >= ENOUGH_SIZES {
         chosen.sizes = suggested.sizes.clone();
     }
@@ -478,6 +491,9 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
         // Now asked of the package rather than guessed from the name, which is the whole
         // difference between this and what was on the screen a moment ago.
         no_picture_because: opened.no_picture_because().map(str::to_string),
+        // Whether to offer guidance is not restated here: `look_at` below reads it out of this
+        // same manifest, and a package that is being opened is a package that is on the disk for
+        // it to read.
         on_disk: true,
         in_memory: true,
         ..look_at(asked)
@@ -931,4 +947,67 @@ fn keep(image: &Tensor) -> Result<(String, usize, usize), Error> {
     }
 
     Err("there are already ten thousand pictures in this directory".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manifest on the disk holding `body`, and the path it was written to.
+    ///
+    /// Named after the test that asked for it so that two of them never collide, and left behind:
+    /// it is a few hundred bytes in the temporary directory, and a file removed on the way out of
+    /// a test that failed is the file somebody wanted to look at.
+    fn a_manifest(called: &str, body: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("libwaifu-{called}-{}.yaml", std::process::id()));
+        std::fs::write(&path, body).expect("somewhere to write a manifest");
+        path
+    }
+
+    #[test]
+    fn a_distilled_model_is_known_to_take_no_guidance_before_it_is_read() {
+        // From the name alone, which is what the boxes are filled in from while the package is
+        // still being fetched. Krea 2 is distilled here or it is not exported at all, so the kind
+        // answers this the same way it answers eight steps and a guidance of one.
+        let turbo = look_at("krea2:turbo:v1.0");
+        assert!(!turbo.takes_guidance);
+        assert_eq!(turbo.defaults.num_steps, 8);
+
+        // And the models that do have a second pass, which is every other kind.
+        assert!(look_at("sdxl:base:v1.0").takes_guidance);
+        assert!(look_at("anima:turbo:v1.1").takes_guidance);
+    }
+
+    #[test]
+    fn a_package_may_say_for_itself_whether_it_takes_guidance() {
+        // Silence is not a no. A package exported before there was a key for this says nothing in
+        // its `suggested:` block, and what fills the gap is what the kind already answered --
+        // which is what lets one keep working here without being rewritten.
+        let quiet = a_manifest(
+            "quiet",
+            "weights:\n  - krea2.0.safetensors\nconfig:\n  model:\n    type: krea2\n\
+             suggested:\n  steps: 8\n  guidance: 1.0\n",
+        );
+        assert!(!look_at(quiet.to_str().expect("a path")).takes_guidance);
+
+        // And a package that says so plainly is believed over the kind, in both directions: the
+        // day there is an undistilled Krea 2, this is the line it gets its dial back with.
+        let undistilled = a_manifest(
+            "undistilled",
+            "weights:\n  - krea2.0.safetensors\nconfig:\n  model:\n    type: krea2\n\
+             suggested:\n  steps: 28\n  guidance: 5.5\n  takes_guidance: \"true\"\n",
+        );
+        let raw = look_at(undistilled.to_str().expect("a path"));
+        assert!(raw.takes_guidance);
+        assert_eq!(raw.defaults.num_steps, 28);
+
+        // The other direction, for a distilled release of a kind that is not otherwise one.
+        let distilled_sdxl = a_manifest(
+            "distilled-sdxl",
+            "weights:\n  - sdxl.0.safetensors\nconfig:\n  model:\n    type: sdxl\n\
+             suggested:\n  steps: 4\n  takes_guidance: \"false\"\n",
+        );
+        assert!(!look_at(distilled_sdxl.to_str().expect("a path")).takes_guidance);
+    }
 }

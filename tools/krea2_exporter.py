@@ -810,7 +810,14 @@ def main() -> int:
 
     # What the card says to ask for, which is not what SDXL wants: eight steps, and a guidance of
     # one, which is this runtime's spelling of the reference's zero.
-    suggested = {"steps": 8, "guidance": 1.0,
+    #
+    # And `takes_guidance: false`, which is the stronger statement of the same thing. The guidance
+    # above is where a dial would start; this says there is no dial. Only the distilled release
+    # gets this far -- `read_shape` refuses the other one -- and diffusers gives the distilled one
+    # blocks of its own with no guider on them and no negative prompt to pass, because a model
+    # trained to answer as though it had already been guided has no second answer to be pushed
+    # away from. The screen reads this and stops offering either.
+    suggested = {"steps": 8, "guidance": 1.0, "takes_guidance": "false",
                  "sizes": [[1024, 1024], [1216, 832], [832, 1216]]}
 
     for name in writer.finish(config, suggested, {"tokenizer": tokenizer_file}):

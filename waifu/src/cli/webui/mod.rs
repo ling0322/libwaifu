@@ -432,6 +432,8 @@ mod tests {
         // An SDXL package is taken to draw from a picture until one says otherwise, and an Anima
         // one is known not to before anything of it has been fetched.
         assert_eq!(chosen["draws_from_a_picture"], true);
+        // And it has a second pass, so the page draws the CFG card and the negative prompt box.
+        assert_eq!(chosen["takes_guidance"], true);
 
         assert_eq!(
             asked(address, "POST /api/model", r#"{"model":"anima:turbo"}"#).0,
@@ -447,6 +449,22 @@ mod tests {
                 .contains("Anima"),
             "{chosen}"
         );
+
+        // Krea 2 is the one that answers in a single pass. The page reads this and stops drawing
+        // the two things that steer a second one, before a byte of the package has been fetched:
+        // a control that appeared once a download finished and then vanished would be a screen
+        // whose settings move while somebody is using them.
+        assert_eq!(
+            asked(address, "POST /api/model", r#"{"model":"krea2:turbo"}"#).0,
+            200
+        );
+        let chosen = &json(address, "GET /api/state", "")["model"];
+        assert_eq!(chosen["name"], "krea2:turbo");
+        assert_eq!(chosen["takes_guidance"], false);
+        // What it would be guided at if it were, which is this runtime's spelling of none. The
+        // number is still described, because it is what a run of this model is posted with.
+        assert_eq!(chosen["guidance"], 1.0);
+        assert_eq!(chosen["steps"], 8);
 
         // A null un-chooses, which is what the page sends when the kind of run changes.
         assert_eq!(
