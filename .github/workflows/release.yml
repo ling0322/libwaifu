@@ -18,7 +18,9 @@ jobs:
     name: Windows (CUDA + FlashAttention)
     runs-on: windows-2022
 
-    timeout-minutes: 120
+    # FlashAttention is twelve kernel sources compiled for every architecture the toolkit can
+    # reach, which is hours of nvcc rather than the minutes the rest of this job takes.
+    timeout-minutes: 360
 
     env:
       # flint compiles against the static MSVC runtime -- CMAKE_MSVC_RUNTIME_LIBRARY asks for
@@ -26,11 +28,22 @@ jobs:
       # is a link error, so cargo is pointed at the one CMake already chose.
       RUSTFLAGS: -C target-feature=+crt-static
 
-      # Named once, and used to find the FlashAttention archive built against it. This has to
-      # agree with CUDA_VERSION in flash-attn.yml, or the key below names an archive that nobody
-      # has published.
+      # Named once, so the toolkit installed below and the FlashAttention compiled against it
+      # cannot drift apart.
       CUDA_VERSION: "12.9.1"
-      PREBUILT_TAG: flash-attn-prebuilt
+
+      # install_flash_attn.sh sizes its own parallelism from /proc/meminfo or sysctl and finds
+      # neither under Git Bash, which would leave it compiling one kernel at a time. A runner has
+      # 4 cores and 16 GB, and one kernel costs about 3 GB in cicc, so three at once is what fits.
+      # Linux needs no such help: the script reads /proc/meminfo there and works it out.
+      FLASH_ATTN_PARALLEL: "3"
+
+      # The script runs a bare `cmake -S -B`, and bare on a runner that has Visual Studio means
+      # the Visual Studio generator: multi-config, so the archive would land in a Debug/ of its
+      # own rather than where the top-level CMakeLists looks -- and be built as Debug, since the
+      # script's --build names no --config. CMake reads this from the environment, so Ninja can
+      # be asked for without the script learning a new argument.
+      CMAKE_GENERATOR: Ninja
 
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +61,7 @@ jobs:
           # 12.8 is the floor, not a preference: flint/cuda/dequant.cu and gemm_nvfp4_cutlass.cu
           # include <cuda_fp4.h> unconditionally, and NVIDIA first shipped that header in 12.8.
           # 12.9 is what this is developed against.
-          cuda: "12.9.1"
+          cuda: ${{ env.CUDA_VERSION }}
           method: network
           # The _dev halves are the ones that carry the import libraries and headers, so cuBLAS
           # needs both of its to be linkable. cuRAND is no longer asked for: flint/cuda/rand.cu
@@ -64,34 +77,20 @@ jobs:
         shell: bash
         run: bash install_cutlass.sh
 
-      # Downloaded rather than built. FlashAttention is hours of nvcc that does not change
-      # between releases, so flash-attn.yml builds it once per revision and publishes it, and
-      # this asks for the archive belonging to the source in this checkout, by name. An archive
-      # built from anything else carries a different name and cannot be picked up by accident.
+      # Built here, from the source in this checkout, so what ships is what this commit says
+      # rather than whatever an archive published earlier happened to contain.
       #
-      # Only the archive is needed. The headers the main build includes are in this repository,
-      # and FlashAttention's pinned CUTLASS is a dependency of building the archive rather than
-      # of anything linking it.
-      - name: Download prebuilt FlashAttention
+      # This clones the CUTLASS revision FlashAttention is pinned against, which is a different
+      # one from the CUTLASS installed above -- two dependencies that happen to share a name.
+      - name: Build FlashAttention
+        working-directory: third_party
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          key=$(bash third_party/flash_attn_key.sh "${CUDA_VERSION}")
-          asset="flash_attn-windows-cuda${CUDA_VERSION}-${key}.zip"
-          echo "looking for ${asset}"
+        run: bash install_flash_attn.sh
 
-          if ! gh release download "${PREBUILT_TAG}" --pattern "${asset}" --dir prebuilt; then
-            echo "::error::No prebuilt FlashAttention published for key ${key}."
-            echo "::error::Run the 'FlashAttention prebuild' workflow on this commit, then tag again."
-            exit 1
-          fi
-
-          mkdir -p third_party/flash-attention/build
-          7z x "prebuilt/${asset}" -othird_party/flash-attention/build -y
-          cat third_party/flash-attention/build/MANIFEST.txt
-          test -f third_party/flash-attention/build/flash_attn.lib
+      # The top-level CMakeLists looks for exactly this, and would otherwise say so much later.
+      - name: Check FlashAttention built
+        shell: bash
+        run: test -f third_party/flash-attention/build/flash_attn.lib
 
       # Every architecture the toolkit can reach, unlike CI's single one: this is the build
       # somebody downloads, and it has to run on the card they own rather than the one here.
@@ -134,13 +133,15 @@ jobs:
   linux-cuda-flash-attn:
     name: Linux (CUDA + FlashAttention)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+
+    # Same reason as the Windows job: the FlashAttention kernels are the long pole here, not the
+    # library built after them.
+    timeout-minutes: 360
 
     env:
-      # Has to agree with CUDA_VERSION in flash-attn.yml, or the key below names an archive that
-      # nobody has published.
+      # Named once, so the toolkit installed below and the FlashAttention compiled against it
+      # cannot drift apart.
       CUDA_VERSION: "12.9.1"
-      PREBUILT_TAG: flash-attn-prebuilt
 
     steps:
       - uses: actions/checkout@v4
@@ -155,7 +156,7 @@ jobs:
       - name: Install CUDA
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          cuda: "12.9.1"
+          cuda: ${{ env.CUDA_VERSION }}
           method: network
           # Linux names cuBLAS differently from Windows: it is libcublas, and it takes no cuda-
           # prefix, which is what the second input is for. Unlike the FlashAttention archive,
@@ -169,11 +170,15 @@ jobs:
         shell: bash
         run: bash install_cutlass.sh
 
-      - name: Download prebuilt FlashAttention
+      - name: Build FlashAttention
+        working-directory: third_party
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/fetch_flash_attn.sh linux libflash_attn.a
+        run: bash install_flash_attn.sh
+
+      # The top-level CMakeLists looks for exactly this, and would otherwise say so much later.
+      - name: Check FlashAttention built
+        shell: bash
+        run: test -f third_party/flash-attention/build/libflash_attn.a
 
       - name: Configure
         run: >

@@ -53,8 +53,8 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, RunContext,
-    Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, Preloaded,
+    RunContext, Tensor, Value,
 };
 use crate::layers::{Conv2d, GroupNorm, Linear};
 
@@ -447,6 +447,7 @@ pub struct VaeDecoder {
     /// Where its weights are, which is where a latent has to be brought to meet them.
     device: Device,
     ir: Ir,
+    preloaded: Preloaded,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
     weights: Rc<dyn ParamSource>,
@@ -480,9 +481,13 @@ impl VaeDecoder {
         write_decoder(&config, float_type, device, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
+        let ir = Ir::compile(&graph, weights.residency());
+        let preloaded = ir.load(weights.as_ref())?;
+
         Ok(VaeDecoder {
             weights: Rc::clone(weights),
-            ir: Ir::compile(&graph),
+            preloaded,
+            ir,
             dtype: float_type,
             device,
             config,
@@ -535,7 +540,9 @@ impl VaeDecoder {
             )));
         }
 
-        let context = RunContext::new(&*self.weights).input("latent", latent);
+        let context = RunContext::new(&*self.weights)
+            .preloaded(&self.preloaded)
+            .input("latent", latent);
 
         output(&self.ir.run(&context)?, "image")
     }
@@ -553,6 +560,7 @@ pub struct VaeEncoder {
     /// Where its weights are, which is where a picture has to be brought to meet them.
     device: Device,
     ir: Ir,
+    preloaded: Preloaded,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
     weights: Rc<dyn ParamSource>,
@@ -583,9 +591,13 @@ impl VaeEncoder {
         write_encoder(&config, float_type, device, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
+        let ir = Ir::compile(&graph, weights.residency());
+        let preloaded = ir.load(weights.as_ref())?;
+
         Ok(VaeEncoder {
             weights: Rc::clone(weights),
-            ir: Ir::compile(&graph),
+            preloaded,
+            ir,
             dtype: float_type,
             device,
             config,
@@ -666,7 +678,9 @@ impl VaeEncoder {
             )));
         }
 
-        let context = RunContext::new(&*self.weights).input("image", image);
+        let context = RunContext::new(&*self.weights)
+            .preloaded(&self.preloaded)
+            .input("image", image);
         let outputs = self.ir.run(&context)?;
 
         Ok((output(&outputs, "mean")?, output(&outputs, "logvar")?))

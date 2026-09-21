@@ -131,6 +131,20 @@ FLAPI int32_t fl_tensor_from_data(
 
 /// Create another handle on the same tensor. The storage is shared rather than copied, exactly as
 /// it is between a tensor and its views.
+/// The bytes of a host tensor, to be read or written where they lie.
+///
+/// For filling storage from something that writes into a buffer of its own choosing -- a file
+/// read is the case this exists for -- without the copy fl_tensor_from_data() makes. The pointer
+/// is the tensor's own, so it is valid while the caller holds a handle on the tensor and stops
+/// being so when the last one goes.
+///
+/// Refused for a tensor on the device, which has no address the caller may touch, and for a
+/// non-contiguous one, whose bytes are not the run that `nbytes` would claim. Both the CPU and
+/// the page-locked host memory CUDA hands out are accepted; telling them apart is not this
+/// function's business, since what differs between them is who may DMA from the result.
+/// @param nbytes how many bytes the pointer addresses, which is the packed size of the tensor.
+FLAPI int32_t fl_tensor_host_data(fl_tensor_t tensor, void **out, int64_t *nbytes);
+
 FLAPI int32_t fl_tensor_clone(fl_tensor_t tensor, fl_tensor_t *out);
 
 /// Release a handle. Storage goes away once the last handle referring to it is destroyed. Passing

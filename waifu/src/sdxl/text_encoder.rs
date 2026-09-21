@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Extent, Graph, Ir, ParamSource, Preloaded, RunContext, Tensor, Value,
     WeightFormat,
 };
 use crate::layers::{Embedding, LayerNorm, Linear};
@@ -209,6 +209,7 @@ fn output(outputs: &[(String, Tensor)], name: &str) -> Result<Tensor> {
 pub struct ClipTextEncoder {
     config: ClipTextConfig,
     ir: Ir,
+    preloaded: Preloaded,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
     weights: Rc<dyn ParamSource>,
@@ -243,9 +244,13 @@ impl ClipTextEncoder {
         write(&config, float_type, has_projection, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
+        let ir = Ir::compile(&graph, weights.residency());
+        let preloaded = ir.load(weights.as_ref())?;
+
         Ok(ClipTextEncoder {
             weights: Rc::clone(weights),
-            ir: Ir::compile(&graph),
+            preloaded,
+            ir,
             config,
         })
     }
@@ -286,6 +291,7 @@ impl ClipTextEncoder {
         let eot = Tensor::from_i64(&[1], &[eot as i64])?.to_device(input_ids.device())?;
 
         let context = RunContext::new(&*self.weights)
+            .preloaded(&self.preloaded)
             .input("input_ids", input_ids)
             .input("eot", &eot);
 

@@ -51,8 +51,8 @@ use std::rc::Rc;
 use super::config::DitConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, RunContext,
-    Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, Preloaded,
+    RunContext, Tensor, Value,
 };
 use crate::layers::Linear;
 
@@ -397,6 +397,7 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
 pub struct Dit {
     config: DitConfig,
     ir: Ir,
+    preloaded: Preloaded,
     weights: Rc<dyn ParamSource>,
     float_type: DType,
 }
@@ -418,9 +419,13 @@ impl Dit {
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
+        let ir = Ir::compile(&graph, weights.residency());
+        let preloaded = ir.load(weights.as_ref())?;
+
         Ok(Dit {
             weights: Rc::clone(weights),
-            ir: Ir::compile(&graph),
+            preloaded,
+            ir,
             config,
             float_type,
         })
@@ -501,6 +506,7 @@ impl Dit {
         let placed = rope_table(&self.config, height / patch, width / patch, device)?;
 
         let run = RunContext::new(&*self.weights)
+            .preloaded(&self.preloaded)
             .input("tokens", &tokens)
             .input("context", context)
             .input("sinusoid", &sinusoid)
