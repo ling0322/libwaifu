@@ -33,6 +33,7 @@ use tiny_http::{Header, Method, Request, Response};
 
 use crate::cli::args::Runtime;
 use crate::cli::hub;
+use crate::cli::webui::machine;
 use crate::cli::webui::state::{Chosen, Doing, Shared};
 use crate::cli::webui::worker::{self, Command, Job, SayJob};
 use crate::{GenerationOptions, SpeechOptions};
@@ -88,6 +89,12 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
 
         (Method::Get, "/api/state") => json(shared.describe(models())),
         (Method::Get, "/api/progress") => json(shared.progress()),
+        // Apart from the state rather than inside it, because it answers a different question.
+        // The state is what this session has done and is a new one every time anything happens;
+        // what the machine has left changes on its own, with nothing here having done anything,
+        // and a revision counted up for every megabyte of memory somebody else's browser took
+        // would have the page reading the gallery back several times a second.
+        (Method::Get, "/api/machine") => json(machine::describe(shared.runtime())),
 
         (Method::Post, "/api/model") => choose_model(shared, request),
         (Method::Post, "/api/device") => use_device(shared, commands, request),

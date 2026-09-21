@@ -33,6 +33,7 @@
 //! being made is a picture. A terminal can say that one was written and where; it cannot show it.
 
 mod http;
+mod machine;
 mod state;
 mod worker;
 
