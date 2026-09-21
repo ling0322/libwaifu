@@ -54,27 +54,99 @@ cargo test --manifest-path waifu/Cargo.toml --test indextts_gpt
 .venv/bin/python tools/indextts_gpt_reference.py
 ```
 
-## What is missing: the generation loop
+## The generation loop
 
-This is the prefill — every position at once. Turning it into speech needs the autoregressive
-loop: one token at a time, each attending to everything before it, until `stop_mel_token` or
-`max_mel_tokens`.
+`Gpt` is the model with weights behind it and the loop on top: two graphs, compiled once and run
+many times.
 
-Done naively that is 1815 forward passes over a growing prefix, which is quadratic and not worth
-writing. What it wants is a **key-value cache**, and the pattern for one is already in this
-author's `libllm`: `llm/src/kv_cache.rs` has `KVCacheSpec` and a `KVCacheManager` that owns block
-pools per layer, and `flint` here already exports the two operators they are built on —
-`paged_attention` and `store_kv_cache`, with `paged_attention_available()` to say whether the
-build has them.
+| | reads | keeps |
+| --- | --- | --- |
+| `Gpt::prefill` | conditioning, text, start token — the whole prefix at once | every layer's keys and values |
+| `Gpt::step` | one token | the same, one position longer |
 
-So the remaining work is wiring, not invention:
+`Gpt::generate` is the loop over the two, with `Sampling` deciding what to draw and when to stop.
+Both are public, so a caller that wants a sampler this crate does not offer can run them itself.
 
-1. a cache sized from the model's shape — twenty-four layers, twenty heads, head width 64;
-2. a prefill that stores the prefix's keys and values rather than discarding them;
-3. a step that runs one position against the cache through `paged_attention`;
-4. sampling on top — `sample_with_params` and `repetition_penalty` are both already bound, and
-   the reference also offers typical sampling, which is not.
+### Why it is not paged attention
 
-Also missing: the exporter, and the emotion conformer and perceiver that produce `emo_vec` when
-it is not supplied. `inference_speech` takes `emo_vec` directly, so that path can be fed from
-outside while it is unwritten.
+An earlier draft of this page said the cache should be built on `paged_attention` and
+`store_kv_cache`, after the `KVCacheManager` pattern in the author's `libllm`. It is not, for two
+reasons.
+
+Those two are **eager** operators — `op.rs` says so in as many words, because an operation whose
+result is a change to somebody else's tensor has no way to say that in a graph. A stack built on
+them could not be one compiled `Ir`. And `paged_attention` rides on the FlashAttention kernels,
+so a build without them has no paged attention at all and no portable fallback: the fast suite,
+which is where this is tested, runs on the CPU.
+
+What is here instead is the cache as ordinary graph values. A step concatenates its own keys onto
+the history and attends over the lot, and `flint`'s causal mask is **aligned to the bottom right
+of the score matrix** — so one query against a longer history sees all of it with `causal` left
+true, and the same block serves the prefill and the step with no second path written. The
+concatenation copies the history once per step, which is the same order of memory traffic the
+attention beside it was always going to spend reading it.
+
+What the cache saves is the rest: twenty-four layers of projections and a head eight thousand
+wide, over the whole prefix, at every one of up to 1815 steps.
+
+### Two places it is easy to be wrong
+
+The head scores the **last position only**, taken before the matmul rather than after. A prefill
+over a six-hundred-token sentence would otherwise compute six hundred rows of an eight-thousand-
+wide projection and sample one of them.
+
+The start token is a mel token at **position zero**, so the first token generated is at position
+one. A loop that counts its own output from zero puts every token one place from where the model
+was trained to find it — and that is the quiet one, because the reading still sounds like speech.
+
+### What the loop is checked against
+
+The three probes above compare against GPT-2. The loop cannot: there is no reference constant for
+a reading. What a cached step has to satisfy instead is that it says what the whole sequence says,
+read in one pass — an invariant that needs no second implementation to state.
+
+Two things that cost time and are worth knowing before touching those tests:
+
+- **The scores, not the tokens.** A token is an argmax, and an argmax over a forty-token alphabet
+  survives a great deal of being wrong. Every mutation this was written against — the history
+  concatenated on the wrong side, a mel position off by one, the prefix assembled in the wrong
+  order — left the argmax alone and moved the scores.
+- **The weights have to scatter.** `Filled` sweeps one sine per parameter, so every row of a
+  projection samples the same curve, every key it produces points nearly the same way, and the
+  softmax over them is flat. A flat softmax is an average, and an average does not care what order
+  its keys arrived in: the whole cache test passed with the history concatenated backwards. The
+  loop tests draw their weights by xorshift instead. Nothing there is compared against Python, so
+  the only thing the numbers have to be is different from one another.
+
+### And against the released weights
+
+`tools/indextts_gpt_exporter.py` writes the 301 tensors the graph reads out of the release's
+`gpt.pth`, renaming and folding nothing — the module was written against the checkpoint's own
+names, so a tensor that turns out to be wrong can be compared with the one it came from.
+
+```bash
+.venv/bin/python tools/indextts_gpt_exporter.py \
+    -checkpoint ~/.cache/libwaifu/indextts25/gpt.pth \
+    -output models/indextts25-gpt.safetensors
+.venv/bin/python tools/indextts_gpt_real_reference.py
+
+cargo test --release --manifest-path waifu/Cargo.toml \
+    --test indextts_gpt -- --ignored --test-threads=1
+```
+
+That test is worth having for one reason the fast ones cannot cover: **weights made up from their
+own names agree with any transposition of themselves that is self-consistent**, and the `Filled`
+source answers every shape it is asked for. `lang_embedding` is the case that actually happened —
+it was declared with nine rows against a table that has a hundred and seven, every fast test
+passed, and only the real checkpoint said otherwise. 107 is `len(LANGUAGE_DICT) + 1`: Whisper's
+list of 106 languages, most of which this model was never trained to say.
+
+## What is still missing
+
+- The **emotion conformer and perceiver** that produce `emo_vec` when it is not supplied — four
+  stages, `emo_conditioning_encoder` → `emo_perceiver_encoder` → `emovec_layer` → `emo_layer`, and
+  155 of the checkpoint's tensors. `prefill` takes the finished 1280-wide vector directly, which
+  is the path `inference_speech` takes when it is given one, so the model says a sentence without
+  them.
+- **Typical sampling**, which the reference offers and `flint` has no operator for. It is left out
+  rather than approximated with one that is nearby.

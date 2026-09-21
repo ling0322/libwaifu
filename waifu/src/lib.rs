@@ -67,6 +67,10 @@ mod qwen_vae;
 mod reader;
 /// IndexTTS-2.5's GPT: text and a voice in, the semantic tokens S2Mel reads out.
 pub mod indextts_gpt;
+/// IndexTTS-2.5's text frontend: writing out what a number is read as, so the model never sees a
+/// digit. Beside [`indextts_gpt`] rather than at the crate root because it belongs to that
+/// pipeline and not to this crate -- a diffusion model has no text to normalize.
+pub mod indextts_normalize;
 /// The semantic codec: w2v-bert's features in, the discrete tokens the GPT reads out.
 pub mod semantic_codec;
 /// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.

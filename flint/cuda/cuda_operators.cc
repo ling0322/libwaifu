@@ -405,6 +405,26 @@ void CudaOperators::resetPeakMemoryStats() {
 #endif
 }
 
+void CudaOperators::releaseUnusedMemory() {
+#ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
+  // The pool is told at startup never to give anything back on its own (its release threshold is
+  // UINT64_MAX), because a run that had to ask the driver for the blocks the last run just freed
+  // would pay for the same memory twice. So a tensor that is gone is memory this process still
+  // holds, and `nvidia-smi` still counts it -- and this is the one call that ends that.
+  //
+  // Synchronized first because a free is stream-ordered: `cudaFreeAsync` hands the block back to
+  // the pool at the point the stream reaches it, not at the point it was called, and a trim that
+  // ran ahead of the stream would walk past blocks that are about to be free and hand back
+  // whatever it happened to find. There is nothing to wait for here anyway -- what this is called
+  // after is the end of a run.
+  LL_CHECK_CUDA_STATUS(cudaDeviceSynchronize());
+
+  cudaMemPool_t memoryPool;
+  LL_CHECK_CUDA_STATUS(cudaDeviceGetDefaultMemPool(&memoryPool, 0));
+  LL_CHECK_CUDA_STATUS(cudaMemPoolTrimTo(memoryPool, 0));
+#endif
+}
+
 void CudaOperators::copy(Tensor src, Tensor dest) {
   CHECK(src.getDevice().getType() == Device::kCuda);
   CHECK(dest.getDevice().getType() == Device::kCuda);

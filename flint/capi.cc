@@ -1226,3 +1226,10 @@ int32_t fl_memory_reset_peak_stats(fl_device_type_t device) {
     return clearError();
   });
 }
+
+int32_t fl_memory_release_unused(fl_device_type_t device) {
+  return guard([&]() {
+    fl::MemorySnapshot::releaseUnused(toDevice(device));
+    return clearError();
+  });
+}

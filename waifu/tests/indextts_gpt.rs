@@ -17,10 +17,23 @@
 //!
 //! Three probes, kept apart so a failure says which part: the stack, the head on top of it, and
 //! the embeddings in front of it.
+//!
+//! The loop on top of those is checked differently, and deliberately so. There is no reference
+//! constant for a reading: what a cached step has to satisfy is that it says what the whole
+//! sequence says, read in one pass, at every position. That invariant needs no second
+//! implementation to state, and it is what the three probes above cannot reach -- they score a
+//! sequence handed to them whole, and a cache is the one thing that is only wrong when a
+//! sequence arrives a piece at a time.
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value};
-use waifu::indextts_gpt::{self, Config};
-use waifu::Result;
+use std::ops::ControlFlow;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use waifu::flint::{
+    resident, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value,
+};
+use waifu::indextts_gpt::{self, Config, Gpt, Sampling};
+use waifu::{ParamFile, Result};
 
 const CPU: Device = Device::Cpu;
 const F32: waifu::DType = waifu::DType::Float;
@@ -31,6 +44,9 @@ const HEADS: i32 = 4;
 const NUMBER_MEL_CODES: i32 = 40;
 const NUMBER_TEXT_TOKENS: i32 = 50;
 const MAX_TEXT_TOKENS: i32 = 30;
+const MAX_MEL_TOKENS: i32 = 200;
+const MEL_POSITIONS: i32 = MAX_MEL_TOKENS + 3;
+const SPEAKER_DIM: i32 = 24;
 const LENGTH: i32 = 12;
 
 const WEIGHT_SCALE: f64 = 0.25;
@@ -81,13 +97,15 @@ fn config() -> Config {
         heads: HEADS,
         number_mel_codes: NUMBER_MEL_CODES,
         number_text_tokens: NUMBER_TEXT_TOKENS,
-        max_mel_tokens: 200,
+        max_mel_tokens: MAX_MEL_TOKENS,
         max_text_tokens: MAX_TEXT_TOKENS,
         start_mel_token: 38,
         stop_mel_token: 39,
         start_text_token: 0,
         stop_text_token: 1,
         languages: 9,
+        mel_positions: MEL_POSITIONS,
+        speaker_dim: SPEAKER_DIM,
         layer_norm_eps: 1e-5,
     }
 }
@@ -123,8 +141,8 @@ impl ParamSource for Filled {
         CPU
     }
 
-    /// Kept: a weight made out of its name costs nothing to keep and there is no package
-    /// behind it to stream one out of.
+    /// Kept: a weight made out of its name costs nothing to keep, and there is no package behind
+    /// it to stream one out of.
     fn residency(&self) -> Residency {
         Residency::Device
     }
@@ -206,7 +224,7 @@ fn the_backbone_is_gpt2() {
     let config = config();
 
     let (shape, got) = run(
-        |g| indextts_gpt::backbone(g, g.input("x"), &config, LENGTH, F32, CPU).unwrap(),
+        |g| indextts_gpt::backbone(g, g.input("x"), &config, F32, CPU).unwrap(),
         &[("x", &x)],
         HIDDEN.len(),
     );
@@ -222,7 +240,7 @@ fn the_head_scores_the_alphabet() {
     let config = config();
 
     let (shape, got) = run(
-        |g| indextts_gpt::graph(g, g.input("x"), &config, LENGTH, F32, CPU).unwrap(),
+        |g| indextts_gpt::graph(g, g.input("x"), &config, F32, CPU).unwrap(),
         &[("x", &x)],
         SCORES.len(),
     );
@@ -266,4 +284,719 @@ fn the_text_embeddings_add_all_three() {
 
     assert_eq!(shape, vec![1, LENGTH, MODEL_DIM]);
     close(&got, &EMBEDDED, "text embeddings");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The loop.
+//
+// Everything below builds the same small model twice: once as `Gpt`, which reads the prefix and
+// then one token at a time against a cache, and once as a single pass over the whole sequence.
+// The two have to agree, and the second is built out of the same public graph functions rather
+// than a copy of them -- what is under test is the cache and the bookkeeping around it, not the
+// arithmetic, which the three probes above already hold against GPT-2.
+
+/// Where the model's weights sit inside the graph, so that `Gpt` and the pass it is checked
+/// against name the same parameters. Any name does, as long as both use it.
+const MODEL: &str = "gpt2";
+
+/// Weights that scatter, which the three probes above deliberately do not have.
+///
+/// `Filled` walks one sine per parameter, so every row of a projection is a sample of the same
+/// curve and every key it produces points very nearly the same way. Attention over keys that are
+/// all alike is attention with a flat softmax, and a flat softmax is an average -- which does not
+/// care what order its keys arrived in. A cache test run on those weights passes whatever the
+/// cache does with them: concatenating the history on the wrong side of the new token moved the
+/// last hidden state by one part in a million, against a tolerance a thousand times wider.
+///
+/// So these tests get their own weights, drawn by xorshift rather than swept. Nothing here is
+/// compared against Python -- both sides of every comparison below are this crate's -- so the
+/// only thing the numbers have to be is different from each other.
+struct Scattered;
+
+fn scatter(name: &str, count: usize, scale: f64) -> Vec<f32> {
+    let mut state = hash32(name) | 1;
+
+    (0..count)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+
+            ((f64::from(state) / f64::from(u32::MAX) * 2.0 - 1.0) * scale) as f32
+        })
+        .collect()
+}
+
+impl ParamSource for Scattered {
+    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
+        let count: usize = shape.iter().map(|size| *size as usize).product();
+
+        Ok(Tensor::from_f32(
+            shape,
+            &scatter(name, count, WEIGHT_SCALE),
+        )?)
+    }
+
+    /// Made on the host, which is where these tests run.
+    fn device(&self) -> Device {
+        CPU
+    }
+
+    /// Kept: a weight made out of its name costs nothing to keep, and there is no package behind
+    /// it to stream one out of.
+    fn residency(&self) -> Residency {
+        Residency::Device
+    }
+
+    fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
+        None
+    }
+
+    fn has(&self, _: &str) -> bool {
+        true
+    }
+
+    fn check(&self, _: &str, _: &[i32]) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// What language every reading here is in. Not zero, so that a language embedding dropped on the
+/// floor shows up as a difference rather than as the row that was going to be read anyway.
+const LANGUAGE: i32 = 3;
+
+/// A voice and a feeling, neither of which these tests care about beyond their shape.
+fn speaker_and_emotion() -> (Tensor, Tensor) {
+    (
+        Tensor::from_f32(
+            &[1, SPEAKER_DIM],
+            &scatter("speaker", SPEAKER_DIM as usize, INPUT_SCALE),
+        )
+        .unwrap(),
+        Tensor::from_f32(
+            &[1, MODEL_DIM],
+            &scatter("emotion", MODEL_DIM as usize, INPUT_SCALE),
+        )
+        .unwrap(),
+    )
+}
+
+/// The sentence every test here says, as ids that are neither of the two the model reserves.
+fn sentence() -> Vec<i32> {
+    (2..9).collect()
+}
+
+fn model() -> Gpt {
+    let weights: Rc<dyn ParamSource> = Rc::new(Scattered);
+
+    Gpt::build(config(), MODEL, &weights, F32, CPU).unwrap()
+}
+
+/// Every position of `[ conditioning ][ text ][ start ][ said... ]`, scored in one pass.
+///
+/// The prefix is assembled here the way `Gpt` assembles it, out of the same three public
+/// functions, and the whole mel sequence goes in at once -- which is exactly what a cache is
+/// supposed to make unnecessary, and therefore what it has to match. What comes back is where the
+/// prefix ends and one row of scores per position.
+fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
+    let config = config();
+    let (speaker, emotion) = speaker_and_emotion();
+
+    let wrapped: Vec<i64> = std::iter::once(config.start_text_token as i64)
+        .chain(sentence().iter().map(|id| i64::from(*id)))
+        .chain(std::iter::once(config.stop_text_token as i64))
+        .collect();
+    let text_length = wrapped.len() as i32;
+    let text = Tensor::from_i64(&[1, text_length], &wrapped).unwrap();
+    let text_positions = Tensor::from_i64(
+        &[text_length],
+        &(0..i64::from(text_length)).collect::<Vec<i64>>(),
+    )
+    .unwrap();
+    let language = Tensor::from_i64(&[1], &[i64::from(LANGUAGE)]).unwrap();
+
+    // The start token leads the mel sequence at position zero, so what was said follows it from
+    // position one.
+    let mel: Vec<i64> = std::iter::once(config.start_mel_token as i64)
+        .chain(said.iter().map(|id| i64::from(*id)))
+        .collect();
+    let mel_length = mel.len() as i32;
+    let mel_tokens = Tensor::from_i64(&[1, mel_length], &mel).unwrap();
+    let mel_positions = Tensor::from_i64(
+        &[mel_length],
+        &(0..i64::from(mel_length)).collect::<Vec<i64>>(),
+    )
+    .unwrap();
+
+    let g = Graph::new();
+    let sub = g.subgraph(MODEL);
+
+    let conditioned = indextts_gpt::conditioning(
+        &sub,
+        sub.input("speaker"),
+        sub.input("emotion"),
+        &config,
+        SPEAKER_DIM,
+        F32,
+        CPU,
+    )
+    .unwrap();
+    let embedded = indextts_gpt::text_embeddings(
+        &sub,
+        sub.input("text"),
+        sub.input("text_positions"),
+        sub.input("language"),
+        &config,
+    );
+    let voiced =
+        indextts_gpt::mel_embeddings(&sub, sub.input("mel"), sub.input("mel_positions"), &config);
+
+    let whole = sub.cat(sub.cat(conditioned, embedded, 1), voiced, 1);
+    g.output(
+        "logits",
+        indextts_gpt::graph(&sub, whole, &config, F32, CPU).unwrap(),
+    );
+
+    let filled = Scattered;
+    let ir = Ir::compile(&g, Residency::Device);
+    let preloaded = ir.load(&filled).unwrap();
+    let outputs = ir
+        .run(
+            &RunContext::new(&filled)
+                .preloaded(&preloaded)
+                .input("speaker", &speaker)
+                .input("emotion", &emotion)
+                .input("text", &text)
+                .input("text_positions", &text_positions)
+                .input("language", &language)
+                .input("mel", &mel_tokens)
+                .input("mel_positions", &mel_positions),
+        )
+        .unwrap();
+
+    let logits = outputs[0].1.to_device(CPU).unwrap();
+    let rows = logits.shape()[1];
+    let values = logits.to_vec_f32().unwrap();
+
+    let by_row = (0..rows as usize)
+        .map(|row| {
+            let begin = row * NUMBER_MEL_CODES as usize;
+            values[begin..begin + NUMBER_MEL_CODES as usize].to_vec()
+        })
+        .collect();
+
+    // Where the prefix ends: three rows of conditioning, the wrapped text, and the start token.
+    (
+        indextts_gpt::Config::CONDITIONING_ROWS + text_length + 1,
+        by_row,
+    )
+}
+
+/// The same number, and not merely a close one.
+///
+/// Not [`close`]: that tolerance is for a comparison against PyTorch, where two libraries summing
+/// the same values in two orders is the whole of the difference. Both sides of every comparison
+/// below are this crate, in f32, on one device, running the same operators over the same weights.
+/// They agree to about a hundred-millionth, and anything looser stops being a test of the cache:
+/// the order a step concatenates its history in moves them by 3e-3, which `close` would have
+/// caught by a hair and this catches by a factor of three hundred.
+fn same_numbers(got: &[f32], want: &[f32], what: &str) {
+    assert_eq!(got.len(), want.len(), "{what}: lengths differ");
+
+    let worst = got
+        .iter()
+        .zip(want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+
+    assert!(worst < 1e-5, "{what}: worst difference is {worst}");
+}
+
+/// The cache's arithmetic, to the last digit rather than to the token.
+///
+/// A sequence run whole, against the same sequence run as all-but-the-last and then one step
+/// against what that kept. The last position's hidden state has to be the same number either way.
+///
+/// This is separate from the reading below it, and stricter on purpose. A reading compares the
+/// tokens it chose, and a token is an argmax: it survives a cache that is wrong by less than the
+/// gap between the best score and the second best. Swapping the order a step concatenates its own
+/// keys onto the history -- so that every key is paired with somebody else's value -- is exactly
+/// that kind of wrong, and it changes these numbers in the third digit while leaving the argmax
+/// of a forty-token alphabet alone.
+#[test]
+fn a_step_against_the_cache_is_the_same_arithmetic() {
+    let config = config();
+
+    // One sequence, read two ways. Anything does as long as both ways see the same rows.
+    let whole = Tensor::from_f32(
+        &[1, LENGTH, MODEL_DIM],
+        &scatter("sequence", (LENGTH * MODEL_DIM) as usize, INPUT_SCALE),
+    )
+    .unwrap();
+    let before = whole.slice(1, 0, LENGTH - 1).unwrap().contiguous().unwrap();
+    let last = whole
+        .slice(1, LENGTH - 1, LENGTH)
+        .unwrap()
+        .contiguous()
+        .unwrap();
+
+    // All at once.
+    let g = Graph::new();
+    let hidden = indextts_gpt::backbone(&g, g.input("x"), &config, F32, CPU).unwrap();
+    g.output("hidden", hidden);
+
+    let filled = Scattered;
+    let whole_ir = Ir::compile(&g, Residency::Device);
+    let whole_weights = whole_ir.load(&filled).unwrap();
+    let at_once = whole_ir
+        .run(
+            &RunContext::new(&filled)
+                .preloaded(&whole_weights)
+                .input("x", &whole),
+        )
+        .unwrap()[0]
+        .1
+        .to_device(CPU)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
+
+    // And a piece at a time: everything but the last row, keeping what each layer computed.
+    let g = Graph::new();
+    let (hidden, kept) =
+        indextts_gpt::backbone_keeping(&g, g.input("x"), None, &config, F32, CPU).unwrap();
+    g.output("hidden", hidden);
+    for (index, one) in kept.iter().enumerate() {
+        g.output(&format!("k{index}"), one.keys);
+        g.output(&format!("v{index}"), one.values);
+    }
+
+    let prefill_ir = Ir::compile(&g, Residency::Device);
+    let prefill_weights = prefill_ir.load(&filled).unwrap();
+    let prefill = prefill_ir
+        .run(
+            &RunContext::new(&filled)
+                .preloaded(&prefill_weights)
+                .input("x", &before),
+        )
+        .unwrap();
+    let find = |wanted: &str| -> Tensor {
+        prefill
+            .iter()
+            .find(|(name, _)| name == wanted)
+            .map(|(_, tensor)| tensor.clone())
+            .unwrap()
+    };
+
+    // Then the last row alone, against what was kept.
+    let g = Graph::new();
+    let past: Vec<indextts_gpt::Kept> = (0..LAYERS)
+        .map(|index| indextts_gpt::Kept {
+            keys: g.input(&format!("past_k{index}")),
+            values: g.input(&format!("past_v{index}")),
+        })
+        .collect();
+    let (hidden, _) =
+        indextts_gpt::backbone_keeping(&g, g.input("x"), Some(&past), &config, F32, CPU).unwrap();
+    g.output("hidden", hidden);
+
+    let names: Vec<(String, String, Tensor, Tensor)> = (0..LAYERS)
+        .map(|index| {
+            (
+                format!("past_k{index}"),
+                format!("past_v{index}"),
+                find(&format!("k{index}")),
+                find(&format!("v{index}")),
+            )
+        })
+        .collect();
+
+    let mut context = RunContext::new(&filled).input("x", &last);
+    for (keys, values, k, v) in &names {
+        context = context.input(keys, k).input(values, v);
+    }
+
+    let step_ir = Ir::compile(&g, Residency::Device);
+    let step_weights = step_ir.load(&filled).unwrap();
+    let stepped = step_ir.run(&context.preloaded(&step_weights)).unwrap()[0]
+        .1
+        .to_device(CPU)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
+
+    // The last row of the whole pass, against the only row the step produced.
+    let width = MODEL_DIM as usize;
+    let tail = &at_once[at_once.len() - width..];
+
+    same_numbers(&stepped, tail, "one step against the cache");
+}
+
+/// The whole of what a key-value cache has to be true for.
+///
+/// `Gpt` reads the prefix once and then one token at a time, each attending to a cache rather
+/// than to a sequence. This runs the same tokens through as one sequence and requires that every
+/// position chose the same token.
+///
+/// It is worth saying what each way of being wrong looks like, because all of them return a
+/// tensor of the right shape and none of them is visible in a prefill. Concatenating the cache
+/// along the wrong axis mixes heads into positions. Masking a single query against its own length
+/// rather than against the history's leaves it reading only itself. And a mel position counted
+/// from zero instead of from one puts every token one place to the left of where the model was
+/// trained to find it -- the quietest of the three, since the reading still sounds like speech
+/// and is simply the wrong speech.
+#[test]
+fn the_cache_says_what_the_whole_sequence_says() {
+    let model = model();
+    let (speaker, emotion) = speaker_and_emotion();
+
+    // Fixed tokens rather than the ones this model would choose. What is under test holds for
+    // whatever is put through it, and a reading that reads back its own output can agree with
+    // itself about the wrong thing.
+    let spoken = [5, 11, 3, 27, 5];
+    let (prefix, rows) = scored_in_one_pass(&spoken);
+
+    let mut reading = model
+        .prefill(&speaker, &emotion, &sentence(), LANGUAGE)
+        .unwrap();
+
+    assert_eq!(
+        reading.len().unwrap(),
+        prefix,
+        "the prefill read a different number of positions than one whole pass did"
+    );
+
+    for (index, token) in spoken.iter().enumerate() {
+        // The row that scored a step is the one before the token it chose: the prefix's last row
+        // scored the first token, and the row holding token `i` scores token `i + 1`.
+        let row = (prefix - 1 + index as i32) as usize;
+        let got = reading
+            .scores()
+            .to_device(CPU)
+            .unwrap()
+            .to_vec_f32()
+            .unwrap();
+
+        same_numbers(&got, &rows[row], &format!("the scores at position {row}"));
+
+        // The start token was position zero, so the first token said is position one.
+        reading = model.step(&reading, *token, index as i32 + 1).unwrap();
+
+        assert_eq!(
+            reading.len().unwrap(),
+            prefix + index as i32 + 1,
+            "the cache did not grow by exactly one position"
+        );
+    }
+}
+
+/// A reading that is asked to stop hands back nothing, rather than half a sentence.
+///
+/// `None` and not an error, and not the tokens so far: the same shape `Voice::speak` has, for the
+/// same reason.
+#[test]
+fn a_reading_that_is_stopped_says_nothing() {
+    let (speaker, emotion) = speaker_and_emotion();
+    let mut seen = 0;
+
+    let said = model()
+        .generate(
+            &speaker,
+            &emotion,
+            &sentence(),
+            LANGUAGE,
+            &Sampling::greedy(20),
+            &mut |done| {
+                seen = done;
+                if done >= 3 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+        )
+        .unwrap();
+
+    assert_eq!(said, None);
+    assert_eq!(seen, 3, "the stop was noticed late");
+}
+
+/// `max_tokens` is a limit, and it is the one a caller gave rather than the one the model has.
+#[test]
+fn a_reading_stops_at_the_length_it_was_given() {
+    let (speaker, emotion) = speaker_and_emotion();
+
+    let said = model()
+        .generate(
+            &speaker,
+            &emotion,
+            &sentence(),
+            LANGUAGE,
+            &Sampling::greedy(4),
+            &mut |_| ControlFlow::Continue(()),
+        )
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        said.len() <= 4,
+        "asked for at most four tokens and got {}",
+        said.len()
+    );
+}
+
+/// Greedy is the setting that repeats, and a cache is a thing that can quietly fail to be reset
+/// between readings.
+#[test]
+fn greedy_says_the_same_thing_twice() {
+    let (speaker, emotion) = speaker_and_emotion();
+    let model = model();
+
+    let once = model
+        .generate(
+            &speaker,
+            &emotion,
+            &sentence(),
+            LANGUAGE,
+            &Sampling::greedy(5),
+            &mut |_| ControlFlow::Continue(()),
+        )
+        .unwrap();
+    let twice = model
+        .generate(
+            &speaker,
+            &emotion,
+            &sentence(),
+            LANGUAGE,
+            &Sampling::greedy(5),
+            &mut |_| ControlFlow::Continue(()),
+        )
+        .unwrap();
+
+    assert_eq!(once, twice);
+}
+
+/// Sampling settings the operator would refuse are refused here instead.
+///
+/// The draw states its preconditions as `CHECK`s, and a `CHECK` ends the process without
+/// unwinding. So each of these has to come back as an error rather than as a reading that never
+/// returns -- which is a thing a test can only show by not being killed.
+#[test]
+fn settings_the_sampler_cannot_use_are_refused() {
+    let (speaker, emotion) = speaker_and_emotion();
+    let model = model();
+
+    let refusal = |sampling: Sampling| -> String {
+        model
+            .generate(
+                &speaker,
+                &emotion,
+                &sentence(),
+                LANGUAGE,
+                &sampling,
+                &mut |_| ControlFlow::Continue(()),
+            )
+            .unwrap_err()
+            .to_string()
+    };
+
+    assert!(refusal(Sampling {
+        temperature: -1.0,
+        ..Sampling::greedy(4)
+    })
+    .contains("temperature"));
+
+    assert!(refusal(Sampling {
+        top_p: 0.0,
+        ..Sampling::greedy(4)
+    })
+    .contains("top_p"));
+
+    assert!(refusal(Sampling {
+        top_p: 1.5,
+        ..Sampling::greedy(4)
+    })
+    .contains("top_p"));
+
+    assert!(refusal(Sampling {
+        repetition_penalty: 0.0,
+        ..Sampling::greedy(4)
+    })
+    .contains("repetition penalty"));
+
+    // And one that is only unusual: more of the alphabet than there is, which is trimmed rather
+    // than refused, because a caller asking for thirty of eight thousand means thirty.
+    let said = model
+        .generate(
+            &speaker,
+            &emotion,
+            &sentence(),
+            LANGUAGE,
+            &Sampling {
+                top_k: NUMBER_MEL_CODES * 10,
+                ..Sampling::greedy(3)
+            },
+            &mut |_| ControlFlow::Continue(()),
+        )
+        .unwrap();
+
+    assert!(said.is_some());
+}
+
+/// A sentence longer than the model reads says so, rather than running off the position table.
+#[test]
+fn a_sentence_too_long_to_read_is_refused() {
+    let (speaker, emotion) = speaker_and_emotion();
+    let long: Vec<i32> = (0..MAX_TEXT_TOKENS + 1).map(|i| i % 40 + 2).collect();
+
+    let error = model()
+        .generate(
+            &speaker,
+            &emotion,
+            &long,
+            LANGUAGE,
+            &Sampling::greedy(4),
+            &mut |_| ControlFlow::Continue(()),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("at most"),
+        "the refusal does not say what the limit is: {error}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The released 574 M parameter GPT, which needs the checkpoint exported first
+// ---------------------------------------------------------------------------------------------
+//
+// Everything above runs on weights made up from their own names, and there is a whole class of
+// mistake such weights cannot catch: a model filled by one rule agrees with any transposition of
+// itself that is self-consistent, and a parameter source that answers every shape agrees with
+// whatever it is asked for. `lang_embedding` is the example that actually happened -- it was
+// declared with nine rows against a table that has a hundred and seven, and every fast test
+// passed.
+//
+// Generated by tools/indextts_gpt_real_reference.py -- the released 574 M GPT.
+// Prefix of 13 positions, then 3 tokens stepped.
+
+/// The sentence, as ids of the released vocabulary. The same ones the reference script uses.
+const REAL_TEXT: [i32; 7] = [3402, 118, 7719, 45, 2210, 908, 31];
+const REAL_LANGUAGE: i32 = 3;
+
+/// `prefill_scores`, (1, 8194) -- 8 of 8194, at [0, 1031, 2062, 3093, 4124, 5155, 6186, 7217].
+const PREFILL_SCORES: [f32; 8] = [
+    2.210242e+00,
+    1.547535e+00,
+    -2.320392e+00,
+    -1.011748e+00,
+    2.856769e+00,
+    -2.649531e+00,
+    9.163681e-01,
+    3.962092e+00,
+];
+
+/// The tokens a greedy reading says first, from the released weights.
+const SAID: [i32; 3] = [513, 4451, 4451];
+
+/// `stepped_scores`, (1, 8194) -- 8 of 8194, at [0, 1031, 2062, 3093, 4124, 5155, 6186, 7217].
+const STEPPED_SCORES: [f32; 8] = [
+    -2.862251e+00,
+    -1.767841e+00,
+    -4.919994e+00,
+    -1.273593e+00,
+    1.006057e+00,
+    -1.040757e+00,
+    -3.192563e+00,
+    6.015072e+00,
+];
+
+/// Where `tools/indextts_gpt_exporter.py` was told to put the file this reads.
+fn models_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
+}
+
+fn exported(name: &str) -> ParamFile {
+    ParamFile::open(&[models_dir().join(name)]).unwrap_or_else(|error| {
+        panic!(
+            "{name}: {error}\nExport it first:\n    .venv/bin/python \
+             tools/indextts_gpt_exporter.py -output models/indextts25-gpt.safetensors"
+        )
+    })
+}
+
+/// Probe a row of scores at the same places the reference script printed.
+fn probed(scores: &Tensor, limit: usize) -> Vec<f32> {
+    let values = scores.to_device(CPU).unwrap().to_vec_f32().unwrap();
+
+    probe_indices(values.len(), limit)
+        .iter()
+        .map(|index| values[*index])
+        .collect()
+}
+
+/// The released GPT, read the way the checkpoint stores it.
+///
+/// One test and not three, because it loads 574 M parameters and the harness gives every test its
+/// own thread: three tests would read the file three times. So it asks three questions of one
+/// model -- the prefix, the tokens a greedy reading chooses, and the scores after the cache has
+/// been stepped.
+#[test]
+#[ignore = "needs the exported IndexTTS-2.5 GPT in models/"]
+fn the_released_gpt_is_the_released_gpt() {
+    // `resident` reads the whole file onto the device once. 574 M parameters is 2.2 GB, which
+    // is what this machine has room for; a package too large for that is what `Residency` exists
+    // to stream instead, and nothing in this test would change but the call.
+    let file = exported("indextts25-gpt.safetensors");
+    let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, CPU).unwrap());
+    let model = Gpt::build(Config::indextts(), "", &weights, F32, CPU).unwrap();
+
+    // The same two vectors the reference was handed, filled from their own names. There is no
+    // recording here: what is being compared is that two implementations read the same weights
+    // the same way, and both sides see the identical vector.
+    let speaker = Tensor::from_f32(&[1, 192], &fill("speaker", 192, INPUT_SCALE)).unwrap();
+    let emotion = Tensor::from_f32(&[1, 1280], &fill("emotion", 1280, INPUT_SCALE)).unwrap();
+
+    let mut reading = model
+        .prefill(&speaker, &emotion, &REAL_TEXT, REAL_LANGUAGE)
+        .unwrap();
+
+    // Three conditioning rows, the text wrapped in its two tokens, and the start token.
+    assert_eq!(reading.len().unwrap(), 3 + REAL_TEXT.len() as i32 + 2 + 1);
+    close(
+        &probed(reading.scores(), PREFILL_SCORES.len()),
+        &PREFILL_SCORES,
+        "the released prefill",
+    );
+
+    // Then the cache, on real weights: step what a greedy reading would say, and require both the
+    // tokens and the scores that follow them.
+    for (index, token) in SAID.iter().enumerate() {
+        let values = reading
+            .scores()
+            .to_device(CPU)
+            .unwrap()
+            .to_vec_f32()
+            .unwrap();
+        let mut best = 0;
+        for (at, value) in values.iter().enumerate() {
+            if *value > values[best] {
+                best = at;
+            }
+        }
+
+        assert_eq!(
+            best as i32, *token,
+            "token {index}: the released weights chose {best} and the reference chose {token}"
+        );
+
+        reading = model.step(&reading, *token, index as i32 + 1).unwrap();
+    }
+
+    close(
+        &probed(reading.scores(), STEPPED_SCORES.len()),
+        &STEPPED_SCORES,
+        "the released scores after three steps",
+    );
 }

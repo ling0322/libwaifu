@@ -643,6 +643,13 @@ FLAPI int32_t fl_memory_capture(fl_device_type_t device, fl_memory_snapshot_t *o
 /// what happens from here.
 FLAPI int32_t fl_memory_reset_peak_stats(fl_device_type_t device);
 
+/// Give every byte of `device` that no tensor is using back to the driver, so that another process
+/// may have it. A device whose allocator hands memory back as each tensor goes does nothing. Worth
+/// calling only where something large has just been let go of and nothing is about to ask for it
+/// again -- a model taken off the card -- since it hands back the blocks the next allocation would
+/// otherwise have reused.
+FLAPI int32_t fl_memory_release_unused(fl_device_type_t device);
+
 /// What fl_set_fatal_handler() registers.
 typedef void (*fl_fatal_handler_t)(void);
 

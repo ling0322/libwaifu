@@ -377,6 +377,20 @@ impl MemorySnapshot {
         init();
         check(unsafe { ffi::fl_memory_reset_peak_stats(device as i32) })
     }
+
+    /// Give every byte of `device` that no tensor holds back to the driver, which is what makes
+    /// [`free`](MemorySnapshot::free) count it and what lets another process have it.
+    ///
+    /// For after a model has been let go of and nothing is about to want it back. It is the wrong
+    /// call between two runs of one model: what it hands over is the memory the next run would
+    /// have taken straight out of the allocator, and that run then waits for the driver again.
+    ///
+    /// A device that gives memory back as each tensor goes -- the CPU, or a CUDA build without its
+    /// pool -- has nothing to do here and says so by doing nothing.
+    pub fn release_unused(device: Device) -> Result<()> {
+        init();
+        check(unsafe { ffi::fl_memory_release_unused(device as i32) })
+    }
 }
 
 /// A tensor: a shape over storage that other tensors may share.

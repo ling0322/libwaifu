@@ -649,6 +649,52 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     drop(kept);
 }
 
+/// Asking a device to hand its spare memory back is a question every device answers, including
+/// the one that has nothing to answer it with.
+///
+/// The webui calls this wherever it takes a model down, with whatever device the run was going to
+/// -- so a session on the CPU asks it too, and an error there would be a red line on the page
+/// about a card that is not in the machine.
+#[test]
+fn a_device_that_holds_nothing_back_is_still_asked_to_hand_it_over() {
+    MemorySnapshot::release_unused(Device::Cpu).unwrap();
+}
+
+/// Letting go of a tensor is not letting go of the card, and what is.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn handing_the_memory_back_is_a_second_thing_after_dropping_it() {
+    // Half a gigabyte, against a number that everything else running on the machine also moves:
+    // the free memory of a card is shared, so what is asserted below is the size of this test's
+    // own tensor with room to spare rather than an exact figure.
+    const BYTES: i64 = 512 * 1024 * 1024;
+    let free = || MemorySnapshot::capture(Device::Cuda).unwrap().free;
+
+    // From a pool holding nothing, so that the first measurement is not of what an earlier test
+    // left in it.
+    MemorySnapshot::release_unused(Device::Cuda).unwrap();
+    let before = free();
+
+    let big = Tensor::zeros(&[8192, 16384], DType::Float, Device::Cuda).unwrap();
+    assert_eq!(bytes_of(&big), BYTES);
+    drop(big);
+
+    // The tensor is gone and the card is still full. This is the allocator doing what it was told
+    // at startup -- keep what is freed, so the next run of this size asks it rather than the
+    // driver -- and it is why a model dropped on a stop is not yet a card anybody else can have.
+    assert!(
+        before - free() >= BYTES / 2,
+        "a dropped tensor leaves its bytes in the pool"
+    );
+
+    // And this is the call that ends it.
+    MemorySnapshot::release_unused(Device::Cuda).unwrap();
+    assert!(
+        free() >= before - BYTES / 2,
+        "handing them back is what the rest of the machine can see"
+    );
+}
+
 /// How much of the card one tensor is holding, which the input above is and the weights are not.
 fn bytes_of(tensor: &Tensor) -> i64 {
     tensor.nbytes().unwrap()
