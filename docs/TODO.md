@@ -661,7 +661,7 @@ Probing `huggingface.co` instead would cost the same one round trip and answer t
 at the price of no longer being a geography test -- which is the thing the current probe is
 actually good at.
 
-## The CUTLASS half GEMM cannot read an odd leading dimension
+## ~~The CUTLASS half GEMM cannot read an odd leading dimension~~ (fixed 2026-09-20)
 
 `flint/cuda/gemm_cutlass.cu` now picks its instantiation by what the operands are aligned to --
 eight halves, then four, then two -- because Anima's patch embedder contracts over a K of 68 and
@@ -691,15 +691,29 @@ SDXL and Anima is even.
 
 Six tests that used to pass, though. cuBLAS was the default until it was put behind
 `FLINT_ENABLE_CUBLAS`, and while it was the default it answered all six -- so `./build/unittest`
-was green and the hole was only ever reachable by asking for CUTLASS by name. It is the default
-now, so these six fail a plain run, and `FLINT_ENABLE_CUBLAS=1 ./build/unittest` is what passes.
-That makes this the thing standing between the CUTLASS-by-default build and a green gate, rather
-than a note about shapes nobody runs.
+was green and the hole was only ever reachable by asking for CUTLASS by name. Making CUTLASS the
+default is what turned it from a note about shapes nobody runs into the thing standing in front
+of a green gate.
 
-The fix is to pad. An operand whose leading dimension is odd wants a copy into a buffer one
-column wider, and the output wants the reverse on the way out -- which is a copy that
-`gemm_cutlass.cu` has nowhere to put, since it is handed raw pointers. `flint/cuda/matmul.cc` has
-the tensors and is the place to do it.
+**What it took was not padding.** The plan recorded here was to copy an odd operand into a buffer
+one column wider and copy the output back -- which `gemm_cutlass.cu` cannot do, being handed raw
+pointers, and so would have gone in `flint/cuda/matmul.cc`. It was the wrong plan, and the
+evidence was already in the list above: two of those six entries are wrong about which path they
+take. `cp_async` is what cannot read an odd leading dimension, and only a staged tensor-core
+mainloop uses it. SIMT reads an element at a time, and `DefaultGemmConfiguration` for
+`OpClassSimt` is alignment 1 -- which is why the float arm (`Sm80SimtGemm`, SIMT since it was
+written) and the batched arm (`GemmArray`, SIMT by default) were never in the hole at all. The
+float assertion in `matmul_test.cc` passes; it is the half one after it that threw. Both batched
+cases pass; the one that failed reaches `bmmToGemm` and lands on the plain `hgemm`.
+
+So all six were one path, and the fix is one instantiation: `Sm80SimtHalfGemm`, half in and out
+and accumulated in float, and a fourth rung under the `{8, 4, 2}` ladder in `hgemm` for operands
+that fit none of them. No copies, nothing added to a path a model takes, and the SDXL GEMM
+benchmark is unchanged -- every shape in it is still read eight halves at a time.
+`compute-sanitizer` reports no errors on any of the six.
+
+What this costs is speed at those shapes, which nothing is paying: a one-column operand or a
+stride like 35 is not something SDXL, Anima or Krea 2 ever asks for.
 
 
 ## cuBLAS is never loaded on Windows, so every GEMM there is CUTLASS
@@ -720,11 +734,15 @@ there the same call asks for `libcublas.so` and gets it.
 Worth doing, and worth doing *after* the CUTLASS path is right rather than before: it would hide
 that path from the only platform this project tests it on.
 
-Half of this closed itself. cuBLAS is behind `FLINT_ENABLE_CUBLAS` now, so every GEMM being
+Most of this closed itself. cuBLAS is behind `FLINT_ENABLE_CUBLAS` now, so every GEMM being
 CUTLASS is what a plain run does on Linux too -- Windows is no longer the odd platform, and the
-warning above no longer greets a user who asked for nothing. What is left is that a Windows user
-who *does* set `FLINT_ENABLE_CUBLAS` still gets the fallback and the warning rather than cuBLAS,
-which is the same wrong name and the same one-line fix.
+warning above no longer greets a user who asked for nothing. The urgency is gone with it: the
+misaligned GEMM this was said to expose a user to is fixed in the entry above, so the CUTLASS
+path a Windows build falls onto is the right one.
+
+What is left is a Windows user who *does* set `FLINT_ENABLE_CUBLAS` and still gets the fallback
+and the warning rather than cuBLAS -- the same wrong name and the same one-line fix, now worth
+doing for its own sake rather than to keep anybody off a broken path.
 
 ## ~~A `CHECK` that fails inside a destructor terminates without a word~~ (fixed 2026-09-16)
 

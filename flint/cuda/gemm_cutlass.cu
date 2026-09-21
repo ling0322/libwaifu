@@ -124,14 +124,51 @@ struct Sm80Gemm {
       true>;
 };
 
-/// The alignments there is an instantiation for, widest first.
+/// The same product on the SIMT pipeline, one half at a time.
+///
+/// This exists for the leading dimensions the kernel above cannot read at all. `cp_async` moves
+/// 4, 8 or 16 bytes and nothing else, so two halves is the narrowest access a staged tensor-core
+/// mainloop has, and an operand whose leading dimension is odd has every second row starting on
+/// an odd number of halves. SIMT does not stage through `cp_async` and reads an element at a
+/// time, so alignment 1 is a configuration it actually has -- it is the default for this operator
+/// class, which is why the float arm below and the batched arm have never been in this hole.
+///
+/// Slow, and deliberately so. It is not on any path a model takes: every dimension in SDXL,
+/// Anima and Krea 2 is even, and what reaches here is a one-column operand or a stride like 35 --
+/// a 1x1 convolution over a 7 by 5 image, say. Being correct at those shapes is worth more than
+/// being fast at them, and the alternative on offer was refusing them.
+template<class LayoutA, class LayoutB>
+struct Sm80SimtHalfGemm {
+  using Gemm = cutlass::gemm::device::Gemm<
+      cutlass::half_t,
+      LayoutA,
+      cutlass::half_t,
+      LayoutB,
+      cutlass::half_t,
+      cutlass::layout::RowMajor,
+      float,
+      cutlass::arch::OpClassSimt,
+      cutlass::arch::Sm80,
+      cutlass::gemm::GemmShape<128, 128, 8>,
+      cutlass::gemm::GemmShape<32, 64, 8>,
+      cutlass::gemm::GemmShape<1, 1, 1>,
+      cutlass::epilogue::thread::LinearCombination<cutlass::half_t, 1, float, float>,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      2,
+      1,
+      1,
+      true>;
+};
+
+/// The alignments the tensor-core kernel has an instantiation for, widest first.
 ///
 /// Three rather than one because a leading dimension is whatever the model made it: eight covers
 /// every shape SDXL runs and all but one of Anima's, and four is what that one -- a K of 68 --
 /// needs. Two is the floor and not a choice: this kernel stages through `cp_async`, which takes
 /// 4, 8 or 16 bytes and nothing else, so one half at a time does not compile.
 ///
-/// Which leaves an odd leading dimension with no kernel that can read it. See `hgemm` below.
+/// An odd leading dimension is therefore not on this ladder at all, and goes to the SIMT kernel
+/// above instead. See `hgemm` below.
 constexpr int kAlignments[] = {8, 4, 2};
 
 /// Whether `data` and `ld` can be read `alignment` halves at a time.
@@ -255,6 +292,42 @@ void hgemmT(
   CUTLASS_CHECK(gemmOperator());
 }
 
+/// The same call on the SIMT kernel, for operands no tensor-core instantiation can read.
+template<class LayoutA, class LayoutB>
+void hgemmSimt(
+    int m,
+    int n,
+    int k,
+    cutlass::half_t alpha,
+    const cutlass::half_t *A,
+    int lda,
+    const cutlass::half_t *B,
+    int ldb,
+    cutlass::half_t beta,
+    cutlass::half_t *C,
+    int ldc) {
+  using Gemm = typename Sm80SimtHalfGemm<LayoutA, LayoutB>::Gemm;
+  Gemm gemmOperator;
+
+  typename Gemm::Arguments args{
+      {m, n, k},
+      {A, lda},
+      {B, ldb},
+      {C, ldc},
+      {C, ldc},
+      {float(alpha), float(beta)},
+      splitKSlices(m, n, k)};
+
+  // Asked here too. This kernel reads an element at a time and so has nothing left to refuse on
+  // alignment, but `can_implement` also checks what the problem size and the split do, and a
+  // refusal named here is worth more than a kernel launched on arguments it cannot serve.
+  CUTLASS_CHECK(Gemm::can_implement(args));
+
+  size_t workspaceSize = Gemm::get_workspace_size(args);
+  CUTLASS_CHECK(gemmOperator.initialize(args, splitKWorkspace(workspaceSize)));
+  CUTLASS_CHECK(gemmOperator());
+}
+
 /// The same call at the widest alignment the three operands can actually be read at.
 template<class LayoutA, class LayoutB, class ArchTag>
 void hgemm(
@@ -283,14 +356,16 @@ void hgemm(
         m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   }
 
-  // An odd leading dimension, which no instantiation above can read: every second row starts on
-  // an odd number of halves, and the narrowest access this kernel has is two. The narrowest is
-  // still what to hand it, because `can_implement` inside will then refuse it by name rather than
-  // launch a kernel that faults the context. Reached only by a one-column operand or a stride
-  // like 33 -- no model gets here -- and the fix it is waiting for is to pad the operand, which
-  // is a copy this layer has nowhere to put. See docs/TODO.md.
-  return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[2]>(
-      m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  if (fits(kAlignments[2])) {
+    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[2]>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  }
+
+  // An odd leading dimension, which no tensor-core instantiation can read: every second row
+  // starts on an odd number of halves, and the narrowest access a staged mainloop has is two.
+  // SIMT reads an element at a time and answers these. Reached only by a one-column operand or a
+  // stride like 35 -- no model gets here -- so what it costs in speed nothing is paying.
+  return hgemmSimt<LayoutA, LayoutB>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
 template<class ArchTag>

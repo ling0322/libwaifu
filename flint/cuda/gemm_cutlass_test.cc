@@ -133,4 +133,37 @@ CATCH_TEST_CASE("test matmul gemm (cutlass, unaligned K)", "[fl][op][cuda][cutla
   CATCH_REQUIRE(F::allClose(actual, expected, 1e-2f));
 }
 
+CATCH_TEST_CASE("test matmul gemm (cutlass, odd leading dimension)", "[fl][op][cuda][cutlass]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The rung below the {8, 4, 2} ladder. A staged tensor-core mainloop moves its operands with
+  // `cp_async`, which reads 4, 8 or 16 bytes and nothing else, so two halves is the narrowest
+  // access it has and an odd leading dimension has no instantiation there at all. These go to
+  // the SIMT kernel instead, and what is checked is that they come back right rather than merely
+  // come back: the shapes below read every operand a single half at a time.
+  std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
+
+  auto runCase = [&mm](int m, int k, int n) {
+    Tensor a = F::rand({m, k}, DType::kFloat);
+    Tensor b = F::rand({k, n}, DType::kFloat);
+    Tensor expected = F::matmul(a, b);
+
+    Tensor x = F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+    Tensor y = F::cast(F::toDevice(Device::getCuda(), b), DType::kFloat16);
+    Tensor actual = F::toDevice(Device::getCpu(), F::cast(mm->apply(x, y), DType::kFloat));
+
+    CATCH_INFO("m = " << m << ", k = " << k << ", n = " << n);
+    CATCH_REQUIRE(actual.getShape() == std::vector<int>{m, n});
+    return F::allClose(actual, expected, 1e-2f);
+  };
+
+  // An odd N, which is the leading dimension of both B and the output at once.
+  CATCH_REQUIRE(runCase(8, 16, 1));
+  CATCH_REQUIRE(runCase(8, 16, 35));
+  // An odd K, which is A's alone.
+  CATCH_REQUIRE(runCase(8, 17, 16));
+  // Both, and a size past one threadblock tile so the kernel has more than one to do.
+  CATCH_REQUIRE(runCase(129, 33, 131));
+}
+
 }  // namespace fl
