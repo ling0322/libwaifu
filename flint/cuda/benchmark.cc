@@ -132,9 +132,10 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL GEMM") {
   // of these alone reads as what a step costs while leaving out the convolutions, the attention
   // and the norms -- a number wrong in a direction nobody checks.
   //
-  // Both backends in the one run, side by side, rather than one per run under LIBWAIFU_GEMM:
-  // which of them is ahead on a shape is the whole question, and two runs minutes apart on a
-  // machine doing other things is a poor way to ask it.
+  // Both backends in the one run, side by side, rather than a run each under a different
+  // environment: which of them is ahead on a shape is the whole question, and two runs minutes
+  // apart on a machine doing other things is a poor way to ask it. Asked for by name here, with
+  // the OPT_ constants, so this does not depend on how the library would have chosen.
   //
   // Read what it says with care: it runs one shape fifty times over, so a weight stays in L2 from
   // one iteration to the next, which a real run never gets. That flatters whatever moves the

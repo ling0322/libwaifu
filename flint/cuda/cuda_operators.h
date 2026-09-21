@@ -33,6 +33,10 @@ class CudaOperators : public Operators {
  public:
   ~CudaOperators() = default;
 
+  /// Pin the GEMM backend instead of letting `MatMul::create` choose. Nothing in the library
+  /// passes these -- a plain run gets CUTLASS, or cuBLAS where FLINT_ENABLE_CUBLAS asks for it --
+  /// and they exist for the benchmark, which builds both in the one process to put them in
+  /// columns beside each other. Asking by name is what makes that comparison mean anything.
   static constexpr int OPT_CUTLASS_GEMM = 0x00000001;
   static constexpr int OPT_CUBLAS_GEMM = 0x00000002;
 
