@@ -271,10 +271,10 @@ fn a_manifest_says_whether_the_model_draws_explicit_pictures() {
     let body = "weights:\n  - m.safetensors\nconfig:\n  model:\n    type: sdxl\n";
 
     // Said, either way.
-    assert!(Manifest::parse(&format!("{body}explicit: true\n"))
+    assert!(Manifest::parse(&format!("{body}not_for_all_audiences: true\n"))
         .unwrap()
         .explicit());
-    assert!(!Manifest::parse(&format!("{body}explicit: false\n"))
+    assert!(!Manifest::parse(&format!("{body}not_for_all_audiences: false\n"))
         .unwrap()
         .explicit());
 

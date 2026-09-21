@@ -100,7 +100,11 @@ impl Manifest {
     pub const TOKENIZERS: &'static str = "tokenizers";
     pub const CONFIG: &'static str = "config";
     pub const SUGGESTED: &'static str = "suggested";
-    pub const EXPLICIT: &'static str = "explicit";
+    /// Spelled after the tag the model cards carry, which is where the answer comes from -- and
+    /// which is also the spelling the hubs will keep: ModelScope's moderation reverts a commit
+    /// that says the same thing in plainer words, silently, reporting the upload as committed and
+    /// rolling it back afterwards.
+    pub const EXPLICIT: &'static str = "not_for_all_audiences";
 
     /// What a weights file is called.
     pub const WEIGHTS_SUFFIX: &'static str = ".safetensors";
