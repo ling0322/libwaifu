@@ -691,6 +691,16 @@ select:focus {
   padding: 16px;
 }
 
+/*
+  A veil over a veil: the question about the list stands in front of the list it is about, rather
+  than replacing it. Ordered here and not by where it falls in the page, because what is in front
+  of what is a thing to be able to read off this file.
+*/
+.veil.above {
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.45);
+}
+
 .dialog {
   background: var(--card);
   border: 1px solid var(--edge);
@@ -699,6 +709,44 @@ select:focus {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* Narrow on purpose: three lines of a question, at a width a sentence can be read across. */
+.ask-dialog {
+  width: 100%;
+  max-width: 460px;
+  gap: 14px;
+  padding: 20px;
+}
+
+/*
+  Bigger than the page around it, both of them. Everywhere else on this screen the small grey type
+  is a caption beside something you can already see, and skipping it costs nothing; here it is the
+  whole of what is being agreed to, and type that asks to be leaned in at is type that gets waved
+  through. Read at arm's length or not read at all.
+*/
+.ask-dialog .card-title {
+  font-size: 17px;
+}
+
+.ask-says {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+/* The answers at the end of the line the question is read along, no first and no second. Sized
+   with the words above them rather than with the page, for the same reason those words are. */
+.ask-do {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.ask-do .plain {
+  font-size: 15px;
+  padding: 0 18px;
 }
 
 /*
@@ -712,15 +760,25 @@ select:focus {
   overflow-y: auto;
 }
 
-/* The title, and the two buttons that belong to the box rather than to any model in it. */
+/* The title, and the buttons that belong to the box rather than to any model in it. */
 .dialog-top {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
+/* As in the rows below: the buttons keep their words and the title gives way, because a title cut
+   short still reads as the title and a button cut short reads as a different button. */
 .dialog-top .card-title {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dialog-top .plain {
+  flex: 0 0 auto;
 }
 
 /* -- the models, and what is on the disk of each --------------------------------------------- */
@@ -786,6 +844,24 @@ select:focus {
 .badge.explicit {
   border-color: var(--bad);
   color: var(--bad);
+}
+
+/*
+  The button that says the list goes on. Filled rather than outlined, in the colour this page
+  warns in: it is the one control here that nothing on the screen hints at -- what it would show
+  is, by design, not shown -- so it has to be found without being looked for.
+*/
+.plain.more {
+  background: var(--go-deep);
+  border-color: var(--go-deep);
+  color: var(--page);
+  font-weight: 600;
+}
+
+.plain.more:hover {
+  background: var(--go);
+  border-color: var(--go);
+  color: var(--page);
 }
 
 /* Deleting several gigabytes is not the same kind of click as loading them. */

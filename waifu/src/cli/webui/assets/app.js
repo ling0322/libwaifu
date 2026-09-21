@@ -77,7 +77,7 @@ function keep(name, value) {
   document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${age}; SameSite=Lax`;
 }
 
-/** Whether the models that draw explicit pictures are shown in the list rather than left out. */
+/** Whether the models marked not for all audiences are shown in the list rather than left out. */
 const SHOW_EXPLICIT = "waifu_show_explicit";
 
 // -- recordings -----------------------------------------------------------------------------------
@@ -1065,6 +1065,52 @@ function onDisk(model) {
 }
 
 /**
+ * The question asked before the whole list is shown.
+ *
+ * A box of this page's own and not the browser's `confirm`: that one arrives wearing the
+ * operating system's clothes rather than this page's, cannot be read by anyone who has told the
+ * browser to stop a page putting boxes up, and pins the words to two buttons whose labels are
+ * not ours to write. What is being agreed to here is worth a box that looks like it came from
+ * the thing that is asking.
+ *
+ * No is the answer this box gives if it is not really read: it is the one the keyboard lands on,
+ * the one Escape gives, the one a click beside the box gives, and the one wearing the colour that
+ * says which button a box expects to be pressed. Continue is a plain button that has to be aimed
+ * at. A question about what somebody is about to be shown should not be answerable by pressing
+ * the key that dismissed whatever was on the screen before it.
+ */
+function AskAboutTheList({ onYes, onNo }) {
+  useEffect(() => {
+    const pressed = (key) => {
+      if (key.key === "Escape") {
+        key.preventDefault();
+        onNo();
+      }
+    };
+    document.addEventListener("keydown", pressed);
+    return () => document.removeEventListener("keydown", pressed);
+  }, [onNo]);
+
+  return html`
+    <div className="veil above" onClick=${onNo}>
+      <div className="dialog ask-dialog" onClick=${(event) => event.stopPropagation()}>
+        <div className="card-title">Show the full model list?</div>
+        ${/* Not `about`, which is the small grey type a field wears underneath it. This is the
+             question, and the question is the reason the box is on the screen. */ ""}
+        <p className="ask-says">
+          The full model list may include Not-For-All-Audiences models that may generate adult or
+          explicit images. Do you want to continue?
+        </p>
+        <div className="ask-do">
+          <button className="plain next" autoFocus onClick=${onNo}>Cancel</button>
+          <button className="plain" onClick=${onYes}>Continue</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/**
  * Every model this build knows, what is on the disk of each, and the two things that can be done
  * about it.
  *
@@ -1073,16 +1119,17 @@ function onDisk(model) {
  * be putting the two the other way round. Choosing reads nothing -- it says which model the next
  * run is of, and the run is what reads it.
  *
- * The ones that draw explicit pictures are not in the list until somebody asks for them. Left out
- * rather than greyed out: a list of names is the one thing on this screen somebody else can read
- * over a shoulder, and a name greyed out is still a name read. The asking is one click and it is
- * remembered, so it is asked once and not every time the list is opened.
+ * The ones marked not for all audiences are not in the list until somebody asks for them. Left
+ * out rather than greyed out: a list of names is the one thing on this screen somebody else can
+ * read over a shoulder, and a name greyed out is still a name read. The asking is one click, and
+ * the click says what is behind it before it lands; the answer is remembered, so it is asked once
+ * and not every time the list is opened.
  */
 function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onClose }) {
   const chosen = state?.model;
   const busy = !!progress.busy;
 
-  /** Whether the explicit ones are in the list. Read from the browser rather than started at no,
+  /** Whether the marked ones are in the list. Read from the browser rather than started at no,
    *  because this box is built again every time it is opened and the answer outlives it. */
   const [shown, setShown] = useState(() => kept(SHOW_EXPLICIT) === "yes");
 
@@ -1091,20 +1138,46 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
     setShown(yes);
   };
 
+  /** Whether the question about the full list is up. Asked on the way in and not on the way out:
+   *  somebody putting the list back the way it was needs no warning about it. */
+  const [asking, setAsking] = useState(false);
+
   // The chosen one is in the list whatever it is. A model can be chosen from the command line, and
   // a list that left the chosen one out would be a list with no "Chosen" in it and no way back to
   // the model whose numbers are in the boxes.
   const all = state?.models ?? [];
   const models = all.filter((model) => shown || !model.explicit || model.name === chosen?.name);
-  const leftOut = all.length - models.length;
+
+  // How many the button is about. Counted off the whole list rather than as what the filter
+  // dropped, because once they are shown the filter drops none and the button still has to say
+  // what putting them back would hide.
+  const marked = all.filter((model) => model.explicit && model.name !== chosen?.name).length;
 
   return html`
+    <${Fragment}>
     <div className="veil" onClick=${onClose}>
       ${/* The box itself swallows the click that would close it: a list is something people click
            about in, and every one of those clicks lands on the veil underneath. */ ""}
       <div className="dialog models-dialog" onClick=${(event) => event.stopPropagation()}>
         <div className="dialog-top">
           <div className="card-title">Choose a model</div>
+          ${/* At the top rather than under the list: it is about the list as a whole, and a
+               button that changes what is in a list belongs where the list starts. Filled while
+               there is something behind it and plain once there is not -- the colour is there to
+               be found by somebody who does not know the rest of the list exists, and a button
+               that only puts back what is on the screen already has nothing to say. */ ""}
+          ${marked > 0 &&
+          html`
+            <button
+              className=${shown ? "plain" : "plain more"}
+              title=${shown
+                ? `${marked} of these are marked not for all audiences`
+                : `${marked} more, marked not for all audiences, are left out of this list`}
+              onClick=${() => (shown ? said(false) : setAsking(true))}
+            >
+              ${shown ? "Show fewer models" : "Show all models"}
+            </button>
+          `}
           <button className="plain" title="Look again at what is on the disk" onClick=${onRefresh}>
             ↻
           </button>
@@ -1128,10 +1201,11 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
                     <span className="model-id">${model.name}</span>
                     ${here &&
                     html`<span className="badge">${chosen.in_memory ? "in memory" : "chosen"}</span>`}
-                    ${/* Said on the row as well as at the foot of the list, because once they are
-                         shown they are eight rows among eight and the name alone does not say
-                         which is which. */ ""}
-                    ${model.explicit && html`<span className="badge explicit">explicit</span>`}
+                    ${/* Said on the row as well as on the button that shows them, because once
+                         they are shown they are eight rows among eight and the name alone does
+                         not say which is which. */ ""}
+                    ${model.explicit &&
+                    html`<span className="badge explicit">not for all audiences</span>`}
                   </div>
                   <p className="about">${onDisk(model)}</p>
                   ${/* What this one will and will not do, as far as it is known before it is
@@ -1162,23 +1236,20 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
             `;
           })}
         </div>
-
-        ${/* Under the list rather than over it: what is shown is what somebody came here for, and
-             a question about what is not shown belongs after the answer to that. */ ""}
-        ${leftOut > 0 &&
-        html`
-          <button className="plain wide" onClick=${() => said(true)}>
-            ${`Show ${leftOut} more ${leftOut === 1 ? "model" : "models"} that draw explicit pictures`}
-          </button>
-        `}
-        ${shown &&
-        html`
-          <button className="plain wide" onClick=${() => said(false)}>
-            Leave out the models that draw explicit pictures
-          </button>
-        `}
       </div>
     </div>
+    ${/* Beside the list and not inside it, so that it is over the box rather than in it: the box
+         scrolls, and a question that scrolled with it would be one you could scroll off the
+         screen without answering. */ ""}
+    ${asking &&
+    html`<${AskAboutTheList}
+      onYes=${() => {
+        setAsking(false);
+        said(true);
+      }}
+      onNo=${() => setAsking(false)}
+    />`}
+    <//>
   `;
 }
 
