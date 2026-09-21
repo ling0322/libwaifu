@@ -19,7 +19,8 @@
 // The cuDNN convolution, which is the reference the CUTLASS one is measured against and nothing
 // else. The library convolves through it no longer: cuDNN is resolved by name at run time, so a
 // machine without it silently got a different implementation than the one the numbers were taken
-// on, which is the kind of difference that should be asked for rather than fallen into.
+// on, which is the kind of difference that should be asked for rather than fallen into. Asking
+// is FLINT_ENABLE_CUDNN; without it nothing here loads the library at all.
 
 #pragma once
 
@@ -30,14 +31,15 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-/// @brief Whether cuDNN is on this machine. Looked for by name at the first call, so a build with
-///        cuDNN still answers where the library is absent.
+/// @brief Whether cuDNN will be used. False unless FLINT_ENABLE_CUDNN is set to something other
+///        than a word for off, and false where the library is not on the machine -- it is looked
+///        for by name at the first call, so a build with cuDNN still answers no without it.
 bool isConv2dCudnnAvailable();
 
 /// @brief The same convolution conv2d() performs, on cuDNN. Takes the groups CUTLASS will not.
 ///
-/// Throws rather than falling back where cuDNN did not load: what this is for is being the other
-/// implementation, and one that turns into the first is measuring nothing.
+/// Throws rather than falling back where cuDNN is off or did not load: what this is for is being
+/// the other implementation, and one that turns into the first is measuring nothing.
 /// @param input <half|float>(N, C, H, W), contiguous.
 /// @param weight <half|float>(K, C / groups, R, S), contiguous and of the same type as `input`.
 /// @param bias <half|float>(K), or an empty tensor for no bias.

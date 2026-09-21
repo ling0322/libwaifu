@@ -108,8 +108,9 @@ void benchmarkConv2d(
 #ifdef LIBWAIFU_CUDNN_ENABLED
   // The same convolution on cuDNN, in a column of its own, because a number for one
   // implementation says nothing on its own: what is worth knowing is whether the one that runs is
-  // behind the one that does not. Left out rather than reported as zero where the library is not
-  // on the machine, since a build having cuDNN and a machine having it are two different things.
+  // behind the one that does not. Left out rather than reported as zero where cuDNN is not in
+  // use -- a build having cuDNN, a machine having it, and FLINT_ENABLE_CUDNN asking for it are
+  // three different things.
   if (op::cuda::isConv2dCudnnAvailable()) {
     float reference = benchmarkCuda(
         [&] { op::cuda::conv2dCudnn(input, weight, bias, {stride, padding, 1, 1}); });
@@ -321,10 +322,10 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL convolution") {
 
   // SDXL shapes at a 1024 by 1024 image, whose latent is 128 by 128.
   //
-  // The cuDNN column appears beside each one where the library is on the machine, which is what
-  // says whether the kernels that actually run are behind the ones that do not. Its own case
-  // rather than the tail of another, so that it can be run on its own and does not have to pay
-  // for a page of unrelated allocations first.
+  // The cuDNN column appears beside each one where FLINT_ENABLE_CUDNN asked for it and the
+  // library is on the machine, which is what says whether the kernels that actually run are
+  // behind the ones that do not. Its own case rather than the tail of another, so that it can be
+  // run on its own and does not have to pay for a page of unrelated allocations first.
   std::string header = lut::sprintf("%-36s %13s %10s", "shape", "cutlass", "TFLOP/s");
 #ifdef LIBWAIFU_CUDNN_ENABLED
   if (op::cuda::isConv2dCudnnAvailable()) {

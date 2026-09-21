@@ -661,7 +661,7 @@ Probing `huggingface.co` instead would cost the same one round trip and answer t
 at the price of no longer being a geography test -- which is the thing the current probe is
 actually good at.
 
-## The CUTLASS half GEMM cannot read an odd leading dimension
+## ~~The CUTLASS half GEMM cannot read an odd leading dimension~~ (fixed 2026-09-20)
 
 `flint/cuda/gemm_cutlass.cu` now picks its instantiation by what the operands are aligned to --
 eight halves, then four, then two -- because Anima's patch embedder contracts over a K of 68 and
@@ -689,10 +689,51 @@ flint/cuda/matvec_test.cc:80     runCase(64, 1)                 a one-row output
 they were never right -- they were unreported. No model reaches any of them: every dimension in
 SDXL and Anima is even.
 
-The fix is to pad. An operand whose leading dimension is odd wants a copy into a buffer one
-column wider, and the output wants the reverse on the way out -- which is a copy that
-`gemm_cutlass.cu` has nowhere to put, since it is handed raw pointers. `flint/cuda/matmul.cc` has
-the tensors and is the place to do it.
+Six tests that used to pass, though. cuBLAS was the default until it was put behind
+`FLINT_ENABLE_CUBLAS`, and while it was the default it answered all six -- so `./build/unittest`
+was green and the hole was only ever reachable by asking for CUTLASS by name. Making CUTLASS the
+default is what turned it from a note about shapes nobody runs into the thing standing in front
+of a green gate.
+
+**All six were one path, and the list above is wrong about two of them.** `cp_async` is what
+cannot read an odd leading dimension, and only a staged tensor-core mainloop uses it. The float
+arm (`Sm80SimtGemm`) and the batched arm (`GemmArray`) are both SIMT, which reads an element at a
+time and is alignment 1 by default, so neither was ever in this hole. The float assertion in
+`matmul_test.cc` passes and it is the half one after it that throws; both genuinely batched cases
+pass and the one that fails is the broadcast case, which goes through `bmmToGemm` onto the plain
+`hgemm`. The two `conv2d_test.cc` entries are `conv1x1`, which is `F::matmul` in a hat.
+
+**And "no model reaches any of them" was wrong.** `conv1d` is `conv2d` on an unsqueezed input, so
+a kernel of one is `conv1x1`, whose operands are `(C, H * W)` with `H = 1`. The leading dimension
+is the frame count -- and an utterance is odd-length as often as not. Every 1x1 `conv1d` in
+`s2mel.rs` and `semantic_codec.rs` is in this hole for half of its inputs. It was true of SDXL and
+Anima, whose spatial extents are all even, and it stopped being true when audio arrived.
+
+**The fix is padding after all, but not the padding described above.** Not one column wider, and
+not in `matmul.cc`: the extents grow too, and it is all in `hgemm`, where the alignment is already
+known and `cudaMemcpy2D` is all the copying takes. `m`, `n` and `k` are rounded up to multiples of
+eight, all three operands are copied into zeroed buffers stepping their own width, the widest
+kernel runs at the padded extents, and the corner is copied back. Zeros are what make it exact: a
+zero row of A gives a zero row of the answer, a zero column of B a zero column, and a zero tail on
+K adds nothing to any sum.
+
+Two things that cost time, recorded in case anyone touches this again:
+
+- **A SIMT half kernel was tried first**, as a fourth rung under the ladder, mirroring the float
+  arm. It is correct and it is four times slower -- 316us against 77us at 1024 by 1280 by 1280 --
+  which is too much to hand to a path that audio actually reaches.
+- **Padding the leading dimension alone is not enough, and faults the device.** The mainloop walks
+  K a tile of 32 at a time, so a row longer than the K it was given is read off the end of the
+  last row of the buffer. `runCase(8, 33, 16)` catches it where `runCase(8, 17, 16)` does not: 17
+  is one step and 33 is two. This is why the extents are padded rather than only the strides, and
+  why every operand is copied rather than only the misaligned ones -- growing an extent forces
+  every operand sharing it to be padded too.
+
+Measured at 1024 by 1281 by 1280: 109us, against 76us for the even shape beside it. Half again as
+long on a shape that reaches here, and nothing at all on one that does not -- the SDXL GEMM
+benchmark is unchanged to the noise, every shape in it still being read eight halves at a time.
+`compute-sanitizer` reports no errors on any of the six, nor on the test that now covers them
+directly.
 
 
 ## cuBLAS is never loaded on Windows, so every GEMM there is CUTLASS
@@ -712,6 +753,16 @@ there the same call asks for `libcublas.so` and gets it.
 `cublas_v2.h` defines `CUBLAS_VER_MAJOR`, so the name is available to build rather than guess at.
 Worth doing, and worth doing *after* the CUTLASS path is right rather than before: it would hide
 that path from the only platform this project tests it on.
+
+Most of this closed itself. cuBLAS is behind `FLINT_ENABLE_CUBLAS` now, so every GEMM being
+CUTLASS is what a plain run does on Linux too -- Windows is no longer the odd platform, and the
+warning above no longer greets a user who asked for nothing. The urgency is gone with it: the
+misaligned GEMM this was said to expose a user to is fixed in the entry above, so the CUTLASS
+path a Windows build falls onto is the right one.
+
+What is left is a Windows user who *does* set `FLINT_ENABLE_CUBLAS` and still gets the fallback
+and the warning rather than cuBLAS -- the same wrong name and the same one-line fix, now worth
+doing for its own sake rather than to keep anybody off a broken path.
 
 ## ~~A `CHECK` that fails inside a destructor terminates without a word~~ (fixed 2026-09-16)
 
