@@ -10,26 +10,29 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 
 | name | model | published as |
 |---|---|---|
-| `sdxl:base` | SDXL 1.0 base, prompted with sentences | [libwaifu-sdxl-base-1.0](https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0) |
-| `sdxl:illust` | Illustrious XL v2.0-STABLE, the official release the fine tunes below descend from | [libwaifu-illustrious-xl-v2.0](https://huggingface.co/ling0322/libwaifu-illustrious-xl-v2.0) |
-| `sdxl:wai` | WAI-illustrious-SDXL v17.0, an anime fine tune prompted with danbooru tags | [libwaifu-wai-illustrious-v17](https://huggingface.co/ling0322/libwaifu-wai-illustrious-v17) |
-| `sdxl:noob` | NoobAI-XL v1.1, an Illustrious fine tune trained on Danbooru and e621 | [libwaifu-noobai-xl-v1.1](https://huggingface.co/ling0322/libwaifu-noobai-xl-v1.1) |
-| `sdxl:obsession` | One Obsession v24, an Illustrious fine tune that draws well at few steps | [libwaifu-one-obsession-v24](https://huggingface.co/ling0322/libwaifu-one-obsession-v24) |
-| `anima:turbo` | Anima Turbo v1.1, a Cosmos-Predict2 transformer rather than an SDXL model, distilled for ten steps at no guidance | [libwaifu-anima-turbo-v1.1](https://huggingface.co/ling0322/libwaifu-anima-turbo-v1.1) |
-| `krea2:turbo` | Krea 2 Turbo, twelve billion parameters of single-stream MMDiT conditioned on twelve tapped layers of a Qwen3-VL encoder, distilled for eight steps at no guidance | [libwaifu-krea2-turbo](https://huggingface.co/ling0322/libwaifu-krea2-turbo) |
-| `krea2:turbo-fp8` | The same weights with the matrices quantized: half the package and half the card | the same repository |
+| `sdxl:base` | SDXL 1.0 base | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-sdxl-base-1.0)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-sdxl-base-1.0)\] |
+| `sdxl:illust` | Illustrious XL v2.0-STABLE | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-illustrious-xl-v2.0)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-illustrious-xl-v2.0)\] |
+| `sdxl:wai` | WAI-illustrious-SDXL v17.0 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-wai-illustrious-v17)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-wai-illustrious-v17)\] |
+| `sdxl:noob` | NoobAI-XL v1.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-noobai-xl-v1.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-noobai-xl-v1.1)\] |
+| `sdxl:obsession` | One Obsession v24 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-one-obsession-v24)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-one-obsession-v24)\] |
+| `anima:turbo` | Anima Turbo v1.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-anima-turbo-v1.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-anima-turbo-v1.1)\] |
+| `krea2:turbo` | Krea 2 Turbo | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
+| `krea2:turbo-fp8` | Krea 2 Turbo, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 
-`krea2:turbo` is 33.8 GB and wants that much card; `krea2:turbo-fp8` is 17.3 GB and wants about
-18. The quantized one is not free -- it costs about four times the error in the text encoder, and
-its eight-step trajectory ends somewhere measurably different -- so take it when the card is the
-constraint rather than by default. [docs/krea2.md](docs/krea2.md) is what the model is, how it
-differs from the two families above it, and what every one of those numbers is measured against.
+## Low memory mode
 
-Krea 2 carries the [Krea 2 Community License](https://krea.ai/krea-2-licensing) rather than this
-repository's MIT: fetching it is agreeing to that, commercial use has a revenue threshold, and a
-deployment is required to carry content filtering. The package here is a converted copy and is
-neither official nor endorsed by Krea.
+`-device cuda_cpu_offload` keeps the weights in host memory and moves each one onto the card as it
+is used, so a model far larger than the card still draws. It costs speed rather than the picture
+-- the whole model crosses the bus once per step -- and it is never picked for you, because a card
+the model does not fit on is something to be told about rather than worked around silently.
 
+RTX 5060 Ti, 16 GB, card otherwise free. `krea2:turbo-fp8`, 1024x1024, the eight steps the
+distilled release is for, seed 7:
+
+| `-device` | peak GPU memory | outcome | wall |
+|---|---|---|---|
+| `cuda` | 15.4 GB | `Aborted: out of memory` | - |
+| `cuda_cpu_offload` | 1.2 GB | a picture | 67 s |
 
 ## Run
 
@@ -52,8 +55,6 @@ speech model implements to take its place.
 
 ## Recent updates
 
-- [2026-09-19] A third tab: type a sentence and get a WAV. The voice behind it is a stand-in until
-  a speech model is published -- see [docs/speech.md](docs/speech.md).
 - [2026-09-18] Krea 2 Turbo draws here: a third architecture, exported from the gated release
   rather than published from this repository.
 - [2026-09-15] The screen is a page in a browser rather than a screenful of terminal: txt2img and
@@ -61,13 +62,8 @@ speech model implements to take its place.
 - [2026-09-15] Anima Turbo v1.1 is published, as `anima:turbo` -- the first model here that is not
   an SDXL one.
 - [2026-09-05] NoobAI-XL v1.1 is published, as `sdxl:noob`.
-- [2026-09-04] Draw from a picture rather than from noise: `waifu draw -i photo.png`.
 - [2026-08-30] Metal, through MLX: a macOS build draws on the GPU rather than the CPU.
-- [2026-08-30] Pick a model on screen: `waifu draw` with no `-m` lists them and fetches one.
 - [2026-08-29] WAI Illustrious v17.0 is published too, as `sdxl:wai`.
-- [2026-08-29] Ask for a model by name: `waifu draw -m sdxl:base` fetches it on first use.
-- [2026-08-28] Draw pictures from a terminal.
-- [2026-08-28] SDXL: a prompt in, an image out.
 
 ## Supported platforms
 
