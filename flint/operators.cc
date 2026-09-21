@@ -21,7 +21,6 @@
 
 #include <atomic>
 #include <cmath>
-#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -492,39 +491,6 @@ std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {
 
 static std::atomic<bool> gInitialized{false};
 
-namespace {
-
-/// Which GEMM backend to build the CUDA operators with, read from LIBWAIFU_GEMM.
-///
-/// The two are picked between at startup and never mixed, which is what makes one run comparable
-/// with another. Naming one here is an explicit request and is honoured as such -- including
-/// "cublas", which does not additionally need FLINT_ENABLE_CUBLAS. Left unset, the operators
-/// choose for themselves, which is CUTLASS unless FLINT_ENABLE_CUBLAS says otherwise.
-int gemmOptionsFromEnvironment() {
-#ifdef LIBWAIFU_CUDA_ENABLED
-  const char *choice = std::getenv("LIBWAIFU_GEMM");
-  if (!choice) return 0;
-
-  std::string name = choice;
-  if (name == "cublas") {
-    LOG(INFO) << "LIBWAIFU_GEMM=cublas";
-    return op::cuda::CudaOperators::OPT_CUBLAS_GEMM;
-  }
-  if (name == "cutlass") {
-    LOG(INFO) << "LIBWAIFU_GEMM=cutlass";
-    return op::cuda::CudaOperators::OPT_CUTLASS_GEMM;
-  }
-
-  // Naming a backend that is not there should say so rather than quietly measure the other one.
-  throw lut::AbortedError(
-      lut::sprintf("LIBWAIFU_GEMM is \"%s\", which is neither cublas nor cutlass", choice));
-#else
-  return 0;
-#endif
-}
-
-}  // namespace
-
 void initOperators() {
   op::cpu::kernel::init();
 
@@ -537,8 +503,7 @@ void initOperators() {
     gOperatorsForDevice[Device::kCpu] = std::make_shared<op::cpu::CPUOperators>();
 #ifdef LIBWAIFU_CUDA_ENABLED
     CHECK(!gOperatorsForDevice[Device::kCuda]);
-    gOperatorsForDevice[Device::kCuda] =
-        op::cuda::CudaOperators::create(gemmOptionsFromEnvironment());
+    gOperatorsForDevice[Device::kCuda] = op::cuda::CudaOperators::create();
 #endif
 #ifdef LIBWAIFU_MLX_ENABLED
     // Unlike CUDA, a build with MLX still has to cope with there being no GPU to talk to, so

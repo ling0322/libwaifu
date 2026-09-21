@@ -429,8 +429,10 @@ is about a percent slower than the 128 by 128 one. Both numbers are in the comme
 Tuning a tile against that benchmark alone will pick the wrong one.
 
 The backend is now complete rather than half of one: CUTLASS answers float as well as half, so
-`LIBWAIFU_GEMM=cutlass` runs the whole model including the autoencoder and cuBLAS is no longer
-reached at all. It stays the default, since `MatMul::create` still tries it first.
+it runs the whole model including the autoencoder and cuBLAS is no longer reached at all. That is
+what later allowed cuBLAS to be put behind `FLINT_ENABLE_CUBLAS` and CUTLASS to become what a
+plain run uses. `LIBWAIFU_GEMM`, which is what this entry originally said to set, no longer
+exists.
 
 ## `CUDA_ARCH_NATIVE=ON` does not build on an RTX 50 series card
 
