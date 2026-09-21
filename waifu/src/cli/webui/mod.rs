@@ -383,6 +383,27 @@ mod tests {
     }
 
     #[test]
+    fn the_list_says_which_models_draw_explicit_pictures() {
+        // The page leaves those out until somebody asks for them, and it has nothing to go on but
+        // this: a catalogue that answered without the label would be a page showing everything.
+        let (address, _commands) = a_server();
+        let state = json(address, "GET /api/state", "");
+        let models = state["models"].as_array().expect("the catalogue");
+
+        let said = |name: &str| {
+            models
+                .iter()
+                .find(|model| model["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is offered"))["explicit"]
+                .as_bool()
+                .expect("a yes or a no about every model")
+        };
+
+        assert!(said("sdxl:noob"));
+        assert!(!said("sdxl:base"));
+    }
+
+    #[test]
     fn a_run_asked_for_with_no_model_is_refused_with_the_reason() {
         let (address, _commands) = a_server();
 

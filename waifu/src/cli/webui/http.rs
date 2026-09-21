@@ -573,6 +573,7 @@ fn models() -> Value {
                 "full_name": model.full_name,
                 "cached": model.cached,
                 "bytes": model.bytes,
+                "explicit": model.explicit,
             })
         })
         .collect()

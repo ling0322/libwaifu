@@ -267,6 +267,24 @@ fn a_list_may_be_written_on_one_line_or_on_several() {
 }
 
 #[test]
+fn a_manifest_says_whether_the_model_draws_explicit_pictures() {
+    let body = "weights:\n  - m.safetensors\nconfig:\n  model:\n    type: sdxl\n";
+
+    // Said, either way.
+    assert!(Manifest::parse(&format!("{body}not_for_all_audiences: true\n"))
+        .unwrap()
+        .explicit());
+    assert!(!Manifest::parse(&format!("{body}not_for_all_audiences: false\n"))
+        .unwrap()
+        .explicit());
+
+    // And not said at all, which is every manifest written before there was anywhere to say it.
+    // It reads as no rather than as an error: an old package still names its weights.
+    assert!(!Manifest::parse(body).unwrap().explicit());
+    assert!(!Manifest::parse(WHOLE).unwrap().explicit());
+}
+
+#[test]
 fn a_file_that_is_not_a_manifest_is_an_error_rather_than_a_guess() {
     let cases: &[(&str, &str)] = &[
         ("", "nothing in this file"),
