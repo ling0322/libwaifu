@@ -23,6 +23,7 @@
 
 #include <type_traits>
 
+#include "lutil/env.h"
 #include "lutil/strings.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/matmul.h"
@@ -42,17 +43,24 @@ std::shared_ptr<MatMul> MatMul::create() {
   std::shared_ptr<MatMul> mm;
   std::string err0, err1;
 
-  // cuBLAS first wherever it can be had: it picks among many kernels per shape where the CUTLASS
-  // backend has one of each, and on the shapes SDXL runs the two measure the same. Falling back
-  // changes which kernels the whole model goes through, so say so rather than leaving it to
-  // whoever thinks to turn debug logging on.
-  try {
-    mm = createCublas();
-    LOG(INFO) << "Use GEMM from cuBLAS.";
-    return mm;
-  } catch (const lut::Error &e) {
-    LOG(WARN) << "cuBLAS is not usable, falling back to CUTLASS: " << e.what();
-    err0 = e.what();
+  // CUTLASS is what a plain run goes through. cuBLAS is resolved by name at run time, so a build
+  // that preferred it multiplied through whichever backend happened to be installed, and two
+  // machines running the same binary went through different kernels without either saying so.
+  // It is still worth having -- it picks among many kernels per shape where the CUTLASS backend
+  // has one of each -- so it stays, behind FLINT_ENABLE_CUBLAS, asked for rather than fallen
+  // into.
+  bool cublasEnabled = lut::isEnvFlagSet("FLINT_ENABLE_CUBLAS");
+  if (cublasEnabled) {
+    try {
+      mm = createCublas();
+      LOG(INFO) << "Use GEMM from cuBLAS (FLINT_ENABLE_CUBLAS).";
+      return mm;
+    } catch (const lut::Error &e) {
+      // Asked for and not there is worth a warning rather than a debug line: the run is about to
+      // go through kernels other than the ones it was pointed at.
+      LOG(WARN) << "cuBLAS is not usable, falling back to CUTLASS: " << e.what();
+      err0 = e.what();
+    }
   }
 
   try {
@@ -64,6 +72,9 @@ std::shared_ptr<MatMul> MatMul::create() {
     err1 = e.what();
   }
 
+  if (!cublasEnabled) {
+    err0 = "cuBLAS is off; set FLINT_ENABLE_CUBLAS=1 to allow it";
+  }
   throw lut::AbortedError("unable to create MatMul operator: " + err0 + "; " + err1);
 }
 

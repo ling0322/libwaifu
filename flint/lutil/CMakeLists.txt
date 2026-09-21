@@ -1,6 +1,7 @@
 set(lutil_SOURCES
     "internal/log.cc"
     "internal/sprintf.cc"
+    "env.cc"
     "error.cc"
     "half.cc"
     "is_debug.cc"
@@ -11,6 +12,7 @@ set(lutil_SOURCES
     "time.cc")
 
 set(lut_test_SOURCES
+    "env_test.cc"
     "log_test.cc"
     "path_test.cc"
     "strings_test.cc")

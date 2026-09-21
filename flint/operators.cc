@@ -497,8 +497,9 @@ namespace {
 /// Which GEMM backend to build the CUDA operators with, read from LIBWAIFU_GEMM.
 ///
 /// The two are picked between at startup and never mixed, which is what makes one run comparable
-/// with another. Left unset, the operators choose for themselves, which is cuBLAS wherever it can
-/// be loaded.
+/// with another. Naming one here is an explicit request and is honoured as such -- including
+/// "cublas", which does not additionally need FLINT_ENABLE_CUBLAS. Left unset, the operators
+/// choose for themselves, which is CUTLASS unless FLINT_ENABLE_CUBLAS says otherwise.
 int gemmOptionsFromEnvironment() {
 #ifdef LIBWAIFU_CUDA_ENABLED
   const char *choice = std::getenv("LIBWAIFU_GEMM");

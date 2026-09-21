@@ -17,7 +17,7 @@ option(WITH_CUDA_SYNC "Synchronize after each CUDA operator." OFF)
 option(WITH_CUDA_MALLOC_ASYNC "Use the CUDA stream-ordered memory allocator." ON)
 option(WITH_MKL "MKL support (only for reference)." OFF)
 option(WITH_OPENMP "Build with OpenMP." ON)
-option(WITH_CUDNN "build the Conv2d operator with cuDNN." OFF)
+option(WITH_CUDNN "Build the benchmark's cuDNN Conv2d reference (needs FLINT_ENABLE_CUDNN to run)." OFF)
 # FlashAttention costs minutes of nvcc per architecture, so it is opt-in: a CUDA build
 # without it still has attention, through the block-wise fallback in operators.cc.
 option(WITH_FLASH_ATTN "Link the prebuilt FlashAttention forward kernels (slow to build)." OFF)
@@ -129,7 +129,8 @@ if(WITH_CUDNN)
     endif()
 
     # Only the headers are needed to build: the library itself is loaded by name at run time, the
-    # same way cuBLAS is, so a build with cuDNN still runs on a machine without it.
+    # same way cuBLAS is, so a build with cuDNN still runs on a machine without it. And it is only
+    # looked for where FLINT_ENABLE_CUDNN asks, so a build with cuDNN is not a run with it either.
     if(NOT CUDNN_ROOT)
         message(FATAL_ERROR
           "WITH_CUDNN=ON needs CUDNN_ROOT set to a directory holding include/cudnn.h. "

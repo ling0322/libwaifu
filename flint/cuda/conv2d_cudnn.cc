@@ -29,6 +29,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "lutil/env.h"
 #include "lutil/error.h"
 #include "lutil/shared_library.h"
 #include "lutil/strings.h"
@@ -172,6 +173,14 @@ class Cudnn {
   }
 
   static Cudnn *create() {
+    // Off unless asked for. Loading cuDNN pulls several hundred megabytes of kernels into the
+    // process and picks up whichever copy the machine happens to have on its search path, so
+    // whether it runs is a decision rather than an accident of what is installed.
+    if (!lut::isEnvFlagSet("FLINT_ENABLE_CUDNN")) {
+      LOG(DEBUG) << "cuDNN is off; set FLINT_ENABLE_CUDNN=1 to allow it";
+      return nullptr;
+    }
+
     try {
       std::unique_ptr<Cudnn> cudnn = std::make_unique<Cudnn>();
       cudnn->_lib = openLibrary();
@@ -415,7 +424,10 @@ Tensor conv2dCudnn(
 
   // No fallback. This is the reference a benchmark measures against, and a reference that
   // quietly becomes the thing it is measuring is worse than one that is missing.
-  if (!cudnn) throw lut::AbortedError("cuDNN did not load on this machine");
+  if (!cudnn) {
+    throw lut::AbortedError(
+        "cuDNN is not in use: either FLINT_ENABLE_CUDNN is unset or the library did not load");
+  }
 
   if (input.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D input, as (N, C, H, W)");
   if (weight.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D weight, as (K, C, R, S)");

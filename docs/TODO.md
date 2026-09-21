@@ -689,6 +689,13 @@ flint/cuda/matvec_test.cc:80     runCase(64, 1)                 a one-row output
 they were never right -- they were unreported. No model reaches any of them: every dimension in
 SDXL and Anima is even.
 
+Six tests that used to pass, though. cuBLAS was the default until it was put behind
+`FLINT_ENABLE_CUBLAS`, and while it was the default it answered all six -- so `./build/unittest`
+was green and the hole was only ever reachable by asking for CUTLASS by name. It is the default
+now, so these six fail a plain run, and `FLINT_ENABLE_CUBLAS=1 ./build/unittest` is what passes.
+That makes this the thing standing between the CUTLASS-by-default build and a green gate, rather
+than a note about shapes nobody runs.
+
 The fix is to pad. An operand whose leading dimension is odd wants a copy into a buffer one
 column wider, and the output wants the reverse on the way out -- which is a copy that
 `gemm_cutlass.cu` has nowhere to put, since it is handed raw pointers. `flint/cuda/matmul.cc` has
@@ -712,6 +719,12 @@ there the same call asks for `libcublas.so` and gets it.
 `cublas_v2.h` defines `CUBLAS_VER_MAJOR`, so the name is available to build rather than guess at.
 Worth doing, and worth doing *after* the CUTLASS path is right rather than before: it would hide
 that path from the only platform this project tests it on.
+
+Half of this closed itself. cuBLAS is behind `FLINT_ENABLE_CUBLAS` now, so every GEMM being
+CUTLASS is what a plain run does on Linux too -- Windows is no longer the odd platform, and the
+warning above no longer greets a user who asked for nothing. What is left is that a Windows user
+who *does* set `FLINT_ENABLE_CUBLAS` still gets the fallback and the warning rather than cuBLAS,
+which is the same wrong name and the same one-line fix.
 
 ## ~~A `CHECK` that fails inside a destructor terminates without a word~~ (fixed 2026-09-16)
 
