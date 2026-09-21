@@ -56,3 +56,19 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 - Never modify, commit to, or push directly to `main`. Use a non-`main` branch and a pull request.
 - Commit or push only when explicitly requested in the current conversation.
 - Never push before the user has reviewed and requested the commit.
+
+### Pull requests
+
+A title and a first paragraph are what everyone else reads. Write them so that somebody scanning
+the list, or opening the page for ten seconds, knows what changed.
+
+- **The title names what changed, not what it feels like.** `module: what it does now` —
+  `indextts_gpt: add KV-cached generation (prefill/step/generate)`. Not a sentence in the voice of
+  the feature: "Say a sentence one token at a time" reads well and tells a reviewer neither which
+  module moved nor what was added to it.
+- **The first paragraph says what the change does, in one or two sentences**, and says it first.
+  Name the module, the new types or functions, and anything removed. A reader who has finished
+  that paragraph should be able to stop.
+- **Everything else comes after it** — why it was built that way, what was tried and rejected,
+  what is still missing, what the tests found. Put it under headings so it can be skipped.
+- **Keep it short.** A description nobody finishes is a description that did not say anything.
