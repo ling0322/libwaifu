@@ -57,6 +57,49 @@ CATCH_TEST_CASE("test CUDA memory snapshot", "[fl][cuda][memory]") {
   CATCH_REQUIRE(after.getPeakAllocatedMemory() >= bytes);
 }
 
+CATCH_TEST_CASE("test CUDA memory release", "[fl][cuda][memory]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+#ifndef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
+  CATCH_SKIP("built without the pool, where a free hands the memory straight back");
+#else
+  // Measured on the pool rather than on the card, because the card is a number every process on
+  // the machine moves and this is a claim about what *this* process holds. It is also the number
+  // the free memory of the card follows: bytes the pool has reserved are bytes no one else may
+  // have, which is the whole reason there is a call to hand them over.
+  cudaMemPool_t memoryPool;
+  LL_CHECK_CUDA_STATUS(cudaDeviceGetDefaultMemPool(&memoryPool, 0));
+  auto reserved = [&memoryPool]() {
+    uint64_t bytes = 0;
+    LL_CHECK_CUDA_STATUS(
+        cudaMemPoolGetAttribute(memoryPool, cudaMemPoolAttrReservedMemCurrent, &bytes));
+    return bytes;
+  };
+
+  // From a pool that is holding nothing, so that what the numbers below move by is this test's
+  // own tensor and not what an earlier test left in there.
+  MemorySnapshot::releaseUnused(Device::getCuda());
+  uint64_t empty = reserved();
+
+  // Large enough to be unmistakable against an allocator that rounds its blocks up.
+  constexpr int64_t kBytes = 32 * 1024 * 1024;
+  {
+    Tensor x = F::tensor({4096, 4096}, DType::kFloat16, Device::getCuda());
+    CATCH_REQUIRE(x.getNumEl() * 2 == kBytes);
+  }
+
+  // The tensor is gone and the pool still has its bytes, which is what the release threshold set
+  // at startup asks for: the next allocation this size is to come out of here rather than out of
+  // the driver.
+  CATCH_REQUIRE(reserved() >= empty + kBytes);
+
+  // And this is the one call that ends that. Somebody who stopped a run to free the card is
+  // asking for this number to come down, not for the allocator to keep its options open.
+  MemorySnapshot::releaseUnused(Device::getCuda());
+  CATCH_REQUIRE(reserved() <= empty);
+#endif
+}
+
 CATCH_TEST_CASE("test CUDA FastDivmod", "[fl][cuda]") {
   constexpr uint32_t divisors[] = {1, 2, 3, 7, 16, 255, 65535, INT32_MAX};
 

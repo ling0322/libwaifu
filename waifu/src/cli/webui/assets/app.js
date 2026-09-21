@@ -479,7 +479,7 @@ function Prompts({ form, change, canDraw, drawing, guided, onDraw, onInterrupt }
           className="interrupt"
           disabled=${!drawing}
           title=${drawing
-            ? "Stop after the step it is on, and keep what has been drawn so far"
+            ? "Stop after the step it is on. The model comes off the card with it, so that whatever else wants the card can have it -- and so the next run reads the model again"
             : "Nothing to stop. A run can be stopped once it is drawing; fetching and reading a model cannot be stopped part way"}
           onClick=${onInterrupt}
         >

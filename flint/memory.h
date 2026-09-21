@@ -38,6 +38,14 @@ class MemorySnapshot {
   /// @param device The device to reset.
   static void resetPeakStats(Device device);
 
+  /// @brief Give every byte that no tensor is using back to the driver, so that another process
+  /// may have it. Devices whose allocator already does this as each tensor goes (the CPU backend)
+  /// do nothing. Worth calling only where something large has just been let go of and nothing is
+  /// about to ask for it again; between two runs of one model it hands back the blocks the next
+  /// run would have reused.
+  /// @param device The device to hand memory back on.
+  static void releaseUnused(Device device);
+
   MemorySnapshot(
       int64_t totalMemory,
       int64_t freeMemory,
