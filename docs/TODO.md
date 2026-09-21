@@ -695,25 +695,45 @@ was green and the hole was only ever reachable by asking for CUTLASS by name. Ma
 default is what turned it from a note about shapes nobody runs into the thing standing in front
 of a green gate.
 
-**What it took was not padding.** The plan recorded here was to copy an odd operand into a buffer
-one column wider and copy the output back -- which `gemm_cutlass.cu` cannot do, being handed raw
-pointers, and so would have gone in `flint/cuda/matmul.cc`. It was the wrong plan, and the
-evidence was already in the list above: two of those six entries are wrong about which path they
-take. `cp_async` is what cannot read an odd leading dimension, and only a staged tensor-core
-mainloop uses it. SIMT reads an element at a time, and `DefaultGemmConfiguration` for
-`OpClassSimt` is alignment 1 -- which is why the float arm (`Sm80SimtGemm`, SIMT since it was
-written) and the batched arm (`GemmArray`, SIMT by default) were never in the hole at all. The
-float assertion in `matmul_test.cc` passes; it is the half one after it that threw. Both batched
-cases pass; the one that failed reaches `bmmToGemm` and lands on the plain `hgemm`.
+**All six were one path, and the list above is wrong about two of them.** `cp_async` is what
+cannot read an odd leading dimension, and only a staged tensor-core mainloop uses it. The float
+arm (`Sm80SimtGemm`) and the batched arm (`GemmArray`) are both SIMT, which reads an element at a
+time and is alignment 1 by default, so neither was ever in this hole. The float assertion in
+`matmul_test.cc` passes and it is the half one after it that throws; both genuinely batched cases
+pass and the one that fails is the broadcast case, which goes through `bmmToGemm` onto the plain
+`hgemm`. The two `conv2d_test.cc` entries are `conv1x1`, which is `F::matmul` in a hat.
 
-So all six were one path, and the fix is one instantiation: `Sm80SimtHalfGemm`, half in and out
-and accumulated in float, and a fourth rung under the `{8, 4, 2}` ladder in `hgemm` for operands
-that fit none of them. No copies, nothing added to a path a model takes, and the SDXL GEMM
-benchmark is unchanged -- every shape in it is still read eight halves at a time.
-`compute-sanitizer` reports no errors on any of the six.
+**And "no model reaches any of them" was wrong.** `conv1d` is `conv2d` on an unsqueezed input, so
+a kernel of one is `conv1x1`, whose operands are `(C, H * W)` with `H = 1`. The leading dimension
+is the frame count -- and an utterance is odd-length as often as not. Every 1x1 `conv1d` in
+`s2mel.rs` and `semantic_codec.rs` is in this hole for half of its inputs. It was true of SDXL and
+Anima, whose spatial extents are all even, and it stopped being true when audio arrived.
 
-What this costs is speed at those shapes, which nothing is paying: a one-column operand or a
-stride like 35 is not something SDXL, Anima or Krea 2 ever asks for.
+**The fix is padding after all, but not the padding described above.** Not one column wider, and
+not in `matmul.cc`: the extents grow too, and it is all in `hgemm`, where the alignment is already
+known and `cudaMemcpy2D` is all the copying takes. `m`, `n` and `k` are rounded up to multiples of
+eight, all three operands are copied into zeroed buffers stepping their own width, the widest
+kernel runs at the padded extents, and the corner is copied back. Zeros are what make it exact: a
+zero row of A gives a zero row of the answer, a zero column of B a zero column, and a zero tail on
+K adds nothing to any sum.
+
+Two things that cost time, recorded in case anyone touches this again:
+
+- **A SIMT half kernel was tried first**, as a fourth rung under the ladder, mirroring the float
+  arm. It is correct and it is four times slower -- 316us against 77us at 1024 by 1280 by 1280 --
+  which is too much to hand to a path that audio actually reaches.
+- **Padding the leading dimension alone is not enough, and faults the device.** The mainloop walks
+  K a tile of 32 at a time, so a row longer than the K it was given is read off the end of the
+  last row of the buffer. `runCase(8, 33, 16)` catches it where `runCase(8, 17, 16)` does not: 17
+  is one step and 33 is two. This is why the extents are padded rather than only the strides, and
+  why every operand is copied rather than only the misaligned ones -- growing an extent forces
+  every operand sharing it to be padded too.
+
+Measured at 1024 by 1281 by 1280: 109us, against 76us for the even shape beside it. Half again as
+long on a shape that reaches here, and nothing at all on one that does not -- the SDXL GEMM
+benchmark is unchanged to the noise, every shape in it still being read eight halves at a time.
+`compute-sanitizer` reports no errors on any of the six, nor on the test that now covers them
+directly.
 
 
 ## cuBLAS is never loaded on Windows, so every GEMM there is CUTLASS

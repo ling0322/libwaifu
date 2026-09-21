@@ -22,6 +22,7 @@
 #include <cuda_fp16.h>
 
 #include <algorithm>
+#include <type_traits>
 
 #include <cutlass/cutlass.h>
 #include <cutlass/gemm/device/gemm.h>
@@ -124,42 +125,6 @@ struct Sm80Gemm {
       true>;
 };
 
-/// The same product on the SIMT pipeline, one half at a time.
-///
-/// This exists for the leading dimensions the kernel above cannot read at all. `cp_async` moves
-/// 4, 8 or 16 bytes and nothing else, so two halves is the narrowest access a staged tensor-core
-/// mainloop has, and an operand whose leading dimension is odd has every second row starting on
-/// an odd number of halves. SIMT does not stage through `cp_async` and reads an element at a
-/// time, so alignment 1 is a configuration it actually has -- it is the default for this operator
-/// class, which is why the float arm below and the batched arm have never been in this hole.
-///
-/// Slow, and deliberately so. It is not on any path a model takes: every dimension in SDXL,
-/// Anima and Krea 2 is even, and what reaches here is a one-column operand or a stride like 35 --
-/// a 1x1 convolution over a 7 by 5 image, say. Being correct at those shapes is worth more than
-/// being fast at them, and the alternative on offer was refusing them.
-template<class LayoutA, class LayoutB>
-struct Sm80SimtHalfGemm {
-  using Gemm = cutlass::gemm::device::Gemm<
-      cutlass::half_t,
-      LayoutA,
-      cutlass::half_t,
-      LayoutB,
-      cutlass::half_t,
-      cutlass::layout::RowMajor,
-      float,
-      cutlass::arch::OpClassSimt,
-      cutlass::arch::Sm80,
-      cutlass::gemm::GemmShape<128, 128, 8>,
-      cutlass::gemm::GemmShape<32, 64, 8>,
-      cutlass::gemm::GemmShape<1, 1, 1>,
-      cutlass::epilogue::thread::LinearCombination<cutlass::half_t, 1, float, float>,
-      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
-      2,
-      1,
-      1,
-      true>;
-};
-
 /// The alignments the tensor-core kernel has an instantiation for, widest first.
 ///
 /// Three rather than one because a leading dimension is whatever the model made it: eight covers
@@ -167,8 +132,8 @@ struct Sm80SimtHalfGemm {
 /// needs. Two is the floor and not a choice: this kernel stages through `cp_async`, which takes
 /// 4, 8 or 16 bytes and nothing else, so one half at a time does not compile.
 ///
-/// An odd leading dimension is therefore not on this ladder at all, and goes to the SIMT kernel
-/// above instead. See `hgemm` below.
+/// An odd leading dimension is therefore not on this ladder at all, and is copied into a buffer
+/// that is on it before anything runs. See `hgemm` below.
 constexpr int kAlignments[] = {8, 4, 2};
 
 /// Whether `data` and `ld` can be read `alignment` halves at a time.
@@ -292,40 +257,90 @@ void hgemmT(
   CUTLASS_CHECK(gemmOperator());
 }
 
-/// The same call on the SIMT kernel, for operands no tensor-core instantiation can read.
-template<class LayoutA, class LayoutB>
-void hgemmSimt(
-    int m,
-    int n,
-    int k,
-    cutlass::half_t alpha,
-    const cutlass::half_t *A,
-    int lda,
-    const cutlass::half_t *B,
-    int ldb,
-    cutlass::half_t beta,
-    cutlass::half_t *C,
-    int ldc) {
-  using Gemm = typename Sm80SimtHalfGemm<LayoutA, LayoutB>::Gemm;
-  Gemm gemmOperator;
+/// A copy of a 2-D operand in a buffer the widest kernel can read.
+///
+/// Zeros in the margin are what make this exact rather than merely aligned. The caller grows `m`,
+/// `n` and `k` to multiples of eight and runs the product at those, so an input buffer carries
+/// its operand in the top-left corner and zeros everywhere else: a zero row of A contributes a
+/// zero row of the answer, a zero column of B a zero column, and a zero tail on K contributes
+/// nothing to any sum. What comes back in the corner is the product that was asked for, to the
+/// bit. A fresh allocation is 256-byte aligned, so the base needs nothing done to it.
+struct PaddedOperand {
+  lut::c_ptr<cutlass::half_t> buffer;
+  cutlass::half_t *data = nullptr;
+  int ld = 0;
+};
 
-  typename Gemm::Arguments args{
-      {m, n, k},
-      {A, lda},
-      {B, ldb},
-      {C, ldc},
-      {C, ldc},
-      {float(alpha), float(beta)},
-      splitKSlices(m, n, k)};
+/// `n` rounded up to where the widest kernel can start every row.
+constexpr int roundUpToAlignment(int n) {
+  return (n + kAlignments[0] - 1) / kAlignments[0] * kAlignments[0];
+}
 
-  // Asked here too. This kernel reads an element at a time and so has nothing left to refuse on
-  // alignment, but `can_implement` also checks what the problem size and the split do, and a
-  // refusal named here is worth more than a kernel launched on arguments it cannot serve.
-  CUTLASS_CHECK(Gemm::can_implement(args));
+/// `srcRows` rows of `srcCols` halves, stepping `srcLd`, in the corner of a zeroed `dstRows` by
+/// `dstCols` buffer that steps `dstCols`.
+///
+/// `copyIn` false leaves the buffer untouched, which is what an output wants: the kernel defines
+/// every element of it, and nothing is going to read it back into a sum first.
+PaddedOperand padOperand(
+    const cutlass::half_t *src,
+    int srcRows,
+    int srcCols,
+    int srcLd,
+    int dstRows,
+    int dstCols,
+    bool copyIn = true) {
+  constexpr size_t kHalf = sizeof(cutlass::half_t);
 
-  size_t workspaceSize = Gemm::get_workspace_size(args);
-  CUTLASS_CHECK(gemmOperator.initialize(args, splitKWorkspace(workspaceSize)));
-  CUTLASS_CHECK(gemmOperator());
+  PaddedOperand out;
+  out.ld = dstCols;
+  out.buffer = llynCudaAlloc<cutlass::half_t>(int64_t(dstRows) * dstCols);
+  out.data = out.buffer.get();
+
+  // An output is left as it is found. The kernel writes every element of it -- the extents it is
+  // given are the padded ones and the leading dimension is their width -- so there is nothing
+  // here that it does not define, and zeroing it first would be writing the whole buffer twice.
+  if (!copyIn) return out;
+
+  // An input is zeroed only where the copy does not reach. Zeroing the whole buffer and then
+  // overwriting the corner costs as much again as the copy, and on a 1024 by 1280 by 1280 shape
+  // that was half of what this path spends. The margin is at most seven columns and seven rows.
+  if (dstCols > srcCols) {
+    LL_CHECK_CUDA_STATUS(cudaMemset2D(
+        out.data + srcCols,
+        size_t(dstCols) * kHalf,
+        0,
+        size_t(dstCols - srcCols) * kHalf,
+        size_t(srcRows)));
+  }
+  if (dstRows > srcRows) {
+    LL_CHECK_CUDA_STATUS(cudaMemset(
+        out.data + int64_t(srcRows) * dstCols,
+        0,
+        size_t(int64_t(dstRows - srcRows) * dstCols) * kHalf));
+  }
+
+  LL_CHECK_CUDA_STATUS(cudaMemcpy2D(
+      out.data,
+      size_t(dstCols) * kHalf,
+      src,
+      size_t(srcLd) * kHalf,
+      size_t(srcCols) * kHalf,
+      size_t(srcRows),
+      cudaMemcpyDeviceToDevice));
+
+  return out;
+}
+
+/// How an operand of `r` by `c` in `Layout` sits in memory, as rows of contiguous halves.
+///
+/// Row-major steps between rows, so it is `r` rows of `c`. Column-major steps between columns --
+/// element (i, j) is at i + j * ld -- so it is `c` rows of `r`. Both step by the leading
+/// dimension, which is what has to come out a multiple of eight.
+template<class Layout>
+void operandExtent(int r, int c, int *rows, int *cols) {
+  constexpr bool kRowMajor = std::is_same<Layout, RowMajor>::value;
+  *rows = kRowMajor ? r : c;
+  *cols = kRowMajor ? c : r;
 }
 
 /// The same call at the widest alignment the three operands can actually be read at.
@@ -361,11 +376,74 @@ void hgemm(
         m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   }
 
-  // An odd leading dimension, which no tensor-core instantiation can read: every second row
-  // starts on an odd number of halves, and the narrowest access a staged mainloop has is two.
-  // SIMT reads an element at a time and answers these. Reached only by a one-column operand or a
-  // stride like 35 -- no model gets here -- so what it costs in speed nothing is paying.
-  return hgemmSimt<LayoutA, LayoutB>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+  // Nothing on the ladder can read these: a leading dimension that is odd has every second row
+  // starting on an odd number of halves, and two halves is the narrowest access a staged mainloop
+  // has. Refusing them is not an option -- a 1x1 convolution over an odd number of audio frames
+  // reaches here, and `conv1d` with a kernel of one is exactly that, on an operand whose leading
+  // dimension is the frame count. Nor is a SIMT kernel that reads an element at a time, which
+  // answers them four times slower: 316us against 77us at 1024 by 1280 by 1280.
+  //
+  // So copy. Every extent grows to a multiple of eight and all three operands are copied into
+  // zeroed buffers stepping their own width, which is the shape the widest kernel wants and the
+  // one it is fastest on. The zeros are why this is exact: a zero row of A gives a zero row of
+  // the answer, a zero column of B a zero column, and a zero tail on K adds nothing to any sum,
+  // so the corner copied back is the product that was asked for.
+  //
+  // All three, including any that could have been read as they stand. Growing K means reading
+  // past where the untouched operand's data ends, and past there is whatever the allocator last
+  // left rather than a zero.
+  //
+  // What it costs is three copies and a fourth back, each an area against a product that is an
+  // area times an extent, so the ratio falls away as the shapes grow. Measured at 1024 by 1281 by
+  // 1280: 109us, against 76us for the even shape beside it and 316us for the SIMT kernel this
+  // replaced. Call it half again as long on a shape that reaches here, and nothing at all on one
+  // that does not -- an operand the ladder above can read never sees any of this.
+  //
+  // Copying only the operands that are misaligned would get most of that back. It is not done
+  // because it cannot be decided per operand: growing an extent forces every operand that shares
+  // it to be padded too, whether or not that one was readable, and the version that tried to be
+  // clever about which is which is the version that read off the end of A.
+  int paddedM = roundUpToAlignment(m);
+  int paddedN = roundUpToAlignment(n);
+  int paddedK = roundUpToAlignment(k);
+
+  int aRows, aCols, aPaddedRows, aPaddedCols;
+  operandExtent<LayoutA>(m, k, &aRows, &aCols);
+  operandExtent<LayoutA>(paddedM, paddedK, &aPaddedRows, &aPaddedCols);
+
+  int bRows, bCols, bPaddedRows, bPaddedCols;
+  operandExtent<LayoutB>(k, n, &bRows, &bCols);
+  operandExtent<LayoutB>(paddedK, paddedN, &bPaddedRows, &bPaddedCols);
+
+  PaddedOperand paddedA = padOperand(A, aRows, aCols, lda, aPaddedRows, aPaddedCols);
+  PaddedOperand paddedB = padOperand(B, bRows, bCols, ldb, bPaddedRows, bPaddedCols);
+
+  // The output is row-major whatever the operands are. A non-zero beta reads it, so it is copied
+  // in as well as out.
+  PaddedOperand paddedC =
+      padOperand(C, m, n, ldc, paddedM, paddedN, beta != cutlass::half_t(0.0f));
+
+  hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[0]>(
+      paddedM,
+      paddedN,
+      paddedK,
+      alpha,
+      paddedA.data,
+      paddedA.ld,
+      paddedB.data,
+      paddedB.ld,
+      beta,
+      paddedC.data,
+      paddedC.ld);
+
+  LL_CHECK_CUDA_STATUS(cudaMemcpy2D(
+      C,
+      size_t(ldc) * sizeof(cutlass::half_t),
+      paddedC.data,
+      size_t(paddedC.ld) * sizeof(cutlass::half_t),
+      size_t(n) * sizeof(cutlass::half_t),
+      size_t(m),
+      cudaMemcpyDeviceToDevice));
 }
 
 template<class ArchTag>
