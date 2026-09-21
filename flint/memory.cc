@@ -42,6 +42,10 @@ void MemorySnapshot::resetPeakStats(Device device) {
   getOperators(device.getType())->resetPeakMemoryStats();
 }
 
+void MemorySnapshot::releaseUnused(Device device) {
+  getOperators(device.getType())->releaseUnusedMemory();
+}
+
 int64_t MemorySnapshot::getTotalMemory() const {
   return _totalMemory;
 }

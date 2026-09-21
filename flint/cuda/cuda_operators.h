@@ -142,6 +142,7 @@ class CudaOperators : public Operators {
 
   MemorySnapshot captureMemorySnapshot() override;
   void resetPeakMemoryStats() override;
+  void releaseUnusedMemory() override;
 
   DType getDefaultFloatType() override;
 

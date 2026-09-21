@@ -392,6 +392,11 @@ void Operators::resetPeakMemoryStats() {
   NOT_IMPL();
 }
 
+// Not NOT_IMPL(): a device whose allocator holds nothing back has nothing to hand over, and has
+// answered this question by already having done it.
+void Operators::releaseUnusedMemory() {
+}
+
 bool Operators::allClose(Tensor A, Tensor B, float rtol, float atol) {
   NOT_IMPL();
 }

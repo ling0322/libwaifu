@@ -37,7 +37,7 @@ use std::time::Instant;
 use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
-use crate::flint::Tensor;
+use crate::flint::{MemorySnapshot, Tensor};
 use crate::wav::{self, Sound};
 use crate::{
     from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2,
@@ -167,9 +167,18 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
             // through letting go of them. Nothing is read back here: the next run reads what it
             // needs, which is the whole of what this program does with a model now.
             Command::UseDevice(runtime) => {
+                let had_weights = model.is_some();
                 model = None;
                 in_memory = None;
                 forget_the_weights(shared);
+                // Where there were weights, and while `shared.runtime()` still names the device
+                // they were on -- which is the only device this can be asked of, and the one
+                // nothing here will allocate on again. Skipped where there were none, because a
+                // device that has had nothing read onto it has nothing to hand back and no reason
+                // to be woken up to say so.
+                if had_weights {
+                    give_the_memory_back(shared);
+                }
                 shared.use_runtime(runtime);
                 shared.say(format!("runs go to {} now", runtime.name()), false);
             }
@@ -188,11 +197,29 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                     }
                 }
 
-                match &model {
-                    Some(model) => draw(shared, model, job),
+                let ran = match &model {
+                    Some(loaded) => draw(shared, loaded, job),
                     // Nothing to say: the read that just failed said why, in the words of
-                    // whatever went wrong with it.
-                    None => (),
+                    // whatever went wrong with it. And nothing ran, which is not a run that was
+                    // stopped -- there are no weights here to let go of.
+                    None => Ran::ToTheEnd,
+                };
+
+                // A run somebody stopped is a run they are done with, and what it was drawing
+                // with is gigabytes of a card that nothing is using now. So the weights follow
+                // the run out: the usual reason to press stop is that something else wants the
+                // card, and a program that kept it until the next prompt would be answering a
+                // different request than the one that was made.
+                //
+                // Only on a stop. A run that finished is a picture somebody is about to ask for
+                // again with one word changed, and taking the model down between two of those
+                // would spend a minute of reading on every prompt.
+                if ran == Ran::Stopped {
+                    model = None;
+                    in_memory = None;
+                    forget_the_weights(shared);
+                    shared.say("stopped where it was, and the model is off the card", false);
+                    give_the_memory_back(shared);
                 }
             }
 
@@ -209,6 +236,11 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                     }
                 }
 
+                // Nothing is let go of when a reading is stopped, unlike a drawing above. What is
+                // loaded to speak with is [`Tones`] -- two floats, on no device -- so there is
+                // nothing a stop could hand back. The first voice with a package behind it is the
+                // one that wants what `Command::Draw` does about a stop, and it wants it at the
+                // same time as it wants this slot and `model` to become one.
                 match &voice {
                     Some(voice) => say(shared, voice.as_ref(), job),
                     None => (),
@@ -223,6 +255,17 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
     }
 }
 
+/// How a run ended, in the one respect the worker does anything different about.
+///
+/// A run that failed is [`Ran::ToTheEnd`] here: what went wrong with it has already been said on
+/// the bar, and the weights it failed with are as good as the weights it would have succeeded
+/// with. What this tells apart is the one ending that is somebody asking for the card back.
+#[derive(Eq, PartialEq)]
+enum Ran {
+    ToTheEnd,
+    Stopped,
+}
+
 /// Says on screen that there are no weights in memory, leaving what is chosen chosen.
 ///
 /// The choice outlives the weights. Somebody who changed the device, or whose last run was of
@@ -233,6 +276,31 @@ fn forget_the_weights(shared: &Shared) {
             chosen.in_memory = false;
         }
     });
+}
+
+/// Hands the memory the weights were in back to the driver, for whoever else wants the card.
+///
+/// The second half of letting go of a model, and no use without the first: this frees nothing a
+/// tensor still holds. Dropping the model is what frees it, and dropping it is not enough on its
+/// own -- the allocator is told at startup to keep what it frees rather than give it back, since
+/// a run that had to ask the driver for the blocks the last run just finished with would pay for
+/// the same memory twice. So the weights can be gone while the card still reads full, and this is
+/// the call that ends that.
+///
+/// Which is why it is called where a model is being put down for good and nowhere else. Between
+/// two runs of one model it hands over the very blocks the next run wants, and the next run waits
+/// for the driver to hand them back.
+fn give_the_memory_back(shared: &Shared) {
+    // Said on the bar rather than raised, and only when it fails. The model is gone either way,
+    // which is the part that was asked for; what a failure changes is what the rest of the
+    // machine can have, and somebody who stopped a run to free the card should hear that it is
+    // not free.
+    if let Err(error) = MemorySnapshot::release_unused(shared.runtime().device()) {
+        shared.say(
+            format!("the model is down, but its memory could not be handed back: {error}"),
+            true,
+        );
+    }
 }
 
 /// Reads the model `asked` names into `model`, and says on screen how it went. True where the
@@ -553,8 +621,9 @@ fn report_fetch(shared: &Shared, model: &str, progress: hub::Progress) {
     });
 }
 
-/// Draws one picture and puts it in the gallery.
-fn draw(shared: &Shared, model: &Model, job: Job) {
+/// Draws one picture and puts it in the gallery. Says whether it got to the end of it, which is
+/// what decides whether the weights stay on the device.
+fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
     // A stop asked for after the last run finished is not this run's business.
     shared.carry_on();
     let started = Instant::now();
@@ -587,7 +656,8 @@ fn draw(shared: &Shared, model: &Model, job: Job) {
             Ok(image) => Some(image),
             Err(error) => {
                 shared.change(|session| session.doing = Doing::Nothing);
-                return shared.say(format!("the picture to draw from: {error}"), true);
+                shared.say(format!("the picture to draw from: {error}"), true);
+                return Ran::ToTheEnd;
             }
         },
         None => None,
@@ -605,9 +675,12 @@ fn draw(shared: &Shared, model: &Model, job: Job) {
         // Written here rather than handed back, because the pixels are three megabytes that
         // nothing on the other side would do anything with but hand to a file.
         Ok(Some(image)) => keep(&image),
+        // Nothing said here, unlike every other way out of this function. What there is to say
+        // about a stop is what the caller does about it next, and the caller is the one place
+        // that knows: the weights go down with the run, and the sentence says so.
         Ok(None) => {
             shared.change(|session| session.doing = Doing::Nothing);
-            return shared.say("stopped where it was", false);
+            return Ran::Stopped;
         }
         Err(error) => Err(error.into()),
     };
@@ -616,7 +689,8 @@ fn draw(shared: &Shared, model: &Model, job: Job) {
         Ok(kept) => kept,
         Err(error) => {
             shared.change(|session| session.doing = Doing::Nothing);
-            return shared.say(error.to_string(), true);
+            shared.say(error.to_string(), true);
+            return Ran::ToTheEnd;
         }
     };
 
@@ -648,6 +722,8 @@ fn draw(shared: &Shared, model: &Model, job: Job) {
         session.doing = Doing::Nothing;
         session.note = None;
     });
+
+    Ran::ToTheEnd
 }
 
 /// Says one sentence and puts the clip in the list.

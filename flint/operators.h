@@ -230,6 +230,16 @@ class Operators {
   virtual MemorySnapshot captureMemorySnapshot();
   virtual void resetPeakMemoryStats();
 
+  /// Hand every byte no tensor is using back to the driver, so that another process on the same
+  /// device may have it. Does nothing where an allocator gives memory back as each tensor goes,
+  /// which is what the CPU does and what CUDA does when it is built without its pool.
+  ///
+  /// Only worth calling where something large has just been let go of and nothing here will ask
+  /// for it again -- a model taken off the card. Between two runs of one model it is the wrong
+  /// call: it gives back the very blocks the next run would have reused, and the next run asks
+  /// the driver for them again.
+  virtual void releaseUnusedMemory();
+
   virtual DType getDefaultFloatType();
 
   /// Wait until all previously submitted work on this device has finished. A no-op on the CPU,
