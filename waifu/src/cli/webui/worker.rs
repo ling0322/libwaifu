@@ -189,6 +189,14 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                 }
 
                 match &model {
+                    // A stop asked for while the model was coming down is a stop to the run it
+                    // was coming down for: whoever pressed it was waiting for this picture, and
+                    // the picture is what they asked to stop waiting for. Only reachable where
+                    // the read went through -- a fetch that was stopped says so for itself, and
+                    // leaves nothing here to draw with.
+                    Some(_) if shared.interrupted() => {
+                        shared.say("stopped -- the model is here, and nothing was drawn", false)
+                    }
                     Some(model) => draw(shared, model, job),
                     // Nothing to say: the read that just failed said why, in the words of
                     // whatever went wrong with it.
@@ -264,7 +272,11 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
         }
         Err(error) => {
             shared.change(|session| session.doing = Doing::Nothing);
-            shared.say(error.to_string(), true);
+            // A stop is not a failure. It is the button doing what it says, and what it has to
+            // say for itself -- which package is left on the disk, what the next fetch will not
+            // have to bring down again -- belongs on the bar in the ordinary way rather than as a
+            // complaint about something going wrong.
+            shared.say(error.to_string(), !hub::stopped(&error));
             false
         }
     }
@@ -440,6 +452,11 @@ fn on_disk(asked: &str) -> Option<PathBuf> {
 
 /// Fetches and reads the model `asked` names, saying how it is getting on as it goes.
 fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
+    // A stop asked for before this began is not this fetch's business -- the same rule `draw`
+    // below is written to, and needed here for the same reason: the flag outlives the run that
+    // was stopped, and the next fetch would read it on the way in and stop before it started.
+    shared.carry_on();
+
     // The name the screen shows. As typed when it was named, because that is what someone would
     // type again; the file name when a path was given, because the whole path does not fit and
     // its tail is the part that identifies it.
@@ -460,8 +477,14 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
         })
     });
 
-    let path =
-        hub::resolve_reporting(asked, &mut |progress| report_fetch(shared, &name, progress))?;
+    // Stoppable from here to the last byte of the last package. What follows it is not: reading
+    // the weights onto the device is one call into the tensor library that returns when it
+    // returns, and the screen says which of the two is happening.
+    let path = hub::resolve_reporting(
+        asked,
+        &mut |progress| report_fetch(shared, &name, progress),
+        &|| shared.interrupted(),
+    )?;
 
     shared.change(|session| {
         session.doing = Doing::Reading {

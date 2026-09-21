@@ -643,6 +643,10 @@ impl Shared {
             // Told apart from drawing, because the two buttons that stop them are on different
             // tabs and each one is live only while its own kind of run is going.
             "speaking": matches!(session.doing, Doing::Speaking(_)),
+            // And told apart from both, because the same button stops a fetch but what it says
+            // it will do is not the same thing: a run that is stopped keeps the picture so far,
+            // and a fetch that is stopped keeps the packages so far.
+            "fetching": matches!(session.doing, Doing::Fetching(_)),
             "fraction": session.doing.fraction(),
             "doing": session.doing.words(),
             "seconds": match &session.doing {
@@ -653,8 +657,15 @@ impl Shared {
             // Only while there is something to stop. The flag stays set between a run that was
             // stopped and the next one that clears it, and a bar saying "stopping" over an idle
             // program would be reporting the flag rather than what is happening.
+            //
+            // A fetch is one of the things there is to stop; reading the weights onto the device
+            // is not, and the flag set during that one is a stop that will be taken by whatever
+            // comes after it rather than by the read.
             "interrupting": self.interrupted()
-                && matches!(session.doing, Doing::Drawing(_) | Doing::Speaking(_)),
+                && matches!(
+                    session.doing,
+                    Doing::Drawing(_) | Doing::Speaking(_) | Doing::Fetching(_)
+                ),
         })
     }
 
@@ -975,6 +986,35 @@ mod tests {
             })
         });
         assert_eq!(shared.progress()["interrupting"], true);
+
+        // A fetch is the other thing there is to stop, and the page is told which of the two it
+        // is looking at: the same button stops both, and what it promises to keep is not the
+        // same.
+        shared.change(|session| {
+            session.doing = Doing::Fetching(Fetch {
+                model: "sdxl:base".to_string(),
+                hub: None,
+                file: "unet.safetensors".to_string(),
+                done: 1,
+                total: Some(2),
+                part: 1,
+                parts: 3,
+            })
+        });
+        assert_eq!(shared.progress()["interrupting"], true);
+        assert_eq!(shared.progress()["fetching"], true);
+        assert_eq!(shared.progress()["drawing"], false);
+
+        // Reading the weights onto the device is neither: it is one call into the tensor library
+        // that returns when it returns, so there is nothing there to ask to stop and the bar does
+        // not offer to.
+        shared.change(|session| {
+            session.doing = Doing::Reading {
+                model: "sdxl:base".to_string(),
+            }
+        });
+        assert_eq!(shared.progress()["interrupting"], false);
+        assert_eq!(shared.progress()["fetching"], false);
 
         shared.carry_on();
         assert!(!shared.interrupted());

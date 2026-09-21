@@ -37,12 +37,14 @@
 //! where its files live and when it is allowed to touch the network.
 
 use std::env;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use hf_hub::progress::{DownloadEvent, Progress as Reported, ProgressEvent, ProgressHandler};
@@ -70,9 +72,13 @@ const DOWNLOAD_BUFFER: usize = 1 << 20;
 /// enough that it is not redrawing for a bar that has not moved.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The directory a Hugging Face fetch is given to itself, inside the cache directory of the model
-/// it belongs to. On the same filesystem as the package it becomes, so the rename that puts it
-/// there is a rename and not a copy.
+/// What the directory a Hugging Face fetch is given to itself is called, inside the cache
+/// directory of the model it belongs to. On the same filesystem as the package it becomes, so the
+/// rename that puts it there is a rename and not a copy.
+///
+/// A prefix rather than the whole name: every attempt gets a directory of its own -- see
+/// [`staging`] -- and what they have in common is this. Deleting the model takes them with it,
+/// since they are inside the directory that is deleted.
 const INCOMING: &str = ".incoming";
 
 /// Which host a model is fetched from, when the environment names one rather than leaving it to
@@ -114,6 +120,33 @@ struct Part {
     at: usize,
     /// How many there are in all, or zero while that is still unknown.
     of: usize,
+}
+
+/// Whoever is watching a fetch: where it says how it is getting on, and where it asks whether
+/// to carry on.
+///
+/// One thing rather than two arguments, for the reason [`Part`] above is one thing: they travel
+/// together down through the fetch and into every file it brings down. And they belong together
+/// -- somebody watching a download of several gigabytes is the same somebody who decides it has
+/// gone on long enough.
+struct Watching<'a> {
+    /// Told how far along the fetch is, on a clock rather than at every byte.
+    report: &'a mut dyn FnMut(Progress),
+    /// Asked, between one piece of the work and the next, whether to give up.
+    stop: &'a dyn Fn() -> bool,
+}
+
+impl Watching<'_> {
+    fn say(&mut self, progress: Progress) {
+        (self.report)(progress);
+    }
+
+    /// Whether to stop where this is. Asked at the places a fetch can stop and nowhere else: what
+    /// it costs to answer is not this side's to guess at, and a question asked per byte is a
+    /// question somebody has to make cheap.
+    fn stopping(&self) -> bool {
+        (self.stop)()
+    }
 }
 
 /// A model that has a name, and where it is published.
@@ -364,6 +397,57 @@ pub enum Progress<'a> {
     },
 }
 
+/// What a fetch comes back with when the `stop` it was given said to give up.
+///
+/// An error rather than a third kind of success. A stop is taken at a dozen places inside a fetch
+/// -- before the first byte, between packages, in the middle of one -- and every one of them
+/// already knows how to hand a failure back up through `?`; a success that had to be carried
+/// through each of them by hand would be the same journey written out a second time. What tells
+/// it apart from a failure is [`stopped`], which is the one question a caller asks before it
+/// prints the words below as a complaint rather than as an answer.
+///
+/// The words say what is left on the disk, because that is what somebody who has just stopped a
+/// download of several gigabytes wants to know, and it is not the same in both of the places a
+/// stop can be taken.
+#[derive(Debug)]
+pub struct Stopped(&'static str);
+
+impl Stopped {
+    /// A stop taken where nothing was left running: between packages, or inside one coming over
+    /// plain HTTP, where what has arrived is a `.part` the next fetch carries on from.
+    fn kept() -> Self {
+        Self("stopped -- what has come down is kept, and fetching it again carries on from there")
+    }
+
+    /// A stop taken inside a package coming from Hugging Face, which cannot be called back.
+    ///
+    /// See [`abandon`]: that package goes on arriving and is kept when it lands. Said out loud
+    /// because it is visible from outside the program -- the light on the router does not go out
+    /// when the bar does -- and a stop that quietly went on downloading would read as a lie.
+    fn kept_and_finishing() -> Self {
+        Self(
+            "stopped -- what has come down is kept, and the package it was on goes on arriving in \
+             the background rather than being thrown away",
+        )
+    }
+}
+
+impl fmt::Display for Stopped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for Stopped {}
+
+/// Whether a fetch ended because it was asked to, rather than because something went wrong.
+///
+/// The difference is the whole of what a caller does with it: a failure is a complaint on the
+/// screen, and a stop is the button working.
+pub fn stopped(error: &Error) -> bool {
+    error.downcast_ref::<Stopped>().is_some()
+}
+
 /// Whether every package of a published model is already in the cache.
 ///
 /// A model is several packages and the first names the rest, so a model that was interrupted
@@ -547,9 +631,18 @@ fn reads_as_a_name(model: &str) -> bool {
 ///
 /// There is no variant that reports nowhere. A fetch is minutes long, and the one caller there
 /// is has a bar to draw it on; somewhere for it to say so is not optional.
-pub fn resolve_reporting(model: &str, report: &mut dyn FnMut(Progress)) -> Result<PathBuf, Error> {
+///
+/// `stop` is asked, between one piece of the work and the next, whether to give up; a fetch that
+/// gives up comes back as [`Stopped`]. Asked rather than told, because a stop arrives from
+/// whichever thread the button was pressed on and there is nothing here to interrupt: this side
+/// is a stack of blocking calls, and where it can look up from them is where it asks.
+pub fn resolve_reporting(
+    model: &str,
+    report: &mut dyn FnMut(Progress),
+    stop: &dyn Fn() -> bool,
+) -> Result<PathBuf, Error> {
     if let Some(published) = published(model) {
-        return fetch(published, report);
+        return fetch(published, &mut Watching { report, stop });
     }
 
     let path = PathBuf::from(model);
@@ -569,7 +662,14 @@ pub fn resolve_reporting(model: &str, report: &mut dyn FnMut(Progress)) -> Resul
 
 /// Make sure the manifest of `published` and every file it names is in the cache, and say where
 /// the manifest is.
-fn fetch(published: &Published, report: &mut dyn FnMut(Progress)) -> Result<PathBuf, Error> {
+fn fetch(published: &Published, watching: &mut Watching) -> Result<PathBuf, Error> {
+    // Before anything is made or asked. Working out which hub is reachable is three seconds of
+    // waiting on a machine that can reach neither, and somebody who changed their mind before any
+    // of that began is owed a fetch that leaves nothing behind.
+    if watching.stopping() {
+        return Err(Stopped::kept().into());
+    }
+
     // One directory per repository, so that a model's files sit beside each other: the manifest
     // names them by file name and they are read from its own directory.
     let directory = cache_directory()?.join(published.repo.replace('/', "--"));
@@ -577,7 +677,7 @@ fn fetch(published: &Published, report: &mut dyn FnMut(Progress)) -> Result<Path
 
     // Before anything is asked for, and only here: settling this is what the probe is for, and
     // doing it now means whoever is watching is told the answer rather than a guess at it.
-    report(Progress::From {
+    watching.say(Progress::From {
         hub: mirror().name(),
     });
 
@@ -589,7 +689,7 @@ fn fetch(published: &Published, report: &mut dyn FnMut(Progress)) -> Result<Path
         published.manifest,
         &manifest,
         Part { at: 0, of: 0 },
-        report,
+        watching,
     )?;
 
     let files = files_named_by(&manifest)?;
@@ -599,7 +699,7 @@ fn fetch(published: &Published, report: &mut dyn FnMut(Progress)) -> Result<Path
             at: index + 1,
             of: files.len(),
         };
-        download(published.repo, file, &at, which, report)?;
+        download(published.repo, file, &at, which, watching)?;
     }
     Ok(manifest)
 }
@@ -658,8 +758,15 @@ fn download(
     file: &str,
     destination: &Path,
     part: Part,
-    report: &mut dyn FnMut(Progress),
+    watching: &mut Watching,
 ) -> Result<(), Error> {
+    // Asked once per package, which is what makes a stop between them prompt: the two below are
+    // what a stop inside one costs, and neither of them has to be paid to stop before the next
+    // one starts.
+    if watching.stopping() {
+        return Err(Stopped::kept().into());
+    }
+
     // Already fetched, and nothing to say about it: a caller that draws a bar would rather see
     // the bar start at the first file that is actually being fetched.
     if destination.exists() {
@@ -667,9 +774,26 @@ fn download(
     }
 
     match mirror() {
-        Mirror::HuggingFace => download_from_hugging_face(repo, file, destination, part, report),
-        Mirror::ModelScope => download_over_http(repo, file, destination, part, report),
+        Mirror::HuggingFace => download_from_hugging_face(repo, file, destination, part, watching),
+        Mirror::ModelScope => download_over_http(repo, file, destination, part, watching),
     }
+}
+
+/// A staging directory of this attempt's own, inside `directory`.
+///
+/// One name for all of them would be two downloads writing one file, because a stopped fetch
+/// leaves its download running -- see [`abandon`] -- and the next fetch of the same model can
+/// begin while it is still going. The process id is in the name for the same reason one attempt's
+/// number is: two copies of this program sharing a cache are two sets of attempts.
+///
+/// What a directory here outlives is the program being killed outright, which is the one ending
+/// that runs nothing afterwards. It is inside the model's own directory, so deleting the model --
+/// which the screen offers -- takes it too.
+fn staging(directory: &Path) -> PathBuf {
+    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+
+    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    directory.join(format!("{INCOMING}.{}.{attempt}", process::id()))
 }
 
 /// Fetch one file from Hugging Face, through the client Hugging Face publishes.
@@ -684,12 +808,15 @@ fn download(
 /// is then either a whole package or nothing, which is the promise the rest of this file is
 /// written against. What is lost against the ModelScope path below is resuming -- an interrupted
 /// fetch starts the package again.
+///
+/// A stop is taken on the same clock the progress is read on, and costs the package in flight:
+/// see [`abandon`] for where that one goes.
 fn download_from_hugging_face(
     repo: &str,
     file: &str,
     destination: &Path,
     part: Part,
-    report: &mut dyn FnMut(Progress),
+    watching: &mut Watching,
 ) -> Result<(), Error> {
     let (owner, name) = repo
         .split_once('/')
@@ -697,7 +824,7 @@ fn download_from_hugging_face(
     let directory = destination
         .parent()
         .ok_or_else(|| format!("{} is not in a directory", destination.display()))?;
-    let staging = directory.join(INCOMING);
+    let staging = staging(directory);
 
     // The download runs on a thread of its own and this one watches the counters it keeps, rather
     // than the other way about: hf-hub hands progress to a handler that has to be shared across
@@ -723,8 +850,23 @@ fn download_from_hugging_face(
     // On the same clock the other path draws on, and for the same reasons: see copy_reporting.
     while !fetching.is_finished() {
         thread::sleep(PROGRESS_INTERVAL);
+
+        // Asked before the line below rather than after it, so that the last thing the bar was
+        // told is where the fetch got to rather than where it was a tenth of a second earlier.
+        // Nothing is said about the stop here: that is the caller's to say, and it is handed the
+        // words for it below.
+        if watching.stopping() {
+            abandon(
+                fetching,
+                staging,
+                destination.to_path_buf(),
+                file.to_string(),
+            );
+            return Err(Stopped::kept_and_finishing().into());
+        }
+
         let total = counted.total.load(Ordering::Relaxed);
-        report(Progress::Fetching {
+        watching.say(Progress::Fetching {
             file,
             done: counted.done.load(Ordering::Relaxed),
             total: (total > 0).then_some(total),
@@ -738,11 +880,11 @@ fn download_from_hugging_face(
 
     let arrived = staging.join(file);
     fs::rename(&arrived, destination)?;
-    // Only ever holds the one file, and only while it is arriving. Left behind if something else
-    // is in there, which is not this function's to throw away.
-    let _ = fs::remove_dir(&staging);
+    // The directory is this attempt's alone, so what is left in it is this attempt's leavings and
+    // there is nothing in there to be careful of.
+    let _ = fs::remove_dir_all(&staging);
 
-    report(Progress::Fetched {
+    watching.say(Progress::Fetched {
         file,
         bytes: fs::metadata(destination)
             .map(|meta| meta.len())
@@ -751,6 +893,35 @@ fn download_from_hugging_face(
         parts: part.of,
     });
     Ok(())
+}
+
+/// Hands a download that is still running to a thread that waits for it, so that whoever asked
+/// for the stop is not the one waiting.
+///
+/// There is no way to call hf-hub back. The download is a blocking call on a thread of its own,
+/// inside an executor of its own, and what it offers to be told along the way is a progress
+/// handler that returns nothing. So a stop taken in the middle of a package cannot be a stop to
+/// the package: it can only be a stop to waiting for it, which is the part anybody is watching.
+///
+/// What arrives is then put where it belongs rather than deleted. It is a whole package, the line
+/// has already been paid for it, and the alternative is throwing away gigabytes that the next
+/// fetch of this model would bring down again. A package that does not arrive -- a failure, or
+/// the program ending first -- leaves the staging directory, which goes here with it.
+fn abandon(
+    fetching: JoinHandle<Result<(), String>>,
+    staging: PathBuf,
+    destination: PathBuf,
+    file: String,
+) {
+    thread::spawn(move || {
+        // A rename only where the download said it finished. Anything else and what is under
+        // there is a part of a package, and a part of a package renamed into place is what the
+        // whole staging dance exists to prevent.
+        if matches!(fetching.join(), Ok(Ok(()))) {
+            let _ = fs::rename(staging.join(&file), &destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+    });
 }
 
 /// How many bytes of the file being fetched have arrived, as the thread fetching it counts them.
@@ -801,13 +972,14 @@ impl ProgressHandler for Counting {
 /// Fetch one file over plain HTTP, which is how ModelScope is asked.
 ///
 /// The download goes to a `.part` beside the destination and is renamed once it is whole, and a
-/// `.part` left behind is resumed rather than restarted.
+/// `.part` left behind is resumed rather than restarted -- which is also what a stop leaves
+/// behind here, so stopping this one costs nothing but the buffer it was in the middle of.
 fn download_over_http(
     repo: &str,
     file: &str,
     destination: &Path,
     part: Part,
-    report: &mut dyn FnMut(Progress),
+    watching: &mut Watching,
 ) -> Result<(), Error> {
     let url = mirror().url(repo, file);
     let partial = PathBuf::from(format!("{}.part", destination.display()));
@@ -865,7 +1037,7 @@ fn download_over_http(
 
     let start = if resuming { have } else { 0 };
     let mut reader = response.into_body().into_reader();
-    let written = copy_reporting(&mut reader, &mut writer, file, start, total, part, report)?;
+    let written = copy_reporting(&mut reader, &mut writer, file, start, total, part, watching)?;
     writer.sync_all()?;
     drop(writer);
 
@@ -907,6 +1079,11 @@ fn range_begins_at(header: &str) -> Option<u64> {
 ///
 /// The line is rewritten in place rather than added to, because this runs on the terminal the
 /// drawing screen is about to take over and a screenful of progress lines is not worth keeping.
+///
+/// A stop here comes back as [`Stopped`] rather than as a short count, which is the difference
+/// between the caller keeping the `.part` and the caller complaining that the file arrived
+/// incomplete. What has been written stays written: `writer` is the file itself and not a buffer
+/// over it, so the bytes that were read are on the disk and the next fetch carries on from them.
 fn copy_reporting(
     reader: &mut impl Read,
     writer: &mut impl Write,
@@ -914,15 +1091,15 @@ fn copy_reporting(
     start: u64,
     total: Option<u64>,
     part: Part,
-    report: &mut dyn FnMut(Progress),
-) -> io::Result<u64> {
+    watching: &mut Watching,
+) -> Result<u64, Error> {
     let mut buffer = vec![0u8; DOWNLOAD_BUFFER];
     let mut done = start;
 
     // Said before the first byte, because the gap between one package finishing and the next
     // showing a number is a stretch where the screen would otherwise hold a full bar and look
     // hung. This is what moves it to the new file at nothing.
-    report(Progress::Fetching {
+    watching.say(Progress::Fetching {
         file: name,
         done,
         total,
@@ -939,13 +1116,20 @@ fn copy_reporting(
         writer.write_all(&buffer[..read])?;
         done += read as u64;
 
+        // After the write rather than before the read, so that a stop is taken with the buffer
+        // that was in flight on the disk rather than dropped. A megabyte at a time, which is as
+        // long as a stop here ever waits.
+        if watching.stopping() {
+            return Err(Stopped::kept().into());
+        }
+
         // On a clock rather than on a fraction of the file. A percent of two gigabytes is twenty
         // megabytes, which is seconds of silence on an ordinary line and reads as a hang; and on
         // a fast one it is several redraws a second for a bar that moved a pixel. Time is what
         // the watcher actually measures the wait in.
         if said.elapsed() >= PROGRESS_INTERVAL {
             said = Instant::now();
-            report(Progress::Fetching {
+            watching.say(Progress::Fetching {
                 file: name,
                 done,
                 total,
@@ -955,7 +1139,7 @@ fn copy_reporting(
         }
     }
 
-    report(Progress::Fetched {
+    watching.say(Progress::Fetched {
         file: name,
         bytes: done,
         part: part.at,
@@ -970,10 +1154,10 @@ mod tests {
 
     use super::*;
 
-    /// [`resolve_reporting`] with nothing listening, for the tests that are about what it refuses
-    /// rather than about what it fetches.
+    /// [`resolve_reporting`] with nothing listening and nothing stopping it, for the tests that
+    /// are about what it refuses rather than about what it fetches.
     fn quietly(model: &str) -> Result<PathBuf, Error> {
-        resolve_reporting(model, &mut |_| ())
+        resolve_reporting(model, &mut |_| (), &|| false)
     }
 
     #[test]
@@ -1136,19 +1320,94 @@ mod tests {
             "config.json",
             &destination,
             Part { at: 1, of: 1 },
-            &mut |progress| finished |= matches!(progress, Progress::Fetched { .. }),
+            &mut Watching {
+                report: &mut |progress| finished |= matches!(progress, Progress::Fetched { .. }),
+                stop: &|| false,
+            },
         )
         .expect("the file is there and so is the network");
 
         // Under the name it was asked for, whole, and with nothing left in the way.
         assert!(destination.exists(), "{}", destination.display());
         assert!(fs::metadata(&destination).expect("it is a file").len() > 0);
-        assert!(!directory.join(INCOMING).exists(), "the staging is cleared");
+        assert!(!staged_in(&directory), "the staging is cleared");
 
         // And it said so when it finished, which is what stops the bar.
         assert!(finished, "the fetch said nothing about finishing");
 
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// Whether any staging directory is left in `directory`, under whichever attempt named it.
+    fn staged_in(directory: &Path) -> bool {
+        fs::read_dir(directory)
+            .expect("a directory to look in")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(INCOMING))
+    }
+
+    #[test]
+    fn a_stopped_download_keeps_what_arrived_and_says_it_was_stopped() {
+        // What the body of a download looks like from in here: bytes, arriving a read at a time.
+        let body = vec![7u8; DOWNLOAD_BUFFER * 3];
+        let mut written = Vec::new();
+
+        // Stopped as the second buffer lands, which is what a click in the middle of a package of
+        // several gigabytes is.
+        let asked = AtomicU64::new(0);
+        let failed = copy_reporting(
+            &mut body.as_slice(),
+            &mut written,
+            "second.safetensors",
+            0,
+            Some(body.len() as u64),
+            Part { at: 2, of: 3 },
+            &mut Watching {
+                report: &mut |_| (),
+                stop: &|| asked.fetch_add(1, Ordering::Relaxed) > 0,
+            },
+        )
+        .expect_err("it was asked to stop");
+
+        // A stop, and not the kind of ending anybody needs to be shown a complaint about. What it
+        // says is what is left behind, which is the question somebody who just stopped a download
+        // is about to ask.
+        assert!(stopped(&failed), "{failed}");
+        assert!(failed.to_string().contains("kept"), "{failed}");
+
+        // And what had arrived by then is written rather than dropped: this is the `.part`, and
+        // the fetch after it asks the server to carry on from where this one got to.
+        assert_eq!(written.len(), DOWNLOAD_BUFFER * 2);
+    }
+
+    #[test]
+    fn a_fetch_stopped_before_it_starts_asks_the_network_for_nothing() {
+        // Nothing is asked of the network here, and nothing is made on the disk: the stop is
+        // taken before the probe that settles which hub to ask, which is the point. That probe is
+        // three seconds of waiting, and it is not worth spending on a fetch already called off.
+        let failed =
+            resolve_reporting("sdxl:base", &mut |_| (), &|| true).expect_err("it was stopped");
+        assert!(stopped(&failed), "{failed}");
+
+        // Whatever else an ending means, a stop does not mean the name was wrong.
+        let refused = quietly("sdxl:nope").expect_err("no such model");
+        assert!(!stopped(&refused), "{refused}");
+    }
+
+    #[test]
+    fn two_attempts_at_one_model_stage_through_different_directories() {
+        // Why there is a directory per attempt: a stopped fetch leaves its download running, and
+        // the fetch that starts after it must not be writing the same file.
+        let directory = env::temp_dir().join("waifu-staging");
+        assert_ne!(staging(&directory), staging(&directory));
+
+        // Both of them recognisable as the leavings of a fetch, which is what the model's own
+        // directory being deleted relies on.
+        assert!(staging(&directory)
+            .file_name()
+            .expect("a name")
+            .to_string_lossy()
+            .starts_with(INCOMING));
     }
 
     #[test]
@@ -1333,11 +1592,12 @@ mod tests {
 
         // A model that was fetched and then stopped partway: whole files, a `.part` of the one it
         // was on, and the directory hf-hub stages through. All of it is the model.
-        fs::create_dir_all(directory.join(INCOMING)).expect("somewhere to put it");
+        let staging = directory.join(format!("{INCOMING}.4171.0"));
+        fs::create_dir_all(&staging).expect("somewhere to put it");
         fs::write(directory.join(model.manifest), b"a manifest").expect("the manifest");
         fs::write(directory.join("second.safetensors.part"), b"half of one")
             .expect("a part file");
-        fs::write(directory.join(INCOMING).join("third"), b"staged").expect("something staged");
+        fs::write(staging.join("third"), b"staged").expect("something staged");
 
         remove_in(model, &cache).expect("it goes");
         assert!(!directory.exists());
