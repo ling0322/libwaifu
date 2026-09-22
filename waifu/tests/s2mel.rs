@@ -122,6 +122,12 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
 struct Filled;
 
 impl ParamSource for Filled {
+    /// The same weight again, for a run that keeps its weights rather than streaming them. These
+    /// are made here rather than read out of a package, so there is nothing for the two to
+    /// differ about.
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
+        self.read(name, shape, false)
+    }
     fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
@@ -210,11 +216,9 @@ fn the_denoiser_is_the_reference_denoiser() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -271,11 +275,9 @@ fn the_transformer_trunk_is_the_reference_trunk() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -329,11 +331,9 @@ fn the_length_regulator_is_the_reference_regulator() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("tokens", &tokens)
                 .input("selection", &selection),
         )
@@ -364,11 +364,9 @@ fn mish_is_the_activation_it_replaces() {
 
     let filled = Filled;
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("x", &x),
         )
         .unwrap();

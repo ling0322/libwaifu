@@ -64,15 +64,14 @@
 //! # let x = g.input("hidden");
 //! # let gated = g.silu(x);
 //! # g.output("hidden", gated);
-//! // The same graph again, and this time run. Compiling says where the weights are to wait;
-//! // `load` is the prologue that puts the kept ones there, once.
+//! // The same graph again, and this time run. Compiling says where the weights are to wait,
+//! // and the source they are read from is what holds them.
 //! let ir = Ir::compile(&g, Residency::Device);
 //!
 //! let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
 //! let weights = HashMap::new();
-//! let preloaded = ir.load(&weights)?;
 //!
-//! let context = RunContext::new(&weights).preloaded(&preloaded).input("hidden", &hidden);
+//! let context = RunContext::new(&weights).input("hidden", &hidden);
 //! let outputs = ir.run(&context)?;
 //! assert_eq!(outputs[0].0, "hidden");
 //! # Ok::<(), waifu::Error>(())
@@ -97,9 +96,7 @@ mod operators;
 
 pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
-pub use ir::{
-    check_parameters, resident, Preloaded, Inst, Ir, ParamSource, Residency, RunContext, Weights,
-};
+pub use ir::{check_parameters, resident, Inst, Ir, ParamSource, Residency, RunContext, Weights};
 pub use nvfp4::Nvfp4Tensor;
 pub use operators::Operators;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};

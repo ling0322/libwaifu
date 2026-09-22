@@ -53,8 +53,8 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, Preloaded,
-    RunContext, Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, RunContext,
+    Tensor, Value,
 };
 use crate::layers::{Conv2d, GroupNorm, Linear};
 
@@ -447,7 +447,6 @@ pub struct VaeDecoder {
     /// Where its weights are, which is where a latent has to be brought to meet them.
     device: Device,
     ir: Ir,
-    preloaded: Preloaded,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
     weights: Rc<dyn ParamSource>,
@@ -482,11 +481,9 @@ impl VaeDecoder {
         check_parameters(&graph, weights.as_ref())?;
 
         let ir = Ir::compile(&graph, weights.residency());
-        let preloaded = ir.load(weights.as_ref())?;
 
         Ok(VaeDecoder {
             weights: Rc::clone(weights),
-            preloaded,
             ir,
             dtype: float_type,
             device,
@@ -541,7 +538,6 @@ impl VaeDecoder {
         }
 
         let context = RunContext::new(&*self.weights)
-            .preloaded(&self.preloaded)
             .input("latent", latent);
 
         output(&self.ir.run(&context)?, "image")
@@ -560,7 +556,6 @@ pub struct VaeEncoder {
     /// Where its weights are, which is where a picture has to be brought to meet them.
     device: Device,
     ir: Ir,
-    preloaded: Preloaded,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
     weights: Rc<dyn ParamSource>,
@@ -592,11 +587,9 @@ impl VaeEncoder {
         check_parameters(&graph, weights.as_ref())?;
 
         let ir = Ir::compile(&graph, weights.residency());
-        let preloaded = ir.load(weights.as_ref())?;
 
         Ok(VaeEncoder {
             weights: Rc::clone(weights),
-            preloaded,
             ir,
             dtype: float_type,
             device,
@@ -679,7 +672,6 @@ impl VaeEncoder {
         }
 
         let context = RunContext::new(&*self.weights)
-            .preloaded(&self.preloaded)
             .input("image", image);
         let outputs = self.ir.run(&context)?;
 

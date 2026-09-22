@@ -200,6 +200,12 @@ fn scatter(name: &str, count: usize, scale: f64) -> Vec<f32> {
 struct Scattered;
 
 impl ParamSource for Scattered {
+    /// The same weight again, for a run that keeps its weights rather than streaming them. These
+    /// are made here rather than read out of a package, so there is nothing for the two to
+    /// differ about.
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
+        self.read(name, shape, false)
+    }
     fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
@@ -297,11 +303,9 @@ fn run(stage: impl Fn(&Graph, Value, &Config, Value) -> Value) -> (Vec<i32>, Vec
 
     let weights = Scattered;
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&weights).unwrap();
     let outputs = ir
         .run(
             &RunContext::new(&weights)
-                .preloaded(&preloaded)
                 .input("x", &features())
                 .input("positions", &positions),
         )
