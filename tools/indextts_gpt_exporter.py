@@ -40,20 +40,43 @@ here rather than reconciled, since reconciling them is what would have to be und
 
 # What it does not export, and why the shapes are checked
 
-The release's GPT checkpoint holds 456 tensors. This writes the 301 the graph reads and says what
-it left, by prefix:
+The release's GPT checkpoint holds 456 tensors. This writes 454 of them -- 301 for
+`waifu::indextts_gpt` and 153 for `waifu::indextts_emotion` -- and leaves exactly one thing
+behind: `text_head`, a training-time head with nothing downstream of it, and 77 M parameters of
+it. That is a decision and not an oversight.
 
-- `emo_conditioning_encoder`, `emo_perceiver_encoder`, `emovec_layer`, `emo_layer` -- the four
-  stages that *make* an emotion vector out of a recording. `inference_speech` takes `emo_vec`
-  directly when it is given one, and that is the path `waifu::indextts_gpt` implements: the
-  vector it is handed is already the 1280-wide one `emo_layer` would have produced. So the model
-  says a sentence without these; they are how the vector is made, not part of saying anything.
-- `text_head` -- a training-time head with nothing downstream of it.
+What is *not* in the checkpoint is worth as much as what is. `UnifiedVoice.__init__` builds a
+`conditioning_encoder` and a `perceiver_encoder` -- the speaker path IndexTTS **2** used, and a
+near twin of the emotion path this now exports -- and the 2.5 release ships **no weights for
+either of them**. They would come up in `load_checkpoint`'s missing keys and stay at their random
+initialization, which is harmless because 2.5 never calls them: it builds its speaker row with
+`spk_cond_mode="campplus"`, which is 192 numbers from `waifu::campplus` through `spk_emb_proj`.
+So the release itself settles a question the source alone leaves open, and `waifu` is right not
+to implement them.
 
-Leaving them out is a decision and not an oversight. The shapes that carry one are checked rather
-than trusted, so a tensor upstream quietly changes size becomes an error here instead of a model
-that loads and speaks nonsense -- `lang_embedding` is the cautionary one, since it is 107 rows
-for a model that advertises five languages, and a plausible guess of 9 loads, runs and is wrong.
+The shapes that carry a decision are checked rather than trusted, so a tensor upstream quietly
+changes size becomes an error here instead of a model that loads and speaks nonsense --
+`lang_embedding` is the cautionary one, since it is 107 rows for a model that advertises five
+languages, and a plausible guess of 9 loads, runs and is wrong.
+
+# The position table is exported, which was not the plan
+
+`emo_conditioning_encoder.embed.pos_enc.pe` is a buffer and not a weight -- five thousand rows of
+sinusoid that depend on nothing but their own shape -- so the obvious move is to rebuild it at
+load and save ten megabytes. `report_position_buffer` is where that turned out to need an
+argument: the released table is the closed form **rounded to `bfloat16`**, exactly and
+reproducibly, and upstream runs with the rounded one rather than the exact one. It is written out
+like any other tensor, and the check on it is a bit-for-bit equality. The function says why the
+bytes won over rebuilding them.
+
+# The emotion path, and the one tensor worth staring at
+
+`emo_conditioning_encoder.embed.out.0.weight` is `(512, 261632)` -- 134 M parameters, more than
+the conformer it belongs to and a fifth of everything written here. That is not a mistake. WeNet's
+`Conv2dSubsampling2` runs one 3 by 3 convolution at stride two over the features read as an image,
+and then flattens *all* of what it produced at each frame -- 512 channels by the 511 feature
+columns that survive 1024 -- into one projection. The shape is checked for exactly that reason:
+it is the one tensor here whose size a reader is most likely to assume is wrong.
 
 # Where the checkpoint comes from
 
@@ -62,6 +85,7 @@ one already on disk.
 """
 
 import argparse
+import math
 import os
 
 import torch
@@ -112,6 +136,81 @@ PER_BLOCK = (
     "mlp.c_proj.bias",
 )
 
+# The emotion path: `waifu::indextts_emotion`'s four stages, as `config.yaml`'s
+# `gpt.emo_condition_module` sizes them.
+EMOTION_BLOCKS = 4
+PERCEIVER_DEPTH = 2
+
+# The sinusoid buffer, which is exported rather than rebuilt -- see the note above.
+POSITION_BUFFER = "emo_conditioning_encoder.embed.pos_enc.pe"
+
+EMOTION_TOP_LEVEL = (
+    "emo_conditioning_encoder.embed.conv.0.weight",
+    "emo_conditioning_encoder.embed.conv.0.bias",
+    "emo_conditioning_encoder.embed.out.0.weight",
+    "emo_conditioning_encoder.embed.out.0.bias",
+    "emo_conditioning_encoder.after_norm.weight",
+    "emo_conditioning_encoder.after_norm.bias",
+    "emo_perceiver_encoder.latents",
+    "emo_perceiver_encoder.proj_context.weight",
+    "emo_perceiver_encoder.proj_context.bias",
+    "emo_perceiver_encoder.norm.gamma",
+    POSITION_BUFFER,
+    "emovec_layer.weight",
+    "emovec_layer.bias",
+    "emo_layer.weight",
+    "emo_layer.bias",
+)
+
+# One conformer block. Thirty-one tensors: `linear_pos` has no bias and the two position biases
+# are parameters rather than layers, which is why this is not a round number.
+EMOTION_PER_BLOCK = (
+    "self_attn.pos_bias_u",
+    "self_attn.pos_bias_v",
+    "self_attn.linear_q.weight",
+    "self_attn.linear_q.bias",
+    "self_attn.linear_k.weight",
+    "self_attn.linear_k.bias",
+    "self_attn.linear_v.weight",
+    "self_attn.linear_v.bias",
+    "self_attn.linear_out.weight",
+    "self_attn.linear_out.bias",
+    "self_attn.linear_pos.weight",
+    "feed_forward.w_1.weight",
+    "feed_forward.w_1.bias",
+    "feed_forward.w_2.weight",
+    "feed_forward.w_2.bias",
+    "conv_module.pointwise_conv1.weight",
+    "conv_module.pointwise_conv1.bias",
+    "conv_module.depthwise_conv.weight",
+    "conv_module.depthwise_conv.bias",
+    "conv_module.norm.weight",
+    "conv_module.norm.bias",
+    "conv_module.pointwise_conv2.weight",
+    "conv_module.pointwise_conv2.bias",
+    "norm_ff.weight",
+    "norm_ff.bias",
+    "norm_mha.weight",
+    "norm_mha.bias",
+    "norm_conv.weight",
+    "norm_conv.bias",
+    "norm_final.weight",
+    "norm_final.bias",
+)
+
+# One perceiver layer. The `0` and `1` are an `nn.ModuleList` of two, and the `1.0` and `1.2` are
+# positions in the `nn.Sequential` the gated feed forward is -- position one is the activation,
+# which has nothing to store.
+EMOTION_PER_PERCEIVER_LAYER = (
+    "0.to_q.weight",
+    "0.to_kv.weight",
+    "0.to_out.weight",
+    "1.0.weight",
+    "1.0.bias",
+    "1.2.weight",
+    "1.2.bias",
+)
+
 # The shapes that carry a decision, checked rather than trusted. Everything else is checked by
 # being present at all.
 EXPECTED_SHAPES = {
@@ -123,16 +222,95 @@ EXPECTED_SHAPES = {
     "spk_emb_proj.weight": (1280, 192),
     "mel_head.weight": (8194, 1280),
     "gpt.h.0.attn.c_attn.weight": (1280, 3840),
+    # The emotion path. Every one of these encodes a decision the graph also makes: the
+    # subsampling arithmetic, the head count, the single latent, and the truncated 1365.
+    "emo_conditioning_encoder.embed.conv.0.weight": (512, 1, 3, 3),
+    "emo_conditioning_encoder.embed.out.0.weight": (512, 261632),
+    "emo_conditioning_encoder.encoders.0.self_attn.pos_bias_u": (4, 128),
+    "emo_conditioning_encoder.encoders.0.conv_module.depthwise_conv.weight": (512, 1, 15),
+    "emo_perceiver_encoder.latents": (1, 1024),
+    "emo_perceiver_encoder.layers.0.0.to_q.weight": (256, 1024),
+    "emo_perceiver_encoder.layers.0.1.0.weight": (2730, 1024),
+    "emovec_layer.weight": (1280, 1024),
 }
 
 
 def wanted(layers=LAYERS):
-    """Every name the graph loads, in the order it loads them."""
+    """Every name the two graphs load, in the order they load them."""
     names = list(TOP_LEVEL)
     for index in range(layers):
         names.extend(f"gpt.h.{index}.{leaf}" for leaf in PER_BLOCK)
 
+    names.extend(EMOTION_TOP_LEVEL)
+    for index in range(EMOTION_BLOCKS):
+        names.extend(
+            f"emo_conditioning_encoder.encoders.{index}.{leaf}"
+            for leaf in EMOTION_PER_BLOCK
+        )
+    for index in range(PERCEIVER_DEPTH):
+        names.extend(
+            f"emo_perceiver_encoder.layers.{index}.{leaf}"
+            for leaf in EMOTION_PER_PERCEIVER_LAYER
+        )
+
     return names
+
+
+def sinusoid(positions, dim):
+    """`PositionalEncoding`'s table, which is upstream's own four lines of it."""
+    position = torch.arange(0, positions).unsqueeze(1)
+    divisor = torch.exp(torch.arange(0, dim, 2) * -(math.log(10000.0) / dim))
+
+    table = torch.zeros(positions, dim)
+    table[:, 0::2] = torch.sin(position * divisor)
+    table[:, 1::2] = torch.cos(position * divisor)
+
+    return table.unsqueeze(0)
+
+
+def report_position_buffer(state):
+    """Check the released position table against the sinusoid, and say what it is.
+
+    `pe` is a registered buffer rather than a learned weight -- five thousand rows that depend on
+    nothing but their own shape -- so the obvious thing is to rebuild it and save the ten
+    megabytes. This is where that turned out to need an argument.
+
+    **The released table is the closed form rounded to `bfloat16`.** Not `float16`: not every
+    stored value is representable in `float16`, every one of them is representable in `bfloat16`,
+    and `sinusoid(...).to(torch.bfloat16).float()` reproduces the released tensor *exactly* --
+    difference zero, not merely small. Somebody saved this model through `bfloat16` once and the
+    buffer kept the scar. Against the unrounded table it is 7.5e-4 out on average and 2.0e-3 at
+    worst -- and 2.0e-3 is 2^-9, which is exactly half a `bfloat16` step for a value just under
+    one, i.e. the worst that round-to-nearest can do.
+
+    Upstream runs with the stored table and not with the exact one. `pe` is persistent, so it is
+    in the file; `load_checkpoint` calls `load_state_dict(strict=False)`, which only forgives
+    *absent* keys and this one is present; so the table computed in `PositionalEncoding.__init__`
+    is overwritten the moment the checkpoint loads.
+
+    Which leaves a real choice, since the rounding is now pinned down exactly: write the tensor
+    out, or rebuild it and round. This writes it out. Ten megabytes is 0.3% of the package, and
+    the alternative is a standing claim that a Rust loop over `f64` sines rounds onto the same
+    `bfloat16` grid `torch` reached through `float32` -- true as far as it was tested, and not
+    worth having to keep true. `waifu::indextts_emotion::positional_encoding` builds the unrounded
+    table for the tests and for running without a package, 2.0e-3 from what the release uses.
+
+    The equality below is exact on purpose. It was a tolerance while the rounding was a mystery;
+    a mystery that has been solved deserves a check that fails the moment it comes back.
+    """
+    stored = state[POSITION_BUFFER].float()
+    _, positions, dim = stored.shape
+    exact = sinusoid(positions, dim)
+    off = (stored - exact).abs()
+
+    if not torch.equal(stored, exact.to(torch.bfloat16).float()):
+        raise SystemExit(
+            f"{POSITION_BUFFER} is no longer the sinusoid rounded to bfloat16 -- it is "
+            f"{off.max().item():.3g} from the closed form. The release has changed its position "
+            f"encoding, and docs/indextts_emotion.md is now telling a story about the old one"
+        )
+
+    return positions, dim, off.mean().item(), off.max().item()
 
 
 def checkpoint(path=None):
@@ -175,13 +353,27 @@ def main():
     arguments = parser.parse_args()
 
     state = checkpoint(arguments.checkpoint)
+
+    positions, dim, mean_off, max_off = report_position_buffer(state)
+    print(
+        f"{POSITION_BUFFER}: ({positions}, {dim}), exactly the sinusoid rounded to bfloat16 -- "
+        f"{mean_off:.2g} mean and {max_off:.2g} worst off the unrounded one. "
+        f"Exported, because upstream runs with it."
+    )
+
     taken, left = select(state, arguments.layers)
 
     total = sum(value.numel() for value in taken.values())
+    emotion = sum(
+        value.numel()
+        for name, value in taken.items()
+        if name.startswith(("emo_", "emovec_"))
+    )
     print(f"{len(taken)} tensors, {total / 1e6:.2f} M parameters")
+    print(f"  of which the emotion path is {emotion / 1e6:.2f} M")
 
-    # What is left is the conditioning half, and it is listed by its prefix rather than tensor by
-    # tensor -- 157 names would bury the one that matters if upstream ever adds a 158th.
+    # What is left is listed by its prefix rather than tensor by tensor -- a few dozen names would
+    # bury the one that matters if upstream ever adds another.
     prefixes = sorted({name.split(".")[0] for name in left})
     print(f"{len(left)} tensors not exported, under: {', '.join(prefixes)}")
 

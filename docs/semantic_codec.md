@@ -1,21 +1,59 @@
 # The semantic codec
 
-w2v-bert's continuous features in, one discrete token per two frames out — the alphabet the GPT
-reads and writes. MaskGCT's codec, as IndexTTS-2.5 vendors it.
+The alphabet the GPT reads and writes, and the way back out of it. MaskGCT's codec, as
+IndexTTS-2.5 vendors it.
 
 ```rust
+// What the pipeline runs: tokens back into features.
+let features = semantic_codec::decode(&g, codes, &Config::indextts(), tokens, dtype, device)?;
+
+// What defines the alphabet, and what this release never calls.
 let scores = semantic_codec::similarity(&g, features, &Config::indextts(), frames, dtype, device)?;
 let tokens = semantic_codec::nearest(&scores, config.codebook_size as usize);
 ```
 
-At inference only half of it runs. `quantize` is the encoder and the codebook lookup; the decoder
-is for training and is not ported.
+## The half that runs is the decoder, which is backwards from the guess
+
+A text-to-speech pipeline sounds like it should encode. It does not. `infer_v2_5.py` calls
+
+```python
+S_infer = self.semantic_codec.decode(codes)
+```
+
+to turn the GPT's tokens into the features S2Mel's length regulator reads — and the line that
+would run the encoder over the reference audio,
+
+```python
+# _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
+```
+
+is **commented out in the released source**, replaced by `S_ref = self.get_emb(...)`. The
+reference recording reaches the length regulator as w2v-bert's continuous 1024-wide features,
+never having been near a codebook.
+
+So `decode` is what a package carries and what a reading runs. The encoder stays in this module
+because it is the definition of the alphabet — the thing that says what a token *means* — but
+nothing here needs it to say a sentence, and `tools/semantic_codec_exporter.py` leaves it out.
+
+An earlier version of this document had it the other way round. It was wrong.
 
 ## The shape of it
 
-A stride-two convolution halves the frame rate, then twelve ConvNeXt blocks read what is left,
-then every frame is projected down to eight numbers and replaced by the nearest of 8192 codebook
-entries. The token is that entry's index.
+Encoding: a stride-two convolution halves the frame rate, then twelve ConvNeXt blocks read what is
+left, then every frame is projected down to eight numbers and replaced by the nearest of 8192
+codebook entries. The token is that entry's index.
+
+Decoding is the mirror, at the same shapes: the entry is looked up, `out_project` widens those
+eight numbers back to 1024, **a second backbone with its own weights** — structurally identical to
+the encoder's, and not its transpose, because a codec is not an invertible function — reads them,
+and then the frame rate is doubled back. One token becomes two frames, which is the ratio it stood
+for.
+
+Two asymmetries worth knowing, both of them the release's rather than this port's. `quantize` puts
+a GELU after `down`; `decode` puts none after `out_project`. And the doubling is
+`F.interpolate(scale_factor=2, mode="nearest")` followed by a width-three convolution — a repeat
+*is* nearest interpolation at exactly two, so the graph concatenates the sequence with itself
+along a new last axis and flattens it, which puts every frame beside its own copy.
 
 A ConvNeXt block is a depthwise convolution seven frames wide that mixes no channels, then two
 linears that mix channels and no frames. That separation is why this needs `depthwise_conv1d`

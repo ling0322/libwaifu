@@ -65,6 +65,12 @@ mod mapping;
 mod param_file;
 mod qwen_vae;
 mod reader;
+/// IndexTTS-2.5's emotion path: the conformer and perceiver that read a feeling off the
+/// reference recording, for the row [`indextts_gpt`] puts beside the speaker's.
+pub mod indextts_emotion;
+/// IndexTTS-2.5's audio front end: what a recording becomes before any of its models sees it --
+/// Kaldi's filterbank, twice, normalized two different ways.
+pub mod indextts_features;
 /// IndexTTS-2.5's GPT: text and a voice in, the semantic tokens S2Mel reads out.
 pub mod indextts_gpt;
 /// IndexTTS-2.5's text frontend: writing out what a number is read as, so the model never sees a
