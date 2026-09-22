@@ -120,9 +120,11 @@ Two things that cost time and are worth knowing before touching those tests:
 
 ### And against the released weights
 
-`tools/indextts_gpt_exporter.py` writes the 301 tensors the graph reads out of the release's
-`gpt.pth`, renaming and folding nothing — the module was written against the checkpoint's own
-names, so a tensor that turns out to be wrong can be compared with the one it came from.
+`tools/indextts_gpt_exporter.py` writes the 301 tensors this graph reads out of the release's
+`gpt.pth` — and, since it is the same checkpoint, the 153 more that
+[the emotion path](indextts_emotion.md) reads. It renames and folds nothing: both modules were
+written against the checkpoint's own names, so a tensor that turns out to be wrong can be compared
+with the one it came from. Of the 456 in the file, only `text_head` is left behind.
 
 ```bash
 .venv/bin/python tools/indextts_gpt_exporter.py \
@@ -141,12 +143,16 @@ it was declared with nine rows against a table that has a hundred and seven, eve
 passed, and only the real checkpoint said otherwise. 107 is `len(LANGUAGE_DICT) + 1`: Whisper's
 list of 106 languages, most of which this model was never trained to say.
 
+## Where `emo_vec` comes from
+
+`prefill` takes the finished 1280-wide emotion vector directly, which is the path
+`inference_speech` takes when it is given one. When it is not, the four stages that make one out
+of the reference recording are [`waifu::indextts_emotion`](indextts_emotion.md) —
+`emo_conditioning_encoder` → `emo_perceiver_encoder` → `emovec_layer` → `emo_layer`, 153 of the
+checkpoint's tensors, exported by the same `tools/indextts_gpt_exporter.py` that writes this
+model.
+
 ## What is still missing
 
-- The **emotion conformer and perceiver** that produce `emo_vec` when it is not supplied — four
-  stages, `emo_conditioning_encoder` → `emo_perceiver_encoder` → `emovec_layer` → `emo_layer`, and
-  155 of the checkpoint's tensors. `prefill` takes the finished 1280-wide vector directly, which
-  is the path `inference_speech` takes when it is given one, so the model says a sentence without
-  them.
 - **Typical sampling**, which the reference offers and `flint` has no operator for. It is left out
   rather than approximated with one that is nearby.

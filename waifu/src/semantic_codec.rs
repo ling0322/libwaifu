@@ -17,15 +17,34 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The semantic codec: w2v-bert's continuous features in, one discrete token per two frames out.
+//! The semantic codec: the alphabet the GPT reads and writes, and the way back out of it.
 //!
-//! This is what turns speech into the alphabet the GPT reads and writes. It is MaskGCT's codec,
-//! as IndexTTS-2.5 vendors it, and at inference only half of it runs -- `quantize`, which is the
-//! encoder and the codebook lookup. The decoder is for training.
+//! MaskGCT's codec, as IndexTTS-2.5 vendors it. Both directions are here, and **the one the
+//! pipeline actually runs is [`decode`]**, which is worth saying first because it is the opposite
+//! of what it looks like:
 //!
-//! A convolution halves the frame rate, then twelve ConvNeXt blocks read what is left, then every
+//! - [`decode`] turns the GPT's tokens back into `hidden_size` features, and that is what
+//!   `infer_v2_5.py` calls -- `S_infer = self.semantic_codec.decode(codes)` -- before S2Mel's
+//!   length regulator reads them.
+//! - [`similarity`] and [`nearest`] are the encoder, `quantize`. IndexTTS-2.5 **does not call
+//!   it.** The line that would, `_, S_ref = self.semantic_codec.quantize(spk_cond_emb)`, is
+//!   commented out in the released source and replaced by `S_ref = self.get_emb(...)`: the
+//!   reference audio reaches the length regulator as w2v-bert's continuous features, never
+//!   having been through a codebook at all.
+//!
+//! So the encoder is kept for what it is -- the definition of the alphabet, and the thing that
+//! says what a token *means* -- and not because anything here needs it to say a sentence.
+//!
+//! # Which way round each half goes
+//!
+//! Encoding: a convolution halves the frame rate, twelve ConvNeXt blocks read what is left, every
 //! frame is projected down to eight numbers and replaced by the nearest of 8192 codebook entries.
 //! The token is that entry's index.
+//!
+//! Decoding is the mirror and the same shapes: the entry is looked up, projected back up to
+//! `hidden_size`, read by twelve more ConvNeXt blocks -- a second backbone with its own weights,
+//! structurally identical to the encoder's -- and then the frame rate is doubled back. One token
+//! becomes two frames, which is the ratio it stood for.
 //!
 //! # The nearest entry is found on the host
 //!
@@ -316,4 +335,107 @@ pub fn nearest(similarity: &[f32], codebook_size: usize) -> Vec<i32> {
             best as i32
         })
         .collect()
+}
+
+/// Tokens in, the features S2Mel's length regulator reads out: `(N, tokens)` to `(N, 2 * tokens,
+/// hidden_size)`.
+///
+/// This is the half the pipeline runs. `codes` are the GPT's semantic tokens as indices into the
+/// codebook, flattened to one dimension -- `lookup` takes a flat index tensor, the way
+/// [`crate::w2v_bert`]'s distance table does -- and `tokens` is how many there are per sequence.
+///
+/// # It is not `similarity` run backwards
+///
+/// The decoder has its own twelve ConvNeXt blocks with their own weights, under `decoder` rather
+/// than `encoder`. The two are the same shape and nothing else: a codec is not an invertible
+/// function, and the trunk that reads a token is not the transpose of the one that wrote it.
+///
+/// # Where the frames come back
+///
+/// `down` halved the frame rate when the alphabet was built, so `decode` doubles it again at the
+/// end -- each frame repeated once, then a width-three convolution over the pair. Upstream is
+/// `F.interpolate(scale_factor=2, mode="nearest")` followed by `up`, and a repeat *is* nearest
+/// interpolation at exactly two: concatenating the sequence with itself along a new last axis and
+/// then flattening that axis puts every frame beside its own copy, which is what a view of
+/// `(N, C, T, 2)` as `(N, C, 2T)` does with the last axis fastest.
+///
+/// There is no activation in front of this backbone. `quantize` puts a GELU after `down` and
+/// `decode` puts none after `out_project`, which is asymmetric and is what the release does.
+#[track_caller]
+pub fn decode(
+    g: &Graph,
+    codes: Value,
+    config: &Config,
+    tokens: i32,
+    dtype: DType,
+    device: Device,
+) -> Result<Value> {
+    let quantizer = g.subgraph("quantizer").subgraph("quantizers").subgraph("0");
+
+    // The entry each token stands for: (N * T) indices -> (N, T, codebook_dim).
+    let codebook = quantizer
+        .subgraph("codebook")
+        .load("weight", &[config.codebook_size, config.codebook_dim]);
+    let entries = g.view(
+        g.lookup(codebook, codes),
+        [
+            Extent::At(1),
+            Extent::At(tokens),
+            Extent::At(config.codebook_dim),
+        ],
+    );
+
+    // Back up to the width the trunk works in: eight numbers to a thousand.
+    let project = quantizer.subgraph("out_project");
+    let weight = project.load("weight", &[config.hidden_size, config.codebook_dim, 1]);
+    let bias = project.load("bias", &[config.hidden_size]);
+    let widened = conv1d(
+        &project,
+        g.contiguous(g.transpose(entries, 1, 2)),
+        weight,
+        Some(bias),
+        1,
+        0,
+        1,
+        1,
+        dtype,
+        device,
+    )?;
+
+    let decoder = g.subgraph("decoder");
+    let trunk = vocos_backbone(
+        &decoder.subgraph("0"),
+        widened,
+        config.hidden_size,
+        config,
+        dtype,
+        device,
+    )?;
+    let features = Linear::graph(
+        &decoder.subgraph("1"),
+        trunk,
+        config.vocos_dim,
+        config.hidden_size,
+        true,
+    );
+
+    // Double the frame rate back. (N, C, T) -> (N, C, T, 2) -> (N, C, 2T), last axis fastest, so
+    // every frame is followed by its own copy.
+    let by_channel = g.contiguous(g.transpose(features, 1, 2));
+    let paired = g.cat(g.unsqueeze(by_channel, 3), g.unsqueeze(by_channel, 3), 3);
+    let doubled = g.view(
+        g.contiguous(paired),
+        [
+            Extent::of(features, 0),
+            Extent::At(config.hidden_size),
+            Extent::At(2 * tokens),
+        ],
+    );
+
+    let up = g.subgraph("up");
+    let weight = up.load("weight", &[config.hidden_size, config.hidden_size, 3]);
+    let bias = up.load("bias", &[config.hidden_size]);
+    let smoothed = conv1d(&up, doubled, weight, Some(bias), 1, 1, 1, 1, dtype, device)?;
+
+    Ok(g.contiguous(g.transpose(smoothed, 1, 2)))
 }
