@@ -24,8 +24,12 @@ Tensor toMetal(const Tensor &a) {
 }
 
 std::vector<float> readFloats(const Tensor &a) {
-  Tensor c = cpuOps()->contiguous(
-      metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat)));
+  // Called on the CPU inputs as well as on what the card gave back, so a tensor already on the
+  // CPU stays where it is: the Metal operators take only their own.
+  Tensor host = a.getDevice().getType() == Device::kCpu
+      ? a
+      : metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat));
+  Tensor c = cpuOps()->contiguous(host);
   const float *data = c.getInternalData()->getData<float>(c.getInternalOffset());
   return std::vector<float>(data, data + c.getNumEl());
 }
