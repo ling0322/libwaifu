@@ -48,7 +48,6 @@
 #include "flint/cuda/glu.h"
 #include "flint/cuda/to_device.h"
 #include "flint/cuda/unary.h"
-#include "flint/functional.h"
 #include "lutil/error.h"
 
 namespace fl {

@@ -22,10 +22,20 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/cpu/common.h"
-#include "flint/functional.h"
+#include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
+namespace {
+
+/// The CPU operators, which is what the calls in this file are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
+}  // namespace
+
 namespace op {
 namespace cpu {
 
@@ -38,7 +48,7 @@ Tensor RefMatMulFp32(const Tensor &A, const Tensor &B) {
   CATCH_REQUIRE(A.getShape(1) == B.getShape(0));
   CATCH_REQUIRE(A.getDType() == DType::kFloat);
 
-  Tensor C = F::zeros({A.getShape(0), B.getShape(1)}, DType::kFloat);
+  Tensor C = cpuOps()->zeros({A.getShape(0), B.getShape(1)}, DType::kFloat);
   float *dataC = getDataPtrCpu<float>(C);
   const float *dataA = getDataPtrCpu<float>(A), *dataB = getDataPtrCpu<float>(B);
   int stride0A = A.getStride(0);
@@ -61,28 +71,28 @@ Tensor RefMatMulFp32(const Tensor &A, const Tensor &B) {
 }
 
 void testGEMM(int m, int k, int n, bool transa, bool transb) {
-  Tensor A = transa ? F::rand({k, m}, DType::kFloat) : F::rand({m, k}, DType::kFloat);
-  Tensor B = transb ? F::rand({n, k}, DType::kFloat) : F::rand({k, n}, DType::kFloat);
+  Tensor A = transa ? cpuOps()->rand({k, m}, DType::kFloat) : cpuOps()->rand({m, k}, DType::kFloat);
+  Tensor B = transb ? cpuOps()->rand({n, k}, DType::kFloat) : cpuOps()->rand({k, n}, DType::kFloat);
 
   if (transa) A = A.transpose(0, 1);
   if (transb) B = B.transpose(0, 1);
 
-  Tensor C = F::matmul(A, B);
+  Tensor C = cpuOps()->matmul(A, B);
   Tensor C_ref = RefMatMulFp32(A, B);
 
-  CATCH_REQUIRE(F::allClose(C, C_ref));
+  CATCH_REQUIRE(cpuOps()->allClose(C, C_ref));
 }
 
 void testGEMV(int M, int N, bool TransA) {
-  Tensor A = TransA ? F::rand({N, M}, DType::kFloat) : F::rand({M, N}, DType::kFloat);
-  Tensor x = F::rand({N, 1}, DType::kFloat);
+  Tensor A = TransA ? cpuOps()->rand({N, M}, DType::kFloat) : cpuOps()->rand({M, N}, DType::kFloat);
+  Tensor x = cpuOps()->rand({N, 1}, DType::kFloat);
 
   if (TransA) A = A.transpose(0, 1);
 
-  Tensor C = F::matmul(A, x);
+  Tensor C = cpuOps()->matmul(A, x);
   Tensor C_ref = RefMatMulFp32(A, x);
 
-  CATCH_REQUIRE(F::allClose(C, C_ref));
+  CATCH_REQUIRE(cpuOps()->allClose(C, C_ref));
 }
 
 int gemmTestShapes[][3] = {

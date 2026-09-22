@@ -25,18 +25,28 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 }  // namespace
@@ -44,14 +54,14 @@ Tensor toCpu(const Tensor &a) {
 CATCH_TEST_CASE("test CUDA repetitionPenalty", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand({2, 16}, DType::kFloat);
+  Tensor a = cpuOps()->rand({2, 16}, DType::kFloat);
   Tensor history = Tensor::create<LongType>({2, 4}, {1, 0, 1, 3, 0, 0, 0, 1});
 
   Tensor x = toCuda(a);
-  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.5);
-  F::repetitionPenalty(a, history, 1.5);
+  cudaOps()->repetitionPenalty(x, cudaOps()->toDevice(Device::getCuda(), history), 1.5);
+  cpuOps()->repetitionPenalty(a, history, 1.5);
 
-  CATCH_REQUIRE(F::allClose(toCpu(x), a, 1e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), a, 1e-3));
 }
 
 CATCH_TEST_CASE("test CUDA repetitionPenalty (packed 1D logits)", "[op][cuda]") {
@@ -59,14 +69,14 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (packed 1D logits)", "[op][cuda]") 
 
   // A single sequence arrives as 1D logits with a 1D history; the operator wraps both in a
   // leading axis, and the penalty has to land on the same positions as the 2D form.
-  Tensor a = F::rand({16}, DType::kFloat);
+  Tensor a = cpuOps()->rand({16}, DType::kFloat);
   Tensor history = Tensor::create<LongType>({3}, {2, 5, 11});
 
   Tensor x = toCuda(a);
-  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.5);
-  F::repetitionPenalty(a, history, 1.5);
+  cudaOps()->repetitionPenalty(x, cudaOps()->toDevice(Device::getCuda(), history), 1.5);
+  cpuOps()->repetitionPenalty(a, history, 1.5);
 
-  CATCH_REQUIRE(F::allClose(toCpu(x), a, 5e-3, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), a, 5e-3, 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA repetitionPenalty (sign and known values)", "[op][cuda]") {
@@ -78,7 +88,7 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (sign and known values)", "[op][cud
   Tensor history = Tensor::create<LongType>({1, 3}, {0, 1, 2});
 
   Tensor x = toCuda(a);
-  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 2.0f);
+  cudaOps()->repetitionPenalty(x, cudaOps()->toDevice(Device::getCuda(), history), 2.0f);
 
   Tensor host = toCpu(x);
   const float *data = host.getInternalData()->getData<float>(host.getInternalOffset());
@@ -92,14 +102,14 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (sign and known values)", "[op][cud
 CATCH_TEST_CASE("test CUDA repetitionPenalty (weight of one is a no-op)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand({2, 16}, DType::kFloat);
+  Tensor a = cpuOps()->rand({2, 16}, DType::kFloat);
   Tensor history = Tensor::create<LongType>({2, 3}, {1, 2, 3, 4, 5, 6});
 
   Tensor x = toCuda(a);
   Tensor before = toCpu(x);
-  F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.0f);
+  cudaOps()->repetitionPenalty(x, cudaOps()->toDevice(Device::getCuda(), history), 1.0f);
 
-  CATCH_REQUIRE(F::allClose(toCpu(x), before, 5e-3, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), before, 5e-3, 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA repetitionPenalty (history lengths)", "[op][cuda]") {
@@ -109,20 +119,20 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (history lengths)", "[op][cuda]") {
   // history, so a short history must not penalise positions it does not name. 63 is the longest
   // history the operator accepts.
   for (int length : {1, 2, 63}) {
-    Tensor a = F::rand({2, 64}, DType::kFloat);
+    Tensor a = cpuOps()->rand({2, 64}, DType::kFloat);
     std::vector<LongType> ids(2 * length);
     for (int i = 0; i < 2 * length; ++i) ids[i] = i % 64;
     Tensor history = Tensor::create<LongType>({2, length}, ids);
 
     Tensor x = toCuda(a);
-    F::repetitionPenalty(x, F::toDevice(Device::getCuda(), history), 1.5);
-    F::repetitionPenalty(a, history, 1.5);
+    cudaOps()->repetitionPenalty(x, cudaOps()->toDevice(Device::getCuda(), history), 1.5);
+    cpuOps()->repetitionPenalty(a, history, 1.5);
 
     // The CUDA side is half and the reference is float, so the comparison has to leave room for
     // half's own round-off. A penalty that failed to apply would be off by the weight itself,
     // which is far outside this.
     CATCH_INFO("history length = " << length);
-    CATCH_REQUIRE(F::allClose(toCpu(x), a, 5e-3, 5e-3));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), a, 5e-3, 5e-3));
   }
 }
 

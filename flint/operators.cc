@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -484,6 +485,33 @@ Tensor Operators::rand(lut::Span<const int> shape, DType dtype) {
 
 Tensor Operators::randNormal(lut::Span<const int> shape) {
   NOT_IMPL();
+}
+
+Tensor Operators::contiguous(Tensor input) {
+  Tensor x = tensorLike(input);
+  copy(input, x);
+
+  return x;
+}
+
+Tensor Operators::cat(Tensor A, Tensor B, int dim) {
+  CHECK(A.getDType() == B.getDType());
+  dim = A.getInternalShape()->getRealDim(dim);
+  CHECK(A.getDim() == B.getDim() && dim < A.getDim());
+
+  std::vector<int> shape = A.getShape();
+  int dA = A.getShape(dim);
+  int dB = B.getShape(dim);
+  shape[dim] = dA + dB;
+
+  Tensor C = tensor(shape, A.getDType());
+  Tensor sA = C.slice(dim, {0, dA});
+  Tensor sB = C.slice(dim, {dA, dA + dB});
+
+  copy(A, sA);
+  copy(B, sB);
+
+  return C;
 }
 
 // One per Device::Type, and cuda-host is deliberately left empty: it names memory rather than a

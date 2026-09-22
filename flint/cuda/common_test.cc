@@ -26,11 +26,20 @@
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/cuda/common.h"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
 
 namespace fl {
+
+namespace {
+
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+}  // namespace
+
 
 CATCH_TEST_CASE("test CUDA memory snapshot", "[fl][cuda][memory]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
@@ -44,7 +53,7 @@ CATCH_TEST_CASE("test CUDA memory snapshot", "[fl][cuda][memory]") {
 
   int64_t bytes = 0;
   {
-    Tensor x = F::tensor({1024, 1024}, DType::kFloat16, Device::getCuda());
+    Tensor x = cudaOps()->tensor({1024, 1024}, DType::kFloat16);
     bytes = x.getNumEl() * 2;
 
     MemorySnapshot allocated = MemorySnapshot::capture(Device::getCuda());
@@ -84,7 +93,7 @@ CATCH_TEST_CASE("test CUDA memory release", "[fl][cuda][memory]") {
   // Large enough to be unmistakable against an allocator that rounds its blocks up.
   constexpr int64_t kBytes = 32 * 1024 * 1024;
   {
-    Tensor x = F::tensor({4096, 4096}, DType::kFloat16, Device::getCuda());
+    Tensor x = cudaOps()->tensor({4096, 4096}, DType::kFloat16);
     CATCH_REQUIRE(x.getNumEl() * 2 == kBytes);
   }
 

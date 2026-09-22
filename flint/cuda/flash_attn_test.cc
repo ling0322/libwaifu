@@ -22,18 +22,28 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 /// One sequence of a packed batch, and the blocks it owns.
@@ -51,7 +61,7 @@ Tensor gatherFromPool(const Tensor &pool, const Sequence &sequence) {
   for (int offset = 0; offset < sequence.keyLength; offset += blockSize) {
     int length = std::min(blockSize, sequence.keyLength - offset);
     Tensor part = pool.subtensor(sequence.blockIds[offset / blockSize]).slice(0, {0, length});
-    gathered = offset == 0 ? part : F::cat(gathered, part, 0);
+    gathered = offset == 0 ? part : cpuOps()->cat(gathered, part, 0);
   }
 
   return gathered;
@@ -64,13 +74,13 @@ Tensor referenceAttention(
     const Tensor &value,
     bool causal) {
   // The dense operator wants <float>(batch, head, length, headDim).
-  Tensor x = F::attention(
+  Tensor x = cpuOps()->attention(
       query.unsqueeze(0).transpose(1, 2),
       key.unsqueeze(0).transpose(1, 2),
       value.unsqueeze(0).transpose(1, 2),
       causal);
 
-  return F::contiguous(x.subtensor(0).transpose(0, 1));
+  return cpuOps()->contiguous(x.subtensor(0).transpose(0, 1));
 }
 
 bool runCase(
@@ -93,9 +103,10 @@ bool runCase(
     maxKeyLength = std::max(maxKeyLength, sequence.keyLength);
   }
 
-  Tensor keyPool = F::rand({numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
-  Tensor valuePool = F::rand({numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
-  Tensor query = F::rand({totalQueryLength, numHeads, headDim}, DType::kFloat);
+  Tensor keyPool = cpuOps()->rand({numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor valuePool =
+      cpuOps()->rand({numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor query = cpuOps()->rand({totalQueryLength, numHeads, headDim}, DType::kFloat);
 
   std::vector<IntType> blockTableData(numSequences * maxNumBlocks, 0);
   std::vector<IntType> cuSeqlensQData(numSequences + 1, 0);
@@ -114,13 +125,13 @@ bool runCase(
   Tensor cuSeqlensQ = Tensor::create<IntType>({numSequences + 1}, cuSeqlensQData);
   Tensor seqlensK = Tensor::create<IntType>({numSequences}, seqlensKData);
 
-  Tensor x = F::pagedAttention(
+  Tensor x = cudaOps()->pagedAttention(
       toCuda(query),
       toCuda(keyPool),
       toCuda(valuePool),
-      F::toDevice(Device::getCuda(), blockTable),
-      F::toDevice(Device::getCuda(), cuSeqlensQ),
-      F::toDevice(Device::getCuda(), seqlensK),
+      cudaOps()->toDevice(Device::getCuda(), blockTable),
+      cudaOps()->toDevice(Device::getCuda(), cuSeqlensQ),
+      cudaOps()->toDevice(Device::getCuda(), seqlensK),
       maxQueryLength,
       maxKeyLength,
       causal);
@@ -139,7 +150,7 @@ bool runCase(
         gatherFromPool(valuePool, sequence),
         causal);
 
-    if (!F::allClose(output.slice(0, {begin, end}), expected, 5e-3f)) return false;
+    if (!cpuOps()->allClose(output.slice(0, {begin, end}), expected, 5e-3f)) return false;
   }
 
   return true;

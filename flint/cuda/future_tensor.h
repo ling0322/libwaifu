@@ -34,7 +34,7 @@ namespace fl {
 /// seen through, neither has anything left to say, while the memory goes on. Holding them here
 /// also means an ordinary CUDA tensor carries no trace of a mechanism it never uses.
 ///
-/// F::toDeviceAsync() returns one of these rather than a Tensor, which is what keeps a tensor
+/// op::cuda::toDeviceAsync() returns one of these rather than a Tensor, which keeps a tensor
 /// that is not readable yet out of every operator: the tensor inside can only be had through
 /// take(), and taking it is what discharges the obligation. Nothing else hands one out, so the
 /// case an operator would have to check for cannot reach it.

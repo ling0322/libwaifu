@@ -28,14 +28,19 @@
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/cuda/rand.h"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 std::vector<float> values(const Tensor &a) {
@@ -127,13 +132,13 @@ CATCH_TEST_CASE("test CUDA rand is uniform over the unit interval", "[op][cuda]"
 CATCH_TEST_CASE("test CUDA manualSeed repeats a draw", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  F::manualSeed(Device::getCuda(), 42);
+  cudaOps()->manualSeed(42);
   std::vector<float> first = values(getOperators(Device::kCuda)->randNormal({1024}));
 
-  F::manualSeed(Device::getCuda(), 42);
+  cudaOps()->manualSeed(42);
   std::vector<float> again = values(getOperators(Device::kCuda)->randNormal({1024}));
 
-  F::manualSeed(Device::getCuda(), 43);
+  cudaOps()->manualSeed(43);
   std::vector<float> other = values(getOperators(Device::kCuda)->randNormal({1024}));
 
   CATCH_REQUIRE(first == again);
@@ -146,7 +151,7 @@ CATCH_TEST_CASE("test CUDA manualSeed repeats a draw", "[op][cuda]") {
 CATCH_TEST_CASE("test CUDA rand advances between draws", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  F::manualSeed(Device::getCuda(), 7);
+  cudaOps()->manualSeed(7);
   std::vector<float> first = values(getOperators(Device::kCuda)->rand({257}, DType::kFloat));
   std::vector<float> second = values(getOperators(Device::kCuda)->rand({257}, DType::kFloat));
 

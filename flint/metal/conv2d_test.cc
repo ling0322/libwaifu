@@ -3,18 +3,33 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The Metal operators, which the calls here that run on Metal are asked of.
+Operators *metalOps() {
+  return getOperators(Device::kMetal);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toMetal(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getMetal(), a), DType::kFloat16);
+  return metalOps()->cast(metalOps()->toDevice(Device::getMetal(), a), DType::kFloat16);
 }
 
 std::vector<float> readFloats(const Tensor &a) {
-  Tensor c = F::contiguous(F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat)));
+  // Called on the CPU inputs as well as on what the card gave back, so a tensor already on the
+  // CPU stays where it is: the Metal operators take only their own.
+  Tensor host = a.getDevice().getType() == Device::kCpu
+      ? a
+      : metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat));
+  Tensor c = cpuOps()->contiguous(host);
   const float *data = c.getInternalData()->getData<float>(c.getInternalOffset());
   return std::vector<float>(data, data + c.getNumEl());
 }
@@ -58,9 +73,9 @@ std::vector<float> referenceConv2d(
 }
 
 bool matchesReference(Shape4 in, Shape4 filter, bool withBias, int stride, int padding) {
-  Tensor input = F::rand({in.n, in.c, in.h, in.w}, DType::kFloat);
-  Tensor weight = F::rand({filter.n, filter.c, filter.h, filter.w}, DType::kFloat);
-  Tensor bias = withBias ? F::rand({filter.n}, DType::kFloat) : Tensor();
+  Tensor input = cpuOps()->rand({in.n, in.c, in.h, in.w}, DType::kFloat);
+  Tensor weight = cpuOps()->rand({filter.n, filter.c, filter.h, filter.w}, DType::kFloat);
+  Tensor bias = withBias ? cpuOps()->rand({filter.n}, DType::kFloat) : Tensor();
 
   std::vector<float> x = readFloats(input);
   std::vector<float> w = readFloats(weight);
@@ -70,7 +85,7 @@ bool matchesReference(Shape4 in, Shape4 filter, bool withBias, int stride, int p
   std::vector<float> expected =
       referenceConv2d(x, in, w, filter, withBias ? &b : nullptr, stride, padding, out);
 
-  Tensor got = F::conv2d(
+  Tensor got = metalOps()->conv2d(
       toMetal(input), toMetal(weight), withBias ? toMetal(bias) : Tensor(),
       stride, padding, 1, 1);
   if (got.getShape() != std::vector<int>{out.n, out.c, out.h, out.w}) return false;

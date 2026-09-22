@@ -28,19 +28,29 @@
 #include "flint/cuda/gemm_nvfp4_cutlass.h"
 #include "flint/cuda/nvfp4.h"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toCudaHalf(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 /// allClose compares magnitudes, and a NaN is not larger than anything, so it slips through the
@@ -118,7 +128,7 @@ bool gemmMatchesReference(const Tensor &a, const Tensor &w) {
   op::cuda::Nvfp4Operand qa = op::cuda::quantizeNvfp4(toCudaHalf(a));
   op::cuda::Nvfp4Operand qw = op::cuda::quantizeNvfp4(toCudaHalf(w));
 
-  Tensor expected = F::matmul(
+  Tensor expected = cudaOps()->matmul(
       op::cuda::dequantNvfp4ToHalf(qa),
       op::cuda::dequantNvfp4ToHalf(qw).transpose(0, 1));
   Tensor actual = op::cuda::gemmNvfp4(qa, qw);
@@ -126,7 +136,7 @@ bool gemmMatchesReference(const Tensor &a, const Tensor &w) {
   if (actual.getShape() != std::vector<int>{a.getShape(0), w.getShape(0)}) return false;
   if (!allFinite(actual)) return false;
 
-  return F::allClose(toCpuFloat(actual), toCpuFloat(expected), 1e-2f);
+  return cpuOps()->allClose(toCpuFloat(actual), toCpuFloat(expected), 1e-2f);
 }
 
 }  // namespace
@@ -148,7 +158,7 @@ CATCH_TEST_CASE("test nvfp4 prologue round trip", "[fl][op][cuda][cutlass][nvfp4
 
   Tensor x = op::cuda::dequantNvfp4ToHalf(q);
   CATCH_REQUIRE(x.getShape() == std::vector<int>{4, 32});
-  CATCH_REQUIRE(F::allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
 }
 
 CATCH_TEST_CASE("test nvfp4 global scale", "[fl][op][cuda][cutlass][nvfp4]") {
@@ -164,10 +174,10 @@ CATCH_TEST_CASE("test nvfp4 global scale", "[fl][op][cuda][cutlass][nvfp4]") {
 
   // amax / (6 * 448) with an amax of 6 * 448 * 16.
   Tensor globalScale = Tensor::create<float>({1}, {16.0f});
-  CATCH_REQUIRE(F::allClose(toCpuFloat(q.globalScale), globalScale, 1e-6f, 1e-6f));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(q.globalScale), globalScale, 1e-6f, 1e-6f));
 
   Tensor x = op::cuda::dequantNvfp4ToHalf(q);
-  CATCH_REQUIRE(F::allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
 }
 
 CATCH_TEST_CASE("test nvfp4 prologue scale array padding", "[fl][op][cuda][cutlass][nvfp4]") {
@@ -184,7 +194,8 @@ CATCH_TEST_CASE("test nvfp4 prologue scale array padding", "[fl][op][cuda][cutla
 
   for (const Case &c : cases) {
     CATCH_INFO("rows = " << c.rows << ", k = " << c.k);
-    op::cuda::Nvfp4Operand q = op::cuda::quantizeNvfp4(toCudaHalf(F::randn({c.rows, c.k})));
+    op::cuda::Nvfp4Operand q = op::cuda::quantizeNvfp4(
+        toCudaHalf(cpuOps()->randNormal({c.rows, c.k})));
 
     CATCH_REQUIRE(q.data.getShape() == std::vector<int>{c.rows, c.k / 2});
     CATCH_REQUIRE(q.blockScale.getShape() == std::vector<int>{c.scaleByte});
@@ -197,7 +208,7 @@ CATCH_TEST_CASE("test gemmNvfp4 (shapes)", "[fl][op][cuda][cutlass][nvfp4]") {
 
   auto runCase = [](int m, int n, int k) {
     CATCH_INFO("m = " << m << ", n = " << n << ", k = " << k);
-    return gemmMatchesReference(F::randn({m, k}), F::randn({n, k}));
+    return gemmMatchesReference(cpuOps()->randNormal({m, k}), cpuOps()->randNormal({n, k}));
   };
 
   // One whole tile, and the tile shape is 128x128x128.
@@ -227,26 +238,26 @@ CATCH_TEST_CASE("test gemmNvfp4 (half activation)", "[fl][op][cuda][cutlass][nvf
 
   // What a projection calls: a half activation in, a weight quantized once, half back out. The
   // activation is quantized by the prologue inside the call.
-  Tensor w = F::randn({64, 128});
+  Tensor w = cpuOps()->randNormal({64, 128});
   op::cuda::Nvfp4Operand qw = op::cuda::quantizeNvfp4(toCudaHalf(w));
 
-  Tensor a2 = toCudaHalf(F::randn({6, 128}));
+  Tensor a2 = toCudaHalf(cpuOps()->randNormal({6, 128}));
   Tensor expected = op::cuda::gemmNvfp4(op::cuda::quantizeNvfp4(a2), qw);
   Tensor actual = op::cuda::gemmNvfp4(a2, qw);
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{6, 64});
-  CATCH_REQUIRE(F::allClose(toCpuFloat(actual), toCpuFloat(expected), 1e-6f, 1e-6f));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(actual), toCpuFloat(expected), 1e-6f, 1e-6f));
 
   // Leading batch axes fold into the row count and come back on the result.
-  Tensor a3 = toCudaHalf(F::randn({2, 3, 128}));
+  Tensor a3 = toCudaHalf(cpuOps()->randNormal({2, 3, 128}));
   Tensor out3 = op::cuda::gemmNvfp4(a3, qw);
   CATCH_REQUIRE(out3.getShape() == std::vector<int>{2, 3, 64});
-  CATCH_REQUIRE(F::allClose(
+  CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(out3.view({-1, 64})),
       toCpuFloat(op::cuda::gemmNvfp4(op::cuda::quantizeNvfp4(a3.view({-1, 128})), qw)),
       1e-6f,
       1e-6f));
 
-  Tensor a4 = toCudaHalf(F::randn({2, 3, 5, 128}));
+  Tensor a4 = toCudaHalf(cpuOps()->randNormal({2, 3, 5, 128}));
   CATCH_REQUIRE(op::cuda::gemmNvfp4(a4, qw).getShape() == std::vector<int>{2, 3, 5, 64});
 }
 
@@ -255,17 +266,17 @@ CATCH_TEST_CASE("test gemmNvfp4 (reused weight)", "[fl][op][cuda][cutlass][nvfp4
 
   // A weight is quantized once at load and multiplied for the rest of the process, so the operand
   // has to survive being used again, and by a different row count than the first time.
-  Tensor w = F::randn({128, 256});
+  Tensor w = cpuOps()->randNormal({128, 256});
   op::cuda::Nvfp4Operand qw = op::cuda::quantizeNvfp4(toCudaHalf(w));
   Tensor reference = op::cuda::dequantNvfp4ToHalf(qw).transpose(0, 1);
 
   for (int m : {1, 7, 64}) {
     CATCH_INFO("m = " << m);
-    Tensor a = toCudaHalf(F::randn({m, 256}));
+    Tensor a = toCudaHalf(cpuOps()->randNormal({m, 256}));
     op::cuda::Nvfp4Operand qa = op::cuda::quantizeNvfp4(a);
 
-    Tensor expected = F::matmul(op::cuda::dequantNvfp4ToHalf(qa), reference);
-    CATCH_REQUIRE(F::allClose(
+    Tensor expected = cudaOps()->matmul(op::cuda::dequantNvfp4ToHalf(qa), reference);
+    CATCH_REQUIRE(cpuOps()->allClose(
         toCpuFloat(op::cuda::gemmNvfp4(qa, qw)),
         toCpuFloat(expected),
         1e-2f));
@@ -278,22 +289,25 @@ CATCH_TEST_CASE("test gemmNvfp4 (zero operand)", "[fl][op][cuda][cutlass][nvfp4]
   // An all zero operand drives the tensor wide maximum to zero, and every scale with it. Both the
   // global scale and the per block one are divisors in the prologue, so this is the case that
   // turns into NaN if either guard is missing.
-  Tensor zeros = F::zeros({64, 128}, DType::kFloat);
-  Tensor w = F::randn({64, 128});
+  Tensor zeros = cpuOps()->zeros({64, 128}, DType::kFloat);
+  Tensor w = cpuOps()->randNormal({64, 128});
 
   op::cuda::Nvfp4Operand qZero = op::cuda::quantizeNvfp4(toCudaHalf(zeros));
   CATCH_REQUIRE(allFinite(op::cuda::dequantNvfp4ToHalf(qZero)));
-  CATCH_REQUIRE(F::allClose(toCpuFloat(op::cuda::dequantNvfp4ToHalf(qZero)), zeros, 1e-6f, 1e-6f));
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpuFloat(op::cuda::dequantNvfp4ToHalf(qZero)), zeros, 1e-6f, 1e-6f));
 
   op::cuda::Nvfp4Operand qw = op::cuda::quantizeNvfp4(toCudaHalf(w));
   Tensor out = op::cuda::gemmNvfp4(qZero, qw);
   CATCH_REQUIRE(allFinite(out));
-  CATCH_REQUIRE(F::allClose(toCpuFloat(out), F::zeros({64, 64}, DType::kFloat), 1e-6f, 1e-6f));
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpuFloat(out), cpuOps()->zeros({64, 64}, DType::kFloat), 1e-6f, 1e-6f));
 
   // And the other way round, where it is the weight that carries no signal.
   Tensor outW = op::cuda::gemmNvfp4(qw, qZero);
   CATCH_REQUIRE(allFinite(outW));
-  CATCH_REQUIRE(F::allClose(toCpuFloat(outW), F::zeros({64, 64}, DType::kFloat), 1e-6f, 1e-6f));
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpuFloat(outW), cpuOps()->zeros({64, 64}, DType::kFloat), 1e-6f, 1e-6f));
 }
 
 CATCH_TEST_CASE("test gemmNvfp4 (dynamic range)", "[fl][op][cuda][cutlass][nvfp4]") {
@@ -309,7 +323,7 @@ CATCH_TEST_CASE("test gemmNvfp4 (dynamic range)", "[fl][op][cuda][cutlass][nvfp4
   data[0] = 4096.0f;
 
   Tensor a = Tensor::create<float>({64, 128}, lut::makeConstSpan(data));
-  Tensor w = F::randn({64, 128});
+  Tensor w = cpuOps()->randNormal({64, 128});
 
   op::cuda::Nvfp4Operand qa = op::cuda::quantizeNvfp4(toCudaHalf(a));
   op::cuda::Nvfp4Operand qw = op::cuda::quantizeNvfp4(toCudaHalf(w));
@@ -319,7 +333,7 @@ CATCH_TEST_CASE("test gemmNvfp4 (dynamic range)", "[fl][op][cuda][cutlass][nvfp4
   Tensor out = op::cuda::gemmNvfp4(qa, qw);
   CATCH_REQUIRE(allFinite(out));
 
-  Tensor expected = F::matmul(
+  Tensor expected = cudaOps()->matmul(
       op::cuda::dequantNvfp4ToHalf(qa),
       op::cuda::dequantNvfp4ToHalf(qw).transpose(0, 1));
   CATCH_REQUIRE(relativeRmse(out, expected) < 1e-2);

@@ -17,12 +17,22 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include "flint/operators.h"
 #include "flint/tensor.h"
 
 #include "../third_party/catch2/catch_amalgamated.hpp"
-#include "flint/functional.h"
 
 namespace fl {
+
+namespace {
+
+/// The CPU operators, which is what the calls in this file are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
+}  // namespace
+
 
 CATCH_TEST_CASE("test subtensor and slice", "[core][nn][tensor]") {
   Tensor tensor = Tensor::create<float>(
@@ -57,7 +67,7 @@ CATCH_TEST_CASE("test subtensor and slice", "[core][nn][tensor]") {
           1.0f,
           1.1f,
       });
-  CATCH_REQUIRE(F::allClose(tensor.slice({1, 3}), subtensor));
+  CATCH_REQUIRE(cpuOps()->allClose(tensor.slice({1, 3}), subtensor));
 
   // subtensor
   subtensor = Tensor::create<float>(
@@ -68,7 +78,7 @@ CATCH_TEST_CASE("test subtensor and slice", "[core][nn][tensor]") {
           0.6f,
           0.7f,
       });
-  CATCH_REQUIRE(F::allClose(tensor.subtensor(1), subtensor));
+  CATCH_REQUIRE(cpuOps()->allClose(tensor.subtensor(1), subtensor));
 
   // slice (any dim)
   subtensor = Tensor::create<float>(
@@ -79,24 +89,24 @@ CATCH_TEST_CASE("test subtensor and slice", "[core][nn][tensor]") {
           0.9f,
           1.0f,
       });
-  CATCH_REQUIRE(F::allClose(tensor.slice(0, {1, 3}).slice(1, {1, 3}), subtensor));
+  CATCH_REQUIRE(cpuOps()->allClose(tensor.slice(0, {1, 3}).slice(1, {1, 3}), subtensor));
 }
 
 CATCH_TEST_CASE("test view infers a dimension", "[core][nn][tensor]") {
-  Tensor tensor = F::rand({2, 3, 4, 5}, DType::kFloat);
+  Tensor tensor = cpuOps()->rand({2, 3, 4, 5}, DType::kFloat);
 
   // A contiguous tensor and a strided one take different code paths, and only the contiguous one
   // resolves the inferred -1 before walking the strides.
   Tensor contiguousView = tensor.view({-1, 4, 5});
   CATCH_REQUIRE(contiguousView.getShape() == std::vector<int>{6, 4, 5});
-  CATCH_REQUIRE(F::allClose(contiguousView, tensor.view({6, 4, 5})));
+  CATCH_REQUIRE(cpuOps()->allClose(contiguousView, tensor.view({6, 4, 5})));
 
   Tensor strided = tensor.transpose(2, 3);
   CATCH_REQUIRE(!strided.isContiguous());
 
   Tensor stridedView = strided.view({-1, 5, 4});
   CATCH_REQUIRE(stridedView.getShape() == std::vector<int>{6, 5, 4});
-  CATCH_REQUIRE(F::allClose(stridedView, strided.view({6, 5, 4})));
+  CATCH_REQUIRE(cpuOps()->allClose(stridedView, strided.view({6, 5, 4})));
 
   // the inferred dimension can sit anywhere in the request, not only first.
   CATCH_REQUIRE(strided.view({6, 5, -1}).getShape() == std::vector<int>{6, 5, 4});

@@ -26,18 +26,28 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 }  // namespace
@@ -53,18 +63,19 @@ CATCH_TEST_CASE("test CUDA attention", "[op][cuda]") {
                     bool causal) {
     // a model feeds attention with [batch, length, heads, headDim] transposed to
     // [batch, heads, length, headDim], so the inputs are not contiguous.
-    Tensor q = F::rand({1, queryLength, numHeads, headDim}, DType::kFloat);
-    Tensor k = F::rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
-    Tensor v = F::rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
-    Tensor xr = F::attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+    Tensor q = cpuOps()->rand({1, queryLength, numHeads, headDim}, DType::kFloat);
+    Tensor k = cpuOps()->rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+    Tensor v = cpuOps()->rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+    Tensor xr =
+      cpuOps()->attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
 
-    Tensor x = F::attention(
+    Tensor x = cudaOps()->attention(
         toCuda(q).transpose(1, 2),
         toCuda(k).transpose(1, 2),
         toCuda(v).transpose(1, 2),
         causal);
 
-    return F::allClose(toCpu(x), xr, 5e-3f);
+    return cpuOps()->allClose(toCpu(x), xr, 5e-3f);
   };
 
   // headDim 128 goes to FlashAttention.
@@ -93,18 +104,19 @@ bool runAttentionCase(
     int keyValueLength,
     int headDim,
     bool causal) {
-  Tensor q = F::rand({1, queryLength, numHeads, headDim}, DType::kFloat);
-  Tensor k = F::rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
-  Tensor v = F::rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
-  Tensor xr = F::attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+  Tensor q = cpuOps()->rand({1, queryLength, numHeads, headDim}, DType::kFloat);
+  Tensor k = cpuOps()->rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor v = cpuOps()->rand({1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor xr =
+      cpuOps()->attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
 
-  Tensor x = F::attention(
+  Tensor x = cudaOps()->attention(
       toCuda(q).transpose(1, 2),
       toCuda(k).transpose(1, 2),
       toCuda(v).transpose(1, 2),
       causal);
 
-  return F::allClose(toCpu(x), xr, 5e-3f);
+  return cpuOps()->allClose(toCpu(x), xr, 5e-3f);
 }
 
 }  // namespace
@@ -117,14 +129,15 @@ Tensor wholeAttention(const Tensor &q, const Tensor &k, const Tensor &v, bool ca
   int keyValueLength = k.getShape(2);
 
   float scale = sqrtf(1.0f / sqrtf(1.0f * headDim));
-  Tensor scores = F::matmul(F::mul(q, scale), F::mul(k, scale).transpose(-2, -1));
+  Tensor scores =
+      cudaOps()->matmul(cudaOps()->mul(q, scale), cudaOps()->mul(k, scale).transpose(-2, -1));
   if (causal && queryLength > 1) {
-    Tensor mask = F::causalMask(keyValueLength, q.getDevice())
+    Tensor mask = cudaOps()->causalMask(keyValueLength)
                       .slice(0, {keyValueLength - queryLength, keyValueLength});
-    scores = F::add(scores, mask);
+    scores = cudaOps()->add(scores, mask);
   }
 
-  return F::matmul(F::softmax(scores), v);
+  return cudaOps()->matmul(cudaOps()->softmax(scores), v);
 }
 
 CATCH_TEST_CASE("test CUDA attention (blocked over the queries)", "[op][cuda]") {
@@ -139,22 +152,22 @@ CATCH_TEST_CASE("test CUDA attention (blocked over the queries)", "[op][cuda]") 
   // one head would fit whole -- and reached with a matrix a tenth the size that one head would
   // need to reach it, which is what keeps this test affordable. The rule that counted only the
   // query and key lengths took this in a single block and held eight times what it meant to.
-  Tensor q = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
-  Tensor k = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
-  Tensor v = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor q = toCuda(cpuOps()->rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor k = toCuda(cpuOps()->rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor v = toCuda(cpuOps()->rand({1, 8, 4200, 32}, DType::kFloat));
 
-  Tensor actual = F::attention(q, k, v, false);
+  Tensor actual = cudaOps()->attention(q, k, v, false);
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, 8, 4200, 32});
-  CATCH_REQUIRE(F::allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, false)), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, false)), 5e-3));
 
   // The same length in one head, which stays under the budget and is taken whole.
-  Tensor q1 = toCuda(F::rand({1, 1, 4200, 32}, DType::kFloat));
-  Tensor k1 = toCuda(F::rand({1, 1, 4200, 32}, DType::kFloat));
-  Tensor v1 = toCuda(F::rand({1, 1, 4200, 32}, DType::kFloat));
+  Tensor q1 = toCuda(cpuOps()->rand({1, 1, 4200, 32}, DType::kFloat));
+  Tensor k1 = toCuda(cpuOps()->rand({1, 1, 4200, 32}, DType::kFloat));
+  Tensor v1 = toCuda(cpuOps()->rand({1, 1, 4200, 32}, DType::kFloat));
 
-  Tensor whole = F::attention(q1, k1, v1, false);
+  Tensor whole = cudaOps()->attention(q1, k1, v1, false);
   CATCH_REQUIRE(whole.getShape() == std::vector<int>{1, 1, 4200, 32});
-  CATCH_REQUIRE(F::allClose(toCpu(whole), toCpu(wholeAttention(q1, k1, v1, false)), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(whole), toCpu(wholeAttention(q1, k1, v1, false)), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA attention (blocked and causal)", "[op][cuda]") {
@@ -165,12 +178,12 @@ CATCH_TEST_CASE("test CUDA attention (blocked and causal)", "[op][cuda]") {
   // exists to prevent and which no shape check would catch. Eight heads over a length that does
   // not divide by the block size leaves a short block at the end, where the mask sits furthest
   // from where it was cut.
-  Tensor q = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
-  Tensor k = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
-  Tensor v = toCuda(F::rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor q = toCuda(cpuOps()->rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor k = toCuda(cpuOps()->rand({1, 8, 4200, 32}, DType::kFloat));
+  Tensor v = toCuda(cpuOps()->rand({1, 8, 4200, 32}, DType::kFloat));
 
-  Tensor actual = F::attention(q, k, v, true);
-  CATCH_REQUIRE(F::allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, true)), 5e-3));
+  Tensor actual = cudaOps()->attention(q, k, v, true);
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, true)), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA attention (head dims)", "[op][cuda]") {

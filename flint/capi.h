@@ -61,6 +61,15 @@ typedef struct fl_tensor_impl_t *fl_tensor_t;
 /// The handle itself is freed by fl_future_tensor_destroy() either way, taken or not.
 typedef struct fl_future_tensor_impl_t *fl_future_tensor_t;
 
+/// The operators of one device: the backend that computes, and what every operation below is
+/// asked of rather than working it out from the tensors it was handed.
+///
+/// Made by fl_operators_create() and released by fl_operators_destroy(). The operators themselves
+/// belong to the library and are shared by the whole process, so a second handle on the same
+/// device makes no second backend and costs nothing; what a handle owns is a reference that keeps
+/// them alive.
+typedef struct fl_operators_impl_t *fl_operators_t;
+
 typedef enum fl_dtype_t {
   FL_DTYPE_UNKNOWN = 0,
   FL_DTYPE_FLOAT = 1,
@@ -100,28 +109,58 @@ FLAPI int32_t fl_get_last_error_code(void);
 /// on the same thread, and never NULL.
 FLAPI const char *fl_get_last_error_message(void);
 
+/// A handle on the operators of `device`. Call fl_init() first.
+///
+/// A device this build or this machine has no operators for is an error; asking about that
+/// without failing is what fl_is_device_available() is for. FL_DEVICE_CUDA_HOST names memory
+/// rather than a processor and so has no operators of its own: page-locked host memory is made by
+/// fl_tensor_host_empty() out of the CUDA operators, which are the ones that know how.
+FLAPI int32_t fl_operators_create(fl_device_type_t device, fl_operators_t *out);
+
+/// Release a handle. The operators outlive it. Passing NULL has no effect.
+FLAPI void fl_operators_destroy(fl_operators_t operators);
+
+/// The device these operators compute on, which is what fl_operators_create() was given.
+FLAPI int32_t fl_operators_get_device(fl_operators_t operators, fl_device_type_t *out);
+
 /// Create a tensor filled with zeros.
 /// @param shape one entry per dimension; may be NULL only when `ndim` is zero.
 /// @param out receives the new tensor, which the caller destroys with fl_tensor_destroy().
 FLAPI int32_t fl_tensor_zeros(
+    fl_operators_t operators,
     const int32_t *shape,
     int32_t ndim,
     fl_dtype_t dtype,
-    fl_device_type_t device,
     fl_tensor_t *out);
 
 /// Create a tensor without writing anything into it, for storage that is about to be overwritten
 /// in full. Reading it before writing it gives whatever the allocator handed back.
 FLAPI int32_t fl_tensor_empty(
+    fl_operators_t operators,
     const int32_t *shape,
     int32_t ndim,
     fl_dtype_t dtype,
-    fl_device_type_t device,
     fl_tensor_t *out);
 
-/// Create a tensor on the CPU holding a copy of `data`.
+/// The same, in host memory that `operators`' device can read without the driver staging it
+/// through a buffer of its own -- FL_DEVICE_CUDA_HOST, made by the CUDA operators.
+///
+/// It is asked of the device rather than of the host because it is the device that decides what
+/// "directly" costs and which calls arrange it. Only CUDA arranges anything, and it is the only
+/// device to pass here: the others have no such call and end the process rather than report one,
+/// the same as every other operation a device has no kernel for.
+FLAPI int32_t fl_tensor_host_empty(
+    fl_operators_t operators,
+    const int32_t *shape,
+    int32_t ndim,
+    fl_dtype_t dtype,
+    fl_tensor_t *out);
+
+/// Create a tensor on the CPU holding a copy of `data`. `operators` must be the CPU's, since the
+/// bytes are written here and now with a memcpy.
 /// @param data_size size of `data` in bytes; must match the shape and dtype exactly.
 FLAPI int32_t fl_tensor_from_data(
+    fl_operators_t operators,
     const int32_t *shape,
     int32_t ndim,
     fl_dtype_t dtype,
@@ -202,10 +241,15 @@ FLAPI int32_t fl_tensor_unsqueeze(fl_tensor_t tensor, int32_t dim, fl_tensor_t *
 FLAPI int32_t fl_tensor_squeeze(fl_tensor_t tensor, int32_t dim, fl_tensor_t *out);
 
 /// Return a contiguous tensor with the same elements, copying only if it is not already one.
-FLAPI int32_t fl_tensor_contiguous(fl_tensor_t tensor, fl_tensor_t *out);
+FLAPI int32_t fl_tensor_contiguous(fl_operators_t operators, fl_tensor_t tensor, fl_tensor_t *out);
 
 /// Copy the tensor to another device.
+///
+/// `operators` are the ones that own the transfer, which is the accelerator's on whichever end of
+/// it is not the CPU: they are the side that knows how either end was allocated. A tensor already
+/// on `device` is handed back as another handle on itself, without asking them anything.
 FLAPI int32_t fl_tensor_to_device(
+    fl_operators_t operators,
     fl_tensor_t tensor,
     fl_device_type_t device,
     fl_tensor_t *out);
@@ -235,58 +279,76 @@ FLAPI int32_t fl_future_tensor_take_sync(fl_future_tensor_t future, fl_tensor_t 
 FLAPI void fl_future_tensor_destroy(fl_future_tensor_t future);
 
 /// Convert the elements to another data type.
-FLAPI int32_t fl_tensor_cast(fl_tensor_t tensor, fl_dtype_t dtype, fl_tensor_t *out);
+FLAPI int32_t fl_tensor_cast(
+    fl_operators_t operators,
+    fl_tensor_t tensor,
+    fl_dtype_t dtype,
+    fl_tensor_t *out);
 
 /// Number of bytes fl_tensor_copy_to_host() will write for this tensor.
 FLAPI int32_t fl_tensor_get_nbytes(fl_tensor_t tensor, int64_t *out);
 
-/// Copy the elements into `buffer` in row-major order, moving them from the device and making them
-/// contiguous first if needed. `buffer_size` must be at least fl_tensor_get_nbytes().
-FLAPI int32_t fl_tensor_copy_to_host(fl_tensor_t tensor, void *buffer, int64_t buffer_size);
+/// Copy the elements into `buffer` in row-major order, packing them and moving them off the
+/// device first if needed. `buffer_size` must be at least fl_tensor_get_nbytes().
+///
+/// `operators` are those of the device the tensor is on, which do both steps: the packing happens
+/// there, because a transfer reads a contiguous run and nothing else.
+FLAPI int32_t fl_tensor_copy_to_host(
+    fl_operators_t operators,
+    fl_tensor_t tensor,
+    void *buffer,
+    int64_t buffer_size);
 
-/// The operations from `flint/functional.h`. Every one of them writes a freshly created tensor to
-/// `out`, or works in place on a tensor the caller already owns.
+/// The operations of `fl::Operators`. Every one of them writes a freshly created tensor to `out`,
+/// or works in place on a tensor the caller already owns, and every one is asked of the operators
+/// the caller hands it rather than of whichever device the tensors turn out to be on.
 ///
 /// They report a null handle or a rejected dtype or device through the error code, as the calls
 /// above do, but not everything comes back that way: the operators check the shapes and dtypes
 /// they were handed with the library's own fatal check, which ends the process instead of raising
 /// anything this layer could catch, and so does asking for an operation the device has no kernel
-/// for. Callers are expected to have got the shapes right before they get here.
+/// for. Handing them tensors from another device is one of the things they check that way.
+/// Callers are expected to have got all of this right before they get here.
 
 /// Create a 1-D tensor holding the values of [begin, end) taken `step` at a time.
 FLAPI int32_t fl_arange(
+    fl_operators_t operators,
     int64_t begin,
     int64_t end,
     int64_t step,
-    fl_device_type_t device,
     fl_tensor_t *out);
 
 /// Create a tensor filled with uniform random numbers in [0, 1).
 FLAPI int32_t fl_rand(
+    fl_operators_t operators,
     const int32_t *shape,
     int32_t ndim,
     fl_dtype_t dtype,
-    fl_device_type_t device,
     fl_tensor_t *out);
 
 /// Create a float tensor filled from a normal distribution with mean 0 and variance 1.
 FLAPI int32_t fl_randn(
+    fl_operators_t operators,
     const int32_t *shape,
     int32_t ndim,
-    fl_device_type_t device,
     fl_tensor_t *out);
 
-/// Seed the random number generator of `device`, which fl_rand() and fl_randn() draw from.
-FLAPI int32_t fl_manual_seed(fl_device_type_t device, uint64_t seed);
+/// Seed the random number generator these operators draw from in fl_rand() and fl_randn().
+FLAPI int32_t fl_manual_seed(fl_operators_t operators, uint64_t seed);
 
 /// Rows of `table` <float>(V, D) named by `indices` <long>(...), which gains a trailing dimension
 /// of D.
-FLAPI int32_t fl_lookup(fl_tensor_t table, fl_tensor_t indices, fl_tensor_t *out);
+FLAPI int32_t fl_lookup(
+    fl_operators_t operators,
+    fl_tensor_t table,
+    fl_tensor_t indices,
+    fl_tensor_t *out);
 
 /// Apply NeoX-style rotary embedding to `query` and `key` in place. `positions` is
 /// <long>(numTokens), the two others are <float>(numTokens, numHeads, headDim), and
 /// `rotary_cache` is <float>(maxPositions, 2 * headDim), each row a cosine half then a sine half.
 FLAPI int32_t fl_rotary_embedding(
+    fl_operators_t operators,
     fl_tensor_t positions,
     fl_tensor_t query,
     fl_tensor_t key,
@@ -294,11 +356,17 @@ FLAPI int32_t fl_rotary_embedding(
 
 /// Root mean square layer normalization over the last dimension of `input`, scaled by `weight`
 /// <float>(D).
-FLAPI int32_t fl_rms_norm(fl_tensor_t input, fl_tensor_t weight, float eps, fl_tensor_t *out);
+FLAPI int32_t fl_rms_norm(
+    fl_operators_t operators,
+    fl_tensor_t input,
+    fl_tensor_t weight,
+    float eps,
+    fl_tensor_t *out);
 
 /// Normalize the last dimension of `input` to zero mean and unit variance, then scale by
 /// `weight` and shift by `bias`; either may be null.
 FLAPI int32_t fl_layer_norm(
+    fl_operators_t operators,
     fl_tensor_t input,
     fl_tensor_t weight,
     fl_tensor_t bias,
@@ -308,6 +376,7 @@ FLAPI int32_t fl_layer_norm(
 /// 2-D convolution of `input` <float16|float>(N, C, H, W) by `weight` (K, C / groups, R, S), with
 /// an optional per-channel `bias` (K) that may be null. Square stride, padding and dilation.
 FLAPI int32_t fl_conv2d(
+    fl_operators_t operators,
     fl_tensor_t input,
     fl_tensor_t weight,
     fl_tensor_t bias,
@@ -322,6 +391,7 @@ FLAPI int32_t fl_conv2d(
 ///
 /// No device implements this; see `Operators::conv1d`. It is reachable so that one can.
 FLAPI int32_t fl_conv1d(
+    fl_operators_t operators,
     fl_tensor_t input,
     fl_tensor_t weight,
     fl_tensor_t bias,
@@ -336,6 +406,7 @@ FLAPI int32_t fl_conv1d(
 ///
 /// No device implements this; see `Operators::convTranspose1d`.
 FLAPI int32_t fl_conv_transpose1d(
+    fl_operators_t operators,
     fl_tensor_t input,
     fl_tensor_t weight,
     fl_tensor_t bias,
@@ -350,6 +421,7 @@ FLAPI int32_t fl_conv_transpose1d(
 ///
 /// No device implements this; see `Operators::snake`.
 FLAPI int32_t fl_snake(
+    fl_operators_t operators,
     fl_tensor_t input,
     fl_tensor_t alpha,
     fl_tensor_t beta,
@@ -362,6 +434,7 @@ FLAPI int32_t fl_snake(
 ///
 /// No device implements this; see `Operators::stft`.
 FLAPI int32_t fl_stft(
+    fl_operators_t operators,
     fl_tensor_t input,
     fl_tensor_t window,
     int32_t n_fft,
@@ -374,6 +447,7 @@ FLAPI int32_t fl_stft(
 ///
 /// No device implements this; see `Operators::istft`.
 FLAPI int32_t fl_istft(
+    fl_operators_t operators,
     fl_tensor_t spectrum,
     fl_tensor_t window,
     int32_t n_fft,
@@ -384,6 +458,7 @@ FLAPI int32_t fl_istft(
 /// Normalize `input` <float16>(N, C, H, W) over each group of channels and the space it covers,
 /// then scale and shift per channel. `weight` and `bias` are (C) and either may be null.
 FLAPI int32_t fl_group_norm(
+    fl_operators_t operators,
     fl_tensor_t input,
     fl_tensor_t weight,
     fl_tensor_t bias,
@@ -392,10 +467,14 @@ FLAPI int32_t fl_group_norm(
     fl_tensor_t *out);
 
 /// Repeat each pixel of `input` <float16>(N, C, H, W) `scale` times along both spatial axes.
-FLAPI int32_t fl_upsample_nearest2d(fl_tensor_t input, int32_t scale, fl_tensor_t *out);
+FLAPI int32_t fl_upsample_nearest2d(
+    fl_operators_t operators,
+    fl_tensor_t input,
+    int32_t scale,
+    fl_tensor_t *out);
 
 /// Matrix multiplication, batched over the leading dimensions.
-FLAPI int32_t fl_matmul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
+FLAPI int32_t fl_matmul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
 /// Whether this build and this GPU can run the NVFP4 matrix multiplication. A build without it,
 /// or a GPU without the block scaled tensor cores, is reported as zero rather than as an error.
@@ -451,101 +530,119 @@ FLAPI int32_t fl_fp8_matmul(
     fl_tensor_t *out);
 
 /// Element-wise x * sigmoid(1.702 * x), the activation OpenAI's CLIP uses in place of GELU.
-FLAPI int32_t fl_quick_gelu(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_quick_gelu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise `a` * `b`, broadcasting `b` over the leading dimensions of `a`.
-FLAPI int32_t fl_mul(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
+FLAPI int32_t fl_mul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
 /// Element-wise `a` + `b`, broadcasting `b` over the leading dimensions of `a`.
-FLAPI int32_t fl_add(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
+FLAPI int32_t fl_add(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
 /// Element-wise `a` - `b`, broadcasting `b` over the leading dimensions of `a`.
-FLAPI int32_t fl_sub(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
+FLAPI int32_t fl_sub(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
 /// Element-wise `a` == `b`, giving a <bool> tensor of the same shape.
-FLAPI int32_t fl_eq(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
+FLAPI int32_t fl_eq(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
 /// Element-wise `a` / `b`, broadcasting `b` over the leading dimensions of `a`.
-FLAPI int32_t fl_div(fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
+FLAPI int32_t fl_div(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
 /// Element-wise `input` * `other`.
-FLAPI int32_t fl_mul_scalar(fl_tensor_t input, float other, fl_tensor_t *out);
+FLAPI int32_t fl_mul_scalar(
+    fl_operators_t operators,
+    fl_tensor_t input,
+    float other,
+    fl_tensor_t *out);
 
 /// Element-wise `input` / `other`.
-FLAPI int32_t fl_div_scalar(fl_tensor_t input, float other, fl_tensor_t *out);
+FLAPI int32_t fl_div_scalar(
+    fl_operators_t operators,
+    fl_tensor_t input,
+    float other,
+    fl_tensor_t *out);
 
 /// Element-wise `input` % `other`, for a <long> tensor.
-FLAPI int32_t fl_mod_scalar(fl_tensor_t input, int64_t other, fl_tensor_t *out);
+FLAPI int32_t fl_mod_scalar(
+    fl_operators_t operators,
+    fl_tensor_t input,
+    int64_t other,
+    fl_tensor_t *out);
 
 /// Element-wise `input` squared.
-FLAPI int32_t fl_square(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_square(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise -x.
-FLAPI int32_t fl_neg(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_neg(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise |x|.
-FLAPI int32_t fl_abs(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_abs(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise e^x.
-FLAPI int32_t fl_exp(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_exp(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise square root.
-FLAPI int32_t fl_sqrt(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_sqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise reciprocal square root, 1/sqrt(x).
-FLAPI int32_t fl_rsqrt(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_rsqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise 1/(1+e^-x).
-FLAPI int32_t fl_sigmoid(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_sigmoid(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise hyperbolic tangent.
-FLAPI int32_t fl_tanh(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_tanh(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise max(x, 0).
-FLAPI int32_t fl_relu(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_relu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise exact GELU, x * P(X <= x). Not the tanh approximation.
-FLAPI int32_t fl_gelu(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_gelu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise x * sigmoid(x).
-FLAPI int32_t fl_silu(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_silu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise sine, in radians.
-FLAPI int32_t fl_sin(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_sin(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Element-wise cosine, in radians.
-FLAPI int32_t fl_cos(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_cos(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Softmax over the last dimension.
-FLAPI int32_t fl_softmax(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_softmax(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Swish-gated linear unit over the last dimension of `input` <float>(..., D), which must be even
 /// and which the result halves.
-FLAPI int32_t fl_swiglu(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_swiglu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// The same gating with a GELU, which is what a diffusion U-Net's feed forward uses.
-FLAPI int32_t fl_geglu(fl_tensor_t input, fl_tensor_t *out);
+FLAPI int32_t fl_geglu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
 /// Sum over dimension `dim`, which may be negative to count from the back and which the result
 /// drops.
-FLAPI int32_t fl_sum(fl_tensor_t input, int32_t dim, fl_tensor_t *out);
+FLAPI int32_t fl_sum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out);
 
 /// Largest element of dimension `dim`, which the result drops the same way fl_sum() does.
-FLAPI int32_t fl_max(fl_tensor_t input, int32_t dim, fl_tensor_t *out);
+FLAPI int32_t fl_max(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out);
 
 /// Smallest element of dimension `dim`, which the result drops the same way fl_sum() does.
-FLAPI int32_t fl_min(fl_tensor_t input, int32_t dim, fl_tensor_t *out);
+FLAPI int32_t fl_min(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out);
 
 /// Concatenate `a` and `b` along `dim`. They must agree on every other dimension.
-FLAPI int32_t fl_cat(fl_tensor_t a, fl_tensor_t b, int32_t dim, fl_tensor_t *out);
+FLAPI int32_t fl_cat(
+    fl_operators_t operators,
+    fl_tensor_t a,
+    fl_tensor_t b,
+    int32_t dim,
+    fl_tensor_t *out);
 
 /// A <float>(max_len, max_len) mask holding -inf where a position may not attend and 0 elsewhere.
-FLAPI int32_t fl_causal_mask(int32_t max_len, fl_device_type_t device, fl_tensor_t *out);
+FLAPI int32_t fl_causal_mask(fl_operators_t operators, int32_t max_len, fl_tensor_t *out);
 
 /// Scaled dot product attention. `q` is <float>(N, nHead, L, D) and `k` and `v` are
 /// <float>(N, nKvHead, S, D), where nKvHead may divide nHead for grouped-query attention.
 /// `causal` masks the future positions, aligned to the bottom right of the score matrix.
 FLAPI int32_t fl_attention(
+    fl_operators_t operators,
     fl_tensor_t q,
     fl_tensor_t k,
     fl_tensor_t v,
@@ -566,6 +663,7 @@ FLAPI int32_t fl_paged_attention_available(int32_t *out);
 /// @param cu_seqlens_q <int>(nSeq + 1): exclusive prefix sum of the query lengths.
 /// @param seqlens_k <int>(nSeq): the number of cached tokens each sequence attends to.
 FLAPI int32_t fl_paged_attention(
+    fl_operators_t operators,
     fl_tensor_t q,
     fl_tensor_t key_cache,
     fl_tensor_t value_cache,
@@ -581,6 +679,7 @@ FLAPI int32_t fl_paged_attention(
 /// fl_paged_attention() reads them back. `key_cache` and `value_cache` are written in place, and
 /// `slot_mapping` is <int>(numTokens) holding blockId * blockSize + offset per token.
 FLAPI int32_t fl_store_kv_cache(
+    fl_operators_t operators,
     fl_tensor_t k,
     fl_tensor_t v,
     fl_tensor_t key_cache,
@@ -591,6 +690,7 @@ FLAPI int32_t fl_store_kv_cache(
 /// `temperatures` and `top_ps` are <float>(rows) and `top_ks` is <int>(rows). A temperature of 0
 /// selects greedily and a top-k of 0 or less keeps every label.
 FLAPI int32_t fl_sample_with_params(
+    fl_operators_t operators,
     fl_tensor_t logits,
     fl_tensor_t temperatures,
     fl_tensor_t top_ks,
@@ -599,16 +699,25 @@ FLAPI int32_t fl_sample_with_params(
 
 /// Divide the logits of the tokens in `history` <long>(N, historyLen) by `weight`, penalizing the
 /// ones already generated. `logits` <float>(N, vocabSize) is written in place.
-FLAPI int32_t fl_repetition_penalty(fl_tensor_t logits, fl_tensor_t history, float weight);
+FLAPI int32_t fl_repetition_penalty(
+    fl_operators_t operators,
+    fl_tensor_t logits,
+    fl_tensor_t history,
+    float weight);
 
 /// Copy the elements of `src` into `dest`, which must have the same shape.
-FLAPI int32_t fl_copy(fl_tensor_t src, fl_tensor_t dest);
+///
+/// `operators` must be able to reach both ends: the CPU's for two tensors in host memory, whoever
+/// page-locked it, and the device's own for two of its. This does not cross the bus -- that is
+/// fl_tensor_to_device().
+FLAPI int32_t fl_copy(fl_operators_t operators, fl_tensor_t src, fl_tensor_t dest);
 
 /// Fill every element of `tensor` with `value`, in place.
-FLAPI int32_t fl_fill(fl_tensor_t tensor, float value);
+FLAPI int32_t fl_fill(fl_operators_t operators, fl_tensor_t tensor, float value);
 
 /// Whether every pair of elements is within `rtol` relative and `atol` absolute tolerance.
 FLAPI int32_t fl_all_close(
+    fl_operators_t operators,
     fl_tensor_t a,
     fl_tensor_t b,
     float rtol,
@@ -616,16 +725,16 @@ FLAPI int32_t fl_all_close(
     int32_t *out);
 
 /// Whether every element of a <bool> tensor is true.
-FLAPI int32_t fl_all(fl_tensor_t tensor, int32_t *out);
+FLAPI int32_t fl_all(fl_operators_t operators, fl_tensor_t tensor, int32_t *out);
 
 /// The single element of a one-element tensor, as a float.
-FLAPI int32_t fl_elem(fl_tensor_t tensor, float *out);
+FLAPI int32_t fl_elem(fl_operators_t operators, fl_tensor_t tensor, float *out);
 
-/// The float type the operators of `device` work in by default.
-FLAPI int32_t fl_get_default_float_type(fl_device_type_t device, fl_dtype_t *out);
+/// The float type these operators work in by default.
+FLAPI int32_t fl_get_default_float_type(fl_operators_t operators, fl_dtype_t *out);
 
 /// Print the tensor to stdout.
-FLAPI int32_t fl_print(fl_tensor_t tensor);
+FLAPI int32_t fl_print(fl_operators_t operators, fl_tensor_t tensor);
 
 /// The memory usage of one device. A device that does not report its usage, which is what the CPU
 /// backend does, reports zero for every field.

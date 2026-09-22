@@ -212,12 +212,30 @@ class Operators {
   virtual Tensor tensorLike(Tensor input);
   virtual Tensor zeros(lut::Span<const int> shape, DType dtype);
   virtual bool all(Tensor A);
-  virtual bool allClose(Tensor A, Tensor B, float rtol, float atol);
+  /// Whether every pair of elements is within `rtol` relative and `atol` absolute tolerance.
+  ///
+  /// The tolerances have defaults because most callers mean the same pair and saying so at every
+  /// call is noise. They belong to this declaration alone: an override must not restate them, and
+  /// a call gets them only through an `Operators *`, which is how everything here is reached.
+  virtual bool allClose(Tensor A, Tensor B, float rtol = 1e-3, float atol = 1e-5);
   virtual void print(Tensor tensor);
   virtual Tensor causalMask(int max_len);
   virtual void copy(Tensor src, Tensor dest);
   virtual Tensor swiglu(Tensor A);
   virtual Tensor toDevice(Device device, Tensor tensor);
+
+  /// A contiguous tensor holding the same elements as `input`, in storage of this device's own.
+  ///
+  /// Not virtual, and not a kernel: it is `tensorLike` followed by `copy`, which every device has
+  /// and which already knows how to read strides. A device with something better to do here would
+  /// override `copy`, not this.
+  Tensor contiguous(Tensor input);
+
+  /// `A` and `B` joined along `dim`, the one dimension they may disagree on.
+  ///
+  /// Not virtual either: it allocates the joined tensor and copies each half into its own slice
+  /// of it, so a device that can copy can do this.
+  Tensor cat(Tensor A, Tensor B, int dim);
 
   virtual float elem(Tensor tensor);
   virtual bool elemBool(Tensor tensor);

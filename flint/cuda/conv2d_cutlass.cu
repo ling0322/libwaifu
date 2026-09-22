@@ -44,7 +44,7 @@
 #include "lutil/error.h"
 #include "lutil/strings.h"
 #include "flint/cuda/common.h"
-#include "flint/functional.h"
+#include "flint/operators.h"
 
 #define LL_CHECK_CUTLASS(x)                                                              \
   {                                                                                      \
@@ -339,6 +339,9 @@ Tensor conv1x1(const Tensor &input, const Tensor &weight, const Tensor &bias) {
   int w = input.getShape(3);
   int k = weight.getShape(0);
 
+  // Everything here is on the card, so the multiply and the join are the card's own operators'.
+  Operators *ops = getOperators(Device::kCuda);
+
   // (K, C) by (C, H * W), which is (K, H * W): the answer, already in NCHW. One image at a time,
   // because the weight is the same for all of them and matmul does not broadcast a smaller left
   // operand over a batched right one.
@@ -346,12 +349,12 @@ Tensor conv1x1(const Tensor &input, const Tensor &weight, const Tensor &bias) {
   Tensor result;
   for (int i = 0; i < n; ++i) {
     Tensor image = n == 1 ? input.view({c, h * w}) : input.subtensor(i).view({c, h * w});
-    Tensor product = F::matmul(flatWeight, image);
-    result = result.empty() ? product : F::cat(result, product, 0);
+    Tensor product = ops->matmul(flatWeight, image);
+    result = result.empty() ? product : ops->cat(result, product, 0);
   }
 
   result = result.view({n, k, h, w});
-  if (!bias.empty()) result = F::add(result, bias.view({1, k, 1, 1}));
+  if (!bias.empty()) result = ops->add(result, bias.view({1, k, 1, 1}));
 
   return result;
 }

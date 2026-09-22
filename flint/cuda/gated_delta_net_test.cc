@@ -27,12 +27,22 @@
 #include "lutil/span.h"
 #include "flint/cuda/gated_delta_net.h"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
 namespace {
+
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
 
 class Lcg {
  public:
@@ -62,15 +72,15 @@ void normalizeRows(std::vector<float> &data, int rows, int dim) {
 }
 
 Tensor toCudaHalf(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCudaFloat(const Tensor &a) {
-  return F::toDevice(Device::getCuda(), a);
+  return cudaOps()->toDevice(Device::getCuda(), a);
 }
 
 Tensor toCpuFloat(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 // The regimes the decays and the write strengths are drawn from. The default is what a trained
@@ -191,7 +201,7 @@ void compareBackends(
 
   // The path is forced rather than left to kAuto: these head counts are far below what kAuto reads
   // as enough CTAs to fuse, so kAuto alone would never reach the fused kernel here.
-  Tensor expected = F::gatedDeltaNetPrefill(
+  Tensor expected = cpuOps()->gatedDeltaNetPrefill(
       q,
       k,
       v,
@@ -212,8 +222,8 @@ void compareBackends(
       path);
 
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{numTokens, numVHead, headDim});
-  CATCH_REQUIRE(F::allClose(toCpuFloat(actual), expected, tolerance, tolerance));
-  CATCH_REQUIRE(F::allClose(toCpuFloat(stateCuda), stateCpu, tolerance, tolerance));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(actual), expected, tolerance, tolerance));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(stateCuda), stateCpu, tolerance, tolerance));
 }
 
 constexpr op::cuda::GatedDeltaNetPath kPaths[] = {

@@ -29,7 +29,6 @@
 #include "lutil/span.h"
 #include "flint/device.h"
 #include "flint/dtype.h"
-#include "flint/functional.h"
 
 namespace fl {
 

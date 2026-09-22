@@ -24,18 +24,30 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toCudaHalf(const Tensor &tensor) {
-  return F::cast(F::toDevice(Device::getCuda(), tensor), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), tensor), DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &tensor) {
-  return F::toDevice(Device::getCpu(), F::cast(F::contiguous(tensor), DType::kFloat));
+  return cudaOps()->toDevice(
+      Device::getCpu(),
+      cudaOps()->cast(cudaOps()->contiguous(tensor), DType::kFloat));
 }
 
 Tensor makeInput(
@@ -71,10 +83,9 @@ Tensor makeCache(
     int prefix,
     int suffix) {
   int elementsPerToken = numHeads * headDim;
-  Tensor storage = F::zeros(
+  Tensor storage = cudaOps()->zeros(
       {numBlocks, blockSize, prefix + elementsPerToken + suffix},
-      DType::kFloat16,
-      Device::getCuda());
+      DType::kFloat16);
   return storage.slice(2, {prefix, prefix + elementsPerToken})
       .view({numBlocks, blockSize, numHeads, headDim});
 }
@@ -90,7 +101,7 @@ void checkStored(
     int offset = slots[token] % blockSize;
     CATCH_INFO("token = " << token);
     CATCH_REQUIRE(
-        F::allClose(
+        cpuOps()->allClose(
             cpuCache.subtensor(blockId).subtensor(offset),
             reference.subtensor(token),
             5e-3));
@@ -112,24 +123,25 @@ CATCH_TEST_CASE("test CUDA storeKVCache follows slot mapping", "[op][cuda]") {
       3 * BlockSize + 7,
       1 * BlockSize};
 
-  Tensor k = F::rand({static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
-  Tensor v = F::rand({static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
+  Tensor k = cpuOps()->rand({static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
+  Tensor v = cpuOps()->rand({static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
   Tensor keyCache = makeCache(NumBlocks, BlockSize, NumHeads, HeadDim, 0, 0);
   Tensor valueCache = makeCache(NumBlocks, BlockSize, NumHeads, HeadDim, 0, 0);
   Tensor slotMapping = Tensor::create<IntType>({static_cast<int>(slots.size())}, slots);
 
-  F::storeKVCache(
+  cudaOps()->storeKVCache(
       toCudaHalf(k),
       toCudaHalf(v),
       keyCache,
       valueCache,
-      F::toDevice(Device::getCuda(), slotMapping));
+      cudaOps()->toDevice(Device::getCuda(), slotMapping));
 
   checkStored(keyCache, k, lut::makeConstSpan(slots), BlockSize);
   checkStored(valueCache, v, lut::makeConstSpan(slots), BlockSize);
 
   Tensor untouched = toCpuFloat(keyCache).subtensor(0);
-  CATCH_REQUIRE(F::allClose(untouched, F::zeros(untouched.getShape(), DType::kFloat)));
+  CATCH_REQUIRE(
+      cpuOps()->allClose(untouched, cpuOps()->zeros(untouched.getShape(), DType::kFloat)));
 }
 
 CATCH_TEST_CASE("test CUDA storeKVCache handles strided model views", "[op][cuda]") {
@@ -156,18 +168,19 @@ CATCH_TEST_CASE("test CUDA storeKVCache handles strided model views", "[op][cuda
   CATCH_REQUIRE(k.getStride(0) != v.getStride(0));
   CATCH_REQUIRE(keyCache.getStride(1) != valueCache.getStride(1));
 
-  F::storeKVCache(
+  cudaOps()->storeKVCache(
       k,
       v,
       keyCache,
       valueCache,
-      F::toDevice(Device::getCuda(), slotMapping));
+      cudaOps()->toDevice(Device::getCuda(), slotMapping));
 
   checkStored(keyCache, expectedK, lut::makeConstSpan(slots), BlockSize);
   checkStored(valueCache, expectedV, lut::makeConstSpan(slots), BlockSize);
 
   Tensor untouched = toCpuFloat(valueCache).subtensor(2).subtensor(0);
-  CATCH_REQUIRE(F::allClose(untouched, F::zeros(untouched.getShape(), DType::kFloat)));
+  CATCH_REQUIRE(
+      cpuOps()->allClose(untouched, cpuOps()->zeros(untouched.getShape(), DType::kFloat)));
 }
 
 }  // namespace fl

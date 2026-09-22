@@ -22,18 +22,28 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 }  // namespace
@@ -41,9 +51,10 @@ Tensor toCpu(const Tensor &a) {
 CATCH_TEST_CASE("test CUDA reductions", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand({2, 5, 150}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(toCpu(F::sum(toCuda(a))), F::sum(a), 5e-3));
-  CATCH_REQUIRE(F::allClose(toCpu(F::max(toCuda(a))), F::max(a), 5e-3));
+  Tensor a = cpuOps()->rand({2, 5, 150}, DType::kFloat);
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpu(cudaOps()->sum(toCuda(a), -1)), cpuOps()->sum(a, -1), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->max(toCuda(a))), cpuOps()->max(a), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA reductions (all ranks)", "[op][cuda]") {
@@ -51,22 +62,22 @@ CATCH_TEST_CASE("test CUDA reductions (all ranks)", "[op][cuda]") {
 
   // Ranks 1 and 2 are reshaped to 3D on the way in and back again on the way out, so the shape
   // that comes out has to match what the CPU reduction produces for the same input.
-  Tensor a1 = F::rand({8}, DType::kFloat);
-  Tensor s1 = toCpu(F::sum(toCuda(a1)));
-  CATCH_REQUIRE(s1.getShape() == F::sum(a1).getShape());
-  CATCH_REQUIRE(F::allClose(s1, F::sum(a1), 5e-3));
-  CATCH_REQUIRE(F::allClose(toCpu(F::max(toCuda(a1))), F::max(a1), 5e-3));
+  Tensor a1 = cpuOps()->rand({8}, DType::kFloat);
+  Tensor s1 = toCpu(cudaOps()->sum(toCuda(a1), -1));
+  CATCH_REQUIRE(s1.getShape() == cpuOps()->sum(a1, -1).getShape());
+  CATCH_REQUIRE(cpuOps()->allClose(s1, cpuOps()->sum(a1, -1), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->max(toCuda(a1))), cpuOps()->max(a1), 5e-3));
 
-  Tensor a2 = F::rand({3, 8}, DType::kFloat);
-  Tensor s2 = toCpu(F::sum(toCuda(a2)));
-  CATCH_REQUIRE(s2.getShape() == F::sum(a2).getShape());
-  CATCH_REQUIRE(F::allClose(s2, F::sum(a2), 5e-3));
-  CATCH_REQUIRE(F::allClose(toCpu(F::max(toCuda(a2))), F::max(a2), 5e-3));
+  Tensor a2 = cpuOps()->rand({3, 8}, DType::kFloat);
+  Tensor s2 = toCpu(cudaOps()->sum(toCuda(a2), -1));
+  CATCH_REQUIRE(s2.getShape() == cpuOps()->sum(a2, -1).getShape());
+  CATCH_REQUIRE(cpuOps()->allClose(s2, cpuOps()->sum(a2, -1), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->max(toCuda(a2))), cpuOps()->max(a2), 5e-3));
 
-  Tensor a3 = F::rand({2, 3, 8}, DType::kFloat);
-  Tensor s3 = toCpu(F::sum(toCuda(a3)));
-  CATCH_REQUIRE(s3.getShape() == F::sum(a3).getShape());
-  CATCH_REQUIRE(F::allClose(s3, F::sum(a3), 5e-3));
+  Tensor a3 = cpuOps()->rand({2, 3, 8}, DType::kFloat);
+  Tensor s3 = toCpu(cudaOps()->sum(toCuda(a3), -1));
+  CATCH_REQUIRE(s3.getShape() == cpuOps()->sum(a3, -1).getShape());
+  CATCH_REQUIRE(cpuOps()->allClose(s3, cpuOps()->sum(a3, -1), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA reductions (row widths)", "[op][cuda]") {
@@ -76,10 +87,11 @@ CATCH_TEST_CASE("test CUDA reductions (row widths)", "[op][cuda]") {
   // threads with nothing to contribute and a width above it makes every thread loop. Both have
   // to reach the same answer as the sequential CPU reduction.
   for (int width : {1, 2, 3, 255, 256, 257, 1000, 4096}) {
-    Tensor a = F::rand({2, 3, width}, DType::kFloat);
+    Tensor a = cpuOps()->rand({2, 3, width}, DType::kFloat);
     CATCH_INFO("width = " << width);
-    CATCH_REQUIRE(F::allClose(toCpu(F::sum(toCuda(a))), F::sum(a), 1e-2));
-    CATCH_REQUIRE(F::allClose(toCpu(F::max(toCuda(a))), F::max(a), 5e-3));
+    CATCH_REQUIRE(
+        cpuOps()->allClose(toCpu(cudaOps()->sum(toCuda(a), -1)), cpuOps()->sum(a, -1), 1e-2));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->max(toCuda(a))), cpuOps()->max(a), 5e-3));
   }
 }
 
@@ -88,12 +100,16 @@ CATCH_TEST_CASE("test CUDA reductions (strided rows)", "[op][cuda]") {
 
   // The reduction reads through an accessor, so a row whose elements are not adjacent has to
   // work as well as a packed one.
-  Tensor a = F::rand({2, 3, 5}, DType::kFloat);
+  Tensor a = cpuOps()->rand({2, 3, 5}, DType::kFloat);
   Tensor strided = toCuda(a).transpose(0, 2);
   CATCH_REQUIRE(!strided.isContiguous());
 
-  CATCH_REQUIRE(F::allClose(toCpu(F::sum(strided)), F::sum(a.transpose(0, 2)), 5e-3));
-  CATCH_REQUIRE(F::allClose(toCpu(F::max(strided)), F::max(a.transpose(0, 2)), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->sum(strided, -1)),
+      cpuOps()->sum(a.transpose(0, 2), -1),
+      5e-3));
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpu(cudaOps()->max(strided)), cpuOps()->max(a.transpose(0, 2)), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA reductions (known values)", "[op][cuda]") {
@@ -104,19 +120,20 @@ CATCH_TEST_CASE("test CUDA reductions (known values)", "[op][cuda]") {
   Tensor a = Tensor::create<float>({2, 4}, {1.0f, 2.0f, 3.0f, 4.0f, -1.0f, -2.0f, -3.0f, -4.0f});
   Tensor x = toCuda(a);
 
-  CATCH_REQUIRE(F::allClose(
-      toCpu(F::sum(x)),
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->sum(x, -1)),
       Tensor::create<float>({2}, {10.0f, -10.0f}),
       5e-3));
   // max over an all-negative row must not fall back to the zero initial value.
-  CATCH_REQUIRE(F::allClose(
-      toCpu(F::max(x)),
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->max(x)),
       Tensor::create<float>({2}, {4.0f, -1.0f}),
       5e-3));
 
   // summing zeros stays zero rather than accumulating the initial value once per thread.
-  Tensor zeros = F::zeros({2, 300}, DType::kFloat16, Device::getCuda());
-  CATCH_REQUIRE(F::allClose(toCpu(F::sum(zeros)), F::zeros({2}, DType::kFloat)));
+  Tensor zeros = cudaOps()->zeros({2, 300}, DType::kFloat16);
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpu(cudaOps()->sum(zeros, -1)), cpuOps()->zeros({2}, DType::kFloat)));
 }
 
 }  // namespace fl

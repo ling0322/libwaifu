@@ -85,7 +85,7 @@ enum class GatedDeltaNetPath {
 /// before building the tensors, and so the failure message can say which half is wrong.
 bool tensorCoreAvailable();
 
-/// Gated DeltaNet linear attention over a packed (varlen) batch. See F::gatedDeltaNetPrefill.
+/// Gated DeltaNet linear attention over a packed (varlen) batch. See `Operators::gatedDeltaNetPrefill`.
 ///
 /// q, k, v and the returned output are <half>, g, beta and state are <float>, and cuSeqlens and
 /// stateSlots are <int>. The head dimension has to be 32, 64 or 128 -- the kernel is a template on

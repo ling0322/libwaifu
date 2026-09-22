@@ -44,8 +44,7 @@ flint/
 |-- lutil/           Utility code used by the native runtime
 |-- bin/             Native test and benchmark entry points
 |-- tensor.{h,cc}    Tensor metadata, views, and storage
-|-- operators.{h,cc} Backend operator interface and dispatch
-|-- functional.{h,cc} C++ functional API
+|-- operators.{h,cc} Backend operator interface and the per-device instances
 |-- capi.{h,cc}      Stable C ABI for language bindings
 `-- CMakeLists.txt
 ```
@@ -53,10 +52,11 @@ flint/
 ## C++ API
 
 Initialize the operator backends before creating tensors and release them after the last tensor
-operation:
+operation. Every operation is asked of an `Operators` instance -- the backend of one device --
+which `getOperators()` hands out; nothing works out which device to use from the tensors it was
+given.
 
 ```cpp
-#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -64,29 +64,36 @@ int main() {
   fl::initOperators();
 
   {
+    fl::Operators *cpu = fl::getOperators(fl::Device::kCpu);
+
     fl::Tensor a = fl::Tensor::create<float>({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f});
     fl::Tensor b = fl::Tensor::create<float>({2, 2}, {4.0f, 3.0f, 2.0f, 1.0f});
-    fl::Tensor sum = fl::F::add(a, b);
-    fl::F::print(sum);
+    fl::Tensor sum = cpu->add(a, b);
+    cpu->print(sum);
   }
 
   fl::destroyOperators();
 }
 ```
 
+A tensor that lives on the card is the CUDA operators' to compute with, and a reference computed
+beside it on the host is the CPU operators': a test that checks one against the other holds both
+instances and says which line runs where.
+
 The main public C++ surfaces are:
 
 - [`tensor.h`](tensor.h): tensor construction, metadata, slicing, views, and storage access.
-- [`functional.h`](functional.h): device-dispatched tensor operations.
+- [`operators.h`](operators.h): the operations themselves, one instance per device.
 - [`device.h`](device.h) and [`dtype.h`](dtype.h): device and element type definitions.
 - [`memory.h`](memory.h): device memory statistics.
 
 ## C and Rust APIs
 
 [`capi.h`](capi.h) exposes opaque tensor handles and status-returning functions for language
-bindings. Call `fl_init()` once before using the C API. A failing call returns an error code, and
-the thread-local details are available through `fl_get_last_error_code()` and
-`fl_get_last_error_message()`.
+bindings. Call `fl_init()` once before using the C API, then `fl_operators_create()` for each
+device you compute on: every operation takes that handle, as the C++ side does. A failing call
+returns an error code, and the thread-local details are available through
+`fl_get_last_error_code()` and `fl_get_last_error_message()`.
 
 Rust applications should use the safe wrapper in [`waifu::flint`](../waifu/src/flint), not call the C
 API directly. `waifu/build.rs` links the native `build/libflint.a` produced by CMake; CMake is what
@@ -161,8 +168,9 @@ An operator normally crosses these layers:
 
 1. Declare the backend interface in `operators.h` and its default unsupported implementation in
    `operators.cc`.
-2. Add the public C++ wrapper in `functional.h` and `functional.cc`.
-3. Implement the CPU and/or CUDA backend and override the method in the backend `Operators`
+2. Implement the CPU and/or CUDA backend and override the method in the backend `Operators`
    subclass.
-4. Add C API and `waifu::flint` functions when the operation is needed outside C++.
-5. Add focused backend tests and run `./build/unittest`.
+3. Add C API and `waifu::flint` functions when the operation is needed outside C++. The C function
+   takes an `fl_operators_t` first; the Rust wrapper gets it from the device of the tensor it
+   reads, which is what `waifu::flint::operators` is for.
+4. Add focused backend tests and run `./build/unittest`.

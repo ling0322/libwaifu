@@ -38,7 +38,6 @@ set(flint_SOURCES
     "device.cc"
     "dtype.cc"
     "fp8.cc"
-    "functional.cc"
     "memory.cc"
     "operators.cc"
     "tensor.cc"

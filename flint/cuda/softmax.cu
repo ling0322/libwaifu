@@ -25,7 +25,6 @@
 
 #include "flint/cuda/accessor.h"
 #include "flint/cuda/common.h"
-#include "flint/functional.h"
 
 namespace fl {
 namespace op {

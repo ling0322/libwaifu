@@ -17,8 +17,8 @@
 //! # Ok::<(), waifu::flint::Error>(())
 //! ```
 //!
-//! The operations that work on tensors rather than describe them live in [`functional`], which
-//! mirrors `flint/functional.h`:
+//! The operations that work on tensors rather than describe them live in [`functional`], one
+//! function per method of the native `Operators`:
 //!
 //! ```no_run
 //! use waifu::flint::{functional as F, Tensor};
@@ -93,6 +93,7 @@ mod graph;
 mod ir;
 mod nvfp4;
 mod op;
+mod operators;
 
 pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
@@ -100,7 +101,10 @@ pub use ir::{
     check_parameters, resident, Preloaded, Inst, Ir, ParamSource, Residency, RunContext, Weights,
 };
 pub use nvfp4::Nvfp4Tensor;
+pub use operators::Operators;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
+
+use operators::{operators_of, raw_operators, readback_operators, transfer_operators};
 
 use std::ffi::CStr;
 use std::fmt;
@@ -433,15 +437,9 @@ impl Tensor {
 
     /// Create a tensor filled with zeros.
     pub fn zeros(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
-        init();
+        let operators = raw_operators(device)?;
         Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_zeros(
-                shape.as_ptr(),
-                shape.len() as i32,
-                dtype as i32,
-                device as i32,
-                out,
-            )
+            ffi::fl_tensor_zeros(operators, shape.as_ptr(), shape.len() as i32, dtype as i32, out)
         })
     }
 
@@ -452,15 +450,24 @@ impl Tensor {
     /// for it. Reading an element before writing it gives whatever the allocator handed back, so
     /// this is only worth using when every element is written first.
     pub fn empty(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
-        init();
+        // Page-locked host memory is made by the device that reads it rather than by the host it
+        // sits on, so this one shape goes to the CUDA operators and to a call of its own.
+        if device == Device::CudaHost {
+            let operators = raw_operators(Device::Cuda)?;
+            return Tensor::produce(|out| unsafe {
+                ffi::fl_tensor_host_empty(
+                    operators,
+                    shape.as_ptr(),
+                    shape.len() as i32,
+                    dtype as i32,
+                    out,
+                )
+            });
+        }
+
+        let operators = raw_operators(device)?;
         Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_empty(
-                shape.as_ptr(),
-                shape.len() as i32,
-                dtype as i32,
-                device as i32,
-                out,
-            )
+            ffi::fl_tensor_empty(operators, shape.as_ptr(), shape.len() as i32, dtype as i32, out)
         })
     }
 
@@ -498,10 +505,12 @@ impl Tensor {
     }
 
     fn from_elements<T>(shape: &[i32], data: &[T], dtype: DType) -> Result<Tensor> {
-        init();
+        // The bytes are copied in here and now, so this is the CPU's whatever else is about.
+        let operators = raw_operators(Device::Cpu)?;
         let size = std::mem::size_of_val(data) as i64;
         Tensor::produce(|out| unsafe {
             ffi::fl_tensor_from_data(
+                operators,
                 shape.as_ptr(),
                 shape.len() as i32,
                 dtype as i32,
@@ -634,12 +643,16 @@ impl Tensor {
 
     /// Return a contiguous tensor with the same elements, copying only if needed.
     pub fn contiguous(&self) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_contiguous(self.raw, out) })
+        let operators = operators_of(self)?;
+        Tensor::produce(|out| unsafe { ffi::fl_tensor_contiguous(operators, self.raw, out) })
     }
 
     /// Copy the tensor to another device.
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_to_device(self.raw, device as i32, out) })
+        let operators = transfer_operators(self.try_device()?, device)?;
+        Tensor::produce(|out| unsafe {
+            ffi::fl_tensor_to_device(operators, self.raw, device as i32, out)
+        })
     }
 
     /// Start copying to `device` and return before the bytes have arrived.
@@ -660,7 +673,10 @@ impl Tensor {
 
     /// Convert the elements to another data type.
     pub fn cast(&self, dtype: DType) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_cast(self.raw, dtype as i32, out) })
+        let operators = operators_of(self)?;
+        Tensor::produce(|out| unsafe {
+            ffi::fl_tensor_cast(operators, self.raw, dtype as i32, out)
+        })
     }
 
     /// Number of bytes the elements occupy once packed together.
@@ -709,8 +725,14 @@ impl Tensor {
         let nbytes = self.nbytes()?;
         let count = nbytes as usize / std::mem::size_of::<T>();
         let mut values = vec![T::default(); count];
+        let operators = readback_operators(self)?;
         check(unsafe {
-            ffi::fl_tensor_copy_to_host(self.raw, values.as_mut_ptr() as *mut c_void, nbytes)
+            ffi::fl_tensor_copy_to_host(
+                operators,
+                self.raw,
+                values.as_mut_ptr() as *mut c_void,
+                nbytes,
+            )
         })?;
         Ok(values)
     }
