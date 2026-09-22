@@ -233,12 +233,19 @@ function TopBar({ state }) {
   `;
 }
 
-/** Which tabs there are, and which of them draw a picture rather than say something. */
-const TABS = ["txt2img", "img2img", "text2speech"];
+/**
+ * Which tabs there are, and which of them draw a picture rather than say something.
+ *
+ * text2speech is left out of the list until there is a speech model to point it at. Everything
+ * behind it -- the settings column, the player, the server's side of it -- is still here and
+ * still tested; nothing offers the page, so nobody reaches it. Put the name back in TABS when a
+ * model ships.
+ */
+const TABS = ["txt2img", "img2img"];
 const SPEAKS = "text2speech";
 
 /**
- * The three kinds of run, one under the other.
+ * The kinds of run there are, one under the other.
  *
  * None of them is ever disabled. Which kind of run comes first and the model second -- and
  * changing between the two that draw un-chooses the model, so a model that cannot start from a
