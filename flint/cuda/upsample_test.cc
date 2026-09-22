@@ -30,21 +30,33 @@
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor cudaHalf(std::initializer_list<int> shape, const std::vector<float> &values) {
-  return F::cast(
-      F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values))),
+  return cudaOps()->cast(
+      cudaOps()->toDevice(
+          Device::getCuda(),
+          Tensor::create<float>(shape, lut::makeConstSpan(values))),
       DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &x) {
-  return F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(x, DType::kFloat));
 }
 
 Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
@@ -54,13 +66,15 @@ Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &valu
 /// The same values left in float and moved to the device as they stand, which is what the
 /// autoencoder hands this operator.
 Tensor cudaFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
-  return F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
+  return cudaOps()->toDevice(
+      Device::getCuda(),
+      Tensor::create<float>(shape, lut::makeConstSpan(values)));
 }
 
-/// An upsample only ever copies a pixel, so in float its result is exact. `F::allClose` compares
+/// An upsample only ever copies a pixel, so in float its result is exact. `allClose` compares
 /// with a strict `<` and so cannot be asked for that; these compare the elements themselves.
 bool equalsOnHost(const Tensor &device, const std::vector<float> &expected) {
-  Tensor host = F::toDevice(Device::getCpu(), device);
+  Tensor host = cudaOps()->toDevice(Device::getCpu(), device);
   const float *p = host.getInternalData()->getData<float>(host.getInternalOffset());
   return std::equal(p, p + host.getNumEl(), expected.begin());
 }
@@ -94,9 +108,11 @@ CATCH_TEST_CASE("test upsampleNearest2d", "[op][cuda]") {
     }
   }
 
-  Tensor out = F::upsampleNearest2d(cudaHalf({kBatch, kChannel, kHeight, kWidth}, x), kScale);
+  Tensor out = cudaOps()->upsampleNearest2d(
+      cudaHalf({kBatch, kChannel, kHeight, kWidth}, x),
+      kScale);
   CATCH_REQUIRE(out.getShape() == std::vector<int>{kBatch, kChannel, outH, outW});
-  CATCH_REQUIRE(F::allClose(
+  CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(out),
       cpuFloat({kBatch, kChannel, outH, outW}, expected),
       1e-6f,
@@ -104,17 +120,17 @@ CATCH_TEST_CASE("test upsampleNearest2d", "[op][cuda]") {
 
   // A scale of one hands the tensor back unchanged, and a scale of three is not only a power of
   // two away from what a U-Net asks for.
-  Tensor same = F::upsampleNearest2d(cudaHalf({1, 1, 2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}), 1);
+  Tensor same = cudaOps()->upsampleNearest2d(cudaHalf({1, 1, 2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}), 1);
   CATCH_REQUIRE(same.getShape() == std::vector<int>{1, 1, 2, 2});
-  CATCH_REQUIRE(F::allClose(
+  CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(same),
       cpuFloat({1, 1, 2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}),
       1e-6f,
       1e-6f));
 
-  Tensor thrice = F::upsampleNearest2d(cudaHalf({1, 1, 1, 2}, {5.0f, 6.0f}), 3);
+  Tensor thrice = cudaOps()->upsampleNearest2d(cudaHalf({1, 1, 1, 2}, {5.0f, 6.0f}), 3);
   CATCH_REQUIRE(thrice.getShape() == std::vector<int>{1, 1, 3, 6});
-  CATCH_REQUIRE(F::allClose(
+  CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(thrice),
       cpuFloat({1, 1, 3, 6}, {5, 5, 5, 6, 6, 6, 5, 5, 5, 6, 6, 6, 5, 5, 5, 6, 6, 6}),
       1e-6f,
@@ -143,13 +159,13 @@ CATCH_TEST_CASE("test upsampleNearest2d (float)", "[op][cuda]") {
     }
   }
 
-  Tensor out = F::upsampleNearest2d(cudaFloat({1, 1, kHeight, kWidth}, x), kScale);
+  Tensor out = cudaOps()->upsampleNearest2d(cudaFloat({1, 1, kHeight, kWidth}, x), kScale);
   CATCH_REQUIRE(out.getDType() == DType::kFloat);
   CATCH_REQUIRE(out.getShape() == std::vector<int>{1, 1, outH, outW});
   CATCH_REQUIRE(equalsOnHost(out, expected));
 
   // A value half cannot hold at all, which is the whole reason this arm exists.
-  Tensor huge = F::upsampleNearest2d(cudaFloat({1, 1, 1, 2}, {1e20f, -3e5f}), 2);
+  Tensor huge = cudaOps()->upsampleNearest2d(cudaFloat({1, 1, 1, 2}, {1e20f, -3e5f}), 2);
   CATCH_REQUIRE(equalsOnHost(
       huge,
       {1e20f, 1e20f, -3e5f, -3e5f, 1e20f, 1e20f, -3e5f, -3e5f}));

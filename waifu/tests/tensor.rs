@@ -1,7 +1,7 @@
 //! Tests for the safe tensor wrapper. These link against the shared library that CMake builds, so
 //! run `cmake --build build --target flint` first, or point LIBWAIFU_LIB_DIR somewhere else.
 
-use waifu::flint::{functional as F, Bound, DType, Device, Fp8Tensor, Tensor};
+use waifu::flint::{functional as F, Bound, DType, Device, Fp8Tensor, Operators, Tensor};
 
 #[test]
 fn reports_metadata() {
@@ -147,4 +147,43 @@ fn has_no_fp8_on_the_processor() {
     let weight = Tensor::from_f32(&[4, 8], &[1.0; 32]).unwrap();
     let error = Fp8Tensor::quantize(&weight).unwrap_err();
     assert!(error.message().contains("no FP8 kernels"), "{error}");
+}
+
+/// The operators every call is asked of, which a caller may hold itself.
+#[test]
+fn hands_out_operators_per_device() {
+    let cpu = Operators::create(Device::Cpu).unwrap();
+    assert_eq!(cpu.device().unwrap(), Device::Cpu);
+
+    // A second handle is another reference rather than another backend.
+    let again = Operators::create(Device::Cpu).unwrap();
+    assert_eq!(again.device().unwrap(), Device::Cpu);
+}
+
+/// Page-locked host memory names memory rather than a processor, so it carries no operators and
+/// nothing may be computed on it.
+#[test]
+fn page_locked_memory_has_no_operators() {
+    let error = Operators::create(Device::CudaHost).unwrap_err();
+    assert!(!error.message().is_empty(), "unexpected error: {error}");
+
+    if !Device::Cuda.is_available() {
+        return;
+    }
+
+    let host = Tensor::empty(&[2, 2], DType::Float, Device::CudaHost).unwrap();
+    assert_eq!(host.device(), Device::CudaHost);
+
+    // Its bytes are the host's to fill and to read back, which is all it is for.
+    let source = Tensor::from_f32(&[2, 2], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let mut destination = host.clone();
+    F::copy(&source, &mut destination).unwrap();
+    assert_eq!(host.to_vec_f32().unwrap(), vec![1.0, 2.0, 3.0, 4.0]);
+
+    // Arithmetic on it is refused rather than quietly run on the processor.
+    let error = F::mul(&host, &host).unwrap_err();
+    assert!(
+        error.message().contains("page-locked"),
+        "unexpected error: {error}"
+    );
 }

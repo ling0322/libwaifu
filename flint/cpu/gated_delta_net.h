@@ -29,7 +29,7 @@ namespace cpu {
 /// system each chunk solves, so both backends have to agree on it for their results to line up.
 constexpr int kGatedDeltaNetChunkSize = 64;
 
-/// Gated DeltaNet linear attention over a packed (varlen) batch. See F::gatedDeltaNetPrefill.
+/// Gated DeltaNet linear attention over a packed (varlen) batch. See `Operators::gatedDeltaNetPrefill`.
 Tensor gatedDeltaNetPrefill(
     const Tensor &q,
     const Tensor &k,

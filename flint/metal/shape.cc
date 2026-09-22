@@ -138,10 +138,10 @@ void copy(const Tensor &src, Tensor dest) {
     return;
   }
 
-  // A strided destination is what F::cat asks for: it allocates the joined tensor and copies each
-  // half into a slice of it. MLX arrays are values and cannot be written through, so the scatter
-  // goes through the pointer that unified memory already exposes. Everything is evaluated by the
-  // time we get here, so there is no GPU work in flight over this buffer.
+  // A strided destination is what `Operators::cat` asks for: it allocates the joined tensor and
+  // copies each half into a slice of it. MLX arrays are values and cannot be written through, so
+  // the scatter goes through the pointer that unified memory already exposes. Everything is
+  // evaluated by the time we get here, so no GPU work is in flight over this buffer.
   int ndim = dest.getDim();
   std::vector<int> shape(ndim);
   std::vector<int64_t> stride(ndim);
@@ -175,7 +175,7 @@ void copy(const Tensor &src, Tensor dest) {
 }
 
 void print(const Tensor &tensor) {
-  F::print(toCpu(tensor));
+  getOperators(Device::kCpu)->print(toCpu(tensor));
 }
 
 }  // namespace metal

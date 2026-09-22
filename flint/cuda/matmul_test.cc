@@ -24,24 +24,34 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
+
 namespace {
 
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
 Tensor toCuda(const Tensor &a) {
-  return F::cast(F::toDevice(Device::getCuda(), a), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(Device::getCpu(), F::cast(a, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
 }
 
 /// A float tensor moved to the device as it stands, which is what the autoencoder's attention
 /// multiplies. It goes to cuBLAS through sgemm rather than hgemm, and never to the vector kernel.
 Tensor toCudaFloat(const Tensor &a) {
-  return F::toDevice(Device::getCuda(), a);
+  return cudaOps()->toDevice(Device::getCuda(), a);
 }
 
 }  // namespace
@@ -50,14 +60,14 @@ CATCH_TEST_CASE("test CUDA matmul", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   auto runCase = [](std::initializer_list<int> shapeA, std::initializer_list<int> shapeB) {
-    Tensor a = F::rand(shapeA, DType::kFloat);
-    Tensor b = F::rand(shapeB, DType::kFloat);
-    Tensor xr = F::matmul(a, b.slice(-1, {8, 32}).transpose(-1, -2));
+    Tensor a = cpuOps()->rand(shapeA, DType::kFloat);
+    Tensor b = cpuOps()->rand(shapeB, DType::kFloat);
+    Tensor xr = cpuOps()->matmul(a, b.slice(-1, {8, 32}).transpose(-1, -2));
 
     Tensor y = toCuda(b).slice(-1, {8, 32}).transpose(-1, -2);
-    Tensor x = F::matmul(toCuda(a), y);
+    Tensor x = cudaOps()->matmul(toCuda(a), y);
 
-    return F::allClose(toCpu(x), xr, 5e-2);
+    return cpuOps()->allClose(toCpu(x), xr, 5e-2);
   };
 
   CATCH_REQUIRE(runCase({10, 24}, {40, 64}));
@@ -69,13 +79,13 @@ CATCH_TEST_CASE("test CUDA matmul (2D shapes)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   auto runCase = [](int m, int k, int n) {
-    Tensor a = F::rand({m, k}, DType::kFloat);
-    Tensor b = F::rand({k, n}, DType::kFloat);
+    Tensor a = cpuOps()->rand({m, k}, DType::kFloat);
+    Tensor b = cpuOps()->rand({k, n}, DType::kFloat);
 
-    Tensor x = F::matmul(toCuda(a), toCuda(b));
+    Tensor x = cudaOps()->matmul(toCuda(a), toCuda(b));
     CATCH_INFO("m = " << m << ", k = " << k << ", n = " << n);
     CATCH_REQUIRE(x.getShape() == std::vector<int>{m, n});
-    return F::allClose(toCpu(x), F::matmul(a, b), 5e-2);
+    return cpuOps()->allClose(toCpu(x), cpuOps()->matmul(a, b), 5e-2);
   };
 
   // A single row or column collapses the output to a vector shape, and k == 1 makes the
@@ -99,15 +109,15 @@ CATCH_TEST_CASE("test CUDA matmul (dispatches a row to gemv)", "[op][cuda]") {
   // during decode, and it is routed to the vector kernel rather than the general GEMM.
   constexpr int K = 64;
   constexpr int N = 40;
-  Tensor x = F::rand({1, K}, DType::kFloat);
-  Tensor w = F::rand({N, K}, DType::kFloat);
+  Tensor x = cpuOps()->rand({1, K}, DType::kFloat);
+  Tensor w = cpuOps()->rand({N, K}, DType::kFloat);
 
   Tensor wT = toCuda(w).transpose(0, 1);
   CATCH_REQUIRE(wT.getStride(0) == 1);
 
-  Tensor actual = F::matmul(toCuda(x), wT);
+  Tensor actual = cudaOps()->matmul(toCuda(x), wT);
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, N});
-  CATCH_REQUIRE(F::allClose(toCpu(actual), F::matmul(x, w.transpose(0, 1)), 5e-2));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(actual), cpuOps()->matmul(x, w.transpose(0, 1)), 5e-2));
 }
 
 CATCH_TEST_CASE("test CUDA matmul (batched)", "[op][cuda]") {
@@ -115,33 +125,33 @@ CATCH_TEST_CASE("test CUDA matmul (batched)", "[op][cuda]") {
 
   // Both operands batched, with one and two batch axes: these are the two instantiations of the
   // pointer-array gather that feeds the batched GEMM.
-  Tensor a3 = F::rand({4, 6, 8}, DType::kFloat);
-  Tensor b3 = F::rand({4, 8, 5}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(
-      toCpu(F::matmul(toCuda(a3), toCuda(b3))),
-      F::matmul(a3, b3),
+  Tensor a3 = cpuOps()->rand({4, 6, 8}, DType::kFloat);
+  Tensor b3 = cpuOps()->rand({4, 8, 5}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->matmul(toCuda(a3), toCuda(b3))),
+      cpuOps()->matmul(a3, b3),
       5e-2));
 
-  Tensor a4 = F::rand({2, 3, 6, 8}, DType::kFloat);
-  Tensor b4 = F::rand({2, 3, 8, 5}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(
-      toCpu(F::matmul(toCuda(a4), toCuda(b4))),
-      F::matmul(a4, b4),
+  Tensor a4 = cpuOps()->rand({2, 3, 6, 8}, DType::kFloat);
+  Tensor b4 = cpuOps()->rand({2, 3, 8, 5}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->matmul(toCuda(a4), toCuda(b4))),
+      cpuOps()->matmul(a4, b4),
       5e-2));
 
   // a right operand with fewer batch axes is broadcast across the batch.
-  Tensor b2 = F::rand({8, 5}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(
-      toCpu(F::matmul(toCuda(a3), toCuda(b2))),
-      F::matmul(a3, b2),
+  Tensor b2 = cpuOps()->rand({8, 5}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->matmul(toCuda(a3), toCuda(b2))),
+      cpuOps()->matmul(a3, b2),
       5e-2));
 
   // a single-element batch still has to take the batched path rather than degenerating.
-  Tensor a1 = F::rand({1, 6, 8}, DType::kFloat);
-  Tensor b1 = F::rand({1, 8, 5}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(
-      toCpu(F::matmul(toCuda(a1), toCuda(b1))),
-      F::matmul(a1, b1),
+  Tensor a1 = cpuOps()->rand({1, 6, 8}, DType::kFloat);
+  Tensor b1 = cpuOps()->rand({1, 8, 5}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->matmul(toCuda(a1), toCuda(b1))),
+      cpuOps()->matmul(a1, b1),
       5e-2));
 }
 
@@ -150,15 +160,15 @@ CATCH_TEST_CASE("test CUDA matmul (strided operands)", "[op][cuda]") {
 
   // A non-contiguous left operand cannot be flattened into a plain GEMM, so it goes through the
   // batched path instead; the answer must not depend on which one was chosen.
-  Tensor a = F::rand({4, 6, 8}, DType::kFloat);
-  Tensor b = F::rand({8, 5}, DType::kFloat);
+  Tensor a = cpuOps()->rand({4, 6, 8}, DType::kFloat);
+  Tensor b = cpuOps()->rand({8, 5}, DType::kFloat);
 
   Tensor strided = toCuda(a).slice(1, {1, 5});
   CATCH_REQUIRE(!strided.isContiguous());
 
-  CATCH_REQUIRE(F::allClose(
-      toCpu(F::matmul(strided, toCuda(b))),
-      F::matmul(a.slice(1, {1, 5}), b),
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(cudaOps()->matmul(strided, toCuda(b))),
+      cpuOps()->matmul(a.slice(1, {1, 5}), b),
       5e-2));
 }
 
@@ -170,15 +180,15 @@ CATCH_TEST_CASE("test CUDA matmul (float)", "[op][cuda]") {
   // interesting. Float against the host in float is nearly exact, so the tolerance is tight
   // enough to catch an operand swapped rather than merely a slower kernel.
   auto runCase = [](std::initializer_list<int> shapeA, std::initializer_list<int> shapeB) {
-    Tensor a = F::rand(shapeA, DType::kFloat);
-    Tensor b = F::rand(shapeB, DType::kFloat);
-    Tensor expected = F::matmul(a, b.slice(-1, {8, 32}).transpose(-1, -2));
+    Tensor a = cpuOps()->rand(shapeA, DType::kFloat);
+    Tensor b = cpuOps()->rand(shapeB, DType::kFloat);
+    Tensor expected = cpuOps()->matmul(a, b.slice(-1, {8, 32}).transpose(-1, -2));
 
     Tensor y = toCudaFloat(b).slice(-1, {8, 32}).transpose(-1, -2);
-    Tensor x = F::matmul(toCudaFloat(a), y);
+    Tensor x = cudaOps()->matmul(toCudaFloat(a), y);
     CATCH_REQUIRE(x.getDType() == DType::kFloat);
 
-    return F::allClose(F::toDevice(Device::getCpu(), x), expected, 1e-4f);
+    return cpuOps()->allClose(cudaOps()->toDevice(Device::getCpu(), x), expected, 1e-4f);
   };
 
   CATCH_REQUIRE(runCase({10, 24}, {40, 64}));
@@ -194,17 +204,17 @@ CATCH_TEST_CASE("test CUDA matmul (float takes the shapes gemv would)", "[op][cu
   // dispatching to something that cannot read its operands.
   constexpr int K = 64;
   constexpr int N = 40;
-  Tensor x = F::rand({1, K}, DType::kFloat);
-  Tensor w = F::rand({N, K}, DType::kFloat);
+  Tensor x = cpuOps()->rand({1, K}, DType::kFloat);
+  Tensor w = cpuOps()->rand({N, K}, DType::kFloat);
 
   Tensor wT = toCudaFloat(w).transpose(0, 1);
   CATCH_REQUIRE(wT.getStride(0) == 1);
 
-  Tensor actual = F::matmul(toCudaFloat(x), wT);
+  Tensor actual = cudaOps()->matmul(toCudaFloat(x), wT);
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, N});
-  CATCH_REQUIRE(F::allClose(
-      F::toDevice(Device::getCpu(), actual),
-      F::matmul(x, w.transpose(0, 1)),
+  CATCH_REQUIRE(cpuOps()->allClose(
+      cudaOps()->toDevice(Device::getCpu(), actual),
+      cpuOps()->matmul(x, w.transpose(0, 1)),
       1e-4f));
 }
 
@@ -213,16 +223,18 @@ CATCH_TEST_CASE("test CUDA matmul (float carries what half cannot)", "[op][cuda]
 
   // The point of the float arm: a product half would return as infinity. 300 * 300 * 4 is
   // 360000, which is past 65504.
-  Tensor a = F::rand({2, 4}, DType::kFloat);
-  Tensor b = F::rand({4, 3}, DType::kFloat);
-  a = F::mul(a, 300.0f);
-  b = F::mul(b, 300.0f);
+  Tensor a = cpuOps()->rand({2, 4}, DType::kFloat);
+  Tensor b = cpuOps()->rand({4, 3}, DType::kFloat);
+  a = cpuOps()->mul(a, 300.0f);
+  b = cpuOps()->mul(b, 300.0f);
 
-  Tensor x = F::toDevice(Device::getCpu(), F::matmul(toCudaFloat(a), toCudaFloat(b)));
-  CATCH_REQUIRE(F::allClose(x, F::matmul(a, b), 1e-4f));
+  Tensor x = cudaOps()->toDevice(
+      Device::getCpu(),
+      cudaOps()->matmul(toCudaFloat(a), toCudaFloat(b)));
+  CATCH_REQUIRE(cpuOps()->allClose(x, cpuOps()->matmul(a, b), 1e-4f));
 
-  Tensor asHalf = toCpu(F::matmul(toCuda(a), toCuda(b)));
-  CATCH_REQUIRE(!F::allClose(asHalf, F::matmul(a, b), 1e-4f));
+  Tensor asHalf = toCpu(cudaOps()->matmul(toCuda(a), toCuda(b)));
+  CATCH_REQUIRE(!cpuOps()->allClose(asHalf, cpuOps()->matmul(a, b), 1e-4f));
 }
 
 }  // namespace fl

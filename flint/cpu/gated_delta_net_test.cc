@@ -25,12 +25,17 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
 namespace {
+
+/// The CPU operators, which is what the calls in this file are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
 
 class Lcg {
  public:
@@ -260,7 +265,7 @@ void checkAgainstRecurrence(const Inputs &in, float tolerance) {
   referenceRecurrence(in, &expectedO, &expectedState);
 
   Tensors t = toTensors(in);
-  Tensor o = F::gatedDeltaNetPrefill(
+  Tensor o = cpuOps()->gatedDeltaNetPrefill(
       t.q,
       t.k,
       t.v,
@@ -271,7 +276,7 @@ void checkAgainstRecurrence(const Inputs &in, float tolerance) {
       t.state);
 
   CATCH_REQUIRE(o.getShape() == std::vector<int>{in.numTokens, in.numVHead, in.headDim});
-  CATCH_REQUIRE(F::allClose(
+  CATCH_REQUIRE(cpuOps()->allClose(
       o,
       Tensor::create<float>(
           {in.numTokens, in.numVHead, in.headDim},
@@ -281,7 +286,7 @@ void checkAgainstRecurrence(const Inputs &in, float tolerance) {
   // Compared as a whole pool, so the spare slot's kUnusedSlot has to have survived along with
   // every sequence's state having landed in the slot the mapping named.
   std::vector<float> expectedPool = toPool(expectedState, in);
-  CATCH_REQUIRE(F::allClose(
+  CATCH_REQUIRE(cpuOps()->allClose(
       t.state,
       Tensor::create<float>(
           {poolSlots(in.numSeq, in.slotPolicy), in.numVHead, in.headDim, in.headDim},

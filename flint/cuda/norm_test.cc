@@ -31,12 +31,22 @@
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
 #include "flint/device.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
 namespace {
+
+/// The CUDA operators, which the calls here that run on CUDA are asked of.
+Operators *cudaOps() {
+  return getOperators(Device::kCuda);
+}
+
+/// The CPU operators, which the calls here that run on CPU are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
 
 /// Values that vary without a pattern the operator could accidentally satisfy, and without
 /// pulling in a random number generator.
@@ -51,18 +61,20 @@ std::vector<float> spread(int count, uint32_t seed) {
 }
 
 Tensor cudaHalf(std::initializer_list<int> shape, const std::vector<float> &values) {
-  return F::cast(
-      F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values))),
+  return cudaOps()->cast(
+      cudaOps()->toDevice(
+          Device::getCuda(),
+          Tensor::create<float>(shape, lut::makeConstSpan(values))),
       DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &x) {
-  return F::toDevice(Device::getCpu(), F::cast(x, DType::kFloat));
+  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(x, DType::kFloat));
 }
 
 /// The counterpart of toCpuFloat, for a tensor that already holds its values.
 Tensor toCudaHalf(const Tensor &x) {
-  return F::cast(F::toDevice(Device::getCuda(), x), DType::kFloat16);
+  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), x), DType::kFloat16);
 }
 
 Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
@@ -72,7 +84,9 @@ Tensor cpuFloat(std::initializer_list<int> shape, const std::vector<float> &valu
 /// The same values left in float and moved to the device as they stand. SDXL's autoencoder
 /// normalizes in float32, and its groupNorm is the first thing every one of its blocks does.
 Tensor cudaFloat(std::initializer_list<int> shape, const std::vector<float> &values) {
-  return F::toDevice(Device::getCuda(), Tensor::create<float>(shape, lut::makeConstSpan(values)));
+  return cudaOps()->toDevice(
+      Device::getCuda(),
+      Tensor::create<float>(shape, lut::makeConstSpan(values)));
 }
 
 }  // namespace
@@ -81,17 +95,18 @@ CATCH_TEST_CASE("test rmsNorm", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   for (int lastDim : {10, 11}) {
-    Tensor a = F::rand({2, 5, lastDim}, DType::kFloat);
-    Tensor w = F::rand({lastDim}, DType::kFloat);
-    Tensor x = F::rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5);
-    CATCH_REQUIRE(F::allClose(toCpuFloat(x), F::rmsNorm(a, w, 1e-5), 5e-3));
+    Tensor a = cpuOps()->rand({2, 5, lastDim}, DType::kFloat);
+    Tensor w = cpuOps()->rand({lastDim}, DType::kFloat);
+    Tensor x = cudaOps()->rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5);
+    CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), cpuOps()->rmsNorm(a, w, 1e-5), 5e-3));
   }
 
   // strided input.
-  Tensor a = F::rand({2, 3, 11}, DType::kFloat);
-  Tensor w = F::rand({11}, DType::kFloat);
-  Tensor x = F::rmsNorm(toCudaHalf(a).transpose(0, 1), toCudaHalf(w), 1e-5);
-  CATCH_REQUIRE(F::allClose(toCpuFloat(x), F::rmsNorm(a.transpose(0, 1), w, 1e-5), 5e-3));
+  Tensor a = cpuOps()->rand({2, 3, 11}, DType::kFloat);
+  Tensor w = cpuOps()->rand({11}, DType::kFloat);
+  Tensor x = cudaOps()->rmsNorm(toCudaHalf(a).transpose(0, 1), toCudaHalf(w), 1e-5);
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpuFloat(x), cpuOps()->rmsNorm(a.transpose(0, 1), w, 1e-5), 5e-3));
 }
 
 CATCH_TEST_CASE("test rmsNorm (packed 2D batch)", "[op][cuda]") {
@@ -100,21 +115,21 @@ CATCH_TEST_CASE("test rmsNorm (packed 2D batch)", "[op][cuda]") {
   // A packed batch is [tokens, hidden]; the operator adds a leading axis and strips it again, so
   // the result must come back 2D.
   for (int hidden : {8, 11, 512}) {
-    Tensor a = F::rand({4, hidden}, DType::kFloat);
-    Tensor w = F::rand({hidden}, DType::kFloat);
-    Tensor x = F::rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5);
+    Tensor a = cpuOps()->rand({4, hidden}, DType::kFloat);
+    Tensor w = cpuOps()->rand({hidden}, DType::kFloat);
+    Tensor x = cudaOps()->rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5);
 
     CATCH_INFO("hidden = " << hidden);
     CATCH_REQUIRE(x.getShape() == std::vector<int>{4, hidden});
-    CATCH_REQUIRE(F::allClose(toCpuFloat(x), F::rmsNorm(a, w, 1e-5), 5e-3));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), cpuOps()->rmsNorm(a, w, 1e-5), 5e-3));
   }
 
   // one token, the decode-step shape.
-  Tensor one = F::rand({1, 64}, DType::kFloat);
-  Tensor oneW = F::rand({64}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(
-      toCpuFloat(F::rmsNorm(toCudaHalf(one), toCudaHalf(oneW), 1e-5)),
-      F::rmsNorm(one, oneW, 1e-5),
+  Tensor one = cpuOps()->rand({1, 64}, DType::kFloat);
+  Tensor oneW = cpuOps()->rand({64}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpuFloat(cudaOps()->rmsNorm(toCudaHalf(one), toCudaHalf(oneW), 1e-5)),
+      cpuOps()->rmsNorm(one, oneW, 1e-5),
       5e-3));
 }
 
@@ -124,13 +139,13 @@ CATCH_TEST_CASE("test rmsNorm (hidden sizes)", "[op][cuda]") {
   // One 256-thread block reduces a whole row, so widths on both sides of the block size take a
   // different number of loop iterations, and odd widths disable the half2 path.
   for (int hidden : {1, 2, 3, 255, 256, 257, 512, 2048, 4096}) {
-    Tensor a = F::rand({2, 3, hidden}, DType::kFloat);
-    Tensor w = F::rand({hidden}, DType::kFloat);
+    Tensor a = cpuOps()->rand({2, 3, hidden}, DType::kFloat);
+    Tensor w = cpuOps()->rand({hidden}, DType::kFloat);
 
     CATCH_INFO("hidden = " << hidden);
-    CATCH_REQUIRE(F::allClose(
-        toCpuFloat(F::rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5)),
-        F::rmsNorm(a, w, 1e-5),
+    CATCH_REQUIRE(cpuOps()->allClose(
+        toCpuFloat(cudaOps()->rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5)),
+        cpuOps()->rmsNorm(a, w, 1e-5),
         1e-2));
   }
 }
@@ -140,14 +155,15 @@ CATCH_TEST_CASE("test rmsNorm (strided weight)", "[op][cuda]") {
 
   // A non-contiguous weight is enough on its own to force the strided kernel, even when the
   // input is contiguous.
-  Tensor a = F::rand({2, 3, 6}, DType::kFloat);
-  Tensor wSource = F::rand({6, 4}, DType::kFloat);
+  Tensor a = cpuOps()->rand({2, 3, 6}, DType::kFloat);
+  Tensor wSource = cpuOps()->rand({6, 4}, DType::kFloat);
   Tensor w = wSource.transpose(0, 1).subtensor(0);
   Tensor wDevice = toCudaHalf(wSource).transpose(0, 1).subtensor(0);
   CATCH_REQUIRE(!wDevice.isContiguous());
 
-  Tensor x = F::rmsNorm(toCudaHalf(a), wDevice, 1e-5);
-  CATCH_REQUIRE(F::allClose(toCpuFloat(x), F::rmsNorm(a, F::contiguous(w), 1e-5), 5e-3));
+  Tensor x = cudaOps()->rmsNorm(toCudaHalf(a), wDevice, 1e-5);
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpuFloat(x), cpuOps()->rmsNorm(a, cpuOps()->contiguous(w), 1e-5), 5e-3));
 }
 
 CATCH_TEST_CASE("test rmsNorm (eps dominates a zero row)", "[op][cuda]") {
@@ -155,10 +171,10 @@ CATCH_TEST_CASE("test rmsNorm (eps dominates a zero row)", "[op][cuda]") {
 
   // An all-zero row has zero mean square, so eps is the only thing keeping the reciprocal square
   // root finite. The output stays zero rather than becoming NaN.
-  Tensor a = F::zeros({2, 8}, DType::kFloat);
-  Tensor w = F::rand({8}, DType::kFloat);
+  Tensor a = cpuOps()->zeros({2, 8}, DType::kFloat);
+  Tensor w = cpuOps()->rand({8}, DType::kFloat);
 
-  Tensor x = toCpuFloat(F::rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5));
+  Tensor x = toCpuFloat(cudaOps()->rmsNorm(toCudaHalf(a), toCudaHalf(w), 1e-5));
   const float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
   for (int i = 0; i < 16; ++i) {
     CATCH_INFO("i = " << i);
@@ -197,14 +213,14 @@ CATCH_TEST_CASE("test layerNorm", "[op][cuda]") {
     }
   }
 
-  Tensor out = F::layerNorm(
+  Tensor out = cudaOps()->layerNorm(
       cudaHalf({kRow, kHidden}, x),
       cudaHalf({kHidden}, weight),
       cudaHalf({kHidden}, bias),
       kEps);
 
   CATCH_REQUIRE(out.getShape() == std::vector<int>{kRow, kHidden});
-  CATCH_REQUIRE(F::allClose(toCpuFloat(out), cpuFloat({kRow, kHidden}, expected), 2e-2f));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(out), cpuFloat({kRow, kHidden}, expected), 2e-2f));
 }
 
 CATCH_TEST_CASE("test layerNorm (no weight, no bias)", "[op][cuda]") {
@@ -215,7 +231,7 @@ CATCH_TEST_CASE("test layerNorm (no weight, no bias)", "[op][cuda]") {
   constexpr int kHidden = 64;
   std::vector<float> x = spread(kHidden, 11);
 
-  Tensor out = F::layerNorm(cudaHalf({1, kHidden}, x), Tensor(), Tensor(), 1e-5f);
+  Tensor out = cudaOps()->layerNorm(cudaHalf({1, kHidden}, x), Tensor(), Tensor(), 1e-5f);
   Tensor cpu = toCpuFloat(out);
   const float *data = cpu.getInternalData()->getData<float>(cpu.getInternalOffset());
   double mean = 0.0;
@@ -270,7 +286,7 @@ CATCH_TEST_CASE("test groupNorm", "[op][cuda]") {
     }
   }
 
-  Tensor out = F::groupNorm(
+  Tensor out = cudaOps()->groupNorm(
       cudaHalf({kBatch, kChannel, kHeight, kWidth}, x),
       cudaHalf({kChannel}, weight),
       cudaHalf({kChannel}, bias),
@@ -278,7 +294,7 @@ CATCH_TEST_CASE("test groupNorm", "[op][cuda]") {
       kEps);
 
   CATCH_REQUIRE(out.getShape() == std::vector<int>{kBatch, kChannel, kHeight, kWidth});
-  CATCH_REQUIRE(F::allClose(
+  CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(out),
       cpuFloat({kBatch, kChannel, kHeight, kWidth}, expected),
       2e-2f));
@@ -292,8 +308,8 @@ CATCH_TEST_CASE("test groupNorm (one group, and one per channel)", "[op][cuda]")
   std::vector<float> x = spread(1 * 4 * 2 * 2, 23);
   Tensor input = cudaHalf({1, 4, 2, 2}, x);
 
-  Tensor one = F::groupNorm(input, Tensor(), Tensor(), 1, 1e-5f);
-  Tensor each = F::groupNorm(input, Tensor(), Tensor(), 4, 1e-5f);
+  Tensor one = cudaOps()->groupNorm(input, Tensor(), Tensor(), 1, 1e-5f);
+  Tensor each = cudaOps()->groupNorm(input, Tensor(), Tensor(), 4, 1e-5f);
   CATCH_REQUIRE(one.getShape() == std::vector<int>{1, 4, 2, 2});
   CATCH_REQUIRE(each.getShape() == std::vector<int>{1, 4, 2, 2});
 
@@ -307,7 +323,7 @@ CATCH_TEST_CASE("test groupNorm (one group, and one per channel)", "[op][cuda]")
   }
 
   // A channel count that does not divide is a caller's mistake, not a reason to stop.
-  CATCH_REQUIRE_THROWS(F::groupNorm(input, Tensor(), Tensor(), 3, 1e-5f));
+  CATCH_REQUIRE_THROWS(cudaOps()->groupNorm(input, Tensor(), Tensor(), 3, 1e-5f));
 }
 
 CATCH_TEST_CASE("test groupNorm (float)", "[op][cuda]") {
@@ -359,21 +375,21 @@ CATCH_TEST_CASE("test groupNorm (float)", "[op][cuda]") {
     }
   }
 
-  Tensor out = F::groupNorm(
+  Tensor out = cudaOps()->groupNorm(
       cudaFloat({kBatch, kChannel, kHeight, kWidth}, x),
       cudaFloat({kChannel}, weight),
       cudaFloat({kChannel}, bias),
       kGroups,
       kEps);
   CATCH_REQUIRE(out.getDType() == DType::kFloat);
-  CATCH_REQUIRE(F::allClose(
-      F::toDevice(Device::getCpu(), out),
+  CATCH_REQUIRE(cpuOps()->allClose(
+      cudaOps()->toDevice(Device::getCpu(), out),
       cpuFloat({kBatch, kChannel, kHeight, kWidth}, expected),
       1e-4f));
 
   // A half weight against a float input is a caller's mistake rather than something to convert
   // on the way past, since the two would then disagree about what the norm is in.
-  CATCH_REQUIRE_THROWS(F::groupNorm(
+  CATCH_REQUIRE_THROWS(cudaOps()->groupNorm(
       cudaFloat({kBatch, kChannel, kHeight, kWidth}, x),
       cudaHalf({kChannel}, weight),
       cudaFloat({kChannel}, bias),
@@ -388,26 +404,33 @@ CATCH_TEST_CASE("test layerNorm and rmsNorm (float)", "[op][cuda]") {
   // element type reaches them too. An odd width is the case the half arm cannot vectorize; in
   // float neither width can, and both have to answer the same.
   for (int lastDim : {10, 11}) {
-    Tensor a = F::rand({2, 5, lastDim}, DType::kFloat);
-    Tensor w = F::rand({lastDim}, DType::kFloat);
-    Tensor b = F::rand({lastDim}, DType::kFloat);
+    Tensor a = cpuOps()->rand({2, 5, lastDim}, DType::kFloat);
+    Tensor w = cpuOps()->rand({lastDim}, DType::kFloat);
+    Tensor b = cpuOps()->rand({lastDim}, DType::kFloat);
     CATCH_INFO("lastDim = " << lastDim);
 
-    Tensor rms = F::rmsNorm(F::toDevice(Device::getCuda(), a), F::toDevice(Device::getCuda(), w), 1e-5f);
+    Tensor rms = cudaOps()->rmsNorm(
+        cudaOps()->toDevice(Device::getCuda(), a),
+        cudaOps()->toDevice(Device::getCuda(), w),
+        1e-5f);
     CATCH_REQUIRE(rms.getDType() == DType::kFloat);
-    CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), rms), F::rmsNorm(a, w, 1e-5f), 1e-5f));
+    CATCH_REQUIRE(cpuOps()->allClose(
+        cudaOps()->toDevice(Device::getCpu(), rms),
+        cpuOps()->rmsNorm(a, w, 1e-5f),
+        1e-5f));
 
-    Tensor layer = F::layerNorm(
-        F::toDevice(Device::getCuda(), a),
-        F::toDevice(Device::getCuda(), w),
-        F::toDevice(Device::getCuda(), b),
+    Tensor layer = cudaOps()->layerNorm(
+        cudaOps()->toDevice(Device::getCuda(), a),
+        cudaOps()->toDevice(Device::getCuda(), w),
+        cudaOps()->toDevice(Device::getCuda(), b),
         1e-5f);
     CATCH_REQUIRE(layer.getDType() == DType::kFloat);
 
     // Against the half arm on the same values, which is what says the two agree rather than that
     // one of them agrees with itself.
-    Tensor half = F::layerNorm(toCudaHalf(a), toCudaHalf(w), toCudaHalf(b), 1e-5f);
-    CATCH_REQUIRE(F::allClose(F::toDevice(Device::getCpu(), layer), toCpuFloat(half), 5e-3f));
+    Tensor half = cudaOps()->layerNorm(toCudaHalf(a), toCudaHalf(w), toCudaHalf(b), 1e-5f);
+    CATCH_REQUIRE(
+        cpuOps()->allClose(cudaOps()->toDevice(Device::getCpu(), layer), toCpuFloat(half), 5e-3f));
   }
 }
 

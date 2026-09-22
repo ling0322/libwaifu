@@ -21,10 +21,20 @@
 // SOFTWARE.
 
 #include "catch2/catch_amalgamated.hpp"
-#include "flint/functional.h"
+#include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
+namespace {
+
+/// The CPU operators, which is what the calls in this file are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
+}  // namespace
+
 namespace op {
 namespace cpu {
 
@@ -70,12 +80,12 @@ CATCH_TEST_CASE("test embedding lookup", "[core][nn][operators]") {
           0.7f,
           0.8f,
       });
-  CATCH_REQUIRE(F::allClose(F::lookup(wte, input), output));
+  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->lookup(wte, input), output));
 
   // packed indices are 1D and give one embedding row per index.
   Tensor packed = Tensor::create<LongType>({3}, {0, 1, 2});
   Tensor packedOutput = Tensor::create<float>({3, 2}, {0.1f, 0.2f, 0.3f, 0.4f, 0.2f, 0.3f});
-  CATCH_REQUIRE(F::allClose(F::lookup(wte, packed), packedOutput));
+  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->lookup(wte, packed), packedOutput));
 }
 
 }  // namespace cpu

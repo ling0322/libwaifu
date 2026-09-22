@@ -21,18 +21,28 @@
 // SOFTWARE.
 
 #include "catch2/catch_amalgamated.hpp"
-#include "flint/functional.h"
+#include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
+namespace {
+
+/// The CPU operators, which is what the calls in this file are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
+}  // namespace
+
 namespace op {
 namespace cpu {
 
 CATCH_TEST_CASE("test CPU reductions", "[core][nn][operators]") {
   Tensor a = Tensor::create<float>({2, 3}, {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f});
 
-  CATCH_REQUIRE(F::allClose(F::sum(a), Tensor::create<float>({2}, {0.6f, 1.5f})));
-  CATCH_REQUIRE(F::allClose(F::max(a), Tensor::create<float>({2}, {0.3f, 0.6f})));
+  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->sum(a, -1), Tensor::create<float>({2}, {0.6f, 1.5f})));
+  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->max(a), Tensor::create<float>({2}, {0.3f, 0.6f})));
 }
 
 }  // namespace cpu

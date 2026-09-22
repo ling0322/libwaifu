@@ -29,6 +29,14 @@ pub struct FlFutureTensorImpl {
 
 pub type FlFutureTensor = *mut FlFutureTensorImpl;
 
+/// Opaque handle on the operators of one device. Only ever held behind a pointer.
+#[repr(C)]
+pub struct FlOperatorsImpl {
+    _private: [u8; 0],
+}
+
+pub type FlOperators = *mut FlOperatorsImpl;
+
 pub type FlDType = c_int;
 pub type FlDeviceType = c_int;
 
@@ -38,21 +46,33 @@ extern "C" {
     pub fn fl_get_last_error_code() -> i32;
     pub fn fl_get_last_error_message() -> *const c_char;
 
+    pub fn fl_operators_create(device: FlDeviceType, out: *mut FlOperators) -> i32;
+    pub fn fl_operators_destroy(operators: FlOperators);
+    pub fn fl_operators_get_device(operators: FlOperators, out: *mut FlDeviceType) -> i32;
+
     pub fn fl_tensor_zeros(
+        operators: FlOperators,
         shape: *const i32,
         ndim: i32,
         dtype: FlDType,
-        device: FlDeviceType,
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_tensor_empty(
+        operators: FlOperators,
         shape: *const i32,
         ndim: i32,
         dtype: FlDType,
-        device: FlDeviceType,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_tensor_host_empty(
+        operators: FlOperators,
+        shape: *const i32,
+        ndim: i32,
+        dtype: FlDType,
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_tensor_from_data(
+        operators: FlOperators,
         shape: *const i32,
         ndim: i32,
         dtype: FlDType,
@@ -61,11 +81,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_tensor_clone(tensor: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_tensor_host_data(
-        tensor: FlTensor,
-        out: *mut *mut c_void,
-        nbytes: *mut i64,
-    ) -> i32;
+    pub fn fl_tensor_host_data(tensor: FlTensor, out: *mut *mut c_void, nbytes: *mut i64) -> i32;
 
     pub fn fl_tensor_destroy(tensor: FlTensor);
 
@@ -94,48 +110,86 @@ extern "C" {
     pub fn fl_tensor_subtensor(tensor: FlTensor, index: i32, out: *mut FlTensor) -> i32;
     pub fn fl_tensor_unsqueeze(tensor: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
     pub fn fl_tensor_squeeze(tensor: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
-    pub fn fl_tensor_contiguous(tensor: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_tensor_to_device(tensor: FlTensor, device: FlDeviceType, out: *mut FlTensor) -> i32;
-    pub fn fl_tensor_cast(tensor: FlTensor, dtype: FlDType, out: *mut FlTensor) -> i32;
+    pub fn fl_tensor_contiguous(
+        operators: FlOperators,
+        tensor: FlTensor,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_tensor_to_device(
+        operators: FlOperators,
+        tensor: FlTensor,
+        device: FlDeviceType,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_tensor_cast(
+        operators: FlOperators,
+        tensor: FlTensor,
+        dtype: FlDType,
+        out: *mut FlTensor,
+    ) -> i32;
 
     pub fn fl_tensor_get_nbytes(tensor: FlTensor, out: *mut i64) -> i32;
-    pub fn fl_tensor_copy_to_host(tensor: FlTensor, buffer: *mut c_void, buffer_size: i64) -> i32;
+    pub fn fl_tensor_copy_to_host(
+        operators: FlOperators,
+        tensor: FlTensor,
+        buffer: *mut c_void,
+        buffer_size: i64,
+    ) -> i32;
 
     pub fn fl_arange(
+        operators: FlOperators,
         begin: i64,
         end: i64,
         step: i64,
-        device: FlDeviceType,
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_rand(
+        operators: FlOperators,
         shape: *const i32,
         ndim: i32,
         dtype: FlDType,
-        device: FlDeviceType,
         out: *mut FlTensor,
     ) -> i32;
-    pub fn fl_randn(shape: *const i32, ndim: i32, device: FlDeviceType, out: *mut FlTensor) -> i32;
-    pub fn fl_manual_seed(device: FlDeviceType, seed: u64) -> i32;
+    pub fn fl_randn(
+        operators: FlOperators,
+        shape: *const i32,
+        ndim: i32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_manual_seed(operators: FlOperators, seed: u64) -> i32;
 
-    pub fn fl_lookup(table: FlTensor, indices: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_lookup(
+        operators: FlOperators,
+        table: FlTensor,
+        indices: FlTensor,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_rotary_embedding(
+        operators: FlOperators,
         positions: FlTensor,
         query: FlTensor,
         key: FlTensor,
         rotary_cache: FlTensor,
     ) -> i32;
-    pub fn fl_rms_norm(input: FlTensor, weight: FlTensor, eps: f32, out: *mut FlTensor) -> i32;
-    pub fn fl_matmul(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_rms_norm(
+        operators: FlOperators,
+        input: FlTensor,
+        weight: FlTensor,
+        eps: f32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_matmul(operators: FlOperators, a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_layer_norm(
+        operators: FlOperators,
         input: FlTensor,
         weight: FlTensor,
         bias: FlTensor,
         eps: f32,
         out: *mut FlTensor,
     ) -> i32;
-    pub fn fl_quick_gelu(input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_quick_gelu(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_conv2d(
+        operators: FlOperators,
         input: FlTensor,
         weight: FlTensor,
         bias: FlTensor,
@@ -146,6 +200,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_conv1d(
+        operators: FlOperators,
         input: FlTensor,
         weight: FlTensor,
         bias: FlTensor,
@@ -156,6 +211,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_conv_transpose1d(
+        operators: FlOperators,
         input: FlTensor,
         weight: FlTensor,
         bias: FlTensor,
@@ -166,6 +222,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_snake(
+        operators: FlOperators,
         input: FlTensor,
         alpha: FlTensor,
         beta: FlTensor,
@@ -173,6 +230,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_stft(
+        operators: FlOperators,
         input: FlTensor,
         window: FlTensor,
         n_fft: i32,
@@ -181,6 +239,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_istft(
+        operators: FlOperators,
         spectrum: FlTensor,
         window: FlTensor,
         n_fft: i32,
@@ -189,6 +248,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_group_norm(
+        operators: FlOperators,
         input: FlTensor,
         weight: FlTensor,
         bias: FlTensor,
@@ -196,7 +256,12 @@ extern "C" {
         eps: f32,
         out: *mut FlTensor,
     ) -> i32;
-    pub fn fl_upsample_nearest2d(input: FlTensor, scale: i32, out: *mut FlTensor) -> i32;
+    pub fn fl_upsample_nearest2d(
+        operators: FlOperators,
+        input: FlTensor,
+        scale: i32,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_nvfp4_available(out: *mut i32) -> i32;
     pub fn fl_paged_attention_available(out: *mut i32) -> i32;
     pub fn fl_nvfp4_quantize(
@@ -235,37 +300,59 @@ extern "C" {
     pub fn fl_future_tensor_take(future: FlFutureTensor, out: *mut FlTensor) -> i32;
     pub fn fl_future_tensor_take_sync(future: FlFutureTensor, out: *mut FlTensor) -> i32;
     pub fn fl_future_tensor_destroy(future: FlFutureTensor);
-    pub fn fl_mul(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_div(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_add(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_sub(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_eq(a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_mul_scalar(input: FlTensor, other: f32, out: *mut FlTensor) -> i32;
-    pub fn fl_div_scalar(input: FlTensor, other: f32, out: *mut FlTensor) -> i32;
-    pub fn fl_mod_scalar(input: FlTensor, other: i64, out: *mut FlTensor) -> i32;
-    pub fn fl_square(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_neg(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_abs(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_exp(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_sqrt(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_rsqrt(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_sigmoid(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_tanh(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_relu(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_gelu(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_silu(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_sin(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_cos(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_softmax(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_swiglu(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_geglu(input: FlTensor, out: *mut FlTensor) -> i32;
-    pub fn fl_sum(input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
-    pub fn fl_max(input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
-    pub fn fl_min(input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
-    pub fn fl_cat(a: FlTensor, b: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
-    pub fn fl_causal_mask(max_len: i32, device: FlDeviceType, out: *mut FlTensor) -> i32;
+    pub fn fl_mul(operators: FlOperators, a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_div(operators: FlOperators, a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_add(operators: FlOperators, a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_sub(operators: FlOperators, a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_eq(operators: FlOperators, a: FlTensor, b: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_mul_scalar(
+        operators: FlOperators,
+        input: FlTensor,
+        other: f32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_div_scalar(
+        operators: FlOperators,
+        input: FlTensor,
+        other: f32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_mod_scalar(
+        operators: FlOperators,
+        input: FlTensor,
+        other: i64,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_square(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_neg(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_abs(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_exp(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_sqrt(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_rsqrt(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_sigmoid(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_tanh(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_relu(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_gelu(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_silu(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_sin(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_cos(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_softmax(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_swiglu(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_geglu(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_sum(operators: FlOperators, input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
+    pub fn fl_max(operators: FlOperators, input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
+    pub fn fl_min(operators: FlOperators, input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
+    pub fn fl_cat(
+        operators: FlOperators,
+        a: FlTensor,
+        b: FlTensor,
+        dim: i32,
+        out: *mut FlTensor,
+    ) -> i32;
+    pub fn fl_causal_mask(operators: FlOperators, max_len: i32, out: *mut FlTensor) -> i32;
 
     pub fn fl_attention(
+        operators: FlOperators,
         q: FlTensor,
         k: FlTensor,
         v: FlTensor,
@@ -273,6 +360,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_paged_attention(
+        operators: FlOperators,
         q: FlTensor,
         key_cache: FlTensor,
         value_cache: FlTensor,
@@ -285,6 +373,7 @@ extern "C" {
         out: *mut FlTensor,
     ) -> i32;
     pub fn fl_store_kv_cache(
+        operators: FlOperators,
         k: FlTensor,
         v: FlTensor,
         key_cache: FlTensor,
@@ -293,21 +382,34 @@ extern "C" {
     ) -> i32;
 
     pub fn fl_sample_with_params(
+        operators: FlOperators,
         logits: FlTensor,
         temperatures: FlTensor,
         top_ks: FlTensor,
         top_ps: FlTensor,
         out: *mut FlTensor,
     ) -> i32;
-    pub fn fl_repetition_penalty(logits: FlTensor, history: FlTensor, weight: f32) -> i32;
+    pub fn fl_repetition_penalty(
+        operators: FlOperators,
+        logits: FlTensor,
+        history: FlTensor,
+        weight: f32,
+    ) -> i32;
 
-    pub fn fl_copy(src: FlTensor, dest: FlTensor) -> i32;
-    pub fn fl_fill(tensor: FlTensor, value: f32) -> i32;
-    pub fn fl_all_close(a: FlTensor, b: FlTensor, rtol: f32, atol: f32, out: *mut i32) -> i32;
-    pub fn fl_all(tensor: FlTensor, out: *mut i32) -> i32;
-    pub fn fl_elem(tensor: FlTensor, out: *mut f32) -> i32;
-    pub fn fl_get_default_float_type(device: FlDeviceType, out: *mut FlDType) -> i32;
-    pub fn fl_print(tensor: FlTensor) -> i32;
+    pub fn fl_copy(operators: FlOperators, src: FlTensor, dest: FlTensor) -> i32;
+    pub fn fl_fill(operators: FlOperators, tensor: FlTensor, value: f32) -> i32;
+    pub fn fl_all_close(
+        operators: FlOperators,
+        a: FlTensor,
+        b: FlTensor,
+        rtol: f32,
+        atol: f32,
+        out: *mut i32,
+    ) -> i32;
+    pub fn fl_all(operators: FlOperators, tensor: FlTensor, out: *mut i32) -> i32;
+    pub fn fl_elem(operators: FlOperators, tensor: FlTensor, out: *mut f32) -> i32;
+    pub fn fl_get_default_float_type(operators: FlOperators, out: *mut FlDType) -> i32;
+    pub fn fl_print(operators: FlOperators, tensor: FlTensor) -> i32;
 
     pub fn fl_memory_capture(device: FlDeviceType, out: *mut FlMemorySnapshot) -> i32;
     pub fn fl_memory_reset_peak_stats(device: FlDeviceType) -> i32;

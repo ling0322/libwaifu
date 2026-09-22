@@ -104,7 +104,7 @@ Tensor fromMlxArray(mlx::core::array array) {
     dims.push_back(static_cast<TensorShape::ShapeType>(dim));
   }
   // MLX reductions can drop to a scalar, which flint has no tensor for; the 1-element vector is
-  // the same value and is what F::elem() expects to read.
+  // the same value and is what elem() expects to read.
   if (dims.empty()) dims.push_back(1);
 
   return Tensor::create(

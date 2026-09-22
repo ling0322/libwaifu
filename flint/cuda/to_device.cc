@@ -33,7 +33,6 @@
 #include "flint/cuda/cuda_host_tensor_data.h"
 #include "flint/cuda/cuda_tensor_data.h"
 #include "flint/cuda/future_tensor.h"
-#include "flint/functional.h"
 #include "flint/tensor.h"
 
 namespace fl {
@@ -176,18 +175,4 @@ Tensor toDevice(Device device, const Tensor &tensor) {
 
 }  // namespace cuda
 }  // namespace op
-}  // namespace fl
-
-namespace fl {
-namespace F {
-
-FutureTensor toDeviceAsync(Device device, Tensor tensor) {
-  // Defined here rather than in functional.cc because a FutureTensor holds a CUDA event, and a
-  // build without CUDA has neither. Narrow on purpose, and the narrowness is checked by the call
-  // it forwards to rather than guessed at here: cuda-host to cuda is the one pair that has anything to gain, and every
-  // other pair is refused rather than served synchronously under a name that promises otherwise.
-  return op::cuda::toDeviceAsync(device, tensor);
-}
-
-}  // namespace F
 }  // namespace fl

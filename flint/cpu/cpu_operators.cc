@@ -27,7 +27,6 @@
 #include <memory>
 #include <numeric>
 
-#include "flint/functional.h"
 #include "lutil/random.h"
 #include "flint/cpu/all_close.h"
 #include "flint/cpu/binary_op.h"
@@ -238,7 +237,7 @@ Tensor CPUOperators::sum(Tensor inputs, int dim) {
     return cpu::reduce(inputs, MapReduceType::SUM);
   }
 
-  Tensor transposed = F::contiguous(inputs.transpose(dim, ndim - 1));
+  Tensor transposed = contiguous(inputs.transpose(dim, ndim - 1));
   Tensor reduced = cpu::reduce(transposed, MapReduceType::SUM);
   return reduced.transpose(dim, ndim - 2);
 }

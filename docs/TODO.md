@@ -150,7 +150,7 @@ it shows, while the CPU one starts at 9.1e-5 and has nothing to hide behind.
 
 ## Operators worth adding next
 
-The element-wise set, `div(a, b)` and `min` are in. Still missing from `functional.h`, roughly in
+The element-wise set, `div(a, b)` and `min` are in. Still missing from `Operators`, roughly in
 order of how often an inference engine wants them:
 
 - `argmax`. Greedy decoding goes through `sample` with a temperature of 0 today, which works but

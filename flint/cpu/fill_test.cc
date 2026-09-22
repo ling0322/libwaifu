@@ -21,21 +21,33 @@
 // SOFTWARE.
 
 #include "catch2/catch_amalgamated.hpp"
-#include "flint/functional.h"
+#include "flint/operators.h"
 #include "flint/tensor.h"
 
 namespace fl {
+
+namespace {
+
+/// The CPU operators, which is what the calls in this file are asked of.
+Operators *cpuOps() {
+  return getOperators(Device::kCpu);
+}
+
+}  // namespace
+
 namespace op {
 namespace cpu {
 
 CATCH_TEST_CASE("test CPU tensor creation", "[core][nn][operators]") {
-  Tensor zeros = F::zeros({2, 3}, DType::kFloat);
-  CATCH_REQUIRE(F::allClose(zeros, Tensor::create<float>({2, 3}, {0, 0, 0, 0, 0, 0})));
+  Tensor zeros = cpuOps()->zeros({2, 3}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(zeros, Tensor::create<float>({2, 3}, {0, 0, 0, 0, 0, 0})));
 
-  Tensor filled = F::tensor({2, 3}, DType::kFloat);
-  F::fill(filled, 1.5f);
+  Tensor filled = cpuOps()->tensor({2, 3}, DType::kFloat);
+  cpuOps()->fill(filled, 1.5f);
   CATCH_REQUIRE(
-      F::allClose(filled, Tensor::create<float>({2, 3}, {1.5f, 1.5f, 1.5f, 1.5f, 1.5f, 1.5f})));
+      cpuOps()->allClose(
+          filled,
+          Tensor::create<float>({2, 3}, {1.5f, 1.5f, 1.5f, 1.5f, 1.5f, 1.5f})));
 }
 
 }  // namespace cpu

@@ -28,7 +28,6 @@
 #include "flint/cpu/common.h"
 #include "flint/cpu/cpu_tensor_data.h"
 #include "flint/cpu/view.h"
-#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
