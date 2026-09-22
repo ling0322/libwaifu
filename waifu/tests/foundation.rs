@@ -212,8 +212,7 @@ fn writes_reads_and_runs_a_pass_of_layers() {
     let ids = Tensor::from_i64(&[2], &[2, 0]).unwrap();
     let context = RunContext::new(&weights).input("tokens", &ids);
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&weights).unwrap();
-    let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
+    let outputs = ir.run(&context).unwrap();
 
     let named = |name: &str| {
         outputs
@@ -320,9 +319,8 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
         .cast(DType::Float16)
         .unwrap();
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&weights).unwrap();
     let outputs = ir
-        .run(&RunContext::new(&weights).preloaded(&preloaded).input("x", &x))
+        .run(&RunContext::new(&weights).input("x", &x))
         .unwrap();
 
     // Sixteen ones against a row worth its scale, and every one of these is exact in float16.
@@ -394,11 +392,12 @@ fn a_weight_read_twice_is_read_once() {
     assert_eq!(g.parameters(), vec!["shared.weight"]);
     assert_eq!(resident(&file, Device::Cpu).unwrap().len(), 1);
 
-    // And it crosses once: the graph holds one `load` for it however many nodes name it, so the
-    // prologue that brings the weights across reads it once and moves it once.
-    let ir = Ir::compile(&g, Residency::Device);
+    // And it crosses once: a streamed pass brings it across in front of the first node that
+    // reads it and the rest are made to stand for that one, so one weight is one trip over the
+    // bus however many nodes name it.
+    let ir = Ir::compile(&g, Residency::LowVram);
     let reads = ir
-        .prologue()
+        .insts()
         .iter()
         .filter(|inst| matches!(inst, waifu::flint::Inst::Read { .. }))
         .count();
@@ -546,13 +545,13 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
         .to_device(Device::Cuda)
         .unwrap();
 
-    // Two compilations of one graph, which is where the modes differ: the kept one brings the
-    // weight across in its prologue, the streamed one in front of the instruction that reads it.
+    // Two compilations of one graph, which is where the modes differ: the kept one reads its
+    // weight out of a source that already holds it, the streamed one brings it across in front
+    // of the instruction that reads it.
     let on_the_card = resident(&param_file(tensors), Device::Cuda).unwrap();
     let kept_ir = Ir::compile(&graph, Residency::Device);
-    let kept_preloaded = kept_ir.load(&on_the_card).unwrap();
     let kept = kept_ir
-        .run(&RunContext::new(&on_the_card).preloaded(&kept_preloaded).input("x", &x))
+        .run(&RunContext::new(&on_the_card).input("x", &x))
         .unwrap();
 
     let over_the_bus =
@@ -560,18 +559,27 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     assert_eq!(over_the_bus.len(), 1);
 
     let streamed_ir = Ir::compile(&graph, Residency::LowVram);
-    assert!(
-        streamed_ir.prologue().is_empty(),
-        "a low-vram run brings nothing across before it starts"
-    );
 
-    let streamed_preloaded = streamed_ir.load(&over_the_bus).unwrap();
-    assert!(streamed_preloaded.is_empty());
+    // The weight is fetched inside the pass rather than being there already, which is the one
+    // thing the two compilations differ by.
+    assert!(
+        streamed_ir
+            .insts()
+            .iter()
+            .any(|inst| matches!(inst, waifu::flint::Inst::Read { .. })),
+        "a low-vram pass reads its weights where it needs them"
+    );
+    assert!(
+        !kept_ir
+            .insts()
+            .iter()
+            .any(|inst| matches!(inst, waifu::flint::Inst::Read { .. })),
+        "a kept weight is looked up rather than read"
+    );
 
     let streamed = streamed_ir
         .run(
             &RunContext::new(&over_the_bus)
-                .preloaded(&streamed_preloaded)
                 .input("x", &x),
         )
         .unwrap();
@@ -584,7 +592,6 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     let again = streamed_ir
         .run(
             &RunContext::new(&over_the_bus)
-                .preloaded(&streamed_preloaded)
                 .input("x", &x),
         )
         .unwrap();
@@ -625,7 +632,6 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     // to bring across -- which is the thing that lets a model larger than the card be built at
     // all, and is not something the older form of this could say.
     let ir = Ir::compile(&graph, Residency::LowVram);
-    let preloaded = ir.load(&pinned).unwrap();
     assert_eq!(allocated(), before, "building a low-vram model moves nothing");
 
     // The pass is where the bytes cross. They land on the card, and they are gone again by the
@@ -633,17 +639,14 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     // them back.
     let x = Tensor::zeros(&[256, 256], DType::Float, Device::Cuda).unwrap();
     let out = ir
-        .run(&RunContext::new(&pinned).preloaded(&preloaded).input("x", &x))
+        .run(&RunContext::new(&pinned).input("x", &x))
         .unwrap();
     drop(out);
     assert_eq!(allocated() - before, bytes_of(&x), "only the input is left");
 
-    // Against which: the same package compiled to keep its weights does put the model on the card
-    // when it is built, and holds it there.
-    let resident_weights = resident(&param_file(tensors), Device::Cuda).unwrap();
-    let kept = Ir::compile(&graph, Residency::Device)
-        .load(&resident_weights)
-        .unwrap();
+    // Against which: the same package read to keep its weights does put the model on the card as
+    // it is built, and holds it there.
+    let kept = resident(&param_file(tensors), Device::Cuda).unwrap();
 
     assert!(allocated() - before >= bytes);
     drop(kept);

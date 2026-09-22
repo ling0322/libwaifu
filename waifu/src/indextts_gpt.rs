@@ -84,7 +84,7 @@ use std::rc::Rc;
 use crate::error::Error;
 use crate::flint::{
     check_parameters, functional as F, Bound, DType, Device, Extent, Graph, Ir, ParamSource,
-    Preloaded, RunContext, Tensor, Value,
+    RunContext, Tensor, Value,
 };
 use crate::Result;
 
@@ -617,11 +617,6 @@ pub struct Gpt {
     prefill: Ir,
     /// One token against what was kept.
     step: Ir,
-    /// The weights each graph keeps across runs, read once at construction. Two of them because
-    /// the two graphs are compiled apart, and a `Preloaded` is a table of handles rather than a
-    /// second copy of the bytes -- the step's entries are the same tensors the prefill's are.
-    prefill_preloaded: Preloaded,
-    step_preloaded: Preloaded,
     /// The names the step graph knows its cache by, held so that a [`RunContext`] can borrow
     /// them. Indexed by layer, keys then values.
     past_names: Vec<(String, String)>,
@@ -679,16 +674,12 @@ impl Gpt {
         )?;
 
         let prefill = Ir::compile(&prefill, weights.residency());
-        let prefill_preloaded = prefill.load(weights.as_ref())?;
 
         let step = Ir::compile(&step, weights.residency());
-        let step_preloaded = step.load(weights.as_ref())?;
 
         Ok(Gpt {
             prefill,
             step,
-            prefill_preloaded,
-            step_preloaded,
             past_names,
             kept_names,
             weights: Rc::clone(weights),
@@ -821,7 +812,6 @@ impl Gpt {
         let at_zero = Tensor::from_i64(&[1], &[0])?.to_device(self.device)?;
 
         let run = RunContext::new(&*self.weights)
-            .preloaded(&self.prefill_preloaded)
             .input("speaker", speaker)
             .input("emotion", emotion)
             .input("text", &text)
@@ -844,7 +834,6 @@ impl Gpt {
         let mel = Tensor::from_i64(&[1, 1], &[i64::from(token)])?.to_device(self.device)?;
 
         let mut run = RunContext::new(&*self.weights)
-            .preloaded(&self.step_preloaded)
             .input("mel", &mel)
             .input("mel_positions", &position);
         for (index, (keys, values)) in self.past_names.iter().enumerate() {

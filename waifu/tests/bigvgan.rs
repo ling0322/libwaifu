@@ -40,9 +40,7 @@ use std::rc::Rc;
 
 use waifu::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
 use waifu::bigvgan::{BigVgan, BigVganConfig};
-use waifu::flint::{
-    resident, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,
-};
+use waifu::flint::{resident, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,};
 use waifu::ParamFile;
 
 const CPU: Device = Device::Cpu;
@@ -170,9 +168,8 @@ fn run(
 
     let empty: HashMap<String, Tensor> = HashMap::new();
     let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&empty).unwrap();
     let outputs = ir
-        .run(&RunContext::new(&empty).preloaded(&preloaded).input("x", x))
+        .run(&RunContext::new(&empty).input("x", x))
         .unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 
@@ -472,6 +469,12 @@ impl Reading {
 }
 
 impl ParamSource for Reading {
+    /// The same weight again, for a run that keeps its weights rather than streaming them. These
+    /// are made here rather than read out of a package, so there is nothing for the two to
+    /// differ about.
+    fn load(&self, name: &str, shape: &[i32]) -> waifu::Result<Tensor> {
+        self.read(name, shape, false)
+    }
     fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> waifu::Result<Tensor> {
         self.asked.borrow_mut().push(name.to_string());
         self.check(name, shape)?;
