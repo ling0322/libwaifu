@@ -24,12 +24,14 @@
 //! reference computed, and that the schedule and the decoder around it produce a picture rather
 //! than noise.
 
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use waifu::flint::Tensor;
 use waifu::{
-    Anima, DType, Device, GenerationOptions, GenerationProgress, Manifest, ParamFile, Residency
+    read_safetensors, Anima, DType, Device, GenerationOptions, GenerationProgress, Manifest,
+    Residency,
 };
 
 /// The prompt the reference outputs were computed for.
@@ -49,8 +51,8 @@ fn model() -> Anima {
     Anima::from_manifest(device(), Residency::Device, &manifest).unwrap()
 }
 
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("anima-turbo-v11_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("anima-turbo-v11_test.safetensors")]).unwrap()
 }
 
 /// The root mean square of the difference over the root mean square of the reference, which says
@@ -125,7 +127,7 @@ fn a_prompt_reaches_the_denoiser_as_the_reference_computed_it() {
     let context = model().encode_prompt(PROMPT).unwrap();
     assert_eq!(context.shape(), vec![1, 512, 1024]);
 
-    let reference = cases().get_unchecked("test_case.context_padded").unwrap();
+    let reference = cases()["test_case.context_padded"].clone();
     let rmse = relative_rmse(&context, &reference);
     println!("context rmse = {rmse}");
 

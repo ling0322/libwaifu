@@ -30,10 +30,12 @@
 //! vocabulary in the package is the one the exporter was pointed at, and that ids come back out of
 //! it unshifted. `docs/TODO.md` has the ftfy measurement.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use waifu::{Manifest, ParamFile, Tokenizer};
+use waifu::flint::Tensor;
+use waifu::{read_safetensors, Manifest, Tokenizer};
 
 const PROMPT: &str = "a photo of an astronaut riding a horse on mars";
 
@@ -46,8 +48,8 @@ fn tokenizer() -> Tokenizer {
     Tokenizer::open(&manifest).unwrap()
 }
 
-fn test_cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
+fn test_cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
 }
 
 #[test]
@@ -97,11 +99,7 @@ fn wraps_a_prompt_the_way_the_text_encoder_is_fed() {
     // model layer has to add, and this says what that has to look like.
     let cases = test_cases();
 
-    let reference: Vec<i32> = cases
-        .get_unchecked("test_case.input_ids")
-        .unwrap()
-        .to_vec_i64()
-        .unwrap()
+    let reference: Vec<i32> = cases["test_case.input_ids"].to_vec_i64().unwrap()
         .iter()
         .map(|id| *id as i32)
         .collect();

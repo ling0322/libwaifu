@@ -25,12 +25,14 @@
 //! numbers rather than looked at.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{functional as F, resident, ParamSource, Tensor};
+use waifu::flint::{functional as F, ParamSource, Tensor};
 use waifu::{
-    ClipTextConfig, ClipTextEncoder, DType, Device, Manifest, ParamFile, WeightFormat
+    read_safetensors, ClipTextConfig, ClipTextEncoder, DType, Device, Manifest, Residency,
+    WeightFormat,
 };
 
 fn models_dir() -> PathBuf {
@@ -43,7 +45,7 @@ fn device() -> Device {
 
 /// The whole package on the device, read once for this whole test binary.
 ///
-/// `resident` reads the file rather than a model's part of it, so reading it per test would read
+/// The package is read whole rather than a model's part of it, so reading it per test would read
 /// seven gigabytes as many times as there are tests here.
 fn weights() -> Rc<dyn ParamSource> {
     thread_local! {
@@ -53,21 +55,18 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
-            let file = params(&manifest);
-
-            let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, device()).unwrap());
-            weights
+            <dyn ParamSource>::from_files(
+                &manifest.weight_paths().unwrap(),
+                device(),
+                Residency::Device,
+            )
+            .unwrap()
         }))
     })
 }
 
-/// The parameters of the model, out of whichever files its manifest names.
-fn params(manifest: &Manifest) -> ParamFile {
-    manifest.params().unwrap()
-}
-
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
 }
 
 fn to_cpu_f32(x: &Tensor) -> Tensor {
@@ -129,10 +128,8 @@ fn config_big_g() -> ClipTextConfig {
     }
 }
 
-fn input_ids(cases: &ParamFile, name: &str) -> Tensor {
-    cases
-        .get_unchecked(name)
-        .unwrap()
+fn input_ids(cases: &HashMap<String, Tensor>, name: &str) -> Tensor {
+    cases[name].clone()
         .view(&[77])
         .unwrap()
         .to_device(device())
@@ -152,7 +149,7 @@ fn the_first_encoder_matches_the_reference() {
         .unwrap();
     assert_eq!(out.hidden.shape(), vec![1, 77, 768]);
 
-    let reference = cases.get_unchecked("test_case.hidden").unwrap();
+    let reference = cases["test_case.hidden"].clone();
     let rmse = relative_rmse(&out.hidden, &reference);
     println!("encoder-1 hidden rmse = {rmse}");
     assert!(rmse < 2e-3, "the hidden state drifted by {rmse}");
@@ -178,7 +175,7 @@ fn the_second_encoder_matches_the_reference() {
 
     let hidden = relative_rmse(
         &out.hidden,
-        &cases.get_unchecked("test_case.hidden2").unwrap(),
+        &cases["test_case.hidden2"],
     );
     println!("encoder-2 hidden rmse = {hidden}");
     assert!(hidden < 1e-2, "the hidden state drifted by {hidden}");
@@ -187,7 +184,7 @@ fn the_second_encoder_matches_the_reference() {
     // position of one layer, so an error anywhere upstream lands here concentrated.
     let pooled = relative_rmse(
         &out.pooled,
-        &cases.get_unchecked("test_case.pooled2").unwrap(),
+        &cases["test_case.pooled2"],
     );
     println!("encoder-2 pooled rmse = {pooled}");
     assert!(pooled < 5e-3, "the pooled vector drifted by {pooled}");
@@ -313,7 +310,7 @@ fn the_activation_is_what_tells_the_two_encoders_apart() {
 
     let file = weights();
     let ids = input_ids(&cases, "test_case.input_ids");
-    let reference = cases.get_unchecked("test_case.hidden").unwrap();
+    let reference = cases["test_case.hidden"].clone();
 
     let right = ClipTextEncoder::build(config_l(), "sdxl.text_encoder", &file, DType::Float16)
         .unwrap()

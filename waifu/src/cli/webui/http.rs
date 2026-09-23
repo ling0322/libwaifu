@@ -230,9 +230,10 @@ fn forget_model(shared: &Arc<Shared>, request: &mut Request) -> Reply {
         return refused(400, "no model was named");
     };
 
-    // A model with its weights in memory is reading them off those files as it draws -- a step at
-    // a time, from a mapping -- so deleting them out from under it is deleting what the next step
-    // needs. One that has only been chosen is holding nothing open, and may go.
+    // Not a model whose weights are in memory. It read them off those files once, when it was
+    // built, and does not read them again -- so this is caution rather than necessity: the model
+    // on the screen as ready and the files it came from go together. One that has only been
+    // chosen holds nothing, and may go.
     if shared
         .session()
         .model

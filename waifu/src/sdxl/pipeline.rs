@@ -261,14 +261,10 @@ impl Sdxl {
         // The weights, read in the order the manifest names them: each file is read through once,
         // in full, and they read into one namespace.
         let dtype = F::default_float_type(device)?;
-        let file = manifest.params()?;
-
         // The whole package, read once, and put where the residency says it waits. The four halves
         // are written against it and share it: a weight is found by the name the package holds it
-        // under, and the four namespaces below are what keeps them apart. The file goes here
-        // rather than being borrowed, so that nothing holds the package a second time behind the
-        // store that was just made out of it.
-        let weights = residency.read(file, device)?;
+        // under, and the four namespaces below are what keeps them apart.
+        let weights = <dyn ParamSource>::from_files(&manifest.weight_paths()?, device, residency)?;
 
         let named = |half: &str| format!("{model_type}.{half}");
         let vae = named("vae");

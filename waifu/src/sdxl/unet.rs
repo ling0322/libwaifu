@@ -772,7 +772,7 @@ impl Unet {
         write(&config, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
-        let ir = Ir::compile(&graph, weights.residency());
+        let ir = Ir::compile(&graph);
 
         Ok(Unet {
             weights: Rc::clone(weights),

@@ -49,14 +49,15 @@
 //! pass, in the order a picture travels them, and `--nocapture` is what shows the numbers.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{resident, ParamSource, Tensor};
+use waifu::flint::{ParamSource, Tensor};
 use waifu::krea2::{
     Dit, DitConfig, EncoderConfig, FlowSampler, SamplerConfig, TextEncoder, VaeConfig, VaeDecoder,
 };
-use waifu::{DType, Device, Manifest, ParamFile, WeightFormat};
+use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
 
 /// How many tokens of the encoder's answer the denoiser reads, which is all of them but the
 /// thirty-four the template puts in front.
@@ -84,16 +85,18 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("krea2-turbo.yaml")).unwrap();
-            let file = manifest.params().unwrap();
-
-            let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, device()).unwrap());
-            weights
+            <dyn ParamSource>::from_files(
+                &manifest.weight_paths().unwrap(),
+                device(),
+                Residency::Device,
+            )
+            .unwrap()
         }))
     })
 }
 
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap()
 }
 
 /// The root mean square of the difference over the root mean square of the reference, which says
@@ -126,10 +129,8 @@ fn read(tensor: &Tensor) -> Vec<f32> {
 }
 
 /// One of the reference's tensors, on the device and in the type this runtime computes in.
-fn fixture(cases: &ParamFile, name: &str) -> Tensor {
-    cases
-        .get_unchecked(name)
-        .unwrap()
+fn fixture(cases: &HashMap<String, Tensor>, name: &str) -> Tensor {
+    cases[name].clone()
         .to_device(device())
         .unwrap()
         .cast(DType::Float16)
@@ -137,8 +138,8 @@ fn fixture(cases: &ParamFile, name: &str) -> Tensor {
 }
 
 /// The ids the reference ran, as the `<long>(L)` the encoder takes.
-fn ids(cases: &ParamFile) -> Tensor {
-    let ids = cases.get_unchecked("test_case.input_ids").unwrap();
+fn ids(cases: &HashMap<String, Tensor>) -> Tensor {
+    let ids = cases["test_case.input_ids"].clone();
     let length = ids.shape().last().copied().unwrap();
     ids.view(&[length]).unwrap().to_device(device()).unwrap()
 }
@@ -221,7 +222,7 @@ fn every_part_matches_the_reference() {
     // The template's opening is dropped from the states and not from the ids: those thirty-four
     // tokens are what every state after them was computed against.
     let kept = hidden.slice(1, PREFIX, length).unwrap();
-    let reference = cases.get_unchecked("test_case.hidden").unwrap();
+    let reference = cases["test_case.hidden"].clone();
     assert_eq!(
         kept.shape(),
         reference.shape(),
@@ -257,13 +258,13 @@ fn every_part_matches_the_reference() {
     // different.
     let context = fixture(&cases, "test_case.hidden");
     let latent = fixture(&cases, "test_case.latent");
-    let timestep = read(&cases.get_unchecked("test_case.timestep").unwrap())[0];
+    let timestep = read(&cases["test_case.timestep"])[0];
 
     let dit = Dit::build(dit_config(), "krea2.dit", &weights, DType::Float16).unwrap();
     let velocity = dit.forward(&latent, timestep, &context).unwrap();
     assert_eq!(velocity.shape(), vec![1, 16, 16, 16]);
 
-    let rmse = relative_rmse(&velocity, &cases.get_unchecked("test_case.velocity").unwrap());
+    let rmse = relative_rmse(&velocity, &cases["test_case.velocity"]);
     println!("velocity rmse = {rmse} (at sigma {timestep})");
 
     // Twenty-eight blocks of half precision against a bfloat16 reference, on inputs that are
@@ -295,13 +296,13 @@ fn every_part_matches_the_reference() {
         DType::Float16,
     )
     .unwrap();
-    let final_latent = cases.get_unchecked("test_case.final_latent").unwrap();
+    let final_latent = cases["test_case.final_latent"].clone();
     let image = decoder
         .forward(&final_latent.to_device(device()).unwrap())
         .unwrap();
     assert_eq!(image.shape(), vec![1, 3, 128, 128]);
 
-    let rmse = relative_rmse(&image, &cases.get_unchecked("test_case.decoded").unwrap());
+    let rmse = relative_rmse(&image, &cases["test_case.decoded"]);
     println!("decoded rmse = {rmse}");
 
     // The fixture is the decoder's own answer and not `vae.decode`'s, which clamps to -1..=1.

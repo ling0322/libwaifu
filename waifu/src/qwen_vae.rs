@@ -355,7 +355,7 @@ impl VaeDecoder {
         let mean = Tensor::from_f32(&shape, &config.latents_mean)?.to_device(device)?;
         let std = Tensor::from_f32(&shape, &config.latents_std)?.to_device(device)?;
 
-        let ir = Ir::compile(&graph, weights.residency());
+        let ir = Ir::compile(&graph);
 
         Ok(VaeDecoder {
             weights: Rc::clone(weights),

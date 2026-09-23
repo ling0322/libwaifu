@@ -27,7 +27,7 @@
 //! use waifu::Manifest;
 //!
 //! let manifest = Manifest::open("sdxl-base.yaml")?;
-//! println!("{} tensors", manifest.params()?.len());
+//! println!("{} files of weights", manifest.weight_paths()?.len());
 //! # Ok::<(), waifu::Error>(())
 //! ```
 //!
@@ -62,7 +62,6 @@ pub mod krea2;
 mod layers;
 mod manifest;
 mod mapping;
-mod param_file;
 mod qwen_vae;
 mod reader;
 /// IndexTTS-2.5, whole: a recording and a sentence in, the sentence in that voice out. The
@@ -90,6 +89,7 @@ mod sdxl;
 /// the screen and everything under it can be written before there is a model to put behind it.
 pub mod speech;
 mod suggested;
+mod tensor_file;
 mod tokenizer;
 /// w2v-bert-2.0: the conformer that reads speech into the features everything else conditions on.
 pub mod w2v_bert;
@@ -110,7 +110,6 @@ pub use generation::{GenerationDefaults, GenerationOptions, GenerationProgress};
 pub use layers::{Conv1d, Conv2d, ConvTranspose1d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use manifest::Manifest;
 pub use mapping::Mapping;
-pub use param_file::ParamFile;
 pub use reader::BinaryRead;
 pub use speech::{SpeechDefaults, SpeechOptions, SpeechProgress, Tones, Voice};
 pub use sdxl::{
@@ -119,6 +118,7 @@ pub use sdxl::{
     VaeDecoder, VaeEncoder, VAE_SCALE,
 };
 pub use suggested::{Size, Suggestions};
+pub use tensor_file::{parse_safetensors, read_safetensors};
 pub use tokenizer::Tokenizer;
 pub use wav::Sound;
 
@@ -128,5 +128,5 @@ pub use wav::Sound;
 /// [`Manifest`].
 pub const MANIFEST_SUFFIX: &str = Manifest::SUFFIX;
 
-/// The suffix a file of weights carries. See [`ParamFile`].
+/// The suffix a file of weights carries. See [`read_safetensors`].
 pub const WEIGHTS_SUFFIX: &str = Manifest::WEIGHTS_SUFFIX;

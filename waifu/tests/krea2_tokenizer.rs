@@ -31,10 +31,12 @@
 //! tokens and all. `<|im_start|>` is a token and not five, and a vocabulary that read it as text
 //! would produce a prompt the model was never conditioned on and would otherwise look fine.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use waifu::{Manifest, ParamFile, Tokenizer};
+use waifu::flint::Tensor;
+use waifu::{read_safetensors, Manifest, Tokenizer};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
@@ -44,8 +46,8 @@ fn manifest() -> Manifest {
     Manifest::open(models_dir().join("krea2-turbo.yaml")).unwrap()
 }
 
-fn test_cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap()
+fn test_cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap()
 }
 
 #[test]
@@ -97,11 +99,7 @@ fn the_tokenizer_matches_the_reference_token_for_token() {
 #[ignore = "needs the krea2 package"]
 fn the_template_gives_the_ids_the_reference_ran_on() {
     let cases = test_cases();
-    let expected: Vec<i32> = cases
-        .get_unchecked("test_case.input_ids")
-        .unwrap()
-        .to_vec_i64()
-        .unwrap()
+    let expected: Vec<i32> = cases["test_case.input_ids"].to_vec_i64().unwrap()
         .iter()
         .map(|&id| id as i32)
         .collect();

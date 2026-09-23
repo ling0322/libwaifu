@@ -52,8 +52,8 @@ fn main() -> Result<(), waifu::Error> {
         mib(start.allocated)
     );
 
-    // What building the model costs. Under a low-vram run the prologue is empty, so this is the
-    // number that says the model was never put on the card.
+    // What building the model costs. A low-vram run page-locks the weights on the host rather than
+    // putting them on the card, so this is the number that says the model was never put there.
     MemorySnapshot::reset_peak_stats(device)?;
     let built = Instant::now();
     let model = Krea2::from_manifest(device, residency, &manifest)?;

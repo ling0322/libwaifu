@@ -673,9 +673,9 @@ impl Gpt {
             device,
         )?;
 
-        let prefill = Ir::compile(&prefill, weights.residency());
+        let prefill = Ir::compile(&prefill);
 
-        let step = Ir::compile(&step, weights.residency());
+        let step = Ir::compile(&step);
 
         Ok(Gpt {
             prefill,

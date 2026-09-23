@@ -76,7 +76,6 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::mapping::Mapping;
-use crate::param_file::ParamFile;
 use crate::suggested::Suggestions;
 use crate::yaml::{self, Node};
 
@@ -112,7 +111,7 @@ impl Manifest {
     /// Read the manifest at `path`.
     ///
     /// Where it is matters as much as what is in it: the files it names are its neighbours, so the
-    /// path is kept and [`Manifest::params`] reads them from beside it.
+    /// path is kept and [`Manifest::weight_paths`] finds them beside it.
     pub fn open(path: impl AsRef<Path>) -> Result<Manifest> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
@@ -277,14 +276,6 @@ impl Manifest {
     /// on disk to open.
     pub fn weight_paths(&self) -> Result<Vec<PathBuf>> {
         self.weights.iter().map(|name| self.file(name)).collect()
-    }
-
-    /// Every tensor of the model, read onto the host.
-    ///
-    /// The files are read into one namespace, so which of them a tensor was written to is not
-    /// something a model has to know.
-    pub fn params(&self) -> Result<ParamFile> {
-        ParamFile::open(&self.weight_paths()?)
     }
 
     /// Every file this model is made of, beside the manifest itself.

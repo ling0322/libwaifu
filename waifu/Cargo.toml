@@ -93,19 +93,6 @@ image = { version = "0.25", default-features = false, features = [
 # No features beyond the default `std`: this reads a header and hands back slices of a buffer.
 safetensors = "0.8"
 
-# Mapping those files rather than reading them.
-#
-# A weight is read at the instruction that needs it, not at the moment the package is opened, and
-# that is what this buys: the header is parsed once and every tensor after it is a range of a
-# mapping the operating system pages in on demand. `std::fs::read` cannot do that -- it is the
-# whole file in ordinary memory before anything has asked for a byte of it -- and for a model
-# larger than memory the difference is running at all.
-#
-# It is also the right cache. The pages of a package are read once per sampler step, in the same
-# order every time, and what keeps the second step from touching the disk is the page cache the
-# kernel already has rather than a copy this would otherwise have to keep beside it.
-memmap2 = "0.9"
-
 # Turning a prompt into ids, from the `tokenizer.json` the model's authors published.
 #
 # The vocabulary, the normalizer, the pre-tokenizer and the merge ranks all live in that one file,

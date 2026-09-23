@@ -55,7 +55,7 @@
 //! encoding in the perceiver's attention. Upstream's `emo_cond_mask_pad` prepends the latent's
 //! own `True` at position zero, so the order would matter the moment a batch were padded.
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value};
+use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor, Value};
 use waifu::indextts_emotion::{self, Config};
 use waifu::Result;
 
@@ -200,30 +200,13 @@ fn scatter(name: &str, count: usize, scale: f64) -> Vec<f32> {
 struct Scattered;
 
 impl ParamSource for Scattered {
-    /// The same weight again, for a run that keeps its weights rather than streaming them. These
-    /// are made here rather than read out of a package, so there is nothing for the two to
-    /// differ about.
     fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        self.read(name, shape, false)
-    }
-    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
         Ok(Tensor::from_f32(
             shape,
             &scatter(name, count, WEIGHT_SCALE),
         )?)
-    }
-
-    /// Made on the host, which is where these tests run.
-    fn device(&self) -> Device {
-        CPU
-    }
-
-    /// Kept: a weight made out of its name costs nothing to keep, and there is no package behind
-    /// it to stream one out of.
-    fn residency(&self) -> Residency {
-        Residency::Device
     }
 
     fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
@@ -302,7 +285,7 @@ fn run(stage: impl Fn(&Graph, Value, &Config, Value) -> Value) -> (Vec<i32>, Vec
     g.output("out", out);
 
     let weights = Scattered;
-    let ir = Ir::compile(&g, Residency::Device);
+    let ir = Ir::compile(&g);
     let outputs = ir
         .run(
             &RunContext::new(&weights)

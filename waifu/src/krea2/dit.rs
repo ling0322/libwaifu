@@ -598,7 +598,7 @@ impl Dit {
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
-        let ir = Ir::compile(&graph, weights.residency());
+        let ir = Ir::compile(&graph);
 
         Ok(Dit {
             weights: Rc::clone(weights),

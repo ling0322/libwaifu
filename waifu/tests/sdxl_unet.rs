@@ -24,12 +24,14 @@
 //! disagreement here is a disagreement about the U-Net.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{functional as F, resident, ParamSource, Tensor};
+use waifu::flint::{functional as F, ParamSource, Tensor};
 use waifu::{
-    DType, Device, Manifest, ParamFile, Unet, UnetCondition, UnetConfig, WeightFormat
+    read_safetensors, DType, Device, Manifest, Residency, Unet, UnetCondition, UnetConfig,
+    WeightFormat,
 };
 
 fn models_dir() -> PathBuf {
@@ -38,7 +40,7 @@ fn models_dir() -> PathBuf {
 
 /// The whole package on the device, read once for this whole test binary.
 ///
-/// `resident` reads the file rather than a model's part of it, so reading it per test would read
+/// The package is read whole rather than a model's part of it, so reading it per test would read
 /// seven gigabytes as many times as there are tests here.
 fn weights() -> Rc<dyn ParamSource> {
     thread_local! {
@@ -48,21 +50,18 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
-            let file = params(&manifest);
-
-            let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, Device::Cuda).unwrap());
-            weights
+            <dyn ParamSource>::from_files(
+                &manifest.weight_paths().unwrap(),
+                Device::Cuda,
+                Residency::Device,
+            )
+            .unwrap()
         }))
     })
 }
 
-/// The parameters of the model, out of whichever files its manifest names.
-fn params(manifest: &Manifest) -> ParamFile {
-    manifest.params().unwrap()
-}
-
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
 }
 
 fn config() -> UnetConfig {
@@ -123,27 +122,19 @@ struct Inputs {
     timestep: f32
 }
 
-fn inputs(cases: &ParamFile) -> Inputs {
-    let hidden = cases.get_unchecked("test_case.hidden").unwrap();
-    let hidden2 = cases.get_unchecked("test_case.hidden2").unwrap();
+fn inputs(cases: &HashMap<String, Tensor>) -> Inputs {
+    let hidden = cases["test_case.hidden"].clone();
+    let hidden2 = cases["test_case.hidden2"].clone();
 
-    let time_ids: Vec<f32> = cases
-        .get_unchecked("test_case.time_ids")
-        .unwrap()
-        .to_vec_f32()
-        .unwrap();
-    let timestep = cases
-        .get_unchecked("test_case.timestep")
-        .unwrap()
-        .to_vec_i64()
-        .unwrap()[0] as f32;
+    let time_ids: Vec<f32> = cases["test_case.time_ids"].to_vec_f32().unwrap();
+    let timestep = cases["test_case.timestep"].to_vec_i64().unwrap()[0] as f32;
 
     Inputs {
-        latent: to_cuda(&cases.get_unchecked("test_case.latent").unwrap()),
+        latent: to_cuda(&cases["test_case.latent"]),
         // The two encoders are conditioned on side by side, 768 and 1280 making the 2048 the
         // cross attention reads.
         context: to_cuda(&F::cat(&hidden, &hidden2, -1).unwrap()),
-        pooled: to_cuda(&cases.get_unchecked("test_case.pooled2").unwrap()),
+        pooled: to_cuda(&cases["test_case.pooled2"]),
         time_ids: time_ids.try_into().unwrap(),
         timestep
     }
@@ -171,7 +162,7 @@ fn one_step_matches_the_reference() {
     // A U-Net answers in the shape it was asked in: this much noise, per latent channel.
     assert_eq!(noise.shape(), inputs.latent.shape());
 
-    let rmse = relative_rmse(&noise, &cases.get_unchecked("test_case.noise").unwrap());
+    let rmse = relative_rmse(&noise, &cases["test_case.noise"]);
     println!("unet rmse = {rmse}");
     assert!(rmse < 2e-2, "one step drifted by {rmse}");
 }
@@ -365,13 +356,14 @@ fn the_pass_reads_every_weight_the_package_holds() {
     let listing = unet.ir().to_string();
 
     let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
-    let file = params(&manifest);
+    let file = read_safetensors(&manifest.weight_paths().unwrap()).unwrap();
 
-    let held: Vec<&str> = file
-        .names()
-        .into_iter()
+    let mut held: Vec<&str> = file
+        .keys()
+        .map(String::as_str)
         .filter(|name| name.starts_with("sdxl.unet."))
         .collect();
+    held.sort_unstable();
     assert!(!held.is_empty());
 
     let unread: Vec<&&str> = held

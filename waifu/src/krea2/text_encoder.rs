@@ -294,7 +294,7 @@ impl TextEncoder {
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
-        let ir = Ir::compile(&graph, weights.residency());
+        let ir = Ir::compile(&graph);
 
         Ok(TextEncoder {
             weights: Rc::clone(weights),

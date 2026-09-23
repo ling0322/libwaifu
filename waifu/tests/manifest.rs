@@ -24,7 +24,7 @@
 //! this crate reads -- the two halves of the format are in different languages and the only thing
 //! holding them together is that they agree here.
 
-use waifu::Manifest;
+use waifu::{read_safetensors, Manifest};
 
 /// A manifest in the shape the exporter writes, with something of each kind in it.
 const WHOLE: &str = r#"# What this model is, and which files it is made of.
@@ -398,16 +398,12 @@ fn the_weights_are_read_from_beside_the_manifest_and_as_one() {
     let manifest = Manifest::open(&path).unwrap();
     assert_eq!(manifest.id(), "m");
 
-    let file = manifest.params().unwrap();
-    assert_eq!(file.names(), vec!["a", "b"]);
-    assert_eq!(
-        file.get("a", &[2]).unwrap().to_vec_f32().unwrap(),
-        vec![1.0, 2.0]
-    );
-    assert_eq!(
-        file.get("b", &[2]).unwrap().to_vec_f32().unwrap(),
-        vec![3.0, 4.0]
-    );
+    let file = read_safetensors(&manifest.weight_paths().unwrap()).unwrap();
+    let mut names: Vec<&str> = file.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["a", "b"]);
+    assert_eq!(file["a"].to_vec_f32().unwrap(), vec![1.0, 2.0]);
+    assert_eq!(file["b"].to_vec_f32().unwrap(), vec![3.0, 4.0]);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

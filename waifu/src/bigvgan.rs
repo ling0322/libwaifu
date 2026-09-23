@@ -526,7 +526,7 @@ impl BigVgan {
         write(&config, float_type, device, &graph.subgraph(name))?;
         check_parameters(&graph, weights.as_ref())?;
 
-        let ir = Ir::compile(&graph, weights.residency());
+        let ir = Ir::compile(&graph);
 
         Ok(BigVgan {
             weights: Rc::clone(weights),

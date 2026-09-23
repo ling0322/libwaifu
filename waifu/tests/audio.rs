@@ -18,7 +18,7 @@ use waifu::audio::{
     istft_basis, magnitude, mel_filterbank, pad1d, resample, resample_kernel, snake, stft,
     stft_basis, window_envelope, MelScale, Padding,
 };
-use waifu::flint::{DType, Device, Graph, Ir, Residency, RunContext, Tensor, Value};
+use waifu::flint::{DType, Device, Graph, Ir, RunContext, Tensor, Value};
 
 const CPU: Device = Device::Cpu;
 const F32: DType = DType::Float;
@@ -33,7 +33,7 @@ fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> Vec<f32> {
         context = context.input(name, tensor);
     }
 
-    let ir = Ir::compile(g, Residency::Device);
+    let ir = Ir::compile(g);
     let outputs = ir.run(&context).unwrap();
     outputs[0].1.to_device(CPU).unwrap().to_vec_f32().unwrap()
 }
@@ -48,7 +48,7 @@ fn run_shaped(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, V
         context = context.input(name, tensor);
     }
 
-    let ir = Ir::compile(g, Residency::Device);
+    let ir = Ir::compile(g);
     let outputs = ir.run(&context).unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 
@@ -1023,7 +1023,7 @@ fn the_audio_operators_are_nodes_no_backend_implements_yet() {
             context = context.input(input, tensor);
         }
 
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
         let error = ir
             .run(&context)
             .expect_err("no backend implements this, so running it has to fail");
