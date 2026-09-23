@@ -51,7 +51,7 @@ $ waifu draw
 waifu is at http://127.0.0.1:7860
 ```
 
-![The page: the kind of run down the left, the model and the settings for it in the middle, and the picture it drew on the right](docs/libwaifu-webui.webp)
+![](docs/libwaifu-webui.webp)
 
 The page has three tabs: txt2img, img2img, and text2speech, the last of which needs `-voice`
 named at the command line -- see [Supported voices](#supported-voices) above.
