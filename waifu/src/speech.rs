@@ -131,7 +131,13 @@ pub enum SpeechProgress {
 ///
 /// `&self` rather than `&mut self`, like the picture models beside it: the weights do not change
 /// as they are read, and the worker holds one of these for as long as a voice is loaded.
-pub trait Voice: Send {
+///
+/// Not `Send`, for the same reason the picture models are not: a [`crate::flint::Tensor`] stays
+/// on the thread that made it, and a voice with weights behind it is made of them. The bound this
+/// trait used to carry cost nothing while the only voice was [`Tones`], two floats; the first
+/// real one could not have implemented it. Nothing moves a voice between threads anyway -- it is
+/// read, held and dropped on the worker's, exactly as a picture model is.
+pub trait Voice {
     /// Says `text`, and hands back the waveform -- or `None`, where `report` asked it to stop.
     ///
     /// `like` is a recording to sound like, where the caller has one and the voice takes one. A

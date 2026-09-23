@@ -63,6 +63,9 @@
 //! non-periodic -- the denominator is `n - 1` and not `n`. Both of those are the kind of thing
 //! that is off by a hair everywhere and wrong nowhere in particular.
 
+use crate::audio::{mel_filterbank, MelScale};
+use crate::Result;
+
 /// How a waveform is cut into frames and turned into log mel energies.
 ///
 /// The defaults are Kaldi's, which is what both callers want; what they disagree about is
@@ -325,7 +328,8 @@ pub fn log_mel(wave: &[f32], analysis: &Analysis) -> (Vec<f32>, usize) {
 ///
 /// Standardized per band over time and then stacked in pairs, which is how 80 bands at a hundred
 /// frames a second become 160 numbers at fifty. An odd frame at the end is dropped, because a
-/// pair needs two.
+/// pair needs two -- where the extractor pads it with a zero frame and masks that pair out of
+/// w2v-bert's attention. Twenty milliseconds at the edge, and masked either way.
 ///
 /// The deviation is the sample one, dividing by `n - 1`. That is `torch.var`'s default and not
 /// `numpy.var`'s, and `transformers` has a comment about it for the same reason this does.
@@ -402,4 +406,189 @@ fn standardize(energies: &[f32], frames: usize, bins: usize, epsilon: f64) -> Ve
     }
 
     out
+}
+
+/// What S2Mel conditions on and BigVGAN reads: the 22.05 kHz mel spectrogram, `(bins, frames)`.
+///
+/// This one is not Kaldi's. It is BigVGAN's `mel_spectrogram`, which `infer_v2_5.py` builds with
+/// S2Mel's `spect_params` and calls `ref_mel`: the signal reflected by `(n_fft - hop) / 2` at each
+/// end, a periodic Hann, the *magnitude* rather than the power -- `sqrt(re² + im² + 1e-9)` -- then
+/// Slaney's filterbank as `librosa` builds it, and `ln(max(x, 1e-5))`.
+///
+/// The layout is band-major, `(80, frames)`, because that is what both of its readers want: S2Mel
+/// holds it as the prompt, `(1, 80, T)`, and BigVGAN reads the same shape.
+pub fn reference_mel(wave: &[f32]) -> Result<(Vec<f32>, usize)> {
+    const RATE: u32 = 22050;
+    const FFT: usize = 1024;
+    const HOP: usize = 256;
+    const BANDS: usize = 80;
+
+    let pad = (FFT - HOP) / 2;
+    let padded = reflect(wave, pad);
+    let frames = match padded.len() >= FFT {
+        true => 1 + (padded.len() - FFT) / HOP,
+        false => 0,
+    };
+
+    let bins = FFT / 2 + 1;
+    let weights = mel_filterbank(
+        RATE,
+        FFT,
+        BANDS,
+        0.0,
+        f64::from(RATE) / 2.0,
+        MelScale::Slaney,
+        true,
+    )?
+    .to_vec_f32()?;
+
+    // Periodic: `torch.hann_window`'s default, and the opposite of Povey's window above.
+    let window: Vec<f64> = (0..FFT)
+        .map(|n| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / FFT as f64).cos())
+        .collect();
+
+    let mut out = vec![0.0f32; BANDS * frames];
+    let mut magnitude = vec![0.0f64; bins];
+    let mut real = vec![0.0f64; FFT];
+    let mut imaginary = vec![0.0f64; FFT];
+
+    for frame in 0..frames {
+        let start = frame * HOP;
+        for (index, slot) in real.iter_mut().enumerate() {
+            *slot = f64::from(padded[start + index]) * window[index];
+        }
+        imaginary.fill(0.0);
+
+        transform(&mut real, &mut imaginary);
+
+        for (bin, slot) in magnitude.iter_mut().enumerate() {
+            *slot = (real[bin] * real[bin] + imaginary[bin] * imaginary[bin] + 1e-9).sqrt();
+        }
+
+        for band in 0..BANDS {
+            let row = &weights[band * bins..(band + 1) * bins];
+            let total: f64 = row
+                .iter()
+                .zip(&magnitude)
+                .map(|(weight, value)| f64::from(*weight) * value)
+                .sum();
+
+            out[band * frames + frame] = total.max(1e-5).ln() as f32;
+        }
+    }
+
+    Ok((out, frames))
+}
+
+/// `wave` with `pad` samples mirrored onto each end, the edge sample itself not repeated -- what
+/// `torch.nn.functional.pad(mode="reflect")` does.
+fn reflect(wave: &[f32], pad: usize) -> Vec<f32> {
+    let length = wave.len();
+    let mut out = Vec::with_capacity(length + 2 * pad);
+
+    // A signal shorter than the reflection is reflected as far as it goes and then repeated from
+    // its edge, rather than read out of bounds. Only a recording under 17 ms reaches this.
+    let at = |index: isize| -> f32 {
+        let last = length as isize - 1;
+        let mut index = index;
+        if index < 0 {
+            index = -index;
+        }
+        if index > last {
+            index = 2 * last - index;
+        }
+
+        wave[index.clamp(0, last.max(0)) as usize]
+    };
+
+    for index in (1..=pad as isize).rev() {
+        out.push(at(index));
+    }
+    out.extend_from_slice(wave);
+    for index in 0..pad as isize {
+        out.push(at(length as isize - 2 - index));
+    }
+
+    out
+}
+
+/// A waveform at `from` hertz, at `to` hertz: `torchaudio.functional.resample`'s windowed sinc.
+///
+/// The reference recording arrives at whatever rate it was recorded at and is needed at two
+/// others -- 16 kHz for w2v-bert and CAMPPlus, 22.05 kHz for the mel -- and `infer_v2_5.py` gets
+/// both with `torchaudio.transforms.Resample`, whose defaults are a Hann-windowed sinc six zero
+/// crossings wide, rolled off to 99% of the lower Nyquist.
+///
+/// # Why not [`crate::audio::resample`]
+///
+/// That one runs in a graph and is the textbook shape: stuff zeros up to the common multiple,
+/// low-pass, keep every `down`th sample. For 44.1 kHz to 16 kHz the common multiple is 160 times
+/// the input, so fifteen seconds of speech becomes a hundred million samples through a filter
+/// fourteen thousand taps long -- almost all of it computing outputs that are then thrown away.
+/// This is the polyphase form instead, which computes only the samples that are kept: one short
+/// dot product per output sample, against one of `to / gcd` precomputed kernels.
+pub fn resample(wave: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == to || wave.is_empty() {
+        return wave.to_vec();
+    }
+
+    const ZERO_CROSSINGS: f64 = 6.0;
+    const ROLLOFF: f64 = 0.99;
+
+    let divisor = greatest_common_divisor(from, to);
+    let (orig, new) = ((from / divisor) as usize, (to / divisor) as usize);
+
+    let base = orig.min(new) as f64 * ROLLOFF;
+    let width = (ZERO_CROSSINGS * orig as f64 / base).ceil() as usize;
+    let taps = 2 * width + orig;
+
+    // One kernel per output phase, exactly as torchaudio lays them out: the phase's offset, then
+    // the tap's position against the input rate, both in units of the cutoff.
+    let mut kernels = vec![0.0f64; new * taps];
+    for phase in 0..new {
+        for tap in 0..taps {
+            let position = -(phase as f64) / new as f64 + (tap as f64 - width as f64) / orig as f64;
+            let t = (position * base).clamp(-ZERO_CROSSINGS, ZERO_CROSSINGS);
+
+            let window = (t * std::f64::consts::PI / ZERO_CROSSINGS / 2.0)
+                .cos()
+                .powi(2);
+            let t = t * std::f64::consts::PI;
+            let sinc = match t == 0.0 {
+                true => 1.0,
+                false => t.sin() / t,
+            };
+
+            kernels[phase * taps + tap] = sinc * window * base / orig as f64;
+        }
+    }
+
+    // Zeros ahead by `width` and behind by `width + orig`, which is what lets every output read a
+    // whole kernel's worth of input.
+    let mut padded = vec![0.0f64; width];
+    padded.extend(wave.iter().map(|sample| f64::from(*sample)));
+    padded.extend(std::iter::repeat_n(0.0, width + orig));
+
+    let length = (new as u64 * wave.len() as u64).div_ceil(orig as u64) as usize;
+
+    (0..length)
+        .map(|index| {
+            let (block, phase) = (index / new, index % new);
+            let start = block * orig;
+            let kernel = &kernels[phase * taps..(phase + 1) * taps];
+
+            kernel
+                .iter()
+                .zip(&padded[start..start + taps])
+                .map(|(weight, sample)| weight * sample)
+                .sum::<f64>() as f32
+        })
+        .collect()
+}
+
+fn greatest_common_divisor(a: u32, b: u32) -> u32 {
+    match b {
+        0 => a,
+        _ => greatest_common_divisor(b, a % b),
+    }
 }
