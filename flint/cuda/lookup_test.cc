@@ -72,6 +72,36 @@ CATCH_TEST_CASE("test CUDA lookup", "[op][cuda]") {
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(packed), packedRef));
 }
 
+CATCH_TEST_CASE("test CUDA lookup (more ids than a grid axis holds)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The kernel used to put the ids on the grid's y and z axes, which hold 65 535 blocks each, so
+  // anything longer failed to launch. w2v-bert asks for one id per pair of frames: 250 000 for
+  // ten seconds of speech. Both the packed and the batched layout, and a batch longer than an
+  // axis as well as a sequence longer than one.
+  const int many = 70000;
+  std::vector<LongType> values(many);
+  for (int i = 0; i < many; ++i) values[i] = (i * 7) % 73;
+
+  Tensor embd = cpuOps()->rand({73, 64}, DType::kFloat);
+  Tensor cudaEmbd = cudaOps()->toDevice(Device::getCuda(), embd);
+
+  Tensor packed = Tensor::create<LongType>({many}, values);
+  Tensor x = cudaOps()->lookup(cudaEmbd, cudaOps()->toDevice(Device::getCuda(), packed));
+  CATCH_REQUIRE(x.getShape() == std::vector<int>{many, 64});
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), cpuOps()->lookup(embd, packed)));
+
+  Tensor tall = Tensor::create<LongType>({many, 1}, values);
+  Tensor y = cudaOps()->lookup(cudaEmbd, cudaOps()->toDevice(Device::getCuda(), tall));
+  CATCH_REQUIRE(y.getShape() == std::vector<int>{many, 1, 64});
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(y), cpuOps()->lookup(embd, tall)));
+
+  Tensor wide = Tensor::create<LongType>({1, many}, values);
+  Tensor z = cudaOps()->lookup(cudaEmbd, cudaOps()->toDevice(Device::getCuda(), wide));
+  CATCH_REQUIRE(z.getShape() == std::vector<int>{1, many, 64});
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(z), cpuOps()->lookup(embd, wide)));
+}
+
 CATCH_TEST_CASE("test CUDA lookup (embedding widths)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 

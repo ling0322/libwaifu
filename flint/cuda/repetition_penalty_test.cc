@@ -64,6 +64,32 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty", "[op][cuda]") {
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), a, 1e-3));
 }
 
+CATCH_TEST_CASE("test CUDA repetitionPenalty (float, long, repeating history)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // What a speech model asks for: float logits over its own alphabet, and a history of every
+  // token said so far -- far longer than the sixty-four the kernel once allowed, and full of
+  // repeats. Each repeated token has to be penalized once, as the host does it, and not once per
+  // appearance. Logits either side of zero, since the penalty divides one sign and multiplies
+  // the other.
+  const int vocabulary = 8194;
+  const int said = 1000;
+
+  Tensor a = cpuOps()->add(
+      cpuOps()->rand({1, vocabulary}, DType::kFloat),
+      Tensor::create<float>({1}, {-0.5f}));
+  std::vector<LongType> values(said);
+  for (int i = 0; i < said; ++i) values[i] = (i * 37) % 97;
+  Tensor history = Tensor::create<LongType>({1, said}, values);
+
+  Tensor x = cudaOps()->toDevice(Device::getCuda(), a);
+  cudaOps()->repetitionPenalty(x, cudaOps()->toDevice(Device::getCuda(), history), 10.0);
+  cpuOps()->repetitionPenalty(a, history, 10.0);
+
+  CATCH_REQUIRE(x.getDType() == DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), a, 1e-6, 1e-6));
+}
+
 CATCH_TEST_CASE("test CUDA repetitionPenalty (packed 1D logits)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
@@ -115,10 +141,10 @@ CATCH_TEST_CASE("test CUDA repetitionPenalty (weight of one is a no-op)", "[op][
 CATCH_TEST_CASE("test CUDA repetitionPenalty (history lengths)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  // The kernel always launches a fixed 64 threads and returns early past the end of the
-  // history, so a short history must not penalise positions it does not name. 63 is the longest
-  // history the operator accepts.
-  for (int length : {1, 2, 63}) {
+  // The kernels launch a whole block of threads and return early past the end of the history, so
+  // a short history must not penalise positions it does not name -- and a long one, past the
+  // sixty-four a single block of the old kernel held, still has to reach every position it does.
+  for (int length : {1, 2, 63, 64, 300}) {
     Tensor a = cpuOps()->rand({2, 64}, DType::kFloat);
     std::vector<LongType> ids(2 * length);
     for (int i = 0; i < 2 * length; ++i) ids[i] = i % 64;
