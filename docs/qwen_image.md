@@ -140,14 +140,35 @@ The weights stream through the card a layer at a time, so the card holds activat
 little else. What decides the speed is whether the 30 GB package stays in the page cache between
 steps: with room for it, each step reads memory; without, each step reads the disk again, which
 on this machine's disk is about 200 MB/s and most of the time a step takes. A machine with 48 GB
-or more of RAM keeps it; `-fp8` halves the package (untested).
+or more of RAM keeps it.
+
+## FP8
+
+`-fp8` stores the denoiser's and the encoder's matrices as E4M3 with a scale per output channel;
+the embedding, the norms and the whole decoder stay as they are. 16 GB in four parts rather than
+30 GB in eight. Measured the same way as above:
+
+| | float16 | fp8 |
+|---|---|---|
+| encoder, against float32 | 9.0e-3 | 1.2e-1 |
+| velocity at step six | 7.9e-3 | 2.2e-2 |
+| the whole ten-step walk | 1.35e-2 | 1.24e-1 |
+| host, the package mapped in | 27 GB | 15 GB |
+
+The fp8 card figure was only measured at 256 x 256, where it peaks at 1.7 GB.
+
+The encoder takes most of the quantization, and the picture little of it: the pipeline test's
+fox at 512 x 512, twenty steps, seed 42, is the same picture from either package to the eye, and
+the fp8 one draws in 70 s against the float16 one's two minutes, because each step reads half the
+bytes. On a machine with less than about 48 GB of RAM it is the package to use.
 
 ## Not done
 
 * Image editing and reference images. The model reads a condition picture both through the VAE
   and through Qwen3-VL's vision tower, which is not exported.
 * The prefix KV cache.
-* A published package. `hub.rs` has no entry; a package exported locally is loaded by its path.
+* A published package. `hub.rs` has no entry; a package exported locally, float16 or fp8, is
+  loaded by its path.
 
 ## Exporting and testing
 

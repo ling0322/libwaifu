@@ -24,8 +24,9 @@
 //! denoiser is asked about the latent that run's sixth step actually read, and the autoencoder
 //! about the latent the ten steps left behind. None of it is `torch.randn`.
 //!
-//! One test, not four: the package is thirty gigabytes, streamed through the card rather than held
-//! on it, and the harness gives every test its own thread and so its own copy.
+//! One test per package, not one per part: a package is sixteen or thirty gigabytes, streamed
+//! through the card rather than held on it, and the harness gives every test its own thread and
+//! so its own copy.
 
 use std::path::PathBuf;
 
@@ -181,4 +182,67 @@ fn every_part_matches_the_reference() {
     println!("final latent rmse = {rmse} (over 10 steps)");
     // Ten steps of the runtime's own schedule, timestep rounding and denoiser: 1.35e-2.
     assert!(rmse < 5e-2, "the walk drifted by {rmse}");
+}
+
+/// The same questions of the package `-fp8` writes, whose matrices are E4M3 with a scale per
+/// output channel. It is held to the same fixtures, and to looser bounds: what is measured is
+/// the quantization on top of the float16 runtime above.
+#[test]
+#[ignore = "needs the qwen-image-2.1-fp8 package"]
+fn the_fp8_package_stays_close_to_the_reference() {
+    let manifest = Manifest::open(models_dir().join("qwen-image-2.1-fp8.yaml")).unwrap();
+    let model = QwenImage::from_manifest(device(), Residency::LowVram, &manifest).unwrap();
+    assert_eq!(model.config().dit.weight_format, waifu::WeightFormat::Fp8);
+    let cases = ParamFile::open(&[models_dir().join("qwen-image-2.1_test.safetensors")]).unwrap();
+
+    let prompt = "a red fox sitting in fresh snow, golden hour, photorealistic";
+    let hidden = model.encode_prompt(prompt).unwrap();
+    let exact = cases.get_unchecked("test_case.hidden_fp32").unwrap();
+    let rmse = relative_rmse(&hidden, &exact);
+    println!("fp8 encoder states rmse = {rmse} against float32");
+    // 1.2e-1, against 9.0e-3 in float16 and 7.3e-2 for the bfloat16 reference: E4M3 costs the
+    // encoder most, and the picture below shows it costs the picture little.
+    assert!(rmse < 2e-1, "the encoder's states drifted by {rmse}");
+
+    let context = fixture(&cases, "test_case.hidden");
+    let latent = fixture(&cases, "test_case.latent");
+    let timestep = read(&cases.get_unchecked("test_case.timestep").unwrap())[0];
+    let velocity = model.dit().forward(&latent, timestep, &context).unwrap();
+    let rmse = relative_rmse(
+        &velocity,
+        &cases.get_unchecked("test_case.velocity").unwrap(),
+    );
+    println!("fp8 velocity rmse = {rmse}");
+    // 2.2e-2, against 7.9e-3 in float16.
+    assert!(rmse < 5e-2, "the velocity drifted by {rmse}");
+
+    // The decoder is never quantized: its convolutions are stored as they are either way.
+    let final_latent = fixture(&cases, "test_case.final_latent");
+    let image = model.decode(&final_latent).unwrap();
+    let rmse = relative_rmse(&image, &cases.get_unchecked("test_case.decoded").unwrap());
+    println!("fp8 package decoded rmse = {rmse}");
+    assert!(rmse < 3e-3, "the picture drifted by {rmse}");
+
+    let options = waifu::GenerationOptions {
+        width: 256,
+        height: 256,
+        num_steps: 10,
+        ..QwenImage::DEFAULTS.options()
+    };
+    let walked = model
+        .denoise_reporting(
+            &fixture(&cases, "test_case.noise"),
+            &model.sampler(256, 256, 10).unwrap(),
+            &hidden.cast(DType::Float16).unwrap(),
+            None,
+            &options,
+            &mut |_| std::ops::ControlFlow::Continue(()),
+        )
+        .unwrap()
+        .unwrap();
+    let rmse = relative_rmse(&walked, &final_latent);
+    println!("fp8 final latent rmse = {rmse} (over 10 steps)");
+    // 1.24e-1, most of it the encoder's. A 512 by 512 picture drawn from the same seed with
+    // either package is the same picture to the eye.
+    assert!(rmse < 2.5e-1, "the walk drifted by {rmse}");
 }
