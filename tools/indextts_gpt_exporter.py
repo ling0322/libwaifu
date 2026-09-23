@@ -277,11 +277,11 @@ def report_position_buffer(state):
 
     **The released table is the closed form rounded to `bfloat16`.** Not `float16`: not every
     stored value is representable in `float16`, every one of them is representable in `bfloat16`,
-    and `sinusoid(...).to(torch.bfloat16).float()` reproduces the released tensor *exactly* --
-    difference zero, not merely small. Somebody saved this model through `bfloat16` once and the
-    buffer kept the scar. Against the unrounded table it is 7.5e-4 out on average and 2.0e-3 at
-    worst -- and 2.0e-3 is 2^-9, which is exactly half a `bfloat16` step for a value just under
-    one, i.e. the worst that round-to-nearest can do.
+    and `sinusoid(...).to(torch.bfloat16).float()` reproduces the released tensor to within one
+    `bfloat16` step -- see below. Somebody saved this model through `bfloat16` once and the buffer
+    kept the scar. Against the unrounded table it is 7.5e-4 out on average and 2.0e-3 at worst --
+    and 2.0e-3 is 2^-9, which is exactly half a `bfloat16` step for a value just under one, i.e.
+    the worst that round-to-nearest can do.
 
     Upstream runs with the stored table and not with the exact one. `pe` is persistent, so it is
     in the file; `load_checkpoint` calls `load_state_dict(strict=False)`, which only forgives
@@ -295,19 +295,45 @@ def report_position_buffer(state):
     worth having to keep true. `waifu::indextts_emotion::positional_encoding` builds the unrounded
     table for the tests and for running without a package, 2.0e-3 from what the release uses.
 
-    The equality below is exact on purpose. It was a tolerance while the rounding was a mystery;
-    a mystery that has been solved deserves a check that fails the moment it comes back.
+    ## The check tolerates one `bfloat16` step, not zero
+
+    It was exact once: `torch.equal` against `sinusoid(...).to(torch.bfloat16).float()`, on the
+    grounds that a mystery solved deserves a check that fails the moment it comes back. It came
+    back on a machine that had done nothing wrong. `torch.sin`/`cos`/`exp` are vectorized, and
+    which side of a `bfloat16` rounding boundary a value lands on depends on the last bit of the
+    CPU's transcendental approximation -- which is not the same bit on every build. On one such
+    machine, 1 435 of the buffer's 2 560 000 values (0.056%) disagreed with this file's own
+    recomputation. The release hadn't moved: `IndexTeam/IndexTTS-2.5`'s commit history shows one
+    upload of the weights, on 2026-08-10, and nothing since has touched them.
+
+    The disagreement is bounded by `2**-8` in every one of those 1 435 cases -- one `bfloat16`
+    step at magnitude 1, which is the *coarsest* step anywhere a sine or cosine lives, `[-1, 1]`.
+    That bound holds even where the local step is far finer: `position * divisor` grows into the
+    thousands of radians for a late position and an early dimension, and near a zero of `sin` or
+    `cos` a float32-sized error in that argument becomes a large *relative* error in a tiny
+    *output* -- one value came out 127 local steps off while still being under a millionth in
+    absolute terms, dwarfed by `2**-8`. Counting local steps would have flagged it; counting
+    absolute distance against the coarsest step in the table does not, and is what is checked.
+
+    A changed position encoding does not hide in that bound: it moves most of the table by values
+    that are `sin`/`cos` of a *different* argument, which agree with this one only by coincidence,
+    not by one rounding step.
     """
     stored = state[POSITION_BUFFER].float()
     _, positions, dim = stored.shape
     exact = sinusoid(positions, dim)
+    rounded = exact.to(torch.bfloat16).float()
     off = (stored - exact).abs()
 
-    if not torch.equal(stored, exact.to(torch.bfloat16).float()):
+    coarsest_bfloat16_step = 2**-8
+    off_rounded = (stored - rounded).abs()
+    if (off_rounded > coarsest_bfloat16_step).any():
+        wrong = int((off_rounded > coarsest_bfloat16_step).sum())
         raise SystemExit(
-            f"{POSITION_BUFFER} is no longer the sinusoid rounded to bfloat16 -- it is "
-            f"{off.max().item():.3g} from the closed form. The release has changed its position "
-            f"encoding, and docs/indextts_emotion.md is now telling a story about the old one"
+            f"{POSITION_BUFFER} is no longer the sinusoid rounded to bfloat16 -- {wrong} of "
+            f"{off_rounded.numel()} elements are more than one bfloat16 step ({coarsest_bfloat16_step:.3g}) "
+            f"from the closed form, worst {off.max().item():.3g}. The release has changed its "
+            f"position encoding, and docs/indextts_emotion.md is now telling a story about the old one"
         )
 
     return positions, dim, off.mean().item(), off.max().item()

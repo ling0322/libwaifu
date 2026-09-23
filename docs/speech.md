@@ -1,8 +1,8 @@
 # Speech: the page, and the model behind it
 
-`waifu draw -voice models/indextts25.yaml` has a third tab. Drop a few seconds of somebody
-speaking on it, type a sentence, press Speak, and get the sentence back in that voice as a WAV --
-said by [IndexTTS-2.5](indextts.md).
+`waifu draw -voice indextts` has a third tab. Drop a few seconds of somebody speaking on it,
+type a sentence, press Speak, and get the sentence back in that voice as a WAV -- said by
+[IndexTTS-2.5](indextts.md).
 
 Without `-voice` there is no third tab. What the page has then is `Tones`, the stand-in the tab was
 built around before there was a model, and a tab whose whole content is an apology for not being
@@ -12,12 +12,11 @@ This document is about the seam between the two: what the page asks of a voice, 
 has to implement to answer it.
 
 ```bash
-waifu draw -voice models/indextts25.yaml
+waifu draw -voice indextts
 ```
 
-The package is not published yet, so a voice is named as a manifest on the disk -- see
-[`indextts.md`](indextts.md) for how to build one. The day it is, it becomes a name in the hub's
-catalogue like every picture model, fetched on first use.
+`indextts` is fetched off the hub like any picture model, into the same cache. Building the
+package yourself instead -- `-voice models/indextts25.yaml` -- is [`indextts.md`](indextts.md).
 
 ## What is here
 
