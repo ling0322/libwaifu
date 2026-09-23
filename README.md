@@ -16,6 +16,7 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 | `sdxl:noob` | NoobAI-XL v1.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-noobai-xl-v1.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-noobai-xl-v1.1)\] |
 | `sdxl:obsession` | One Obsession v24 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-one-obsession-v24)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-one-obsession-v24)\] |
 | `anima:turbo` | Anima Turbo v1.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-anima-turbo-v1.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-anima-turbo-v1.1)\] |
+| `anima:miaomiao` | MiaoMiao Harem v1.6 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-miaomiao-harem-v1.6)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-miaomiao-harem-v1.6)\] |
 | `krea2:turbo` | Krea 2 Turbo | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 | `krea2:turbo-fp8` | Krea 2 Turbo, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 
@@ -60,6 +61,8 @@ named at the command line -- see [Supported voices](#supported-voices) above.
 
 - [2026-09-23] IndexTTS-2.5 speaks here, as `indextts` -- the first published voice, and the
   text2speech tab's first real model.
+- [2026-09-23] MiaoMiao Harem v1.6 is published, as `anima:miaomiao` -- an Anima fine tune, mirrored
+  here with the author's permission for this specific conversion.
 - [2026-09-18] Krea 2 Turbo draws here: a third architecture, exported from the gated release
   rather than published from this repository.
 - [2026-09-15] The screen is a page in a browser rather than a screenful of terminal: txt2img and

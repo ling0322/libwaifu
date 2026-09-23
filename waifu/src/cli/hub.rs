@@ -231,6 +231,14 @@ const CATALOG: &[Published] = &[
         kind: Kind::Picture,
     },
     Published {
+        name: "anima:miaomiao:v1.6",
+        full_name: "MiaoMiao Harem v1.6",
+        repo: "ling0322/libwaifu-miaomiao-harem-v1.6",
+        manifest: "miaomiao-harem-v1.6.yaml",
+        explicit: true,
+        kind: Kind::Picture,
+    },
+    Published {
         name: "krea2:turbo:v1.0",
         full_name: "Krea 2 Turbo",
         repo: "ling0322/libwaifu-krea2-turbo",
@@ -383,6 +391,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("sdxl:illust", "sdxl:illust:v2.0"),
     ("sdxl:obsession", "sdxl:obsession:v24"),
     ("anima:turbo", "anima:turbo:v1.1"),
+    ("anima:miaomiao", "anima:miaomiao:v1.6"),
     ("krea2:turbo", "krea2:turbo:v1.0"),
     ("krea2:turbo-fp8", "krea2:turbo-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
@@ -1509,6 +1518,8 @@ mod tests {
         assert!(names.contains(&"sdxl:obsession:v24"));
         assert!(names.contains(&"anima:turbo"));
         assert!(names.contains(&"anima:turbo:v1.1"));
+        assert!(names.contains(&"anima:miaomiao"));
+        assert!(names.contains(&"anima:miaomiao:v1.6"));
 
         // The spellings these replaced are answered but not offered: one name each.
         assert!(!names.contains(&"sdxl:base:v1"));
