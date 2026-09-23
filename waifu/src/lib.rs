@@ -65,6 +65,9 @@ mod mapping;
 mod param_file;
 mod qwen_vae;
 mod reader;
+/// IndexTTS-2.5, whole: a recording and a sentence in, the sentence in that voice out. The
+/// modules beside it are its parts; this is the order they run in.
+pub mod indextts;
 /// IndexTTS-2.5's emotion path: the conformer and perceiver that read a feeling off the
 /// reference recording, for the row [`indextts_gpt`] puts beside the speaker's.
 pub mod indextts_emotion;

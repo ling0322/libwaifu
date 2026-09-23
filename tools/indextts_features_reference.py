@@ -37,6 +37,14 @@ instead, which is the same `spectrogram` the extractor above uses, configured th
 defaults configure it. The extractor's own docstring says it is computing "mel-filter bank
 features using TorchAudio", so the two agree by construction rather than by coincidence.
 
+# Resampling and the 22.05 kHz mel come from upstream too
+
+The reference recording is resampled by `torchaudio.transforms.Resample`, and torchaudio is not
+here. Its resampler is two plain-torch functions, so they are lifted out of torchaudio's own
+`functional.py` -- fetched once into `~/.cache/libwaifu/torchaudio-source` -- with `ast` and run
+as written. The mel S2Mel conditions on is IndexTTS's own `s2mel/modules/audio.py`, imported
+from the cached upstream tree; it needs only librosa, which is here.
+
 # The waveform is a chirp, not noise
 
 A sweep from 80 Hz to 6 kHz, which crosses most of the filterbank and lands different energy in
@@ -44,7 +52,14 @@ different bands at different times. Noise would exercise the same code and make 
 alike, and a band that is wrong would then be hard to see.
 """
 
+import ast
+import math
+import os
+import sys
+import types
+
 import numpy as np
+import torch
 
 from transformers.audio_utils import mel_filter_bank, spectrogram, window_function
 from transformers.models.seamless_m4t.feature_extraction_seamless_m4t import (
@@ -59,6 +74,97 @@ BINS = 80
 FRAME_LENGTH = 400
 HOP = 160
 FFT_LENGTH = 512
+
+
+UPSTREAM = os.path.expanduser("~/.cache/libwaifu/indextts-src")
+TORCHAUDIO = os.path.expanduser("~/.cache/libwaifu/torchaudio-source/functional.py")
+TORCHAUDIO_URL = (
+    "https://raw.githubusercontent.com/pytorch/audio/main/src/torchaudio/functional/functional.py"
+)
+
+# The rates the resampler is checked between: a common recording rate onto both of the rates
+# the pipeline needs.
+SOURCE_RATE = 44100
+MEL_RATE = 22050
+
+
+def torchaudio_resample():
+    """torchaudio's `_get_sinc_resample_kernel` and `_apply_sinc_resample_kernel`, as written."""
+    if not os.path.exists(TORCHAUDIO):
+        import urllib.request
+
+        os.makedirs(os.path.dirname(TORCHAUDIO), exist_ok=True)
+        urllib.request.urlretrieve(TORCHAUDIO_URL, TORCHAUDIO)
+
+    tree = ast.parse(open(TORCHAUDIO).read())
+    wanted = {"_get_sinc_resample_kernel", "_apply_sinc_resample_kernel"}
+    body = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+
+    from typing import Optional
+
+    namespace = {
+        "torch": torch,
+        "math": math,
+        "warnings": __import__("warnings"),
+        "Optional": Optional,
+        "Tensor": torch.Tensor,
+        "_CPU": torch.device("cpu"),
+    }
+    exec(compile(ast.Module(body=body, type_ignores=[]), TORCHAUDIO, "exec"), namespace)
+
+    def resample(wave, orig, new):
+        gcd = math.gcd(orig, new)
+        kernel, width = namespace["_get_sinc_resample_kernel"](orig, new, gcd)
+        return namespace["_apply_sinc_resample_kernel"](wave, orig, new, gcd, kernel, width)
+
+    return resample
+
+
+def upstream_mel():
+    """IndexTTS's own `mel_spectrogram`, with S2Mel's parameters as `infer_v2_5.py` passes them."""
+    sys.path.insert(0, UPSTREAM)
+    from indextts.s2mel.modules.audio import mel_spectrogram
+
+    def mel(wave):
+        return mel_spectrogram(
+            torch.from_numpy(wave).unsqueeze(0),
+            n_fft=1024,
+            num_mels=80,
+            sampling_rate=MEL_RATE,
+            hop_size=256,
+            win_size=1024,
+            fmin=0,
+            fmax=None,
+        )[0]
+
+    return mel
+
+
+def chirp_at(rate):
+    """The same sweep as `chirp`, at another rate."""
+    samples = int(rate * SECONDS)
+    time = np.arange(samples) / rate
+    sweep = 80.0 + (6000.0 - 80.0) * time / SECONDS
+    phase = 2.0 * np.pi * np.cumsum(sweep) / rate
+
+    return (0.1 * np.sin(phase)).astype(np.float32)
+
+
+def broadband_at(rate):
+    """The sweep with a little noise under it, so that every band has something in it.
+
+    A sweep alone is narrowband: at any moment it is in one band, and every other cell of a mel
+    spectrogram sits on the `1e-5` floor -- where two implementations agree whatever they do.
+    The noise is a plain linear congruential generator in integers, which the Rust test repeats
+    exactly rather than approximately.
+    """
+    wave = chirp_at(rate).astype(np.float64)
+    state = 12345
+    for index in range(wave.size):
+        state = (1103515245 * state + 12345) % (1 << 31)
+        wave[index] += (state / (1 << 31) - 0.5) * 0.1
+
+    return wave.astype(np.float32)
 
 
 def chirp():
@@ -139,6 +245,21 @@ def main():
     emit("w2v_features", features, "standardized per band, then stacked in pairs")
     emit("campplus_features", centred, "each band's mean over time removed")
 
+    # Resampling: a 44.1 kHz sweep onto both of the rates the pipeline needs.
+    resample = torchaudio_resample()
+    source = torch.from_numpy(chirp_at(SOURCE_RATE))
+    to_16k = resample(source, SOURCE_RATE, RATE)
+    to_22k = resample(source, SOURCE_RATE, MEL_RATE)
+    emit("resampled_16k", to_16k, "44.1 kHz onto 16 kHz by torchaudio's own sinc")
+    emit("resampled_22k", to_22k, "44.1 kHz onto 22.05 kHz")
+
+    # The mel S2Mel conditions on, of a broadband signal made at 22.05 kHz directly.
+    reference = upstream_mel()(broadband_at(MEL_RATE))
+    emit("reference_mel", reference, "(bands, frames), IndexTTS's own mel_spectrogram")
+    print(f"// reference mel cells on the 1e-5 floor: {int((reference <= math.log(1e-5) + 1e-3).sum())}")
+
+    print(f"// resampled: {to_16k.shape[-1]} at 16 kHz, {to_22k.shape[-1]} at 22.05 kHz")
+    print(f"// reference mel: {tuple(reference.shape)}")
     print(f"// w2v-bert: {features.shape[0]} pairs of {features.shape[1]} from {SAMPLES} samples")
     print(f"// campplus: {centred.shape[0]} frames of {centred.shape[1]}")
 

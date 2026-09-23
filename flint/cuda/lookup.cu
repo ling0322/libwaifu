@@ -22,81 +22,67 @@
 #include "flint/cuda/accessor.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/lookup.h"
+#include "flint/operators.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
+// One thread per element of the output, on a grid that is one-dimensional.
+//
+// The grid used to be two- and three-dimensional, with the ids along y and z. Those two axes hold
+// at most 65 535 blocks each, so a lookup of more ids than that -- w2v-bert's relative positions
+// are one per *pair* of frames, a quarter of a million for ten seconds of speech -- failed to
+// launch at all, with `invalid configuration argument` and no hint that the count was the
+// problem. The x axis holds 2^31 - 1 blocks, which is more than any tensor here will have
+// elements.
 template<typename T>
-__global__ void lookupKernel2D(
-  PackedTensorAccessor<const T, 2> embd,
-    PackedTensorAccessor<const int64_t, 2> inputs,
-  PackedTensorAccessor<T, 3> dst) {
-  int x = blockIdx.x * blockDim.x + threadIdx.x;
-  int y = blockIdx.y * blockDim.y + threadIdx.y;
-  int z = blockIdx.z * blockDim.z + threadIdx.z;
+__global__ void lookupKernel(
+    const T *embd,
+    const int64_t *ids,
+    T *dst,
+    int64_t rows,
+    int64_t width,
+    int64_t tableRows) {
+  int64_t element = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (element >= rows * width) return;
 
-  if (x < embd.getShape(1) && y < inputs.getShape(1) && z < inputs.getShape(0)) {
-    int index = inputs[z][y];
-    assert(index < embd.getShape(0));
-    dst[z][y][x] = embd[index][x];
-  }
+  int64_t row = element / width;
+  int64_t column = element % width;
+
+  int64_t index = ids[row];
+  assert(index >= 0 && index < tableRows);
+  dst[element] = embd[index * width + column];
 }
 
+// Every id at once, whatever shape they arrive in: one row of `embdTable` per id, the result shaped
+// like `input` with the row's width after it.
 template<typename T>
-Tensor lookup2D(const Tensor &embdTable, const Tensor &input) {
+Tensor lookupRows(const Tensor &embdTable, const Tensor &input) {
   std::vector<Tensor::ShapeType> shape = input.getShape();
   shape.push_back(embdTable.getShape(1));
   Tensor dst = createCudaTensor<T>(shape);
 
-  constexpr int blockSize = 256;
-  dim3 d;
-  d.z = dst.getShape(0);
-  d.y = dst.getShape(1);
-  d.x = (dst.getShape(2) + blockSize - 1) / blockSize;
+  // Both are read as flat arrays, so both have to be laid out as one.
+  Operators *ops = getOperators(Device::kCuda);
+  Tensor table = embdTable.isContiguous() ? embdTable : ops->contiguous(embdTable);
+  Tensor ids = input.isContiguous() ? input : ops->contiguous(input);
 
-  PackedTensorAccessor<const T, 2> sA(embdTable);
-  PackedTensorAccessor<const int64_t, 2> sB(input);
-  PackedTensorAccessor<T, 3> sC(dst);
-
-  lookupKernel2D<<<d, blockSize>>>(sA, sB, sC);
-  LL_CUDA_SYNCHRONIZE();
-  LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return dst;
-}
-
-template<typename T>
-__global__ void lookupKernel1D(
-  PackedTensorAccessor<const T, 2> embd,
-    PackedTensorAccessor<const int64_t, 1> inputs,
-  PackedTensorAccessor<T, 2> dst) {
-  int x = blockIdx.x * blockDim.x + threadIdx.x;
-  int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-  if (x < embd.getShape(1) && y < inputs.getShape(0)) {
-    int index = inputs[y];
-    assert(index < embd.getShape(0));
-    dst[y][x] = embd[index][x];
-  }
-}
-
-template<typename T>
-Tensor lookup1D(const Tensor &embdTable, const Tensor &input) {
-  std::vector<Tensor::ShapeType> shape = input.getShape();
-  shape.push_back(embdTable.getShape(1));
-  Tensor dst = createCudaTensor<T>(shape);
+  int64_t rows = ids.getNumEl();
+  int64_t width = table.getShape(1);
+  int64_t total = rows * width;
+  if (total == 0) return dst;
 
   constexpr int blockSize = 256;
-  dim3 d;
-  d.y = dst.getShape(0);
-  d.x = (dst.getShape(1) + blockSize - 1) / blockSize;
+  int64_t blocks = (total + blockSize - 1) / blockSize;
 
-  PackedTensorAccessor<const T, 2> sA(embdTable);
-  PackedTensorAccessor<const int64_t, 1> sB(input);
-  PackedTensorAccessor<T, 2> sC(dst);
-
-  lookupKernel1D<<<d, blockSize>>>(sA, sB, sC);
+  lookupKernel<T><<<static_cast<unsigned int>(blocks), blockSize>>>(
+      getDataPtrCuda<T>(table),
+      getDataPtrCuda<int64_t>(ids),
+      getDataPtrCuda<T>(dst),
+      rows,
+      width,
+      table.getShape(0));
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
@@ -109,19 +95,11 @@ Tensor lookup(const Tensor &embdTable, const Tensor &input) {
   CHECK(embdTable.getDevice().getType() == Device::kCuda);
   CHECK(embdTable.getDim() == 2);
 
-  if (input.getDim() == 2 && embdTable.getDType() == DType::kFloat16) {
-    return lookup2D<half>(embdTable, input);
-  }
-  if (input.getDim() == 2 && embdTable.getDType() == DType::kFloat) {
-    return lookup2D<float>(embdTable, input);
-  }
-
-  // a packed batch of ids is 1D, one embedding row comes out per id.
-  if (input.getDim() == 1 && embdTable.getDType() == DType::kFloat16) {
-    return lookup1D<half>(embdTable, input);
-  }
-  if (input.getDim() == 1 && embdTable.getDType() == DType::kFloat) {
-    return lookup1D<float>(embdTable, input);
+  // Ids are 2D for a batch of sequences and 1D for a packed one; either way one embedding row
+  // comes out per id.
+  if (input.getDim() == 1 || input.getDim() == 2) {
+    if (embdTable.getDType() == DType::kFloat16) return lookupRows<half>(embdTable, input);
+    if (embdTable.getDType() == DType::kFloat) return lookupRows<float>(embdTable, input);
   }
 
   NOT_IMPL();

@@ -32,7 +32,9 @@ the log, so `Analysis::scale` is spelled out for each rather than assumed away.
 | out | 160 wide at 50 fps | 80 wide at 100 fps |
 
 The stacking is why w2v-bert's input is 160 and not 80: two consecutive frames side by side, which
-halves the frame rate going in. An odd frame at the end is dropped, because a pair needs two.
+halves the frame rate going in. An odd frame at the end is dropped, because a pair needs two --
+where `SeamlessM4TFeatureExtractor` pads it with a zero frame and masks the pair out of
+w2v-bert's attention instead. Twenty milliseconds, at the edge, and masked either way.
 
 ## Details that are each individually forgettable
 
@@ -89,8 +91,24 @@ which is not installed here and should not be: it pins itself against a torch ve
 venv's pins hold several models' reference tensors steady. The extractor's own docstring says it
 is computing "mel-filter bank features using TorchAudio", so the two agree by construction.
 
-## What is not here yet
+## Resampling, and the other mel
 
-The 22.05 kHz mel spectrogram S2Mel conditions on — `ref_mel` in `infer_v2_5.py`. That one is an
-ordinary mel and can be built from [`waifu::audio`](audio.md)'s `stft` and `mel_filterbank` in the
-graph, rather than needing Kaldi's frame handling.
+Two more things a recording goes through, which the pipeline needed and which live here for the
+same reason the filterbank does.
+
+**`resample`** is `torchaudio.functional.resample`'s Hann-windowed sinc, six zero crossings wide,
+in polyphase form -- one short dot product per output sample against one of `to / gcd` kernels.
+[`waifu::audio`](audio.md) has a resampler too, and it is the textbook shape: stuff zeros up to the
+common multiple, filter, keep every `down`th sample. For 44.1 kHz to 16 kHz that common multiple
+is 160 times the input, and fifteen seconds of speech becomes a hundred million samples through a
+filter fourteen thousand taps long, almost all of it computing samples that are thrown away.
+
+**`reference_mel`** is the 22.05 kHz mel S2Mel conditions on -- `ref_mel` in `infer_v2_5.py`. It
+is not Kaldi's: BigVGAN's `mel_spectrogram`, the signal reflected at each end, a *periodic* Hann,
+the magnitude rather than the power, Slaney's filterbank, `ln(max(x, 1e-5))`.
+
+Both are checked against upstream's own code: the resampler against torchaudio's two functions,
+lifted out of its `functional.py` with `ast` and run, to 1e-5; the mel against IndexTTS's own
+`s2mel/modules/audio.py`, imported. The mel's input is a sweep with noise under it, because a
+sweep alone is narrowband and leaves most of a mel spectrogram on the `1e-5` floor, where any two
+implementations agree whatever they do.

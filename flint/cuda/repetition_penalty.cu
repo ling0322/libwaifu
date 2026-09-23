@@ -27,24 +27,32 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-__device__ constexpr int MaxHistory = 64;
-
-__global__ void repetitionPenalty2DKernel(
-    PackedTensorAccessor<half, 2> logits,
+// Two kernels, a gather and then a scatter, which is what the processor does on the host and what
+// HuggingFace's `RepetitionPenaltyLogitsProcessor` does.
+//
+// This used to be one kernel, a thread per history entry reading a score, penalizing it and
+// writing it straight back. That had three problems. It was written for half logits only, and the
+// only caller casts its logits to float first, so on a card it never ran at all. It launched one
+// block of sixty-four threads per row and refused a history longer than that, where a speech model
+// says hundreds of tokens and penalizes every one. And a token said twice was two threads reading
+// and writing the same score with nothing ordering them -- penalized once or twice depending on
+// which read landed first.
+//
+// Splitting the read from the write settles the last of those: every score is gathered from the
+// logits as they were before any of them changed, so a token said five times writes the same
+// once-penalized value five times.
+template<typename T>
+__global__ void gatherPenalizedKernel(
+    PackedTensorAccessor<const T, 2> logits,
     PackedTensorAccessor<const LongType, 2> history,
+    PackedTensorAccessor<T, 2> scores,
     float weight) {
-  assert(logits.getShape(0) == history.getShape(0));
+  int batchIdx = blockIdx.y;
+  int historyIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (historyIdx >= history.getShape(1)) return;
 
-  int batchIdx = blockIdx.x;
-  int historyIdx = threadIdx.x;
-
-  if (historyIdx >= history.getShape(1)) {
-    return;
-  }
-
-  // gather
   LongType logitsIdx = history[batchIdx][historyIdx];
-  assert(logitsIdx < logits.getShape(1));
+  assert(logitsIdx >= 0 && logitsIdx < logits.getShape(1));
 
   float score = logits[batchIdx][logitsIdx];
   if (score > 0) {
@@ -53,15 +61,48 @@ __global__ void repetitionPenalty2DKernel(
     score *= weight;
   }
 
-  logits[batchIdx][logitsIdx] = score;
+  scores[batchIdx][historyIdx] = score;
+}
+
+template<typename T>
+__global__ void scatterPenalizedKernel(
+    PackedTensorAccessor<T, 2> logits,
+    PackedTensorAccessor<const LongType, 2> history,
+    PackedTensorAccessor<const T, 2> scores) {
+  int batchIdx = blockIdx.y;
+  int historyIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (historyIdx >= history.getShape(1)) return;
+
+  logits[batchIdx][history[batchIdx][historyIdx]] = scores[batchIdx][historyIdx];
+}
+
+template<typename T>
+void repetitionPenalty2DImpl(Tensor logits, Tensor history, float weight) {
+  CHECK(logits.getShape(0) == history.getShape(0));
+
+  int rows = history.getShape(0);
+  int length = history.getShape(1);
+  if (rows == 0 || length == 0) return;
+
+  Tensor scores = createCudaTensor<T>({rows, length});
+
+  constexpr int blockSize = 256;
+  dim3 grid((length + blockSize - 1) / blockSize, rows);
+
+  gatherPenalizedKernel<T><<<grid, blockSize>>>(logits, history, scores, weight);
+  LL_CUDA_SYNCHRONIZE();
+  LL_CHECK_CUDA_STATUS(cudaGetLastError());
+
+  scatterPenalizedKernel<T><<<grid, blockSize>>>(logits, history, scores);
+  LL_CUDA_SYNCHRONIZE();
+  LL_CHECK_CUDA_STATUS(cudaGetLastError());
 }
 
 void repetitionPenalty2D(Tensor logits, Tensor history, float weight) {
-  CHECK(history.getShape(1) < MaxHistory);
+  if (logits.getDType() == DType::kFloat) return repetitionPenalty2DImpl<float>(logits, history, weight);
+  if (logits.getDType() == DType::kFloat16) return repetitionPenalty2DImpl<half>(logits, history, weight);
 
-  repetitionPenalty2DKernel<<<logits.getShape(0), MaxHistory>>>(logits, history, weight);
-  LL_CUDA_SYNCHRONIZE();
-  LL_CHECK_CUDA_STATUS(cudaGetLastError());
+  NOT_IMPL();
 }
 
 void repetitionPenalty1D(const Tensor &logits, const Tensor &history, float weight) {

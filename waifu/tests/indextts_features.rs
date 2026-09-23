@@ -85,6 +85,45 @@ const CAMPPLUS_FEATURES: [f32; 8] = [
     -3.191409e+00,
 ];
 
+/// `resampled_16k`, (8000,) -- 44.1 kHz onto 16 kHz by torchaudio's own sinc
+///   8 of 8000, at [0, 1007, 2014, 3021, 4028, 5035, 6042, 7049].
+const RESAMPLED_16K: [f32; 8] = [
+    1.071262e-03,
+    3.048822e-03,
+    -6.456004e-02,
+    9.083547e-02,
+    7.129557e-02,
+    2.108011e-02,
+    2.591968e-02,
+    8.133135e-02,
+];
+
+/// `resampled_22k`, (11025,) -- 44.1 kHz onto 22.05 kHz
+///   8 of 11025, at [0, 1385, 2770, 4155, 5540, 6925, 8310, 9695].
+const RESAMPLED_22K: [f32; 8] = [
+    1.043396e-03,
+    6.302100e-02,
+    3.912297e-03,
+    9.325556e-02,
+    -8.575194e-02,
+    4.611845e-02,
+    1.805707e-02,
+    -9.374381e-02,
+];
+
+/// `reference_mel`, (80, 43) -- (bands, frames), IndexTTS's own mel_spectrogram
+///   8 of 3440, at [0, 437, 874, 1311, 1748, 2185, 2622, 3059].
+const REFERENCE_MEL: [f32; 8] = [
+    -1.098766e+00,
+    -4.338463e+00,
+    -3.714065e+00,
+    -3.948900e+00,
+    -4.055123e+00,
+    -3.570365e+00,
+    -3.320031e+00,
+    -3.779419e+00,
+];
+
 /// The same sweep the reference builds, in the same order of operations.
 fn chirp() -> Vec<f32> {
     let mut running = 0.0f64;
@@ -178,4 +217,84 @@ fn differs_from_kaldi_only_in_the_scaling() {
     assert_eq!(seamless.bins, kaldi.bins);
     assert_eq!(seamless.low, kaldi.low);
     assert_eq!(seamless.preemphasis, kaldi.preemphasis);
+}
+
+/// The sweep at another rate, as the reference's `chirp_at` builds it.
+fn chirp_at(rate: f64) -> Vec<f32> {
+    let samples = (rate * SECONDS) as usize;
+    let mut running = 0.0f64;
+
+    (0..samples)
+        .map(|index| {
+            let time = index as f64 / rate;
+            running += 80.0 + (6000.0 - 80.0) * time / SECONDS;
+
+            (0.1 * (2.0 * std::f64::consts::PI * running / rate).sin()) as f32
+        })
+        .collect()
+}
+
+/// The sweep with the reference's integer noise under it, so that no cell of a mel spectrogram
+/// sits on the floor -- where any two implementations agree.
+fn broadband_at(rate: f64) -> Vec<f32> {
+    let mut state: u64 = 12345;
+
+    chirp_at(rate)
+        .into_iter()
+        .map(|sample| {
+            state = (1_103_515_245 * state + 12345) % (1 << 31);
+
+            (f64::from(sample) + (state as f64 / (1u64 << 31) as f64 - 0.5) * 0.1) as f32
+        })
+        .collect()
+}
+
+/// A resampled signal is compared at a tighter tolerance than a log energy: it is an amplitude
+/// around a tenth, and the two implementations differ only in carrying `f64` where torch
+/// carries `f32`.
+const RESAMPLE_TOLERANCE: f32 = 1e-5;
+
+fn probe_within(values: &[f32], want: &[f32], tolerance: f32, what: &str) {
+    for (index, (at, right)) in probe_indices(values.len(), 8).iter().zip(want).enumerate() {
+        let left = values[*at];
+        assert!(
+            (left - right).abs() <= tolerance,
+            "{what}[{index}]: {left} against {right}",
+        );
+    }
+}
+
+/// 44.1 kHz onto 16 kHz, against torchaudio's own resampler.
+///
+/// The ratio is 160 over 441 once the common factor is out, which is the case the polyphase form
+/// exists for: a hundred and sixty kernels, each read once per block of output.
+#[test]
+fn resamples_the_way_torchaudio_does() {
+    let source = chirp_at(44100.0);
+
+    let to_16k = indextts_features::resample(&source, 44100, 16000);
+    assert_eq!(to_16k.len(), 8000);
+    probe_within(&to_16k, &RESAMPLED_16K, RESAMPLE_TOLERANCE, "resampled_16k");
+
+    let to_22k = indextts_features::resample(&source, 44100, 22050);
+    assert_eq!(to_22k.len(), 11025);
+    probe_within(&to_22k, &RESAMPLED_22K, RESAMPLE_TOLERANCE, "resampled_22k");
+}
+
+/// A rate onto itself is the same samples, not a filtered copy of them.
+#[test]
+fn leaves_a_signal_at_its_own_rate_alone() {
+    let source = chirp_at(16000.0);
+
+    assert_eq!(indextts_features::resample(&source, 16000, 16000), source);
+}
+
+/// The 22.05 kHz mel S2Mel conditions on, against IndexTTS's own `mel_spectrogram`.
+#[test]
+fn draws_the_mel_the_way_indextts_does() {
+    let (mel, frames) = indextts_features::reference_mel(&broadband_at(22050.0)).unwrap();
+
+    assert_eq!(frames, 43);
+    assert_eq!(mel.len(), 80 * 43);
+    probe(&mel, &REFERENCE_MEL, "reference_mel");
 }

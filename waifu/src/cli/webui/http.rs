@@ -120,7 +120,7 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         // its own box behind them: they are two different runs' inputs, and dropping one should
         // not throw away the other.
         (Method::Post, "/api/voice") => hold_recording(shared, request),
-        (Method::Get, "/api/voice") => held_recording(shared),
+        (Method::Get, "/api/voice") => held_recording(shared, range_of(request)),
         (Method::Delete, "/api/voice") => {
             shared.forget_recording();
             json(json!({ "ok": true }))
@@ -134,7 +134,7 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
             Some((_, script)) => page(script, "text/javascript; charset=utf-8"),
             None => match (path.strip_prefix("/picture/"), path.strip_prefix("/clip/")) {
                 (Some(file), _) => picture(shared, file),
-                (_, Some(file)) => clip(shared, file),
+                (_, Some(file)) => clip(shared, file, range_of(request)),
                 _ => refused(404, "no such page"),
             },
         },
@@ -433,21 +433,21 @@ fn hold_recording(shared: &Arc<Shared>, request: &mut Request) -> Reply {
 }
 
 /// Hands back the recording being held, so that a page opening fresh can play what is in the box.
-fn held_recording(shared: &Arc<Shared>) -> Reply {
+fn held_recording(shared: &Arc<Shared>, range: Option<String>) -> Reply {
     match shared.recording() {
-        Some(bytes) => reply(200, "audio/wav", bytes),
+        Some(bytes) => media("audio/wav", bytes, range.as_deref()),
         None => refused(404, "no recording is being held"),
     }
 }
 
 /// One of the clips this session said.
-fn clip(shared: &Arc<Shared>, file: &str) -> Reply {
+fn clip(shared: &Arc<Shared>, file: &str, range: Option<String>) -> Reply {
     let Some(path) = shared.spoke(file) else {
         return refused(404, "this session did not say that");
     };
 
     match std::fs::read(&path) {
-        Ok(bytes) => reply(200, "audio/wav", bytes),
+        Ok(bytes) => media("audio/wav", bytes, range.as_deref()),
         Err(error) => refused(410, &format!("{file} can no longer be read: {error}")),
     }
 }
@@ -731,6 +731,96 @@ fn refused(status: u16, said: &str) -> Reply {
     )
 }
 
+/// What a request's `Range` header asked for, if it sent one.
+fn range_of(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Range"))
+        .map(|header| header.value.as_str().to_string())
+}
+
+/// Something an `<audio>` element plays: sent with its length, and in pieces when asked for them.
+///
+/// An ordinary [`reply`] is not enough for one. `tiny_http` sends anything over 32 KB with chunked
+/// transfer encoding and no `Content-Length`, which a picture does not mind and a media element
+/// does: it asks for byte ranges so that it can find the length and seek, and a response of
+/// unknown length that ignores the range is one it gives up on -- the player on the speech tab
+/// showed an error over a clip that was a perfectly good WAV. `Tones` never found this out,
+/// because its clips were small and the tab was hidden.
+///
+/// So the length is always sent, `Accept-Ranges` says ranges may be asked for, and a single range
+/// -- `bytes=a-b`, `bytes=a-` or `bytes=-n`, which is all a browser sends a media file -- comes
+/// back as a `206` with its `Content-Range`. A range that cannot be satisfied is a `416`.
+fn media(mime: &str, body: Vec<u8>, range: Option<&str>) -> Reply {
+    let length = body.len();
+
+    let (status, body, span) = match range.map(|range| byte_range(range, length)) {
+        None => (200, body, None),
+        Some(Some((first, last))) => (206, body[first..=last].to_vec(), Some((first, last))),
+        Some(None) => {
+            let mut response = reply(416, mime, Vec::new());
+            if let Ok(header) =
+                Header::from_bytes(&b"Content-Range"[..], format!("bytes */{length}").as_bytes())
+            {
+                response.add_header(header);
+            }
+            return response.with_chunked_threshold(usize::MAX);
+        }
+    };
+
+    let mut response = reply(status, mime, body).with_chunked_threshold(usize::MAX);
+    if let Ok(header) = Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]) {
+        response.add_header(header);
+    }
+    if let Some((first, last)) = span {
+        if let Ok(header) = Header::from_bytes(
+            &b"Content-Range"[..],
+            format!("bytes {first}-{last}/{length}").as_bytes(),
+        ) {
+            response.add_header(header);
+        }
+    }
+
+    response
+}
+
+/// The inclusive byte span a `Range` header asks for out of `length`, or `None` where it asks for
+/// nothing this can give -- another unit, several ranges, or a span that starts past the end.
+///
+/// An end past the last byte is cut to it rather than refused, which is what the standard says to
+/// do and what a browser relies on when it asks for `bytes=0-` of something it has not seen yet.
+fn byte_range(range: &str, length: usize) -> Option<(usize, usize)> {
+    let spec = range.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') || length == 0 {
+        return None;
+    }
+
+    let (first, last) = spec.split_once('-')?;
+    let (first, last) = (first.trim(), last.trim());
+
+    let (first, last) = match (first.is_empty(), last.is_empty()) {
+        // `bytes=-n`: the last n bytes.
+        (true, false) => {
+            let suffix: usize = last.parse().ok()?;
+            if suffix == 0 {
+                return None;
+            }
+            (length.saturating_sub(suffix), length - 1)
+        }
+        // `bytes=a-`: from a to the end.
+        (false, true) => (first.parse().ok()?, length - 1),
+        // `bytes=a-b`.
+        (false, false) => {
+            let (first, last): (usize, usize) = (first.parse().ok()?, last.parse().ok()?);
+            (first, last.min(length - 1))
+        }
+        (true, true) => return None,
+    };
+
+    (first <= last && first < length).then_some((first, last))
+}
+
 fn reply(status: u16, mime: &str, body: Vec<u8>) -> Reply {
     let mut response = Response::from_data(body).with_status_code(status);
     if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], mime.as_bytes()) {
@@ -752,6 +842,30 @@ mod tests {
     use super::*;
 
     use serde_json::json;
+
+    /// The three forms a browser sends a media file, and what each asks for out of 1000 bytes.
+    #[test]
+    fn a_range_is_the_bytes_it_names() {
+        assert_eq!(byte_range("bytes=0-", 1000), Some((0, 999)));
+        assert_eq!(byte_range("bytes=100-199", 1000), Some((100, 199)));
+        assert_eq!(byte_range("bytes=-10", 1000), Some((990, 999)));
+
+        // An end past the last byte is cut to it, which is what `bytes=0-` relies on too.
+        assert_eq!(byte_range("bytes=900-5000", 1000), Some((900, 999)));
+        // A suffix longer than the whole is the whole.
+        assert_eq!(byte_range("bytes=-5000", 1000), Some((0, 999)));
+    }
+
+    #[test]
+    fn a_range_that_cannot_be_given_is_none() {
+        assert_eq!(byte_range("bytes=1000-", 1000), None);
+        assert_eq!(byte_range("bytes=500-100", 1000), None);
+        assert_eq!(byte_range("bytes=0-1,5-9", 1000), None);
+        assert_eq!(byte_range("items=0-1", 1000), None);
+        assert_eq!(byte_range("bytes=-0", 1000), None);
+        assert_eq!(byte_range("bytes=-", 1000), None);
+        assert_eq!(byte_range("bytes=0-", 0), None);
+    }
 
     #[test]
     fn a_seed_survives_being_sixty_four_bits_wide() {

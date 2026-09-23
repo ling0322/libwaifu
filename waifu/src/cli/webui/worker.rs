@@ -38,6 +38,7 @@ use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
 use crate::flint::{MemorySnapshot, Tensor};
+use crate::indextts::{self, IndexTts};
 use crate::wav::{self, Sound};
 use crate::{
     from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2,
@@ -70,11 +71,12 @@ const ANIMA_DRAWS_FROM_NO_PICTURE: &str = "Anima cannot start from a picture yet
 const KREA2_DRAWS_FROM_NO_PICTURE: &str = "Krea 2 cannot start from a picture yet: its package \
      carries an image encoder, but the layer that reads one is not written";
 
-/// What the one voice there is, is called where a name is asked for.
+/// What the built-in stand-in voice is called where a name is asked for, and the voice the page
+/// has when `-voice` names none.
 ///
 /// A constant rather than a catalogue entry, because it is not published anywhere and cannot be
-/// fetched: it is in the binary. When a voice is published this becomes a row in [`hub`]'s
-/// catalogue like every other model, and this constant is what the page asks for until then.
+/// fetched: it is in the binary. A real voice is named by `-voice`, as a manifest on the disk --
+/// IndexTTS-2.5 is not published yet, so there is no catalogue row for it to be fetched by.
 pub const VOICE: &str = "tones";
 
 /// How many sizes a model has to name before its list is used instead of the one above.
@@ -143,12 +145,11 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
 
     // What is loaded to speak with.
     //
-    // Held beside the picture model rather than instead of it, which is right only for as long as
-    // what is behind this holds nothing: [`Tones`] is arithmetic and no weights. The first voice
-    // with a package behind it cannot sit on the card beside a twelve billion parameter picture
-    // model, so the day one lands, this and `model` become one slot that the two take turns in --
-    // the same swap `Command::Draw` already does between one picture model and the next, and it
-    // belongs here beside it.
+    // Beside the picture model when it is [`Tones`], which is arithmetic and no weights. A voice
+    // with a package behind it is not: IndexTTS-2.5 is five gigabytes, and it does not sit on a
+    // card beside a twelve billion parameter picture model. So a heavy voice and `model` take
+    // turns -- reading either puts the other down first, the same swap `Command::Draw` already
+    // does between one picture model and the next. See `voice_holds_weights`.
     let mut voice: Option<Box<dyn Voice>> = None;
     let mut speaking: Option<String> = None;
 
@@ -158,6 +159,11 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
             Command::Use(asked) => {
                 model = None;
                 in_memory = None;
+                if speaking.as_deref().is_some_and(voice_holds_weights) {
+                    voice = None;
+                    speaking = None;
+                    forget_the_voice(shared);
+                }
                 if read_model(shared, &asked, &mut model) {
                     in_memory = Some(asked);
                 }
@@ -167,10 +173,14 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
             // through letting go of them. Nothing is read back here: the next run reads what it
             // needs, which is the whole of what this program does with a model now.
             Command::UseDevice(runtime) => {
-                let had_weights = model.is_some();
+                let had_weights =
+                    model.is_some() || speaking.as_deref().is_some_and(voice_holds_weights);
                 model = None;
                 in_memory = None;
                 forget_the_weights(shared);
+                voice = None;
+                speaking = None;
+                forget_the_voice(shared);
                 // Where there were weights, and while `shared.runtime()` still names the device
                 // they were on -- which is the only device this can be asked of, and the one
                 // nothing here will allocate on again. Skipped where there were none, because a
@@ -191,6 +201,13 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                     model = None;
                     in_memory = None;
                     forget_the_weights(shared);
+
+                    // One card, taken in turns: see `voice` above.
+                    if speaking.as_deref().is_some_and(voice_holds_weights) {
+                        voice = None;
+                        speaking = None;
+                        forget_the_voice(shared);
+                    }
 
                     if read_model(shared, &job.model, &mut model) {
                         in_memory = Some(job.model.clone());
@@ -230,26 +247,45 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
             }
 
             Command::Speak(job) => {
-                // Read at the first run that needs it, exactly as a picture model is. There is
-                // nothing to fetch today and this costs nothing; what it is, is the place the
-                // fetch goes.
+                // Read at the first run that needs it, exactly as a picture model is.
                 if speaking.as_deref() != Some(job.voice.as_str()) {
                     voice = None;
                     speaking = None;
+
+                    // A voice with weights puts the picture model down first -- one card, taken
+                    // in turns. Tones has none and leaves it where it is.
+                    if voice_holds_weights(&job.voice) && model.is_some() {
+                        model = None;
+                        in_memory = None;
+                        forget_the_weights(shared);
+                    }
 
                     if read_voice(shared, &job.voice, &mut voice) {
                         speaking = Some(job.voice.clone());
                     }
                 }
 
-                // Nothing is let go of when a reading is stopped, unlike a drawing above. What is
-                // loaded to speak with is [`Tones`] -- two floats, on no device -- so there is
-                // nothing a stop could hand back. The first voice with a package behind it is the
-                // one that wants what `Command::Draw` does about a stop, and it wants it at the
-                // same time as it wants this slot and `model` to become one.
-                match &voice {
+                let ran = match &voice {
+                    // A stop asked for while the voice was being read is a stop to the reading
+                    // it was being read for, as it is for a picture.
+                    Some(_) if shared.interrupted() => Ran::Stopped,
                     Some(voice) => say(shared, voice.as_ref(), job),
-                    None => (),
+                    None => Ran::ToTheEnd,
+                };
+
+                // What `Command::Draw` does about a stop, for a voice that holds the card: the
+                // usual reason to press stop is that something else wants it. Tones holds
+                // nothing, so a stopped reading with it is only a message.
+                if let Some(said) = ran.stopped() {
+                    if speaking.as_deref().is_some_and(voice_holds_weights) {
+                        voice = None;
+                        speaking = None;
+                        forget_the_voice(shared);
+                        shared.say(said, false);
+                        give_the_memory_back(shared);
+                    } else {
+                        shared.say("stopped where it was", false);
+                    }
                 }
             }
         }
@@ -370,20 +406,34 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
     }
 }
 
-/// The only voice there is, as the screen describes it.
+/// The voice `asked` names, as the screen describes it, without reading any of it.
 ///
-/// What [`look_at`] is for a picture model: what can be said about a voice before any of it is
-/// read. It is a name today rather than a choice, because nothing is published to choose between
-/// -- so this constructs the one there is, asks it about itself, and lets it go again. The day
-/// there are two, this takes a name the way `look_at` does and reads a manifest for the rest.
-pub fn look_at_voice() -> Spoken {
-    describe_voice(&Tones::new(), false)
+/// What [`look_at`] is for a picture model. [`VOICE`] is [`Tones`], built into the binary, which
+/// can be constructed and asked about itself for nothing. Anything else is a package -- a manifest
+/// on the disk, or a published name -- and what can be said of one before minutes of reading is
+/// what its kind says: IndexTTS-2.5's rate and starting values, and that it is not in memory. The
+/// read itself is [`read_voice`], at the first run that wants it, and it says so if the package
+/// turns out to be something else.
+pub fn look_at_voice(asked: &str) -> Spoken {
+    if asked == VOICE {
+        return describe_voice(asked, &Tones::new(), false);
+    }
+
+    Spoken {
+        name: asked.to_string(),
+        full_name: IndexTts::NAME.to_string(),
+        in_memory: false,
+        defaults: IndexTts::DEFAULTS,
+        rate: indextts::RATE,
+        no_likeness_because: None,
+        not_a_voice_because: None,
+    }
 }
 
-/// What a voice says about itself, in the words the screen shows.
-fn describe_voice(voice: &dyn Voice, in_memory: bool) -> Spoken {
+/// What a voice says about itself, in the words the screen shows, under the name it was asked for.
+fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken {
     Spoken {
-        name: VOICE.to_string(),
+        name: name.to_string(),
         full_name: voice.name().to_string(),
         in_memory,
         defaults: voice.defaults(),
@@ -393,29 +443,98 @@ fn describe_voice(voice: &dyn Voice, in_memory: bool) -> Spoken {
     }
 }
 
-/// Reads the voice `asked` names into `voice`, and says on screen how it went.
-///
-/// The mirror of [`read_model`], and shaped like it rather than like what it currently does:
-/// there is one voice, it is built into the binary, and constructing it is a struct with two
-/// floats in it. What earns the shape is the seam -- a voice with a package behind it is fetched
-/// and read here, reporting through the same [`Doing::Fetching`] and [`Doing::Reading`] the
-/// picture models already report through, and nothing above this function finds out.
-fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) -> bool {
-    if asked != VOICE {
-        shared.say(format!("there is no voice called \"{asked}\""), true);
-        return false;
-    }
+/// Whether the voice `asked` names has weights behind it -- which is to say, whether it can share
+/// the card with a picture model. [`Tones`] is two floats and can; a package cannot.
+fn voice_holds_weights(asked: &str) -> bool {
+    asked != VOICE
+}
 
-    let read = Tones::new();
-    let described = describe_voice(&read, true);
-    *voice = Some(Box::new(read));
+/// Reads the voice `asked` names into `voice`, and says on screen how it went. True where it is
+/// now ready to speak with.
+///
+/// The mirror of [`read_model`]: a package is fetched if it is a name and read onto the device,
+/// reporting through the same [`Doing::Fetching`] and [`Doing::Reading`] the picture models
+/// report through, and nothing above this function finds out which kind of voice it was.
+fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) -> bool {
+    let read: Result<Box<dyn Voice>, Error> = match asked == VOICE {
+        true => Ok(Box::new(Tones::new())),
+        false => load_voice(shared, asked).map(|read| Box::new(read) as Box<dyn Voice>),
+    };
+
+    match read {
+        Ok(read) => {
+            let described = describe_voice(asked, read.as_ref(), true);
+            *voice = Some(read);
+
+            shared.change(|session| {
+                session.voice = Some(described);
+                session.doing = Doing::Nothing;
+            });
+            if voice_holds_weights(asked) {
+                shared.say("ready", false);
+            }
+            true
+        }
+        Err(error) => {
+            shared.change(|session| session.doing = Doing::Nothing);
+            // A stop is not a failure -- see `read_model`, which says the same thing.
+            shared.say(error.to_string(), !hub::stopped(&error));
+            false
+        }
+    }
+}
+
+/// Fetches the voice package `asked` names, if it is a name, and reads it onto the device.
+fn load_voice(shared: &Shared, asked: &str) -> Result<IndexTts, Error> {
+    // The same rules `load` keeps for a picture model: a stop from before this began is not this
+    // fetch's business, and the name on the screen is the tail of a path rather than all of it.
+    shared.carry_on();
+
+    let name = match asked.rsplit_once('/') {
+        Some((_, file)) if !file.is_empty() => file.to_string(),
+        _ => asked.to_string(),
+    };
 
     shared.change(|session| {
-        session.voice = Some(described);
-        session.doing = Doing::Nothing;
+        session.doing = Doing::Fetching(Fetch {
+            model: name.clone(),
+            hub: None,
+            file: String::new(),
+            done: 0,
+            total: None,
+            part: 0,
+            parts: 0,
+        })
     });
 
-    true
+    let path = hub::resolve_reporting(
+        asked,
+        &mut |progress| report_fetch(shared, &name, progress),
+        &|| shared.interrupted(),
+    )?;
+
+    shared.change(|session| {
+        session.doing = Doing::Reading {
+            model: name.clone(),
+        }
+    });
+
+    let runtime = shared.runtime();
+    Ok(IndexTts::from_manifest(
+        runtime.device(),
+        runtime.residency(),
+        &Manifest::open(&path)?,
+    )?)
+}
+
+/// Says on screen that the voice is not in memory, leaving it chosen -- what
+/// [`forget_the_weights`] is for a picture model.
+fn forget_the_voice(shared: &Shared) {
+    shared.change(|session| {
+        if let Some(spoken) = &mut session.voice {
+            spoken.in_memory = false;
+        }
+    });
 }
 
 /// What a kind of model implies for the screen before any of its weights are read: what to ask
@@ -773,7 +892,7 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
 ///
 /// The mirror of [`draw`]: the same claim, the same reporter, the same three ways out -- a
 /// waveform, a stop, or a message on the bar.
-fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) {
+fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
     shared.carry_on();
     let started = Instant::now();
     shared.change(|session| {
@@ -814,7 +933,8 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) {
             Ok(sound) => Some(sound),
             Err(error) => {
                 shared.change(|session| session.doing = Doing::Nothing);
-                return shared.say(format!("the recording to sound like: {error}"), true);
+                shared.say(format!("the recording to sound like: {error}"), true);
+                return Ran::ToTheEnd;
             }
         },
         None => None,
@@ -828,9 +948,10 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) {
         // speech is a couple of megabytes that nothing on the other side would do anything with
         // but hand to a file.
         Ok(Some(sound)) => keep_sound(&sound),
+        // Said by the worker, which also knows whether the voice is being put down with it.
         Ok(None) => {
             shared.change(|session| session.doing = Doing::Nothing);
-            return shared.say("stopped where it was", false);
+            return Ran::Stopped;
         }
         Err(error) => Err(error.into()),
     };
@@ -839,7 +960,8 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) {
         Ok(kept) => kept,
         Err(error) => {
             shared.change(|session| session.doing = Doing::Nothing);
-            return shared.say(error.to_string(), true);
+            shared.say(error.to_string(), true);
+            return Ran::ToTheEnd;
         }
     };
 
@@ -863,6 +985,7 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) {
         session.doing = Doing::Nothing;
         session.note = None;
     });
+    Ran::ToTheEnd
 }
 
 /// Writes the waveform a reading ends with into the first `waifu-NNNN.wav` here that nothing else

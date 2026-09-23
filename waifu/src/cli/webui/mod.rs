@@ -102,6 +102,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     }
 
     let model = with_usage(args.model())?.map(str::to_string);
+    let voice = args.voice().unwrap_or(worker::VOICE).to_string();
     let runtime = with_usage(args.device())?.resolve();
     let wanted_port = with_usage(args.port())?;
 
@@ -109,10 +110,10 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     let (commands, waiting) = channel::<Command>();
 
     // The voice the speech tab reads with, described before any page has opened. The boxes on
-    // that tab are a voice's own numbers and there is nothing else to fill them from -- and
-    // unlike a picture model, there is nothing to choose and nothing to fetch, so saying what it
-    // is costs the same as not saying it.
-    shared.change(|session| session.voice = Some(worker::look_at_voice()));
+    // that tab are a voice's own numbers and there is nothing else to fill them from. Described
+    // rather than read: a voice with a package behind it is read at the first reading that wants
+    // it, exactly as a picture model is at the first picture.
+    shared.change(|session| session.voice = Some(worker::look_at_voice(&voice)));
 
     // A picture named on the command line only fills the box. Everything about a run is
     // changeable between runs, and this is no different: it is where to start, not what to be
@@ -272,7 +273,7 @@ mod tests {
         // The same thing `main` does before it opens a browser: there is one voice and it is
         // described before any page reads the state. A server without it is a server no run of
         // this program produces.
-        shared.change(|session| session.voice = Some(worker::look_at_voice()));
+        shared.change(|session| session.voice = Some(worker::look_at_voice(worker::VOICE)));
 
         // Left running for the rest of the test process. There is no way to stop it short of the
         // process ending, which is the same shape the program has. What it answers with is

@@ -428,6 +428,15 @@ pub struct Session {
     /// "nothing has happened" from "everything happened and finished" without comparing the whole
     /// of it. A run that starts and ends between two polls still moves this.
     pub revision: u64,
+    /// The [`Session::revision`] the held picture last changed at, and the held recording.
+    ///
+    /// What the page puts on the end of the address it shows each one from, so that the browser
+    /// fetches it again when it is a different picture or recording and not otherwise. It used
+    /// the session's own revision for that, which moves on every token of a reading and every
+    /// step of a drawing -- and the recording's player reloaded twice a second for as long as a
+    /// run went on, which is what somebody listening to it noticed.
+    pub picture_revision: u64,
+    pub recording_revision: u64,
 }
 
 impl Session {
@@ -440,6 +449,8 @@ impl Session {
             gallery: Vec::new(),
             clips: Vec::new(),
             revision: 0,
+            picture_revision: 0,
+            recording_revision: 0,
         }
     }
 }
@@ -552,7 +563,7 @@ impl Shared {
         *self.held() = Some(bytes);
         // Counted as news: the page shows whether it has a picture to draw from, and a run
         // started from `-i` puts one there before any page has opened.
-        self.change(|_| ());
+        self.change(|session| session.picture_revision = session.revision + 1);
     }
 
     /// A copy of the picture being held, for whoever is about to do something with it.
@@ -566,7 +577,7 @@ impl Shared {
 
     pub fn forget_upload(&self) {
         *self.held() = None;
-        self.change(|_| ());
+        self.change(|session| session.picture_revision = session.revision + 1);
     }
 
     /// Whether there is a picture to draw from, which is the part of it the page is told about.
@@ -580,7 +591,7 @@ impl Shared {
 
     pub fn hold_recording(&self, bytes: Vec<u8>) {
         *self.recorded() = Some(bytes);
-        self.change(|_| ());
+        self.change(|session| session.recording_revision = session.revision + 1);
     }
 
     /// A copy of the recording being held, for the run that is about to be given it.
@@ -590,7 +601,7 @@ impl Shared {
 
     pub fn forget_recording(&self) {
         *self.recorded() = None;
-        self.change(|_| ());
+        self.change(|session| session.recording_revision = session.revision + 1);
     }
 
     /// Whether there is a recording to sound like, which is the part of it the page is told.
@@ -723,6 +734,8 @@ impl Shared {
                 .collect::<Vec<_>>(),
             "holding_a_picture": self.holding_a_picture(),
             "holding_a_recording": self.holding_a_recording(),
+            "picture_revision": session.picture_revision,
+            "recording_revision": session.recording_revision,
             "models": models,
             "model": model,
             "voice": voice,
@@ -1155,6 +1168,39 @@ mod tests {
         // Deleting what is not there leaves the rest alone rather than failing.
         shared.forget_clip("waifu-0001.wav");
         assert_eq!(shared.session().clips.len(), 1);
+    }
+
+    /// What the page puts on the end of the recording's address moves when the recording does and
+    /// not when anything else does. A reading reports every token, and the player beside it
+    /// reloaded on every one while the address carried the session's revision instead.
+    #[test]
+    fn a_held_file_is_only_news_when_it_changes() {
+        let shared = a_session();
+
+        shared.hold_recording(vec![1]);
+        shared.hold_upload(vec![2]);
+        let (recording, picture) = {
+            let session = shared.session();
+            (session.recording_revision, session.picture_revision)
+        };
+
+        // A run's progress, many times over.
+        for _ in 0..5 {
+            shared.change(|session| session.note = None);
+        }
+        let described = shared.describe(Value::Null);
+        assert_eq!(described["recording_revision"], recording);
+        assert_eq!(described["picture_revision"], picture);
+
+        // Each moves with its own file, and neither with the other's.
+        shared.hold_recording(vec![3]);
+        assert!(shared.session().recording_revision > recording);
+        assert_eq!(shared.session().picture_revision, picture);
+
+        let recording = shared.session().recording_revision;
+        shared.forget_upload();
+        assert!(shared.session().picture_revision > picture);
+        assert_eq!(shared.session().recording_revision, recording);
     }
 
     #[test]
