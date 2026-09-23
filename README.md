@@ -53,14 +53,8 @@ waifu is at http://127.0.0.1:7860
 
 ![The page: the kind of run down the left, the model and the settings for it in the middle, and the picture it drew on the right](docs/libwaifu-webui.webp)
 
-The page has three tabs: txt2img, img2img, and text2speech. The third needs `-voice` named at the
-command line -- `waifu draw -voice indextts:base` -- to read with
-[IndexTTS-2.5](docs/indextts.md), a few seconds of somebody speaking in and the sentence, in that
-voice, out. Without it the tab falls back to `Tones`, the stand-in built into the binary that
-makes a pitched tone where each syllable goes; it is not speech and the page says so above every
-setting on that tab. [docs/speech.md](docs/speech.md) has the seam between the page and the model:
-what the box, the recording, the settings, the bar and the player ask of a voice, and the five
-methods a speech model implements to answer.
+The page has three tabs: txt2img, img2img, and text2speech, the last of which needs `-voice`
+named at the command line -- see [Supported voices](#supported-voices) above.
 
 ## Recent updates
 
