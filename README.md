@@ -19,6 +19,14 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 | `krea2:turbo` | Krea 2 Turbo | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 | `krea2:turbo-fp8` | Krea 2 Turbo, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 
+## Supported voices
+
+`-voice` takes a name the same way `-m` does, resolved and fetched off the same two hubs.
+
+| name | model | published as |
+|---|---|---|
+| `indextts:base` | IndexTTS 2.5 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-indextts-2.5)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-indextts-2.5)\] |
+
 ## Low memory mode
 
 `-device cuda_cpu_offload` keeps the weights in host memory and moves each one onto the card as it
@@ -45,16 +53,19 @@ waifu is at http://127.0.0.1:7860
 
 ![The page: the kind of run down the left, the model and the settings for it in the middle, and the picture it drew on the right](docs/libwaifu-webui.webp)
 
-The page has three tabs: txt2img, img2img, and text2speech. The third one is a page ahead of its
-model -- there is no published voice for libwaifu yet, and what reads a sentence out is a stand-in
-built into the binary that makes a pitched tone where each syllable goes. It is not speech and the
-page says so above every setting on that tab. What is real is everything around it: the box, the
-recording to sound like, the settings, the bar, the clip on the disk and the player it comes back
-in. [docs/speech.md](docs/speech.md) is what is a stand-in, what is not, and the five methods a
-speech model implements to take its place.
+The page has three tabs: txt2img, img2img, and text2speech. The third needs `-voice` named at the
+command line -- `waifu draw -voice indextts:base` -- to read with
+[IndexTTS-2.5](docs/indextts.md), a few seconds of somebody speaking in and the sentence, in that
+voice, out. Without it the tab falls back to `Tones`, the stand-in built into the binary that
+makes a pitched tone where each syllable goes; it is not speech and the page says so above every
+setting on that tab. [docs/speech.md](docs/speech.md) has the seam between the page and the model:
+what the box, the recording, the settings, the bar and the player ask of a voice, and the five
+methods a speech model implements to answer.
 
 ## Recent updates
 
+- [2026-09-23] IndexTTS-2.5 speaks here, as `indextts:base` -- the first published voice, and the
+  text2speech tab's first real model.
 - [2026-09-18] Krea 2 Turbo draws here: a third architecture, exported from the gated release
   rather than published from this repository.
 - [2026-09-15] The screen is a page in a browser rather than a screenful of terminal: txt2img and

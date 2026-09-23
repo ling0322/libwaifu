@@ -149,9 +149,19 @@ impl Watching<'_> {
     }
 }
 
+/// What a name resolves to, once fetched: something `-m` draws pictures with, or something
+/// `-voice` reads sentences with. The two are never offered in the same picker -- [`listed`] is
+/// pictures only -- but they are fetched, cached and named through the one table and the one set
+/// of functions, since none of that differs by kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Kind {
+    Picture,
+    Voice,
+}
+
 /// A model that has a name, and where it is published.
 struct Published {
-    /// The name `-m` takes, version and all.
+    /// The name `-m` or `-voice` takes, version and all.
     name: &'static str,
     /// Human-readable name shown in the picker alongside the short name.
     full_name: &'static str,
@@ -162,8 +172,12 @@ struct Published {
     /// Whether what it was trained on means it draws explicit pictures readily, prompted for them
     /// or not. A property of the weights rather than of any one run, which is why it is written
     /// here beside the repository and not worked out from a prompt: the list can say what a model
-    /// is before it is chosen, and a screen can leave it out until somebody asks to see it.
+    /// is before it is chosen, and a screen can leave it out until somebody asks to see it. Only
+    /// meaningful for [`Kind::Picture`] -- always `false` on a voice, which [`listed`] never
+    /// offers a screen anyway.
     explicit: bool,
+    /// Which picker this belongs in.
+    kind: Kind,
 }
 
 /// Every model this build knows by name.
@@ -174,6 +188,7 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-sdxl-base-1.0",
         manifest: "sdxl-base-1.0.yaml",
         explicit: false,
+        kind: Kind::Picture,
     },
     Published {
         name: "sdxl:wai:v17",
@@ -181,6 +196,7 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-wai-illustrious-v17",
         manifest: "wai-illustrious-v17.yaml",
         explicit: true,
+        kind: Kind::Picture,
     },
     Published {
         name: "sdxl:noob:v1.1",
@@ -188,6 +204,7 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-noobai-xl-v1.1",
         manifest: "noobai-xl-v1.1.yaml",
         explicit: true,
+        kind: Kind::Picture,
     },
     Published {
         name: "sdxl:illust:v2.0",
@@ -195,6 +212,7 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-illustrious-xl-v2.0",
         manifest: "illustrious-xl-v2.0.yaml",
         explicit: true,
+        kind: Kind::Picture,
     },
     Published {
         name: "sdxl:obsession:v24",
@@ -202,6 +220,7 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-one-obsession-v24",
         manifest: "one-obsession-v24.yaml",
         explicit: true,
+        kind: Kind::Picture,
     },
     Published {
         name: "anima:turbo:v1.1",
@@ -209,6 +228,7 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-anima-turbo-v1.1",
         manifest: "anima-turbo-v1.1.yaml",
         explicit: true,
+        kind: Kind::Picture,
     },
     Published {
         name: "krea2:turbo:v1.0",
@@ -216,6 +236,7 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-krea2-turbo",
         manifest: "krea2-turbo.yaml",
         explicit: false,
+        kind: Kind::Picture,
     },
     // The same weights with the matrices quantized, out of the same repository: half the package
     // and half the card, for about four times the error in the text encoder. A name of its own
@@ -226,6 +247,17 @@ const CATALOG: &[Published] = &[
         repo: "ling0322/libwaifu-krea2-turbo",
         manifest: "krea2-turbo-fp8.yaml",
         explicit: false,
+        kind: Kind::Picture,
+    },
+    // The only voice here so far, and the release IndexTeam published rather than a fine tune --
+    // `sdxl:base` is this family's nearest precedent, hence the `base` in the name.
+    Published {
+        name: "indextts:base:v2.5",
+        full_name: "IndexTTS 2.5",
+        repo: "ling0322/libwaifu-indextts-2.5",
+        manifest: "indextts25.yaml",
+        explicit: false,
+        kind: Kind::Voice,
     },
 ];
 
@@ -352,6 +384,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("anima:turbo", "anima:turbo:v1.1"),
     ("krea2:turbo", "krea2:turbo:v1.0"),
     ("krea2:turbo-fp8", "krea2:turbo-fp8:v1.0"),
+    ("indextts:base", "indextts:base:v2.5"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -568,7 +601,10 @@ pub fn full_name(name: &str) -> Option<&'static str> {
         .map(|m| m.full_name)
 }
 
-/// One model a screen can offer, and what is on the disk for it.
+/// One picture model a screen can offer, and what is on the disk for it.
+///
+/// Pictures only -- a voice is named by `-voice` directly, not chosen from a list of these, and
+/// [`listed`] leaves every [`Kind::Voice`] entry out for exactly that reason.
 pub struct Listed {
     pub name: &'static str,
     pub full_name: &'static str,
@@ -581,14 +617,16 @@ pub struct Listed {
     pub explicit: bool,
 }
 
-/// The models to offer, in the order a list should show them.
+/// The picture models to offer, in the order a list should show them.
 ///
 /// Versioned names are left out. Someone who wants `sdxl:base:v1.0` in particular can ask for it
-/// by name, and a list is for someone who does not yet know what to ask for.
+/// by name, and a list is for someone who does not yet know what to ask for. Voices are left out
+/// too -- the picture picker is not where one is chosen.
 pub fn listed() -> Vec<Listed> {
     names()
         .into_iter()
         .filter(|name| name.matches(':').count() == 1)
+        .filter(|name| published(name).is_some_and(|model| model.kind == Kind::Picture))
         .map(|name| Listed {
             name,
             full_name: full_name(name).unwrap_or(""),
@@ -1503,6 +1541,21 @@ mod tests {
     }
 
     #[test]
+    fn a_voice_is_named_and_fetched_but_not_offered_as_a_picture() {
+        // `-voice` resolves a voice exactly the way `-m` resolves a picture -- same table, same
+        // functions -- but `listed()` is what feeds the picture picker, and a voice put there
+        // would be a name someone could click that fails the moment it is chosen.
+        assert!(published("indextts:base").is_some());
+        assert_eq!(full_name("indextts:base"), Some("IndexTTS 2.5"));
+        assert!(names().contains(&"indextts:base"));
+
+        assert!(
+            !listed().iter().any(|model| model.name == "indextts:base"),
+            "a voice is in the picture picker"
+        );
+    }
+
+    #[test]
     fn the_name_a_model_used_to_have_still_finds_it() {
         // `sdxl:noob:v11` went out in the README and is in scripts by now. It has to keep meaning
         // NoobAI-XL v1.1, whatever the catalogue calls that today.
@@ -1540,10 +1593,11 @@ mod tests {
         // A name is `<family>:<model>:<version>`, and what every one of them names is a manifest.
         // Cheap to check, and it is the sort of thing a copied table entry gets wrong.
         //
-        // The family is one of the kinds this build can draw with rather than anything at all: a
-        // name is what someone types before they have the model, so it should say what they are
-        // about to fetch. Add to this list when the runtime learns another.
-        const FAMILIES: [&str; 3] = ["sdxl", "anima", "krea2"];
+        // The family is one of the kinds this build can fetch a model of rather than anything at
+        // all: a name is what someone types before they have the model, so it should say what
+        // they are about to fetch. Add to this list when the runtime learns another -- of a
+        // picture model or, as `indextts` did, of a voice.
+        const FAMILIES: [&str; 4] = ["sdxl", "anima", "krea2", "indextts"];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
