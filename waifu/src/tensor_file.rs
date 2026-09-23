@@ -66,7 +66,7 @@ const HEADER_LENGTH_BYTES: usize = 8;
 ///
 /// For what is not a model: the reference activations a test checks a pass against, a file being
 /// looked into. A model is read with
-/// [`ParamSource::from_files`](crate::flint::ParamSource::from_files) instead, which puts each
+/// [`Weights::from_files`](crate::flint::Weights::from_files) instead, which puts each
 /// weight where it will be used as it is read rather than holding all of them here first.
 pub fn read_safetensors(paths: &[impl AsRef<Path>]) -> Result<HashMap<String, Tensor>> {
     collect(paths, &mut Ok)

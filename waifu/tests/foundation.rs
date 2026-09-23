@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use waifu::flint::{check_parameters, Graph, Ir, ParamSource, Residency, RunContext};
+use waifu::flint::{check_parameters, Graph, Ir, ParamSource, Residency, RunContext, Weights};
 use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
 use waifu::{parse_safetensors, read_safetensors, Embedding, Linear, WeightFormat};
 
@@ -74,7 +74,7 @@ fn source(
     device: Device,
     residency: Residency,
 ) -> Rc<dyn ParamSource> {
-    <dyn ParamSource>::from_bytes(&write_params(tensors), device, residency).unwrap()
+    Rc::new(Weights::from_bytes(&write_params(tensors), device, residency).unwrap())
 }
 
 /// The same, for a file whose tensors are not all one element type: each is given the name
@@ -306,18 +306,14 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
     let x = g.input("x");
     g.output("y", Linear::graph(&g.subgraph("proj"), x, 16, 8, false));
 
-    let weights =
-        <dyn ParamSource>::from_bytes(&bytes, Device::Cuda, Residency::Device).unwrap();
+    let weights = Weights::from_bytes(&bytes, Device::Cuda, Residency::Device).unwrap();
     assert_eq!(
         weights.load("proj.weight", &[8, 16]).unwrap().dtype(),
         DType::Fp8E4M3,
         "the elements are read as themselves"
     );
     assert_eq!(
-        weights
-            .load("proj.weight.scale", &[8])
-            .unwrap()
-            .dtype(),
+        weights.load("proj.weight.scale", &[8]).unwrap().dtype(),
         DType::Float,
         "a scale is not narrowed to what the device computes in"
     );
@@ -329,9 +325,7 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
         .cast(DType::Float16)
         .unwrap();
     let ir = Ir::compile(&g);
-    let outputs = ir
-        .run(&RunContext::new(weights.as_ref()).input("x", &x))
-        .unwrap();
+    let outputs = ir.run(&RunContext::new(&weights).input("x", &x)).unwrap();
 
     // Sixteen ones against a row worth its scale, and every one of these is exact in float16.
     let expected: Vec<f32> = scales.iter().map(|scale| scale * 16.0).collect();

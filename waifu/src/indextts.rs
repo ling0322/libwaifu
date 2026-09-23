@@ -89,6 +89,7 @@ use std::rc::Rc;
 use crate::bigvgan::{BigVgan, BigVganConfig};
 use crate::flint::{
     functional as F, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,
+    Weights,
 };
 use crate::indextts_gpt::{Gpt, Sampling};
 use crate::indextts_normalize::{self, Language};
@@ -249,7 +250,11 @@ impl IndexTts {
 
         // Every model here runs in full precision; see the module note.
         let dtype = DType::Float;
-        let weights = <dyn ParamSource>::from_files(&manifest.weight_paths()?, device, residency)?;
+        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+            &manifest.weight_paths()?,
+            device,
+            residency,
+        )?);
 
         Ok(IndexTts {
             settings: Settings::from_manifest(manifest)?,

@@ -99,9 +99,10 @@ pub mod wav;
 mod yaml;
 
 /// The tensor types a caller of this crate needs to name, re-exported so that the common case
-/// does not have to reach into [`flint`]. [`Residency`](flint::Residency) is here for the same
-/// reason: asking for a model is where it has to be said.
-pub use flint::{DType, Device, Fp8Tensor, Nvfp4Tensor, Residency, WeightFormat};
+/// does not have to reach into [`flint`]. [`Residency`](flint::Residency) and
+/// [`Weights`](flint::Weights) are here for the same reason: asking for a model is where they have
+/// to be said.
+pub use flint::{DType, Device, Fp8Tensor, Nvfp4Tensor, Residency, WeightFormat, Weights};
 
 pub use anima::Anima;
 pub use error::{Error, Result};

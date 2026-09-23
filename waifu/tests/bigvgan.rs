@@ -40,7 +40,7 @@ use std::rc::Rc;
 
 use waifu::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
 use waifu::bigvgan::{BigVgan, BigVganConfig};
-use waifu::flint::{DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor};
+use waifu::flint::{DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Weights};
 use waifu::read_safetensors;
 
 const CPU: Device = Device::Cpu;
@@ -408,8 +408,10 @@ fn exported(name: &str) -> HashMap<String, Tensor> {
 #[ignore = "needs the exported BigVGAN checkpoint in models/"]
 fn the_released_vocoder_is_the_released_vocoder() {
     let name = "bigvgan-22khz-80band.safetensors";
-    let weights = <dyn ParamSource>::from_files(&[models_dir().join(name)], CPU, Residency::Device)
-        .unwrap_or_else(|error| panic!("{name}: {error}\nExport it first; see `exported`."));
+    let weights: Rc<dyn ParamSource> = Rc::new(
+        Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device)
+            .unwrap_or_else(|error| panic!("{name}: {error}\nExport it first; see `exported`.")),
+    );
     let vocoder = BigVgan::build(
         BigVganConfig::v2_22khz_80band_256x(),
         "",

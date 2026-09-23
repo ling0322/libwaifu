@@ -104,7 +104,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::rc::Rc;
 
 use super::{functional as F, Bound, DType, Device, Tensor};
 use crate::error::{Error, Result};
@@ -157,7 +156,7 @@ impl fmt::Display for Inst {
 ///
 /// Where the weights are -- on the card, or page-locked on the host -- was decided when the source
 /// was built, so the one thing a run asks of it is a weight, on the device the run is going to.
-/// [`ParamSource::from_files`] is how a model is read into one.
+/// [`Weights`] is what a model is read into.
 ///
 /// A weight is asked for by the name the package holds it under, because that is all a graph
 /// knows: there is no build step that could have handed out anything shorter.
@@ -305,138 +304,138 @@ impl<'a> RunContext<'a> {
     }
 }
 
-impl dyn ParamSource {
+/// A model's weights, read out of its package and kept where [`Residency`] says.
+///
+/// One map of tensors, whichever residency: on the card for [`Residency::Device`], page-locked on
+/// the host for [`Residency::LowVram`]. What differs is only whether a [`load`](ParamSource::load)
+/// has to move the weight -- a kept one is already where the run wants it and is handed over as a
+/// handle, and a waiting one is copied across the bus, to be given back at the `free` after its
+/// last reader.
+///
+/// # What low-vram costs
+///
+/// The copy, once per load per run, which is the whole model across the bus for every sampler
+/// step. So it is slower than keeping the weights on the card and always will be; it is the mode
+/// for when the alternative is not drawing at all.
+///
+/// And the model's size in host memory the driver has locked, for as long as the model is held.
+/// Page-locked once, when the weights are read, rather than for each copy: the copy engine reads
+/// page-locked memory directly where it stages a pageable source through a bounce buffer of its
+/// own, and a page-locked copy made for one move and freed after it would pay for the locking
+/// every step and save nothing.
+pub struct Weights {
+    /// Keyed the way the package keys them, which is what a graph's `load` asks for.
+    tensors: HashMap<String, Tensor>,
+    /// Where a run wants a weight, which is the device the model was built for.
+    device: Device,
+}
+
+impl Weights {
     /// Every weight of the safetensors files at `paths`, for a model running on `device` with its
     /// weights held the way `residency` says.
     ///
     /// The one way a model's weights are read. Each file is read in turn and each of its weights
-    /// is put where it is going as it is read -- on the card for [`Residency::Device`], page-locked
-    /// on the host for [`Residency::LowVram`] -- so what the host holds on top of that at any
-    /// moment is one file, and nothing afterwards reads the disk.
-    ///
-    /// Behind an [`Rc`] because that is what the halves of a model share: SDXL is four passes
-    /// built out of one package, and the point of reading it once is that they all read the same
-    /// one afterwards.
+    /// is put where it is going as it is read, so what the host holds on top of that at any moment
+    /// is one file, and nothing afterwards reads the disk.
     ///
     /// A low-vram run on anything but CUDA is refused before a byte is read.
     pub fn from_files(
         paths: &[impl AsRef<Path>],
         device: Device,
         residency: Residency,
-    ) -> Result<Rc<dyn ParamSource>> {
-        build(device, residency, &mut |place| {
+    ) -> Result<Weights> {
+        Weights::read(device, residency, &mut |place| {
             tensor_file::collect(paths, place)
         })
     }
 
     /// The same, out of one file's bytes already in hand rather than off the disk.
-    pub fn from_bytes(
-        bytes: &[u8],
-        device: Device,
-        residency: Residency,
-    ) -> Result<Rc<dyn ParamSource>> {
-        build(device, residency, &mut |place| {
+    pub fn from_bytes(bytes: &[u8], device: Device, residency: Residency) -> Result<Weights> {
+        Weights::read(device, residency, &mut |place| {
             tensor_file::collect_bytes(bytes, place)
+        })
+    }
+
+    /// How many weights there are.
+    pub fn len(&self) -> usize {
+        self.tensors.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tensors.is_empty()
+    }
+
+    /// The weights `read` hands over, each `retype`d and put where `residency` keeps it as it
+    /// arrives.
+    ///
+    /// `retype` runs before the move rather than after it, because a conversion is cheaper on a
+    /// tensor that has not been sent anywhere -- and page-locked host memory has no operators to
+    /// convert with at all.
+    fn read(device: Device, residency: Residency, read: &mut Read<'_>) -> Result<Weights> {
+        if !residency.works_on(device) {
+            return Err(Error::model(format!(
+                "a low-vram run waits in page-locked host memory, which is cuda's to hand out, \
+                 so it has nothing to offer {}",
+                device.name()
+            )));
+        }
+
+        let computes_in = F::default_float_type(device)?;
+        let kept_on = match residency {
+            Residency::Device => device,
+            Residency::LowVram => Device::CudaHost,
+        };
+
+        Ok(Weights {
+            tensors: read(&mut |tensor| Ok(retype(tensor, computes_in)?.to_device(kept_on)?))?,
+            device,
         })
     }
 }
 
-/// How a package is read, handed the step that puts each tensor where it is going.
+/// How a package is read, handed the step that puts each tensor where it is kept.
 type Read<'a> =
     dyn FnMut(&mut dyn FnMut(Tensor) -> Result<Tensor>) -> Result<HashMap<String, Tensor>> + 'a;
 
-/// A source whose weights `read` hands over, each `retype`d and moved as it arrives.
-///
-/// `retype` runs before the move rather than after it, because a conversion is cheaper on a tensor
-/// that has not been sent anywhere -- and page-locked host memory has no operators to convert with
-/// at all.
-fn build(device: Device, residency: Residency, read: &mut Read<'_>) -> Result<Rc<dyn ParamSource>> {
-    if !residency.works_on(device) {
-        return Err(cannot_pin(device));
-    }
-
-    let computes_in = F::default_float_type(device)?;
-    let to = match residency {
-        Residency::Device => device,
-        Residency::LowVram => Device::CudaHost,
-    };
-    let weights = read(&mut |tensor| Ok(retype(tensor, computes_in)?.to_device(to)?))?;
-
-    Ok(match residency {
-        // Already where a run wants them, so a load is a lookup in the map.
-        Residency::Device => Rc::new(weights),
-        Residency::LowVram => Rc::new(Pinned {
-            host: weights,
-            device,
-        }),
-    })
-}
-
-/// Every weight of a model, page-locked on the host, and put on the device one load at a time.
-///
-/// What [`Residency::LowVram`] reads a model into, for a card the model does not fit on. A load
-/// is the copy across the bus, and the `free` the compiler put after the weight's last reader is
-/// the card taking those bytes back -- so the device holds what the pass is using and not the
-/// model.
-///
-/// # What it costs
-///
-/// The copy, once per load per run, which is the whole model across the bus for every sampler
-/// step. So this is slower than keeping the weights on the card and always will be; it is the mode for when the
-/// alternative is not drawing at all.
-///
-/// And the model's size in host memory the driver has locked, for as long as the model is held.
-/// Page-locked once, here, rather than for each copy, because the copy engine reads page-locked
-/// memory directly where it stages a pageable source through a bounce buffer of its own -- and a
-/// page-locked copy made for one move and freed after it would pay for the locking every step and
-/// save nothing.
-struct Pinned {
-    /// The weights, in memory the CUDA driver page-locked. Keyed the way the package keys them,
-    /// which is what a graph's `load` asks for.
-    host: HashMap<String, Tensor>,
-    /// Where a load puts a weight, which is the device the model was built for.
-    device: Device,
-}
-
-impl ParamSource for Pinned {
-    /// The copy across the bus, which is what this whole mode is.
+impl ParamSource for Weights {
+    /// The weight, where the run wants it: a handle on it if it is already there, and the copy
+    /// across the bus if it is waiting on the host.
+    ///
+    /// Asked of the device rather than assumed, because `to_device` copies whether or not the
+    /// tensor has anywhere to go -- a kept weight moved "to" the card it is on would be a second
+    /// copy of the model, one weight at a time, every step.
     ///
     /// Synchronous, because the instruction after this one reads what it returns and there is
     /// nothing else for the host to be doing in between.
     fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        Ok(held(&self.host, name, shape)?.to_device(self.device)?)
+        let held = held(&self.tensors, name, shape)?;
+        match held.device() == self.device {
+            true => Ok(held.clone()),
+            false => Ok(held.to_device(self.device)?),
+        }
     }
 
     fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
-        self.host.get(name).map(|tensor| tensor.shape())
+        self.tensors.get(name).map(|tensor| tensor.shape())
     }
 
     fn has(&self, name: &str) -> bool {
-        self.host.contains_key(name)
+        self.tensors.contains_key(name)
     }
 
     /// Asked of the map, which is the reason `check` is not `load` with its result dropped:
-    /// checking a model this way moves none of it.
+    /// checking a low-vram model this way moves none of it.
     fn check(&self, name: &str, shape: &[i32]) -> Result<()> {
-        held(&self.host, name, shape).map(drop)
+        held(&self.tensors, name, shape).map(drop)
     }
 }
 
-/// What a low-vram run on anything but CUDA is told, from wherever it is asked.
-fn cannot_pin(device: Device) -> Error {
-    Error::model(format!(
-        "a low-vram run waits in page-locked host memory, which is cuda's to hand out, so it has \
-         nothing to offer {}",
-        device.name()
-    ))
-}
-
-impl fmt::Debug for Pinned {
-    /// How much is waiting and where it is going, rather than every weight: a model holds hundreds
-    /// of them and they are named in the IR that reads them.
+impl fmt::Debug for Weights {
+    /// How many there are and where they are going, rather than every weight: a model holds
+    /// hundreds of them and they are named in the IR that reads them.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Pinned")
-            .field("tensors", &self.host.len())
+        f.debug_struct("Weights")
+            .field("tensors", &self.tensors.len())
             .field("device", &self.device)
             .finish()
     }
@@ -454,7 +453,7 @@ pub enum Residency {
     Device,
     /// Page-locked on the host, and moved onto the device by each load and given back after its
     /// last reader. For a card the model does not fit on: what the card holds is what the pass is
-    /// using rather than the model. See [`Pinned`].
+    /// using rather than the model. See [`Weights`].
     LowVram,
 }
 
@@ -1549,7 +1548,7 @@ mod tests {
         check_parameters(&feed_forward(), &source).unwrap();
 
         assert_eq!(source.checks.get(), 1);
-        // The whole reason `check` is not `load` with its answer thrown away: from a `Pinned`
+        // The whole reason `check` is not `load` with its answer thrown away: from a low-vram
         // source a load is a weight crossing the bus, and checking a model would otherwise move
         // the whole of it to learn that the package is the right one.
         assert_eq!(source.loads.get(), 0, "checking a model must not move it");
@@ -1580,7 +1579,7 @@ mod tests {
         // too, on a machine that has none: the refusal comes before anything is asked of the
         // device, which is the point of it.
         for device in [Device::Cpu, Device::Metal] {
-            let error = <dyn ParamSource>::from_bytes(&empty_file(), device, Residency::LowVram)
+            let error = Weights::from_bytes(&empty_file(), device, Residency::LowVram)
                 .map(drop)
                 .unwrap_err()
                 .to_string();

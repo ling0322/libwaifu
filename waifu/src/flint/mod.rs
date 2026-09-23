@@ -96,7 +96,7 @@ mod operators;
 
 pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
-pub use ir::{check_parameters, Inst, Ir, ParamSource, Residency, RunContext};
+pub use ir::{check_parameters, Inst, Ir, ParamSource, Residency, RunContext, Weights};
 pub use nvfp4::Nvfp4Tensor;
 pub use operators::Operators;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};

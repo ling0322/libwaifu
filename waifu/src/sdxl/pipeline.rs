@@ -26,9 +26,12 @@
 //! is pushed away from the one that ignored it.
 
 use std::ops::ControlFlow;
+use std::rc::Rc;
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, ParamSource, Residency, Tensor, WeightFormat};
+use crate::flint::{
+    functional as F, DType, Device, ParamSource, Residency, Tensor, WeightFormat, Weights,
+};
 use crate::generation::{unwatched, GenerationOptions, GenerationProgress};
 use crate::manifest::Manifest;
 use crate::mapping::Mapping;
@@ -264,7 +267,11 @@ impl Sdxl {
         // The whole package, read once, and put where the residency says it waits. The four halves
         // are written against it and share it: a weight is found by the name the package holds it
         // under, and the four namespaces below are what keeps them apart.
-        let weights = <dyn ParamSource>::from_files(&manifest.weight_paths()?, device, residency)?;
+        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+            &manifest.weight_paths()?,
+            device,
+            residency,
+        )?);
 
         let named = |half: &str| format!("{model_type}.{half}");
         let vae = named("vae");

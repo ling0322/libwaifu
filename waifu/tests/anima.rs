@@ -38,7 +38,7 @@ use waifu::anima::{
     Adapter, AdapterConfig, Dit, DitConfig, FlowSampler, SamplerConfig, TextConfig, TextEncoder,
     VaeConfig, VaeDecoder
 };
-use waifu::flint::{ParamSource, Tensor};
+use waifu::flint::{ParamSource, Tensor, Weights};
 use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
 
 fn models_dir() -> PathBuf {
@@ -58,12 +58,14 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("anima-turbo-v11.yaml")).unwrap();
-            <dyn ParamSource>::from_files(
-                &manifest.weight_paths().unwrap(),
-                device(),
-                Residency::Device,
+            Rc::new(
+                Weights::from_files(
+                    &manifest.weight_paths().unwrap(),
+                    device(),
+                    Residency::Device,
+                )
+                .unwrap(),
             )
-            .unwrap()
         }))
     })
 }

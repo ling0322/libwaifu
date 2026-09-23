@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{functional as F, ParamSource, Tensor};
+use waifu::flint::{functional as F, ParamSource, Tensor, Weights};
 use waifu::{
     read_safetensors, DType, Device, Manifest, Residency, Unet, UnetCondition, UnetConfig,
     WeightFormat,
@@ -50,12 +50,14 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
-            <dyn ParamSource>::from_files(
-                &manifest.weight_paths().unwrap(),
-                Device::Cuda,
-                Residency::Device,
+            Rc::new(
+                Weights::from_files(
+                    &manifest.weight_paths().unwrap(),
+                    Device::Cuda,
+                    Residency::Device,
+                )
+                .unwrap(),
             )
-            .unwrap()
         }))
     })
 }

@@ -29,7 +29,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value};
+use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value, Weights};
 use waifu::indextts_gpt::{self, Config, Gpt, Sampling};
 use waifu::Result;
 
@@ -908,13 +908,16 @@ fn the_released_gpt_is_the_released_gpt() {
     // for; a package too large for that is what `Residency::LowVram` is for, and nothing in this
     // test would change but the argument.
     let name = "indextts25-gpt.safetensors";
-    let weights = <dyn ParamSource>::from_files(&[models_dir().join(name)], CPU, Residency::Device)
-        .unwrap_or_else(|error| {
-            panic!(
-                "{name}: {error}\nExport it first:\n    .venv/bin/python \
-                 tools/indextts_gpt_exporter.py -output models/indextts25-gpt.safetensors"
-            )
-        });
+    let weights: Rc<dyn ParamSource> = Rc::new(
+        Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device).unwrap_or_else(
+            |error| {
+                panic!(
+                    "{name}: {error}\nExport it first:\n    .venv/bin/python \
+                     tools/indextts_gpt_exporter.py -output models/indextts25-gpt.safetensors"
+                )
+            },
+        ),
+    );
     let model = Gpt::build(Config::indextts(), "", &weights, F32, CPU).unwrap();
 
     // The same two vectors the reference was handed, filled from their own names. There is no

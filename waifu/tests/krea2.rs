@@ -53,7 +53,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{ParamSource, Tensor};
+use waifu::flint::{ParamSource, Tensor, Weights};
 use waifu::krea2::{
     Dit, DitConfig, EncoderConfig, FlowSampler, SamplerConfig, TextEncoder, VaeConfig, VaeDecoder,
 };
@@ -85,12 +85,14 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("krea2-turbo.yaml")).unwrap();
-            <dyn ParamSource>::from_files(
-                &manifest.weight_paths().unwrap(),
-                device(),
-                Residency::Device,
+            Rc::new(
+                Weights::from_files(
+                    &manifest.weight_paths().unwrap(),
+                    device(),
+                    Residency::Device,
+                )
+                .unwrap(),
             )
-            .unwrap()
         }))
     })
 }
