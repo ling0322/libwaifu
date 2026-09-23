@@ -40,10 +40,8 @@ use std::rc::Rc;
 
 use waifu::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
 use waifu::bigvgan::{BigVgan, BigVganConfig};
-use waifu::flint::{
-    resident, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,
-};
-use waifu::ParamFile;
+use waifu::flint::{DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Weights};
+use waifu::read_safetensors;
 
 const CPU: Device = Device::Cpu;
 const F32: DType = DType::Float;
@@ -169,10 +167,9 @@ fn run(
     g.output("out", out);
 
     let empty: HashMap<String, Tensor> = HashMap::new();
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&empty).unwrap();
+    let ir = Ir::compile(&g);
     let outputs = ir
-        .run(&RunContext::new(&empty).preloaded(&preloaded).input("x", x))
+        .run(&RunContext::new(&empty).input("x", x))
         .unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 
@@ -397,8 +394,8 @@ fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
 }
 
-fn exported(name: &str) -> ParamFile {
-    ParamFile::open(&[models_dir().join(name)]).unwrap_or_else(|error| {
+fn exported(name: &str) -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join(name)]).unwrap_or_else(|error| {
         panic!(
             "{name}: {error}\nExport it first:\n    .venv/bin/python tools/bigvgan_exporter.py \
              -output models/bigvgan-22khz-80band.safetensors \
@@ -410,8 +407,11 @@ fn exported(name: &str) -> ParamFile {
 #[test]
 #[ignore = "needs the exported BigVGAN checkpoint in models/"]
 fn the_released_vocoder_is_the_released_vocoder() {
-    let file = exported("bigvgan-22khz-80band.safetensors");
-    let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, CPU).unwrap());
+    let name = "bigvgan-22khz-80band.safetensors";
+    let weights: Rc<dyn ParamSource> = Rc::new(
+        Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device)
+            .unwrap_or_else(|error| panic!("{name}: {error}\nExport it first; see `exported`.")),
+    );
     let vocoder = BigVgan::build(
         BigVganConfig::v2_22khz_80band_256x(),
         "",
@@ -425,8 +425,8 @@ fn the_released_vocoder_is_the_released_vocoder() {
     // is being compared is the whole model over a signal it could plausibly be asked for, and not
     // a shape test dressed up as one.
     let bundle = exported("bigvgan-22khz-80band_test.safetensors");
-    let mel = bundle.get_unchecked("mel").unwrap();
-    let expected = bundle.get_unchecked("waveform").unwrap();
+    let mel = bundle["mel"].clone();
+    let expected = bundle["waveform"].clone();
 
     let waveform = vocoder.forward(&mel).unwrap();
     assert_eq!(waveform.shape(), expected.shape());
@@ -472,21 +472,11 @@ impl Reading {
 }
 
 impl ParamSource for Reading {
-    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> waifu::Result<Tensor> {
+    fn load(&self, name: &str, shape: &[i32]) -> waifu::Result<Tensor> {
         self.asked.borrow_mut().push(name.to_string());
         self.check(name, shape)?;
 
         Ok(self.held(name).expect("checked just above"))
-    }
-
-    /// The host, which is where the reference's parameters are made and where these run.
-    fn device(&self) -> Device {
-        CPU
-    }
-
-    /// Kept: what this holds is made when it is asked for, so there is nothing to stream.
-    fn residency(&self) -> Residency {
-        Residency::Device
     }
 
     fn shape_of(&self, name: &str) -> Option<Vec<i32>> {

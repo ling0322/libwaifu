@@ -24,13 +24,14 @@
 //! the same schedule with the same guidance lands in the same place.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use waifu::flint::{functional as F, Tensor};
 use waifu::{
-    to_rgb8, DType, Device, GenerationOptions, Manifest, ParamFile, Residency, Sdxl,
-    UnetCondition
+    read_safetensors, to_rgb8, DType, Device, GenerationOptions, Manifest, Residency, Sdxl,
+    UnetCondition,
 };
 
 /// What the reference denoising run in the exporter was written for.
@@ -105,8 +106,8 @@ fn model() -> Rc<Sdxl> {
     })
 }
 
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
 }
 
 fn options() -> GenerationOptions {
@@ -182,8 +183,8 @@ fn encodes_a_prompt_the_way_the_reference_does() {
     assert_eq!(embedding.context.shape(), vec![1, 77, 2048]);
     assert_eq!(embedding.pooled.shape(), vec![1, 1280]);
 
-    let hidden = cases.get_unchecked("test_case.hidden").unwrap();
-    let hidden2 = cases.get_unchecked("test_case.hidden2").unwrap();
+    let hidden = cases["test_case.hidden"].clone();
+    let hidden2 = cases["test_case.hidden2"].clone();
 
     // Sliced where it lives: a half precision tensor on the host has no copy kernel behind it,
     // and making one contiguous is a copy.
@@ -196,7 +197,7 @@ fn encodes_a_prompt_the_way_the_reference_does() {
     assert!(
         relative_rmse(
             &embedding.pooled,
-            &cases.get_unchecked("test_case.pooled2").unwrap()
+            &cases["test_case.pooled2"]
         ) < 2e-2
     );
 }
@@ -215,7 +216,7 @@ fn a_batch_of_two_is_two_batches_of_one() {
 
     let prompt = model.encode_prompt(PROMPT).unwrap();
     let negative = model.encode_prompt("").unwrap();
-    let latent = to_cuda(&cases.get_unchecked("test_case.latent").unwrap());
+    let latent = to_cuda(&cases["test_case.latent"]);
     let time_ids = [SIZE as f32, SIZE as f32, 0.0, 0.0, SIZE as f32, SIZE as f32];
 
     let alone = |embedding: &waifu::PromptEmbedding| {
@@ -275,7 +276,7 @@ fn denoising_matches_the_reference_pipeline() {
 
     // The same unit noise the reference started from. Everything after it -- the schedule, the
     // guidance, the size the model is told about -- has to agree for four steps running.
-    let latent = to_cuda(&cases.get_unchecked("test_case.latent").unwrap());
+    let latent = to_cuda(&cases["test_case.latent"]);
 
     let prompt = model.encode_prompt(PROMPT).unwrap();
     let negative = model.encode_prompt("").unwrap();
@@ -287,7 +288,7 @@ fn denoising_matches_the_reference_pipeline() {
 
     let rmse = relative_rmse(
         &denoised,
-        &cases.get_unchecked("test_case.denoised").unwrap(),
+        &cases["test_case.denoised"],
     );
     println!("denoise rmse = {rmse} (torch's own half precision is {TORCH_HALF_GAP} from float32)");
     assert!(
@@ -312,7 +313,7 @@ fn denoising_on_the_cpu_matches_the_reference_pipeline() {
     let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
     let model = Sdxl::from_manifest(Device::Cpu, Residency::Device, &manifest).unwrap();
 
-    let latent = cases.get_unchecked("test_case.latent").unwrap();
+    let latent = cases["test_case.latent"].clone();
     let prompt = model.encode_prompt(PROMPT).unwrap();
     let negative = model.encode_prompt("").unwrap();
 
@@ -323,7 +324,7 @@ fn denoising_on_the_cpu_matches_the_reference_pipeline() {
 
     let rmse = relative_rmse(
         &denoised,
-        &cases.get_unchecked("test_case.denoised").unwrap(),
+        &cases["test_case.denoised"],
     );
     println!("cpu denoise rmse = {rmse}");
     assert!(rmse < FLOAT32_TOLERANCE, "four steps drifted by {rmse}");
@@ -367,7 +368,7 @@ fn decodes_a_denoised_latent_into_an_image() {
     let cases = cases();
     let model = model();
 
-    let denoised = to_cuda(&cases.get_unchecked("test_case.denoised").unwrap());
+    let denoised = to_cuda(&cases["test_case.denoised"]);
     let image = model.decode(&denoised).unwrap();
     assert_eq!(image.shape(), vec![1, 3, SIZE, SIZE]);
     assert_eq!(image.dtype(), DType::Float);
@@ -460,7 +461,7 @@ fn guidance_of_one_is_the_unprompted_answer() {
     // is skipped for it. Anything else would be running the model twice for nothing.
     let cases = cases();
     let model = model();
-    let latent = to_cuda(&cases.get_unchecked("test_case.latent").unwrap());
+    let latent = to_cuda(&cases["test_case.latent"]);
 
     let prompt = model.encode_prompt(PROMPT).unwrap();
     let negative = model.encode_prompt("a completely different thing").unwrap();
@@ -502,8 +503,8 @@ fn refuses_a_size_it_cannot_work_in() {
 /// Left on the host, in float32, which is where a picture read off the disk is: `from_rgb8` hands
 /// one back on the CPU whatever the model is on. That is what the draw command passes and so it is
 /// what these tests pass; the one below says a picture already on the device works too.
-fn picture(cases: &ParamFile) -> Tensor {
-    cases.get_unchecked("test_case.decoded").unwrap()
+fn picture(cases: &HashMap<String, Tensor>) -> Tensor {
+    cases["test_case.decoded"].clone()
 }
 
 #[test]
@@ -550,7 +551,7 @@ fn no_strength_is_the_picture_through_the_autoencoder_and_nothing_else() {
 
     let rmse = relative_rmse(
         &image,
-        &cases.get_unchecked("test_case.round_trip").unwrap(),
+        &cases["test_case.round_trip"],
     );
     println!("round trip rmse against the reference = {rmse}");
     assert!(rmse < 2e-2, "a run of no steps drifted by {rmse}");
@@ -577,7 +578,7 @@ fn more_strength_leaves_less_of_the_picture() {
         let image = model.generate_from_image(&given, PROMPT, &options).unwrap();
         drift.push(relative_rmse(
             &image,
-            &cases.get_unchecked("test_case.decoded").unwrap(),
+            &cases["test_case.decoded"],
         ));
     }
 

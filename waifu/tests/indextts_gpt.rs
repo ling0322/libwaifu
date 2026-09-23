@@ -29,11 +29,9 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{
-    resident, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value,
-};
+use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value, Weights};
 use waifu::indextts_gpt::{self, Config, Gpt, Sampling};
-use waifu::{ParamFile, Result};
+use waifu::Result;
 
 const CPU: Device = Device::Cpu;
 const F32: waifu::DType = waifu::DType::Float;
@@ -130,21 +128,10 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
 struct Filled;
 
 impl ParamSource for Filled {
-    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
         Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
-    }
-
-    /// Made on the host, which is where these tests run.
-    fn device(&self) -> Device {
-        CPU
-    }
-
-    /// Kept: a weight made out of its name costs nothing to keep, and there is no package behind
-    /// it to stream one out of.
-    fn residency(&self) -> Residency {
-        Residency::Device
     }
 
     fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
@@ -199,9 +186,8 @@ fn run(
         context = context.input(name, tensor);
     }
 
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
-    let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
+    let ir = Ir::compile(&g);
+    let outputs = ir.run(&context).unwrap();
     let tensor = outputs[0].1.to_device(CPU).unwrap();
     let values = tensor.to_vec_f32().unwrap();
     let indices = probe_indices(values.len(), probe);
@@ -328,24 +314,13 @@ fn scatter(name: &str, count: usize, scale: f64) -> Vec<f32> {
 }
 
 impl ParamSource for Scattered {
-    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
         Ok(Tensor::from_f32(
             shape,
             &scatter(name, count, WEIGHT_SCALE),
         )?)
-    }
-
-    /// Made on the host, which is where these tests run.
-    fn device(&self) -> Device {
-        CPU
-    }
-
-    /// Kept: a weight made out of its name costs nothing to keep, and there is no package behind
-    /// it to stream one out of.
-    fn residency(&self) -> Residency {
-        Residency::Device
     }
 
     fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
@@ -458,12 +433,10 @@ fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
     );
 
     let filled = Scattered;
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
+    let ir = Ir::compile(&g);
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("speaker", &speaker)
                 .input("emotion", &emotion)
                 .input("text", &text)
@@ -546,12 +519,10 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
     g.output("hidden", hidden);
 
     let filled = Scattered;
-    let whole_ir = Ir::compile(&g, Residency::Device);
-    let whole_weights = whole_ir.load(&filled).unwrap();
+    let whole_ir = Ir::compile(&g);
     let at_once = whole_ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&whole_weights)
                 .input("x", &whole),
         )
         .unwrap()[0]
@@ -571,12 +542,10 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
         g.output(&format!("v{index}"), one.values);
     }
 
-    let prefill_ir = Ir::compile(&g, Residency::Device);
-    let prefill_weights = prefill_ir.load(&filled).unwrap();
+    let prefill_ir = Ir::compile(&g);
     let prefill = prefill_ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&prefill_weights)
                 .input("x", &before),
         )
         .unwrap();
@@ -616,9 +585,8 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
         context = context.input(keys, k).input(values, v);
     }
 
-    let step_ir = Ir::compile(&g, Residency::Device);
-    let step_weights = step_ir.load(&filled).unwrap();
-    let stepped = step_ir.run(&context.preloaded(&step_weights)).unwrap()[0]
+    let step_ir = Ir::compile(&g);
+    let stepped = step_ir.run(&context).unwrap()[0]
         .1
         .to_device(CPU)
         .unwrap()
@@ -917,15 +885,6 @@ fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
 }
 
-fn exported(name: &str) -> ParamFile {
-    ParamFile::open(&[models_dir().join(name)]).unwrap_or_else(|error| {
-        panic!(
-            "{name}: {error}\nExport it first:\n    .venv/bin/python \
-             tools/indextts_gpt_exporter.py -output models/indextts25-gpt.safetensors"
-        )
-    })
-}
-
 /// Probe a row of scores at the same places the reference script printed.
 fn probed(scores: &Tensor, limit: usize) -> Vec<f32> {
     let values = scores.to_device(CPU).unwrap().to_vec_f32().unwrap();
@@ -945,11 +904,20 @@ fn probed(scores: &Tensor, limit: usize) -> Vec<f32> {
 #[test]
 #[ignore = "needs the exported IndexTTS-2.5 GPT in models/"]
 fn the_released_gpt_is_the_released_gpt() {
-    // `resident` reads the whole file onto the device once. 574 M parameters is 2.2 GB, which
-    // is what this machine has room for; a package too large for that is what `Residency` exists
-    // to stream instead, and nothing in this test would change but the call.
-    let file = exported("indextts25-gpt.safetensors");
-    let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, CPU).unwrap());
+    // Read onto the device once. 574 M parameters is 2.2 GB, which is what this machine has room
+    // for; a package too large for that is what `Residency::LowVram` is for, and nothing in this
+    // test would change but the argument.
+    let name = "indextts25-gpt.safetensors";
+    let weights: Rc<dyn ParamSource> = Rc::new(
+        Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device).unwrap_or_else(
+            |error| {
+                panic!(
+                    "{name}: {error}\nExport it first:\n    .venv/bin/python \
+                     tools/indextts_gpt_exporter.py -output models/indextts25-gpt.safetensors"
+                )
+            },
+        ),
+    );
     let model = Gpt::build(Config::indextts(), "", &weights, F32, CPU).unwrap();
 
     // The same two vectors the reference was handed, filled from their own names. There is no

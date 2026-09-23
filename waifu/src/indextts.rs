@@ -89,6 +89,7 @@ use std::rc::Rc;
 use crate::bigvgan::{BigVgan, BigVganConfig};
 use crate::flint::{
     functional as F, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,
+    Weights,
 };
 use crate::indextts_gpt::{Gpt, Sampling};
 use crate::indextts_normalize::{self, Language};
@@ -249,7 +250,11 @@ impl IndexTts {
 
         // Every model here runs in full precision; see the module note.
         let dtype = DType::Float;
-        let weights = residency.read(manifest.params()?, device)?;
+        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+            &manifest.weight_paths()?,
+            device,
+            residency,
+        )?);
 
         Ok(IndexTts {
             settings: Settings::from_manifest(manifest)?,
@@ -290,10 +295,9 @@ impl IndexTts {
     /// or per sentence. That is cheap: under [`Residency::Device`] a weight is moved onto the card
     /// once, and a second graph asking for it gets the tensor that is already there.
     fn run(&self, g: &Graph, inputs: &[(&str, &Tensor)]) -> Result<Vec<Tensor>> {
-        let ir = Ir::compile(g, self.weights.residency());
-        let preloaded = ir.load(self.weights.as_ref())?;
+        let ir = Ir::compile(g);
 
-        let mut context = RunContext::new(self.weights.as_ref()).preloaded(&preloaded);
+        let mut context = RunContext::new(self.weights.as_ref());
         for (name, tensor) in inputs {
             context = context.input(name, tensor);
         }
@@ -486,8 +490,7 @@ impl IndexTts {
         )?;
         g.output("direction", direction);
 
-        let ir = Ir::compile(&g, self.weights.residency());
-        let preloaded = ir.load(self.weights.as_ref())?;
+        let ir = Ir::compile(&g);
 
         let (cos, sin) = s2mel::rotary_tables(
             frames,
@@ -526,7 +529,6 @@ impl IndexTts {
                 };
 
                 let context = RunContext::new(self.weights.as_ref())
-                    .preloaded(&preloaded)
                     .input("x", x)
                     .input("prompt_x", prompt_x)
                     .input("cond", cond)

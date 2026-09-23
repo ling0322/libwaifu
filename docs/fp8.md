@@ -67,7 +67,8 @@ proj.weight.scale   F32      [2560]
 Two tensors and not one, because that is what the format can say. A safetensors header holds a
 dtype, a shape and two offsets per tensor, and the only free text in the file is one string map for
 the whole of it -- so there is nowhere to write down that these two belong together, and the name
-is the whole of the pairing. `ParamFile` is where that convention is enforced: an `F8_E4M3` tensor
+is the whole of the pairing. Reading a package is where that convention is enforced --
+`read_safetensors` and `Weights::from_files` go through the same reader: an `F8_E4M3` tensor
 with no scale beside it, or with one of the wrong shape or type, is refused when the file is read.
 A weight scaled by nothing would otherwise load perfectly well and draw noise.
 

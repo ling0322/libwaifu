@@ -30,6 +30,7 @@
 //! number says is where the error is rather than how far along it happened.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -37,8 +38,8 @@ use waifu::anima::{
     Adapter, AdapterConfig, Dit, DitConfig, FlowSampler, SamplerConfig, TextConfig, TextEncoder,
     VaeConfig, VaeDecoder
 };
-use waifu::flint::{resident, ParamSource, Tensor};
-use waifu::{DType, Device, Manifest, ParamFile, WeightFormat};
+use waifu::flint::{ParamSource, Tensor, Weights};
+use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
@@ -57,21 +58,20 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("anima-turbo-v11.yaml")).unwrap();
-            let file = params(&manifest);
-
-            let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, device()).unwrap());
-            weights
+            Rc::new(
+                Weights::from_files(
+                    &manifest.weight_paths().unwrap(),
+                    device(),
+                    Residency::Device,
+                )
+                .unwrap(),
+            )
         }))
     })
 }
 
-/// The parameters of the model, out of whichever files its manifest names.
-fn params(manifest: &Manifest) -> ParamFile {
-    manifest.params().unwrap()
-}
-
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("anima-turbo-v11_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("anima-turbo-v11_test.safetensors")]).unwrap()
 }
 
 /// The root mean square of the difference over the root mean square of the reference, which says
@@ -117,7 +117,7 @@ fn config() -> TextConfig {
 #[ignore = "needs the anima package"]
 fn encodes_a_prompt_the_way_the_reference_does() {
     let cases = cases();
-    let ids = cases.get_unchecked("test_case.qwen_ids").unwrap();
+    let ids = cases["test_case.qwen_ids"].clone();
     let length = ids.shape().last().copied().unwrap();
     let ids = ids.view(&[length]).unwrap().to_device(device()).unwrap();
 
@@ -125,7 +125,7 @@ fn encodes_a_prompt_the_way_the_reference_does() {
     let hidden = encoder.forward(&ids).unwrap();
     assert_eq!(hidden.shape(), vec![1, length, 1024]);
 
-    let reference = cases.get_unchecked("test_case.hidden").unwrap();
+    let reference = cases["test_case.hidden"].clone();
     let rmse = relative_rmse(&hidden, &reference);
     println!("qwen3 hidden rmse = {rmse}");
 
@@ -166,7 +166,7 @@ fn adapter_config() -> AdapterConfig {
 fn the_adapter_matches_the_reference() {
     let cases = cases();
 
-    let qwen_ids = cases.get_unchecked("test_case.qwen_ids").unwrap();
+    let qwen_ids = cases["test_case.qwen_ids"].clone();
     let length = qwen_ids.shape().last().copied().unwrap();
     let qwen_ids = qwen_ids
         .view(&[length])
@@ -174,7 +174,7 @@ fn the_adapter_matches_the_reference() {
         .to_device(device())
         .unwrap();
 
-    let t5_ids = cases.get_unchecked("test_case.t5_ids").unwrap();
+    let t5_ids = cases["test_case.t5_ids"].clone();
     let t5_length = t5_ids.shape().last().copied().unwrap();
     let t5_ids = t5_ids
         .view(&[t5_length])
@@ -197,7 +197,7 @@ fn the_adapter_matches_the_reference() {
     let context = adapter.forward(&t5_ids, &hidden).unwrap();
     assert_eq!(context.shape(), vec![1, t5_length, 1024]);
 
-    let reference = cases.get_unchecked("test_case.context").unwrap();
+    let reference = cases["test_case.context"].clone();
     let rmse = relative_rmse(&context, &reference);
     println!("adapter context rmse = {rmse}");
 
@@ -236,17 +236,11 @@ fn one_step_matches_the_reference() {
 
     // Against the reference's own context rather than this runtime's, so that what is measured
     // is the denoiser alone and not the two stages in front of it a second time.
-    let context = cases
-        .get_unchecked("test_case.context_padded")
-        .unwrap()
-        .to_device(device())
+    let context = cases["test_case.context_padded"].to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
-    let latent = cases
-        .get_unchecked("test_case.latent")
-        .unwrap()
-        .to_device(device())
+    let latent = cases["test_case.latent"].to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
@@ -255,7 +249,7 @@ fn one_step_matches_the_reference() {
     let velocity = dit.forward(&latent, 0.75, &context).unwrap();
     assert_eq!(velocity.shape(), latent.shape());
 
-    let reference = cases.get_unchecked("test_case.velocity").unwrap();
+    let reference = cases["test_case.velocity"].clone();
     let rmse = relative_rmse(&velocity, &reference);
     println!("dit velocity rmse = {rmse}");
 
@@ -297,10 +291,7 @@ fn vae_config() -> VaeConfig {
 #[ignore = "needs the anima package"]
 fn decodes_a_latent_the_way_the_reference_does() {
     let cases = cases();
-    let latent = cases
-        .get_unchecked("test_case.latent")
-        .unwrap()
-        .to_device(device())
+    let latent = cases["test_case.latent"].to_device(device())
         .unwrap();
 
     let decoder = VaeDecoder::build(
@@ -316,7 +307,7 @@ fn decodes_a_latent_the_way_the_reference_does() {
     // An eighth of the side, three channels out of sixteen: a 16 by 16 latent is 128 by 128.
     assert_eq!(image.shape(), vec![1, 3, 128, 128]);
 
-    let reference = cases.get_unchecked("test_case.decoded").unwrap();
+    let reference = cases["test_case.decoded"].clone();
     let rmse = relative_rmse(&image, &reference);
     println!("vae decoded rmse = {rmse}");
 
@@ -381,10 +372,7 @@ fn draws_a_picture_end_to_end() {
 
     // From the reference's context, so that this is the sampler, the denoiser and the decoder
     // being tested together rather than the tokenizers, which are still to come.
-    let context = cases
-        .get_unchecked("test_case.context_padded")
-        .unwrap()
-        .to_device(device())
+    let context = cases["test_case.context_padded"].to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();

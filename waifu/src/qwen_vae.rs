@@ -46,8 +46,7 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, Preloaded, RunContext, Tensor,
-    Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
 };
 use crate::layers::{Conv2d, Linear};
 
@@ -308,7 +307,6 @@ fn stages(weights: &dyn ParamSource, name: &str) -> Result<Vec<Stage>> {
 pub struct VaeDecoder {
     config: VaeConfig,
     ir: Ir,
-    preloaded: Preloaded,
     weights: Rc<dyn ParamSource>,
     mean: Tensor,
     std: Tensor,
@@ -357,12 +355,10 @@ impl VaeDecoder {
         let mean = Tensor::from_f32(&shape, &config.latents_mean)?.to_device(device)?;
         let std = Tensor::from_f32(&shape, &config.latents_std)?.to_device(device)?;
 
-        let ir = Ir::compile(&graph, weights.residency());
-        let preloaded = ir.load(weights.as_ref())?;
+        let ir = Ir::compile(&graph);
 
         Ok(VaeDecoder {
             weights: Rc::clone(weights),
-            preloaded,
             ir,
             config,
             mean,
@@ -396,7 +392,6 @@ impl VaeDecoder {
         }
 
         let run = RunContext::new(&*self.weights)
-            .preloaded(&self.preloaded)
             .input("latent", latent)
             .input("latents_mean", &self.mean)
             .input("latents_std", &self.std);

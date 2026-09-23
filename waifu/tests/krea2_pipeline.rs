@@ -31,12 +31,14 @@
 //! fixture is read once per test rather than once per binary. What follows is therefore a single
 //! pass that asks several questions, with `--nocapture` to show the numbers.
 
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 
 use waifu::flint::Tensor;
 use waifu::{
-    DType, Device, GenerationOptions, GenerationProgress, Krea2, Manifest, ParamFile, Residency,
+    read_safetensors, DType, Device, GenerationOptions, GenerationProgress, Krea2, Manifest,
+    Residency,
 };
 
 /// The prompt the reference outputs were computed for.
@@ -56,8 +58,8 @@ fn model() -> Krea2 {
     Krea2::from_manifest(device(), Residency::Device, &manifest).unwrap()
 }
 
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap()
 }
 
 /// The root mean square of the difference over the root mean square of the reference.
@@ -127,7 +129,7 @@ fn draws_a_picture_the_reference_would_recognize() {
     let model = model();
 
     // -- the prompt ------------------------------------------------------------------------
-    let reference = cases.get_unchecked("test_case.hidden").unwrap();
+    let reference = cases["test_case.hidden"].clone();
     let context = model.encode_prompt(PROMPT).unwrap();
 
     // The shape first, because this is where the padding argument either holds or does not: the

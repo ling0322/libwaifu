@@ -63,10 +63,12 @@ fn main() -> Result<(), waifu::Error> {
     }
 
     let start = std::time::Instant::now();
-    let file = manifest.params()?;
+    let file = waifu::read_safetensors(&manifest.weight_paths()?)?;
     println!("{} tensors read in {:?}", file.len(), start.elapsed());
 
-    for name in file.names() {
+    let mut names: Vec<&str> = file.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    for name in names {
         println!("  {name}");
     }
 

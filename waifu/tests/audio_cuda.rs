@@ -17,11 +17,11 @@
 use std::collections::HashMap;
 
 use waifu::audio::{
-    conv1d, conv_transpose1d, depthwise_conv1d, hann_window, istft, istft_basis, pad1d, snake,
-    stft, stft_basis, window_envelope, Padding,
+    conv1d, conv_transpose1d, depthwise_conv1d, hann_window, istft, istft_basis, pad1d, snake, stft,
+    stft_basis, window_envelope, Padding,
 };
 use waifu::flint::{
-    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor, Value,
+    functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Value,
 };
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
@@ -38,9 +38,8 @@ fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, Vec<f32>
         context = context.input(name, tensor);
     }
 
-    let ir = Ir::compile(g, Residency::Device);
-    let preloaded = ir.load(&weights).unwrap();
-    let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
+    let ir = Ir::compile(g);
+    let outputs = ir.run(&context).unwrap();
     let tensor = outputs[0]
         .1
         .to_device(Device::Cpu)

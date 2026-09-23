@@ -20,6 +20,7 @@
 //! The graph itself, and the one function per operation that puts a node into it.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::panic::Location;
 use std::rc::Rc;
@@ -197,6 +198,9 @@ struct Body {
     sites: Vec<Site>,
     inputs: Vec<(String, Value)>,
     outputs: Vec<(String, Value)>,
+    /// The `load` already made for each weight, keyed by its whole name and shape. See
+    /// [`Graph::load`].
+    loads: HashMap<(String, Vec<i32>), Value>,
 }
 
 /// Where a node came from: the line that built it, and the namespace it was built in.
@@ -347,12 +351,29 @@ impl Graph {
     }
 
     /// A weight of `shape`, read from the model's package under `name` in this namespace.
+    ///
+    /// One node per weight, however many times it is asked for. A tied weight -- two layers built
+    /// in one namespace, an embedding read again as a head -- is the value the first `load` made,
+    /// so a pass asks its source for it once: a lookup where the weights are on the card, and one
+    /// copy across the bus rather than one per reader where they are not.
+    ///
+    /// Keyed by shape as well as by name. Two loads of one name in two shapes are a model that is
+    /// wrong about its own weights, and are left as two nodes so that the second fails where it
+    /// is read rather than quietly being handed the first one's tensor.
     #[track_caller]
     pub fn load(&self, name: &str, shape: &[i32]) -> Value {
-        self.push(Op::Load {
-            name: self.name_of(name),
-            shape: shape.to_vec(),
-        })
+        let key = (self.name_of(name), shape.to_vec());
+        if let Some(value) = self.body.borrow().loads.get(&key) {
+            return *value;
+        }
+
+        let value = self.push(Op::Load {
+            name: key.0.clone(),
+            shape: key.1.clone(),
+        });
+        self.body.borrow_mut().loads.insert(key, value);
+
+        value
     }
 
     /// A tensor built into the graph. See [`Op::Constant`] for what it costs.

@@ -39,7 +39,7 @@
 use std::path::PathBuf;
 
 use waifu::krea2::{FlowSampler, SamplerConfig};
-use waifu::{DType, Device, ParamFile};
+use waifu::{read_safetensors, DType, Device};
 
 /// The number of steps the reference walked, which is what the distilled release is for.
 const STEPS: i32 = 8;
@@ -59,11 +59,8 @@ fn config() -> SamplerConfig {
 #[test]
 #[ignore = "needs the krea2 package"]
 fn walks_the_schedule_the_reference_walked() {
-    let cases = ParamFile::open(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap();
-    let reference = cases
-        .get_unchecked("test_case.sigmas")
-        .unwrap()
-        .to_device(Device::Cpu)
+    let cases = read_safetensors(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap();
+    let reference = cases["test_case.sigmas"].to_device(Device::Cpu)
         .unwrap()
         .cast(DType::Float)
         .unwrap()

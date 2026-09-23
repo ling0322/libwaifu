@@ -36,7 +36,7 @@ use std::rc::Rc;
 use super::config::AdapterConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, ParamSource, Preloaded, RunContext, Tensor, Value,
+    check_parameters, DType, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
 };
 use crate::layers::{Embedding, Linear};
 
@@ -263,7 +263,6 @@ fn write(config: &AdapterConfig, float_type: DType, g: &Graph) {
 pub struct Adapter {
     config: AdapterConfig,
     ir: Ir,
-    preloaded: Preloaded,
     weights: Rc<dyn ParamSource>,
 }
 
@@ -284,12 +283,10 @@ impl Adapter {
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
-        let ir = Ir::compile(&graph, weights.residency());
-        let preloaded = ir.load(weights.as_ref())?;
+        let ir = Ir::compile(&graph);
 
         Ok(Adapter {
             weights: Rc::clone(weights),
-            preloaded,
             ir,
             config,
         })
@@ -336,7 +333,6 @@ impl Adapter {
         };
 
         let run = RunContext::new(&*self.weights)
-            .preloaded(&self.preloaded)
             .input("input_ids", input_ids)
             .input("context", hidden)
             .input("rope_cos", &rotary.cos)

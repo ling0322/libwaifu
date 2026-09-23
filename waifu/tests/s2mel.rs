@@ -22,7 +22,7 @@
 //! the end of a list; at a depth of two there is nothing to get wrong and at thirteen there is an
 //! off-by-one in three places.
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value};
+use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor, Value};
 use waifu::s2mel::{self, Config};
 use waifu::Result;
 
@@ -122,21 +122,10 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
 struct Filled;
 
 impl ParamSource for Filled {
-    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
         Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
-    }
-
-    /// Made on the host, which is where these tests run.
-    fn device(&self) -> Device {
-        CPU
-    }
-
-    /// Kept: a weight made out of its name costs nothing to keep and there is no package
-    /// behind it to stream one out of.
-    fn residency(&self) -> Residency {
-        Residency::Device
     }
 
     fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
@@ -209,12 +198,10 @@ fn the_denoiser_is_the_reference_denoiser() {
     g.output("out", out);
 
     let filled = Filled;
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
+    let ir = Ir::compile(&g);
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -270,12 +257,10 @@ fn the_transformer_trunk_is_the_reference_trunk() {
     g.output("out", out);
 
     let filled = Filled;
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
+    let ir = Ir::compile(&g);
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -328,12 +313,10 @@ fn the_length_regulator_is_the_reference_regulator() {
     g.output("out", out);
 
     let filled = Filled;
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
+    let ir = Ir::compile(&g);
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("tokens", &tokens)
                 .input("selection", &selection),
         )
@@ -363,12 +346,10 @@ fn mish_is_the_activation_it_replaces() {
     g.output("out", out);
 
     let filled = Filled;
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
+    let ir = Ir::compile(&g);
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("x", &x),
         )
         .unwrap();

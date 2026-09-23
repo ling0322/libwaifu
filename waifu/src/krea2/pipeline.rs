@@ -48,9 +48,10 @@
 
 use std::fmt;
 use std::ops::ControlFlow;
+use std::rc::Rc;
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, Residency, Tensor};
+use crate::flint::{functional as F, DType, Device, ParamSource, Residency, Tensor, Weights};
 use crate::flow::FlowSampler;
 use crate::generation::{unwatched, GenerationDefaults, GenerationOptions, GenerationProgress};
 use crate::krea2::{Dit, Krea2Config, TextEncoder};
@@ -143,8 +144,11 @@ impl Krea2 {
         let config = Krea2Config::from_section(manifest.section(&model_type)?)?;
 
         let dtype = F::default_float_type(device)?;
-        let file = manifest.params()?;
-        let weights = residency.read(file, device)?;
+        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+            &manifest.weight_paths()?,
+            device,
+            residency,
+        )?);
 
         let named = |half: &str| format!("{model_type}.{half}");
         let tokenizer = Tokenizer::open(manifest)?;

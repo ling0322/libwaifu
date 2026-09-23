@@ -58,41 +58,29 @@
 //! optimization, they are what makes running a graph cost what running the pass costs.
 //!
 //! What they buy on top of that is the weights. A model's parameters are `load` instructions
-//! like any other, read out of the package the model was written to, and freed at the
-//! instruction that read one last. So the two ends of a weight's life are both written down, and
-//! a run holds no more of a model at once than the pass is actually using -- which is what a
-//! model too large for the device it runs on needs and what an eager pass, whose weights are all
-//! read before the first of them is used, cannot say.
+//! like any other, answered by the [`ParamSource`] the run was given and freed at the instruction
+//! that read one last. So a run holds no more of a model's weights *on the device* at once than
+//! the pass is actually using, whatever the source holds elsewhere.
 //!
-//! # The three hops, and why they are three instructions
+//! # Where a weight comes from
 //!
-//! A weight does not arrive in one step. It is read out of the package onto the host, it crosses
-//! to the device, and at some point each of those copies is finished with -- and the two are
-//! finished with at different times, which is the whole reason they are written separately. The
-//! host copy is dead the moment the move has run. The device copy lives until the last operator
-//! that reads it. One instruction could not say both.
+//! The source, and nowhere else: an IR is one list of instructions whichever [`Residency`] the
+//! model was read with, and a `load` is one of them either way. What differs is only what the
+//! source does when a load asks it for a weight, and that was decided when the source was built.
 //!
-//! So a `load` node compiles to an [`Inst::Read`], an [`Inst::Upload`] and the frees that go with
-//! them, and [`Residency`] decides which of two lists they are written into:
+//! * [`Residency::Device`] put every weight on the card when the source was built, so a
+//!   load is a lookup and the handle it hands back costs no bytes. What the card holds is the
+//!   model, which is what a model that fits wants and what twenty sampler steps would otherwise
+//!   pay for twenty times over.
+//! * [`Residency::LowVram`] page-locked every weight on the host when the source was
+//!   built, and a load is the copy across the bus. The `free` after the weight's last reader is
+//!   the card taking those bytes back, so the card holds what the pass is using rather than the
+//!   model. Page-locked once, rather than for each copy, because that is when page-locking pays:
+//!   the driver's copy engine reads page-locked memory directly, and the same memory is read again
+//!   on every step.
 //!
-//! * [`Residency::Device`] puts them in the **prologue**, which [`Ir::load`] runs once when the
-//!   model is built. What it leaves on the card is there for every pass afterwards, which is what
-//!   a model that fits wants and what twenty sampler steps would otherwise pay for twenty times.
-//! * [`Residency::LowVram`] puts them in the **pass**, in front of the instruction that reads the
-//!   weight, and frees both copies after the last one that does. The card holds what the pass is
-//!   using rather than the model; the host holds one weight rather than the package.
-//!
-//! Neither list is special. They are the same instructions in the same vocabulary, and both print,
-//! so what a model does once and what it does per step can be read off the same page.
-//!
-//! This is a change from what it used to be, and worth saying plainly because the older shape is
-//! the obvious one. A [`ParamSource`] used to decide all three hops before the IR ran: one mode
-//! read the whole package onto the card at build time, another page-locked the whole package on
-//! the host, and a `load` instruction was whatever was left over. Both held the model. The second
-//! held it twice over in the sense that matters -- page-locked memory is a reservation no other
-//! process may have -- and neither could be asked to do less, because the decision had already
-//! been made by the time there were instructions to make it with. What a source is asked now is
-//! only the first hop, and only for one weight at a time.
+//! Both hold the model somewhere for as long as it is in use: on the card, or in host memory the
+//! driver has locked. That is the price of the IR not having to know which.
 //!
 //! # What is deliberately not here
 //!
@@ -115,11 +103,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::rc::Rc;
+use std::path::Path;
 
 use super::{functional as F, Bound, DType, Device, Tensor};
 use crate::error::{Error, Result};
-use crate::param_file::ParamFile;
+use crate::tensor_file;
 
 use super::graph::{Graph, Site};
 use super::op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
@@ -134,46 +122,6 @@ pub enum Inst {
         /// Where the node was built, which is what an error about this instruction says.
         site: Site,
     },
-    /// Read the weight `name` out of the package, onto the host.
-    ///
-    /// The first of the three hops a weight makes, and the one that touches the disk: what comes
-    /// back is a tensor of ordinary host memory, or of the page-locked kind when `pinned`, in the
-    /// element type the package wrote.
-    ///
-    /// `pinned` is not a property of the weight but of what is about to happen to it. A weight
-    /// that crosses to the device once and stays there is read into ordinary memory, because
-    /// page-locking it would hold a second copy of it for the length of one move. A weight that
-    /// crosses on every pass is read into the page-locked kind, because the driver reads that
-    /// directly where it has to stage a pageable source through a bounce buffer of its own.
-    Read {
-        value: Value,
-        name: String,
-        shape: Vec<i32>,
-        pinned: bool,
-        /// Where the load was built, which is what an error about this instruction says. The same
-        /// thing a `Run`'s site is, and here for the same reason: a package that does not hold
-        /// what a model asks for should name the line that asked.
-        site: Site,
-    },
-    /// Let `value` stand for `source`, which is the same weight under another node.
-    ///
-    /// A graph may name one weight from more than one place -- a tied embedding, a block written
-    /// twice -- and each of those is a `load` node of its own with a value of its own. Bringing
-    /// each across would put one weight on the card once per node that named it, so the first is
-    /// brought across and the rest are made to stand for it, right where it arrives.
-    ///
-    /// Two slots then hold handles on one tensor, which is what a tensor is built to allow: the
-    /// storage goes when the last of them does, so the frees the compiler already emits for each
-    /// of them are exactly right and none of them had to know about the others.
-    Alias { value: Value, source: Value },
-    /// Move `source` from the host onto the device this run is for.
-    ///
-    /// The second hop, and the one that costs the bus. Split from the read above rather than done
-    /// with it because the two ends have different lifetimes: the host copy is dead the moment
-    /// this instruction has run, and the device copy lives until the last operator that reads it.
-    /// Written as two instructions, those are two `free`s in two places, which is the whole of why
-    /// a package larger than the card can be run at all.
-    Upload { value: Value, source: Value },
     /// Let go of `value`, which nothing left to run is going to read.
     ///
     /// Always after the instruction that read it last, so a value is alive from the `Run` that
@@ -199,61 +147,34 @@ impl fmt::Display for Inst {
 
                 Ok(())
             }
-            Inst::Read {
-                value,
-                name,
-                shape,
-                pinned,
-                ..
-            } => {
-                let where_to = if *pinned { "pinned" } else { "host" };
-                write!(f, "{value} = read {name:?} {shape:?} -> {where_to}")
-            }
-            Inst::Alias { value, source } => write!(f, "{value} = alias {source}"),
-            Inst::Upload { value, source } => write!(f, "{value} = upload {source}"),
             Inst::Free { value } => write!(f, "free {value}"),
         }
     }
 }
 
-/// Where a [`load`](Op::Load) gets its weight, and what kind of memory it comes to rest in.
+/// What a [`load`](Op::Load) is answered out of.
 ///
-/// A load is not one thing happening but three: the package is read, the bytes come to rest on the
-/// host, and that host copy crosses to the device. Only the first of them is asked of a source.
-/// The other two are instructions -- [`Inst::Read`] is this call, [`Inst::Upload`] is the move --
-/// and where each of them sits is the [`Ir`]'s to decide and not this trait's to guess.
+/// Where the weights are -- on the card, or page-locked on the host -- was decided when the source
+/// was built, so the one thing a run asks of it is a weight, on the device the run is going to.
+/// [`Weights`] is what a model is read into.
 ///
 /// A weight is asked for by the name the package holds it under, because that is all a graph
 /// knows: there is no build step that could have handed out anything shorter.
 pub trait ParamSource {
-    /// The weight called `name`, on the host, which the caller expects to have `shape`.
+    /// The weight called `name`, which the caller expects to have `shape`, on the device the run
+    /// is going to.
     ///
-    /// `pinned` asks for page-locked host memory rather than ordinary memory. It is a request
-    /// about what is about to happen to the weight and not about the weight: the driver's copy
-    /// engine reads page-locked memory directly where it has to stage a pageable source through a
-    /// bounce buffer of its own first, so a weight that crosses the bus on every pass asks for it
-    /// and one that crosses once does not.
-    ///
-    /// A source with nothing to page-lock -- anything that is not a package bound for a CUDA
-    /// device -- reads into ordinary memory instead. There being nothing else for it to be given.
-    fn read(&self, name: &str, shape: &[i32], pinned: bool) -> Result<Tensor>;
-
-    /// The device a weight goes to once it has been read, which is the one the model runs on.
-    fn device(&self) -> Device;
-
-    /// Where this model's weights wait between the instructions that read them.
-    ///
-    /// Read when the graph is compiled rather than when it is run: what it decides is whether a
-    /// load's hops are written into the prologue, which happens once, or into the pass, which
-    /// happens once per step. See [`Ir::compile`].
-    fn residency(&self) -> Residency;
+    /// A lookup where the weights were kept on the card, and the copy across the bus where they
+    /// were kept on the host. Either way what comes back is a tensor the operators can read, and
+    /// a handle the run lets go of after the weight's last reader.
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor>;
 
     /// What shape the weight called `name` is, if there is one here.
     ///
     /// For a model that reads its own architecture out of the package rather than out of a
     /// configuration -- Anima's autoencoder counts its stages by looking for them -- which has to
     /// ask before it knows what it is asking for. Answered without handing the weight over, for
-    /// the same reason `check` is: reading a weight is a read of the disk, and finding out how big
+    /// the same reason `check` is: a weight asked for is a weight moved, and finding out how big
     /// one is should not be.
     fn shape_of(&self, name: &str) -> Option<Vec<i32>>;
 
@@ -267,34 +188,18 @@ pub trait ParamSource {
 
     /// Whether `name` is here with `shape`, answered without handing the weight over.
     ///
-    /// Apart from `read` because for a source where reading costs something the two are not the
-    /// same question at all: checking a model's eight hundred weights by reading each one and
-    /// dropping it would pull the whole package off the disk to learn nothing but that the package
-    /// is the right one. See [`check_parameters`], which is the only caller.
+    /// Apart from `load` because for a source where loading costs something the two are not the
+    /// same question at all: checking a model's eight hundred weights by moving each one across
+    /// the bus and dropping it would be a whole pass's worth of copying to learn nothing but that
+    /// the package is the right one. See [`check_parameters`], which is the only caller.
     fn check(&self, name: &str, shape: &[i32]) -> Result<()>;
 }
 
 impl ParamSource for HashMap<String, Tensor> {
-    /// A state dict that is already in memory, which hands over another handle on what it holds
-    /// rather than reading anything. Nothing in it is page-locked, and nothing here pretends it
-    /// is: what `pinned` buys is a faster copy, and a source that cannot offer one says so by
-    /// handing back what it has.
-    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
+    /// A state dict whose tensors are already where the run wants them, which hands over another
+    /// handle on one rather than moving anything. A handle costs no bytes.
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
         Ok(held(self, name, shape)?.clone())
-    }
-
-    /// Wherever its tensors already are, which whoever built it decided. An empty one has nothing
-    /// to be asked about and answers for the host.
-    fn device(&self) -> Device {
-        self.values()
-            .next()
-            .map_or(Device::Cpu, |tensor| tensor.device())
-    }
-
-    /// Kept, which is the only thing a map in memory can be: there is no package behind it to read
-    /// a weight out of a second time.
-    fn residency(&self) -> Residency {
-        Residency::Device
     }
 
     fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
@@ -346,11 +251,10 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// # let g = Graph::new();
 /// # let x = g.input("hidden");
 /// # g.output("hidden", g.silu(x));
-/// # let ir = Ir::compile(&g, Residency::Device);
+/// # let ir = Ir::compile(&g);
 /// # let weights = HashMap::new();
-/// # let preloaded = ir.load(&weights)?;
 /// # let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
-/// let context = RunContext::new(&weights).preloaded(&preloaded).input("hidden", &hidden);
+/// let context = RunContext::new(&weights).input("hidden", &hidden);
 /// let outputs = ir.run(&context)?;
 /// # Ok::<(), waifu::Error>(())
 /// ```
@@ -359,12 +263,6 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// five pairs for the U-Net, against the pass they are handed to.
 pub struct RunContext<'a> {
     params: &'a dyn ParamSource,
-    /// What [`Ir::load`] already brought across, which a pass starts from rather than recomputing.
-    ///
-    /// None where there is nothing to start from, which is two cases and not an error in either:
-    /// the prologue's own run, which is what *produces* the table, and a pass under
-    /// [`Residency::LowVram`], where no weight is kept between runs at all.
-    preloaded: Option<&'a Preloaded>,
     inputs: Vec<(&'a str, &'a Tensor)>,
 }
 
@@ -374,19 +272,8 @@ impl<'a> RunContext<'a> {
     pub fn new(params: &'a dyn ParamSource) -> Self {
         RunContext {
             params,
-            preloaded: None,
             inputs: Vec::new(),
         }
-    }
-
-    /// The weights [`Ir::load`] kept for this IR, which the pass starts from.
-    ///
-    /// Left off by a caller that has none to give. Under [`Residency::LowVram`] that is every
-    /// caller, since the table `load` hands back there is empty -- so saying it or leaving it out
-    /// comes to the same run.
-    pub fn preloaded(mut self, preloaded: &'a Preloaded) -> Self {
-        self.preloaded = Some(preloaded);
-        self
     }
 
     /// The tensor the graph's input called `name` stands for.
@@ -417,36 +304,74 @@ impl<'a> RunContext<'a> {
     }
 }
 
-/// A model's weights: the package they are in, and where they are going.
+/// A model's weights, read out of its package and kept where [`Residency`] says.
 ///
-/// What a [`load`](Op::Load) is answered out of, and it holds no weight. The package is mapped
-/// rather than read, so making one costs the headers and nothing else; every byte after that is
-/// read at the instruction that asked for it and let go of at the instruction that finished with
-/// it.
+/// One map of tensors, whichever residency: on the card for [`Residency::Device`], page-locked on
+/// the host for [`Residency::LowVram`]. What differs is only whether a [`load`](ParamSource::load)
+/// has to move the weight -- a kept one is already where the run wants it and is handed over as a
+/// handle, and a waiting one is copied across the bus, to be given back at the `free` after its
+/// last reader.
 ///
-/// That is the difference from what this replaced. The older form read the whole package onto the
-/// device when the model was built, which is what a model that fits wants and what a model that
-/// does not fit cannot do at all; a second form page-locked the whole package on the host, which
-/// fits but reserves the model's size in memory no other process may have. Neither decision is
-/// made here any more. Both are the [`Ir`]'s, one weight at a time, and what is left here is the
-/// two questions an instruction cannot answer for itself: what the package holds, and where this
-/// model is running.
+/// # What low-vram costs
+///
+/// The copy, once per load per run, which is the whole model across the bus for every sampler
+/// step. So it is slower than keeping the weights on the card and always will be; it is the mode
+/// for when the alternative is not drawing at all.
+///
+/// And the model's size in host memory the driver has locked, for as long as the model is held.
+/// Page-locked once, when the weights are read, rather than for each copy: the copy engine reads
+/// page-locked memory directly where it stages a pageable source through a bounce buffer of its
+/// own, and a page-locked copy made for one move and freed after it would pay for the locking
+/// every step and save nothing.
 pub struct Weights {
-    file: ParamFile,
+    /// Keyed the way the package keys them, which is what a graph's `load` asks for.
+    tensors: HashMap<String, Tensor>,
+    /// Where a run wants a weight, which is the device the model was built for.
     device: Device,
-    residency: Residency,
-    /// What the device computes in. Worked out once because `retype` is asked about every weight
-    /// read and the answer cannot change within a model.
-    computes_in: DType,
 }
 
 impl Weights {
-    /// The weights of `file`, for a model running on `device` with its loads compiled the way
-    /// `residency` says.
+    /// Every weight of the safetensors files at `paths`, for a model running on `device` with its
+    /// weights held the way `residency` says.
     ///
-    /// Refuses the pair that cannot be built rather than quietly running as the other one: a
-    /// low-vram run waits in page-locked host memory, which is CUDA's to hand out.
-    pub fn new(file: ParamFile, device: Device, residency: Residency) -> Result<Weights> {
+    /// The one way a model's weights are read. Each file is read in turn and each of its weights
+    /// is put where it is going as it is read, so what the host holds on top of that at any moment
+    /// is one file, and nothing afterwards reads the disk.
+    ///
+    /// A low-vram run on anything but CUDA is refused before a byte is read.
+    pub fn from_files(
+        paths: &[impl AsRef<Path>],
+        device: Device,
+        residency: Residency,
+    ) -> Result<Weights> {
+        Weights::read(device, residency, &mut |place| {
+            tensor_file::collect(paths, place)
+        })
+    }
+
+    /// The same, out of one file's bytes already in hand rather than off the disk.
+    pub fn from_bytes(bytes: &[u8], device: Device, residency: Residency) -> Result<Weights> {
+        Weights::read(device, residency, &mut |place| {
+            tensor_file::collect_bytes(bytes, place)
+        })
+    }
+
+    /// How many weights there are.
+    pub fn len(&self) -> usize {
+        self.tensors.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tensors.is_empty()
+    }
+
+    /// The weights `read` hands over, each `retype`d and put where `residency` keeps it as it
+    /// arrives.
+    ///
+    /// `retype` runs before the move rather than after it, because a conversion is cheaper on a
+    /// tensor that has not been sent anywhere -- and page-locked host memory has no operators to
+    /// convert with at all.
+    fn read(device: Device, residency: Residency, read: &mut Read<'_>) -> Result<Weights> {
         if !residency.works_on(device) {
             return Err(Error::model(format!(
                 "a low-vram run waits in page-locked host memory, which is cuda's to hand out, \
@@ -455,109 +380,68 @@ impl Weights {
             )));
         }
 
+        let computes_in = F::default_float_type(device)?;
+        let kept_on = match residency {
+            Residency::Device => device,
+            Residency::LowVram => Device::CudaHost,
+        };
+
         Ok(Weights {
-            computes_in: F::default_float_type(device)?,
-            file,
+            tensors: read(&mut |tensor| Ok(retype(tensor, computes_in)?.to_device(kept_on)?))?,
             device,
-            residency,
         })
-    }
-
-    /// How many weights the package holds.
-    pub fn len(&self) -> usize {
-        self.file.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.file.is_empty()
     }
 }
 
+/// How a package is read, handed the step that puts each tensor where it is kept.
+type Read<'a> =
+    dyn FnMut(&mut dyn FnMut(Tensor) -> Result<Tensor>) -> Result<HashMap<String, Tensor>> + 'a;
+
 impl ParamSource for Weights {
-    /// One weight, off the disk and onto the host.
+    /// The weight, where the run wants it: a handle on it if it is already there, and the copy
+    /// across the bus if it is waiting on the host.
     ///
-    /// Three things happen, and they are here in this order:
+    /// Asked of the device rather than assumed, because `to_device` copies whether or not the
+    /// tensor has anywhere to go -- a kept weight moved "to" the card it is on would be a second
+    /// copy of the model, one weight at a time, every step.
     ///
-    /// 1. storage is allocated, in ordinary host memory or the page-locked kind, in the element
-    ///    type the exporter wrote;
-    /// 2. [`ParamFile::read_into`] fills it, which is a read of the mapping straight into those
-    ///    bytes rather than into a buffer that would then have to be copied into them;
-    /// 3. `retype` changes the element type, in the one case a device cannot take it.
-    ///
-    /// The last is where anything is decided at all, and doing it here rather than after the move
-    /// is what keeps it cheap: a conversion happens on a tensor that has not been sent anywhere.
-    fn read(&self, name: &str, shape: &[i32], pinned: bool) -> Result<Tensor> {
-        // Page-locked memory is the CUDA driver's to hand out, so a run going anywhere else reads
-        // into ordinary memory whatever it was asked for. Saying so here rather than refusing is
-        // right because `pinned` is an optimization: what it changes is the speed of the move
-        // below it, and a device with no such move loses nothing by ignoring it.
-        let into = if pinned && self.device == Device::Cuda {
-            Device::CudaHost
-        } else {
-            Device::Cpu
-        };
-
-        let dtype = self.file.dtype_of(name).ok_or_else(|| {
-            Error::model(format!("tensor {name:?} not found in model"))
-        })?;
-
-        let mut tensor = Tensor::empty(shape, dtype, into)?;
-        self.file.read_into(name, &mut tensor)?;
-
-        retype(tensor, self.computes_in)
+    /// Synchronous, because the instruction after this one reads what it returns and there is
+    /// nothing else for the host to be doing in between.
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
+        let held = held(&self.tensors, name, shape)?;
+        match held.device() == self.device {
+            true => Ok(held.clone()),
+            false => Ok(held.to_device(self.device)?),
+        }
     }
 
-    fn device(&self) -> Device {
-        self.device
-    }
-
-    fn residency(&self) -> Residency {
-        self.residency
-    }
-
-    /// Off the header, so asking moves nothing and touches no disk.
     fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
-        self.file.shape_of(name)
+        self.tensors.get(name).map(|tensor| tensor.shape())
     }
 
     fn has(&self, name: &str) -> bool {
-        self.file.has(name)
+        self.tensors.contains_key(name)
     }
 
-    /// Asked of the header too, which is the reason `check` is not `read` with its result
-    /// dropped: checking a model this way reads none of it.
+    /// Asked of the map, which is the reason `check` is not `load` with its result dropped:
+    /// checking a low-vram model this way moves none of it.
     fn check(&self, name: &str, shape: &[i32]) -> Result<()> {
-        match self.file.shape_of(name) {
-            None => Err(Error::model(format!("tensor {name:?} not found in model"))),
-            Some(found) if found != shape => Err(Error::model(format!(
-                "tensor {name:?} has shape {found:?}, expected {shape:?}"
-            ))),
-            Some(_) => Ok(()),
-        }
+        held(&self.tensors, name, shape).map(drop)
     }
 }
 
 impl fmt::Debug for Weights {
-    /// How much is in the package and where it is going, rather than every weight: a model holds
+    /// How many there are and where they are going, rather than every weight: a model holds
     /// hundreds of them and they are named in the IR that reads them.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Weights")
-            .field("tensors", &self.file.len())
+            .field("tensors", &self.tensors.len())
             .field("device", &self.device)
-            .field("residency", &self.residency)
             .finish()
     }
 }
 
-/// The weights of `file`, for a model that fits on `device` and will keep them there.
-///
-/// [`Weights::new`] with [`Residency::Device`], which is what all but one caller wants and what
-/// every model in this library did before there was a choice.
-pub fn resident(file: &ParamFile, device: Device) -> Result<Weights> {
-    Weights::new(file.clone(), device, Residency::Device)
-}
-
-/// Where a model's weights wait between the instructions that read them.
+/// Where a model's weights wait between the passes that read them.
 ///
 /// The one question a caller has to answer that the package cannot: both modes run the same IR
 /// over the same weights and draw the same picture, and they differ only in what the card is
@@ -567,26 +451,13 @@ pub enum Residency {
     /// On the device, moved once and kept. Fastest, and what a card the model fits on wants.
     #[default]
     Device,
-    /// Nowhere, between passes. A weight is read out of the package into page-locked host memory
-    /// at the [`Inst::Read`] that wants it, crosses the bus at the [`Inst::Upload`] after that,
-    /// and both copies are given back at the `free` after its last reader. For a card the model
-    /// does not fit on: what the card holds is what the pass is using rather than the model.
+    /// Page-locked on the host, and moved onto the device by each load and given back after its
+    /// last reader. For a card the model does not fit on: what the card holds is what the pass is
+    /// using rather than the model. See [`Weights`].
     LowVram,
 }
 
 impl Residency {
-    /// The weights of `file`, for a model on `device` that will hold them the way this says.
-    ///
-    /// Behind an [`Rc`] because that is what the halves of a model share: SDXL is four passes
-    /// built out of one package, and the point of opening it once is that they all read the same
-    /// one afterwards.
-    ///
-    /// Nothing is read here whichever this is. What the two differ in is where the instructions
-    /// that read them end up, which is [`Ir::compile`]'s to arrange.
-    pub fn read(self, file: ParamFile, device: Device) -> Result<Rc<dyn ParamSource>> {
-        Ok(Rc::new(Weights::new(file, device, self)?))
-    }
-
     /// Whether a run on `device` can be had this way.
     ///
     /// [`Residency::LowVram`] waits in memory only CUDA hands out, so it is the one answer that
@@ -658,174 +529,39 @@ fn retype(tensor: Tensor, computes_in: DType) -> Result<Tensor> {
 /// instruction produces; that is one empty slot each, and it buys being able to compare the two.
 #[derive(Clone, Debug)]
 pub struct Ir {
-    /// The weights that cross once, as the instructions that bring them across.
-    ///
-    /// Run by [`Ir::load`] before the first pass and never again; what it produces is a
-    /// [`Preloaded`], which every run of `insts` below starts from. Empty under
-    /// [`Residency::LowVram`], where no weight stays.
-    prologue: Vec<Inst>,
     insts: Vec<Inst>,
-    /// How many slots a run needs. Every value the graph had -- see the type documentation -- and
-    /// after them the ones compiling handed out for the host copy of a streamed weight.
+    /// How many slots a run needs, which is every value the graph had -- see the type
+    /// documentation.
     width: usize,
     inputs: Vec<(String, Value)>,
     outputs: Vec<(String, Value)>,
 }
 
-/// The weights an [`Ir`] loaded before its first pass, which every pass after it starts from.
-///
-/// Preloaded rather than kept, because the number that matters is how many were brought across
-/// ahead of any work, and under [`Residency::LowVram`] that number is zero: nothing is loaded
-/// early there, and every pass reads what it needs at the instruction that needs it. So an empty
-/// one is not a failure to fill it, it is the whole of what the streaming mode preloads.
-///
-/// A run starts from these slots rather than from empty ones, so a weight that crossed once is
-/// there for the twentieth pass as it was for the first. Cloning the slot table per run is a
-/// handle each and no bytes; what a run then frees is its own handle, and the storage stays
-/// because this still holds one.
-#[derive(Clone, Debug)]
-pub struct Preloaded {
-    slots: Vec<Option<Tensor>>,
-}
-
-impl Preloaded {
-    /// How many weights were preloaded, which is how many the prologue brought across.
-    pub fn len(&self) -> usize {
-        self.slots.iter().filter(|slot| slot.is_some()).count()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.slots.iter().all(Option::is_none)
-    }
-}
-
 impl Ir {
-    /// Work out how to run `graph`, with its weights held the way `residency` says.
+    /// Work out how to run `graph`.
     ///
     /// Cannot fail: a graph already guarantees that every operand exists and comes before the
     /// node reading it, which is everything this needs of it.
     ///
-    /// # What residency decides
-    ///
-    /// Every [`Op::Load`] becomes the same three instructions -- read the weight onto the host,
-    /// move it to the device, let the host copy go -- and `residency` decides which list they are
-    /// written into, which is the whole of the difference between the two modes:
-    ///
-    /// * [`Residency::Device`] puts them in the prologue. They run once, before the first pass,
-    ///   and what they leave on the card is there for every pass after it. The read is into
-    ///   ordinary host memory, since page-locking a copy that is about to be moved once and
-    ///   dropped buys nothing.
-    /// * [`Residency::LowVram`] puts them in the pass, in front of the instruction that reads the
-    ///   weight, and frees what they produced after the last one that does. The read is into
-    ///   page-locked memory, which is what makes the move that follows it a copy the driver can
-    ///   make directly. So the card holds what the pass is using rather than the model -- and the
-    ///   host holds one weight rather than the package, which is what the older form of this,
-    ///   page-locking the whole package up front, could not say.
-    ///
-    /// Both lists are the same instructions in the same vocabulary, and both print. What a model
-    /// does when it is built and what it does on every step can be read off the same page.
-    pub fn compile(graph: &Graph, residency: Residency) -> Ir {
+    /// Nothing here depends on where the weights are. A `load` is an instruction like any other,
+    /// answered by the [`ParamSource`] a run is given, and freed after its last reader like any
+    /// other value -- which is a handle let go of where the weights are kept on the card, and the
+    /// card's copy given back where they wait on the host.
+    pub fn compile(graph: &Graph) -> Ir {
         // The whole graph, once. Every node here is either moved into an instruction below or
         // dropped as one nothing reads, and asking for them one at a time would copy each of them
         // a second time.
         let nodes = graph.nodes();
         let outputs = graph.outputs();
 
-        // Which `load` brings a weight across, and which ones stand for it. Keyed by what a load
-        // asks for rather than by name alone: two loads of one name in two shapes is a model that
-        // is wrong about its own weights, and it should fail at the second read rather than
-        // quietly be handed the first one's tensor.
-        let mut first_load: HashMap<(&str, &[i32]), Value> = HashMap::new();
-        let mut repeats: HashMap<usize, Vec<Value>> = HashMap::new();
-        let mut is_repeat = vec![false; nodes.len()];
-        for (value, op) in &nodes {
-            if let Op::Load { name, shape } = op {
-                match first_load.get(&(name.as_str(), shape.as_slice())) {
-                    Some(brought) => {
-                        repeats.entry(brought.slot()).or_default().push(*value);
-                        is_repeat[value.slot()] = true;
-                    }
-                    None => {
-                        first_load.insert((name.as_str(), shape.as_slice()), *value);
-                    }
-                }
-            }
-        }
-
         let live = live_values(&nodes, &outputs);
         let mut remaining = remaining_reads(&nodes, &live, &outputs);
 
-        // Every value the graph handed out, and room after them for the ones this hands out: a
-        // streamed weight needs a second slot for its host copy, which no node ever named.
-        let mut width = nodes.len();
-
-        let kept = residency == Residency::Device;
-        let mut prologue = Vec::new();
+        let width = nodes.len();
         let mut insts = Vec::new();
-
-        // Which values are weights the prologue brought across. A pass does not free one: it
-        // did not put it there, the `Preloaded` it came from still holds it, and a `free` for a
-        // value no instruction in this list produced is a thing no one reading the list can make
-        // sense of.
-        let mut preloaded_here = vec![false; width];
 
         for (value, op) in nodes {
             if !live[value.slot()] {
-                continue;
-            }
-
-            // A load is three instructions rather than one, and the only node that is. Which list
-            // they go on is the whole of what residency decides; see the note above.
-            if let Op::Load { name, shape } = &op {
-                // A repeat was dealt with where the weight arrived, several instructions ago.
-                if is_repeat[value.slot()] {
-                    continue;
-                }
-
-                let staging = Value::at(width);
-                width += 1;
-
-                let hops = [
-                    Inst::Read {
-                        value: staging,
-                        name: name.clone(),
-                        shape: shape.clone(),
-                        pinned: !kept,
-                        site: graph.site(value),
-                    },
-                    Inst::Upload {
-                        value,
-                        source: staging,
-                    },
-                    // The host copy is dead the moment the move above has run, whichever list
-                    // this is on. It is the device copy whose life the two modes differ over.
-                    Inst::Free { value: staging },
-                ];
-
-                // The nodes that named the same weight, made to stand for it here rather than
-                // where they asked: under streaming the tensor this aliases is freed at its own
-                // last reader, which may come first.
-                let standing_for = repeats.remove(&value.slot()).unwrap_or_default();
-                let also = standing_for.iter().map(|repeat| Inst::Alias {
-                    value: *repeat,
-                    source: value,
-                });
-
-                if kept {
-                    prologue.extend(hops);
-                    prologue.extend(also);
-                    preloaded_here[value.slot()] = true;
-                    for repeat in standing_for {
-                        preloaded_here[repeat.slot()] = true;
-                    }
-                } else {
-                    insts.extend(hops);
-                    insts.extend(also);
-                }
-
-                // A load reads no operand, so there is nothing to count down here. The free for
-                // what it produced is emitted below by whichever instruction reads it last, and
-                // only when the weight is this pass's to free -- see `preloaded_here`.
                 continue;
             }
 
@@ -840,7 +576,7 @@ impl Ir {
 
             for operand in operands {
                 remaining[operand.slot()] -= 1;
-                if remaining[operand.slot()] == 0 && !preloaded_here[operand.slot()] {
+                if remaining[operand.slot()] == 0 {
                     insts.push(Inst::Free { value: operand });
                 }
             }
@@ -852,7 +588,6 @@ impl Ir {
         }
 
         Ir {
-            prologue,
             insts,
             width,
             inputs: graph.inputs(),
@@ -860,26 +595,12 @@ impl Ir {
         }
     }
 
-    /// Bring the weights that are kept across, which is running the prologue.
-    ///
-    /// Once, when the model is built. Under [`Residency::LowVram`] the prologue is empty and this
-    /// reads nothing, which is the point of it: a model too large for the card is not read onto
-    /// the card before it is asked to draw.
-    pub fn load(&self, params: &dyn ParamSource) -> Result<Preloaded> {
-        let context = RunContext::new(params);
-        let mut slots: Vec<Option<Tensor>> = vec![None; self.width];
-        for inst in &self.prologue {
-            step(inst, &mut slots, &context)?;
-        }
-
-        Ok(Preloaded { slots })
-    }
-
     /// Run the instructions, and hand back what the graph named as its outputs.
     ///
-    /// `held` is what [`Ir::load`] produced for this IR, and `context` holds a tensor for each of
-    /// [`Ir::inputs`] and the [`ParamSource`] every [`Inst::Read`] reads its weight from. The
-    /// outputs come back in the order [`Graph::output`] named them.
+    /// `context` holds a tensor for each of [`Ir::inputs`] and the [`ParamSource`] every load
+    /// reads its weight from -- by lookup where the weights are kept, and through the
+    /// [`Inst::Read`] in front of the reader where they are streamed. The outputs come back in
+    /// the order [`Graph::output`] named them.
     ///
     /// # Errors
     ///
@@ -888,16 +609,10 @@ impl Ir {
     pub fn run(&self, context: &RunContext<'_>) -> Result<Vec<(String, Tensor)>> {
         self.check_inputs(context.inputs())?;
 
-        // The weights that are kept, as this run's handles on them. A clone of the table is a
-        // handle per weight and no bytes, and what this run frees is its own handle. A context
-        // that was given none starts from an empty table instead, which `resize` fills out to the
-        // width this IR needs -- so the prologue's own run and a low-vram pass take the same path
-        // here as any other.
-        let mut slots = match context.preloaded {
-            Some(preloaded) => preloaded.slots.clone(),
-            None => Vec::new(),
-        };
-        slots.resize(self.width, None);
+        // Empty, every run. What a kept weight costs here is the handle the lookup hands back and
+        // the free that follows its last reader; the storage is the source's, and it stays
+        // because the source still holds it.
+        let mut slots: Vec<Option<Tensor>> = vec![None; self.width];
 
         for inst in &self.insts {
             step(inst, &mut slots, context)?;
@@ -915,12 +630,6 @@ impl Ir {
             })
             .collect())
     }
-
-    /// The instructions the prologue runs, in the order they run.
-    pub fn prologue(&self) -> &[Inst] {
-        &self.prologue
-    }
-
 
     /// The instructions, in the order they run.
     pub fn insts(&self) -> &[Inst] {
@@ -979,24 +688,12 @@ impl Ir {
 impl fmt::Display for Ir {
     /// The instructions, one per line, and then what the run hands back.
     ///
-    /// The prologue comes first, in a block of its own, and is left out when there is none: what a
-    /// model does once and what it does per pass are different enough to be worth separating on
-    /// the page, and a low-vram model does nothing once.
+    /// One block, because there is one list: what a run does is what it says, and a weight that
+    /// was brought across before any of it shows up as the `load` it always was.
     ///
     /// The alternate form, `{:#}`, writes where each node was built after it, the way `{:#}` on a
     /// [`Graph`] does.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.prologue.is_empty() {
-            writeln!(f, "prologue {{")?;
-            for inst in &self.prologue {
-                match f.alternate() {
-                    true => writeln!(f, "  {inst:#}")?,
-                    false => writeln!(f, "  {inst}")?,
-                }
-            }
-            writeln!(f, "}}")?;
-        }
-
         writeln!(f, "ir {{")?;
         for inst in &self.insts {
             match f.alternate() {
@@ -1022,18 +719,9 @@ fn blame(value: Value, op: &Op, site: &Site, error: Error) -> Error {
     Error::model(format!("{value} = {op}, built at {site}: {error}"))
 }
 
-/// The same for a read, which has a name and a shape where a node has an operation.
-///
-/// Written to read like the `load` node it was compiled from, since that is the thing whoever is
-/// reading this wrote.
-fn blame_read(name: &str, shape: &[i32], site: &Site, error: Error) -> Error {
-    Error::model(format!("load({name:?}, {shape:?}), built at {site}: {error}"))
-}
-
 /// Run one instruction against the slots.
 ///
-/// The whole of what a run does, and shared by the prologue and the pass so that an instruction
-/// means the same thing wherever it was written.
+/// The whole of what a run does.
 fn step(inst: &Inst, slots: &mut [Option<Tensor>], context: &RunContext<'_>) -> Result<()> {
     match inst {
         Inst::Run { value, op, site } => {
@@ -1041,27 +729,6 @@ fn step(inst: &Inst, slots: &mut [Option<Tensor>], context: &RunContext<'_>) -> 
                 .map_err(|error| blame(*value, op, site, error))?;
 
             slots[value.slot()] = Some(tensor);
-        }
-        Inst::Read {
-            value,
-            name,
-            shape,
-            pinned,
-            site,
-        } => {
-            let tensor = context
-                .params()
-                .read(name, shape, *pinned)
-                .map_err(|error| blame_read(name, shape, site, error))?;
-
-            slots[value.slot()] = Some(tensor);
-        }
-        Inst::Alias { value, source } => {
-            slots[value.slot()] = Some(read(slots, *source).clone());
-        }
-        Inst::Upload { value, source } => {
-            let host = read(slots, *source);
-            slots[value.slot()] = Some(host.to_device(context.params().device())?);
         }
         Inst::Free { value } => slots[value.slot()] = None,
     }
@@ -1078,12 +745,9 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
             .tensor(name)
             .cloned()
             .expect("run checked that every input was given"),
-        // Compiled into an `Inst::Read` and an `Inst::Upload` rather than run here, so that where
-        // a weight comes to rest is something the IR says. `compile` puts no load in an
-        // `Inst::Run`, which is why this is unreachable rather than a second way of doing it.
-        Op::Load { name, .. } => {
-            unreachable!("a load is compiled to read and upload, not run: {name:?}")
-        }
+        // Answered by the source: a lookup where the weights are kept on the card, and the copy
+        // across the bus where they wait page-locked on the host.
+        Op::Load { name, shape } => context.params().load(name, shape)?,
         Op::Constant { tensor } => tensor.clone(),
 
         Op::Zeros {
@@ -1445,17 +1109,9 @@ mod tests {
     }
 
     impl ParamSource for Counting {
-        fn read(&self, name: &str, shape: &[i32], pinned: bool) -> Result<Tensor> {
+        fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
             self.loads.set(self.loads.get() + 1);
-            self.weights.read(name, shape, pinned)
-        }
-
-        fn device(&self) -> Device {
-            self.weights.device()
-        }
-
-        fn residency(&self) -> Residency {
-            Residency::Device
+            self.weights.load(name, shape)
         }
 
         fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
@@ -1472,14 +1128,14 @@ mod tests {
         }
     }
 
-    /// A parameter file holding nothing, for the checks that happen before one is read.
+    /// A safetensors file holding nothing, for the checks that happen before one is read.
     ///
-    /// A safetensors file with an empty header, which is the smallest one there is: eight bytes
-    /// saying the header is two long, and then `{}`.
-    fn empty_file() -> ParamFile {
+    /// An empty header, which is the smallest file there is: eight bytes saying the header is two
+    /// long, and then `{}`.
+    fn empty_file() -> Vec<u8> {
         let mut bytes = 2u64.to_le_bytes().to_vec();
         bytes.extend_from_slice(b"{}");
-        ParamFile::parse(&bytes).unwrap()
+        bytes
     }
 
     /// One transformer feed forward, which reads its input twice and so has a value that outlives
@@ -1498,18 +1154,9 @@ mod tests {
         g
     }
 
-    /// Compile, bring the kept weights across, and run: the three calls a caller makes, as one.
-    ///
-    /// The context is taken by value because saying what is kept is a builder call on it, which
-    /// a borrow could not make.
-    fn compile_and_run(
-        graph: &Graph,
-        params: &dyn ParamSource,
-        context: RunContext<'_>,
-    ) -> Result<Vec<(String, Tensor)>> {
-        let ir = Ir::compile(graph, params.residency());
-        let preloaded = ir.load(params)?;
-        ir.run(&context.preloaded(&preloaded))
+    /// Compile and run: the two calls a caller makes, as one.
+    fn compile_and_run(graph: &Graph, context: RunContext<'_>) -> Result<Vec<(String, Tensor)>> {
+        Ir::compile(graph).run(&context)
     }
 
     /// The instructions as they are printed, which is the readable way to say what an IR is.
@@ -1517,19 +1164,11 @@ mod tests {
         ir.insts().iter().map(Inst::to_string).collect()
     }
 
-    /// The same for the prologue, which is the other half of what an IR says.
-    fn prologue(ir: &Ir) -> Vec<String> {
-        ir.prologue().iter().map(Inst::to_string).collect()
-    }
-
     fn produced(insts: &[Inst]) -> Vec<Value> {
         insts
             .iter()
             .filter_map(|inst| match inst {
-                Inst::Run { value, .. }
-                | Inst::Read { value, .. }
-                | Inst::Upload { value, .. }
-                | Inst::Alias { value, .. } => Some(*value),
+                Inst::Run { value, .. } => Some(*value),
                 Inst::Free { .. } => None,
             })
             .collect()
@@ -1547,27 +1186,19 @@ mod tests {
 
     #[test]
     fn runs_the_nodes_in_order_and_frees_each_value_where_it_dies() {
-        let ir = Ir::compile(&feed_forward(), Residency::Device);
+        let ir = Ir::compile(&feed_forward());
 
-        // The weight crosses once, before any pass: read onto the host, moved to the device, and
-        // the host copy dropped where it is finished with. `%6` is the slot compiling handed out
-        // for that host copy, which no node named.
-        assert_eq!(
-            prologue(&ir),
-            [
-                "%6 = read \"fc.weight\" [2, 2] -> host",
-                "%1 = upload %6",
-                "free %6",
-            ]
-        );
-
-        // And the pass is the arithmetic alone. `%1` is not freed here: this list did not put it
-        // there and the `Preloaded` it came from still holds it.
+        // A weight is a `load` like any other node, answered by the source the run is given, and
+        // freed at its last reader like any other value -- a handle dropped where the source
+        // keeps the weights on the card, the card's copy given back where it keeps them on the
+        // host. The list is the same either way.
         assert_eq!(
             listing(&ir),
             [
                 "%0 = input(\"hidden\")",
+                "%1 = load(\"fc.weight\", [2, 2])",
                 "%2 = transpose(%1, 0, 1)",
+                "free %1",
                 "%3 = matmul(%0, %2)",
                 "free %2",
                 "%4 = silu(%3)",
@@ -1582,51 +1213,19 @@ mod tests {
     }
 
     #[test]
-    fn brings_a_streamed_weight_across_inside_the_pass_and_frees_both_copies() {
-        let ir = Ir::compile(&feed_forward(), Residency::LowVram);
-
-        // Nothing happens before the first pass, which is what lets a model larger than the card
-        // be built at all.
-        assert!(ir.prologue().is_empty());
-
-        assert_eq!(
-            listing(&ir),
-            [
-                "%0 = input(\"hidden\")",
-                // Page-locked, because this copy is about to cross the bus and will do so again
-                // on every pass after this one.
-                "%6 = read \"fc.weight\" [2, 2] -> pinned",
-                "%1 = upload %6",
-                "free %6",
-                "%2 = transpose(%1, 0, 1)",
-                // And the device copy goes at its last reader, exactly as any other value does.
-                "free %1",
-                "%3 = matmul(%0, %2)",
-                "free %2",
-                "%4 = silu(%3)",
-                "free %3",
-                "%5 = add(%0, %4)",
-                "free %0",
-                "free %4",
-            ]
-        );
-    }
-
-    #[test]
     fn runs_every_node_the_graph_holds_and_asks_for_what_it_asked_for() {
         let g = feed_forward();
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
 
-        // Every node but the loads, which the prologue took, and one value per load in it.
-        assert_eq!(produced(ir.insts()).len() + g.parameters().len(), g.len());
-        assert_eq!(produced(ir.prologue()).len(), 2 * g.parameters().len());
+        // Every node the graph had, loads included: a kept load is an instruction like the rest.
+        assert_eq!(produced(ir.insts()).len(), g.len());
         assert_eq!(ir.inputs(), g.inputs());
         assert_eq!(ir.outputs(), g.outputs());
     }
 
     #[test]
     fn never_frees_what_the_graph_names_as_an_output() {
-        let ir = Ir::compile(&feed_forward(), Residency::Device);
+        let ir = Ir::compile(&feed_forward());
         let output = ir.outputs()[0].1;
 
         assert!(!freed(ir.insts()).contains(&output));
@@ -1639,7 +1238,7 @@ mod tests {
         let doubled = g.add(x, x);
         g.output("x", doubled);
 
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
 
         assert_eq!(
             listing(&ir),
@@ -1655,7 +1254,7 @@ mod tests {
         let spare = g.gelu(x);
         g.output("y", wanted);
 
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
 
         assert_eq!(g.len(), 3);
         assert!(!produced(ir.insts()).contains(&spare));
@@ -1674,7 +1273,7 @@ mod tests {
         let y = g.silu(x);
         g.output("y", y);
 
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
 
         assert_eq!(produced(ir.insts()), vec![x, noise, y]);
         // Drawn, and then let go of at once: nothing is going to read it.
@@ -1688,7 +1287,7 @@ mod tests {
         let spare = g.input("spare");
         g.output("x", x);
 
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
 
         assert_eq!(ir.inputs().len(), 2);
         assert_eq!(produced(ir.insts()), vec![x, spare]);
@@ -1707,7 +1306,7 @@ mod tests {
 
         // The value a size is read off is a value the node reads, so it is an operand and is not
         // let go of before the instruction that reads it.
-        let plan = listing(&Ir::compile(&g, Residency::Device));
+        let plan = listing(&Ir::compile(&g));
         assert_eq!(
             plan,
             [
@@ -1725,7 +1324,7 @@ mod tests {
         let context = RunContext::new(&params)
             .input("x", &two)
             .input("table", &table);
-        let outputs = compile_and_run(&g, &params, context).unwrap();
+        let outputs = compile_and_run(&g, context).unwrap();
 
         assert_eq!(outputs[0].1.to_vec_f32().unwrap(), [1.0, 2.0, 3.0, 4.0]);
 
@@ -1734,7 +1333,7 @@ mod tests {
         let context = RunContext::new(&params)
             .input("x", &three)
             .input("table", &table);
-        let outputs = compile_and_run(&g, &params, context).unwrap();
+        let outputs = compile_and_run(&g, context).unwrap();
 
         assert_eq!(
             outputs[0].1.to_vec_f32().unwrap(),
@@ -1751,13 +1350,12 @@ mod tests {
             g.view(x, [Extent::At(1), Extent::of(x, 0), Extent::At(1)]),
         );
 
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
         let params = state_dict(&[]);
-        let preloaded = ir.load(&params).unwrap();
         for length in [2, 6] {
             let x = Tensor::from_f32(&[length], &vec![1.0; length as usize]).unwrap();
             let context = RunContext::new(&params).input("x", &x);
-            let outputs = ir.run(&context.preloaded(&preloaded)).unwrap();
+            let outputs = ir.run(&context).unwrap();
 
             assert_eq!(outputs[0].1.shape(), [1, length, 1]);
         }
@@ -1770,7 +1368,7 @@ mod tests {
         let weight = params["fc.weight"].clone();
 
         let context = RunContext::new(&params).input("hidden", &hidden);
-        let outputs = compile_and_run(&feed_forward(), &params, context).unwrap();
+        let outputs = compile_and_run(&feed_forward(), context).unwrap();
 
         // The same calls in the same order, written out. Nothing was reassociated, so this is an
         // equality and not a tolerance.
@@ -1798,7 +1396,7 @@ mod tests {
         let params = state_dict(&[]);
         let context = RunContext::new(&params).input("hidden", &hidden);
 
-        let outputs = compile_and_run(&g, &params, context).unwrap();
+        let outputs = compile_and_run(&g, context).unwrap();
 
         let names: Vec<&str> = outputs.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["hidden", "pooled"]);
@@ -1811,15 +1409,11 @@ mod tests {
         let x = g.input("hidden");
         g.output("hidden", x);
 
-        let ir = Ir::compile(&g, Residency::Device);
+        let ir = Ir::compile(&g);
         let params = state_dict(&[]);
         let tensor = Tensor::from_f32(&[1], &[1.0]).unwrap();
 
-        let preloaded = ir.load(&params).unwrap();
-        let missing = ir
-            .run(&RunContext::new(&params).preloaded(&preloaded))
-            .unwrap_err()
-            .to_string();
+        let missing = ir.run(&RunContext::new(&params)).unwrap_err().to_string();
         assert!(
             missing.contains("\"hidden\", which was not given"),
             "{missing}"
@@ -1828,7 +1422,6 @@ mod tests {
         let stray = ir
             .run(
                 &RunContext::new(&params)
-                    .preloaded(&preloaded)
                     .input("hidden", &tensor)
                     .input("hidde", &tensor),
             )
@@ -1845,14 +1438,18 @@ mod tests {
         g.output("weight", weight);
 
         // A state dict that does not hold what the graph asks for, which is a failure that comes
-        // back rather than one the library aborts on.
-        let error = Ir::compile(&g, Residency::Device)
-            .load(&state_dict(&[]))
+        // back rather than one the library aborts on. It comes back from the run now rather than
+        // from a load of its own, and says the same thing: a kept load is an instruction in the
+        // pass, so what blames it is what blames any other.
+        let error = Ir::compile(&g)
+            .run(&RunContext::new(&state_dict(&[])))
             .unwrap_err()
             .to_string();
 
+        // The value it would have produced is named too, which a read could not say: the node is
+        // the instruction now, so the blame is the one every other node gets.
         assert!(
-            error.starts_with("load(\"fc.weight\", [2, 2]), built at "),
+            error.contains("load(\"fc.weight\", [2, 2]), built at "),
             "{error}"
         );
         assert!(error.contains(&format!("ir.rs:{line}")), "{error}");
@@ -1881,12 +1478,8 @@ mod tests {
             ("out.bias", &[2, 2], &[10.0, 10.0, 10.0, 10.0]),
         ]);
 
-        let outputs = compile_and_run(
-            &g,
-            &params,
-            RunContext::new(&params).input("hidden", &hidden),
-        )
-        .unwrap();
+        let outputs =
+            compile_and_run(&g, RunContext::new(&params).input("hidden", &hidden)).unwrap();
         assert_eq!(outputs[0].1.to_vec_f32().unwrap(), [11.0, 12.0, 13.0, 14.0]);
     }
 
@@ -1897,8 +1490,8 @@ mod tests {
         g.output("weight", weight);
 
         let params = state_dict(&[("fc.weight", &[4], &[1.0, 2.0, 3.0, 4.0])]);
-        let error = Ir::compile(&g, Residency::Device)
-            .load(&params)
+        let error = Ir::compile(&g)
+            .run(&RunContext::new(&params))
             .unwrap_err()
             .to_string();
 
@@ -1916,17 +1509,14 @@ mod tests {
         g.output("sample", x);
 
         assert_eq!(
-            Ir::compile(&g, Residency::Device).to_string(),
+            Ir::compile(&g).to_string(),
             concat!(
-                "prologue {\n",
-                "  %4 = read \"conv_in.weight\" [320, 4, 3, 3] -> host\n",
-                "  %1 = upload %4\n",
-                "  free %4\n",
-                "}\n",
                 "ir {\n",
                 "  %0 = input(\"latent\")\n",
+                "  %1 = load(\"conv_in.weight\", [320, 4, 3, 3])\n",
                 "  %2 = conv2d(%0, %1, stride=1, padding=1, dilation=1, groups=1)\n",
                 "  free %0\n",
+                "  free %1\n",
                 "  %3 = silu(%2)\n",
                 "  free %2\n",
                 "  -> sample = %3\n",
@@ -1937,7 +1527,7 @@ mod tests {
 
     #[test]
     fn prints_where_a_node_was_built_only_when_asked() {
-        let ir = Ir::compile(&feed_forward(), Residency::Device);
+        let ir = Ir::compile(&feed_forward());
 
         assert!(!ir.to_string().contains("ir.rs:"));
 
@@ -1958,9 +1548,9 @@ mod tests {
         check_parameters(&feed_forward(), &source).unwrap();
 
         assert_eq!(source.checks.get(), 1);
-        // The whole reason `check` is not `load` with its answer thrown away: under
-        // `Residency::LowVram` a load is a weight crossing the bus, and checking a model would
-        // otherwise move the whole of it to learn that the package is the right one.
+        // The whole reason `check` is not `load` with its answer thrown away: from a low-vram
+        // source a load is a weight crossing the bus, and checking a model would otherwise move
+        // the whole of it to learn that the package is the right one.
         assert_eq!(source.loads.get(), 0, "checking a model must not move it");
     }
 
@@ -1985,9 +1575,12 @@ mod tests {
 
     #[test]
     fn says_that_page_locked_memory_is_cudas_to_hand_out() {
-        // Refused before the file is touched, so an empty one is enough to ask with.
+        // Refused before anything is read, so an empty file is enough to ask with. Metal is asked
+        // too, on a machine that has none: the refusal comes before anything is asked of the
+        // device, which is the point of it.
         for device in [Device::Cpu, Device::Metal] {
-            let error = Weights::new(empty_file(), device, Residency::LowVram)
+            let error = Weights::from_bytes(&empty_file(), device, Residency::LowVram)
+                .map(drop)
                 .unwrap_err()
                 .to_string();
 

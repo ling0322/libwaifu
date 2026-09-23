@@ -31,10 +31,12 @@
 //! the two files in the package are the two the exporter was pointed at, and whether the ids come
 //! back out of them unshifted. A package built from the wrong revision fails it.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use waifu::{Anima, Manifest, ParamFile, Tokenizer};
+use waifu::flint::Tensor;
+use waifu::{read_safetensors, Anima, Manifest, Tokenizer};
 
 const PROMPT: &str = "masterpiece, best quality, 1girl, solo, long hair, brown eyes, school \
                       uniform, smile";
@@ -47,8 +49,8 @@ fn manifest() -> Manifest {
     Manifest::open(models_dir().join("anima-turbo-v11.yaml")).unwrap()
 }
 
-fn test_cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("anima-turbo-v11_test.safetensors")]).unwrap()
+fn test_cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("anima-turbo-v11_test.safetensors")]).unwrap()
 }
 
 /// One tokenizer against the corpus the exporter wrote for it.
@@ -113,9 +115,7 @@ fn both_tokenizers_give_the_ids_the_reference_ran_on() {
     let cases = test_cases();
 
     let reference = |name: &str| -> Vec<i32> {
-        cases
-            .get_unchecked(name)
-            .unwrap()
+        cases[name].clone()
             .to_vec_i64()
             .unwrap()
             .iter()

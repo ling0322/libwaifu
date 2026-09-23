@@ -24,12 +24,13 @@
 //! eye is no good at telling one from the other.
 
 use std::cell::OnceCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{resident, ParamSource, Tensor};
+use waifu::flint::{ParamSource, Tensor, Weights};
 use waifu::{
-    DType, Device, Manifest, ParamFile, VaeConfig, VaeDecoder, VaeEncoder
+    read_safetensors, DType, Device, Manifest, Residency, VaeConfig, VaeDecoder, VaeEncoder,
 };
 
 fn models_dir() -> PathBuf {
@@ -41,7 +42,7 @@ fn models_dir() -> PathBuf {
 /// last up block would overflow.
 /// The whole package on the device, read once for this whole test binary.
 ///
-/// `resident` reads the file rather than a model's part of it, so reading it per test would read
+/// The package is read whole rather than a model's part of it, so reading it per test would read
 /// seven gigabytes as many times as there are tests here.
 fn weights() -> Rc<dyn ParamSource> {
     thread_local! {
@@ -51,21 +52,20 @@ fn weights() -> Rc<dyn ParamSource> {
     WEIGHTS.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
-            let file = params(&manifest);
-
-            let weights: Rc<dyn ParamSource> = Rc::new(resident(&file, Device::Cuda).unwrap());
-            weights
+            Rc::new(
+                Weights::from_files(
+                    &manifest.weight_paths().unwrap(),
+                    Device::Cuda,
+                    Residency::Device,
+                )
+                .unwrap(),
+            )
         }))
     })
 }
 
-/// The parameters of the model, out of whichever files its manifest names.
-fn params(manifest: &Manifest) -> ParamFile {
-    manifest.params().unwrap()
-}
-
-fn cases() -> ParamFile {
-    ParamFile::open(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[models_dir().join("sdxl-base_test.safetensors")]).unwrap()
 }
 
 fn config() -> VaeConfig {
@@ -99,22 +99,16 @@ fn relative_rmse(actual: &Tensor, reference: &Tensor) -> f32 {
     (error / scale).sqrt() as f32
 }
 
-fn latent(cases: &ParamFile) -> Tensor {
-    cases
-        .get_unchecked("test_case.latent")
-        .unwrap()
-        .to_device(Device::Cuda)
+fn latent(cases: &HashMap<String, Tensor>) -> Tensor {
+    cases["test_case.latent"].to_device(Device::Cuda)
         .unwrap()
         .cast(DType::Float16)
         .unwrap()
 }
 
 /// The image the reference decoder made of that latent, which is what the encoder is given back.
-fn image(cases: &ParamFile) -> Tensor {
-    cases
-        .get_unchecked("test_case.decoded")
-        .unwrap()
-        .to_device(Device::Cuda)
+fn image(cases: &HashMap<String, Tensor>) -> Tensor {
+    cases["test_case.decoded"].to_device(Device::Cuda)
         .unwrap()
         .cast(DType::Float16)
         .unwrap()
@@ -132,7 +126,7 @@ fn decodes_a_latent_the_way_the_reference_does() {
     // Eight times larger on each axis, and three channels rather than four.
     assert_eq!(image.shape(), vec![1, 3, 256, 256]);
 
-    let rmse = relative_rmse(&image, &cases.get_unchecked("test_case.decoded").unwrap());
+    let rmse = relative_rmse(&image, &cases["test_case.decoded"]);
     println!("vae decode rmse = {rmse}");
     assert!(rmse < 2e-2, "the decoded image drifted by {rmse}");
 }
@@ -264,7 +258,7 @@ fn encodes_an_image_the_way_the_reference_does() {
     // Eight times smaller on each axis, and four channels rather than three.
     assert_eq!(latent.shape(), vec![1, 4, 32, 32]);
 
-    let rmse = relative_rmse(&latent, &cases.get_unchecked("test_case.encoded").unwrap());
+    let rmse = relative_rmse(&latent, &cases["test_case.encoded"]);
     println!("vae encode rmse = {rmse}");
     assert!(rmse < 2e-2, "the encoded latent drifted by {rmse}");
 }

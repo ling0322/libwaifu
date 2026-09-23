@@ -25,7 +25,7 @@
 //! inside `CAMLayer` three segments with a short one at the end.
 
 use waifu::campplus::{self, Config};
-use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor};
+use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;
@@ -129,7 +129,7 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
 struct Filled;
 
 impl ParamSource for Filled {
-    fn read(&self, name: &str, shape: &[i32], _pinned: bool) -> Result<Tensor> {
+    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
         let count: usize = shape.iter().map(|size| *size as usize).product();
 
         // The two halves of a folded normalization are filled the way the reference sets them:
@@ -146,17 +146,6 @@ impl ParamSource for Filled {
         };
 
         Ok(Tensor::from_f32(shape, &values)?)
-    }
-
-    /// Made on the host, which is where these tests run.
-    fn device(&self) -> Device {
-        CPU
-    }
-
-    /// Kept: a weight made out of its name costs nothing to keep and there is no package
-    /// behind it to stream one out of.
-    fn residency(&self) -> Residency {
-        Residency::Device
     }
 
     fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
@@ -213,12 +202,10 @@ fn run(build: impl FnOnce(&Graph) -> waifu::flint::Value) -> (Vec<i32>, Vec<f32>
 
     let filled = Filled;
     let x = input();
-    let ir = Ir::compile(&g, Residency::Device);
-    let preloaded = ir.load(&filled).unwrap();
+    let ir = Ir::compile(&g);
     let outputs = ir
         .run(
             &RunContext::new(&filled)
-                .preloaded(&preloaded)
                 .input("x", &x),
         )
         .unwrap();

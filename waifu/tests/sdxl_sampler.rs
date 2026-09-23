@@ -24,27 +24,24 @@
 //! All of it in float32 on both sides, which is why the tolerances here are so much tighter than
 //! anywhere else in these tests.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use waifu::flint::Tensor;
-use waifu::{EulerSampler, ParamFile, SamplerConfig};
+use waifu::{read_safetensors, EulerSampler, SamplerConfig};
 
 /// What the reference package was written for.
 const STEPS: i32 = 50;
 
-fn cases() -> ParamFile {
-    ParamFile::open(&[
+fn cases() -> HashMap<String, Tensor> {
+    read_safetensors(&[
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models/sdxl-base_test.safetensors")
     ])
     .unwrap()
 }
 
-fn reference(cases: &ParamFile, name: &str) -> Vec<f32> {
-    cases
-        .get_unchecked(&format!("test_case.{name}"))
-        .unwrap()
-        .to_vec_f32()
-        .unwrap()
+fn reference(cases: &HashMap<String, Tensor>, name: &str) -> Vec<f32> {
+    cases[&format!("test_case.{name}")].to_vec_f32().unwrap()
 }
 
 fn sampler() -> EulerSampler {
@@ -106,7 +103,7 @@ fn the_starting_noise_level_matches() {
 #[ignore = "needs the sdxl package"]
 fn scaling_the_input_matches_the_reference() {
     let cases = cases();
-    let latent = cases.get_unchecked("test_case.latent").unwrap();
+    let latent = cases["test_case.latent"].clone();
 
     let scaled = sampler().scale_model_input(&latent, 0).unwrap();
     let difference = max_diff(&scaled.to_vec_f32().unwrap(), &reference(&cases, "scaled"));
@@ -120,8 +117,8 @@ fn scaling_the_input_matches_the_reference() {
 #[ignore = "needs the sdxl package"]
 fn one_step_matches_the_reference() {
     let cases = cases();
-    let latent = cases.get_unchecked("test_case.latent").unwrap();
-    let noise = cases.get_unchecked("test_case.noise").unwrap();
+    let latent = cases["test_case.latent"].clone();
+    let noise = cases["test_case.noise"].clone();
 
     let stepped = sampler().step(&noise, &latent, 0).unwrap();
     let difference = max_diff(

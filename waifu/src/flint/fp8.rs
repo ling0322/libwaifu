@@ -26,9 +26,10 @@ use super::{check, ffi, init, Device, Result, Tensor};
 ///
 /// The pairing is a naming convention because safetensors has nowhere else to put it -- a tensor's
 /// header holds a dtype, a shape and two offsets, and the only free text in the format is one
-/// string map for the file as a whole. So the convention is the format, and
-/// [`ParamFile`](crate::ParamFile) enforces it when it reads: an `<fp8e4m3>` tensor with no scale
-/// beside it is refused there rather than found out by a kernel much later.
+/// string map for the file as a whole. So the convention is the format, and reading a package
+/// enforces it -- [`read_safetensors`](crate::read_safetensors) and
+/// [`Weights::from_files`](super::Weights::from_files) alike: an `<fp8e4m3>` tensor with no
+/// scale beside it is refused there rather than found out by a kernel much later.
 pub const CHANNEL_SCALE_SUFFIX: &str = ".scale";
 
 /// A tensor quantized to E4M3: one byte per element, and one `float` scale per row, held together
