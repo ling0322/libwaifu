@@ -1,11 +1,23 @@
-# Speech: the page before the model
+# Speech: the page, and the model behind it
 
-`waifu draw` has a third tab. Type a sentence, press Speak, get a WAV -- and what says it is not a
-speech model, because there is not one here yet.
+`waifu draw -voice models/indextts25.yaml` has a third tab. Drop a few seconds of somebody
+speaking on it, type a sentence, press Speak, and get the sentence back in that voice as a WAV --
+said by [IndexTTS-2.5](indextts.md).
 
-That is deliberate, and it is the whole point of this document. What follows says what is real,
-what is a stand-in, and exactly what a speech model has to implement to take the stand-in's place
-without anything above it changing.
+Without `-voice` there is no third tab. What the page has then is `Tones`, the stand-in the tab was
+built around before there was a model, and a tab whose whole content is an apology for not being
+speech is not worth a place in the list.
+
+This document is about the seam between the two: what the page asks of a voice, and what a voice
+has to implement to answer it.
+
+```bash
+waifu draw -voice models/indextts25.yaml
+```
+
+The package is not published yet, so a voice is named as a manifest on the disk -- see
+[`indextts.md`](indextts.md) for how to build one. The day it is, it becomes a name in the hub's
+catalogue like every picture model, fetched on first use.
 
 ## What is here
 
@@ -15,9 +27,9 @@ without anything above it changing.
 | the run | a command on the worker thread, a bar that moves, a button that stops it |
 | the clip | `waifu-NNNN.wav` beside the pictures, played on the page, saved, deleted, said again |
 | the voice | [`Voice`](../waifu/src/speech.rs), a trait with five methods |
-| what implements it | `Tones`, which reads the text as pitched tones -- one to a syllable |
+| what implements it | [`IndexTts`](../waifu/src/indextts.rs), named by `-voice`; and `Tones`, the stand-in, when nothing is |
 
-## What is not
+## The stand-in
 
 `Tones` is not speech and does not claim to be. It is a tone every three letters of a word, a gap
 between words, a longer one at a comma, pitched by the letters themselves so the same word is the
@@ -70,21 +82,29 @@ about 40" and holds at the end rather than running past it. That is written down
 -- the enum, the bar's arithmetic and the words under it -- because a bar that fills up and starts
 again is the kind of thing that gets reported as a bug against the model.
 
-### What a real model changes
+### What a real model changed
 
-Three functions in [`worker.rs`](../waifu/src/cli/webui/worker.rs), and nothing else above them:
+The three things this section used to predict, in [`worker.rs`](../waifu/src/cli/webui/worker.rs):
 
-- `look_at_voice()` takes a name and reads a manifest, the way `look_at` does for a picture model.
-- `read_voice()` fetches and reads a package, reporting through the same `Doing::Fetching` and
-  `Doing::Reading` the picture models already report through. The plumbing is already there; the
-  function currently constructs a struct with two floats in it.
-- The `voice` slot beside `model` becomes one slot the two take turns in. `Tones` holds nothing, so
-  it can sit beside a picture model today. A real one cannot -- the card is not big enough for a
-  voice and twelve billion parameters of Krea 2 -- and that swap is the same one `Command::Draw`
-  already does between one picture model and the next.
+- `look_at_voice(name)` describes a voice before any of it is read: `Tones` by asking it, and a
+  package by what its kind says -- IndexTTS-2.5's rate and starting values, and that it is not in
+  memory. The tab's boxes start from that.
+- `read_voice()` fetches and reads a package at the first reading that wants it, reporting through
+  the same `Doing::Fetching` and `Doing::Reading` the picture models report through.
+- **The card is taken in turns.** IndexTTS-2.5 is five gigabytes and does not sit beside a twelve
+  billion parameter picture model, so reading either puts the other down first -- the swap
+  `Command::Draw` already did between one picture model and the next. `Tones` holds nothing and
+  still sits beside anything. A stopped reading puts a voice with weights down and hands the
+  memory back, as a stopped drawing does.
 
-`VOICE`, the constant naming the one voice there is, becomes a row in the hub's catalogue like
-every other model, and the speech tab's voice card becomes the same button the picture tab has.
+Two things the prediction did not cover:
+
+- **`Voice` is no longer `Send`.** It was, while the only voice was two floats. A real one is made
+  of tensors, and a tensor stays on the thread that made it -- the same reason the picture models
+  are not `Send` either. Nothing moves a voice between threads.
+- **A voice can refuse to speak without a recording.** IndexTTS-2.5 has no voice of its own; upstream
+  takes the speaker's audio as a required argument. Asked to speak with none, it says so on the
+  bar, in a sentence, rather than guessing at a voice.
 
 ## Audio, and why there is no codec here
 

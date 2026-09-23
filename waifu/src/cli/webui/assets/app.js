@@ -233,16 +233,21 @@ function TopBar({ state }) {
   `;
 }
 
-/**
- * Which tabs there are, and which of them draw a picture rather than say something.
- *
- * text2speech is left out of the list until there is a speech model to point it at. Everything
- * behind it -- the settings column, the player, the server's side of it -- is still here and
- * still tested; nothing offers the page, so nobody reaches it. Put the name back in TABS when a
- * model ships.
- */
-const TABS = ["txt2img", "img2img"];
+/** The tabs that draw a picture, which there always are. */
+const DRAWS = ["txt2img", "img2img"];
 const SPEAKS = "text2speech";
+
+/**
+ * Which tabs there are: the two that draw, and text2speech when there is a voice to read with.
+ *
+ * A voice, and not the stand-in. Without `-voice` the server describes `Tones`, which makes a
+ * noise where the syllables are and says so in `not_a_voice_because` -- and a tab whose whole
+ * content is an apology for not being speech is not worth a place in the list. Named on the
+ * command line, IndexTTS-2.5 says nothing there, and the tab is offered.
+ */
+function tabsFor(voice) {
+  return voice && !voice.not_a_voice_because ? [...DRAWS, SPEAKS] : DRAWS;
+}
 
 /**
  * The kinds of run there are, one under the other.
@@ -252,10 +257,10 @@ const SPEAKS = "text2speech";
  * picture is not a reason to bar the way to the page that starts from one. What that model
  * cannot do is said on the page it is chosen on, beside the button that would have asked for it.
  */
-function Nav({ tab, onTab }) {
+function Nav({ tabs, tab, onTab }) {
   return html`
     <nav className="nav">
-      ${TABS.map(
+      ${tabs.map(
         (page) => html`
           <button
             key=${page}
@@ -640,6 +645,171 @@ function VoiceAndDevice({ state, progress, onDevice }) {
   `;
 }
 
+/** A length of sound as the player says it: minutes and seconds, `1:05`. */
+function clock(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const whole = Math.floor(seconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+const PLAY_ICON = html`
+  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+    <path d="M4.5 2.5v11l9-5.5z" fill="currentColor" />
+  </svg>
+`;
+const PAUSE_ICON = html`
+  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+    <path d="M3.5 2.5h3.2v11H3.5zM9.3 2.5h3.2v11H9.3z" fill="currentColor" />
+  </svg>
+`;
+
+/**
+ * A player drawn by the page rather than by the browser.
+ *
+ * The browser's own controls are a different widget in every browser, and none of them takes the
+ * page's colours: a grey pill from another design sitting in the middle of this one. So the
+ * `<audio>` element is kept for what it is good at -- decoding, buffering, asking the server for
+ * byte ranges -- and hidden, and what is on screen is a play button, a bar and the time, drawn
+ * here.
+ *
+ * Never plays by itself. Somebody presses play; see `ClipOutput` for why.
+ *
+ * The bar follows the sound every frame while it plays. `timeupdate` alone comes four times a
+ * second, which is a bar that moves in visible steps. It can be clicked or dragged to move, and
+ * when it has the focus the arrow keys move five seconds and Home and End go to either end.
+ */
+function Player({ src, className = "" }) {
+  const audio = useRef(null);
+  const track = useRef(null);
+  const dragging = useRef(false);
+  const [playing, setPlaying] = useState(false);
+  const [at, setAt] = useState(0);
+  const [length, setLength] = useState(0);
+  const [broken, setBroken] = useState(false);
+
+  // A new address is a new sound, started from nothing rather than from where the last one was.
+  useEffect(() => {
+    setPlaying(false);
+    setAt(0);
+    setLength(0);
+    setBroken(false);
+  }, [src]);
+
+  useEffect(() => {
+    if (!playing) return undefined;
+
+    let frame = 0;
+    const follow = () => {
+      if (audio.current && !dragging.current) setAt(audio.current.currentTime);
+      frame = requestAnimationFrame(follow);
+    };
+    frame = requestAnimationFrame(follow);
+    return () => cancelAnimationFrame(frame);
+  }, [playing]);
+
+  const toggle = () => {
+    const element = audio.current;
+    if (!element || broken) return;
+    if (element.paused) element.play().catch(() => setBroken(true));
+    else element.pause();
+  };
+
+  const moveTo = (seconds) => {
+    const element = audio.current;
+    if (!element || !length) return;
+    element.currentTime = Math.min(length, Math.max(0, seconds));
+    setAt(element.currentTime);
+  };
+
+  const seekTo = (clientX) => {
+    const box = track.current?.getBoundingClientRect();
+    if (!box || !box.width) return;
+    moveTo(((clientX - box.left) / box.width) * length);
+  };
+
+  const keys = (event) => {
+    const step = { ArrowLeft: -5, ArrowRight: 5, Home: -Infinity, End: Infinity }[event.key];
+    if (step === undefined) return;
+    event.preventDefault();
+    moveTo((audio.current?.currentTime ?? 0) + step);
+  };
+
+  const measured = (event) => {
+    const seconds = event.currentTarget.duration;
+    if (Number.isFinite(seconds)) setLength(seconds);
+  };
+
+  const fraction = length ? Math.min(1, at / length) : 0;
+
+  return html`
+    <div className=${`player-bar${className ? ` ${className}` : ""}`}>
+      <audio
+        ref=${audio}
+        src=${src}
+        preload="metadata"
+        onPlay=${() => setPlaying(true)}
+        onPause=${() => setPlaying(false)}
+        onEnded=${(event) => {
+          setPlaying(false);
+          setAt(event.currentTarget.duration || 0);
+        }}
+        onLoadedMetadata=${measured}
+        onDurationChange=${measured}
+        onTimeUpdate=${(event) => {
+          if (!dragging.current) setAt(event.currentTarget.currentTime);
+        }}
+        onError=${() => setBroken(true)}
+      ></audio>
+
+      <button
+        type="button"
+        className="play"
+        aria-label=${playing ? "Pause" : "Play"}
+        disabled=${broken}
+        onClick=${toggle}
+      >
+        ${playing ? PAUSE_ICON : PLAY_ICON}
+      </button>
+
+      <div
+        ref=${track}
+        className="track"
+        role="slider"
+        tabIndex="0"
+        aria-label="Position"
+        aria-valuemin="0"
+        aria-valuemax=${Math.round(length)}
+        aria-valuenow=${Math.round(at)}
+        aria-valuetext=${`${clock(at)} of ${clock(length)}`}
+        onPointerDown=${(event) => {
+          dragging.current = true;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          seekTo(event.clientX);
+        }}
+        onPointerMove=${(event) => {
+          if (dragging.current) seekTo(event.clientX);
+        }}
+        onPointerUp=${(event) => {
+          dragging.current = false;
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }}
+        onPointerCancel=${() => {
+          dragging.current = false;
+        }}
+        onKeyDown=${keys}
+      >
+        <div className="rail">
+          <div className="rail-fill" style=${{ width: `${fraction * 100}%` }}></div>
+        </div>
+      </div>
+
+      <span className="time">
+        ${broken ? "cannot play this" : `${clock(at)} / ${clock(length)}`}
+      </span>
+    </div>
+  `;
+}
+
 /** text2speech: the recording a reading is to sound like. */
 function FromRecording({ holding, revision, why, onHold, onClear }) {
   const [over, setOver] = useState(false);
@@ -678,15 +848,15 @@ function FromRecording({ holding, revision, why, onHold, onClear }) {
            it is clicked -- which is what should happen to a thumbnail and is the opposite of what
            should happen to a play button. */ ""}
       ${holding &&
-      html`<audio
+      html`<${Player}
         className="held"
-        controls
         src=${
-          // With the revision on the end, because the address is the same every time and what is
-          // behind it is not.
+          // With the recording's own revision on the end, because the address is the same every
+          // time and what is behind it is not. Its own and not the session's: that one moves on
+          // every token of a reading, and a player whose address changes reloads.
           `/api/voice?${revision}`
         }
-      ></audio>`}
+      />`}
       <label
         className=${`dropzone short${over ? " over" : ""}`}
         onDragEnter=${dragged}
@@ -751,7 +921,7 @@ function SpeechSettings({ state, progress, form, change, onHold, onClear, onAnyS
 
       <${FromRecording}
         holding=${!!state?.holding_a_recording}
-        revision=${state?.revision}
+        revision=${state?.recording_revision}
         why=${voice?.no_likeness_because}
         onHold=${onHold}
         onClear=${onClear}
@@ -884,7 +1054,7 @@ function Settings({
             `
           : html`<${FromPicture}
               holding=${!!state?.holding_a_picture}
-              revision=${state?.revision}
+              revision=${state?.picture_revision}
               off=${off}
               onHold=${onHold}
               onClear=${onClear}
@@ -1375,8 +1545,13 @@ function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete 
           ? html`
               ${/* Keyed by the file, so that a new clip replaces the player rather than leaving
                    the old one loaded under a new address -- which is a player that goes on
-                   playing what it had. */ ""}
-              <audio key=${clip.file} controls autoPlay src=${`/clip/${clip.file}`}></audio>
+                   playing what it had.
+
+                   Not autoPlay. With it, every change of the clip on show started a sound: a new
+                   reading finishing, but also a click on an old one in the strip, and a page
+                   reload with clips already in it. A sound is played when somebody presses
+                   play. */ ""}
+              <${Player} key=${clip.file} src=${`/clip/${clip.file}`} />
               <p className="said">${clip.text}</p>
             `
           : html`<div className="nothing">Nothing said yet.</div>`}
@@ -1841,7 +2016,7 @@ function App() {
 
     <div className="below">
       <aside className="side">
-        <${Nav} tab=${tab} onTab=${switchTask} />
+        <${Nav} tabs=${tabsFor(state?.voice)} tab=${tab} onTab=${switchTask} />
         ${/* Under the tabs rather than beside the settings. It is not a setting -- there is
              nothing on it to change -- and what it is is the ground everything else on the page
              stands on, which is where the column's other permanent thing already is. */ ""}
