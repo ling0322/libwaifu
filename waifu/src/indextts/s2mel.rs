@@ -29,7 +29,7 @@
 //! - `cond`, the semantic tokens, one 512-wide vector per output frame;
 //! - `prompt_x`, the reference speaker's own mel for the frames that have one and zeros after,
 //!   which is what makes this continue a voice rather than invent one;
-//! - `style`, 192 numbers from [`crate::campplus`], which is who is speaking;
+//! - `style`, 192 numbers from [`crate::indextts::campplus`], which is who is speaking;
 //! - `t`, where along the trajectory this step is.
 //!
 //! # The shape of it
@@ -72,7 +72,7 @@ pub struct Config {
     pub num_heads: i32,
     /// The width of one semantic token.
     pub content_dim: i32,
-    /// What [`crate::campplus`] produces.
+    /// What [`crate::indextts::campplus`] produces.
     pub style_dim: i32,
     /// The WaveNet's width, which is also the transformer's here.
     pub wavenet_dim: i32,

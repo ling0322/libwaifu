@@ -3,7 +3,7 @@
 What a recording becomes before any of the models sees it.
 
 ```rust
-use waifu::indextts_features;
+use waifu::indextts::features;
 
 let (features, pairs)  = indextts_features::w2v_bert(&wave_16k);  // (pairs, 160)
 let (energies, frames) = indextts_features::campplus(&wave_16k);  // (frames, 80)

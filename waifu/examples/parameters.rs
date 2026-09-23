@@ -34,7 +34,7 @@
 //! it is the exporter's job to say so; `tools/indextts_gpt_exporter.py` is the worked example.
 
 use waifu::flint::{DType, Device, Graph, Op};
-use waifu::{indextts_emotion, s2mel, semantic_codec, w2v_bert};
+use waifu::indextts::{emotion, s2mel, semantic_codec, w2v_bert};
 
 const F32: DType = DType::Float;
 const CPU: Device = Device::Cpu;
@@ -109,9 +109,9 @@ fn s2mel_graph(g: &Graph) {
 }
 
 fn emotion_graph(g: &Graph) {
-    let config = indextts_emotion::Config::indextts();
+    let config = emotion::Config::indextts();
 
-    indextts_emotion::graph(
+    emotion::graph(
         g,
         g.input("x"),
         &config,

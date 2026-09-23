@@ -342,7 +342,7 @@ pub fn nearest(similarity: &[f32], codebook_size: usize) -> Vec<i32> {
 ///
 /// This is the half the pipeline runs. `codes` are the GPT's semantic tokens as indices into the
 /// codebook, flattened to one dimension -- `lookup` takes a flat index tensor, the way
-/// [`crate::w2v_bert`]'s distance table does -- and `tokens` is how many there are per sequence.
+/// [`crate::indextts::w2v_bert`]'s distance table does -- and `tokens` is how many there are per sequence.
 ///
 /// # It is not `similarity` run backwards
 ///

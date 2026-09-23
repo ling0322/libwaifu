@@ -24,7 +24,7 @@
 //! the channels of all the ones before it, and 420 frames is what gives the segment pooling
 //! inside `CAMLayer` three segments with a short one at the end.
 
-use waifu::campplus::{self, Config};
+use waifu::indextts::campplus::{self, Config};
 use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor};
 use waifu::Result;
 

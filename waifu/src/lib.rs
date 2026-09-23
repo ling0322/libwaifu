@@ -43,18 +43,17 @@ pub mod anima;
 /// activation, all composed from the operators [`flint`] already has rather than written as
 /// kernels of their own.
 pub mod audio;
-/// BigVGAN, the vocoder that turns a mel spectrogram back into sound. The last thing IndexTTS-2.5
-/// runs, and the only part of it whose output is audio.
-pub mod bigvgan;
-/// CAMPPlus, the speaker encoder IndexTTS-2.5 conditions on: filterbank energies in, one vector
-/// saying whose voice it is out.
-pub mod campplus;
 #[cfg(feature = "cli")]
 pub mod cli;
 mod error;
 pub mod flint;
 mod flow;
 mod generation;
+/// IndexTTS-2.5, whole: a recording and a sentence in, the sentence in that voice out. A module
+/// rather than files at the crate root the way `sdxl` is, because half of what it runs is
+/// somebody else's model -- w2v-bert, CAMPPlus, BigVGAN -- and a name like `w2v_bert` beside
+/// `sdxl` says nothing about which pipeline reaches for it.
+pub mod indextts;
 /// Krea 2. A module for the same reason [`anima`] is one, and the third family here: a
 /// single-stream MMDiT over the same sixteen-channel latents, conditioned on twelve tapped layers
 /// of a Qwen3-VL encoder. `docs/krea2.md` is where the whole of it is written down.
@@ -65,25 +64,6 @@ mod manifest;
 mod mapping;
 mod qwen_vae;
 mod reader;
-/// IndexTTS-2.5, whole: a recording and a sentence in, the sentence in that voice out. The
-/// modules beside it are its parts; this is the order they run in.
-pub mod indextts;
-/// IndexTTS-2.5's emotion path: the conformer and perceiver that read a feeling off the
-/// reference recording, for the row [`indextts_gpt`] puts beside the speaker's.
-pub mod indextts_emotion;
-/// IndexTTS-2.5's audio front end: what a recording becomes before any of its models sees it --
-/// Kaldi's filterbank, twice, normalized two different ways.
-pub mod indextts_features;
-/// IndexTTS-2.5's GPT: text and a voice in, the semantic tokens S2Mel reads out.
-pub mod indextts_gpt;
-/// IndexTTS-2.5's text frontend: writing out what a number is read as, so the model never sees a
-/// digit. Beside [`indextts_gpt`] rather than at the crate root because it belongs to that
-/// pipeline and not to this crate -- a diffusion model has no text to normalize.
-pub mod indextts_normalize;
-/// The semantic codec: w2v-bert's features in, the discrete tokens the GPT reads out.
-pub mod semantic_codec;
-/// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
-pub mod s2mel;
 mod sdxl;
 /// Turning text into a waveform. [`Voice`] is the shape of the question and [`Tones`] is the one
 /// answer to it there is so far -- a stand-in that makes a noise where the syllables are, so that
@@ -92,8 +72,6 @@ pub mod speech;
 mod suggested;
 mod tensor_file;
 mod tokenizer;
-/// w2v-bert-2.0: the conformer that reads speech into the features everything else conditions on.
-pub mod w2v_bert;
 /// Reading and writing WAV, which is the one audio format this crate handles itself: a header, a
 /// format chunk and the samples, and no codec to depend on.
 pub mod wav;

@@ -23,7 +23,7 @@
 //! off-by-one in three places.
 
 use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor, Value};
-use waifu::s2mel::{self, Config};
+use waifu::indextts::s2mel::{self, Config};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;

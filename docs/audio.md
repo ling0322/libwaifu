@@ -252,12 +252,12 @@ its own and a test against the implementation it came from:
 
 | piece | |
 | --- | --- |
-| GPT backbone, 1280d × 24L | `waifu::indextts_gpt`, and [indextts_gpt.md](indextts_gpt.md) -- with the generation loop on top of it |
-| semantic codec, 8192 entries | `waifu::semantic_codec`, and [semantic_codec.md](semantic_codec.md) |
-| S2Mel, flow-matching DiT 13L × 512d | `waifu::s2mel`, and [s2mel.md](s2mel.md) |
-| BigVGAN vocoder | `waifu::bigvgan`, and [bigvgan.md](bigvgan.md) |
-| w2v-bert-2.0 | `waifu::w2v_bert`, and [w2v_bert.md](w2v_bert.md) |
-| CAMPPlus | `waifu::campplus`, and [campplus.md](campplus.md) |
+| GPT backbone, 1280d × 24L | `waifu::indextts::gpt`, and [indextts_gpt.md](indextts_gpt.md) -- with the generation loop on top of it |
+| semantic codec, 8192 entries | `waifu::indextts::semantic_codec`, and [semantic_codec.md](semantic_codec.md) |
+| S2Mel, flow-matching DiT 13L × 512d | `waifu::indextts::s2mel`, and [s2mel.md](s2mel.md) |
+| BigVGAN vocoder | `waifu::indextts::bigvgan`, and [bigvgan.md](bigvgan.md) |
+| w2v-bert-2.0 | `waifu::indextts::w2v_bert`, and [w2v_bert.md](w2v_bert.md) |
+| CAMPPlus | `waifu::indextts::campplus`, and [campplus.md](campplus.md) |
 
 What remains is not a model. It is the emotion conformer and perceiver that produce `emo_vec`
 when a recording is not handed one; a `.pth` to safetensors exporter for four of the six, and so

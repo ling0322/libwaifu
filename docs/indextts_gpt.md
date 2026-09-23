@@ -147,7 +147,7 @@ list of 106 languages, most of which this model was never trained to say.
 
 `prefill` takes the finished 1280-wide emotion vector directly, which is the path
 `inference_speech` takes when it is given one. When it is not, the four stages that make one out
-of the reference recording are [`waifu::indextts_emotion`](indextts_emotion.md) —
+of the reference recording are [`waifu::indextts::emotion`](indextts_emotion.md) —
 `emo_conditioning_encoder` → `emo_perceiver_encoder` → `emovec_layer` → `emo_layer`, 153 of the
 checkpoint's tensors, exported by the same `tools/indextts_gpt_exporter.py` that writes this
 model.

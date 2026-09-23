@@ -4,7 +4,7 @@ The speaker encoder IndexTTS-2.5 conditions on: 80-band Kaldi filterbank energie
 reference audio in, one 192-dimensional vector out saying whose voice it is.
 
 ```rust
-use waifu::campplus::{self, Config};
+use waifu::indextts::campplus::{self, Config};
 
 let embedding = campplus::graph(&g, features, &Config::indextts(), frames, dtype, device)?;
 ```

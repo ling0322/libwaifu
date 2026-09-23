@@ -18,7 +18,7 @@
 //! matrix whose answer is obvious by construction.
 
 use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor};
-use waifu::semantic_codec::{self, Config};
+use waifu::indextts::semantic_codec::{self, Config};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;

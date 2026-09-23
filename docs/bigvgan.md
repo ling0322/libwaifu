@@ -4,7 +4,7 @@ The last model in a speech pipeline and the only one whose output is audio: a me
 a waveform out.
 
 ```rust
-use waifu::bigvgan::{BigVgan, BigVganConfig};
+use waifu::indextts::bigvgan::{BigVgan, BigVganConfig};
 
 let vocoder = BigVgan::build(
     BigVganConfig::v2_22khz_80band_256x(), "", &weights, Device::Cuda, DType::Float,
@@ -16,7 +16,8 @@ let wave = vocoder.forward(&mel)?;   // (1, 80, frames) -> (1, 1, frames * 256)
 `nvidia/bigvgan_v2_22khz_80band_256x` is the release IndexTTS-2.5 fetches on first run: 112 M
 parameters, 80 mel bands, 22.05 kHz out, and one mel frame for every 256 samples. Nothing about
 it is IndexTTS's -- it is NVIDIA's, published separately under the MIT licence and shared by
-several speech models, which is why it is `waifu::bigvgan` and not `waifu::indextts::vocoder`.
+several speech models. It sits under `indextts` because that is the only pipeline here that
+runs it; the day a second one does, it moves back up beside [`waifu::audio`](audio.md).
 
 ## It adds no operator
 

@@ -4,7 +4,7 @@ Where the emotion vector comes from when nobody supplies one. A recording in, on
 — the row that sits beside the speaker's in [the GPT](indextts_gpt.md)'s prefix.
 
 ```rust
-use waifu::indextts_emotion::{self, Config};
+use waifu::indextts::emotion::{self, Config};
 
 let config = Config::indextts();
 let emotion = indextts_emotion::graph(
@@ -115,7 +115,7 @@ lands on the same `bfloat16` grid `torch` reached through `float32`. True as far
 and not worth having to keep true. The check at export is now a bit-for-bit equality rather than a
 tolerance — a mystery that has been solved deserves a check that fails the moment it comes back.
 
-`waifu::indextts_emotion::positional_encoding` still builds the unrounded table, for the tests and
+`waifu::indextts::emotion::positional_encoding` still builds the unrounded table, for the tests and
 for running without a package. What that costs is 0.13% of the position term after `linear_pos`,
 below the noise floor of the half precision this model runs in on a card — worth writing down
 rather than worth worrying about.

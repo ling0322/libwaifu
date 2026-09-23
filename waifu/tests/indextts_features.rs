@@ -44,7 +44,7 @@
 //! them. A constant factor divides out of every slope. The two names are a difference in
 //! spelling, not in filterbank.
 
-use waifu::indextts_features::{self, Analysis};
+use waifu::indextts::features::{self, Analysis};
 
 const RATE: f64 = 16000.0;
 const SECONDS: f64 = 0.5;
@@ -165,7 +165,7 @@ fn probe(values: &[f32], want: &[f32], what: &str) {
 /// The 160-wide features w2v-bert reads, against `SeamlessM4TFeatureExtractor`.
 #[test]
 fn reads_a_recording_the_way_the_extractor_does() {
-    let (features, pairs) = indextts_features::w2v_bert(&chirp());
+    let (features, pairs) = features::w2v_bert(&chirp());
 
     assert_eq!(pairs, 24);
     assert_eq!(features.len(), 24 * 2 * BINS);
@@ -175,7 +175,7 @@ fn reads_a_recording_the_way_the_extractor_does() {
 /// The 80-wide ones CAMPPlus reads, against the same analysis unscaled.
 #[test]
 fn reads_a_recording_the_way_kaldi_does() {
-    let (features, frames) = indextts_features::campplus(&chirp());
+    let (features, frames) = features::campplus(&chirp());
 
     assert_eq!(frames, 48);
     assert_eq!(features.len(), 48 * BINS);
@@ -272,11 +272,11 @@ fn probe_within(values: &[f32], want: &[f32], tolerance: f32, what: &str) {
 fn resamples_the_way_torchaudio_does() {
     let source = chirp_at(44100.0);
 
-    let to_16k = indextts_features::resample(&source, 44100, 16000);
+    let to_16k = features::resample(&source, 44100, 16000);
     assert_eq!(to_16k.len(), 8000);
     probe_within(&to_16k, &RESAMPLED_16K, RESAMPLE_TOLERANCE, "resampled_16k");
 
-    let to_22k = indextts_features::resample(&source, 44100, 22050);
+    let to_22k = features::resample(&source, 44100, 22050);
     assert_eq!(to_22k.len(), 11025);
     probe_within(&to_22k, &RESAMPLED_22K, RESAMPLE_TOLERANCE, "resampled_22k");
 }
@@ -286,13 +286,13 @@ fn resamples_the_way_torchaudio_does() {
 fn leaves_a_signal_at_its_own_rate_alone() {
     let source = chirp_at(16000.0);
 
-    assert_eq!(indextts_features::resample(&source, 16000, 16000), source);
+    assert_eq!(features::resample(&source, 16000, 16000), source);
 }
 
 /// The 22.05 kHz mel S2Mel conditions on, against IndexTTS's own `mel_spectrogram`.
 #[test]
 fn draws_the_mel_the_way_indextts_does() {
-    let (mel, frames) = indextts_features::reference_mel(&broadband_at(22050.0)).unwrap();
+    let (mel, frames) = features::reference_mel(&broadband_at(22050.0)).unwrap();
 
     assert_eq!(frames, 43);
     assert_eq!(mel.len(), 80 * 43);

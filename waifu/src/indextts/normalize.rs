@@ -28,7 +28,7 @@
 //! deliberately: see below.
 //!
 //! ```
-//! use waifu::indextts_normalize::{normalize, Language};
+//! use waifu::indextts::normalize::{normalize, Language};
 //!
 //! assert_eq!(normalize("共1234人", Language::Chinese), "共一千二百三十四人");
 //! assert_eq!(normalize("3.5% more", Language::English), "three point five percent more");
