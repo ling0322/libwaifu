@@ -85,7 +85,7 @@ enum Stage {
 /// `F.normalize(x, dim=1) * sqrt(C) * gamma` is `x / sqrt(mean(x^2)) * gamma` along C, which is
 /// RMSNorm -- but along the channel rather than the last dimension, so the image is transposed
 /// into `(N, H, W, C)` and back.
-fn channel_norm(g: &Graph, input: Value, channels: i32, name: &str) -> Value {
+pub(crate) fn channel_norm(g: &Graph, input: Value, channels: i32, name: &str) -> Value {
     let batch = Extent::of(input, 0);
     let height = Extent::of(input, 2);
     let width = Extent::of(input, 3);
@@ -149,7 +149,7 @@ fn residual(
 }
 
 /// The one attention in the decoder, at its smallest resolution, every pixel over every other.
-fn attention(g: &Graph, input: Value, channels: i32) -> Value {
+pub(crate) fn attention(g: &Graph, input: Value, channels: i32) -> Value {
     let batch = Extent::of(input, 0);
     let height = Extent::of(input, 2);
     let width = Extent::of(input, 3);

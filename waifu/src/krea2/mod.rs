@@ -42,7 +42,7 @@
 //! that are easy to get wrong and fail quietly.
 
 mod config;
-mod dit;
+pub(crate) mod dit;
 mod pipeline;
 mod text_encoder;
 
