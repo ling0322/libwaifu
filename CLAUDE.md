@@ -38,6 +38,11 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test krea2 --test krea2_sampler --test krea2_pipeline --test krea2_tokenizer \
     -- --ignored --test-threads=1
+
+# waifu/src/qwen_image/, tools/qwen_image_exporter.py
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test qwen_image --test qwen_image_pipeline --test qwen_image_tokenizer \
+    -- --ignored --test-threads=1
 ```
 
 - Keep `--no-fail-fast` and `--test-threads=1`; each test loads a full model onto the GPU.

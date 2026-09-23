@@ -158,7 +158,7 @@ fn rope_table(
 /// than it, and the timestep multiplied by a thousand on the way in -- the model is handed a
 /// sigma in `0..=1` and embeds a number in `0..=1000`. All three are the opposite of the commoner
 /// convention and all three are what this was trained with.
-fn timestep_sinusoid(timestep: f32, channels: i32, device: Device) -> Result<Tensor> {
+pub(crate) fn timestep_sinusoid(timestep: f32, channels: i32, device: Device) -> Result<Tensor> {
     let half = (channels / 2) as usize;
     let mut values = vec![0.0f32; channels as usize];
 
@@ -181,7 +181,7 @@ fn timestep_sinusoid(timestep: f32, channels: i32, device: Device) -> Result<Ten
 ///
 /// Written as `h + h * tanh(...)` rather than `h * (1 + tanh(...))` because flint adds tensors to
 /// tensors and not scalars to them.
-fn gelu_tanh(g: &Graph, x: Value) -> Value {
+pub(crate) fn gelu_tanh(g: &Graph, x: Value) -> Value {
     const ROOT_TWO_OVER_PI: f32 = 0.797_884_56;
     const COEFFICIENT: f32 = 0.044_715;
 
@@ -259,7 +259,7 @@ fn heads(g: &Graph, x: Value, norm: &str, count: i32, head_dim: i32, eps: f32) -
 /// one picture at a time -- and what that buys is a rank of four rather than five, which is as
 /// deep as flint's binary kernels go over a tensor with a gap in it. The two slices below are
 /// exactly that.
-fn rotate(g: &Graph, x: Value, cos: Value, sin: Value, pairs: i32) -> Value {
+pub(crate) fn rotate(g: &Graph, x: Value, cos: Value, sin: Value, pairs: i32) -> Value {
     let length = Extent::of(x, 1);
     let count = Extent::of(x, 2);
 

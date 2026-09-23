@@ -88,6 +88,32 @@ impl FlowSampler {
         })
     }
 
+    /// The same schedule stretched so that its last step starts at `terminal` rather than
+    /// wherever the shift put it: `1 - (1 - sigma) / scale`, with the scale chosen to land the
+    /// last one there. The first stays at one and the zero it finishes at stays zero.
+    ///
+    /// diffusers' `shift_terminal`, which Qwen-Image 2.1's scheduler sets and Anima's and Krea
+    /// 2's do not. It is applied after the shift, as the reference does.
+    pub fn stretched(mut self, terminal: f32) -> Result<FlowSampler> {
+        if !(0.0..1.0).contains(&terminal) {
+            return Err(Error::model(format!(
+                "a schedule cannot be stretched to end at {terminal}"
+            )));
+        }
+
+        let steps = self.steps();
+        let last = 1.0 - self.sigmas[steps - 1];
+        if last <= 0.0 {
+            // One step, which starts at pure noise wherever it is stretched to.
+            return Ok(self);
+        }
+        let scale = last / (1.0 - terminal);
+        for sigma in &mut self.sigmas[..steps] {
+            *sigma = 1.0 - (1.0 - *sigma) / scale;
+        }
+        Ok(self)
+    }
+
     /// The noise levels, one longer than [`FlowSampler::steps`].
     pub fn sigmas(&self) -> &[f32] {
         &self.sigmas
@@ -219,6 +245,31 @@ mod tests {
             4
         )
         .is_err());
+    }
+
+    /// Qwen-Image 2.1's schedule at 1024 by 1024 and ten steps, from diffusers'
+    /// `FlowMatchEulerDiscreteScheduler` with `mu = 0.6935` and `shift_terminal = 0.02`.
+    #[test]
+    fn stretches_the_last_step_onto_the_terminal() {
+        let shift = 0.69354838f32.exp();
+        let sampler = FlowSampler::new(
+            &SamplerConfig {
+                shift,
+                multiplier: 1.0,
+            },
+            10,
+        )
+        .unwrap()
+        .stretched(0.02)
+        .unwrap();
+
+        let sigmas = sampler.sigmas();
+        assert_eq!(sigmas[0], 1.0);
+        assert!((sigmas[9] - 0.02).abs() < 1e-6, "{}", sigmas[9]);
+        assert_eq!(sigmas[10], 0.0);
+        for pair in sigmas.windows(2) {
+            assert!(pair[1] < pair[0], "{pair:?} goes the wrong way");
+        }
     }
 
     #[test]

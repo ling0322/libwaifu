@@ -41,7 +41,7 @@ use crate::flint::{MemorySnapshot, Tensor};
 use crate::wav::{self, Sound};
 use crate::{
     from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2,
-    Manifest, Sdxl, SpeechOptions, SpeechProgress, Tones, Voice,
+    Manifest, QwenImage, Sdxl, SpeechOptions, SpeechProgress, Tones, Voice,
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -69,6 +69,11 @@ const ANIMA_DRAWS_FROM_NO_PICTURE: &str = "Anima cannot start from a picture yet
 /// autoencoder, and the half of it that reads a picture has no layer to run it.
 const KREA2_DRAWS_FROM_NO_PICTURE: &str = "Krea 2 cannot start from a picture yet: its package \
      carries an image encoder, but the layer that reads one is not written";
+
+/// And why Qwen-Image 2.1 cannot, for a different reason: its model edits pictures by reading
+/// them as well as starting from them, and neither half of that is written here.
+const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 cannot start from a picture yet: \
+     it edits by reading the picture through its text encoder too, and that is not written";
 
 /// What the one voice there is, is called where a name is asked for.
 ///
@@ -443,6 +448,14 @@ fn about(kind: &str) -> (GenerationDefaults, &'static str, Option<&'static str>,
             Some(KREA2_DRAWS_FROM_NO_PICTURE),
             false,
         ),
+        // Sampled without guidance by default, and able to take it: the reference's
+        // `true_cfg_scale` is a second pass on a negative prompt, which is this runtime's.
+        QwenImage::MODEL_TYPE => (
+            QwenImage::DEFAULTS,
+            "Flow match Euler",
+            Some(QWEN_IMAGE_DRAWS_FROM_NO_PICTURE),
+            true,
+        ),
         // Everything else is SDXL, which is what `Model::from_manifest` decides too.
         _ => (GenerationDefaults::default(), "Euler", None, true),
     }
@@ -461,6 +474,7 @@ pub fn look_at(asked: &str) -> Chosen {
     let guessed = match asked {
         name if name.starts_with("anima") => Anima::MODEL_TYPE,
         name if name.starts_with("krea") => Krea2::MODEL_TYPE,
+        name if name.starts_with("qwen") => QwenImage::MODEL_TYPE,
         _ => "",
     };
     let (defaults, sampler, no_picture, takes_guidance) = about(guessed);
@@ -899,6 +913,7 @@ pub enum Model {
     Sdxl(Sdxl),
     Anima(Anima),
     Krea2(Krea2),
+    QwenImage(QwenImage),
 }
 
 impl Model {
@@ -931,6 +946,11 @@ impl Model {
                 runtime.residency(),
                 &manifest,
             )?)),
+            QwenImage::MODEL_TYPE => Ok(Model::QwenImage(QwenImage::from_manifest(
+                runtime.device(),
+                runtime.residency(),
+                &manifest,
+            )?)),
             // Everything else goes to SDXL, which says what it makes of it. A model of a kind
             // nobody here has heard of is its complaint to make rather than this one's, since it
             // is the one that knows what it can read.
@@ -950,6 +970,7 @@ impl Model {
             Model::Sdxl(_) => GenerationDefaults::default(),
             Model::Anima(_) => Anima::DEFAULTS,
             Model::Krea2(_) => Krea2::DEFAULTS,
+            Model::QwenImage(_) => QwenImage::DEFAULTS,
         }
     }
 
@@ -957,7 +978,7 @@ impl Model {
     fn sampler(&self) -> &'static str {
         match self {
             Model::Sdxl(_) => "Euler",
-            Model::Anima(_) | Model::Krea2(_) => "Flow match Euler",
+            Model::Anima(_) | Model::Krea2(_) | Model::QwenImage(_) => "Flow match Euler",
         }
     }
 
@@ -978,6 +999,7 @@ impl Model {
             // missing half.
             Model::Anima(_) => Some(ANIMA_DRAWS_FROM_NO_PICTURE),
             Model::Krea2(_) => Some(KREA2_DRAWS_FROM_NO_PICTURE),
+            Model::QwenImage(_) => Some(QWEN_IMAGE_DRAWS_FROM_NO_PICTURE),
         }
     }
 
@@ -991,6 +1013,7 @@ impl Model {
             Model::Sdxl(model) => model.generate_reporting(prompt, options, report),
             Model::Anima(model) => model.generate_reporting(prompt, options, report),
             Model::Krea2(model) => model.generate_reporting(prompt, options, report),
+            Model::QwenImage(model) => model.generate_reporting(prompt, options, report),
         }
     }
 
@@ -1007,7 +1030,7 @@ impl Model {
             }
             // The same sentence the door turns a run away with, for the caller that is not the
             // door: one wording for one refusal.
-            Model::Anima(_) | Model::Krea2(_) => Err(crate::Error::model(
+            Model::Anima(_) | Model::Krea2(_) | Model::QwenImage(_) => Err(crate::Error::model(
                 self.no_picture_because()
                     .unwrap_or("this model cannot start from a picture"),
             )),
