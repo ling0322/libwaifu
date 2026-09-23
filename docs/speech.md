@@ -1,6 +1,6 @@
 # Speech: the page, and the model behind it
 
-`waifu draw -voice indextts:base` has a third tab. Drop a few seconds of somebody speaking on it,
+`waifu draw -voice indextts` has a third tab. Drop a few seconds of somebody speaking on it,
 type a sentence, press Speak, and get the sentence back in that voice as a WAV -- said by
 [IndexTTS-2.5](indextts.md).
 
@@ -12,10 +12,10 @@ This document is about the seam between the two: what the page asks of a voice, 
 has to implement to answer it.
 
 ```bash
-waifu draw -voice indextts:base
+waifu draw -voice indextts
 ```
 
-`indextts:base` is fetched off the hub like any picture model, into the same cache. Building the
+`indextts` is fetched off the hub like any picture model, into the same cache. Building the
 package yourself instead -- `-voice models/indextts25.yaml` -- is [`indextts.md`](indextts.md).
 
 ## What is here

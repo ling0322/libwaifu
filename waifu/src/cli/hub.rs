@@ -249,10 +249,11 @@ const CATALOG: &[Published] = &[
         explicit: false,
         kind: Kind::Picture,
     },
-    // The only voice here so far, and the release IndexTeam published rather than a fine tune --
-    // `sdxl:base` is this family's nearest precedent, hence the `base` in the name.
+    // The only voice here so far, and named `<family>:<version>` rather than
+    // `<family>:<model>:<version>`: there is no second IndexTTS variant to tell it apart from, so
+    // a `model` slot would name nothing.
     Published {
-        name: "indextts:base:v2.5",
+        name: "indextts:v2.5",
         full_name: "IndexTTS 2.5",
         repo: "ling0322/libwaifu-indextts-2.5",
         manifest: "indextts25.yaml",
@@ -384,7 +385,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("anima:turbo", "anima:turbo:v1.1"),
     ("krea2:turbo", "krea2:turbo:v1.0"),
     ("krea2:turbo-fp8", "krea2:turbo-fp8:v1.0"),
-    ("indextts:base", "indextts:base:v2.5"),
+    ("indextts", "indextts:v2.5"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1545,12 +1546,12 @@ mod tests {
         // `-voice` resolves a voice exactly the way `-m` resolves a picture -- same table, same
         // functions -- but `listed()` is what feeds the picture picker, and a voice put there
         // would be a name someone could click that fails the moment it is chosen.
-        assert!(published("indextts:base").is_some());
-        assert_eq!(full_name("indextts:base"), Some("IndexTTS 2.5"));
-        assert!(names().contains(&"indextts:base"));
+        assert!(published("indextts").is_some());
+        assert_eq!(full_name("indextts"), Some("IndexTTS 2.5"));
+        assert!(names().contains(&"indextts"));
 
         assert!(
-            !listed().iter().any(|model| model.name == "indextts:base"),
+            !listed().iter().any(|model| model.name == "indextts"),
             "a voice is in the picture picker"
         );
     }
@@ -1590,8 +1591,10 @@ mod tests {
 
     #[test]
     fn every_model_is_named_the_way_the_others_are() {
-        // A name is `<family>:<model>:<version>`, and what every one of them names is a manifest.
-        // Cheap to check, and it is the sort of thing a copied table entry gets wrong.
+        // A picture is `<family>:<model>:<version>` -- there is more than one SDXL, so which one
+        // needs its own word. A voice is `<family>:<version>`: only one IndexTTS exists to name,
+        // and a `model` slot naming nothing is worse than one field fewer. Cheap to check, and it
+        // is the sort of thing a copied table entry gets wrong.
         //
         // The family is one of the kinds this build can fetch a model of rather than anything at
         // all: a name is what someone types before they have the model, so it should say what
@@ -1601,7 +1604,17 @@ mod tests {
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
-            assert_eq!(fields.len(), 3, "{} is not family:model:version", model.name);
+            let expected = match model.kind {
+                Kind::Picture => 3,
+                Kind::Voice => 2,
+            };
+            assert_eq!(
+                fields.len(),
+                expected,
+                "{} is not the shape a {:?} is named",
+                model.name,
+                model.kind
+            );
             assert!(
                 FAMILIES.contains(&fields[0]),
                 "{} is in no family this build knows: {FAMILIES:?}",

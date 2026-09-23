@@ -25,7 +25,7 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 
 | name | model | published as |
 |---|---|---|
-| `indextts:base` | IndexTTS 2.5 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-indextts-2.5)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-indextts-2.5)\] |
+| `indextts` | IndexTTS 2.5 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-indextts-2.5)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-indextts-2.5)\] |
 
 ## Low memory mode
 
@@ -58,7 +58,7 @@ named at the command line -- see [Supported voices](#supported-voices) above.
 
 ## Recent updates
 
-- [2026-09-23] IndexTTS-2.5 speaks here, as `indextts:base` -- the first published voice, and the
+- [2026-09-23] IndexTTS-2.5 speaks here, as `indextts` -- the first published voice, and the
   text2speech tab's first real model.
 - [2026-09-18] Krea 2 Turbo draws here: a third architecture, exported from the gated release
   rather than published from this repository.
