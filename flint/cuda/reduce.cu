@@ -30,6 +30,7 @@
 #include "flint/cuda/accessor.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/reduce.h"
+#include "flint/operators.h"
 
 namespace fl {
 namespace op {
@@ -92,25 +93,27 @@ __device__ __host__ T getReduceInitial() {
   }
 }
 
-// Wrap-level reduce
+// One block per row, reducing the row's elements into one.
+//
+// The row is the block's x index. It used to be two indices, y and z, over a 3D view of the input
+// -- which held at most 65 535 rows on each axis and refused any input of rank four or more
+// outright. Every input is now read as `(rows, last)`, and x holds 2^31 - 1 blocks.
 template<typename TIn, typename TOut, MapReduceType REDUCE_TYPE, int BLOCK_DIM>
-__global__ void reduce0Kernel3D(
-    PackedTensorAccessor<const TIn, 3> input,
-    PackedTensorAccessor<TOut, 2> output) {
+__global__ void reduceRowsKernel(
+    PackedTensorAccessor<const TIn, 2> input,
+    PackedTensorAccessor<TOut, 1> output) {
   assert(blockDim.x == BLOCK_DIM);
-  assert(input.getShape(0) == output.getShape(0));
   MapOp<REDUCE_TYPE, TIn, TOut> mapOp;
   ReduceOp<REDUCE_TYPE, TOut> reduceOp;
 
-  int y = blockIdx.y * blockDim.y + threadIdx.y;
-  int z = blockIdx.z * blockDim.z + threadIdx.z;
+  int64_t row = blockIdx.x;
 
   TOut elemReduce = getReduceInitial<TOut, REDUCE_TYPE>();
-  for (int offset = 0; offset < input.getShape(2); offset += BLOCK_DIM) {
+  for (int offset = 0; offset < input.getShape(1); offset += BLOCK_DIM) {
     int idx = offset + threadIdx.x;
-    if (idx < input.getShape(2)) {
+    if (idx < input.getShape(1)) {
       // element-wise map.
-      TIn elemIn = input[z][y][idx];
+      TIn elemIn = input[row][idx];
       TOut elemMap = mapOp(elemIn);
       elemReduce = reduceOp(elemReduce, elemMap);
     }
@@ -123,7 +126,7 @@ __global__ void reduce0Kernel3D(
   BlockReduce blockReduce{tempStorage};
   elemReduce = blockReduce.Reduce(elemReduce, reduceOp);
 
-  if (threadIdx.x == 0) output[z][y] = elemReduce;
+  if (threadIdx.x == 0) output[row] = elemReduce;
 }
 
 template<MapReduceType MR_TYPE, typename TIn, typename TOut>
@@ -172,50 +175,33 @@ Tensor reduceAllImpl(const Tensor &A) {
 template<MapReduceType MR_TYPE, typename TIn, typename TOut>
 Tensor reduceLastDim3DImpl(Tensor A) {
   CHECK(A.getDType() == DType::getType<TIn>());
-  int origDim = A.getDim();
+  CHECK(A.getDim() >= 1);
 
-  switch (A.getDim()) {
-    case 1:
-      A = A.view({1, 1, A.getShape(0)});
-      break;
-    case 2:
-      A = A.view({1, A.getShape(0), A.getShape(1)});
-      break;
-    case 3:
-      break;
-    default:
-      NOT_IMPL();
-  }
-
+  // Everything before the last axis is one axis of rows. Folding them needs them laid out as one,
+  // which is a copy for a strided input and nothing for a contiguous one.
   std::vector<int> shape = A.getShape();
+  int last = shape.back();
   shape.pop_back();
 
-  Tensor C = createCudaTensor<TOut>(shape);
+  int rows = 1;
+  for (int size : shape) rows *= size;
 
-  constexpr int blockSize = 256;
-  dim3 d;
-  d.z = A.getShape(0);
-  d.y = A.getShape(1);
-  d.x = 1;
+  Tensor flat = A.isContiguous() ? A : getOperators(Device::kCuda)->contiguous(A);
+  flat = flat.view({rows, last});
 
-  reduce0Kernel3D<TIn, TOut, MR_TYPE, blockSize><<<d, blockSize>>>(A, C);
+  Tensor C = createCudaTensor<TOut>({rows});
+  if (rows > 0) {
+    constexpr int blockSize = 256;
+    reduceRowsKernel<TIn, TOut, MR_TYPE, blockSize><<<rows, blockSize>>>(flat, C);
 
-  LL_CUDA_SYNCHRONIZE();
-  LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  // C is 2D -- the input was reshaped to 3D above and the reduced axis dropped -- so undoing the
-  // reshape means dropping the leading axis that was added, not indexing the input's rank.
-  switch (origDim) {
-    case 1:
-    case 2:
-      C = C.view({C.getShape(1)});
-      break;
-    case 3:
-      break;
-    default:
-      NOT_IMPL();
+    LL_CUDA_SYNCHRONIZE();
+    LL_CHECK_CUDA_STATUS(cudaGetLastError());
   }
-  return C;
+
+  // The reduced axis is gone and the rest come back. A 1D input reduces to one element, which
+  // stays a 1D tensor of one rather than becoming a scalar -- what it always was.
+  if (shape.empty()) return C;
+  return C.view(shape);
 }
 
 Tensor reduceLastDim(Tensor A, DType outType, MapReduceType reduceType) {
@@ -232,6 +218,25 @@ Tensor reduceLastDim(Tensor A, DType outType, MapReduceType reduceType) {
     return reduceLastDim3DImpl<MapReduceType::MAX, half, half>(A);
   if (inType == DType::kFloat16 && outType == DType::kFloat16 && reduceType == MapReduceType::MIN)
     return reduceLastDim3DImpl<MapReduceType::MIN, half, half>(A);
+
+  // The same reductions over float32, for a model that runs in full precision on the card -- the
+  // kernels were always generic over the type, and only this dispatch was half-only.
+  if (inType == DType::kFloat && outType == DType::kFloat) {
+    switch (reduceType) {
+      case MapReduceType::SUM_EXP:
+        return reduceLastDim3DImpl<MapReduceType::SUM_EXP, float, float>(A);
+      case MapReduceType::SUM:
+        return reduceLastDim3DImpl<MapReduceType::SUM, float, float>(A);
+      case MapReduceType::SUM_SQUARE:
+        return reduceLastDim3DImpl<MapReduceType::SUM_SQUARE, float, float>(A);
+      case MapReduceType::MAX:
+        return reduceLastDim3DImpl<MapReduceType::MAX, float, float>(A);
+      case MapReduceType::MIN:
+        return reduceLastDim3DImpl<MapReduceType::MIN, float, float>(A);
+      default:
+        break;
+    }
+  }
 
   NOT_IMPL();
 }

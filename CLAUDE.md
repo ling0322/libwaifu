@@ -43,6 +43,11 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test qwen_image --test qwen_image_pipeline --test qwen_image_tokenizer \
     -- --ignored --test-threads=1
+
+# waifu/src/indextts*.rs, the speech models it runs, tools/indextts_*
+# needs models/indextts25.yaml and the two recordings tools/indextts_reference_voices.py writes
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test indextts --test indextts_gpt -- --ignored --test-threads=1
 ```
 
 - Keep `--no-fail-fast` and `--test-threads=1`; each test loads a full model onto the GPU.

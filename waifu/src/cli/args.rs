@@ -152,6 +152,7 @@ pub struct Args {
     device: Option<String>,
     image: Option<String>,
     port: Option<String>,
+    voice: Option<String>,
     help: bool,
 }
 
@@ -183,6 +184,7 @@ impl Args {
                 "-device" | "--device" => args.device = Some(value("-device")?),
                 "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
                 "-port" | "--port" => args.port = Some(value("-port")?),
+                "-voice" | "--voice" => args.voice = Some(value("-voice")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
                 other => return Err(ArgError(format!("flag provided but not defined: {other}"))),
             }
@@ -218,6 +220,13 @@ impl Args {
     /// between runs, and the file is read by the thread that owns the model when a run begins.
     pub fn image(&self) -> Option<&str> {
         self.image.as_deref()
+    }
+
+    /// The voice the speech tab reads with, if one was named: a manifest on the disk or a
+    /// published name, read at the first reading that wants it. Left out, it is the built-in
+    /// stand-in, and the page does not offer the speech tab at all -- see `app.js`.
+    pub fn voice(&self) -> Option<&str> {
+        self.voice.as_deref()
     }
 
     /// The port to serve the page on, if one was named.
@@ -288,6 +297,11 @@ pub fn print_options() {
         "  -i string\n    \ta picture to draw from rather than from noise, as a PNG or a JPEG. \
          It opens in the img2img tab, scaled to the size chosen there, and how far the run walks \
          away from it is what the denoising strength box says."
+    );
+    eprintln!(
+        "  -voice value\n    \tthe voice the text2speech tab reads with: a manifest file of a \
+         speech model, such as IndexTTS-2.5's \"indextts25.yaml\". Left out, the page has no \
+         text2speech tab, because there is nothing to read with."
     );
     eprintln!(
         "  -port int\n    \tthe port to serve the page on (default 7860). Left out, the first \
