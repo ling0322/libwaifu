@@ -1379,10 +1379,11 @@ function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefr
         <div className="dialog-top">
           <div className="card-title">${voices ? "Choose a voice" : "Choose a model"}</div>
           ${/* At the top rather than under the list: it is about the list as a whole, and a
-               button that changes what is in a list belongs where the list starts. Filled while
-               there is something behind it and plain once there is not -- the colour is there to
-               be found by somebody who does not know the rest of the list exists, and a button
-               that only puts back what is on the screen already has nothing to say. */ ""}
+               button that changes what is in a list belongs where the list starts. A plain button
+               like the two beside it, with a count on it while there is something behind it --
+               the count is there to be found by somebody who does not know the rest of the list
+               exists, and says how much of it there is; a button that only puts back what is on
+               the screen already has nothing to count. */ ""}
           ${marked > 0 &&
           html`
             <button
@@ -1392,7 +1393,9 @@ function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefr
                 : `${marked} more, marked not for all audiences, are left out of this list`}
               onClick=${() => (shown ? said(false) : setAsking(true))}
             >
-              ${shown ? "Show fewer models" : "Show all models"}
+              ${shown
+                ? "Show fewer models"
+                : html`Show all models <span className="count">+${marked}</span>`}
             </button>
           `}
           <button className="plain" title="Look again at what is on the disk" onClick=${onRefresh}>
