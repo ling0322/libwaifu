@@ -389,7 +389,7 @@ FLAPI int32_t fl_conv2d(
 /// 1-D convolution of `input` <float16|float>(N, C, L) by `weight` (K, C / groups, R), with an
 /// optional per-channel `bias` (K) that may be null.
 ///
-/// No device implements this; see `Operators::conv1d`. It is reachable so that one can.
+/// CUDA only; any other device fails with FL_ERROR_ABORTED. See `Operators::conv1d`.
 FLAPI int32_t fl_conv1d(
     fl_operators_t operators,
     fl_tensor_t input,

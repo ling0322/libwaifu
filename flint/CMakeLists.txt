@@ -124,6 +124,7 @@ if (WITH_CUDA)
         "cuda/binary_test.cc"
         "cuda/causal_mask_test.cc"
         "cuda/common_test.cc"
+        "cuda/conv1d_test.cc"
         "cuda/conv2d_test.cc"
         "cuda/norm_test.cc"
         "cuda/copy_test.cc"
@@ -152,7 +153,7 @@ if (WITH_CUDA)
     endif()
 
     set(flint_SOURCES ${flint_SOURCES}
-        "cuda/conv2d_cutlass.cu"
+        "cuda/conv_cutlass.cu"
         "cuda/gemm_cutlass.cu"
         "cuda/gemm_fp8_cutlass.cu"
         "cuda/gemm_nvfp4_cutlass.cu")

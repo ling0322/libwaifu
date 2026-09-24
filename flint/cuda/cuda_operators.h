@@ -72,6 +72,14 @@ class CudaOperators : public Operators {
       int padding,
       int dilation,
       int groups) override;
+  Tensor conv1d(
+      Tensor input,
+      Tensor weight,
+      Tensor bias,
+      int stride,
+      int padding,
+      int dilation,
+      int groups) override;
   Tensor gatedDeltaNetPrefill(
       Tensor q,
       Tensor k,

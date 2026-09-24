@@ -314,7 +314,9 @@ Tensor Operators::conv1d(
     int padding,
     int dilation,
     int groups) {
-  THROW(NotImplemented, "conv1d: no device has this kernel; waifu::audio::conv1d composes one");
+  THROW(
+      NotImplemented,
+      "conv1d is only available on the CUDA device; waifu::audio::conv1d composes one");
 }
 
 Tensor Operators::convTranspose1d(

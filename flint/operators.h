@@ -74,9 +74,10 @@ class Operators {
   /// with every group a single channel -- but it is the case a speech model actually asks for and
   /// the one a backend has most to gain from specializing.
   ///
-  /// No backend implements this. `waifu::audio::conv1d` composes it out of `conv2d` over an image
-  /// one row tall, plus the padding a square `conv2d` padding cannot express, and that is what
-  /// runs today; overriding this replaces that path without the caller knowing.
+  /// CUDA implements this on CUTLASS, groups and all; no other backend does. Elsewhere
+  /// `waifu::audio::conv1d` composes it out of `conv2d` over an image one row tall, plus the
+  /// padding a square `conv2d` padding cannot express, and that is also what `waifu` still runs
+  /// on a card until it is pointed here.
   virtual Tensor conv1d(
       Tensor input,
       Tensor weight,

@@ -722,9 +722,9 @@ impl Graph {
 
     /// A 1-D convolution as a single node.
     ///
-    /// No backend implements this, so a graph holding one fails when it runs. What computes a
-    /// 1-D convolution today is [`crate::audio::conv1d`], which writes several nodes instead;
-    /// this is here so that a backend which grows the kernel has something to be reached by.
+    /// Only CUDA implements this; on any other device a graph holding one fails when it runs.
+    /// What computes a 1-D convolution today is [`crate::audio::conv1d`], which writes several
+    /// nodes instead and runs everywhere.
     #[track_caller]
     #[allow(clippy::too_many_arguments)]
     pub fn conv1d(
