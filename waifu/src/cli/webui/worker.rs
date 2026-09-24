@@ -130,6 +130,9 @@ pub struct SayJob {
 pub enum Command {
     /// Fetch this model if it is not on the disk, read it onto the device, and hold it.
     Use(String),
+    /// Fetch this model or voice if it is not on the disk, and read none of it: the page's
+    /// Download button. What is in memory stays there.
+    Fetch(String),
     /// Send what is loaded, and everything after it, to another device.
     UseDevice(Runtime),
     Draw(Job),
@@ -172,6 +175,8 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                     in_memory = Some(asked);
                 }
             }
+
+            Command::Fetch(asked) => fetch(shared, &asked),
 
             // The weights live on the device they were read onto, so the way to another one is
             // through letting go of them. Nothing is read back here: the next run reads what it
@@ -748,6 +753,58 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
     };
 
     Ok((read, opened))
+}
+
+/// Fetches what `asked` names, if it is not on the disk already, and reads none of it.
+///
+/// The half of [`load`] that is a download, for a page that asks for the download on its own:
+/// the same progress on the bar, the same stop. What is chosen is described again once it is
+/// here, since its manifest can now say what the name could only guess -- sizes, steps, whether
+/// it takes a picture.
+fn fetch(shared: &Shared, asked: &str) {
+    shared.carry_on();
+
+    let name = match asked.rsplit_once('/') {
+        Some((_, file)) if !file.is_empty() => file.to_string(),
+        _ => asked.to_string(),
+    };
+    shared.change(|session| {
+        session.doing = Doing::Fetching(Fetch {
+            model: name.clone(),
+            hub: None,
+            file: String::new(),
+            done: 0,
+            total: None,
+            part: 0,
+            parts: 0,
+        })
+    });
+
+    let fetched = hub::resolve_reporting(
+        asked,
+        &mut |progress| report_fetch(shared, &name, progress),
+        &|| shared.interrupted(),
+    );
+
+    match fetched {
+        Ok(_) => {
+            shared.change(|session| {
+                if session.model.as_ref().is_some_and(|one| one.name == asked) {
+                    session.model = Some(look_at(asked));
+                }
+                if session.voice.as_ref().is_some_and(|one| one.name == asked) {
+                    session.voice = Some(look_at_voice(asked));
+                }
+                session.doing = Doing::Nothing;
+            });
+            shared.say(format!("{name} is downloaded"), false);
+        }
+        Err(error) => {
+            shared.change(|session| session.doing = Doing::Nothing);
+            // A stop is not a failure -- see `read_model`, which says the same thing.
+            shared.say(error.to_string(), !hub::stopped(&error));
+        }
+    }
 }
 
 /// Copies what a fetch has to say into the session.

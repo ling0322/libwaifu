@@ -88,8 +88,8 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         (Method::Get, "/app.js") => page(SCRIPT, "text/javascript; charset=utf-8"),
 
         (Method::Get, "/api/state") => json(shared.describe(
-            listing(hub::listed()),
-            listing(hub::listed_voices()),
+            listing(hub::listed(), true),
+            listing(hub::listed_voices(), false),
         )),
         (Method::Get, "/api/progress") => json(shared.progress()),
         // Apart from the state rather than inside it, because it answers a different question.
@@ -103,6 +103,7 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         // Not `/api/voice`, which is the recording a reading is to sound like. Deleting a voice's
         // package goes through `DELETE /api/model` like any other: it is the same cache.
         (Method::Post, "/api/voice-model") => choose_voice(shared, request),
+        (Method::Post, "/api/fetch") => fetch(shared, commands, request),
         (Method::Post, "/api/device") => use_device(shared, commands, request),
         (Method::Delete, "/api/model") => forget_model(shared, request),
         (Method::Post, "/api/generate") => generate(shared, commands, request),
@@ -206,6 +207,30 @@ fn choose_voice(shared: &Arc<Shared>, request: &mut Request) -> Reply {
     shared.say(format!("{name} is what readings will use"), false);
 
     json(json!({ "ok": true }))
+}
+
+/// Downloads a model or a voice without reading it: the page's Download button, which stands where
+/// Generate does until what is chosen is on the disk.
+fn fetch(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
+    let asked = match body(request) {
+        Ok(body) => body,
+        Err(error) => return refused(400, &error),
+    };
+    let Some(name) = asked
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return refused(400, "nothing was named to download");
+    };
+
+    // The same claim a run takes: a download is minutes of the worker, and a run started beside it
+    // would be a run of a model that is only half here.
+    if !shared.claim() {
+        return refused(409, &already(shared));
+    }
+    post(shared, commands, Command::Fetch(name.to_string()))
 }
 
 /// Sends what runs next to another device, once whatever is in front of it has finished.
@@ -610,17 +635,26 @@ fn picture(shared: &Arc<Shared>, file: &str) -> Reply {
 }
 
 /// Every model of one kind this build can be asked for, and whether it is on the disk already.
-fn listing(listed: Vec<hub::Listed>) -> Value {
+///
+/// Picture models also say whether they can start from a picture, so that the img2img tab lists
+/// only the ones that can. As far as it is known without reading the weights: out of the kind, and
+/// out of the manifest where the package is here -- see [`worker::look_at`].
+fn listing(listed: Vec<hub::Listed>, pictures: bool) -> Value {
     listed
         .into_iter()
         .map(|model| {
-            json!({
+            let mut described = json!({
                 "name": model.name,
                 "full_name": model.full_name,
                 "cached": model.cached,
                 "bytes": model.bytes,
                 "explicit": model.explicit,
-            })
+            });
+            if pictures {
+                described["draws_from_a_picture"] =
+                    json!(worker::look_at(model.name).no_picture_because.is_none());
+            }
+            described
         })
         .collect()
 }
