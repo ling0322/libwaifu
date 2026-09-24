@@ -67,6 +67,16 @@ Tensor groupNorm(
 // attention.cc
 Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, bool causal);
 
+// conv1d.cc
+Tensor conv1d(
+    const Tensor &input,
+    const Tensor &weight,
+    const Tensor &bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups);
+
 // conv2d.cc
 Tensor conv2d(
     const Tensor &input,

@@ -81,6 +81,17 @@ Tensor MetalOperators::conv2d(
   return metal::conv2d(input, weight, bias, stride, padding, dilation, groups);
 }
 
+Tensor MetalOperators::conv1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  return metal::conv1d(input, weight, bias, stride, padding, dilation, groups);
+}
+
 Tensor MetalOperators::softmax(Tensor input) {
   return metal::softmax(input);
 }

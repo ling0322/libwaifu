@@ -172,6 +172,7 @@ if(WITH_MLX)
         ${flint_SOURCES}
         "metal/attention.cc"
         "metal/common.cc"
+        "metal/conv1d.cc"
         "metal/conv2d.cc"
         "metal/elementwise.cc"
         "metal/matmul.cc"
@@ -186,6 +187,7 @@ if(WITH_MLX)
     set(flint_test_SOURCES
         ${flint_test_SOURCES}
         "metal/attention_test.cc"
+        "metal/conv1d_test.cc"
         "metal/conv2d_test.cc"
         "metal/elementwise_test.cc"
         "metal/matmul_test.cc"
