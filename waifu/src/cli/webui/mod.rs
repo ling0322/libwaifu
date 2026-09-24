@@ -684,6 +684,30 @@ mod tests {
     }
 
     #[test]
+    fn the_model_list_says_which_models_can_start_from_a_picture() {
+        // What the img2img tab filters its list on: a model that cannot start from a picture is
+        // not one to offer there.
+        let (address, _commands) = a_server();
+        let state = json(address, "GET /api/state", "");
+        let models = state["models"].as_array().expect("the models");
+        let says = |name: &str| {
+            models
+                .iter()
+                .find(|model| model["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is listed"))["draws_from_a_picture"]
+                .clone()
+        };
+
+        assert_eq!(says("sdxl:base"), true);
+        assert_eq!(says("krea2:turbo"), false);
+        assert_eq!(says("anima:turbo"), false);
+
+        // A voice has no picture to start from or not, and says nothing about it.
+        let voices = state["voices"].as_array().expect("the voices");
+        assert!(voices.iter().all(|voice| voice.get("draws_from_a_picture").is_none()));
+    }
+
+    #[test]
     fn a_published_voice_is_listed_and_chosen_the_way_a_model_is() {
         // What the voice list offers: the published voice, by the name it is chosen with.
         let (address, _commands) = a_server();
@@ -736,6 +760,27 @@ mod tests {
         assert!(body.contains("already"), "{body}");
 
         assert!(matches!(commands.try_recv(), Ok(Command::Speak(_))));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_download_is_posted_to_the_worker_once_and_takes_it_like_a_run() {
+        // The Download button that stands where Generate does until the model is here.
+        let (address, commands) = a_server();
+
+        let (status, body) = asked(address, "POST /api/fetch", r#"{"name":"  "}"#);
+        assert_eq!(status, 400);
+        assert!(body.contains("nothing was named"), "{body}");
+        assert!(commands.try_recv().is_err(), "the worker was told anyway");
+
+        let download = r#"{"name":"krea2:turbo"}"#;
+        assert_eq!(asked(address, "POST /api/fetch", download).0, 200);
+        // A second click while the first is under way is told so, rather than queued behind it.
+        let (status, body) = asked(address, "POST /api/fetch", download);
+        assert_eq!(status, 409);
+        assert!(body.contains("already"), "{body}");
+
+        assert!(matches!(commands.try_recv(), Ok(Command::Fetch(name)) if name == "krea2:turbo"));
         assert!(commands.try_recv().is_err());
     }
 

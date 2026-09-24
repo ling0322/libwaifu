@@ -396,7 +396,7 @@ function ModelAndDevice({ state, progress, onDevice, onModels }) {
       ? "read, and on the device"
       : chosen.on_disk
         ? "on the disk -- read at the first run"
-        : "not fetched -- fetched and read at the first run";
+        : "not downloaded yet -- download it to begin";
 
   return html`
     <div className="card">
@@ -427,8 +427,6 @@ function ModelAndDevice({ state, progress, onDevice, onModels }) {
         <//>
       </div>
       <p className="about">${standing}</p>
-      ${chosen?.no_picture_because &&
-      html`<p className="about">Cannot start from a picture: ${chosen.no_picture_because}.</p>`}
     </div>
   `;
 }
@@ -496,6 +494,41 @@ function Prompts({ form, change, canDraw, drawing, fetching, guided, onDraw, onI
             : fetching
               ? "Stop the download. The packages that have come down are kept, and fetching it again carries on from there"
               : "Nothing to stop. A run can be stopped while it is drawing and a model while it is coming down; reading one onto the card cannot be stopped part way"}
+          onClick=${onInterrupt}
+        >
+          Cancel
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+/**
+ * What stands where the prompt and Generate do while what is chosen is not on the disk: a line
+ * saying so, and a Download button in Generate's place.
+ *
+ * The boxes are not shown until it is here. A run of a model that is not here starts with a
+ * download of several gigabytes, and a page that let somebody type a prompt and press Generate
+ * first would be hiding that behind the button.
+ */
+function DownloadBar({ chosen, busy, fetching, onDownload, onInterrupt }) {
+  return html`
+    <section className="prompts fetch-first">
+      <div className="card download-says">
+        <div className="card-title">${chosen.full_name} is not downloaded yet</div>
+        <p className="about">
+          Download it to begin. It is several gigabytes, and it is kept afterwards, so this is
+          once.
+        </p>
+      </div>
+      <div className="go">
+        <button className="generate download" disabled=${busy} onClick=${onDownload}>
+          ${fetching ? "Downloading..." : "Download"}
+        </button>
+        <button
+          className="interrupt"
+          disabled=${!fetching}
+          title="Stop the download. What has come down is kept, and downloading again carries on from there"
           onClick=${onInterrupt}
         >
           Cancel
@@ -620,7 +653,7 @@ function VoiceAndDevice({ state, progress, onDevice, onVoices }) {
       ? "read, and on the device"
       : voice.on_disk
         ? "on the disk -- read at the first reading"
-        : "not fetched -- fetched and read at the first reading";
+        : "not downloaded yet -- download it to begin";
 
   return html`
     <div className="card">
@@ -927,10 +960,9 @@ function SpeechSettings({
         onVoices=${onVoices}
       />
 
-      ${/* Nothing below this until there is a voice, for the reason there is nothing below the
-           model on the other tabs until there is a model: every one of them is a setting for
-           one. */ ""}
-      ${!!voice &&
+      ${/* Nothing below this until there is a voice on the disk, for the reason there is nothing
+           below the model on the other tabs until there is one. */ ""}
+      ${!!voice?.on_disk &&
       html`
         <${Fragment}>
 
@@ -968,10 +1000,6 @@ function SpeechSettings({
             onChange=${(value) => change("speed", value)}
           />
         </div>
-        <p className="about">
-          How fast to read it, as a multiple of the voice's own pace. One is whatever the voice
-          does on its own.
-        </p>
       </div>
 
       <div className="card">
@@ -989,10 +1017,6 @@ function SpeechSettings({
             onChange=${(value) => change("temperature", value)}
           />
         </div>
-        <p className="about">
-          How far the voice may wander from the likeliest reading. Zero is the same reading every
-          time, whatever the seed says; high is a reading that surprises itself.
-        </p>
       </div>
 
       <div className="card">
@@ -1009,10 +1033,6 @@ function SpeechSettings({
             🎲
           </button>
         </div>
-        <p className="about">
-          Which reading to take. The same seed with everything else the same says it the same way
-          again; minus one is a new one every time.
-        </p>
       </div>
 
         <//>
@@ -1063,10 +1083,10 @@ function Settings({
         onModels=${onModels}
       />
 
-      ${/* Nothing below this is worth showing until there is a model: every one of them is a
-           setting for one, and a column of greyed-out boxes is a longer way of saying the same
-           thing the button above says. */ ""}
-      ${!!model &&
+      ${/* Nothing below this is worth showing until there is a model on the disk: every one of
+           them is a setting for one, and until it is downloaded the thing to do is the Download
+           button where Generate will be. */ ""}
+      ${!!model?.on_disk &&
       html`
         <${Fragment}>
 
@@ -1090,7 +1110,7 @@ function Settings({
             />`)}
 
         ${/*
-          One knob to a card, each with the sentence that says what it does. They used to be paired
+          One knob to a card, and nothing under it but the knob. They used to be paired
           two to a row -- the sampler beside the steps, the size beside the guidance -- which was a
           shape borrowed from another tool: a wide box and a narrow one filling one line. Nothing
           related the size to the guidance except the width left over beside the size.
@@ -1141,11 +1161,6 @@ function Settings({
               onChange=${(value) => change("height", value)}
             />
           </div>
-          <p className="about">
-            What shape to draw. The list is what the model was trained at, which is where it draws
-            one of a thing rather than two; a side typed into the boxes is taken down to the
-            multiple of 64 below it, which is the shape the model can actually be asked for.
-          </p>
         </div>
 
         <div className="card">
@@ -1165,10 +1180,6 @@ function Settings({
               onChange=${(value) => change("steps", value)}
             />
           </div>
-          <p className="about">
-            How many times the model is asked what to take out. More is more detail and costs its
-            share of the time; past about forty there is little left to add.
-          </p>
         </div>
 
         ${guided &&
@@ -1192,10 +1203,6 @@ function Settings({
                 onChange=${(value) => change("guidance", value)}
               />
             </div>
-            <p className="about">
-              How hard to push towards the prompt. Five to eight is the usual range; higher burns the
-              colours out, and one ignores the prompt and runs twice as fast.
-            </p>
           </div>
         `}
 
@@ -1219,10 +1226,6 @@ function Settings({
                 onChange=${(value) => change("strength", value)}
               />
             </div>
-            <p className="about">
-              How far to walk from the picture above. Around 0.8 redraws it and keeps its
-              composition; below about 0.3 there is little left for the prompt to do.
-            </p>
           </div>
         `}
 
@@ -1254,10 +1257,6 @@ function Settings({
               ♻
             </button>
           </div>
-          <p className="about">
-            Which noise to start from. The same seed with everything else the same draws the same
-            picture again; minus one is a new one every time.
-          </p>
         </div>
         <//>
       `}
@@ -1273,7 +1272,7 @@ function onDisk(model) {
   // Not fetched and not nothing: a fetch that was stopped part way, which is worth saying,
   // because what is there is what the next fetch does not have to bring down again.
   if (model.bytes > 0) return `part fetched -- ${room(model.bytes)} of it is here`;
-  return "not fetched -- it comes down at the first run";
+  return "not downloaded yet";
 }
 
 /**
@@ -1342,7 +1341,17 @@ function AskAboutTheList({ onYes, onNo }) {
  * deleted -- is what there is to say of a model. None of them is marked, so the question above is
  * never asked of them.
  */
-function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefresh, onClose }) {
+function ModelPicker({
+  state,
+  progress,
+  note,
+  voices,
+  fromPicture,
+  onChoose,
+  onForget,
+  onRefresh,
+  onClose,
+}) {
   const chosen = voices ? state?.voice : state?.model;
   const busy = !!progress.busy;
 
@@ -1362,7 +1371,11 @@ function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefr
   // The chosen one is in the list whatever it is. A model can be chosen from the command line, and
   // a list that left the chosen one out would be a list with no "Chosen" in it and no way back to
   // the model whose numbers are in the boxes.
-  const all = (voices ? state?.voices : state?.models) ?? [];
+  // On img2img, only the models that can start from a picture: offering one that cannot is
+  // offering a choice that fails the moment a run is asked of it.
+  const all = ((voices ? state?.voices : state?.models) ?? []).filter(
+    (model) => !fromPicture || model.draws_from_a_picture,
+  );
   const models = all.filter((model) => shown || !model.explicit || model.name === chosen?.name);
 
   // How many the button is about. Counted off the whole list rather than as what the filter
@@ -1442,18 +1455,15 @@ function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefr
                     html`<span className="badge explicit">not for all audiences</span>`}
                   </div>
                   <p className="about">${onDisk(model)}</p>
-                  ${/* What this one will and will not do, as far as it is known before it is
-                       read: out of its manifest where the package is here, and guessed from the
-                       name where it is not. */ ""}
+                  ${/* How this one runs, as far as it is known before it is read: out of its
+                       manifest where the package is here, and guessed from the name where it is
+                       not. */ ""}
                   ${here &&
-                  (voices
-                    ? html`<p className="about">${voiceSays(chosen)}</p>`
-                    : html`<p className="about">
-                        ${`${chosen.sampler} -- ${chosen.steps} steps -- ${chosen.width} x ${chosen.height}`}
-                        ${chosen.no_picture_because
-                          ? ` -- cannot start from a picture: ${chosen.no_picture_because}`
-                          : " -- draws from a prompt or from a picture"}
-                      </p>`)}
+                  html`<p className="about">
+                    ${voices
+                      ? voiceSays(chosen)
+                      : `${chosen.sampler} -- ${chosen.steps} steps -- ${chosen.width} x ${chosen.height}`}
+                  </p>`}
                 </div>
 
                 ${/* Kept to itself: a click on Delete is not a click on the card, and deleting a
@@ -1826,11 +1836,11 @@ function App() {
   // will refuse: the reason is on the screen beside the button, so the button says no rather than
   // the wait does.
   const canDraw =
-    !!chosen && !progress.busy && !(tab === "img2img" && chosen.no_picture_because);
+    !!chosen?.on_disk && !progress.busy && !(tab === "img2img" && chosen.no_picture_because);
 
   // Nothing to choose on the speech tab, so nothing to be chosen first: what stops the button is
   // an empty box or something already happening.
-  const canSpeak = !!state?.voice && !progress.busy && !!form.text.trim();
+  const canSpeak = !!state?.voice?.on_disk && !progress.busy && !!form.text.trim();
 
   const generate = useCallback(async () => {
     // Both or neither, and neither for a model with no second pass to steer. The server drops
@@ -1900,6 +1910,17 @@ function App() {
   }, [readState]);
 
   /** Says which voice readings are of. Reads nothing either: the first reading does that. */
+  /** Downloads a model or voice without reading it. The bar says how far along it is. */
+  const download = useCallback(
+    async (name) => {
+      if (!name) return;
+      const answer = await ask("POST", "/api/fetch", { name });
+      if (!answer.ok) return setComplaint(answer.error);
+      await readState();
+    },
+    [readState],
+  );
+
   const chooseVoice = useCallback(
     async (name) => {
       setPicking(null);
@@ -2095,14 +2116,22 @@ function App() {
               ${/* The same rule as the prompt box: until a voice is chosen there is nothing to
                    read with, and the card that chooses one is what is left on the screen. */ ""}
               ${!!state?.voice &&
-              html`<${SayBox}
-                form=${form}
-                change=${change}
-                canSpeak=${canSpeak}
-                speaking=${!!progress.speaking}
-                onSpeak=${speak}
-                onInterrupt=${() => ask("POST", "/api/interrupt")}
-              />`}
+              (state.voice.on_disk
+                ? html`<${SayBox}
+                    form=${form}
+                    change=${change}
+                    canSpeak=${canSpeak}
+                    speaking=${!!progress.speaking}
+                    onSpeak=${speak}
+                    onInterrupt=${() => ask("POST", "/api/interrupt")}
+                  />`
+                : html`<${DownloadBar}
+                    chosen=${state.voice}
+                    busy=${!!progress.busy}
+                    fetching=${!!progress.fetching}
+                    onDownload=${() => download(state.voice.name)}
+                    onInterrupt=${() => ask("POST", "/api/interrupt")}
+                  />`)}
 
               <section className="panes">
                 <${SpeechSettings}
@@ -2132,16 +2161,24 @@ function App() {
                    prompt box and no button under it. What is left on the screen is the one card
                    that chooses one, which is the only thing that was ever going to work. */ ""}
               ${!!chosen &&
-              html`<${Prompts}
-                form=${form}
-                change=${change}
-                canDraw=${canDraw}
-                guided=${chosen.takes_guidance !== false}
-                drawing=${!!progress.drawing}
-                fetching=${!!progress.fetching}
-                onDraw=${generate}
-                onInterrupt=${() => ask("POST", "/api/interrupt")}
-              />`}
+              (chosen.on_disk
+                ? html`<${Prompts}
+                    form=${form}
+                    change=${change}
+                    canDraw=${canDraw}
+                    guided=${chosen.takes_guidance !== false}
+                    drawing=${!!progress.drawing}
+                    fetching=${!!progress.fetching}
+                    onDraw=${generate}
+                    onInterrupt=${() => ask("POST", "/api/interrupt")}
+                  />`
+                : html`<${DownloadBar}
+                    chosen=${chosen}
+                    busy=${!!progress.busy}
+                    fetching=${!!progress.fetching}
+                    onDownload=${() => download(chosen.name)}
+                    onInterrupt=${() => ask("POST", "/api/interrupt")}
+                  />`)}
 
               <section className="panes">
                 <${Settings}
@@ -2178,6 +2215,7 @@ function App() {
       progress=${progress}
       note=${note}
       voices=${picking === "voice"}
+      fromPicture=${picking === "model" && tab === "img2img"}
       onChoose=${picking === "voice" ? chooseVoice : chooseModel}
       onForget=${forgetModel}
       onRefresh=${readState}
