@@ -232,7 +232,7 @@ const CATALOG: &[Published] = &[
     },
     Published {
         name: "anima:miaomiao:v1.6",
-        full_name: "MiaoMiao Harem v1.6",
+        full_name: "Anima MiaoMiao Harem v1.6",
         repo: "ling0322/libwaifu-miaomiao-harem-v1.6",
         manifest: "miaomiao-harem-v1.6.yaml",
         explicit: true,
