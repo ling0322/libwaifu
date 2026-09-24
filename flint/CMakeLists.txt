@@ -14,7 +14,7 @@ set(flint_SOURCES
     "cpu/binary_op.cc"
     "cpu/cast.cc"
     "cpu/common.cc"
-    "cpu/conv2d.cc"
+    "cpu/conv.cc"
     "cpu/copy.cc"
     "cpu/cpu_operators.cc"
     "cpu/cpu_tensor_data.cc"
@@ -45,6 +45,7 @@ set(flint_SOURCES
 
 set(flint_test_SOURCES
     "capi_test.cc"
+    "cpu/conv1d_test.cc"
     "cpu/conv2d_test.cc"
     "cpu/fill_test.cc"
     "cpu/gated_delta_net_test.cc"

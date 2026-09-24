@@ -316,7 +316,7 @@ Tensor Operators::conv1d(
     int groups) {
   THROW(
       NotImplemented,
-      "conv1d is only available on the CUDA device; waifu::audio::conv1d composes one");
+      "conv1d is not available on this device; the CPU and CUDA both have it");
 }
 
 Tensor Operators::convTranspose1d(

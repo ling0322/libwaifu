@@ -32,6 +32,8 @@
 
 #include "flint/cpu/conv2d.h"
 
+#include "flint/cpu/conv1d.h"
+
 #include <algorithm>
 #include <type_traits>
 #include <vector>
@@ -66,7 +68,10 @@ struct Problem {
   int outH;
   int outW;
   int stride;
-  int padding;
+  /// Apart, because a flat image is padded along its length and not across its one row: a single
+  /// padding would make a height of one into 2 * padding + 1 and the output the wrong shape.
+  int padH;
+  int padW;
   int dilation;
   int groups;
 };
@@ -98,8 +103,8 @@ void im2col(
 
         for (int i = 0; i < count; ++i) {
           int pixel = first + i;
-          int y = (pixel / p.outW) * p.stride - p.padding + r * p.dilation;
-          int x = (pixel % p.outW) * p.stride - p.padding + s * p.dilation;
+          int y = (pixel / p.outW) * p.stride - p.padH + r * p.dilation;
+          int x = (pixel % p.outW) * p.stride - p.padW + s * p.dilation;
 
           // Outside the image is the zero the padding stands for.
           bool inside = y >= 0 && y < p.inH && x >= 0 && x < p.inW;
@@ -314,7 +319,8 @@ Tensor conv2d(
   p.filterH = weight.getShape(2);
   p.filterW = weight.getShape(3);
   p.stride = stride;
-  p.padding = padding;
+  p.padH = padding;
+  p.padW = padding;
   p.dilation = dilation;
   p.groups = groups;
   p.outH = (p.inH + 2 * padding - dilation * (p.filterH - 1) - 1) / stride + 1;
@@ -329,6 +335,86 @@ Tensor conv2d(
   // Half throughout, which is what the default float type is on this architecture. The GEMM sums
   // in float, so the reduction over the filter and the channel depth is no worse for it.
   if (input.getDType() == DType::kFloat16) return conv2dImpl<Float16>(input, weight, bias, p);
+#endif
+
+  NOT_IMPL();
+}
+
+Tensor conv1d(
+    const Tensor &input,
+    const Tensor &weight,
+    const Tensor &bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  if (input.getDim() != 3) THROW(InvalidArg, "conv1d takes a 3-D input, as (N, C, L)");
+  if (weight.getDim() != 3) THROW(InvalidArg, "conv1d takes a 3-D weight, as (K, C, R)");
+  if (input.getDType() != weight.getDType() &&
+      !(input.getDType() == DType::kFloat && weight.getDType() == DType::kFloat16)) {
+    THROW(InvalidArg, "conv1d: the input and the weight are of different types");
+  }
+  if (groups < 1) THROW(InvalidArg, "conv1d: the group count is below one");
+  if (stride < 1 || dilation < 1) {
+    THROW(InvalidArg, "conv1d: the stride and the dilation are below one");
+  }
+  if (padding < 0) THROW(InvalidArg, "conv1d: the padding is negative");
+  if (!input.isContiguous() || !weight.isContiguous()) {
+    THROW(InvalidArg, "conv1d takes contiguous tensors");
+  }
+
+  if (input.getShape(1) != weight.getShape(1) * groups) {
+    THROW(
+        InvalidArg,
+        lut::sprintf(
+            "conv1d: an input of %d channels does not match a weight of %d by %d groups",
+            input.getShape(1),
+            weight.getShape(1),
+            groups));
+  }
+  if (weight.getShape(0) % groups != 0) {
+    THROW(InvalidArg, "conv1d: the filters do not divide into the groups");
+  }
+  if (!bias.empty()) {
+    if (bias.getNumEl() != weight.getShape(0)) {
+      THROW(InvalidArg, "conv1d: the bias does not match the output channels");
+    }
+    if (bias.getDType() != input.getDType()) {
+      THROW(InvalidArg, "conv1d: the bias and the input are of different types");
+    }
+  }
+
+  // One row tall, and padded along the length only. A stride or a dilation over a single row of a
+  // single-row kernel steps nowhere, so both are left as they are and the height stays one.
+  Problem p{};
+  p.batch = input.getShape(0);
+  p.inChannels = input.getShape(1);
+  p.inH = 1;
+  p.inW = input.getShape(2);
+  p.outChannels = weight.getShape(0);
+  p.filterH = 1;
+  p.filterW = weight.getShape(2);
+  p.stride = stride;
+  p.padH = 0;
+  p.padW = padding;
+  p.dilation = dilation;
+  p.groups = groups;
+  p.outH = 1;
+  p.outW = (p.inW + 2 * padding - dilation * (p.filterW - 1) - 1) / stride + 1;
+
+  if (p.outW < 1) THROW(InvalidArg, "conv1d: the input is smaller than the kernel reaches");
+
+  // `conv2dImpl` reads the data and takes every shape off the problem, so the tensors go in as
+  // they are and only what comes back has to be given the shape a 1-D caller asked for.
+  std::vector<int> shape{p.batch, p.outChannels, p.outW};
+
+  if (input.getDType() == DType::kFloat) {
+    return conv2dImpl<float>(input, weight, bias, p).view(shape);
+  }
+#if LUT_CPU_ARCH == LUT_AARCH64
+  if (input.getDType() == DType::kFloat16) {
+    return conv2dImpl<Float16>(input, weight, bias, p).view(shape);
+  }
 #endif
 
   NOT_IMPL();
