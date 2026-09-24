@@ -554,7 +554,7 @@ conv2d_cudnn.h, built into the benchmark alone", and `flint/CMakeLists.txt:150` 
 Fixed by taking the choice away: `WITH_CUTLASS` is gone as an option, and `WITH_CUDA` brings
 CUTLASS with it. The configure step checks `third_party/cutlass` and names `install_cutlass.sh`
 where it is missing, which is the error a fresh clone now gets instead of a link failure.
-`LIBWAIFU_CUTLASS_ENABLED` is gone with it -- `capi.cc` guards the NVFP4 entry points on
+`LIBWAIFU_CUTLASS_ENABLED` is gone with it -- `capi.cc` guards the CUTLASS entry points on
 `LIBWAIFU_CUDA_ENABLED` instead, and `isConv2dCutlassAvailable()` and `isConv2dAvailable()` are
 deleted rather than left answering `true` to a question no build can now answer `false` to.
 
@@ -572,8 +572,7 @@ to fall back to -- `Operators::pagedAttention` is itself `NOT_IMPL()` -- but it 
 `lut::AbortedError` naming the flag, the way `conv2d.cc:45` does, so the C API reports it and
 the caller can catch it.
 
-The Rust test has the gate this entry asked for: `fl_paged_attention_available()`, matching
-`fl_nvfp4_available()`, lets `F::paged_attention_available()` skip the test in a build without
+The Rust test has the gate this entry asked for: `fl_paged_attention_available()` lets `F::paged_attention_available()` skip the test in a build without
 the kernels. It matters more than it did, since `WITH_FLASH_ATTN` is now off by default.
 
 

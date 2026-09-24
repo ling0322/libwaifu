@@ -81,7 +81,7 @@ mod yaml;
 /// does not have to reach into [`flint`]. [`Residency`](flint::Residency) and
 /// [`Weights`](flint::Weights) are here for the same reason: asking for a model is where they have
 /// to be said.
-pub use flint::{DType, Device, Fp8Tensor, Nvfp4Tensor, Residency, WeightFormat, Weights};
+pub use flint::{DType, Device, Fp8Tensor, Residency, WeightFormat, Weights};
 
 pub use anima::Anima;
 pub use error::{Error, Result};

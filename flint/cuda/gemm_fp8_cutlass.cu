@@ -184,7 +184,7 @@ __global__ void dequantizeFp8Kernel(
 using namespace cute;
 
 // A is row major and B column major, which for a weight stored one output channel per row means B
-// is that weight read as its own transpose -- the same arrangement the NVFP4 path uses.
+// is that weight read as its own transpose.
 using ElementA = cutlass::half_t;
 using ElementB = cutlass::float_e4m3_t;
 using ElementOutput = cutlass::half_t;
@@ -382,8 +382,8 @@ void runFp8Gemm(int m, int n, int k, const half *A, const Fp8E4M3 *B, const floa
 }  // namespace
 
 bool isFp8GemmAvailable() {
-  // An sm_80 kernel with nothing arch conditional in it, so unlike the NVFP4 path this asks only
-  // whether the tensor cores it is written against exist.
+  // An sm_80 kernel with nothing arch conditional in it, so this asks only whether the tensor
+  // cores it is written against exist.
   static const bool available = getCudaArch() >= 80;
   return available;
 }

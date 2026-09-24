@@ -45,8 +45,7 @@ pub const CHANNEL_SCALE_SUFFIX: &str = ".scale";
 /// makes both pieces in the same breath, and [`Fp8Tensor::data`] and
 /// [`Fp8Tensor::channel_scale`] are how they get back out.
 ///
-/// Where [`super::Nvfp4Tensor`] narrows both operands and multiplies on the block scaled tensor
-/// cores, this narrows the weight alone: the multiply is the ordinary one, and the weight is
+/// This narrows the weight alone: the multiply is the ordinary one, and the weight is
 /// widened on its way into it. So it buys bandwidth rather than arithmetic -- about twice the
 /// speed of the half GEMM where a weight is read once and multiplied by few rows, and a little
 /// slower than it where the rows are many. It costs about 2.6e-2 of relative RMSE. See
@@ -63,8 +62,7 @@ pub struct Fp8Tensor {
 
 impl Fp8Tensor {
     /// Whether `device` can quantize and multiply in FP8, which today is CUDA and nothing else.
-    /// The kernel is written against the sm_80 tensor cores, so unlike NVFP4 it needs no more
-    /// than Ampere -- but a device with no FP8 kernels at all answers no here rather than failing
+    /// The kernel is written against the sm_80 tensor cores, so it needs no more than Ampere -- but a device with no FP8 kernels at all answers no here rather than failing
     /// further in.
     pub fn is_available(device: Device) -> bool {
         init();

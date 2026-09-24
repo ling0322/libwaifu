@@ -30,7 +30,7 @@
 //! ```
 
 use super::operators::{copy_operators, operators_of, raw_operators};
-use super::{check, ffi, DType, Device, Nvfp4Tensor, Result, Tensor};
+use super::{check, ffi, DType, Device, Result, Tensor};
 
 /// Reduce over the last dimension, the default of [`sum`] and [`max`].
 pub const LAST_DIM: i32 = -1;
@@ -287,21 +287,6 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_matmul(operators, a.raw, b.raw, out) })
 }
 
-/// `a` `<float16>(..., k)` times the transpose of an NVFP4 `weight` `(rows, k)`, as
-/// `<float16>(..., rows)`. `a` is quantized on the way in, because the block scaled tensor cores
-/// take no other kind of operand; `rows` has to be a multiple of 8.
-pub fn nvfp4_matmul(a: &Tensor, weight: &Nvfp4Tensor) -> Result<Tensor> {
-    Tensor::produce(|out| unsafe {
-        ffi::fl_nvfp4_matmul(
-            a.raw,
-            weight.data.raw,
-            weight.block_scale.raw,
-            weight.global_scale.raw,
-            out,
-        )
-    })
-}
-
 /// `a` `(..., k)` times the transpose of an FP8 weight `(rows, k)`, as `(..., rows)`, in the
 /// float type the weight's device computes in.
 ///
@@ -312,8 +297,8 @@ pub fn nvfp4_matmul(a: &Tensor, weight: &Nvfp4Tensor) -> Result<Tensor> {
 /// ordinary tensors under two ordinary names and there is nothing to be gained by pairing them up
 /// again on the way to a call that takes them apart.
 ///
-/// Unlike [`nvfp4_matmul`] the activation is not narrowed: the multiply happens at full width
-/// either way and only the weight is narrow. So this is `<float16>` in and out, with `rows` a
+/// The activation is not narrowed: the multiply happens at full width and only the weight is
+/// narrow. So this is `<float16>` in and out, with `rows` a
 /// multiple of 8 and `k` a multiple of 16. CUDA is the only device with the kernels for it.
 pub fn fp8_matmul(a: &Tensor, weight: &Tensor, channel_scale: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_fp8_matmul(a.raw, weight.raw, channel_scale.raw, out) })

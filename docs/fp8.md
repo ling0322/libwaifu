@@ -8,8 +8,7 @@ Fp8Operand w = op::cuda::quantizeFp8(weightFp16);   // once, at load
 Tensor y = op::cuda::gemmFp8(xFp16, w);             // per layer: half in, half out
 ```
 
-Needs `WITH_CUDA=ON` and an sm_80 or newer device; unlike the NVFP4 path, which needs sm_120a
-exactly, that is everything from Ampere on. `isFp8GemmAvailable()` reports it.
+Needs `WITH_CUDA=ON` and an sm_80 or newer device, which is everything from Ampere on. `isFp8GemmAvailable()` reports it.
 
 **The card is the only device that has it.** Nothing about the format is the card's -- `Fp8Operand`
 and the bytes it holds are device agnostic, and a package that stores a weight quantized says
@@ -177,9 +176,8 @@ nothing: it would be converted straight back to half before the multiply. What t
 saves is bandwidth -- half the bytes from global memory and half the shared memory -- and that is
 the whole of what this path is for.
 
-That is the difference from `docs/nvfp4.md`, and it is the reason both exist. NVFP4 changes the
-instruction, so it buys arithmetic and needs both operands narrow; FP8 here keeps the instruction
-and buys traffic, so it needs only the weight narrow and leaves the activation exact.
+FP8 here keeps the instruction and buys traffic, so it needs only the weight narrow and leaves the
+activation exact.
 
 It is the same story on a processor with the ceiling lower, which is worth knowing before wanting
 one: x64 and aarch64 have no FP8 arithmetic at all, so the weight would be widened to float32
@@ -326,9 +324,8 @@ The two columns agree to three figures, which is the result worth having: the GE
 its own to the format's error. Three mantissa bits is a step of one sixteenth at the top of a
 binade, and 2.6e-2 is what rounding normally distributed data to that costs.
 
-For scale: `docs/nvfp4.md` measures 9.5e-2 for a single NVFP4 operand and 1.34e-1 for two, and the
-FP16 GEMM's own error against an FP32 one is 3.6e-4. So this sits between them -- about 3.6 times
-more accurate than NVFP4 on one operand, and about seventy times less accurate than FP16.
+For scale: the FP16 GEMM's own error against an FP32 one is 3.6e-4, so this is about seventy times
+less accurate than FP16.
 
 ## Known gaps
 
