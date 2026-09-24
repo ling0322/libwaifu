@@ -948,9 +948,12 @@ fn depthwise_conv1d_is_conv1d_with_one_group_per_channel() {
 // the operators, as opposed to the compositions
 // ---------------------------------------------------------------------------------------------
 
-/// `conv1d`, `conv_transpose1d`, `snake`, `stft` and `istft` are also operators -- named in
-/// `Operators`, dispatched through `F::`, reachable as a single node from a graph -- and no
-/// backend implements any of them.
+/// `conv_transpose1d`, `snake`, `stft` and `istft` are also operators -- named in `Operators`,
+/// dispatched through `F::`, reachable as a single node from a graph -- and no backend implements
+/// any of them.
+///
+/// `conv1d` was the fifth until #43 gave it a CUDA kernel, and its line is gone from here for the
+/// reason the last paragraph gives. What covers that kernel now is `flint/cuda/conv1d_test.cc`.
 ///
 /// That combination is easy to get wrong in a way nothing notices, because the whole chain is
 /// declarations: a node no pass recognises and a node whose kernel is missing both do nothing,
@@ -966,7 +969,7 @@ fn depthwise_conv1d_is_conv1d_with_one_group_per_channel() {
 /// When a backend grows one of these kernels its line here stops failing, and that is the signal
 /// to delete the line rather than a reason to doubt it.
 #[test]
-fn the_audio_operators_are_nodes_no_backend_implements_yet() {
+fn the_remaining_audio_operators_are_nodes_no_backend_implements_yet() {
     let signal = Tensor::from_f32(&[1, 2, 8], &ramp(16, 0.0)).unwrap();
     let weight = Tensor::from_f32(&[2, 1, 3], &ramp(6, 1.0)).unwrap();
     let per_channel = Tensor::from_f32(&[2], &[0.7, 1.3]).unwrap();
@@ -977,11 +980,6 @@ fn the_audio_operators_are_nodes_no_backend_implements_yet() {
     type Build = Box<dyn Fn(&Graph) -> Value>;
     type Case<'a> = (&'a str, Build, Vec<(&'a str, &'a Tensor)>);
     let cases: Vec<Case> = vec![
-        (
-            "conv1d",
-            Box::new(|g: &Graph| g.conv1d(g.input("x"), g.input("w"), None, 1, 1, 1, 1)),
-            vec![("x", &signal), ("w", &weight)],
-        ),
         (
             "conv_transpose1d",
             Box::new(|g: &Graph| g.conv_transpose1d(g.input("x"), g.input("w"), None, 2, 0, 0, 1)),
