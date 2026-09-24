@@ -410,5 +410,13 @@ config:
         .unwrap();
         assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8);
         assert_eq!(quantized.encoder.weight_format, WeightFormat::Fp8);
+
+        let tensor_scale = parse(&RELEASE.replace(
+            "    prediction: flow",
+            "    prediction: flow\n    weight_format: fp8_tensor_scale",
+        ))
+        .unwrap();
+        assert_eq!(tensor_scale.dit.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(tensor_scale.encoder.weight_format, WeightFormat::Fp8TensorScale);
     }
 }

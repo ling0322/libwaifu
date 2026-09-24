@@ -32,7 +32,7 @@ This reads the published diffusers layout as it stands, which is what `hf downlo
         -model  ~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/<rev> \\
         -output models/qwen-image-2.1.safetensors
 
-`-fp8` writes the matrices as E4M3 with a scale per output channel: thirty gigabytes to sixteen.
+`-fp8` writes the matrices as E4M3 with one scale for the whole weight: thirty gigabytes to sixteen.
 
 `-test_output` also writes reference tensors off one real run of diffusers' `QwenImage21Pipeline`.
 That needs a diffusers new enough to have it -- newer than `tools/requirements.txt` pins -- and a
@@ -69,15 +69,10 @@ TOKENIZER_CORPUS = "_corpus.tsv"
 
 class Converter(Krea2Converter):
     """Krea 2's converter, which already knows the Qwen3-VL text tower this model also reads,
-    taught the denoiser and the autoencoder that are this model's own."""
+    taught the denoiser and the autoencoder that are this model's own.
 
-    def _matrix(self, ctx: Context, tensor: torch.Tensor) -> None:
-        """Krea 2's own `_matrix` now writes the tensor-scale FP8 format; this export has not
-        moved to it yet, so `-fp8` here still writes one scale per row. See docs/fp8.md."""
-        if not self._fp8:
-            return self._write(ctx, tensor)
-
-        self._writer.write_fp8_tensor(ctx, tensor.to(torch.float32))
+    `_matrix` is inherited as is: `-fp8` here writes the same tensor-scale format Krea 2's does,
+    one `<float>` scale for the whole weight. See docs/fp8.md."""
 
     # ---- the denoiser -------------------------------------------------------------------
 
@@ -259,7 +254,7 @@ def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, fp8: bo
     }}
 
     if fp8:
-        config["qwen_image"]["weight_format"] = "fp8"
+        config["qwen_image"]["weight_format"] = "fp8_tensor_scale"
 
     return config
 
@@ -416,7 +411,7 @@ def main() -> int:
                         help="what to call the model. Names the weights and the manifest beside "
                              "them.")
     parser.add_argument("-fp8", action="store_true",
-                        help="store the matrices as E4M3 with a scale per output channel.")
+                        help="store the matrices as E4M3 with one scale for the whole weight.")
     parser.add_argument("-part-size", type=parse_size, default="4GB",
                         help='split the package into parts of about this size, as in "4GB".')
     parser.add_argument("-test_output", type=str, default=None,
