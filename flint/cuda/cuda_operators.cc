@@ -27,6 +27,7 @@
 #include "flint/cpu/all_close.h"
 #include "flint/cuda/cast.h"
 #include "flint/cuda/causal_mask.h"
+#include "flint/cuda/conv1d.h"
 #include "flint/cuda/conv2d.h"
 #include "flint/cuda/cuda_host_tensor_data.h"
 #include "flint/cuda/norm.h"
@@ -250,6 +251,17 @@ Tensor CudaOperators::conv2d(
     int dilation,
     int groups) {
   return cuda::conv2d(input, weight, bias, {stride, padding, dilation, groups});
+}
+
+Tensor CudaOperators::conv1d(
+    Tensor input,
+    Tensor weight,
+    Tensor bias,
+    int stride,
+    int padding,
+    int dilation,
+    int groups) {
+  return cuda::conv1d(input, weight, bias, {stride, padding, dilation, groups});
 }
 
 Tensor CudaOperators::gatedDeltaNetPrefill(
