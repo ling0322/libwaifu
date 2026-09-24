@@ -228,8 +228,8 @@ impl Linear {
     pub const WEIGHT: &'static str = "weight";
     pub const BIAS: &'static str = "bias";
 
-    /// The scales of a weight the package stored in FP8, read only under [`WeightFormat::Fp8`].
-    /// See [`Linear::graph`].
+    /// The scales of a weight the package stored in FP8, read only under [`WeightFormat::Fp8`] or
+    /// [`WeightFormat::Fp8TensorScale`]. See [`Linear::graph`].
     pub const WEIGHT_SCALE: &'static str = "weight.scale";
 
     /// Written into `g`, which reads its weights out of `g`'s namespace.
@@ -243,7 +243,9 @@ impl Linear {
     /// Under [`WeightFormat::Fp8`] the package holds this projection as
     /// `<fp8e4m3>(out_dim, in_dim)` and a `<float>(out_dim)` scale beside it, which is what
     /// `docs/fp8.md` describes: half the bytes on the device and about 2.6e-2 of relative error.
-    /// The graph says which, because the model's configuration said so -- see [`WeightFormat`].
+    /// Under [`WeightFormat::Fp8TensorScale`] the elements are the same and the scale is a single
+    /// `<float>` for the whole weight rather than one per row. The graph says which, because the
+    /// model's configuration said so -- see [`WeightFormat`].
     ///
     /// Everything around it is unchanged: the same weight under the same name with the same
     /// shape, the same bias, the same value out. What changes is two nodes -- the scale is a
@@ -256,6 +258,9 @@ impl Linear {
         let x = match g.weight_format() {
             WeightFormat::Fp8 => {
                 g.fp8_matmul(input, weight, g.load(Self::WEIGHT_SCALE, &[out_dim]))
+            }
+            WeightFormat::Fp8TensorScale => {
+                g.fp8_matmul_tensor_scale(input, weight, g.load(Self::WEIGHT_SCALE, &[1]))
             }
             WeightFormat::Float => g.matmul(input, g.transpose(weight, 0, 1)),
         };

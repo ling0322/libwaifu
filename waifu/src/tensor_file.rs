@@ -223,6 +223,13 @@ fn dtype(dtype: Dtype) -> Result<DType> {
 /// scale may have been written to different ones. Where each tensor went does not change the
 /// answer: placing one moves it, and keeps its type and its shape.
 ///
+/// A scale of `<float>[rows]` (one per output channel, [`WeightFormat::Fp8`](crate::flint::WeightFormat::Fp8))
+/// or `<float>[1]` (one for the whole weight, [`WeightFormat::Fp8TensorScale`](crate::flint::WeightFormat::Fp8TensorScale))
+/// both pass here: which one a model actually wants is a configuration's call, not this reader's --
+/// see [`WeightFormat`](crate::flint::WeightFormat) -- and by the time a graph is built for it,
+/// [`Linear::graph`](crate::Linear::graph) asks for the scale at the exact shape its format means,
+/// so a package that names the wrong shape for what its manifest declares fails there instead.
+///
 /// The other direction is deliberately not checked. A `"…scale"` with no FP8 tensor beside it is
 /// an ordinary tensor with an unlucky name, and refusing one would make a suffix this library
 /// chose into a word no other exporter may use.
@@ -242,10 +249,11 @@ fn check_fp8_pairs(tensors: &HashMap<String, Tensor>) -> Result<()> {
         };
 
         let rows = tensor.shape().first().copied().unwrap_or(0);
-        if scale.dtype() != DType::Float || scale.shape() != [rows] {
+        let shape = scale.shape();
+        if scale.dtype() != DType::Float || (shape != [rows] && shape != [1]) {
             return Err(Error::format(format!(
                 "tensor {scale_name:?} is {:?}{:?}, and the scales of {name:?} have to be \
-                 <float>[{rows}] -- one per row",
+                 <float>[{rows}] -- one per row -- or <float>[1] -- one for the whole weight",
                 scale.dtype(),
                 scale.shape(),
             )));

@@ -114,6 +114,11 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
+/// What a file holding `tensors`, not all one element type, reads back as.
+fn stored_typed(tensors: &[(&str, &str, &[i32], Vec<u8>)]) -> HashMap<String, Tensor> {
+    parse_safetensors(&write_typed(tensors)).unwrap()
+}
+
 /// Every tensor of several files at once, which is what a model written as several is read as.
 ///
 /// Counted as well as named after the process, because these tests run beside each other and two
@@ -277,6 +282,13 @@ fn builds_a_quantized_projection_out_of_two_loads() {
     assert_eq!(asked, vec!["proj.weight", "proj.bias"]);
     assert!(pass.contains("transpose("), "{pass}");
     assert!(!pass.contains("fp8_matmul("), "{pass}");
+
+    // One scale for the whole weight rather than one per row, but otherwise the same two loads
+    // and the same missing transpose.
+    let (asked, pass) = written(WeightFormat::Fp8TensorScale);
+    assert_eq!(asked, vec!["proj.weight", "proj.weight.scale", "proj.bias"]);
+    assert!(pass.contains("fp8_matmul_tensor_scale("), "{pass}");
+    assert!(!pass.contains("transpose("), "{pass}");
 }
 
 /// And on the only device that has the kernels, it computes what it should.
@@ -333,6 +345,47 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
     assert_eq!(to_host(&y), expected);
 }
 
+/// And on the only device that has the kernels, the tensor-scale format computes what it should.
+///
+/// The same path as [`multiplies_by_a_quantized_weight_on_the_card`], with one scale for the whole
+/// weight instead of one per row.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn multiplies_by_a_tensor_scale_quantized_weight_on_the_card() {
+    const ONE: u8 = 0x38;
+    const SCALE: f32 = 0.5;
+
+    let bytes = write_typed(&[
+        ("proj.weight", "F8_E4M3", &[8, 16], vec![ONE; 8 * 16]),
+        ("proj.weight.scale", "F32", &[1], f32_bytes(&[SCALE])),
+    ]);
+
+    let g = Graph::with_weights(WeightFormat::Fp8TensorScale);
+    let x = g.input("x");
+    g.output("y", Linear::graph(&g.subgraph("proj"), x, 16, 8, false));
+
+    let weights = Weights::from_bytes(&bytes, Device::Cuda, Residency::Device).unwrap();
+    assert_eq!(
+        weights.load("proj.weight.scale", &[1]).unwrap().dtype(),
+        DType::Float,
+        "a scale is not narrowed to what the device computes in"
+    );
+
+    let x = Tensor::from_f32(&[1, 16], &[1.0; 16])
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap()
+        .cast(DType::Float16)
+        .unwrap();
+    let ir = Ir::compile(&g);
+    let outputs = ir.run(&RunContext::new(&weights).input("x", &x)).unwrap();
+
+    // Sixteen ones against the one scale every row shares, and exact in float16.
+    let expected: Vec<f32> = vec![SCALE * 16.0; 8];
+    let y = outputs[0].1.cast(DType::Float).unwrap();
+    assert_eq!(to_host(&y), expected);
+}
+
 /// What the graph calls the scales and what the file reader looks for are one name.
 #[test]
 fn the_scale_is_named_the_same_by_both_halves() {
@@ -357,13 +410,15 @@ fn refuses_quantized_elements_with_no_scales_beside_them() {
     .unwrap_err();
     assert!(error.to_string().contains("proj.weight.scale"), "{error}");
 
-    // One per row, and a float: a scale of the wrong shape would be read as the wrong rows'.
+    // One per row, or one for the whole weight, and a float: a scale of any other shape would be
+    // read as the wrong rows'.
     let error = parse_safetensors(&write_typed(&[
         ("proj.weight", "F8_E4M3", &[2, 4], vec![0x38; 8]),
         ("proj.weight.scale", "F32", &[4], f32_bytes(&[1.0; 4])),
     ]))
     .unwrap_err();
     assert!(error.to_string().contains("one per row"), "{error}");
+    assert!(error.to_string().contains("one for the whole weight"), "{error}");
 
     let error = parse_safetensors(&write_typed(&[
         ("proj.weight", "F8_E4M3", &[2, 4], vec![0x38; 8]),
@@ -371,6 +426,13 @@ fn refuses_quantized_elements_with_no_scales_beside_them() {
     ]))
     .unwrap_err();
     assert!(error.to_string().contains("one per row"), "{error}");
+
+    // A single scale for the whole weight is the other shape this accepts.
+    let file = stored_typed(&[
+        ("proj.weight", "F8_E4M3", &[2, 4], vec![0x38; 8]),
+        ("proj.weight.scale", "F32", &[1], f32_bytes(&[1.0])),
+    ]);
+    assert!(file.contains_key("proj.weight"));
 
     // A tensor whose name happens to end in the suffix is nobody's scale and stays an ordinary
     // weight: the suffix is this library's convention, not a word reserved in the format.

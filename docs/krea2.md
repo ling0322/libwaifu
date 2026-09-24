@@ -324,9 +324,11 @@ there is an undistilled package, its manifest says `takes_guidance: "true"` and 
 | `vae.*` | the table above |
 
 `-fp8` quantizes everything the runtime multiplies by and nothing else: the package goes from
-33.8 GB to 17.3 GB -- 279 matrices quantized, everything else as it was -- for about 2.6e-2 of
-relative error per weight. The `12 -> 1` projector stays float whatever is asked for, because an
-FP8 multiply wants its inner dimension in multiples of sixteen.
+33.8 GB to 17.3 GB -- 279 matrices quantized, everything else as it was. Each weight gets one
+`<float>` scale for the whole matrix rather than one per row; see "One scale for the whole tensor"
+in `docs/fp8.md` for what that format is and the accuracy it trades against. The `12 -> 1`
+projector stays float whatever is asked for, because an FP8 multiply wants its inner dimension in
+multiples of sixteen.
 
 ### And the reference outputs
 

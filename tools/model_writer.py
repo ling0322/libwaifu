@@ -177,6 +177,37 @@ class Quantization:
 
         return data, scales
 
+    @classmethod
+    def quantize_to_fp8_tensor_scale(cls, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """A 2D weight to E4M3 elements and one float32 scale for the whole matrix.
+
+        The same rounding and the same saturation as `quantize_to_fp8`, over the whole tensor
+        rather than one row at a time:
+
+            scale      = amax(|x|) / 448          # 448 is E4M3's largest finite magnitude
+            data[i][j] = e4m3(x[i][j] / scale)
+
+        One `<float>` beside the elements instead of the `(out,)` `quantize_to_fp8` writes -- which
+        is what `flint::gemmFp8TensorScale` reads, a single value its epilogue broadcasts rather
+        than a row vector. The saving is smaller still to write and load; what it gives up is the
+        row-by-row scaling `quantize_to_fp8` does: a single outlier row's magnitude sets the scale
+        for every other row too, so a weight whose rows vary widely in magnitude loses more to this
+        format than to the per-row one.
+
+        An all zero tensor has no scale to speak of; dividing by one is what would make a NaN.
+        """
+        if tensor.dim() != 2:
+            raise ValueError(f"fp8 takes a matrix, not {tuple(tensor.shape)}")
+
+        weights = tensor.detach().cpu().to(torch.float32)
+        scale = weights.abs().amax() / FP8_E4M3_MAX
+
+        divisor = scale if scale > 0 else torch.ones_like(scale)
+        data = weights / divisor
+        data = data.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+        return data, scale.reshape(1)
+
 
 #: E4M3's largest finite magnitude, which is what a row's maximum is scaled onto.
 FP8_E4M3_MAX = 448.0
@@ -614,6 +645,21 @@ class WeightsWriter:
 
         self._hold(ctx.name, data)
         self._hold(ctx.name + FP8_SCALE_SUFFIX, scales)
+
+    def write_fp8_tensor_scale(self, ctx, tensor: torch.Tensor) -> None:
+        """A matrix, quantized to E4M3 with one scale for the whole tensor rather than one per row.
+
+        The same two tensors `write_fp8_tensor` writes, under the same names -- `<name>` and
+        `<name>.scale` -- so the pairing `docs/fp8.md` describes and `check_fp8_pairs` enforces is
+        unchanged. `<name>.scale` is a single `<float>` here rather than one per row, which is what
+        tells the runtime to build `fp8_matmul_tensor_scale` rather than `fp8_matmul`:
+        `weight_format: fp8_tensor_scale` in the manifest is where that is said, the same way
+        `weight_format: fp8` says the row-scaled format.
+        """
+        data, scale = Quantization.quantize_to_fp8_tensor_scale(tensor)
+
+        self._hold(ctx.name, data)
+        self._hold(ctx.name + FP8_SCALE_SUFFIX, scale)
 
     def _hold(self, name: str, tensor: torch.Tensor) -> None:
         """Keep one tensor for the part being filled, rolling over to the next when it is full."""

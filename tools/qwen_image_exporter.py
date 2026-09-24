@@ -71,6 +71,14 @@ class Converter(Krea2Converter):
     """Krea 2's converter, which already knows the Qwen3-VL text tower this model also reads,
     taught the denoiser and the autoencoder that are this model's own."""
 
+    def _matrix(self, ctx: Context, tensor: torch.Tensor) -> None:
+        """Krea 2's own `_matrix` now writes the tensor-scale FP8 format; this export has not
+        moved to it yet, so `-fp8` here still writes one scale per row. See docs/fp8.md."""
+        if not self._fp8:
+            return self._write(ctx, tensor)
+
+        self._writer.write_fp8_tensor(ctx, tensor.to(torch.float32))
+
     # ---- the denoiser -------------------------------------------------------------------
 
     def export_dit(self, ctx: Context, weights: dict, blocks: int) -> None:
