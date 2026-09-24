@@ -104,6 +104,14 @@ class CPUOperators : public Operators {
       int padding,
       int dilation,
       int groups) override;
+  Tensor conv1d(
+      Tensor input,
+      Tensor weight,
+      Tensor bias,
+      int stride,
+      int padding,
+      int dilation,
+      int groups) override;
   Tensor sample(Tensor logits, Tensor temperatures, Tensor topKs, Tensor topPs) override;
   Tensor softmax(Tensor input) override;
   Tensor sum(Tensor inputs, int dim) override;

@@ -135,9 +135,11 @@ fn naive_conv1d(case: &Conv1dCase, x: &[f32], w: &[f32], bias: &[f32]) -> (usize
     (out_length, out)
 }
 
-#[test]
-fn conv1d_is_the_sum_it_is_defined_to_be() {
-    let cases = [
+/// The shapes both 1-D convolutions are asked for: the composition here and, since #43 and the
+/// CPU kernel beside it, `flint`'s own operator. Shared so that the two are compared on the same
+/// ground rather than on two lists that drift apart.
+fn conv1d_cases() -> Vec<Conv1dCase> {
+    vec![
         // The plain one.
         Conv1dCase {
             batch: 2,
@@ -209,7 +211,12 @@ fn conv1d_is_the_sum_it_is_defined_to_be() {
             dilation: 1,
             groups: 6,
         },
-    ];
+    ]
+}
+
+#[test]
+fn conv1d_is_the_sum_it_is_defined_to_be() {
+    let cases = conv1d_cases();
 
     for (index, case) in cases.iter().enumerate() {
         let x = ramp(case.batch * case.in_channels * case.length, index as f32);
@@ -253,6 +260,74 @@ fn conv1d_is_the_sum_it_is_defined_to_be() {
             CPU,
         )
         .unwrap();
+
+        let (shape, got) = run_shaped(
+            &g,
+            out,
+            &[("x", &x_tensor), ("w", &w_tensor), ("bias", &bias_tensor)],
+        );
+
+        let (out_length, expected) = naive_conv1d(case, &x, &w, &bias);
+        assert_eq!(
+            shape,
+            vec![
+                case.batch as i32,
+                case.out_channels as i32,
+                out_length as i32
+            ],
+            "case {index} came back the wrong shape"
+        );
+        close(&got, &expected, 1e-5);
+    }
+}
+
+/// The same shapes through `Graph::conv1d` -- the operator rather than the composition -- which
+/// the CPU has a kernel for and which is what `waifu::audio::conv1d` is to be replaced by.
+///
+/// Against `naive_conv1d` and not against the composition above, for the reason that test gives:
+/// two implementations agreeing tells you nothing if they agree on the same misreading. What this
+/// adds over `flint/cpu/conv1d_test.cc` is the chain -- `Graph` to `Op` to `ir` to the C
+/// interface to `Operators` -- which C++ alone cannot reach.
+#[test]
+fn the_conv1d_operator_is_the_sum_it_is_defined_to_be() {
+    for (index, case) in conv1d_cases().iter().enumerate() {
+        let x = ramp(case.batch * case.in_channels * case.length, index as f32);
+        let w = ramp(
+            case.out_channels * (case.in_channels / case.groups) * case.kernel,
+            index as f32 + 3.0,
+        );
+        let bias = ramp(case.out_channels, index as f32 + 7.0);
+
+        let x_tensor = Tensor::from_f32(
+            &[
+                case.batch as i32,
+                case.in_channels as i32,
+                case.length as i32,
+            ],
+            &x,
+        )
+        .unwrap();
+        let w_tensor = Tensor::from_f32(
+            &[
+                case.out_channels as i32,
+                (case.in_channels / case.groups) as i32,
+                case.kernel as i32,
+            ],
+            &w,
+        )
+        .unwrap();
+        let bias_tensor = Tensor::from_f32(&[case.out_channels as i32], &bias).unwrap();
+
+        let g = Graph::new();
+        let out = g.conv1d(
+            g.input("x"),
+            g.input("w"),
+            Some(g.input("bias")),
+            case.stride as i32,
+            case.padding as i32,
+            case.dilation as i32,
+            case.groups as i32,
+        );
 
         let (shape, got) = run_shaped(
             &g,
