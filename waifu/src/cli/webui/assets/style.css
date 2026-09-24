@@ -860,21 +860,31 @@ select:focus {
 }
 
 /*
-  The button that says the list goes on. Filled rather than outlined, in the colour this page
-  warns in: it is the one control here that nothing on the screen hints at -- what it would show
-  is, by design, not shown -- so it has to be found without being looked for.
+  The button that says the list goes on. A plain button like the two beside it, carrying a count in
+  the page's accent: it is the one control here that nothing on the screen hints at -- what it
+  would show is, by design, not shown -- so it has to be found without being looked for. A light
+  wash and an edge of the accent do that without shouting over the rest of the header the way a
+  solid fill did. The words stay the ink colour under the pointer: blue on blue does not read.
 */
 .plain.more {
-  background: var(--go-deep);
-  border-color: var(--go-deep);
-  color: var(--page);
-  font-weight: 600;
+  gap: 8px;
+  border-color: var(--accent);
+  background: rgba(106, 163, 255, 0.14);
 }
 
 .plain.more:hover {
-  background: var(--go);
-  border-color: var(--go);
+  color: var(--ink);
+  background: rgba(106, 163, 255, 0.24);
+}
+
+.plain.more .count {
+  background: var(--accent);
   color: var(--page);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 /* Deleting several gigabytes is not the same kind of click as loading them. */
