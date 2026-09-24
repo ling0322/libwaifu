@@ -24,7 +24,7 @@
 //! implementation.
 //!
 //! There is one thing the tool does, and the command line exists to say how to do it rather than
-//! which to do: `waifu` on its own is the same as `waifu draw`, and both open a page in a browser
+//! which to do: `waifu` on its own is the same as `waifu webui`, and both open a page in a browser
 //! where everything else is asked.
 
 mod args;
@@ -54,8 +54,8 @@ struct Task {
 }
 
 static ALL: &[Task] = &[Task {
-    name: "draw",
-    about: "Draw a picture, or say something, with your waifu",
+    name: "webui",
+    about: "Open the web UI: draw a picture, or say something, with your waifu",
     main: webui::main,
 }];
 

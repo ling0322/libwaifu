@@ -319,12 +319,12 @@ what exists.
 | `waifu/src/anima/text_encoder.rs` | done | 0.0029 |
 | `waifu/src/anima/adapter.rs` | done | 0.0024 |
 | `waifu/src/anima/dit.rs` | done | 0.0028 |
-| `waifu/src/anima/vae.rs` | decoder done. The package carries the encoder's weights and the reference outputs to check one against, but the encoder itself is unwritten, so no `draw -image` yet | 0.00072 |
+| `waifu/src/anima/vae.rs` | decoder done. The package carries the encoder's weights and the reference outputs to check one against, but the encoder itself is unwritten, so no img2img yet | 0.00072 |
 | `waifu/src/anima/sampler.rs` | done | -- |
 | the four of them together | draws a 512 by 512 picture in ten steps | -- |
 | tokenizers | done; both in the package | token for token, over 611 texts each |
 | `waifu/src/anima/pipeline.rs` | done | 0.0031, prompt to context |
-| package + CLI | done. `waifu draw` reads `[model] type` and takes the package to whichever model it names |
+| package + CLI | done. `waifu webui` reads `[model] type` and takes the package to whichever model it names |
 | `hub.rs` `CATALOG` | done, once it was asked for: turbo v1.1 is published to both hubs as `anima:turbo`, under CircleStone Labs' licence rather than libwaifu's. See Licensing |
 
 flint: nothing, as promised.

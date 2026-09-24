@@ -376,7 +376,7 @@ curl -sIL -o /dev/null -w "%{http_code}\n" "https://huggingface.co/<repo>/resolv
 curl -sIL -o /dev/null -w "%{http_code}\n" "https://modelscope.cn/models/<repo>/resolve/master/<manifest>"
 ```
 
-Then `README.md`: the model table, the `waifu draw -m` example list, and a `Recent updates` line.
+Then `README.md`: the model table, the `waifu webui -m` example list, and a `Recent updates` line.
 
 ## 7. Test
 

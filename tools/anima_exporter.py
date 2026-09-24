@@ -281,7 +281,7 @@ class Converter:
 
         The loop takes the checkpoint as it finds it, which is how the encoder came to be in the
         package before anything asked for it. What is new is that it is now required rather than
-        incidental: `draw -image` reads it, so a decoder-only checkpoint has to fail here, where
+        incidental: img2img reads it, so a decoder-only checkpoint has to fail here, where
         the message can say what is missing, rather than at load time on the one run that wanted
         it.
         """

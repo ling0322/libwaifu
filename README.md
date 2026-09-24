@@ -45,10 +45,10 @@ distilled release is for, seed 7:
 
 ## Run
 
-`draw` is the only command, and it opens a page in a browser rather than drawing and exiting:
+`webui` is the only command, and it opens a page in a browser rather than drawing and exiting:
 
 ```bash
-$ waifu draw
+$ waifu webui
 waifu is at http://127.0.0.1:7860
 ```
 
@@ -140,7 +140,7 @@ comes out burnt at the thirty and five SDXL likes, so take a model's own `sugges
 the defaults where it has one.
 
 `Sdxl::generate_reporting` is the same run with a reporter that hears how far along it is and can
-stop it between steps, which is what the `draw` command is built on.
+stop it between steps, which is what the `webui` command is built on.
 
 After completing the build steps below, run the complete example with:
 
