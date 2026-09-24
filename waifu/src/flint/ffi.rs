@@ -292,6 +292,12 @@ extern "C" {
         channel_scale: FlTensor,
         out: *mut FlTensor,
     ) -> i32;
+    pub fn fl_fp8_matmul_tensor_scale(
+        a: FlTensor,
+        data: FlTensor,
+        scale: FlTensor,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_tensor_to_device_async(
         tensor: FlTensor,
         device: FlDeviceType,

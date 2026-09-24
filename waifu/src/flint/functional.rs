@@ -320,6 +320,20 @@ pub fn fp8_matmul(a: &Tensor, weight: &Tensor, channel_scale: &Tensor) -> Result
     Tensor::produce(|out| unsafe { ffi::fl_fp8_matmul(a.raw, weight.raw, channel_scale.raw, out) })
 }
 
+/// [`fp8_matmul`] for a weight with one scale for the whole tensor rather than one per row:
+/// `a` `(..., k)` times the transpose of `<fp8e4m3>(rows, k)`, times the one `<float>` in
+/// `scale`, as `(..., rows)`.
+///
+/// This is how a checkpoint quantized elsewhere usually arrives -- a `weight` of E4M3 codes and a
+/// single `weight_scale` -- and it is multiplied as stored. `scale` holds one element, whatever its
+/// shape, on the weight's device; the kernel reads it there. The same constraints as
+/// [`fp8_matmul`] otherwise: `<float16>` in and out, `rows` a multiple of 8, `k` of 16, CUDA only.
+pub fn fp8_matmul_tensor_scale(a: &Tensor, weight: &Tensor, scale: &Tensor) -> Result<Tensor> {
+    Tensor::produce(|out| unsafe {
+        ffi::fl_fp8_matmul_tensor_scale(a.raw, weight.raw, scale.raw, out)
+    })
+}
+
 /// Element-wise `a * b`, broadcasting `b` over the leading dimensions of `a`.
 pub fn mul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let operators = operators_of(a)?;

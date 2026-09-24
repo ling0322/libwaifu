@@ -688,6 +688,13 @@ impl Graph {
         })
     }
 
+    /// `lhs` times the transpose of an FP8 weight with one scale for the whole tensor: the
+    /// `<fp8e4m3>(rows, k)` elements and a single `<float>`. See [`Op::Fp8MatmulTensorScale`].
+    #[track_caller]
+    pub fn fp8_matmul_tensor_scale(&self, lhs: Value, weight: Value, scale: Value) -> Value {
+        self.push(Op::Fp8MatmulTensorScale { lhs, weight, scale })
+    }
+
     #[track_caller]
     pub fn lookup(&self, table: Value, indices: Value) -> Value {
         self.push(Op::Lookup { table, indices })
@@ -1138,6 +1145,21 @@ mod tests {
         assert_eq!(g.op(Value::at(3)).name(), "transpose");
         assert_eq!(g.parameters(), vec!["fc1.weight", "fc2.weight"]);
         assert!(g.get(Value::at(99)).is_none());
+    }
+
+    #[test]
+    fn a_tensor_scale_is_an_ordinary_load() {
+        let g = Graph::new();
+        let x = g.input("hidden");
+        let weight = g.load("proj.weight", &[8, 16]);
+        let scale = g.load("proj.weight_scale", &[1]);
+        let out = g.fp8_matmul_tensor_scale(x, weight, scale);
+        g.output("hidden", out);
+
+        assert_eq!(g.op(out).name(), "fp8_matmul_tensor_scale");
+        assert_eq!(g.op(out).operands(), vec![x, weight, scale]);
+        assert_eq!(g.parameters(), vec!["proj.weight", "proj.weight_scale"]);
+        assert!(g.to_string().contains("fp8_matmul_tensor_scale("), "{g}");
     }
 
     #[test]
