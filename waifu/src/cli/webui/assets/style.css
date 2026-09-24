@@ -799,6 +799,19 @@ select:focus {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  cursor: pointer;
+}
+
+/* The whole card is what chooses it, so the whole card is what answers the pointer. */
+.model:hover,
+.model:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* And the one already chosen keeps the colour, so it can be found in the list at a glance. */
+.model.here {
+  border-color: var(--go);
 }
 
 .model-what {

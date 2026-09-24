@@ -1402,16 +1402,33 @@ function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefr
         </div>
 
         <p className="about">
-          Choosing one reads nothing: the weights are read by the first run that needs them, and
-          fetched first -- several gigabytes, kept afterwards -- where they are not here yet.
+          Click one to choose it. Choosing reads nothing: the weights are read by the first run
+          that needs them, and fetched first -- several gigabytes, kept afterwards -- where they
+          are not here yet.
         </p>
         ${note?.bad && html`<div className="note bad">${note.said}</div>`}
 
         <div className="models">
           ${models.map((model) => {
             const here = chosen?.name === model.name;
+            // The card is the button: clicking anywhere on it chooses it. The one already chosen
+            // has nothing to change, so clicking it only puts the list away.
+            const pick = () => (here ? onClose() : onChoose(model.name));
             return html`
-              <div key=${model.name} className="card model">
+              <div
+                key=${model.name}
+                className=${`card model${here ? " here" : ""}`}
+                role="button"
+                tabIndex="0"
+                onClick=${pick}
+                onKeyDown=${(key) => {
+                  if (key.target !== key.currentTarget) return;
+                  if (key.key === "Enter" || key.key === " ") {
+                    key.preventDefault();
+                    pick();
+                  }
+                }}
+              >
                 <div className="model-what">
                   <div className="model-name">
                     ${model.full_name}
@@ -1439,10 +1456,9 @@ function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefr
                       </p>`)}
                 </div>
 
-                <div className="model-do">
-                  <button className="plain" disabled=${here} onClick=${() => onChoose(model.name)}>
-                    ${here ? "Chosen" : "Choose"}
-                  </button>
+                ${/* Kept to itself: a click on Delete is not a click on the card, and deleting a
+                     model is not a reason to choose it. */ ""}
+                <div className="model-do" onClick=${(event) => event.stopPropagation()}>
                   <button
                     className="plain away"
                     disabled=${busy || model.bytes === 0}
