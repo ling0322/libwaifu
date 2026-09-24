@@ -27,11 +27,12 @@
 //! One test, not four: the package is thirty gigabytes, streamed through the card rather than held
 //! on it, and the harness gives every test its own thread and so its own copy.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use waifu::flint::Tensor;
 use waifu::qwen_image::QwenImage;
-use waifu::{DType, Device, Manifest, ParamFile, Residency};
+use waifu::{read_safetensors, DType, Device, Manifest, Residency};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
@@ -67,10 +68,9 @@ fn read(tensor: &Tensor) -> Vec<f32> {
         .unwrap()
 }
 
-fn fixture(cases: &ParamFile, name: &str) -> Tensor {
-    cases
-        .get_unchecked(name)
-        .unwrap()
+fn fixture(cases: &HashMap<String, Tensor>, name: &str) -> Tensor {
+    cases[name]
+        .clone()
         .to_device(device())
         .unwrap()
         .cast(DType::Float16)
@@ -82,12 +82,12 @@ fn fixture(cases: &ParamFile, name: &str) -> Tensor {
 fn every_part_matches_the_reference() {
     let manifest = Manifest::open(models_dir().join("qwen-image-2.1.yaml")).unwrap();
     let model = QwenImage::from_manifest(device(), Residency::LowVram, &manifest).unwrap();
-    let cases = ParamFile::open(&[models_dir().join("qwen-image-2.1_test.safetensors")]).unwrap();
+    let cases = read_safetensors(&[models_dir().join("qwen-image-2.1_test.safetensors")]).unwrap();
 
     // -- the template and the encoder --------------------------------------------------------
     let prompt = "a red fox sitting in fresh snow, golden hour, photorealistic";
     let ids = model.ids(prompt).unwrap();
-    let reference_ids = cases.get_unchecked("test_case.input_ids").unwrap();
+    let reference_ids = &cases["test_case.input_ids"];
     assert_eq!(
         ids.to_device(Device::Cpu).unwrap().to_vec_i64().unwrap(),
         reference_ids.to_vec_i64().unwrap(),
@@ -95,16 +95,16 @@ fn every_part_matches_the_reference() {
     );
 
     let hidden = model.encode_ids(&ids).unwrap();
-    let reference = cases.get_unchecked("test_case.hidden").unwrap();
+    let reference = &cases["test_case.hidden"];
     assert_eq!(
         hidden.shape(),
         reference.shape(),
         "a different number of states was kept"
     );
 
-    let exact = cases.get_unchecked("test_case.hidden_fp32").unwrap();
-    let rmse = relative_rmse(&hidden, &exact);
-    let theirs = relative_rmse(&reference, &exact);
+    let exact = &cases["test_case.hidden_fp32"];
+    let rmse = relative_rmse(&hidden, exact);
+    let theirs = relative_rmse(reference, exact);
     println!("qwen3-vl last-layer states rmse = {rmse} against float32 (the bfloat16 reference is {theirs})");
     // Against float32 and not against the bfloat16 reference, because the reference is the less
     // exact of the two: the last layer before the norm carries activations in the hundreds, and
@@ -119,14 +119,11 @@ fn every_part_matches_the_reference() {
     // -- the denoiser, at the sixth step of the walk -----------------------------------------
     let context = fixture(&cases, "test_case.hidden");
     let latent = fixture(&cases, "test_case.latent");
-    let timestep = read(&cases.get_unchecked("test_case.timestep").unwrap())[0];
+    let timestep = read(&cases["test_case.timestep"])[0];
 
     let velocity = model.dit().forward(&latent, timestep, &context).unwrap();
     assert_eq!(velocity.shape(), vec![1, 64, 16, 16]);
-    let rmse = relative_rmse(
-        &velocity,
-        &cases.get_unchecked("test_case.velocity").unwrap(),
-    );
+    let rmse = relative_rmse(&velocity, &cases["test_case.velocity"]);
     println!("velocity rmse = {rmse} (at timestep {timestep})");
     // Measured at 7.9e-3. The block-causal split, the t = 0 modulation of the prompt and the
     // centred positions each fail an order of magnitude above this and none of them loudly.
@@ -134,7 +131,7 @@ fn every_part_matches_the_reference() {
 
     // -- the schedule ------------------------------------------------------------------------
     let sampler = model.sampler(256, 256, 10).unwrap();
-    let sigmas = read(&cases.get_unchecked("test_case.sigmas").unwrap());
+    let sigmas = read(&cases["test_case.sigmas"]);
     assert_eq!(sampler.sigmas().len(), sigmas.len());
     for (ours, theirs) in sampler.sigmas().iter().zip(&sigmas) {
         assert!(
@@ -148,7 +145,7 @@ fn every_part_matches_the_reference() {
     let final_latent = fixture(&cases, "test_case.final_latent");
     let image = model.decode(&final_latent).unwrap();
     assert_eq!(image.shape(), vec![1, 4, 256, 256]);
-    let rmse = relative_rmse(&image, &cases.get_unchecked("test_case.decoded").unwrap());
+    let rmse = relative_rmse(&image, &cases["test_case.decoded"]);
     println!("decoded rmse = {rmse}");
     // float16 against a float32 reference, unclamped on both sides: 7.5e-4. A shortcut that
     // read the wrong channels -- the first time slice of `DupUp3D` instead of the last -- is

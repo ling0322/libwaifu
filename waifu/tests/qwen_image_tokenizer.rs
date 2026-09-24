@@ -22,10 +22,12 @@
 //!
 //! Needs only the package's manifest and tokenizer and the test bundle, not its weights.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 
-use waifu::{Manifest, ParamFile, Tokenizer};
+use waifu::flint::Tensor;
+use waifu::{read_safetensors, Manifest, Tokenizer};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
@@ -80,20 +82,15 @@ fn the_tokenizer_matches_the_reference_token_for_token() {
 #[test]
 #[ignore = "needs the qwen-image-2.1 package"]
 fn the_template_gives_the_ids_the_reference_ran_on() {
-    let cases = ParamFile::open(&[models_dir().join("qwen-image-2.1_test.safetensors")]).unwrap();
-    let expected: Vec<i32> = cases
-        .get_unchecked("test_case.input_ids")
-        .unwrap()
+    let cases: HashMap<String, Tensor> =
+        read_safetensors(&[models_dir().join("qwen-image-2.1_test.safetensors")]).unwrap();
+    let expected: Vec<i32> = cases["test_case.input_ids"]
         .to_vec_i64()
         .unwrap()
         .iter()
         .map(|&id| id as i32)
         .collect();
-    let dropped = cases
-        .get_unchecked("test_case.drop")
-        .unwrap()
-        .to_vec_i64()
-        .unwrap()[0] as usize;
+    let dropped = cases["test_case.drop"].to_vec_i64().unwrap()[0] as usize;
 
     let system = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n";
     let prompt = "a red fox sitting in fresh snow, golden hour, photorealistic";
