@@ -56,8 +56,7 @@ use std::rc::Rc;
 use super::config::DitConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, Preloaded, RunContext, Tensor,
-    Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
 };
 use crate::krea2::dit::{gelu_tanh, rotate, timestep_sinusoid};
 use crate::layers::Linear;
@@ -358,7 +357,6 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
 pub struct Dit {
     config: DitConfig,
     ir: Ir,
-    preloaded: Preloaded,
     weights: Rc<dyn ParamSource>,
     float_type: DType,
     placed: RefCell<Option<Placed>>,
@@ -381,12 +379,10 @@ impl Dit {
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
-        let ir = Ir::compile(&graph, weights.residency());
-        let preloaded = ir.load(weights.as_ref())?;
+        let ir = Ir::compile(&graph);
 
         Ok(Dit {
             weights: Rc::clone(weights),
-            preloaded,
             ir,
             config,
             float_type,
@@ -453,7 +449,6 @@ impl Dit {
         let table = placed.as_ref().expect("it was just built");
 
         let run = RunContext::new(&*self.weights)
-            .preloaded(&self.preloaded)
             .input("tokens", &tokens)
             .input("context", context)
             .input("sinusoid", &sinusoid)
