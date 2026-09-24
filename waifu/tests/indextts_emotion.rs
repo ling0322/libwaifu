@@ -38,7 +38,7 @@
 //! Nine plausible bugs were written into the module one at a time, and every one of them fails
 //! here by between 55 and 11,000 times the tolerance: the gate taken from the wrong half of
 //! either gated unit, the feed forward halved as though this conformer were macaron style (it is
-//! not -- [`waifu::w2v_bert`]'s is, which is exactly how that mistake would arrive), the position
+//! not -- [`waifu::indextts::w2v_bert`]'s is, which is exactly how that mistake would arrive), the position
 //! term dropped from the scores, `pos_bias_v` used where `pos_bias_u` belongs, the depthwise
 //! convolution made causal, `norm_conv` and `norm_ff` swapped, `xscale` left off, and the
 //! perceiver's latents left out of what they read.
@@ -56,7 +56,7 @@
 //! own `True` at position zero, so the order would matter the moment a batch were padded.
 
 use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor, Value};
-use waifu::indextts_emotion::{self, Config};
+use waifu::indextts::emotion::{self, Config};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;
@@ -258,7 +258,7 @@ fn features() -> Tensor {
 /// Build a graph around `stage`, run it over the same recording, and sample what comes out.
 ///
 /// The position table is an input rather than a constant, the way the model takes it, so every
-/// probe below reads the one [`indextts_emotion::positional_encoding`] built -- which is itself
+/// probe below reads the one [`emotion::positional_encoding`] built -- which is itself
 /// the first thing checked.
 /// Where the conformer's weights live, which is where a probe of one stage has to look for them.
 ///
@@ -277,7 +277,7 @@ fn perceiver_namespace(g: &Graph) -> Graph {
 fn run(stage: impl Fn(&Graph, Value, &Config, Value) -> Value) -> (Vec<i32>, Vec<f32>) {
     let config = config();
     let positions =
-        indextts_emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU)
+        emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU)
             .unwrap();
 
     let g = Graph::new();
@@ -301,7 +301,7 @@ fn run(stage: impl Fn(&Graph, Value, &Config, Value) -> Value) -> (Vec<i32>, Vec
 /// probe after it would fail for a reason that is not its own.
 #[test]
 fn builds_the_sinusoid_table_upstream_carries() {
-    let table = indextts_emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU)
+    let table = emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU)
         .unwrap();
 
     let (shape, got) = probe(&table);
@@ -318,7 +318,7 @@ fn builds_the_sinusoid_table_upstream_carries() {
 #[test]
 fn embeds_the_recording_the_way_the_subsampling_does() {
     let (shape, got) = run(|g, x, config, _| {
-        indextts_emotion::embed(&encoder_namespace(g).subgraph("embed"), x, config, FRAMES)
+        emotion::embed(&encoder_namespace(g).subgraph("embed"), x, config, FRAMES)
     });
 
     assert_eq!(shape, vec![1, 10, ENCODER_DIM]);
@@ -330,7 +330,7 @@ fn embeds_the_recording_the_way_the_subsampling_does() {
 #[test]
 fn reads_the_recording_the_way_the_conformer_does() {
     let (shape, got) = run(|g, x, config, positions| {
-        indextts_emotion::encoder(
+        emotion::encoder(
             &encoder_namespace(g),
             x,
             config,
@@ -353,7 +353,7 @@ fn reads_the_recording_the_way_the_conformer_does() {
 #[test]
 fn boils_the_recording_down_the_way_the_perceiver_does() {
     let (shape, got) = run(|g, x, config, positions| {
-        let encoded = indextts_emotion::encoder(
+        let encoded = emotion::encoder(
             &encoder_namespace(g),
             x,
             config,
@@ -364,7 +364,7 @@ fn boils_the_recording_down_the_way_the_perceiver_does() {
         )
         .unwrap();
 
-        indextts_emotion::perceiver(
+        emotion::perceiver(
             &perceiver_namespace(g),
             encoded,
             config,
@@ -382,7 +382,7 @@ fn boils_the_recording_down_the_way_the_perceiver_does() {
 #[test]
 fn produces_the_emotion_row_the_gpt_takes() {
     let (shape, got) = run(|g, x, config, positions| {
-        indextts_emotion::graph(g, x, config, FRAMES, positions, F32, CPU).unwrap()
+        emotion::graph(g, x, config, FRAMES, positions, F32, CPU).unwrap()
     });
 
     assert_eq!(shape, vec![1, MODEL_DIM]);
@@ -394,12 +394,12 @@ fn produces_the_emotion_row_the_gpt_takes() {
 ///
 /// A shape rather than a number, and worth its own test: every probe above runs a model whose
 /// widths were chosen to be quick, and the one thing they cannot check is that the released
-/// widths fit together. `model_dim` here and `indextts_gpt::Config::indextts().model_dim` are two
+/// widths fit together. `model_dim` here and `gpt::Config::indextts().model_dim` are two
 /// constants that have to agree, and nothing else compares them.
 #[test]
 fn releases_a_row_as_wide_as_the_gpt_is() {
     let emotion = Config::indextts();
-    let gpt = waifu::indextts_gpt::Config::indextts();
+    let gpt = waifu::indextts::gpt::Config::indextts();
 
     assert_eq!(emotion.model_dim, gpt.model_dim);
     assert_eq!(emotion.input_dim, 1024);

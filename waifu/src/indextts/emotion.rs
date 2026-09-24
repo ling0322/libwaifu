@@ -19,18 +19,18 @@
 
 //! The emotion vector IndexTTS-2.5 conditions on when it is not handed one.
 //!
-//! [`crate::indextts_gpt`]'s prefix is a speaker row, an emotion row and two empty ones, and
+//! [`crate::indextts::gpt`]'s prefix is a speaker row, an emotion row and two empty ones, and
 //! `Gpt::prefill` takes that emotion row ready-made -- which is the path `inference_speech` takes
 //! when a caller supplies one. This is where it comes from otherwise: the same w2v-bert features
-//! [`crate::semantic_codec`] reads, run through a conformer, boiled down to a single vector by a
+//! [`crate::indextts::semantic_codec`] reads, run through a conformer, boiled down to a single vector by a
 //! perceiver, and widened twice into the GPT's 1280.
 //!
 //! ```text
 //! let config = Config::indextts();
-//! let positions = indextts_emotion::positional_encoding(
+//! let positions = emotion::positional_encoding(
 //!     Config::subsampled(frames), config.encoder_dim, device,
 //! )?;
-//! let emotion = indextts_emotion::graph(
+//! let emotion = emotion::graph(
 //!     &g, features, &config, frames, g.input("positions"), dtype, device,
 //! )?;
 //! ```
@@ -55,8 +55,8 @@
 //! **the 2.5 release ships no weights for either of them.** They would turn up in
 //! `load_checkpoint`'s missing keys and sit at their random initialization, which does no harm
 //! because 2.5 never calls them. It builds its speaker row with `spk_cond_mode` `"campplus"`
-//! instead -- [`crate::campplus`] produces 192 numbers and `spk_emb_proj` widens them, which is
-//! what [`crate::indextts_gpt::conditioning`] already does.
+//! instead -- [`crate::indextts::campplus`] produces 192 numbers and `spk_emb_proj` widens them, which is
+//! what [`crate::indextts::gpt::conditioning`] already does.
 //!
 //! # Three things upstream does that are easy to get wrong
 //!
@@ -106,7 +106,7 @@ pub struct Config {
     /// `num_blocks`. Four, against the speaker path's six.
     pub encoder_blocks: i32,
     /// How wide the depthwise convolution is. Odd, and padded symmetrically -- unlike
-    /// [`crate::w2v_bert`]'s, which is causal.
+    /// [`crate::indextts::w2v_bert`]'s, which is causal.
     pub cnn_kernel: i32,
     /// How wide the perceiver works, which is also how wide its output is.
     pub latent_dim: i32,
@@ -375,7 +375,7 @@ fn attention(g: &Graph, x: Value, config: &Config, frames: i32, positions: Value
 ///
 /// The normalization inside it is over channels, so time goes last for it and comes back. Note
 /// that the module has no normalization of its own at the front -- the block applies `norm_conv`
-/// before calling this, which is where [`crate::w2v_bert`]'s equivalent differs.
+/// before calling this, which is where [`crate::indextts::w2v_bert`]'s equivalent differs.
 #[track_caller]
 fn conv_module(
     g: &Graph,
@@ -437,7 +437,7 @@ fn conv_module(
 ///
 /// **Not macaron.** `macaron_style` is false here, so there is one feed forward rather than two
 /// halves of one, and `ff_scale` is one rather than a half. That is the opposite of
-/// [`crate::w2v_bert`], whose two feed forwards *are* halved -- the two conformers in this
+/// [`crate::indextts::w2v_bert`], whose two feed forwards *are* halved -- the two conformers in this
 /// pipeline differ on exactly that, and a scale copied from the wrong one changes every layer.
 #[track_caller]
 #[allow(clippy::too_many_arguments)]
@@ -656,11 +656,11 @@ pub fn perceiver(
 
 /// The whole of it: w2v-bert features in, the `(N, model_dim)` emotion row out.
 ///
-/// `x` is `(N, frames, input_dim)` -- `hidden_states[17]` of [`crate::w2v_bert`], standardized by
+/// `x` is `(N, frames, input_dim)` -- `hidden_states[17]` of [`crate::indextts::w2v_bert`], standardized by
 /// the release's own mean and deviation, which is the same tensor the semantic codec is handed.
 /// `positions` is [`positional_encoding`] for [`Config::subsampled`] rows.
 ///
-/// What comes back goes straight into [`crate::indextts_gpt::Gpt::prefill`]'s `emotion`.
+/// What comes back goes straight into [`crate::indextts::gpt::Gpt::prefill`]'s `emotion`.
 #[track_caller]
 #[allow(clippy::too_many_arguments)]
 pub fn graph(

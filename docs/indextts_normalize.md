@@ -4,7 +4,7 @@ Writing out what a number is read as, so the model never sees a digit. `$5.20` b
 point two zero dollars", `共1234人` becomes `共一千二百三十四人`, and `Son 21 días` becomes
 `Son veintiuno días`.
 
-`waifu::indextts_normalize`, beside [the GPT](indextts_gpt.md) rather than at the crate root —
+`waifu::indextts::normalize`, beside [the GPT](indextts_gpt.md) rather than at the crate root —
 a diffusion model has no text to normalize, and this is the speech pipeline's.
 
 ## Three languages, and one that is skipped

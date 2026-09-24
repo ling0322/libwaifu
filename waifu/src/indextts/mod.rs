@@ -36,9 +36,9 @@
 //!
 //! | | reads | gives |
 //! | --- | --- | --- |
-//! | [`crate::w2v_bert`] | the 16 kHz features, 160 wide | `features`, `(1, T, 1024)`, standardized |
-//! | [`crate::campplus`] | Kaldi energies of the 16 kHz audio | `speaker`, `(1, 192)` |
-//! | [`crate::indextts_emotion`] | `features` | `emotion`, `(1, 1280)` |
+//! | [`crate::indextts::w2v_bert`] | the 16 kHz features, 160 wide | `features`, `(1, T, 1024)`, standardized |
+//! | [`crate::indextts::campplus`] | Kaldi energies of the 16 kHz audio | `speaker`, `(1, 192)` |
+//! | [`crate::indextts::emotion`] | `features` | `emotion`, `(1, 1280)` |
 //! | the 22.05 kHz mel | the 22.05 kHz audio | `prompt_mel`, `(1, 80, M)` |
 //! | S2Mel's length regulator | `features`, stretched onto `M` frames | `prompt_condition`, `(1, M, 512)` |
 //!
@@ -52,13 +52,13 @@
 //! The text is normalized, prefixed with its language, cut into segments of at most 120 tokens,
 //! and each segment goes through:
 //!
-//! 1. [`crate::indextts_gpt::Gpt::generate`] -- speaker, emotion and text in, semantic tokens out.
-//! 2. [`crate::semantic_codec::decode`] -- the tokens back to 1024-wide features, two per token.
+//! 1. [`crate::indextts::gpt::Gpt::generate`] -- speaker, emotion and text in, semantic tokens out.
+//! 2. [`crate::indextts::semantic_codec::decode`] -- the tokens back to 1024-wide features, two per token.
 //! 3. The length regulator, stretching those onto `1.72` mel frames each -- 22 050 / 256 frames
 //!    a second over the codec's fifty -- divided by the speed.
-//! 4. [`crate::s2mel`], twenty-five Euler steps with guidance at 0.7, the reference mel held in
+//! 4. [`crate::indextts::s2mel`], twenty-five Euler steps with guidance at 0.7, the reference mel held in
 //!    front as the prompt and cut off the result afterwards.
-//! 5. [`crate::bigvgan::BigVgan`] -- the mel to 22.05 kHz audio.
+//! 5. [`crate::indextts::bigvgan::BigVgan`] -- the mel to 22.05 kHz audio.
 //!
 //! Segments are joined with 200 milliseconds of silence between them, as upstream's
 //! `interval_silence` does.
@@ -80,24 +80,46 @@
 //! - **Everything runs in `float32`.** Upstream runs the GPT under autocast and S2Mel and the
 //!   vocoder in full precision. Narrowing is a thing to measure before doing.
 
+/// BigVGAN, the vocoder that turns a mel spectrogram back into sound. The last thing this
+/// pipeline runs, and the only part of it whose output is audio.
+pub mod bigvgan;
+/// CAMPPlus, the speaker encoder this pipeline conditions on: filterbank energies in, one vector
+/// saying whose voice it is out.
+pub mod campplus;
+/// The emotion path: the conformer and perceiver that read a feeling off the reference recording,
+/// for the row [`crate::indextts::gpt`] puts beside the speaker's.
+pub mod emotion;
+/// The audio front end: what a recording becomes before any of these models sees it -- Kaldi's
+/// filterbank, twice, normalized two different ways.
+pub mod features;
+/// The GPT: text and a voice in, the semantic tokens [`crate::indextts::s2mel`] reads out.
+pub mod gpt;
+/// The text frontend: writing out what a number is read as, so the model never sees a digit.
+pub mod normalize;
+/// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
+pub mod s2mel;
+/// The semantic codec: w2v-bert's features in, the discrete tokens the GPT reads out.
+pub mod semantic_codec;
+/// w2v-bert-2.0: the conformer that reads speech into the features everything else conditions on.
+pub mod w2v_bert;
+
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use crate::bigvgan::{BigVgan, BigVganConfig};
 use crate::flint::{
     functional as F, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,
     Weights,
 };
-use crate::indextts_gpt::{Gpt, Sampling};
-use crate::indextts_normalize::{self, Language};
 use crate::{
-    campplus, indextts_emotion, indextts_features, indextts_gpt, s2mel, semantic_codec, w2v_bert,
-    Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Tokenizer,
-    Voice,
+    Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Tokenizer, Voice,
 };
+
+use self::bigvgan::{BigVgan, BigVganConfig};
+use self::gpt::{Gpt, Sampling};
+use self::normalize::Language;
 
 /// Where each of the six models sits in the package. See `tools/indextts_package.py`.
 const GPT: &str = "indextts2.gpt";
@@ -113,7 +135,7 @@ pub const RATE: u32 = 22050;
 /// The rate w2v-bert and CAMPPlus listen at.
 const LISTENING_RATE: u32 = 16000;
 
-/// How many rows the released sinusoid table has. See [`indextts_emotion::positional_encoding`]
+/// How many rows the released sinusoid table has. See [`crate::indextts::emotion::positional_encoding`]
 /// for why the table is read out of the package rather than rebuilt.
 const POSITION_ROWS: i32 = 5000;
 
@@ -258,13 +280,7 @@ impl IndexTts {
 
         Ok(IndexTts {
             settings: Settings::from_manifest(manifest)?,
-            gpt: Gpt::build(
-                indextts_gpt::Config::indextts(),
-                GPT,
-                &weights,
-                dtype,
-                device,
-            )?,
+            gpt: Gpt::build(gpt::Config::indextts(), GPT, &weights, dtype, device)?,
             vocoder: BigVgan::build(
                 BigVganConfig::v2_22khz_80band_256x(),
                 BIGVGAN,
@@ -318,15 +334,15 @@ impl IndexTts {
     /// Everything the voice in `recording` contributes, worked out once.
     pub fn listen(&self, recording: &Sound) -> Result<Reference> {
         // Upstream reads the recording at 22.05 kHz and cuts it there, then resamples the cut.
-        let mut wave = indextts_features::resample(&recording.samples, recording.rate, RATE);
+        let mut wave = features::resample(&recording.samples, recording.rate, RATE);
         wave.truncate((self.settings.reference_seconds * RATE as f32) as usize);
-        let listening = indextts_features::resample(&wave, RATE, LISTENING_RATE);
+        let listening = features::resample(&wave, RATE, LISTENING_RATE);
 
         let (features, frames) = self.features(&listening)?;
         let speaker = self.speaker(&listening)?;
         let emotion = self.emotion(&features, frames)?;
 
-        let (mel, prompt_frames) = indextts_features::reference_mel(&wave)?;
+        let (mel, prompt_frames) = features::reference_mel(&wave)?;
         let prompt_frames = prompt_frames as i32;
         let prompt_mel = self.upload(&[1, 80, prompt_frames], &mel)?;
         let prompt_condition = self.regulate(&features, frames, prompt_frames)?;
@@ -344,7 +360,7 @@ impl IndexTts {
 
     /// w2v-bert's `hidden_states[17]`, standardized by the release's own mean and deviation.
     fn features(&self, wave: &[f32]) -> Result<(Tensor, i32)> {
-        let (values, pairs) = indextts_features::w2v_bert(wave);
+        let (values, pairs) = features::w2v_bert(wave);
         let frames = pairs as i32;
         if frames < 3 {
             return Err(Error::model(
@@ -380,7 +396,7 @@ impl IndexTts {
 
     /// CAMPPlus's embedding of who is speaking.
     fn speaker(&self, wave: &[f32]) -> Result<Tensor> {
-        let (values, frames) = indextts_features::campplus(wave);
+        let (values, frames) = features::campplus(wave);
         let frames = frames as i32;
         let input = self.upload(&[1, frames, 80], &values)?;
 
@@ -400,8 +416,8 @@ impl IndexTts {
 
     /// The emotion row, from the same features, against the release's own position table.
     fn emotion(&self, features: &Tensor, frames: i32) -> Result<Tensor> {
-        let config = indextts_emotion::Config::indextts();
-        let rows = indextts_emotion::Config::subsampled(frames);
+        let config = emotion::Config::indextts();
+        let rows = emotion::Config::subsampled(frames);
 
         let g = Graph::new();
         let sub = g.subgraph(GPT);
@@ -412,7 +428,7 @@ impl IndexTts {
             .load("pe", &[1, POSITION_ROWS, config.encoder_dim]);
         let positions = g.contiguous(g.slice(table, 1, 0, rows));
 
-        let emotion = indextts_emotion::graph(
+        let emotion = emotion::graph(
             &sub,
             g.input("x"),
             &config,
@@ -671,7 +687,7 @@ impl IndexTts {
         let text = clean_punctuation(text);
         let normalized = match language {
             Language::Japanese => text,
-            _ => indextts_normalize::normalize(&text, language),
+            _ => normalize::normalize(&text, language),
         };
         let normalized = match language {
             Language::Spanish => normalized.to_uppercase(),

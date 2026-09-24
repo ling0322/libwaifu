@@ -38,7 +38,7 @@
 //! [ zero padding ][ speaker + emotion ][ 0 ][ 0 ][ text tokens ][ start mel ]
 //! ```
 //!
-//! Three conditioning rows -- one carrying the speaker vector from [`crate::campplus`] plus an
+//! Three conditioning rows -- one carrying the speaker vector from [`crate::indextts::campplus`] plus an
 //! emotion vector, then two zeros -- and then the text, each token embedded and given both a
 //! position and a language. The padding is on the *left*, so that generation always begins at the
 //! same offset from the end.
@@ -120,7 +120,7 @@ pub struct Config {
     /// default rather than anything the config states, and [`check_parameters`] is what says so
     /// if a checkpoint ever disagrees.
     pub mel_positions: i32,
-    /// How wide the speaker vector is: 192, which is what [`crate::campplus`] produces.
+    /// How wide the speaker vector is: 192, which is what [`crate::indextts::campplus`] produces.
     pub speaker_dim: i32,
     pub layer_norm_eps: f32,
 }
@@ -458,7 +458,7 @@ pub fn head(g: &Graph, x: Value, config: &Config) -> Value {
 
 /// The speaker vector and the emotion vector, as the three rows that sit in front of the text.
 ///
-/// `speaker` is what [`crate::campplus`] produced, `(N, 192)`, and `emotion` is `(N, model_dim)`.
+/// `speaker` is what [`crate::indextts::campplus`] produced, `(N, 192)`, and `emotion` is `(N, model_dim)`.
 /// The reference adds them and then pads with two rows of zeros; those two are not learned and
 /// carry nothing, which is worth knowing before anyone goes looking for their weights.
 #[track_caller]
@@ -776,7 +776,7 @@ impl Gpt {
 
     /// Read the whole prefix -- conditioning, text, start token -- and score what comes next.
     ///
-    /// `speaker` is `(1, speaker_dim)` from [`crate::campplus`] and `emotion` is `(1, model_dim)`;
+    /// `speaker` is `(1, speaker_dim)` from [`crate::indextts::campplus`] and `emotion` is `(1, model_dim)`;
     /// the reference has a conformer and a perceiver that produce the second one from a recording,
     /// and neither is written here, so it is passed in. `text` is the ids of the sentence
     /// *without* its start and stop tokens -- those belong to the model and are put on here.

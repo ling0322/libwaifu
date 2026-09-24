@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value, Weights};
-use waifu::indextts_gpt::{self, Config, Gpt, Sampling};
+use waifu::indextts::gpt::{self, Config, Gpt, Sampling};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;
@@ -210,7 +210,7 @@ fn the_backbone_is_gpt2() {
     let config = config();
 
     let (shape, got) = run(
-        |g| indextts_gpt::backbone(g, g.input("x"), &config, F32, CPU).unwrap(),
+        |g| gpt::backbone(g, g.input("x"), &config, F32, CPU).unwrap(),
         &[("x", &x)],
         HIDDEN.len(),
     );
@@ -226,7 +226,7 @@ fn the_head_scores_the_alphabet() {
     let config = config();
 
     let (shape, got) = run(
-        |g| indextts_gpt::graph(g, g.input("x"), &config, F32, CPU).unwrap(),
+        |g| gpt::graph(g, g.input("x"), &config, F32, CPU).unwrap(),
         &[("x", &x)],
         SCORES.len(),
     );
@@ -252,7 +252,7 @@ fn the_text_embeddings_add_all_three() {
 
     let (shape, got) = run(
         |g| {
-            indextts_gpt::text_embeddings(
+            gpt::text_embeddings(
                 g,
                 g.input("text"),
                 g.input("positions"),
@@ -406,7 +406,7 @@ fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
     let g = Graph::new();
     let sub = g.subgraph(MODEL);
 
-    let conditioned = indextts_gpt::conditioning(
+    let conditioned = gpt::conditioning(
         &sub,
         sub.input("speaker"),
         sub.input("emotion"),
@@ -416,7 +416,7 @@ fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
         CPU,
     )
     .unwrap();
-    let embedded = indextts_gpt::text_embeddings(
+    let embedded = gpt::text_embeddings(
         &sub,
         sub.input("text"),
         sub.input("text_positions"),
@@ -424,12 +424,12 @@ fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
         &config,
     );
     let voiced =
-        indextts_gpt::mel_embeddings(&sub, sub.input("mel"), sub.input("mel_positions"), &config);
+        gpt::mel_embeddings(&sub, sub.input("mel"), sub.input("mel_positions"), &config);
 
     let whole = sub.cat(sub.cat(conditioned, embedded, 1), voiced, 1);
     g.output(
         "logits",
-        indextts_gpt::graph(&sub, whole, &config, F32, CPU).unwrap(),
+        gpt::graph(&sub, whole, &config, F32, CPU).unwrap(),
     );
 
     let filled = Scattered;
@@ -460,7 +460,7 @@ fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
 
     // Where the prefix ends: three rows of conditioning, the wrapped text, and the start token.
     (
-        indextts_gpt::Config::CONDITIONING_ROWS + text_length + 1,
+        gpt::Config::CONDITIONING_ROWS + text_length + 1,
         by_row,
     )
 }
@@ -515,7 +515,7 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
 
     // All at once.
     let g = Graph::new();
-    let hidden = indextts_gpt::backbone(&g, g.input("x"), &config, F32, CPU).unwrap();
+    let hidden = gpt::backbone(&g, g.input("x"), &config, F32, CPU).unwrap();
     g.output("hidden", hidden);
 
     let filled = Scattered;
@@ -535,7 +535,7 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
     // And a piece at a time: everything but the last row, keeping what each layer computed.
     let g = Graph::new();
     let (hidden, kept) =
-        indextts_gpt::backbone_keeping(&g, g.input("x"), None, &config, F32, CPU).unwrap();
+        gpt::backbone_keeping(&g, g.input("x"), None, &config, F32, CPU).unwrap();
     g.output("hidden", hidden);
     for (index, one) in kept.iter().enumerate() {
         g.output(&format!("k{index}"), one.keys);
@@ -559,14 +559,14 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
 
     // Then the last row alone, against what was kept.
     let g = Graph::new();
-    let past: Vec<indextts_gpt::Kept> = (0..LAYERS)
-        .map(|index| indextts_gpt::Kept {
+    let past: Vec<gpt::Kept> = (0..LAYERS)
+        .map(|index| gpt::Kept {
             keys: g.input(&format!("past_k{index}")),
             values: g.input(&format!("past_v{index}")),
         })
         .collect();
     let (hidden, _) =
-        indextts_gpt::backbone_keeping(&g, g.input("x"), Some(&past), &config, F32, CPU).unwrap();
+        gpt::backbone_keeping(&g, g.input("x"), Some(&past), &config, F32, CPU).unwrap();
     g.output("hidden", hidden);
 
     let names: Vec<(String, String, Tensor, Tensor)> = (0..LAYERS)

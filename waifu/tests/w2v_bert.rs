@@ -23,7 +23,7 @@
 //! where the reference says it does.
 
 use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor};
-use waifu::w2v_bert::{self, Config};
+use waifu::indextts::w2v_bert::{self, Config};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;

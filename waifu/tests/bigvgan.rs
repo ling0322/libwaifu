@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use waifu::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
-use waifu::bigvgan::{BigVgan, BigVganConfig};
+use waifu::indextts::bigvgan::{BigVgan, BigVganConfig};
 use waifu::flint::{DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Weights};
 use waifu::read_safetensors;
 

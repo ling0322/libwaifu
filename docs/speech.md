@@ -26,7 +26,7 @@ package yourself instead -- `-voice models/indextts25.yaml` -- is [`indextts.md`
 | the run | a command on the worker thread, a bar that moves, a button that stops it |
 | the clip | `waifu-NNNN.wav` beside the pictures, played on the page, saved, deleted, said again |
 | the voice | [`Voice`](../waifu/src/speech.rs), a trait with five methods |
-| what implements it | [`IndexTts`](../waifu/src/indextts.rs), named by `-voice`; and `Tones`, the stand-in, when nothing is |
+| what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), named by `-voice`; and `Tones`, the stand-in, when nothing is |
 
 ## The stand-in
 

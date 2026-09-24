@@ -20,13 +20,13 @@
 //! What a recording becomes before any of IndexTTS-2.5's models sees it.
 //!
 //! Two analyses, and they are the same analysis twice. [`w2v_bert`] produces the 160-wide
-//! features [`crate::w2v_bert`] reads; [`campplus`] produces the 80-wide ones
-//! [`crate::campplus`] reads. Both are Kaldi's filterbank -- the same frames, the same window,
+//! features [`crate::indextts::w2v_bert`] reads; [`crate::indextts::campplus`] produces the 80-wide ones
+//! [`crate::indextts::campplus`] reads. Both are Kaldi's filterbank -- the same frames, the same window,
 //! the same triangles -- and they differ only in what is done to the result afterwards.
 //!
 //! ```text
-//! let (features, frames) = indextts_features::w2v_bert(&wave_16k);   // (frames, 160)
-//! let (energies, frames) = indextts_features::campplus(&wave_16k);   // (frames, 80)
+//! let (features, frames) = features::w2v_bert(&wave_16k);   // (frames, 160)
+//! let (energies, frames) = features::campplus(&wave_16k);   // (frames, 80)
 //! ```
 //!
 //! # Why this is on the host and not in a graph
@@ -324,7 +324,7 @@ pub fn log_mel(wave: &[f32], analysis: &Analysis) -> (Vec<f32>, usize) {
     (out, frames)
 }
 
-/// The features [`crate::w2v_bert`] reads: `(frames / 2, 2 * bins)`.
+/// The features [`crate::indextts::w2v_bert`] reads: `(frames / 2, 2 * bins)`.
 ///
 /// Standardized per band over time and then stacked in pairs, which is how 80 bands at a hundred
 /// frames a second become 160 numbers at fifty. An odd frame at the end is dropped, because a
@@ -354,7 +354,7 @@ pub fn w2v_bert(wave: &[f32]) -> (Vec<f32>, usize) {
     (out, pairs)
 }
 
-/// The features [`crate::campplus`] reads: `(frames, bins)`, each band's mean over time removed.
+/// The features [`crate::indextts::campplus`] reads: `(frames, bins)`, each band's mean over time removed.
 ///
 /// No deviation, and no stacking. `infer_v2_5.py` writes this as `feat - feat.mean(dim=0)`, and
 /// the comment beside it says it is a second filterbank energy feature -- which it is not, it is

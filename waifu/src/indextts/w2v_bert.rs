@@ -20,7 +20,7 @@
 //! w2v-bert-2.0: the conformer that reads speech into the features everything else conditions on.
 //!
 //! Meta's model, shared by several speech systems. IndexTTS-2.5 runs it over the reference audio
-//! and hands what comes out to [`crate::semantic_codec`], which turns it into tokens.
+//! and hands what comes out to [`crate::indextts::semantic_codec`], which turns it into tokens.
 //!
 //! # Sixteen layers of twenty-four
 //!

@@ -4,7 +4,7 @@ The middle of IndexTTS-2.5. The GPT in front of it produces semantic tokens; thi
 the mel spectrogram a BigVGAN makes audio of.
 
 ```rust
-use waifu::s2mel::{self, Config};
+use waifu::indextts::s2mel::{self, Config};
 
 let direction = s2mel::graph(
     &g, x, prompt_x, cond, style, time, time2,
