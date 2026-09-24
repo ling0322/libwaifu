@@ -262,27 +262,7 @@ extern "C" {
         scale: i32,
         out: *mut FlTensor,
     ) -> i32;
-    pub fn fl_nvfp4_available(out: *mut i32) -> i32;
     pub fn fl_paged_attention_available(out: *mut i32) -> i32;
-    pub fn fl_nvfp4_quantize(
-        x: FlTensor,
-        data: *mut FlTensor,
-        block_scale: *mut FlTensor,
-        global_scale: *mut FlTensor,
-    ) -> i32;
-    pub fn fl_nvfp4_dequantize(
-        data: FlTensor,
-        block_scale: FlTensor,
-        global_scale: FlTensor,
-        out: *mut FlTensor,
-    ) -> i32;
-    pub fn fl_nvfp4_matmul(
-        a: FlTensor,
-        data: FlTensor,
-        block_scale: FlTensor,
-        global_scale: FlTensor,
-        out: *mut FlTensor,
-    ) -> i32;
     pub fn fl_fp8_available(device: FlDeviceType, out: *mut i32) -> i32;
     pub fn fl_fp8_quantize(x: FlTensor, data: *mut FlTensor, channel_scale: *mut FlTensor) -> i32;
     pub fn fl_fp8_dequantize(data: FlTensor, channel_scale: FlTensor, out: *mut FlTensor) -> i32;

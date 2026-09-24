@@ -58,8 +58,8 @@ jobs:
       - name: Install CUDA
         uses: Jimver/cuda-toolkit@v0.2.36
         with:
-          # 12.8 is the floor, not a preference: flint/cuda/dequant.cu and gemm_nvfp4_cutlass.cu
-          # include <cuda_fp4.h> unconditionally, and NVIDIA first shipped that header in 12.8.
+          # 12.8 is the floor, not a preference: flint/cuda/dequant.cu
+          # includes <cuda_fp4.h> unconditionally, and NVIDIA first shipped that header in 12.8.
           # 12.9 is what this is developed against.
           cuda: ${{ env.CUDA_VERSION }}
           method: network

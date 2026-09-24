@@ -476,36 +476,6 @@ FLAPI int32_t fl_upsample_nearest2d(
 /// Matrix multiplication, batched over the leading dimensions.
 FLAPI int32_t fl_matmul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 
-/// Whether this build and this GPU can run the NVFP4 matrix multiplication. A build without it,
-/// or a GPU without the block scaled tensor cores, is reported as zero rather than as an error.
-FLAPI int32_t fl_nvfp4_available(int32_t *out);
-
-/// Quantize `x` <float16>(rows, k) to NVFP4, giving the E2M1 elements as <fp4>(rows, k / 2), the
-/// E4M3 block scales as <uint8>(n), interleaved as the tensor cores read them, and the per-tensor
-/// scale as <float>(1). `x` has to be a contiguous CUDA tensor with a k that 32 divides.
-FLAPI int32_t fl_nvfp4_quantize(
-    fl_tensor_t x,
-    fl_tensor_t *data,
-    fl_tensor_t *block_scale,
-    fl_tensor_t *global_scale);
-
-/// The inverse of fl_nvfp4_quantize, as <float16>(rows, k).
-FLAPI int32_t fl_nvfp4_dequantize(
-    fl_tensor_t data,
-    fl_tensor_t block_scale,
-    fl_tensor_t global_scale,
-    fl_tensor_t *out);
-
-/// `a` <float16>(..., k) times the transpose of the NVFP4 operand named by the other three, as
-/// <float16>(..., rows). `a` is quantized on the way in. The operand's row count has to be a
-/// multiple of 8.
-FLAPI int32_t fl_nvfp4_matmul(
-    fl_tensor_t a,
-    fl_tensor_t data,
-    fl_tensor_t block_scale,
-    fl_tensor_t global_scale,
-    fl_tensor_t *out);
-
 /// Whether `device` can run the FP8 matrix multiplication, which today means CUDA on sm_80 or
 /// newer. Every other device, and a build without CUDA, is reported as zero rather than as an
 /// error -- the format is not the card's, but the kernels that read it are.

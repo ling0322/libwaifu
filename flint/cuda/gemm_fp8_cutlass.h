@@ -27,7 +27,7 @@ namespace op {
 namespace cuda {
 
 /// @brief Return true if this build and this GPU can run the mixed precision kernel. It is an
-///        sm_80 kernel, so unlike the NVFP4 path this is true on anything from Ampere on.
+///        sm_80 kernel, so this is true on anything from Ampere on.
 bool isFp8GemmAvailable();
 
 /// @brief D = A * transpose(B) in half, with A read as half and B as E4M3 upcast in registers.
