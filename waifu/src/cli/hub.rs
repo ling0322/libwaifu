@@ -151,8 +151,8 @@ impl Watching<'_> {
 
 /// What a name resolves to, once fetched: something `-m` draws pictures with, or something
 /// `-voice` reads sentences with. The two are never offered in the same picker -- [`listed`] is
-/// pictures only -- but they are fetched, cached and named through the one table and the one set
-/// of functions, since none of that differs by kind.
+/// pictures and [`listed_voices`] is voices -- but they are fetched, cached and named through the
+/// one table and the one set of functions, since none of that differs by kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kind {
     Picture,
@@ -611,10 +611,11 @@ pub fn full_name(name: &str) -> Option<&'static str> {
         .map(|m| m.full_name)
 }
 
-/// One picture model a screen can offer, and what is on the disk for it.
+/// One model a screen can offer, and what is on the disk for it.
 ///
-/// Pictures only -- a voice is named by `-voice` directly, not chosen from a list of these, and
-/// [`listed`] leaves every [`Kind::Voice`] entry out for exactly that reason.
+/// Pictures and voices alike, in two lists rather than one: [`listed`] feeds the picture picker
+/// and [`listed_voices`] the voice picker, and a voice in the first would be a name someone could
+/// click that fails the moment it is chosen.
 pub struct Listed {
     pub name: &'static str,
     pub full_name: &'static str,
@@ -630,13 +631,23 @@ pub struct Listed {
 /// The picture models to offer, in the order a list should show them.
 ///
 /// Versioned names are left out. Someone who wants `sdxl:base:v1.0` in particular can ask for it
-/// by name, and a list is for someone who does not yet know what to ask for. Voices are left out
-/// too -- the picture picker is not where one is chosen.
+/// by name, and a list is for someone who does not yet know what to ask for.
 pub fn listed() -> Vec<Listed> {
+    listed_of(Kind::Picture)
+}
+
+/// The voices to offer, the same way: `indextts` rather than `indextts:v2.5`.
+pub fn listed_voices() -> Vec<Listed> {
+    listed_of(Kind::Voice)
+}
+
+/// Every unversioned name of one kind, which is every alias: each published model has one, and
+/// counting colons would not do -- a voice's versioned name has as many as a picture's alias.
+fn listed_of(kind: Kind) -> Vec<Listed> {
     names()
         .into_iter()
-        .filter(|name| name.matches(':').count() == 1)
-        .filter(|name| published(name).is_some_and(|model| model.kind == Kind::Picture))
+        .filter(|name| ALIASES.iter().any(|(alias, _)| alias == name))
+        .filter(|name| published(name).is_some_and(|model| model.kind == kind))
         .map(|name| Listed {
             name,
             full_name: full_name(name).unwrap_or(""),
@@ -1553,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_is_named_and_fetched_but_not_offered_as_a_picture() {
+    fn a_voice_is_offered_in_the_voice_list_and_not_as_a_picture() {
         // `-voice` resolves a voice exactly the way `-m` resolves a picture -- same table, same
         // functions -- but `listed()` is what feeds the picture picker, and a voice put there
         // would be a name someone could click that fails the moment it is chosen.
@@ -1565,6 +1576,15 @@ mod tests {
             !listed().iter().any(|model| model.name == "indextts"),
             "a voice is in the picture picker"
         );
+
+        // And the voice list is voices only, under the name the page starts with rather than the
+        // versioned one -- which is the name the page compares against to mark it chosen.
+        let voices = listed_voices();
+        assert_eq!(
+            voices.iter().map(|voice| voice.name).collect::<Vec<_>>(),
+            ["indextts"]
+        );
+        assert_eq!(voices[0].full_name, "IndexTTS 2.5");
     }
 
     #[test]

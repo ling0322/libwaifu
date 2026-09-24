@@ -87,7 +87,10 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         (Method::Get, "/style.css") => page(STYLE, "text/css; charset=utf-8"),
         (Method::Get, "/app.js") => page(SCRIPT, "text/javascript; charset=utf-8"),
 
-        (Method::Get, "/api/state") => json(shared.describe(models())),
+        (Method::Get, "/api/state") => json(shared.describe(
+            listing(hub::listed()),
+            listing(hub::listed_voices()),
+        )),
         (Method::Get, "/api/progress") => json(shared.progress()),
         // Apart from the state rather than inside it, because it answers a different question.
         // The state is what this session has done and is a new one every time anything happens;
@@ -97,6 +100,9 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         (Method::Get, "/api/machine") => json(machine::describe(shared.runtime())),
 
         (Method::Post, "/api/model") => choose_model(shared, request),
+        // Not `/api/voice`, which is the recording a reading is to sound like. Deleting a voice's
+        // package goes through `DELETE /api/model` like any other: it is the same cache.
+        (Method::Post, "/api/voice-model") => choose_voice(shared, request),
         (Method::Post, "/api/device") => use_device(shared, commands, request),
         (Method::Delete, "/api/model") => forget_model(shared, request),
         (Method::Post, "/api/generate") => generate(shared, commands, request),
@@ -178,6 +184,30 @@ fn choose_model(shared: &Arc<Shared>, request: &mut Request) -> Reply {
     json(json!({ "ok": true }))
 }
 
+/// Says which voice readings are of. Reads nothing, as choosing a model reads nothing: the first
+/// reading fetches the package where it is not here and reads it, and puts down whatever else is
+/// on the card first.
+fn choose_voice(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+    let asked = match body(request) {
+        Ok(body) => body,
+        Err(error) => return refused(400, &error),
+    };
+    let Some(name) = asked
+        .get("voice")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return refused(400, "no voice was named");
+    };
+
+    let chosen = worker::look_at_voice(name);
+    shared.change(|session| session.voice = Some(chosen));
+    shared.say(format!("{name} is what readings will use"), false);
+
+    json(json!({ "ok": true }))
+}
+
 /// Sends what runs next to another device, once whatever is in front of it has finished.
 fn use_device(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
     let asked = match body(request) {
@@ -234,12 +264,17 @@ fn forget_model(shared: &Arc<Shared>, request: &mut Request) -> Reply {
     // built, and does not read them again -- so this is caution rather than necessity: the model
     // on the screen as ready and the files it came from go together. One that has only been
     // chosen holds nothing, and may go.
-    if shared
-        .session()
+    let session = shared.session();
+    let in_memory = session
         .model
         .as_ref()
         .is_some_and(|model| model.in_memory && model.name == name)
-    {
+        || session
+            .voice
+            .as_ref()
+            .is_some_and(|voice| voice.in_memory && voice.name == name);
+    drop(session);
+    if in_memory {
         return refused(409, "that model is in memory: pick another one first");
     }
     if shared.is_busy() {
@@ -248,6 +283,16 @@ fn forget_model(shared: &Arc<Shared>, request: &mut Request) -> Reply {
 
     match hub::remove(name) {
         Ok(()) => {
+            // So that what the chosen one says of itself -- "on the disk", or a fetch to come --
+            // is true of the disk as it is now.
+            shared.change(|session| {
+                if let Some(model) = session.model.as_mut().filter(|one| one.name == name) {
+                    model.on_disk = false;
+                }
+                if let Some(voice) = session.voice.as_mut().filter(|one| one.name == name) {
+                    voice.on_disk = false;
+                }
+            });
             shared.say(format!("{name} is no longer on the disk"), false);
             json(json!({ "ok": true }))
         }
@@ -564,9 +609,9 @@ fn picture(shared: &Arc<Shared>, file: &str) -> Reply {
     }
 }
 
-/// Every model this build can be asked for, and whether it is on the disk already.
-fn models() -> Value {
-    hub::listed()
+/// Every model of one kind this build can be asked for, and whether it is on the disk already.
+fn listing(listed: Vec<hub::Listed>) -> Value {
+    listed
         .into_iter()
         .map(|model| {
             json!({

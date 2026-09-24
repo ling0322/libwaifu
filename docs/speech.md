@@ -1,22 +1,25 @@
 # Speech: the page, and the model behind it
 
-`waifu webui -voice indextts` has a third tab. Drop a few seconds of somebody speaking on it,
-type a sentence, press Speak, and get the sentence back in that voice as a WAV -- said by
+`waifu webui` has a third tab. Drop a few seconds of somebody speaking on it, type a sentence,
+press Speak, and get the sentence back in that voice as a WAV -- said by
 [IndexTTS-2.5](indextts.md).
 
-Without `-voice` there is no third tab. What the page has then is `Tones`, the stand-in the tab was
-built around before there was a model, and a tab whose whole content is an apology for not being
-speech is not worth a place in the list.
+The voice is chosen on that tab the way a model is on the other two: a button opens the list of
+published voices, with what is on the disk of each and a button to delete it. Until one is chosen
+there is no box to type in. Choosing reads nothing -- the first reading fetches the package off
+the hub, into the same cache the picture models use, and reads it.
 
 This document is about the seam between the two: what the page asks of a voice, and what a voice
 has to implement to answer it.
 
 ```bash
-waifu webui -voice indextts
+waifu webui                     # choose a voice on the page
+waifu webui -voice indextts     # or have it chosen before the page opens
+waifu webui -voice tones        # the stand-in, which makes a noise where the syllables are
 ```
 
-`indextts` is fetched off the hub like any picture model, into the same cache. Building the
-package yourself instead -- `-voice models/indextts25.yaml` -- is [`indextts.md`](indextts.md).
+Building the package yourself instead -- `-voice models/indextts25.yaml` -- is
+[`indextts.md`](indextts.md).
 
 ## What is here
 
@@ -26,7 +29,7 @@ package yourself instead -- `-voice models/indextts25.yaml` -- is [`indextts.md`
 | the run | a command on the worker thread, a bar that moves, a button that stops it |
 | the clip | `waifu-NNNN.wav` beside the pictures, played on the page, saved, deleted, said again |
 | the voice | [`Voice`](../waifu/src/speech.rs), a trait with five methods |
-| what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), named by `-voice`; and `Tones`, the stand-in, when nothing is |
+| what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), chosen on the page or by `-voice`; and `Tones`, the stand-in, by `-voice tones` |
 
 ## The stand-in
 

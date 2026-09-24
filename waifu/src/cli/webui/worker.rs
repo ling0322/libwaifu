@@ -76,13 +76,12 @@ const KREA2_DRAWS_FROM_NO_PICTURE: &str = "Krea 2 cannot start from a picture ye
 const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 cannot start from a picture yet: \
      it edits by reading the picture through its text encoder too, and that is not written";
 
-/// What the built-in stand-in voice is called where a name is asked for, and the voice the page
-/// has when `-voice` names none.
+/// What the built-in stand-in voice is called where a name is asked for.
 ///
 /// A constant rather than a catalogue entry, because it is not published anywhere and cannot be
-/// fetched: it is in the binary. A real voice is named by `-voice`, as a manifest on the disk --
-/// IndexTTS-2.5 is not published yet, so there is no catalogue row for it to be fetched by.
-pub const VOICE: &str = "tones";
+/// fetched: it is in the binary. Only ever had by asking for it with `-voice tones` -- it makes a
+/// noise where the syllables are, which is for checking the page and not for listening to.
+pub const TONES: &str = "tones";
 
 /// How many sizes a model has to name before its list is used instead of the one above.
 ///
@@ -413,20 +412,22 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
 
 /// The voice `asked` names, as the screen describes it, without reading any of it.
 ///
-/// What [`look_at`] is for a picture model. [`VOICE`] is [`Tones`], built into the binary, which
+/// What [`look_at`] is for a picture model. [`TONES`] is [`Tones`], built into the binary, which
 /// can be constructed and asked about itself for nothing. Anything else is a package -- a manifest
 /// on the disk, or a published name -- and what can be said of one before minutes of reading is
-/// what its kind says: IndexTTS-2.5's rate and starting values, and that it is not in memory. The
-/// read itself is [`read_voice`], at the first run that wants it, and it says so if the package
-/// turns out to be something else.
+/// what its kind says: IndexTTS-2.5's rate and starting values, whether it is on the disk, and
+/// that it is not in memory. The read itself is [`read_voice`], at the first run that wants it,
+/// and it says so if the package turns out to be something else.
 pub fn look_at_voice(asked: &str) -> Spoken {
-    if asked == VOICE {
+    if asked == TONES {
         return describe_voice(asked, &Tones::new(), false);
     }
 
     Spoken {
         name: asked.to_string(),
-        full_name: IndexTts::NAME.to_string(),
+        // The catalogue's name for it where it has one, and the kind's where it was named by path.
+        full_name: hub::full_name(asked).unwrap_or(IndexTts::NAME).to_string(),
+        on_disk: on_disk(asked).is_some(),
         in_memory: false,
         defaults: IndexTts::DEFAULTS,
         rate: indextts::RATE,
@@ -439,7 +440,10 @@ pub fn look_at_voice(asked: &str) -> Spoken {
 fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken {
     Spoken {
         name: name.to_string(),
-        full_name: voice.name().to_string(),
+        // The catalogue's name first, so the button does not change its wording when it is read.
+        full_name: hub::full_name(name).unwrap_or(voice.name()).to_string(),
+        // Built in, or just read off the disk: either way there is nothing left to fetch.
+        on_disk: true,
         in_memory,
         defaults: voice.defaults(),
         rate: voice.rate(),
@@ -451,7 +455,7 @@ fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken {
 /// Whether the voice `asked` names has weights behind it -- which is to say, whether it can share
 /// the card with a picture model. [`Tones`] is two floats and can; a package cannot.
 fn voice_holds_weights(asked: &str) -> bool {
-    asked != VOICE
+    asked != TONES
 }
 
 /// Reads the voice `asked` names into `voice`, and says on screen how it went. True where it is
@@ -461,7 +465,7 @@ fn voice_holds_weights(asked: &str) -> bool {
 /// reporting through the same [`Doing::Fetching`] and [`Doing::Reading`] the picture models
 /// report through, and nothing above this function finds out which kind of voice it was.
 fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) -> bool {
-    let read: Result<Box<dyn Voice>, Error> = match asked == VOICE {
+    let read: Result<Box<dyn Voice>, Error> = match asked == TONES {
         true => Ok(Box::new(Tones::new())),
         false => load_voice(shared, asked).map(|read| Box::new(read) as Box<dyn Voice>),
     };

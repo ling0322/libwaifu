@@ -107,14 +107,16 @@ pub struct Chosen {
 /// the speech tab are a voice's numbers and have to start somewhere.
 #[derive(Clone)]
 pub struct Spoken {
-    /// What to ask for when the time comes to read it. One name today -- there is no published
-    /// voice to choose between -- and it travels with a run the way a model's name does, so that
-    /// the day there are two, a run is of the one that was chosen when the button was pressed.
+    /// What to ask for when the time comes to read it. It travels with a run the way a model's
+    /// name does, so that a run is of the voice that was chosen when the button was pressed.
     pub name: String,
     /// What it is called on screen.
     pub full_name: String,
-    /// Whether it is read and on the device. What stands in for a voice today holds nothing, so
-    /// this is true from the first run rather than after a fetch.
+    /// Whether the package is already here, which is the difference between a first reading that
+    /// takes seconds and one that starts with a download of several gigabytes.
+    pub on_disk: bool,
+    /// Whether it is read and on the device. The stand-in, `tones`, holds nothing, so for it this
+    /// is true from the first run rather than after a fetch.
     pub in_memory: bool,
     /// What the boxes start at, which is the voice's to say.
     pub defaults: SpeechDefaults,
@@ -681,7 +683,7 @@ impl Shared {
     }
 
     /// The whole of it, which is what a browser asks for when it opens and after anything lands.
-    pub fn describe(&self, models: Value) -> Value {
+    pub fn describe(&self, models: Value, voices: Value) -> Value {
         let session = self.session();
         let model = session.model.as_ref().map(|model| {
             json!({
@@ -710,6 +712,7 @@ impl Shared {
             json!({
                 "name": voice.name,
                 "full_name": voice.full_name,
+                "on_disk": voice.on_disk,
                 "in_memory": voice.in_memory,
                 "speed": showable(voice.defaults.speed),
                 "temperature": showable(voice.defaults.temperature),
@@ -737,6 +740,7 @@ impl Shared {
             "picture_revision": session.picture_revision,
             "recording_revision": session.recording_revision,
             "models": models,
+            "voices": voices,
             "model": model,
             "voice": voice,
             "note": session.note.as_ref().map(|note| json!({ "said": note.said, "bad": note.bad })),
@@ -1044,7 +1048,7 @@ mod tests {
 
         // Held where the page can see it, so that a picture named on the command line is one an
         // already-open page finds out about.
-        assert_eq!(shared.describe(Value::Null)["holding_a_picture"], true);
+        assert_eq!(shared.describe(Value::Null, Value::Null)["holding_a_picture"], true);
 
         shared.forget_upload();
         assert!(!shared.holding_a_picture());
@@ -1188,7 +1192,7 @@ mod tests {
         for _ in 0..5 {
             shared.change(|session| session.note = None);
         }
-        let described = shared.describe(Value::Null);
+        let described = shared.describe(Value::Null, Value::Null);
         assert_eq!(described["recording_revision"], recording);
         assert_eq!(described["picture_revision"], picture);
 
@@ -1214,7 +1218,7 @@ mod tests {
         shared.hold_recording(vec![4, 5, 6]);
         assert_eq!(shared.upload(), Some(vec![1, 2, 3]));
         assert_eq!(shared.recording(), Some(vec![4, 5, 6]));
-        assert_eq!(shared.describe(Value::Null)["holding_a_recording"], true);
+        assert_eq!(shared.describe(Value::Null, Value::Null)["holding_a_recording"], true);
 
         shared.forget_recording();
         assert!(!shared.holding_a_recording());
@@ -1250,12 +1254,12 @@ mod tests {
         assert_eq!(showable(7.0), 7.0);
         assert_eq!(showable(0.0), 0.0);
 
-        let described = a_session().describe(Value::Null);
+        let described = a_session().describe(Value::Null, Value::Null);
         assert_eq!(described["voice"], Value::Null);
 
         let shared = a_session();
         shared.change(|session| session.clips.push(a_clip(1)));
-        let clip = &shared.describe(Value::Null)["clips"][0];
+        let clip = &shared.describe(Value::Null, Value::Null)["clips"][0];
         assert_eq!(clip["temperature"], 0.8);
         assert_eq!(clip["speed"], 1.0);
     }
@@ -1265,7 +1269,7 @@ mod tests {
         // Whichever screen is up when something goes wrong is the one that ends up in the
         // screenshot, and a screenshot that cannot say which code it came from is worth much less
         // than one that can.
-        let described = a_session().describe(Value::Null);
+        let described = a_session().describe(Value::Null, Value::Null);
         assert_eq!(described["built_from"], crate::cli::REVISION);
         assert_eq!(described["device"], "cpu");
         assert!(described["model"].is_null());

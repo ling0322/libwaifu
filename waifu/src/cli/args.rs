@@ -223,8 +223,8 @@ impl Args {
     }
 
     /// The voice the speech tab reads with, if one was named: a manifest on the disk or a
-    /// published name, read at the first reading that wants it. Left out, it is the built-in
-    /// stand-in, and the page does not offer the speech tab at all -- see `app.js`.
+    /// published name, fetched and read at the first reading that wants it. Left out, nothing is
+    /// chosen, and one is chosen on the page the way a model is.
     pub fn voice(&self) -> Option<&str> {
         self.voice.as_deref()
     }
@@ -299,9 +299,9 @@ pub fn print_options() {
          away from it is what the denoising strength box says."
     );
     eprintln!(
-        "  -voice value\n    \tthe voice the text2speech tab reads with: a manifest file of a \
-         speech model, such as IndexTTS-2.5's \"indextts25.yaml\". Left out, the page has no \
-         text2speech tab, because there is nothing to read with."
+        "  -voice value\n    \tthe voice the text2speech tab starts with: a published name, such \
+         as \"indextts\", or a manifest file of a speech model. Left out, one is chosen on the \
+         page, the way a model is, and fetched at the first reading."
     );
     eprintln!(
         "  -port int\n    \tthe port to serve the page on (default 7860). Left out, the first \
