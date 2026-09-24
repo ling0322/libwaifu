@@ -16,7 +16,7 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 | `sdxl:noob` | NoobAI-XL v1.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-noobai-xl-v1.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-noobai-xl-v1.1)\] |
 | `sdxl:obsession` | One Obsession v24 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-one-obsession-v24)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-one-obsession-v24)\] |
 | `anima:turbo` | Anima Turbo v1.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-anima-turbo-v1.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-anima-turbo-v1.1)\] |
-| `anima:miaomiao` | MiaoMiao Harem v1.6 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-miaomiao-harem-v1.6)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-miaomiao-harem-v1.6)\] |
+| `anima:miaomiao` | MiaoMiao Harem Anima v1.6 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-miaomiao-harem-v1.6)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-miaomiao-harem-v1.6)\] |
 | `krea2:turbo` | Krea 2 Turbo | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 | `krea2:turbo-fp8` | Krea 2 Turbo, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 
