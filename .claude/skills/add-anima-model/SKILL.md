@@ -350,7 +350,7 @@ curl -sIL -o /dev/null -w "%{http_code}\n" "https://huggingface.co/<repo>/resolv
 curl -sIL -o /dev/null -w "%{http_code}\n" "https://modelscope.cn/models/<repo>/resolve/master/<manifest>"
 ```
 
-Then `README.md`: the model table, the `waifu draw -m` example list, and a `Recent updates` line.
+Then `README.md`: the model table, the `waifu webui -m` example list, and a `Recent updates` line.
 The table's prose talks about `sdxl:*` names and the licences of SDXL fine tunes; a first Anima
 entry makes that paragraph wrong as well as incomplete.
 
@@ -388,7 +388,7 @@ produces `Aborted: out of memory`, which reads as a code failure and is not one.
 | `OverflowError: ... which fp16 cannot hold` | a weight outside fp16's range, which bf16 has and fp16 has not | the check is right; the format would otherwise write an infinity |
 | a picture that is soft and unfinished, or burnt and over-contrasted | turbo's numbers on an aesthetic release, or the reverse | `suggested.steps`/`guidance` belong to the release, not to Anima |
 | `... is not a multiple of 16, which is what this model draws in` | a `suggested.sizes` entry the VAE and the 2x2 patches cannot divide | every size is a multiple of `VAE_SCALE * patch_size` |
-| `this model draws from a prompt but not yet from a picture` | Anima has no VAE *encoder* -- the weights are in the package, the layer is not written | expected; `draw -image` is SDXL only |
+| `this model draws from a prompt but not yet from a picture` | Anima has no VAE *encoder* -- the weights are in the package, the layer is not written | expected; img2img is SDXL only |
 | the anima tokenizer tests cannot find their corpus | the corpus is named after the **test package**: `<stem>_test.safetensors` puts it in `<stem>_test_qwen3_corpus.tsv` | pass `-test_output models/<stem>_test.safetensors`, not some other stem |
 | `hub.rs` tests fail on a name that is plainly right | `every_model_is_named_the_way_the_others_are` expects `sdxl` as the first field | §6 -- that test is part of adding a second family |
 | every `anima*.rs` test fails with `Aborted: out of memory` | another job has the card, or `--test-threads=1` was left off | `nvidia-smi` before blaming a diff |

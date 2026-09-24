@@ -17,7 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The draw command: a page in a browser, a model behind it, and a file at the end.
+//! The webui command: a page in a browser, a model behind it, and a file at the end.
 //!
 //! Two kinds of file, since the page grew a third tab: a PNG from a diffusion model, and a WAV
 //! from a voice. Everything below this line is the same for both -- one worker thread, one lock
@@ -71,7 +71,7 @@ const NEARBY: u16 = 16;
 const ANSWERERS: usize = 4;
 
 fn print_usage() {
-    eprintln!("Usage: waifu draw [OPTIONS]");
+    eprintln!("Usage: waifu webui [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
     crate::cli::args::print_options();
@@ -135,7 +135,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         move || worker::work(&shared, &waiting)
     });
 
-    // Asked for here rather than left to the page, so that `waifu draw -m sdxl:base` starts
+    // Asked for here rather than left to the page, so that `waifu webui -m sdxl:base` starts
     // fetching and reading while the browser is still being opened -- which is what someone who
     // named a model on the command line asked for.
     if let Some(model) = model {

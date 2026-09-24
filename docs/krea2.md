@@ -411,7 +411,7 @@ ModelScope under the same name. What §3 of the agreement asks of that, and what
 
 | | |
 |---|---|
-| §3.1(a) a copy of the agreement, recipients bound by it | `LICENSE.pdf` ships in the package and the card says that downloading is agreeing. The repository is **not** gated, unlike Krea's -- gating would 401 the anonymous fetch `waifu draw` makes |
+| §3.1(a) a copy of the agreement, recipients bound by it | `LICENSE.pdf` ships in the package and the card says that downloading is agreeing. The repository is **not** gated, unlike Krea's -- gating would 401 the anonymous fetch `waifu webui` makes |
 | §3.1(b) "Krea" at the beginning of the model name | the card names the model *Krea 2 Turbo*; the repository id keeps this project's `libwaifu-` prefix |
 | §3.1(c) the attribution notice, verbatim | `NOTICE` |
 | §3.2(a) say that you modified it | `NOTICE` lists every change: the renaming and refusing, the conv folding, the norm folding, the narrowing, the quantization |

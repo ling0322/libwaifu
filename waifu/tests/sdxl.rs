@@ -501,7 +501,7 @@ fn refuses_a_size_it_cannot_work_in() {
 /// size these tests work at and so the natural thing to hand an encoder.
 ///
 /// Left on the host, in float32, which is where a picture read off the disk is: `from_rgb8` hands
-/// one back on the CPU whatever the model is on. That is what the draw command passes and so it is
+/// one back on the CPU whatever the model is on. That is what the webui command passes and so it is
 /// what these tests pass; the one below says a picture already on the device works too.
 fn picture(cases: &HashMap<String, Tensor>) -> Tensor {
     cases["test_case.decoded"].clone()

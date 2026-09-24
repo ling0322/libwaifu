@@ -213,7 +213,7 @@ pub struct Sdxl {
 /// An Anima package has one, and the keys in it are not these, so what came back was a complaint
 /// about `vocab_size` -- the first key SDXL has and Anima does not -- rather than about the model.
 ///
-/// Reaching this is now a caller that asked the wrong half of the crate: `waifu draw` looks at the
+/// Reaching this is now a caller that asked the wrong half of the crate: `waifu webui` looks at the
 /// same key first and takes an Anima package to [`crate::Anima`], so what is left here is a
 /// program that named this type itself.
 fn check_model_type(model_type: &str) -> Result<()> {

@@ -33,7 +33,7 @@
 //! takes whatever the model's own `suggested:` block says over that -- which is the order the
 //! screen asks them in too.
 //!
-//! The `draw` command in the CLI is this with a screen around it: the same pipeline, reported on
+//! The `webui` command in the CLI is this with a screen around it: the same pipeline, reported on
 //! as it goes and interruptible between steps.
 
 use std::io::Write;
@@ -118,7 +118,7 @@ fn main() -> Result<(), waifu::Error> {
     let pixels = to_rgb8(&image)?;
 
     // A PPM is what an image file looks like with nothing in the way: three numbers and the
-    // pixels. The `draw` command writes a PNG, which is this plus two checksums.
+    // pixels. The `webui` command writes a PNG, which is this plus two checksums.
     let mut out = std::fs::File::create("generate.ppm")?;
     write!(out, "P6\n{} {}\n255\n", options.width, options.height)?;
     out.write_all(&pixels)?;

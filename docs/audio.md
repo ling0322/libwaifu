@@ -263,7 +263,7 @@ What remains is not a model. It is the emotion conformer and perceiver that prod
 when a recording is not handed one; a `.pth` to safetensors exporter for four of the six, and so
 a package; a `.tiktoken` vocabulary the `tokenizers` crate does not read; a text frontend for five
 languages; and the pipeline that runs the six in order behind a
-[`Voice`](../waifu/src/speech.rs). Until that last one exists, `waifu draw`'s speech tab is still
+[`Voice`](../waifu/src/speech.rs). Until that last one exists, `waifu webui`'s speech tab is still
 the stand-in described in [speech.md](speech.md).
 
 None of it is blocked on a kernel, and since `depthwise_conv1d` none of it is blocked on the CUDA
