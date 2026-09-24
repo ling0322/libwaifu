@@ -57,6 +57,14 @@ class MetalOperators : public Operators {
       int padding,
       int dilation,
       int groups) override;
+  Tensor conv1d(
+      Tensor input,
+      Tensor weight,
+      Tensor bias,
+      int stride,
+      int padding,
+      int dilation,
+      int groups) override;
   Tensor softmax(Tensor input) override;
   Tensor attention(Tensor q, Tensor k, Tensor v, bool causal) override;
 

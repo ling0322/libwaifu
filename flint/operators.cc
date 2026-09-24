@@ -316,7 +316,7 @@ Tensor Operators::conv1d(
     int groups) {
   THROW(
       NotImplemented,
-      "conv1d is not available on this device; the CPU and CUDA both have it");
+      "conv1d is not available on this device; the CPU, CUDA and Metal all have it");
 }
 
 Tensor Operators::convTranspose1d(

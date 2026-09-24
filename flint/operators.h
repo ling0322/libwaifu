@@ -74,12 +74,10 @@ class Operators {
   /// with every group a single channel -- but it is the case a speech model actually asks for and
   /// the one a backend has most to gain from specializing.
   ///
-  /// CUDA implements this on CUTLASS, groups and all, and the CPU as the 2-D convolution over an
-  /// image one row tall that it is -- `cpu::conv1d` shares `conv.cc`'s im2col and GEMM with
-  /// `conv2d` and differs only in padding the length and not the height. Metal does not have it.
-  ///
-  /// `waifu::audio::conv1d` still composes one for itself, which is what `waifu` runs until it is
-  /// pointed here.
+  /// Every backend implements this. CUDA on CUTLASS, groups and all; the CPU as the 2-D
+  /// convolution over an image one row tall that it is, sharing `conv.cc`'s im2col and GEMM with
+  /// `conv2d` and differing only in padding the length and not the height; Metal as MLX's own,
+  /// with the operands turned channels last and back.
   virtual Tensor conv1d(
       Tensor input,
       Tensor weight,
