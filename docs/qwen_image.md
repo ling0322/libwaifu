@@ -110,20 +110,27 @@ The runtime's `generate` composites RGBA over white, since everything downstream
 
 ## How close it is
 
-Against diffusers' `QwenImage21Pipeline` on the same weights, 256 x 256, ten steps, float16 here
-and bfloat16 there, relative RMSE (`waifu/tests/qwen_image.rs`):
+Against diffusers' `QwenImage21Pipeline` on the same weights, 256 x 256, ten steps, float16 (or
+fp8) here and bfloat16 there, relative RMSE (`waifu/tests/qwen_image.rs`):
 
-| | |
-|---|---|
-| encoder, last layer before the norm | 9.0e-3 from float32; the bfloat16 reference is 7.3e-2 from it |
-| velocity at step six | 7.9e-3 |
-| decoder, RGBA, against float32 | 7.5e-4 |
-| the whole ten-step walk | 1.35e-2 |
-| schedule | the reference's eleven sigmas to 1e-5 |
+| | float16 | fp8 |
+|---|---|---|
+| encoder, last layer before the norm | 9.0e-3 from float32; the bfloat16 reference is 7.3e-2 from it | 1.21e-1 from float32 |
+| velocity at step six | 7.9e-3 | 2.15e-2 |
+| decoder, RGBA, against float32 | 7.5e-4 | 7.5e-4 -- it is not quantized |
+| the whole ten-step walk | 1.35e-2 | 1.19e-1 |
+| schedule | the reference's eleven sigmas to 1e-5 | the same |
 
 The encoder is held to float32 rather than to the bfloat16 reference because the reference is the
 less exact of the two: the last layer before the norm carries activations in the hundreds, and
-bfloat16 loses most of the first token the denoiser reads.
+bfloat16 loses most of the first token the denoiser reads. float16 is the more exact of the two;
+fp8 is not -- at 1.21e-1 it is well past the reference's own 7.3e-2 rounding, unlike every other
+fp8 package here, where the float type is still most of the number. `-fp8` here still writes one
+scale per row rather than one for the whole tensor (see "One scale for the whole tensor" in
+`docs/fp8.md`) -- the same format Krea 2's fp8 package started with before moving off it -- and
+this encoder's weights are evidently less forgiving of it than Krea 2's are. Nothing crashes or
+NaNs; the picture is a real, working one, just a more noticeably different one than this runtime's
+other fp8 packages draw.
 
 ## Memory
 
@@ -140,14 +147,14 @@ The weights stream through the card a layer at a time, so the card holds activat
 little else. What decides the speed is whether the 30 GB package stays in the page cache between
 steps: with room for it, each step reads memory; without, each step reads the disk again, which
 on this machine's disk is about 200 MB/s and most of the time a step takes. A machine with 48 GB
-or more of RAM keeps it; `-fp8` halves the package (untested).
+or more of RAM keeps it; `-fp8` halves the package -- 30 GB to 16 GB, the same ratio as its size on
+disk, since `Residency::LowVram` moves whichever package it was given the same way.
 
 ## Not done
 
 * Image editing and reference images. The model reads a condition picture both through the VAE
   and through Qwen3-VL's vision tower, which is not exported.
 * The prefix KV cache.
-* A published package. `hub.rs` has no entry; a package exported locally is loaded by its path.
 
 ## Exporting and testing
 
@@ -159,3 +166,24 @@ hf download Qwen/Qwen-Image-2.1
 python tools/qwen_image_exporter.py -test_only -model <snapshot> \
     -test_output models/qwen-image-2.1_test.safetensors
 ```
+
+Add `-fp8` to the first command for the quantized package; it reads the same `-model` directory,
+so both can be exported from one download.
+
+## Licensing
+
+`license: other`, `license_name: qwen-research`, and the Qwen RESEARCH LICENSE AGREEMENT is
+**non-commercial (research and evaluation) use only** -- unlike Krea 2's, there is no revenue
+threshold that opens it up. Section 3 asks for, and this gets:
+
+| | |
+|---|---|
+| §3.a a copy of the agreement | `LICENSE` ships in the package |
+| §3.b modified files carry a notice | `NOTICE` lists every change: the renaming, the fusing, the norm folding, the narrowing, the quantization |
+| §3.c the attribution notice, verbatim | `NOTICE` |
+| §4.b "Built with Qwen" in the product documentation | said in `NOTICE` and on the card |
+| §4.c not "Qwen" as the primary name | the repository id keeps this project's `libwaifu-` prefix |
+
+The converted packages are published at
+[ling0322/libwaifu-qwen-image-2.1](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1) and
+on ModelScope under the same name.

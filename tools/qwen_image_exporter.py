@@ -78,6 +78,8 @@ class Converter(Krea2Converter):
             return self._write(ctx, tensor)
 
         self._writer.write_fp8_tensor(ctx, tensor.to(torch.float32))
+        self._quantized += 1
+        self._count += 1
 
     # ---- the denoiser -------------------------------------------------------------------
 

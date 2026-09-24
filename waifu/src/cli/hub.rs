@@ -247,13 +247,34 @@ const CATALOG: &[Published] = &[
         kind: Kind::Picture,
     },
     // The same weights with the matrices quantized, out of the same repository: half the package
-    // and half the card, for about four times the error in the text encoder. A name of its own
+    // and half the card, for about five times the error in the text encoder. A name of its own
     // rather than a flag, because which one is on the disk is what a run has to be told.
     Published {
         name: "krea2:turbo-fp8:v1.0",
         full_name: "Krea 2 Turbo (fp8)",
         repo: "ling0322/libwaifu-krea2-turbo",
         manifest: "krea2-turbo-fp8.yaml",
+        explicit: false,
+        kind: Kind::Picture,
+    },
+    Published {
+        name: "qwen-image:2.1:v1.0",
+        full_name: "Qwen-Image 2.1",
+        repo: "ling0322/libwaifu-qwen-image-2.1",
+        manifest: "qwen-image-2.1.yaml",
+        explicit: false,
+        kind: Kind::Picture,
+    },
+    // The same weights with the matrices quantized, one scale per row rather than per tensor
+    // (`-fp8` here has not moved to the tensor-scale format the way Krea 2's has; see
+    // docs/qwen_image.md and docs/fp8.md). Half the package and half the card, for well past ten
+    // times the error in the text encoder -- more than this runtime's other fp8 packages cost,
+    // and worth knowing before reaching for it over the float16 one.
+    Published {
+        name: "qwen-image:2.1-fp8:v1.0",
+        full_name: "Qwen-Image 2.1 (fp8)",
+        repo: "ling0322/libwaifu-qwen-image-2.1",
+        manifest: "qwen-image-2.1-fp8.yaml",
         explicit: false,
         kind: Kind::Picture,
     },
@@ -394,6 +415,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("anima:miaomiao", "anima:miaomiao:v1.6"),
     ("krea2:turbo", "krea2:turbo:v1.0"),
     ("krea2:turbo-fp8", "krea2:turbo-fp8:v1.0"),
+    ("qwen-image:2.1", "qwen-image:2.1:v1.0"),
+    ("qwen-image:2.1-fp8", "qwen-image:2.1-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
 ];
 
@@ -1631,7 +1654,7 @@ mod tests {
         // all: a name is what someone types before they have the model, so it should say what
         // they are about to fetch. Add to this list when the runtime learns another -- of a
         // picture model or, as `indextts` did, of a voice.
-        const FAMILIES: [&str; 4] = ["sdxl", "anima", "krea2", "indextts"];
+        const FAMILIES: [&str; 5] = ["sdxl", "anima", "krea2", "qwen-image", "indextts"];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
