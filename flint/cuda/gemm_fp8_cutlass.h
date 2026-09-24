@@ -41,6 +41,20 @@ bool isFp8GemmAvailable();
 ///         writes, and k a multiple of 16, which is how wide the mainloop reads the weight.
 Tensor gemmFp8(const Tensor &A, const Fp8Operand &B);
 
+/// @brief gemmFp8 for a weight with one scale for the whole tensor rather than one per channel:
+///        D = A * transpose(B) * scale.
+///
+/// The same mainloop and tiles as gemmFp8; only the epilogue differs. This is the layout a
+/// checkpoint quantized elsewhere arrives in -- a `weight` of E4M3 codes and a single
+/// `weight_scale` -- so it is multiplied as it was stored rather than requantized per channel.
+/// @param A <half>(..., k), contiguous. Leading batch axes are folded into the row count.
+/// @param B <fp8e4m3>(n, k), contiguous, one output channel per row. n has to be a multiple of 8
+///          and k a multiple of 16, as in gemmFp8.
+/// @param scale <float> with one element, on the device. It is read there by the kernel, so the
+///              launch does not wait for it.
+/// @return <half>(..., n).
+Tensor gemmFp8TensorScale(const Tensor &A, const Tensor &B, const Tensor &scale);
+
 }  // namespace cuda
 }  // namespace op
 }  // namespace fl
