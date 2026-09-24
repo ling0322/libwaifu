@@ -22,7 +22,9 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 
 ## Supported voices
 
-`-voice` takes a name the same way `-m` does, resolved and fetched off the same two hubs.
+A voice is chosen on the text2speech tab the way a model is chosen on the other two, and fetched
+off the same two hubs at the first reading. `-voice` chooses one before the page opens, as `-m`
+does a model -- a name, or a manifest on the disk.
 
 | name | model | published as |
 |---|---|---|
@@ -54,8 +56,8 @@ waifu is at http://127.0.0.1:7860
 
 ![](docs/libwaifu-webui.webp)
 
-The page has three tabs: txt2img, img2img, and text2speech, the last of which needs `-voice`
-named at the command line -- see [Supported voices](#supported-voices) above.
+The page has three tabs: txt2img, img2img, and text2speech -- see
+[Supported voices](#supported-voices) above.
 
 ## Recent updates
 

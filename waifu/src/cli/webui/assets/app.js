@@ -238,16 +238,13 @@ const DRAWS = ["txt2img", "img2img"];
 const SPEAKS = "text2speech";
 
 /**
- * Which tabs there are: the two that draw, and text2speech when there is a voice to read with.
+ * Every tab, always: the two that draw, and text2speech.
  *
- * A voice, and not the stand-in. Without `-voice` the server describes `Tones`, which makes a
- * noise where the syllables are and says so in `not_a_voice_because` -- and a tab whose whole
- * content is an apology for not being speech is not worth a place in the list. Named on the
- * command line, IndexTTS-2.5 says nothing there, and the tab is offered.
+ * The speech tab is where a voice is chosen, the way the model is chosen on the other two, so it
+ * is there whether or not one has been -- none when `-voice` names none, and even the stand-in
+ * `tones`, whose tab says at the top that it is not speech.
  */
-function tabsFor(voice) {
-  return voice && !voice.not_a_voice_because ? [...DRAWS, SPEAKS] : DRAWS;
-}
+const TABS = [...DRAWS, SPEAKS];
 
 /**
  * The kinds of run there are, one under the other.
@@ -599,27 +596,39 @@ function FromPicture({ holding, revision, off, onHold, onClear }) {
   `;
 }
 
+/** What a voice takes and writes, in the one line there is room for under it. */
+function voiceSays(voice) {
+  return `${voice.rate} Hz -- ${
+    voice.takes_a_recording ? "takes a recording to sound like" : "takes no recording"
+  }`;
+}
+
 /**
  * What is going to speak, and where -- the head of the settings column on the speech tab.
  *
- * Not a button, unlike the model above it, because there is nothing to choose: one voice is built
- * into the binary and none is published. The day one is, this becomes the same button, opening
- * the same list.
+ * The same button the model is on the other two tabs, opening the same list with the voices in
+ * it: a voice is fetched, kept and deleted the way a model is, and read at the first reading.
  */
-function VoiceAndDevice({ state, progress, onDevice }) {
+function VoiceAndDevice({ state, progress, onDevice, onVoices }) {
   const voice = state?.voice;
+
+  // What it costs to start a reading, said before the reading for the reason the model's is:
+  // it is the difference between a few seconds and a download of several gigabytes.
+  const standing = !voice
+    ? "nothing chosen yet -- a reading needs a voice"
+    : voice.in_memory
+      ? "read, and on the device"
+      : voice.on_disk
+        ? "on the disk -- read at the first reading"
+        : "not fetched -- fetched and read at the first reading";
 
   return html`
     <div className="card">
       <div className="row">
         <${Field} label="Voice" kind="grow">
-          ${/* A box rather than a button, because there is nothing behind it to open: one voice
-               is built into the binary and none is published. The day one is, this becomes the
-               same button the model above it is, opening the same list. */ ""}
-          <div className="picker settled">
-            ${voice?.full_name ?? "none"}
-            ${voice?.in_memory && html`<span className="badge">in memory</span>`}
-          </div>
+          <button className=${`plain wide picker${voice ? "" : " next"}`} onClick=${onVoices}>
+            ${voice ? voice.full_name : "Choose a voice"}
+          </button>
         <//>
         <${Field} label="Device" kind="short">
           <select
@@ -634,13 +643,8 @@ function VoiceAndDevice({ state, progress, onDevice }) {
           </select>
         <//>
       </div>
-      <p className="about">
-        ${voice
-          ? `${voice.rate} Hz -- ${
-              voice.takes_a_recording ? "takes a recording to sound like" : "takes no recording"
-            }`
-          : "nothing to speak with"}
-      </p>
+      <p className="about">${standing}</p>
+      ${voice && html`<p className="about">${voiceSays(voice)}</p>`}
     </div>
   `;
 }
@@ -901,12 +905,34 @@ function FromRecording({ holding, revision, why, onHold, onClear }) {
 }
 
 /** text2speech: everything a reading is asked for that is not the text itself. */
-function SpeechSettings({ state, progress, form, change, onHold, onClear, onAnySeed, onDevice }) {
+function SpeechSettings({
+  state,
+  progress,
+  form,
+  change,
+  onHold,
+  onClear,
+  onAnySeed,
+  onDevice,
+  onVoices,
+}) {
   const voice = state?.voice;
 
   return html`
     <div className="settings">
-      <${VoiceAndDevice} state=${state} progress=${progress} onDevice=${onDevice} />
+      <${VoiceAndDevice}
+        state=${state}
+        progress=${progress}
+        onDevice=${onDevice}
+        onVoices=${onVoices}
+      />
+
+      ${/* Nothing below this until there is a voice, for the reason there is nothing below the
+           model on the other tabs until there is a model: every one of them is a setting for
+           one. */ ""}
+      ${!!voice &&
+      html`
+        <${Fragment}>
 
       ${/* The first thing on the tab, above every setting, for as long as it is true. It comes
            out of the voice itself rather than being written here, so the day a real model is
@@ -988,6 +1014,9 @@ function SpeechSettings({ state, progress, form, change, onHold, onClear, onAnyS
           again; minus one is a new one every time.
         </p>
       </div>
+
+        <//>
+      `}
     </div>
   `;
 }
@@ -1307,9 +1336,14 @@ function AskAboutTheList({ onYes, onNo }) {
  * read over a shoulder, and a name greyed out is still a name read. The asking is one click, and
  * the click says what is behind it before it lands; the answer is remembered, so it is asked once
  * and not every time the list is opened.
+ *
+ * The same list for the voices when `voices` is set: the speech tab's button opens it, and what
+ * there is to say of a voice -- what is on the disk, what it costs to fetch, that it can be
+ * deleted -- is what there is to say of a model. None of them is marked, so the question above is
+ * never asked of them.
  */
-function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onClose }) {
-  const chosen = state?.model;
+function ModelPicker({ state, progress, note, voices, onChoose, onForget, onRefresh, onClose }) {
+  const chosen = voices ? state?.voice : state?.model;
   const busy = !!progress.busy;
 
   /** Whether the marked ones are in the list. Read from the browser rather than started at no,
@@ -1328,7 +1362,7 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
   // The chosen one is in the list whatever it is. A model can be chosen from the command line, and
   // a list that left the chosen one out would be a list with no "Chosen" in it and no way back to
   // the model whose numbers are in the boxes.
-  const all = state?.models ?? [];
+  const all = (voices ? state?.voices : state?.models) ?? [];
   const models = all.filter((model) => shown || !model.explicit || model.name === chosen?.name);
 
   // How many the button is about. Counted off the whole list rather than as what the filter
@@ -1343,7 +1377,7 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
            about in, and every one of those clicks lands on the veil underneath. */ ""}
       <div className="dialog models-dialog" onClick=${(event) => event.stopPropagation()}>
         <div className="dialog-top">
-          <div className="card-title">Choose a model</div>
+          <div className="card-title">${voices ? "Choose a voice" : "Choose a model"}</div>
           ${/* At the top rather than under the list: it is about the list as a whole, and a
                button that changes what is in a list belongs where the list starts. Filled while
                there is something behind it and plain once there is not -- the colour is there to
@@ -1395,12 +1429,14 @@ function ModelPicker({ state, progress, note, onChoose, onForget, onRefresh, onC
                        read: out of its manifest where the package is here, and guessed from the
                        name where it is not. */ ""}
                   ${here &&
-                  html`<p className="about">
-                    ${`${chosen.sampler} -- ${chosen.steps} steps -- ${chosen.width} x ${chosen.height}`}
-                    ${chosen.no_picture_because
-                      ? ` -- cannot start from a picture: ${chosen.no_picture_because}`
-                      : " -- draws from a prompt or from a picture"}
-                  </p>`}
+                  (voices
+                    ? html`<p className="about">${voiceSays(chosen)}</p>`
+                    : html`<p className="about">
+                        ${`${chosen.sampler} -- ${chosen.steps} steps -- ${chosen.width} x ${chosen.height}`}
+                        ${chosen.no_picture_because
+                          ? ` -- cannot start from a picture: ${chosen.no_picture_because}`
+                          : " -- draws from a prompt or from a picture"}
+                      </p>`)}
                 </div>
 
                 <div className="model-do">
@@ -1613,8 +1649,8 @@ function App() {
    *  what a run is asked for, not what the program is doing. */
   const [tab, setTab] = useState("txt2img");
 
-  /** Whether the list of models is up over the page. */
-  const [picking, setPicking] = useState(false);
+  /** Which list is up over the page: "model", "voice", or null for neither. */
+  const [picking, setPicking] = useState(null);
 
   /** The picture in the big frame, which is the newest one until somebody clicks another. */
   const [showing, setShowing] = useState(null);
@@ -1738,9 +1774,8 @@ function App() {
     });
   }, [chosen, described, progress.busy]);
 
-  // And the voice's own numbers, the same way: once, into boxes nobody has moved. There is one
-  // voice and it never changes, so unlike a model this happens on the first state the page reads
-  // and not again.
+  // And the voice's own numbers, the same way: into boxes nobody has moved, on the first state the
+  // page reads and again whenever another voice is chosen or the chosen one is read.
   const voiceDefaults = state?.voice && `${state.voice.name} ${state.voice.in_memory}`;
   const tookVoice = useRef(null);
   useEffect(() => {
@@ -1842,11 +1877,22 @@ function App() {
 
     // Out of the way first: what was asked for is what the button that opened this said, and the
     // page behind it is the one the choice was made for.
-    setPicking(false);
+    setPicking(null);
     const answer = await ask("POST", "/api/model", { model: name ?? null });
     if (!answer.ok) return setComplaint(answer.error);
     await readState();
   }, [readState]);
+
+  /** Says which voice readings are of. Reads nothing either: the first reading does that. */
+  const chooseVoice = useCallback(
+    async (name) => {
+      setPicking(null);
+      const answer = await ask("POST", "/api/voice-model", { voice: name });
+      if (!answer.ok) return setComplaint(answer.error);
+      await readState();
+    },
+    [readState],
+  );
 
   /**
    * Opens the other kind of run, and un-chooses the model on the way.
@@ -2016,7 +2062,7 @@ function App() {
 
     <div className="below">
       <aside className="side">
-        <${Nav} tabs=${tabsFor(state?.voice)} tab=${tab} onTab=${switchTask} />
+        <${Nav} tabs=${TABS} tab=${tab} onTab=${switchTask} />
         ${/* Under the tabs rather than beside the settings. It is not a setting -- there is
              nothing on it to change -- and what it is is the ground everything else on the page
              stands on, which is where the column's other permanent thing already is. */ ""}
@@ -2030,14 +2076,17 @@ function App() {
       <main>
         ${tab === SPEAKS
           ? html`
-              <${SayBox}
+              ${/* The same rule as the prompt box: until a voice is chosen there is nothing to
+                   read with, and the card that chooses one is what is left on the screen. */ ""}
+              ${!!state?.voice &&
+              html`<${SayBox}
                 form=${form}
                 change=${change}
                 canSpeak=${canSpeak}
                 speaking=${!!progress.speaking}
                 onSpeak=${speak}
                 onInterrupt=${() => ask("POST", "/api/interrupt")}
-              />
+              />`}
 
               <section className="panes">
                 <${SpeechSettings}
@@ -2049,6 +2098,7 @@ function App() {
                   onClear=${clearRecording}
                   onAnySeed=${() => change("seed", "-1")}
                   onDevice=${useDevice}
+                  onVoices=${() => setPicking("voice")}
                 />
                 <${ClipOutput}
                   state=${state}
@@ -2089,7 +2139,7 @@ function App() {
                   onAnySeed=${() => change("seed", "-1")}
                   onLastSeed=${lastSeed}
                   onDevice=${useDevice}
-                  onModels=${() => setPicking(true)}
+                  onModels=${() => setPicking("model")}
                 />
                 <${Output}
                   state=${state}
@@ -2111,10 +2161,11 @@ function App() {
       state=${state}
       progress=${progress}
       note=${note}
-      onChoose=${chooseModel}
+      voices=${picking === "voice"}
+      onChoose=${picking === "voice" ? chooseVoice : chooseModel}
       onForget=${forgetModel}
       onRefresh=${readState}
-      onClose=${() => setPicking(false)}
+      onClose=${() => setPicking(null)}
     />`}
   `;
 }

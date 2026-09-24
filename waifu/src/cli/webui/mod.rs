@@ -102,18 +102,21 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     }
 
     let model = with_usage(args.model())?.map(str::to_string);
-    let voice = args.voice().unwrap_or(worker::VOICE).to_string();
+    let voice = args.voice().map(str::to_string);
     let runtime = with_usage(args.device())?.resolve();
     let wanted_port = with_usage(args.port())?;
 
     let shared = Arc::new(Shared::new(runtime));
     let (commands, waiting) = channel::<Command>();
 
-    // The voice the speech tab reads with, described before any page has opened. The boxes on
-    // that tab are a voice's own numbers and there is nothing else to fill them from. Described
-    // rather than read: a voice with a package behind it is read at the first reading that wants
-    // it, exactly as a picture model is at the first picture.
-    shared.change(|session| session.voice = Some(worker::look_at_voice(&voice)));
+    // A voice named on the command line is chosen before any page has opened, as `-m` chooses a
+    // model; with none named, the speech tab starts with nothing chosen and a button to choose
+    // one. Described rather than read or fetched either way: a voice with a package behind it is
+    // fetched and read at the first reading that wants it, exactly as a picture model is at the
+    // first picture.
+    if let Some(voice) = voice {
+        shared.change(|session| session.voice = Some(worker::look_at_voice(&voice)));
+    }
 
     // A picture named on the command line only fills the box. Everything about a run is
     // changeable between runs, and this is no different: it is where to start, not what to be
@@ -270,10 +273,10 @@ mod tests {
         let shared = Arc::new(Shared::new(DeviceOption::Cpu.resolve()));
         let (commands, waiting) = channel::<Command>();
 
-        // The same thing `main` does before it opens a browser: there is one voice and it is
-        // described before any page reads the state. A server without it is a server no run of
-        // this program produces.
-        shared.change(|session| session.voice = Some(worker::look_at_voice(worker::VOICE)));
+        // What `main` does before it opens a browser: a voice is described before any page reads
+        // the state. The stand-in rather than the published one, because a test that speaks
+        // should not start by fetching gigabytes -- `-voice tones` is the same server.
+        shared.change(|session| session.voice = Some(worker::look_at_voice(worker::TONES)));
 
         // Left running for the rest of the test process. There is no way to stop it short of the
         // process ending, which is the same shape the program has. What it answers with is
@@ -678,6 +681,33 @@ mod tests {
 
         assert_eq!(state["holding_a_recording"], false);
         assert_eq!(state["clips"].as_array().expect("the clips").len(), 0);
+    }
+
+    #[test]
+    fn a_published_voice_is_listed_and_chosen_the_way_a_model_is() {
+        // What the voice list offers: the published voice, by the name it is chosen with.
+        let (address, _commands) = a_server();
+        let state = json(address, "GET /api/state", "");
+        let voices = state["voices"].as_array().expect("the voices");
+        assert!(
+            voices.iter().any(|voice| voice["name"] == "indextts"),
+            "{voices:?}"
+        );
+
+        // Choosing it reads and fetches nothing. It is a real voice, so the tab has no apology to
+        // make, and it says what it is called and whether the first reading has to fetch it.
+        let (status, body) = asked(address, "POST /api/voice-model", r#"{"voice":"indextts"}"#);
+        assert_eq!(status, 200, "{body}");
+        let voice = &json(address, "GET /api/state", "")["voice"];
+        assert_eq!(voice["name"], "indextts");
+        assert_eq!(voice["full_name"], "IndexTTS 2.5");
+        assert_eq!(voice["in_memory"], false);
+        assert!(voice["on_disk"].is_boolean(), "{voice}");
+        assert_eq!(voice["not_a_voice_because"], Value::Null);
+
+        let (status, body) = asked(address, "POST /api/voice-model", r#"{"voice":"  "}"#);
+        assert_eq!(status, 400);
+        assert!(body.contains("no voice was named"), "{body}");
     }
 
     #[test]
