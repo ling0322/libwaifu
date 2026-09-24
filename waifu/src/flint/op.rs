@@ -423,6 +423,15 @@ pub enum Op {
         weight: Value,
         channel_scale: Value,
     },
+    /// [`Fp8Matmul`](Op::Fp8Matmul) with one scale for the whole weight: `weight` is
+    /// `<fp8e4m3>(rows, k)` and `scale` a single `<float>`, the weight meaning `weight * scale`.
+    /// A separate operand for the same reason the channel scale is one: it is an ordinary weight
+    /// reached by an ordinary [`Op::Load`].
+    Fp8MatmulTensorScale {
+        lhs: Value,
+        weight: Value,
+        scale: Value,
+    },
     /// The rows of `table` named by `indices`.
     Lookup {
         table: Value,
@@ -567,6 +576,7 @@ impl Op {
             Op::GroupNorm { .. } => "group_norm",
             Op::Matmul { .. } => "matmul",
             Op::Fp8Matmul { .. } => "fp8_matmul",
+            Op::Fp8MatmulTensorScale { .. } => "fp8_matmul_tensor_scale",
             Op::Lookup { .. } => "lookup",
             Op::Conv2d { .. } => "conv2d",
             Op::Conv1d { .. } => "conv1d",
@@ -654,6 +664,7 @@ impl Op {
                 weight,
                 channel_scale,
             } => vec![*lhs, *weight, *channel_scale],
+            Op::Fp8MatmulTensorScale { lhs, weight, scale } => vec![*lhs, *weight, *scale],
             Op::RmsNorm { input, weight, .. } => vec![*input, *weight],
 
             Op::LayerNorm {
@@ -861,6 +872,7 @@ impl fmt::Display for Op {
             | Op::Binary { .. }
             | Op::Matmul { .. }
             | Op::Fp8Matmul { .. }
+            | Op::Fp8MatmulTensorScale { .. }
             | Op::Lookup { .. }
             | Op::Contiguous { .. } => (),
         }

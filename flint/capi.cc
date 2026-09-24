@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -1130,6 +1131,60 @@ int32_t fl_fp8_matmul(
         throw lut::InvalidArgError("the fp8 operand's k is not a multiple of 16");
       }
       return publish(fl::op::cuda::gemmFp8(deref(a), operand), out);
+    }
+#endif
+    throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
+  });
+}
+
+int32_t fl_fp8_matmul_tensor_scale(
+    fl_tensor_t a,
+    fl_tensor_t data,
+    fl_tensor_t scale,
+    fl_tensor_t *out) {
+  // As in fl_fp8_dequantize: without CUDA every path out of here throws.
+  return guard([&]() -> int32_t {
+    const fl::Tensor &weight = deref(data);
+    const fl::Tensor &tensorScale = deref(scale);
+
+    // What makeFp8Operand checks of the pair, with one scale in place of a row of them. The
+    // kernel CHECKs all of this too, but a caller's mistake should come back as an error rather
+    // than end the process.
+    if (weight.getDType() != fl::DType::kFp8E4M3 || weight.getDim() != 2) {
+      throw lut::InvalidArgError("fp8 operand: data is not <fp8e4m3>(rows, k)");
+    }
+    if (tensorScale.getDType() != fl::DType::kFloat || tensorScale.getNumEl() != 1) {
+      throw lut::InvalidArgError("fp8 operand: the tensor scale is not a single <float>");
+    }
+    if (weight.getDevice().getType() != tensorScale.getDevice().getType()) {
+      throw lut::InvalidArgError("fp8 operand: the data and the scale are on different devices");
+    }
+    if (!weight.isContiguous()) {
+      throw lut::InvalidArgError("fp8 operand: not contiguous");
+    }
+    if (weight.getNumEl() >= std::numeric_limits<int32_t>::max()) {
+      throw lut::InvalidArgError("fp8 operand: more elements than the kernels can index");
+    }
+
+    fl::Device::Type device = weight.getDevice().getType();
+    int rows = weight.getShape(0);
+    int k = weight.getShape(1);
+
+    checkFp8Activation(deref(a), device, "the left operand");
+    if (deref(a).getShape(-1) != k) {
+      throw lut::InvalidArgError("the two operands disagree about k");
+    }
+
+#ifdef LIBWAIFU_CUDA_ENABLED
+    if (device == fl::Device::kCuda) {
+      // What the CUTLASS instantiation can read, rather than what the format can hold.
+      if (rows % 8 != 0) {
+        throw lut::InvalidArgError("the fp8 operand's row count is not a multiple of 8");
+      }
+      if (k % 16 != 0) {
+        throw lut::InvalidArgError("the fp8 operand's k is not a multiple of 16");
+      }
+      return publish(fl::op::cuda::gemmFp8TensorScale(deref(a), weight, tensorScale), out);
     }
 #endif
     throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");

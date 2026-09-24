@@ -529,6 +529,17 @@ FLAPI int32_t fl_fp8_matmul(
     fl_tensor_t channel_scale,
     fl_tensor_t *out);
 
+/// fl_fp8_matmul for a weight with one scale for the whole tensor rather than one per row: `a`
+/// (..., k) times the transpose of `data` <fp8e4m3>(rows, k), times the one <float> in `scale`,
+/// as (..., rows). `scale` holds a single element, whatever its shape, on the weight's device.
+///
+/// <float16> in and out, with `rows` a multiple of 8 and `k` a multiple of 16.
+FLAPI int32_t fl_fp8_matmul_tensor_scale(
+    fl_tensor_t a,
+    fl_tensor_t data,
+    fl_tensor_t scale,
+    fl_tensor_t *out);
+
 /// Element-wise x * sigmoid(1.702 * x), the activation OpenAI's CLIP uses in place of GELU.
 FLAPI int32_t fl_quick_gelu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 

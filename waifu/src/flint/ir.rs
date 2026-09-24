@@ -850,6 +850,9 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
             weight,
             channel_scale,
         } => F::fp8_matmul(get(lhs), get(weight), get(channel_scale))?,
+        Op::Fp8MatmulTensorScale { lhs, weight, scale } => {
+            F::fp8_matmul_tensor_scale(get(lhs), get(weight), get(scale))?
+        }
         Op::Lookup { table, indices } => F::lookup(get(table), get(indices))?,
         Op::Conv2d {
             input,
