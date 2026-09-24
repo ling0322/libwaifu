@@ -32,9 +32,8 @@ disk:
         -model  models/krea2-turbo \\
         -output models/krea2-turbo.safetensors
 
-`-fp8` writes the two halves that have matrices in them as E4M3 with a scale per output channel,
-which halves the package -- twenty-four gigabytes to twelve -- for about 2.6e-2 of relative error
-on each weight. See `docs/fp8.md`.
+`-fp8` writes the two halves that have matrices in them as E4M3 with one scale for the whole
+weight, which halves the package -- twenty-four gigabytes to twelve. See `docs/fp8.md`.
 
 The released weights are gated and carry the Krea 2 Community License. Nothing here publishes
 anything; what it writes is a package on your own disk, and where it goes afterwards is a decision
@@ -136,7 +135,7 @@ class Converter:
         if not self._fp8:
             return self._write(ctx, tensor)
 
-        self._writer.write_fp8_tensor(ctx, tensor.to(torch.float32))
+        self._writer.write_fp8_tensor_scale(ctx, tensor.to(torch.float32))
         self._quantized += 1
         self._count += 1
 
@@ -570,7 +569,7 @@ def generate_config(model: dict, text: dict, index: dict, vae: dict, shape: dict
     }}
 
     if fp8:
-        config["krea2"]["weight_format"] = "fp8"
+        config["krea2"]["weight_format"] = "fp8_tensor_scale"
 
     return config
 
@@ -759,8 +758,8 @@ def main() -> int:
                              "them.")
     parser.add_argument(
         "-fp8", action="store_true",
-        help="store the matrices as E4M3 with a scale per output channel: half the package and "
-             "half the card, for about 2.6e-2 of relative error. See docs/fp8.md.")
+        help="store the matrices as E4M3 with one scale for the whole weight: half the package "
+             "and half the card. See docs/fp8.md.")
     parser.add_argument(
         "-part-size", type=parse_size, default="4GB",
         help='split the package into parts of about this size, as in "4GB".')

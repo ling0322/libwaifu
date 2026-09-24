@@ -124,8 +124,41 @@ It has to be the same: a package written there is read by this, and this is one 
 two only if every producer agrees on the bytes. Three details in it are load bearing -- the
 rounding of the division above is one -- and the docstring says which.
 
-No exporter here writes one yet. What a published package holds is a decision about a published
-package, and this is the machinery for making it rather than the making of it.
+`tools/krea2_exporter.py` and `tools/qwen_image_exporter.py` (which shares its `Converter`) no
+longer write this one for `-fp8`; see "One scale for the whole tensor" below for the format they
+write instead. `write_fp8_tensor` and `quantize_to_fp8` stay for a package that wants one scale per
+row on purpose -- an exporter is free to call either.
+
+## One scale for the whole tensor
+
+`WeightFormat::Fp8TensorScale` is everything above with one difference: `"…weight.scale"` is a
+single `<float>`, not one per row, and the graph reads it that way -- `Linear::graph` loads it at
+shape `[1]` rather than `[out_dim]` and builds `fp8_matmul_tensor_scale` in place of `fp8_matmul`.
+Same elements, same pairing, same suffix; only the scale's shape and which multiply reads it change.
+
+```rust
+let y = F::fp8_matmul_tensor_scale(&x, w.data(), &tensor_scale)?;   // tensor_scale is <float>[1]
+```
+
+`flint::gemmFp8TensorScale` is the CUDA side of it (`flint/cuda/gemm_fp8_cutlass.h`,
+`fl_fp8_matmul_tensor_scale` in the C interface): the same CUTLASS 2.x mixed-input mainloop as
+`gemmFp8`, with `VisitorScalarBroadcast` in the epilogue where `gemmFp8` has
+`VisitorRowBroadcast` -- a value read once and broadcast over the whole tile rather than a row
+vector. `check_fp8_pairs` accepts `<float>[rows]` or `<float>[1]` beside an E4M3 tensor for this
+reason: which shape a package actually means is the manifest's `weight_format`, read once the graph
+is built, not something the file-level check is in a position to enforce ahead of that.
+
+`Quantization.quantize_to_fp8_tensor_scale` in `tools/model_writer.py` is the same arithmetic as
+`quantize_to_fp8`, over the whole matrix instead of one row: `scale = amax(|x|) / 448` taken across
+every element, not per row. `WeightsWriter.write_fp8_tensor_scale` writes the pair; a manifest that
+wants this format says `weight_format: fp8_tensor_scale`.
+
+What one scale buys over one per row: a smaller pair -- `<float>[1]` against `<float>[out_dim]` --
+and nothing else; the E4M3 elements are the same size either way. What it costs is precision on a
+weight whose rows vary widely in magnitude, since the whole tensor's largest element sets the scale
+every row is divided by: a row far below that magnitude lands in E4M3's coarser codes near zero,
+where the per-row format would have scaled it onto the format's full range on its own. Which is
+worth it for a given weight is the exporter's call, the same way choosing FP8 at all is.
 
 ## Why the activation is not narrowed
 

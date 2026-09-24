@@ -169,6 +169,10 @@ pub enum WeightFormat {
     /// `"…weight"` and `"…weight.scale"`. Half the bytes on the device, about 2.6e-2 of relative
     /// error, and `docs/fp8.md` for the whole of it.
     Fp8,
+    /// [`Fp8`](WeightFormat::Fp8) with one `<float>` scale for the whole weight rather than one
+    /// per row, stored the same way -- `"…weight"` and `"…weight.scale"`, the scale now a single
+    /// element rather than one per output channel.
+    Fp8TensorScale,
 }
 
 impl WeightFormat {
@@ -177,6 +181,7 @@ impl WeightFormat {
         match name {
             "float" => Some(WeightFormat::Float),
             "fp8" => Some(WeightFormat::Fp8),
+            "fp8_tensor_scale" => Some(WeightFormat::Fp8TensorScale),
             _ => None,
         }
     }
@@ -186,6 +191,7 @@ impl WeightFormat {
         match self {
             WeightFormat::Float => "float",
             WeightFormat::Fp8 => "fp8",
+            WeightFormat::Fp8TensorScale => "fp8_tensor_scale",
         }
     }
 }
