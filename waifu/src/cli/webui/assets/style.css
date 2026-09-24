@@ -860,22 +860,21 @@ select:focus {
 }
 
 /*
-  The button that says the list goes on. Filled rather than outlined, in the colour this page
-  warns in: it is the one control here that nothing on the screen hints at -- what it would show
-  is, by design, not shown -- so it has to be found without being looked for. White and bold on
-  it, the way Generate is: the other orange button on the page, and the weight is what keeps white
-  on orange readable at this size.
+  The button that says the list goes on. Filled rather than outlined, in the page's accent: it is
+  the one control here that nothing on the screen hints at -- what it would show is, by design, not
+  shown -- so it has to be found without being looked for. White and bold on it; darker rather than
+  lighter under the pointer, because a lighter blue is one white is harder to read on.
 */
 .plain.more {
-  background: var(--go-deep);
-  border-color: var(--go-deep);
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
   font-weight: 600;
 }
 
 .plain.more:hover {
-  background: var(--go);
-  border-color: var(--go);
+  background: #4f8ef0;
+  border-color: #4f8ef0;
   color: #fff;
 }
 
