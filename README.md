@@ -3,7 +3,7 @@
 [![CI](https://github.com/ling0322/libwaifu/actions/workflows/ci.yml/badge.svg)](https://github.com/ling0322/libwaifu/actions/workflows/ci.yml)
 
 libwaifu is an image generator that runs start to finish on your own machine. A prompt in, a
-picture out -- SDXL, Anima or Krea 2, painted by the GPU you already have, as fast as the
+picture out -- SDXL, Anima, Krea 2 or Qwen-Image, painted by the GPU you already have, as fast as the
 hardware allows. No API key, no cloud, no queue, and no one else seeing what you asked for.
 
 ## Supported models
@@ -19,6 +19,8 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 | `anima:miaomiao` | MiaoMiao Harem Anima v1.6 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-miaomiao-harem-v1.6)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-miaomiao-harem-v1.6)\] |
 | `krea2:turbo` | Krea 2 Turbo | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 | `krea2:turbo-fp8` | Krea 2 Turbo, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
+| `qwen-image:2.1` | Qwen-Image 2.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1)\] |
+| `qwen-image:2.1-fp8` | Qwen-Image 2.1, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1)\] |
 
 ## Supported voices
 
@@ -61,6 +63,9 @@ The page has three tabs: txt2img, img2img, and text2speech -- see
 
 ## Recent updates
 
+- [2026-09-23] Qwen-Image 2.1 is published, as `qwen-image:2.1` and `qwen-image:2.1-fp8` -- a
+  fourth architecture, Built with Qwen. Its licence is non-commercial (research and evaluation)
+  only; see [docs/qwen_image.md](docs/qwen_image.md#licensing).
 - [2026-09-23] IndexTTS-2.5 speaks here, as `indextts` -- the first published voice, and the
   text2speech tab's first real model.
 - [2026-09-23] MiaoMiao Harem v1.6 is published, as `anima:miaomiao` -- an Anima fine tune, mirrored
@@ -134,9 +139,9 @@ fn main() -> Result<(), waifu::Error> {
 }
 ```
 
-`Anima::from_manifest` and `Krea2::from_manifest` are the same call for the other two families,
-and `manifest.section("model")` says which one a manifest holds, so a reader that handles all
-three asks it first. What differs is the
+`Anima::from_manifest`, `Krea2::from_manifest` and `QwenImage::from_manifest` are the same call
+for the other three families, and `manifest.section("model")` says which one a manifest holds, so
+a reader that handles all four asks it first. What differs is the
 numbers rather than the code: Anima's turbo release is distilled for few steps at no guidance and
 comes out burnt at the thirty and five SDXL likes, so take a model's own `suggested:` block over
 the defaults where it has one.
@@ -276,6 +281,11 @@ cargo test --release -p waifu --no-fail-fast \
 # Krea 2
 cargo test --release -p waifu --no-fail-fast \
 	--test krea2 --test krea2_sampler --test krea2_pipeline --test krea2_tokenizer \
+	-- --ignored --test-threads=1
+
+# Qwen-Image
+cargo test --release -p waifu --no-fail-fast \
+	--test qwen_image --test qwen_image_pipeline --test qwen_image_tokenizer \
 	-- --ignored --test-threads=1
 ```
 
