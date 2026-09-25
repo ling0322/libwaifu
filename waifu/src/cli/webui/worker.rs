@@ -37,6 +37,7 @@ use std::time::Instant;
 use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
+use crate::cosyvoice3::{self, CosyVoice3};
 use crate::flint::{MemorySnapshot, Tensor};
 use crate::indextts::{self, IndexTts};
 use crate::wav::{self, Sound};
@@ -428,16 +429,40 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         return describe_voice(asked, &Tones::new(), false);
     }
 
+    let path = on_disk(asked);
+    let (kind_name, defaults, rate) = match path.as_deref().and_then(voice_kind) {
+        Some(VoiceKind::CosyVoice3) => (CosyVoice3::NAME, CosyVoice3::DEFAULTS, cosyvoice3::RATE),
+        _ => (IndexTts::NAME, IndexTts::DEFAULTS, indextts::RATE),
+    };
+
     Spoken {
         name: asked.to_string(),
         // The catalogue's name for it where it has one, and the kind's where it was named by path.
-        full_name: hub::full_name(asked).unwrap_or(IndexTts::NAME).to_string(),
-        on_disk: on_disk(asked).is_some(),
+        full_name: hub::full_name(asked).unwrap_or(kind_name).to_string(),
+        on_disk: path.is_some(),
         in_memory: false,
-        defaults: IndexTts::DEFAULTS,
-        rate: indextts::RATE,
+        defaults,
+        rate,
         no_likeness_because: None,
         not_a_voice_because: None,
+    }
+}
+
+/// The speech models a package can be.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VoiceKind {
+    IndexTts,
+    CosyVoice3,
+}
+
+/// Which speech model the manifest at `path` describes, by its `model.type`; `None` where it
+/// cannot be read or is not a speech model this reads.
+fn voice_kind(path: &std::path::Path) -> Option<VoiceKind> {
+    let manifest = Manifest::open(path).ok()?;
+    match manifest.section("model").ok()?.get_str("type").ok()? {
+        IndexTts::MODEL_TYPE => Some(VoiceKind::IndexTts),
+        CosyVoice3::MODEL_TYPE => Some(VoiceKind::CosyVoice3),
+        _ => None,
     }
 }
 
@@ -472,7 +497,7 @@ fn voice_holds_weights(asked: &str) -> bool {
 fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) -> bool {
     let read: Result<Box<dyn Voice>, Error> = match asked == TONES {
         true => Ok(Box::new(Tones::new())),
-        false => load_voice(shared, asked).map(|read| Box::new(read) as Box<dyn Voice>),
+        false => load_voice(shared, asked),
     };
 
     match read {
@@ -499,7 +524,7 @@ fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) 
 }
 
 /// Fetches the voice package `asked` names, if it is a name, and reads it onto the device.
-fn load_voice(shared: &Shared, asked: &str) -> Result<IndexTts, Error> {
+fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
     // The same rules `load` keeps for a picture model: a stop from before this began is not this
     // fetch's business, and the name on the screen is the tail of a path rather than all of it.
     shared.carry_on();
@@ -534,11 +559,17 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<IndexTts, Error> {
     });
 
     let runtime = shared.runtime();
-    Ok(IndexTts::from_manifest(
-        runtime.device(),
-        runtime.residency(),
-        &Manifest::open(&path)?,
-    )?)
+    let manifest = Manifest::open(&path)?;
+    let (device, residency) = (runtime.device(), runtime.residency());
+
+    // Whichever speech model the package says it is. Anything else is IndexTTS-2.5's to refuse,
+    // which it does by naming the kind it found.
+    Ok(match voice_kind(&path) {
+        Some(VoiceKind::CosyVoice3) => {
+            Box::new(CosyVoice3::from_manifest(device, residency, &manifest)?)
+        }
+        _ => Box::new(IndexTts::from_manifest(device, residency, &manifest)?),
+    })
 }
 
 /// Says on screen that the voice is not in memory, leaving it chosen -- what
