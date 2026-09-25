@@ -192,6 +192,10 @@ Tensor MetalOperators::sum(Tensor input, int dim) {
   return metal::sum(input, dim);
 }
 
+Tensor MetalOperators::cumsum(Tensor input, int dim) {
+  return metal::cumsum(input, dim);
+}
+
 Tensor MetalOperators::max(Tensor input) {
   return metal::max(input);
 }

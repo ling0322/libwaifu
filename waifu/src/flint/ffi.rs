@@ -327,6 +327,7 @@ extern "C" {
     pub fn fl_geglu(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_sum(operators: FlOperators, input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
     pub fn fl_max(operators: FlOperators, input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
+    pub fn fl_cumsum(operators: FlOperators, input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
     pub fn fl_min(operators: FlOperators, input: FlTensor, dim: i32, out: *mut FlTensor) -> i32;
     pub fn fl_cat(
         operators: FlOperators,

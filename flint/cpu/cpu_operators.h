@@ -115,6 +115,7 @@ class CPUOperators : public Operators {
   Tensor sample(Tensor logits, Tensor temperatures, Tensor topKs, Tensor topPs) override;
   Tensor softmax(Tensor input) override;
   Tensor sum(Tensor inputs, int dim) override;
+  Tensor cumsum(Tensor input, int dim) override;
   Tensor swiglu(Tensor A) override;
   Tensor geglu(Tensor input) override;
   Tensor tensor(lut::Span<const int> shape, DType dtype) override;

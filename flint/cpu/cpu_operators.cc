@@ -46,6 +46,7 @@
 #include "flint/cpu/print.h"
 #include "flint/cpu/rand.h"
 #include "flint/cpu/reduce.h"
+#include "flint/cpu/scan.h"
 #include "flint/cpu/repetition_penalty.h"
 #include "flint/cpu/softmax.h"
 #include "flint/cpu/glu.h"
@@ -241,6 +242,27 @@ Tensor CPUOperators::sum(Tensor inputs, int dim) {
   Tensor transposed = contiguous(inputs.transpose(dim, ndim - 1));
   Tensor reduced = cpu::reduce(transposed, MapReduceType::SUM);
   return reduced.transpose(dim, ndim - 2);
+}
+
+Tensor CPUOperators::cumsum(Tensor input, int dim) {
+  int ndim = input.getDim();
+  if (dim < 0) dim += ndim;
+  CHECK(dim >= 0 && dim < ndim);
+
+  // Float16 arithmetic is an aarch64 feature on this backend, so a half tensor is scanned in
+  // float32 and narrowed once at the end -- which is also where the precision is wanted.
+  DType dtype = input.getDType();
+  if (dtype == DType::kFloat16) input = cast(input, DType::kFloat);
+
+  Tensor scanned;
+  if (dim == ndim - 1) {
+    scanned = cpu::cumsumLastDim(contiguous(input));
+  } else {
+    Tensor transposed = contiguous(input.transpose(dim, ndim - 1));
+    scanned = contiguous(cpu::cumsumLastDim(transposed).transpose(dim, ndim - 1));
+  }
+
+  return dtype == DType::kFloat16 ? cast(scanned, DType::kFloat16) : scanned;
 }
 
 Tensor CPUOperators::max(Tensor inputs) {

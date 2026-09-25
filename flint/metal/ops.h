@@ -101,6 +101,7 @@ void print(const Tensor &tensor);
 
 // reduce.cc
 Tensor sum(const Tensor &input, int dim);
+Tensor cumsum(const Tensor &input, int dim);
 Tensor max(const Tensor &input);
 Tensor min(const Tensor &input);
 bool all(const Tensor &input);

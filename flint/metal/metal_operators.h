@@ -93,6 +93,7 @@ class MetalOperators : public Operators {
   Tensor cos(Tensor input) override;
 
   Tensor sum(Tensor input, int dim) override;
+  Tensor cumsum(Tensor input, int dim) override;
   Tensor max(Tensor input) override;
   Tensor min(Tensor input) override;
   bool all(Tensor input) override;

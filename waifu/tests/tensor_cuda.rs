@@ -58,6 +58,32 @@ fn squares_and_divides() {
 
 #[test]
 #[ignore = "needs a CUDA device"]
+fn sums_as_it_goes_on_the_card() {
+    // Longer than one 256-wide tile, so the carry from one tile into the next is exercised.
+    let values: Vec<f32> = (0..600).map(|i| (i % 7) as f32 * 0.25).collect();
+    let x = cuda_f32(&[2, 300], &values);
+
+    let got = to_host_f32(&F::cumsum(&x, -1).unwrap());
+    let cpu = F::cumsum(&Tensor::from_f32(&[2, 300], &values).unwrap(), -1)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
+    for (g, w) in got.iter().zip(&cpu) {
+        assert!((g - w).abs() <= 0.25 + w.abs() * 2e-3, "{g} against {w}");
+    }
+
+    // And along a dimension that is not the last.
+    let got = to_host_f32(&F::cumsum(&x, 0).unwrap());
+    assert_eq!(
+        &got[300..],
+        &(0..300)
+            .map(|i| values[i] + values[300 + i])
+            .collect::<Vec<_>>()[..]
+    );
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
 fn takes_a_remainder() {
     let x = F::arange(0, 5, 1, Device::Cuda).unwrap();
     let remainders = F::mod_scalar(&x, 2).unwrap();
