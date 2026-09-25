@@ -1164,6 +1164,19 @@ int32_t fl_sum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tens
   return guard([&]() { return publish(deref(operators)->sum(deref(input), dim), out); });
 }
 
+int32_t fl_cumsum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
+  return guard([&]() {
+    const fl::Tensor &tensor = deref(input);
+    int32_t rank = tensor.getDim();
+    if (dim < -rank || dim >= rank) {
+      throw lut::InvalidArgError(
+          "fl_cumsum: dimension " + std::to_string(dim) + " of a tensor of rank " +
+          std::to_string(rank));
+    }
+    return publish(deref(operators)->cumsum(tensor, dim), out);
+  });
+}
+
 int32_t fl_max(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
   return guard([&]() {
     checkLastDim(deref(input), dim, "fl_max");

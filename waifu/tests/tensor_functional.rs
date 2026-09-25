@@ -69,6 +69,25 @@ fn reduces_over_the_last_dimension() {
 }
 
 #[test]
+fn sums_as_it_goes_along_either_dimension() {
+    let x = cpu_f32(&[2, 3], &[1.0, 2.0, 3.0, 40.0, 50.0, 60.0]);
+
+    let along_rows = F::cumsum(&x, F::LAST_DIM).unwrap();
+    assert_eq!(along_rows.shape(), vec![2, 3]);
+    assert_eq!(
+        along_rows.to_vec_f32().unwrap(),
+        vec![1.0, 3.0, 6.0, 40.0, 90.0, 150.0]
+    );
+    assert_eq!(
+        F::cumsum(&x, 0).unwrap().to_vec_f32().unwrap(),
+        vec![1.0, 2.0, 3.0, 41.0, 52.0, 63.0]
+    );
+    // The last of each row is the row's sum.
+    let sums = F::sum(&x, F::LAST_DIM).unwrap().to_vec_f32().unwrap();
+    assert_eq!(along_rows.to_vec_f32().unwrap()[2], sums[0]);
+}
+
+#[test]
 fn softmax_gives_rows_that_sum_to_one() {
     let x = cpu_f32(&[2, 3], &[1.0, 2.0, 3.0, 1.0, 1.0, 1.0]);
     let probabilities = F::softmax(&x).unwrap();

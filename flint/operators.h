@@ -182,6 +182,11 @@ class Operators {
   virtual Tensor sub(Tensor input, Tensor other);
   virtual Tensor subFloat(Tensor input, float other);
   virtual Tensor sum(Tensor input, int dim);
+
+  /// Inclusive prefix sum along `dim`, which may be negative to count from the back: element `i`
+  /// of the result is the sum of elements `0..=i` of the input. Same shape and dtype as `input`;
+  /// float16 is accumulated in float32.
+  virtual Tensor cumsum(Tensor input, int dim);
   virtual Tensor max(Tensor input);
   virtual Tensor eq(Tensor input, Tensor other);
   virtual Tensor square(Tensor input);

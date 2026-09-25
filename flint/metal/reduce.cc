@@ -30,6 +30,12 @@ Tensor sum(const Tensor &input, int dim) {
   return fromMlxArray(mlx::core::sum(toMlxArray(input), dim, /*keepdims=*/false));
 }
 
+Tensor cumsum(const Tensor &input, int dim) {
+  // MLX's own scan: forward, and inclusive of the element itself, which is what torch.cumsum is.
+  return fromMlxArray(mlx::core::cumsum(toMlxArray(input), dim, /*reverse=*/false,
+                                        /*inclusive=*/true));
+}
+
 Tensor max(const Tensor &input) {
   return fromMlxArray(mlx::core::max(toMlxArray(input)));
 }

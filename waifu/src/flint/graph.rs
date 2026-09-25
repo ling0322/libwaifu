@@ -635,6 +635,13 @@ impl Graph {
         self.reduce(Reduce::Min, input, dim)
     }
 
+    /// The inclusive prefix sum along `dim`, which may be negative to count from the back. Unlike
+    /// the reductions above it keeps `dim`: the result is the input's shape.
+    #[track_caller]
+    pub fn cumsum(&self, input: Value, dim: i32) -> Value {
+        self.push(Op::Cumsum { input, dim })
+    }
+
     // Normalizations.
 
     #[track_caller]

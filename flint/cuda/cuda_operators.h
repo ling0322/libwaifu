@@ -135,6 +135,7 @@ class CudaOperators : public Operators {
       Tensor valueCache,
       Tensor slotMapping) override;
   Tensor sum(Tensor inputs, int dim) override;
+  Tensor cumsum(Tensor input, int dim) override;
   Tensor swiglu(Tensor A) override;
   Tensor tensor(lut::Span<const int> shape, DType dtype) override;
   Tensor hostTensor(lut::Span<const int> shape, DType dtype) override;

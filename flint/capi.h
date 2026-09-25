@@ -602,6 +602,10 @@ FLAPI int32_t fl_geglu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t 
 /// drops.
 FLAPI int32_t fl_sum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out);
 
+/// Inclusive prefix sum along dimension `dim`, which may be negative to count from the back:
+/// element `i` is the sum of elements `0..=i`. The result has the input's shape and dtype.
+FLAPI int32_t fl_cumsum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out);
+
 /// Largest element of dimension `dim`, which the result drops the same way fl_sum() does.
 FLAPI int32_t fl_max(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out);
 

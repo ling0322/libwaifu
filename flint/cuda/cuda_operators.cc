@@ -41,6 +41,7 @@
 #include "flint/cuda/print.h"
 #include "flint/cuda/rand.h"
 #include "flint/cuda/reduce.h"
+#include "flint/cuda/scan.h"
 #include "flint/cuda/repetition_penalty.h"
 #include "flint/cuda/rotary_embedding.h"
 #include "flint/cuda/sampling.h"
@@ -204,6 +205,17 @@ Tensor CudaOperators::sum(Tensor inputs, int dim) {
     C = castFloatToHalf(C);
   }
   return C;
+}
+
+Tensor CudaOperators::cumsum(Tensor input, int dim) {
+  int ndim = input.getDim();
+  if (dim < 0) dim += ndim;
+  CHECK(dim >= 0 && dim < ndim);
+
+  if (dim == ndim - 1) return op::cuda::cumsumLastDim(contiguous(input));
+
+  Tensor transposed = contiguous(input.transpose(dim, ndim - 1));
+  return contiguous(op::cuda::cumsumLastDim(transposed).transpose(dim, ndim - 1));
 }
 
 Tensor CudaOperators::lookup(Tensor table, Tensor indices) {

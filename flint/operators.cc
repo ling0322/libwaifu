@@ -247,6 +247,10 @@ Tensor Operators::max(Tensor input) {
   NOT_IMPL();
 }
 
+Tensor Operators::cumsum(Tensor input, int dim) {
+  NOT_IMPL();
+}
+
 Tensor Operators::square(Tensor input) {
   NOT_IMPL();
 }

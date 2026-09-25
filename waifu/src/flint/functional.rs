@@ -472,6 +472,14 @@ pub fn sum(input: &Tensor, dim: i32) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_sum(operators, input.raw, dim, out) })
 }
 
+/// The inclusive prefix sum along `dim`, which may be negative to count from the back: element `i`
+/// of the result is the sum of elements `0..=i`. Same shape and dtype as `input`; a float16 input
+/// is accumulated in float32.
+pub fn cumsum(input: &Tensor, dim: i32) -> Result<Tensor> {
+    let operators = operators_of(input)?;
+    Tensor::produce(|out| unsafe { ffi::fl_cumsum(operators, input.raw, dim, out) })
+}
+
 /// The largest element of dimension `dim`, which the result drops the same way [`sum`] does.
 pub fn max(input: &Tensor, dim: i32) -> Result<Tensor> {
     let operators = operators_of(input)?;

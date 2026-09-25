@@ -61,4 +61,18 @@ CATCH_TEST_CASE("test Metal allClose", "[op][metal]") {
   CATCH_REQUIRE(metalOps()->allClose(toMetal(a), toMetal(a), 0, 0));
 }
 
+CATCH_TEST_CASE("test Metal cumsum", "[op][metal]") {
+  if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
+
+  // Float16 on the card, so the tolerance is a half's at the ~150 a row of 300 sums to.
+  Tensor a = cpuOps()->rand({3, 300, 5}, DType::kFloat);
+  for (int dim : {0, 1, 2, -1}) {
+    CATCH_REQUIRE(cpuOps()->allClose(
+        toCpu(metalOps()->cumsum(toMetal(a), dim)),
+        cpuOps()->cumsum(cpuOps()->cast(cpuOps()->cast(a, DType::kFloat16), DType::kFloat), dim),
+        5e-3,
+        0.2));
+  }
+}
+
 }  // namespace fl

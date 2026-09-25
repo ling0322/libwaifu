@@ -817,6 +817,7 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
                 Reduce::Min => F::min(input, *dim)?,
             }
         }
+        Op::Cumsum { input, dim } => F::cumsum(get(input), *dim)?,
 
         Op::LayerNorm {
             input,
@@ -1404,6 +1405,28 @@ mod tests {
         let names: Vec<&str> = outputs.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["hidden", "pooled"]);
         assert_eq!(outputs[1].1.to_vec_f32().unwrap(), [3.0, 7.0]);
+    }
+
+    #[test]
+    fn a_cumsum_keeps_the_shape_it_sums_along() {
+        let g = Graph::new();
+        let x = g.input("x");
+        g.output("rows", g.cumsum(x, -1));
+        g.output("columns", g.cumsum(x, 0));
+
+        let x = Tensor::from_f32(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let params = state_dict(&[]);
+        let outputs = compile_and_run(&g, RunContext::new(&params).input("x", &x)).unwrap();
+
+        assert_eq!(outputs[0].1.shape(), vec![2, 3]);
+        assert_eq!(
+            outputs[0].1.to_vec_f32().unwrap(),
+            [1.0, 3.0, 6.0, 4.0, 9.0, 15.0]
+        );
+        assert_eq!(
+            outputs[1].1.to_vec_f32().unwrap(),
+            [1.0, 2.0, 3.0, 5.0, 7.0, 9.0]
+        );
     }
 
     #[test]

@@ -377,6 +377,11 @@ pub enum Op {
         input: Value,
         dim: i32,
     },
+    /// The inclusive prefix sum along `dim`, which keeps the input's shape.
+    Cumsum {
+        input: Value,
+        dim: i32,
+    },
 
     /// Zero mean and unit variance over the last dimension, then scale and shift.
     LayerNorm {
@@ -571,6 +576,7 @@ impl Op {
             Op::Scalar { kind, .. } => kind.name(),
             Op::ModScalar { .. } => "mod_scalar",
             Op::Reduce { kind, .. } => kind.name(),
+            Op::Cumsum { .. } => "cumsum",
             Op::LayerNorm { .. } => "layer_norm",
             Op::RmsNorm { .. } => "rms_norm",
             Op::GroupNorm { .. } => "group_norm",
@@ -644,6 +650,7 @@ impl Op {
             | Op::Scalar { input, .. }
             | Op::ModScalar { input, .. }
             | Op::Reduce { input, .. }
+            | Op::Cumsum { input, .. }
             | Op::UpsampleNearest2d { input, .. }
             | Op::View { input, .. }
             | Op::Transpose { input, .. }
@@ -785,7 +792,9 @@ impl fmt::Display for Op {
 
             Op::Scalar { other, .. } => call.arg(other)?,
             Op::ModScalar { other, .. } => call.arg(other)?,
-            Op::Reduce { dim, .. } | Op::Cat { dim, .. } => call.arg(format_args!("dim={dim}"))?,
+            Op::Reduce { dim, .. } | Op::Cumsum { dim, .. } | Op::Cat { dim, .. } => {
+                call.arg(format_args!("dim={dim}"))?
+            }
 
             Op::LayerNorm { eps, .. } | Op::RmsNorm { eps, .. } => {
                 call.arg(format_args!("eps={eps}"))?
