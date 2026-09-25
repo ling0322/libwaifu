@@ -300,7 +300,8 @@ pub fn print_options() {
     );
     eprintln!(
         "  -voice value\n    \tthe voice the text2speech tab starts with: a published name, such \
-         as \"indextts\", or a manifest file of a speech model. Left out, one is chosen on the \
+         as \"indextts\", or a manifest file of a speech model -- IndexTTS-2.5 or \
+         Fun-CosyVoice3. Left out, one is chosen on the \
          page, the way a model is, and fetched at the first reading."
     );
     eprintln!(

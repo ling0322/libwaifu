@@ -45,6 +45,9 @@ pub mod anima;
 pub mod audio;
 #[cfg(feature = "cli")]
 pub mod cli;
+/// Fun-CosyVoice3-0.5B: a recording and a sentence in, the sentence in that voice out, at 24 kHz.
+/// A module for the reason [`indextts`] is one -- five models, two of them somebody else's.
+pub mod cosyvoice3;
 mod error;
 pub mod flint;
 mod flow;

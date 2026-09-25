@@ -44,7 +44,12 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test qwen_image --test qwen_image_pipeline --test qwen_image_tokenizer \
     -- --ignored --test-threads=1
 
-# waifu/src/indextts/, tools/indextts_*
+# waifu/src/cosyvoice3/, tools/cosyvoice3_*
+# needs models/cosyvoice3.yaml and models/cosyvoice3_test.safetensors; docs/cosyvoice3.md says how
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test cosyvoice3 -- --ignored --test-threads=1
+
+# waifu/src/indextts/, tools/indextts_* (campplus.rs and features.rs: run cosyvoice3's too)
 # needs models/indextts25.yaml and the two recordings tools/indextts_reference_voices.py writes
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test indextts --test indextts_gpt -- --ignored --test-threads=1

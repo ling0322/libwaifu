@@ -19,7 +19,9 @@ waifu webui -voice tones        # the stand-in, which makes a noise where the sy
 ```
 
 Building the package yourself instead -- `-voice models/indextts25.yaml` -- is
-[`indextts.md`](indextts.md).
+[`indextts.md`](indextts.md). [Fun-CosyVoice3](cosyvoice3.md) is the second speech model, not
+published yet: build it and choose it by path, `-voice models/cosyvoice3.yaml`. Which of the two
+a package is, the worker reads off its manifest's `model.type`.
 
 ## What is here
 
@@ -29,7 +31,7 @@ Building the package yourself instead -- `-voice models/indextts25.yaml` -- is
 | the run | a command on the worker thread, a bar that moves, a button that stops it |
 | the clip | `waifu-NNNN.wav` beside the pictures, played on the page, saved, deleted, said again |
 | the voice | [`Voice`](../waifu/src/speech.rs), a trait with five methods |
-| what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), chosen on the page or by `-voice`; and `Tones`, the stand-in, by `-voice tones` |
+| what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), chosen on the page or by `-voice`; [`CosyVoice3`](../waifu/src/cosyvoice3/mod.rs), by `-voice` and a manifest path; and `Tones`, the stand-in, by `-voice tones` |
 
 ## The stand-in
 
