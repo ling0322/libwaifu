@@ -13,6 +13,7 @@ transformers
 /third_party/cutlass
 /third_party/libunwind
 /third_party/mlx
+/third_party/vulkan
 /third_party/flash-attention/build
 /third_party/flash-attention/csrc/cutlass
 

@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use crate::cli::args::Runtime;
 use crate::cli::hub;
+use crate::cli::webui::log;
 use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
 use crate::cosyvoice3::{self, CosyVoice3};
 use crate::flint::{MemorySnapshot, Tensor};
@@ -850,6 +851,19 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
         });
         session.note = None;
     });
+    log::line(format_args!(
+        "drawing with {}: {}x{}, {} steps, seed {}{} -- \"{}\"",
+        job.model,
+        job.options.width,
+        job.options.height,
+        job.options.num_steps,
+        job.options.seed.unwrap_or_default(),
+        match &job.from {
+            Some(_) => format!(", from a picture at strength {}", job.options.strength),
+            None => String::new(),
+        },
+        log::clipped(&job.prompt, 80)
+    ));
 
     let mut report = |progress| {
         shared.change(|session| {
@@ -909,6 +923,8 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
         }
     };
 
+    log::line(format_args!("drew {file} in {:.1}s", elapsed.as_secs_f64()));
+
     let model_name = shared
         .session()
         .model
@@ -958,6 +974,16 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
         });
         session.note = None;
     });
+    log::line(format_args!(
+        "speaking with {}: seed {}{} -- \"{}\"",
+        job.voice,
+        job.options.seed.unwrap_or_default(),
+        match &job.like {
+            Some(_) => ", like a recording",
+            None => "",
+        },
+        log::clipped(&job.text, 80)
+    ));
 
     let mut report = |progress| {
         shared.change(|session| {
@@ -1017,6 +1043,11 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
             return Ran::ToTheEnd;
         }
     };
+
+    log::line(format_args!(
+        "said {file} ({seconds:.1}s of sound) in {:.1}s",
+        elapsed.as_secs_f64()
+    ));
 
     shared.change(|session| {
         session.clips.insert(

@@ -1,0 +1,107 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// C = op(A), or A op scalar, with A strided and C contiguous. Computed in float.
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+// Keep in step with UnaryOp in flint/vulkan/elementwise.cc.
+#define OP_NEG 0
+#define OP_ABS 1
+#define OP_EXP 2
+#define OP_SQRT 3
+#define OP_RSQRT 4
+#define OP_SQUARE 5
+#define OP_SIGMOID 6
+#define OP_TANH 7
+#define OP_RELU 8
+#define OP_GELU 9
+#define OP_SILU 10
+#define OP_SIN 11
+#define OP_COS 12
+#define OP_QUICK_GELU 13
+#define OP_MUL_SCALAR 14
+#define OP_DIV_SCALAR 15
+#define OP_ADD_SCALAR 16
+#define OP_LOG 17
+
+// The natural logarithm, with the edges logf gives: GLSL leaves log undefined for anything not
+// positive, so -inf for zero, NaN below it and +inf for +inf are said here rather than left to the
+// driver.
+float naturalLog(float x) {
+  if (x > 0.0 && !isinf(x)) return log(x);
+  if (x == 0.0) return uintBitsToFloat(0xff800000u);  // -inf
+  if (isinf(x) && x > 0.0) return x;
+  return uintBitsToFloat(0x7fc00000u);  // NaN, for negatives and NaN alike
+}
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t a;
+  uint numel;
+  uint ndim;
+  uint op;
+  float scalar;
+  uint shape[MAX_DIMS];
+  uint strideA[MAX_DIMS];
+} pc;
+
+void main() {
+  uint i = globalIndex();
+  if (i >= pc.numel) return;
+
+  uint offsetA = 0;
+  uint rest = i;
+  for (int d = int(pc.ndim) - 1; d >= 0; --d) {
+    uint size = pc.shape[d];
+    uint next = rest / size;
+    offsetA += (rest - next * size) * pc.strideA[d];
+    rest = next;
+  }
+
+  float x = LOAD_A(pc.a, offsetA);
+  float y;
+  switch (pc.op) {
+    case OP_NEG: y = -x; break;
+    case OP_ABS: y = abs(x); break;
+    case OP_EXP: y = exp(x); break;
+    case OP_LOG: y = naturalLog(x); break;
+    case OP_SQRT: y = sqrt(x); break;
+    case OP_RSQRT: y = inversesqrt(x); break;
+    case OP_SQUARE: y = x * x; break;
+    case OP_SIGMOID: y = 1.0 / (1.0 + exp(-x)); break;
+    // GLSL lets tanh be a ratio of exponentials, which is NaN once they overflow. Nothing a float
+    // can tell apart from +-1 is lost by clamping first.
+    case OP_TANH: y = tanh(clamp(x, -15.0, 15.0)); break;
+    case OP_RELU: y = x > 0.0 ? x : 0.0; break;
+    case OP_GELU: y = gelu(x); break;
+    case OP_SILU: y = silu(x); break;
+    case OP_SIN: y = sin(x); break;
+    case OP_COS: y = cos(x); break;
+    case OP_QUICK_GELU: y = x / (1.0 + exp(-1.702 * x)); break;
+    case OP_MUL_SCALAR: y = x * pc.scalar; break;
+    case OP_DIV_SCALAR: y = x / pc.scalar; break;
+    case OP_ADD_SCALAR: y = x + pc.scalar; break;
+    default: y = x; break;
+  }
+
+  STORE_C(pc.c, i, y);
+}

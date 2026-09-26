@@ -232,7 +232,7 @@ fn up_block(
 /// exactly halved, and a convolution with `padding = 1` would take it from both sides. The
 /// encoder's halving takes it from the far side only, which is what the reference does: padding
 /// both sides would start the first window one pixel earlier and move every output pixel with it.
-fn pad_right_bottom(g: &Graph, input: Value) -> Value {
+pub(crate) fn pad_right_bottom(g: &Graph, input: Value) -> Value {
     // The zeros are a slice of the input multiplied by nothing rather than a `zeros` node, so that
     // the shape, the type and the device all come from the value being padded without any of the
     // three being written down here -- which in a graph is not merely tidier, since it is a graph

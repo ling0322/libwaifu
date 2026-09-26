@@ -31,7 +31,7 @@ use std::fmt;
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use super::{Dit, QwenImageConfig, VaeDecoder};
+use super::{ControlConfig, Dit, QwenImageConfig, VaeDecoder, VaeEncoder};
 use crate::error::{Error, Result};
 use crate::flint::{functional as F, DType, Device, ParamSource, Residency, Tensor, Weights};
 use crate::flow::{FlowSampler, SamplerConfig};
@@ -65,6 +65,9 @@ pub struct QwenImage {
     text_encoder: TextEncoder,
     dit: Dit,
     vae: VaeDecoder,
+    /// The autoencoder's other half, built only beside a control package: it is how a control
+    /// picture reaches the control chain, and nothing else here reads a picture.
+    encoder: Option<VaeEncoder>,
     /// How many tokens the system turn comes to, which are read and then dropped. Counted from
     /// the package's vocabulary rather than written down.
     prefix_length: i32,
@@ -101,10 +104,24 @@ impl QwenImage {
         guidance_scale: 1.0,
     };
 
+    /// What `model type` says for a control package this can read beside the model.
+    pub const CONTROL_TYPE: &'static str = "qwen_image_control";
+
     pub fn from_manifest(
         device: Device,
         residency: Residency,
         manifest: &Manifest,
+    ) -> Result<QwenImage> {
+        Self::from_manifests(device, residency, manifest, None)
+    }
+
+    /// The model, and with `control` the ControlNet package that steers it: one set of weights
+    /// read out of both, since the control chain is part of the denoiser's graph.
+    pub fn from_manifests(
+        device: Device,
+        residency: Residency,
+        manifest: &Manifest,
+        control: Option<&Manifest>,
     ) -> Result<QwenImage> {
         let model_section = manifest.section(Self::MODEL_SECTION)?;
         let model_type = model_section.get_str("type")?.to_string();
@@ -117,12 +134,32 @@ impl QwenImage {
 
         let config = QwenImageConfig::from_section(manifest.section(&model_type)?)?;
 
+        let mut paths = manifest.weight_paths()?;
+        let control_config = match control {
+            Some(control) => {
+                let kind = control
+                    .section(Self::MODEL_SECTION)?
+                    .get_str("type")?
+                    .to_string();
+                if kind != Self::CONTROL_TYPE {
+                    return Err(Error::model(format!(
+                        "the control package describes a model of kind {kind:?}, which is not \
+                         {:?}",
+                        Self::CONTROL_TYPE
+                    )));
+                }
+                paths.extend(control.weight_paths()?);
+                Some(ControlConfig::from_section(
+                    control.section(ControlConfig::SECTION)?,
+                    &config.dit,
+                )?)
+            }
+            None => None,
+        };
+
         let dtype = F::default_float_type(device)?;
-        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
-            &manifest.weight_paths()?,
-            device,
-            residency,
-        )?);
+        let weights: Rc<dyn ParamSource> =
+            Rc::new(Weights::from_files(&paths, device, residency)?);
 
         let named = |half: &str| format!("{model_type}.{half}");
         let tokenizer = Tokenizer::open(manifest)?;
@@ -135,7 +172,23 @@ impl QwenImage {
                 &weights,
                 dtype,
             )?,
-            dit: Dit::build(config.dit.clone(), &named("dit"), &weights, dtype)?,
+            encoder: match control_config {
+                Some(_) => Some(VaeEncoder::build(
+                    config.vae.clone(),
+                    &named("vae"),
+                    &weights,
+                    device,
+                    dtype,
+                )?),
+                None => None,
+            },
+            dit: Dit::build_with_control(
+                config.dit.clone(),
+                control_config,
+                &named("dit"),
+                &weights,
+                dtype,
+            )?,
             vae: VaeDecoder::build(config.vae.clone(), &named("vae"), &weights, device, dtype)?,
             prefix_length,
             tokenizer,
@@ -239,7 +292,7 @@ impl QwenImage {
         options: &GenerationOptions,
         report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
     ) -> Result<Option<Tensor>> {
-        let Some(latent) = self.generate_latent_reporting(prompt, options, report)? else {
+        let Some(latent) = self.generate_latent_reporting(prompt, options, None, report)? else {
             return Ok(None);
         };
 
@@ -257,7 +310,100 @@ impl QwenImage {
 
     /// The latent [`QwenImage::generate`] would decode.
     pub fn generate_latent(&self, prompt: &str, options: &GenerationOptions) -> Result<Tensor> {
-        let latent = self.generate_latent_reporting(prompt, options, &mut unwatched)?;
+        let latent = self.generate_latent_reporting(prompt, options, None, &mut unwatched)?;
+        Ok(latent.expect("a run nothing asked to stop runs to the end"))
+    }
+
+    /// Whether a control package was read, so that [`QwenImage::generate_controlled`] can run.
+    pub fn has_control(&self) -> bool {
+        self.dit.control().is_some()
+    }
+
+    /// A control picture as the control chain reads it: `picture` is `(1, 3, H, W)` or
+    /// `(1, 4, H, W)` in `-1..=1`, already the size the picture is to be drawn at -- a pose, a
+    /// depth map, an edge map, whatever the preprocessor made -- and what comes back is the
+    /// `(1, 129, H / 16, W / 16)` [`Dit::forward_controlled`] takes.
+    ///
+    /// The three channels are given an opaque alpha, encoded, and followed by a mask of zeros and
+    /// a latent of zeros: nothing is kept, which is how the reference steers a picture drawn from
+    /// noise rather than one being inpainted.
+    pub fn control_conditioning(&self, picture: &Tensor) -> Result<Tensor> {
+        let Some(encoder) = &self.encoder else {
+            return Err(Error::model(
+                "this model was read without a control package, so it has no control chain",
+            ));
+        };
+
+        let picture = picture.to_device(self.device)?.cast(DType::Float)?;
+        let shape = picture.shape();
+        let rgba = match shape.as_slice() {
+            [1, 3, height, width] => {
+                let opaque = vec![1.0; (*height * *width) as usize];
+                let alpha =
+                    Tensor::from_f32(&[1, 1, *height, *width], &opaque)?.to_device(self.device)?;
+                F::cat(&picture, &alpha, 1)?
+            }
+            [1, 4, _, _] => picture,
+            _ => {
+                return Err(Error::model(format!(
+                    "a control picture is (1, 3, H, W) or (1, 4, H, W), got {shape:?}"
+                )))
+            }
+        };
+        self.check_size(shape[3], shape[2])?;
+
+        let latent = encoder.forward(&rgba.cast(self.dtype)?)?;
+        let (rows, columns) = (latent.shape_at(2)?, latent.shape_at(3)?);
+        let channels = self.config.dit.latent_channels;
+        let kept = Tensor::zeros(&[1, channels + 1, rows, columns], DType::Float, self.device)?;
+        Ok(F::cat(&latent.cast(DType::Float)?, &kept, 1)?)
+    }
+
+    /// [`QwenImage::generate`] steered by a control picture: `conditioning` is what
+    /// [`QwenImage::control_conditioning`] made of it, and `scale` how hard it steers -- one is
+    /// what the checkpoint was trained at, zero is no steering at all.
+    pub fn generate_controlled(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        conditioning: &Tensor,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let image =
+            self.generate_controlled_reporting(prompt, options, conditioning, scale, &mut unwatched)?;
+        Ok(image.expect("a run nothing asked to stop runs to the end"))
+    }
+
+    /// [`QwenImage::generate_controlled`] for a caller who wants to watch it happen.
+    pub fn generate_controlled_reporting(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        conditioning: &Tensor,
+        scale: f32,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Tensor>> {
+        let control = Some((conditioning, scale));
+        let Some(latent) = self.generate_latent_reporting(prompt, options, control, report)? else {
+            return Ok(None);
+        };
+
+        if report(GenerationProgress::Decoding).is_break() {
+            return Ok(None);
+        }
+        over_white(&self.decode(&latent)?).map(Some)
+    }
+
+    /// The latent [`QwenImage::generate_controlled`] would decode.
+    pub fn generate_controlled_latent(
+        &self,
+        prompt: &str,
+        options: &GenerationOptions,
+        conditioning: &Tensor,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let control = Some((conditioning, scale));
+        let latent = self.generate_latent_reporting(prompt, options, control, &mut unwatched)?;
         Ok(latent.expect("a run nothing asked to stop runs to the end"))
     }
 
@@ -265,6 +411,7 @@ impl QwenImage {
         &self,
         prompt: &str,
         options: &GenerationOptions,
+        control: Option<(&Tensor, f32)>,
         report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
     ) -> Result<Option<Tensor>> {
         self.check_size(options.width, options.height)?;
@@ -302,33 +449,46 @@ impl QwenImage {
             &sampler,
             &context,
             unprompted.as_ref(),
+            control,
             options,
             report,
         )
     }
 
-    /// Walk `latent` down `sampler`'s schedule. None where `report` said to stop.
+    /// Walk `latent` down `sampler`'s schedule, steered by `control` -- a conditioning and its
+    /// scale -- when there is one. None where `report` said to stop.
+    #[allow(clippy::too_many_arguments)]
     pub fn denoise_reporting(
         &self,
         latent: &Tensor,
         sampler: &FlowSampler,
         context: &Tensor,
         unprompted: Option<&Tensor>,
+        control: Option<(&Tensor, f32)>,
         options: &GenerationOptions,
         report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
     ) -> Result<Option<Tensor>> {
         let total = sampler.steps() as i32;
         let mut latent = latent.clone();
 
+        // Both passes of a guided step are steered, as the reference steers them.
+        let answer = |latent: &Tensor, timestep: f32, context: &Tensor| match control {
+            Some((conditioning, scale)) => {
+                self.dit
+                    .forward_controlled(latent, timestep, context, conditioning, scale)
+            }
+            None => self.dit.forward(latent, timestep, context),
+        };
+
         for index in 0..sampler.steps() {
             let timestep = model_timestep(sampler.sigma(index)?);
-            let velocity = self.dit.forward(&latent, timestep, context)?;
+            let velocity = answer(&latent, timestep, context)?;
 
             // `true_cfg_scale`: two passes, and a scale of one means none.
             let velocity = match unprompted {
                 None => velocity,
                 Some(unprompted) => {
-                    let plain = self.dit.forward(&latent, timestep, unprompted)?;
+                    let plain = answer(&latent, timestep, unprompted)?;
                     let difference = F::sub(&velocity, &plain)?;
                     F::add(&plain, &F::mul_scalar(&difference, options.guidance_scale)?)?
                 }

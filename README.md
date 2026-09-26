@@ -91,15 +91,16 @@ $ waifu -task img2img -m sdxl:noob -i cat.png
 
 ## Supported platforms
 
-| OS       |  Platform | CUDA       | Metal  |  avx2  |  avx512 | asimdhp | asimdfhm |
-|----------|-----------|------------|--------|--------|---------|---------|----------|
-| Linux    | x64       | ✅         |        | ✅     | ✅       |         |          |
-| Windows  | x64       | ✅         |        | ✅     | ✅       |         |          |
-| macOS    | arm64     |            | ✅     |        |         | ✅      | ✅        |
+| OS       |  Platform | CUDA       | Metal  | Vulkan |  avx2  |  avx512 | asimdhp | asimdfhm |
+|----------|-----------|------------|--------|--------|--------|---------|---------|----------|
+| Linux    | x64       | ✅         |        | ✅     | ✅     | ✅       |         |          |
+| Windows  | x64       | ✅         |        |        | ✅     | ✅       |         |          |
+| macOS    | arm64     |            | ✅     |        |        |         | ✅      | ✅        |
 
-The GPU column a machine has is the one `waifu` picks on its own -- CUDA first, then Metal,
-and the CPU kernels when there is neither. Metal is compiled in by `-DWITH_MLX=ON` and macOS is
-the only host that configures with it.
+The GPU column a machine has is the one `waifu` picks on its own -- CUDA first, then Metal, then
+Vulkan, and the CPU kernels when there is none. Metal is compiled in by `-DWITH_MLX=ON` and macOS is
+the only host that configures with it. Vulkan is compiled in by default on Linux and Windows
+(`-DWITH_VULKAN=OFF` leaves it out); it has only been run on Linux so far.
 
 The two aarch64 kernels are one choice, not two: FEAT_FHM is optional in ARMv8.2, so the half
 GEMM has a kernel whether or not the part has `fmlal`, and the backend is picked at startup by
@@ -110,11 +111,12 @@ otherwise.
 
 | `-device` | what it means |
 |---|---|
-| `auto` | The first accelerator this build has -- CUDA, then Metal -- and the CPU where there is neither. The default, and never `cuda_cpu_offload`: that one is for a card the model does not fit on, which is not a thing to decide on someone's behalf. |
+| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `cuda_cpu_offload`: that one is for a card the model does not fit on, which is not a thing to decide on someone's behalf. |
 | `cpu` | The CPU kernels. |
 | `cuda` | The card, weights moved once and kept there. |
 | `cuda_cpu_offload` | Weights stay in host memory and each is moved onto the card as it is used, so a model larger than the card still draws. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
 | `metal` | The GPU on Apple Silicon, through MLX. |
+| `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. |
 
 A build only has the devices it was configured with, so `cuda` on a `-DWITH_CUDA=OFF` build is a
 device that is not there. See the matrix above and the build section below.
@@ -196,7 +198,7 @@ weights are widened to float32 as they are read. That is also why it is the more
 two -- float32 throughout, against a float32 reference, is 1.3e-4 where the half path is 2.1e-2.
 
 ```bash
-cmake -S . -B build -DWITH_CUDA=OFF
+cmake -S . -B build -DWITH_CUDA=OFF -DWITH_VULKAN=OFF
 cmake --build build --parallel
 ```
 
@@ -248,6 +250,14 @@ cmake --build build --parallel
 ```
 
 Leave `-DWITH_MLX=ON` out for a CPU-only build.
+
+### Vulkan
+
+On by default on Linux and Windows, beside CUDA or alone; `-DWITH_VULKAN=OFF` leaves it out. No
+Vulkan SDK and no Vulkan loader is needed to build: CMake fetches the headers and builds the shader
+compiler itself, which costs about half a minute the first time, and the binary opens the loader at
+run time -- where there is none, the `vulkan` device is simply not available.
+[flint/README.md](flint/README.md#vulkan) has the details.
 
 ### Tests
 

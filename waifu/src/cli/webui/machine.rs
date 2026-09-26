@@ -81,7 +81,7 @@ pub fn describe(runtime: Runtime) -> Value {
     // The accelerators this build can actually use on this machine, which is a different question
     // from what is fitted: a card in a build with no CUDA in it is a card the page can name and
     // cannot send anything to.
-    let accelerators: Vec<&str> = [Device::Cuda, Device::Metal]
+    let accelerators: Vec<&str> = [Device::Cuda, Device::Metal, Device::Vulkan]
         .into_iter()
         .filter(|device| device.is_available())
         .map(|device| device.name())
@@ -112,8 +112,8 @@ pub fn describe(runtime: Runtime) -> Value {
 
 /// How much room is on the card, and -- when that is nothing -- why.
 ///
-/// Asked only while runs are going to CUDA. Measuring it means `cudaMemGetInfo`, and the first
-/// call to that in a process has the driver build a context on the card: several hundred
+/// Asked only while runs are going to CUDA or Vulkan. Measuring it means asking the driver, and
+/// the first time a process does that the driver builds a context on the card: several hundred
 /// megabytes of the very thing being measured. Somebody who chose the CPU chose not to touch the
 /// card at all, and a sidebar that made a context behind their back would be spending their VRAM
 /// on a picture of their VRAM.
@@ -122,11 +122,12 @@ pub fn describe(runtime: Runtime) -> Value {
 /// for one ends the process. Its card has the machine's memory anyway, which the line above
 /// already shows -- that is what `unified` is for.
 fn vram(runtime: Runtime) -> (Value, Value) {
-    if runtime.device() != Device::Cuda {
+    let device = runtime.device();
+    if device != Device::Cuda && device != Device::Vulkan {
         return (Value::Null, json!("measured while runs go to the card"));
     }
 
-    match MemorySnapshot::capture(Device::Cuda) {
+    match MemorySnapshot::capture(device) {
         Ok(memory) if memory.total > 0 => (
             json!({
                 "total": memory.total,

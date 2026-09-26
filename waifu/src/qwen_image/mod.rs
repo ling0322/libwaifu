@@ -35,10 +35,12 @@ mod dit;
 mod pipeline;
 mod vae;
 
-pub use config::{DitConfig, Prediction, QwenImageConfig, ScheduleConfig, VaeConfig};
+pub use config::{
+    ControlConfig, DitConfig, Prediction, QwenImageConfig, ScheduleConfig, VaeConfig,
+};
 pub use dit::Dit;
 pub use pipeline::QwenImage;
-pub use vae::VaeDecoder;
+pub use vae::{VaeDecoder, VaeEncoder};
 
 pub use crate::flow::{FlowSampler, SamplerConfig};
 pub use crate::krea2::{EncoderConfig, TextEncoder};

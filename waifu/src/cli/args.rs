@@ -52,11 +52,12 @@ pub struct Runtime {
 
 impl Runtime {
     /// Every place a run can go, in the order the flag's own usage lists them.
-    pub const ALL: [Runtime; 4] = [
+    pub const ALL: [Runtime; 5] = [
         Runtime::on(Device::Cpu),
         Runtime::on(Device::Cuda),
         Runtime::CUDA_CPU_OFFLOAD,
         Runtime::on(Device::Metal),
+        Runtime::on(Device::Vulkan),
     ];
 
     /// Cuda, with the package page-locked on the host and each weight moved onto the card at the
@@ -104,12 +105,14 @@ impl Runtime {
 /// Where the model should run, as `-device` spells it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceOption {
-    /// The first accelerator there is a device for -- CUDA, then Metal -- and the CPU otherwise.
+    /// The first accelerator there is a device for -- CUDA, then Metal, then Vulkan -- and the CPU
+    /// otherwise.
     Auto,
     Cpu,
     Cuda,
     CudaCpuOffload,
     Metal,
+    Vulkan,
 }
 
 impl DeviceOption {
@@ -120,15 +123,20 @@ impl DeviceOption {
             DeviceOption::Cuda => Runtime::on(Device::Cuda),
             DeviceOption::CudaCpuOffload => Runtime::CUDA_CPU_OFFLOAD,
             DeviceOption::Metal => Runtime::on(Device::Metal),
+            DeviceOption::Vulkan => Runtime::on(Device::Vulkan),
             // Never the offload one. It is slower, and what it is for is a card the model does
             // not fit on, which is not something to decide on someone's behalf.
             DeviceOption::Auto => {
-                // At most one of the two is ever built, so the order between them only decides
-                // which check runs first, not which machine gets which accelerator.
+                // At most one of CUDA and Metal is ever built, so the order between those two only
+                // decides which check runs first. Vulkan comes last because it runs on the same
+                // cards as either, through kernels of its own that are not the fastest those
+                // cards have.
                 if Device::Cuda.is_available() {
                     Runtime::on(Device::Cuda)
                 } else if Device::Metal.is_available() {
                     Runtime::on(Device::Metal)
+                } else if Device::Vulkan.is_available() {
+                    Runtime::on(Device::Vulkan)
                 } else {
                     Runtime::on(Device::Cpu)
                 }
@@ -264,6 +272,7 @@ impl Args {
             // typed both ways and being told off over the punctuation helps nobody.
             "cuda_cpu_offload" | "cuda-cpu-offload" => Ok(DeviceOption::CudaCpuOffload),
             "metal" => Ok(DeviceOption::Metal),
+            "vulkan" => Ok(DeviceOption::Vulkan),
             // Every name it would have taken, built from the list rather than written out
             // again: a name refused here is most often a name that was nearly right, and a list
             // that had drifted from the one above would be the worst possible thing to show

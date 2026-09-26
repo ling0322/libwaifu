@@ -168,7 +168,7 @@ fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Requ
         return give_up(
             shared,
             409,
-            "no model is chosen: pick one from the list of models",
+            "this session has no model to draw with: run waifu again and pick one",
         );
     };
 
@@ -594,7 +594,11 @@ fn json(value: Value) -> Reply {
 
 /// An answer that is not the one that was asked for, with the reason in the same shape everything
 /// else answers in, so that the page can show it without knowing which request it came from.
+///
+/// Said in the terminal as well, on the line before the request's own: a status code says that a
+/// request was turned away and nothing about why.
 fn refused(status: u16, said: &str) -> Reply {
+    crate::cli::webui::log::line(format_args!("refused ({status}): {said}"));
     reply(
         status,
         "application/json",

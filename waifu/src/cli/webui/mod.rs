@@ -36,6 +36,7 @@
 //! no model list, no download and no device box of its own.
 
 mod http;
+mod log;
 mod machine;
 mod state;
 mod worker;
@@ -413,10 +414,14 @@ fn serve(
                 while let Ok(mut request) = server.recv() {
                     // One at a time, which is what the channel wants and costs nothing: posting a
                     // command is a pointer move, and the work it asks for happens elsewhere.
+                    let method = request.method().to_string();
+                    let path = request.url().split('?').next().unwrap_or("/").to_string();
+                    let started = std::time::Instant::now();
                     let reply = {
                         let commands = commands.lock().unwrap_or_else(|held| held.into_inner());
                         http::answer(&shared, &commands, &mut request)
                     };
+                    log::request(&method, &path, reply.status_code().0, started.elapsed());
 
                     // A browser that navigated away mid-request is not this program's problem,
                     // and it is the commonest way for this to fail.
@@ -591,7 +596,7 @@ mod tests {
 
         let (status, body) = asked(address, "POST /api/generate", r#"{"prompt":"a cat"}"#);
         assert_eq!(status, 409);
-        assert!(body.contains("no model is chosen"), "{body}");
+        assert!(body.contains("no model to draw with"), "{body}");
     }
 
     #[test]
