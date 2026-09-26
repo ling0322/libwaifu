@@ -174,6 +174,8 @@ pub enum Unary {
     Neg,
     Abs,
     Exp,
+    /// The natural logarithm.
+    Log,
     Sqrt,
     Rsqrt,
     Square,
@@ -204,6 +206,7 @@ impl Unary {
             Unary::Neg => "neg",
             Unary::Abs => "abs",
             Unary::Exp => "exp",
+            Unary::Log => "log",
             Unary::Sqrt => "sqrt",
             Unary::Rsqrt => "rsqrt",
             Unary::Square => "square",

@@ -109,6 +109,33 @@ CATCH_TEST_CASE("test CUDA unary operators (positive domain)", "[op][cuda]") {
       cpuOps()->allClose(toCpu(cudaOps()->sqrt(x)), cpuOps()->sqrt(a), 5e-3, 5e-3));
   CATCH_REQUIRE(
       cpuOps()->allClose(toCpu(cudaOps()->rsqrt(x)), cpuOps()->rsqrt(a), 5e-3, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->log(x)), cpuOps()->log(a), 5e-3, 5e-3));
+}
+
+CATCH_TEST_CASE("test CUDA log", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Float32 across the range a mel energy covers -- from the 1e-10 floor Whisper clamps to up to
+  // thousands -- against the CPU, to float32's precision rather than half's.
+  std::vector<float> values;
+  for (int i = 0; i < 300; ++i) values.push_back(std::pow(10.0f, -10.0f + i * 0.045f));
+  Tensor a = Tensor::create<float>({3, 100}, values);
+  Tensor got = cudaOps()->log(cudaOps()->toDevice(Device::getCuda(), a));
+  CATCH_REQUIRE(got.getDType() == DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      cudaOps()->toDevice(Device::getCpu(), got), cpuOps()->log(a), 1e-6, 1e-5));
+
+  // A strided view, and log(0) = -inf, as on the CPU.
+  Tensor strided = cudaOps()->log(cudaOps()->toDevice(Device::getCuda(), a).transpose(0, 1));
+  CATCH_REQUIRE(cpuOps()->allClose(
+      cudaOps()->toDevice(Device::getCpu(), cudaOps()->contiguous(strided)),
+      cpuOps()->log(cpuOps()->contiguous(a.transpose(0, 1))),
+      1e-6,
+      1e-5));
+  Tensor zero = cudaOps()->log(cudaOps()->toDevice(Device::getCuda(), Tensor::create<float>({1}, {0.0f})));
+  float value = cudaOps()->elem(zero);
+  CATCH_REQUIRE(std::isinf(value));
+  CATCH_REQUIRE(value < 0.0f);
 }
 
 CATCH_TEST_CASE("test CUDA unary operators (shapes and strides)", "[op][cuda]") {

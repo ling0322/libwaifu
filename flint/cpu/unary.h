@@ -31,6 +31,7 @@ enum class UnaryOp {
   NEG,
   ABS,
   EXP,
+  LOG,
   SQUARE,
   SQRT,
   RSQRT,

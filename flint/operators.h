@@ -194,6 +194,8 @@ class Operators {
   virtual Tensor neg(Tensor input);
   virtual Tensor abs(Tensor input);
   virtual Tensor exp(Tensor input);
+  /// The natural logarithm; zero gives -inf and a negative number NaN, as `logf` does.
+  virtual Tensor log(Tensor input);
   virtual Tensor sqrt(Tensor input);
   virtual Tensor rsqrt(Tensor input);
   virtual Tensor sigmoid(Tensor input);

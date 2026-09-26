@@ -270,6 +270,10 @@ Tensor Operators::abs(Tensor input) {
   NOT_IMPL();
 }
 
+Tensor Operators::log(Tensor input) {
+  NOT_IMPL();
+}
+
 Tensor Operators::exp(Tensor input) {
   NOT_IMPL();
 }
