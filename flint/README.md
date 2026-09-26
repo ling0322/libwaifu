@@ -1,7 +1,7 @@
 # Flint
 
 Flint is libwaifu's native tensor and kernel runtime. It provides the tensor storage, device
-dispatch, CPU/CUDA operators, and stable C ABI used by the Rust bindings in
+dispatch, CPU, CUDA, Metal and Vulkan operators, and stable C ABI used by the Rust bindings in
 [`waifu::flint`](../waifu/src/flint).
 
 Flint is intentionally focused on inference workloads rather than being a general-purpose tensor
@@ -22,15 +22,18 @@ Flint C API (capi.h)
 	|
 	v
 Tensor + Operators dispatch
-	|             |
-	v             v
-  CPU backend    CUDA backend
+	|             |              |               |
+	v             v              v               v
+  CPU backend    CUDA backend   Metal backend   Vulkan backend
 ```
 
 - `Tensor` owns shape/stride metadata and shared storage.
 - `Operators` dispatches an operation to the backend for the tensor's device.
 - The CPU backend contains portable kernels plus AVX2, AVX-512, and ARM half-precision paths.
 - The CUDA backend contains custom inference kernels and optional FlashAttention/CUTLASS paths.
+- The Metal backend runs on MLX.
+- The Vulkan backend has GLSL compute kernels of its own, and runs on any GPU with a Vulkan 1.2
+  driver. See [Vulkan](#vulkan).
 - The C API owns no tensor storage directly; callers receive opaque handles and destroy them with
   `fl_tensor_destroy`.
 - `lutil/` contains the small utility layer used by Flint and remains a separate CMake target.
@@ -41,6 +44,8 @@ Tensor + Operators dispatch
 flint/
 |-- cpu/             CPU tensors and kernels
 |-- cuda/            CUDA tensors and kernels
+|-- metal/           Metal tensors and operators, through MLX
+|-- vulkan/          Vulkan tensors and kernels; vulkan/shaders/ holds the GLSL
 |-- lutil/           Utility code used by the native runtime
 |-- bin/             Native test and benchmark entry points
 |-- tensor.{h,cc}    Tensor metadata, views, and storage
@@ -116,6 +121,9 @@ cmake -S . -B build -DWITH_CUDA=ON -DCUDA_ARCH_NATIVE=ON
 cmake --build build --parallel
 ```
 
+Vulkan is built by default on Linux and Windows, alone or beside CUDA; `-DWITH_VULKAN=OFF` leaves
+it out. See [Vulkan](#vulkan).
+
 FlashAttention is opt-in, since its kernels are slow to compile. Build them once with
 `./third_party/install_flash_attn.sh` and add `-DWITH_FLASH_ATTN=ON` to use them.
 
@@ -132,6 +140,50 @@ build/benchmark           Native benchmark executable
 line binary, since the default target set includes the `waifu-cli` custom target that invokes
 `cargo build`. Use
 `--target flint`, `--target unittest`, or `--target benchmark` to build just one native piece.
+
+## Vulkan
+
+On by default on Linux and Windows, and off on macOS, where Metal is the GPU backend:
+
+```bash
+cmake -S . -B build                      # Linux or Windows: Vulkan included
+cmake -S . -B build -DWITH_VULKAN=OFF    # without it
+```
+
+The build needs no Vulkan SDK, and no Vulkan loader either. Configuring fetches Vulkan-Headers, volk and VulkanMemoryAllocator
+into `third_party/vulkan/`, and the build compiles glslang's `glslang` there too, unless a
+`glslangValidator` is already on the `PATH`. The GLSL in `vulkan/shaders/` is compiled to SPIR-V at
+build time and embedded in the library. `vulkan/shaders/shaders.cmake` lists the kernel variants,
+one for each element type a kernel is built for.
+
+Nothing links against a Vulkan loader. volk opens `libvulkan` when the operators are created, so
+a Vulkan build still runs on a machine that has no loader, and there `fl_is_device_available`
+reports the device as unavailable.
+
+**What a device needs:** Vulkan 1.2 with buffer device addresses, 8- and 16-bit storage and 64-bit
+integers in shaders. Kernels reach tensors through buffer device addresses passed as push
+constants, so there are no descriptor sets. On devices that offer `VK_KHR_cooperative_matrix`
+(16 x 16 x 16, half precision into float, subgroups of 32), half precision matmul and conv2d run on
+the tensor cores. Every other device runs the same products on plain shader arithmetic.
+
+**Operators:** the ones the image models use. That is the elementwise family, matmul, conv1d and
+conv2d, the norms, softmax, lookup, rotary embedding, upsampling, the GLUs, the reductions,
+rand/randn (the same Philox stream the CUDA operators draw, so a seed gives the same noise), cast,
+copy and the memory statistics. Attention is the base class's composition of matmul and softmax.
+The rest (paged attention, the KV cache, DeltaNet, sampling, fp8) is not implemented and says so.
+
+**Environment variables:**
+
+| Variable | Effect |
+|---|---|
+| `FLINT_VULKAN_DEVICE` | Pick the device by index or by part of its name. Needed to run on a software implementation such as lavapipe, which is never picked on its own. |
+| `FLINT_VULKAN_COOPERATIVE_MATRIX=0` | Do not use cooperative matrices, to compare against the portable kernels. |
+| `FLINT_VULKAN_PROFILE=1` | Time every command on the device, and print the time spent in each kernel when the process exits. |
+| `FLINT_VULKAN_VALIDATION=1` | Enable the Khronos validation layer, where it is installed. |
+
+**Tests:** `./build/unittest "[vulkan]"` checks every operator against the CPU. The hidden
+`./build/unittest "[vulkan-benchmark]"` reports the throughput of matmul and conv2d on SDXL's
+shapes.
 
 ## Tests and benchmarks
 

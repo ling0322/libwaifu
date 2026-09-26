@@ -1,0 +1,129 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// conv2d.comp on cooperative matrices, for half precision with the input channels last. The
+// input is (N, H, W, C) and the weight (K, R, S, C / groups), both contiguous, which puts eight
+// consecutive channels of one tap at one sixteen byte load; the unfolded K runs over (r, s, c)
+// with c fastest. The output is (N, K, P, Q), contiguous, and the bias is added when its address
+// is not zero. For one group of one image at a time -- gl_WorkGroupID.z, image * groups + group.
+// Every group's channel count is a multiple of eight.
+#include "common.glsl"
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t input_;
+  uint64_t weight;
+  uint64_t bias;
+  uint channels;     // C, all groups
+  uint height;
+  uint width;
+  uint outChannels;  // K, all groups
+  uint outHeight;
+  uint outWidth;
+  uint kernelHeight;
+  uint kernelWidth;
+  uint strideH;
+  uint strideW;
+  int paddingH;
+  int paddingW;
+  uint dilationH;
+  uint dilationW;
+  uint groups;
+} pc;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Vec8Buffer {
+  uvec4 v[];
+};
+
+uint image;
+uint channelsPerGroup;
+uint channelBase;
+uint outChannelBase;
+uint numPixels;  // M
+uint numOut;     // N
+uint depth;      // K
+
+uvec4 loadA8(uint m, uint k) {
+  if (m >= numPixels || k >= depth) return uvec4(0);
+
+  uint p = m / pc.outWidth;
+  uint q = m - p * pc.outWidth;
+  uint tap = k / channelsPerGroup;
+  uint c = k - tap * channelsPerGroup;
+  uint r = tap / pc.kernelWidth;
+  uint s = tap - r * pc.kernelWidth;
+
+  int y = int(p * pc.strideH + r * pc.dilationH) - pc.paddingH;
+  int x = int(q * pc.strideW + s * pc.dilationW) - pc.paddingW;
+  if (y < 0 || y >= int(pc.height) || x < 0 || x >= int(pc.width)) return uvec4(0);
+
+  uint pixel = (image * pc.height + uint(y)) * pc.width + uint(x);
+  return Vec8Buffer(pc.input_).v[(pixel * pc.channels + channelBase + c) / 8];
+}
+
+uvec4 loadB8K(uint n, uint k) {
+  if (n >= numOut || k >= depth) return uvec4(0);
+  return Vec8Buffer(pc.weight).v[((outChannelBase + n) * depth + k) / 8];
+}
+
+uvec4 loadB8N(uint k, uint n) {
+  return uvec4(0);
+}
+
+bool bAlongN() {
+  return false;
+}
+
+float biasOf(uint n) {
+  return pc.bias != 0 ? LOAD_A(pc.bias, outChannelBase + n) : 0.0;
+}
+
+#define Tile coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+
+// A tile is sixteen pixels of sixteen channels, and a channel's pixels are adjacent: column major,
+// a column apart by the whole of one channel's image.
+void storeTile(Tile tile, uint m, uint n) {
+  coopMatStore(tile, BufferC(pc.c).v, (image * pc.outChannels + outChannelBase + n) * numPixels + m,
+               numPixels, gl_CooperativeMatrixLayoutColumnMajor);
+}
+
+void storeC(uint m, uint n, float value) {
+  STORE_C(pc.c, (image * pc.outChannels + outChannelBase + n) * numPixels + m, value);
+}
+
+// Adjacent pixels of one output channel are adjacent in the output.
+#define C_ALONG_M
+
+#include "gemm_coopmat_core.glsl"
+
+void main() {
+  image = gl_WorkGroupID.z / pc.groups;
+  uint group = gl_WorkGroupID.z - image * pc.groups;
+  channelsPerGroup = pc.channels / pc.groups;
+  channelBase = group * channelsPerGroup;
+  numOut = pc.outChannels / pc.groups;
+  outChannelBase = group * numOut;
+  numPixels = pc.outHeight * pc.outWidth;
+  depth = channelsPerGroup * pc.kernelHeight * pc.kernelWidth;
+
+  gemm(numPixels, numOut, depth);
+}

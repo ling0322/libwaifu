@@ -19,7 +19,7 @@ use std::marker::PhantomData;
 use super::{check, ffi, init, Device, Error, Result};
 
 /// One slot per [`Device`], which the enum numbers from zero.
-const DEVICE_COUNT: usize = 4;
+const DEVICE_COUNT: usize = 5;
 
 /// A handle on the operators of one device.
 ///
@@ -74,7 +74,7 @@ impl Drop for Operators {
 thread_local! {
     /// One handle per device, made on first use and kept for the life of the thread.
     static PER_DEVICE: RefCell<[Option<Operators>; DEVICE_COUNT]> =
-        RefCell::new([None, None, None, None]);
+        RefCell::new([None, None, None, None, None]);
 }
 
 /// The handle this thread uses for `device`, making it if this is the first call.
@@ -118,6 +118,8 @@ pub(crate) fn transfer_operators(from: Device, to: Device) -> Result<ffi::FlOper
         raw_operators(Device::Cuda)
     } else if from == Device::Metal || to == Device::Metal {
         raw_operators(Device::Metal)
+    } else if from == Device::Vulkan || to == Device::Vulkan {
+        raw_operators(Device::Vulkan)
     } else {
         raw_operators(Device::Cpu)
     }

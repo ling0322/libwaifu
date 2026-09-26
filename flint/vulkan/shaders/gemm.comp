@@ -1,0 +1,79 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// A batched matrix multiply of strided operands: for every batch (b0, b1), C[b0, b1] =
+// A[b0, b1] B[b0, b1], A and B of type A_T with any strides -- a batch stride of zero broadcasts
+// -- and C of type C_T, contiguous. The batch is gl_WorkGroupID.z, b0 * batch1 + b1.
+#include "common.glsl"
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t a;
+  uint64_t b;
+  uint M;
+  uint N;
+  uint K;
+  uint strideAm;
+  uint strideAk;
+  uint strideBk;
+  uint strideBn;
+  uint batch1;
+  uint strideA0;
+  uint strideA1;
+  uint strideB0;
+  uint strideB1;
+} pc;
+
+uint offsetA;
+uint offsetB;
+uint offsetC;
+
+float loadA(uint m, uint k) {
+  return LOAD_A(pc.a, offsetA + m * pc.strideAm + k * pc.strideAk);
+}
+
+float loadB(uint k, uint n) {
+  return LOAD_A(pc.b, offsetB + k * pc.strideBk + n * pc.strideBn);
+}
+
+void storeC(uint m, uint n, float value) {
+  STORE_C(pc.c, offsetC + m * pc.N + n, value);
+}
+
+bool aAlongM() {
+  return pc.strideAm == 1 && pc.strideAk != 1;
+}
+
+bool bAlongN() {
+  return pc.strideBn == 1;
+}
+
+#include "gemm_core.glsl"
+
+void main() {
+  uint batch = gl_WorkGroupID.z;
+  uint b0 = batch / pc.batch1;
+  uint b1 = batch - b0 * pc.batch1;
+  offsetA = b0 * pc.strideA0 + b1 * pc.strideA1;
+  offsetB = b0 * pc.strideB0 + b1 * pc.strideB1;
+  offsetC = batch * pc.M * pc.N;
+
+  gemm(pc.M, pc.N, pc.K);
+}

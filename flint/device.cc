@@ -24,6 +24,9 @@
 #ifdef LIBWAIFU_MLX_ENABLED
 #include "flint/metal/metal_operators.h"
 #endif
+#ifdef LIBWAIFU_VULKAN_ENABLED
+#include "flint/vulkan/vulkan_operators.h"
+#endif
 
 namespace fl {
 
@@ -50,6 +53,10 @@ Device Device::getMetal() {
   return Device(Type::kMetal);
 }
 
+Device Device::getVulkan() {
+  return Device(Type::kVulkan);
+}
+
 bool Device::isCudaAvailable() {
 #ifdef LIBWAIFU_CUDA_ENABLED
   return op::cuda::CudaOperators::isAvailable();
@@ -66,6 +73,14 @@ bool Device::isMetalAvailable() {
 #endif
 }
 
+bool Device::isVulkanAvailable() {
+#ifdef LIBWAIFU_VULKAN_ENABLED
+  return op::vulkan::VulkanOperators::isAvailable();
+#else
+  return false;
+#endif
+}
+
 std::string Device::getName() const {
   switch (_type) {
     case kCpu:
@@ -76,6 +91,8 @@ std::string Device::getName() const {
       return "cuda-host";
     case kMetal:
       return "metal";
+    case kVulkan:
+      return "vulkan";
     default:
       NOT_IMPL();
   }

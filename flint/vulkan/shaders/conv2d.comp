@@ -1,0 +1,110 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// 2-D convolution as an implicit GEMM, never writing the unfolded input out. For one group of
+// one image at a time -- gl_WorkGroupID.z, image * groups + group -- the product is
+//
+//   C (P * Q, K) = unfold(input) (P * Q, C * R * S) weight^T (C * R * S, K)
+//
+// taken per group, with the input (N, C, H, W) and weight (K, C / groups, R, S) contiguous and of
+// type A_T, and the output (N, K, P, Q) contiguous and of type C_T. The bias, of type A_T, is
+// added when its address is not zero. Stride, padding and dilation are per axis, which is what
+// lets a 1-D convolution be this one over an image one row tall.
+#include "common.glsl"
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t input_;
+  uint64_t weight;
+  uint64_t bias;
+  uint channels;     // C, all groups
+  uint height;
+  uint width;
+  uint outChannels;  // K, all groups
+  uint outHeight;
+  uint outWidth;
+  uint kernelHeight;
+  uint kernelWidth;
+  uint strideH;
+  uint strideW;
+  int paddingH;
+  int paddingW;
+  uint dilationH;
+  uint dilationW;
+  uint groups;
+} pc;
+
+uint image;
+uint channelBase;     // the first input channel of this group
+uint outChannelBase;  // and the first output channel
+
+float loadA(uint m, uint k) {
+  uint p = m / pc.outWidth;
+  uint q = m - p * pc.outWidth;
+  uint kernelSize = pc.kernelHeight * pc.kernelWidth;
+  uint c = k / kernelSize;
+  uint rs = k - c * kernelSize;
+  uint r = rs / pc.kernelWidth;
+  uint s = rs - r * pc.kernelWidth;
+
+  int y = int(p * pc.strideH + r * pc.dilationH) - pc.paddingH;
+  int x = int(q * pc.strideW + s * pc.dilationW) - pc.paddingW;
+  if (y < 0 || y >= int(pc.height) || x < 0 || x >= int(pc.width)) return 0.0;
+
+  uint channel = channelBase + c;
+  return LOAD_A(pc.input_, ((image * pc.channels + channel) * pc.height + uint(y)) * pc.width +
+                               uint(x));
+}
+
+float loadB(uint k, uint n) {
+  uint perGroup = (pc.channels / pc.groups) * pc.kernelHeight * pc.kernelWidth;
+  return LOAD_A(pc.weight, (outChannelBase + n) * perGroup + k);
+}
+
+void storeC(uint m, uint n, float value) {
+  uint channel = outChannelBase + n;
+  if (pc.bias != 0) value += LOAD_A(pc.bias, channel);
+  uint spatial = pc.outHeight * pc.outWidth;
+  STORE_C(pc.c, (image * pc.outChannels + channel) * spatial + m, value);
+}
+
+// Adjacent output pixels read adjacent input pixels when the stride is one, which is nearly
+// every convolution there is. The weight is laid out along k.
+bool aAlongM() {
+  return true;
+}
+
+bool bAlongN() {
+  return false;
+}
+
+#include "gemm_core.glsl"
+
+void main() {
+  image = gl_WorkGroupID.z / pc.groups;
+  uint group = gl_WorkGroupID.z - image * pc.groups;
+  channelBase = group * (pc.channels / pc.groups);
+  outChannelBase = group * (pc.outChannels / pc.groups);
+
+  uint M = pc.outHeight * pc.outWidth;
+  uint N = pc.outChannels / pc.groups;
+  uint K = (pc.channels / pc.groups) * pc.kernelHeight * pc.kernelWidth;
+  gemm(M, N, K);
+}

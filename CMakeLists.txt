@@ -22,6 +22,15 @@ option(WITH_CUDNN "Build the benchmark's cuDNN Conv2d reference (needs FLINT_ENA
 # without it still has attention, through the block-wise fallback in operators.cc.
 option(WITH_FLASH_ATTN "Link the prebuilt FlashAttention forward kernels (slow to build)." OFF)
 option(WITH_MLX "Metal compute support, through MLX." OFF)
+# On by default where there is a Vulkan to run on. The build needs no SDK and the binary loads the
+# loader itself, so turning it on costs a machine without Vulkan nothing but build time -- about
+# half a minute, most of it compiling glslang once. macOS has Metal instead, through MLX.
+if(WIN32 OR (UNIX AND NOT APPLE))
+    set(_libwaifu_vulkan_default ON)
+else()
+    set(_libwaifu_vulkan_default OFF)
+endif()
+option(WITH_VULKAN "Vulkan compute support." ${_libwaifu_vulkan_default})
 option(CUDA_ARCH_NATIVE "Build CUDA kernels only for the GPUs in this machine." OFF)
 option(MKL_PREFIX "Prefix for MKL headers and libraries." "/opt/intel/mkl")
 
@@ -395,6 +404,91 @@ if(WITH_MLX)
     set(MLX_METALLIB_LINK_OPTION "-Wl,-sectcreate,__TEXT,__metallib,${MLX_METALLIB}")
     set_property(TARGET mlx APPEND PROPERTY
         INTERFACE_LINK_OPTIONS "${MLX_METALLIB_LINK_OPTION}")
+endif()
+
+if(WITH_VULKAN)
+    # Nothing Vulkan is linked. volk opens the loader with dlopen when the operators are first
+    # created, so a build with Vulkan still starts on a machine that has no loader, and simply
+    # reports the device as unavailable -- the same bargain an MLX build makes with a Mac that
+    # has no Metal GPU. That is also why nothing here asks for a Vulkan SDK: the headers, volk
+    # and the memory allocator are fetched source, and the one tool, the GLSL compiler, is built.
+    include(FetchContent)
+    include(ExternalProject)
+
+    set(VULKAN_SDK_TAG "vulkan-sdk-1.4.350.0")
+    set(VULKAN_THIRD_PARTY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/vulkan")
+
+    # SOURCE_SUBDIR names a directory none of them has, which is what keeps FetchContent from
+    # adding their own CMake projects: only the headers and volk.c are wanted.
+    FetchContent_Declare(vulkan_headers
+        GIT_REPOSITORY  https://github.com/KhronosGroup/Vulkan-Headers.git
+        GIT_TAG         "${VULKAN_SDK_TAG}"
+        GIT_SHALLOW     TRUE
+        SOURCE_DIR      "${VULKAN_THIRD_PARTY}/Vulkan-Headers"
+        SOURCE_SUBDIR   "_not_a_project")
+    FetchContent_Declare(volk
+        GIT_REPOSITORY  https://github.com/zeux/volk.git
+        GIT_TAG         "${VULKAN_SDK_TAG}"
+        GIT_SHALLOW     TRUE
+        SOURCE_DIR      "${VULKAN_THIRD_PARTY}/volk"
+        SOURCE_SUBDIR   "_not_a_project")
+    FetchContent_Declare(vma
+        GIT_REPOSITORY  https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+        GIT_TAG         v3.3.0
+        GIT_SHALLOW     TRUE
+        SOURCE_DIR      "${VULKAN_THIRD_PARTY}/VulkanMemoryAllocator"
+        SOURCE_SUBDIR   "_not_a_project")
+    FetchContent_MakeAvailable(vulkan_headers volk vma)
+
+    set(VULKAN_INCDIRS
+        "${VULKAN_THIRD_PARTY}/Vulkan-Headers/include"
+        "${VULKAN_THIRD_PARTY}/volk"
+        "${VULKAN_THIRD_PARTY}/VulkanMemoryAllocator/include")
+
+    # The shaders are GLSL compiled to SPIR-V at build time and embedded in the library. A
+    # glslangValidator on the PATH is used as it is; otherwise glslang's own is built, without
+    # its optimizer -- that would need SPIRV-Tools, and every driver optimizes the SPIR-V it is
+    # handed anyway.
+    find_program(GLSLANG_VALIDATOR NAMES glslangValidator glslang)
+    set(GLSLANG_DEPENDS "")
+    if(NOT GLSLANG_VALIDATOR)
+        set(GLSLANG_BUILD_ROOT "${CMAKE_BINARY_DIR}/glslang-build")
+        # Always Release, and named as such: a multi-config generator -- Visual Studio, say -- puts
+        # the binary in a directory of the configuration's name, and builds Debug when not told.
+        get_property(_libwaifu_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+        if(_libwaifu_multi_config)
+            set(GLSLANG_VALIDATOR
+                "${GLSLANG_BUILD_ROOT}/StandAlone/Release/glslang${CMAKE_EXECUTABLE_SUFFIX}")
+        else()
+            set(GLSLANG_VALIDATOR
+                "${GLSLANG_BUILD_ROOT}/StandAlone/glslang${CMAKE_EXECUTABLE_SUFFIX}")
+        endif()
+        ExternalProject_Add(glslang_external
+            GIT_REPOSITORY  https://github.com/KhronosGroup/glslang.git
+            GIT_TAG         "${VULKAN_SDK_TAG}"
+            GIT_SHALLOW     TRUE
+            SOURCE_DIR      "${VULKAN_THIRD_PARTY}/glslang"
+            BINARY_DIR      "${GLSLANG_BUILD_ROOT}"
+            CMAKE_ARGS
+                -DCMAKE_BUILD_TYPE=Release
+                -DENABLE_OPT=OFF
+                -DENABLE_HLSL=OFF
+                -DGLSLANG_TESTS=OFF
+                -DGLSLANG_ENABLE_INSTALL=OFF
+                -DBUILD_EXTERNAL=OFF
+                -DENABLE_GLSLANG_BINARIES=ON
+            BUILD_COMMAND   ${CMAKE_COMMAND} --build <BINARY_DIR> --target glslang-standalone
+                                --config Release --parallel
+            INSTALL_COMMAND ""
+            BUILD_BYPRODUCTS "${GLSLANG_VALIDATOR}"
+            LOG_CONFIGURE   ON
+            LOG_BUILD       ON
+            LOG_OUTPUT_ON_FAILURE ON)
+        set(GLSLANG_DEPENDS glslang_external)
+    endif()
+    message(STATUS "libwaifu GLSL compiler: ${GLSLANG_VALIDATOR}")
+
+    add_definitions("-DLIBWAIFU_VULKAN_ENABLED")
 endif()
 
 add_subdirectory("flint")

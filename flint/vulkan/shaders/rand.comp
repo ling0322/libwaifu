@@ -1,0 +1,86 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// Uniform or normal random floats from Philox4x32-10, the generator flint/cuda/rand.cu uses and
+// in the same arrangement, so that a seed draws the same numbers on either device: element i of
+// a draw is word i % 4 of the block at counter `base + i / 4`, keyed by the seed. Normals are
+// Box-Muller over word pairs (0, 1) and (2, 3).
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t seed;
+  uint64_t base;
+  uint numel;
+  uint normal;
+} pc;
+
+const uint kM0 = 0xD2511F53u;
+const uint kM1 = 0xCD9E8D57u;
+const uint kW0 = 0x9E3779B9u;
+const uint kW1 = 0xBB67AE85u;
+const float kTwoPow32Inv = 2.3283064e-10;
+const float kTwoPi = 6.283185307179586;
+
+uvec4 philox(uvec4 ctr, uint k0, uint k1) {
+  for (int round = 0; round < 10; ++round) {
+    if (round > 0) {
+      k0 += kW0;
+      k1 += kW1;
+    }
+    uint hi0, lo0, hi1, lo1;
+    umulExtended(kM0, ctr.x, hi0, lo0);
+    umulExtended(kM1, ctr.z, hi1, lo1);
+    ctr = uvec4(hi1 ^ ctr.y ^ k0, lo1, hi0 ^ ctr.w ^ k1, lo0);
+  }
+  return ctr;
+}
+
+float uniformFromBits(uint bits) {
+  return float(bits) * kTwoPow32Inv + kTwoPow32Inv / 2.0;
+}
+
+vec2 normalFromBits(uint b0, uint b1) {
+  float radius = sqrt(-2.0 * log(uniformFromBits(b0)));
+  float angle = kTwoPi * uniformFromBits(b1);
+  return radius * vec2(cos(angle), sin(angle));
+}
+
+void main() {
+  uint block = globalIndex();
+  uint first = block * 4;
+  if (first >= pc.numel) return;
+
+  uint64_t position = pc.base + uint64_t(block);
+  uvec4 counter = uvec4(uint(position), uint(position >> 32), 0u, 0u);
+  uvec4 bits = philox(counter, uint(pc.seed), uint(pc.seed >> 32));
+
+  vec4 values;
+  if (pc.normal != 0) {
+    values = vec4(normalFromBits(bits.x, bits.y), normalFromBits(bits.z, bits.w));
+  } else {
+    values = vec4(uniformFromBits(bits.x), uniformFromBits(bits.y), uniformFromBits(bits.z),
+                  uniformFromBits(bits.w));
+  }
+
+  for (uint i = 0; i < 4 && first + i < pc.numel; ++i) FloatBuffer(pc.c).v[first + i] = values[i];
+}

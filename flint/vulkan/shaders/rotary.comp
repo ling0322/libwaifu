@@ -1,0 +1,62 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// Rotary embedding of A (T, heads, headDim) in place, element d paired with d + headDim / 2. A's
+// rows may be spaced by any stride -- a slice of a fused projection -- but each row's heads are
+// contiguous. The cache is (positions, 2 * headDim): cosines, then sines, a full head of each.
+// Positions are longs. In float.
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+  uint64_t a;
+  uint64_t cache;
+  uint64_t positions;
+  uint numPairs;  // T * heads * headDim / 2
+  uint heads;
+  uint headDim;
+  uint rowStride;
+  uint cacheStride;
+} pc;
+
+void main() {
+  uint i = globalIndex();
+  if (i >= pc.numPairs) return;
+
+  uint halfWidth = pc.headDim / 2;
+  uint d = i % halfWidth;
+  uint head = (i / halfWidth) % pc.heads;
+  uint t = i / (halfWidth * pc.heads);
+
+  uint position = uint(LongBuffer(pc.positions).v[t]);
+  uint cacheRow = position * pc.cacheStride;
+  uint base = t * pc.rowStride + head * pc.headDim;
+
+  float x1 = LOAD_A(pc.a, base + d);
+  float x2 = LOAD_A(pc.a, base + d + halfWidth);
+  float cos1 = LOAD_A(pc.cache, cacheRow + d);
+  float cos2 = LOAD_A(pc.cache, cacheRow + d + halfWidth);
+  float sin1 = LOAD_A(pc.cache, cacheRow + pc.headDim + d);
+  float sin2 = LOAD_A(pc.cache, cacheRow + pc.headDim + d + halfWidth);
+
+  BufferA(pc.a).v[base + d] = A_T(x1 * cos1 - x2 * sin1);
+  BufferA(pc.a).v[base + d + halfWidth] = A_T(x2 * cos2 + x1 * sin2);
+}
