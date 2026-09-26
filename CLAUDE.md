@@ -50,6 +50,11 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test cosyvoice3 -- --ignored --test-threads=1
 
+# waifu/src/seed_vc/, tools/seed_vc_*
+# needs models/seed_vc.yaml and models/seed_vc_test.safetensors; docs/seed_vc.md says how
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test seed_vc -- --ignored --test-threads=1
+
 # waifu/src/indextts/, tools/indextts_* (campplus.rs and features.rs: run cosyvoice3's too)
 # needs models/indextts25.yaml and the two recordings tools/indextts_reference_voices.py writes
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
