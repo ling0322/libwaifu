@@ -29,7 +29,7 @@
 //! read as a digit in base three. The eight projections come out of the graph; the rest is on the
 //! host, where a rounding that ties to even is one call rather than an operator.
 
-use crate::flint::{DType, Device, Extent, Graph, Value};
+use crate::flint::{DType, Device, Extent, Graph, Tensor, Value};
 use crate::layers::Linear;
 use crate::Result;
 
@@ -191,6 +191,15 @@ pub fn rotary(frames: i32) -> (Vec<f32>, Vec<f32>, [i32; 3]) {
         }
     }
     (cos, sin, [frames, HEADS, half as i32])
+}
+
+/// [`rotary`] on `device`, as two tensors.
+pub fn rotary_on(frames: i32, device: Device) -> Result<(Tensor, Tensor)> {
+    let (cos, sin, shape) = rotary(frames);
+    Ok((
+        Tensor::from_f32(&shape, &cos)?.to_device(device)?,
+        Tensor::from_f32(&shape, &sin)?.to_device(device)?,
+    ))
 }
 
 /// The quantizer on the host: `(T', 8)` projections to `T'` tokens.

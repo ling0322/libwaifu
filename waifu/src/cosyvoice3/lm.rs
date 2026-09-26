@@ -49,6 +49,7 @@
 //! index from 6561 up stops a reading. So the minimum length does not prevent the end token, and
 //! it does not here either.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
@@ -317,6 +318,62 @@ pub struct Lm {
     weights: Rc<dyn ParamSource>,
     device: Device,
     dtype: DType,
+    /// Every position's rotary angles, on the device. See [`Rotary`].
+    rotary: RefCell<Rotary>,
+}
+
+/// The cosines and sines of positions `0..positions`, `(positions, heads, head_dim / 2)` each, on the
+/// device.
+///
+/// They depend on nothing but the position, so they are worked out once, when the model is read,
+/// and each pass is handed a view of the rows it needs -- the whole prefix for a prefill, one row for
+/// a step -- rather than having them computed on the host and uploaded every token. A reading that
+/// runs past the end has the table rebuilt at twice the length, which a sentence of ordinary length
+/// never reaches.
+///
+/// Every head's row is the same numbers; they are stored once per head because a binary operation
+/// here broadcasts its right operand over leading dimensions only, and the heads are not leading.
+struct Rotary {
+    cos: Tensor,
+    sin: Tensor,
+    positions: i32,
+}
+
+impl Rotary {
+    /// How many positions the table starts with: 14.7 MB of float32, and longer than any reading
+    /// of one sentence with its prompt.
+    const INITIAL_POSITIONS: i32 = 4096;
+
+    fn build(config: &Config, positions: i32, device: Device) -> Result<Rotary> {
+        let half = (config.head_dim / 2) as usize;
+        let heads = config.heads as usize;
+        let count = positions as usize * heads * half;
+        let mut cos = Vec::with_capacity(count);
+        let mut sin = Vec::with_capacity(count);
+        for position in 0..positions {
+            // `position / theta^e`, as the per-call version wrote it, so the table is the same bits.
+            let angles: Vec<(f32, f32)> = (0..half)
+                .map(|index| {
+                    let exponent = 2.0 * index as f64 / config.head_dim as f64;
+                    let angle = position as f64 / config.rope_theta.powf(exponent);
+                    (angle.cos() as f32, angle.sin() as f32)
+                })
+                .collect();
+            for _ in 0..heads {
+                for (c, s) in &angles {
+                    cos.push(*c);
+                    sin.push(*s);
+                }
+            }
+        }
+
+        let shape = [positions, config.heads, half as i32];
+        Ok(Rotary {
+            cos: Tensor::from_f32(&shape, &cos)?.to_device(device)?,
+            sin: Tensor::from_f32(&shape, &sin)?.to_device(device)?,
+            positions,
+        })
+    }
 }
 
 impl fmt::Debug for Lm {
@@ -424,6 +481,7 @@ impl Lm {
             past_names,
             kept_names,
             weights: Rc::clone(weights),
+            rotary: RefCell::new(Rotary::build(&config, Rotary::INITIAL_POSITIONS, device)?),
             device,
             dtype,
         })
@@ -433,29 +491,19 @@ impl Lm {
         &self.config
     }
 
-    /// The rotary table for positions `from..from + count`, `(count, heads, head_dim / 2)`.
+    /// The rotary rows of positions `from..from + count`, `(count, heads, head_dim / 2)`: views of
+    /// the table on the device, which is rebuilt longer first if these run past its end.
     fn rotary(&self, from: i32, count: i32) -> Result<(Tensor, Tensor)> {
-        let config = &self.config;
-        let half = (config.head_dim / 2) as usize;
-        let heads = config.heads as usize;
-
-        let mut cos = Vec::with_capacity(count as usize * heads * half);
-        let mut sin = Vec::with_capacity(count as usize * heads * half);
-        for position in from..from + count {
-            for _ in 0..heads {
-                for index in 0..half {
-                    let exponent = 2.0 * index as f64 / config.head_dim as f64;
-                    let angle = position as f64 / config.rope_theta.powf(exponent);
-                    cos.push(angle.cos() as f32);
-                    sin.push(angle.sin() as f32);
-                }
-            }
+        let end = from + count;
+        if end > self.rotary.borrow().positions {
+            let positions = end.max(2 * self.rotary.borrow().positions);
+            *self.rotary.borrow_mut() = Rotary::build(&self.config, positions, self.device)?;
         }
 
-        let shape = [count, config.heads, half as i32];
+        let table = self.rotary.borrow();
         Ok((
-            Tensor::from_f32(&shape, &cos)?.to_device(self.device)?,
-            Tensor::from_f32(&shape, &sin)?.to_device(self.device)?,
+            table.cos.slice(0, from, end)?,
+            table.sin.slice(0, from, end)?,
         ))
     }
 
