@@ -24,9 +24,9 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 
 ## Supported voices
 
-A voice is chosen on the text2speech tab the way a model is chosen on the other two, and fetched
-off the same two hubs at the first reading. `-voice` chooses one before the page opens, as `-m`
-does a model -- a name, or a manifest on the disk.
+A voice is chosen in the terminal the way a model is, when the task is text2speech, and fetched
+off the same two hubs before the page opens. `-m` names one there too -- a name, or a manifest on
+the disk -- and a voice named that way opens the text2speech page on its own.
 
 | name | model | published as |
 |---|---|---|
@@ -49,17 +49,26 @@ distilled release is for, seed 7:
 
 ## Run
 
-`webui` is the only command, and it opens a page in a browser rather than drawing and exiting:
+`waifu` asks three things in the terminal -- the task (txt2img, img2img or text2speech), the model
+for it, and the device -- fetches the model under a progress bar if it is not on the disk yet, and
+then opens a page in a browser for that task:
 
 ```bash
-$ waifu webui
-waifu is at http://127.0.0.1:7860
+$ waifu
+waifu is at http://127.0.0.1:7860 -- txt2img with sdxl:wai on cuda
 ```
 
 ![](docs/libwaifu-webui.webp)
 
-The page has three tabs: txt2img, img2img, and text2speech -- see
-[Supported voices](#supported-voices) above.
+The page is where things are drawn and said; it does not choose, download or move a model. To run
+another one, stop it and run `waifu` again. The terminal can be skipped by naming everything on
+the command line:
+
+```bash
+$ waifu -m sdxl:wai -device cuda              # txt2img; img2img if -i names a picture
+$ waifu -m indextts                           # a voice: text2speech
+$ waifu -task img2img -m sdxl:noob -i cat.png
+```
 
 ## Recent updates
 

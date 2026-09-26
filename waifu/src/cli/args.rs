@@ -21,6 +21,7 @@
 
 use std::fmt;
 
+use crate::cli::task::Task;
 use crate::{Device, Residency};
 
 /// What went wrong with what the user typed. Reported rather than exiting, so that the caller
@@ -89,23 +90,14 @@ impl Runtime {
         }
     }
 
-    /// The one this name spells, which is [`Runtime::name`] read backwards.
-    pub fn named(name: &str) -> Option<Runtime> {
-        Runtime::ALL
-            .into_iter()
-            .find(|runtime| runtime.name() == name.trim())
-    }
-
-    /// The places this build can actually send a run.
-    ///
-    /// Asked of the machine rather than of what was compiled in: a CUDA build on a machine with
-    /// no card answers the same as a build without CUDA in it, and a list that offered one anyway
-    /// would be offering a load that fails.
-    pub fn available() -> Vec<Runtime> {
-        Runtime::ALL
-            .into_iter()
-            .filter(|runtime| runtime.device().is_available())
-            .collect()
+    /// What the terminal's device list says beside the name of one this machine can use.
+    pub fn about(self) -> &'static str {
+        match self.residency {
+            Residency::Device => "ready",
+            // The one row that has to say more than that. It is the slow answer, and the slow
+            // answer picked by someone who was not told is a run that looks broken.
+            Residency::LowVram => "ready, slower: for a model larger than the card",
+        }
     }
 }
 
@@ -152,7 +144,7 @@ pub struct Args {
     device: Option<String>,
     image: Option<String>,
     port: Option<String>,
-    voice: Option<String>,
+    task: Option<String>,
     help: bool,
 }
 
@@ -184,7 +176,7 @@ impl Args {
                 "-device" | "--device" => args.device = Some(value("-device")?),
                 "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
                 "-port" | "--port" => args.port = Some(value("-port")?),
-                "-voice" | "--voice" => args.voice = Some(value("-voice")?),
+                "-task" | "--task" => args.task = Some(value("-task")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
                 other => return Err(ArgError(format!("flag provided but not defined: {other}"))),
             }
@@ -199,8 +191,8 @@ impl Args {
 
     /// The one model file to work with, if one was named.
     ///
-    /// None is not an error: without `-m` the screen offers the published models and fetches the
-    /// one that is picked. Several `-m` flags is usually a stray comma in one of them, and that
+    /// None is not an error: without `-m` the terminal offers the published models and fetches the
+    /// one that is picked. For text2speech it is the voice. Several `-m` flags is usually a stray comma in one of them, and that
     /// is an error, because guessing which of the two was meant is worse than saying so.
     pub fn model(&self) -> Result<Option<&str>, ArgError> {
         match self.models.len() {
@@ -222,11 +214,21 @@ impl Args {
         self.image.as_deref()
     }
 
-    /// The voice the speech tab reads with, if one was named: a manifest on the disk or a
-    /// published name, fetched and read at the first reading that wants it. Left out, nothing is
-    /// chosen, and one is chosen on the page the way a model is.
-    pub fn voice(&self) -> Option<&str> {
-        self.voice.as_deref()
+    /// The task the page is served for, if one was named.
+    ///
+    /// None is not an error: beside `-m` the task is what the model is -- a voice reads, anything
+    /// else draws -- and without `-m` the terminal asks.
+    pub fn task(&self) -> Result<Option<Task>, ArgError> {
+        let Some(task) = &self.task else {
+            return Ok(None);
+        };
+
+        Task::named(task).map(Some).ok_or_else(|| {
+            ArgError(format!(
+                "invalid task \"{task}\": must be one of {}",
+                Task::ALL.map(Task::name).join(", ")
+            ))
+        })
     }
 
     /// The port to serve the page on, if one was named.
@@ -282,15 +284,17 @@ impl Args {
 pub fn print_options() {
     eprintln!(
         "  -device string\n    \tinference device, one of cpu, cuda, cuda_cpu_offload, metal or \
-         auto (default \"auto\"). cuda_cpu_offload keeps the weights in host memory and moves each \
+         auto (default \"auto\"). Without -m it is where the terminal's device list starts. \
+         cuda_cpu_offload keeps the weights in host memory and moves each \
          one onto the card as it is used, so that a model larger than the card can still draw; it \
          is slower, since the whole model crosses the bus once per step."
     );
     eprintln!(
-        "  -m value\n    \tthe model to draw with: either a manifest file, which has the suffix \
-         \".yaml\" and names the packages the weights are in, or the name of a published model, \
-         which is fetched on first use. Left out, the page offers the published ones to pick \
-         from. The names are: {}.",
+        "  -m value\n    \tthe model to draw with, or the voice to read with: either a manifest \
+         file, which has the suffix \".yaml\" and names the packages the weights are in, or the \
+         name of a published model, which is fetched before the page opens. Left out, the \
+         terminal asks for the task, the model and the device, and fetches what is picked. The \
+         names are: {}.",
         crate::cli::hub::names().join(", ")
     );
     eprintln!(
@@ -299,10 +303,10 @@ pub fn print_options() {
          away from it is what the denoising strength box says."
     );
     eprintln!(
-        "  -voice value\n    \tthe voice the text2speech tab starts with: a published name, such \
-         as \"indextts\", or a manifest file of a speech model -- IndexTTS-2.5 or \
-         Fun-CosyVoice3. Left out, one is chosen on the \
-         page, the way a model is, and fetched at the first reading."
+        "  -task string\n    \twhat the page is for, one of {}. Beside -m it can be left out: a \
+         voice reads -- a published one, or a manifest of IndexTTS-2.5 or Fun-CosyVoice3 -- and \
+         a picture model draws, from the picture where -i names one.",
+        Task::ALL.map(Task::name).join(", ")
     );
     eprintln!(
         "  -port int\n    \tthe port to serve the page on (default 7860). Left out, the first \
@@ -460,6 +464,32 @@ mod tests {
             let error = args(&["-port", typed]).unwrap().port().unwrap_err();
             assert!(error.to_string().contains("invalid port"), "{typed}");
         }
+    }
+
+    #[test]
+    fn reads_the_task_and_refuses_one_there_is_not() {
+        assert_eq!(args(&[]).unwrap().task().unwrap(), None);
+        assert_eq!(
+            args(&["-task", "img2img"]).unwrap().task().unwrap(),
+            Some(Task::Img2Img)
+        );
+        assert_eq!(
+            args(&["--task=text2speech"]).unwrap().task().unwrap(),
+            Some(Task::Text2Speech)
+        );
+
+        // Every name it would have taken, for the reason the device's refusal lists them.
+        let error = args(&["-task", "sing"]).unwrap().task().unwrap_err();
+        for task in Task::ALL {
+            assert!(error.to_string().contains(task.name()), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_offload_device_says_what_it_costs() {
+        // The one row in the terminal's device list anybody has to be told something about.
+        assert!(Runtime::CUDA_CPU_OFFLOAD.about().contains("slower"));
+        assert!(!Runtime::ALL[0].about().contains("slower"));
     }
 
     #[test]

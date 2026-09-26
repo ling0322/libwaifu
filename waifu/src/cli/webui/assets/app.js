@@ -53,34 +53,6 @@ function room(bytes) {
   return `${(bytes / 1_000).toFixed(0)} kB`;
 }
 
-// -- what the browser keeps ---------------------------------------------------------------------
-
-/**
- * The one answer this page keeps on its own rather than asking the program for.
- *
- * A cookie rather than a setting in the program, because it is about who is sitting here and not
- * about what is being drawn: a machine somebody else can open the page on should not have been
- * answered on their behalf, and the same person coming back to the same browser should not be
- * asked twice. A year, because being asked again next week is being asked twice.
- */
-const KEPT_A_YEAR = 365 * 24 * 60 * 60;
-
-/** What the browser is holding under this name, or an empty string where it holds nothing. */
-function kept(name) {
-  const here = document.cookie.split("; ").find((pair) => pair.startsWith(`${name}=`));
-  return here ? decodeURIComponent(here.slice(name.length + 1)) : "";
-}
-
-/** Keeps an answer under that name, or forgets it -- an empty value is the forgetting. */
-function keep(name, value) {
-  const age = value ? KEPT_A_YEAR : 0;
-  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${age}; SameSite=Lax`;
-}
-
-/** Whether the models marked not for all audiences are shown in the list rather than left out. */
-const SHOW_EXPLICIT = "waifu_show_explicit";
-
-// -- recordings -----------------------------------------------------------------------------------
 
 /**
  * How much of a recording is worth keeping, in seconds.
@@ -238,22 +210,18 @@ const DRAWS = ["txt2img", "img2img"];
 const SPEAKS = "text2speech";
 
 /**
- * Every tab, always: the two that draw, and text2speech.
- *
- * The speech tab is where a voice is chosen, the way the model is chosen on the other two, so it
- * is there whether or not one has been -- none when `-voice` names none, and even the stand-in
- * `tones`, whose tab says at the top that it is not speech.
+ * The tabs this session has, which the terminal decided: the task was chosen there, and the model
+ * with it. A voice has its one tab. A picture model has txt2img, and img2img beside it where it
+ * can start from a picture -- the same model either way, so moving between the two throws nothing
+ * away, and a picture drawn on one can be sent to the other.
  */
-const TABS = [...DRAWS, SPEAKS];
+function tabsFor(state) {
+  if (!state) return [];
+  if (state.task === SPEAKS) return [SPEAKS];
+  return state.model?.draws_from_a_picture ? DRAWS : [DRAWS[0]];
+}
 
-/**
- * The kinds of run there are, one under the other.
- *
- * None of them is ever disabled. Which kind of run comes first and the model second -- and
- * changing between the two that draw un-chooses the model, so a model that cannot start from a
- * picture is not a reason to bar the way to the page that starts from one. What that model
- * cannot do is said on the page it is chosen on, beside the button that would have asked for it.
- */
+/** The kinds of run this session can do, one under the other. */
 function Nav({ tabs, tab, onTab }) {
   return html`
     <nav className="nav">
@@ -377,58 +345,46 @@ function Meter({ used, total }) {
 }
 
 /**
- * What is going to be drawn with, and where: the two things a run needs before any of its own
- * settings mean anything, at the head of the column they belong to.
+ * What a run is going to be drawn or read with, and where, as they were chosen in the terminal.
  *
- * The model is a button rather than a list. What the list has to say about each one -- what is on
- * the disk, what each costs to fetch, what can be deleted -- does not go in a dropdown, so the
- * dropdown is not offered anywhere; this is the one way to the list and the one place the answer
- * is shown.
+ * Said and not offered. The model and the device are settled before the page opens -- the model
+ * fetched there, under its own bar -- and a box here that could change them would be a second
+ * place to decide what the first had already decided. To run something else, the terminal is
+ * where to go back to.
  */
-function ModelAndDevice({ state, progress, onDevice, onModels }) {
-  const chosen = state?.model;
-
-  // Chosen is not read. What it costs to start a run is worth saying before the run, because it
-  // is the difference between four seconds and a download of several gigabytes.
-  const standing = !chosen
-    ? "nothing chosen yet -- a run needs one"
-    : chosen.in_memory
-      ? "read, and on the device"
-      : chosen.on_disk
-        ? "on the disk -- read at the first run"
-        : "not downloaded yet -- download it to begin";
-
+function Chosen({ label, chosen, device, standing, children }) {
   return html`
     <div className="card">
       <div className="row">
-        <${Field} label="Model" kind="grow">
-          ${/* Lit up while there is nothing chosen, because until there is, this is the only
-               thing on the page that does anything; an ordinary button once it has been. */ ""}
-          <button
-            className=${`plain wide picker${chosen ? "" : " next"}`}
-            onClick=${onModels}
-          >
-            ${chosen ? chosen.full_name : "Choose a model"}
-          </button>
+        <${Field} label=${label} kind="grow">
+          <div className="fixed" title=${chosen?.name ?? ""}>${chosen?.full_name ?? "none"}</div>
         <//>
         <${Field} label="Device" kind="short">
-          ${/* Said in the tooltip rather than in a paragraph of its own: this is two words at the
-               top of a column of settings, not one of the settings. */ ""}
-          <select
-            value=${state?.device ?? ""}
-            disabled=${!!progress.busy}
-            title="Where runs go. Changing it lets go of whatever weights are in memory; the next run reads them again on the device chosen."
-            onChange=${(e) => onDevice(e.target.value)}
-          >
-            ${(state?.devices ?? []).map(
-              (device) => html`<option key=${device} value=${device}>${device}</option>`,
-            )}
-          </select>
+          <div className="fixed">${device ?? ""}</div>
         <//>
       </div>
       <p className="about">${standing}</p>
+      ${children}
     </div>
   `;
+}
+
+/** How far a model or a voice is from being ready, in the words the card under it carries. */
+function standingOf(chosen, first) {
+  if (!chosen) return "nothing was chosen";
+  if (chosen.in_memory) return "read, and on the device";
+  if (chosen.on_disk) return `on the disk -- read ${first}`;
+  return "not on the disk -- quit, and run waifu again to fetch it";
+}
+
+function ModelAndDevice({ state }) {
+  const chosen = state?.model;
+  return html`<${Chosen}
+    label="Model"
+    chosen=${chosen}
+    device=${state?.device}
+    standing=${standingOf(chosen, "before the first run")}
+  />`;
 }
 
 // -- what to draw -------------------------------------------------------------------------------
@@ -494,41 +450,6 @@ function Prompts({ form, change, canDraw, drawing, fetching, guided, onDraw, onI
             : fetching
               ? "Stop the download. The packages that have come down are kept, and fetching it again carries on from there"
               : "Nothing to stop. A run can be stopped while it is drawing and a model while it is coming down; reading one onto the card cannot be stopped part way"}
-          onClick=${onInterrupt}
-        >
-          Cancel
-        </button>
-      </div>
-    </section>
-  `;
-}
-
-/**
- * What stands where the prompt and Generate do while what is chosen is not on the disk: a line
- * saying so, and a Download button in Generate's place.
- *
- * The boxes are not shown until it is here. A run of a model that is not here starts with a
- * download of several gigabytes, and a page that let somebody type a prompt and press Generate
- * first would be hiding that behind the button.
- */
-function DownloadBar({ chosen, busy, fetching, onDownload, onInterrupt }) {
-  return html`
-    <section className="prompts fetch-first">
-      <div className="card download-says">
-        <div className="card-title">${chosen.full_name} is not downloaded yet</div>
-        <p className="about">
-          Download it to begin. It is several gigabytes, and it is kept afterwards, so this is
-          once.
-        </p>
-      </div>
-      <div className="go">
-        <button className="generate download" disabled=${busy} onClick=${onDownload}>
-          ${fetching ? "Downloading..." : "Download"}
-        </button>
-        <button
-          className="interrupt"
-          disabled=${!fetching}
-          title="Stop the download. What has come down is kept, and downloading again carries on from there"
           onClick=${onInterrupt}
         >
           Cancel
@@ -636,49 +557,18 @@ function voiceSays(voice) {
   }`;
 }
 
-/**
- * What is going to speak, and where -- the head of the settings column on the speech tab.
- *
- * The same button the model is on the other two tabs, opening the same list with the voices in
- * it: a voice is fetched, kept and deleted the way a model is, and read at the first reading.
- */
-function VoiceAndDevice({ state, progress, onDevice, onVoices }) {
+/** What is going to speak, and where -- the head of the settings column on the speech tab. */
+function VoiceAndDevice({ state }) {
   const voice = state?.voice;
-
-  // What it costs to start a reading, said before the reading for the reason the model's is:
-  // it is the difference between a few seconds and a download of several gigabytes.
-  const standing = !voice
-    ? "nothing chosen yet -- a reading needs a voice"
-    : voice.in_memory
-      ? "read, and on the device"
-      : voice.on_disk
-        ? "on the disk -- read at the first reading"
-        : "not downloaded yet -- download it to begin";
-
   return html`
-    <div className="card">
-      <div className="row">
-        <${Field} label="Voice" kind="grow">
-          <button className=${`plain wide picker${voice ? "" : " next"}`} onClick=${onVoices}>
-            ${voice ? voice.full_name : "Choose a voice"}
-          </button>
-        <//>
-        <${Field} label="Device" kind="short">
-          <select
-            value=${state?.device ?? ""}
-            disabled=${!!progress.busy}
-            title="Where runs go. Changing it lets go of whatever weights are in memory; the next run reads them again on the device chosen."
-            onChange=${(e) => onDevice(e.target.value)}
-          >
-            ${(state?.devices ?? []).map(
-              (device) => html`<option key=${device} value=${device}>${device}</option>`,
-            )}
-          </select>
-        <//>
-      </div>
-      <p className="about">${standing}</p>
+    <${Chosen}
+      label="Voice"
+      chosen=${voice}
+      device=${state?.device}
+      standing=${standingOf(voice, "at the first reading")}
+    >
       ${voice && html`<p className="about">${voiceSays(voice)}</p>`}
-    </div>
+    <//>
   `;
 }
 
@@ -946,19 +836,12 @@ function SpeechSettings({
   onHold,
   onClear,
   onAnySeed,
-  onDevice,
-  onVoices,
 }) {
   const voice = state?.voice;
 
   return html`
     <div className="settings">
-      <${VoiceAndDevice}
-        state=${state}
-        progress=${progress}
-        onDevice=${onDevice}
-        onVoices=${onVoices}
-      />
+      <${VoiceAndDevice} state=${state} />
 
       ${/* Nothing below this until there is a voice on the disk, for the reason there is nothing
            below the model on the other tabs until there is one. */ ""}
@@ -1051,8 +934,6 @@ function Settings({
   onClear,
   onAnySeed,
   onLastSeed,
-  onDevice,
-  onModels,
 }) {
   const model = state?.model;
   const why = model?.no_picture_because;
@@ -1076,12 +957,7 @@ function Settings({
 
   return html`
     <div className="settings">
-      <${ModelAndDevice}
-        state=${state}
-        progress=${progress}
-        onDevice=${onDevice}
-        onModels=${onModels}
-      />
+      <${ModelAndDevice} state=${state} />
 
       ${/* Nothing below this is worth showing until there is a model on the disk: every one of
            them is a setting for one, and until it is downloaded the thing to do is the Download
@@ -1264,243 +1140,6 @@ function Settings({
   `;
 }
 
-// -- choosing a model ---------------------------------------------------------------------------
-
-/** What is on the disk of one model, in the one line the row has for it. */
-function onDisk(model) {
-  if (model.cached) return `on the disk -- ${room(model.bytes)}`;
-  // Not fetched and not nothing: a fetch that was stopped part way, which is worth saying,
-  // because what is there is what the next fetch does not have to bring down again.
-  if (model.bytes > 0) return `part fetched -- ${room(model.bytes)} of it is here`;
-  return "not downloaded yet";
-}
-
-/**
- * The question asked before the whole list is shown.
- *
- * A box of this page's own and not the browser's `confirm`: that one arrives wearing the
- * operating system's clothes rather than this page's, cannot be read by anyone who has told the
- * browser to stop a page putting boxes up, and pins the words to two buttons whose labels are
- * not ours to write. What is being agreed to here is worth a box that looks like it came from
- * the thing that is asking.
- *
- * No is the answer this box gives if it is not really read: it is the one the keyboard lands on,
- * the one Escape gives, the one a click beside the box gives, and the one wearing the colour that
- * says which button a box expects to be pressed. Continue is a plain button that has to be aimed
- * at. A question about what somebody is about to be shown should not be answerable by pressing
- * the key that dismissed whatever was on the screen before it.
- */
-function AskAboutTheList({ onYes, onNo }) {
-  useEffect(() => {
-    const pressed = (key) => {
-      if (key.key === "Escape") {
-        key.preventDefault();
-        onNo();
-      }
-    };
-    document.addEventListener("keydown", pressed);
-    return () => document.removeEventListener("keydown", pressed);
-  }, [onNo]);
-
-  return html`
-    <div className="veil above" onClick=${onNo}>
-      <div className="dialog ask-dialog" onClick=${(event) => event.stopPropagation()}>
-        <div className="card-title">Show the full model list?</div>
-        ${/* Not `about`, which is the small grey type a field wears underneath it. This is the
-             question, and the question is the reason the box is on the screen. */ ""}
-        <p className="ask-says">
-          The full model list may include Not-For-All-Audiences models that may generate adult or
-          explicit images. Do you want to continue?
-        </p>
-        <div className="ask-do">
-          <button className="plain next" autoFocus onClick=${onNo}>Cancel</button>
-          <button className="plain" onClick=${onYes}>Continue</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-/**
- * Every model this build knows, what is on the disk of each, and the two things that can be done
- * about it.
- *
- * Over the page rather than a page of its own: what is being drawn is decided before what it is
- * drawn with, and a screen that made somebody leave their prompt to go and change the model would
- * be putting the two the other way round. Choosing reads nothing -- it says which model the next
- * run is of, and the run is what reads it.
- *
- * The ones marked not for all audiences are not in the list until somebody asks for them. Left
- * out rather than greyed out: a list of names is the one thing on this screen somebody else can
- * read over a shoulder, and a name greyed out is still a name read. The asking is one click, and
- * the click says what is behind it before it lands; the answer is remembered, so it is asked once
- * and not every time the list is opened.
- *
- * The same list for the voices when `voices` is set: the speech tab's button opens it, and what
- * there is to say of a voice -- what is on the disk, what it costs to fetch, that it can be
- * deleted -- is what there is to say of a model. None of them is marked, so the question above is
- * never asked of them.
- */
-function ModelPicker({
-  state,
-  progress,
-  note,
-  voices,
-  fromPicture,
-  onChoose,
-  onForget,
-  onRefresh,
-  onClose,
-}) {
-  const chosen = voices ? state?.voice : state?.model;
-  const busy = !!progress.busy;
-
-  /** Whether the marked ones are in the list. Read from the browser rather than started at no,
-   *  because this box is built again every time it is opened and the answer outlives it. */
-  const [shown, setShown] = useState(() => kept(SHOW_EXPLICIT) === "yes");
-
-  const said = (yes) => {
-    keep(SHOW_EXPLICIT, yes ? "yes" : "");
-    setShown(yes);
-  };
-
-  /** Whether the question about the full list is up. Asked on the way in and not on the way out:
-   *  somebody putting the list back the way it was needs no warning about it. */
-  const [asking, setAsking] = useState(false);
-
-  // The chosen one is in the list whatever it is. A model can be chosen from the command line, and
-  // a list that left the chosen one out would be a list with no "Chosen" in it and no way back to
-  // the model whose numbers are in the boxes.
-  // On img2img, only the models that can start from a picture: offering one that cannot is
-  // offering a choice that fails the moment a run is asked of it.
-  const all = ((voices ? state?.voices : state?.models) ?? []).filter(
-    (model) => !fromPicture || model.draws_from_a_picture,
-  );
-  const models = all.filter((model) => shown || !model.explicit || model.name === chosen?.name);
-
-  // How many the button is about. Counted off the whole list rather than as what the filter
-  // dropped, because once they are shown the filter drops none and the button still has to say
-  // what putting them back would hide.
-  const marked = all.filter((model) => model.explicit && model.name !== chosen?.name).length;
-
-  return html`
-    <${Fragment}>
-    <div className="veil" onClick=${onClose}>
-      ${/* The box itself swallows the click that would close it: a list is something people click
-           about in, and every one of those clicks lands on the veil underneath. */ ""}
-      <div className="dialog models-dialog" onClick=${(event) => event.stopPropagation()}>
-        <div className="dialog-top">
-          <div className="card-title">${voices ? "Choose a voice" : "Choose a model"}</div>
-          ${/* At the top rather than under the list: it is about the list as a whole, and a
-               button that changes what is in a list belongs where the list starts. A plain button
-               like the two beside it, with a count on it while there is something behind it --
-               the count is there to be found by somebody who does not know the rest of the list
-               exists, and says how much of it there is; a button that only puts back what is on
-               the screen already has nothing to count. */ ""}
-          ${marked > 0 &&
-          html`
-            <button
-              className=${shown ? "plain" : "plain more"}
-              title=${shown
-                ? `${marked} of these are marked not for all audiences`
-                : `${marked} more, marked not for all audiences, are left out of this list`}
-              onClick=${() => (shown ? said(false) : setAsking(true))}
-            >
-              ${shown
-                ? "Show fewer models"
-                : html`Show all models <span className="count">+${marked}</span>`}
-            </button>
-          `}
-          <button className="plain" title="Look again at what is on the disk" onClick=${onRefresh}>
-            ↻
-          </button>
-          <button className="plain" onClick=${onClose}>Close</button>
-        </div>
-
-        <p className="about">
-          Click one to choose it. Choosing reads nothing: the weights are read by the first run
-          that needs them, and fetched first -- several gigabytes, kept afterwards -- where they
-          are not here yet.
-        </p>
-        ${note?.bad && html`<div className="note bad">${note.said}</div>`}
-
-        <div className="models">
-          ${models.map((model) => {
-            const here = chosen?.name === model.name;
-            // The card is the button: clicking anywhere on it chooses it. The one already chosen
-            // has nothing to change, so clicking it only puts the list away.
-            const pick = () => (here ? onClose() : onChoose(model.name));
-            return html`
-              <div
-                key=${model.name}
-                className=${`card model${here ? " here" : ""}`}
-                role="button"
-                tabIndex="0"
-                onClick=${pick}
-                onKeyDown=${(key) => {
-                  if (key.target !== key.currentTarget) return;
-                  if (key.key === "Enter" || key.key === " ") {
-                    key.preventDefault();
-                    pick();
-                  }
-                }}
-              >
-                <div className="model-what">
-                  <div className="model-name">
-                    ${model.full_name}
-                    <span className="model-id">${model.name}</span>
-                    ${here &&
-                    html`<span className="badge">${chosen.in_memory ? "in memory" : "chosen"}</span>`}
-                    ${/* Said on the row as well as on the button that shows them, because once
-                         they are shown they are eight rows among eight and the name alone does
-                         not say which is which. */ ""}
-                    ${model.explicit &&
-                    html`<span className="badge explicit">not for all audiences</span>`}
-                  </div>
-                  <p className="about">${onDisk(model)}</p>
-                  ${/* How this one runs, as far as it is known before it is read: out of its
-                       manifest where the package is here, and guessed from the name where it is
-                       not. */ ""}
-                  ${here &&
-                  html`<p className="about">
-                    ${voices
-                      ? voiceSays(chosen)
-                      : `${chosen.sampler} -- ${chosen.steps} steps -- ${chosen.width} x ${chosen.height}`}
-                  </p>`}
-                </div>
-
-                ${/* Kept to itself: a click on Delete is not a click on the card, and deleting a
-                     model is not a reason to choose it. */ ""}
-                <div className="model-do" onClick=${(event) => event.stopPropagation()}>
-                  <button
-                    className="plain away"
-                    disabled=${busy || model.bytes === 0}
-                    onClick=${() => onForget(model.name)}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            `;
-          })}
-        </div>
-      </div>
-    </div>
-    ${/* Beside the list and not inside it, so that it is over the box rather than in it: the box
-         scrolls, and a question that scrolled with it would be one you could scroll off the
-         screen without answering. */ ""}
-    ${asking &&
-    html`<${AskAboutTheList}
-      onYes=${() => {
-        setAsking(false);
-        said(true);
-      }}
-      onNo=${() => setAsking(false)}
-    />`}
-    <//>
-  `;
-}
-
 // -- what came of it ----------------------------------------------------------------------------
 
 /** The bar, which is the only thing on the page that moves on its own. */
@@ -1557,7 +1196,10 @@ function Output({ state, progress, note, showing, onShow, onSend, onReuse, onDel
       html`
         <div className="actions">
           <a className="plain" href=${`/picture/${picture.file}`} download=${picture.file}>Save</a>
-          <button className="plain" onClick=${onSend}>Send to img2img</button>
+          ${/* Only where there is an img2img tab to send it to, which is a model that can start
+               from a picture. */ ""}
+          ${state?.model?.draws_from_a_picture &&
+          html`<button className="plain" onClick=${onSend}>Send to img2img</button>`}
           <button className="plain" onClick=${() => onReuse(picture)}>Reuse these settings</button>
           ${/* Off to the side of the three that keep it, because it is the one that does not. */ ""}
           <button className="plain away last" onClick=${() => onDelete(picture)}>Delete</button>
@@ -1674,12 +1316,10 @@ function App() {
    *  keeps the column from flashing a row of empty labels while the page opens. */
   const [machine, setMachine] = useState(null);
 
-  /** Which tab is on top. The only thing on this page the program does not know about: it decides
-   *  what a run is asked for, not what the program is doing. */
-  const [tab, setTab] = useState("txt2img");
-
-  /** Which list is up over the page: "model", "voice", or null for neither. */
-  const [picking, setPicking] = useState(null);
+  /** Which tab is on top. It starts on the task chosen in the terminal, once the first state has
+   *  said which that was; after that it is the page's own, since it decides what a run is asked
+   *  for and not what the program is doing. */
+  const [tab, setTab] = useState(null);
 
   /** The picture in the big frame, which is the newest one until somebody clicks another. */
   const [showing, setShowing] = useState(null);
@@ -1822,14 +1462,15 @@ function App() {
     });
   }, [state, voiceDefaults]);
 
-  // A picture named on the command line opens the tab it is for: somebody who passed -i has said
-  // which kind of run they came here to do. Once, on the first state this page ever reads.
+  // The page opens on the task chosen in the terminal. Once, on the first state this page ever
+  // reads: a tab somebody has moved to since is theirs.
   const arrived = useRef(false);
   useEffect(() => {
     if (arrived.current || !state) return;
     arrived.current = true;
-    if (state.holding_a_picture && state.model?.draws_from_a_picture) setTab("img2img");
+    setTab(state.task);
   }, [state]);
+  const tabs = tabsFor(state);
 
   // What this page has to say beats what the program had to say: a complaint is about the click
   // that was just made, and the note is about whatever happened last on the other side.
@@ -1900,76 +1541,6 @@ function App() {
     document.addEventListener("keydown", pressed);
     return () => document.removeEventListener("keydown", pressed);
   }, []);
-
-  /** Says which model runs are of, or that none is. Reads nothing: the first run does that. */
-  const chooseModel = useCallback(async (name) => {
-
-    // Out of the way first: what was asked for is what the button that opened this said, and the
-    // page behind it is the one the choice was made for.
-    setPicking(null);
-    const answer = await ask("POST", "/api/model", { model: name ?? null });
-    if (!answer.ok) return setComplaint(answer.error);
-    await readState();
-  }, [readState]);
-
-  /** Says which voice readings are of. Reads nothing either: the first reading does that. */
-  /** Downloads a model or voice without reading it. The bar says how far along it is. */
-  const download = useCallback(
-    async (name) => {
-      if (!name) return;
-      const answer = await ask("POST", "/api/fetch", { name });
-      if (!answer.ok) return setComplaint(answer.error);
-      await readState();
-    },
-    [readState],
-  );
-
-  const chooseVoice = useCallback(
-    async (name) => {
-      setPicking(null);
-      const answer = await ask("POST", "/api/voice-model", { voice: name });
-      if (!answer.ok) return setComplaint(answer.error);
-      await readState();
-    },
-    [readState],
-  );
-
-  /**
-   * Opens the other kind of run, and un-chooses the model on the way.
-   *
-   * What is worth drawing with is a question about the run: the model that was picked to draw
-   * from a prompt is not automatically the one to redraw a picture with, and one of them cannot
-   * do the second at all. So the choice is made again for the run it is being made about.
-   */
-  const switchTask = useCallback(
-    (which) => {
-      setTab((tab) => {
-        // Only between the two that draw. The speech tab picks no model and has no opinion about
-        // which one is chosen, so passing through it is not a reason to throw somebody's choice
-        // away and make them fetch it back.
-        if (tab !== which && tab !== SPEAKS && which !== SPEAKS) chooseModel(null);
-        return which;
-      });
-    },
-    [chooseModel],
-  );
-
-  const useDevice = useCallback(async (device) => {
-    const answer = await ask("POST", "/api/device", { device });
-    if (!answer.ok) setComplaint(answer.error);
-  }, []);
-
-  const forgetModel = useCallback(
-    async (name) => {
-      if (!name) return;
-      if (!confirm(`Delete everything fetched of ${name}? It can be fetched again.`)) return;
-
-      const answer = await ask("DELETE", "/api/model", { model: name });
-      if (!answer.ok) return setComplaint(answer.error);
-      await readState();
-    },
-    [readState],
-  );
 
   /** Holds a picture to draw from, and shows it once the program has it. */
   const hold = useCallback(
@@ -2102,7 +1673,7 @@ function App() {
 
     <div className="below">
       <aside className="side">
-        <${Nav} tabs=${TABS} tab=${tab} onTab=${switchTask} />
+        <${Nav} tabs=${tabs} tab=${tab} onTab=${setTab} />
         ${/* Under the tabs rather than beside the settings. It is not a setting -- there is
              nothing on it to change -- and what it is is the ground everything else on the page
              stands on, which is where the column's other permanent thing already is. */ ""}
@@ -2116,25 +1687,15 @@ function App() {
       <main>
         ${tab === SPEAKS
           ? html`
-              ${/* The same rule as the prompt box: until a voice is chosen there is nothing to
-                   read with, and the card that chooses one is what is left on the screen. */ ""}
               ${!!state?.voice &&
-              (state.voice.on_disk
-                ? html`<${SayBox}
-                    form=${form}
-                    change=${change}
-                    canSpeak=${canSpeak}
-                    speaking=${!!progress.speaking}
-                    onSpeak=${speak}
-                    onInterrupt=${() => ask("POST", "/api/interrupt")}
-                  />`
-                : html`<${DownloadBar}
-                    chosen=${state.voice}
-                    busy=${!!progress.busy}
-                    fetching=${!!progress.fetching}
-                    onDownload=${() => download(state.voice.name)}
-                    onInterrupt=${() => ask("POST", "/api/interrupt")}
-                  />`)}
+              html`<${SayBox}
+                form=${form}
+                change=${change}
+                canSpeak=${canSpeak}
+                speaking=${!!progress.speaking}
+                onSpeak=${speak}
+                onInterrupt=${() => ask("POST", "/api/interrupt")}
+              />`}
 
               <section className="panes">
                 <${SpeechSettings}
@@ -2145,8 +1706,6 @@ function App() {
                   onHold=${holdRecording}
                   onClear=${clearRecording}
                   onAnySeed=${() => change("seed", "-1")}
-                  onDevice=${useDevice}
-                  onVoices=${() => setPicking("voice")}
                 />
                 <${ClipOutput}
                   state=${state}
@@ -2160,28 +1719,17 @@ function App() {
               </section>
             `
           : html`
-              ${/* Until a model is chosen there is nothing to write a prompt for, so there is no
-                   prompt box and no button under it. What is left on the screen is the one card
-                   that chooses one, which is the only thing that was ever going to work. */ ""}
               ${!!chosen &&
-              (chosen.on_disk
-                ? html`<${Prompts}
-                    form=${form}
-                    change=${change}
-                    canDraw=${canDraw}
-                    guided=${chosen.takes_guidance !== false}
-                    drawing=${!!progress.drawing}
-                    fetching=${!!progress.fetching}
-                    onDraw=${generate}
-                    onInterrupt=${() => ask("POST", "/api/interrupt")}
-                  />`
-                : html`<${DownloadBar}
-                    chosen=${chosen}
-                    busy=${!!progress.busy}
-                    fetching=${!!progress.fetching}
-                    onDownload=${() => download(chosen.name)}
-                    onInterrupt=${() => ask("POST", "/api/interrupt")}
-                  />`)}
+              html`<${Prompts}
+                form=${form}
+                change=${change}
+                canDraw=${canDraw}
+                guided=${chosen.takes_guidance !== false}
+                drawing=${!!progress.drawing}
+                fetching=${!!progress.fetching}
+                onDraw=${generate}
+                onInterrupt=${() => ask("POST", "/api/interrupt")}
+              />`}
 
               <section className="panes">
                 <${Settings}
@@ -2194,8 +1742,6 @@ function App() {
                   onClear=${clearPicture}
                   onAnySeed=${() => change("seed", "-1")}
                   onLastSeed=${lastSeed}
-                  onDevice=${useDevice}
-                  onModels=${() => setPicking("model")}
                 />
                 <${Output}
                   state=${state}
@@ -2211,19 +1757,6 @@ function App() {
             `}
       </main>
     </div>
-
-    ${picking &&
-    html`<${ModelPicker}
-      state=${state}
-      progress=${progress}
-      note=${note}
-      voices=${picking === "voice"}
-      fromPicture=${picking === "model" && tab === "img2img"}
-      onChoose=${picking === "voice" ? chooseVoice : chooseModel}
-      onForget=${forgetModel}
-      onRefresh=${readState}
-      onClose=${() => setPicking(null)}
-    />`}
   `;
 }
 

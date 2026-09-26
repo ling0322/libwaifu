@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::cli::args::Runtime;
+use crate::cli::task::Task;
 use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgress};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
@@ -488,25 +489,25 @@ pub struct Shared {
     /// is given and posts the samples -- which means what arrives here is always something
     /// [`crate::wav::read`] can read.
     recording: Mutex<Option<Vec<u8>>>,
-    /// Where runs go. Named on the command line to begin with and changed from the page after
-    /// that, which is why it is behind a lock: a request reads it to describe the program while
-    /// the worker is reading it to decide where to put the next model.
-    ///
-    /// Changed only by the worker, and only with nothing loaded -- weights live on the device
-    /// they were read onto, and a model that is on a card the runtime no longer names is a model
-    /// nothing can be asked of.
-    runtime: Mutex<Runtime>,
+    /// Where runs go, chosen in the terminal before the page opened. Not something the page can
+    /// change: weights live on the device they were read onto, and moving them is a question the
+    /// terminal asks, before anything has been read.
+    runtime: Runtime,
+    /// What the page is for, chosen in the terminal as well: which tab it opens on, and which of
+    /// the two kinds of model this session runs.
+    task: Task,
 }
 
 impl Shared {
-    pub fn new(runtime: Runtime) -> Shared {
+    pub fn new(task: Task, runtime: Runtime) -> Shared {
         Shared {
             session: Mutex::new(Session::new()),
             cancel: AtomicBool::new(false),
             working: AtomicBool::new(false),
             upload: Mutex::new(None),
             recording: Mutex::new(None),
-            runtime: Mutex::new(runtime),
+            runtime,
+            task,
         }
     }
 
@@ -618,14 +619,7 @@ impl Shared {
     }
 
     pub fn runtime(&self) -> Runtime {
-        *self.runtime.lock().unwrap_or_else(|held| held.into_inner())
-    }
-
-    /// Sends what is loaded next somewhere else. The worker's to call, once it has let go of
-    /// whatever was on the old device.
-    pub fn use_runtime(&self, runtime: Runtime) {
-        *self.runtime.lock().unwrap_or_else(|held| held.into_inner()) = runtime;
-        self.change(|_| ());
+        self.runtime
     }
 
     /// Asks whatever is running to stop where it is.
@@ -683,7 +677,7 @@ impl Shared {
     }
 
     /// The whole of it, which is what a browser asks for when it opens and after anything lands.
-    pub fn describe(&self, models: Value, voices: Value) -> Value {
+    pub fn describe(&self) -> Value {
         let session = self.session();
         let model = session.model.as_ref().map(|model| {
             json!({
@@ -728,19 +722,12 @@ impl Shared {
         json!({
             "revision": session.revision,
             "built_from": crate::cli::REVISION,
-            "device": self.runtime().name(),
-            // What else this machine could be asked for. A list rather than a flag, because the
-            // answer is the machine's and not the build's.
-            "devices": Runtime::available()
-                .into_iter()
-                .map(|runtime| runtime.name())
-                .collect::<Vec<_>>(),
+            "task": self.task.name(),
+            "device": self.runtime.name(),
             "holding_a_picture": self.holding_a_picture(),
             "holding_a_recording": self.holding_a_recording(),
             "picture_revision": session.picture_revision,
             "recording_revision": session.recording_revision,
-            "models": models,
-            "voices": voices,
             "model": model,
             "voice": voice,
             "note": session.note.as_ref().map(|note| json!({ "said": note.said, "bad": note.bad })),
@@ -799,7 +786,7 @@ mod tests {
     use crate::cli::args::DeviceOption;
 
     fn a_session() -> Shared {
-        Shared::new(DeviceOption::Cpu.resolve())
+        Shared::new(Task::Txt2Img, DeviceOption::Cpu.resolve())
     }
 
     fn a_clip(seed: u64) -> Clip {
@@ -1048,7 +1035,7 @@ mod tests {
 
         // Held where the page can see it, so that a picture named on the command line is one an
         // already-open page finds out about.
-        assert_eq!(shared.describe(Value::Null, Value::Null)["holding_a_picture"], true);
+        assert_eq!(shared.describe()["holding_a_picture"], true);
 
         shared.forget_upload();
         assert!(!shared.holding_a_picture());
@@ -1192,7 +1179,7 @@ mod tests {
         for _ in 0..5 {
             shared.change(|session| session.note = None);
         }
-        let described = shared.describe(Value::Null, Value::Null);
+        let described = shared.describe();
         assert_eq!(described["recording_revision"], recording);
         assert_eq!(described["picture_revision"], picture);
 
@@ -1218,7 +1205,7 @@ mod tests {
         shared.hold_recording(vec![4, 5, 6]);
         assert_eq!(shared.upload(), Some(vec![1, 2, 3]));
         assert_eq!(shared.recording(), Some(vec![4, 5, 6]));
-        assert_eq!(shared.describe(Value::Null, Value::Null)["holding_a_recording"], true);
+        assert_eq!(shared.describe()["holding_a_recording"], true);
 
         shared.forget_recording();
         assert!(!shared.holding_a_recording());
@@ -1254,12 +1241,12 @@ mod tests {
         assert_eq!(showable(7.0), 7.0);
         assert_eq!(showable(0.0), 0.0);
 
-        let described = a_session().describe(Value::Null, Value::Null);
+        let described = a_session().describe();
         assert_eq!(described["voice"], Value::Null);
 
         let shared = a_session();
         shared.change(|session| session.clips.push(a_clip(1)));
-        let clip = &shared.describe(Value::Null, Value::Null)["clips"][0];
+        let clip = &shared.describe()["clips"][0];
         assert_eq!(clip["temperature"], 0.8);
         assert_eq!(clip["speed"], 1.0);
     }
@@ -1269,7 +1256,7 @@ mod tests {
         // Whichever screen is up when something goes wrong is the one that ends up in the
         // screenshot, and a screenshot that cannot say which code it came from is worth much less
         // than one that can.
-        let described = a_session().describe(Value::Null, Value::Null);
+        let described = a_session().describe();
         assert_eq!(described["built_from"], crate::cli::REVISION);
         assert_eq!(described["device"], "cpu");
         assert!(described["model"].is_null());

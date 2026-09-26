@@ -80,7 +80,7 @@ const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 cannot start from
 /// What the built-in stand-in voice is called where a name is asked for.
 ///
 /// A constant rather than a catalogue entry, because it is not published anywhere and cannot be
-/// fetched: it is in the binary. Only ever had by asking for it with `-voice tones` -- it makes a
+/// fetched: it is in the binary. Only ever had by asking for it with `-m tones` -- it makes a
 /// noise where the syllables are, which is for checking the page and not for listening to.
 pub const TONES: &str = "tones";
 
@@ -127,15 +127,16 @@ pub struct SayJob {
     pub like: Option<Vec<u8>>,
 }
 
-/// What the requests can ask the worker for.
+/// What the worker can be asked for.
+///
+/// Nothing here fetches on its own account or changes the device. The model was picked, fetched
+/// and given a device in the terminal before the page opened, and the page asks for runs of it.
 pub enum Command {
-    /// Fetch this model if it is not on the disk, read it onto the device, and hold it.
+    /// Read this model onto the device, and hold it. Asked for before the server is up, so the
+    /// page opens with the model already in memory.
     Use(String),
-    /// Fetch this model or voice if it is not on the disk, and read none of it: the page's
-    /// Download button. What is in memory stays there.
-    Fetch(String),
-    /// Send what is loaded, and everything after it, to another device.
-    UseDevice(Runtime),
+    /// The same, for a voice.
+    UseVoice(String),
     Draw(Job),
     Speak(SayJob),
 }
@@ -163,7 +164,8 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
 
     for command in commands {
         match command {
-            // Asked for by `-m`, which says to have it ready rather than to wait for a run.
+            // Asked for before the server is up, which says to have it ready rather than to wait
+            // for a run.
             Command::Use(asked) => {
                 model = None;
                 in_memory = None;
@@ -177,30 +179,19 @@ pub fn work(shared: &Shared, commands: &Receiver<Command>) {
                 }
             }
 
-            Command::Fetch(asked) => fetch(shared, &asked),
-
-            // The weights live on the device they were read onto, so the way to another one is
-            // through letting go of them. Nothing is read back here: the next run reads what it
-            // needs, which is the whole of what this program does with a model now.
-            Command::UseDevice(runtime) => {
-                let had_weights =
-                    model.is_some() || speaking.as_deref().is_some_and(voice_holds_weights);
-                model = None;
-                in_memory = None;
-                forget_the_weights(shared);
+            // The voice's half of the same, with the same one-card rule `Command::Speak` keeps:
+            // a voice with weights puts the picture model down first.
+            Command::UseVoice(asked) => {
                 voice = None;
                 speaking = None;
-                forget_the_voice(shared);
-                // Where there were weights, and while `shared.runtime()` still names the device
-                // they were on -- which is the only device this can be asked of, and the one
-                // nothing here will allocate on again. Skipped where there were none, because a
-                // device that has had nothing read onto it has nothing to hand back and no reason
-                // to be woken up to say so.
-                if had_weights {
-                    give_the_memory_back(shared);
+                if voice_holds_weights(&asked) && model.is_some() {
+                    model = None;
+                    in_memory = None;
+                    forget_the_weights(shared);
                 }
-                shared.use_runtime(runtime);
-                shared.say(format!("runs go to {} now", runtime.name()), false);
+                if read_voice(shared, &asked, &mut voice) {
+                    speaking = Some(asked);
+                }
             }
 
             Command::Draw(job) => {
@@ -446,6 +437,14 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         no_likeness_because: None,
         not_a_voice_because: None,
     }
+}
+
+/// Whether `asked` is a voice: the stand-in, a published voice, or a manifest on the disk whose
+/// `model.type` is one of the speech models. What `-m` alone is taken to mean text2speech by.
+pub fn is_a_voice(asked: &str) -> bool {
+    asked == TONES
+        || hub::is_voice(asked)
+        || on_disk(asked).as_deref().and_then(voice_kind).is_some()
 }
 
 /// The speech models a package can be.
@@ -784,58 +783,6 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
     };
 
     Ok((read, opened))
-}
-
-/// Fetches what `asked` names, if it is not on the disk already, and reads none of it.
-///
-/// The half of [`load`] that is a download, for a page that asks for the download on its own:
-/// the same progress on the bar, the same stop. What is chosen is described again once it is
-/// here, since its manifest can now say what the name could only guess -- sizes, steps, whether
-/// it takes a picture.
-fn fetch(shared: &Shared, asked: &str) {
-    shared.carry_on();
-
-    let name = match asked.rsplit_once('/') {
-        Some((_, file)) if !file.is_empty() => file.to_string(),
-        _ => asked.to_string(),
-    };
-    shared.change(|session| {
-        session.doing = Doing::Fetching(Fetch {
-            model: name.clone(),
-            hub: None,
-            file: String::new(),
-            done: 0,
-            total: None,
-            part: 0,
-            parts: 0,
-        })
-    });
-
-    let fetched = hub::resolve_reporting(
-        asked,
-        &mut |progress| report_fetch(shared, &name, progress),
-        &|| shared.interrupted(),
-    );
-
-    match fetched {
-        Ok(_) => {
-            shared.change(|session| {
-                if session.model.as_ref().is_some_and(|one| one.name == asked) {
-                    session.model = Some(look_at(asked));
-                }
-                if session.voice.as_ref().is_some_and(|one| one.name == asked) {
-                    session.voice = Some(look_at_voice(asked));
-                }
-                session.doing = Doing::Nothing;
-            });
-            shared.say(format!("{name} is downloaded"), false);
-        }
-        Err(error) => {
-            shared.change(|session| session.doing = Doing::Nothing);
-            // A stop is not a failure -- see `read_model`, which says the same thing.
-            shared.say(error.to_string(), !hub::stopped(&error));
-        }
-    }
 }
 
 /// Copies what a fetch has to say into the session.

@@ -420,8 +420,8 @@ mod tests {
     fn what_the_machine_is_survives_being_asked_twice() {
         // The whole of it, on whatever this is being built on. What it must not do is panic, and
         // the second call must answer out of the first rather than reading anything again.
-        let once = describe(Runtime::named("cpu").unwrap());
-        let twice = describe(Runtime::named("cpu").unwrap());
+        let once = describe(crate::cli::args::DeviceOption::Cpu.resolve());
+        let twice = describe(crate::cli::args::DeviceOption::Cpu.resolve());
 
         assert_eq!(once["cpu"], twice["cpu"]);
         assert_eq!(once["threads"], twice["threads"]);

@@ -1,27 +1,28 @@
 # Speech: the page, and the model behind it
 
-`waifu webui` has a third tab. Drop a few seconds of somebody speaking on it, type a sentence,
-press Speak, and get the sentence back in that voice as a WAV -- said by
+`waifu` has a text2speech task. Drop a few seconds of somebody speaking on its page, type a
+sentence, press Speak, and get the sentence back in that voice as a WAV -- said by
 [IndexTTS-2.5](indextts.md).
 
-The voice is chosen on that tab the way a model is on the other two: a button opens the list of
-published voices, with what is on the disk of each and a button to delete it. Until one is chosen
-there is no box to type in. Choosing reads nothing -- the first reading fetches the package off
-the hub, into the same cache the picture models use, and reads it.
+The voice is chosen in the terminal the way a model is for the other two tasks: pick text2speech,
+and the list is of published voices, with what is on the disk of each and `d` to delete one. One
+that is not on the disk is fetched there, into the same cache the picture models use, before the
+page opens. The page reads it at the first reading.
 
 This document is about the seam between the two: what the page asks of a voice, and what a voice
 has to implement to answer it.
 
 ```bash
-waifu webui                     # choose a voice on the page
-waifu webui -voice indextts     # or have it chosen before the page opens
-waifu webui -voice tones        # the stand-in, which makes a noise where the syllables are
+waifu                                           # choose text2speech and a voice in the terminal
+waifu -m indextts                               # or name it, and the page opens straight away
+waifu -m tones                                  # the stand-in, which makes a noise where the syllables are
 ```
 
-Building the package yourself instead -- `-voice models/indextts25.yaml` -- is
+Building the package yourself instead -- `-m models/indextts25.yaml` -- is
 [`indextts.md`](indextts.md). [Fun-CosyVoice3](cosyvoice3.md) is the second speech model, not
-published yet: build it and choose it by path, `-voice models/cosyvoice3.yaml`. Which of the two
-a package is, the worker reads off its manifest's `model.type`.
+published yet: build it and choose it by path, `-m models/cosyvoice3.yaml`, or through "a file..."
+at the foot of the terminal's voice list. Which of the two a package is -- and so that `-m` alone
+means text2speech -- is read off its manifest's `model.type`.
 
 ## What is here
 
@@ -31,7 +32,7 @@ a package is, the worker reads off its manifest's `model.type`.
 | the run | a command on the worker thread, a bar that moves, a button that stops it |
 | the clip | `waifu-NNNN.wav` beside the pictures, played on the page, saved, deleted, said again |
 | the voice | [`Voice`](../waifu/src/speech.rs), a trait with five methods |
-| what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), chosen on the page or by `-voice`; [`CosyVoice3`](../waifu/src/cosyvoice3/mod.rs), by `-voice` and a manifest path; and `Tones`, the stand-in, by `-voice tones` |
+| what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), chosen in the terminal or by `-m`; [`CosyVoice3`](../waifu/src/cosyvoice3/mod.rs), by a manifest path; and `Tones`, the stand-in, by `-m tones` |
 
 ## The stand-in
 
