@@ -171,6 +171,24 @@ CATCH_TEST_CASE("test Vulkan unary operators", "[op][vulkan]") {
     CATCH_REQUIRE(close(vk()->cos(x), cpu()->cos(at), tol, tol));
     CATCH_REQUIRE(close(vk()->sqrt(p), cpu()->sqrt(positive), tol, tol));
     CATCH_REQUIRE(close(vk()->rsqrt(p), cpu()->rsqrt(positive), tol, tol));
+    CATCH_REQUIRE(close(vk()->log(p), cpu()->log(positive), tol, tol));
+  }
+}
+
+CATCH_TEST_CASE("test Vulkan log at its edges", "[op][vulkan]") {
+  SKIP_WITHOUT_VULKAN();
+
+  // GLSL leaves log undefined at and below zero, so these are the kernel's own answers, and they
+  // have to be the ones logf gives.
+  Tensor x = Tensor::create<float>({5}, {0.0f, -1.0f, INFINITY, 1.0f, 2.718281828f});
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    CATCH_INFO("dtype = " << dtype.toString());
+    std::vector<float> y = values(vk()->log(toVulkan(x, dtype)));
+    CATCH_REQUIRE((isinf(y[0]) && y[0] < 0));
+    CATCH_REQUIRE(isnan(y[1]));
+    CATCH_REQUIRE((isinf(y[2]) && y[2] > 0));
+    CATCH_REQUIRE(y[3] == 0.0f);
+    CATCH_REQUIRE(fabsf(y[4] - 1.0f) < 1e-3f);
   }
 }
 
