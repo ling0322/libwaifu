@@ -192,6 +192,36 @@ CATCH_TEST_CASE("test Vulkan log at its edges", "[op][vulkan]") {
   }
 }
 
+CATCH_TEST_CASE("test Vulkan round and cast to int64", "[op][vulkan]") {
+  SKIP_WITHOUT_VULKAN();
+
+  // Ties to even, as torch.round; half holds every value exactly, so both types answer exactly.
+  Tensor x = Tensor::create<float>({10}, {-2.5f, -1.5f, -0.5f, 0.5f, 1.5f, 2.5f, 0.4f, 0.6f, -0.6f, 3.7f});
+  const std::vector<float> rounded = {-2.0f, -2.0f, 0.0f, 0.0f, 2.0f, 2.0f, 0.0f, 1.0f, -1.0f, 4.0f};
+  const std::vector<LongType> truncated = {-2, -1, 0, 0, 1, 2, 0, 0, 0, 3};
+
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    CATCH_INFO(dtype.toString());
+    Tensor onDevice = toVulkan(x, dtype);
+
+    Tensor r = vk()->round(onDevice);
+    CATCH_REQUIRE(r.getDType() == dtype);
+    CATCH_REQUIRE(values(r) == rounded);
+
+    // To int64, which truncates toward zero; rounded first it is the nearest id.
+    auto asLongs = [](const Tensor &ids) {
+      Tensor host = toCpu(ids);
+      const LongType *data = host.getInternalData()->getData<LongType>(host.getInternalOffset());
+      return std::vector<LongType>(data, data + host.getNumEl());
+    };
+    Tensor ids = vk()->cast(r, DType::kLong);
+    CATCH_REQUIRE(ids.getDType() == DType::kLong);
+    std::vector<LongType> nearest(rounded.begin(), rounded.end());
+    CATCH_REQUIRE(asLongs(ids) == nearest);
+    CATCH_REQUIRE(asLongs(vk()->cast(onDevice, DType::kLong)) == truncated);
+  }
+}
+
 CATCH_TEST_CASE("test Vulkan softmax and reductions", "[op][vulkan]") {
   SKIP_WITHOUT_VULKAN();
 

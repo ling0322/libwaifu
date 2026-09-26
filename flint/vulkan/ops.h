@@ -49,6 +49,7 @@ enum class UnaryOp {
   kDivScalar = 15,
   kAddScalar = 16,
   kLog = 17,
+  kRound = 18,
 };
 
 enum class BinaryOp {
