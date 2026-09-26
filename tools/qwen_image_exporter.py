@@ -34,6 +34,14 @@ This reads the published diffusers layout as it stands, which is what `hf downlo
 
 `-fp8` writes the matrices as E4M3 with a scale per output channel: thirty gigabytes to sixteen.
 
+`-controlnet` exports VideoX-Fun's ControlNet-Union for this model instead, as a package of its
+own that the runtime reads beside the model's; the two have to agree on `-fp8`:
+
+    .venv/bin/python tools/qwen_image_exporter.py \\
+        -model  ~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/<rev> \\
+        -controlnet <Qwen-Image-2.1-Fun-Controlnet-Union.safetensors> \\
+        -output models/qwen-image-2.1-controlnet.safetensors
+
 `-test_output` also writes reference tensors off one real run of diffusers' `QwenImage21Pipeline`.
 That needs a diffusers new enough to have it -- newer than `tools/requirements.txt` pins -- and a
 CUDA torch; the run offloads layer by layer, so a sixteen gigabyte card is enough.
@@ -148,6 +156,33 @@ class Converter(Krea2Converter):
             if name.endswith(".gamma"):
                 name, tensor = name[:-len(".gamma")] + ".weight", tensor.reshape(-1)
             self._write(ctx.with_subname(name), tensor)
+
+    # ---- the ControlNet -----------------------------------------------------------------
+
+    def export_control(self, ctx: Context, weights: dict, blocks: int) -> None:
+        """VideoX-Fun's ControlNet-Union: `blocks` more of the denoiser's own blocks, a projection
+        into them and one out of each.
+
+        The blocks are written the way the denoiser's are, so the runtime reads both with one
+        function. `control_img_in` reads 129 channels, which is not a multiple of the sixteen an
+        FP8 multiply reads at a time, so it is written at full width in every package; it is half
+        a million numbers.
+        """
+        self._write(ctx.with_subname("img_in.weight"), weights["control_img_in.weight"])
+        self._write(ctx.with_subname("img_in.bias"), weights["control_img_in.bias"])
+
+        # Only the first block of the chain takes the denoiser's input in.
+        before = ctx.with_subname("block0.before_proj")
+        self._matrix(before.with_subname("weight"), weights["control_blocks.0.before_proj.weight"])
+        self._write(before.with_subname("bias"), weights["control_blocks.0.before_proj.bias"])
+
+        for index in range(blocks):
+            prefix = f"control_blocks.{index}."
+            block = ctx.with_subname(f"block{index}")
+            self._export_block(block, weights, prefix)
+            after = block.with_subname("after_proj")
+            self._matrix(after.with_subname("weight"), weights[prefix + "after_proj.weight"])
+            self._write(after.with_subname("bias"), weights[prefix + "after_proj.bias"])
 
 
 def transformer_files(directory: str) -> list:
@@ -264,6 +299,37 @@ def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, fp8: bo
         config["qwen_image"]["weight_format"] = "fp8"
 
     return config
+
+
+def generate_control_config(model: dict, weights: dict, fp8: bool) -> tuple:
+    """The control package's manifest, and how many blocks its chain has.
+
+    Nothing in the release says which of the denoiser's blocks a skip is added after: the
+    checkpoint is one safetensors file and VideoX-Fun's config for it is not published. What
+    `QwenImage21ControlTransformer2DModel` does without one is every second block from the first,
+    which is also what the model card writes down -- `[0, 2, 4, .., 30]` -- and what sixteen blocks
+    of chain come to over thirty-two.
+    """
+    blocks = count_blocks(weights, r"control_blocks\.(\d+)\.")
+    layers = list(range(0, model["num_layers"], 2))
+    if len(layers) != blocks:
+        raise SystemExit(f"{blocks} control blocks, and every second of {model['num_layers']} "
+                         f"denoiser blocks is {len(layers)}")
+
+    in_channels = weights["control_img_in.weight"].shape[1]
+    if in_channels != 2 * model["in_channels"] + 1:
+        raise SystemExit(f"the control projection reads {in_channels} channels, not two latents "
+                         f"and a mask")
+    if "control_blocks.1.before_proj.weight" in weights:
+        raise SystemExit("more than the first control block takes the denoiser's input in")
+
+    section = {
+        "control_layers": layers,
+        "control_in_channels": str(in_channels),
+    }
+    if fp8:
+        section["weight_format"] = "fp8"
+    return {"model": {"type": "qwen_image_control"}, "qwen_image_control": section}, blocks
 
 
 # What the reference outputs are computed for.
@@ -408,6 +474,210 @@ def export_test_cases(directory: str, prompt: str) -> TensorBag:
     return writer
 
 
+def export_control_test_cases(directory: str, controlnet: str, control_image: str,
+                              prompt: str) -> TensorBag:
+    """Write what VideoX-Fun makes of one prompt steered by one control picture.
+
+    | | what it is |
+    |---|---|
+    | `control_image` | the picture as the pipeline hands it to the encoder: three channels, `-1..=1` |
+    | `control_latent` | what the encoder makes of it with an opaque alpha, at float32, normalized |
+    | `control_context` | the 129 channels the chain reads: that latent, a zero mask, a zero latent |
+    | `hidden` | the prompt's states, as the control pipeline encoded them |
+    | `noise`, `sigmas` | where the run starts, and the noise levels it walked |
+    | `latent`, `timestep` | the latent entering step `STEP_AT` of the controlled run, and its time |
+    | `velocity` | the controlled answer there, the skips at scale one |
+    | `velocity_half` | the same at scale one half |
+    | `velocity_plain` | VideoX-Fun's own copy of the denoiser there, with no control at all |
+    | `final_latent` | what the ten controlled steps leave behind |
+
+    The upstream is VideoX-Fun, which trained the checkpoint and carries its own copies of the
+    denoiser and the autoencoder rather than diffusers'. `velocity_plain` is what says its
+    denoiser is the one the runtime was already held to; the encoder is checked against diffusers'
+    here, at float32, before anything is written.
+
+    Pure control, the recipe the model card leads with: no inpainting source and no mask, which
+    the pipeline turns into a mask of zeros ("regenerate everywhere") and a latent of zeros.
+    """
+    from diffusers import AutoencoderKLQwenImage21 as DiffusersVae
+    from diffusers import FlowMatchEulerDiscreteScheduler
+    from PIL import Image
+    from videox_fun.models import (AutoencoderKLQwenImage21, Qwen3VLForConditionalGeneration,
+                                   Qwen3VLProcessor, QwenImage21ControlTransformer2DModel)
+    from videox_fun.pipeline import QwenImage21ControlPipeline
+
+    ctx = Context("test_case")
+    writer = TensorBag()
+
+    def put(name: str, tensor: torch.Tensor) -> None:
+        writer.write_tensor(ctx.with_subname(name), tensor, preserve_dtype=True)
+
+    import gc
+
+    # The prompt first, and the encoder gone before the denoiser arrives: the offloaded run keeps
+    # every model it was handed in host memory, and the encoder alone is sixteen gigabytes of it.
+    processor = Qwen3VLProcessor.from_pretrained(directory, subfolder="processor")
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(directory, subfolder="scheduler")
+    reader = QwenImage21ControlPipeline(
+        vae=None,
+        text_encoder=Qwen3VLForConditionalGeneration.from_pretrained(
+            directory, subfolder="text_encoder", torch_dtype=torch.bfloat16),
+        processor=processor,
+        transformer=None,
+        scheduler=scheduler,
+    )
+    with torch.no_grad():
+        embeds, mask, image_pad_mask = reader.encode_prompt(prompt, device="cpu")
+    if mask is not None:
+        raise SystemExit("one prompt came back padded")
+    del reader
+    gc.collect()
+
+    model = read_json(directory, "transformer", "config.json")
+    weights = read_weights(controlnet)
+    config, _ = generate_control_config(model, weights, fp8=False)
+    section = config["qwen_image_control"]
+
+    transformer = QwenImage21ControlTransformer2DModel.from_pretrained(
+        directory, subfolder="transformer", low_cpu_mem_usage=True, torch_dtype=torch.bfloat16,
+        transformer_additional_kwargs={"control_layers": section["control_layers"],
+                                       "control_in_dim": int(section["control_in_channels"])},
+    ).to(torch.bfloat16)
+    missing, unexpected = transformer.load_state_dict(weights, strict=False)
+    if unexpected or any(name.startswith("control") for name in missing):
+        raise SystemExit(f"the checkpoint does not fit VideoX-Fun's control transformer: "
+                         f"{len(unexpected)} unexpected, missing {[n for n in missing][:4]}")
+    del weights
+    gc.collect()
+
+    pipeline = QwenImage21ControlPipeline(
+        vae=AutoencoderKLQwenImage21.from_pretrained(directory, subfolder="vae").to(torch.bfloat16),
+        text_encoder=None,
+        processor=processor,
+        transformer=transformer,
+        scheduler=scheduler,
+    )
+    pipeline.enable_sequential_cpu_offload()
+    side = TEST_SIDE // VAE_SCALE
+
+    def pack(latent):
+        channels = latent.shape[1]
+        return latent.reshape(1, channels, side * side).transpose(1, 2)
+
+    def unpack(packed):
+        return packed.transpose(1, 2).reshape(1, packed.shape[2], side, side)
+
+    with torch.no_grad():
+        picture = Image.open(control_image).convert("RGB")
+        control = pipeline.image_processor.preprocess(picture, height=TEST_SIDE, width=TEST_SIDE)
+        put("control_image", control.float())
+        put("hidden", embeds.float())
+        embeds = embeds.to("cuda")
+        image_pad_mask = image_pad_mask.to("cuda")
+
+        generator = torch.Generator().manual_seed(11)
+        noise = torch.randn((1, TEST_CHANNELS, side, side), generator=generator)
+        put("noise", noise)
+
+        entering = {}
+
+        def capture(pipe, index, timestep, kwargs):
+            if index == STEP_AT - 1:
+                entering["latent"] = kwargs["latents"].clone()
+            return kwargs
+
+        final = pipeline(
+            prompt_embeds=embeds,
+            control_image=picture,
+            control_context_scale=1.0,
+            height=TEST_SIDE,
+            width=TEST_SIDE,
+            num_inference_steps=TEST_STEPS,
+            latents=pack(noise).to("cuda", torch.bfloat16),
+            output_type="latent",
+            return_dict=False,
+            use_kv_cache=False,
+            callback_on_step_end=capture,
+            callback_on_step_end_tensor_inputs=["latents"])[0]
+        put("sigmas", pipeline.scheduler.sigmas.float().cpu())
+        put("final_latent", unpack(final).float())
+
+        timestep = pipeline.scheduler.timesteps[STEP_AT].expand(1).to(torch.bfloat16) / 1000
+        put("timestep", timestep.float().cpu())
+        latent = entering["latent"]
+        put("latent", unpack(latent).float())
+
+        # The encoder at float32, VideoX-Fun's and diffusers', which have to agree before either
+        # is worth writing down.
+        rgba = torch.cat([control, torch.ones_like(control[:, :1])], dim=1)[:, :, None]
+        encoded = []
+        for kind in (AutoencoderKLQwenImage21, DiffusersVae):
+            vae = kind.from_pretrained(directory, subfolder="vae", torch_dtype=torch.float32)
+            vae = vae.to("cuda")
+            moments = vae.encode(rgba.to("cuda")).latent_dist.mode().cpu()
+            mean = torch.tensor(vae.config.latents_mean).view(1, TEST_CHANNELS, 1, 1, 1)
+            std = torch.tensor(vae.config.latents_std).view(1, TEST_CHANNELS, 1, 1, 1)
+            encoded.append(((moments - mean) / std)[:, :, 0])
+            del vae
+            torch.cuda.empty_cache()
+        apart = ((encoded[0] - encoded[1]).norm() / encoded[1].norm()).item()
+        print(f"VideoX-Fun's encoder is {apart:.2e} from diffusers'")
+        if apart > 1e-4:
+            raise SystemExit("VideoX-Fun's autoencoder is not diffusers'")
+        control_latent = encoded[0]
+        put("control_latent", control_latent)
+
+        control_context = torch.cat([
+            control_latent,
+            torch.zeros(1, 1, side, side),
+            torch.zeros(1, TEST_CHANNELS, side, side),
+        ], dim=1)
+        put("control_context", control_context)
+
+        slots = torch.ones(1, side * side // 4, dtype=torch.bool, device=image_pad_mask.device)
+        arguments = dict(
+            hidden_states=latent,
+            encoder_hidden_states=embeds,
+            timestep=timestep.to("cuda"),
+            img_shapes=[[(1, side, side)]],
+            img_mask=torch.cat([image_pad_mask, slots], dim=1),
+            return_dict=False)
+        packed = pack(control_context).to("cuda", torch.bfloat16)
+
+        for name, scale in (("velocity", 1.0), ("velocity_half", 0.5)):
+            velocity = transformer(**arguments, control_context=packed,
+                                   control_context_scale=scale)[0]
+            put(name, unpack(velocity[:, -side * side:]).float())
+        velocity = transformer(**arguments)[0]
+        put("velocity_plain", unpack(velocity[:, -side * side:]).float())
+
+    return writer
+
+
+def export_controlnet(args) -> int:
+    """The ControlNet as a package of its own, which the runtime reads beside the model's."""
+    model = read_json(args.model, "transformer", "config.json")
+
+    if not args.test_only:
+        weights = read_weights(args.controlnet)
+        config, blocks = generate_control_config(model, weights, args.fp8)
+        writer = open_weights(args.output, args.part_size)
+        converter = Converter(writer, args.fp8)
+        converter.export_control(Context("qwen_image.dit.control"), weights, blocks)
+        for name in writer.finish(config):
+            print(f"wrote {name}")
+        print(f"{converter.written} tensors, {converter.widened} of them narrowed from bfloat16, "
+              f"{converter.quantized} quantized")
+
+    if args.test_output:
+        if not args.control_image:
+            raise SystemExit("the ControlNet's reference needs a -control_image")
+        export_control_test_cases(args.model, args.controlnet, args.control_image,
+                                  TEST_PROMPT).save(args.test_output)
+        print(f"wrote {args.test_output}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -426,7 +696,18 @@ def main() -> int:
                              "with QwenImage21Pipeline and a CUDA card.")
     parser.add_argument("-test_only", action="store_true",
                         help="write only the reference tensors, not the package.")
+    parser.add_argument("-controlnet", type=str, default=None,
+                        help="export this ControlNet-Union checkpoint -- VideoX-Fun's "
+                             "`Qwen-Image-2.1-Fun-Controlnet-Union.safetensors` -- as a package of "
+                             "its own instead of the model. `-model` is still the release it "
+                             "steers. With `-test_output`, the reference is VideoX-Fun's.")
+    parser.add_argument("-control_image", type=str, default=None,
+                        help="the control picture the ControlNet's reference is computed for: a "
+                             "real one, such as VideoX-Fun's `asset/pose.jpg`.")
     args = parser.parse_args()
+
+    if args.controlnet:
+        return export_controlnet(args)
 
     model = read_json(args.model, "transformer", "config.json")
     text_config = read_json(args.model, "text_encoder", "config.json")

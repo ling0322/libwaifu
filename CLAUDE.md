@@ -40,9 +40,10 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     -- --ignored --test-threads=1
 
 # waifu/src/qwen_image/, tools/qwen_image_exporter.py
+# qwen_image_control needs models/qwen-image-2.1-controlnet.yaml and its _test.safetensors
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test qwen_image --test qwen_image_pipeline --test qwen_image_tokenizer \
-    -- --ignored --test-threads=1
+    --test qwen_image_control -- --ignored --test-threads=1
 
 # waifu/src/cosyvoice3/, tools/cosyvoice3_*
 # needs models/cosyvoice3.yaml and models/cosyvoice3_test.safetensors; docs/cosyvoice3.md says how
