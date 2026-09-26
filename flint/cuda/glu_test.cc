@@ -137,4 +137,68 @@ CATCH_TEST_CASE("test CUDA swiglu (gate saturation)", "[op][cuda]") {
   CATCH_REQUIRE(cpuOps()->allClose(x, cpuOps()->swiglu(a), 5e-3));
 }
 
+CATCH_TEST_CASE("test CUDA swiglu and geglu in float32", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Float32 used to be read as if it were half: every value garbage, and no error. Now it is
+  // computed in float32 and comes back in float32, so the tolerance is float32's.
+  auto toCudaFloat = [](const Tensor &a) { return cudaOps()->toDevice(Device::getCuda(), a); };
+  auto toCpuFloat = [](const Tensor &a) { return cudaOps()->toDevice(Device::getCpu(), a); };
+
+  for (int outputWidth : {1, 3, 256, 257}) {
+    Tensor a = cpuOps()->rand({2, 3, outputWidth * 2}, DType::kFloat);
+    Tensor x = cudaOps()->swiglu(toCudaFloat(a));
+    Tensor y = cudaOps()->geglu(toCudaFloat(a));
+
+    CATCH_INFO("outputWidth = " << outputWidth);
+    CATCH_REQUIRE(x.getDType() == DType::kFloat);
+    CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), cpuOps()->swiglu(a), 1e-5, 1e-6));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(y), cpuOps()->geglu(a), 1e-5, 1e-6));
+  }
+
+  // Strided, through the rank-3 path and the rank-2 one.
+  Tensor b = cpuOps()->rand({2, 3, 152}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpuFloat(cudaOps()->swiglu(toCudaFloat(b).transpose(0, 1))),
+      cpuOps()->swiglu(cpuOps()->contiguous(b.transpose(0, 1))),
+      1e-5,
+      1e-6));
+  Tensor c = cpuOps()->rand({8, 6}, DType::kFloat);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpuFloat(cudaOps()->swiglu(toCudaFloat(c).transpose(0, 1))),
+      cpuOps()->swiglu(cpuOps()->contiguous(c.transpose(0, 1))),
+      1e-5,
+      1e-6));
+}
+
+CATCH_TEST_CASE("test CUDA swiglu (any rank)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Rank 1 and rank 4 used to end in NOT_IMPL; a strided rank 4 is copied first.
+  Tensor one = cpuOps()->rand({10}, DType::kFloat);
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpu(cudaOps()->swiglu(toCuda(one))), cpuOps()->swiglu(one), 5e-3));
+
+  Tensor four = cpuOps()->rand({2, 3, 4, 20}, DType::kFloat);
+  Tensor x = cudaOps()->swiglu(toCuda(four));
+  CATCH_REQUIRE(x.getShape() == std::vector<int>{2, 3, 4, 10});
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), cpuOps()->swiglu(four), 5e-3));
+
+  Tensor strided = cudaOps()->swiglu(toCuda(four).transpose(0, 2));
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(strided),
+      cpuOps()->swiglu(cpuOps()->contiguous(four.transpose(0, 2))),
+      5e-3));
+}
+
+CATCH_TEST_CASE("test CUDA swiglu (more rows than a grid axis holds)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // 70 000 rows is past the 65 535 a grid's y axis holds, so the rows spill into z, and the last
+  // z slice is part empty -- which the kernel has to skip rather than write past the end.
+  Tensor a = cpuOps()->rand({70000, 4}, DType::kFloat);
+  CATCH_REQUIRE(
+      cpuOps()->allClose(toCpu(cudaOps()->swiglu(toCuda(a))), cpuOps()->swiglu(a), 5e-3));
+}
+
 }  // namespace fl

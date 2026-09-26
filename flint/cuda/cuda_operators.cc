@@ -195,10 +195,30 @@ bool CudaOperators::all(Tensor A) {
 Tensor CudaOperators::sum(Tensor inputs, int dim) {
   Tensor C;
 
-  if (dim == -1 || dim == inputs.getDim() - 1) {
-    C = op::cuda::reduceLastDim(inputs, DType::kFloat, MapReduceType::SUM);
-  } else if (dim == None) {
+  if (dim == None) {
     C = op::cuda::reduceAll(inputs, DType::kFloat, MapReduceType::SUM);
+  } else {
+    int ndim = inputs.getDim();
+    if (dim < 0) dim += ndim;
+    CHECK(dim >= 0 && dim < ndim);
+
+    if (dim == ndim - 1) {
+      C = op::cuda::reduceLastDim(inputs, DType::kFloat, MapReduceType::SUM);
+    } else {
+      // (.., D, ..) viewed as (outer, D, inner) and turned to (outer, inner, D), so that the
+      // summed dimension is last and every other one keeps its place; then viewed back without it.
+      std::vector<int> shape = inputs.getShape();
+      int outer = 1, inner = 1;
+      for (int d = 0; d < dim; ++d) outer *= shape[d];
+      for (int d = dim + 1; d < ndim; ++d) inner *= shape[d];
+
+      Tensor grouped = contiguous(inputs).view({outer, shape[dim], inner});
+      Tensor moved = contiguous(grouped.transpose(1, 2));
+      C = op::cuda::reduceLastDim(moved, DType::kFloat, MapReduceType::SUM);
+
+      shape.erase(shape.begin() + dim);
+      C = C.view(shape);
+    }
   }
 
   if (inputs.getDType() == DType::kFloat16) {
@@ -232,10 +252,6 @@ void CudaOperators::rotaryEmbedding(
 
 Tensor CudaOperators::matmul(Tensor a, Tensor b) {
   return _matmul->apply(a, b);
-}
-
-Tensor CudaOperators::matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB) {
-  return _matmul->applyNarrowPrecision(A, sfA, B, sfB);
 }
 
 Tensor CudaOperators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {

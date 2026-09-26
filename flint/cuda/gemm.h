@@ -69,19 +69,6 @@ class Gemm {
     NOT_IMPL();
   }
 
-  virtual void gemmMxfp4Bf16(
-      int m,
-      int n,
-      int k,
-      float alpha,
-      const Fp4E2M0x2 *A,
-      const UInt8 *sfA,
-      const Fp4E2M0x2 *B,
-      const UInt8 *sfB,
-      Float16 *C) {
-    NOT_IMPL();
-  }
-
   virtual void hgemmArray(
       bool transA,
       bool transB,
