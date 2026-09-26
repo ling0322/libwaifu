@@ -776,6 +776,7 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
                 Unary::Abs => F::abs(input)?,
                 Unary::Exp => F::exp(input)?,
                 Unary::Log => F::log(input)?,
+                Unary::Round => F::round(input)?,
                 Unary::Sqrt => F::sqrt(input)?,
                 Unary::Rsqrt => F::rsqrt(input)?,
                 Unary::Square => F::square(input)?,
@@ -1442,6 +1443,27 @@ mod tests {
 
         let logged = outputs[0].1.to_vec_f32().unwrap();
         assert!(logged[0].abs() < 1e-7 && (logged[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rounded_floats_look_up_rows_through_the_graph() {
+        // What a quantizer does with a projection: round it, make it an id, read the row.
+        let g = Graph::new();
+        let x = g.input("x");
+        let table = g.input("table");
+        let ids = g.cast(g.round(x), DType::Long);
+        g.output("rows", g.lookup(table, ids));
+
+        let x = Tensor::from_f32(&[2], &[2.4, 0.5]).unwrap();
+        let table = Tensor::from_f32(&[3, 2], &[0.0, 0.0, 1.0, 1.0, 2.0, 2.0]).unwrap();
+        let params = state_dict(&[]);
+        let context = RunContext::new(&params)
+            .input("x", &x)
+            .input("table", &table);
+        let outputs = compile_and_run(&g, context).unwrap();
+
+        // 2.4 to row 2, and 0.5 -- a tie -- to row 0, the even one.
+        assert_eq!(outputs[0].1.to_vec_f32().unwrap(), [2.0, 2.0, 0.0, 0.0]);
     }
 
     #[test]

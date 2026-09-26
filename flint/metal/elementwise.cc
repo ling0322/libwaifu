@@ -85,6 +85,11 @@ Tensor log(const Tensor &a) {
   return fromMlxArray(mlx::core::log(toMlxArray(a)));
 }
 
+Tensor round(const Tensor &a) {
+  // MLX's round at zero decimals is rint, ties to even, as torch.round is.
+  return fromMlxArray(mlx::core::round(toMlxArray(a), 0));
+}
+
 Tensor sqrt(const Tensor &a) {
   return fromMlxArray(mlx::core::sqrt(toMlxArray(a)));
 }

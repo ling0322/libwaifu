@@ -46,6 +46,9 @@ inline float applyUnaryOpFloat(float x, UnaryOp op) {
       return expf(x);
     case UnaryOp::LOG:
       return logf(x);
+    case UnaryOp::ROUND:
+      // rintf under the default rounding mode, which is to nearest with ties to even.
+      return rintf(x);
     case UnaryOp::SQUARE:
       return x * x;
     case UnaryOp::SQRT:

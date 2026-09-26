@@ -43,6 +43,11 @@ Tensor cast(Tensor A, DType dtype) {
     return castFp16ToFp32(A);
   } else if (A.getDType() == DType::kFloat && dtype == DType::kFloat16) {
     return castFp32ToFp16(A);
+  } else if (A.getDType() == DType::kFloat && dtype == DType::kLong) {
+    return castFp32ToLong(A);
+  } else if (A.getDType() == DType::kFloat16 && dtype == DType::kLong) {
+    // Every half is exactly a float, so going through one changes nothing.
+    return castFp32ToLong(castFp16ToFp32(A));
   } else {
     NOT_IMPL();
   }
@@ -70,6 +75,21 @@ Tensor castFp32ToFp16(Tensor A) {
       reinterpret_cast<kernel::Float16 *>(getDataPtrCpu<Float16>(C)),
       kernel::Mode::OMP,
       kernel::CpuMathBackend::DEFAULT);
+
+  return C;
+}
+
+Tensor castFp32ToLong(Tensor A) {
+  CHECK(A.isContiguous()) << "unable to cast a non-contiguous float tensor to int64";
+  Tensor C = op::cpu::tensor(A.getShape(), DType::kLong);
+  const float *src = getDataPtrCpu<float>(A);
+  LongType *dest = getDataPtrCpu<LongType>(C);
+
+  int64_t numel = A.getNumEl();
+#pragma omp parallel for schedule(static)
+  for (int64_t i = 0; i < numel; ++i) {
+    dest[i] = static_cast<LongType>(src[i]);
+  }
 
   return C;
 }

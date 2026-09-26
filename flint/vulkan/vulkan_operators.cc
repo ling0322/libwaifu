@@ -162,6 +162,10 @@ Tensor VulkanOperators::log(Tensor input) {
   return unary(UnaryOp::kLog, input);
 }
 
+Tensor VulkanOperators::round(Tensor input) {
+  return unary(UnaryOp::kRound, input);
+}
+
 Tensor VulkanOperators::sqrt(Tensor input) {
   return unary(UnaryOp::kSqrt, input);
 }

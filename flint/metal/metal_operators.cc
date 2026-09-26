@@ -148,6 +148,10 @@ Tensor MetalOperators::log(Tensor input) {
   return metal::log(input);
 }
 
+Tensor MetalOperators::round(Tensor input) {
+  return metal::round(input);
+}
+
 Tensor MetalOperators::sqrt(Tensor input) {
   return metal::sqrt(input);
 }

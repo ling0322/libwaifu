@@ -1120,6 +1120,10 @@ int32_t fl_log(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
   return guard([&]() { return publish(deref(operators)->log(deref(input)), out); });
 }
 
+int32_t fl_round(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
+  return guard([&]() { return publish(deref(operators)->round(deref(input)), out); });
+}
+
 int32_t fl_sqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
   return guard([&]() { return publish(deref(operators)->sqrt(deref(input)), out); });
 }

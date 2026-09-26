@@ -95,6 +95,7 @@ class CudaOperators : public Operators {
   Tensor abs(Tensor input) override;
   Tensor exp(Tensor input) override;
   Tensor log(Tensor input) override;
+  Tensor round(Tensor input) override;
   Tensor sqrt(Tensor input) override;
   Tensor rsqrt(Tensor input) override;
   Tensor sigmoid(Tensor input) override;

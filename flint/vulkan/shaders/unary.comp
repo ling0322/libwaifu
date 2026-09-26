@@ -42,6 +42,7 @@ layout(local_size_x = 256) in;
 #define OP_DIV_SCALAR 15
 #define OP_ADD_SCALAR 16
 #define OP_LOG 17
+#define OP_ROUND 18
 
 // The natural logarithm, with the edges logf gives: GLSL leaves log undefined for anything not
 // positive, so -inf for zero, NaN below it and +inf for +inf are said here rather than left to the
@@ -84,6 +85,9 @@ void main() {
     case OP_ABS: y = abs(x); break;
     case OP_EXP: y = exp(x); break;
     case OP_LOG: y = naturalLog(x); break;
+    // roundEven, not round: GLSL lets round() take a tie either way, and torch.round takes it
+    // to the even neighbour.
+    case OP_ROUND: y = roundEven(x); break;
     case OP_SQRT: y = sqrt(x); break;
     case OP_RSQRT: y = inversesqrt(x); break;
     case OP_SQUARE: y = x * x; break;

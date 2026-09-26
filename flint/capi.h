@@ -565,6 +565,9 @@ FLAPI int32_t fl_exp(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *o
 /// The natural logarithm of every element: zero gives -inf and a negative number NaN.
 FLAPI int32_t fl_log(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
+/// Every element to the nearest integer, a tie to the even one, in the input's float type.
+FLAPI int32_t fl_round(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
+
 /// Element-wise square root.
 FLAPI int32_t fl_sqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out);
 
