@@ -43,6 +43,7 @@ mod worker;
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 
@@ -112,6 +113,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     let asked_task = with_usage(args.task())?;
     let runtime = with_usage(args.device())?.resolve();
     let wanted_port = with_usage(args.port())?;
+    let output = PathBuf::from(args.output());
 
     // Read now rather than when a run begins, so that a path that is not there is said here --
     // and before the terminal is taken over by the screens, which would hide it.
@@ -121,6 +123,11 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         ),
         None => None,
     };
+
+    // Made now for the same reason: a directory that cannot be written to is something to find
+    // out before a model has been fetched, not after the first picture has been drawn into it.
+    std::fs::create_dir_all(&output)
+        .map_err(|error| format!("could not make {}: {error}", output.display()))?;
 
     let launch = match model {
         // Named on the command line: nothing to ask, and the task is what the model is where it
@@ -154,7 +161,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         }
     };
 
-    serve_the_page(launch, picture, wanted_port)
+    serve_the_page(launch, picture, wanted_port, &output)
 }
 
 /// The task `-m` asks for when `-task` does not say: a voice reads, and a picture model draws --
@@ -260,19 +267,25 @@ fn serve_the_page(
     launch: Launch,
     picture: Option<Vec<u8>>,
     wanted_port: Option<u16>,
+    output: &Path,
 ) -> Result<(), Error> {
-    let shared = Arc::new(Shared::new(launch.task, launch.runtime));
-    let (commands, waiting) = channel::<Command>();
-
-    if let Some(bytes) = picture {
-        shared.hold_upload(bytes);
-    }
-
     // Taken before the model is read, and not answered on until it has been. A port that is taken
     // is a session that cannot go anywhere, and finding that out after a minute of reading a model
     // is finding it out late; nothing is served from it, and no address is printed, until the
     // model is in memory.
     let (listener, address) = listen(wanted_port)?;
+
+    let mut shared = Shared::new(
+        launch.task,
+        launch.runtime,
+        output.to_path_buf(),
+        address.port(),
+    );
+    if let Some(bytes) = picture {
+        shared.start_holding(bytes);
+    }
+    let shared = Arc::new(shared);
+    let (commands, waiting) = channel::<Command>();
 
     let worker = std::thread::spawn({
         let shared = Arc::clone(&shared);
@@ -284,15 +297,16 @@ fn serve_the_page(
     // that is still being read, and one that cannot be read is said here rather than on a page.
     let command = match launch.task.speaks() {
         true => {
-            shared.change(|session| session.voice = Some(worker::look_at_voice(&launch.model)));
+            shared.change(|world| world.voice = Some(worker::look_at_voice(&launch.model)));
             Command::UseVoice(launch.model.clone())
         }
         false => {
-            shared.change(|session| session.model = Some(worker::look_at(&launch.model)));
+            shared.change(|world| world.model = Some(worker::look_at(&launch.model)));
             Command::Use(launch.model.clone())
         }
     };
-    shared.claim();
+    // For no page: none is open yet, and what this read has to say is the terminal's.
+    shared.claim(None);
     commands
         .send(command)
         .map_err(|_| "the model thread stopped before it could read anything")?;
@@ -303,6 +317,10 @@ fn serve_the_page(
         launch.task.name(),
         launch.model,
         launch.runtime.name()
+    );
+    println!(
+        "Each page writes into a folder of its own under {}.",
+        output.display()
     );
     println!("Press ctrl-c to stop.");
 
@@ -317,10 +335,7 @@ fn serve_the_page(
 fn read_in_the_terminal(shared: &Shared, launch: &Launch) -> Result<(), Error> {
     let started = std::time::Instant::now();
     while shared.is_busy() {
-        let doing = shared.progress()["doing"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        let doing = shared.world().doing.words();
         let doing = match doing.is_empty() {
             true => format!("reading {}", launch.model),
             false => doing,
@@ -334,10 +349,10 @@ fn read_in_the_terminal(shared: &Shared, launch: &Launch) -> Result<(), Error> {
     }
     eprintln!();
 
-    let session = shared.session();
+    let world = shared.world();
     let read = match launch.task.speaks() {
-        true => session.voice.as_ref().is_some_and(|voice| voice.in_memory),
-        false => session.model.as_ref().is_some_and(|model| model.in_memory),
+        true => world.voice.as_ref().is_some_and(|voice| voice.in_memory),
+        false => world.model.as_ref().is_some_and(|model| model.in_memory),
     };
     if read {
         eprintln!(
@@ -349,7 +364,7 @@ fn read_in_the_terminal(shared: &Shared, launch: &Launch) -> Result<(), Error> {
         return Ok(());
     }
 
-    let why = session
+    let why = world
         .note
         .as_ref()
         .map(|note| note.said.clone())
@@ -445,6 +460,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::sync::mpsc::Receiver;
+    use std::sync::Mutex;
 
     use serde_json::Value;
 
@@ -474,15 +490,25 @@ mod tests {
     /// chose -- and not read, which is the worker's to do, and there is no worker here.
     fn a_server_for(task: Task, model: Option<&str>) -> (SocketAddr, Receiver<Command>) {
         let (listener, address) = listen(Some(a_free_port())).expect("somewhere to listen");
-        let shared = Arc::new(Shared::new(task, DeviceOption::Cpu.resolve()));
+        let output = std::env::temp_dir().join(format!(
+            "libwaifu-webui-{}-{}",
+            address.port(),
+            std::process::id()
+        ));
+        let shared = Arc::new(Shared::new(
+            task,
+            DeviceOption::Cpu.resolve(),
+            output,
+            address.port(),
+        ));
         let (commands, waiting) = channel::<Command>();
 
         // A voice as well, whatever the task. The stand-in rather than the published one, because
         // a test that speaks should not start by fetching gigabytes -- `-m tones` is the same
         // server.
-        shared.change(|session| session.voice = Some(worker::look_at_voice(worker::TONES)));
+        shared.change(|world| world.voice = Some(worker::look_at_voice(worker::TONES)));
         if let Some(model) = model {
-            shared.change(|session| session.model = Some(worker::look_at(model)));
+            shared.change(|world| world.model = Some(worker::look_at(model)));
         }
 
         // Left running for the rest of the test process. There is no way to stop it short of the
@@ -495,6 +521,13 @@ mod tests {
 
         (address, waiting)
     }
+
+    /// The cookie each test's server handed out, by the server's address.
+    ///
+    /// Which is what makes the requests of one test one browser's, the way a page's are: each
+    /// test has a server of its own, so each has one entry here. A test that wants a second
+    /// browser asks through [`exchange`] with a cookie of its own.
+    static JAR: Mutex<Vec<(SocketAddr, String)>> = Mutex::new(Vec::new());
 
     /// One request, as the bytes of one, and what came back: the status and the body.
     ///
@@ -510,16 +543,45 @@ mod tests {
     /// whatever the replacement character made of every one that was not valid UTF-8, which is a
     /// file that no longer parses and a test that was checking the wrong refusal.
     fn posted(address: SocketAddr, line: &str, body: &[u8]) -> (u16, String) {
+        let kept = |jar: &Vec<(SocketAddr, String)>| {
+            jar.iter()
+                .find(|(server, _)| *server == address)
+                .map(|(_, cookie)| cookie.clone())
+        };
+        let cookie = kept(&JAR.lock().unwrap());
+
+        let (status, body, set) = exchange(address, line, body, cookie.as_deref());
+        if let Some(set) = set {
+            let mut jar = JAR.lock().unwrap();
+            jar.retain(|(server, _)| *server != address);
+            jar.push((address, set));
+        }
+
+        (status, body)
+    }
+
+    /// One request from a browser holding `cookie`, or none: the status, the body, and the
+    /// cookie the server handed back, as the `name=value` a browser would send with the next.
+    fn exchange(
+        address: SocketAddr,
+        line: &str,
+        body: &[u8],
+        cookie: Option<&str>,
+    ) -> (u16, String, Option<String>) {
         let mut socket = TcpStream::connect(address).expect("the server");
+        let cookie = match cookie {
+            Some(cookie) => format!("Cookie: {cookie}\r\n"),
+            None => String::new(),
+        };
         let head = format!(
-            "{line} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "{line} HTTP/1.1\r\nHost: localhost\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         socket.write_all(head.as_bytes()).expect("to ask");
         socket.write_all(body).expect("to ask");
 
-        // Read as bytes, since what comes back can be a file too. Only the status line and a
-        // refusal's JSON are ever looked at, and both are text.
+        // Read as bytes, since what comes back can be a file too. Only the status line, the
+        // headers and a refusal's JSON are ever looked at, and all three are text.
         let mut whole = Vec::new();
         socket.read_to_end(&mut whole).expect("an answer");
         let answer = String::from_utf8_lossy(&whole).to_string();
@@ -529,12 +591,20 @@ mod tests {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or(0);
-        let body = answer
-            .split_once("\r\n\r\n")
-            .map(|(_, body)| body)
-            .unwrap_or("");
+        let (head, body) = answer.split_once("\r\n\r\n").unwrap_or((&answer, ""));
+        let set = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("set-cookie").then(|| {
+                value
+                    .split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+        });
 
-        (status, body.to_string())
+        (status, body.to_string(), set)
     }
 
     fn json(address: SocketAddr, line: &str, body: &str) -> Value {
@@ -849,9 +919,14 @@ mod tests {
     fn a_published_voice_is_described_the_way_a_model_is() {
         // Described and not read or fetched. It is a real voice, so the tab has no apology to
         // make, and it says what it is called and whether it is in memory yet.
-        let shared = Shared::new(Task::Text2Speech, DeviceOption::Cpu.resolve());
-        shared.change(|session| session.voice = Some(worker::look_at_voice("indextts")));
-        let state = shared.describe();
+        let shared = Shared::new(
+            Task::Text2Speech,
+            DeviceOption::Cpu.resolve(),
+            PathBuf::from("."),
+            7860,
+        );
+        shared.change(|world| world.voice = Some(worker::look_at_voice("indextts")));
+        let state = shared.describe(&shared.session_for(None).session);
 
         assert_eq!(state["task"], "text2speech");
         let voice = &state["voice"];
@@ -991,5 +1066,95 @@ mod tests {
         // error: the flag is cleared by the next run before it starts.
         let (address, _commands) = a_server();
         assert_eq!(asked(address, "POST /api/interrupt", "").0, 200);
+    }
+
+    #[test]
+    fn a_browser_is_handed_a_cookie_and_the_files_the_page_is_drawn_from_are_not_a_visit() {
+        let (address, _commands) = a_server();
+
+        // The files are the same for everybody, and fetching one starts nothing.
+        let (status, _, set) = exchange(address, "GET /app.js", b"", None);
+        assert_eq!(status, 200);
+        assert!(set.is_none(), "{set:?}");
+
+        // The page is a visit, and a browser that brought no cookie is handed one -- named for
+        // the port, so that a second copy of the program on this machine keeps its own.
+        let (status, _, set) = exchange(address, "GET /", b"", None);
+        assert_eq!(status, 200);
+        let set = set.expect("a cookie for a browser that brought none");
+        assert!(
+            set.starts_with(&format!("waifu-{}=", address.port())),
+            "{set}"
+        );
+
+        // Brought back, it is the same session: handed back with the page to keep it from
+        // running out, and not with anything else.
+        let (_, _, again) = exchange(address, "GET /", b"", Some(&set));
+        assert_eq!(again.as_deref(), Some(set.as_str()));
+        let (_, _, again) = exchange(address, "GET /api/progress", b"", Some(&set));
+        assert!(again.is_none(), "{again:?}");
+    }
+
+    #[test]
+    fn what_one_browser_holds_is_not_another_browser_s() {
+        let (address, _commands) = a_server();
+        let picture = [0x89, b'P', b'N', b'G', 1, 2, 3];
+        assert_eq!(posted(address, "POST /api/upload", &picture).0, 200);
+        assert_eq!(asked(address, "GET /api/upload", "").0, 200);
+
+        // A second browser, with no cookie of its own yet: an empty box, and nothing to read out
+        // of the first one's.
+        let (status, _, stranger) = exchange(address, "GET /api/upload", b"", None);
+        assert_eq!(status, 404);
+        let stranger = stranger.expect("a cookie of its own");
+        let (_, state, _) = exchange(address, "GET /api/state", b"", Some(&stranger));
+        let state: Value = serde_json::from_str(&state).unwrap();
+        assert_eq!(state["holding_a_picture"], false);
+
+        // And clearing its own box leaves the first browser's where it was.
+        exchange(address, "DELETE /api/upload", b"", Some(&stranger));
+        assert_eq!(asked(address, "GET /api/upload", "").0, 200);
+    }
+
+    #[test]
+    fn another_browser_is_told_whose_run_it_is_waiting_on_and_cannot_stop_it() {
+        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
+
+        // The first browser's run, posted and not yet picked up: there is no worker here.
+        assert_eq!(
+            asked(address, "POST /api/generate", r#"{"prompt":"a cat"}"#).0,
+            200
+        );
+        assert!(commands.try_recv().is_ok());
+
+        let (_, _, stranger) = exchange(address, "GET /", b"", None);
+        let stranger = stranger.unwrap();
+
+        let (status, body, _) = exchange(
+            address,
+            "POST /api/generate",
+            br#"{"prompt":"a dog"}"#,
+            Some(&stranger),
+        );
+        assert_eq!(status, 409);
+        assert!(body.contains("another page"), "{body}");
+        assert!(
+            commands.try_recv().is_err(),
+            "the second run never reached the worker"
+        );
+
+        let (status, body, _) = exchange(address, "POST /api/interrupt", b"", Some(&stranger));
+        assert_eq!(status, 409);
+        assert!(body.contains("another page's"), "{body}");
+
+        // The progress it polls says the card is busy, and that the run is not its own.
+        let (_, progress, _) = exchange(address, "GET /api/progress", b"", Some(&stranger));
+        let progress: Value = serde_json::from_str(&progress).unwrap();
+        assert_eq!(progress["busy"], true);
+        assert_eq!(progress["mine"], false);
+
+        // While the browser whose run it is may stop it.
+        assert_eq!(asked(address, "POST /api/interrupt", "").0, 200);
+        assert_eq!(json(address, "GET /api/progress", "")["mine"], true);
     }
 }

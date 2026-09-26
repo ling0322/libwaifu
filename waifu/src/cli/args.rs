@@ -152,6 +152,7 @@ pub struct Args {
     device: Option<String>,
     image: Option<String>,
     port: Option<String>,
+    output: Option<String>,
     task: Option<String>,
     help: bool,
 }
@@ -184,6 +185,7 @@ impl Args {
                 "-device" | "--device" => args.device = Some(value("-device")?),
                 "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
                 "-port" | "--port" => args.port = Some(value("-port")?),
+                "-output" | "--output" => args.output = Some(value("-output")?),
                 "-task" | "--task" => args.task = Some(value("-task")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
                 other => return Err(ArgError(format!("flag provided but not defined: {other}"))),
@@ -244,6 +246,13 @@ impl Args {
     /// None is not an error: without it the tool takes the usual port, or the first free one near
     /// it. Zero is refused rather than passed on -- the operating system reads it as "any port at
     /// all", which is a fine thing for a test to ask for and not something anybody types.
+    /// The directory the pictures and clips are written under: each page's in a folder of its
+    /// own inside it. Left out, the directory the program was started in, which is where they
+    /// always went.
+    pub fn output(&self) -> &str {
+        self.output.as_deref().unwrap_or(".")
+    }
+
     pub fn port(&self) -> Result<Option<u16>, ArgError> {
         let Some(port) = &self.port else {
             return Ok(None);
@@ -321,6 +330,12 @@ pub fn print_options() {
         "  -port int\n    \tthe port to serve the page on (default 7860). Left out, the first \
          free port from 7860 upwards is used, so that a second copy of this in another window \
          still starts. The page is served to this machine and no further."
+    );
+    eprintln!(
+        "  -output string\n    \twhere pictures and clips are written (default \".\", the directory \
+         this was started in). Each browser that opens the page writes into a folder of its own \
+         inside it -- session-0001, session-0002 and on -- so that two people's pictures are not \
+         one list."
     );
 }
 
@@ -473,6 +488,14 @@ mod tests {
             let error = args(&["-port", typed]).unwrap().port().unwrap_err();
             assert!(error.to_string().contains("invalid port"), "{typed}");
         }
+    }
+
+    #[test]
+    fn reads_where_to_write() {
+        // Left out, where it has always been: the directory the program was started in.
+        assert_eq!(args(&[]).unwrap().output(), ".");
+        assert_eq!(args(&["-output", "out"]).unwrap().output(), "out");
+        assert_eq!(args(&["--output=/tmp/w"]).unwrap().output(), "/tmp/w");
     }
 
     #[test]

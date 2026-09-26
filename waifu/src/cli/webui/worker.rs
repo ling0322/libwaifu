@@ -32,12 +32,15 @@ use std::io::Cursor;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::log;
-use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
+use crate::cli::webui::state::{
+    Chosen, Clip, Doing, Fetch, Picture, Run, Say, Session, Shared, Spoken,
+};
 use crate::cosyvoice3::{self, CosyVoice3};
 use crate::flint::{MemorySnapshot, Tensor};
 use crate::indextts::{self, IndexTts};
@@ -93,6 +96,8 @@ const ENOUGH_SIZES: usize = 3;
 
 /// A prompt to draw.
 pub struct Job {
+    /// The page that asked for it, which is where the picture goes and what is said about it.
+    pub session: Arc<Session>,
     /// The model to draw it with, as it was chosen: read now if the weights in memory are of
     /// another one, or of none.
     pub model: String,
@@ -111,6 +116,8 @@ pub struct Job {
 
 /// A sentence to read out.
 pub struct SayJob {
+    /// The page that asked for it, which is where the clip goes.
+    pub session: Arc<Session>,
     /// The voice to read it with, as it was chosen. There is one to choose from today, and it
     /// travels with the run anyway for the same reason a model's name does: what was chosen when
     /// the button was pressed is what this run is of.
@@ -144,7 +151,7 @@ pub enum Command {
 
 /// Reads commands and carries them out, until the channel is closed.
 pub fn work(shared: &Shared, commands: &Receiver<Command>) {
-    // What is in memory. Held here rather than in the session, which describes the model without
+    // What is in memory. Held here rather than in the world, which describes the model without
     // holding it: the weights are the one thing in this program that cannot cross a thread.
     let mut model: Option<Model> = None;
 
@@ -337,8 +344,8 @@ impl Ran {
 /// The choice outlives the weights. Somebody who changed the device, or whose last run was of
 /// another model, has not un-chosen anything -- the next run reads what they chose again.
 fn forget_the_weights(shared: &Shared) {
-    shared.change(|session| {
-        if let Some(chosen) = &mut session.model {
+    shared.change(|world| {
+        if let Some(chosen) = &mut world.model {
             chosen.in_memory = false;
         }
     });
@@ -380,24 +387,20 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
     match load(shared, asked) {
         Ok((read, opened)) => {
             *model = Some(opened);
-            shared.change(|session| {
+            shared.change(|world| {
                 // Only where it is still the chosen one. A choice made while this was reading is
                 // the newer answer to "what is the page set to draw with", and describing the
                 // model that has just been read over the top of it would undo somebody's click.
-                if session
-                    .model
-                    .as_ref()
-                    .is_none_or(|one| one.name == read.name)
-                {
-                    session.model = Some(read);
+                if world.model.as_ref().is_none_or(|one| one.name == read.name) {
+                    world.model = Some(read);
                 }
-                session.doing = Doing::Nothing;
+                world.doing = Doing::Nothing;
             });
             shared.say("ready", false);
             true
         }
         Err(error) => {
-            shared.change(|session| session.doing = Doing::Nothing);
+            shared.change(|world| world.doing = Doing::Nothing);
             // A stop is not a failure. It is the button doing what it says, and what it has to
             // say for itself -- which package is left on the disk, what the next fetch will not
             // have to bring down again -- belongs on the bar in the ordinary way rather than as a
@@ -505,9 +508,9 @@ fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) 
             let described = describe_voice(asked, read.as_ref(), true);
             *voice = Some(read);
 
-            shared.change(|session| {
-                session.voice = Some(described);
-                session.doing = Doing::Nothing;
+            shared.change(|world| {
+                world.voice = Some(described);
+                world.doing = Doing::Nothing;
             });
             if voice_holds_weights(asked) {
                 shared.say("ready", false);
@@ -515,7 +518,7 @@ fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) 
             true
         }
         Err(error) => {
-            shared.change(|session| session.doing = Doing::Nothing);
+            shared.change(|world| world.doing = Doing::Nothing);
             // A stop is not a failure -- see `read_model`, which says the same thing.
             shared.say(error.to_string(), !hub::stopped(&error));
             false
@@ -534,8 +537,8 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
         _ => asked.to_string(),
     };
 
-    shared.change(|session| {
-        session.doing = Doing::Fetching(Fetch {
+    shared.change(|world| {
+        world.doing = Doing::Fetching(Fetch {
             model: name.clone(),
             hub: None,
             file: String::new(),
@@ -552,8 +555,8 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
         &|| shared.interrupted(),
     )?;
 
-    shared.change(|session| {
-        session.doing = Doing::Reading {
+    shared.change(|world| {
+        world.doing = Doing::Reading {
             model: name.clone(),
         }
     });
@@ -575,8 +578,8 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
 /// Says on screen that the voice is not in memory, leaving it chosen -- what
 /// [`forget_the_weights`] is for a picture model.
 fn forget_the_voice(shared: &Shared) {
-    shared.change(|session| {
-        if let Some(spoken) = &mut session.voice {
+    shared.change(|world| {
+        if let Some(spoken) = &mut world.voice {
             spoken.in_memory = false;
         }
     });
@@ -726,8 +729,8 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
         _ => asked.to_string(),
     };
 
-    shared.change(|session| {
-        session.doing = Doing::Fetching(Fetch {
+    shared.change(|world| {
+        world.doing = Doing::Fetching(Fetch {
             model: name.clone(),
             hub: None,
             file: String::new(),
@@ -747,8 +750,8 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
         &|| shared.interrupted(),
     )?;
 
-    shared.change(|session| {
-        session.doing = Doing::Reading {
+    shared.change(|world| {
+        world.doing = Doing::Reading {
             model: name.clone(),
         }
     });
@@ -786,12 +789,12 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
     Ok((read, opened))
 }
 
-/// Copies what a fetch has to say into the session.
+/// Copies what a fetch has to say into the world: how far along, which is progress and not news.
 fn report_fetch(shared: &Shared, model: &str, progress: hub::Progress) {
-    shared.change(|session| {
+    shared.report(|world| {
         // Whatever it said last, so that a line about one field does not blank the others: the
         // hub is said once, before the first byte, and every line after it is about a file.
-        let mut fetch = match &session.doing {
+        let mut fetch = match &world.doing {
             Doing::Fetching(fetch) => fetch.clone(),
             _ => Fetch {
                 model: model.to_string(),
@@ -833,7 +836,7 @@ fn report_fetch(shared: &Shared, model: &str, progress: hub::Progress) {
             }
         }
 
-        session.doing = Doing::Fetching(fetch);
+        world.doing = Doing::Fetching(fetch);
     });
 }
 
@@ -843,14 +846,14 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
     // A stop asked for after the last run finished is not this run's business.
     shared.carry_on();
     let started = Instant::now();
-    shared.change(|session| {
-        session.doing = Doing::Drawing(Run {
+    shared.change(|world| {
+        world.doing = Doing::Drawing(Run {
             progress: GenerationProgress::Encoding,
             steps: job.options.num_steps,
             started,
         });
-        session.note = None;
     });
+    job.session.change(|record| record.note = None);
     log::line(format_args!(
         "drawing with {}: {}x{}, {} steps, seed {}{} -- \"{}\"",
         job.model,
@@ -866,8 +869,8 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
     ));
 
     let mut report = |progress| {
-        shared.change(|session| {
-            if let Doing::Drawing(run) = &mut session.doing {
+        shared.report(|world| {
+            if let Doing::Drawing(run) = &mut world.doing {
                 run.progress = progress;
             }
         });
@@ -884,7 +887,7 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
         Some(bytes) => match read_image(bytes, job.options.width, job.options.height) {
             Ok(image) => Some(image),
             Err(error) => {
-                shared.change(|session| session.doing = Doing::Nothing);
+                shared.change(|world| world.doing = Doing::Nothing);
                 shared.say(format!("the picture to draw from: {error}"), true);
                 return Ran::ToTheEnd;
             }
@@ -903,12 +906,16 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
     let kept = match drawn {
         // Written here rather than handed back, because the pixels are three megabytes that
         // nothing on the other side would do anything with but hand to a file.
-        Ok(Some(image)) => keep(&image),
+        Ok(Some(image)) => job
+            .session
+            .folder(shared.output())
+            .map_err(Error::from)
+            .and_then(|folder| keep(&image, &folder)),
         // Nothing said here, unlike every other way out of this function. What there is to say
         // about a stop is what the caller does about it next, and the caller is the one place
         // that knows: the weights go down with the run, and the sentence says so.
         Ok(None) => {
-            shared.change(|session| session.doing = Doing::Nothing);
+            shared.change(|world| world.doing = Doing::Nothing);
             return Ran::Stopped;
         }
         Err(error) => Err(error.into()),
@@ -917,7 +924,7 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
     let (file, width, height) = match kept {
         Ok(kept) => kept,
         Err(error) => {
-            shared.change(|session| session.doing = Doing::Nothing);
+            shared.change(|world| world.doing = Doing::Nothing);
             shared.say(error.to_string(), true);
             return Ran::ToTheEnd;
         }
@@ -926,14 +933,14 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
     log::line(format_args!("drew {file} in {:.1}s", elapsed.as_secs_f64()));
 
     let model_name = shared
-        .session()
+        .world()
         .model
         .as_ref()
         .map(|loaded| loaded.name.clone())
         .unwrap_or_default();
 
-    shared.change(|session| {
-        session.gallery.insert(
+    job.session.change(|record| {
+        record.gallery.insert(
             0,
             Picture {
                 file,
@@ -950,9 +957,9 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
                 elapsed,
             },
         );
-        session.doing = Doing::Nothing;
-        session.note = None;
+        record.note = None;
     });
+    shared.change(|world| world.doing = Doing::Nothing);
 
     Ran::ToTheEnd
 }
@@ -964,16 +971,16 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
 fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
     shared.carry_on();
     let started = Instant::now();
-    shared.change(|session| {
-        session.doing = Doing::Speaking(Say {
+    shared.change(|world| {
+        world.doing = Doing::Speaking(Say {
             progress: SpeechProgress::Reading,
             // Not known until the model has an opinion, which arrives with the first token. The
             // bar reads it as "no idea yet" and sits at the start, which is where the run is.
             expected: 0,
             started,
         });
-        session.note = None;
     });
+    job.session.change(|record| record.note = None);
     log::line(format_args!(
         "speaking with {}: seed {}{} -- \"{}\"",
         job.voice,
@@ -986,8 +993,8 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
     ));
 
     let mut report = |progress| {
-        shared.change(|session| {
-            if let Doing::Speaking(say) = &mut session.doing {
+        shared.report(|world| {
+            if let Doing::Speaking(say) = &mut world.doing {
                 say.progress = progress;
                 // The model's own estimate, taken as it arrives rather than once: a model that
                 // revises it upward mid-reading is a bar that should follow it rather than one
@@ -1011,7 +1018,7 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
         Some(bytes) => match wav::read(bytes) {
             Ok(sound) => Some(sound),
             Err(error) => {
-                shared.change(|session| session.doing = Doing::Nothing);
+                shared.change(|world| world.doing = Doing::Nothing);
                 shared.say(format!("the recording to sound like: {error}"), true);
                 return Ran::ToTheEnd;
             }
@@ -1026,10 +1033,14 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
         // Written here rather than handed back, for the same reason the pixels are: a minute of
         // speech is a couple of megabytes that nothing on the other side would do anything with
         // but hand to a file.
-        Ok(Some(sound)) => keep_sound(&sound),
+        Ok(Some(sound)) => job
+            .session
+            .folder(shared.output())
+            .map_err(Error::from)
+            .and_then(|folder| keep_sound(&sound, &folder)),
         // Said by the worker, which also knows whether the voice is being put down with it.
         Ok(None) => {
-            shared.change(|session| session.doing = Doing::Nothing);
+            shared.change(|world| world.doing = Doing::Nothing);
             return Ran::Stopped;
         }
         Err(error) => Err(error.into()),
@@ -1038,7 +1049,7 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
     let (file, seconds) = match kept {
         Ok(kept) => kept,
         Err(error) => {
-            shared.change(|session| session.doing = Doing::Nothing);
+            shared.change(|world| world.doing = Doing::Nothing);
             shared.say(error.to_string(), true);
             return Ran::ToTheEnd;
         }
@@ -1049,8 +1060,8 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
         elapsed.as_secs_f64()
     ));
 
-    shared.change(|session| {
-        session.clips.insert(
+    job.session.change(|record| {
+        record.clips.insert(
             0,
             Clip {
                 file,
@@ -1066,31 +1077,32 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
                 elapsed,
             },
         );
-        session.doing = Doing::Nothing;
-        session.note = None;
+        record.note = None;
     });
+    shared.change(|world| world.doing = Doing::Nothing);
     Ran::ToTheEnd
 }
 
-/// Writes the waveform a reading ends with into the first `waifu-NNNN.wav` here that nothing else
-/// has, and says how long it turned out to be.
+/// Writes the waveform a reading ends with into the first `waifu-NNNN.wav` in `folder` that
+/// nothing else has, and says what it was called and how long it turned out to be.
 ///
 /// The same naming as the pictures and beside them, so that what a session made is one run of
-/// numbered files in the directory it was started in rather than two schemes to learn.
-fn keep_sound(sound: &Sound) -> Result<(String, f64), Error> {
+/// numbered files in its own folder rather than two schemes to learn.
+fn keep_sound(sound: &Sound, folder: &Path) -> Result<(String, f64), Error> {
     let bytes = wav::write(sound);
 
     for number in 1..10_000 {
         let name = format!("waifu-{number:04}.wav");
-        if Path::new(&name).exists() {
+        let path = folder.join(&name);
+        if path.exists() {
             continue;
         }
 
-        std::fs::write(&name, &bytes)?;
+        std::fs::write(&path, &bytes)?;
         return Ok((name, sound.seconds()));
     }
 
-    Err("there are already ten thousand clips in this directory".into())
+    Err("there are already ten thousand clips in this session's folder".into())
 }
 
 /// The model a run draws with, whichever kind of package was opened.
@@ -1259,20 +1271,23 @@ fn read_image(bytes: &[u8], width: i32, height: i32) -> Result<Tensor, Error> {
     Ok(from_rgb8(width, height, scaled.to_rgb8().as_raw())?)
 }
 
-/// Writes the tensor a run ends with into the first `waifu-NNNN.png` here that nothing else has.
-fn keep(image: &Tensor) -> Result<(String, usize, usize), Error> {
+/// Writes the tensor a run ends with into the first `waifu-NNNN.png` in `folder` that nothing else
+/// has, and says what it was called -- the name, not the path, since the name is what the page
+/// asks for it by.
+fn keep(image: &Tensor, folder: &Path) -> Result<(String, usize, usize), Error> {
     let pixels = to_rgb8(image)?;
     let shape = image.shape();
     let (width, height) = (shape[3] as usize, shape[2] as usize);
 
     for number in 1..10_000 {
         let name = format!("waifu-{number:04}.png");
-        if Path::new(&name).exists() {
+        let path = folder.join(&name);
+        if path.exists() {
             continue;
         }
 
         image::save_buffer(
-            &name,
+            &path,
             &pixels,
             width as u32,
             height as u32,
@@ -1281,7 +1296,7 @@ fn keep(image: &Tensor) -> Result<(String, usize, usize), Error> {
         return Ok((name, width, height));
     }
 
-    Err("there are already ten thousand pictures in this directory".into())
+    Err("there are already ten thousand pictures in this session's folder".into())
 }
 
 #[cfg(test)]
