@@ -1,0 +1,67 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "rows.glsl"
+
+// Inclusive prefix sum along each row: element i of a row is the sum of elements 0..i.
+//
+// One workgroup a row, walking it a tile of ROW_THREADS elements at a time. Each tile is scanned in
+// shared memory by doubling -- every step adds the value `offset` places back, offset 1, 2, 4, ...
+// -- which is log2(ROW_THREADS) steps and a barrier either side of each read. The running total of
+// the tiles before carries into the next one, so a row of any length is one dispatch. The sum is
+// kept in float whatever the storage type, as the CPU and CUDA kernels keep it.
+//
+// The loop over tiles runs the same number of times in every invocation of a workgroup, since the
+// row length is a push constant, so every barrier is reached in uniform control flow.
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t a;
+  uint numRows;
+  uint rowLength;
+} pc;
+
+void main() {
+  uint row = rowIndex();
+  if (row >= pc.numRows) return;
+
+  uint tid = gl_LocalInvocationID.x;
+  uint base = row * pc.rowLength;
+
+  float carry = 0.0;
+  for (uint start = 0; start < pc.rowLength; start += ROW_THREADS) {
+    uint i = start + tid;
+    rowScratch[tid] = i < pc.rowLength ? LOAD_A(pc.a, base + i) : 0.0;
+    barrier();
+
+    for (uint offset = 1; offset < ROW_THREADS; offset <<= 1) {
+      float behind = tid >= offset ? rowScratch[tid - offset] : 0.0;
+      barrier();
+      rowScratch[tid] += behind;
+      barrier();
+    }
+
+    if (i < pc.rowLength) STORE_C(pc.c, base + i, carry + rowScratch[tid]);
+    carry += rowScratch[ROW_THREADS - 1];
+    // The scratch is refilled by the next tile; every invocation has to be done reading it.
+    barrier();
+  }
+}

@@ -214,6 +214,10 @@ Tensor VulkanOperators::sum(Tensor input, int dim) {
   return vulkan::sum(input, dim);
 }
 
+Tensor VulkanOperators::cumsum(Tensor input, int dim) {
+  return vulkan::cumsum(input, dim);
+}
+
 Tensor VulkanOperators::max(Tensor input) {
   return reduceLastDim(input, ReduceOp::kMax);
 }

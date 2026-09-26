@@ -255,6 +255,46 @@ CATCH_TEST_CASE("test Vulkan softmax and reductions", "[op][vulkan]") {
   CATCH_REQUIRE(fabsf(vk()->elem(all) - total) < 1e-4f);
 }
 
+CATCH_TEST_CASE("test Vulkan cumsum", "[op][vulkan]") {
+  SKIP_WITHOUT_VULKAN();
+
+  // Rows shorter than a 256-wide tile, exactly one, just past it, and several with a ragged end:
+  // the carry from one tile into the next is what the longer ones check.
+  for (int length : {1, 7, 256, 257, 1000, 4099}) {
+    CATCH_INFO("length = " << length);
+    Tensor a = cpu()->rand({3, 5, length}, DType::kFloat);
+    Tensor got = vk()->cumsum(toVulkan(a), -1);
+    CATCH_REQUIRE(got.getShape() == a.getShape());
+    CATCH_REQUIRE(close(got, cpu()->cumsum(a, -1), 1e-4f, 1e-4f));
+  }
+
+  // Every dimension, counted from either end.
+  Tensor b = cpu()->rand({4, 300, 9}, DType::kFloat);
+  for (int dim : {0, 1, 2, -1, -2, -3}) {
+    CATCH_INFO("dim = " << dim);
+    CATCH_REQUIRE(close(vk()->cumsum(toVulkan(b), dim), cpu()->cumsum(b, dim), 1e-4f, 1e-4f));
+  }
+
+  // A strided view, scanned along its middle dimension.
+  Tensor strided = toVulkan(b).transpose(0, 2);
+  CATCH_REQUIRE(close(
+      vk()->cumsum(strided, 1), cpu()->cumsum(cpu()->contiguous(b.transpose(0, 2)), 1), 1e-4f, 1e-4f));
+
+  // Half, accumulated in float and rounded once: within half a unit of the ~300 a row sums to.
+  Tensor c = cpu()->rand({2, 600}, DType::kFloat);
+  Tensor half = vk()->cumsum(toVulkan(c, DType::kFloat16), -1);
+  CATCH_REQUIRE(half.getDType() == DType::kFloat16);
+  Tensor want = cpu()->cumsum(cpu()->cast(cpu()->cast(c, DType::kFloat16), DType::kFloat), -1);
+  CATCH_REQUIRE(close(half, want, 1e-3f, 1e-3f));
+
+  // Known values, so a dropped or double-counted element is a wrong total and not noise.
+  Tensor d = Tensor::create<float>({2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+  CATCH_REQUIRE(values(vk()->cumsum(toVulkan(d), -1)) ==
+                std::vector<float>({1.0f, 3.0f, 6.0f, 4.0f, 9.0f, 15.0f}));
+  CATCH_REQUIRE(values(vk()->cumsum(toVulkan(d), 0)) ==
+                std::vector<float>({1.0f, 2.0f, 3.0f, 5.0f, 7.0f, 9.0f}));
+}
+
 CATCH_TEST_CASE("test Vulkan norms", "[op][vulkan]") {
   SKIP_WITHOUT_VULKAN();
 

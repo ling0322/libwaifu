@@ -79,6 +79,7 @@ enum class ReduceOp {
 /// Reduce the last dimension, which the result drops -- a vector becomes a vector of one.
 Tensor reduceLastDim(const Tensor &input, ReduceOp op);
 Tensor sum(const Tensor &input, int dim);
+Tensor cumsum(const Tensor &input, int dim);
 Tensor softmax(const Tensor &input);
 bool all(const Tensor &input);
 float elem(const Tensor &tensor);
