@@ -73,11 +73,12 @@ autoencoder. `layerNorm`, `groupNorm`, `upsampleNearest2d` and `conv2d` were wha
 way, and each is checked against its definition written out in the test rather than against the
 CUDA kernel.
 
-Four operators are still declared on `Operators` and still abort on the CPU -- `rotaryEmbedding`,
-`pagedAttention`, `storeKVCache` and `matmulNarrowPrecision`. All four are the language model's,
-and the language model was deleted; nothing reachable calls them on either device. They are dead
-declarations rather than missing implementations, and the thing to do with them is probably to
-take them out.
+Three operators are still declared on `Operators` and still abort on the CPU -- `rotaryEmbedding`,
+`pagedAttention` and `storeKVCache`. All three are the language model's, and the language model
+was deleted; nothing reachable calls them on either device. They are dead declarations rather than
+missing implementations, and the thing to do with them is probably to take them out.
+`matmulNarrowPrecision`, the fourth, is gone: no GEMM backend ever implemented its MXFP4 hook, so
+it could only abort.
 
 What the CPU costs, on a 32 thread machine: 512 by 512 at 20 steps is 2m30s, 256 by 256 is 4.0 s
 a step, and the model takes what it does on disk -- 6.96 GB.

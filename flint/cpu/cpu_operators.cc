@@ -239,9 +239,20 @@ Tensor CPUOperators::sum(Tensor inputs, int dim) {
     return cpu::reduce(inputs, MapReduceType::SUM);
   }
 
-  Tensor transposed = contiguous(inputs.transpose(dim, ndim - 1));
-  Tensor reduced = cpu::reduce(transposed, MapReduceType::SUM);
-  return reduced.transpose(dim, ndim - 2);
+  // Not a single transpose of `dim` with the last: swapping them back afterwards puts the old last
+  // dimension in the wrong place on any rank-4 input summed over a dimension before the third from
+  // the end. (.., D, ..) is viewed as (outer, D, inner) instead, turned to (outer, inner, D), and
+  // viewed back without D, which keeps every other dimension where it was.
+  std::vector<int> shape = inputs.getShape();
+  int outer = 1, inner = 1;
+  for (int d = 0; d < dim; ++d) outer *= shape[d];
+  for (int d = dim + 1; d < ndim; ++d) inner *= shape[d];
+
+  Tensor grouped = contiguous(inputs).view({outer, shape[dim], inner});
+  Tensor reduced = cpu::reduce(contiguous(grouped.transpose(1, 2)), MapReduceType::SUM);
+
+  shape.erase(shape.begin() + dim);
+  return reduced.view(shape);
 }
 
 Tensor CPUOperators::cumsum(Tensor input, int dim) {

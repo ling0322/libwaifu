@@ -73,10 +73,6 @@ Tensor Operators::matmul(Tensor a, Tensor b) {
   NOT_IMPL();
 }
 
-Tensor Operators::matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB) {
-  NOT_IMPL();
-}
-
 Tensor Operators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
   THROW(NotImplemented, "layerNorm is only available on the CUDA device");
   return Tensor();

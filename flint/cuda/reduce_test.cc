@@ -80,6 +80,35 @@ CATCH_TEST_CASE("test CUDA reductions (all ranks)", "[op][cuda]") {
   CATCH_REQUIRE(cpuOps()->allClose(s3, cpuOps()->sum(a3, -1), 5e-3));
 }
 
+CATCH_TEST_CASE("test CUDA sum over any dimension", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Anything but the last dimension used to come back as an empty tensor, with no error. Every
+  // dimension of a rank-4 tensor, counted from either end, in float16 and in float32.
+  Tensor a = cpuOps()->rand({2, 3, 4, 300}, DType::kFloat);
+  for (int dim : {0, 1, 2, 3, -2, -3, -4}) {
+    CATCH_INFO("dim = " << dim);
+    Tensor want = cpuOps()->sum(a, dim);
+
+    Tensor half = toCpu(cudaOps()->sum(toCuda(a), dim));
+    CATCH_REQUIRE(half.getShape() == want.getShape());
+    CATCH_REQUIRE(cpuOps()->allClose(half, want, 1e-2, 5e-2));
+
+    Tensor single = cudaOps()->sum(cudaOps()->toDevice(Device::getCuda(), a), dim);
+    CATCH_REQUIRE(single.getDType() == DType::kFloat);
+    CATCH_REQUIRE(cpuOps()->allClose(
+        cudaOps()->toDevice(Device::getCpu(), single), want, 1e-5, 1e-4));
+  }
+
+  // A strided input over a middle dimension.
+  Tensor strided = cudaOps()->toDevice(Device::getCuda(), a).transpose(1, 3);
+  CATCH_REQUIRE(cpuOps()->allClose(
+      cudaOps()->toDevice(Device::getCpu(), cudaOps()->sum(strided, 2)),
+      cpuOps()->sum(a.transpose(1, 3), 2),
+      1e-5,
+      1e-4));
+}
+
 CATCH_TEST_CASE("test CUDA reductions (row widths)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 

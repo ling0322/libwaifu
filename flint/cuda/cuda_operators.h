@@ -59,7 +59,6 @@ class CudaOperators : public Operators {
   Tensor lookup(Tensor table, Tensor indices) override;
   void rotaryEmbedding(Tensor positions, Tensor query, Tensor key, Tensor rotaryCache) override;
   Tensor matmul(Tensor a, Tensor b) override;
-  Tensor matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB) override;
   Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) override;
   Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) override;
   Tensor upsampleNearest2d(Tensor input, int scale) override;

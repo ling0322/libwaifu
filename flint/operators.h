@@ -64,7 +64,6 @@ class Operators {
       int padding,
       int dilation,
       int groups);
-  virtual Tensor matmulNarrowPrecision(Tensor A, Tensor sfA, Tensor B, Tensor sfB);
 
   /// 1-D convolution of `input` <float16|float>(N, C, L) by `weight` (K, C / groups, R), with an
   /// optional per-channel `bias` (K). The result is (N, K, Lout), Lout being

@@ -39,11 +39,6 @@ class MatMul {
   static std::shared_ptr<MatMul> createCublas();
 
   Tensor apply(const Tensor &A, const Tensor &B);
-  Tensor applyNarrowPrecision(
-      const Tensor &A,
-      const Tensor &sfA,
-      const Tensor &B,
-      const Tensor &sfB);
 
  protected:
   std::shared_ptr<Gemm> _gemm;
@@ -66,8 +61,6 @@ class MatMul {
   Tensor matmulQ4(const Tensor &A, const Tensor &B);
   Tensor gemmQ4(const Tensor &A, const Tensor &B);
   Tensor bmmToGemmQ4(const Tensor &A, const Tensor &B);
-
-  Tensor matmulMxfp4(const Tensor &A, const Tensor &sfA, const Tensor &B, const Tensor &sfB);
 };
 
 }  // namespace cuda
