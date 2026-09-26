@@ -80,6 +80,7 @@ class MetalOperators : public Operators {
   Tensor neg(Tensor input) override;
   Tensor abs(Tensor input) override;
   Tensor exp(Tensor input) override;
+  Tensor log(Tensor input) override;
   Tensor sqrt(Tensor input) override;
   Tensor rsqrt(Tensor input) override;
   Tensor square(Tensor input) override;

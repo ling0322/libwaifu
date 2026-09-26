@@ -88,6 +88,27 @@ fn sums_as_it_goes_along_either_dimension() {
 }
 
 #[test]
+fn takes_the_natural_log_and_undoes_exp() {
+    let x = cpu_f32(&[4], &[1.0, std::f32::consts::E, 0.5, 10.0]);
+
+    let logged = F::log(&x).unwrap().to_vec_f32().unwrap();
+    for (got, want) in logged.iter().zip([0.0f32, 1.0, 0.5f32.ln(), 10.0f32.ln()]) {
+        assert!((got - want).abs() < 1e-6, "{got} against {want}");
+    }
+
+    let back = F::log(&F::exp(&x).unwrap()).unwrap().to_vec_f32().unwrap();
+    for (got, want) in back.iter().zip(x.to_vec_f32().unwrap()) {
+        assert!((got - want).abs() < 1e-4, "{got} against {want}");
+    }
+
+    let zero = F::log(&cpu_f32(&[1], &[0.0]))
+        .unwrap()
+        .to_vec_f32()
+        .unwrap();
+    assert_eq!(zero[0], f32::NEG_INFINITY);
+}
+
+#[test]
 fn softmax_gives_rows_that_sum_to_one() {
     let x = cpu_f32(&[2, 3], &[1.0, 2.0, 3.0, 1.0, 1.0, 1.0]);
     let probabilities = F::softmax(&x).unwrap();

@@ -132,6 +132,10 @@ Tensor CudaOperators::exp(Tensor input) {
   return op::cuda::applyUnaryOp(op::cuda::UnaryOp::EXP, input);
 }
 
+Tensor CudaOperators::log(Tensor input) {
+  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::LOG, input);
+}
+
 Tensor CudaOperators::sqrt(Tensor input) {
   return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SQRT, input);
 }

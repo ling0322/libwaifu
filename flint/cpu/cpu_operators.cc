@@ -304,6 +304,10 @@ Tensor CPUOperators::exp(Tensor input) {
   return cpu::unaryOp(input, cpu::UnaryOp::EXP);
 }
 
+Tensor CPUOperators::log(Tensor input) {
+  return cpu::unaryOp(input, cpu::UnaryOp::LOG);
+}
+
 Tensor CPUOperators::sqrt(Tensor input) {
   return cpu::unaryOp(input, cpu::UnaryOp::SQRT);
 }

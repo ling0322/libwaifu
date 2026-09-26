@@ -390,6 +390,12 @@ pub fn exp(input: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_exp(operators, input.raw, out) })
 }
 
+/// Element-wise natural logarithm. Zero gives minus infinity and a negative number NaN.
+pub fn log(input: &Tensor) -> Result<Tensor> {
+    let operators = operators_of(input)?;
+    Tensor::produce(|out| unsafe { ffi::fl_log(operators, input.raw, out) })
+}
+
 /// Element-wise square root.
 pub fn sqrt(input: &Tensor) -> Result<Tensor> {
     let operators = operators_of(input)?;

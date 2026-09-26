@@ -81,6 +81,10 @@ Tensor exp(const Tensor &a) {
   return fromMlxArray(mlx::core::exp(toMlxArray(a)));
 }
 
+Tensor log(const Tensor &a) {
+  return fromMlxArray(mlx::core::log(toMlxArray(a)));
+}
+
 Tensor sqrt(const Tensor &a) {
   return fromMlxArray(mlx::core::sqrt(toMlxArray(a)));
 }

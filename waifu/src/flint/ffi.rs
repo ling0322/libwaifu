@@ -313,6 +313,7 @@ extern "C" {
     pub fn fl_neg(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_abs(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_exp(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
+    pub fn fl_log(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_sqrt(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_rsqrt(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_sigmoid(operators: FlOperators, input: FlTensor, out: *mut FlTensor) -> i32;

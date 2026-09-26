@@ -112,6 +112,21 @@ CATCH_TEST_CASE("test CPU unary operators (positive domain)", "[core][nn][operat
     CATCH_REQUIRE(std::fabs(invRoot[i] - 1.0f / std::sqrt(values[i])) < 1e-3f);
   }
 
+  Tensor logTensor = cpuOps()->log(x);
+  const float *logged = logTensor.getInternalData()->getData<float>(logTensor.getInternalOffset());
+  for (size_t i = 0; i < values.size(); ++i) {
+    CATCH_INFO("log at x = " << values[i]);
+    CATCH_REQUIRE(std::fabs(logged[i] - std::log(values[i])) < 1e-5f);
+  }
+
+  // The edges a spectrogram floors its energies to stay away from: log(0) is -inf, and a negative
+  // number is NaN rather than anything that could pass for a value.
+  Tensor edges = cpuOps()->log(Tensor::create<float>({2}, {0.0f, -1.0f}));
+  const float *edge = edges.getInternalData()->getData<float>(edges.getInternalOffset());
+  CATCH_REQUIRE(std::isinf(edge[0]));
+  CATCH_REQUIRE(edge[0] < 0.0f);
+  CATCH_REQUIRE(std::isnan(edge[1]));
+
   // sqrt(0) is 0 rather than NaN. Read the value directly: elem() has no CPU implementation.
   Tensor zero = cpuOps()->sqrt(Tensor::create<float>({1}, {0.0f}));
   CATCH_REQUIRE(zero.getInternalData()->getData<float>(zero.getInternalOffset())[0] == 0.0f);
