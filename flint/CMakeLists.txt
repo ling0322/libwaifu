@@ -203,6 +203,30 @@ if(WITH_MLX)
     set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal/benchmark.cc")
 endif()
 
+if(WITH_VULKAN)
+    set(flint_SOURCES
+        ${flint_SOURCES}
+        "vulkan/common.cc"
+        "vulkan/context.cc"
+        "vulkan/elementwise.cc"
+        "vulkan/matmul.cc"
+        "vulkan/norm.cc"
+        "vulkan/rand.cc"
+        "vulkan/reduce.cc"
+        "vulkan/shape.cc"
+        "vulkan/to_device.cc"
+        "vulkan/vma.cc"
+        "${VULKAN_THIRD_PARTY}/volk/volk.c"
+        "vulkan/vulkan_operators.cc"
+        "vulkan/vulkan_tensor_data.cc"
+        "${CMAKE_CURRENT_BINARY_DIR}/vulkan_shaders/shaders.cc")
+    set(flint_test_SOURCES
+        ${flint_test_SOURCES}
+        "vulkan/operators_test.cc")
+    set(flint_INCDIR ${flint_INCDIR} "${CMAKE_CURRENT_BINARY_DIR}/vulkan_shaders")
+    include("vulkan/shaders/shaders.cmake")
+endif()
+
 # CPU specific code
 if(LIBWAIFU_KERNEL_X86_64)
     set(flint_SOURCES
@@ -255,6 +279,16 @@ target_include_directories(flint_test PRIVATE ${flint_INCDIR})
 
 add_library(flint_benchmark OBJECT ${flint_benchmark_SOURCES})
 target_include_directories(flint_benchmark PRIVATE ${flint_INCDIR})
+
+# volk and VMA are third-party headers too, with warnings of their own. VK_NO_PROTOTYPES because
+# every Vulkan entry point comes through volk's function pointers rather than from a linked loader.
+if(WITH_VULKAN)
+    foreach(_target flint_static flint_test flint_benchmark)
+        target_include_directories(${_target} SYSTEM PRIVATE ${VULKAN_INCDIRS})
+        target_compile_definitions(${_target} PRIVATE VK_NO_PROTOTYPES)
+    endforeach()
+    add_dependencies(flint_static flint_vulkan_shaders)
+endif()
 
 # MLX headers use C++20 features (defaulted comparisons). Mark them as SYSTEM so the compiler
 # does not warn about code this project does not own.

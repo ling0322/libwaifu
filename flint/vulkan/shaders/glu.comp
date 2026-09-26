@@ -1,0 +1,47 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// The gated linear units: a contiguous A (..., 2D) into C (..., D), C = A[..., D:] * act(A[..., :D])
+// -- the first half is the gate. GEGLU when op is 1, SwiGLU when it is 0. In float.
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t a;
+  uint numel;  // of C
+  uint halfWidth;  // D
+  uint op;
+} pc;
+
+void main() {
+  uint i = globalIndex();
+  if (i >= pc.numel) return;
+
+  uint row = i / pc.halfWidth;
+  uint column = i - row * pc.halfWidth;
+  uint base = row * 2 * pc.halfWidth;
+
+  float gate = LOAD_A(pc.a, base + column);
+  float value = LOAD_A(pc.a, base + pc.halfWidth + column);
+  float activated = pc.op == 1 ? gelu(gate) : silu(gate);
+  STORE_C(pc.c, i, value * activated);
+}

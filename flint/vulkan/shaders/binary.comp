@@ -1,0 +1,93 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// C = A op B, with A and B strided -- B's strides are zero where it is broadcast -- and C
+// contiguous. Computed in float, except for integers, which are added and compared as integers.
+// EQUAL_ONLY builds the comparison, whose C is bool whatever A and B are.
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+// Keep in step with BinaryOp in flint/vulkan/elementwise.cc.
+#define OP_ADD 0
+#define OP_SUB 1
+#define OP_MUL 2
+#define OP_DIV 3
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t a;
+  uint64_t b;
+  uint numel;
+  uint ndim;
+  uint op;
+  uint pad;
+  uint shape[MAX_DIMS];
+  uint strideA[MAX_DIMS];
+  uint strideB[MAX_DIMS];
+} pc;
+
+void main() {
+  uint i = globalIndex();
+  if (i >= pc.numel) return;
+
+  uint offsetA = 0;
+  uint offsetB = 0;
+  uint rest = i;
+  for (int d = int(pc.ndim) - 1; d >= 0; --d) {
+    uint size = pc.shape[d];
+    uint next = rest / size;
+    uint index = rest - next * size;
+    offsetA += index * pc.strideA[d];
+    offsetB += index * pc.strideB[d];
+    rest = next;
+  }
+
+#if defined(EQUAL_ONLY)
+#if defined(A_INTEGER)
+  bool equal = int64_t(LOAD_A_RAW(pc.a, offsetA)) == int64_t(LOAD_B_RAW(pc.b, offsetB));
+#else
+  bool equal = LOAD_A(pc.a, offsetA) == LOAD_B(pc.b, offsetB);
+#endif
+  BufferC(pc.c).v[i] = C_T(uint(equal));
+#elif defined(A_INTEGER)
+  int64_t x = int64_t(LOAD_A_RAW(pc.a, offsetA));
+  int64_t y = int64_t(LOAD_B_RAW(pc.b, offsetB));
+  int64_t z;
+  switch (pc.op) {
+    case OP_ADD: z = x + y; break;
+    case OP_SUB: z = x - y; break;
+    case OP_MUL: z = x * y; break;
+    default: z = x / y; break;
+  }
+  BufferC(pc.c).v[i] = C_T(z);
+#else
+  float x = LOAD_A(pc.a, offsetA);
+  float y = LOAD_B(pc.b, offsetB);
+  float z;
+  switch (pc.op) {
+    case OP_ADD: z = x + y; break;
+    case OP_SUB: z = x - y; break;
+    case OP_MUL: z = x * y; break;
+    default: z = x / y; break;
+  }
+  STORE_C(pc.c, i, z);
+#endif
+}

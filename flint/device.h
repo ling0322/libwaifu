@@ -42,6 +42,7 @@ class Device {
     /// memory belongs to.
     kCudaHost,
     kMetal,
+    kVulkan,
     NumDeviceType,  // number of device types
     kUnknown
   };
@@ -55,10 +56,16 @@ class Device {
   /// @return availability of the Metal device.
   static bool isMetalAvailable();
 
+  /// @brief Return true if the Vulkan device is available, which needs both a build with Vulkan
+  ///        and a machine with a Vulkan loader and a device this backend can run on.
+  /// @return availability of the Vulkan device.
+  static bool isVulkanAvailable();
+
   static Device getCpu();
   static Device getCuda();
   static Device getCudaHost();
   static Device getMetal();
+  static Device getVulkan();
 
   // construct device by device type
   Device();

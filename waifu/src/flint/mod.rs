@@ -172,6 +172,7 @@ pub enum Device {
     /// of its own: it is where weights wait to be copied to the GPU.
     CudaHost = 2,
     Metal = 3,
+    Vulkan = 4,
 }
 
 impl Device {
@@ -182,6 +183,7 @@ impl Device {
             Device::Cuda => "cuda",
             Device::CudaHost => "cuda-host",
             Device::Metal => "metal",
+            Device::Vulkan => "vulkan",
         }
     }
 
@@ -204,6 +206,7 @@ impl Device {
             1 => Ok(Device::Cuda),
             2 => Ok(Device::CudaHost),
             3 => Ok(Device::Metal),
+            4 => Ok(Device::Vulkan),
             other => Err(Error::unsupported(format!("unknown device {other}"))),
         }
     }

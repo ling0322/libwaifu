@@ -1,0 +1,67 @@
+#version 460
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// Layer norm over the last dimension of a contiguous A, into C. A workgroup per row, in float.
+// The weight and bias are A's type and each is left out when its address is zero. RMS_NORM
+// builds the variant without a mean, where the weight is not optional.
+//
+// The variance is E[x^2] - E[x]^2, and eps goes inside the square root, as on the other devices.
+#include "common.glsl"
+#include "rows.glsl"
+
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t a;
+  uint64_t weight;
+  uint64_t bias;
+  uint numRows;
+  uint rowLength;
+  float eps;
+} pc;
+
+void main() {
+  uint row = rowIndex();
+  if (row >= pc.numRows) return;
+
+  uint tid = gl_LocalInvocationID.x;
+  uint base = row * pc.rowLength;
+
+  vec2 sums = vec2(0.0);
+  for (uint i = tid; i < pc.rowLength; i += ROW_THREADS) {
+    float x = LOAD_A(pc.a, base + i);
+    sums += vec2(x, x * x);
+  }
+  sums = sumRow2(sums) / float(pc.rowLength);
+
+#if defined(RMS_NORM)
+  float mean = 0.0;
+#else
+  float mean = sums.x;
+#endif
+  float variance = sums.y - mean * mean;
+  float invStd = inversesqrt(variance > 0.0 ? variance + pc.eps : pc.eps);
+
+  for (uint i = tid; i < pc.rowLength; i += ROW_THREADS) {
+    float y = (LOAD_A(pc.a, base + i) - mean) * invStd;
+    if (pc.weight != 0) y *= LOAD_A(pc.weight, i);
+    if (pc.bias != 0) y += LOAD_A(pc.bias, i);
+    STORE_C(pc.c, base + i, y);
+  }
+}

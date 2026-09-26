@@ -39,6 +39,9 @@
 #ifdef LIBWAIFU_MLX_ENABLED
 #include "flint/metal/metal_operators.h"
 #endif
+#ifdef LIBWAIFU_VULKAN_ENABLED
+#include "flint/vulkan/vulkan_operators.h"
+#endif
 
 namespace fl {
 
@@ -526,6 +529,7 @@ std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {
     nullptr,
     nullptr,
     nullptr,
+    nullptr,
     nullptr};
 
 static std::atomic<bool> gInitialized{false};
@@ -550,6 +554,14 @@ void initOperators() {
     if (op::metal::MetalOperators::isAvailable()) {
       CHECK(!gOperatorsForDevice[Device::kMetal]);
       gOperatorsForDevice[Device::kMetal] = op::metal::MetalOperators::create();
+    }
+#endif
+#ifdef LIBWAIFU_VULKAN_ENABLED
+    // Registered the same way, only where there is a device: a Vulkan build loads the loader
+    // itself, and so runs on machines that have none.
+    if (op::vulkan::VulkanOperators::isAvailable()) {
+      CHECK(!gOperatorsForDevice[Device::kVulkan]);
+      gOperatorsForDevice[Device::kVulkan] = op::vulkan::VulkanOperators::create();
     }
 #endif
   }
