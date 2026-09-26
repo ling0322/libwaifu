@@ -92,6 +92,24 @@ Tensor sum(const Tensor &input, int dim) {
   return makeContiguous(restored);
 }
 
+Tensor cumsum(const Tensor &input, int dim) {
+  checkFloat(input.getDType(), "cumsum");
+  CHECK(input.getDim() >= 1);
+
+  // The scan runs along the last dimension; any other is moved there and back, which leaves the
+  // shape as it was.
+  int realDim = input.getInternalShape()->getRealDim(dim);
+  bool moved = realDim != input.getDim() - 1;
+  Tensor x = makeContiguous(moved ? input.transpose(realDim, -1) : input);
+
+  Tensor output = createTensor(x.getShape(), x.getDType());
+  if (x.getNumEl() > 0 && x.getShape(-1) > 0) {
+    dispatchRows(kernelName("scan", x.getDType()).c_str(), x, output, 0);
+  }
+
+  return moved ? makeContiguous(output.transpose(realDim, -1)) : output;
+}
+
 Tensor softmax(const Tensor &input) {
   checkFloat(input.getDType(), "softmax");
   CHECK(input.getDim() >= 1);
