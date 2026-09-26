@@ -110,6 +110,7 @@ if (WITH_CUDA)
         "cuda/rotary_embedding.cu"
         "cuda/sampling.cu"
         "cuda/softmax.cu"
+        "cuda/staged_upload.cc"
         "cuda/store_kv_cache.cu"
         "cuda/to_device.cc"
         "cuda/upsample.cu"

@@ -20,10 +20,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/cuda/staged_upload.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -91,6 +94,69 @@ CATCH_TEST_CASE("test CUDA to (rank and dtype)", "[op][cuda]") {
       idsRoundTrip.getInternalOffset());
   CATCH_REQUIRE(data[0] == -1);
   CATCH_REQUIRE(data[5] == (LongType{1} << 40));
+}
+
+CATCH_TEST_CASE("test CUDA to from pageable memory through the staging buffers", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  constexpr int ChunkFloats = static_cast<int>(op::cuda::StagedUpload::ChunkBytes / 4);
+  constexpr int MinFloats = static_cast<int>(op::cuda::StagedUpload::MinBytes / 4);
+
+  // Either side of the threshold, exactly one buffer, and three buffers' worth with a ragged end,
+  // which uses both buffers and comes back round to the first.
+  for (int numel : {MinFloats - 1, MinFloats, ChunkFloats, 2 * ChunkFloats + 1234}) {
+    Tensor a = cpuOps()->rand({numel}, DType::kFloat);
+    Tensor roundTrip =
+        cudaOps()->toDevice(Device::getCpu(), cudaOps()->toDevice(Device::getCuda(), a));
+    CATCH_INFO("numel = " << numel);
+    CATCH_REQUIRE(roundTrip.getShape() == a.getShape());
+    CATCH_REQUIRE(std::memcmp(
+                      roundTrip.getInternalData()->getData<float>(0),
+                      a.getInternalData()->getData<float>(0),
+                      numel * sizeof(float)) == 0);
+  }
+}
+
+CATCH_TEST_CASE("test CUDA staged copy has read its source when it returns", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  constexpr int ChunkFloats = static_cast<int>(op::cuda::StagedUpload::ChunkBytes / 4);
+  int numel = 3 * ChunkFloats + 7;
+  Tensor a = cpuOps()->rand({numel}, DType::kFloat);
+  std::vector<float> expected(
+      a.getInternalData()->getData<float>(0),
+      a.getInternalData()->getData<float>(0) + numel);
+
+  // The last buffers may still be on the bus, but they are the staging buffers', not the
+  // source's: overwriting the source now must not reach the device.
+  Tensor x = cudaOps()->toDevice(Device::getCuda(), a);
+  float *source = a.getInternalData()->getData<float>(0);
+  std::fill(source, source + numel, -1.0f);
+
+  Tensor back = cudaOps()->toDevice(Device::getCpu(), x);
+  CATCH_REQUIRE(std::memcmp(
+                    back.getInternalData()->getData<float>(0),
+                    expected.data(),
+                    numel * sizeof(float)) == 0);
+}
+
+CATCH_TEST_CASE("test CUDA staged copies are seen by the kernels after them", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Two copies back to back, each longer than both buffers, then a kernel on the compute stream
+  // reading both: the second copy reuses the buffers the first one filled, and the kernel has to
+  // wait for the copy stream to see either.
+  constexpr int ChunkFloats = static_cast<int>(op::cuda::StagedUpload::ChunkBytes / 4);
+  int numel = 2 * ChunkFloats + 99;
+  for (int round = 0; round < 3; ++round) {
+    Tensor a = cpuOps()->rand({numel}, DType::kFloat);
+    Tensor b = cpuOps()->rand({numel}, DType::kFloat);
+    Tensor sum = cudaOps()->add(
+        cudaOps()->toDevice(Device::getCuda(), a),
+        cudaOps()->toDevice(Device::getCuda(), b));
+    CATCH_INFO("round " << round);
+    CATCH_REQUIRE(cpuOps()->allClose(cudaOps()->toDevice(Device::getCpu(), sum), cpuOps()->add(a, b)));
+  }
 }
 
 CATCH_TEST_CASE("test CUDA cast is a no-op for the same dtype", "[op][cuda]") {

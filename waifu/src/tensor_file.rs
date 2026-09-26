@@ -40,7 +40,7 @@
 //!
 //! One file at a time. A file is read whole, each of its tensors is handed on as it is built, and
 //! the file's bytes are let go of before the next file is read. So what a caller keeps is the
-//! caller's -- a model puts each weight on the card, or page-locks it, as it arrives -- and the
+//! caller's -- a model puts each weight on the card, or keeps it on the host, as it arrives -- and the
 //! reading itself costs one file on top of that, not the whole package.
 //!
 //! There is no object in between that holds a model's files. A model is read once, into the

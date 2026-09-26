@@ -60,7 +60,7 @@ impl Runtime {
         Runtime::on(Device::Vulkan),
     ];
 
-    /// Cuda, with the package page-locked on the host and each weight moved onto the card at the
+    /// Cuda, with the package held on the host and each weight moved onto the card at the
     /// instruction that reads it. For a card the model does not fit on.
     pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
         device: Device::Cuda,

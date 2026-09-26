@@ -72,15 +72,13 @@
 //!   load is a lookup and the handle it hands back costs no bytes. What the card holds is the
 //!   model, which is what a model that fits wants and what twenty sampler steps would otherwise
 //!   pay for twenty times over.
-//! * [`Residency::LowVram`] page-locked every weight on the host when the source was
+//! * [`Residency::LowVram`] kept every weight in ordinary host memory when the source was
 //!   built, and a load is the copy across the bus. The `free` after the weight's last reader is
 //!   the card taking those bytes back, so the card holds what the pass is using rather than the
-//!   model. Page-locked once, rather than for each copy, because that is when page-locking pays:
-//!   the driver's copy engine reads page-locked memory directly, and the same memory is read again
-//!   on every step.
+//!   model. See [`Weights`] for why the host copy is not page-locked.
 //!
-//! Both hold the model somewhere for as long as it is in use: on the card, or in host memory the
-//! driver has locked. That is the price of the IR not having to know which.
+//! Both hold the model somewhere for as long as it is in use: on the card, or in host memory.
+//! That is the price of the IR not having to know which.
 //!
 //! # What is deliberately not here
 //!
@@ -154,7 +152,7 @@ impl fmt::Display for Inst {
 
 /// What a [`load`](Op::Load) is answered out of.
 ///
-/// Where the weights are -- on the card, or page-locked on the host -- was decided when the source
+/// Where the weights are -- on the card, or on the host -- was decided when the source
 /// was built, so the one thing a run asks of it is a weight, on the device the run is going to.
 /// [`Weights`] is what a model is read into.
 ///
@@ -306,8 +304,8 @@ impl<'a> RunContext<'a> {
 
 /// A model's weights, read out of its package and kept where [`Residency`] says.
 ///
-/// One map of tensors, whichever residency: on the card for [`Residency::Device`], page-locked on
-/// the host for [`Residency::LowVram`]. What differs is only whether a [`load`](ParamSource::load)
+/// One map of tensors, whichever residency: on the card for [`Residency::Device`], in ordinary host
+/// memory for [`Residency::LowVram`]. What differs is only whether a [`load`](ParamSource::load)
 /// has to move the weight -- a kept one is already where the run wants it and is handed over as a
 /// handle, and a waiting one is copied across the bus, to be given back at the `free` after its
 /// last reader.
@@ -318,11 +316,12 @@ impl<'a> RunContext<'a> {
 /// step. So it is slower than keeping the weights on the card and always will be; it is the mode
 /// for when the alternative is not drawing at all.
 ///
-/// And the model's size in host memory the driver has locked, for as long as the model is held.
-/// Page-locked once, when the weights are read, rather than for each copy: the copy engine reads
-/// page-locked memory directly where it stages a pageable source through a bounce buffer of its
-/// own, and a page-locked copy made for one move and freed after it would pay for the locking
-/// every step and save nothing.
+/// And the model's size in host memory, for as long as the model is held -- ordinary memory, not
+/// page-locked. It used to be locked, because the driver sends a pageable source at well under
+/// the bus's rate. Flint's own upload does not (see `flint/cuda/staged_upload.h`): it stages
+/// through two small locked buffers filled by several threads and sends as fast as a locked
+/// source. Locking the model therefore bought nothing, and cost a limit: Windows locks no more
+/// than half of RAM for the GPU, so a 32 GB machine could not hold a 17 GB model this way.
 pub struct Weights {
     /// Keyed the way the package keys them, which is what a graph's `load` asks for.
     tensors: HashMap<String, Tensor>,
@@ -369,12 +368,11 @@ impl Weights {
     /// arrives.
     ///
     /// `retype` runs before the move rather than after it, because a conversion is cheaper on a
-    /// tensor that has not been sent anywhere -- and page-locked host memory has no operators to
-    /// convert with at all.
+    /// tensor that has not been sent anywhere.
     fn read(device: Device, residency: Residency, read: &mut Read<'_>) -> Result<Weights> {
         if !residency.works_on(device) {
             return Err(Error::model(format!(
-                "a low-vram run waits in page-locked host memory, which is cuda's to hand out, \
+                "a low-vram run sends each weight across the bus through cuda's staged upload, \
                  so it has nothing to offer {}",
                 device.name()
             )));
@@ -383,7 +381,7 @@ impl Weights {
         let computes_in = F::default_float_type(device)?;
         let kept_on = match residency {
             Residency::Device => device,
-            Residency::LowVram => Device::CudaHost,
+            Residency::LowVram => Device::Cpu,
         };
 
         Ok(Weights {
@@ -451,7 +449,7 @@ pub enum Residency {
     /// On the device, moved once and kept. Fastest, and what a card the model fits on wants.
     #[default]
     Device,
-    /// Page-locked on the host, and moved onto the device by each load and given back after its
+    /// On the host, and moved onto the device by each load and given back after its
     /// last reader. For a card the model does not fit on: what the card holds is what the pass is
     /// using rather than the model. See [`Weights`].
     LowVram,
@@ -460,8 +458,8 @@ pub enum Residency {
 impl Residency {
     /// Whether a run on `device` can be had this way.
     ///
-    /// [`Residency::LowVram`] waits in memory only CUDA hands out, so it is the one answer that
-    /// depends on where the run is going. Nothing above offers the pair that cannot be built --
+    /// [`Residency::LowVram`] is built on CUDA's staged upload, which no other backend has, so it
+    /// is the one answer that depends on where the run is going. Nothing above offers the pair that cannot be built --
     /// the command line and both screens name the two together, as one device -- so this is the
     /// check that says so for a caller reaching the library directly.
     pub fn works_on(self, device: Device) -> bool {
@@ -746,7 +744,7 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
             .cloned()
             .expect("run checked that every input was given"),
         // Answered by the source: a lookup where the weights are kept on the card, and the copy
-        // across the bus where they wait page-locked on the host.
+        // across the bus where they wait on the host.
         Op::Load { name, shape } => context.params().load(name, shape)?,
         Op::Constant { tensor } => tensor.clone(),
 
@@ -1637,7 +1635,7 @@ mod tests {
     }
 
     #[test]
-    fn says_that_page_locked_memory_is_cudas_to_hand_out() {
+    fn says_that_low_vram_is_cudas_alone() {
         // Refused before anything is read, so an empty file is enough to ask with. Metal is asked
         // too, on a machine that has none: the refusal comes before anything is asked of the
         // device, which is the point of it.
@@ -1647,7 +1645,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
 
-            assert!(error.contains("page-locked"), "{error}");
+            assert!(error.contains("staged upload"), "{error}");
             assert!(error.contains(device.name()), "{error}");
         }
     }
