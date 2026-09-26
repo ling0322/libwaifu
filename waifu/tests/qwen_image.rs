@@ -169,6 +169,7 @@ fn every_part_matches_the_reference() {
                 .cast(DType::Float16)
                 .unwrap(),
             None,
+            None,
             &options,
             &mut |_| std::ops::ControlFlow::Continue(()),
         )

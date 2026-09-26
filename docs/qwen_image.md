@@ -150,11 +150,59 @@ on this machine's disk is about 200 MB/s and most of the time a step takes. A ma
 or more of RAM keeps it; `-fp8` halves the package -- 30 GB to 16 GB, the same ratio as its size on
 disk, since `Residency::LowVram` moves whichever package it was given the same way.
 
+## ControlNet
+
+[`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union)
+steers the denoiser with a structure picture -- canny, depth, grayscale, HED, lineart, MLSD, pose
+or scribble; one checkpoint, and nothing says which kind it was handed. It was trained with
+VideoX-Fun, which is the reference here (`qwenimage21_transformer2d_control.py`,
+`pipeline_qwenimage21_control.py`); diffusers has no class for it.
+
+It is a package of its own, `qwen-image-2.1-controlnet`, 7.5 GB in fp16, read beside the model's
+with `QwenImage::from_manifests`. Its tensors are named `qwen_image.dit.control.*` and it has to be
+exported with the same `-fp8` as the model, because one graph reads both.
+
+**What it is.** A second chain of sixteen of the denoiser's own blocks -- the same attention,
+modulation, rope and block-causal split -- with a projection in and one out of each:
+
+```
+c = control_img_in(conditioning)          # (N, 129) -> (N, 4096) at the picture's positions,
+                                          # zero at the prompt's
+c = before_proj(c) + x                    # x: the denoiser's input to its first block
+for k in 0..16:
+    c = control_block[k](c)
+    skip[k] = after_proj[k](c)
+
+for i in 0..32:                           # the denoiser, afterwards
+    x = block[i](x)
+    if i is even: x = x + skip[i / 2] * scale
+```
+
+The chain reads the denoiser's stream once, at the start, and never its middle, so it runs to its
+end first. The skips cover the whole sequence, prompt included: the prompt's half of the chain
+starts as the prompt plus `before_proj`'s bias. `control_img_in` reads 129 channels, which an FP8
+multiply cannot (it reads sixteen at a time), so it stays at full width in every package.
+
+**The conditioning** is 129 channels on the latent grid: the control picture's latent, a mask
+(one where the picture is kept), and the kept picture's latent. For a picture drawn from noise the
+mask and the last latent are zeros. The latents are the VAE encoder's mode, normalized by the
+package's `latents_mean` and `latents_std` like the sampler's. The picture is RGB in `-1..=1`
+given an opaque alpha, since the encoder reads four channels.
+
+**The encoder** is new here: the decoder was all a picture drawn from noise needed. It is Wan
+2.2's, one frame. Each halving stage's shortcut, `AvgDown3D`, pads time in front to its temporal
+factor before it averages, so on a temporal stage every even output channel is the mean of the
+padded frame -- zero -- and every odd one the 2 x 2 mean of an input channel. The halving
+convolution pads right and bottom only, like SDXL's.
+
 ## Not done
 
 * Image editing and reference images. The model reads a condition picture both through the VAE
   and through Qwen3-VL's vision tower, which is not exported.
 * The prefix KV cache.
+* The ControlNet's inpainting (a mask and a kept picture), the webui, and the hub. The runtime
+  takes a preprocessed control picture; making one out of a photograph -- a pose detector, a
+  depth estimator -- is the caller's.
 
 ## Exporting and testing
 
@@ -169,6 +217,18 @@ python tools/qwen_image_exporter.py -test_only -model <snapshot> \
 
 Add `-fp8` to the first command for the quantized package; it reads the same `-model` directory,
 so both can be exported from one download.
+
+The ControlNet, and its reference off VideoX-Fun (which needs VideoX-Fun on `PYTHONPATH`, and
+`accelerate` beside the rest):
+
+```bash
+hf download alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union
+.venv/bin/python tools/qwen_image_exporter.py -model <snapshot> -controlnet <checkpoint> \
+    -output models/qwen-image-2.1-controlnet.safetensors
+python tools/qwen_image_exporter.py -test_only -model <snapshot> -controlnet <checkpoint> \
+    -control_image <VideoX-Fun>/asset/pose.jpg \
+    -test_output models/qwen-image-2.1-controlnet_test.safetensors
+```
 
 ## Licensing
 

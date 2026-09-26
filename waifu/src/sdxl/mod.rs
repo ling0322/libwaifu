@@ -23,7 +23,7 @@ mod pipeline;
 mod sampler;
 mod text_encoder;
 mod unet;
-mod vae;
+pub(crate) mod vae;
 
 pub use pipeline::{from_rgb8, to_rgb8, PromptEmbedding, Sdxl, SdxlConfig, VAE_SCALE};
 pub use sampler::{EulerSampler, SamplerConfig};

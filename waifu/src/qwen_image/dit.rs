@@ -53,7 +53,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
-use super::config::DitConfig;
+use super::config::{ControlConfig, DitConfig};
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
@@ -257,8 +257,80 @@ fn block(
     (text, image)
 }
 
-/// The whole denoiser, written into `g`.
-fn write(config: &DitConfig, float_type: DType, g: &Graph) {
+/// The ControlNet's chain, which runs to its end before the denoiser's first block does.
+///
+/// `text` and `image` are the denoiser's two streams where they enter its first block; the chain
+/// reads them once, there, and never again. What comes back is one skip per block of the chain,
+/// `(1, L + N, D)` in the narrow type, prompt first, for [`write`] to add after the blocks
+/// `control.layers` names.
+///
+/// The chain is a stream of its own shaped like the denoiser's: the conditioning is projected
+/// into the picture's positions, the prompt's positions are left at zero, and the first block's
+/// `before_proj` adds the denoiser's input on top. A zero through `before_proj` is its bias, so
+/// the prompt's half of the chain starts as the prompt plus that bias.
+#[allow(clippy::too_many_arguments)]
+fn write_control(
+    config: &DitConfig,
+    control: &ControlConfig,
+    g: &Graph,
+    text: Value,
+    image: Value,
+    now: Value,
+    zero: Value,
+    cos: Value,
+    sin: Value,
+    narrow: DType,
+) -> Vec<Value> {
+    let d = config.hidden_size;
+    let conditioning = g.cast(g.input("control"), narrow);
+
+    // Not a `Linear`: it reads 129 channels, which an FP8 multiply cannot, and it is small
+    // enough that every package keeps it at full width.
+    let projected = {
+        let sub = g.subgraph("control.img_in");
+        let weight = sub.load(Linear::WEIGHT, &[d, control.in_channels]);
+        let bias = sub.load(Linear::BIAS, &[d]);
+        g.add(g.matmul(conditioning, g.transpose(weight, 0, 1)), bias)
+    };
+
+    let before = g.subgraph("control.block0.before_proj");
+    let mut image = g.add(
+        g.cast(Linear::graph(&before, projected, d, d, true), DType::Float),
+        image,
+    );
+    let mut text = g.add(
+        text,
+        g.cast(before.load(Linear::BIAS, &[d]), DType::Float),
+    );
+
+    let mut skips = Vec::with_capacity(control.layers.len());
+    for index in 0..control.layers.len() {
+        let sub = g.subgraph(&format!("control.block{index}"));
+        (text, image) = block(config, &sub, text, image, now, zero, cos, sin, narrow);
+
+        let joined = g.cat(g.cast(text, narrow), g.cast(image, narrow), 1);
+        skips.push(Linear::graph(&sub.subgraph("after_proj"), joined, d, d, true));
+    }
+    skips
+}
+
+/// Add one of the control chain's skips onto both streams, `scale` times over.
+fn add_skip(g: &Graph, text: Value, image: Value, skip: Value, scale: Value) -> (Value, Value) {
+    let split = Extent::of(text, 1);
+    let part = |begin: Extent, end: Extent| {
+        g.mul(
+            g.cast(g.contiguous(g.slice(skip, 1, begin, end)), DType::Float),
+            scale,
+        )
+    };
+    (
+        g.add(text, part(Extent::At(0), split)),
+        g.add(image, part(split, Extent::End)),
+    )
+}
+
+/// The whole denoiser, written into `g`; with `control`, the control chain beside it.
+fn write(config: &DitConfig, control: Option<&ControlConfig>, float_type: DType, g: &Graph) {
     let tokens = g.cast(g.input("tokens"), float_type);
     let context = g.input("context");
     let sinusoid = g.cast(g.input("sinusoid"), float_type);
@@ -321,6 +393,16 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
     // Two residual streams in float32, whatever the sublayers run in.
     let mut text = g.cast(text, DType::Float);
     let mut image = g.cast(image, DType::Float);
+
+    // The skips and the scale they are added at: a `(D,)` of one value, since an element-wise
+    // operand broadcasts over leading dimensions and not from a single element.
+    let skips = control.map(|control| {
+        let skips = write_control(
+            config, control, g, text, image, now, zero, cos, sin, float_type,
+        );
+        (control, skips, g.input("control_scale"))
+    });
+
     for index in 0..config.num_blocks {
         (text, image) = block(
             config,
@@ -333,6 +415,12 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
             sin,
             float_type,
         );
+
+        if let Some((control, skips, scale)) = &skips {
+            if let Some(at) = control.layers.iter().position(|&layer| layer == index) {
+                (text, image) = add_skip(g, text, image, skips[at], *scale);
+            }
+        }
     }
 
     // The last layer reads only the picture: the prompt's rows would be thrown away. A scale and
@@ -357,6 +445,8 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
 pub struct Dit {
     config: DitConfig,
     ir: Ir,
+    /// The same denoiser with the control chain beside it, when a control package was read.
+    controlled: Option<(ControlConfig, Ir)>,
     weights: Rc<dyn ParamSource>,
     float_type: DType,
     placed: RefCell<Option<Placed>>,
@@ -364,8 +454,25 @@ pub struct Dit {
 
 impl fmt::Debug for Dit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Dit({} instructions)", self.ir.len())
+        write!(f, "Dit({} instructions", self.ir.len())?;
+        if let Some((_, controlled)) = &self.controlled {
+            write!(f, ", {} with control", controlled.len())?;
+        }
+        write!(f, ")")
     }
+}
+
+fn compile(
+    config: &DitConfig,
+    control: Option<&ControlConfig>,
+    name: &str,
+    weights: &dyn ParamSource,
+    float_type: DType,
+) -> Result<Ir> {
+    let graph = Graph::with_weights(config.weight_format);
+    write(config, control, float_type, &graph.subgraph(name));
+    check_parameters(&graph, weights)?;
+    Ok(Ir::compile(&graph))
 }
 
 impl Dit {
@@ -375,15 +482,31 @@ impl Dit {
         weights: &Rc<dyn ParamSource>,
         float_type: DType,
     ) -> Result<Dit> {
-        let graph = Graph::with_weights(config.weight_format);
-        write(&config, float_type, &graph.subgraph(name));
-        check_parameters(&graph, weights.as_ref())?;
+        Self::build_with_control(config, None, name, weights, float_type)
+    }
 
-        let ir = Ir::compile(&graph);
+    /// The denoiser, and with `control` a second graph of it that runs the control chain too,
+    /// whose weights `weights` has to hold under `{name}.control`.
+    pub fn build_with_control(
+        config: DitConfig,
+        control: Option<ControlConfig>,
+        name: &str,
+        weights: &Rc<dyn ParamSource>,
+        float_type: DType,
+    ) -> Result<Dit> {
+        let ir = compile(&config, None, name, weights.as_ref(), float_type)?;
+        let controlled = match control {
+            Some(control) => {
+                let ir = compile(&config, Some(&control), name, weights.as_ref(), float_type)?;
+                Some((control, ir))
+            }
+            None => None,
+        };
 
         Ok(Dit {
             weights: Rc::clone(weights),
             ir,
+            controlled,
             config,
             float_type,
             placed: RefCell::new(None),
@@ -398,6 +521,11 @@ impl Dit {
         &self.ir
     }
 
+    /// The control chain's configuration, when one was read.
+    pub fn control(&self) -> Option<&ControlConfig> {
+        self.controlled.as_ref().map(|(control, _)| control)
+    }
+
     pub fn float_type(&self) -> DType {
         self.float_type
     }
@@ -408,6 +536,61 @@ impl Dit {
     /// embedding multiplies by a thousand on its own; `context` is `(1, L, D)` from the encoder,
     /// the system turn already dropped.
     pub fn forward(&self, latent: &Tensor, timestep: f32, context: &Tensor) -> Result<Tensor> {
+        self.run(&self.ir, latent, timestep, context, None)
+    }
+
+    /// [`Dit::forward`] steered by the control chain.
+    ///
+    /// `conditioning` is `(1, 129, H, W)` on the latent's grid: the control picture's latent, the
+    /// inpainting mask (one where the picture is kept) and the kept picture's latent, the latents
+    /// normalized the way the sampler's are. `scale` multiplies every skip; at zero the answer is
+    /// the plain denoiser's.
+    pub fn forward_controlled(
+        &self,
+        latent: &Tensor,
+        timestep: f32,
+        context: &Tensor,
+        conditioning: &Tensor,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let Some((control, ir)) = &self.controlled else {
+            return Err(Error::model(
+                "this denoiser was built without a control package, so it has no control chain",
+            ));
+        };
+
+        let (rows, columns) = (latent.shape_at(2)?, latent.shape_at(3)?);
+        let expected = [1, control.in_channels, rows, columns];
+        let found = (0..4)
+            .map(|dim| conditioning.shape_at(dim))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if conditioning.dim()? != 4 || found != expected {
+            return Err(Error::model(format!(
+                "the control conditioning is {found:?}, and this latent needs {expected:?}"
+            )));
+        }
+
+        let device = latent.device();
+        let tokens = conditioning
+            .view(&[1, control.in_channels, rows * columns])?
+            .transpose(1, 2)?
+            .contiguous()?
+            .to_device(device)?;
+
+        let width = self.config.hidden_size;
+        let scale = Tensor::from_f32(&[width], &vec![scale; width as usize])?.to_device(device)?;
+
+        self.run(ir, latent, timestep, context, Some((&tokens, &scale)))
+    }
+
+    fn run(
+        &self,
+        ir: &Ir,
+        latent: &Tensor,
+        timestep: f32,
+        context: &Tensor,
+        control: Option<(&Tensor, &Tensor)>,
+    ) -> Result<Tensor> {
         if latent.dim()? != 4 {
             return Err(Error::model(format!(
                 "the denoiser takes a latent as (1, C, H, W), got a {}-D tensor",
@@ -448,14 +631,19 @@ impl Dit {
         }
         let table = placed.as_ref().expect("it was just built");
 
-        let run = RunContext::new(&*self.weights)
+        let mut run = RunContext::new(&*self.weights)
             .input("tokens", &tokens)
             .input("context", context)
             .input("sinusoid", &sinusoid)
             .input("rope_cos", &table.cos)
             .input("rope_sin", &table.sin);
+        if let Some((conditioning, scale)) = control {
+            run = run
+                .input("control", conditioning)
+                .input("control_scale", scale);
+        }
 
-        let outputs = self.ir.run(&run)?;
+        let outputs = ir.run(&run)?;
         let velocity = outputs
             .iter()
             .find(|(name, _)| name == "velocity")

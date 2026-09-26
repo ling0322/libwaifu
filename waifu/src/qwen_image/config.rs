@@ -59,6 +59,70 @@ impl DitConfig {
     }
 }
 
+/// A ControlNet-Union for the denoiser, which comes in a package of its own and is read against
+/// the denoiser it was trained beside.
+///
+/// It is a second chain of the denoiser's own blocks, run ahead of the first; each of its blocks
+/// hands back one skip, and the skip is added to what one of the denoiser's blocks produced.
+#[derive(Clone, Debug)]
+pub struct ControlConfig {
+    /// The denoiser's blocks a skip is added after, in order: `0, 2, .. 30` in the release, one
+    /// for each block of the chain.
+    pub layers: Vec<i32>,
+    /// How wide one token of the conditioning is: the control picture's latent, the inpainting
+    /// mask and the kept picture's latent, `64 + 1 + 64`.
+    pub in_channels: i32,
+    pub weight_format: WeightFormat,
+}
+
+impl ControlConfig {
+    /// The section a control package's `[model] type` points at.
+    pub const SECTION: &'static str = "qwen_image_control";
+
+    pub fn from_section(section: &Mapping, dit: &DitConfig) -> Result<ControlConfig> {
+        let control = ControlConfig {
+            layers: number_list(section, "control_layers")?,
+            in_channels: section.get("control_in_channels")?,
+            weight_format: section.get_weight_format_or("weight_format", WeightFormat::Float)?,
+        };
+
+        // The first block of the chain is the one that takes the denoiser's input in, so the
+        // chain has to be read from the denoiser's first block.
+        if control.layers.first() != Some(&0) {
+            return Err(Error::model(format!(
+                "the control chain is added after blocks {:?}, and has to start at block 0",
+                control.layers
+            )));
+        }
+        if control.layers.windows(2).any(|pair| pair[0] >= pair[1])
+            || control.layers.iter().any(|&layer| layer >= dit.num_blocks)
+        {
+            return Err(Error::model(format!(
+                "the control chain is added after blocks {:?}, which are not rising block \
+                 indices of a {}-block denoiser",
+                control.layers, dit.num_blocks
+            )));
+        }
+        if control.in_channels != 2 * dit.latent_channels + 1 {
+            return Err(Error::model(format!(
+                "the control projection reads {} channels, where two latents of {} and a mask \
+                 come to {}",
+                control.in_channels,
+                dit.latent_channels,
+                2 * dit.latent_channels + 1
+            )));
+        }
+        // One graph reads both packages' matrices, and a graph reads its matrices one way.
+        if control.weight_format != dit.weight_format {
+            return Err(Error::model(format!(
+                "the control package stores its matrices as {:?} and the denoiser's as {:?}",
+                control.weight_format, dit.weight_format
+            )));
+        }
+        Ok(control)
+    }
+}
+
 /// The autoencoder this model draws through, which is its own and not the Qwen-Image one.
 #[derive(Clone, Debug)]
 pub struct VaeConfig {
@@ -410,5 +474,51 @@ config:
         .unwrap();
         assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8);
         assert_eq!(quantized.encoder.weight_format, WeightFormat::Fp8);
+    }
+
+    /// What `tools/qwen_image_exporter.py -controlnet` writes for VideoX-Fun's checkpoint.
+    const CONTROL: &str = r#"
+weights:
+  - qwen-image-2.1-controlnet.safetensors
+
+config:
+  model:
+    type: qwen_image_control
+  qwen_image_control:
+    control_layers: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
+    control_in_channels: 129
+"#;
+
+    fn control(text: &str) -> Result<ControlConfig> {
+        let manifest = Manifest::parse(text)?;
+        ControlConfig::from_section(manifest.section(ControlConfig::SECTION)?, &release().dit)
+    }
+
+    #[test]
+    fn reads_what_the_control_exporter_writes() {
+        let config = control(CONTROL).unwrap();
+        assert_eq!(config.layers, (0..32).step_by(2).collect::<Vec<i32>>());
+        assert_eq!(config.in_channels, 129);
+        assert_eq!(config.weight_format, WeightFormat::Float);
+    }
+
+    #[test]
+    fn refuses_a_control_chain_the_denoiser_cannot_carry() {
+        let late = control(&CONTROL.replace("[0, 2,", "[1, 2,")).expect_err("starts at 1");
+        assert!(late.to_string().contains("block 0"), "{late}");
+
+        let past = control(&CONTROL.replace("28, 30]", "28, 32]")).expect_err("33rd block");
+        assert!(past.to_string().contains("rising"), "{past}");
+
+        let wide = control(&CONTROL.replace("129", "132")).expect_err("132 channels");
+        assert!(wide.to_string().contains("mask"), "{wide}");
+
+        // A float control package beside an FP8 model: one graph reads both.
+        let quantized = control(&CONTROL.replace(
+            "control_in_channels: 129",
+            "control_in_channels: 129\n    weight_format: fp8",
+        ))
+        .expect_err("fp8 beside float");
+        assert!(quantized.to_string().contains("stores"), "{quantized}");
     }
 }

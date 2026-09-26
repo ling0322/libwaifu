@@ -43,17 +43,19 @@ use crate::flint::{
     check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
 };
 use crate::layers::Conv2d;
+use crate::sdxl::vae::pad_right_bottom;
 use crate::qwen_vae::{attention, channel_norm};
 
-/// One stage of the decoder, as its weights and the package describe it.
+/// One stage of the decoder or the encoder, as its weights and the package describe it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Stage {
     input: i32,
     output: i32,
     residuals: i32,
-    /// Whether the stage doubles the picture, and so has a resample and a shortcut around it.
-    upsamples: bool,
-    /// Whether the doubling was a temporal one too, which only the shortcut remembers.
+    /// Whether the stage doubles the picture (in the decoder) or halves it (in the encoder), and
+    /// so has a resample and a shortcut around it.
+    resamples: bool,
+    /// Whether the resample was a temporal one too, which only the shortcut remembers.
     temporal: bool,
 }
 
@@ -136,6 +138,170 @@ fn dup_up(g: &Graph, input: Value, stage: &Stage, device: Device) -> Result<Valu
     ))
 }
 
+/// Which row of the space-to-depth table each `(output channel, member)` of `AvgDown3D` reads,
+/// for a single frame, and how many members each output channel averages.
+///
+/// `AvgDown3D` pads time in *front* to a multiple of its temporal factor, folds each channel's
+/// `(t, 2, 2)` block into `C_in * t * 4` channels, groups them `g` at a time into `C_out` and takes
+/// each group's mean. A single frame padded to two puts a frame of zeros first, so a group whose
+/// members all lie in that frame averages zeros: it reads row `4 * C_in`, the zero row after the
+/// table. The table's row `c * 4 + 2 * i + j` is channel `c` at sub-row `i` and sub-column `j`.
+fn avg_down_indices(input: i32, output: i32, temporal: bool) -> (Vec<i64>, i32) {
+    let frames = if temporal { 2 } else { 1 };
+    let folded = input * frames * 4;
+    let group = folded / output;
+
+    let mut indices = Vec::with_capacity(folded as usize);
+    for flat in 0..folded {
+        let (channel, within) = (flat / (frames * 4), flat % (frames * 4));
+        let (frame, pixel) = (within / 4, within % 4);
+        let padded = temporal && frame == 0;
+        indices.push(match padded {
+            true => 4 * input as i64,
+            false => (channel * 4 + pixel) as i64,
+        });
+    }
+    (indices, group)
+}
+
+/// The shortcut around a downsampling stage: `(1, C_in, 2H, 2W)` to `(1, C_out, H, W)`. `halved`
+/// is any `(.., .., H, W)` value, which is where the halved size is read from.
+fn avg_down(g: &Graph, input: Value, halved: Value, stage: &Stage, device: Device) -> Result<Value> {
+    let (indices, group) = avg_down_indices(stage.input, stage.output, stage.temporal);
+    let indices = Tensor::from_i64(&[indices.len() as i32], &indices)?.to_device(device)?;
+
+    let height = Extent::of(halved, 2);
+    let width = Extent::of(halved, 3);
+
+    // (c, H, i, W, j) -> (c, i, j, H, W), then one row per (c, i, j) and a row of zeros after.
+    let x = g.view(
+        input,
+        [
+            stage.input.into(),
+            height,
+            Extent::At(2),
+            width,
+            Extent::At(2),
+        ],
+    );
+    let x = g.transpose(g.transpose(g.transpose(x, 1, 2), 3, 4), 2, 3);
+    let table = g.view(
+        g.contiguous(x),
+        [Extent::At(4 * stage.input), Extent::prod(halved, 2, 4)],
+    );
+    let zeros = g.mul_scalar(g.contiguous(g.slice(table, 0, 0, 1)), 0.0);
+    let table = g.cat(table, zeros, 0);
+
+    let picked = g.lookup(table, g.constant(indices));
+    let grouped = g.view(
+        picked,
+        [
+            stage.output.into(),
+            Extent::At(group),
+            Extent::prod(halved, 2, 4),
+        ],
+    );
+    let mean = g.div_scalar(g.sum(grouped, 1), group as f32);
+    Ok(g.view(
+        mean,
+        [Extent::At(1), stage.output.into(), height, width],
+    ))
+}
+
+/// The encoder, written into `g`: a picture in `-1..=1` to the normalized latent the denoiser
+/// reads, the mode of the posterior and not a draw from it.
+fn write_encoder(
+    config: &VaeConfig,
+    stages: &[Stage],
+    dtype: DType,
+    device: Device,
+    g: &Graph,
+) -> Result<()> {
+    let image = g.input("image");
+    let mean = g.input("latents_mean");
+    let std = g.input("latents_std");
+    let channels = config.latent_channels;
+
+    let encoder = g.subgraph("encoder");
+    let first = stages[0].input;
+    let x = g.cast(g.to_device(image, device), dtype);
+    let mut x = Conv2d::graph(
+        &encoder.subgraph("conv_in"),
+        x,
+        config.image_channels,
+        first,
+        3,
+        1,
+        1,
+    );
+
+    for (index, stage) in stages.iter().enumerate() {
+        let sub = encoder.subgraph(&format!("down_blocks.{index}"));
+        let entering = x;
+
+        let mut width = stage.input;
+        for resnet in 0..stage.residuals {
+            x = residual(
+                &sub.subgraph(&format!("resnets.{resnet}")),
+                x,
+                width,
+                stage.output,
+            );
+            width = stage.output;
+        }
+
+        // A stage that does not halve has a shortcut that does not either: a group of one, which
+        // is the stage's input as it came in.
+        x = match stage.resamples {
+            true => {
+                let halved = Conv2d::graph(
+                    &sub.subgraph("downsampler.resample.1"),
+                    pad_right_bottom(g, x),
+                    stage.output,
+                    stage.output,
+                    3,
+                    2,
+                    0,
+                );
+                g.add(halved, avg_down(g, entering, halved, stage, device)?)
+            }
+            false => g.add(x, entering),
+        };
+    }
+
+    let deepest = stages.last().map(|stage| stage.output).unwrap_or(first);
+    let middle = encoder.subgraph("mid_block");
+    x = residual(&middle.subgraph("resnets.0"), x, deepest, deepest);
+    x = attention(&middle.subgraph("attentions.0"), x, deepest);
+    x = residual(&middle.subgraph("resnets.1"), x, deepest, deepest);
+
+    let x = g.silu(channel_norm(&encoder, x, deepest, "norm_out"));
+    let x = Conv2d::graph(
+        &encoder.subgraph("conv_out"),
+        x,
+        deepest,
+        2 * channels,
+        3,
+        1,
+        1,
+    );
+    let moments = Conv2d::graph(
+        &g.subgraph("quant_conv"),
+        x,
+        2 * channels,
+        2 * channels,
+        1,
+        1,
+        0,
+    );
+
+    // The first half is the mean, and the mean is the mode.
+    let latent = g.contiguous(g.slice(moments, 1, 0, channels));
+    let latent = g.div(g.sub(latent, g.cast(mean, dtype)), g.cast(std, dtype));
+    g.output("latent", g.cast(latent, DType::Float));
+    Ok(())
+}
+
 fn write(
     config: &VaeConfig,
     stages: &[Stage],
@@ -184,7 +350,7 @@ fn write(
             width = stage.output;
         }
 
-        if stage.upsamples {
+        if stage.resamples {
             let up = g.upsample_nearest2d(x, 2);
             x = Conv2d::graph(
                 &sub.subgraph("upsampler.resample.1"),
@@ -235,15 +401,15 @@ fn stages(weights: &dyn ParamSource, name: &str, temporal: &[bool]) -> Result<Ve
             residuals += 1;
         }
 
-        let upsamples = weights
+        let resamples = weights
             .shape_of(&format!("{prefix}.upsampler.resample.1.weight"))
             .is_some();
         found.push(Stage {
             input: shape[1],
             output: shape[0],
             residuals,
-            upsamples,
-            temporal: upsamples && temporal.get(index).copied().unwrap_or(false),
+            resamples,
+            temporal: resamples && temporal.get(index).copied().unwrap_or(false),
         });
     }
 
@@ -252,9 +418,72 @@ fn stages(weights: &dyn ParamSource, name: &str, temporal: &[bool]) -> Result<Ve
     }
     for stage in &found {
         let frames = if stage.temporal { 2 } else { 1 };
-        if stage.upsamples && (stage.output * frames * 4) % stage.input != 0 {
+        if stage.resamples && (stage.output * frames * 4) % stage.input != 0 {
             return Err(Error::model(format!(
                 "a shortcut from {} channels to {} does not repeat evenly",
+                stage.input, stage.output
+            )));
+        }
+    }
+    Ok(found)
+}
+
+/// The encoder's stages, read off the weights. `temporal` is the decoder's flags, as the package
+/// states them: the encoder's are the same stages walked the other way.
+fn encoder_stages(weights: &dyn ParamSource, name: &str, temporal: &[bool]) -> Result<Vec<Stage>> {
+    let mut found = Vec::new();
+
+    for index in 0.. {
+        let prefix = format!("{name}.encoder.down_blocks.{index}");
+        let Some(shape) = weights.shape_of(&format!("{prefix}.resnets.0.conv1.weight")) else {
+            break;
+        };
+
+        let mut residuals = 0;
+        while weights
+            .shape_of(&format!("{prefix}.resnets.{residuals}.conv1.weight"))
+            .is_some()
+        {
+            residuals += 1;
+        }
+
+        let resamples = weights
+            .shape_of(&format!("{prefix}.downsampler.resample.1.weight"))
+            .is_some();
+        found.push(Stage {
+            input: shape[1],
+            output: shape[0],
+            residuals,
+            resamples,
+            temporal: false,
+        });
+    }
+
+    if found.is_empty() {
+        return Err(Error::model(format!("{name} holds no encoder")));
+    }
+
+    let halvings = found.iter().filter(|stage| stage.resamples).count();
+    if halvings != temporal.len() {
+        return Err(Error::model(format!(
+            "the encoder halves {halvings} times and the package states {} temporal flags",
+            temporal.len()
+        )));
+    }
+    let mut flags = temporal.iter().rev();
+    for stage in found.iter_mut().filter(|stage| stage.resamples) {
+        stage.temporal = *flags.next().expect("counted above");
+    }
+
+    for stage in &found {
+        let frames = if stage.temporal { 2 } else { 1 };
+        let evenly = match stage.resamples {
+            true => (stage.input * frames * 4) % stage.output == 0,
+            false => stage.input == stage.output,
+        };
+        if !evenly {
+            return Err(Error::model(format!(
+                "a shortcut from {} channels to {} does not average evenly",
                 stage.input, stage.output
             )));
         }
@@ -345,9 +574,106 @@ impl VaeDecoder {
     }
 }
 
+/// The other half: a picture to the latent the denoiser reads, which is what a control picture
+/// or an inpainting source has to become before the control chain can use it.
+pub struct VaeEncoder {
+    config: VaeConfig,
+    ir: Ir,
+    weights: Rc<dyn ParamSource>,
+    mean: Tensor,
+    std: Tensor,
+}
+
+impl fmt::Debug for VaeEncoder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VaeEncoder({} instructions)", self.ir.len())
+    }
+}
+
+impl VaeEncoder {
+    pub fn build(
+        config: VaeConfig,
+        name: &str,
+        weights: &Rc<dyn ParamSource>,
+        device: Device,
+        float_type: DType,
+    ) -> Result<VaeEncoder> {
+        let stages = encoder_stages(weights.as_ref(), name, &config.temporal_upsample)?;
+
+        let graph = Graph::new();
+        write_encoder(&config, &stages, float_type, device, &graph.subgraph(name))?;
+        check_parameters(&graph, weights.as_ref())?;
+
+        let shape = [1, config.latent_channels, 1, 1];
+        let mean = Tensor::from_f32(&shape, &config.latents_mean)?.to_device(device)?;
+        let std = Tensor::from_f32(&shape, &config.latents_std)?.to_device(device)?;
+
+        Ok(VaeEncoder {
+            weights: Rc::clone(weights),
+            ir: Ir::compile(&graph),
+            config,
+            mean,
+            std,
+        })
+    }
+
+    pub fn config(&self) -> &VaeConfig {
+        &self.config
+    }
+
+    /// `image` is `(1, 4, H, W)` in `-1..=1`, the fourth channel alpha, with `H` and `W`
+    /// multiples of sixteen; what comes back is `(1, 64, H / 16, W / 16)` in float32, normalized
+    /// by the package's mean and deviation the way a latent the sampler walks is.
+    pub fn forward(&self, image: &Tensor) -> Result<Tensor> {
+        let scale = self.config.scale;
+        let dims = image.dim()?;
+        if dims != 4 || image.shape_at(1)? != self.config.image_channels {
+            return Err(Error::model(format!(
+                "the encoder takes a picture as (1, {}, H, W)",
+                self.config.image_channels
+            )));
+        }
+        let (height, width) = (image.shape_at(2)?, image.shape_at(3)?);
+        if height % scale != 0 || width % scale != 0 {
+            return Err(Error::model(format!(
+                "the encoder takes a picture whose sides are multiples of {scale}, got \
+                 {width} x {height}"
+            )));
+        }
+
+        let run = RunContext::new(&*self.weights)
+            .input("image", image)
+            .input("latents_mean", &self.mean)
+            .input("latents_std", &self.std);
+
+        let outputs = self.ir.run(&run)?;
+        outputs
+            .iter()
+            .find(|(name, _)| name == "latent")
+            .map(|(_, tensor)| tensor.clone())
+            .ok_or_else(|| Error::model("the encoder produced no latent"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The released encoder's shortcuts, worked out by hand from `AvgDown3D`.
+    #[test]
+    fn the_shortcut_averages_what_avg_down_does() {
+        // 96 to 96, spatial only: each channel is the mean of its own four sub-pixels.
+        let (same, group) = avg_down_indices(96, 96, false);
+        assert_eq!(group, 4);
+        assert_eq!(&same[..8], &[0, 1, 2, 3, 4, 5, 6, 7]);
+
+        // 96 to 192, temporal: the frame of zeros padded in front fills the even channels, and
+        // the odd ones are the real frame's four sub-pixels.
+        let (doubled, group) = avg_down_indices(96, 192, true);
+        assert_eq!(group, 4);
+        assert_eq!(&doubled[..12], &[384, 384, 384, 384, 0, 1, 2, 3, 384, 384, 384, 384]);
+        assert_eq!(&doubled[12..16], &[4, 5, 6, 7]);
+    }
 
     /// The four shortcuts of the released decoder, worked out by hand from `DupUp3D`.
     #[test]
