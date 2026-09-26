@@ -530,13 +530,15 @@ impl Shared {
         answer
     }
 
+    /// Puts a sentence under the bar, and the same sentence in the terminal: what the page is told
+    /// is what somebody watching the log is told.
     pub fn say(&self, said: impl Into<String>, bad: bool) {
-        self.change(|session| {
-            session.note = Some(Note {
-                said: said.into(),
-                bad,
-            })
-        });
+        let said = said.into();
+        crate::cli::webui::log::line(format_args!(
+            "{}: {said}",
+            if bad { "error" } else { "note" }
+        ));
+        self.change(|session| session.note = Some(Note { said, bad }));
     }
 
     /// Takes the worker, if it is free. True means it is this caller's to post a command to.
