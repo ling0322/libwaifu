@@ -525,6 +525,13 @@ impl Graph {
         self.unary(Unary::Log, input)
     }
 
+    /// To the nearest integer, a tie to the even one -- `torch.round`, not `f32::round`, which
+    /// takes a tie away from zero. The result is still a float; [`Graph::cast`] makes it an id.
+    #[track_caller]
+    pub fn round(&self, input: Value) -> Value {
+        self.unary(Unary::Round, input)
+    }
+
     #[track_caller]
     pub fn sqrt(&self, input: Value) -> Value {
         self.unary(Unary::Sqrt, input)

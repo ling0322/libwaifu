@@ -30,6 +30,9 @@ Tensor castFp32ToQ4(Tensor A);
 Tensor castQ4ToFp32(Tensor A);
 Tensor castFp16ToFp32(Tensor A);
 Tensor castFp32ToFp16(Tensor A);
+/// Float to int64, truncated toward zero as torch's .long() is. NaN and values outside int64's
+/// range are undefined, as they are there.
+Tensor castFp32ToLong(Tensor A);
 
 }  // namespace cpu
 }  // namespace op

@@ -40,6 +40,9 @@ __forceinline__ __device__ T applyUnaryOp(T x) {
     return static_cast<T>(expf(v));
   } else if constexpr (OP == UnaryOp::LOG) {
     return static_cast<T>(logf(v));
+  } else if constexpr (OP == UnaryOp::ROUND) {
+    // rintf rounds to nearest with ties to even on the device, as torch.round does.
+    return static_cast<T>(rintf(v));
   } else if constexpr (OP == UnaryOp::SQUARE) {
     return x * x;
   } else if constexpr (OP == UnaryOp::SQRT) {
@@ -142,6 +145,7 @@ Tensor applyUnaryOp(UnaryOp op, const Tensor &tensor) {
   LL_DISPATCH_UNARY(ABS)
   LL_DISPATCH_UNARY(EXP)
   LL_DISPATCH_UNARY(LOG)
+  LL_DISPATCH_UNARY(ROUND)
   LL_DISPATCH_UNARY(SQUARE)
   LL_DISPATCH_UNARY(SQRT)
   LL_DISPATCH_UNARY(RSQRT)

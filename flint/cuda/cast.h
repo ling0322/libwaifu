@@ -27,6 +27,9 @@ namespace cuda {
 
 Tensor castFloatToHalf(const Tensor &tensor);
 Tensor castHalfToFloat(const Tensor &tensor);
+/// Float or half to int64, truncated toward zero as torch's .long() is. NaN and values outside
+/// int64's range are undefined, as they are there.
+Tensor castToLong(const Tensor &tensor);
 
 Tensor cast(const Tensor &tensor, DType dtype);
 

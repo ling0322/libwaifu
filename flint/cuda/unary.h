@@ -32,6 +32,8 @@ enum class UnaryOp {
   ABS,
   EXP,
   LOG,
+  // To the nearest integer, a tie to the even one: torch.round, not C's round().
+  ROUND,
   SQUARE,
   SQRT,
   RSQRT,

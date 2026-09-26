@@ -267,6 +267,10 @@ Tensor Operators::abs(Tensor input) {
   NOT_IMPL();
 }
 
+Tensor Operators::round(Tensor input) {
+  NOT_IMPL();
+}
+
 Tensor Operators::log(Tensor input) {
   NOT_IMPL();
 }

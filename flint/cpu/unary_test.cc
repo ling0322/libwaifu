@@ -273,6 +273,46 @@ CATCH_TEST_CASE("test CPU eq and all", "[core][nn][operators]") {
   CATCH_REQUIRE(data[3]);
 }
 
+CATCH_TEST_CASE("test CPU round", "[core][nn][operators]") {
+  // Every tie goes to the even neighbour -- torch.round -- where C's round() would take -2.5 to
+  // -3 and 2.5 to 3. Float only: this backend's unary kernels take half on aarch64 alone, and the
+  // CUDA and Metal tests check half.
+  std::vector<float> in = {-2.5f, -1.5f, -0.5f, 0.5f, 1.5f, 2.5f, 0.4f, 0.6f, -0.6f, 3.7f};
+  std::vector<float> want = {-2.0f, -2.0f, 0.0f, 0.0f, 2.0f, 2.0f, 0.0f, 1.0f, -1.0f, 4.0f};
+  Tensor x = Tensor::create<float>({static_cast<int>(in.size())}, in);
+
+  Tensor rounded = cpuOps()->round(x);
+  CATCH_REQUIRE(rounded.getDType() == DType::kFloat);
+  const float *got = rounded.getInternalData()->getData<float>(rounded.getInternalOffset());
+  for (size_t i = 0; i < in.size(); ++i) {
+    CATCH_INFO("round(" << in[i] << ")");
+    CATCH_REQUIRE(got[i] == want[i]);
+  }
+}
+
+CATCH_TEST_CASE("test CPU cast to int64", "[core][nn][operators]") {
+  // Truncated toward zero, as torch's .long() is -- a caller that wants the nearest integer rounds
+  // first -- up to the 6560 a speech token reaches.
+  std::vector<float> in = {2.9f, -2.9f, 0.0f, 6560.0f, 1e6f, -0.5f};
+  std::vector<LongType> want = {2, -2, 0, 6560, 1000000, 0};
+  Tensor x = Tensor::create<float>({2, 3}, in);
+
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    Tensor source = cpuOps()->cast(x, dtype);
+    Tensor ids = cpuOps()->cast(source, DType::kLong);
+    CATCH_REQUIRE(ids.getDType() == DType::kLong);
+    CATCH_REQUIRE(ids.getShape() == std::vector<int>{2, 3});
+
+    const LongType *got = ids.getInternalData()->getData<LongType>(ids.getInternalOffset());
+    for (size_t i = 0; i < in.size(); ++i) {
+      CATCH_INFO(in[i] << " from " << dtype.toString());
+      // 1e6 is past half's range and becomes infinity there, so that one is float's alone.
+      if (dtype == DType::kFloat16 && in[i] > 65504.0f) continue;
+      CATCH_REQUIRE(got[i] == want[i]);
+    }
+  }
+}
+
 }  // namespace cpu
 }  // namespace op
 }  // namespace fl

@@ -74,12 +74,49 @@ Tensor castHalfToFloat(const Tensor &tensor) {
   return tgtTensor;
 }
 
+template<typename T>
+__global__ void castToLongKernel(int64_t n, const T *src, LongType *dest) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= n) return;
+
+  // Through float for half, which every half is exactly; the conversion truncates toward zero.
+  dest[idx] = static_cast<LongType>(static_cast<float>(src[idx]));
+}
+
+Tensor castToLong(const Tensor &tensor) {
+  LL_CHECK_CONTIGUOUS(tensor);
+
+  Tensor tgtTensor = createCudaTensorLong(tensor.getShape());
+  LongType *dest = getDataPtrCuda<LongType>(tgtTensor);
+
+  int64_t numel = tensor.getNumEl();
+  if (numel == 0) return tgtTensor;
+
+  constexpr int blockSize = 256;
+  int64_t nb = (numel + blockSize - 1) / blockSize;
+  if (tensor.getDType() == DType::kFloat) {
+    castToLongKernel<float><<<nb, blockSize>>>(numel, getDataPtrCuda<float>(tensor), dest);
+  } else if (tensor.getDType() == DType::kFloat16) {
+    castToLongKernel<half>
+        <<<nb, blockSize>>>(numel, (const half *)getDataPtrCuda<Float16>(tensor), dest);
+  } else {
+    NOT_IMPL();
+  }
+  LL_CUDA_SYNCHRONIZE();
+  LL_CHECK_CUDA_STATUS(cudaGetLastError());
+
+  return tgtTensor;
+}
+
 Tensor cast(const Tensor &tensor, DType dtype) {
   if (tensor.getDType() == dtype) return tensor;
   if (tensor.getDType() == DType::kFloat16 && dtype == DType::kFloat)
     return castHalfToFloat(tensor);
   if (tensor.getDType() == DType::kFloat && dtype == DType::kFloat16)
     return castFloatToHalf(tensor);
+  if ((tensor.getDType() == DType::kFloat || tensor.getDType() == DType::kFloat16) &&
+      dtype == DType::kLong)
+    return castToLong(tensor);
 
   NOT_IMPL();
 }

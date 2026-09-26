@@ -396,6 +396,12 @@ pub fn log(input: &Tensor) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_log(operators, input.raw, out) })
 }
 
+/// Element-wise to the nearest integer, a tie to the even one, as `torch.round`. Still a float.
+pub fn round(input: &Tensor) -> Result<Tensor> {
+    let operators = operators_of(input)?;
+    Tensor::produce(|out| unsafe { ffi::fl_round(operators, input.raw, out) })
+}
+
 /// Element-wise square root.
 pub fn sqrt(input: &Tensor) -> Result<Tensor> {
     let operators = operators_of(input)?;

@@ -176,6 +176,8 @@ pub enum Unary {
     Exp,
     /// The natural logarithm.
     Log,
+    /// To the nearest integer, a tie to the even one, as `torch.round`.
+    Round,
     Sqrt,
     Rsqrt,
     Square,
@@ -207,6 +209,7 @@ impl Unary {
             Unary::Abs => "abs",
             Unary::Exp => "exp",
             Unary::Log => "log",
+            Unary::Round => "round",
             Unary::Sqrt => "sqrt",
             Unary::Rsqrt => "rsqrt",
             Unary::Square => "square",

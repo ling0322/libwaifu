@@ -98,6 +98,26 @@ CATCH_TEST_CASE("test Metal unary operators", "[op][metal]") {
       cpuOps()->allClose(toCpu(metalOps()->quickGelu(xt)), cpuOps()->quickGelu(at), 5e-3, 5e-3));
 }
 
+CATCH_TEST_CASE("test Metal round and cast to int64", "[op][metal]") {
+  if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
+
+  // Ties to even, as torch.round; half holds every value exactly, so the answers are exact.
+  Tensor a = Tensor::create<float>({8}, {-2.5f, -1.5f, -0.5f, 0.5f, 1.5f, 2.5f, 0.6f, 3.7f});
+  // Exact, element by element: allClose compares with a strict `<`, so no tolerance says "equal".
+  Tensor rounded = metalOps()->round(toMetal(a));
+  Tensor back = toCpu(rounded);
+  const float *values = back.getInternalData()->getData<float>(back.getInternalOffset());
+  const float wantRounded[] = {-2.0f, -2.0f, 0.0f, 0.0f, 2.0f, 2.0f, 1.0f, 4.0f};
+  for (int i = 0; i < 8; ++i) CATCH_REQUIRE(values[i] == wantRounded[i]);
+
+  // And to int64, through the same astype every Metal cast goes through.
+  Tensor ids = metalOps()->toDevice(Device::getCpu(), metalOps()->cast(rounded, DType::kLong));
+  CATCH_REQUIRE(ids.getDType() == DType::kLong);
+  const LongType *data = ids.getInternalData()->getData<LongType>(ids.getInternalOffset());
+  const LongType want[] = {-2, -2, 0, 0, 2, 2, 1, 4};
+  for (int i = 0; i < 8; ++i) CATCH_REQUIRE(data[i] == want[i]);
+}
+
 CATCH_TEST_CASE("test Metal unary operators (larger contiguous)", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 

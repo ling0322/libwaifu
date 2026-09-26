@@ -109,6 +109,25 @@ fn takes_the_natural_log_and_undoes_exp() {
 }
 
 #[test]
+fn rounds_a_tie_to_even_and_casts_to_ids() {
+    let x = cpu_f32(&[6], &[-2.5, -1.5, 0.5, 1.5, 2.5, 3.7]);
+
+    let rounded = F::round(&x).unwrap();
+    assert_eq!(
+        rounded.to_vec_f32().unwrap(),
+        vec![-2.0, -2.0, 0.0, 2.0, 2.0, 4.0]
+    );
+
+    // And to int64, which truncates: round first for the nearest id.
+    let ids = rounded.cast(DType::Long).unwrap();
+    assert_eq!(ids.to_vec_i64().unwrap(), vec![-2, -2, 0, 2, 2, 4]);
+    assert_eq!(
+        x.cast(DType::Long).unwrap().to_vec_i64().unwrap(),
+        vec![-2, -1, 0, 1, 2, 3]
+    );
+}
+
+#[test]
 fn softmax_gives_rows_that_sum_to_one() {
     let x = cpu_f32(&[2, 3], &[1.0, 2.0, 3.0, 1.0, 1.0, 1.0]);
     let probabilities = F::softmax(&x).unwrap();

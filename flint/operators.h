@@ -196,6 +196,9 @@ class Operators {
   virtual Tensor exp(Tensor input);
   /// The natural logarithm; zero gives -inf and a negative number NaN, as `logf` does.
   virtual Tensor log(Tensor input);
+  /// To the nearest integer, a tie going to the even one -- 0.5 to 0, 1.5 and 2.5 to 2 -- which is
+  /// torch.round and not C's round(). The result keeps the input's float type.
+  virtual Tensor round(Tensor input);
   virtual Tensor sqrt(Tensor input);
   virtual Tensor rsqrt(Tensor input);
   virtual Tensor sigmoid(Tensor input);

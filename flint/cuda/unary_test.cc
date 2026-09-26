@@ -262,4 +262,58 @@ CATCH_TEST_CASE("test CUDA min", "[op][cuda]") {
   }
 }
 
+CATCH_TEST_CASE("test CUDA round and cast to int64", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Ties to even, then truncated to int64: the two steps the speech tokenizer's quantizer takes
+  // from a projection to a token id. Half holds every value here exactly.
+  std::vector<float> in = {-2.5f, -1.5f, -0.5f, 0.5f, 1.5f, 2.5f, 0.4f, 0.6f, -0.6f, 3.7f};
+  std::vector<float> rounded = {-2.0f, -2.0f, 0.0f, 0.0f, 2.0f, 2.0f, 0.0f, 1.0f, -1.0f, 4.0f};
+  std::vector<float> truncated = {-2.0f, -1.0f, 0.0f, 0.0f, 1.0f, 2.0f, 0.0f, 0.0f, 0.0f, 3.0f};
+  Tensor x = Tensor::create<float>({2, 5}, in);
+
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    CATCH_INFO("from " << dtype.toString());
+    Tensor onCard = cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), x), dtype);
+
+    // Exact, element by element: allClose compares with a strict `<`, so no tolerance says "equal".
+    Tensor r = cudaOps()->round(onCard);
+    CATCH_REQUIRE(r.getDType() == dtype);
+    Tensor back = toCpu(r);
+    const float *values = back.getInternalData()->getData<float>(back.getInternalOffset());
+    for (size_t i = 0; i < in.size(); ++i) {
+      CATCH_INFO("round(" << in[i] << ")");
+      CATCH_REQUIRE(values[i] == rounded[i]);
+    }
+
+    auto asLongs = [](const Tensor &ids) {
+      Tensor host = cudaOps()->toDevice(Device::getCpu(), ids);
+      const LongType *data = host.getInternalData()->getData<LongType>(host.getInternalOffset());
+      return std::vector<LongType>(data, data + host.getNumEl());
+    };
+
+    Tensor ids = cudaOps()->cast(r, DType::kLong);
+    CATCH_REQUIRE(ids.getDType() == DType::kLong);
+    CATCH_REQUIRE(ids.getShape() == std::vector<int>{2, 5});
+    std::vector<LongType> got = asLongs(ids);
+    for (size_t i = 0; i < in.size(); ++i) CATCH_REQUIRE(got[i] == LongType(rounded[i]));
+
+    // Cast alone truncates toward zero.
+    got = asLongs(cudaOps()->cast(onCard, DType::kLong));
+    for (size_t i = 0; i < in.size(); ++i) {
+      CATCH_INFO(in[i]);
+      CATCH_REQUIRE(got[i] == LongType(truncated[i]));
+    }
+  }
+
+  // Ids off the card go straight into lookup, which is what the cast is for.
+  Tensor table = cudaOps()->toDevice(
+      Device::getCuda(), Tensor::create<float>({3, 2}, {0.0f, 0.0f, 1.0f, 1.0f, 2.0f, 2.0f}));
+  Tensor idsFloat = cudaOps()->toDevice(Device::getCuda(), Tensor::create<float>({2}, {2.4f, 0.6f}));
+  Tensor rows = cudaOps()->lookup(table, cudaOps()->cast(cudaOps()->round(idsFloat), DType::kLong));
+  CATCH_REQUIRE(cpuOps()->allClose(
+      cudaOps()->toDevice(Device::getCpu(), rows),
+      Tensor::create<float>({2, 2}, {2.0f, 2.0f, 1.0f, 1.0f})));
+}
+
 }  // namespace fl
