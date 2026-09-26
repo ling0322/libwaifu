@@ -29,8 +29,11 @@
 //! browser talks to it through a server: a command goes one way down a channel, and how far along
 //! the run is, is read back out of a lock the worker writes as it goes.
 //!
-//! It is a browser rather than the terminal it used to be for one reason, which is that the thing
-//! being made is a picture. A terminal can say that one was written and where; it cannot show it.
+//! It is a browser rather than the terminal for one reason, which is that the thing being made is
+//! a picture. A terminal can say that one was written and where; it cannot show it. What comes
+//! before the page -- which task, which model, which device, and the fetch -- is still asked in
+//! the terminal (see [`tui`](crate::cli::tui)), and the page is served for the answers: it offers
+//! no model list, no download and no device box of its own.
 
 mod http;
 mod machine;
@@ -43,6 +46,9 @@ use std::sync::mpsc::channel;
 use std::sync::Arc;
 
 use crate::cli::args::Args;
+use crate::cli::hub;
+use crate::cli::task::{Launch, Task};
+use crate::cli::tui;
 use crate::cli::webui::state::Shared;
 use crate::cli::webui::worker::Command;
 
@@ -102,35 +108,169 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     }
 
     let model = with_usage(args.model())?.map(str::to_string);
-    let voice = args.voice().map(str::to_string);
+    let asked_task = with_usage(args.task())?;
     let runtime = with_usage(args.device())?.resolve();
     let wanted_port = with_usage(args.port())?;
 
-    let shared = Arc::new(Shared::new(runtime));
-    let (commands, waiting) = channel::<Command>();
+    // Read now rather than when a run begins, so that a path that is not there is said here --
+    // and before the terminal is taken over by the screens, which would hide it.
+    let picture = match args.image() {
+        Some(picture) => Some(
+            std::fs::read(picture).map_err(|error| format!("could not read {picture}: {error}"))?,
+        ),
+        None => None,
+    };
 
-    // A voice named on the command line is chosen before any page has opened, as `-m` chooses a
-    // model; with none named, the speech tab starts with nothing chosen and a button to choose
-    // one. Described rather than read or fetched either way: a voice with a package behind it is
-    // fetched and read at the first reading that wants it, exactly as a picture model is at the
-    // first picture.
-    if let Some(voice) = voice {
-        shared.change(|session| session.voice = Some(worker::look_at_voice(&voice)));
+    let launch = match model {
+        // Named on the command line: nothing to ask, and the task is what the model is where it
+        // was not named. Fetched here, in the terminal, so that the page never has a download.
+        Some(model) => {
+            let task = match asked_task {
+                Some(task) => task,
+                None => task_for(&model, picture.is_some()),
+            };
+            with_usage(fits(task, &model))?;
+            fetch_in_the_terminal(&model)?;
+            Launch {
+                task,
+                model,
+                runtime,
+            }
+        }
+        // Not named: the terminal asks, where there is a terminal to ask on.
+        None => {
+            if !tui::can_take_the_screen() {
+                return with_usage(Err(
+                    "no model was named, and there is no terminal to pick one on: name one with -m"
+                        .into(),
+                ));
+            }
+            match tui::choose(asked_task, runtime)? {
+                Some(launch) => launch,
+                // Somebody who looked at the lists and left. Not a failure.
+                None => return Ok(()),
+            }
+        }
+    };
+
+    serve_the_page(launch, picture, wanted_port)
+}
+
+/// The task `-m` asks for when `-task` does not say: a voice reads, and a picture model draws --
+/// from the picture, where `-i` named one. A manifest on the disk is a voice where its
+/// `model.type` names a speech model.
+fn task_for(model: &str, from_a_picture: bool) -> Task {
+    if worker::is_a_voice(model) {
+        Task::Text2Speech
+    } else if from_a_picture {
+        Task::Img2Img
+    } else {
+        Task::Txt2Img
+    }
+}
+
+/// Whether `model` can do `task`, as far as can be told before reading it: a published model is
+/// a voice or a picture model by its name, and a picture model can start from a picture or not by
+/// its kind. A manifest on the disk is taken at its word, and says so at the first run if not.
+fn fits(task: Task, model: &str) -> Result<(), String> {
+    let published = hub::full_name(model).is_some() || model == worker::TONES;
+    let voice = model == worker::TONES || hub::is_voice(model);
+
+    if published && voice != task.speaks() {
+        return Err(match task.speaks() {
+            true => format!("{model} draws pictures: {} needs a voice", task.name()),
+            false => format!(
+                "{model} is a voice: {} needs a model that draws",
+                task.name()
+            ),
+        });
+    }
+    if task == Task::Img2Img && !voice {
+        if let Some(why) = worker::look_at(model).no_picture_because {
+            return Err(format!("{model} cannot do img2img: {why}"));
+        }
     }
 
-    // A picture named on the command line only fills the box. Everything about a run is
-    // changeable between runs, and this is no different: it is where to start, not what to be
-    // stuck with. Read now rather than when a run begins, so that a path that is not there is
-    // said here, where there is still a terminal to say it on.
-    if let Some(picture) = args.image() {
-        let bytes =
-            std::fs::read(picture).map_err(|error| format!("could not read {picture}: {error}"))?;
+    Ok(())
+}
+
+/// Whether a picture model can start from a picture, as far as is known without reading it: what
+/// the terminal's img2img list is filtered on.
+pub fn draws_from_a_picture(model: &str) -> bool {
+    worker::look_at(model).no_picture_because.is_none()
+}
+
+/// Fetches a published model that is not on the disk yet, saying how it is going on one line
+/// that rewrites itself -- the command line's version of the terminal's bar, for `-m`.
+///
+/// Nothing for a model already here, which is asked of the cache first: fetching one that is
+/// here would still go looking for which hub to ask, and a machine that is offline would wait on
+/// that for nothing. A path is checked for being there, which is the whole of what fetching one
+/// means.
+fn fetch_in_the_terminal(model: &str) -> Result<(), Error> {
+    if model == worker::TONES || hub::is_cached(model) {
+        return Ok(());
+    }
+
+    let mut from = String::new();
+    let mut report = |progress: hub::Progress| {
+        let (file, done, total, part, parts) = match progress {
+            hub::Progress::From { hub } => {
+                from = format!(" from {hub}");
+                return;
+            }
+            hub::Progress::Fetching {
+                file,
+                done,
+                total,
+                part,
+                parts,
+            } => (file, done, total, part, parts),
+            hub::Progress::Fetched {
+                file,
+                bytes,
+                part,
+                parts,
+            } => (file, bytes, Some(bytes), part, parts),
+        };
+
+        let of = match parts {
+            0 => String::new(),
+            parts => format!(" ({part} of {parts})"),
+        };
+        let how_far = match total {
+            Some(total) if total > 0 => format!(
+                "{:.0}% of {:.2} GB",
+                done as f64 / total as f64 * 100.0,
+                total as f64 / 1e9
+            ),
+            _ => format!("{:.2} GB", done as f64 / 1e9),
+        };
+        eprint!("\r\x1b[2Kfetching {file}{from}{of}: {how_far}");
+    };
+
+    let fetched = hub::resolve_reporting(model, &mut report, &|| false);
+    eprintln!();
+    fetched.map(|_| ())
+}
+
+/// Serves the page for what was launched, until the process is stopped.
+fn serve_the_page(
+    launch: Launch,
+    picture: Option<Vec<u8>>,
+    wanted_port: Option<u16>,
+) -> Result<(), Error> {
+    let shared = Arc::new(Shared::new(launch.task, launch.runtime));
+    let (commands, waiting) = channel::<Command>();
+
+    if let Some(bytes) = picture {
         shared.hold_upload(bytes);
     }
 
-    // Bound before the worker starts and before anything is fetched. A port that is taken is a
-    // run that cannot go anywhere, and finding that out after ten minutes of downloading a model
-    // is finding it out at the worst possible moment.
+    // Taken before the model is read, and not answered on until it has been. A port that is taken
+    // is a session that cannot go anywhere, and finding that out after a minute of reading a model
+    // is finding it out late; nothing is served from it, and no address is printed, until the
+    // model is in memory.
     let (listener, address) = listen(wanted_port)?;
 
     let worker = std::thread::spawn({
@@ -138,29 +278,82 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         move || worker::work(&shared, &waiting)
     });
 
-    // Asked for here rather than left to the page, so that `waifu webui -m sdxl:base` starts
-    // fetching and reading while the browser is still being opened -- which is what someone who
-    // named a model on the command line asked for.
-    if let Some(model) = model {
-        // Chosen straight away, so that the page opens with the boxes already filled in for it,
-        // and read straight away as well -- which is what naming one on the command line asks
-        // for, rather than waiting for the first run the way a model picked on the page does.
-        shared.change(|session| session.model = Some(worker::look_at(&model)));
-        shared.claim();
-        let _ = commands.send(Command::Use(model));
-    } else {
-        shared.say("pick a model to begin", false);
-    }
+    // Read onto the device before the page opens, on the worker -- the thread the weights have to
+    // live on -- with this one waiting for it in the terminal. The page never opens on a model
+    // that is still being read, and one that cannot be read is said here rather than on a page.
+    let command = match launch.task.speaks() {
+        true => {
+            shared.change(|session| session.voice = Some(worker::look_at_voice(&launch.model)));
+            Command::UseVoice(launch.model.clone())
+        }
+        false => {
+            shared.change(|session| session.model = Some(worker::look_at(&launch.model)));
+            Command::Use(launch.model.clone())
+        }
+    };
+    shared.claim();
+    commands
+        .send(command)
+        .map_err(|_| "the model thread stopped before it could read anything")?;
+    read_in_the_terminal(&shared, &launch)?;
 
-    // Not "drawing at" any more: the page has a tab that says things rather than draws them, and
-    // a line that names one of the two is a line somebody reads as the whole of what is there.
-    println!("waifu is at http://{address}");
+    println!(
+        "waifu is at http://{address} -- {} with {} on {}",
+        launch.task.name(),
+        launch.model,
+        launch.runtime.name()
+    );
     println!("Press ctrl-c to stop.");
 
     serve(listener, shared, commands)?;
     let _ = worker.join();
 
     Ok(())
+}
+
+/// Waits for the worker to finish reading what `launch` names, saying how long it has been on one
+/// line that rewrites itself, and says why where it could not be read.
+fn read_in_the_terminal(shared: &Shared, launch: &Launch) -> Result<(), Error> {
+    let started = std::time::Instant::now();
+    while shared.is_busy() {
+        let doing = shared.progress()["doing"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let doing = match doing.is_empty() {
+            true => format!("reading {}", launch.model),
+            false => doing,
+        };
+        eprint!(
+            "\r\x1b[2K{doing} onto {} -- {}s",
+            launch.runtime.name(),
+            started.elapsed().as_secs()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    eprintln!();
+
+    let session = shared.session();
+    let read = match launch.task.speaks() {
+        true => session.voice.as_ref().is_some_and(|voice| voice.in_memory),
+        false => session.model.as_ref().is_some_and(|model| model.in_memory),
+    };
+    if read {
+        eprintln!(
+            "{} is on {}, read in {:.1}s",
+            launch.model,
+            launch.runtime.name(),
+            started.elapsed().as_secs_f64()
+        );
+        return Ok(());
+    }
+
+    let why = session
+        .note
+        .as_ref()
+        .map(|note| note.said.clone())
+        .unwrap_or_else(|| "it stopped without saying why".to_string());
+    Err(format!("could not read {}: {why}", launch.model).into())
 }
 
 /// Takes a port to listen on: the one that was asked for, or the first free one near it.
@@ -269,14 +462,23 @@ mod tests {
     /// would be refused as "the model thread is no longer there", which is not what these are
     /// about.
     fn a_server() -> (SocketAddr, Receiver<Command>) {
+        a_server_for(Task::Txt2Img, None)
+    }
+
+    /// A server for `task`, with `model` described the way `main` describes what the terminal
+    /// chose -- and not read, which is the worker's to do, and there is no worker here.
+    fn a_server_for(task: Task, model: Option<&str>) -> (SocketAddr, Receiver<Command>) {
         let (listener, address) = listen(Some(a_free_port())).expect("somewhere to listen");
-        let shared = Arc::new(Shared::new(DeviceOption::Cpu.resolve()));
+        let shared = Arc::new(Shared::new(task, DeviceOption::Cpu.resolve()));
         let (commands, waiting) = channel::<Command>();
 
-        // What `main` does before it opens a browser: a voice is described before any page reads
-        // the state. The stand-in rather than the published one, because a test that speaks
-        // should not start by fetching gigabytes -- `-voice tones` is the same server.
+        // A voice as well, whatever the task. The stand-in rather than the published one, because
+        // a test that speaks should not start by fetching gigabytes -- `-m tones` is the same
+        // server.
         shared.change(|session| session.voice = Some(worker::look_at_voice(worker::TONES)));
+        if let Some(model) = model {
+            shared.change(|session| session.model = Some(worker::look_at(model)));
+        }
 
         // Left running for the rest of the test process. There is no way to stop it short of the
         // process ending, which is the same shape the program has. What it answers with is
@@ -378,33 +580,9 @@ mod tests {
         let state = json(address, "GET /api/state", "");
 
         assert!(state["model"].is_null());
-        assert!(!state["models"]
-            .as_array()
-            .expect("the catalogue")
-            .is_empty());
+        assert_eq!(state["task"], "txt2img");
         assert_eq!(state["device"], "cpu");
         assert_eq!(state["holding_a_picture"], false);
-    }
-
-    #[test]
-    fn the_list_says_which_models_draw_explicit_pictures() {
-        // The page leaves those out until somebody asks for them, and it has nothing to go on but
-        // this: a catalogue that answered without the label would be a page showing everything.
-        let (address, _commands) = a_server();
-        let state = json(address, "GET /api/state", "");
-        let models = state["models"].as_array().expect("the catalogue");
-
-        let said = |name: &str| {
-            models
-                .iter()
-                .find(|model| model["name"] == name)
-                .unwrap_or_else(|| panic!("{name} is offered"))["explicit"]
-                .as_bool()
-                .expect("a yes or a no about every model")
-        };
-
-        assert!(said("sdxl:noob"));
-        assert!(!said("sdxl:base"));
     }
 
     #[test]
@@ -437,35 +615,23 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_model_reads_nothing_and_says_what_it_would_read() {
-        // Choosing is a click; reading is minutes and several gigabytes. So nothing is posted to
-        // the worker here -- what comes back is what the name says about the model, which is what
-        // the boxes on the page are filled in from until a run reads the package itself.
-        let (address, commands) = a_server();
-
-        assert_eq!(
-            asked(address, "POST /api/model", r#"{"model":"sdxl:base"}"#).0,
-            200
-        );
-        assert!(commands.try_recv().is_err(), "the worker was told anyway");
-
+    fn the_model_the_terminal_chose_is_described_before_a_byte_of_it_is_read() {
+        // What the boxes on the page are filled in from until the worker has read the package:
+        // what the name says about the model.
+        let (address, _commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
         let chosen = &json(address, "GET /api/state", "")["model"];
         assert_eq!(chosen["name"], "sdxl:base");
         assert_eq!(chosen["full_name"], "Stable Diffusion XL Base 1.0");
         assert_eq!(chosen["in_memory"], false);
         assert_eq!(chosen["sampler"], "Euler");
-        // An SDXL package is taken to draw from a picture until one says otherwise, and an Anima
-        // one is known not to before anything of it has been fetched.
+        // An SDXL package is taken to draw from a picture until one says otherwise, and has a
+        // second pass, so the page draws the CFG card and the negative prompt box.
         assert_eq!(chosen["draws_from_a_picture"], true);
-        // And it has a second pass, so the page draws the CFG card and the negative prompt box.
         assert_eq!(chosen["takes_guidance"], true);
 
-        assert_eq!(
-            asked(address, "POST /api/model", r#"{"model":"anima:turbo"}"#).0,
-            200
-        );
+        // An Anima one is known not to start from a picture before anything of it is read.
+        let (address, _commands) = a_server_for(Task::Txt2Img, Some("anima:turbo"));
         let chosen = &json(address, "GET /api/state", "")["model"];
-        assert_eq!(chosen["name"], "anima:turbo");
         assert_eq!(chosen["draws_from_a_picture"], false);
         assert!(
             chosen["no_picture_because"]
@@ -475,83 +641,45 @@ mod tests {
             "{chosen}"
         );
 
-        // Krea 2 is the one that answers in a single pass. The page reads this and stops drawing
-        // the two things that steer a second one, before a byte of the package has been fetched:
-        // a control that appeared once a download finished and then vanished would be a screen
-        // whose settings move while somebody is using them.
-        assert_eq!(
-            asked(address, "POST /api/model", r#"{"model":"krea2:turbo"}"#).0,
-            200
-        );
+        // Krea 2 answers in a single pass, and the page stops drawing the two things that steer
+        // a second one.
+        let (address, _commands) = a_server_for(Task::Txt2Img, Some("krea2:turbo"));
         let chosen = &json(address, "GET /api/state", "")["model"];
-        assert_eq!(chosen["name"], "krea2:turbo");
         assert_eq!(chosen["takes_guidance"], false);
-        // What it would be guided at if it were, which is this runtime's spelling of none. The
-        // number is still described, because it is what a run of this model is posted with.
         assert_eq!(chosen["guidance"], 1.0);
         assert_eq!(chosen["steps"], 8);
-
-        // A null un-chooses, which is what the page sends when the kind of run changes.
-        assert_eq!(
-            asked(address, "POST /api/model", r#"{"model":null}"#).0,
-            200
-        );
-        assert!(json(address, "GET /api/state", "")["model"].is_null());
-
-        // And a request that names nothing is refused rather than remembered as an empty name,
-        // which the first run would then fail to fetch a model called "". A field that is missing
-        // is a request that forgot to say anything; the null above is a decision.
-        let (status, body) = asked(address, "POST /api/model", r#"{"model":"  "}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("no model was named"), "{body}");
-        let (status, body) = asked(address, "POST /api/model", r#"{}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("no model was named"), "{body}");
     }
 
     #[test]
-    fn a_device_this_machine_does_not_have_is_refused_by_name() {
-        // Every build knows all four names and no machine has all four devices. What decides is
-        // what is here, and the refusal says what that is rather than only that this was wrong.
-        let (address, _commands) = a_server();
+    fn the_page_cannot_choose_fetch_or_move_a_model() {
+        // All three are the terminal's. A page that could would be a second place to change what
+        // the first had settled, and the doors are not there to be knocked on.
+        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
 
-        let (status, body) = asked(address, "POST /api/device", r#"{"device":"nonsense"}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("no device here is called"), "{body}");
-        assert!(body.contains("cpu"), "{body}");
-
-        let (status, body) = asked(address, "POST /api/device", r#"{"model":"cpu"}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("no device was named"), "{body}");
-    }
-
-    #[test]
-    fn the_device_already_in_use_is_not_asked_for_again() {
-        // The page sends what the box says, and the box says the device it is already on until
-        // somebody changes it. Taking the worker for that would unload the model to load it
-        // again onto the device it is already on.
-        let (address, commands) = a_server();
-
-        let device = json(address, "GET /api/state", "")["device"]
-            .as_str()
-            .expect("a device")
-            .to_string();
-        let sent = format!(r#"{{"device":"{device}"}}"#);
-        assert_eq!(asked(address, "POST /api/device", &sent).0, 200);
+        for (line, body) in [
+            ("POST /api/model", r#"{"model":"sdxl:noob"}"#),
+            ("DELETE /api/model", r#"{"model":"sdxl:base"}"#),
+            ("POST /api/voice-model", r#"{"voice":"indextts"}"#),
+            ("POST /api/fetch", r#"{"name":"krea2:turbo"}"#),
+            ("POST /api/device", r#"{"device":"cpu"}"#),
+        ] {
+            assert_eq!(asked(address, line, body).0, 404, "{line}");
+        }
         assert!(commands.try_recv().is_err(), "the worker was told anyway");
-    }
 
+        // Nor does it have anything to choose from: no list of models, voices or devices.
+        let state = json(address, "GET /api/state", "");
+        for gone in ["models", "voices", "devices"] {
+            assert!(state.get(gone).is_none(), "{gone}: {state}");
+        }
+    }
     #[test]
     fn a_second_thing_asked_for_before_the_first_has_started_is_refused() {
         // Two clicks on a button are a few tens of milliseconds apart, and the worker picks a
         // command up some time after it is posted. Asked of what the worker is doing, both
         // requests read "nothing", and one press drew two pictures.
-        let (address, commands) = a_server();
+        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
 
-        assert_eq!(
-            asked(address, "POST /api/model", r#"{"model":"sdxl:base"}"#).0,
-            200
-        );
         let run = r#"{"prompt":"a cat"}"#;
         assert_eq!(asked(address, "POST /api/generate", run).0, 200);
         let (status, body) = asked(address, "POST /api/generate", run);
@@ -568,11 +696,7 @@ mod tests {
         // A refusal after the claim has found a request that could not be carried out, not a
         // program that is busy. Keeping the claim would leave every request after it refused as
         // "already happening" by something that never started.
-        let (address, commands) = a_server();
-        assert_eq!(
-            asked(address, "POST /api/model", r#"{"model":"sdxl:base"}"#).0,
-            200
-        );
+        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
         drop(commands);
 
         for _ in 0..2 {
@@ -684,56 +808,54 @@ mod tests {
     }
 
     #[test]
-    fn the_model_list_says_which_models_can_start_from_a_picture() {
-        // What the img2img tab filters its list on: a model that cannot start from a picture is
-        // not one to offer there.
-        let (address, _commands) = a_server();
-        let state = json(address, "GET /api/state", "");
-        let models = state["models"].as_array().expect("the models");
-        let says = |name: &str| {
-            models
-                .iter()
-                .find(|model| model["name"] == name)
-                .unwrap_or_else(|| panic!("{name} is listed"))["draws_from_a_picture"]
-                .clone()
-        };
-
-        assert_eq!(says("sdxl:base"), true);
-        assert_eq!(says("krea2:turbo"), false);
-        assert_eq!(says("anima:turbo"), false);
-
-        // A voice has no picture to start from or not, and says nothing about it.
-        let voices = state["voices"].as_array().expect("the voices");
-        assert!(voices.iter().all(|voice| voice.get("draws_from_a_picture").is_none()));
+    fn a_model_named_on_the_command_line_says_which_task_it_is_for() {
+        // A voice reads, and a picture model draws -- from the picture, where -i named one.
+        assert_eq!(task_for("indextts", false), Task::Text2Speech);
+        assert_eq!(task_for(worker::TONES, true), Task::Text2Speech);
+        assert_eq!(task_for("sdxl:base", false), Task::Txt2Img);
+        assert_eq!(task_for("sdxl:base", true), Task::Img2Img);
+        // A manifest that is not there, or says nothing of a speech model, draws until -task says
+        // otherwise.
+        assert_eq!(task_for("/somewhere/else.yaml", false), Task::Txt2Img);
     }
 
     #[test]
-    fn a_published_voice_is_listed_and_chosen_the_way_a_model_is() {
-        // What the voice list offers: the published voice, by the name it is chosen with.
-        let (address, _commands) = a_server();
-        let state = json(address, "GET /api/state", "");
-        let voices = state["voices"].as_array().expect("the voices");
-        assert!(
-            voices.iter().any(|voice| voice["name"] == "indextts"),
-            "{voices:?}"
-        );
+    fn a_task_the_model_cannot_do_is_refused_before_anything_is_fetched() {
+        assert!(fits(Task::Txt2Img, "sdxl:base").is_ok());
+        assert!(fits(Task::Img2Img, "sdxl:base").is_ok());
+        assert!(fits(Task::Text2Speech, "indextts").is_ok());
+        assert!(fits(Task::Text2Speech, worker::TONES).is_ok());
 
-        // Choosing it reads and fetches nothing. It is a real voice, so the tab has no apology to
-        // make, and it says what it is called and whether the first reading has to fetch it.
-        let (status, body) = asked(address, "POST /api/voice-model", r#"{"voice":"indextts"}"#);
-        assert_eq!(status, 200, "{body}");
-        let voice = &json(address, "GET /api/state", "")["voice"];
+        let refused = fits(Task::Text2Speech, "sdxl:base").unwrap_err();
+        assert!(refused.contains("needs a voice"), "{refused}");
+        let refused = fits(Task::Txt2Img, "indextts").unwrap_err();
+        assert!(refused.contains("is a voice"), "{refused}");
+
+        // What the img2img list in the terminal is filtered on, said for a model named instead.
+        let refused = fits(Task::Img2Img, "anima:turbo").unwrap_err();
+        assert!(refused.contains("cannot do img2img"), "{refused}");
+        assert!(!draws_from_a_picture("krea2:turbo"));
+        assert!(draws_from_a_picture("sdxl:base"));
+
+        // A manifest on the disk is taken at its word.
+        assert!(fits(Task::Text2Speech, "/somewhere/voice.yaml").is_ok());
+    }
+    #[test]
+    fn a_published_voice_is_described_the_way_a_model_is() {
+        // Described and not read or fetched. It is a real voice, so the tab has no apology to
+        // make, and it says what it is called and whether it is in memory yet.
+        let shared = Shared::new(Task::Text2Speech, DeviceOption::Cpu.resolve());
+        shared.change(|session| session.voice = Some(worker::look_at_voice("indextts")));
+        let state = shared.describe();
+
+        assert_eq!(state["task"], "text2speech");
+        let voice = &state["voice"];
         assert_eq!(voice["name"], "indextts");
         assert_eq!(voice["full_name"], "IndexTTS 2.5");
         assert_eq!(voice["in_memory"], false);
         assert!(voice["on_disk"].is_boolean(), "{voice}");
         assert_eq!(voice["not_a_voice_because"], Value::Null);
-
-        let (status, body) = asked(address, "POST /api/voice-model", r#"{"voice":"  "}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("no voice was named"), "{body}");
     }
-
     #[test]
     fn a_reading_with_nothing_to_read_is_refused_with_the_reason() {
         let (address, _commands) = a_server();
@@ -760,27 +882,6 @@ mod tests {
         assert!(body.contains("already"), "{body}");
 
         assert!(matches!(commands.try_recv(), Ok(Command::Speak(_))));
-        assert!(commands.try_recv().is_err());
-    }
-
-    #[test]
-    fn a_download_is_posted_to_the_worker_once_and_takes_it_like_a_run() {
-        // The Download button that stands where Generate does until the model is here.
-        let (address, commands) = a_server();
-
-        let (status, body) = asked(address, "POST /api/fetch", r#"{"name":"  "}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("nothing was named"), "{body}");
-        assert!(commands.try_recv().is_err(), "the worker was told anyway");
-
-        let download = r#"{"name":"krea2:turbo"}"#;
-        assert_eq!(asked(address, "POST /api/fetch", download).0, 200);
-        // A second click while the first is under way is told so, rather than queued behind it.
-        let (status, body) = asked(address, "POST /api/fetch", download);
-        assert_eq!(status, 409);
-        assert!(body.contains("already"), "{body}");
-
-        assert!(matches!(commands.try_recv(), Ok(Command::Fetch(name)) if name == "krea2:turbo"));
         assert!(commands.try_recv().is_err());
     }
 

@@ -149,10 +149,11 @@ impl Watching<'_> {
     }
 }
 
-/// What a name resolves to, once fetched: something `-m` draws pictures with, or something
-/// `-voice` reads sentences with. The two are never offered in the same picker -- [`listed`] is
-/// pictures and [`listed_voices`] is voices -- but they are fetched, cached and named through the
-/// one table and the one set of functions, since none of that differs by kind.
+/// What a name resolves to, once fetched: something that draws pictures, or something that reads
+/// sentences. The two are never offered in the same list -- [`listed`] is pictures and
+/// [`listed_voices`] is voices, and which one the terminal shows is the task's -- but they are
+/// fetched, cached and named through the one table and the one set of functions, since none of
+/// that differs by kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kind {
     Picture,
@@ -161,7 +162,7 @@ enum Kind {
 
 /// A model that has a name, and where it is published.
 struct Published {
-    /// The name `-m` or `-voice` takes, version and all.
+    /// The name `-m` takes, version and all.
     name: &'static str,
     /// Human-readable name shown in the picker alongside the short name.
     full_name: &'static str,
@@ -632,6 +633,13 @@ pub fn full_name(name: &str) -> Option<&'static str> {
         .iter()
         .find(|m| m.name == versioned)
         .map(|m| m.full_name)
+}
+
+/// Whether a published name is a voice rather than a picture model: which task `-m` on its own
+/// is asking for. False for anything the catalogue does not know, a path included -- a manifest
+/// on the disk says what it is only once it is read, so for one of those the task is asked for.
+pub fn is_voice(name: &str) -> bool {
+    published(name).is_some_and(|model| model.kind == Kind::Voice)
 }
 
 /// One model a screen can offer, and what is on the disk for it.
@@ -1588,9 +1596,9 @@ mod tests {
 
     #[test]
     fn a_voice_is_offered_in_the_voice_list_and_not_as_a_picture() {
-        // `-voice` resolves a voice exactly the way `-m` resolves a picture -- same table, same
-        // functions -- but `listed()` is what feeds the picture picker, and a voice put there
-        // would be a name someone could click that fails the moment it is chosen.
+        // A voice resolves exactly the way a picture model does -- same table, same functions --
+        // but `listed()` is what feeds the picture list, and a voice put there would be a name
+        // someone could pick that fails the moment it is chosen.
         assert!(published("indextts").is_some());
         assert_eq!(full_name("indextts"), Some("IndexTTS 2.5"));
         assert!(names().contains(&"indextts"));

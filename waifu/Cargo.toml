@@ -18,15 +18,25 @@ path = "src/bin/waifu.rs"
 required-features = ["cli"]
 
 [features]
-# The command line tool. Off by default: what it pulls in -- a web server, an HTTP client, an
-# image encoder -- is the binary's to need, and nothing the library does asks for any of it.
-cli = ["dep:hf-hub", "dep:image", "dep:serde_json", "dep:tiny_http", "dep:ureq"]
+# The command line tool. Off by default: what it pulls in -- a terminal stack, a web server, an
+# HTTP client, an image encoder -- is the binary's to need, and nothing the library does asks for
+# any of it.
+cli = ["dep:hf-hub", "dep:image", "dep:ratatui", "dep:serde_json", "dep:tiny_http", "dep:ureq"]
 
 [dependencies]
 # What the command line tool needs.
 #
-# The server the screen is served from. The screen is a browser tab now rather than the terminal,
-# which is the one place a picture can actually be looked at, and this is the smallest thing that
+# The terminal the choosing happens in: which task, which model -- fetched there, under a bar --
+# and which device, before the page opens on the task that was picked. Trimmed to the crossterm
+# backend: the default set also builds the termwiz and termina ones, which is two more terminal
+# stacks than a program that runs in one terminal needs.
+ratatui = { version = "0.29", default-features = false, features = [
+    "crossterm",
+    "underline-color",
+], optional = true }
+
+# The server the page is served from. The page is a browser tab rather than the terminal, because
+# it is the one place a picture can actually be looked at, and this is the smallest thing that
 # will hand one to it: a socket, a thread per request and a `Request` with the method, the path
 # and the body already read off it. No executor, which matters -- nothing else in this crate is
 # async, and a run is a thread that owns a model and blocks for minutes at a time.

@@ -3,7 +3,7 @@
 A few seconds of somebody speaking and a sentence in; the sentence, in that voice, out.
 
 ```bash
-waifu webui -voice models/indextts25.yaml          # the page's text2speech tab
+waifu -task text2speech -m models/indextts25.yaml   # the text2speech page
 cargo run --release --example speak -- models/indextts25.yaml voice.wav "Hello there." out.wav
 ```
 

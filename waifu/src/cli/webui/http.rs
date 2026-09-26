@@ -20,7 +20,7 @@
 //! The requests, and what each one answers with.
 //!
 //! Three of them serve the page itself, and the rest are the conversation the page holds with the
-//! worker: what models there are, what is loaded, what is happening, draw this, stop. None of
+//! worker: what is loaded, what is happening, draw this, say this, stop. None of
 //! them waits for a model -- a request that did would hold its socket open for minutes -- so each
 //! one posts a command and answers with what is true at that moment. The page asks again.
 
@@ -31,11 +31,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response};
 
-use crate::cli::args::Runtime;
-use crate::cli::hub;
 use crate::cli::webui::machine;
 use crate::cli::webui::state::{Chosen, Doing, Shared};
-use crate::cli::webui::worker::{self, Command, Job, SayJob};
+use crate::cli::webui::worker::{Command, Job, SayJob};
 use crate::{GenerationOptions, SpeechOptions};
 
 /// The page, built into the binary. There is no directory of files to find at runtime and no
@@ -87,10 +85,7 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         (Method::Get, "/style.css") => page(STYLE, "text/css; charset=utf-8"),
         (Method::Get, "/app.js") => page(SCRIPT, "text/javascript; charset=utf-8"),
 
-        (Method::Get, "/api/state") => json(shared.describe(
-            listing(hub::listed(), true),
-            listing(hub::listed_voices(), false),
-        )),
+        (Method::Get, "/api/state") => json(shared.describe()),
         (Method::Get, "/api/progress") => json(shared.progress()),
         // Apart from the state rather than inside it, because it answers a different question.
         // The state is what this session has done and is a new one every time anything happens;
@@ -99,13 +94,9 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         // would have the page reading the gallery back several times a second.
         (Method::Get, "/api/machine") => json(machine::describe(shared.runtime())),
 
-        (Method::Post, "/api/model") => choose_model(shared, request),
-        // Not `/api/voice`, which is the recording a reading is to sound like. Deleting a voice's
-        // package goes through `DELETE /api/model` like any other: it is the same cache.
-        (Method::Post, "/api/voice-model") => choose_voice(shared, request),
-        (Method::Post, "/api/fetch") => fetch(shared, commands, request),
-        (Method::Post, "/api/device") => use_device(shared, commands, request),
-        (Method::Delete, "/api/model") => forget_model(shared, request),
+        // Nothing here chooses a model, fetches one or moves it to another device. All three were
+        // settled in the terminal before this server was listening, and the page is served for
+        // what was settled.
         (Method::Post, "/api/generate") => generate(shared, commands, request),
         (Method::Post, "/api/speak") => speak(shared, commands, request),
         (Method::Post, "/api/interrupt") => {
@@ -147,181 +138,6 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         },
 
         _ => refused(404, "no such page"),
-    }
-}
-
-/// Sets what the page draws with. Nothing is read here.
-///
-/// The weights are the expensive part and they are read by the run that needs them -- this is a
-/// name, what the name says about the model, and nothing else. So it takes no worker and waits
-/// for nothing: somebody can change their mind about which model to use while the one before it
-/// is still being fetched.
-fn choose_model(shared: &Arc<Shared>, request: &mut Request) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
-    };
-    // A null is "nothing is chosen", which the page sends when the kind of run changes: what is
-    // worth drawing with is a question about the run, and the answer to the old one is not the
-    // answer to the new one. Told apart from a missing field, which is a request that forgot to
-    // say anything -- one is a decision and the other is a mistake.
-    if matches!(asked.get("model"), Some(Value::Null)) {
-        shared.change(|session| session.model = None);
-        shared.say("pick a model to begin", false);
-        return json(json!({ "ok": true }));
-    }
-
-    let Some(name) = asked.get("model").and_then(Value::as_str) else {
-        return refused(400, "no model was named");
-    };
-    if name.trim().is_empty() {
-        return refused(400, "no model was named");
-    }
-
-    let chosen = worker::look_at(name.trim());
-    shared.change(|session| session.model = Some(chosen));
-    shared.say(format!("{} is what runs will use", name.trim()), false);
-
-    json(json!({ "ok": true }))
-}
-
-/// Says which voice readings are of. Reads nothing, as choosing a model reads nothing: the first
-/// reading fetches the package where it is not here and reads it, and puts down whatever else is
-/// on the card first.
-fn choose_voice(shared: &Arc<Shared>, request: &mut Request) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
-    };
-    let Some(name) = asked
-        .get("voice")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    else {
-        return refused(400, "no voice was named");
-    };
-
-    let chosen = worker::look_at_voice(name);
-    shared.change(|session| session.voice = Some(chosen));
-    shared.say(format!("{name} is what readings will use"), false);
-
-    json(json!({ "ok": true }))
-}
-
-/// Downloads a model or a voice without reading it: the page's Download button, which stands where
-/// Generate does until what is chosen is on the disk.
-fn fetch(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
-    };
-    let Some(name) = asked
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    else {
-        return refused(400, "nothing was named to download");
-    };
-
-    // The same claim a run takes: a download is minutes of the worker, and a run started beside it
-    // would be a run of a model that is only half here.
-    if !shared.claim() {
-        return refused(409, &already(shared));
-    }
-    post(shared, commands, Command::Fetch(name.to_string()))
-}
-
-/// Sends what runs next to another device, once whatever is in front of it has finished.
-fn use_device(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
-    };
-    let Some(name) = asked.get("device").and_then(Value::as_str) else {
-        return refused(400, "no device was named");
-    };
-
-    // Against what this machine has, not against what the names spell: a build with CUDA in it
-    // on a machine with no card knows both words and can carry out neither.
-    let Some(runtime) = Runtime::named(name).filter(|one| Runtime::available().contains(one))
-    else {
-        let names: Vec<&str> = Runtime::available().iter().map(|one| one.name()).collect();
-        return refused(
-            400,
-            &format!(
-                "no device here is called \"{name}\": this machine has {}",
-                names.join(", ")
-            ),
-        );
-    };
-    if runtime == shared.runtime() {
-        return json(json!({ "ok": true }));
-    }
-
-    // The same claim a load takes, because this is one: the model on the old device is let go of
-    // and read again on the new one.
-    if !shared.claim() {
-        return refused(409, &already(shared));
-    }
-
-    post(shared, commands, Command::UseDevice(runtime))
-}
-
-/// Throws away what has been fetched of a model, which is the only way this program gives disk
-/// space back.
-///
-/// A model is several gigabytes and the list says which are on the disk, so the list is where
-/// somebody notices they are keeping four of them. What is lost is a download and nothing more:
-/// nothing outside the cache is touched, and a package somebody exported themselves is not
-/// something the catalogue can reach.
-fn forget_model(shared: &Arc<Shared>, request: &mut Request) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
-    };
-    let Some(name) = asked.get("model").and_then(Value::as_str) else {
-        return refused(400, "no model was named");
-    };
-
-    // Not a model whose weights are in memory. It read them off those files once, when it was
-    // built, and does not read them again -- so this is caution rather than necessity: the model
-    // on the screen as ready and the files it came from go together. One that has only been
-    // chosen holds nothing, and may go.
-    let session = shared.session();
-    let in_memory = session
-        .model
-        .as_ref()
-        .is_some_and(|model| model.in_memory && model.name == name)
-        || session
-            .voice
-            .as_ref()
-            .is_some_and(|voice| voice.in_memory && voice.name == name);
-    drop(session);
-    if in_memory {
-        return refused(409, "that model is in memory: pick another one first");
-    }
-    if shared.is_busy() {
-        return refused(409, &already(shared));
-    }
-
-    match hub::remove(name) {
-        Ok(()) => {
-            // So that what the chosen one says of itself -- "on the disk", or a fetch to come --
-            // is true of the disk as it is now.
-            shared.change(|session| {
-                if let Some(model) = session.model.as_mut().filter(|one| one.name == name) {
-                    model.on_disk = false;
-                }
-                if let Some(voice) = session.voice.as_mut().filter(|one| one.name == name) {
-                    voice.on_disk = false;
-                }
-            });
-            shared.say(format!("{name} is no longer on the disk"), false);
-            json(json!({ "ok": true }))
-        }
-        Err(error) => refused(400, &error.to_string()),
     }
 }
 
@@ -634,31 +450,6 @@ fn picture(shared: &Arc<Shared>, file: &str) -> Reply {
     }
 }
 
-/// Every model of one kind this build can be asked for, and whether it is on the disk already.
-///
-/// Picture models also say whether they can start from a picture, so that the img2img tab lists
-/// only the ones that can. As far as it is known without reading the weights: out of the kind, and
-/// out of the manifest where the package is here -- see [`worker::look_at`].
-fn listing(listed: Vec<hub::Listed>, pictures: bool) -> Value {
-    listed
-        .into_iter()
-        .map(|model| {
-            let mut described = json!({
-                "name": model.name,
-                "full_name": model.full_name,
-                "cached": model.cached,
-                "bytes": model.bytes,
-                "explicit": model.explicit,
-            });
-            if pictures {
-                described["draws_from_a_picture"] =
-                    json!(worker::look_at(model.name).no_picture_because.is_none());
-            }
-            described
-        })
-        .collect()
-}
-
 /// What is happening, for a request that has just been told it cannot have the worker.
 ///
 /// The commonest of these is a second click on a button, where "there is already a picture being
@@ -922,6 +713,8 @@ mod tests {
     use super::*;
 
     use serde_json::json;
+
+    use crate::cli::webui::worker;
 
     /// The three forms a browser sends a media file, and what each asks for out of 1000 bytes.
     #[test]

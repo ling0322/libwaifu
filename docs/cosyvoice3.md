@@ -5,7 +5,7 @@ A few seconds of somebody speaking and a sentence in; the sentence, in that voic
 under Apache 2.0.
 
 ```bash
-waifu webui -voice models/cosyvoice3.yaml          # the page's text2speech tab
+waifu -m models/cosyvoice3.yaml                     # the text2speech page
 cargo run --release --example speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav
 cargo run --release --example speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav 7 "录音里说的话。"
 ```

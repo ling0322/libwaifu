@@ -24,11 +24,14 @@
 //! implementation.
 //!
 //! There is one thing the tool does, and the command line exists to say how to do it rather than
-//! which to do: `waifu` on its own is the same as `waifu webui`, and both open a page in a browser
-//! where everything else is asked.
+//! which to do: `waifu` on its own is the same as `waifu webui`. Both ask in the terminal what the
+//! session is for -- a task, a model, a device -- fetch the model there if it is not on the disk,
+//! and then open a page in a browser for that one task.
 
 mod args;
 mod hub;
+mod task;
+mod tui;
 mod webui;
 
 use std::process::ExitCode;
@@ -44,7 +47,7 @@ pub(crate) const REVISION: &str = env!("WAIFU_REVISION");
 /// One row, and a table anyway: the usage prints from it and the command line dispatches through
 /// it, so a command cannot be in one and missing from the other -- and the day a second one lands
 /// is not the day to go looking for the three places that named the first.
-struct Task {
+struct Command {
     /// What it is called, which is what is typed.
     name: &'static str,
     /// What it does, in the one line the usage has room for.
@@ -53,23 +56,23 @@ struct Task {
     main: fn(&[String]) -> Result<(), Error>,
 }
 
-static ALL: &[Task] = &[Task {
+static ALL: &[Command] = &[Command {
     name: "webui",
-    about: "Open the web UI: draw a picture, or say something, with your waifu",
+    about: "Pick a task, a model and a device, then draw or speak with your waifu in a browser",
     main: webui::main,
 }];
 
-/// The task a word names, if it names one.
-fn named(word: &str) -> Option<&'static Task> {
-    ALL.iter().find(|task| task.name == word)
+/// The command a word names, if it names one.
+fn named(word: &str) -> Option<&'static Command> {
+    ALL.iter().find(|command| command.name == word)
 }
 
 fn print_usage() {
     eprintln!("Usage: waifu COMMAND");
     eprintln!();
     eprintln!("Commands:");
-    for task in ALL {
-        eprintln!("    {:<15}{}", task.name, task.about);
+    for command in ALL {
+        eprintln!("    {:<15}{}", command.name, command.about);
     }
     eprintln!();
     eprintln!("Run 'waifu COMMAND -h' for more information on a command.");
@@ -90,14 +93,14 @@ pub fn run() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
 
     // The first argument is the command, unless it starts with a dash, in which case no command
-    // was named at all: `waifu -m sdxl:base` says nothing about which task and plenty about how
-    // to run it, so the flags are kept for the task that is about to run and handed on as they
-    // were typed.
-    let (task, rest) = match arguments.first().filter(|first| !first.starts_with('-')) {
-        Some(command) => match named(command) {
-            Some(task) => (task, &arguments[1..]),
+    // was named at all: `waifu -m sdxl:base` says nothing about which command and plenty about
+    // how to run it, so the flags are kept for the command that is about to run and handed on as
+    // they were typed.
+    let (command, rest) = match arguments.first().filter(|first| !first.starts_with('-')) {
+        Some(word) => match named(word) {
+            Some(command) => (command, &arguments[1..]),
             None => {
-                eprintln!("Invalid command \"{command}\"\n");
+                eprintln!("Invalid command \"{word}\"\n");
                 print_usage();
                 return ExitCode::FAILURE;
             }
@@ -111,7 +114,7 @@ pub fn run() -> ExitCode {
         None => (&ALL[0], &arguments[..]),
     };
 
-    match task.run(rest) {
+    match command.run(rest) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error}");
@@ -120,7 +123,7 @@ pub fn run() -> ExitCode {
     }
 }
 
-impl Task {
+impl Command {
     fn run(&self, arguments: &[String]) -> Result<(), Error> {
         (self.main)(arguments)
     }
@@ -131,12 +134,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_task_is_a_word_the_command_line_takes() {
-        for task in ALL {
+    fn every_command_is_a_word_the_command_line_takes() {
+        for command in ALL {
             assert!(
-                std::ptr::eq(named(task.name).unwrap(), task),
+                std::ptr::eq(named(command.name).unwrap(), command),
                 "{}",
-                task.name
+                command.name
             );
         }
         assert!(named("sing").is_none());
