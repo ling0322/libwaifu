@@ -44,6 +44,8 @@ inline float applyUnaryOpFloat(float x, UnaryOp op) {
       return fabsf(x);
     case UnaryOp::EXP:
       return expf(x);
+    case UnaryOp::LOG:
+      return logf(x);
     case UnaryOp::SQUARE:
       return x * x;
     case UnaryOp::SQRT:

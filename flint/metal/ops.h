@@ -39,6 +39,7 @@ Tensor subScalar(const Tensor &a, float other);
 Tensor neg(const Tensor &a);
 Tensor abs(const Tensor &a);
 Tensor exp(const Tensor &a);
+Tensor log(const Tensor &a);
 Tensor sqrt(const Tensor &a);
 Tensor rsqrt(const Tensor &a);
 Tensor square(const Tensor &a);

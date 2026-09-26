@@ -518,6 +518,13 @@ impl Graph {
         self.unary(Unary::Exp, input)
     }
 
+    /// The natural logarithm. Zero gives minus infinity, so a spectrogram floors its energies
+    /// before taking it, the way every one here does.
+    #[track_caller]
+    pub fn log(&self, input: Value) -> Value {
+        self.unary(Unary::Log, input)
+    }
+
     #[track_caller]
     pub fn sqrt(&self, input: Value) -> Value {
         self.unary(Unary::Sqrt, input)

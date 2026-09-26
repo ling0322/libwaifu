@@ -81,6 +81,13 @@ CATCH_TEST_CASE("test Metal unary operators", "[op][metal]") {
 
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(metalOps()->neg(xt)), cpuOps()->neg(at), 5e-3, 5e-3));
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(metalOps()->exp(xt)), cpuOps()->exp(at), 5e-3, 5e-3));
+  // Through exp first, so every input is at least one and log has no zero to fall off; half keeps
+  // a relative error, which log turns into an absolute one of about the same size.
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(metalOps()->log(metalOps()->exp(xt))),
+      cpuOps()->log(cpuOps()->exp(at)),
+      5e-3,
+      5e-3));
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(metalOps()->sqrt(xt)), cpuOps()->sqrt(at), 5e-3, 5e-3));
   CATCH_REQUIRE(
       cpuOps()->allClose(toCpu(metalOps()->sigmoid(xt)), cpuOps()->sigmoid(at), 5e-3, 5e-3));

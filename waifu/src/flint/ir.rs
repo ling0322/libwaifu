@@ -775,6 +775,7 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
                 Unary::Neg => F::neg(input)?,
                 Unary::Abs => F::abs(input)?,
                 Unary::Exp => F::exp(input)?,
+                Unary::Log => F::log(input)?,
                 Unary::Sqrt => F::sqrt(input)?,
                 Unary::Rsqrt => F::rsqrt(input)?,
                 Unary::Square => F::square(input)?,
@@ -1427,6 +1428,20 @@ mod tests {
             outputs[1].1.to_vec_f32().unwrap(),
             [1.0, 2.0, 3.0, 5.0, 7.0, 9.0]
         );
+    }
+
+    #[test]
+    fn a_log_runs_through_the_graph() {
+        let g = Graph::new();
+        let x = g.input("x");
+        g.output("logged", g.log(x));
+
+        let x = Tensor::from_f32(&[2], &[1.0, std::f32::consts::E]).unwrap();
+        let params = state_dict(&[]);
+        let outputs = compile_and_run(&g, RunContext::new(&params).input("x", &x)).unwrap();
+
+        let logged = outputs[0].1.to_vec_f32().unwrap();
+        assert!(logged[0].abs() < 1e-7 && (logged[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]
