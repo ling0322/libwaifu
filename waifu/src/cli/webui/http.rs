@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response};
 
 use crate::cli::webui::machine;
-use crate::cli::webui::state::{Chosen, Doing, Shared};
+use crate::cli::webui::state::{Chosen, Doing, Session, Shared};
 use crate::cli::webui::worker::{Command, Job, SayJob};
 use crate::{GenerationOptions, SpeechOptions};
 
@@ -80,13 +80,68 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
     // defeat its own cache, and a path that kept it would match nothing.
     let path = request.url().split('?').next().unwrap_or("/").to_string();
 
-    match (request.method(), path.as_str()) {
-        (Method::Get, "/") => page(INDEX, "text/html; charset=utf-8"),
-        (Method::Get, "/style.css") => page(STYLE, "text/css; charset=utf-8"),
-        (Method::Get, "/app.js") => page(SCRIPT, "text/javascript; charset=utf-8"),
+    // The files the page is built from are the same for everybody, and asking for one is not
+    // opening a page: nothing is looked up for them and no session is started by them.
+    if *request.method() == Method::Get {
+        if let Some(reply) = static_file(&path) {
+            return reply;
+        }
+    }
 
-        (Method::Get, "/api/state") => json(shared.describe()),
-        (Method::Get, "/api/progress") => json(shared.progress()),
+    // Everything else is some page's, and which page is the cookie. A browser that brought none,
+    // or one this program did not give out, is a new session and is handed its key.
+    let visit = shared.session_for(cookies_of(request));
+    let mut reply = answer_for(shared, &visit.session, commands, request, &path);
+
+    // Handed back with the page itself as well as with a new session's first answer. What that
+    // buys is the expiry: a cookie that is only ever set once runs out a day after the first
+    // visit, however often the page has been opened since.
+    if visit.new || path == "/" {
+        let set = shared.set_cookie(&visit.key);
+        if let Ok(header) = Header::from_bytes(&b"Set-Cookie"[..], set.as_bytes()) {
+            reply.add_header(header);
+        }
+    }
+
+    reply
+}
+
+/// One of the files the page is drawn from, if that is what `path` names.
+fn static_file(path: &str) -> Option<Reply> {
+    let (said, mime) = match path {
+        "/style.css" => (STYLE, "text/css; charset=utf-8"),
+        "/app.js" => (SCRIPT, "text/javascript; charset=utf-8"),
+        path => (
+            VENDOR.iter().find(|(name, _)| *name == path)?.1,
+            "text/javascript; charset=utf-8",
+        ),
+    };
+
+    Some(page(said, mime))
+}
+
+/// The `Cookie` header a request carried, if it carried one.
+fn cookies_of(request: &Request) -> Option<&str> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Cookie"))
+        .map(|header| header.value.as_str())
+}
+
+/// Answers a request from `session`'s page.
+fn answer_for(
+    shared: &Arc<Shared>,
+    session: &Arc<Session>,
+    commands: &Sender<Command>,
+    request: &mut Request,
+    path: &str,
+) -> Reply {
+    match (request.method(), path) {
+        (Method::Get, "/") => page(INDEX, "text/html; charset=utf-8"),
+
+        (Method::Get, "/api/state") => json(shared.describe(session)),
+        (Method::Get, "/api/progress") => json(shared.progress(session)),
         // Apart from the state rather than inside it, because it answers a different question.
         // The state is what this session has done and is a new one every time anything happens;
         // what the machine has left changes on its own, with nothing here having done anything,
@@ -97,52 +152,59 @@ pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Re
         // Nothing here chooses a model, fetches one or moves it to another device. All three were
         // settled in the terminal before this server was listening, and the page is served for
         // what was settled.
-        (Method::Post, "/api/generate") => generate(shared, commands, request),
-        (Method::Post, "/api/speak") => speak(shared, commands, request),
-        (Method::Post, "/api/interrupt") => {
-            shared.interrupt();
-            json(json!({ "ok": true }))
-        }
+        (Method::Post, "/api/generate") => generate(shared, session, commands, request),
+        (Method::Post, "/api/speak") => speak(shared, session, commands, request),
+        (Method::Post, "/api/interrupt") => match shared.interrupt(session) {
+            true => json(json!({ "ok": true })),
+            false => refused(
+                409,
+                "what is running is another page's, and only that page can stop it",
+            ),
+        },
 
-        (Method::Delete, "/api/picture") => forget_picture(shared, request),
-        (Method::Delete, "/api/clip") => forget_clip(shared, request),
+        (Method::Delete, "/api/picture") => forget_picture(session, request),
+        (Method::Delete, "/api/clip") => forget_clip(session, request),
 
-        (Method::Post, "/api/upload") => upload(shared, request),
-        (Method::Get, "/api/upload") => held_picture(shared),
+        (Method::Post, "/api/upload") => upload(session, request),
+        (Method::Get, "/api/upload") => held_picture(session),
         (Method::Delete, "/api/upload") => {
-            shared.forget_upload();
+            session.forget_upload();
             json(json!({ "ok": true }))
         }
 
         // The recording a reading is to sound like. The same three doors the picture has, and
         // its own box behind them: they are two different runs' inputs, and dropping one should
         // not throw away the other.
-        (Method::Post, "/api/voice") => hold_recording(shared, request),
-        (Method::Get, "/api/voice") => held_recording(shared, range_of(request)),
+        (Method::Post, "/api/voice") => hold_recording(session, request),
+        (Method::Get, "/api/voice") => held_recording(session, range_of(request)),
         (Method::Delete, "/api/voice") => {
-            shared.forget_recording();
+            session.forget_recording();
             json(json!({ "ok": true }))
         }
 
-        // What is left of a GET: the libraries the page is drawn with, and the pictures this
-        // session drew. A picture goes by the name it was written under and no other -- a path
-        // out of a request is otherwise a way to read any file this process can, and a server on
-        // the loopback address is still reachable by anything else running on the machine.
-        (Method::Get, path) => match VENDOR.iter().find(|(name, _)| *name == path) {
-            Some((_, script)) => page(script, "text/javascript; charset=utf-8"),
-            None => match (path.strip_prefix("/picture/"), path.strip_prefix("/clip/")) {
-                (Some(file), _) => picture(shared, file),
-                (_, Some(file)) => clip(shared, file, range_of(request)),
+        // What is left of a GET: the pictures and clips this session made. Each goes by the name
+        // it was written under and no other -- a path out of a request is otherwise a way to read
+        // any file this process can, and a server on the loopback address is still reachable by
+        // anything else running on the machine.
+        (Method::Get, path) => {
+            match (path.strip_prefix("/picture/"), path.strip_prefix("/clip/")) {
+                (Some(file), _) => picture(session, file),
+                (_, Some(file)) => clip(session, file, range_of(request)),
                 _ => refused(404, "no such page"),
-            },
-        },
+            }
+        }
 
         _ => refused(404, "no such page"),
     }
 }
 
 /// Starts a run, if there is a model and nothing else is happening.
-fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
+fn generate(
+    shared: &Arc<Shared>,
+    session: &Arc<Session>,
+    commands: &Sender<Command>,
+    request: &mut Request,
+) -> Reply {
     let asked = match body(request) {
         Ok(body) => body,
         Err(error) => return refused(400, &error),
@@ -160,11 +222,11 @@ fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Requ
     // The worker is taken before anything else is asked of the state, so that what a second
     // request is told is what is actually happening -- "no model is loaded" is a true sentence
     // while one is being read and a baffling thing to be told at that moment.
-    if !shared.claim() {
-        return refused(409, &already(shared));
+    if !shared.claim(Some(Arc::clone(session))) {
+        return refused(409, &already(shared, session));
     }
 
-    let Some(chosen) = shared.session().model.clone() else {
+    let Some(chosen) = shared.world().model.clone() else {
         return give_up(
             shared,
             409,
@@ -180,7 +242,7 @@ fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Requ
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let from = match from_a_picture {
-        true => match shared.upload() {
+        true => match session.upload() {
             Some(bytes) => Some(bytes),
             None => return give_up(shared, 400, "there is no picture to draw from"),
         },
@@ -209,6 +271,7 @@ fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Requ
         shared,
         commands,
         Command::Draw(Job {
+            session: Arc::clone(session),
             // Which model to draw with travels with the run rather than being read off the
             // session by the worker: what was chosen when the button was pressed is what this
             // run is of, whatever gets chosen while it waits its turn.
@@ -224,7 +287,12 @@ fn generate(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Requ
 ///
 /// The mirror of [`generate`], including the order it refuses in: what is wrong with an empty
 /// page is that there is nothing to say, and that is the thing somebody can act on.
-fn speak(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
+fn speak(
+    shared: &Arc<Shared>,
+    session: &Arc<Session>,
+    commands: &Sender<Command>,
+    request: &mut Request,
+) -> Reply {
     let asked = match body(request) {
         Ok(body) => body,
         Err(error) => return refused(400, &error),
@@ -241,11 +309,11 @@ fn speak(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request
 
     // Taken before anything else is asked of the state, for the same reason a picture's run takes
     // it first: what a second request is told should be what is actually happening.
-    if !shared.claim() {
-        return refused(409, &already(shared));
+    if !shared.claim(Some(Arc::clone(session))) {
+        return refused(409, &already(shared, session));
     }
 
-    let Some(voice) = shared.session().voice.clone() else {
+    let Some(voice) = shared.world().voice.clone() else {
         return give_up(shared, 409, "there is no voice to speak with");
     };
 
@@ -257,7 +325,7 @@ fn speak(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let like = match from_a_recording {
-        true => match shared.recording() {
+        true => match session.recording() {
             Some(bytes) => Some(bytes),
             None => return give_up(shared, 400, "there is no recording to sound like"),
         },
@@ -279,6 +347,7 @@ fn speak(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request
         shared,
         commands,
         Command::Speak(SayJob {
+            session: Arc::clone(session),
             voice: voice.name,
             text,
             options,
@@ -293,7 +362,7 @@ fn speak(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request
 /// it -- the browser has a decoder for every format it will play, and this program has one for
 /// none of them -- so what arrives is samples this program can actually read, whatever the file
 /// on the far side was.
-fn hold_recording(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+fn hold_recording(session: &Session, request: &mut Request) -> Reply {
     let mut bytes = Vec::new();
     if let Err(error) = request
         .as_reader()
@@ -315,21 +384,21 @@ fn hold_recording(shared: &Arc<Shared>, request: &mut Request) -> Reply {
         return refused(400, &error.to_string());
     }
 
-    shared.hold_recording(bytes);
+    session.hold_recording(bytes);
     json(json!({ "ok": true }))
 }
 
 /// Hands back the recording being held, so that a page opening fresh can play what is in the box.
-fn held_recording(shared: &Arc<Shared>, range: Option<String>) -> Reply {
-    match shared.recording() {
+fn held_recording(session: &Session, range: Option<String>) -> Reply {
+    match session.recording() {
         Some(bytes) => media("audio/wav", bytes, range.as_deref()),
         None => refused(404, "no recording is being held"),
     }
 }
 
 /// One of the clips this session said.
-fn clip(shared: &Arc<Shared>, file: &str, range: Option<String>) -> Reply {
-    let Some(path) = shared.spoke(file) else {
+fn clip(session: &Session, file: &str, range: Option<String>) -> Reply {
+    let Some(path) = session.spoke(file) else {
         return refused(404, "this session did not say that");
     };
 
@@ -343,7 +412,7 @@ fn clip(shared: &Arc<Shared>, file: &str, range: Option<String>) -> Reply {
 ///
 /// The same door as a picture's and the same rule through it: by the name it was written under
 /// and no other.
-fn forget_clip(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+fn forget_clip(session: &Session, request: &mut Request) -> Reply {
     let asked = match body(request) {
         Ok(body) => body,
         Err(error) => return refused(400, &error),
@@ -351,7 +420,7 @@ fn forget_clip(shared: &Arc<Shared>, request: &mut Request) -> Reply {
     let Some(file) = asked.get("file").and_then(Value::as_str) else {
         return refused(400, "no clip was named");
     };
-    let Some(path) = shared.spoke(file) else {
+    let Some(path) = session.spoke(file) else {
         return refused(404, "this session did not say that");
     };
 
@@ -361,7 +430,7 @@ fn forget_clip(shared: &Arc<Shared>, request: &mut Request) -> Reply {
         Err(error) => return refused(500, &format!("{file} could not be deleted: {error}")),
     }
 
-    shared.forget_clip(file);
+    session.forget_clip(file);
     json(json!({ "ok": true }))
 }
 
@@ -370,7 +439,7 @@ fn forget_clip(shared: &Arc<Shared>, request: &mut Request) -> Reply {
 /// By the name it was written under and no other, like every other way this program is asked for
 /// a picture: the gallery is the whole of what a request may name, and a path that came out of a
 /// request is otherwise a way to delete any file this process can reach.
-fn forget_picture(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+fn forget_picture(session: &Session, request: &mut Request) -> Reply {
     let asked = match body(request) {
         Ok(body) => body,
         Err(error) => return refused(400, &error),
@@ -378,7 +447,7 @@ fn forget_picture(shared: &Arc<Shared>, request: &mut Request) -> Reply {
     let Some(file) = asked.get("file").and_then(Value::as_str) else {
         return refused(400, "no picture was named");
     };
-    let Some(path) = shared.wrote(file) else {
+    let Some(path) = session.wrote(file) else {
         return refused(404, "this session did not draw that");
     };
 
@@ -391,7 +460,7 @@ fn forget_picture(shared: &Arc<Shared>, request: &mut Request) -> Reply {
         Err(error) => return refused(500, &format!("{file} could not be deleted: {error}")),
     }
 
-    shared.forget_picture(file);
+    session.forget_picture(file);
     json(json!({ "ok": true }))
 }
 
@@ -400,7 +469,7 @@ fn forget_picture(shared: &Arc<Shared>, request: &mut Request) -> Reply {
 /// Posted as the bytes of the file and nothing else -- no form, no boundary, no field names. What
 /// crosses is one file, the page knows which, and a multipart body would be a parser this program
 /// owns in order to unwrap something it already has.
-fn upload(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+fn upload(session: &Session, request: &mut Request) -> Reply {
     let mut bytes = Vec::new();
     if let Err(error) = request
         .as_reader()
@@ -413,13 +482,13 @@ fn upload(shared: &Arc<Shared>, request: &mut Request) -> Reply {
         return refused(400, "the picture was empty");
     }
 
-    shared.hold_upload(bytes);
+    session.hold_upload(bytes);
     json(json!({ "ok": true }))
 }
 
 /// Hands back the picture being held, so that a page opening fresh can show what `-i` named.
-fn held_picture(shared: &Arc<Shared>) -> Reply {
-    match shared.upload() {
+fn held_picture(session: &Session) -> Reply {
+    match session.upload() {
         // Read off the first bytes rather than off a name: what is held arrived either as a file
         // this program opened or as a body a browser posted, and only one of those ever had a
         // name on it.
@@ -437,8 +506,8 @@ fn looks_like(bytes: &[u8]) -> &'static str {
 }
 
 /// One of the pictures this session drew.
-fn picture(shared: &Arc<Shared>, file: &str) -> Reply {
-    let Some(path) = shared.wrote(file) else {
+fn picture(session: &Session, file: &str) -> Reply {
+    let Some(path) = session.wrote(file) else {
         return refused(404, "this session did not draw that");
     };
 
@@ -454,9 +523,24 @@ fn picture(shared: &Arc<Shared>, file: &str) -> Reply {
 ///
 /// The commonest of these is a second click on a button, where "there is already a picture being
 /// drawn" is the whole answer. The others are worth naming: waiting on a fetch of several
-/// gigabytes looks exactly like a program that has ignored the click.
-fn already(shared: &Arc<Shared>) -> String {
-    match &shared.session().doing {
+/// gigabytes looks exactly like a program that has ignored the click -- and so is waiting on
+/// somebody else's run, which this page did nothing to start and cannot stop.
+fn already(shared: &Arc<Shared>, session: &Arc<Session>) -> String {
+    let world = shared.world();
+    let theirs = world
+        .owner
+        .as_ref()
+        .is_some_and(|owner| !Arc::ptr_eq(owner, session));
+    if theirs {
+        return match &world.doing {
+            Doing::Drawing(_) => "another page is drawing a picture: wait for it to finish",
+            Doing::Speaking(_) => "another page is reading something out: wait for it to finish",
+            _ => "the model is busy with another page's run: wait for it to finish",
+        }
+        .to_string();
+    }
+
+    match &world.doing {
         Doing::Drawing(_) => "there is already a picture being drawn".to_string(),
         Doing::Speaking(_) => "there is already something being said".to_string(),
         Doing::Reading { model } => format!("{model} is still being read"),

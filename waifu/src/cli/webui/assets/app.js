@@ -17,6 +17,10 @@
 const { Fragment, useCallback, useEffect, useRef, useState } = React;
 const html = htm.bind(React.createElement);
 
+/** What the stop button says while the card is busy with another page's run. */
+const THEIRS =
+  "Another page is using the model. Only the page that started a run can stop it; this one can start its own once that one is done";
+
 /** How often to ask what is happening. Short enough that the bar moves, long enough to be free. */
 const TICK = 500;
 
@@ -400,7 +404,17 @@ function ModelAndDevice({ state }) {
  * `guided` is the same thought one box further in: a model that answers in a single pass has
  * nowhere to put a negative prompt, so it does not get one to write in either.
  */
-function Prompts({ form, change, canDraw, drawing, fetching, guided, onDraw, onInterrupt }) {
+function Prompts({
+  form,
+  change,
+  canDraw,
+  drawing,
+  fetching,
+  theirs,
+  guided,
+  onDraw,
+  onInterrupt,
+}) {
   return html`
     <section className="prompts">
       <div className="prompt-boxes">
@@ -449,7 +463,9 @@ function Prompts({ form, change, canDraw, drawing, fetching, guided, onDraw, onI
             ? "Stop after the step it is on. The model comes off the card with it, so that whatever else wants the card can have it -- and so the next run reads the model again"
             : fetching
               ? "Stop the download. The packages that have come down are kept, and fetching it again carries on from there"
-              : "Nothing to stop. A run can be stopped while it is drawing and a model while it is coming down; reading one onto the card cannot be stopped part way"}
+              : theirs
+                ? THEIRS
+                : "Nothing to stop. A run can be stopped while it is drawing and a model while it is coming down; reading one onto the card cannot be stopped part way"}
           onClick=${onInterrupt}
         >
           Cancel
@@ -466,7 +482,7 @@ function Prompts({ form, change, canDraw, drawing, fetching, guided, onDraw, onI
  * nothing here is steered away from anything -- and a screen with one box beside an empty one is
  * a screen asking to be typed in twice.
  */
-function SayBox({ form, change, canSpeak, speaking, onSpeak, onInterrupt }) {
+function SayBox({ form, change, canSpeak, speaking, theirs, onSpeak, onInterrupt }) {
   return html`
     <section className="prompts">
       <div className="prompt-boxes">
@@ -486,7 +502,9 @@ function SayBox({ form, change, canSpeak, speaking, onSpeak, onInterrupt }) {
           disabled=${!speaking}
           title=${speaking
             ? "Stop where it is. Nothing is kept: half a sentence is not a clip"
-            : "Nothing to stop"}
+            : theirs
+              ? THEIRS
+              : "Nothing to stop"}
           onClick=${onInterrupt}
         >
           Cancel
@@ -1486,6 +1504,12 @@ function App() {
   // an empty box or something already happening.
   const canSpeak = !!state?.voice?.on_disk && !progress.busy && !!form.text.trim();
 
+  // Whether what the card is busy with is another page's. Shown -- it is why this page's button is
+  // not live -- and not offered to stop: the server refuses a stop from any page but the one that
+  // started the run. `false` and not merely absent, because the bar this page sets itself the
+  // moment it posts a run says nothing about whose it is, and that run is this page's.
+  const theirs = progress.busy && progress.mine === false;
+
   const generate = useCallback(async () => {
     // Both or neither, and neither for a model with no second pass to steer. The server drops
     // them for such a model anyway; what this saves is a request that said one thing while the
@@ -1693,6 +1717,7 @@ function App() {
                 change=${change}
                 canSpeak=${canSpeak}
                 speaking=${!!progress.speaking}
+                theirs=${theirs}
                 onSpeak=${speak}
                 onInterrupt=${() => ask("POST", "/api/interrupt")}
               />`}
@@ -1727,6 +1752,7 @@ function App() {
                 guided=${chosen.takes_guidance !== false}
                 drawing=${!!progress.drawing}
                 fetching=${!!progress.fetching}
+                theirs=${theirs}
                 onDraw=${generate}
                 onInterrupt=${() => ask("POST", "/api/interrupt")}
               />`}
