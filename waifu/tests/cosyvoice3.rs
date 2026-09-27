@@ -30,7 +30,7 @@ use std::rc::Rc;
 
 use std::ops::ControlFlow;
 use waifu::cosyvoice3::flow::{self, Flow};
-use waifu::cosyvoice3::hift::{Hift, Noise};
+use waifu::cosyvoice3::hift::Hift;
 use waifu::cosyvoice3::lm::{self, Lm};
 use waifu::cosyvoice3::{features, speech_tokenizer};
 use waifu::flint::{Graph, Ir, ParamSource, RunContext, Tensor};
@@ -159,16 +159,19 @@ fn the_frontend_hears_the_recording_as_upstream_does() {
     println!("16 kHz resampling: max error {error:.2e}");
     assert!(error < 1e-4);
 
-    // Whisper's mel, of upstream's own 16 kHz samples.
+    // Whisper's mel, of upstream's own 16 kHz samples, taken on the device.
+    let features = features::Features::new(DEVICE).unwrap();
     let want_mel = floats(&cases, "whisper_mel");
-    let (mel, frames) = features::whisper_mel(&want_16k).unwrap();
-    let error = max_error(&mel, &want_mel);
+    let mel = features.whisper_mel(&want_16k).unwrap();
+    let frames = mel.shape_at(2).unwrap();
+    let error = max_error(&host(&mel), &want_mel);
     println!("whisper mel: {frames} frames, max error {error:.2e}");
     assert!(error < 1e-3);
 
     // The 24 kHz mel, frame-major as upstream holds it.
     let want_feat = floats(&cases, "prompt_feat");
-    let (feat, feat_frames) = features::speech_mel(&wave_24k).unwrap();
+    let feat = host(&features.speech_mel(&wave_24k).unwrap());
+    let feat_frames = feat.len() / 80;
     let transposed: Vec<f32> = (0..feat_frames)
         .flat_map(|frame| (0..80).map(move |band| (frame, band)))
         .map(|(frame, band)| feat[band * feat_frames + frame])
@@ -177,9 +180,9 @@ fn the_frontend_hears_the_recording_as_upstream_does() {
     println!("24 kHz mel: {feat_frames} frames, max error {error:.2e}");
     assert!(error < 1e-3);
 
-    // The speech tokens, from upstream's own mel.
+    // The speech tokens, from upstream's own mel, quantized on the device.
     let want_tokens = ints(&cases, "prompt_tokens");
-    let out = speech_tokenizer::frames_out(frames as i32);
+    let out = speech_tokenizer::frames_out(frames);
     let (cos, sin, shape) = speech_tokenizer::rotary(out);
     let g = Graph::new();
     let projected = speech_tokenizer::graph(
@@ -191,17 +194,25 @@ fn the_frontend_hears_the_recording_as_upstream_does() {
         DEVICE,
     )
     .unwrap();
-    g.output("projected", projected);
+    let ids = speech_tokenizer::quantize(&g, projected, DType::Float, DEVICE).unwrap();
+    g.output("ids", ids);
     let outputs = run(
         &weights,
         &g,
         &[
-            ("mel", &upload(&[1, 128, frames as i32], &want_mel)),
+            ("mel", &upload(&[1, 128, frames], &want_mel)),
             ("cos", &upload(&shape, &cos)),
             ("sin", &upload(&shape, &sin)),
         ],
     );
-    let tokens = speech_tokenizer::quantize(&host(&outputs[0]));
+    let tokens: Vec<i32> = outputs[0]
+        .to_device(Device::Cpu)
+        .unwrap()
+        .to_vec_i64()
+        .unwrap()
+        .into_iter()
+        .map(|id| id as i32)
+        .collect();
     let agree = tokens
         .iter()
         .zip(&want_tokens)
@@ -211,24 +222,26 @@ fn the_frontend_hears_the_recording_as_upstream_does() {
     assert_eq!(tokens.len(), want_tokens.len());
     assert!(agree + 2 >= want_tokens.len());
 
-    // CAMPPlus, through IndexTTS's port and the package's own copy of the weights.
-    let (fbank, fbank_frames) = indextts::features::campplus(&want_16k);
+    // Kaldi's filterbank on the device against IndexTTS's host one, which was checked against
+    // torchaudio's; then CAMPPlus, through IndexTTS's port and the package's own weights.
+    let fbank = features.kaldi_fbank(&want_16k).unwrap();
+    let fbank_frames = fbank.shape_at(1).unwrap();
+    let (host_fbank, _) = indextts::features::campplus(&want_16k);
+    let error = max_error(&host(&fbank), &host_fbank);
+    println!("kaldi fbank: {fbank_frames} frames, max error {error:.2e} against the host's");
+    assert!(error < 1e-3);
     let g = Graph::new();
     let speaker = indextts::campplus::graph(
         &g.subgraph("cosyvoice3.campplus"),
         g.input("x"),
         &indextts::campplus::Config::indextts(),
-        fbank_frames as i32,
+        fbank_frames,
         DType::Float,
         DEVICE,
     )
     .unwrap();
     g.output("speaker", speaker);
-    let outputs = run(
-        &weights,
-        &g,
-        &[("x", &upload(&[1, fbank_frames as i32, 80], &fbank))],
-    );
+    let outputs = run(&weights, &g, &[("x", &fbank)]);
     let error = max_error(&host(&outputs[0]), &floats(&cases, "speaker"));
     println!("speaker embedding: max error {error:.2e}");
     assert!(error < 2e-3);
@@ -323,11 +336,10 @@ fn the_flow_draws_the_mel_upstream_draws() {
     let prompt_frames = (prompt_mel.len() / 80) as i32;
     assert_eq!(prompt_frames, 2 * prompt.len() as i32);
 
-    let condition = flow
-        .condition(&prompt, &said, &floats(&cases, "speaker"))
-        .unwrap();
+    let speaker = upload(&[1, 192], &floats(&cases, "speaker"));
+    let condition = flow.condition(&prompt, &said, &speaker).unwrap();
     let want_mu = frame_major(&floats(&cases, "flow_mu"), 80);
-    let error = max_error(condition.mu(), &want_mu);
+    let error = max_error(&host(condition.mu()), &want_mu);
     println!("mu: {} frames, max error {error:.2e}", condition.frames());
     assert!(error < 1e-3);
 
@@ -337,16 +349,16 @@ fn the_flow_draws_the_mel_upstream_draws() {
         .chunks(x.len() / 2)
         .flat_map(|half| frame_major(half, 80))
         .collect();
-    let context = flow
-        .context_tensor(&condition, &prompt_mel, prompt_frames)
-        .unwrap();
+    let prompt_mel = upload(&[1, prompt_frames, 80], &prompt_mel);
+    let context = flow.context_tensor(&condition, &prompt_mel).unwrap();
     let rotary = flow.rotary_tables(condition.frames()).unwrap();
     let t = floats(&cases, "dit_t")[0];
     let time = Tensor::from_f32(&[1, 256], &flow::time_sinusoid(t, 256))
         .unwrap()
         .to_device(DEVICE)
         .unwrap();
-    let velocity = flow.velocity(&x, &context, &time, &rotary).unwrap();
+    let x = upload(&[2, condition.frames(), 80], &x);
+    let velocity = host(&flow.velocity(&x, &context, &time, &rotary).unwrap());
     let want = floats(&cases, "dit_velocity");
     let want: Vec<f32> = want
         .chunks(want.len() / 2)
@@ -357,9 +369,7 @@ fn the_flow_draws_the_mel_upstream_draws() {
     println!("first velocity: max error {error:.2e} of {scale:.2}");
     assert!(error < 5e-3 * scale.max(1.0));
 
-    let mel = flow
-        .draw(&condition, &prompt_mel, prompt_frames, 10, 0.7)
-        .unwrap();
+    let mel = host(&flow.draw(&condition, &prompt_mel, 10, 0.7).unwrap());
     let want = frame_major(&floats(&cases, "mel"), 80);
     let error = max_error(&mel, &want);
     let mean: f32 = mel
@@ -384,21 +394,24 @@ fn the_vocoder_sounds_the_mel_as_upstream_does() {
     let cases = fixture();
     let hift = Hift::build("cosyvoice3.hift", &weights(&manifest), DType::Float, DEVICE).unwrap();
 
-    let mel = floats(&cases, "mel");
-    let frames = mel.len() / 80;
-    let noise = Noise {
-        start: floats(&cases, "hift_rand_ini"),
-        sine: floats(&cases, "hift_sine_noise"),
-    };
+    // `(1, 80, T)`, as upstream holds it and as the vocoder reads it. The noise is upstream's own
+    // `(1, samples, 9)` draw; its starting phases, `hift_rand_ini`, never reach the output (see
+    // `hift`'s module note) and are not handed in.
+    let mel_values = floats(&cases, "mel");
+    let frames = mel_values.len() / 80;
+    let mel = upload(&[1, 80, frames as i32], &mel_values);
+    let samples = (frames * 480) as i32;
+    let noise = upload(&[1, samples, 9], &floats(&cases, "hift_sine_noise"));
 
-    let f0 = hift.pitch(&mel, frames).unwrap();
+    let f0 = host(&hift.pitch(&mel).unwrap());
     let want_f0 = floats(&cases, "f0");
     let error = max_error(&f0, &want_f0);
     println!("pitch: {frames} frames, max error {error:.2e} Hz");
     assert!(error < 0.5);
 
     // The excitation from upstream's own pitch, so that this measures the source alone.
-    let excitation = hift.source(&want_f0, &noise).unwrap();
+    let upstream_f0 = upload(&[1, frames as i32], &want_f0);
+    let excitation = host(&hift.source(&upstream_f0, &noise).unwrap());
     let want_source = floats(&cases, "source");
     let error = max_error(&excitation, &want_source);
     println!(
@@ -409,12 +422,13 @@ fn the_vocoder_sounds_the_mel_as_upstream_does() {
 
     // The filter over upstream's excitation, and then the whole of it from the mel.
     let want_wave = floats(&cases, "wave");
-    let wave = hift.decode(&mel, frames, &want_source).unwrap();
+    let upstream_source = upload(&[1, 1, samples], &want_source);
+    let wave = host(&hift.decode(&mel, &upstream_source).unwrap());
     let error = max_error(&wave, &want_wave);
     println!("filter: {} samples, max error {error:.2e}", wave.len());
     assert!(error < 1e-2);
 
-    let wave = hift.forward(&mel, frames, &noise).unwrap();
+    let wave = host(&hift.forward(&mel, &noise).unwrap());
     let difference: f32 = wave
         .iter()
         .zip(&want_wave)
@@ -442,7 +456,7 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
 
     let heard = tts.listen(&recording).unwrap();
     assert_eq!(heard.tokens, ints(&cases, "flow_prompt_tokens"));
-    let error = max_error(&heard.mel, &floats(&cases, "flow_prompt_feat"));
+    let error = max_error(&host(&heard.mel), &floats(&cases, "flow_prompt_feat"));
     assert!(error < 1e-3, "the prompt's mel is off by {error}");
 
     let options = SpeechOptions {

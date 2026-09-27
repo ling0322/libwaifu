@@ -202,23 +202,31 @@ pub fn rotary_on(frames: i32, device: Device) -> Result<(Tensor, Tensor)> {
     ))
 }
 
-/// The quantizer on the host: `(T', 8)` projections to `T'` tokens.
-pub fn quantize(projections: &[f32]) -> Vec<i32> {
-    projections
-        .chunks(DIGITS as usize)
-        .map(|digits| {
-            digits
-                .iter()
-                .enumerate()
-                .map(|(place, value)| {
-                    // `h.tanh() * 0.9990000128746033`, `round()` -- ties to even -- then `+ 1`.
-                    // Upstream's literal is 0.9990000128746033, which is 0.999 as a float32.
-                    let digit = (value.tanh() * 0.999_f32).round_ties_even() + 1.0;
-                    digit as i32 * 3i32.pow(place as u32)
-                })
-                .sum()
-        })
-        .collect()
+/// The quantizer as operators: `(1, T', 8)` projections to `(T')` int64 tokens.
+///
+/// `h.tanh() * 0.9990000128746033` -- upstream's literal, which is 0.999 as a float32 -- rounded
+/// with ties to even to -1, 0 or 1, and read as eight little-endian base-three digits. Upstream adds
+/// one to each digit before weighting it; the ones add up to the same 3280 for every token, so they
+/// are added once after the product. Every value on the way is a small integer, exact in float.
+pub fn quantize(g: &Graph, projected: Value, dtype: DType, device: Device) -> Result<Value> {
+    let rounded = g.round(g.mul_scalar(g.tanh(projected), 0.999));
+
+    let places: Vec<f32> = (0..DIGITS).map(|place| 3f32.powi(place)).collect();
+    let places = g.constant(
+        Tensor::from_f32(&[DIGITS, 1], &places)?
+            .to_device(device)?
+            .cast(dtype)?,
+    );
+    let offset: f32 = (0..DIGITS).map(|place| 3f32.powi(place)).sum();
+    let offset = g.constant(
+        Tensor::from_f32(&[1], &[offset])?
+            .to_device(device)?
+            .cast(dtype)?,
+    );
+
+    let tokens = g.add(g.matmul(rounded, places), offset);
+    let tokens = g.view(tokens, [Extent::of(tokens, 1)]);
+    Ok(g.cast(tokens, DType::Long))
 }
 
 #[cfg(test)]
@@ -233,10 +241,19 @@ mod tests {
 
     #[test]
     fn digits_are_little_endian_base_three() {
-        let mut projections = vec![0.0f32; 8];
-        assert_eq!(quantize(&projections), vec![3280]); // every digit 1
-        projections[0] = 5.0; // tanh -> ~1, digit 2
-        projections[1] = -5.0; // digit 0
-        assert_eq!(quantize(&projections), vec![3280 + 1 - 3]);
+        // Two frames: every digit 1; then digit 0 up to 2 and digit 1 down to 0.
+        let mut projections = vec![0.0f32; 16];
+        projections[8] = 5.0;
+        projections[9] = -5.0;
+
+        let g = Graph::new();
+        let ids = quantize(&g, g.input("p"), DType::Float, Device::Cpu).unwrap();
+        g.output("ids", ids);
+        let p = Tensor::from_f32(&[1, 2, 8], &projections).unwrap();
+        let params: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        let out = crate::flint::Ir::compile(&g)
+            .run(&crate::flint::RunContext::new(&params).input("p", &p))
+            .unwrap();
+        assert_eq!(out[0].1.to_vec_i64().unwrap(), vec![3280, 3280 + 1 - 3]);
     }
 }

@@ -50,7 +50,8 @@ use std::rc::Rc;
 
 use crate::audio::{pad1d, Padding};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, RunContext,
+    Tensor, Value,
 };
 use crate::indextts::gpt::gelu_new;
 use crate::layers::Linear;
@@ -172,9 +173,14 @@ fn write_condition(g: &Graph, config: &Config, dtype: DType, device: Device) -> 
     );
     g.output("mu", mu);
 
+    // `F.normalize`: the embedding over its length, the length floored at 1e-12.
+    let raw = g.cast(g.input("speaker"), dtype);
+    let length = g.sqrt(g.sum(g.square(raw), -1));
+    let floor = constant(g, 1e-12, dtype, device)?;
+    let length = g.add(g.relu(g.sub(length, floor)), floor);
     let speaker = Linear::graph(
         &g.subgraph("spk_embed_affine_layer"),
-        g.cast(g.input("speaker"), dtype),
+        g.div(raw, length),
         config.speaker_dim,
         config.mel,
         true,
@@ -466,18 +472,21 @@ pub fn schedule(steps: usize) -> Vec<f32> {
         .collect()
 }
 
-/// What the flow is given for a whole sentence: tokens, the prompt's mel and the speaker.
+/// What the flow is given for a whole sentence, on the device: `mu`, the projected speaker, and the
+/// noise it starts from.
 pub struct Condition {
     /// `(1, M, 80)`, frame-major.
-    mu: Vec<f32>,
-    speaker: Vec<f32>,
-    noise: Vec<f32>,
+    mu: Tensor,
+    /// `(1, 80)`.
+    speaker: Tensor,
+    /// `(1, M, 80)`, the solver's starting point.
+    noise: Tensor,
     frames: i32,
 }
 
 impl Condition {
-    /// `mu`, `(frames, 80)` frame-major.
-    pub fn mu(&self) -> &[f32] {
+    /// `mu`, `(1, frames, 80)` frame-major.
+    pub fn mu(&self) -> &Tensor {
         &self.mu
     }
 
@@ -546,20 +555,14 @@ impl Flow {
         &self.config
     }
 
-    fn host(tensor: &Tensor) -> Result<Vec<f32>> {
-        Ok(tensor
-            .to_device(Device::Cpu)?
-            .cast(DType::Float)?
-            .to_vec_f32()?)
-    }
-
     fn upload(&self, shape: &[i32], values: &[f32]) -> Result<Tensor> {
         Ok(Tensor::from_f32(shape, values)?.to_device(self.device)?)
     }
 
     /// `mu`, the projected speaker and the noise, for the prompt's tokens followed by `tokens`.
-    /// `speaker` is CAMPPlus's `(192)` as it came out; it is normalized here, as upstream does.
-    pub fn condition(&self, prompt: &[i32], tokens: &[i32], speaker: &[f32]) -> Result<Condition> {
+    /// `speaker` is CAMPPlus's `(1, 192)` as it came out, on the device; it is normalized in the
+    /// graph, as upstream normalizes it.
+    pub fn condition(&self, prompt: &[i32], tokens: &[i32], speaker: &Tensor) -> Result<Condition> {
         let all: Vec<i64> = prompt.iter().chain(tokens).map(|t| i64::from(*t)).collect();
         if let Some(token) = all
             .iter()
@@ -577,21 +580,17 @@ impl Flow {
             )));
         }
 
-        let norm = speaker.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-        let normalized: Vec<f32> = speaker.iter().map(|x| x / norm).collect();
-
         let ids = Tensor::from_i64(&[all.len() as i32], &all)?.to_device(self.device)?;
-        let speaker = self.upload(&[1, self.config.speaker_dim], &normalized)?;
         let run = RunContext::new(&*self.weights)
             .input("tokens", &ids)
-            .input("speaker", &speaker);
+            .input("speaker", speaker);
         let outputs = self.condition.run(&run)?;
-        let find = |wanted: &str| -> Result<Vec<f32>> {
-            let (_, tensor) = outputs
+        let find = |wanted: &str| -> Result<Tensor> {
+            outputs
                 .iter()
                 .find(|(name, _)| name == wanted)
-                .ok_or_else(|| Error::model(format!("the flow produced no {wanted}")))?;
-            Self::host(tensor)
+                .map(|(_, tensor)| tensor.clone())
+                .ok_or_else(|| Error::model(format!("the flow produced no {wanted}")))
         };
 
         Ok(Condition {
@@ -617,34 +616,33 @@ impl Flow {
         ))
     }
 
-    /// The guided and unguided context, `(2, M, 240)`: the prompt's mel in front of zeros, `mu`,
-    /// the speaker on every row; and all zeros.
-    fn context(&self, condition: &Condition, prompt_mel: &[f32], prompt_frames: i32) -> Vec<f32> {
-        let mel = self.config.mel as usize;
-        let frames = condition.frames as usize;
-        let mut context = vec![0.0f32; 2 * frames * 3 * mel];
-        for frame in 0..frames {
-            let row = &mut context[frame * 3 * mel..(frame + 1) * 3 * mel];
-            if frame < prompt_frames as usize {
-                row[..mel].copy_from_slice(&prompt_mel[frame * mel..(frame + 1) * mel]);
-            }
-            row[mel..2 * mel].copy_from_slice(&condition.mu[frame * mel..(frame + 1) * mel]);
-            row[2 * mel..].copy_from_slice(&condition.speaker);
+    /// The guided and unguided context of `condition`, `(2, M, 240)`: the prompt's mel `(1, P, 80)`
+    /// in front of zeros, `mu`, and the speaker on every row; then all zeros, which is what the
+    /// unguided half of classifier-free guidance is handed.
+    ///
+    /// Put together from device operations rather than in the condition graph, because a graph's
+    /// lengths are the lengths of its values and `M - P` -- how many zeros follow the prompt -- is
+    /// a difference of two, which an extent cannot say.
+    pub fn context_tensor(&self, condition: &Condition, prompt_mel: &Tensor) -> Result<Tensor> {
+        let mel = self.config.mel;
+        let frames = condition.frames;
+        let prompt_frames = prompt_mel.shape_at(1)?;
+        if prompt_frames > frames {
+            return Err(Error::model(
+                "the prompt is longer than the whole of what is drawn",
+            ));
         }
-        context
-    }
 
-    /// The guided and unguided context of `condition` on the device, for [`Flow::velocity`].
-    pub fn context_tensor(
-        &self,
-        condition: &Condition,
-        prompt_mel: &[f32],
-        prompt_frames: i32,
-    ) -> Result<Tensor> {
-        self.upload(
-            &[2, condition.frames, 3 * self.config.mel],
-            &self.context(condition, prompt_mel, prompt_frames),
-        )
+        let zeros =
+            |length: i32, width: i32| Tensor::zeros(&[1, length, width], DType::Float, self.device);
+        let cond = match prompt_frames < frames {
+            true => F::cat(prompt_mel, &zeros(frames - prompt_frames, mel)?, 1)?,
+            false => prompt_mel.clone(),
+        };
+        let speaker = F::add(&zeros(frames, mel)?, &condition.speaker.view(&[mel])?)?;
+
+        let guided = F::cat(&F::cat(&cond, &condition.mu, 2)?, &speaker, 2)?;
+        Ok(F::cat(&guided, &zeros(frames, 3 * mel)?, 0)?)
     }
 
     /// The rotary table of `frames` positions on the device, for [`Flow::velocity`].
@@ -654,45 +652,40 @@ impl Flow {
 
     /// The estimator once, on both halves of the guided batch: `x` `(2, M, 80)` frame-major, the
     /// context from [`Flow::context_tensor`], the time as [`time_sinusoid`] on the device `(1, 256)`,
-    /// and the rotary rows from [`Flow::rotary_tables`]. The velocity comes back `(2, M, 80)`.
+    /// and the rotary rows from [`Flow::rotary_tables`]. The velocity comes back `(2, M, 80)`, on
+    /// the device.
     pub fn velocity(
         &self,
-        x: &[f32],
+        x: &Tensor,
         context: &Tensor,
         time: &Tensor,
         rotary: &(Tensor, Tensor),
-    ) -> Result<Vec<f32>> {
-        let frames = context.shape_at(1)?;
-        let x = self.upload(&[2, frames, self.config.mel], x)?;
+    ) -> Result<Tensor> {
         let run = RunContext::new(&*self.weights)
-            .input("x", &x)
+            .input("x", x)
             .input("context", context)
             .input("time", time)
             .input("cos", &rotary.0)
             .input("sin", &rotary.1);
-        let outputs = self.estimator.run(&run)?;
-        Self::host(&outputs[0].1)
+        Ok(self.estimator.run(&run)?.remove(0).1)
     }
 
-    /// Ten Euler steps from the fixed noise to the mel of the sentence: `(frames, 80)` frame-major,
-    /// the prompt's frames already cut off the front. `prompt_mel` is `(prompt_frames, 80)`.
+    /// Ten Euler steps from the fixed noise to the mel of the sentence: `(1, frames, 80)`
+    /// frame-major on the device, the prompt's frames already cut off the front. `prompt_mel` is
+    /// `(1, P, 80)` on the device.
+    ///
+    /// Every step stays on the device: the two halves of the guided batch are the same `x`, the
+    /// guidance mixes the estimator's two answers, and the step adds `dt` of that to `x`.
     pub fn draw(
         &self,
         condition: &Condition,
-        prompt_mel: &[f32],
-        prompt_frames: i32,
+        prompt_mel: &Tensor,
         steps: usize,
         cfg_rate: f32,
-    ) -> Result<Vec<f32>> {
-        let mel = self.config.mel as usize;
+    ) -> Result<Tensor> {
         let frames = condition.frames;
-        if prompt_frames > frames {
-            return Err(Error::model(
-                "the prompt is longer than the whole of what is drawn",
-            ));
-        }
-
-        let context = self.context_tensor(condition, prompt_mel, prompt_frames)?;
+        let prompt_frames = prompt_mel.shape_at(1)?;
+        let context = self.context_tensor(condition, prompt_mel)?;
         let rotary = self.rotary(frames)?;
         let span = schedule(steps);
         // Every step's time as the estimator reads it, up front: once a sentence rather than once a
@@ -708,24 +701,25 @@ impl Flow {
             .collect::<Result<Vec<Tensor>>>()?;
 
         let mut x = condition.noise.clone();
-        let half = x.len();
         let mut t = span[0];
         let mut dt = span[1] - span[0];
         for step in 1..span.len() {
-            let doubled: Vec<f32> = x.iter().chain(x.iter()).copied().collect();
+            let doubled = F::cat(&x, &x, 0)?;
             let velocity = self.velocity(&doubled, &context, &times[step - 1], &rotary)?;
-            let (guided, unguided) = velocity.split_at(half);
-            for index in 0..half {
-                let v = (1.0 + cfg_rate) * guided[index] - cfg_rate * unguided[index];
-                x[index] += dt * v;
-            }
+            let guided = velocity.slice(0, 0, 1)?;
+            let unguided = velocity.slice(0, 1, 2)?;
+            let mixed = F::sub(
+                &F::mul_scalar(&guided, 1.0 + cfg_rate)?,
+                &F::mul_scalar(&unguided, cfg_rate)?,
+            )?;
+            x = F::add(&x, &F::mul_scalar(&mixed, dt)?)?;
             t += dt;
             if step < span.len() - 1 {
                 dt = span[step + 1] - t;
             }
         }
 
-        Ok(x[prompt_frames as usize * mel..].to_vec())
+        Ok(x.slice(1, prompt_frames, frames)?.contiguous()?)
     }
 }
 
