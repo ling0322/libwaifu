@@ -40,7 +40,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::cli::args::Runtime;
+use crate::cli::args::{DeviceOption, Room, Runtime};
+use crate::cli::hub;
 use crate::cli::task::{Launch, Task};
 
 type Error = Box<dyn std::error::Error>;
@@ -74,32 +75,76 @@ pub fn can_take_the_screen() -> bool {
 
 /// Asks for a task, a model and a device, and fetches the model if it is not here.
 ///
-/// `task` is where the task list starts, which is what `-task` said, and `runtime` is where the
-/// device list starts, which is what `-device` said or what `auto` came to. Both are only where the
-/// cursor starts: the screens are still shown, since the model between them is not yet chosen.
-/// `None` is somebody leaving, which is not a failure.
-pub fn choose(task: Option<Task>, runtime: Runtime) -> Result<Option<Launch>, Error> {
+/// `task` is where the task list starts, which is what `-task` said, and `device` is where the
+/// device list starts: what `-device` named, or for `auto` the fastest device the picked model
+/// fits on. Both are only where the cursor starts: the screens are still shown, since the model
+/// between them is not yet chosen. `None` is somebody leaving, which is not a failure.
+pub fn choose(task: Option<Task>, device: DeviceOption) -> Result<Option<Launch>, Error> {
     // Asked before the screen is taken, not when the device list comes up. The first question
     // put to a device starts the tensor library, which says what hardware it found on stderr --
-    // straight over whatever is on the screen at that moment.
-    let available: Vec<Runtime> = Runtime::ALL
-        .into_iter()
-        .filter(|runtime| runtime.device().is_available())
-        .collect();
+    // straight over whatever is on the screen at that moment. The cards are measured only for
+    // `auto`: a device that was named is not second-guessed, so there is nothing to measure for.
+    let available = Runtime::available();
+    let room = match device {
+        DeviceOption::Auto => Room::measure(&available),
+        _ => Room::default(),
+    };
+    let machine = Machine {
+        device,
+        available,
+        room,
+    };
 
     let mut terminal = take_the_screen()?;
-    let chosen = walk(&mut terminal, task, runtime, &available);
+    let chosen = walk(&mut terminal, task, &machine);
     ratatui::restore();
 
     chosen
+}
+
+/// What the device list is chosen from: what `-device` said, what this machine can run on, and how
+/// much room its cards had before anything was put on them.
+struct Machine {
+    device: DeviceOption,
+    available: Vec<Runtime>,
+    room: Room,
+}
+
+impl Machine {
+    /// Where the device list starts for `model`, and -- where that was worked out from the size
+    /// of the model -- the line that says so.
+    fn start_for(&self, model: &str) -> (Runtime, Option<String>) {
+        if self.device != DeviceOption::Auto {
+            return (self.device.resolve(), None);
+        }
+
+        let weights = hub::model_bytes(model);
+        let runtime = Runtime::best(weights, &self.available, self.room);
+        let why = weights.map(|weights| {
+            // CUDA's room where there is CUDA: that is the card both of its rows are about.
+            match self.room.cuda.or(self.room.vulkan) {
+                Some(free) => format!(
+                    "{} of weights and {} free on the card: {} is where it runs fastest",
+                    gigabytes(weights),
+                    gigabytes(free),
+                    runtime.name()
+                ),
+                None => format!(
+                    "{} of weights: {} is where it runs fastest",
+                    gigabytes(weights),
+                    runtime.name()
+                ),
+            }
+        });
+        (runtime, why)
+    }
 }
 
 /// The three screens, with the way back through them.
 fn walk(
     terminal: &mut DefaultTerminal,
     task: Option<Task>,
-    runtime: Runtime,
-    available: &[Runtime],
+    machine: &Machine,
 ) -> Result<Option<Launch>, Error> {
     let mut task_at = task
         .and_then(|task| Task::ALL.iter().position(|one| *one == task))
@@ -120,7 +165,17 @@ fn walk(
                 Step::Quit => return Ok(None),
             };
 
-            match devices::choose(terminal, task, &picked.label, runtime, available)? {
+            // Worked out again for each model: the one picked last time round may have fitted
+            // on the card where this one does not.
+            let (runtime, why) = machine.start_for(&picked.model);
+            match devices::choose(
+                terminal,
+                task,
+                &picked.label,
+                runtime,
+                why,
+                &machine.available,
+            )? {
                 Step::Next(runtime) => {
                     return Ok(Some(Launch {
                         task,
