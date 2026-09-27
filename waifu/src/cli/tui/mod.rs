@@ -159,6 +159,10 @@ fn heading(trail: &[&str]) -> Line<'static> {
         Span::raw(" libwaifu").bold(),
         Span::raw("  "),
         Span::styled(crate::cli::REVISION, Style::new().fg(Color::DarkGray)),
+        Span::styled(
+            format!("  {}", crate::LICENSE),
+            Style::new().fg(Color::DarkGray),
+        ),
     ];
     for step in trail {
         spans.push(Span::styled("  >  ", Style::new().fg(Color::DarkGray)));
