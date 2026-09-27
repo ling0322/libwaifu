@@ -616,6 +616,14 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
 
     let allocated = || MemorySnapshot::capture(Device::Cuda).unwrap().allocated;
 
+    // One matmul of the pass's shape first. A GEMM this small is split along K, and the split
+    // keeps its semaphores in a workspace flint allocates once and holds for the life of the
+    // process (`splitKWorkspace` in flint/cuda/gemm_cutlass.cu) -- 16 bytes here. Paying for it
+    // before `before` keeps it out of what the run is charged with.
+    let warm = Tensor::zeros(&[256, 256], DType::Float, Device::Cuda).unwrap();
+    drop(F::matmul(&warm, &warm).unwrap());
+    drop(warm);
+
     // Read the way a model reads it, through `Residency`. The whole package is on the host now,
     // and none of it is on the card.
     let before = allocated();
