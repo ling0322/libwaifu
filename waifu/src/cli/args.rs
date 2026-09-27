@@ -22,6 +22,7 @@
 use std::fmt;
 
 use crate::cli::task::Task;
+use crate::flint::MemorySnapshot;
 use crate::{Device, Residency};
 
 /// What went wrong with what the user typed. Reported rather than exiting, so that the caller
@@ -124,8 +125,8 @@ impl DeviceOption {
             DeviceOption::CudaCpuOffload => Runtime::CUDA_CPU_OFFLOAD,
             DeviceOption::Metal => Runtime::on(Device::Metal),
             DeviceOption::Vulkan => Runtime::on(Device::Vulkan),
-            // Never the offload one. It is slower, and what it is for is a card the model does
-            // not fit on, which is not something to decide on someone's behalf.
+            // Never the offload one: with no model in hand there is nothing to measure against
+            // the card. [`DeviceOption::resolve_for`] is the answer once there is.
             DeviceOption::Auto => {
                 // At most one of CUDA and Metal is ever built, so the order between those two only
                 // decides which check runs first. Vulkan comes last because it runs on the same
@@ -142,6 +143,106 @@ impl DeviceOption {
                 }
             }
         }
+    }
+
+    /// The runtime this means for a model of `weights` bytes: a named device is that device, and
+    /// `auto` is [`Runtime::best`] for this machine as it is now.
+    pub fn resolve_for(self, weights: Option<u64>) -> Runtime {
+        match self {
+            DeviceOption::Auto => {
+                let available = Runtime::available();
+                Runtime::best(weights, &available, Room::measure(&available))
+            }
+            named => named.resolve(),
+        }
+    }
+}
+
+/// How much of each card is free, where the card said. `None` is a card that was not asked or
+/// did not answer, which is taken as room enough: that is what `auto` assumed before it measured.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Room {
+    pub cuda: Option<u64>,
+    pub vulkan: Option<u64>,
+}
+
+impl Room {
+    /// Asks the cards among `available` how much of them is free.
+    ///
+    /// Not Metal: that backend has no snapshot, and asking for one ends the process. Its memory is
+    /// the machine's, so there is no separate card for a model not to fit on.
+    ///
+    /// The first question to CUDA builds a context on the card, a few hundred megabytes of it --
+    /// which is why this is only asked for `auto`, where a card is about to be used anyway.
+    pub fn measure(available: &[Runtime]) -> Room {
+        let free = |device: Device| match available.contains(&Runtime::on(device)) {
+            true => match MemorySnapshot::capture(device) {
+                Ok(memory) if memory.total > 0 => Some(memory.free.max(0) as u64),
+                _ => None,
+            },
+            false => None,
+        };
+        Room {
+            cuda: free(Device::Cuda),
+            vulkan: free(Device::Vulkan),
+        }
+    }
+}
+
+/// What a model of `weights` bytes wants of a card to run with its weights on it: the weights,
+/// and room beside them for what a run makes -- the latents, the attention, the decoded picture.
+///
+/// A guess, and a generous one. Too small and the run aborts out of memory halfway through a
+/// picture; too large and a model that would have fitted runs offloaded, which is slower but
+/// finishes. SDXL's 7 GB comes to 9.7, and Qwen-Image's 15 GB of fp8 to 18.6, which is what puts
+/// the one on a sixteen gigabyte card and the other beside it.
+pub fn wanted_on_the_card(weights: u64) -> u64 {
+    const GIB: u64 = 1 << 30;
+    weights + weights / 10 + 2 * GIB
+}
+
+impl Runtime {
+    /// Every place a run can go that this build and this machine can take it.
+    ///
+    /// The first call starts the tensor library, which says what it found on stderr.
+    pub fn available() -> Vec<Runtime> {
+        Runtime::ALL
+            .into_iter()
+            .filter(|runtime| runtime.device().is_available())
+            .collect()
+    }
+
+    /// The fastest of `available` a model of `weights` bytes will run on, given `room`.
+    ///
+    /// CUDA where the model fits on the card, and CUDA with the weights on the host where it does
+    /// not: slower, but far faster than the processor, and it finishes where the other aborts.
+    /// Then Metal, whose memory is the machine's. Then Vulkan, which has no offload of its own and
+    /// so is only the answer where the model fits. The processor otherwise. A size that is not
+    /// known is taken as one that fits.
+    pub fn best(weights: Option<u64>, available: &[Runtime], room: Room) -> Runtime {
+        let fits = |free: Option<u64>| match (weights, free) {
+            (Some(weights), Some(free)) => wanted_on_the_card(weights) <= free,
+            _ => true,
+        };
+        let cuda = Runtime::on(Device::Cuda);
+        let metal = Runtime::on(Device::Metal);
+        let vulkan = Runtime::on(Device::Vulkan);
+
+        if available.contains(&cuda) {
+            if fits(room.cuda) {
+                return cuda;
+            }
+            if available.contains(&Runtime::CUDA_CPU_OFFLOAD) {
+                return Runtime::CUDA_CPU_OFFLOAD;
+            }
+        }
+        if available.contains(&metal) {
+            return metal;
+        }
+        if available.contains(&vulkan) && fits(room.vulkan) {
+            return vulkan;
+        }
+        Runtime::on(Device::Cpu)
     }
 }
 
@@ -302,7 +403,9 @@ impl Args {
 pub fn print_options() {
     eprintln!(
         "  -device string\n    \tinference device, one of cpu, cuda, cuda_cpu_offload, metal or \
-         auto (default \"auto\"). Without -m it is where the terminal's device list starts. \
+         auto (default \"auto\"). auto picks the fastest one the model fits on: cuda where the \
+         weights and room for a run fit in the card's free memory, cuda_cpu_offload where they do \
+         not. Without -m it is where the terminal's device list starts. \
          cuda_cpu_offload keeps the weights in host memory and moves each \
          one onto the card as it is used, so that a model larger than the card can still draw; it \
          is slower, since the whole model crosses the bus once per step."
@@ -345,6 +448,66 @@ mod tests {
 
     fn args(arguments: &[&str]) -> Result<Args, ArgError> {
         Args::parse(&arguments.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    const GB: u64 = 1_000_000_000;
+
+    #[test]
+    fn auto_puts_a_model_on_the_card_it_fits_and_offloads_one_it_does_not() {
+        let everything = Runtime::ALL.to_vec();
+        let cuda = Runtime::on(Device::Cuda);
+        let sixteen = Room {
+            cuda: Some(16 * GB),
+            vulkan: Some(16 * GB),
+        };
+
+        // SDXL on a sixteen gigabyte card, and Qwen-Image's fp8 beside it.
+        assert_eq!(Runtime::best(Some(7 * GB), &everything, sixteen), cuda);
+        assert_eq!(
+            Runtime::best(Some(15 * GB), &everything, sixteen),
+            Runtime::CUDA_CPU_OFFLOAD
+        );
+
+        // A size or a card that did not say is the old answer, which is the card.
+        assert_eq!(Runtime::best(None, &everything, sixteen), cuda);
+        assert_eq!(
+            Runtime::best(Some(40 * GB), &everything, Room::default()),
+            cuda
+        );
+    }
+
+    #[test]
+    fn auto_without_cuda_goes_to_vulkan_only_where_the_model_fits() {
+        let cpu = Runtime::on(Device::Cpu);
+        let vulkan = Runtime::on(Device::Vulkan);
+        let here = [cpu, vulkan];
+        let eight = Room {
+            cuda: None,
+            vulkan: Some(8 * GB),
+        };
+
+        assert_eq!(Runtime::best(Some(3 * GB), &here, eight), vulkan);
+        assert_eq!(Runtime::best(Some(7 * GB), &here, eight), cpu);
+
+        // Metal has the machine's memory, so it has no card to be too big for.
+        let mac = [cpu, Runtime::on(Device::Metal)];
+        assert_eq!(
+            Runtime::best(Some(40 * GB), &mac, Room::default()),
+            Runtime::on(Device::Metal)
+        );
+        assert_eq!(Runtime::best(Some(1), &[cpu], Room::default()), cpu);
+    }
+
+    #[test]
+    fn a_named_device_is_not_second_guessed_by_the_size_of_the_model() {
+        assert_eq!(
+            DeviceOption::Cuda.resolve_for(Some(1000 * GB)),
+            Runtime::on(Device::Cuda)
+        );
+        assert_eq!(
+            DeviceOption::Cpu.resolve_for(Some(1)),
+            Runtime::on(Device::Cpu)
+        );
     }
 
     #[test]

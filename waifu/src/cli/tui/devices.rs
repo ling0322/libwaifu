@@ -20,7 +20,8 @@
 //! The third screen: where the model runs.
 //!
 //! Last, because it is the one question with an answer already -- whatever `-device` said, or what
-//! `auto` makes of this machine -- and most of the time enter is all it takes. Every device there
+//! `auto` makes of this machine and the model just picked -- and most of the time enter is all it
+//! takes. Every device there
 //! is has a row. One this machine cannot use says so rather than being left off: that is how
 //! somebody finds out which kind of build they are running.
 
@@ -53,6 +54,8 @@ struct Devices {
     model: String,
     choices: Vec<Choice>,
     selected: usize,
+    /// Why the cursor started where it did, where `auto` chose by the size of the model.
+    why: Option<String>,
     refused: Option<String>,
 }
 
@@ -62,6 +65,7 @@ pub fn choose(
     task: Task,
     model: &str,
     runtime: Runtime,
+    why: Option<String>,
     available: &[Runtime],
 ) -> Result<Step<Runtime>, Error> {
     let choices: Vec<Choice> = Runtime::ALL
@@ -79,6 +83,7 @@ pub fn choose(
             .position(|choice| choice.runtime == runtime)
             .unwrap_or(0),
         choices,
+        why,
         refused: None,
     };
 
@@ -133,7 +138,7 @@ impl Devices {
     fn render(&self, frame: &mut Frame) {
         let [top, told, devices, _, foot] = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(if self.why.is_some() { 2 } else { 1 }),
             Constraint::Length(self.choices.len() as u16 + 2),
             Constraint::Min(0),
             Constraint::Length(3),
@@ -144,12 +149,12 @@ impl Devices {
             Paragraph::new(heading(&[self.task.name(), &self.model])),
             top,
         );
-        frame.render_widget(
-            Paragraph::new(
-                Line::from(" Where should it run? The page opens once this is chosen.").dim(),
-            ),
-            told,
-        );
+        let mut lines =
+            vec![Line::from(" Where should it run? The page opens once this is chosen.").dim()];
+        if let Some(why) = &self.why {
+            lines.push(Line::from(format!(" {why}")).dim());
+        }
+        frame.render_widget(Paragraph::new(lines), told);
 
         let rows: Vec<Line> = self
             .choices
@@ -215,6 +220,7 @@ mod tests {
                 })
                 .collect(),
             selected: 0,
+            why: None,
             refused: None,
         }
     }
@@ -236,6 +242,18 @@ mod tests {
 
         // And the heading says what it is choosing for.
         assert!(drawn.contains("txt2img  >  sdxl:base"), "{drawn}");
+    }
+
+    #[test]
+    fn says_why_the_cursor_started_where_it_did() {
+        let mut devices = devices();
+        assert!(!screen(&devices).contains("fastest"));
+
+        devices.why = Some("7.00 GB of weights: cuda is where it runs fastest".to_string());
+        let drawn = screen(&devices);
+        assert!(drawn.contains("cuda is where it runs fastest"), "{drawn}");
+        // And the list is still all there beneath it.
+        assert!(drawn.contains("vulkan"), "{drawn}");
     }
 
     #[test]

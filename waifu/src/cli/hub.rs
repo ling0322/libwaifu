@@ -552,6 +552,22 @@ pub fn cached_bytes(name: &str) -> u64 {
     }
 }
 
+/// How many bytes of packages `model` is -- a published name or the path of a manifest -- for
+/// choosing a device it fits on. None where it is not all on the disk, or has no manifest.
+pub fn model_bytes(model: &str) -> Option<u64> {
+    let manifest = match published(model) {
+        Some(_) => cached_manifest(model)?,
+        None => PathBuf::from(model),
+    };
+    let manifest = Manifest::open(manifest).ok()?;
+
+    let mut bytes = 0;
+    for name in manifest.files() {
+        bytes += fs::metadata(manifest.file(&name).ok()?).ok()?.len();
+    }
+    Some(bytes)
+}
+
 fn is_cached_in(published: &Published, cache: &Path) -> bool {
     let directory = cache.join(published.repo.replace('/', "--"));
     let manifest = directory.join(published.manifest);
@@ -1771,6 +1787,34 @@ mod tests {
         assert_eq!(cached_bytes("sdxl:nope"), 0);
 
         let _ = fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_model_on_disk_weighs_what_its_manifest_names() {
+        let directory = std::env::temp_dir().join(format!("waifu-bytes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("a directory to put it in");
+        let manifest = directory.join("m.yaml");
+        fs::write(
+            &manifest,
+            "weights:\n  - a.safetensors\n  - b.safetensors\ntokenizers:\n  text: t.json\n\
+             config:\n  model:\n    type: sdxl\n",
+        )
+        .expect("the manifest");
+        fs::write(directory.join("a.safetensors"), [0; 100]).expect("a");
+        fs::write(directory.join("b.safetensors"), [0; 20]).expect("b");
+
+        // A package it names that is not there: no size, rather than the size of half of it.
+        let path = manifest.to_string_lossy().to_string();
+        assert_eq!(model_bytes(&path), None);
+
+        // Everything it names, and nothing else in the directory.
+        fs::write(directory.join("t.json"), [0; 3]).expect("t");
+        fs::write(directory.join("other.safetensors"), [0; 1000]).expect("other");
+        assert_eq!(model_bytes(&path), Some(123));
+
+        assert_eq!(model_bytes("sdxl:nope"), None);
+        let _ = fs::remove_dir_all(&directory);
     }
 
     #[test]

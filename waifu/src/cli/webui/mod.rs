@@ -111,7 +111,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
 
     let model = with_usage(args.model())?.map(str::to_string);
     let asked_task = with_usage(args.task())?;
-    let runtime = with_usage(args.device())?.resolve();
+    let device = with_usage(args.device())?;
     let wanted_port = with_usage(args.port())?;
     let output = PathBuf::from(args.output());
 
@@ -139,6 +139,8 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
             };
             with_usage(fits(task, &model))?;
             fetch_in_the_terminal(&model)?;
+            // After the fetch, since it is the packages on the disk that are measured.
+            let runtime = device.resolve_for(hub::model_bytes(&model));
             Launch {
                 task,
                 model,
@@ -153,7 +155,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
                         .into(),
                 ));
             }
-            match tui::choose(asked_task, runtime)? {
+            match tui::choose(asked_task, device)? {
                 Some(launch) => launch,
                 // Somebody who looked at the lists and left. Not a failure.
                 None => return Ok(()),
