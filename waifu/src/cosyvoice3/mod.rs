@@ -32,7 +32,7 @@
 //! | --- | --- | --- |
 //! | [`speech_tokenizer`] | the recording's Whisper mel, 16 kHz | its speech tokens, 25 a second |
 //! | [`crate::indextts::campplus`] | Kaldi energies of the 16 kHz recording | the speaker, `(192)` |
-//! | [`features::speech_mel`] | the recording at 24 kHz | its mel, two frames a token |
+//! | [`features::Features::speech_mel`] | the recording at 24 kHz | its mel, two frames a token |
 //! | [`lm`] | the text, and in zero-shot the transcript and the prompt's tokens | speech tokens |
 //! | [`flow`] | the prompt's and the sentence's tokens, the prompt's mel, the speaker | the mel |
 //! | [`hift`] | the mel | 24 kHz audio |
@@ -82,14 +82,16 @@ use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use crate::flint::{DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Weights};
+use crate::flint::{
+    functional as F, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Weights,
+};
 use crate::indextts::{campplus, features::resample};
 use crate::{
     Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Tokenizer, Voice,
 };
 
 use self::flow::Flow;
-use self::hift::{Hift, Noise};
+use self::hift::Hift;
 use self::lm::{Lm, Sampler, Sampling};
 
 const LM: &str = "cosyvoice3.lm";
@@ -160,14 +162,17 @@ impl Settings {
 }
 
 /// Everything a recording says about a voice, worked out once and kept for every sentence.
-#[derive(Clone, Debug)]
+///
+/// The mel and the speaker stay on the device, where every sentence reads them; the tokens are a
+/// few dozen ids, and on the host, because the language model and the flow are handed ids.
+#[derive(Clone)]
 pub struct Reference {
     /// The recording's speech tokens, cut to half its mel frames.
     pub tokens: Vec<i32>,
-    /// Its 24 kHz mel, `(2 * tokens, 80)` frame-major.
-    pub mel: Vec<f32>,
-    /// CAMPPlus's embedding, `(192)`, not yet normalized.
-    pub speaker: Vec<f32>,
+    /// Its 24 kHz mel, `(1, 2 * tokens, 80)` frame-major, on the device.
+    pub mel: Tensor,
+    /// CAMPPlus's embedding, `(1, 192)`, not yet normalized, on the device.
+    pub speaker: Tensor,
 }
 
 /// Fun-CosyVoice3-0.5B, with every model it runs read and waiting.
@@ -180,6 +185,8 @@ pub struct CosyVoice3 {
     tokenizer: Tokenizer,
     device: Device,
     dtype: DType,
+    /// The three spectrograms' banks and filterbanks, on the device.
+    features: features::Features,
     /// The speech tokenizer's rotary table for the longest recording it reads, on the device, and
     /// sliced to each recording's length. See [`speech_tokenizer::rotary`].
     tokenizer_rotary: (Tensor, Tensor),
@@ -235,6 +242,7 @@ impl CosyVoice3 {
             hift: Hift::build(HIFT, &weights, dtype, device)?,
             tokenizer: Tokenizer::open(manifest)?,
             tokenizer_rotary: speech_tokenizer::rotary_on(Self::TOKENIZER_POSITIONS, device)?,
+            features: features::Features::new(device)?,
             weights,
             device,
             dtype,
@@ -255,10 +263,6 @@ impl CosyVoice3 {
         Ok(ir.run(&context)?.into_iter().map(|(_, t)| t).collect())
     }
 
-    fn upload(&self, shape: &[i32], values: &[f32]) -> Result<Tensor> {
-        Ok(Tensor::from_f32(shape, values)?.to_device(self.device)?)
-    }
-
     fn host(tensor: &Tensor) -> Result<Vec<f32>> {
         Ok(tensor
             .to_device(Device::Cpu)?
@@ -275,7 +279,8 @@ impl CosyVoice3 {
         let wave = resample(&samples, recording.rate, RATE);
 
         let tokens = self.speech_tokens(&listening)?;
-        let (mel, frames) = features::speech_mel(&wave)?;
+        let mel = self.features.speech_mel(&wave)?;
+        let frames = mel.shape_at(2)? as usize;
 
         // `frontend_zero_shot`: the mel is exactly two frames a token, whichever runs out first.
         let count = (frames / 2).min(tokens.len());
@@ -285,11 +290,8 @@ impl CosyVoice3 {
             ));
         }
         let tokens = tokens[..count].to_vec();
-        let kept = 2 * count;
-        let mel: Vec<f32> = (0..kept)
-            .flat_map(|frame| (0..80).map(move |band| band * frames + frame))
-            .map(|index| mel[index])
-            .collect();
+        let kept = 2 * count as i32;
+        let mel = mel.slice(2, 0, kept)?.transpose(1, 2)?.contiguous()?;
 
         Ok(Reference {
             tokens,
@@ -298,9 +300,11 @@ impl CosyVoice3 {
         })
     }
 
-    /// S3Tokenizer's tokens of a 16 kHz recording.
+    /// S3Tokenizer's tokens of a 16 kHz recording: the mel, the encoder and the quantizer on the
+    /// device, and only the few dozen ids back.
     fn speech_tokens(&self, wave: &[f32]) -> Result<Vec<i32>> {
-        let (mel, frames) = features::whisper_mel(wave)?;
+        let mel = self.features.whisper_mel(wave)?;
+        let frames = mel.shape_at(2)?;
         if frames < 4 {
             return Err(Error::model(
                 "the recording is too short to hear a voice in",
@@ -326,26 +330,19 @@ impl CosyVoice3 {
             self.dtype,
             self.device,
         )?;
-        g.output("projected", g.cast(projected, DType::Float));
+        let ids = speech_tokenizer::quantize(&g, projected, self.dtype, self.device)?;
+        g.output("ids", ids);
 
-        let outputs = self.run(
-            &g,
-            &[
-                (
-                    "mel",
-                    &self.upload(&[1, speech_tokenizer::MELS, frames as i32], &mel)?,
-                ),
-                ("cos", &cos),
-                ("sin", &sin),
-            ],
-        )?;
-        Ok(speech_tokenizer::quantize(&Self::host(&outputs[0])?))
+        let outputs = self.run(&g, &[("mel", &mel), ("cos", &cos), ("sin", &sin)])?;
+        let ids = outputs[0].to_device(Device::Cpu)?.to_vec_i64()?;
+        Ok(ids.into_iter().map(|id| id as i32).collect())
     }
 
-    /// CAMPPlus's embedding of who is speaking, through IndexTTS-2.5's port of the same model.
-    fn speaker(&self, wave: &[f32]) -> Result<Vec<f32>> {
-        let (values, frames) = crate::indextts::features::campplus(wave);
-        let frames = frames as i32;
+    /// CAMPPlus's embedding of who is speaking, through IndexTTS-2.5's port of the same model, from
+    /// the Kaldi filterbank taken on the device.
+    fn speaker(&self, wave: &[f32]) -> Result<Tensor> {
+        let fbank = self.features.kaldi_fbank(wave)?;
+        let frames = fbank.shape_at(1)?;
 
         let g = Graph::new();
         let embedding = campplus::graph(
@@ -358,8 +355,8 @@ impl CosyVoice3 {
         )?;
         g.output("speaker", embedding);
 
-        let outputs = self.run(&g, &[("x", &self.upload(&[1, frames, 80], &values)?)])?;
-        Self::host(&outputs[0])
+        let outputs = self.run(&g, &[("x", &fbank)])?;
+        Ok(outputs.into_iter().next().expect("one output"))
     }
 
     fn encode(&self, text: &str) -> Result<Vec<i32>> {
@@ -404,7 +401,8 @@ impl CosyVoice3 {
 
         let seed = options.seed.unwrap_or(0);
         let mut sampler = Sampler::new(seed);
-        let mut noise_source = Sampler::new(seed ^ 0x5eed_0f4e_15e0);
+        // The vocoder's noise is drawn on the device, from the reading's seed.
+        F::manual_seed(self.device, seed)?;
         let sampling = Sampling {
             temperature: options.temperature,
             ..self.settings.sampling
@@ -473,7 +471,7 @@ impl CosyVoice3 {
             if said.is_empty() {
                 continue;
             }
-            samples.extend(self.sound(said, reference, options.speed, &mut noise_source)?);
+            samples.extend(self.sound(said, reference, options.speed)?);
             if report(SpeechProgress::Sounding).is_break() {
                 return Ok(None);
             }
@@ -483,59 +481,78 @@ impl CosyVoice3 {
     }
 
     /// One reading's tokens, all the way to audio: `token2wav` with `finalize=True`.
-    pub fn sound(
-        &self,
-        said: &[i32],
-        reference: &Reference,
-        speed: f32,
-        noise_source: &mut Sampler,
-    ) -> Result<Vec<f32>> {
+    ///
+    /// On the device from the flow's condition to the last sample, which is the one thing that
+    /// comes back to the host.
+    pub fn sound(&self, said: &[i32], reference: &Reference, speed: f32) -> Result<Vec<f32>> {
         let condition = self
             .flow
             .condition(&reference.tokens, said, &reference.speaker)?;
-        let prompt_frames = (reference.mel.len() / 80) as i32;
         let mel = self.flow.draw(
             &condition,
             &reference.mel,
-            prompt_frames,
             self.settings.diffusion_steps,
             self.settings.cfg_rate,
         )?;
 
-        let frames = mel.len() / 80;
-        let mut banded: Vec<f32> = (0..80)
-            .flat_map(|band| (0..frames).map(move |frame| frame * 80 + band))
-            .map(|index| mel[index])
-            .collect();
-        let mut frames = frames;
-        if speed > 0.0 && (speed - 1.0).abs() > 1e-6 {
-            (banded, frames) = stretch(&banded, frames, speed);
-        }
+        // `(1, frames, 80)` to the vocoder's `(1, 80, frames)`, stretched on the way where the
+        // reading is to be faster or slower.
+        let mel = match speed > 0.0 && (speed - 1.0).abs() > 1e-6 {
+            true => stretch(&mel, speed, self.device)?,
+            false => mel.transpose(1, 2)?.contiguous()?,
+        };
 
-        let noise = Noise::draw(frames * hift::HOP, &mut || noise_source.uniform() as f32);
-        self.hift.forward(&banded, frames, &noise)
+        let samples = mel.shape_at(2)? * hift::HOP as i32;
+        let noise = F::rand(
+            &[1, samples, hift::HARMONICS as i32],
+            DType::Float,
+            self.device,
+        )?;
+        let wave = self.hift.forward(&mel, &noise)?;
+        Self::host(&wave)
     }
 }
 
-/// `F.interpolate(mel, size=int(frames / speed), mode="linear")`, band by band.
-fn stretch(mel: &[f32], frames: usize, speed: f32) -> (Vec<f32>, usize) {
+/// Where `F.interpolate(mel, size=int(frames / speed), mode="linear")` reads each output frame
+/// from: the frame on its left, the one on its right, and how far between them. `(out, left, right,
+/// weight)`.
+fn stretch_plan(frames: usize, speed: f32) -> (usize, Vec<i64>, Vec<i64>, Vec<f32>) {
     let out = ((frames as f32 / speed) as usize).max(1);
     let scale = frames as f64 / out as f64;
-    let mut stretched = vec![0.0f32; 80 * out];
-    for band in 0..80 {
-        let row = &mel[band * frames..(band + 1) * frames];
-        for (index, slot) in stretched[band * out..(band + 1) * out]
-            .iter_mut()
-            .enumerate()
-        {
-            let source = ((index as f64 + 0.5) * scale - 0.5).max(0.0);
-            let left = (source.floor() as usize).min(frames - 1);
-            let right = (left + 1).min(frames - 1);
-            let weight = (source - left as f64) as f32;
-            *slot = row[left] * (1.0 - weight) + row[right] * weight;
-        }
+    let mut left = Vec::with_capacity(out);
+    let mut right = Vec::with_capacity(out);
+    let mut weight = Vec::with_capacity(out);
+    for index in 0..out {
+        let source = ((index as f64 + 0.5) * scale - 0.5).max(0.0);
+        let l = (source.floor() as usize).min(frames - 1);
+        left.push(l as i64);
+        right.push((l + 1).min(frames - 1) as i64);
+        weight.push((source - l as f64) as f32);
     }
-    (stretched, out)
+    (out, left, right, weight)
+}
+
+/// `mel` `(1, frames, 80)` frame-major, stretched linearly to `frames / speed` frames and turned to
+/// `(1, 80, frames / speed)`, on `mel`'s device. The plan is a few hundred indices worked out on
+/// the host; the interpolation itself is two row lookups and a weighted sum there.
+fn stretch(mel: &Tensor, speed: f32, device: Device) -> Result<Tensor> {
+    let frames = mel.shape_at(1)? as usize;
+    let (out, left, right, weight) = stretch_plan(frames, speed);
+    let ids = |values: &[i64]| -> Result<Tensor> {
+        Ok(Tensor::from_i64(&[out as i32], values)?.to_device(device)?)
+    };
+
+    let table = mel.view(&[frames as i32, 80])?;
+    let left = F::lookup(&table, &ids(&left)?)?;
+    let right = F::lookup(&table, &ids(&right)?)?;
+    let weight = Tensor::from_f32(&[out as i32], &weight)?.to_device(device)?;
+
+    // Band-major, so that one weight a frame broadcasts over the bands in front of it.
+    let step = F::sub(&right, &left)?;
+    let left = left.transpose(0, 1)?.contiguous()?;
+    let step = step.transpose(0, 1)?.contiguous()?;
+    let stretched = F::add(&left, &F::mul(&step, &weight)?)?;
+    Ok(stretched.view(&[1, 80, out as i32])?)
 }
 
 impl Voice for CosyVoice3 {
@@ -592,20 +609,36 @@ fn fingerprint(sound: &Sound) -> u64 {
 mod tests {
     use super::*;
 
+    /// `(frames, 80)` frame-major values as the `(1, frames, 80)` tensor `stretch` takes, on the CPU.
+    fn frames(values: &[f32], frames: i32) -> Tensor {
+        Tensor::from_f32(&[1, frames, 80], values).unwrap()
+    }
+
     #[test]
     fn stretching_by_one_half_doubles_the_frames() {
-        let mel: Vec<f32> = (0..80 * 4).map(|i| i as f32).collect();
-        let (out, frames) = stretch(&mel, 4, 0.5);
-        assert_eq!(frames, 8);
-        assert_eq!(out.len(), 80 * 8);
-        assert_eq!(out[0], 0.0);
+        // Frame f holds f in every band.
+        let mel: Vec<f32> = (0..4)
+            .flat_map(|f| std::iter::repeat_n(f as f32, 80))
+            .collect();
+        let out = stretch(&frames(&mel, 4), 0.5, Device::Cpu).unwrap();
+        assert_eq!(out.shape(), vec![1, 80, 8]);
+        let values = out.to_vec_f32().unwrap();
+        // Band 0, band-major: held at the first frame, then halfway steps, held at the last.
+        assert_eq!(
+            &values[..8],
+            &[0.0, 0.25, 0.75, 1.25, 1.75, 2.25, 2.75, 3.0]
+        );
     }
 
     #[test]
     fn stretching_leaves_a_steady_band_steady() {
         let mel = vec![2.5f32; 80 * 10];
-        let (out, frames) = stretch(&mel, 10, 1.3);
-        assert_eq!(frames, 7);
-        assert!(out.iter().all(|x| (*x - 2.5).abs() < 1e-6));
+        let out = stretch(&frames(&mel, 10), 1.3, Device::Cpu).unwrap();
+        assert_eq!(out.shape(), vec![1, 80, 7]);
+        assert!(out
+            .to_vec_f32()
+            .unwrap()
+            .iter()
+            .all(|x| (*x - 2.5).abs() < 1e-6));
     }
 }
