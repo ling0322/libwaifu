@@ -62,6 +62,7 @@ pub mod indextts;
 /// of a Qwen3-VL encoder. `docs/krea2.md` is where the whole of it is written down.
 pub mod krea2;
 pub mod qwen_image;
+pub mod seed_vc;
 mod layers;
 mod manifest;
 mod mapping;
