@@ -459,7 +459,7 @@ fn a_weight_read_twice_is_read_once() {
     assert_eq!(file.len(), 1);
 
     // And it is loaded once: the graph holds one `load` for it however many nodes name it, so a
-    // pass asks the source for it once -- which, from a `Pinned` source, is one trip over the bus.
+    // pass asks the source for it once -- which, from a low-vram source, is one trip over the bus.
     let ir = Ir::compile(&g);
     let loads = ir
         .insts()
@@ -552,7 +552,7 @@ fn to_host(tensor: &Tensor) -> Vec<f32> {
     tensor.to_device(Device::Cpu).unwrap().to_vec_f32().unwrap()
 }
 
-/// The same pass, once with the weights on the card and once with them page-locked on the host.
+/// The same pass, once with the weights on the card and once with them held on the host.
 ///
 /// What a low-vram run promises is the picture, not a cheaper picture: the same instructions read
 /// the same weights, and all that changed is where a weight was sitting when the `load` asked for
@@ -573,7 +573,7 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
         .unwrap();
 
     // One graph, one IR, and two sources. What the two modes differ by is what a load is answered
-    // out of -- a tensor already on the card, or one page-locked on the host and copied across --
+    // out of -- a tensor already on the card, or one held on the host and copied across --
     // and nothing the IR says.
     let ir = Ir::compile(&graph);
 
@@ -616,10 +616,10 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
 
     let allocated = || MemorySnapshot::capture(Device::Cuda).unwrap().allocated;
 
-    // Read the way a model reads it, through `Residency`. The whole package is page-locked on the
-    // host now, and none of it is on the card.
+    // Read the way a model reads it, through `Residency`. The whole package is on the host now,
+    // and none of it is on the card.
     let before = allocated();
-    let pinned = source(tensors, Device::Cuda, Residency::LowVram);
+    let on_the_host = source(tensors, Device::Cuda, Residency::LowVram);
     assert_eq!(
         allocated(),
         before,
@@ -628,7 +628,7 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
 
     // And neither does checking the model against it, which is the whole reason `check` is a
     // question of its own rather than a load whose answer is dropped.
-    check_parameters(&graph, pinned.as_ref()).unwrap();
+    check_parameters(&graph, on_the_host.as_ref()).unwrap();
     assert_eq!(allocated(), before, "checking a model must not move it");
 
     let ir = Ir::compile(&graph);
@@ -639,7 +639,7 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     // them back.
     let x = Tensor::zeros(&[256, 256], DType::Float, Device::Cuda).unwrap();
     let out = ir
-        .run(&RunContext::new(pinned.as_ref()).input("x", &x))
+        .run(&RunContext::new(on_the_host.as_ref()).input("x", &x))
         .unwrap();
     drop(out);
     assert_eq!(allocated() - before, bytes_of(&x), "only the input is left");

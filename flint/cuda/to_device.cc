@@ -33,6 +33,7 @@
 #include "flint/cuda/cuda_host_tensor_data.h"
 #include "flint/cuda/cuda_tensor_data.h"
 #include "flint/cuda/future_tensor.h"
+#include "flint/cuda/staged_upload.h"
 #include "flint/tensor.h"
 
 namespace fl {
@@ -106,8 +107,53 @@ Tensor toCpu(const Tensor &tensor) {
   return toDevice<Device::kCpu>(tensor);
 }
 
+/// Pageable host memory to the GPU through StagedUpload, on the copy stream.
+///
+/// The copy stream rather than the compute stream, and that is most of what this buys beside the
+/// rate. A cudaMemcpy on the legacy stream waits for every kernel queued before it, so the host
+/// stands still while the GPU drains and the bus and the GPU take turns. Here the host only waits
+/// for the staging buffers, and the kernels already queued go on running while the next weight
+/// crosses. The compute stream is made to wait for the copy instead, which is the one ordering the
+/// reader needs.
+Tensor toCudaStaged(const Tensor &tensor) {
+  CHECK(tensor.isContiguous()) << "only contiguous tensor is allowed to copy between devices";
+  std::shared_ptr<TensorData> srcData = tensor.getInternalData();
+  DType dtype = srcData->getDType();
+  int64_t numel = tensor.getNumEl();
+
+  cudaStream_t stream = CopyStream::getInstance()->getStream();
+
+  // Allocated in the copy stream's order, which is where it is written first -- the same
+  // arrangement as toDeviceAsync().
+  std::shared_ptr<TensorData> destData = CudaTensorData::create(numel, dtype, stream);
+
+  const void *src = srcData->getRawData() + dtype.getTotalSize(tensor.getInternalOffset());
+  StagedUpload::getInstance()->copy(
+      destData->getRawData(),
+      src,
+      dtype.getTotalSize(numel),
+      stream);
+
+  cudaEvent_t event = nullptr;
+  LL_CHECK_CUDA_STATUS(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+  LL_CHECK_CUDA_STATUS(cudaEventRecord(event, stream));
+  LL_CHECK_CUDA_STATUS(cudaStreamWaitEvent(0, event, 0));
+  LL_CHECK_CUDA_STATUS(cudaEventDestroy(event));
+
+  // The compute stream is ordered after the copy now, so it owns the bytes and is where they go
+  // back -- as in FutureTensor::finish().
+  static_cast<CudaTensorData *>(destData.get())->setOwningStream(0);
+
+  auto shape = std::make_shared<TensorShape>(tensor.getShape());
+  return Tensor::create(shape, destData);
+}
+
 Tensor toCuda(const Tensor &tensor) {
   if (tensor.getDevice().getType() == Device::kCuda) return tensor;
+  if (tensor.getDevice().getType() == Device::kCpu &&
+      tensor.getDType().getTotalSize(tensor.getNumEl()) >= StagedUpload::MinBytes) {
+    return toCudaStaged(tensor);
+  }
   return toDevice<Device::kCuda>(tensor);
 }
 
