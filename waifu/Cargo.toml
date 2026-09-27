@@ -2,7 +2,8 @@
 name = "waifu"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+# MIT, except the Seed-VC port behind the `gpl` feature, which is GPL-3.0-only; see below.
+license = "MIT AND GPL-3.0-only"
 description = "Your local AI waifu: diffusion image generation on top of the flint tensor library"
 # Declares that this crate links libflint.a, so Cargo runs build.rs and keeps the native library
 # to a single owner in the dependency graph.
@@ -17,7 +18,21 @@ name = "waifu"
 path = "src/bin/waifu.rs"
 required-features = ["cli"]
 
+[[example]]
+name = "convert"
+required-features = ["gpl"]
+
+[[test]]
+name = "seed_vc"
+required-features = ["gpl"]
+
 [features]
+# Everything GPL-licensed, which today is the Seed-VC v2 voice conversion port, `waifu::seed_vc`:
+# Seed-VC and its ASTRAL tokenizers are GPL-3.0 and the port is written from their source. Off by
+# default, as FFmpeg's `--enable-gpl` is. Without it none of that code is compiled and what is
+# built is MIT; with it, the build as a whole is covered by the GPL. CMake's `-DENABLE_GPL=ON`
+# turns it on for the `waifu` it builds. Never make a default feature depend on this one.
+gpl = []
 # The command line tool. Off by default: what it pulls in -- a terminal stack, a web server, an
 # HTTP client, an image encoder -- is the binary's to need, and nothing the library does asks for
 # any of it.

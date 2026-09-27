@@ -6,8 +6,8 @@ voice, out, at 22.05 kHz. [`Plachtaa/seed-vc`](https://github.com/Plachtaa/seed-
 `Plachta/ASTRAL-quantization` -- under **GPL-3.0**, both the code and the weights.
 
 ```bash
-cargo run --release --example convert -- models/seed_vc.yaml source.wav voice.wav out.wav
-cargo run --release --example convert -- models/seed_vc.yaml source.wav voice.wav out.wav --style --seed 7
+cargo run --release --features gpl --example convert -- models/seed_vc.yaml source.wav voice.wav out.wav
+cargo run --release --features gpl --example convert -- models/seed_vc.yaml source.wav voice.wav out.wav --style --seed 7
 ```
 
 ```rust
@@ -15,6 +15,20 @@ let vc = SeedVc::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
 let voice = vc.listen(&recording)?;                                    // once per voice
 let sound = vc.convert(&source, &voice, &vc.conversion(), &mut report)?;
 ```
+
+## Licence: GPL-3.0, behind a feature
+
+Seed-VC and ASTRAL are GPL-3.0, and this port is written from their source, so it is GPL-3.0 too
+-- `waifu/src/seed_vc/`, its test, the `convert` example and `tools/seed_vc_*.py`, each marked
+`SPDX-License-Identifier: GPL-3.0-only`, with the licence in `LICENSE-GPL-3.0`. Everything else in
+libwaifu is MIT.
+
+It is compiled only with the `gpl` feature -- `-DENABLE_GPL=ON` to CMake -- which is off by
+default. Without it none of the GPL code is built and what comes out is MIT; with it, the build as
+a whole is covered by the GPL -- the same arrangement as FFmpeg's `--enable-gpl`. The weights the exporter reads are GPL-3.0 as
+well; the exporter reads them from the HuggingFace cache and nothing here redistributes them.
+
+## Where it runs
 
 It is library and command line only: the web page's tasks are text to picture and text to
 speech, and a conversion takes two recordings rather than a sentence. It is not published to
@@ -111,8 +125,9 @@ timbre only; 0.84 against upstream's 0.80 with style -- and Whisper large-v3 tra
 timbre conversion word for word as it does upstream's.
 
 ```bash
-cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+cargo test --release --manifest-path waifu/Cargo.toml --features gpl --no-fail-fast \
     --test seed_vc -- --ignored --test-threads=1
+cargo test --manifest-path waifu/Cargo.toml --features gpl --lib seed_vc   # the unit tests
 ```
 
 ## What is not upstream's

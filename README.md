@@ -314,3 +314,17 @@ stopping the ones after it. Leave `--features cli` off these: nothing under `wai
 reached from `tests/`, and asking for it drags hyper and rustls through a release compile first.
 One GPU means one job -- a second checkout running these at the same time reports `Aborted: out of
 memory`, which reads as a code failure and is not one.
+
+## License
+
+MIT (see `LICENSE`), with one exception: the Seed-VC v2 voice conversion port (`waifu/src/seed_vc/`,
+[`docs/seed_vc.md`](docs/seed_vc.md)) is GPL-3.0, as Seed-VC itself is. It is compiled only with the
+`gpl` Cargo feature, off by default as FFmpeg's `--enable-gpl` is: a default build contains no GPL
+code and is MIT, and a build with it on is covered by the GPL (`LICENSE-GPL-3.0`) as a whole.
+
+```bash
+cmake -S . -B build -DENABLE_GPL=ON ...          # the waifu CMake builds, with the GPL parts
+cargo build --manifest-path waifu/Cargo.toml --features gpl   # the crate, the same
+```
+
+CMake prints which licence the build it configured is under, and `waifu -h` says which it was built as.
