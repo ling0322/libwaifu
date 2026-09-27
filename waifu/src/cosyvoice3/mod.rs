@@ -180,6 +180,9 @@ pub struct CosyVoice3 {
     tokenizer: Tokenizer,
     device: Device,
     dtype: DType,
+    /// The speech tokenizer's rotary table for the longest recording it reads, on the device, and
+    /// sliced to each recording's length. See [`speech_tokenizer::rotary`].
+    tokenizer_rotary: (Tensor, Tensor),
     /// The last recording listened to, by fingerprint, and what was heard in it.
     heard: RefCell<Option<(u64, Reference)>>,
 }
@@ -195,6 +198,10 @@ impl CosyVoice3 {
         speed: 1.0,
         temperature: 1.0,
     };
+
+    /// How many positions the speech tokenizer's table holds: thirty seconds' worth -- the longest
+    /// recording read -- after the two stride-two convolutions.
+    const TOKENIZER_POSITIONS: i32 = 750;
 
     pub const NEEDS_A_RECORDING: &'static str = "CosyVoice3 speaks in the voice of a recording -- \
          drop one on the page, a few seconds of somebody speaking, and say the sentence again";
@@ -227,6 +234,7 @@ impl CosyVoice3 {
             flow: Flow::build(flow::Config::cosyvoice3(), FLOW, &weights, dtype, device)?,
             hift: Hift::build(HIFT, &weights, dtype, device)?,
             tokenizer: Tokenizer::open(manifest)?,
+            tokenizer_rotary: speech_tokenizer::rotary_on(Self::TOKENIZER_POSITIONS, device)?,
             weights,
             device,
             dtype,
@@ -299,7 +307,15 @@ impl CosyVoice3 {
             ));
         }
         let out = speech_tokenizer::frames_out(frames as i32);
-        let (cos, sin, shape) = speech_tokenizer::rotary(out);
+        // The table built at load covers every recording `listen` lets through; one that is longer
+        // gets a table of its own rather than an error.
+        let (cos, sin) = match out <= Self::TOKENIZER_POSITIONS {
+            true => (
+                self.tokenizer_rotary.0.slice(0, 0, out)?,
+                self.tokenizer_rotary.1.slice(0, 0, out)?,
+            ),
+            false => speech_tokenizer::rotary_on(out, self.device)?,
+        };
 
         let g = Graph::new();
         let projected = speech_tokenizer::graph(
@@ -319,8 +335,8 @@ impl CosyVoice3 {
                     "mel",
                     &self.upload(&[1, speech_tokenizer::MELS, frames as i32], &mel)?,
                 ),
-                ("cos", &self.upload(&shape, &cos)?),
-                ("sin", &self.upload(&shape, &sin)?),
+                ("cos", &cos),
+                ("sin", &sin),
             ],
         )?;
         Ok(speech_tokenizer::quantize(&Self::host(&outputs[0])?))

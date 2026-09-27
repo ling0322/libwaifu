@@ -342,7 +342,11 @@ fn the_flow_draws_the_mel_upstream_draws() {
         .unwrap();
     let rotary = flow.rotary_tables(condition.frames()).unwrap();
     let t = floats(&cases, "dit_t")[0];
-    let velocity = flow.velocity(&x, &context, t, &rotary).unwrap();
+    let time = Tensor::from_f32(&[1, 256], &flow::time_sinusoid(t, 256))
+        .unwrap()
+        .to_device(DEVICE)
+        .unwrap();
+    let velocity = flow.velocity(&x, &context, &time, &rotary).unwrap();
     let want = floats(&cases, "dit_velocity");
     let want: Vec<f32> = want
         .chunks(want.len() / 2)

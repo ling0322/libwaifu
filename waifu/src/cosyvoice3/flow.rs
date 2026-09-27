@@ -417,6 +417,45 @@ pub fn time_sinusoid(t: f32, width: i32) -> Vec<f32> {
         .collect()
 }
 
+/// The times the estimator is evaluated at over `steps` Euler steps: `t` as [`Flow::draw`] advances
+/// it, `t += dt` with `dt` the gap to the next point of the schedule, in float32 -- which is not
+/// quite the schedule's own points, and has to be the same bits the loop reaches.
+pub fn step_times(steps: usize) -> Vec<f32> {
+    let span = schedule(steps);
+    let mut times = Vec::with_capacity(steps);
+    let mut t = span[0];
+    let mut dt = span[1] - span[0];
+    for step in 1..span.len() {
+        times.push(t);
+        t += dt;
+        if step < span.len() - 1 {
+            dt = span[step + 1] - t;
+        }
+    }
+    times
+}
+
+/// The rotary cosines and sines of positions `0..frames`, `(frames, head_dim / 2, 1)` each, on
+/// `device`: `position * 10000^(-2i / head_dim)` in float32, as `x_transformers` works it out.
+fn rotary_table(config: &Config, frames: i32, device: Device) -> Result<(Tensor, Tensor)> {
+    let half = config.head_dim / 2;
+    let mut cos = Vec::with_capacity((frames * half) as usize);
+    let mut sin = Vec::with_capacity((frames * half) as usize);
+    for position in 0..frames {
+        for index in 0..half {
+            let frequency = 1.0 / 10000f32.powf(2.0 * index as f32 / config.head_dim as f32);
+            let angle = position as f32 * frequency;
+            cos.push(angle.cos());
+            sin.push(angle.sin());
+        }
+    }
+    let shape = [frames, half, 1];
+    Ok((
+        Tensor::from_f32(&shape, &cos)?.to_device(device)?,
+        Tensor::from_f32(&shape, &sin)?.to_device(device)?,
+    ))
+}
+
 /// `1 - cos(pi / 2 * i / steps)` for `i` in `0..=steps`, in float32.
 pub fn schedule(steps: usize) -> Vec<f32> {
     (0..=steps)
@@ -455,6 +494,9 @@ pub struct Flow {
     estimator: Ir,
     weights: Rc<dyn ParamSource>,
     device: Device,
+    /// The rotary cosines and sines of every frame the flow can draw, `(noise_frames, head_dim / 2,
+    /// 1)` each, on the device: 3.8 MB, worked out once and sliced to a sentence's length.
+    rotary: (Tensor, Tensor),
 }
 
 impl fmt::Debug for Flow {
@@ -491,6 +533,7 @@ impl Flow {
         check_parameters(&estimator, weights.as_ref())?;
 
         Ok(Flow {
+            rotary: rotary_table(&config, config.noise_frames, device)?,
             config,
             condition: Ir::compile(&condition),
             estimator: Ir::compile(&estimator),
@@ -559,22 +602,19 @@ impl Flow {
         })
     }
 
-    /// The rotary table for `frames` positions, `(frames, head_dim / 2, 1)`.
+    /// The rotary rows of the first `frames` positions, `(frames, head_dim / 2, 1)`: views of the
+    /// table built when the flow was read.
     fn rotary(&self, frames: i32) -> Result<(Tensor, Tensor)> {
-        let half = self.config.head_dim / 2;
-        let mut cos = Vec::with_capacity((frames * half) as usize);
-        let mut sin = Vec::with_capacity((frames * half) as usize);
-        for position in 0..frames {
-            for index in 0..half {
-                let frequency =
-                    1.0 / 10000f32.powf(2.0 * index as f32 / self.config.head_dim as f32);
-                let angle = position as f32 * frequency;
-                cos.push(angle.cos());
-                sin.push(angle.sin());
-            }
+        if frames > self.config.noise_frames {
+            return Err(Error::model(format!(
+                "{frames} mel frames is more than the {} the flow has positions for",
+                self.config.noise_frames
+            )));
         }
-        let shape = [frames, half, 1];
-        Ok((self.upload(&shape, &cos)?, self.upload(&shape, &sin)?))
+        Ok((
+            self.rotary.0.slice(0, 0, frames)?,
+            self.rotary.1.slice(0, 0, frames)?,
+        ))
     }
 
     /// The guided and unguided context, `(2, M, 240)`: the prompt's mel in front of zeros, `mu`,
@@ -612,24 +652,22 @@ impl Flow {
         self.rotary(frames)
     }
 
-    /// The estimator once, on both halves of the guided batch.
+    /// The estimator once, on both halves of the guided batch: `x` `(2, M, 80)` frame-major, the
+    /// context from [`Flow::context_tensor`], the time as [`time_sinusoid`] on the device `(1, 256)`,
+    /// and the rotary rows from [`Flow::rotary_tables`]. The velocity comes back `(2, M, 80)`.
     pub fn velocity(
         &self,
         x: &[f32],
         context: &Tensor,
-        t: f32,
+        time: &Tensor,
         rotary: &(Tensor, Tensor),
     ) -> Result<Vec<f32>> {
         let frames = context.shape_at(1)?;
         let x = self.upload(&[2, frames, self.config.mel], x)?;
-        let time = self.upload(
-            &[1, self.config.time_dim],
-            &time_sinusoid(t, self.config.time_dim),
-        )?;
         let run = RunContext::new(&*self.weights)
             .input("x", &x)
             .input("context", context)
-            .input("time", &time)
+            .input("time", time)
             .input("cos", &rotary.0)
             .input("sin", &rotary.1);
         let outputs = self.estimator.run(&run)?;
@@ -657,6 +695,17 @@ impl Flow {
         let context = self.context_tensor(condition, prompt_mel, prompt_frames)?;
         let rotary = self.rotary(frames)?;
         let span = schedule(steps);
+        // Every step's time as the estimator reads it, up front: once a sentence rather than once a
+        // step, and not kept past it -- ten small vectors are nothing beside ten passes of the DiT.
+        let times = step_times(steps)
+            .into_iter()
+            .map(|t| {
+                self.upload(
+                    &[1, self.config.time_dim],
+                    &time_sinusoid(t, self.config.time_dim),
+                )
+            })
+            .collect::<Result<Vec<Tensor>>>()?;
 
         let mut x = condition.noise.clone();
         let half = x.len();
@@ -664,7 +713,7 @@ impl Flow {
         let mut dt = span[1] - span[0];
         for step in 1..span.len() {
             let doubled: Vec<f32> = x.iter().chain(x.iter()).copied().collect();
-            let velocity = self.velocity(&doubled, &context, t, &rotary)?;
+            let velocity = self.velocity(&doubled, &context, &times[step - 1], &rotary)?;
             let (guided, unguided) = velocity.split_at(half);
             for index in 0..half {
                 let v = (1.0 + cfg_rate) * guided[index] - cfg_rate * unguided[index];
