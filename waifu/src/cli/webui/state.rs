@@ -17,39 +17,29 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! What the browser is looking at, and the one lock the two threads meet over.
+//! What the program is doing, and the one lock the threads meet over.
 //!
 //! The model sits on a thread of its own -- a tensor never leaves the thread that made it -- and
-//! the requests arrive on whichever thread the server handed them to. Between the two there used
-//! to be a pair of channels, which worked when one screen read them in a loop; a request cannot
-//! read a channel, because it arrives once and has to answer with everything at that moment
-//! rather than with whatever has been posted since it last looked.
+//! the requests arrive on whichever thread the server handed them to. What moves between them is
+//! a value under a lock: the worker writes what it is doing as it does it, and a request reads
+//! what it needs. The lock is held for the length of a field copy and never across anything that
+//! draws, which is the only rule this arrangement has.
 //!
-//! So what moves is a value under a lock. The worker writes what it is doing as it does it, and
-//! every request reads the whole of it. The lock is held for the length of a field copy and never
-//! across anything that draws, which is the only rule this arrangement has.
-//!
-//! Two kinds of value, since more than one browser can have the page open. What the program is
-//! doing -- which model is on the card, what the worker is busy with, and for whom -- is one
-//! [`World`], the same for every page. What a page has made and been told -- its pictures, its
-//! clips, the file it dropped on the img2img box -- is a [`Session`] of its own, found by the
-//! cookie the browser sends back. Two tabs of one browser share a cookie and so a session, which
-//! is what a second tab has always been: the same page, open twice.
-//!
-//! When locks nest, the order is the registry of sessions, then the world, then a session's own
-//! record. Nothing takes them the other way round.
+//! There is one of everything here. Nothing knows who is asking: a job is found by its id, and
+//! what a request is answered with is the same whoever sent it. The jobs themselves, and what they
+//! made, are kept by the [`Store`]; this is what only the running program knows -- which job is
+//! running, how far along it is, and which are waiting their turn.
 
-use std::collections::HashMap;
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::cli::args::Runtime;
 use crate::cli::task::Task;
+use crate::cli::webui::store::{Job, Kind, Refused, Status, Store};
 use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgress};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
@@ -67,20 +57,6 @@ const DECODING: f64 = 3.0;
 /// would sit in front of, saying nothing, for a second or two.
 const TEXT: f64 = 1.0;
 const VOCODER: f64 = 4.0;
-
-/// How long a session is kept after its page was last heard from.
-///
-/// An open page asks twice a second, so this is the time since a tab was closed. A day, so that
-/// somebody who closed the tab at night and opens it in the morning finds what they drew. What
-/// goes after that is the list; the files stay where they were written.
-const IDLE: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// How many sessions are kept at once, however recently they were heard from.
-///
-/// Each can hold a picture and a recording of several megabytes, and anything that talks to the
-/// server without keeping its cookie -- a script, `curl` -- is a new one on every request. The
-/// one heard from longest ago goes first.
-const MOST_SESSIONS: usize = 16;
 
 /// The model the page is set to draw with, as the screen describes it.
 ///
@@ -313,14 +289,13 @@ fn showable(value: f32) -> f64 {
     (f64::from(value) * 10_000.0).round() / 10_000.0
 }
 
-/// A finished picture: the file it was written to, and what it was asked for.
+/// What a finished picture was asked for, which is written into the PNG and kept with its job.
 ///
 /// What was asked for is kept beside it because a picture that came out well is asked about
 /// later, and by then the seed it came from is the first thing nobody remembers. It is the same
 /// line the browser shows under the picture and the same line that would let somebody draw it
 /// again.
 pub struct Picture {
-    pub file: String,
     pub width: usize,
     pub height: usize,
     pub prompt: String,
@@ -355,9 +330,8 @@ impl Picture {
         lines.join("\n")
     }
 
-    fn json(&self) -> Value {
+    pub fn json(&self) -> Value {
         json!({
-            "file": self.file,
             "width": self.width,
             "height": self.height,
             "prompt": self.prompt,
@@ -373,13 +347,12 @@ impl Picture {
     }
 }
 
-/// A finished clip: the file it was written to, and what it was asked for.
+/// What a finished clip was asked for, kept with its job.
 ///
 /// The same thing beside a clip that [`Picture::parameters`] is beside a picture, and kept for
 /// the same reason: a reading that came out well is asked about later, and by then the seed and
 /// the speed are the first two things nobody remembers.
 pub struct Clip {
-    pub file: String,
     pub text: String,
     pub seconds: f64,
     pub rate: u32,
@@ -408,9 +381,8 @@ impl Clip {
         format!("{}\n{settings}", self.text)
     }
 
-    fn json(&self) -> Value {
+    pub fn json(&self) -> Value {
         json!({
-            "file": self.file,
             "text": self.text,
             "length": self.seconds,
             "rate": self.rate,
@@ -425,378 +397,67 @@ impl Clip {
     }
 }
 
-/// Something worth saying, under the bar. `bad` is what colours it.
-#[derive(Clone)]
-pub struct Note {
-    pub said: String,
-    pub bad: bool,
-}
-
-/// What the program is doing, which is the same whichever page is asking.
+/// What the program is doing, which is the same whoever is asking.
 pub struct World {
-    /// What the page is set to draw with, whether or not its weights have been read.
+    /// What the program draws with, for a program started to draw.
     pub model: Option<Chosen>,
-    /// What the page is set to speak with. Filled in before any page opens, because the boxes on
-    /// the speech tab are a voice's numbers and there is nothing else to fill them from.
+    /// What it speaks with, for a program started to speak.
     pub voice: Option<Spoken>,
     pub doing: Doing,
-    /// Whose run [`World::doing`] is: the session that claimed the worker, until the worker gives
-    /// it back. None for what no page asked for, which is the model read before the server was up.
-    ///
-    /// What decides whose the bar is. Every page sees that the card is busy and how far along the
-    /// run is; only this one is offered the button that stops it, and only this one is told what
-    /// came of it.
-    pub owner: Option<Arc<Session>>,
-    /// Something said while no page owned the worker, which is only ever the read before the
-    /// server was up. The terminal reads it; a page is told what its own runs came to instead.
-    pub note: Option<Note>,
-    /// Counted up whenever anything here that a page shows changes, so that a browser polling for
-    /// news can tell "nothing has happened" from "everything happened and finished" without
-    /// comparing the whole of it.
-    ///
-    /// Not on each step of a run or each megabyte of a fetch. Those are [`Shared::report`], and
-    /// they reach a page through the progress it polls rather than through the state -- which is
-    /// what keeps a run on one page from having every other page read its state twice a second.
-    pub revision: u64,
+    /// The job the worker is running, if it is running one.
+    pub running: Option<String>,
+    /// The jobs waiting their turn, first in line first.
+    pub queue: VecDeque<String>,
+    /// What the read before the server was up came to. The terminal reads it; a job's own
+    /// failure is written on the job.
+    pub note: Option<String>,
 }
 
-impl World {
-    fn new() -> World {
-        World {
-            model: None,
-            voice: None,
-            doing: Doing::Nothing,
-            owner: None,
-            note: None,
-            revision: 0,
-        }
-    }
-
-    /// Whether what is running is `session`'s.
-    fn owned_by(&self, session: &Arc<Session>) -> bool {
-        self.owner
-            .as_ref()
-            .is_some_and(|owner| Arc::ptr_eq(owner, session))
-    }
-}
-
-/// What one session has made and been told.
-pub struct Record {
-    pub note: Option<Note>,
-    /// What has been drawn this session, newest first. The files themselves are in
-    /// [`Record::folder`]; this is the list of what may be asked for by name, which is also what
-    /// keeps a request from asking for a file that was never written here.
-    pub gallery: Vec<Picture>,
-    /// What has been said this session, newest first.
-    ///
-    /// Beside the pictures rather than mixed in with them. It is one gallery in the sense that
-    /// matters -- one list of what this session made, and one place that decides which file names
-    /// a request may ask for -- and two lists in the sense that also matters, which is that a
-    /// clip has a length and a picture has a shape and neither has the other. The screen shows
-    /// one kind at a time, so a single list would be a list the page filtered on every draw.
-    pub clips: Vec<Clip>,
-    /// Counted up every time anything here changes. What a page polls is this and
-    /// [`World::revision`] added together, which moves whenever either does.
-    pub revision: u64,
-    /// The [`Record::revision`] the held picture last changed at, and the held recording.
-    ///
-    /// What the page puts on the end of the address it shows each one from, so that the browser
-    /// fetches it again when it is a different picture or recording and not otherwise. It used
-    /// the session's own revision for that, which moved on every token of a reading and every
-    /// step of a drawing -- and the recording's player reloaded twice a second for as long as a
-    /// run went on, which is what somebody listening to it noticed.
-    pub picture_revision: u64,
-    pub recording_revision: u64,
-    /// The directory this session's files are written into, once it has written one.
-    ///
-    /// A directory of its own under the one the program was told to write into, so that two
-    /// people's pictures are two runs of numbered files rather than one run of both. Made at the
-    /// first file rather than when the session begins: a page opened and closed again has nothing
-    /// to leave behind, and every page that polls is a session.
-    pub folder: Option<PathBuf>,
-}
-
-/// One browser's page: what it has made, and the two files it is holding for its next run.
-///
-/// Shared behind an `Arc`. The registry holds one, and a run in flight holds another, so that a
-/// session let go of by the registry while its run was going still has somewhere to put the
-/// picture the run ends with.
-pub struct Session {
-    record: Mutex<Record>,
-    /// The picture an image to image run would start from, as the bytes it arrived as.
-    ///
-    /// One of them rather than a list: the page has one such box, and a second file dropped on it
-    /// replaces the first. Behind its own lock, away from the record, because the record is copied
-    /// out into JSON several times a second and this is megabytes.
-    upload: Mutex<Option<Vec<u8>>>,
-    /// The recording a reading should sound like, as the WAV bytes it arrived as.
-    ///
-    /// Its own lock beside the picture's, for the same reason that one is not in the record: it
-    /// is megabytes and the record is copied into JSON several times a second. Separate from the
-    /// picture rather than one box for both, because they are two different runs' inputs and
-    /// dropping a voice should not throw away the picture somebody is about to redraw.
-    ///
-    /// WAV rather than whatever was dropped on the page. The browser has a decoder for every
-    /// format it will play and this program has one for none of them, so the page decodes what it
-    /// is given and posts the samples -- which means what arrives here is always something
-    /// [`crate::wav::read`] can read.
-    recording: Mutex<Option<Vec<u8>>>,
-    /// When a request last came from this session's page, which is what decides when it goes.
-    seen: Mutex<Instant>,
-}
-
-impl Session {
-    /// A session holding nothing, or holding the picture `-i` named.
-    pub fn new(upload: Option<Vec<u8>>) -> Session {
-        Session {
-            record: Mutex::new(Record {
-                note: None,
-                gallery: Vec::new(),
-                clips: Vec::new(),
-                revision: 0,
-                picture_revision: 0,
-                recording_revision: 0,
-                folder: None,
-            }),
-            upload: Mutex::new(upload),
-            recording: Mutex::new(None),
-            seen: Mutex::new(Instant::now()),
-        }
-    }
-
-    /// The record, for as long as the returned guard lives.
-    ///
-    /// A poisoned lock is taken as it is rather than unwrapped into a panic of this thread's own,
-    /// for the reason [`Shared::world`] gives.
-    pub fn record(&self) -> MutexGuard<'_, Record> {
-        self.record.lock().unwrap_or_else(|held| held.into_inner())
-    }
-
-    /// Changes the record and marks it changed, which is the only way it is changed.
-    pub fn change<T>(&self, change: impl FnOnce(&mut Record) -> T) -> T {
-        let mut record = self.record();
-        let answer = change(&mut record);
-        record.revision += 1;
-
-        answer
-    }
-
-    /// Puts a sentence under this page's bar, and the same sentence in the terminal: what the page
-    /// is told is what somebody watching the log is told.
-    pub fn say(&self, said: impl Into<String>, bad: bool) {
-        let said = said.into();
-        crate::cli::webui::log::line(format_args!(
-            "{}: {said}",
-            if bad { "error" } else { "note" }
-        ));
-        self.change(|record| record.note = Some(Note { said, bad }));
-    }
-
-    pub fn hold_upload(&self, bytes: Vec<u8>) {
-        *self.held() = Some(bytes);
-        self.change(|record| record.picture_revision = record.revision + 1);
-    }
-
-    /// A copy of the picture being held, for whoever is about to do something with it.
-    ///
-    /// Copied rather than borrowed: what wants it is the worker, on the far side of a channel,
-    /// and holding this lock while a run decodes and scales the thing would be holding it for as
-    /// long as that takes.
-    pub fn upload(&self) -> Option<Vec<u8>> {
-        self.held().clone()
-    }
-
-    pub fn forget_upload(&self) {
-        *self.held() = None;
-        self.change(|record| record.picture_revision = record.revision + 1);
-    }
-
-    /// Whether there is a picture to draw from, which is the part of it the page is told about.
-    pub fn holding_a_picture(&self) -> bool {
-        self.held().is_some()
-    }
-
-    fn held(&self) -> MutexGuard<'_, Option<Vec<u8>>> {
-        self.upload.lock().unwrap_or_else(|held| held.into_inner())
-    }
-
-    pub fn hold_recording(&self, bytes: Vec<u8>) {
-        *self.recorded() = Some(bytes);
-        self.change(|record| record.recording_revision = record.revision + 1);
-    }
-
-    /// A copy of the recording being held, for the run that is about to be given it.
-    pub fn recording(&self) -> Option<Vec<u8>> {
-        self.recorded().clone()
-    }
-
-    pub fn forget_recording(&self) {
-        *self.recorded() = None;
-        self.change(|record| record.recording_revision = record.revision + 1);
-    }
-
-    /// Whether there is a recording to sound like, which is the part of it the page is told.
-    pub fn holding_a_recording(&self) -> bool {
-        self.recorded().is_some()
-    }
-
-    fn recorded(&self) -> MutexGuard<'_, Option<Vec<u8>>> {
-        self.recording
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-    }
-
-    /// Where a file the browser asks for by name is, if this session wrote it.
-    ///
-    /// The gallery is the whole of what can be asked for. A path out of a request is otherwise a
-    /// way to read any file the process can, and a server on the loopback address is still
-    /// reachable by anything else running on the machine, a browser tab on another site included.
-    /// And this session's gallery rather than anybody's: another page's pictures are not this
-    /// page's to look at or delete.
-    pub fn wrote(&self, file: &str) -> Option<PathBuf> {
-        let record = self.record();
-        let folder = record.folder.as_ref()?;
-        record
-            .gallery
-            .iter()
-            .find(|picture| picture.file == file)
-            .map(|picture| folder.join(&picture.file))
-    }
-
-    /// Where a clip the browser asks for by name is, if this session said it.
-    ///
-    /// The same door as a picture and the same answer through it: a name that is not in the list
-    /// of what this session made is not a file this program will open, whatever it is a path to.
-    /// Two lists and two doors rather than one of each, so that a request for a picture cannot
-    /// reach a clip and be handed one under the wrong content type.
-    pub fn spoke(&self, file: &str) -> Option<PathBuf> {
-        let record = self.record();
-        let folder = record.folder.as_ref()?;
-        record
-            .clips
-            .iter()
-            .find(|clip| clip.file == file)
-            .map(|clip| folder.join(&clip.file))
-    }
-
-    /// Takes a clip out of the list, which is what makes its name unaskable-for again.
-    pub fn forget_clip(&self, file: &str) {
-        self.change(|record| record.clips.retain(|clip| clip.file != file));
-    }
-
-    /// Takes a picture out of the gallery, which is what makes its name unaskable-for again.
-    ///
-    /// Said separately from deleting the file: the row goes whether or not the file was still
-    /// there to delete, because a row for a file that is gone is a thumbnail that cannot load.
-    pub fn forget_picture(&self, file: &str) {
-        self.change(|record| record.gallery.retain(|picture| picture.file != file));
-    }
-
-    /// The directory this session writes into, made under `root` the first time it is asked for.
-    ///
-    /// The first `session-NNNN` there that does not exist yet, so that a second run of the program
-    /// in the same place carries on from where the first left off rather than writing into its
-    /// folders. Made with `create_dir` rather than checked and then made, so that two programs
-    /// writing to one place cannot both be told one name is free.
-    pub fn folder(&self, root: &Path) -> std::io::Result<PathBuf> {
-        let mut record = self.record();
-        if let Some(folder) = &record.folder {
-            return Ok(folder.clone());
-        }
-
-        std::fs::create_dir_all(root)?;
-        for number in 1..100_000 {
-            let folder = root.join(format!("session-{number:04}"));
-            match std::fs::create_dir(&folder) {
-                Ok(()) => {
-                    record.folder = Some(folder.clone());
-                    return Ok(folder);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-
-        Err(std::io::Error::other(format!(
-            "there are already a hundred thousand session folders in {}",
-            root.display()
-        )))
-    }
-
-    fn touch(&self) {
-        *self.seen.lock().unwrap_or_else(|held| held.into_inner()) = Instant::now();
-    }
-
-    fn quiet_for(&self) -> Duration {
-        self.seen
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-            .elapsed()
-    }
-}
-
-/// A request's session, as [`Shared::session_for`] found it.
-pub struct Visit {
-    pub session: Arc<Session>,
-    /// What the browser's cookie says, or is to be told to say.
-    pub key: String,
-    /// Whether the session was made for this request, which is when the browser has to be handed
-    /// the key to it.
-    pub new: bool,
-}
-
-/// The world, the sessions, the flag that stops a run, and what about the process cannot change.
+/// The world, the store, the flag that stops a run, and what about the process cannot change.
 pub struct Shared {
     world: Mutex<World>,
-    /// Every page that has been heard from, by the key its cookie carries.
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
-    /// Set while a run is in flight to ask it to stop between steps, which is the only place it
+    /// Rung when a job is queued, which is what the worker waits on between jobs.
+    queued: Condvar,
+    /// Set while a job is running to ask it to stop between steps, which is the only place it
     /// can be asked: a step, once started, is a kernel launch that nothing here can call back.
     cancel: AtomicBool,
-    /// Whether a command has been posted to the worker and not yet finished.
-    ///
-    /// [`Doing`] is not that. It says what the worker has picked up, which is a moment later than
-    /// when a request handed it over -- and in that moment a second request reads "nothing is
-    /// happening" and posts a second run. Two clicks on a button are exactly that far apart, and
-    /// what came of it was two pictures for one press.
-    working: AtomicBool,
-    /// Where runs go, chosen in the terminal before the page opened. Not something the page can
-    /// change: weights live on the device they were read onto, and moving them is a question the
-    /// terminal asks, before anything has been read.
+    /// Whether the read before the server was up is still going.
+    reading: AtomicBool,
+    /// Where runs go, chosen in the terminal before the page opened.
     runtime: Runtime,
-    /// What the page is for, chosen in the terminal as well: which tab it opens on, and which of
-    /// the two kinds of model this program runs.
+    /// What the program is for, chosen in the terminal as well: which kind of job it takes.
     task: Task,
-    /// The directory every session's folder is made in.
-    output: PathBuf,
-    /// What the cookie is called. With the port in it: a browser keeps cookies by host and not by
-    /// port, and two copies of this program on one machine would otherwise take turns throwing
-    /// each other's sessions away.
-    cookie: String,
-    /// The picture `-i` named, which every new session starts out holding: it is what whoever ran
-    /// the program asked the img2img box to open with, and the page it was asked for is whichever
-    /// one opens first -- which is not something the program can know in advance.
-    first_picture: Option<Vec<u8>>,
+    /// Every job and upload, kept on the disk.
+    store: Store,
+    /// The upload `-i` named, which the page offers to start from.
+    starting_picture: Option<String>,
 }
 
 impl Shared {
-    pub fn new(task: Task, runtime: Runtime, output: PathBuf, port: u16) -> Shared {
+    pub fn new(task: Task, runtime: Runtime, store: Store) -> Shared {
         Shared {
-            world: Mutex::new(World::new()),
-            sessions: Mutex::new(HashMap::new()),
+            world: Mutex::new(World {
+                model: None,
+                voice: None,
+                doing: Doing::Nothing,
+                running: None,
+                queue: VecDeque::new(),
+                note: None,
+            }),
+            queued: Condvar::new(),
             cancel: AtomicBool::new(false),
-            working: AtomicBool::new(false),
+            reading: AtomicBool::new(false),
             runtime,
             task,
-            output,
-            cookie: format!("waifu-{port}"),
-            first_picture: None,
+            store,
+            starting_picture: None,
         }
     }
 
-    /// Has every session from here on start out holding `bytes`, which is what `-i` asks for.
-    pub fn start_holding(&mut self, bytes: Vec<u8>) {
-        self.first_picture = Some(bytes);
+    /// Keeps `bytes` as an upload that the page offers to start from, which is what `-i` asks.
+    pub fn start_holding(&mut self, bytes: &[u8]) -> Result<(), Refused> {
+        self.starting_picture = Some(self.store.upload(bytes)?.id);
+        Ok(())
     }
 
     /// The world, for as long as the returned guard lives.
@@ -809,249 +470,151 @@ impl Shared {
         self.world.lock().unwrap_or_else(|held| held.into_inner())
     }
 
-    /// Changes the world and marks it changed, which is the way it is changed for anything a page
-    /// would need to read the state again to see.
+    /// Changes the world under its lock.
     pub fn change<T>(&self, change: impl FnOnce(&mut World) -> T) -> T {
-        let mut world = self.world();
-        let answer = change(&mut world);
-        world.revision += 1;
-
-        answer
+        change(&mut self.world())
     }
 
-    /// Changes the world without marking it changed, for how far along a run or a fetch is.
-    ///
-    /// Those reach a page through the progress it polls, which carries them whether or not the
-    /// revision moved. Counting them as news had every open page read the whole state again on
-    /// every step of every run, including the runs that were not its own.
-    pub fn report(&self, change: impl FnOnce(&mut World)) {
-        change(&mut self.world());
-    }
-
-    /// Says something about what the worker is doing, to whoever it is doing it for.
-    ///
-    /// Under the bar of the page whose run it is. Where no page asked -- the read before the
-    /// server is up -- it is kept in the world instead, where the terminal reads it.
-    pub fn say(&self, said: impl Into<String>, bad: bool) {
-        let owner = self.world().owner.clone();
-        match owner {
-            Some(session) => session.say(said, bad),
-            None => {
-                let said = said.into();
-                crate::cli::webui::log::line(format_args!(
-                    "{}: {said}",
-                    if bad { "error" } else { "note" }
-                ));
-                self.change(|world| world.note = Some(Note { said, bad }));
-            }
-        }
-    }
-
-    /// Takes the worker for `owner`, if it is free. True means it is the caller's to post a
-    /// command to, and that what the worker does next is `owner`'s run.
-    ///
-    /// The one place a request decides whether the program is busy, and the deciding and the
-    /// claiming are the same instruction on purpose: asked and answered separately, two requests
-    /// both get told yes.
-    pub fn claim(&self, owner: Option<Arc<Session>>) -> bool {
-        let claimed = self
-            .working
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok();
-        if claimed {
-            self.world().owner = owner;
-        }
-
-        claimed
-    }
-
-    /// Gives it back, which the worker does as it finishes each command -- and which a request
-    /// does itself when the command it claimed for could not be posted after all.
-    pub fn release(&self) {
-        self.world().owner = None;
-        self.working.store(false, Ordering::Release);
-    }
-
-    /// Whether anything is happening, which is a wider question than what the worker has picked
-    /// up: a command posted a moment ago has not been picked up and is still something happening.
-    pub fn is_busy(&self) -> bool {
-        self.working.load(Ordering::Acquire) || self.world().doing.is_busy()
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     pub fn runtime(&self) -> Runtime {
         self.runtime
     }
 
-    /// The directory every session's folder is made in.
-    pub fn output(&self) -> &Path {
-        &self.output
-    }
-
-    /// Asks whatever is running to stop where it is, if it is `session`'s to stop.
-    ///
-    /// False where the run is another page's. A page can see that somebody else's run is going,
-    /// and it cannot stop it: a stop takes the model off the card, and that is a decision about
-    /// the run of whoever pressed the button that started it. With nothing running there is
-    /// nothing to refuse, and nothing is set -- a stop left lying around is a stop the next run
-    /// would read on its way in.
-    pub fn interrupt(&self, session: &Arc<Session>) -> bool {
-        let world = self.world();
-        match &world.owner {
-            Some(_) if !world.owned_by(session) => false,
-            Some(_) => {
-                self.cancel.store(true, Ordering::Relaxed);
-                true
-            }
-            None => true,
+    /// What kind of job this program takes.
+    pub fn kind(&self) -> Kind {
+        match self.task.speaks() {
+            true => Kind::Speech,
+            false => Kind::Image,
         }
     }
 
-    /// Whether a stop has been asked for. Cleared by the worker as each run begins: a stop asked
-    /// for after the last run finished is not the next run's business.
+    /// Says something about the read before the server was up, in the terminal.
+    pub fn say(&self, said: impl Into<String>, bad: bool) {
+        let said = said.into();
+        crate::cli::webui::log::line(format_args!(
+            "{}: {said}",
+            if bad { "error" } else { "note" }
+        ));
+        self.world().note = Some(said);
+    }
+
+    /// Marks the read before the server was up as started or finished.
+    pub fn reading(&self, reading: bool) {
+        self.reading.store(reading, Ordering::Release);
+    }
+
+    /// Whether anything is happening: the read before the server is up, or a job.
+    pub fn is_busy(&self) -> bool {
+        let world = self.world();
+        self.reading.load(Ordering::Acquire)
+            || world.running.is_some()
+            || !world.queue.is_empty()
+            || world.doing.is_busy()
+    }
+
+    // -- the queue ------------------------------------------------------------------------------
+
+    /// Puts a job in line, and wakes the worker if it is waiting.
+    pub fn enqueue(&self, id: &str) {
+        self.world().queue.push_back(id.to_string());
+        self.queued.notify_one();
+    }
+
+    /// Where a queued job is in line: nought for next.
+    #[cfg(test)]
+    pub fn position(&self, id: &str) -> Option<usize> {
+        self.world().queue.iter().position(|queued| queued == id)
+    }
+
+    /// The next job, waiting for one where there is none. Taken off the queue and marked as
+    /// running in the same breath, and the stop flag cleared with it: a stop asked for after the
+    /// last job finished is not this one's.
+    pub fn next(&self) -> String {
+        let mut world = self.world();
+        loop {
+            if let Some(id) = world.queue.pop_front() {
+                world.running = Some(id.clone());
+                self.cancel.store(false, Ordering::Relaxed);
+                return id;
+            }
+            world = self
+                .queued
+                .wait(world)
+                .unwrap_or_else(|held| held.into_inner());
+        }
+    }
+
+    /// Marks the running job as finished with, whichever way it ended.
+    pub fn finished(&self) {
+        let mut world = self.world();
+        world.running = None;
+        world.doing = Doing::Nothing;
+    }
+
+    /// Asks a job to stop: taken out of the line where it is waiting, asked to stop between steps
+    /// where it is running. Under the one lock that [`Shared::next`] takes a job off the line
+    /// under, so that a job is always one or the other here and never neither.
+    pub fn cancel(&self, id: &str) -> Cancelled {
+        let mut world = self.world();
+        if let Some(at) = world.queue.iter().position(|queued| queued == id) {
+            world.queue.remove(at);
+            drop(world);
+            self.store.cancelled(id);
+            return Cancelled::Dequeued;
+        }
+        if world.running.as_deref() == Some(id) {
+            self.cancel.store(true, Ordering::Relaxed);
+            return Cancelled::Stopping;
+        }
+        Cancelled::NotGoing
+    }
+
+    /// Whether the running job has been asked to stop.
     pub fn interrupted(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
 
-    pub fn carry_on(&self) {
-        self.cancel.store(false, Ordering::Relaxed);
-    }
+    // -- what is answered with ------------------------------------------------------------------
 
-    /// The session a request's `Cookie` header names, or a new one where it names none this
-    /// program knows.
-    ///
-    /// A key from a cookie is only ever looked up, never trusted to be well formed: a name that
-    /// is not in the registry is a new session, whatever it looked like.
-    pub fn session_for(&self, cookies: Option<&str>) -> Visit {
-        let key = cookies.and_then(|cookies| cookie(cookies, &self.cookie));
-
-        let mut sessions = self.sessions();
-        if let Some((key, session)) = key.and_then(|key| sessions.get_key_value(key)) {
-            session.touch();
-            return Visit {
-                session: Arc::clone(session),
-                key: key.clone(),
-                new: false,
-            };
-        }
-
-        self.make_room(&mut sessions);
-        let key = a_key();
-        let session = Arc::new(Session::new(self.first_picture.clone()));
-        sessions.insert(key.clone(), Arc::clone(&session));
-
-        Visit {
-            session,
-            key,
-            new: true,
-        }
-    }
-
-    /// The `Set-Cookie` value that hands `key` to a browser.
-    ///
-    /// `HttpOnly`, since nothing the page runs has any use for it; `SameSite=Strict`, so that a
-    /// page on another site cannot start a run as somebody who has this one open; and kept for as
-    /// long as the session is, so that a browser closed and opened again finds the same one.
-    pub fn set_cookie(&self, key: &str) -> String {
-        format!(
-            "{}={key}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
-            self.cookie,
-            IDLE.as_secs()
-        )
-    }
-
-    fn sessions(&self) -> MutexGuard<'_, HashMap<String, Arc<Session>>> {
-        self.sessions
-            .lock()
-            .unwrap_or_else(|held| held.into_inner())
-    }
-
-    /// Lets go of the sessions nobody has heard from in [`IDLE`], and then of the one heard from
-    /// longest ago for as long as there are too many, so that there is room for one more.
-    ///
-    /// Never the one whose run is going. Its page has asked for a picture and is waiting for it,
-    /// and a session let go of now would be one that came back to an empty gallery.
-    fn make_room(&self, sessions: &mut HashMap<String, Arc<Session>>) {
-        let owner = self.world().owner.clone();
-        let running = |session: &Arc<Session>| {
-            owner
-                .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(owner, session))
-        };
-
-        sessions.retain(|_, session| running(session) || session.quiet_for() < IDLE);
-
-        while sessions.len() >= MOST_SESSIONS {
-            let quietest = sessions
-                .iter()
-                .filter(|(_, session)| !running(session))
-                .max_by_key(|(_, session)| session.quiet_for())
-                .map(|(key, _)| key.clone());
-            match quietest {
-                Some(key) => sessions.remove(&key),
-                None => break,
-            };
-        }
-    }
-
-    /// The little of it a browser drawing a progress bar needs, which it asks for twice a second.
-    pub fn progress(&self, session: &Arc<Session>) -> Value {
-        // Read before the lock is taken, since asking it takes the lock too.
-        let busy = self.is_busy();
-
+    /// A job as a request is answered with it: what is kept, and what only the running program
+    /// knows -- where it is in line, and how far along it is.
+    pub fn describe_job(&self, job: &Job) -> Value {
+        let mut described = job.json();
         let world = self.world();
-        let mine = world.owned_by(session);
-        let theirs = world.owner.is_some() && !mine;
+        match job.status {
+            Status::Queued => {
+                if let Some(at) = world.queue.iter().position(|queued| *queued == job.id) {
+                    described["position"] = json!(at);
+                }
+            }
+            Status::Running if world.running.as_deref() == Some(job.id.as_str()) => {
+                described["progress"] = progress(&world.doing);
+                described["stopping"] = json!(self.interrupted());
+            }
+            _ => {}
+        }
 
-        let words = world.doing.words();
+        described
+    }
+
+    /// What the worker is doing, for anybody: whether it is busy, which job, how far along, and
+    /// how many are waiting.
+    pub fn describe_worker(&self) -> Value {
+        let busy = self.is_busy();
+        let world = self.world();
         json!({
-            // Both counts at once. Each only ever goes up, so the sum moves whenever either does,
-            // which is all a page asks of it: whether to read the state again.
-            "revision": world.revision + session.record().revision,
             "busy": busy,
-            // Whether the run is this page's. The page is shown another's -- the card is busy,
-            // and a button that stayed live would only be refused -- but not offered its stop.
-            "mine": mine,
-            "drawing": mine && matches!(world.doing, Doing::Drawing(_)),
-            // Told apart from drawing, because the two buttons that stop them are on different
-            // tabs and each one is live only while its own kind of run is going.
-            "speaking": mine && matches!(world.doing, Doing::Speaking(_)),
-            // And told apart from both, because the same button stops a fetch but what it says
-            // it will do is not the same thing: a run that is stopped keeps the picture so far,
-            // and a fetch that is stopped keeps the packages so far.
-            "fetching": mine && matches!(world.doing, Doing::Fetching(_)),
-            "fraction": world.doing.fraction(),
-            "doing": match theirs && !words.is_empty() {
-                true => format!("for another page: {words}"),
-                false => words,
-            },
-            "seconds": match &world.doing {
-                Doing::Drawing(run) => Some(run.started.elapsed().as_secs_f64()),
-                Doing::Speaking(say) => Some(say.started.elapsed().as_secs_f64()),
-                _ => None,
-            },
-            // Only while there is something to stop. The flag stays set between a run that was
-            // stopped and the next one that clears it, and a bar saying "stopping" over an idle
-            // program would be reporting the flag rather than what is happening.
-            //
-            // A fetch is one of the things there is to stop; reading the weights onto the device
-            // is not, and the flag set during that one is a stop that will be taken by whatever
-            // comes after it rather than by the read.
-            "interrupting": mine
-                && self.interrupted()
-                && matches!(
-                    world.doing,
-                    Doing::Drawing(_) | Doing::Speaking(_) | Doing::Fetching(_)
-                ),
+            "running": world.running,
+            "queued": world.queue.len(),
+            "progress": progress(&world.doing),
         })
     }
 
-    /// The whole of it, as `session`'s page sees it: what the program is set to run, and what
-    /// this page has made. What a browser asks for when it opens and after anything lands.
-    pub fn describe(&self, session: &Arc<Session>) -> Value {
-        // Asked before either lock is taken: each takes a lock of its own.
-        let holding_a_picture = session.holding_a_picture();
-        let holding_a_recording = session.holding_a_recording();
-
+    /// The model this program serves, and what a job of it can be asked for.
+    pub fn describe_model(&self) -> Value {
         let world = self.world();
         let model = world.model.as_ref().map(|model| {
             json!({
@@ -1093,57 +656,45 @@ impl Shared {
             })
         });
 
-        let record = session.record();
         json!({
-            "revision": world.revision + record.revision,
             "built_from": crate::cli::REVISION,
             "task": self.task.name(),
+            "kind": self.kind().name(),
             "device": self.runtime.name(),
-            "holding_a_picture": holding_a_picture,
-            "holding_a_recording": holding_a_recording,
-            "picture_revision": record.picture_revision,
-            "recording_revision": record.recording_revision,
             "model": model,
             "voice": voice,
-            "note": record.note.as_ref().map(|note| json!({ "said": note.said, "bad": note.bad })),
-            "gallery": record.gallery.iter().map(Picture::json).collect::<Vec<_>>(),
-            "clips": record.clips.iter().map(Clip::json).collect::<Vec<_>>(),
+            "starting_picture": self.starting_picture,
+            "output": {
+                "used": self.store.used(),
+                "limit": self.store.limit(),
+            },
         })
     }
 }
 
-/// The value of the cookie called `name` in a `Cookie` header, if it has one.
-fn cookie<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
-    cookies.split(';').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key.trim() == name).then_some(value.trim())
-    })
+/// What asking a job to stop came to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cancelled {
+    /// It was waiting, and is not any more.
+    Dequeued,
+    /// It is running, and will stop after the step it is on.
+    Stopping,
+    /// It is neither: finished already, or never was.
+    NotGoing,
 }
 
-/// A fresh session key: 128 bits, as hex.
-///
-/// It is the whole of what makes one page's pictures another's to look at, so it comes from the
-/// operating system where there is a `/dev/urandom` to read. Elsewhere it is two finished
-/// `RandomState` hashers -- keyed from the operating system's randomness as well, once per
-/// thread, and a keyed hash that nothing outside this process has the key to.
-fn a_key() -> String {
-    let mut bytes = [0u8; 16];
-    let from_the_system = std::fs::File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut bytes))
-        .is_ok();
-
-    if !from_the_system {
-        use std::hash::{BuildHasher, Hasher};
-        let mut halves = (0..2).map(|_| {
-            std::collections::hash_map::RandomState::new()
-                .build_hasher()
-                .finish()
-        });
-        bytes[..8].copy_from_slice(&halves.next().unwrap_or_default().to_le_bytes());
-        bytes[8..].copy_from_slice(&halves.next().unwrap_or_default().to_le_bytes());
-    }
-
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+/// How far along the worker is, as a bar draws it.
+fn progress(doing: &Doing) -> Value {
+    json!({
+        "doing": doing.words(),
+        "fraction": doing.fraction(),
+        "seconds": match doing {
+            Doing::Drawing(run) => Some(run.started.elapsed().as_secs_f64()),
+            Doing::Speaking(say) => Some(say.started.elapsed().as_secs_f64()),
+            _ => None,
+        },
+        "fetching": matches!(doing, Doing::Fetching(_)),
+    })
 }
 
 #[cfg(test)]
@@ -1152,45 +703,28 @@ mod tests {
 
     use crate::cli::args::DeviceOption;
 
-    /// A program with nothing loaded, writing under a directory of the calling test's own.
+    /// A program with nothing loaded, keeping its jobs in a directory of the calling test's own.
     fn a_program(called: &str) -> Shared {
-        let output =
+        let root =
             std::env::temp_dir().join(format!("libwaifu-state-{called}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&output);
-        Shared::new(Task::Txt2Img, DeviceOption::Cpu.resolve(), output, 7860)
+        let _ = std::fs::remove_dir_all(&root);
+        Shared::new(
+            Task::Txt2Img,
+            DeviceOption::Cpu.resolve(),
+            Store::open(&root, None).expect("a store"),
+        )
     }
 
-    /// A page open on `shared`, as a browser with no cookie yet would open one.
-    fn a_page(shared: &Shared) -> Arc<Session> {
-        shared.session_for(None).session
-    }
-
-    /// A page that has already written into a folder, which is what a gallery with rows in it
-    /// always is outside a test.
-    fn a_page_with_a_folder(shared: &Shared) -> Arc<Session> {
-        let page = a_page(shared);
-        page.record().folder = Some(PathBuf::from("out/session-0001"));
-        page
-    }
-
-    fn a_clip(seed: u64) -> Clip {
-        Clip {
-            file: format!("waifu-{seed:04}.wav"),
-            text: "hello there".to_string(),
-            seconds: 1.5,
-            rate: 24_000,
-            speed: 1.0,
-            temperature: 0.8,
-            seed,
-            voice: "tones".to_string(),
-            from_a_recording: false,
-            elapsed: Duration::from_millis(120),
-        }
+    fn a_drawing() -> Doing {
+        Doing::Drawing(Run {
+            progress: GenerationProgress::Step { done: 3, total: 8 },
+            steps: 8,
+            started: Instant::now(),
+        })
     }
 
     fn a_picture(seed: u64) -> Picture {
         Picture {
-            file: format!("waifu-{seed:04}.png"),
             width: 1024,
             height: 1024,
             prompt: "a cat".to_string(),
@@ -1204,12 +738,18 @@ mod tests {
         }
     }
 
-    fn a_drawing() -> Doing {
-        Doing::Drawing(Run {
-            progress: GenerationProgress::Encoding,
-            steps: 8,
-            started: Instant::now(),
-        })
+    fn a_clip(seed: u64) -> Clip {
+        Clip {
+            text: "hello there".to_string(),
+            seconds: 1.5,
+            rate: 24_000,
+            speed: 1.0,
+            temperature: 0.8,
+            seed,
+            voice: "tones".to_string(),
+            from_a_recording: false,
+            elapsed: Duration::from_millis(120),
+        }
     }
 
     #[test]
@@ -1317,339 +857,6 @@ mod tests {
     }
 
     #[test]
-    fn every_change_is_news() {
-        // The page polls a handful of numbers and asks for the whole state only when this moves,
-        // so a change that did not move it is a change no open page would ever see -- whether it
-        // was a change to the program or to the page's own session.
-        let shared = a_program("news");
-        let page = a_page(&shared);
-        let revision = |shared: &Shared| shared.progress(&page)["revision"].as_u64().unwrap();
-
-        let first = revision(&shared);
-        page.say("ready", false);
-        let second = revision(&shared);
-        assert!(second > first);
-
-        shared.change(|world| world.model = Some(crate::cli::webui::worker::look_at("sdxl:base")));
-        let third = revision(&shared);
-        assert!(third > second);
-
-        page.change(|record| record.gallery.push(a_picture(1)));
-        assert!(revision(&shared) > third);
-    }
-
-    #[test]
-    fn how_far_along_a_run_is_is_not_news() {
-        // It reaches every page through the progress it polls. Counted as news, it had every open
-        // page read the whole state again on every step of every run -- somebody else's included.
-        let shared = a_program("progress-is-not-news");
-        let page = a_page(&shared);
-        shared.change(|world| world.doing = a_drawing());
-        let before = shared.progress(&page)["revision"].clone();
-
-        for done in 1..=8 {
-            shared.report(|world| {
-                if let Doing::Drawing(run) = &mut world.doing {
-                    run.progress = GenerationProgress::Step { done, total: 8 };
-                }
-            });
-        }
-
-        let after = shared.progress(&page);
-        assert_eq!(after["revision"], before);
-        assert!(
-            after["doing"].as_str().unwrap().contains("8 of 8"),
-            "{after}"
-        );
-    }
-
-    #[test]
-    fn only_what_this_session_drew_can_be_asked_for_by_name() {
-        // The gallery is the whole of what is readable. Anything else is a path out of a request,
-        // and this server is reachable by everything else running on the machine.
-        let shared = a_program("by-name");
-        let page = a_page_with_a_folder(&shared);
-        page.change(|record| record.gallery.push(a_picture(1)));
-
-        assert_eq!(
-            page.wrote("waifu-0001.png"),
-            Some(PathBuf::from("out/session-0001/waifu-0001.png"))
-        );
-        assert!(page.wrote("waifu-0002.png").is_none());
-        assert!(page.wrote("../../etc/passwd").is_none());
-        assert!(page.wrote("/etc/passwd").is_none());
-    }
-
-    #[test]
-    fn one_page_cannot_ask_for_what_another_drew() {
-        // Two browsers, two galleries. A picture is a name in one session's list, and a request
-        // from any other page is not a request that list answers.
-        let shared = a_program("another-page");
-        let mine = a_page_with_a_folder(&shared);
-        let theirs = a_page_with_a_folder(&shared);
-        theirs.change(|record| record.gallery.push(a_picture(1)));
-        theirs.change(|record| record.clips.push(a_clip(1)));
-
-        assert!(theirs.wrote("waifu-0001.png").is_some());
-        assert!(mine.wrote("waifu-0001.png").is_none());
-        assert!(mine.spoke("waifu-0001.wav").is_none());
-
-        // And what each page is told about is its own.
-        assert_eq!(
-            shared.describe(&theirs)["gallery"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            shared.describe(&mine)["gallery"].as_array().unwrap().len(),
-            0
-        );
-    }
-
-    #[test]
-    fn a_picture_that_has_been_deleted_is_no_longer_one_of_this_session_s() {
-        // Out of the gallery is out of everything: the list the page draws, and the names a
-        // request may ask for.
-        let shared = a_program("deleted-picture");
-        let page = a_page_with_a_folder(&shared);
-        page.change(|record| record.gallery.push(a_picture(1)));
-        page.change(|record| record.gallery.push(a_picture(2)));
-        let before = page.record().revision;
-
-        page.forget_picture("waifu-0001.png");
-        assert!(page.wrote("waifu-0001.png").is_none());
-        assert!(page.wrote("waifu-0002.png").is_some());
-        // News, so that a second tab open on the same address stops showing it too.
-        assert!(page.record().revision > before);
-
-        // Deleting what is not there leaves the rest alone rather than failing.
-        page.forget_picture("waifu-0001.png");
-        assert_eq!(page.record().gallery.len(), 1);
-    }
-
-    #[test]
-    fn a_stop_is_only_reported_while_there_is_something_to_stop() {
-        // The flag stays set between a run that was stopped and the next one that clears it, and
-        // a bar saying "stopping" over an idle program would be reporting the flag rather than
-        // what is happening.
-        let shared = a_program("stop-reported");
-        let page = a_page(&shared);
-        assert!(shared.claim(Some(Arc::clone(&page))));
-        assert!(shared.interrupt(&page));
-        assert!(shared.interrupted());
-        assert_eq!(shared.progress(&page)["interrupting"], false);
-
-        shared.change(|world| world.doing = a_drawing());
-        assert_eq!(shared.progress(&page)["interrupting"], true);
-
-        // A fetch is the other thing there is to stop, and the page is told which of the two it
-        // is looking at: the same button stops both, and what it promises to keep is not the
-        // same.
-        shared.change(|world| {
-            world.doing = Doing::Fetching(Fetch {
-                model: "sdxl:base".to_string(),
-                hub: None,
-                file: "unet.safetensors".to_string(),
-                done: 1,
-                total: Some(2),
-                part: 1,
-                parts: 3,
-            })
-        });
-        assert_eq!(shared.progress(&page)["interrupting"], true);
-        assert_eq!(shared.progress(&page)["fetching"], true);
-        assert_eq!(shared.progress(&page)["drawing"], false);
-
-        // Reading the weights onto the device is neither: it is one call into the tensor library
-        // that returns when it returns, so there is nothing there to ask to stop and the bar does
-        // not offer to.
-        shared.change(|world| {
-            world.doing = Doing::Reading {
-                model: "sdxl:base".to_string(),
-            }
-        });
-        assert_eq!(shared.progress(&page)["interrupting"], false);
-        assert_eq!(shared.progress(&page)["fetching"], false);
-
-        shared.carry_on();
-        assert!(!shared.interrupted());
-    }
-
-    #[test]
-    fn another_page_s_run_is_shown_and_cannot_be_stopped() {
-        // Every page sees that the card is busy and how far along it is, which is why its own
-        // button is not live. Only the page that started the run is offered its stop, and a stop
-        // posted from any other is refused rather than taken.
-        let shared = a_program("another-run");
-        let mine = a_page(&shared);
-        let theirs = a_page(&shared);
-
-        assert!(shared.claim(Some(Arc::clone(&theirs))));
-        shared.change(|world| world.doing = a_drawing());
-
-        let seen = shared.progress(&mine);
-        assert_eq!(seen["busy"], true);
-        assert_eq!(seen["mine"], false);
-        assert_eq!(seen["drawing"], false);
-        assert!(
-            seen["doing"]
-                .as_str()
-                .unwrap()
-                .starts_with("for another page"),
-            "{seen}"
-        );
-
-        assert!(!shared.interrupt(&mine));
-        assert!(!shared.interrupted());
-
-        let theirs_seen = shared.progress(&theirs);
-        assert_eq!(theirs_seen["mine"], true);
-        assert_eq!(theirs_seen["drawing"], true);
-        assert!(shared.interrupt(&theirs));
-        assert!(shared.interrupted());
-
-        // Given back, it is nobody's, and a stop with nothing running has nothing to refuse.
-        shared.release();
-        shared.carry_on();
-        assert!(shared.interrupt(&mine));
-        assert!(
-            !shared.interrupted(),
-            "a stop left lying around is the next run's"
-        );
-    }
-
-    #[test]
-    fn what_the_worker_says_goes_to_the_page_it_is_working_for() {
-        let shared = a_program("say-to-owner");
-        let mine = a_page(&shared);
-        let theirs = a_page(&shared);
-
-        shared.claim(Some(Arc::clone(&theirs)));
-        shared.say("out of memory", true);
-        assert_eq!(shared.describe(&theirs)["note"]["said"], "out of memory");
-        assert!(shared.describe(&mine)["note"].is_null());
-        shared.release();
-
-        // With no page to say it to -- the read before the server is up -- it is kept where the
-        // terminal reads it, and no page is told.
-        shared.claim(None);
-        shared.say("ready", false);
-        assert_eq!(shared.world().note.as_ref().unwrap().said, "ready");
-        assert!(shared.describe(&mine)["note"].is_null());
-    }
-
-    #[test]
-    fn a_browser_is_found_again_by_its_cookie() {
-        let shared = a_program("cookie");
-        let first = shared.session_for(None);
-        assert!(first.new);
-        let key = first.key;
-        assert_eq!(key.len(), 32);
-
-        // Among whatever else the browser keeps for this host -- which includes the cookie of a
-        // second copy of this program on another port.
-        let header = format!("theme=dark; waifu-7861=someone-else; waifu-7860={key}");
-        let again = shared.session_for(Some(&header));
-        assert!(Arc::ptr_eq(&first.session, &again.session));
-        assert!(!again.new, "a session that was found is not made again");
-        assert_eq!(again.key, key);
-
-        // A key this program never gave out is a new session, not an error.
-        let stranger = shared.session_for(Some("waifu-7860=0123"));
-        assert!(!Arc::ptr_eq(&first.session, &stranger.session));
-        assert!(stranger.new);
-        assert_ne!(stranger.key, "0123");
-
-        // Two keys are two sessions.
-        assert_ne!(shared.session_for(None).key, shared.session_for(None).key);
-
-        let set = shared.set_cookie(&key);
-        assert!(set.starts_with(&format!("waifu-7860={key};")), "{set}");
-        assert!(set.contains("HttpOnly"), "{set}");
-        assert!(set.contains("SameSite=Strict"), "{set}");
-    }
-
-    #[test]
-    fn there_is_a_limit_to_how_many_sessions_are_kept_and_a_running_one_is_not_let_go_of() {
-        let shared = a_program("room");
-        let Visit {
-            session: running,
-            key,
-            ..
-        } = shared.session_for(None);
-        shared.claim(Some(Arc::clone(&running)));
-
-        for _ in 0..MOST_SESSIONS * 2 {
-            shared.session_for(None);
-        }
-        assert!(shared.sessions().len() <= MOST_SESSIONS);
-
-        // The quietest of them all, and still here: its page is waiting on a picture.
-        let found = shared.session_for(Some(&format!("waifu-7860={key}")));
-        assert!(!found.new);
-        assert!(Arc::ptr_eq(&found.session, &running));
-    }
-
-    #[test]
-    fn each_session_writes_into_a_folder_of_its_own_made_at_its_first_file() {
-        let shared = a_program("folders");
-        let root = shared.output().to_path_buf();
-        let first = a_page(&shared);
-        let second = a_page(&shared);
-
-        // Nothing made for a page that has not written anything.
-        assert!(!root.exists());
-
-        // One left behind by an earlier run of the program in the same place is skipped over.
-        std::fs::create_dir_all(root.join("session-0001")).unwrap();
-
-        let made = first.folder(&root).unwrap();
-        assert_eq!(made, root.join("session-0002"));
-        assert!(made.is_dir());
-        // Asked again, the same one.
-        assert_eq!(first.folder(&root).unwrap(), made);
-
-        assert_eq!(second.folder(&root).unwrap(), root.join("session-0003"));
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn the_picture_to_draw_from_is_held_until_it_is_let_go_of() {
-        let shared = a_program("held-picture");
-        let page = a_page(&shared);
-        assert!(!page.holding_a_picture());
-
-        page.hold_upload(vec![1, 2, 3]);
-        assert!(page.holding_a_picture());
-        assert_eq!(page.upload(), Some(vec![1, 2, 3]));
-        assert_eq!(shared.describe(&page)["holding_a_picture"], true);
-
-        page.forget_upload();
-        assert!(!page.holding_a_picture());
-        assert_eq!(page.upload(), None);
-    }
-
-    #[test]
-    fn the_picture_minus_i_named_is_in_every_page_s_box() {
-        // Whoever ran the program asked for the img2img box to open with it, and which page opens
-        // first is not something the program knows in advance.
-        let mut shared = a_program("minus-i");
-        shared.start_holding(vec![7, 7, 7]);
-
-        let first = a_page(&shared);
-        let second = a_page(&shared);
-        assert_eq!(shared.describe(&first)["holding_a_picture"], true);
-        assert_eq!(second.upload(), Some(vec![7, 7, 7]));
-
-        // Each page's own from there: clearing one box is not clearing the other.
-        first.forget_upload();
-        assert!(second.holding_a_picture());
-    }
-
-    #[test]
     fn the_speech_bar_weighs_the_vocoder_at_the_end() {
         // The same weighing the picture bar has, and for the same reason: a bar drawn from the
         // tokens alone fills up and then sits there while the vocoder runs.
@@ -1734,114 +941,116 @@ mod tests {
     }
 
     #[test]
-    fn only_what_this_session_said_can_be_asked_for_by_name_either() {
-        // The same rule the pictures are under, through its own door: a request for a picture
-        // cannot reach a clip and be handed one under the wrong content type.
-        let shared = a_program("said-by-name");
-        let page = a_page_with_a_folder(&shared);
-        page.change(|record| record.clips.push(a_clip(1)));
-        page.change(|record| record.gallery.push(a_picture(1)));
+    fn jobs_are_run_in_the_order_they_were_asked_for() {
+        let shared = a_program("order");
+        let first = shared.store().submit(Kind::Image, json!({})).unwrap();
+        let second = shared.store().submit(Kind::Image, json!({})).unwrap();
+        shared.enqueue(&first.id);
+        shared.enqueue(&second.id);
 
-        assert!(page.spoke("waifu-0001.wav").is_some());
-        assert!(page.spoke("waifu-0002.wav").is_none());
-        assert!(page.spoke("../../etc/passwd").is_none());
-        assert!(page.spoke("/etc/passwd").is_none());
+        assert_eq!(shared.position(&first.id), Some(0));
+        assert_eq!(shared.position(&second.id), Some(1));
+        assert_eq!(shared.describe_job(&second)["position"], 1);
+        assert_eq!(shared.describe_worker()["queued"], 2);
 
-        // And neither list is a door into the other.
-        assert!(page.spoke("waifu-0001.png").is_none());
-        assert!(page.wrote("waifu-0001.wav").is_none());
+        assert_eq!(shared.next(), first.id);
+        assert_eq!(shared.world().running.as_deref(), Some(first.id.as_str()));
+        assert_eq!(shared.position(&second.id), Some(0));
+        assert!(shared.is_busy());
+
+        shared.finished();
+        assert_eq!(shared.next(), second.id);
+        shared.finished();
+        assert!(!shared.is_busy());
     }
 
     #[test]
-    fn a_clip_that_has_been_deleted_is_no_longer_one_of_this_session_s() {
-        let shared = a_program("deleted-clip");
-        let page = a_page_with_a_folder(&shared);
-        page.change(|record| record.clips.push(a_clip(1)));
-        page.change(|record| record.clips.push(a_clip(2)));
-        let before = page.record().revision;
+    fn a_waiting_job_is_taken_out_of_line_and_a_running_one_asked_to_stop() {
+        let shared = a_program("cancel");
+        let running = shared.store().submit(Kind::Image, json!({})).unwrap();
+        let waiting = shared.store().submit(Kind::Image, json!({})).unwrap();
+        shared.enqueue(&running.id);
+        shared.enqueue(&waiting.id);
+        shared.next();
+        shared.store().start(&running.id);
 
-        page.forget_clip("waifu-0001.wav");
-        assert!(page.spoke("waifu-0001.wav").is_none());
-        assert!(page.spoke("waifu-0002.wav").is_some());
-        assert!(page.record().revision > before);
+        assert_eq!(shared.cancel(&waiting.id), Cancelled::Dequeued);
+        assert_eq!(shared.position(&waiting.id), None);
+        assert_eq!(
+            shared.store().find(&waiting.id).unwrap().status,
+            Status::Cancelled
+        );
 
-        // Deleting what is not there leaves the rest alone rather than failing.
-        page.forget_clip("waifu-0001.wav");
-        assert_eq!(page.record().clips.len(), 1);
-    }
+        assert!(!shared.interrupted());
+        assert_eq!(shared.cancel(&running.id), Cancelled::Stopping);
+        assert!(shared.interrupted());
+        shared.world().doing = a_drawing();
+        let described = shared.describe_job(&shared.store().find(&running.id).unwrap());
+        assert_eq!(described["stopping"], true);
+        assert!(described["progress"]["doing"]
+            .as_str()
+            .unwrap()
+            .contains("3 of 8"));
 
-    /// What the page puts on the end of the recording's address moves when the recording does and
-    /// not when anything else does. A reading reports every token, and the player beside it
-    /// reloaded on every one while the address carried the session's revision instead.
-    #[test]
-    fn a_held_file_is_only_news_when_it_changes() {
-        let shared = a_program("held-news");
-        let page = a_page(&shared);
-
-        page.hold_recording(vec![1]);
-        page.hold_upload(vec![2]);
-        let (recording, picture) = {
-            let record = page.record();
-            (record.recording_revision, record.picture_revision)
-        };
-
-        // Other news, many times over.
-        for _ in 0..5 {
-            page.change(|record| record.note = None);
-        }
-        let described = shared.describe(&page);
-        assert_eq!(described["recording_revision"], recording);
-        assert_eq!(described["picture_revision"], picture);
-
-        // Each moves with its own file, and neither with the other's.
-        page.hold_recording(vec![3]);
-        assert!(page.record().recording_revision > recording);
-        assert_eq!(page.record().picture_revision, picture);
-
-        let recording = page.record().recording_revision;
-        page.forget_upload();
-        assert!(page.record().picture_revision > picture);
-        assert_eq!(page.record().recording_revision, recording);
+        assert_eq!(shared.cancel(&"0".repeat(32)), Cancelled::NotGoing);
     }
 
     #[test]
-    fn the_recording_and_the_picture_are_two_boxes_rather_than_one() {
-        // They are two different runs' inputs. Dropping a recording should not throw away the
-        // picture somebody is about to redraw, and the other way round.
-        let shared = a_program("two-boxes");
-        let page = a_page(&shared);
-        assert!(!page.holding_a_recording());
+    fn a_stop_left_over_from_the_last_job_is_not_the_next_one_s() {
+        let shared = a_program("stale-stop");
+        let first = shared.store().submit(Kind::Image, json!({})).unwrap();
+        let second = shared.store().submit(Kind::Image, json!({})).unwrap();
+        shared.enqueue(&first.id);
+        shared.next();
+        shared.cancel(&first.id);
+        assert!(shared.interrupted());
+        shared.finished();
 
-        page.hold_upload(vec![1, 2, 3]);
-        page.hold_recording(vec![4, 5, 6]);
-        assert_eq!(page.upload(), Some(vec![1, 2, 3]));
-        assert_eq!(page.recording(), Some(vec![4, 5, 6]));
-        assert_eq!(shared.describe(&page)["holding_a_recording"], true);
-
-        page.forget_recording();
-        assert!(!page.holding_a_recording());
-        assert!(page.holding_a_picture());
+        shared.enqueue(&second.id);
+        shared.next();
+        assert!(!shared.interrupted());
     }
 
     #[test]
-    fn a_stop_is_reported_while_something_is_being_said_as_well() {
-        // The button is on both tabs and stops whichever kind of run is going.
-        let shared = a_program("stop-speaking");
-        let page = a_page(&shared);
-        shared.claim(Some(Arc::clone(&page)));
-        shared.interrupt(&page);
-        assert_eq!(shared.progress(&page)["interrupting"], false);
+    fn the_worker_waits_for_a_job_when_there_is_none() {
+        let shared = std::sync::Arc::new(a_program("wait"));
+        let job = shared.store().submit(Kind::Image, json!({})).unwrap();
 
-        shared.change(|world| {
-            world.doing = Doing::Speaking(Say {
-                progress: SpeechProgress::Reading,
-                expected: 0,
-                started: Instant::now(),
-            })
+        let waiting = std::thread::spawn({
+            let shared = std::sync::Arc::clone(&shared);
+            move || shared.next()
         });
-        assert_eq!(shared.progress(&page)["interrupting"], true);
-        assert_eq!(shared.progress(&page)["speaking"], true);
-        assert_eq!(shared.progress(&page)["drawing"], false);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!waiting.is_finished());
+
+        shared.enqueue(&job.id);
+        assert_eq!(waiting.join().unwrap(), job.id);
+    }
+
+    #[test]
+    fn the_model_says_what_built_it_what_it_takes_and_how_full_the_output_is() {
+        // Whichever screen is up when something goes wrong is the one that ends up in the
+        // screenshot, and a screenshot that cannot say which code it came from is worth much less
+        // than one that can.
+        let shared = a_program("model");
+        let described = shared.describe_model();
+        assert_eq!(described["built_from"], crate::cli::REVISION);
+        assert_eq!(described["device"], "cpu");
+        assert_eq!(described["kind"], "image");
+        assert!(described["model"].is_null());
+        assert_eq!(described["output"]["used"], 0);
+        assert!(described["starting_picture"].is_null());
+    }
+
+    #[test]
+    fn the_picture_minus_i_named_is_an_upload_the_page_is_offered() {
+        let mut shared = a_program("minus-i");
+        shared.start_holding(&[0x89, b'P', b'N', b'G', 1]).unwrap();
+        let id = shared.describe_model()["starting_picture"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(shared.store().find_upload(&id).unwrap().mime, "image/png");
     }
 
     #[test]
@@ -1854,26 +1063,8 @@ mod tests {
         assert_eq!(showable(7.0), 7.0);
         assert_eq!(showable(0.0), 0.0);
 
-        let shared = a_program("settings");
-        let page = a_page(&shared);
-        assert_eq!(shared.describe(&page)["voice"], Value::Null);
-
-        page.change(|record| record.clips.push(a_clip(1)));
-        let clip = &shared.describe(&page)["clips"][0];
+        let clip = a_clip(1).json();
         assert_eq!(clip["temperature"], 0.8);
         assert_eq!(clip["speed"], 1.0);
-    }
-
-    #[test]
-    fn the_whole_state_says_what_built_it_and_where_runs_go() {
-        // Whichever screen is up when something goes wrong is the one that ends up in the
-        // screenshot, and a screenshot that cannot say which code it came from is worth much less
-        // than one that can.
-        let shared = a_program("whole-state");
-        let described = shared.describe(&a_page(&shared));
-        assert_eq!(described["built_from"], crate::cli::REVISION);
-        assert_eq!(described["device"], "cpu");
-        assert!(described["model"].is_null());
-        assert_eq!(described["gallery"].as_array().unwrap().len(), 0);
     }
 }

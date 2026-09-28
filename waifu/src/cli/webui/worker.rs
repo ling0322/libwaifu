@@ -21,30 +21,30 @@
 //!
 //! A tensor never leaves the thread that made it, so the model cannot be touched from a request:
 //! a request arrives on whichever of the server's threads was free, and there are several of
-//! them. What the requests do instead is post a command down a channel to this one thread, which
-//! reads them in the order they were posted and says what it is doing in [`Shared`] as it goes.
+//! them. What the requests do instead is keep a job and put its id in line, and this one thread
+//! takes the ids off the line in order, runs each, and says what it is doing in [`Shared`] as it
+//! goes.
 //!
-//! It is also why the answer to "draw this" is an empty acknowledgement rather than a picture.
-//! A run is minutes long; a request that waited for one would hold a socket open across it, and
-//! the browser would have nothing to show in the meantime.
+//! It is also why the answer to "draw this" is where the job is rather than a picture. A run is
+//! minutes long; a request that waited for one would hold a socket open across it, and the
+//! browser would have nothing to show in the meantime.
 
 use std::io::Cursor;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
-use std::sync::Arc;
 use std::time::Instant;
+
+use serde_json::Value;
 
 use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::log;
-use crate::cli::webui::state::{
-    Chosen, Clip, Doing, Fetch, Picture, Run, Say, Session, Shared, Spoken,
-};
+use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
+use crate::cli::webui::store::{self, Kind};
 use crate::cosyvoice3::{self, CosyVoice3};
-use crate::flint::{MemorySnapshot, Tensor};
+use crate::flint::Tensor;
 use crate::indextts::{self, IndexTts};
-use crate::wav::{self, Sound};
+use crate::wav;
 use crate::{
     from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2,
     Manifest, QwenImage, Sdxl, SpeechOptions, SpeechProgress, Tones, Voice,
@@ -94,286 +94,136 @@ pub const TONES: &str = "tones";
 /// list, it has emptied it, and the built-in one is the better thing to offer.
 const ENOUGH_SIZES: usize = 3;
 
-/// A prompt to draw.
-pub struct Job {
-    /// The page that asked for it, which is where the picture goes and what is said about it.
-    pub session: Arc<Session>,
-    /// The model to draw it with, as it was chosen: read now if the weights in memory are of
-    /// another one, or of none.
-    pub model: String,
-    pub prompt: String,
-    /// Always with a seed in it. A run asked for without one is given a fresh one here rather
-    /// than left to whatever the device's generator was last used for, so that the picture that
-    /// comes out can be drawn a second time -- which is most of what a seed is for.
-    pub options: GenerationOptions,
-    /// The picture to start from, as the bytes it arrived as, where the run starts from one.
-    ///
-    /// Bytes rather than a path. One of these was dropped on the page and never had a name on
-    /// this machine at all, and the other was read where `-i` named it, back when there was still
-    /// a terminal to complain to about a file that is not there.
-    pub from: Option<Vec<u8>>,
+/// What the worker reads before the server is up: the one model this program serves.
+pub enum Load {
+    Model(String),
+    Voice(String),
 }
 
-/// A sentence to read out.
-pub struct SayJob {
-    /// The page that asked for it, which is where the clip goes.
-    pub session: Arc<Session>,
-    /// The voice to read it with, as it was chosen. There is one to choose from today, and it
-    /// travels with the run anyway for the same reason a model's name does: what was chosen when
-    /// the button was pressed is what this run is of.
-    pub voice: String,
-    pub text: String,
-    /// Always with a seed in it, like a picture's options: a reading asked for without one is
-    /// given a fresh one before it is posted, so that what comes out says which number said it.
-    pub options: SpeechOptions,
-    /// The recording to sound like, as the WAV bytes it arrived as, on a run that has one.
-    ///
-    /// Bytes rather than a path, and for the same reason a picture's are: it was dropped on the
-    /// page and never had a name on this machine. Read here rather than on the request's thread
-    /// so that a file that turns out not to be readable is one message on the bar rather than a
-    /// refusal at the door of a run that would otherwise have worked.
-    pub like: Option<Vec<u8>>,
-}
-
-/// What the worker can be asked for.
+/// Reads the model, then runs jobs off the queue for as long as the program runs.
 ///
-/// Nothing here fetches on its own account or changes the device. The model was picked, fetched
-/// and given a device in the terminal before the page opened, and the page asks for runs of it.
-pub enum Command {
-    /// Read this model onto the device, and hold it. Asked for before the server is up, so the
-    /// page opens with the model already in memory.
-    Use(String),
-    /// The same, for a voice.
-    UseVoice(String),
-    Draw(Job),
-    Speak(SayJob),
-}
-
-/// Reads commands and carries them out, until the channel is closed.
-pub fn work(shared: &Shared, commands: &Receiver<Command>) {
-    // What is in memory. Held here rather than in the world, which describes the model without
-    // holding it: the weights are the one thing in this program that cannot cross a thread.
+/// The model is read once, before the page is served, and it stays on the device until the
+/// program stops. That is what the program is for: it is started for one model, chosen in the
+/// terminal, and every job anybody posts is run with it. Nothing a request does takes it off the
+/// card -- a stop included. A stop ends one job, and the next one in line starts straight away.
+pub fn work(shared: &Shared, load: Load) {
     let mut model: Option<Model> = None;
-
-    // Which model the weights in there are. What the page has chosen may be another one by now,
-    // and the two are compared at each run: this is the name that was opened, not the name that
-    // is wanted.
-    let mut in_memory: Option<String> = None;
-
-    // What is loaded to speak with.
-    //
-    // Beside the picture model when it is [`Tones`], which is arithmetic and no weights. A voice
-    // with a package behind it is not: IndexTTS-2.5 is five gigabytes, and it does not sit on a
-    // card beside a twelve billion parameter picture model. So a heavy voice and `model` take
-    // turns -- reading either puts the other down first, the same swap `Command::Draw` already
-    // does between one picture model and the next. See `voice_holds_weights`.
     let mut voice: Option<Box<dyn Voice>> = None;
-    let mut speaking: Option<String> = None;
 
-    for command in commands {
-        match command {
-            // Asked for before the server is up, which says to have it ready rather than to wait
-            // for a run.
-            Command::Use(asked) => {
-                model = None;
-                in_memory = None;
-                if speaking.as_deref().is_some_and(voice_holds_weights) {
-                    voice = None;
-                    speaking = None;
-                    forget_the_voice(shared);
-                }
-                if read_model(shared, &asked, &mut model) {
-                    in_memory = Some(asked);
-                }
-            }
-
-            // The voice's half of the same, with the same one-card rule `Command::Speak` keeps:
-            // a voice with weights puts the picture model down first.
-            Command::UseVoice(asked) => {
-                voice = None;
-                speaking = None;
-                if voice_holds_weights(&asked) && model.is_some() {
-                    model = None;
-                    in_memory = None;
-                    forget_the_weights(shared);
-                }
-                if read_voice(shared, &asked, &mut voice) {
-                    speaking = Some(asked);
-                }
-            }
-
-            Command::Draw(job) => {
-                // Read here rather than when it was chosen. Choosing is a click and reading is
-                // minutes -- a fetch of several gigabytes, on a model that is not here yet -- and
-                // somebody still deciding what to type should not be waiting for either.
-                if in_memory.as_deref() != Some(job.model.as_str()) {
-                    model = None;
-                    in_memory = None;
-                    forget_the_weights(shared);
-
-                    // One card, taken in turns: see `voice` above.
-                    if speaking.as_deref().is_some_and(voice_holds_weights) {
-                        voice = None;
-                        speaking = None;
-                        forget_the_voice(shared);
-                    }
-
-                    if read_model(shared, &job.model, &mut model) {
-                        in_memory = Some(job.model.clone());
-                    }
-                }
-
-                let ran = match &model {
-                    // A stop asked for while the model was coming down is a stop to the run it
-                    // was coming down for: whoever pressed it was waiting for this picture, and
-                    // the picture is what they asked to stop waiting for. Only reachable where
-                    // the read went through -- a fetch that was stopped says so for itself, and
-                    // leaves nothing here to draw with.
-                    Some(_) if shared.interrupted() => Ran::StoppedBeforeItDrew,
-                    Some(loaded) => draw(shared, loaded, job),
-                    // Nothing to say: the read that just failed said why, in the words of
-                    // whatever went wrong with it. And nothing ran, which is not a run that was
-                    // stopped -- there are no weights here to let go of.
-                    None => Ran::ToTheEnd,
-                };
-
-                // A run somebody stopped is a run they are done with, and what it was drawing
-                // with is gigabytes of a card that nothing is using now. So the weights follow
-                // the run out: the usual reason to press stop is that something else wants the
-                // card, and a program that kept it until the next prompt would be answering a
-                // different request than the one that was made.
-                //
-                // Only on a stop. A run that finished is a picture somebody is about to ask for
-                // again with one word changed, and taking the model down between two of those
-                // would spend a minute of reading on every prompt.
-                if let Some(said) = ran.stopped() {
-                    model = None;
-                    in_memory = None;
-                    forget_the_weights(shared);
-                    shared.say(said, false);
-                    give_the_memory_back(shared);
-                }
-            }
-
-            Command::Speak(job) => {
-                // Read at the first run that needs it, exactly as a picture model is.
-                if speaking.as_deref() != Some(job.voice.as_str()) {
-                    voice = None;
-                    speaking = None;
-
-                    // A voice with weights puts the picture model down first -- one card, taken
-                    // in turns. Tones has none and leaves it where it is.
-                    if voice_holds_weights(&job.voice) && model.is_some() {
-                        model = None;
-                        in_memory = None;
-                        forget_the_weights(shared);
-                    }
-
-                    if read_voice(shared, &job.voice, &mut voice) {
-                        speaking = Some(job.voice.clone());
-                    }
-                }
-
-                let ran = match &voice {
-                    // A stop asked for while the voice was being read is a stop to the reading
-                    // it was being read for, as it is for a picture.
-                    Some(_) if shared.interrupted() => Ran::Stopped,
-                    Some(voice) => say(shared, voice.as_ref(), job),
-                    None => Ran::ToTheEnd,
-                };
-
-                // What `Command::Draw` does about a stop, for a voice that holds the card: the
-                // usual reason to press stop is that something else wants it. Tones holds
-                // nothing, so a stopped reading with it is only a message.
-                if let Some(said) = ran.stopped() {
-                    if speaking.as_deref().is_some_and(voice_holds_weights) {
-                        voice = None;
-                        speaking = None;
-                        forget_the_voice(shared);
-                        shared.say(said, false);
-                        give_the_memory_back(shared);
-                    } else {
-                        shared.say("stopped where it was", false);
-                    }
-                }
-            }
+    match load {
+        Load::Model(asked) => {
+            read_model(shared, &asked, &mut model);
         }
+        Load::Voice(asked) => {
+            read_voice(shared, &asked, &mut voice);
+        }
+    }
+    shared.reading(false);
 
-        // Whatever it was, it is finished with, and the next request can have the worker. Every
-        // way out of the two arms above comes through here -- which is the point of releasing it
-        // in one place rather than at each of the dozen places a command can end.
-        shared.release();
+    loop {
+        let id = shared.next();
+        run(shared, model.as_ref(), voice.as_deref(), &id);
+        shared.finished();
     }
 }
 
-/// How a run ended, in the one respect the worker does anything different about.
-///
-/// A run that failed is [`Ran::ToTheEnd`] here: what went wrong with it has already been said on
-/// the bar, and the weights it failed with are as good as the weights it would have succeeded
-/// with. What this tells apart is the endings that are somebody asking for the card back.
+/// How a job ended, where it did not fail.
 enum Ran {
-    ToTheEnd,
+    /// With a file, and a description of it to keep beside it.
+    Made {
+        bytes: Vec<u8>,
+        made: Value,
+    },
     Stopped,
-    /// Stopped before a step of it was drawn, which is what a stop pressed while the model was
-    /// still coming down amounts to. The weights go down the same way -- they were read for a run
-    /// that is not happening -- and only the sentence differs, because nothing was drawn and
-    /// there is nothing to say was kept.
-    StoppedBeforeItDrew,
 }
 
-impl Ran {
-    /// What to say about an ending that takes the model off the card with it, and `None` for one
-    /// that leaves it where it is.
-    ///
-    /// The words live here rather than where the run ended, for the reason [`draw`] says nothing
-    /// about a stop of its own: what there is to say about one is what the worker does next, and
-    /// the two endings below are the two that are followed by the same thing being done.
-    fn stopped(&self) -> Option<&'static str> {
-        match self {
-            Ran::ToTheEnd => None,
-            Ran::Stopped => Some("stopped where it was, and the model is off the card"),
-            Ran::StoppedBeforeItDrew => {
-                Some("stopped before it drew anything, and the model is off the card")
+/// Runs one job, and writes down how it went.
+fn run(shared: &Shared, model: Option<&Model>, voice: Option<&dyn Voice>, id: &str) {
+    let store = shared.store();
+    // Not queued any more: cancelled in the moment between being taken off the line and here.
+    let Some(job) = store.start(id) else {
+        return;
+    };
+
+    let ran = if shared.interrupted() {
+        Ok(Ran::Stopped)
+    } else {
+        match (job.kind, model, voice) {
+            (Kind::Image, Some(model), _) => draw(shared, model, &job),
+            (Kind::Speech, _, Some(voice)) => say(shared, voice, &job),
+            // Not reachable through the API, which refuses a job of the other kind -- but a
+            // job is a job, and one with nothing to run it is said to have failed.
+            (Kind::Image, None, _) => Err("this program was not started to draw".into()),
+            (Kind::Speech, _, None) => Err("this program was not started to speak".into()),
+        }
+    };
+
+    match ran {
+        Ok(Ran::Made { bytes, made }) => {
+            if let Err(error) = store.done(id, &bytes, made) {
+                log::line(format_args!("error: job {id}: {error}"));
+                store.failed(id, format!("what it made could not be kept: {error}"));
             }
         }
-    }
-}
-
-/// Says on screen that there are no weights in memory, leaving what is chosen chosen.
-///
-/// The choice outlives the weights. Somebody who changed the device, or whose last run was of
-/// another model, has not un-chosen anything -- the next run reads what they chose again.
-fn forget_the_weights(shared: &Shared) {
-    shared.change(|world| {
-        if let Some(chosen) = &mut world.model {
-            chosen.in_memory = false;
+        Ok(Ran::Stopped) => {
+            log::line(format_args!("job {id} stopped where it was"));
+            store.cancelled(id);
         }
-    });
+        Err(error) => {
+            log::line(format_args!("error: job {id}: {error}"));
+            store.failed(id, error.to_string());
+        }
+    }
 }
 
-/// Hands the memory the weights were in back to the driver, for whoever else wants the card.
-///
-/// The second half of letting go of a model, and no use without the first: this frees nothing a
-/// tensor still holds. Dropping the model is what frees it, and dropping it is not enough on its
-/// own -- the allocator is told at startup to keep what it frees rather than give it back, since
-/// a run that had to ask the driver for the blocks the last run just finished with would pay for
-/// the same memory twice. So the weights can be gone while the card still reads full, and this is
-/// the call that ends that.
-///
-/// Which is why it is called where a model is being put down for good and nowhere else. Between
-/// two runs of one model it hands over the very blocks the next run wants, and the next run waits
-/// for the driver to hand them back.
-fn give_the_memory_back(shared: &Shared) {
-    // Said on the bar rather than raised, and only when it fails. The model is gone either way,
-    // which is the part that was asked for; what a failure changes is what the rest of the
-    // machine can have, and somebody who stopped a run to free the card should hear that it is
-    // not free.
-    if let Err(error) = MemorySnapshot::release_unused(shared.runtime().device()) {
-        shared.say(
-            format!("the model is down, but its memory could not be handed back: {error}"),
-            true,
-        );
+/// A job's settings, read back out of what was kept. Every one is there: the request was given
+/// the model's defaults for whatever it left out before it was kept.
+fn generation_options(asked: &Value) -> GenerationOptions {
+    let whole = |field: &str| asked.get(field).and_then(Value::as_i64).unwrap_or(0) as i32;
+    let decimal = |field: &str| asked.get(field).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    GenerationOptions {
+        width: whole("width"),
+        height: whole("height"),
+        num_steps: whole("steps"),
+        guidance_scale: decimal("guidance"),
+        negative_prompt: text(asked, "negative"),
+        seed: seed(asked),
+        strength: decimal("strength"),
     }
+}
+
+fn speech_options(asked: &Value) -> SpeechOptions {
+    let decimal = |field: &str| asked.get(field).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    SpeechOptions {
+        speed: decimal("speed"),
+        temperature: decimal("temperature"),
+        seed: seed(asked),
+    }
+}
+
+fn text(asked: &Value, field: &str) -> String {
+    asked
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A seed is sixty-four bits and is kept as a string: a JSON number is a double.
+fn seed(asked: &Value) -> Option<u64> {
+    asked.get("seed").and_then(Value::as_str)?.parse().ok()
+}
+
+/// The bytes of the upload a job's settings name under `field`, if they name one.
+fn upload_named(shared: &Shared, asked: &Value, field: &str) -> Result<Option<Vec<u8>>, Error> {
+    let Some(id) = asked.get(field).and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let (_, path) = shared
+        .store()
+        .upload_file(id)
+        .ok_or_else(|| format!("the upload it was to start from ({id}) has been deleted"))?;
+    Ok(Some(std::fs::read(path)?))
 }
 
 /// Reads the model `asked` names into `model`, and says on screen how it went. True where the
@@ -528,10 +378,8 @@ fn read_voice(shared: &Shared, asked: &str, voice: &mut Option<Box<dyn Voice>>) 
 
 /// Fetches the voice package `asked` names, if it is a name, and reads it onto the device.
 fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
-    // The same rules `load` keeps for a picture model: a stop from before this began is not this
-    // fetch's business, and the name on the screen is the tail of a path rather than all of it.
-    shared.carry_on();
-
+    // The same rule `load` keeps for a picture model: the name on the screen is the tail of a
+    // path rather than all of it.
     let name = match asked.rsplit_once('/') {
         Some((_, file)) if !file.is_empty() => file.to_string(),
         _ => asked.to_string(),
@@ -573,16 +421,6 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
         }
         _ => Box::new(IndexTts::from_manifest(device, residency, &manifest)?),
     })
-}
-
-/// Says on screen that the voice is not in memory, leaving it chosen -- what
-/// [`forget_the_weights`] is for a picture model.
-fn forget_the_voice(shared: &Shared) {
-    shared.change(|world| {
-        if let Some(spoken) = &mut world.voice {
-            spoken.in_memory = false;
-        }
-    });
 }
 
 /// What a kind of model implies for the screen before any of its weights are read: what to ask
@@ -716,11 +554,6 @@ fn on_disk(asked: &str) -> Option<PathBuf> {
 
 /// Fetches and reads the model `asked` names, saying how it is getting on as it goes.
 fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
-    // A stop asked for before this began is not this fetch's business -- the same rule `draw`
-    // below is written to, and needed here for the same reason: the flag outlives the run that
-    // was stopped, and the next fetch would read it on the way in and stop before it started.
-    shared.carry_on();
-
     // The name the screen shows. As typed when it was named, because that is what someone would
     // type again; the file name when a path was given, because the whole path does not fit and
     // its tail is the part that identifies it.
@@ -791,7 +624,7 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
 
 /// Copies what a fetch has to say into the world: how far along, which is progress and not news.
 fn report_fetch(shared: &Shared, model: &str, progress: hub::Progress) {
-    shared.report(|world| {
+    shared.change(|world| {
         // Whatever it said last, so that a line about one field does not blank the others: the
         // hub is said once, before the first byte, and every line after it is about a file.
         let mut fetch = match &world.doing {
@@ -840,36 +673,36 @@ fn report_fetch(shared: &Shared, model: &str, progress: hub::Progress) {
     });
 }
 
-/// Draws one picture and puts it in the gallery. Says whether it got to the end of it, which is
-/// what decides whether the weights stay on the device.
-fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
-    // A stop asked for after the last run finished is not this run's business.
-    shared.carry_on();
+/// Draws one job's picture, and says what came of it.
+fn draw(shared: &Shared, model: &Model, job: &store::Job) -> Result<Ran, Error> {
+    let prompt = text(&job.asked, "prompt");
+    let options = generation_options(&job.asked);
+    let from = upload_named(shared, &job.asked, "init_image")?;
+
     let started = Instant::now();
     shared.change(|world| {
         world.doing = Doing::Drawing(Run {
             progress: GenerationProgress::Encoding,
-            steps: job.options.num_steps,
+            steps: options.num_steps,
             started,
-        });
+        })
     });
-    job.session.change(|record| record.note = None);
     log::line(format_args!(
-        "drawing with {}: {}x{}, {} steps, seed {}{} -- \"{}\"",
-        job.model,
-        job.options.width,
-        job.options.height,
-        job.options.num_steps,
-        job.options.seed.unwrap_or_default(),
-        match &job.from {
-            Some(_) => format!(", from a picture at strength {}", job.options.strength),
+        "job {}: drawing {}x{}, {} steps, seed {}{} -- \"{}\"",
+        job.id,
+        options.width,
+        options.height,
+        options.num_steps,
+        options.seed.unwrap_or_default(),
+        match &from {
+            Some(_) => format!(", from a picture at strength {}", options.strength),
             None => String::new(),
         },
-        log::clipped(&job.prompt, 80)
+        log::clipped(&prompt, 80)
     ));
 
     let mut report = |progress| {
-        shared.report(|world| {
+        shared.change(|world| {
             if let Doing::Drawing(run) = &mut world.doing {
                 run.progress = progress;
             }
@@ -882,94 +715,62 @@ fn draw(shared: &Shared, model: &Model, job: Job) -> Ran {
     };
 
     // The picture to start from is read and scaled before the run, so that one that cannot be
-    // read is one message rather than a run that fails partway.
-    let started_from = match &job.from {
-        Some(bytes) => match read_image(bytes, job.options.width, job.options.height) {
-            Ok(image) => Some(image),
-            Err(error) => {
-                shared.change(|world| world.doing = Doing::Nothing);
-                shared.say(format!("the picture to draw from: {error}"), true);
-                return Ran::ToTheEnd;
-            }
-        },
+    // read is one failure rather than a run that fails partway.
+    let image = match &from {
+        Some(bytes) => {
+            let started_from = read_image(bytes, options.width, options.height)
+                .map_err(|error| format!("the picture to draw from: {error}"))?;
+            model.generate_from_image_reporting(&started_from, &prompt, &options, &mut report)?
+        }
+        None => model.generate_reporting(&prompt, &options, &mut report)?,
+    };
+    let Some(image) = image else {
+        return Ok(Ran::Stopped);
+    };
+
+    let shape = image.shape();
+    let picture = Picture {
+        width: shape[3] as usize,
+        height: shape[2] as usize,
+        prompt,
+        negative: options.negative_prompt.clone(),
+        seed: options.seed.unwrap_or_default(),
+        steps: options.num_steps,
+        guidance: options.guidance_scale,
+        model: shared
+            .world()
+            .model
+            .as_ref()
+            .map(|chosen| chosen.name.clone())
+            .unwrap_or_default(),
+        from_image: from.as_ref().map(|_| options.strength),
+        elapsed: started.elapsed(),
+    };
+    log::line(format_args!(
+        "job {}: drew it in {:.1}s",
+        job.id,
+        picture.elapsed.as_secs_f64()
+    ));
+
+    // With the line that says what drew it written into the file, so that a picture saved out of
+    // the page still says so wherever it ends up.
+    Ok(Ran::Made {
+        bytes: png(&image, &picture.parameters())?,
+        made: picture.json(),
+    })
+}
+
+/// Reads one job's text out, and says what came of it.
+fn say(shared: &Shared, voice: &dyn Voice, job: &store::Job) -> Result<Ran, Error> {
+    let said = text(&job.asked, "text");
+    let options = speech_options(&job.asked);
+    let like = match upload_named(shared, &job.asked, "reference")? {
+        Some(bytes) => Some(
+            wav::read(&bytes).map_err(|error| format!("the recording to sound like: {error}"))?,
+        ),
         None => None,
     };
 
-    let drawn = match &started_from {
-        Some(image) => {
-            model.generate_from_image_reporting(image, &job.prompt, &job.options, &mut report)
-        }
-        None => model.generate_reporting(&job.prompt, &job.options, &mut report),
-    };
-
-    let elapsed = started.elapsed();
-    let kept = match drawn {
-        // Written here rather than handed back, because the pixels are three megabytes that
-        // nothing on the other side would do anything with but hand to a file.
-        Ok(Some(image)) => job
-            .session
-            .folder(shared.output())
-            .map_err(Error::from)
-            .and_then(|folder| keep(&image, &folder)),
-        // Nothing said here, unlike every other way out of this function. What there is to say
-        // about a stop is what the caller does about it next, and the caller is the one place
-        // that knows: the weights go down with the run, and the sentence says so.
-        Ok(None) => {
-            shared.change(|world| world.doing = Doing::Nothing);
-            return Ran::Stopped;
-        }
-        Err(error) => Err(error.into()),
-    };
-
-    let (file, width, height) = match kept {
-        Ok(kept) => kept,
-        Err(error) => {
-            shared.change(|world| world.doing = Doing::Nothing);
-            shared.say(error.to_string(), true);
-            return Ran::ToTheEnd;
-        }
-    };
-
-    log::line(format_args!("drew {file} in {:.1}s", elapsed.as_secs_f64()));
-
-    let model_name = shared
-        .world()
-        .model
-        .as_ref()
-        .map(|loaded| loaded.name.clone())
-        .unwrap_or_default();
-
-    job.session.change(|record| {
-        record.gallery.insert(
-            0,
-            Picture {
-                file,
-                width,
-                height,
-                prompt: job.prompt.clone(),
-                negative: job.options.negative_prompt.clone(),
-                // Always there: a job is given one before it is posted.
-                seed: job.options.seed.unwrap_or_default(),
-                steps: job.options.num_steps,
-                guidance: job.options.guidance_scale,
-                model: model_name,
-                from_image: job.from.as_ref().map(|_| job.options.strength),
-                elapsed,
-            },
-        );
-        record.note = None;
-    });
-    shared.change(|world| world.doing = Doing::Nothing);
-
-    Ran::ToTheEnd
-}
-
-/// Says one sentence and puts the clip in the list.
-///
-/// The mirror of [`draw`]: the same claim, the same reporter, the same three ways out -- a
-/// waveform, a stop, or a message on the bar.
-fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
-    shared.carry_on();
     let started = Instant::now();
     shared.change(|world| {
         world.doing = Doing::Speaking(Say {
@@ -978,22 +779,21 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
             // bar reads it as "no idea yet" and sits at the start, which is where the run is.
             expected: 0,
             started,
-        });
+        })
     });
-    job.session.change(|record| record.note = None);
     log::line(format_args!(
-        "speaking with {}: seed {}{} -- \"{}\"",
-        job.voice,
-        job.options.seed.unwrap_or_default(),
-        match &job.like {
+        "job {}: speaking, seed {}{} -- \"{}\"",
+        job.id,
+        options.seed.unwrap_or_default(),
+        match &like {
             Some(_) => ", like a recording",
             None => "",
         },
-        log::clipped(&job.text, 80)
+        log::clipped(&said, 80)
     ));
 
     let mut report = |progress| {
-        shared.report(|world| {
+        shared.change(|world| {
             if let Doing::Speaking(say) = &mut world.doing {
                 say.progress = progress;
                 // The model's own estimate, taken as it arrives rather than once: a model that
@@ -1011,109 +811,39 @@ fn say(shared: &Shared, voice: &dyn Voice, job: SayJob) -> Ran {
         }
     };
 
-    // Read before the run, so that a file that is not a recording is one message rather than a
-    // run that fails partway through. The page decodes whatever was dropped on it and posts a
-    // WAV, so anything that fails here came from something that is not the page.
-    let like = match &job.like {
-        Some(bytes) => match wav::read(bytes) {
-            Ok(sound) => Some(sound),
-            Err(error) => {
-                shared.change(|world| world.doing = Doing::Nothing);
-                shared.say(format!("the recording to sound like: {error}"), true);
-                return Ran::ToTheEnd;
-            }
-        },
-        None => None,
+    let Some(sound) = voice.speak(&said, like.as_ref(), &options, &mut report)? else {
+        return Ok(Ran::Stopped);
     };
 
-    let said = voice.speak(&job.text, like.as_ref(), &job.options, &mut report);
-
-    let elapsed = started.elapsed();
-    let kept = match said {
-        // Written here rather than handed back, for the same reason the pixels are: a minute of
-        // speech is a couple of megabytes that nothing on the other side would do anything with
-        // but hand to a file.
-        Ok(Some(sound)) => job
-            .session
-            .folder(shared.output())
-            .map_err(Error::from)
-            .and_then(|folder| keep_sound(&sound, &folder)),
-        // Said by the worker, which also knows whether the voice is being put down with it.
-        Ok(None) => {
-            shared.change(|world| world.doing = Doing::Nothing);
-            return Ran::Stopped;
-        }
-        Err(error) => Err(error.into()),
+    let clip = Clip {
+        text: said,
+        seconds: sound.seconds(),
+        rate: voice.rate(),
+        speed: options.speed,
+        temperature: options.temperature,
+        seed: options.seed.unwrap_or_default(),
+        voice: shared
+            .world()
+            .voice
+            .as_ref()
+            .map(|spoken| spoken.name.clone())
+            .unwrap_or_default(),
+        from_a_recording: like.is_some(),
+        elapsed: started.elapsed(),
     };
-
-    let (file, seconds) = match kept {
-        Ok(kept) => kept,
-        Err(error) => {
-            shared.change(|world| world.doing = Doing::Nothing);
-            shared.say(error.to_string(), true);
-            return Ran::ToTheEnd;
-        }
-    };
-
     log::line(format_args!(
-        "said {file} ({seconds:.1}s of sound) in {:.1}s",
-        elapsed.as_secs_f64()
+        "job {}: said {:.1}s of sound in {:.1}s",
+        job.id,
+        clip.seconds,
+        clip.elapsed.as_secs_f64()
     ));
 
-    job.session.change(|record| {
-        record.clips.insert(
-            0,
-            Clip {
-                file,
-                text: job.text.clone(),
-                seconds,
-                rate: voice.rate(),
-                speed: job.options.speed,
-                temperature: job.options.temperature,
-                // Always there: a job is given one before it is posted.
-                seed: job.options.seed.unwrap_or_default(),
-                voice: job.voice.clone(),
-                from_a_recording: job.like.is_some(),
-                elapsed,
-            },
-        );
-        record.note = None;
-    });
-    shared.change(|world| world.doing = Doing::Nothing);
-    Ran::ToTheEnd
+    Ok(Ran::Made {
+        bytes: wav::write(&sound),
+        made: clip.json(),
+    })
 }
 
-/// Writes the waveform a reading ends with into the first `waifu-NNNN.wav` in `folder` that
-/// nothing else has, and says what it was called and how long it turned out to be.
-///
-/// The same naming as the pictures and beside them, so that what a session made is one run of
-/// numbered files in its own folder rather than two schemes to learn.
-fn keep_sound(sound: &Sound, folder: &Path) -> Result<(String, f64), Error> {
-    let bytes = wav::write(sound);
-
-    for number in 1..10_000 {
-        let name = format!("waifu-{number:04}.wav");
-        let path = folder.join(&name);
-        if path.exists() {
-            continue;
-        }
-
-        std::fs::write(&path, &bytes)?;
-        return Ok((name, sound.seconds()));
-    }
-
-    Err("there are already ten thousand clips in this session's folder".into())
-}
-
-/// The model a run draws with, whichever kind of package was opened.
-///
-/// The two share no code and no weights. What they share is the question -- here is a prompt and
-/// here is how big -- and this is where that question stops being asked of a particular model.
-///
-/// One of these exists, on the worker's stack, for as long as a model is loaded, and the two
-/// variants differ by a couple of hundred bytes against the gigabytes of weights they point at.
-/// Boxing the larger to even them up would buy an indirection and nothing else.
-#[allow(clippy::large_enum_variant)]
 pub enum Model {
     Sdxl(Sdxl),
     Anima(Anima),
@@ -1271,37 +1001,194 @@ fn read_image(bytes: &[u8], width: i32, height: i32) -> Result<Tensor, Error> {
     Ok(from_rgb8(width, height, scaled.to_rgb8().as_raw())?)
 }
 
-/// Writes the tensor a run ends with into the first `waifu-NNNN.png` in `folder` that nothing else
-/// has, and says what it was called -- the name, not the path, since the name is what the page
-/// asks for it by.
-fn keep(image: &Tensor, folder: &Path) -> Result<(String, usize, usize), Error> {
+/// The tensor a run ends with, as a PNG, with `parameters` written into it.
+fn png(image: &Tensor, parameters: &str) -> Result<Vec<u8>, Error> {
+    use image::ImageEncoder;
+
     let pixels = to_rgb8(image)?;
     let shape = image.shape();
-    let (width, height) = (shape[3] as usize, shape[2] as usize);
+    let (width, height) = (shape[3] as u32, shape[2] as u32);
 
-    for number in 1..10_000 {
-        let name = format!("waifu-{number:04}.png");
-        let path = folder.join(&name);
-        if path.exists() {
-            continue;
-        }
+    let mut encoded = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut encoded).write_image(
+        &pixels,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )?;
 
-        image::save_buffer(
-            &path,
-            &pixels,
-            width as u32,
-            height as u32,
-            image::ColorType::Rgb8,
-        )?;
-        return Ok((name, width, height));
+    Ok(with_text(&encoded, "parameters", parameters))
+}
+
+/// `png` with a text chunk saying `keyword` is `text`, straight after the header.
+///
+/// `parameters` is the keyword every other tool of this kind writes its generation line under,
+/// so that a picture dropped into one of them says what drew it. An `iTXt` chunk rather than a
+/// `tEXt`, because `tEXt` is Latin-1 and a prompt is whatever somebody typed -- in Chinese, as
+/// often as not.
+///
+/// Written here rather than asked of the encoder: the one `image` wraps does not take text, and a
+/// chunk is a length, four letters, the bytes and a checksum.
+fn with_text(png: &[u8], keyword: &str, text: &str) -> Vec<u8> {
+    // The eight-byte signature, then the header chunk: its length, its type, thirteen bytes and
+    // its checksum. Anything that does not start that way is left as it is.
+    const AFTER_THE_HEADER: usize = 8 + 4 + 4 + 13 + 4;
+    if png.len() < AFTER_THE_HEADER || &png[12..16] != b"IHDR" {
+        return png.to_vec();
     }
 
-    Err("there are already ten thousand pictures in this session's folder".into())
+    // The keyword, then no compression, no method, an empty language and an empty translation,
+    // each ended by a zero -- and the text itself, which is not.
+    let mut data = keyword.as_bytes().to_vec();
+    data.extend_from_slice(&[0, 0, 0, 0, 0]);
+    data.extend_from_slice(text.as_bytes());
+
+    let mut chunk = b"iTXt".to_vec();
+    chunk.extend_from_slice(&data);
+    let checksum = crc32(&chunk);
+
+    let mut whole = Vec::with_capacity(png.len() + chunk.len() + 8);
+    whole.extend_from_slice(&png[..AFTER_THE_HEADER]);
+    whole.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    whole.extend_from_slice(&chunk);
+    whole.extend_from_slice(&checksum.to_be_bytes());
+    whole.extend_from_slice(&png[AFTER_THE_HEADER..]);
+
+    whole
+}
+
+/// The CRC-32 a PNG chunk ends with, over its type and its data. A bit at a time rather than from
+/// a table: a chunk of a few hundred bytes once per picture does not need the table.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = match crc & 1 {
+                1 => (crc >> 1) ^ 0xedb8_8320,
+                _ => crc >> 1,
+            };
+        }
+    }
+
+    !crc
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stop_ends_one_job_and_the_voice_is_still_there_for_the_next() {
+        use crate::cli::args::DeviceOption;
+        use crate::cli::task::Task;
+        use crate::cli::webui::store::{Status, Store};
+
+        let root =
+            std::env::temp_dir().join(format!("libwaifu-worker-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let shared = Shared::new(
+            Task::Text2Speech,
+            DeviceOption::Cpu.resolve(),
+            Store::open(&root, None).unwrap(),
+        );
+        shared.change(|world| world.voice = Some(look_at_voice(TONES)));
+        let mut voice = None;
+        assert!(read_voice(&shared, TONES, &mut voice));
+
+        let asked = serde_json::json!({"text": "hello there", "speed": 1.0, "temperature": 0.8, "seed": "7"});
+
+        // Stopped after it was taken off the line and before it ran: it does not run.
+        let stopped = shared.store().submit(Kind::Speech, asked.clone()).unwrap();
+        shared.enqueue(&stopped.id);
+        let id = shared.next();
+        shared.cancel(&id);
+        run(&shared, None, voice.as_deref(), &id);
+        shared.finished();
+        assert_eq!(shared.store().find(&id).unwrap().status, Status::Cancelled);
+
+        // Nothing was put down: the next job runs with what is loaded, and the stop before it is
+        // not its own.
+        assert!(voice.is_some());
+        assert!(shared.world().voice.as_ref().unwrap().in_memory);
+        let next = shared.store().submit(Kind::Speech, asked).unwrap();
+        shared.enqueue(&next.id);
+        let id = shared.next();
+        run(&shared, None, voice.as_deref(), &id);
+        shared.finished();
+        let done = shared.store().find(&id).unwrap();
+        assert_eq!(done.status, Status::Done, "{:?}", done.error);
+        assert_eq!(done.made.unwrap()["seed"], 7);
+    }
+
+    #[test]
+    fn the_checksum_is_the_one_a_png_reader_checks() {
+        // The check value every CRC-32 is published with.
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+    }
+
+    #[test]
+    fn a_picture_says_what_drew_it_and_is_still_a_picture() {
+        // One pixel, as the encoder writes it, and then with the line written into it -- in a
+        // script Latin-1 has no letters for, which is why the chunk is iTXt.
+        let mut plain = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut plain),
+            &[255, 0, 0],
+            1,
+            1,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+        let said = "一只猫\nSteps: 20, Seed: 7";
+        let written = with_text(&plain, "parameters", said);
+
+        // A reader that checks every chunk's checksum still reads it, and reads the same pixel.
+        let read = image::load_from_memory(&written)
+            .expect("still a PNG")
+            .to_rgb8();
+        assert_eq!(read.get_pixel(0, 0).0, [255, 0, 0]);
+
+        // And the line is in it, after the header and before the pixels, under the keyword.
+        let at = written
+            .windows(4)
+            .position(|four| four == b"iTXt")
+            .expect("a text chunk");
+        assert_eq!(at, 8 + 4 + 4 + 13 + 4 + 4);
+        let after = &written[at + 4..];
+        assert!(after.starts_with(b"parameters\0\0\0\0\0"));
+        assert!(after[15..].starts_with(said.as_bytes()));
+
+        // Something that is not a PNG is handed back as it came.
+        assert_eq!(with_text(b"GIF89a", "parameters", said), b"GIF89a");
+    }
+
+    #[test]
+    fn a_job_is_run_with_the_settings_it_was_kept_with() {
+        let asked = serde_json::json!({
+            "prompt": "a cat",
+            "negative": "blurry",
+            "width": 832,
+            "height": 1216,
+            "steps": 28,
+            "guidance": 5.5,
+            "strength": 0.6,
+            "seed": "18446744073709551615",
+        });
+        let options = generation_options(&asked);
+        assert_eq!((options.width, options.height), (832, 1216));
+        assert_eq!(options.num_steps, 28);
+        assert_eq!(options.guidance_scale, 5.5);
+        assert_eq!(options.strength, 0.6);
+        assert_eq!(options.negative_prompt, "blurry");
+        // All sixty-four bits of it, which is why it is kept as a string.
+        assert_eq!(options.seed, Some(u64::MAX));
+
+        let spoken =
+            speech_options(&serde_json::json!({"speed": 1.25, "temperature": 0.7, "seed": "7"}));
+        assert_eq!(spoken.speed, 1.25);
+        assert_eq!(spoken.seed, Some(7));
+    }
 
     /// A manifest on the disk holding `body`, and the path it was written to.
     ///

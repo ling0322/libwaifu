@@ -39,12 +39,12 @@ mod http;
 mod log;
 mod machine;
 mod state;
+mod store;
 mod worker;
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::channel;
 use std::sync::Arc;
 
 use crate::cli::args::Args;
@@ -52,7 +52,8 @@ use crate::cli::hub;
 use crate::cli::task::{Launch, Task};
 use crate::cli::tui;
 use crate::cli::webui::state::Shared;
-use crate::cli::webui::worker::Command;
+use crate::cli::webui::store::Store;
+use crate::cli::webui::worker::Load;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -114,6 +115,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     let device = with_usage(args.device())?;
     let wanted_port = with_usage(args.port())?;
     let output = PathBuf::from(args.output());
+    let limit = with_usage(args.output_limit())?;
 
     // Read now rather than when a run begins, so that a path that is not there is said here --
     // and before the terminal is taken over by the screens, which would hide it.
@@ -163,7 +165,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         }
     };
 
-    serve_the_page(launch, picture, wanted_port, &output)
+    serve_the_page(launch, picture, wanted_port, &output, limit)
 }
 
 /// The task `-m` asks for when `-task` does not say: a voice reads, and a picture model draws --
@@ -270,6 +272,7 @@ fn serve_the_page(
     picture: Option<Vec<u8>>,
     wanted_port: Option<u16>,
     output: &Path,
+    limit: Option<u64>,
 ) -> Result<(), Error> {
     // Taken before the model is read, and not answered on until it has been. A port that is taken
     // is a session that cannot go anywhere, and finding that out after a minute of reading a model
@@ -277,41 +280,35 @@ fn serve_the_page(
     // model is in memory.
     let (listener, address) = listen(wanted_port)?;
 
-    let mut shared = Shared::new(
-        launch.task,
-        launch.runtime,
-        output.to_path_buf(),
-        address.port(),
-    );
+    let store = Store::open(output, limit)
+        .map_err(|error| format!("could not use {}: {error}", output.display()))?;
+    let mut shared = Shared::new(launch.task, launch.runtime, store);
     if let Some(bytes) = picture {
-        shared.start_holding(bytes);
+        shared
+            .start_holding(&bytes)
+            .map_err(|error| format!("could not keep the picture -i named: {error}"))?;
     }
-    let shared = Arc::new(shared);
-    let (commands, waiting) = channel::<Command>();
-
-    let worker = std::thread::spawn({
-        let shared = Arc::clone(&shared);
-        move || worker::work(&shared, &waiting)
-    });
 
     // Read onto the device before the page opens, on the worker -- the thread the weights have to
     // live on -- with this one waiting for it in the terminal. The page never opens on a model
     // that is still being read, and one that cannot be read is said here rather than on a page.
-    let command = match launch.task.speaks() {
+    let load = match launch.task.speaks() {
         true => {
             shared.change(|world| world.voice = Some(worker::look_at_voice(&launch.model)));
-            Command::UseVoice(launch.model.clone())
+            Load::Voice(launch.model.clone())
         }
         false => {
             shared.change(|world| world.model = Some(worker::look_at(&launch.model)));
-            Command::Use(launch.model.clone())
+            Load::Model(launch.model.clone())
         }
     };
-    // For no page: none is open yet, and what this read has to say is the terminal's.
-    shared.claim(None);
-    commands
-        .send(command)
-        .map_err(|_| "the model thread stopped before it could read anything")?;
+    shared.reading(true);
+    let shared = Arc::new(shared);
+
+    let worker = std::thread::spawn({
+        let shared = Arc::clone(&shared);
+        move || worker::work(&shared, load)
+    });
     read_in_the_terminal(&shared, &launch)?;
 
     println!(
@@ -321,12 +318,16 @@ fn serve_the_page(
         launch.runtime.name()
     );
     println!(
-        "Each page writes into a folder of its own under {}.",
-        output.display()
+        "Jobs and what they made are kept in {} ({}).",
+        output.display(),
+        match shared.store().limit() {
+            Some(limit) => format!("up to {}, oldest deleted first", size(limit)),
+            None => "with no limit".to_string(),
+        }
     );
     println!("Press ctrl-c to stop.");
 
-    serve(listener, shared, commands)?;
+    serve(listener, shared)?;
     let _ = worker.join();
 
     Ok(())
@@ -368,10 +369,18 @@ fn read_in_the_terminal(shared: &Shared, launch: &Launch) -> Result<(), Error> {
 
     let why = world
         .note
-        .as_ref()
-        .map(|note| note.said.clone())
+        .clone()
         .unwrap_or_else(|| "it stopped without saying why".to_string());
     Err(format!("could not read {}: {why}", launch.model).into())
+}
+
+/// A number of bytes, in the unit that says it in a few digits.
+fn size(bytes: u64) -> String {
+    match bytes {
+        bytes if bytes >= 1 << 30 => format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64),
+        bytes if bytes >= 1 << 20 => format!("{:.0} MB", bytes as f64 / (1u64 << 20) as f64),
+        bytes => format!("{bytes} bytes"),
+    }
 }
 
 /// Takes a port to listen on: the one that was asked for, or the first free one near it.
@@ -409,35 +418,24 @@ fn listen(wanted: Option<u16>) -> Result<(TcpListener, SocketAddr), Error> {
 /// There is no way out of this short of ctrl-c, which is the honest shape: the page is the
 /// program, and a page that could shut the server down from a button is a page any other tab on
 /// the machine could shut down too.
-fn serve(
-    listener: TcpListener,
-    shared: Arc<Shared>,
-    commands: std::sync::mpsc::Sender<Command>,
-) -> Result<(), Error> {
+fn serve(listener: TcpListener, shared: Arc<Shared>) -> Result<(), Error> {
     // Mapped rather than passed on: what comes back is a `Send + Sync` box, which is not the
     // plain box everything here reports with and does not convert into one on its own.
     let server = tiny_http::Server::from_listener(listener, None)
         .map_err(|error| format!("could not answer on that port: {error}"))?;
     let server = Arc::new(server);
-    let commands = Arc::new(std::sync::Mutex::new(commands));
 
     let answerers: Vec<_> = (0..ANSWERERS)
         .map(|_| {
             let server = Arc::clone(&server);
             let shared = Arc::clone(&shared);
-            let commands = Arc::clone(&commands);
 
             std::thread::spawn(move || {
                 while let Ok(mut request) = server.recv() {
-                    // One at a time, which is what the channel wants and costs nothing: posting a
-                    // command is a pointer move, and the work it asks for happens elsewhere.
                     let method = request.method().to_string();
                     let path = request.url().split('?').next().unwrap_or("/").to_string();
                     let started = std::time::Instant::now();
-                    let reply = {
-                        let commands = commands.lock().unwrap_or_else(|held| held.into_inner());
-                        http::answer(&shared, &commands, &mut request)
-                    };
+                    let reply = http::answer(&shared, &mut request);
                     log::request(&method, &path, reply.status_code().0, started.elapsed());
 
                     // A browser that navigated away mid-request is not this program's problem,
@@ -461,10 +459,8 @@ mod tests {
 
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    use std::sync::mpsc::Receiver;
-    use std::sync::Mutex;
 
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     use crate::cli::args::DeviceOption;
 
@@ -479,140 +475,6 @@ mod tests {
             .port()
     }
 
-    /// A server with no model behind it, answering on a port of its own.
-    ///
-    /// The receiving end of the channel comes back with it: dropped, every command posted to it
-    /// would be refused as "the model thread is no longer there", which is not what these are
-    /// about.
-    fn a_server() -> (SocketAddr, Receiver<Command>) {
-        a_server_for(Task::Txt2Img, None)
-    }
-
-    /// A server for `task`, with `model` described the way `main` describes what the terminal
-    /// chose -- and not read, which is the worker's to do, and there is no worker here.
-    fn a_server_for(task: Task, model: Option<&str>) -> (SocketAddr, Receiver<Command>) {
-        let (listener, address) = listen(Some(a_free_port())).expect("somewhere to listen");
-        let output = std::env::temp_dir().join(format!(
-            "libwaifu-webui-{}-{}",
-            address.port(),
-            std::process::id()
-        ));
-        let shared = Arc::new(Shared::new(
-            task,
-            DeviceOption::Cpu.resolve(),
-            output,
-            address.port(),
-        ));
-        let (commands, waiting) = channel::<Command>();
-
-        // A voice as well, whatever the task. The stand-in rather than the published one, because
-        // a test that speaks should not start by fetching gigabytes -- `-m tones` is the same
-        // server.
-        shared.change(|world| world.voice = Some(worker::look_at_voice(worker::TONES)));
-        if let Some(model) = model {
-            shared.change(|world| world.model = Some(worker::look_at(model)));
-        }
-
-        // Left running for the rest of the test process. There is no way to stop it short of the
-        // process ending, which is the same shape the program has. What it answers with is
-        // dropped here rather than carried out: an error in it is a box that is not `Send`, and
-        // nothing on this side would do anything with one anyway.
-        std::thread::spawn(move || {
-            let _ = serve(listener, shared, commands).is_ok();
-        });
-
-        (address, waiting)
-    }
-
-    /// The cookie each test's server handed out, by the server's address.
-    ///
-    /// Which is what makes the requests of one test one browser's, the way a page's are: each
-    /// test has a server of its own, so each has one entry here. A test that wants a second
-    /// browser asks through [`exchange`] with a cookie of its own.
-    static JAR: Mutex<Vec<(SocketAddr, String)>> = Mutex::new(Vec::new());
-
-    /// One request, as the bytes of one, and what came back: the status and the body.
-    ///
-    /// Written out rather than asked of a client library, because what is being tested is the
-    /// wire -- a client that rewrote the request on the way out would be testing itself.
-    fn asked(address: SocketAddr, line: &str, body: &str) -> (u16, String) {
-        posted(address, line, body.as_bytes())
-    }
-
-    /// The same, for a body that is not text.
-    ///
-    /// A WAV file is bytes, and most of them are not characters: sent as a string it arrives as
-    /// whatever the replacement character made of every one that was not valid UTF-8, which is a
-    /// file that no longer parses and a test that was checking the wrong refusal.
-    fn posted(address: SocketAddr, line: &str, body: &[u8]) -> (u16, String) {
-        let kept = |jar: &Vec<(SocketAddr, String)>| {
-            jar.iter()
-                .find(|(server, _)| *server == address)
-                .map(|(_, cookie)| cookie.clone())
-        };
-        let cookie = kept(&JAR.lock().unwrap());
-
-        let (status, body, set) = exchange(address, line, body, cookie.as_deref());
-        if let Some(set) = set {
-            let mut jar = JAR.lock().unwrap();
-            jar.retain(|(server, _)| *server != address);
-            jar.push((address, set));
-        }
-
-        (status, body)
-    }
-
-    /// One request from a browser holding `cookie`, or none: the status, the body, and the
-    /// cookie the server handed back, as the `name=value` a browser would send with the next.
-    fn exchange(
-        address: SocketAddr,
-        line: &str,
-        body: &[u8],
-        cookie: Option<&str>,
-    ) -> (u16, String, Option<String>) {
-        let mut socket = TcpStream::connect(address).expect("the server");
-        let cookie = match cookie {
-            Some(cookie) => format!("Cookie: {cookie}\r\n"),
-            None => String::new(),
-        };
-        let head = format!(
-            "{line} HTTP/1.1\r\nHost: localhost\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        socket.write_all(head.as_bytes()).expect("to ask");
-        socket.write_all(body).expect("to ask");
-
-        // Read as bytes, since what comes back can be a file too. Only the status line, the
-        // headers and a refusal's JSON are ever looked at, and all three are text.
-        let mut whole = Vec::new();
-        socket.read_to_end(&mut whole).expect("an answer");
-        let answer = String::from_utf8_lossy(&whole).to_string();
-
-        let status = answer
-            .split_whitespace()
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .unwrap_or(0);
-        let (head, body) = answer.split_once("\r\n\r\n").unwrap_or((&answer, ""));
-        let set = head.lines().find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("set-cookie").then(|| {
-                value
-                    .split(';')
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string()
-            })
-        });
-
-        (status, body.to_string(), set)
-    }
-
-    fn json(address: SocketAddr, line: &str, body: &str) -> Value {
-        serde_json::from_str(&asked(address, line, body).1).expect("an answer in JSON")
-    }
-
     #[test]
     fn a_port_somebody_named_and_cannot_have_is_refused() {
         // Named, so they have something pointed at it; a quiet walk to the next one along would
@@ -622,266 +484,6 @@ mod tests {
 
         let refused = listen(Some(port)).expect_err("the port is taken");
         assert!(refused.to_string().contains(&port.to_string()));
-    }
-
-    #[test]
-    fn the_page_and_everything_it_asks_for_is_served() {
-        let (address, _commands) = a_server();
-
-        for (line, mime) in [
-            ("GET /", "text/html"),
-            ("GET /style.css", "text/css"),
-            ("GET /app.js", "text/javascript"),
-            // The page is drawn in React, and a missing one of these is a blank window rather
-            // than a broken corner: every script the frame names has to be here.
-            ("GET /vendor/react.js", "text/javascript"),
-            ("GET /vendor/react-dom.js", "text/javascript"),
-            ("GET /vendor/htm.js", "text/javascript"),
-        ] {
-            let (status, body) = asked(address, line, "");
-            assert_eq!(status, 200, "{line}");
-            assert!(!body.is_empty(), "{line} came back empty");
-            assert!(mime.starts_with("text/"), "{mime}");
-        }
-
-        // A browser appends a query to defeat its own cache. A path that kept it would match
-        // nothing, which is the kind of failure that only shows up on the second load.
-        assert_eq!(asked(address, "GET /api/state?4", "").0, 200);
-    }
-
-    #[test]
-    fn the_state_says_there_is_no_model_rather_than_failing_to_say_anything() {
-        // The page opens before anything is loaded, every time. Half of what it draws has to hold
-        // for a program that has not been asked to do anything yet.
-        let (address, _commands) = a_server();
-        let state = json(address, "GET /api/state", "");
-
-        assert!(state["model"].is_null());
-        assert_eq!(state["task"], "txt2img");
-        assert_eq!(state["device"], "cpu");
-        assert_eq!(state["holding_a_picture"], false);
-    }
-
-    #[test]
-    fn a_run_asked_for_with_no_model_is_refused_with_the_reason() {
-        let (address, _commands) = a_server();
-
-        let (status, body) = asked(address, "POST /api/generate", r#"{"prompt":"a cat"}"#);
-        assert_eq!(status, 409);
-        assert!(body.contains("no model to draw with"), "{body}");
-    }
-
-    #[test]
-    fn a_run_with_nothing_to_draw_is_refused_before_anything_else_is_looked_at() {
-        // Before the model is, because "type a prompt" is the more useful of the two things that
-        // are wrong with an empty page, and it is the one the person can act on.
-        let (address, _commands) = a_server();
-
-        let (status, body) = asked(address, "POST /api/generate", r#"{"prompt":"   "}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("type a prompt"), "{body}");
-    }
-
-    #[test]
-    fn what_is_not_a_request_is_said_to_be_one_rather_than_dropped() {
-        let (address, _commands) = a_server();
-
-        let (status, body) = asked(address, "POST /api/generate", "not json at all");
-        assert_eq!(status, 400);
-        assert!(body.contains("not a request"), "{body}");
-    }
-
-    #[test]
-    fn the_model_the_terminal_chose_is_described_before_a_byte_of_it_is_read() {
-        // What the boxes on the page are filled in from until the worker has read the package:
-        // what the name says about the model.
-        let (address, _commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
-        let chosen = &json(address, "GET /api/state", "")["model"];
-        assert_eq!(chosen["name"], "sdxl:base");
-        assert_eq!(chosen["full_name"], "Stable Diffusion XL Base 1.0");
-        assert_eq!(chosen["in_memory"], false);
-        assert_eq!(chosen["sampler"], "Euler");
-        // An SDXL package is taken to draw from a picture until one says otherwise, and has a
-        // second pass, so the page draws the CFG card and the negative prompt box.
-        assert_eq!(chosen["draws_from_a_picture"], true);
-        assert_eq!(chosen["takes_guidance"], true);
-
-        // An Anima one is known not to start from a picture before anything of it is read.
-        let (address, _commands) = a_server_for(Task::Txt2Img, Some("anima:turbo"));
-        let chosen = &json(address, "GET /api/state", "")["model"];
-        assert_eq!(chosen["draws_from_a_picture"], false);
-        assert!(
-            chosen["no_picture_because"]
-                .as_str()
-                .expect("a reason")
-                .contains("Anima"),
-            "{chosen}"
-        );
-
-        // Krea 2 answers in a single pass, and the page stops drawing the two things that steer
-        // a second one.
-        let (address, _commands) = a_server_for(Task::Txt2Img, Some("krea2:turbo"));
-        let chosen = &json(address, "GET /api/state", "")["model"];
-        assert_eq!(chosen["takes_guidance"], false);
-        assert_eq!(chosen["guidance"], 1.0);
-        assert_eq!(chosen["steps"], 8);
-    }
-
-    #[test]
-    fn the_page_cannot_choose_fetch_or_move_a_model() {
-        // All three are the terminal's. A page that could would be a second place to change what
-        // the first had settled, and the doors are not there to be knocked on.
-        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
-
-        for (line, body) in [
-            ("POST /api/model", r#"{"model":"sdxl:noob"}"#),
-            ("DELETE /api/model", r#"{"model":"sdxl:base"}"#),
-            ("POST /api/voice-model", r#"{"voice":"indextts"}"#),
-            ("POST /api/fetch", r#"{"name":"krea2:turbo"}"#),
-            ("POST /api/device", r#"{"device":"cpu"}"#),
-        ] {
-            assert_eq!(asked(address, line, body).0, 404, "{line}");
-        }
-        assert!(commands.try_recv().is_err(), "the worker was told anyway");
-
-        // Nor does it have anything to choose from: no list of models, voices or devices.
-        let state = json(address, "GET /api/state", "");
-        for gone in ["models", "voices", "devices"] {
-            assert!(state.get(gone).is_none(), "{gone}: {state}");
-        }
-    }
-    #[test]
-    fn a_second_thing_asked_for_before_the_first_has_started_is_refused() {
-        // Two clicks on a button are a few tens of milliseconds apart, and the worker picks a
-        // command up some time after it is posted. Asked of what the worker is doing, both
-        // requests read "nothing", and one press drew two pictures.
-        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
-
-        let run = r#"{"prompt":"a cat"}"#;
-        assert_eq!(asked(address, "POST /api/generate", run).0, 200);
-        let (status, body) = asked(address, "POST /api/generate", run);
-        assert_eq!(status, 409);
-        assert!(body.contains("already happening"), "{body}");
-
-        // One command, not two: the second never reached the channel.
-        assert!(commands.try_recv().is_ok());
-        assert!(commands.try_recv().is_err());
-    }
-
-    #[test]
-    fn a_command_that_could_not_be_posted_gives_the_worker_back() {
-        // A refusal after the claim has found a request that could not be carried out, not a
-        // program that is busy. Keeping the claim would leave every request after it refused as
-        // "already happening" by something that never started.
-        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
-        drop(commands);
-
-        for _ in 0..2 {
-            let (status, body) = asked(address, "POST /api/generate", r#"{"prompt":"a cat"}"#);
-            assert_eq!(status, 500);
-            assert!(body.contains("no longer there"), "{body}");
-        }
-    }
-
-    #[test]
-    fn a_picture_this_session_did_not_draw_cannot_be_deleted_through_it_either() {
-        // The same door as reading one, and the same answer through it: a name that is not in the
-        // gallery is not a file this program will touch, whatever it is a path to.
-        let (address, _commands) = a_server();
-
-        let (status, body) = asked(
-            address,
-            "DELETE /api/picture",
-            r#"{"file":"../../etc/passwd"}"#,
-        );
-        assert_eq!(status, 404);
-        assert!(body.contains("did not draw that"), "{body}");
-
-        let (status, body) = asked(address, "DELETE /api/picture", r#"{}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("no picture was named"), "{body}");
-    }
-
-    #[test]
-    fn a_picture_this_session_did_not_draw_cannot_be_read_through_it() {
-        // The gallery is the whole of what is readable. This server is on the loopback address,
-        // which every other program on the machine can reach, a browser tab on another site
-        // included.
-        let (address, _commands) = a_server();
-
-        for path in [
-            "/picture/../../../etc/passwd",
-            "/picture//etc/passwd",
-            "/picture/waifu-0001.png",
-        ] {
-            let (status, body) = asked(address, &format!("GET {path}"), "");
-            assert_eq!(status, 404, "{path}");
-            assert!(body.contains("did not draw"), "{path}: {body}");
-        }
-    }
-
-    #[test]
-    fn the_picture_to_draw_from_goes_up_and_comes_back_as_it_went() {
-        // The page posts the bytes of a file and nothing else -- no form, no boundary, no field
-        // names -- and asks for them back to show what a run started from `-i` is drawing from.
-        let (address, _commands) = a_server();
-        assert_eq!(asked(address, "GET /api/upload", "").0, 404);
-
-        let png = "\u{89}PNG\r\n\u{1a}\nand the rest of it";
-        assert_eq!(asked(address, "POST /api/upload", png).0, 200);
-
-        let (status, body) = asked(address, "GET /api/upload", "");
-        assert_eq!(status, 200);
-        assert_eq!(body, png);
-        assert_eq!(
-            json(address, "GET /api/state", "")["holding_a_picture"],
-            true
-        );
-
-        assert_eq!(asked(address, "DELETE /api/upload", "").0, 200);
-        assert_eq!(asked(address, "GET /api/upload", "").0, 404);
-    }
-
-    #[test]
-    fn an_empty_picture_is_not_a_picture() {
-        let (address, _commands) = a_server();
-
-        let (status, body) = asked(address, "POST /api/upload", "");
-        assert_eq!(status, 400);
-        assert!(body.contains("empty"), "{body}");
-    }
-
-    #[test]
-    fn a_page_that_is_not_there_says_so_in_the_shape_everything_else_answers_in() {
-        // So that the page can show what went wrong without knowing which request it came from.
-        let (address, _commands) = a_server();
-
-        let (status, body) = asked(address, "GET /nope", "");
-        assert_eq!(status, 404);
-        assert!(body.contains("\"error\""), "{body}");
-    }
-
-    #[test]
-    fn the_state_says_what_will_speak_and_that_it_is_not_a_voice() {
-        // The one sentence the speech tab is built around. A page that did not get it would be a
-        // page claiming a voice this program has not got.
-        let (address, _commands) = a_server();
-        let state = json(address, "GET /api/state", "");
-        let voice = &state["voice"];
-
-        assert_eq!(voice["name"], "tones");
-        assert_eq!(voice["rate"], 24_000);
-        assert_eq!(voice["takes_a_recording"], true);
-        assert!(
-            voice["not_a_voice_because"]
-                .as_str()
-                .expect("the sentence")
-                .contains("not a speech model"),
-            "{voice}"
-        );
-
-        assert_eq!(state["holding_a_recording"], false);
-        assert_eq!(state["clips"].as_array().expect("the clips").len(), 0);
     }
 
     #[test]
@@ -917,246 +519,543 @@ mod tests {
         // A manifest on the disk is taken at its word.
         assert!(fits(Task::Text2Speech, "/somewhere/voice.yaml").is_ok());
     }
+
+    /// A program for `task`, keeping its jobs in a directory of the calling test's own, with
+    /// `model` described the way `main` describes what the terminal chose -- and a voice, the
+    /// stand-in, for one that speaks.
+    fn a_program(called: &str, task: Task, model: Option<&str>) -> Shared {
+        let root =
+            std::env::temp_dir().join(format!("libwaifu-webui-{called}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let shared = Shared::new(
+            task,
+            DeviceOption::Cpu.resolve(),
+            Store::open(&root, None).expect("a store"),
+        );
+        match task.speaks() {
+            true => shared.change(|world| {
+                world.voice = Some(worker::look_at_voice(model.unwrap_or(worker::TONES)))
+            }),
+            false => {
+                if let Some(model) = model {
+                    shared.change(|world| world.model = Some(worker::look_at(model)));
+                }
+            }
+        }
+        shared
+    }
+
+    /// `shared`, answering on a port of its own, with no worker behind it: what is posted waits
+    /// in line, which is what most of these are about. Left running for the rest of the test
+    /// process, which is the same shape the program has.
+    fn a_server(shared: Shared) -> (SocketAddr, Arc<Shared>) {
+        let (listener, address) = listen(Some(a_free_port())).expect("somewhere to listen");
+        let shared = Arc::new(shared);
+        std::thread::spawn({
+            let shared = Arc::clone(&shared);
+            move || {
+                let _ = serve(listener, shared).is_ok();
+            }
+        });
+        (address, shared)
+    }
+
+    /// The same, with a worker behind it that has read the stand-in voice: `tones` holds no
+    /// weights, so a job of it is a real job that takes no time.
+    fn a_speaking_server(called: &str) -> (SocketAddr, Arc<Shared>) {
+        let shared = a_program(called, Task::Text2Speech, None);
+        shared.reading(true);
+        let (address, shared) = a_server(shared);
+        std::thread::spawn({
+            let shared = Arc::clone(&shared);
+            move || worker::work(&shared, Load::Voice(worker::TONES.to_string()))
+        });
+        while shared.is_busy() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        (address, shared)
+    }
+
+    /// What came back from one request.
+    struct Answer {
+        status: u16,
+        head: String,
+        body: Vec<u8>,
+    }
+
+    impl Answer {
+        fn json(&self) -> Value {
+            serde_json::from_slice(&self.body).expect("an answer in JSON")
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.body).to_string()
+        }
+
+        fn header(&self, name: &str) -> Option<String> {
+            self.head.lines().find_map(|line| {
+                let (field, value) = line.split_once(':')?;
+                field
+                    .eq_ignore_ascii_case(name)
+                    .then(|| value.trim().to_string())
+            })
+        }
+    }
+
+    /// One request, as the bytes of one, with whatever extra header lines `extra` carries.
+    ///
+    /// Written out rather than asked of a client library, because what is being tested is the
+    /// wire -- a client that rewrote the request on the way out would be testing itself.
+    fn ask(address: SocketAddr, line: &str, extra: &str, body: &[u8]) -> Answer {
+        let mut socket = TcpStream::connect(address).expect("the server");
+        let head = format!(
+            "{line} HTTP/1.1\r\nHost: {address}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(head.as_bytes()).expect("to ask");
+        socket.write_all(body).expect("to ask");
+
+        let mut whole = Vec::new();
+        socket.read_to_end(&mut whole).expect("an answer");
+        let at = whole
+            .windows(4)
+            .position(|four| four == b"\r\n\r\n")
+            .expect("a head");
+        let head = String::from_utf8_lossy(&whole[..at]).to_string();
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0);
+
+        Answer {
+            status,
+            head,
+            body: whole[at + 4..].to_vec(),
+        }
+    }
+
+    fn get(address: SocketAddr, path: &str) -> Answer {
+        ask(address, &format!("GET {path}"), "", b"")
+    }
+
+    fn delete(address: SocketAddr, path: &str) -> Answer {
+        ask(address, &format!("DELETE {path}"), "", b"")
+    }
+
+    /// A POST of JSON, the way the page sends one.
+    fn post(address: SocketAddr, path: &str, body: &str) -> Answer {
+        ask(
+            address,
+            &format!("POST {path}"),
+            "Content-Type: application/json\r\n",
+            body.as_bytes(),
+        )
+    }
+
+    /// A POST of a file, the way the page uploads one.
+    fn post_file(address: SocketAddr, mime: &str, bytes: &[u8]) -> Answer {
+        ask(
+            address,
+            "POST /api/uploads",
+            &format!("Content-Type: {mime}\r\n"),
+            bytes,
+        )
+    }
+
+    /// A job, asked after until it has finished.
+    fn once_it_is_done(address: SocketAddr, id: &str) -> Value {
+        for _ in 0..500 {
+            let job = get(address, &format!("/api/jobs/{id}")).json();
+            if !matches!(job["status"].as_str(), Some("queued" | "running")) {
+                return job;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("job {id} never finished");
+    }
+
+    /// A WAV of a tenth of a second of silence.
+    fn a_recording() -> Vec<u8> {
+        crate::wav::write(&crate::wav::Sound::new(vec![0.0; 2400], 24_000))
+    }
+
+    const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 13, 10, 26, 10];
+
+    #[test]
+    fn the_page_and_everything_it_asks_for_is_served() {
+        let (address, _) = a_server(a_program("page", Task::Txt2Img, None));
+
+        for path in [
+            "/",
+            "/style.css",
+            "/app.js",
+            // The page is drawn in React, and a missing one of these is a blank window rather
+            // than a broken corner: every script the frame names has to be here.
+            "/vendor/react.js",
+            "/vendor/react-dom.js",
+            "/vendor/htm.js",
+        ] {
+            let answer = get(address, path);
+            assert_eq!(answer.status, 200, "{path}");
+            assert!(!answer.body.is_empty(), "{path} came back empty");
+        }
+
+        // A browser appends a query to defeat its own cache. A path that kept it would match
+        // nothing, which is the kind of failure that only shows up on the second load.
+        assert_eq!(get(address, "/api/model?4").status, 200);
+    }
+
+    #[test]
+    fn the_model_the_terminal_chose_is_described_before_a_byte_of_it_is_read() {
+        // What the boxes on the page are filled in from: what the name says about the model.
+        let (address, _) = a_server(a_program("sdxl", Task::Txt2Img, Some("sdxl:base")));
+        let described = get(address, "/api/model").json();
+        assert_eq!(described["kind"], "image");
+        assert_eq!(described["task"], "txt2img");
+        assert_eq!(described["device"], "cpu");
+        let chosen = &described["model"];
+        assert_eq!(chosen["name"], "sdxl:base");
+        assert_eq!(chosen["full_name"], "Stable Diffusion XL Base 1.0");
+        assert_eq!(chosen["in_memory"], false);
+        assert_eq!(chosen["sampler"], "Euler");
+        // An SDXL package is taken to draw from a picture until one says otherwise, and has a
+        // second pass, so the page draws the CFG card and the negative prompt box.
+        assert_eq!(chosen["draws_from_a_picture"], true);
+        assert_eq!(chosen["takes_guidance"], true);
+
+        // An Anima one is known not to start from a picture before anything of it is read.
+        let (address, _) = a_server(a_program("anima", Task::Txt2Img, Some("anima:turbo")));
+        let chosen = &get(address, "/api/model").json()["model"];
+        assert_eq!(chosen["draws_from_a_picture"], false);
+        assert!(
+            chosen["no_picture_because"]
+                .as_str()
+                .expect("a reason")
+                .contains("Anima"),
+            "{chosen}"
+        );
+
+        // Krea 2 answers in a single pass, and the page stops drawing the two things that steer
+        // a second one.
+        let (address, _) = a_server(a_program("krea2", Task::Txt2Img, Some("krea2:turbo")));
+        let chosen = &get(address, "/api/model").json()["model"];
+        assert_eq!(chosen["takes_guidance"], false);
+        assert_eq!(chosen["guidance"], 1.0);
+        assert_eq!(chosen["steps"], 8);
+    }
+
+    #[test]
+    fn the_model_says_what_will_speak_and_that_it_is_not_a_voice() {
+        // The one sentence the speech tab is built around. A page that did not get it would be a
+        // page claiming a voice this program has not got.
+        let (address, _) = a_server(a_program("tones", Task::Text2Speech, None));
+        let described = get(address, "/api/model").json();
+        assert_eq!(described["kind"], "speech");
+        let voice = &described["voice"];
+
+        assert_eq!(voice["name"], "tones");
+        assert_eq!(voice["rate"], 24_000);
+        assert_eq!(voice["takes_a_recording"], true);
+        assert!(
+            voice["not_a_voice_because"]
+                .as_str()
+                .expect("the sentence")
+                .contains("not a speech model"),
+            "{voice}"
+        );
+    }
+
     #[test]
     fn a_published_voice_is_described_the_way_a_model_is() {
         // Described and not read or fetched. It is a real voice, so the tab has no apology to
         // make, and it says what it is called and whether it is in memory yet.
-        let shared = Shared::new(
-            Task::Text2Speech,
-            DeviceOption::Cpu.resolve(),
-            PathBuf::from("."),
-            7860,
-        );
-        shared.change(|world| world.voice = Some(worker::look_at_voice("indextts")));
-        let state = shared.describe(&shared.session_for(None).session);
+        let shared = a_program("indextts", Task::Text2Speech, Some("indextts"));
+        let described = shared.describe_model();
 
-        assert_eq!(state["task"], "text2speech");
-        let voice = &state["voice"];
+        assert_eq!(described["task"], "text2speech");
+        let voice = &described["voice"];
         assert_eq!(voice["name"], "indextts");
         assert_eq!(voice["full_name"], "IndexTTS 2.5");
         assert_eq!(voice["in_memory"], false);
         assert!(voice["on_disk"].is_boolean(), "{voice}");
         assert_eq!(voice["not_a_voice_because"], Value::Null);
     }
+
     #[test]
-    fn a_reading_with_nothing_to_read_is_refused_with_the_reason() {
-        let (address, _commands) = a_server();
+    fn the_page_cannot_choose_fetch_or_move_a_model() {
+        // All three are the terminal's. A page that could would be a second place to change what
+        // the first had settled, and the doors are not there to be knocked on.
+        let (address, shared) = a_server(a_program("no-doors", Task::Txt2Img, Some("sdxl:base")));
 
-        let (status, body) = asked(address, "POST /api/speak", r#"{"text":"   "}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("nothing to say"), "{body}");
-
-        let (status, body) = asked(address, "POST /api/speak", "not json at all");
-        assert_eq!(status, 400);
-        assert!(body.contains("not a request"), "{body}");
+        for path in ["/api/model", "/api/fetch", "/api/device"] {
+            assert_eq!(
+                post(address, path, r#"{"model":"sdxl:noob"}"#).status,
+                404,
+                "{path}"
+            );
+        }
+        assert_eq!(delete(address, "/api/model").status, 404);
+        assert!(!shared.is_busy(), "something was started anyway");
     }
 
     #[test]
-    fn a_reading_is_posted_to_the_worker_once_however_often_it_is_asked_for() {
-        // The same two clicks that used to draw two pictures. Nothing about the speech tab makes
-        // that different: the worker is picked up some time after a command is posted to it.
-        let (address, commands) = a_server();
+    fn a_job_is_taken_put_in_line_and_can_be_found_again() {
+        let (address, _) = a_server(a_program("submit", Task::Txt2Img, Some("sdxl:base")));
 
-        let run = r#"{"text":"hello there"}"#;
-        assert_eq!(asked(address, "POST /api/speak", run).0, 200);
-        let (status, body) = asked(address, "POST /api/speak", run);
-        assert_eq!(status, 409);
-        assert!(body.contains("already"), "{body}");
-
-        assert!(matches!(commands.try_recv(), Ok(Command::Speak(_))));
-        assert!(commands.try_recv().is_err());
-    }
-
-    #[test]
-    fn a_reading_from_a_recording_there_is_none_of_is_refused_rather_than_run() {
-        // A page left open while the recording was cleared asks for exactly this, and what it
-        // must not do is take the worker and then quietly read without one.
-        let (address, commands) = a_server();
-
-        let (status, body) = asked(
+        let first = post(
             address,
-            "POST /api/speak",
-            r#"{"text":"hello","from_recording":true}"#,
+            "/api/jobs",
+            r#"{"prompt":"a cat","width":1000,"seed":"7"}"#,
         );
-        assert_eq!(status, 400);
-        assert!(body.contains("no recording"), "{body}");
-        assert!(commands.try_recv().is_err(), "the worker was told anyway");
+        assert_eq!(first.status, 202, "{}", first.text());
+        let job = first.json();
+        let id = job["id"].as_str().unwrap().to_string();
+        assert_eq!(first.header("Location"), Some(format!("/api/jobs/{id}")));
+        assert_eq!(job["status"], "queued");
+        assert_eq!(job["kind"], "image");
+        assert_eq!(job["position"], 0);
 
-        // And the worker was handed back, rather than left claimed by a run that never started.
+        // Every setting spelled out: what was asked, rounded to what the model can be asked for,
+        // and the model's own for the rest.
+        let asked = &job["asked"];
+        assert_eq!(asked["prompt"], "a cat");
+        assert_eq!(asked["width"], 960);
+        assert_eq!(asked["height"], 1024);
+        assert_eq!(asked["seed"], "7");
+        assert_eq!(asked["model"], "sdxl:base");
+
+        // A second one waits behind it, and is given a seed of its own where it asked for none.
+        let second = post(address, "/api/jobs", r#"{"prompt":"a dog"}"#).json();
+        assert_eq!(second["position"], 1);
+        let seed = second["asked"]["seed"].as_str().unwrap();
+        assert!(seed.parse::<u64>().is_ok(), "{seed}");
+        let second_id = second["id"].as_str().unwrap();
+
+        // Found again by id, by a list of ids, and in the list of all of them.
         assert_eq!(
-            asked(address, "POST /api/speak", r#"{"text":"hello"}"#).0,
-            200
+            get(address, &format!("/api/jobs/{id}")).json()["asked"]["prompt"],
+            "a cat"
         );
-    }
-
-    #[test]
-    fn the_recording_to_sound_like_goes_up_and_comes_back_as_it_went() {
-        let (address, _commands) = a_server();
-        assert_eq!(asked(address, "GET /api/voice", "").0, 404);
-
-        // A real WAV file, because this door reads what it is handed rather than holding bytes
-        // that a run would find out about later. Posted as bytes: most of a WAV file is not
-        // characters, and sent as a string it would arrive as something that no longer parses.
-        let wav = crate::wav::write(&crate::Sound::new(vec![0.0; 64], 16_000));
-        assert_eq!(posted(address, "POST /api/voice", &wav).0, 200);
-
-        assert_eq!(asked(address, "GET /api/voice", "").0, 200);
+        let some = get(address, &format!("/api/jobs?ids={second_id}")).json();
+        assert_eq!(some["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(some["jobs"][0]["id"], second_id);
         assert_eq!(
-            json(address, "GET /api/state", "")["holding_a_recording"],
-            true
+            get(address, "/api/jobs").json()["jobs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
 
-        // And the picture is a different box: clearing one leaves the other alone.
-        assert_eq!(asked(address, "POST /api/upload", "a picture").0, 200);
-        assert_eq!(asked(address, "DELETE /api/voice", "").0, 200);
-        assert_eq!(asked(address, "GET /api/voice", "").0, 404);
-        assert_eq!(asked(address, "GET /api/upload", "").0, 200);
+        let worker = get(address, "/api/worker").json();
+        assert_eq!(worker["queued"], 2);
+        assert_eq!(worker["busy"], true);
+
+        // Nothing made yet.
+        assert_eq!(get(address, &format!("/api/jobs/{id}/output")).status, 404);
+        assert_eq!(
+            get(address, &format!("/api/jobs/{}", "0".repeat(32))).status,
+            404
+        );
+        assert_eq!(get(address, "/api/jobs/../../etc/passwd").status, 404);
     }
 
     #[test]
-    fn a_file_that_is_not_a_recording_is_refused_at_the_door() {
-        // Rather than at the run, which is after a button was pressed and a wait. It is the one
-        // thing posted to this server that is checked as it arrives, because it is the one where
-        // the check is a header rather than a decoder.
-        let (address, _commands) = a_server();
+    fn a_job_that_cannot_be_run_is_refused_with_the_reason() {
+        let (address, _) = a_server(a_program("refused", Task::Txt2Img, Some("anima:turbo")));
 
-        let (status, body) = asked(address, "POST /api/voice", "ID3 this is an mp3");
-        assert_eq!(status, 400);
-        assert!(body.contains("not a WAV file"), "{body}");
-
-        let (status, body) = asked(address, "POST /api/voice", "");
-        assert_eq!(status, 400);
-        assert!(body.contains("empty"), "{body}");
-    }
-
-    #[test]
-    fn a_clip_this_session_did_not_say_cannot_be_read_or_deleted_through_it() {
-        // The same door the pictures have, and it has to be the same door: this server is on the
-        // loopback address, which every other program on the machine can reach.
-        let (address, _commands) = a_server();
-
-        for path in [
-            "/clip/../../../etc/passwd",
-            "/clip//etc/passwd",
-            "/clip/waifu-0001.wav",
+        for (body, reason) in [
+            (r#"{"prompt":"   "}"#, "give it a prompt"),
+            ("not json at all", "not a request"),
+            (r#"{"kind":"speech","text":"hello"}"#, "runs image jobs"),
+            (
+                r#"{"prompt":"a cat","init_image":"00000000000000000000000000000000"}"#,
+                "no upload",
+            ),
         ] {
-            let (status, body) = asked(address, &format!("GET {path}"), "");
-            assert_eq!(status, 404, "{path}");
-            assert!(body.contains("did not say"), "{path}: {body}");
+            let answer = post(address, "/api/jobs", body);
+            assert_eq!(answer.status, 400, "{body}");
+            assert!(answer.text().contains(reason), "{body}: {}", answer.text());
         }
 
-        let (status, body) = asked(
+        // A picture to start from, for a model that cannot: refused with the model's own reason.
+        let upload = post_file(address, "image/png", PNG).json();
+        let answer = post(
             address,
-            "DELETE /api/clip",
-            r#"{"file":"../../etc/passwd"}"#,
+            "/api/jobs",
+            &json!({"prompt": "a cat", "init_image": upload["id"]}).to_string(),
         );
-        assert_eq!(status, 404);
-        assert!(body.contains("did not say"), "{body}");
+        assert_eq!(answer.status, 400);
+        assert!(answer.text().contains("Anima"), "{}", answer.text());
 
-        let (status, body) = asked(address, "DELETE /api/clip", r#"{}"#);
-        assert_eq!(status, 400);
-        assert!(body.contains("no clip was named"), "{body}");
-
-        // And a clip is not reachable through the door pictures come out of, which would hand a
-        // WAV back under an image's content type.
-        assert_eq!(asked(address, "GET /picture/waifu-0001.wav", "").0, 404);
+        // Nothing refused went in line.
+        assert_eq!(get(address, "/api/worker").json()["queued"], 0);
     }
 
     #[test]
-    fn stopping_is_asked_for_whether_or_not_there_is_anything_to_stop() {
-        // A run that finished between the button being pressed and the request arriving is not an
-        // error: the flag is cleared by the next run before it starts.
-        let (address, _commands) = a_server();
-        assert_eq!(asked(address, "POST /api/interrupt", "").0, 200);
-    }
+    fn a_waiting_job_is_cancelled_and_then_deleted() {
+        let (address, _) = a_server(a_program("cancel", Task::Txt2Img, Some("sdxl:base")));
+        let id = post(address, "/api/jobs", r#"{"prompt":"a cat"}"#).json()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
-    #[test]
-    fn a_browser_is_handed_a_cookie_and_the_files_the_page_is_drawn_from_are_not_a_visit() {
-        let (address, _commands) = a_server();
+        let cancelled = post(address, &format!("/api/jobs/{id}/cancel"), "{}");
+        assert_eq!(cancelled.status, 200);
+        assert_eq!(cancelled.json()["status"], "cancelled");
+        assert_eq!(get(address, "/api/worker").json()["queued"], 0);
 
-        // The files are the same for everybody, and fetching one starts nothing.
-        let (status, _, set) = exchange(address, "GET /app.js", b"", None);
-        assert_eq!(status, 200);
-        assert!(set.is_none(), "{set:?}");
-
-        // The page is a visit, and a browser that brought no cookie is handed one -- named for
-        // the port, so that a second copy of the program on this machine keeps its own.
-        let (status, _, set) = exchange(address, "GET /", b"", None);
-        assert_eq!(status, 200);
-        let set = set.expect("a cookie for a browser that brought none");
-        assert!(
-            set.starts_with(&format!("waifu-{}=", address.port())),
-            "{set}"
-        );
-
-        // Brought back, it is the same session: handed back with the page to keep it from
-        // running out, and not with anything else.
-        let (_, _, again) = exchange(address, "GET /", b"", Some(&set));
-        assert_eq!(again.as_deref(), Some(set.as_str()));
-        let (_, _, again) = exchange(address, "GET /api/progress", b"", Some(&set));
-        assert!(again.is_none(), "{again:?}");
-    }
-
-    #[test]
-    fn what_one_browser_holds_is_not_another_browser_s() {
-        let (address, _commands) = a_server();
-        let picture = [0x89, b'P', b'N', b'G', 1, 2, 3];
-        assert_eq!(posted(address, "POST /api/upload", &picture).0, 200);
-        assert_eq!(asked(address, "GET /api/upload", "").0, 200);
-
-        // A second browser, with no cookie of its own yet: an empty box, and nothing to read out
-        // of the first one's.
-        let (status, _, stranger) = exchange(address, "GET /api/upload", b"", None);
-        assert_eq!(status, 404);
-        let stranger = stranger.expect("a cookie of its own");
-        let (_, state, _) = exchange(address, "GET /api/state", b"", Some(&stranger));
-        let state: Value = serde_json::from_str(&state).unwrap();
-        assert_eq!(state["holding_a_picture"], false);
-
-        // And clearing its own box leaves the first browser's where it was.
-        exchange(address, "DELETE /api/upload", b"", Some(&stranger));
-        assert_eq!(asked(address, "GET /api/upload", "").0, 200);
-    }
-
-    #[test]
-    fn another_browser_is_told_whose_run_it_is_waiting_on_and_cannot_stop_it() {
-        let (address, commands) = a_server_for(Task::Txt2Img, Some("sdxl:base"));
-
-        // The first browser's run, posted and not yet picked up: there is no worker here.
+        // Nothing to stop the second time.
         assert_eq!(
-            asked(address, "POST /api/generate", r#"{"prompt":"a cat"}"#).0,
-            200
+            post(address, &format!("/api/jobs/{id}/cancel"), "{}").status,
+            409
         );
-        assert!(commands.try_recv().is_ok());
 
-        let (_, _, stranger) = exchange(address, "GET /", b"", None);
-        let stranger = stranger.unwrap();
+        assert_eq!(delete(address, &format!("/api/jobs/{id}")).status, 204);
+        assert_eq!(get(address, &format!("/api/jobs/{id}")).status, 404);
+        assert_eq!(delete(address, &format!("/api/jobs/{id}")).status, 404);
+    }
 
-        let (status, body, _) = exchange(
+    #[test]
+    fn deleting_a_waiting_job_takes_it_out_of_line() {
+        let (address, _) = a_server(a_program("delete-queued", Task::Txt2Img, Some("sdxl:base")));
+        let id = post(address, "/api/jobs", r#"{"prompt":"a cat"}"#).json()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert_eq!(delete(address, &format!("/api/jobs/{id}")).status, 204);
+        assert_eq!(get(address, "/api/worker").json()["queued"], 0);
+    }
+
+    #[test]
+    fn a_file_goes_up_and_comes_back_as_it_went() {
+        let (address, _) = a_server(a_program("uploads", Task::Txt2Img, None));
+
+        let up = post_file(address, "image/png", PNG);
+        assert_eq!(up.status, 201, "{}", up.text());
+        let upload = up.json();
+        let id = upload["id"].as_str().unwrap();
+        assert_eq!(up.header("Location"), Some(format!("/api/uploads/{id}")));
+        assert_eq!(upload["type"], "image/png");
+
+        let back = get(address, &format!("/api/uploads/{id}"));
+        assert_eq!(back.status, 200);
+        assert_eq!(back.body, PNG);
+        assert_eq!(back.header("Content-Type").as_deref(), Some("image/png"));
+
+        // A recording, which is read at the door.
+        let recording = post_file(address, "audio/wav", &a_recording());
+        assert_eq!(recording.status, 201, "{}", recording.text());
+        assert_eq!(recording.json()["type"], "audio/wav");
+
+        assert_eq!(delete(address, &format!("/api/uploads/{id}")).status, 204);
+        assert_eq!(get(address, &format!("/api/uploads/{id}")).status, 404);
+        assert_eq!(delete(address, &format!("/api/uploads/{id}")).status, 404);
+    }
+
+    #[test]
+    fn a_file_a_job_cannot_start_from_is_refused_at_the_door() {
+        let (address, _) = a_server(a_program("bad-uploads", Task::Txt2Img, None));
+
+        assert_eq!(post_file(address, "image/png", b"").status, 400);
+        assert_eq!(
+            post_file(address, "application/x-sh", b"#!/bin/sh").status,
+            415
+        );
+
+        // Says it is a WAV and is not one: found out now, rather than after waiting in line.
+        let answer = post_file(address, "audio/wav", b"RIFF\0\0\0\0WAVEjunk");
+        assert_eq!(answer.status, 400, "{}", answer.text());
+    }
+
+    #[test]
+    fn only_this_machine_s_own_pages_are_answered() {
+        let (address, _) = a_server(a_program("from-here", Task::Txt2Img, Some("sdxl:base")));
+        let job = r#"{"prompt":"a cat"}"#.as_bytes();
+
+        // What a form on some other site can send without the browser asking first: no type, or
+        // a plain one. Refused, and not taken.
+        for extra in [
+            "",
+            "Content-Type: text/plain\r\n",
+            "Content-Type: application/x-www-form-urlencoded\r\n",
+            "Content-Type: multipart/form-data; boundary=x\r\n",
+        ] {
+            let answer = ask(address, "POST /api/jobs", extra, job);
+            assert_eq!(answer.status, 415, "{extra:?}");
+        }
+
+        // Another site's page, and a name some other site has pointed at this machine.
+        let answer = ask(
             address,
-            "POST /api/generate",
-            br#"{"prompt":"a dog"}"#,
-            Some(&stranger),
+            "POST /api/jobs",
+            "Content-Type: application/json\r\nOrigin: http://evil.example\r\n",
+            job,
         );
-        assert_eq!(status, 409);
-        assert!(body.contains("another page"), "{body}");
-        assert!(
-            commands.try_recv().is_err(),
-            "the second run never reached the worker"
+        assert_eq!(answer.status, 403);
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket
+            .write_all(b"GET /api/jobs HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut whole = String::new();
+        socket.read_to_string(&mut whole).unwrap();
+        assert!(whole.starts_with("HTTP/1.1 403"), "{whole}");
+
+        assert_eq!(get(address, "/api/worker").json()["queued"], 0);
+
+        // And this server's own page is answered, Origin and all.
+        let answer = ask(
+            address,
+            "POST /api/jobs",
+            &format!("Content-Type: application/json\r\nOrigin: http://{address}\r\n"),
+            job,
         );
+        assert_eq!(answer.status, 202, "{}", answer.text());
+    }
 
-        let (status, body, _) = exchange(address, "POST /api/interrupt", b"", Some(&stranger));
-        assert_eq!(status, 409);
-        assert!(body.contains("another page's"), "{body}");
+    #[test]
+    fn a_page_that_is_not_there_says_so_in_the_shape_everything_else_answers_in() {
+        let (address, _) = a_server(a_program("missing", Task::Txt2Img, None));
+        let answer = get(address, "/nowhere");
+        assert_eq!(answer.status, 404);
+        assert!(answer.json()["error"].is_string());
+    }
 
-        // The progress it polls says the card is busy, and that the run is not its own.
-        let (_, progress, _) = exchange(address, "GET /api/progress", b"", Some(&stranger));
-        let progress: Value = serde_json::from_str(&progress).unwrap();
-        assert_eq!(progress["busy"], true);
-        assert_eq!(progress["mine"], false);
+    #[test]
+    fn a_job_runs_to_the_end_and_what_it_made_is_kept_until_it_is_deleted() {
+        let (address, shared) = a_speaking_server("runs");
 
-        // While the browser whose run it is may stop it.
-        assert_eq!(asked(address, "POST /api/interrupt", "").0, 200);
-        assert_eq!(json(address, "GET /api/progress", "")["mine"], true);
+        let reference = post_file(address, "audio/wav", &a_recording()).json();
+        let posted = post(
+            address,
+            "/api/jobs",
+            &json!({"text": "hello there", "seed": "7", "reference": reference["id"]}).to_string(),
+        );
+        assert_eq!(posted.status, 202, "{}", posted.text());
+        let id = posted.json()["id"].as_str().unwrap().to_string();
+
+        let job = once_it_is_done(address, &id);
+        assert_eq!(job["status"], "done", "{job}");
+        let output = &job["output"];
+        assert_eq!(output["type"], "audio/wav");
+        assert_eq!(output["made"]["seed"], 7);
+        assert_eq!(output["made"]["from_a_recording"], true);
+
+        let made = get(address, output["url"].as_str().unwrap());
+        assert_eq!(made.status, 200);
+        assert!(made.body.starts_with(b"RIFF"));
+        assert_eq!(made.body.len() as u64, output["bytes"].as_u64().unwrap());
+
+        // On the disk, where a restart would find it, until it is deleted.
+        let directory = std::env::temp_dir()
+            .join(format!("libwaifu-webui-runs-{}", std::process::id()))
+            .join("jobs")
+            .join(&id);
+        assert!(directory.join("output.wav").is_file());
+        assert_eq!(delete(address, &format!("/api/jobs/{id}")).status, 204);
+        assert!(!directory.exists());
+        assert!(!shared.is_busy());
     }
 }

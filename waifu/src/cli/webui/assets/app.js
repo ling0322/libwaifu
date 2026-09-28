@@ -1,13 +1,12 @@
 // What the page does.
 //
-// It holds no state of its own beyond what is being looked at: everything that matters -- which
-// model is loaded, what is happening, what has been drawn -- lives in the program, and this asks
-// for it. Which means a second tab opened on the same address shows the same thing, and a tab
-// left open across a run that started somewhere else catches up on its own.
+// It is one client of the program's API, and it keeps one thing of its own: the ids of the jobs it
+// posted and the files it uploaded, in localStorage. The server knows nothing of who is asking --
+// whoever holds an id can read what it names -- so which pictures are this browser's is this
+// list. A second tab of the same browser shares it; another browser has its own.
 //
-// There are two things it asks for. The whole of the state, which is cheap but not free, is read
-// when something has happened; and how far along a run is, which is a handful of numbers, is read
-// twice a second. The `revision` in each says whether the other is worth asking for.
+// It asks for the model once, when it opens; what the worker is doing, twice a second; and how its
+// own jobs are getting on, for as long as any of them is still waiting or running.
 //
 // React draws it, from the three files under vendor/: React itself, its renderer, and htm, which
 // is what stands in for JSX -- a tagged template the browser parses on its own. All three are
@@ -36,7 +35,10 @@ async function ask(method, path, body) {
   try {
     const sent = {
       method,
-      headers: body instanceof Blob ? {} : { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type":
+          body instanceof Blob ? body.type || "application/octet-stream" : "application/json",
+      },
       body: body instanceof Blob ? body : body === undefined ? undefined : JSON.stringify(body),
     };
     const answer = await fetch(path, sent);
@@ -545,9 +547,9 @@ function FromPicture({ holding, revision, off, onHold, onClear }) {
           onChange=${(event) => onHold(event.target.files[0])}
         />
         ${holding
-          ? // With the revision on the end, because the address is the same every time and the
-            // picture behind it is not.
-            html`<img alt="" src=${`/api/upload?${revision}`} />`
+          ? // By the upload's id: a different picture is a different address, so the browser
+            // fetches it again when it changes and not otherwise.
+            html`<img alt="" src=${`/api/uploads/${revision}`} />`
           : html`<span>Drop a picture here, or click to choose one</span>`}
       </label>
       ${holding &&
@@ -796,10 +798,9 @@ function FromRecording({ holding, revision, why, onHold, onClear }) {
       html`<${Player}
         className="held"
         src=${
-          // With the recording's own revision on the end, because the address is the same every
-          // time and what is behind it is not. Its own and not the session's: that one moves on
-          // every token of a reading, and a player whose address changes reloads.
-          `/api/voice?${revision}`
+          // By the upload's id, which changes when the recording does and not otherwise: a
+          // player whose address changes reloads.
+          `/api/uploads/${revision}`
         }
       />`}
       <label
@@ -880,7 +881,7 @@ function SpeechSettings({
 
       <${FromRecording}
         holding=${!!state?.holding_a_recording}
-        revision=${state?.recording_revision}
+        revision=${state?.recording_upload}
         why=${voice?.no_likeness_because}
         onHold=${onHold}
         onClear=${onClear}
@@ -997,7 +998,7 @@ function Settings({
             `
           : html`<${FromPicture}
               holding=${!!state?.holding_a_picture}
-              revision=${state?.picture_revision}
+              revision=${state?.picture_upload}
               off=${off}
               onHold=${onHold}
               onClear=${onClear}
@@ -1193,11 +1194,10 @@ function Bar({ progress }) {
   `;
 }
 
-function Output({ state, progress, note, showing, onShow, onSend, onReuse, onDelete }) {
+function Output({ state, pictures, progress, note, showing, onShow, onSend, onReuse, onDelete }) {
   // The newest is what somebody is looking at, unless they have clicked another and it is still
   // there: a run that finishes while an older picture is up should not snatch the frame away.
-  const pictures = state?.gallery ?? [];
-  const picture = pictures.find((one) => one.file === showing) ?? pictures[0] ?? null;
+  const picture = pictures.find((one) => one.id === showing) ?? pictures[0] ?? null;
 
   return html`
     <div className="output">
@@ -1206,14 +1206,14 @@ function Output({ state, progress, note, showing, onShow, onSend, onReuse, onDel
 
       <div className="canvas">
         ${picture
-          ? html`<img alt="" src=${`/picture/${picture.file}`} />`
+          ? html`<img alt="" src=${picture.url} />`
           : html`<div className="nothing">Nothing drawn yet.</div>`}
       </div>
 
       ${picture &&
       html`
         <div className="actions">
-          <a className="plain" href=${`/picture/${picture.file}`} download=${picture.file}>Save</a>
+          <a className="plain" href=${picture.url} download=${fileName(picture)}>Save</a>
           ${/* Only where there is an img2img tab to send it to, which is a model that can start
                from a picture. */ ""}
           ${state?.model?.draws_from_a_picture &&
@@ -1226,7 +1226,7 @@ function Output({ state, progress, note, showing, onShow, onSend, onReuse, onDel
           className="parameters"
           rows="4"
           readOnly
-          value=${`${picture.parameters}\nTime taken: ${picture.seconds.toFixed(2)}s -- written to ${picture.file}`}
+          value=${`${picture.parameters}\nTime taken: ${picture.seconds.toFixed(2)}s`}
         ></textarea>
       `}
 
@@ -1234,12 +1234,12 @@ function Output({ state, progress, note, showing, onShow, onSend, onReuse, onDel
         ${pictures.map(
           (one) => html`
             <img
-              key=${one.file}
-              src=${`/picture/${one.file}`}
+              key=${one.id}
+              src=${one.url}
               alt=${one.prompt}
-              title=${`${one.file} -- ${one.seed}`}
-              className=${one.file === (picture?.file ?? null) ? "on" : ""}
-              onClick=${() => onShow(one.file)}
+              title=${`${fileName(one)} -- ${one.seed}`}
+              className=${one.id === (picture?.id ?? null) ? "on" : ""}
+              onClick=${() => onShow(one.id)}
             />
           `,
         )}
@@ -1256,9 +1256,8 @@ function Output({ state, progress, note, showing, onShow, onSend, onReuse, onDel
  * be shown the way a picture can, so what the strip holds is the first words of each rather than
  * a thumbnail of it.
  */
-function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete }) {
-  const clips = state?.clips ?? [];
-  const clip = clips.find((one) => one.file === showing) ?? clips[0] ?? null;
+function ClipOutput({ clips, progress, note, showing, onShow, onReuse, onDelete }) {
+  const clip = clips.find((one) => one.id === showing) ?? clips[0] ?? null;
 
   return html`
     <div className="output">
@@ -1268,7 +1267,7 @@ function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete 
       <div className="canvas player">
         ${clip
           ? html`
-              ${/* Keyed by the file, so that a new clip replaces the player rather than leaving
+              ${/* Keyed by the clip, so that a new clip replaces the player rather than leaving
                    the old one loaded under a new address -- which is a player that goes on
                    playing what it had.
 
@@ -1276,7 +1275,7 @@ function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete 
                    reading finishing, but also a click on an old one in the strip, and a page
                    reload with clips already in it. A sound is played when somebody presses
                    play. */ ""}
-              <${Player} key=${clip.file} src=${`/clip/${clip.file}`} />
+              <${Player} key=${clip.id} src=${clip.url} />
               <p className="said">${clip.text}</p>
             `
           : html`<div className="nothing">Nothing said yet.</div>`}
@@ -1285,7 +1284,7 @@ function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete 
       ${clip &&
       html`
         <div className="actions">
-          <a className="plain" href=${`/clip/${clip.file}`} download=${clip.file}>Save</a>
+          <a className="plain" href=${clip.url} download=${fileName(clip)}>Save</a>
           <button className="plain" onClick=${() => onReuse(clip)}>Reuse these settings</button>
           <button className="plain away last" onClick=${() => onDelete(clip)}>Delete</button>
         </div>
@@ -1295,7 +1294,7 @@ function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete 
           readOnly
           value=${`${clip.parameters}\nTime taken: ${clip.seconds.toFixed(2)}s -- ${clock(
             clip.length,
-          )} long -- written to ${clip.file}`}
+          )} long`}
         ></textarea>
       `}
 
@@ -1303,10 +1302,10 @@ function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete 
         ${clips.map(
           (one) => html`
             <button
-              key=${one.file}
-              className=${`clip${one.file === (clip?.file ?? null) ? " on" : ""}`}
-              title=${`${one.file} -- ${one.seed}`}
-              onClick=${() => onShow(one.file)}
+              key=${one.id}
+              className=${`clip${one.id === (clip?.id ?? null) ? " on" : ""}`}
+              title=${`${fileName(one)} -- ${one.seed}`}
+              onClick=${() => onShow(one.id)}
             >
               <span className="clip-said">${one.text}</span>
               <span className="dim">${clock(one.length)}</span>
@@ -1318,14 +1317,74 @@ function ClipOutput({ state, progress, note, showing, onShow, onReuse, onDelete 
   `;
 }
 
+// -- what this browser keeps --------------------------------------------------------------------
+
+/**
+ * The ids of this browser's jobs and uploads, kept in localStorage.
+ *
+ * The server knows nothing of who is asking: a job is found by its id, and whoever holds the id can
+ * look at it and delete it. So "my pictures" is the list of ids this browser posted, kept here.
+ * Per address, host and port -- which is also where the server keeps them, since one program
+ * serves one port.
+ *
+ * Read and written through try, because a browser that will not keep anything (some private
+ * windows) still has a page that works: it forgets its jobs when the tab closes, which is all.
+ */
+const KEPT_JOBS = "waifu-jobs";
+const KEPT_INPUTS = "waifu-inputs";
+
+function readKept(key, otherwise) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? otherwise;
+  } catch {
+    return otherwise;
+  }
+}
+
+function writeKept(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Kept for this tab, in React's state, and nowhere else.
+  }
+}
+
+/** What a thing is called when it is saved out of the page: when it was made, to the second. */
+function fileName(one) {
+  const at = new Date(one.created);
+  const two = (n) => String(n).padStart(2, "0");
+  const stamp =
+    `${at.getFullYear()}${two(at.getMonth() + 1)}${two(at.getDate())}` +
+    `-${two(at.getHours())}${two(at.getMinutes())}${two(at.getSeconds())}`;
+  return `waifu-${stamp}.${one.kind === "clip" ? "wav" : "png"}`;
+}
+
+/** A finished job, as the gallery shows it: what it made, and where to fetch it. */
+function asMade(job) {
+  return {
+    ...job.output.made,
+    id: job.id,
+    url: job.output.url,
+    created: job.finished ?? job.created,
+    kind: job.kind === "speech" ? "clip" : "picture",
+  };
+}
+
 // -- the whole of it ----------------------------------------------------------------------------
 
 function App() {
-  /** The last whole state, as the program described it. */
-  const [state, setState] = useState(null);
+  /** The model this program serves, as it describes itself. Asked for once: it was read before
+   *  the page was served, and it does not change while the program runs. */
+  const [model, setModel] = useState(null);
 
-  /** How far along a run is, which is read far more often than the rest. */
-  const [progress, setProgress] = useState({ busy: false, drawing: false });
+  /** What the worker is doing, for anybody's job. Read twice a second. */
+  const [worker, setWorker] = useState({ busy: false, queued: 0, progress: {} });
+
+  /** This browser's jobs, newest first, as the server last described them. */
+  const [jobs, setJobs] = useState([]);
+
+  /** The uploads this browser is holding to start from: a picture, and a recording. */
+  const [inputs, setInputs] = useState(() => readKept(KEPT_INPUTS, { image: null, voice: null }));
 
   /** What this page has to say about the last thing that was clicked, if it went wrong. */
   const [complaint, setComplaint] = useState(null);
@@ -1334,16 +1393,14 @@ function App() {
    *  keeps the column from flashing a row of empty labels while the page opens. */
   const [machine, setMachine] = useState(null);
 
-  /** Which tab is on top. It starts on the task chosen in the terminal, once the first state has
-   *  said which that was; after that it is the page's own, since it decides what a run is asked
-   *  for and not what the program is doing. */
+  /** Which tab is on top. It starts on the task chosen in the terminal, once the model has said
+   *  which that was; after that it is the page's own. */
   const [tab, setTab] = useState(null);
 
   /** The picture in the big frame, which is the newest one until somebody clicks another. */
   const [showing, setShowing] = useState(null);
 
-  /** And the clip in the player, kept apart from it: they are two lists and two frames, and a
-   *  name from one of them means nothing in the other. */
+  /** And the clip in the player, kept apart from it: they are two lists and two frames. */
   const [playing, setPlaying] = useState(null);
 
   /** What is in the boxes. Everything here is somebody's typing until it is sent. */
@@ -1363,50 +1420,98 @@ function App() {
     temperature: 0.8,
   });
 
-  /** Which revision of the state this page has seen, so that a poll can tell news from quiet. */
-  const seen = useRef(-1);
-
   /** The model whose numbers have been put in the boxes, so that they go in once rather than on
    *  every draw -- which would type over somebody mid-sentence. */
   const adopted = useRef(null);
 
-  /** Which of the boxes have been moved by hand since. A chosen model is described twice -- from
-   *  its name, and again from the package once a run has read it -- and the second description is
-   *  worth taking, but not over the top of somebody's own numbers. */
-  const byHand = useRef(new Set());
-
   const change = useCallback((what, value) => {
-    byHand.current.add(what);
     setForm((form) => ({ ...form, [what]: value }));
   }, []);
 
-  const readState = useCallback(async () => {
-    const answer = await ask("GET", "/api/state");
-    if (!answer.ok) return setComplaint(answer.error);
-
-    setComplaint(null);
-    seen.current = answer.said.revision;
-    setState(answer.said);
+  const holdInputs = useCallback((next) => {
+    setInputs((inputs) => {
+      const held = { ...inputs, ...next };
+      writeKept(KEPT_INPUTS, held);
+      return held;
+    });
   }, []);
 
-  // Reads how far along things are, and the whole state again when something has happened.
+  /** Reads this browser's jobs from the server, and forgets the ones it no longer has: deleted
+   *  from another tab, or pushed out by the output limit. */
+  const readJobs = useCallback(async () => {
+    const ids = readKept(KEPT_JOBS, []);
+    if (!ids.length) return setJobs([]);
+
+    const answer = await ask("GET", `/api/jobs?ids=${ids.join(",")}`);
+    if (!answer.ok) return setComplaint(answer.error);
+
+    const found = answer.said.jobs.sort((a, b) => b.created - a.created);
+    const still = new Set(found.map((job) => job.id));
+    writeKept(
+      KEPT_JOBS,
+      ids.filter((id) => still.has(id)),
+    );
+    setJobs(found);
+  }, []);
+
+  /** Asks after the jobs that are still going, and takes what has changed. */
+  const readGoing = useCallback(async (going) => {
+    const answer = await ask("GET", `/api/jobs?ids=${going.map((job) => job.id).join(",")}`);
+    if (!answer.ok) return;
+    const fresh = new Map(answer.said.jobs.map((job) => [job.id, job]));
+    setJobs((jobs) => jobs.map((job) => fresh.get(job.id) ?? job));
+  }, []);
+
+  // What is here when the page opens: the model, this browser's jobs, and whether the uploads it
+  // was holding are still there to hold.
   useEffect(() => {
-    readState();
+    (async () => {
+      const answer = await ask("GET", "/api/model");
+      if (!answer.ok) return setComplaint(answer.error);
+      setModel(answer.said);
+      setTab(answer.said.task);
+
+      const held = readKept(KEPT_INPUTS, { image: null, voice: null });
+      for (const which of ["image", "voice"]) {
+        if (held[which] && (await fetch(`/api/uploads/${held[which]}`)).status === 404) {
+          held[which] = null;
+        }
+      }
+      // The picture -i named, for a page that has not been given one since.
+      const start = answer.said.starting_picture;
+      if (start && !held.image && readKept("waifu-started-from", null) !== start) {
+        held.image = start;
+        writeKept("waifu-started-from", start);
+      }
+      holdInputs(held);
+    })();
+    readJobs();
+
+    // Another tab of this browser posted or deleted something.
+    const elsewhere = (event) => {
+      if (event.key === KEPT_JOBS) readJobs();
+      if (event.key === KEPT_INPUTS) setInputs(readKept(KEPT_INPUTS, { image: null, voice: null }));
+    };
+    window.addEventListener("storage", elsewhere);
+    return () => window.removeEventListener("storage", elsewhere);
+  }, [readJobs, holdInputs]);
+
+  // How far along things are, twice a second: the worker, and this browser's jobs that are still
+  // going. Only those -- a finished job does not change.
+  const going = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const goingNow = useRef(going);
+  goingNow.current = going;
+  useEffect(() => {
     const timer = setInterval(async () => {
-      const answer = await ask("GET", "/api/progress");
-      if (!answer.ok) return;
-
-      setProgress(answer.said);
-      if (answer.said.revision !== seen.current) readState();
+      const answer = await ask("GET", "/api/worker");
+      if (answer.ok) setWorker(answer.said);
+      if (goingNow.current.length) readGoing(goingNow.current);
     }, TICK);
-
     return () => clearInterval(timer);
-  }, [readState]);
+  }, [readGoing]);
 
   // And what is left of the machine, which nothing this page does decides -- so it is asked for
-  // on a clock of its own rather than when the state changes. A failed read is left alone: the
-  // column keeps the last answer, because a sidebar that empties itself is a worse way to say
-  // "the program has gone" than the bar already says it.
+  // on a clock of its own. A failed read is left alone: the column keeps the last answer.
   useEffect(() => {
     const read = async () => {
       const answer = await ask("GET", "/api/machine");
@@ -1419,103 +1524,108 @@ function App() {
     return () => clearInterval(timer);
   }, []);
 
+  // What the components read as the state: the model, and what this browser is holding.
+  const state = model && {
+    ...model,
+    holding_a_picture: !!inputs.image,
+    picture_upload: inputs.image,
+    holding_a_recording: !!inputs.voice,
+    recording_upload: inputs.voice,
+  };
+
   // Puts the chosen model's own numbers in the boxes, and its card's suggestions in the prompts
-  // -- which is what it asks to be drawn with, not a setting anybody chose.
-  //
-  // Twice for one model, in the ordinary case: once from its name when it is chosen, and again
-  // when a run has read the package and the numbers in it turn out to be its own. The second time
-  // goes only into boxes nobody has touched.
+  // -- which is what it asks to be drawn with, not a setting anybody chose. Once: the model does
+  // not change while the program runs.
   const chosen = state?.model ?? null;
-  const described = chosen && `${chosen.name} ${chosen.in_memory}`;
   useEffect(() => {
-    if (!chosen) {
-      adopted.current = null;
-      return;
-    }
-    if (described === adopted.current) return;
+    if (!chosen || adopted.current === chosen.name) return;
+    adopted.current = chosen.name;
+    setForm((form) => ({
+      ...form,
+      width: chosen.width,
+      height: chosen.height,
+      steps: chosen.steps,
+      guidance: chosen.guidance,
+      strength: 0.8,
+      // Only into a box nobody has typed in.
+      prompt: form.prompt.trim() ? form.prompt : chosen.prompt ?? "",
+      negative: form.negative.trim() ? form.negative : chosen.avoid ?? "",
+    }));
+  }, [chosen]);
 
-    // The second description of one model waits for the run that produced it to finish. It only
-    // happens to a model that was not on the disk when it was chosen -- what is here is read when
-    // it is picked -- and numbers that change while the bar is counting the old ones read as a
-    // screen that has lost track of what it is doing.
-    const again = adopted.current?.startsWith(`${chosen.name} `);
-    if (again && progress.busy) return;
-
-    adopted.current = described;
-    if (!again) byHand.current.clear();
-
-    setForm((form) => {
-      const keep = (what, value) => (again && byHand.current.has(what) ? form[what] : value);
-      return {
-        ...form,
-        width: keep("width", chosen.width),
-        height: keep("height", chosen.height),
-        steps: keep("steps", chosen.steps),
-        guidance: keep("guidance", chosen.guidance),
-        strength: keep("strength", 0.8),
-        // Only into a box nobody has typed in. A prompt that was being written when a model
-        // finished loading is somebody's work, and a suggestion is not worth losing it over.
-        prompt: form.prompt.trim() ? form.prompt : chosen.prompt ?? "",
-        negative: form.negative.trim() ? form.negative : chosen.avoid ?? "",
-      };
-    });
-  }, [chosen, described, progress.busy]);
-
-  // And the voice's own numbers, the same way: into boxes nobody has moved, on the first state the
-  // page reads and again whenever another voice is chosen or the chosen one is read.
-  const voiceDefaults = state?.voice && `${state.voice.name} ${state.voice.in_memory}`;
-  const tookVoice = useRef(null);
+  // And the voice's own numbers, the same way.
+  const voice = state?.voice ?? null;
   useEffect(() => {
-    if (!state?.voice || voiceDefaults === tookVoice.current) return;
-    const again = tookVoice.current !== null;
-    tookVoice.current = voiceDefaults;
+    if (!voice || adopted.current === voice.name) return;
+    adopted.current = voice.name;
+    setForm((form) => ({ ...form, speed: voice.speed, temperature: voice.temperature }));
+  }, [voice]);
 
-    setForm((form) => {
-      const keep = (what, value) => (again && byHand.current.has(what) ? form[what] : value);
-      return {
-        ...form,
-        speed: keep("speed", state.voice.speed),
-        temperature: keep("temperature", state.voice.temperature),
-      };
-    });
-  }, [state, voiceDefaults]);
-
-  // The page opens on the task chosen in the terminal. Once, on the first state this page ever
-  // reads: a tab somebody has moved to since is theirs.
-  const arrived = useRef(false);
-  useEffect(() => {
-    if (arrived.current || !state) return;
-    arrived.current = true;
-    setTab(state.task);
-  }, [state]);
   const tabs = tabsFor(state);
 
-  // What this page has to say beats what the program had to say: a complaint is about the click
-  // that was just made, and the note is about whatever happened last on the other side.
-  const note = complaint ? { said: complaint, bad: true } : state?.note;
+  // Which of this browser's jobs are going, and what the bar says about them.
+  const running = going.find((job) => job.status === "running") ?? null;
+  const waiting = going.filter((job) => job.status === "queued");
+  const mine = !!running && worker.running === running.id;
+  const speaks = model?.kind === "speech";
+  const theirs = worker.busy && !mine && !waiting.length;
+  const doing = mine
+    ? worker.progress.doing
+    : waiting.length
+      ? `waiting: ${waiting[0].position ?? 0} ahead of this one`
+      : worker.busy
+        ? `busy with another job${worker.queued ? `, ${worker.queued} waiting` : ""}`
+        : "";
+  const progress = {
+    busy: worker.busy || going.length > 0,
+    mine,
+    // Whether this page has something to stop: its running job, or one waiting its turn.
+    drawing: !speaks && going.length > 0,
+    speaking: speaks && going.length > 0,
+    fetching: false,
+    fraction: mine ? worker.progress.fraction ?? null : null,
+    doing,
+    seconds: mine ? worker.progress.seconds ?? null : null,
+    interrupting: mine && !!running.stopping,
+  };
 
-  // Nothing is chosen until the list has been to, and no run is asked for that the chosen model
-  // will refuse: the reason is on the screen beside the button, so the button says no rather than
-  // the wait does.
+  // What came of this browser's jobs, newest first.
+  const done = jobs.filter((job) => job.status === "done" && job.output);
+  const pictures = done.filter((job) => job.kind === "image").map(asMade);
+  const clips = done.filter((job) => job.kind === "speech").map(asMade);
+
+  // What this page has to say beats what the last job came to: a complaint is about the click
+  // that was just made.
+  const latest = jobs[0];
+  const note = complaint
+    ? { said: complaint, bad: true }
+    : latest?.status === "failed"
+      ? { said: latest.error, bad: true }
+      : latest?.status === "cancelled"
+        ? { said: "stopped where it was", bad: false }
+        : null;
+
+  // A job can be posted while another is running -- it waits its turn -- but not while one of
+  // this page's own is already waiting: a second click is not a second job.
   const canDraw =
-    !!chosen?.on_disk && !progress.busy && !(tab === "img2img" && chosen.no_picture_because);
+    !!chosen?.on_disk && !waiting.length && !(tab === "img2img" && chosen.no_picture_because);
+  const canSpeak = !!voice?.on_disk && !waiting.length && !!form.text.trim();
 
-  // Nothing to choose on the speech tab, so nothing to be chosen first: what stops the button is
-  // an empty box or something already happening.
-  const canSpeak = !!state?.voice?.on_disk && !progress.busy && !!form.text.trim();
+  /** Posts a job, and keeps its id. */
+  const post = useCallback(async (asked) => {
+    const answer = await ask("POST", "/api/jobs", asked);
+    if (!answer.ok) return setComplaint(answer.error);
 
-  // Whether what the card is busy with is another page's. Shown -- it is why this page's button is
-  // not live -- and not offered to stop: the server refuses a stop from any page but the one that
-  // started the run. `false` and not merely absent, because the bar this page sets itself the
-  // moment it posts a run says nothing about whose it is, and that run is this page's.
-  const theirs = progress.busy && progress.mine === false;
+    setComplaint(null);
+    writeKept(KEPT_JOBS, [answer.said.id, ...readKept(KEPT_JOBS, [])]);
+    setJobs((jobs) => [answer.said, ...jobs]);
+  }, []);
 
-  const generate = useCallback(async () => {
-    // Both or neither, and neither for a model with no second pass to steer. The server drops
-    // them for such a model anyway; what this saves is a request that said one thing while the
-    // picture it came back with had been drawn from another.
+  const generate = useCallback(() => {
+    // Both or neither, and neither for a model with no second pass to steer.
     const guided = chosen ? chosen.takes_guidance !== false : true;
-    const answer = await ask("POST", "/api/generate", {
+    post({
+      kind: "image",
       prompt: form.prompt,
       ...(guided ? { negative: form.negative, guidance: Number(form.guidance) } : {}),
       steps: Number(form.steps),
@@ -1525,38 +1635,34 @@ function App() {
       // ones there are would not survive the trip.
       seed: String(form.seed).trim(),
       strength: Number(form.strength),
-      from_picture: tab === "img2img" && !!state?.holding_a_picture,
+      ...(tab === "img2img" && inputs.image ? { init_image: inputs.image } : {}),
     });
+  }, [form, tab, inputs, chosen, post]);
 
-    if (!answer.ok) return setComplaint(answer.error);
-    // Straight away, rather than at the next poll: a button that stays live for half a second
-    // after it is pressed is a button that gets pressed twice.
-    setProgress({ busy: true, drawing: true, fraction: 0, doing: "starting", seconds: 0 });
-  }, [form, tab, state]);
-
-  const speak = useCallback(async () => {
-    const answer = await ask("POST", "/api/speak", {
+  const speak = useCallback(() => {
+    post({
+      kind: "speech",
       text: form.text,
       speed: Number(form.speed),
       temperature: Number(form.temperature),
-      // As a string, for the same reason a picture's is: a seed is sixty-four bits and a JSON
-      // number is a double.
       seed: String(form.seed).trim(),
-      from_recording: !!state?.holding_a_recording,
+      ...(inputs.voice ? { reference: inputs.voice } : {}),
     });
+  }, [form, inputs, post]);
 
-    if (!answer.ok) return setComplaint(answer.error);
-    setProgress({ busy: true, speaking: true, fraction: 0, doing: "starting", seconds: 0 });
-  }, [form, state]);
+  /** Stops this page's running job, or takes the one waiting out of line. */
+  const interrupt = useCallback(async () => {
+    const job = running ?? waiting[0];
+    if (!job) return;
+    const answer = await ask("POST", `/api/jobs/${job.id}/cancel`, {});
+    if (!answer.ok) setComplaint(answer.error);
+  }, [running, waiting]);
 
   // Ctrl-enter draws, from wherever the cursor is. The one keystroke every tool of this kind has.
-  // Through a box rather than in the listener itself, so that the page is not listened to afresh
-  // every time a letter is typed into the prompt.
   const draw = useRef(null);
   draw.current = tab === SPEAKS ? (canSpeak ? speak : null) : canDraw ? generate : null;
   useEffect(() => {
     const pressed = (key) => {
-      // The same keystroke on every tab, doing whichever of the two things that tab is for.
       if (key.key === "Enter" && (key.ctrlKey || key.metaKey)) {
         key.preventDefault();
         draw.current?.();
@@ -1566,24 +1672,38 @@ function App() {
     return () => document.removeEventListener("keydown", pressed);
   }, []);
 
-  /** Holds a picture to draw from, and shows it once the program has it. */
+  /** Uploads a file to start from, and lets go of the one it replaces. */
+  const upload = useCallback(
+    async (which, file) => {
+      const answer = await ask("POST", "/api/uploads", file);
+      if (!answer.ok) return setComplaint(answer.error);
+
+      setComplaint(null);
+      if (inputs[which]) ask("DELETE", `/api/uploads/${inputs[which]}`);
+      holdInputs({ [which]: answer.said.id });
+    },
+    [inputs, holdInputs],
+  );
+
+  const letGo = useCallback(
+    async (which) => {
+      if (inputs[which]) await ask("DELETE", `/api/uploads/${inputs[which]}`);
+      holdInputs({ [which]: null });
+    },
+    [inputs, holdInputs],
+  );
+
+  /** Holds a picture to draw from. */
   const hold = useCallback(
     async (file) => {
       if (!file) return;
-
-      const answer = await ask("POST", "/api/upload", file);
-      if (!answer.ok) return setComplaint(answer.error);
-
-      await readState();
+      await upload("image", file);
       setTab("img2img");
     },
-    [readState],
+    [upload],
   );
 
-  const clearPicture = useCallback(async () => {
-    await ask("DELETE", "/api/upload");
-    await readState();
-  }, [readState]);
+  const clearPicture = useCallback(() => letGo("image"), [letGo]);
 
   /**
    * Holds a recording for the voice to sound like.
@@ -1605,32 +1725,29 @@ function App() {
             `Anything it can play will work -- wav, mp3, m4a, ogg, flac`,
         );
       }
-
-      const answer = await ask("POST", "/api/voice", wav);
-      if (!answer.ok) return setComplaint(answer.error);
-
-      setComplaint(null);
-      await readState();
+      await upload("voice", wav);
     },
-    [readState],
+    [upload],
   );
 
-  const clearRecording = useCallback(async () => {
-    await ask("DELETE", "/api/voice");
-    await readState();
-  }, [readState]);
+  const clearRecording = useCallback(() => letGo("voice"), [letGo]);
 
-  /** Deletes a clip, from the disk and from the page. Asked about first, like a picture. */
-  const deleteClip = useCallback(
-    async (clip) => {
-      if (!confirm(`Delete ${clip.file}? The file itself goes, and nothing keeps a copy.`)) return;
+  /**
+   * Deletes a picture or a clip, from the server and from this browser's list. Asked about first:
+   * what it costs to make one again is a run, and nothing else keeps a copy.
+   */
+  const forget = useCallback(async (one) => {
+    if (!confirm(`Delete this ${one.kind}? Nothing else keeps a copy.`)) return;
 
-      const answer = await ask("DELETE", "/api/clip", { file: clip.file });
-      if (!answer.ok) return setComplaint(answer.error);
-      await readState();
-    },
-    [readState],
-  );
+    const answer = await ask("DELETE", `/api/jobs/${one.id}`);
+    if (!answer.ok && !answer.error.includes("no job")) return setComplaint(answer.error);
+
+    writeKept(
+      KEPT_JOBS,
+      readKept(KEPT_JOBS, []).filter((id) => id !== one.id),
+    );
+    setJobs((jobs) => jobs.filter((job) => job.id !== one.id));
+  }, []);
 
   /** Puts a clip's own settings back in the boxes, which is how one is said again. */
   const reuseClip = useCallback((clip) => {
@@ -1645,31 +1762,12 @@ function App() {
 
   /** Takes a picture that was drawn back round to the box it can be drawn from. */
   const sendToImg2Img = useCallback(async () => {
-    const answer = await fetch(`/picture/${showing ?? state?.gallery[0]?.file}`);
+    const picture = pictures.find((one) => one.id === showing) ?? pictures[0];
+    if (!picture) return;
+    const answer = await fetch(picture.url);
     if (!answer.ok) return setComplaint("that picture can no longer be read");
-
     await hold(await answer.blob());
-  }, [hold, showing, state]);
-
-  /**
-   * Deletes a picture, from the disk and from the page.
-   *
-   * Asked about first. What it costs to draw one again is a run, and what it costs to have
-   * deleted the wrong one is that picture -- the file is written where the program was started
-   * and there is no copy of it anywhere else.
-   */
-  const deletePicture = useCallback(
-    async (picture) => {
-      if (!confirm(`Delete ${picture.file}? The file itself goes, and nothing keeps a copy.`)) {
-        return;
-      }
-
-      const answer = await ask("DELETE", "/api/picture", { file: picture.file });
-      if (!answer.ok) return setComplaint(answer.error);
-      await readState();
-    },
-    [readState],
-  );
+  }, [hold, showing, pictures]);
 
   /** Puts a picture's own settings back in the boxes, which is how one is drawn again. */
   const reuse = useCallback((picture) => {
@@ -1687,10 +1785,9 @@ function App() {
   }, []);
 
   const lastSeed = useCallback(() => {
-    const pictures = state?.gallery ?? [];
-    const picture = pictures.find((one) => one.file === showing) ?? pictures[0];
+    const picture = pictures.find((one) => one.id === showing) ?? pictures[0];
     if (picture) change("seed", String(picture.seed));
-  }, [change, showing, state]);
+  }, [change, showing, pictures]);
 
   return html`
     <${TopBar} state=${state} />
@@ -1719,7 +1816,7 @@ function App() {
                 speaking=${!!progress.speaking}
                 theirs=${theirs}
                 onSpeak=${speak}
-                onInterrupt=${() => ask("POST", "/api/interrupt")}
+                onInterrupt=${interrupt}
               />`}
 
               <section className="panes">
@@ -1733,13 +1830,13 @@ function App() {
                   onAnySeed=${() => change("seed", "-1")}
                 />
                 <${ClipOutput}
-                  state=${state}
+                  clips=${clips}
                   progress=${progress}
                   note=${note}
                   showing=${playing}
                   onShow=${setPlaying}
                   onReuse=${reuseClip}
-                  onDelete=${deleteClip}
+                  onDelete=${forget}
                 />
               </section>
             `
@@ -1754,7 +1851,7 @@ function App() {
                 fetching=${!!progress.fetching}
                 theirs=${theirs}
                 onDraw=${generate}
-                onInterrupt=${() => ask("POST", "/api/interrupt")}
+                onInterrupt=${interrupt}
               />`}
 
               <section className="panes">
@@ -1771,13 +1868,14 @@ function App() {
                 />
                 <${Output}
                   state=${state}
+                  pictures=${pictures}
                   progress=${progress}
                   note=${note}
                   showing=${showing}
                   onShow=${setShowing}
                   onSend=${sendToImg2Img}
                   onReuse=${reuse}
-                  onDelete=${deletePicture}
+                  onDelete=${forget}
                 />
               </section>
             `}
