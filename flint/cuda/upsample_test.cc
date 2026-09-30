@@ -29,6 +29,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
+#include "flint/cpu/upsample.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
@@ -169,6 +170,35 @@ CATCH_TEST_CASE("test upsampleNearest2d (float)", "[op][cuda]") {
   CATCH_REQUIRE(equalsOnHost(
       huge,
       {1e20f, 1e20f, -3e5f, -3e5f, 1e20f, 1e20f, -3e5f, -3e5f}));
+}
+
+CATCH_TEST_CASE("test upsampleNearest1d", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Lengths a length regulator is handed, including 90 to 154, where torch's float32 product
+  // floors one frame below the exact quotient. The values are their own positions, so what comes
+  // back is the source index each output copied.
+  const std::pair<int, int> lengths[] = {{5, 8}, {8, 3}, {90, 154}, {160, 275}, {500, 860}};
+  for (auto [length, size] : lengths) {
+    std::vector<float> x;
+    for (int row = 0; row < 3; ++row) {
+      for (int i = 0; i < length; ++i) x.push_back(float(i));
+    }
+
+    std::vector<int> sources = op::cpu::nearestSources(length, size);
+    std::vector<float> expected;
+    for (int row = 0; row < 3; ++row) {
+      for (int source : sources) expected.push_back(float(source));
+    }
+
+    Tensor out = cudaOps()->upsampleNearest1d(cudaFloat({1, 3, length}, x), size);
+    CATCH_REQUIRE(out.getShape() == std::vector<int>{1, 3, size});
+    CATCH_REQUIRE(equalsOnHost(out, expected));
+
+    Tensor half = cudaOps()->upsampleNearest1d(cudaHalf({1, 3, length}, x), size);
+    CATCH_REQUIRE(half.getDType() == DType::kFloat16);
+    CATCH_REQUIRE(equalsOnHost(cudaOps()->cast(half, DType::kFloat), expected));
+  }
 }
 
 }  // namespace fl

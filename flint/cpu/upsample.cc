@@ -19,6 +19,10 @@
 
 #include "flint/cpu/upsample.h"
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 #include "lutil/error.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/tensor.h"
@@ -65,7 +69,59 @@ Tensor upsampleNearest2dKernel(const Tensor &input, int scale) {
   return output;
 }
 
+/// Each row read through one table of source positions, worked out once: the rows are many and
+/// the table is the same for all of them. Only copied, so the element is moved as its bytes.
+template<typename T>
+Tensor upsampleNearest1dKernel(const Tensor &input, int size) {
+  int length = input.getShape(-1);
+  int64_t rows = input.getNumEl() / length;
+
+  std::vector<int> shape = input.getShape();
+  shape.back() = size;
+  Tensor output = tensor(shape, input.getDType());
+  const T *in = reinterpret_cast<const T *>(input.getInternalData()->getData<void>(
+      input.getInternalOffset()));
+  T *out = reinterpret_cast<T *>(output.getInternalData()->getData<void>(
+      output.getInternalOffset()));
+
+  std::vector<int> source = nearestSources(length, size);
+
+#pragma omp parallel for
+  for (int64_t row = 0; row < rows; ++row) {
+    const T *inRow = in + row * length;
+    T *outRow = out + row * size;
+    for (int j = 0; j < size; ++j) outRow[j] = inRow[source[j]];
+  }
+
+  return output;
+}
+
 }  // namespace
+
+std::vector<int> nearestSources(int length, int size) {
+  // Volatile so that neither the division nor the product is folded into something wider or
+  // fused: the whole point is to land on the float32 value torch lands on.
+  volatile float scale = static_cast<float>(length) / static_cast<float>(size);
+
+  std::vector<int> source(size);
+  for (int j = 0; j < size; ++j) {
+    volatile float position = static_cast<float>(j) * scale;
+    source[j] = std::min(static_cast<int>(std::floor(position)), length - 1);
+  }
+  return source;
+}
+
+Tensor upsampleNearest1d(const Tensor &input, int size) {
+  if (input.getDim() < 1) THROW(InvalidArg, "upsampleNearest1d takes at least one dimension");
+  if (!input.isContiguous()) THROW(InvalidArg, "upsampleNearest1d takes a contiguous input");
+  if (size < 1) THROW(InvalidArg, "upsampleNearest1d: the size is below one");
+  if (input.getShape(-1) < 1) THROW(InvalidArg, "upsampleNearest1d: the input is empty");
+
+  if (input.getDType() == DType::kFloat) return upsampleNearest1dKernel<uint32_t>(input, size);
+  if (input.getDType() == DType::kFloat16) return upsampleNearest1dKernel<uint16_t>(input, size);
+
+  NOT_IMPL();
+}
 
 Tensor upsampleNearest2d(const Tensor &input, int scale) {
   if (input.getDim() != 4) {

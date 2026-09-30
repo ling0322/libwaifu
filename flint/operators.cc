@@ -91,6 +91,10 @@ Tensor Operators::upsampleNearest2d(Tensor input, int scale) {
   return Tensor();
 }
 
+Tensor Operators::upsampleNearest1d(Tensor input, int size) {
+  NOT_IMPL();
+}
+
 Tensor Operators::geglu(Tensor input) {
   NOT_IMPL();
 }

@@ -282,6 +282,14 @@ pub fn upsample_nearest2d(input: &Tensor, scale: i32) -> Result<Tensor> {
     Tensor::produce(|out| unsafe { ffi::fl_upsample_nearest2d(operators, input.raw, scale, out) })
 }
 
+/// Resize the last dimension of `input` to `size` as `F.interpolate(size=size, mode="nearest")`
+/// does: output `j` copies input `min(floor(j * scale), length - 1)`, with `scale` the float32
+/// ratio `length / size` and the product taken in float32 -- torch's index, frame for frame.
+pub fn upsample_nearest1d(input: &Tensor, size: i32) -> Result<Tensor> {
+    let operators = operators_of(input)?;
+    Tensor::produce(|out| unsafe { ffi::fl_upsample_nearest1d(operators, input.raw, size, out) })
+}
+
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let operators = operators_of(a)?;
     Tensor::produce(|out| unsafe { ffi::fl_matmul(operators, a.raw, b.raw, out) })

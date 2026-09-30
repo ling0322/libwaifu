@@ -754,6 +754,17 @@ impl Graph {
         self.push(Op::UpsampleNearest2d { input, scale })
     }
 
+    /// The last dimension of `input` resized to `size` by nearest neighbour, torch's
+    /// `F.interpolate(size=size, mode="nearest")`; see
+    /// [`crate::flint::functional::upsample_nearest1d`].
+    #[track_caller]
+    pub fn upsample_nearest1d(&self, input: Value, size: impl Into<Extent>) -> Value {
+        self.push(Op::UpsampleNearest1d {
+            input,
+            size: size.into(),
+        })
+    }
+
     /// A 1-D convolution as a single node.
     ///
     /// Only CUDA implements this; on any other device a graph holding one fails when it runs.

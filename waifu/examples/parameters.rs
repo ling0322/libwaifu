@@ -99,7 +99,6 @@ fn s2mel_graph(g: &Graph) {
     s2mel::length_regulator(
         &g.subgraph("length_regulator"),
         g.input("tokens"),
-        g.input("selection"),
         &s2mel::RegulatorConfig::indextts(),
         FRAMES,
         F32,

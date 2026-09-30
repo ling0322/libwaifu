@@ -46,6 +46,15 @@ struct UpsamplePush {
   uint32_t scale;
 };
 
+struct Upsample1dPush {
+  uint64_t c;
+  uint64_t a;
+  uint32_t numel;
+  uint32_t width;
+  uint32_t size;
+  float scale;
+};
+
 struct GluPush {
   uint64_t c;
   uint64_t a;
@@ -166,6 +175,36 @@ Tensor upsampleNearest2d(const Tensor &input, int scale) {
   push.scale = static_cast<uint32_t>(scale);
   getContext(x)->dispatchLinear(
       kernelName("upsample", x.getDType()).c_str(),
+      &push,
+      sizeof(push),
+      push.numel);
+  return output;
+}
+
+Tensor upsampleNearest1d(const Tensor &input, int size) {
+  checkFloat(input.getDType(), "upsampleNearest1d");
+  if (input.getDim() < 1) {
+    throw lut::InvalidArgError("upsampleNearest1d takes at least one dimension");
+  }
+  if (size < 1) throw lut::InvalidArgError("upsampleNearest1d: the size must be positive");
+  if (input.getShape(-1) < 1) throw lut::InvalidArgError("upsampleNearest1d: the input is empty");
+
+  Tensor x = makeContiguous(input);
+  int length = x.getShape(-1);
+  std::vector<int> shape = x.getShape();
+  shape.back() = size;
+  Tensor output = createTensor(shape, x.getDType());
+  if (output.getNumEl() == 0) return output;
+
+  Upsample1dPush push{};
+  push.c = getAddress(output);
+  push.a = getAddress(x);
+  push.numel = static_cast<uint32_t>(output.getNumEl());
+  push.width = static_cast<uint32_t>(length);
+  push.size = static_cast<uint32_t>(size);
+  push.scale = static_cast<float>(length) / static_cast<float>(size);
+  getContext(x)->dispatchLinear(
+      kernelName("upsample1d", x.getDType()).c_str(),
       &push,
       sizeof(push),
       push.numel);

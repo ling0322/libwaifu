@@ -72,6 +72,10 @@ Tensor VulkanOperators::upsampleNearest2d(Tensor input, int scale) {
   return vulkan::upsampleNearest2d(input, scale);
 }
 
+Tensor VulkanOperators::upsampleNearest1d(Tensor input, int size) {
+  return vulkan::upsampleNearest1d(input, size);
+}
+
 Tensor VulkanOperators::geglu(Tensor input) {
   return vulkan::geglu(input);
 }

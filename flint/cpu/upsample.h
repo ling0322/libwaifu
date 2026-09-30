@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "flint/tensor.h"
 
 namespace fl {
@@ -31,6 +33,17 @@ namespace cpu {
 /// @param input <float>(N, C, H, W), contiguous, or <float16> where the CPU has it natively.
 /// @return the same type, (N, C, H * scale, W * scale).
 Tensor upsampleNearest2d(const Tensor &input, int scale);
+
+/// @brief Resize the last dimension to `size` the way `F.interpolate(size=size, mode="nearest")`
+///        does: output `j` copies input `min(floor(j * scale), length - 1)`, `scale` being
+///        `float(length) / size` and the product taken in float32 as torch takes it.
+/// @param input <float> or <float16>, contiguous, of any rank from one up.
+/// @return the same type and leading dimensions, the last one `size` long.
+Tensor upsampleNearest1d(const Tensor &input, int size);
+
+/// @brief The input position each of `size` outputs copies from a row `length` long, as
+///        [`upsampleNearest1d`] reads them.
+std::vector<int> nearestSources(int length, int size);
 
 }  // namespace cpu
 }  // namespace op

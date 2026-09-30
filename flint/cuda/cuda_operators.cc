@@ -274,6 +274,10 @@ Tensor CudaOperators::upsampleNearest2d(Tensor input, int scale) {
   return cuda::upsampleNearest2d(input, scale);
 }
 
+Tensor CudaOperators::upsampleNearest1d(Tensor input, int size) {
+  return cuda::upsampleNearest1d(input, size);
+}
+
 Tensor CudaOperators::geglu(Tensor input) {
   return cuda::geglu(input);
 }

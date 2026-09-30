@@ -121,13 +121,13 @@ number, so the test says the loop is right and not merely unchanged.
 One vector per semantic token in, one per mel frame out: a projection, a nearest-neighbour resize
 onto the mel's frame rate, and four convolution-normalization-activation stages.
 
-Two pieces of it had to be written around what `flint` has.
-
-**The resize is a matrix.** Nearest-neighbour interpolation to an arbitrary length picks input
-frame `floor(i * from / to)` for output frame `i`, which is a gather, and there is no gather
-here. As a matrix it is one-hot per row and the gather is a `matmul`. It costs a GEMM rather than
-a copy; it runs once per utterance where the denoiser runs many times, so it has not been worth a
-kernel.
+**The resize is torch's, float32 and all.** Upstream's `F.interpolate(size=frames,
+mode="nearest")` has output frame `i` copy input frame `min(floor(i * scale), from - 1)`, with
+`scale = from / to` worked out *and multiplied* in float32. Where `i * from / to` is a whole
+number the float32 product can land a hair under it and floor one frame early — 90 tokens onto
+154 frames copies frame 44 at position 77, where the exact quotient says 45 — so an exact integer
+division picks a different frame for about one length in seventy. `upsample_nearest1d` computes
+the index torch's kernel does, on every backend.
 
 **Mish has no logarithm in it.** `x * tanh(softplus(x))` needs `ln`, which `flint` does not have.
 With `u = exp(x)` the identity `tanh(softplus(x)) = (u² + 2u) / (u² + 2u + 2)` is exact and uses
