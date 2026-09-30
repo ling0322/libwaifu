@@ -298,3 +298,82 @@ fn draws_the_mel_the_way_indextts_does() {
     assert_eq!(mel.len(), 80 * 43);
     probe(&mel, &REFERENCE_MEL, "reference_mel");
 }
+
+/// The same three analyses as graphs, held to the same references. They run on the CPU here; the
+/// pipeline runs them on its card.
+fn spectrograms() -> features::Spectrograms {
+    features::Spectrograms::new(waifu::Device::Cpu).unwrap()
+}
+
+#[test]
+fn the_graphs_read_a_recording_the_way_the_extractor_does() {
+    let got = spectrograms().w2v_bert(&chirp()).unwrap();
+
+    assert_eq!(got.shape(), vec![1, 24, 2 * BINS as i32]);
+    probe(&got.to_vec_f32().unwrap(), &W2V_FEATURES, "w2v_features");
+}
+
+#[test]
+fn the_graphs_read_a_recording_the_way_kaldi_does() {
+    let got = spectrograms().campplus(&chirp()).unwrap();
+
+    assert_eq!(got.shape(), vec![1, 48, BINS as i32]);
+    probe(
+        &got.to_vec_f32().unwrap(),
+        &CAMPPLUS_FEATURES,
+        "campplus_features",
+    );
+}
+
+#[test]
+fn the_graphs_draw_the_mel_the_way_indextts_does() {
+    let got = spectrograms()
+        .reference_mel(&broadband_at(22050.0))
+        .unwrap();
+
+    assert_eq!(got.shape(), vec![1, 80, 43]);
+    probe(&got.to_vec_f32().unwrap(), &REFERENCE_MEL, "reference_mel");
+}
+
+/// Everywhere, not only at the probes: each graph against the host walk it replaces, over a
+/// recording long enough to leave an odd frame over for w2v-bert to count and then drop.
+///
+/// The samples are sixteen-bit, as a recording read from a file is. Unquantized, the pure chirp
+/// puts bands at a level some 130 dB down -- below what sixteen bits can hold -- where the graph's
+/// float32 transform and the host's float64 one part by 8e-3 once w2v-bert standardizes them;
+/// quantized, the noise floor is a real one and the two agree to 1e-4.
+#[test]
+fn the_graphs_agree_with_the_host_everywhere() {
+    let spectrograms = spectrograms();
+    let wave: Vec<f32> = broadband_at(16000.0)
+        .into_iter()
+        .chain(chirp())
+        .take(12_345)
+        .map(|sample| (sample * 32767.0).round() / 32767.0)
+        .collect();
+
+    let worst = |got: &[f32], want: &[f32]| {
+        assert_eq!(got.len(), want.len());
+        got.iter()
+            .zip(want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+    };
+
+    let (want, pairs) = features::w2v_bert(&wave);
+    let got = spectrograms.w2v_bert(&wave).unwrap();
+    assert_eq!(got.shape(), vec![1, pairs as i32, 2 * BINS as i32]);
+    let error = worst(&got.to_vec_f32().unwrap(), &want);
+    assert!(error <= TOLERANCE, "w2v-bert features: {error}");
+
+    let (want, _) = features::campplus(&wave);
+    let got = spectrograms.campplus(&wave).unwrap();
+    let error = worst(&got.to_vec_f32().unwrap(), &want);
+    assert!(error <= TOLERANCE, "CAMPPlus features: {error}");
+
+    let wave_22k = broadband_at(22050.0);
+    let (want, _) = features::reference_mel(&wave_22k).unwrap();
+    let got = spectrograms.reference_mel(&wave_22k).unwrap();
+    let error = worst(&got.to_vec_f32().unwrap(), &want);
+    assert!(error <= TOLERANCE, "reference mel: {error}");
+}
