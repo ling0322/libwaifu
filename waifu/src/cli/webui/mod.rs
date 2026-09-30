@@ -825,7 +825,9 @@ mod tests {
         assert_eq!(asked["seed"], "7");
         assert_eq!(asked["model"], "sdxl:base");
 
-        // A second one waits behind it, and is given a seed of its own where it asked for none.
+        // A second one waits behind it, and is given a seed of its own where it asked for none. A
+        // moment later: two posted in the same millisecond go in the order of their ids.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let second = post(address, "/api/jobs", r#"{"prompt":"a dog"}"#).json();
         assert_eq!(second["position"], 1);
         let seed = second["asked"]["seed"].as_str().unwrap();

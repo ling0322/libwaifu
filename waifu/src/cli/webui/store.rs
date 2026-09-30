@@ -34,10 +34,10 @@
 //! whoever holds one can read and delete what it names; which ids belong to whom is the business
 //! of whatever sits in front of this, which for the page is the browser that posted them.
 
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -139,6 +139,12 @@ pub struct Job {
 }
 
 impl Job {
+    /// Where it comes in the order of jobs: when it was posted, and its id for two posted in the
+    /// same millisecond.
+    fn order(&self) -> (u64, &str) {
+        (self.created, &self.id)
+    }
+
     /// The file it made, and what it is.
     pub fn output(&self) -> (&'static str, &'static str) {
         self.kind.output()
@@ -249,18 +255,39 @@ impl From<io::Error> for Refused {
     }
 }
 
-/// The jobs and uploads, in the order they arrived, and the directory they are kept in.
+/// The jobs and uploads, by id, and the directory they are kept in.
+///
+/// One map for each and nothing beside them: whether a job is waiting its turn is its status, and
+/// which came first is its `(created, id)`. The line of waiting jobs, the order jobs are listed
+/// in, and which are the oldest when the directory is over its limit are all found by looking --
+/// a pass over a few thousand jobs at most, which is nothing beside the job it is finding.
+///
+/// `(created, id)` rather than `created` alone, since two jobs can be posted in the same
+/// millisecond: which of those two goes first is not something anybody could tell, but it is the
+/// same answer every time it is asked, and after a restart too.
 pub struct Store {
     root: PathBuf,
     /// How many bytes of outputs and uploads the directory may hold. `None` is no limit.
     limit: Option<u64>,
     kept: Mutex<Kept>,
+    /// Rung when a job is queued, which is what the worker waits on between jobs.
+    queued: Condvar,
 }
 
 struct Kept {
-    /// Oldest first.
-    jobs: VecDeque<Job>,
-    uploads: VecDeque<Upload>,
+    jobs: HashMap<String, Job>,
+    uploads: HashMap<String, Upload>,
+}
+
+/// What asking a job to stop came to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cancelled {
+    /// It was waiting, and is not any more.
+    Dequeued,
+    /// It is running, and will stop after the step it is on.
+    Stopping,
+    /// It is neither: finished already, or never was.
+    NotGoing,
 }
 
 impl Store {
@@ -272,7 +299,7 @@ impl Store {
         std::fs::create_dir_all(root.join("jobs"))?;
         std::fs::create_dir_all(root.join("uploads"))?;
 
-        let mut jobs = Vec::new();
+        let mut jobs = HashMap::new();
         for entry in std::fs::read_dir(root.join("jobs"))? {
             let path = entry?.path().join("job.json");
             let Ok(text) = std::fs::read_to_string(&path) else {
@@ -291,11 +318,10 @@ impl Store {
                 job.finished = Some(now());
                 write_job(root, &job)?;
             }
-            jobs.push(job);
+            jobs.insert(job.id.clone(), job);
         }
-        jobs.sort_by_key(|job| job.created);
 
-        let mut uploads = Vec::new();
+        let mut uploads = HashMap::new();
         for entry in std::fs::read_dir(root.join("uploads"))? {
             let entry = entry?;
             let path = entry.path();
@@ -308,7 +334,7 @@ impl Store {
                 continue;
             };
             let metadata = entry.metadata()?;
-            uploads.push(Upload {
+            let upload = Upload {
                 id: id.to_string(),
                 mime,
                 bytes: metadata.len(),
@@ -318,17 +344,15 @@ impl Store {
                     .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
                     .map(|since| since.as_millis() as u64)
                     .unwrap_or(0),
-            });
+            };
+            uploads.insert(upload.id.clone(), upload);
         }
-        uploads.sort_by_key(|upload| upload.created);
 
         let store = Store {
             root: root.to_path_buf(),
             limit,
-            kept: Mutex::new(Kept {
-                jobs: jobs.into(),
-                uploads: uploads.into(),
-            }),
+            kept: Mutex::new(Kept { jobs, uploads }),
+            queued: Condvar::new(),
         };
         store.keep_to_the_limit(None);
 
@@ -357,7 +381,9 @@ impl Store {
         };
         std::fs::write(self.root.join("uploads").join(upload.file()), bytes)?;
 
-        self.kept().uploads.push_back(upload.clone());
+        self.kept()
+            .uploads
+            .insert(upload.id.clone(), upload.clone());
         self.keep_to_the_limit(Some(&upload.id));
         Ok(upload)
     }
@@ -365,46 +391,34 @@ impl Store {
     /// Where an upload is on the disk, and what it is.
     pub fn upload_file(&self, id: &str) -> Option<(&'static str, PathBuf)> {
         let kept = self.kept();
-        let upload = kept.uploads.iter().find(|upload| upload.id == id)?;
+        let upload = kept.uploads.get(id)?;
         Some((upload.mime, self.root.join("uploads").join(upload.file())))
     }
 
     pub fn find_upload(&self, id: &str) -> Option<Upload> {
-        self.kept()
-            .uploads
-            .iter()
-            .find(|upload| upload.id == id)
-            .cloned()
+        self.kept().uploads.get(id).cloned()
     }
 
     /// Deletes an upload. False where there was none by that id.
     pub fn delete_upload(&self, id: &str) -> bool {
-        let mut kept = self.kept();
-        let Some(at) = kept.uploads.iter().position(|upload| upload.id == id) else {
+        let Some(upload) = self.kept().uploads.remove(id) else {
             return false;
         };
-        let upload = kept.uploads.remove(at).expect("found above");
         let _ = std::fs::remove_file(self.root.join("uploads").join(upload.file()));
         true
     }
 
     // -- jobs -------------------------------------------------------------------------------
 
-    /// A new job, queued. Written to the disk before it is answered with, so that one that was
-    /// accepted is one that a restart still knows about.
-    ///
-    /// Each one a millisecond after the last at least, so that two posted in the same millisecond
-    /// still have an order -- which is the order they are listed in, and read back in after a
-    /// restart, where nothing else says which came first.
+    /// A new job, queued, and the worker woken for it. Written to the disk before it is answered
+    /// with, so that one that was accepted is one that a restart still knows about.
     pub fn submit(&self, kind: Kind, asked: Value) -> io::Result<Job> {
-        let mut kept = self.kept();
-        let after = kept.jobs.back().map_or(0, |last| last.created + 1);
         let job = Job {
             id: a_key(),
             kind,
             asked,
             status: Status::Queued,
-            created: now().max(after),
+            created: now(),
             started: None,
             finished: None,
             error: None,
@@ -415,29 +429,111 @@ impl Store {
         std::fs::create_dir_all(self.root.join("jobs").join(&job.id))?;
         write_job(&self.root, &job)?;
 
-        kept.jobs.push_back(job.clone());
+        self.kept().jobs.insert(job.id.clone(), job.clone());
+        self.queued.notify_one();
         Ok(job)
     }
 
     pub fn find(&self, id: &str) -> Option<Job> {
-        self.kept().jobs.iter().find(|job| job.id == id).cloned()
+        self.kept().jobs.get(id).cloned()
     }
 
     /// Every job, oldest first.
     pub fn jobs(&self) -> Vec<Job> {
-        self.kept().jobs.iter().cloned().collect()
+        let mut jobs: Vec<Job> = self.kept().jobs.values().cloned().collect();
+        jobs.sort_by(|a, b| a.order().cmp(&b.order()));
+        jobs
     }
 
     /// Where a finished job's output is, and what it is.
     pub fn output_file(&self, id: &str) -> Option<(&'static str, PathBuf)> {
         let kept = self.kept();
-        let job = kept.jobs.iter().find(|job| job.id == id)?;
+        let job = kept.jobs.get(id)?;
         job.made.as_ref()?;
         let (file, mime) = job.output();
         Some((mime, self.root.join("jobs").join(&job.id).join(file)))
     }
 
-    /// Marks a job as running, and says what it asked for. None where it is not queued any more.
+    /// How many jobs are waiting their turn.
+    pub fn queued(&self) -> usize {
+        self.kept()
+            .jobs
+            .values()
+            .filter(|job| job.status == Status::Queued)
+            .count()
+    }
+
+    /// Where a queued job is in line: nought for next. None for one that is not waiting.
+    pub fn position(&self, id: &str) -> Option<usize> {
+        let kept = self.kept();
+        let job = kept.jobs.get(id)?;
+        (job.status == Status::Queued).then(|| {
+            kept.jobs
+                .values()
+                .filter(|other| other.status == Status::Queued && other.order() < job.order())
+                .count()
+        })
+    }
+
+    /// The job that has waited longest, marked as running -- waiting for one where none is.
+    ///
+    /// `taken` is called with it before the lock is let go of, which is where whatever else has to
+    /// know it is running is told: a request asking it to stop, which takes the same lock, then
+    /// finds it either still waiting or running and known to be, and never in between.
+    pub fn take_next(&self, taken: impl FnOnce(&Job)) -> Job {
+        let mut kept = self.kept();
+        loop {
+            let next = kept
+                .jobs
+                .values()
+                .filter(|job| job.status == Status::Queued)
+                .min_by(|a, b| a.order().cmp(&b.order()))
+                .map(|job| job.id.clone());
+
+            if let Some(id) = next {
+                let job = kept.jobs.get_mut(&id).expect("found above");
+                job.status = Status::Running;
+                job.started = Some(now());
+                let job = job.clone();
+                self.write_down(&job);
+                taken(&job);
+                return job;
+            }
+
+            kept = self
+                .queued
+                .wait(kept)
+                .unwrap_or_else(|held| held.into_inner());
+        }
+    }
+
+    /// Asks a job to stop: marked cancelled where it is waiting, and `stop` called where it is
+    /// running, to ask it to stop between steps. Under the one lock [`Store::take_next`] takes a
+    /// job under, so that it is always one or the other here.
+    pub fn cancel(&self, id: &str, stop: impl FnOnce()) -> Cancelled {
+        let mut kept = self.kept();
+        let Some(job) = kept.jobs.get_mut(id) else {
+            return Cancelled::NotGoing;
+        };
+        match job.status {
+            Status::Queued => {
+                job.status = Status::Cancelled;
+                job.finished = Some(now());
+                let job = job.clone();
+                self.write_down(&job);
+                Cancelled::Dequeued
+            }
+            Status::Running => {
+                stop();
+                Cancelled::Stopping
+            }
+            _ => Cancelled::NotGoing,
+        }
+    }
+
+    /// Marks a job as running, by id. The worker takes the next one with [`Store::take_next`];
+    /// this is for a test that wants a particular one done.
+    #[cfg(test)]
     pub fn start(&self, id: &str) -> Option<Job> {
         self.change(id, |job| {
             (job.status == Status::Queued).then(|| {
@@ -477,7 +573,7 @@ impl Store {
         });
     }
 
-    /// Marks a job cancelled. Only one that has not finished: a job that is done stays done.
+    /// Marks a job cancelled: one that was running and stopped. A job that is done stays done.
     pub fn cancelled(&self, id: &str) -> bool {
         self.change(id, |job| {
             (!job.status.finished()).then(|| {
@@ -492,14 +588,14 @@ impl Store {
     /// is being written into the directory this would remove. False where there is none.
     pub fn delete(&self, id: &str) -> bool {
         let mut kept = self.kept();
-        let Some(at) = kept.jobs.iter().position(|job| job.id == id) else {
+        let Some(job) = kept.jobs.get_mut(id) else {
             return false;
         };
-        if kept.jobs[at].status == Status::Running {
-            kept.jobs[at].doomed = true;
+        if job.status == Status::Running {
+            job.doomed = true;
             return true;
         }
-        kept.jobs.remove(at);
+        kept.jobs.remove(id);
         let _ = std::fs::remove_dir_all(self.root.join("jobs").join(id));
         true
     }
@@ -508,21 +604,28 @@ impl Store {
     /// stopped. `change` answering None changes nothing.
     fn change(&self, id: &str, change: impl FnOnce(&mut Job) -> Option<()>) -> Option<()> {
         let mut kept = self.kept();
-        let at = kept.jobs.iter().position(|job| job.id == id)?;
-        let job = &mut kept.jobs[at];
+        let job = kept.jobs.get_mut(id)?;
         change(job)?;
 
         if job.doomed && job.status.finished() {
-            kept.jobs.remove(at);
+            kept.jobs.remove(id);
             let _ = std::fs::remove_dir_all(self.root.join("jobs").join(id));
             return Some(());
         }
+        let job = job.clone();
+        self.write_down(&job);
+        Some(())
+    }
+
+    /// Writes a job out, saying so in the terminal where it could not be: what is kept in memory
+    /// is still right, and the next change writes it again.
+    fn write_down(&self, job: &Job) {
         if let Err(error) = write_job(&self.root, job) {
             crate::cli::webui::log::line(format_args!(
-                "error: could not write down job {id}: {error}"
+                "error: could not write down job {}: {error}",
+                job.id
             ));
         }
-        Some(())
     }
 
     // -- the limit ----------------------------------------------------------------------------
@@ -530,8 +633,12 @@ impl Store {
     /// How many bytes of outputs and uploads are kept.
     pub fn used(&self) -> u64 {
         let kept = self.kept();
-        kept.jobs.iter().map(|job| job.bytes).sum::<u64>()
-            + kept.uploads.iter().map(|upload| upload.bytes).sum::<u64>()
+        kept.jobs.values().map(|job| job.bytes).sum::<u64>()
+            + kept
+                .uploads
+                .values()
+                .map(|upload| upload.bytes)
+                .sum::<u64>()
     }
 
     pub fn limit(&self) -> Option<u64> {
@@ -550,62 +657,69 @@ impl Store {
         };
         let mut kept = self.kept();
 
-        loop {
-            let used = kept.jobs.iter().map(|job| job.bytes).sum::<u64>()
-                + kept.uploads.iter().map(|upload| upload.bytes).sum::<u64>();
+        let mut used = kept.jobs.values().map(|job| job.bytes).sum::<u64>()
+            + kept
+                .uploads
+                .values()
+                .map(|upload| upload.bytes)
+                .sum::<u64>();
+        if used <= limit {
+            return;
+        }
+
+        let wanted: Vec<String> = kept
+            .jobs
+            .values()
+            .filter(|job| !job.status.finished())
+            .flat_map(|job| uploads_named(&job.asked))
+            .collect();
+
+        // Everything that may go, oldest first: finished jobs with something to free, and uploads
+        // nothing waiting needs.
+        let mut going: Vec<(u64, String, bool)> = kept
+            .jobs
+            .values()
+            .filter(|job| job.status.finished() && job.bytes > 0)
+            .map(|job| (job.created, job.id.clone(), true))
+            .chain(
+                kept.uploads
+                    .values()
+                    .filter(|upload| !wanted.contains(&upload.id))
+                    .map(|upload| (upload.created, upload.id.clone(), false)),
+            )
+            .filter(|(_, id, _)| Some(id.as_str()) != keeping)
+            .collect();
+        going.sort();
+
+        for (_, id, is_a_job) in going {
             if used <= limit {
                 return;
             }
-
-            let wanted: Vec<String> = kept
-                .jobs
-                .iter()
-                .filter(|job| !job.status.finished())
-                .flat_map(|job| uploads_named(&job.asked))
-                .collect();
-
-            let oldest_job = kept
-                .jobs
-                .iter()
-                .filter(|job| job.status.finished() && job.bytes > 0)
-                .filter(|job| Some(job.id.as_str()) != keeping)
-                .map(|job| (job.created, job.id.clone()))
-                .next();
-            let oldest_upload = kept
-                .uploads
-                .iter()
-                .filter(|upload| Some(upload.id.as_str()) != keeping)
-                .filter(|upload| !wanted.contains(&upload.id))
-                .map(|upload| (upload.created, upload.id.clone()))
-                .next();
-
-            match (oldest_job, oldest_upload) {
-                (Some(job), Some(upload)) if upload.0 < job.0 => {
-                    self.forget_upload(&mut kept, &upload.1)
-                }
-                (Some(job), _) => self.forget_job(&mut kept, &job.1),
-                (None, Some(upload)) => self.forget_upload(&mut kept, &upload.1),
-                (None, None) => return,
-            }
+            used -= match is_a_job {
+                true => self.forget_job(&mut kept, &id),
+                false => self.forget_upload(&mut kept, &id),
+            };
         }
     }
 
-    fn forget_job(&self, kept: &mut Kept, id: &str) {
+    /// Deletes a job for the limit, and says how many bytes that freed.
+    fn forget_job(&self, kept: &mut Kept, id: &str) -> u64 {
         crate::cli::webui::log::line(format_args!(
             "note: over the output limit, deleting job {id}"
         ));
-        kept.jobs.retain(|job| job.id != id);
         let _ = std::fs::remove_dir_all(self.root.join("jobs").join(id));
+        kept.jobs.remove(id).map_or(0, |job| job.bytes)
     }
 
-    fn forget_upload(&self, kept: &mut Kept, id: &str) {
+    fn forget_upload(&self, kept: &mut Kept, id: &str) -> u64 {
         crate::cli::webui::log::line(format_args!(
             "note: over the output limit, deleting upload {id}"
         ));
-        if let Some(at) = kept.uploads.iter().position(|upload| upload.id == id) {
-            let upload = kept.uploads.remove(at).expect("found above");
-            let _ = std::fs::remove_file(self.root.join("uploads").join(upload.file()));
-        }
+        let Some(upload) = kept.uploads.remove(id) else {
+            return 0;
+        };
+        let _ = std::fs::remove_file(self.root.join("uploads").join(upload.file()));
+        upload.bytes
     }
 }
 
@@ -713,7 +827,11 @@ mod tests {
 
     const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0, 0, 0, 0];
 
+    /// A finished job, posted a moment after the last so that which is older is the order they
+    /// were made in: two in the same millisecond go by id, which would make "the oldest" a coin
+    /// toss.
     fn a_done_job(store: &Store, bytes: usize) -> String {
+        std::thread::sleep(std::time::Duration::from_millis(2));
         let job = store
             .submit(Kind::Image, json!({"prompt": "a cat"}))
             .unwrap();
@@ -777,9 +895,93 @@ mod tests {
         }
         assert_eq!(again.find(&queued.id).unwrap().kind, Kind::Speech);
         assert_eq!(again.find_upload(&upload.id).unwrap().mime, "image/png");
-        // In the order they arrived.
-        let order: Vec<_> = again.jobs().into_iter().map(|job| job.id).collect();
-        assert_eq!(order, vec![done, running.id, queued.id]);
+        // All three, in the same order as before the restart: by when they were posted, and by id
+        // for any posted in the same millisecond.
+        let before: Vec<_> = [&done, &running.id, &queued.id]
+            .into_iter()
+            .map(|id| {
+                let job = again.find(id).unwrap();
+                (job.created, job.id)
+            })
+            .collect();
+        let mut sorted = before.clone();
+        sorted.sort();
+        let listed: Vec<_> = again
+            .jobs()
+            .into_iter()
+            .map(|job| (job.created, job.id))
+            .collect();
+        assert_eq!(listed, sorted);
+    }
+
+    #[test]
+    fn the_worker_is_handed_the_job_that_has_waited_longest() {
+        let store = a_store("take-next", None);
+        let first = store.submit(Kind::Image, json!({})).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = store.submit(Kind::Image, json!({})).unwrap();
+        assert_eq!(store.queued(), 2);
+        assert_eq!(store.position(&first.id), Some(0));
+        assert_eq!(store.position(&second.id), Some(1));
+
+        let mut told = None;
+        let taken = store.take_next(|job| told = Some(job.id.clone()));
+        assert_eq!(taken.id, first.id);
+        assert_eq!(taken.status, Status::Running);
+        assert_eq!(told.as_deref(), Some(first.id.as_str()));
+        assert_eq!(store.find(&first.id).unwrap().status, Status::Running);
+        assert_eq!(store.position(&first.id), None);
+        assert_eq!(store.position(&second.id), Some(0));
+        assert_eq!(store.queued(), 1);
+    }
+
+    #[test]
+    fn two_jobs_posted_in_the_same_millisecond_go_by_id() {
+        // Which of the two came first is not something anybody could tell. What matters is that
+        // the answer is the same every time: by id.
+        let store = a_store("same-millisecond", None);
+        let a = store.submit(Kind::Image, json!({})).unwrap();
+        let b = store.submit(Kind::Image, json!({})).unwrap();
+        {
+            let mut kept = store.kept();
+            let created = kept.jobs[&a.id].created;
+            kept.jobs.get_mut(&b.id).unwrap().created = created;
+        }
+        let (early, late) = match a.id < b.id {
+            true => (&a.id, &b.id),
+            false => (&b.id, &a.id),
+        };
+
+        assert_eq!(store.position(early), Some(0));
+        assert_eq!(store.position(late), Some(1));
+        assert_eq!(&store.take_next(|_| {}).id, early);
+    }
+
+    #[test]
+    fn asking_a_job_to_stop_depends_on_where_it_is() {
+        let store = a_store("cancel-where", None);
+        let waiting = store.submit(Kind::Image, json!({})).unwrap();
+        let mut stopped = false;
+        assert_eq!(
+            store.cancel(&waiting.id, || stopped = true),
+            Cancelled::Dequeued
+        );
+        assert!(!stopped, "nothing was running to stop");
+        assert_eq!(store.find(&waiting.id).unwrap().status, Status::Cancelled);
+        assert_eq!(store.queued(), 0);
+
+        let running = store.submit(Kind::Image, json!({})).unwrap();
+        store.take_next(|_| {});
+        assert_eq!(
+            store.cancel(&running.id, || stopped = true),
+            Cancelled::Stopping
+        );
+        assert!(stopped);
+        // Still running until it stops between steps and says so.
+        assert_eq!(store.find(&running.id).unwrap().status, Status::Running);
+
+        assert_eq!(store.cancel(&waiting.id, || {}), Cancelled::NotGoing);
+        assert_eq!(store.cancel(&"0".repeat(32), || {}), Cancelled::NotGoing);
     }
 
     #[test]

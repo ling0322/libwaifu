@@ -53,8 +53,8 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response};
 
 use crate::cli::webui::machine;
-use crate::cli::webui::state::{Cancelled, Chosen, Shared, Spoken};
-use crate::cli::webui::store::{Kind, Refused, Status};
+use crate::cli::webui::state::{Chosen, Shared, Spoken};
+use crate::cli::webui::store::{Cancelled, Kind, Refused, Status};
 
 /// The page, built into the binary. There is no directory of files to find at runtime and no
 /// order the program has to be started from: a single executable is the whole of it.
@@ -285,7 +285,7 @@ fn submit(shared: &Arc<Shared>, request: &mut Request) -> Reply {
         Err(error) => return refused(400, &error),
     };
 
-    if shared.world().queue.len() >= MOST_QUEUED {
+    if shared.store().queued() >= MOST_QUEUED {
         return refused(
             503,
             &format!("{MOST_QUEUED} jobs are already waiting: ask again when fewer are"),
@@ -296,7 +296,6 @@ fn submit(shared: &Arc<Shared>, request: &mut Request) -> Reply {
         Ok(job) => job,
         Err(error) => return refused(500, &format!("the job could not be kept: {error}")),
     };
-    shared.enqueue(&job.id);
 
     let mut reply = json(202, shared.describe_job(&job));
     add_header(&mut reply, "Location", &format!("/api/jobs/{}", job.id));

@@ -121,8 +121,8 @@ pub fn work(shared: &Shared, load: Load) {
     shared.reading(false);
 
     loop {
-        let id = shared.next();
-        run(shared, model.as_ref(), voice.as_deref(), &id);
+        let job = shared.next();
+        run(shared, model.as_ref(), voice.as_deref(), &job);
         shared.finished();
     }
 }
@@ -137,20 +137,18 @@ enum Ran {
     Stopped,
 }
 
-/// Runs one job, and writes down how it went.
-fn run(shared: &Shared, model: Option<&Model>, voice: Option<&dyn Voice>, id: &str) {
+/// Runs one job, already marked as running, and writes down how it went.
+fn run(shared: &Shared, model: Option<&Model>, voice: Option<&dyn Voice>, job: &store::Job) {
     let store = shared.store();
-    // Not queued any more: cancelled in the moment between being taken off the line and here.
-    let Some(job) = store.start(id) else {
-        return;
-    };
+    let id = job.id.as_str();
 
+    // Asked to stop in the moment between being handed over and here.
     let ran = if shared.interrupted() {
         Ok(Ran::Stopped)
     } else {
         match (job.kind, model, voice) {
-            (Kind::Image, Some(model), _) => draw(shared, model, &job),
-            (Kind::Speech, _, Some(voice)) => say(shared, voice, &job),
+            (Kind::Image, Some(model), _) => draw(shared, model, job),
+            (Kind::Speech, _, Some(voice)) => say(shared, voice, job),
             // Not reachable through the API, which refuses a job of the other kind -- but a
             // job is a job, and one with nothing to run it is said to have failed.
             (Kind::Image, None, _) => Err("this program was not started to draw".into()),
@@ -1098,25 +1096,27 @@ mod tests {
 
         let asked = serde_json::json!({"text": "hello there", "speed": 1.0, "temperature": 0.8, "seed": "7"});
 
-        // Stopped after it was taken off the line and before it ran: it does not run.
+        // Stopped after it was handed to the worker and before it ran: it does not run.
         let stopped = shared.store().submit(Kind::Speech, asked.clone()).unwrap();
-        shared.enqueue(&stopped.id);
-        let id = shared.next();
-        shared.cancel(&id);
-        run(&shared, None, voice.as_deref(), &id);
+        let job = shared.next();
+        assert_eq!(job.id, stopped.id);
+        shared.cancel(&job.id);
+        run(&shared, None, voice.as_deref(), &job);
         shared.finished();
-        assert_eq!(shared.store().find(&id).unwrap().status, Status::Cancelled);
+        assert_eq!(
+            shared.store().find(&job.id).unwrap().status,
+            Status::Cancelled
+        );
 
         // Nothing was put down: the next job runs with what is loaded, and the stop before it is
         // not its own.
         assert!(voice.is_some());
         assert!(shared.world().voice.as_ref().unwrap().in_memory);
-        let next = shared.store().submit(Kind::Speech, asked).unwrap();
-        shared.enqueue(&next.id);
-        let id = shared.next();
-        run(&shared, None, voice.as_deref(), &id);
+        shared.store().submit(Kind::Speech, asked).unwrap();
+        let job = shared.next();
+        run(&shared, None, voice.as_deref(), &job);
         shared.finished();
-        let done = shared.store().find(&id).unwrap();
+        let done = shared.store().find(&job.id).unwrap();
         assert_eq!(done.status, Status::Done, "{:?}", done.error);
         assert_eq!(done.made.unwrap()["seed"], 7);
     }

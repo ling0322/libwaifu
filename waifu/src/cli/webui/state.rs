@@ -30,16 +30,15 @@
 //! made, are kept by the [`Store`]; this is what only the running program knows -- which job is
 //! running, how far along it is, and which are waiting their turn.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use crate::cli::args::Runtime;
 use crate::cli::task::Task;
-use crate::cli::webui::store::{Job, Kind, Refused, Status, Store};
+use crate::cli::webui::store::{Cancelled, Job, Kind, Refused, Status, Store};
 use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgress};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
@@ -404,20 +403,21 @@ pub struct World {
     /// What it speaks with, for a program started to speak.
     pub voice: Option<Spoken>,
     pub doing: Doing,
-    /// The job the worker is running, if it is running one.
+    /// The job the worker is running, if it is running one. Set by the store as it hands the
+    /// job over, under the store's own lock: see [`Store::take_next`].
     pub running: Option<String>,
-    /// The jobs waiting their turn, first in line first.
-    pub queue: VecDeque<String>,
     /// What the read before the server was up came to. The terminal reads it; a job's own
     /// failure is written on the job.
     pub note: Option<String>,
 }
 
 /// The world, the store, the flag that stops a run, and what about the process cannot change.
+///
+/// Where both locks are taken, the store's is taken first: [`Store::take_next`] tells the world
+/// which job is running while it holds its own. Anything that wants both takes what it needs from
+/// the store before it takes the world.
 pub struct Shared {
     world: Mutex<World>,
-    /// Rung when a job is queued, which is what the worker waits on between jobs.
-    queued: Condvar,
     /// Set while a job is running to ask it to stop between steps, which is the only place it
     /// can be asked: a step, once started, is a kernel launch that nothing here can call back.
     cancel: AtomicBool,
@@ -441,10 +441,8 @@ impl Shared {
                 voice: None,
                 doing: Doing::Nothing,
                 running: None,
-                queue: VecDeque::new(),
                 note: None,
             }),
-            queued: Condvar::new(),
             cancel: AtomicBool::new(false),
             reading: AtomicBool::new(false),
             runtime,
@@ -508,43 +506,25 @@ impl Shared {
 
     /// Whether anything is happening: the read before the server is up, or a job.
     pub fn is_busy(&self) -> bool {
+        // The store's before the world's, as everywhere.
+        let queued = self.store.queued();
         let world = self.world();
         self.reading.load(Ordering::Acquire)
+            || queued > 0
             || world.running.is_some()
-            || !world.queue.is_empty()
             || world.doing.is_busy()
     }
 
     // -- the queue ------------------------------------------------------------------------------
 
-    /// Puts a job in line, and wakes the worker if it is waiting.
-    pub fn enqueue(&self, id: &str) {
-        self.world().queue.push_back(id.to_string());
-        self.queued.notify_one();
-    }
-
-    /// Where a queued job is in line: nought for next.
-    #[cfg(test)]
-    pub fn position(&self, id: &str) -> Option<usize> {
-        self.world().queue.iter().position(|queued| queued == id)
-    }
-
-    /// The next job, waiting for one where there is none. Taken off the queue and marked as
-    /// running in the same breath, and the stop flag cleared with it: a stop asked for after the
-    /// last job finished is not this one's.
-    pub fn next(&self) -> String {
-        let mut world = self.world();
-        loop {
-            if let Some(id) = world.queue.pop_front() {
-                world.running = Some(id.clone());
-                self.cancel.store(false, Ordering::Relaxed);
-                return id;
-            }
-            world = self
-                .queued
-                .wait(world)
-                .unwrap_or_else(|held| held.into_inner());
-        }
+    /// The job that has waited longest, marked as running, waiting for one where there is none.
+    /// The world is told which it is, and the stop flag cleared, before anything can ask it to
+    /// stop: a stop asked for after the last job finished is not this one's.
+    pub fn next(&self) -> Job {
+        self.store.take_next(|job| {
+            self.world().running = Some(job.id.clone());
+            self.cancel.store(false, Ordering::Relaxed);
+        })
     }
 
     /// Marks the running job as finished with, whichever way it ended.
@@ -554,22 +534,11 @@ impl Shared {
         world.doing = Doing::Nothing;
     }
 
-    /// Asks a job to stop: taken out of the line where it is waiting, asked to stop between steps
-    /// where it is running. Under the one lock that [`Shared::next`] takes a job off the line
-    /// under, so that a job is always one or the other here and never neither.
+    /// Asks a job to stop: marked cancelled where it is waiting, asked to stop between steps where
+    /// it is running. There is one worker, so a running job is the one it is running.
     pub fn cancel(&self, id: &str) -> Cancelled {
-        let mut world = self.world();
-        if let Some(at) = world.queue.iter().position(|queued| queued == id) {
-            world.queue.remove(at);
-            drop(world);
-            self.store.cancelled(id);
-            return Cancelled::Dequeued;
-        }
-        if world.running.as_deref() == Some(id) {
-            self.cancel.store(true, Ordering::Relaxed);
-            return Cancelled::Stopping;
-        }
-        Cancelled::NotGoing
+        self.store
+            .cancel(id, || self.cancel.store(true, Ordering::Relaxed))
     }
 
     /// Whether the running job has been asked to stop.
@@ -583,16 +552,18 @@ impl Shared {
     /// knows -- where it is in line, and how far along it is.
     pub fn describe_job(&self, job: &Job) -> Value {
         let mut described = job.json();
-        let world = self.world();
         match job.status {
             Status::Queued => {
-                if let Some(at) = world.queue.iter().position(|queued| *queued == job.id) {
+                if let Some(at) = self.store.position(&job.id) {
                     described["position"] = json!(at);
                 }
             }
-            Status::Running if world.running.as_deref() == Some(job.id.as_str()) => {
-                described["progress"] = progress(&world.doing);
-                described["stopping"] = json!(self.interrupted());
+            Status::Running => {
+                let world = self.world();
+                if world.running.as_deref() == Some(job.id.as_str()) {
+                    described["progress"] = progress(&world.doing);
+                    described["stopping"] = json!(self.interrupted());
+                }
             }
             _ => {}
         }
@@ -604,17 +575,19 @@ impl Shared {
     /// how many are waiting.
     pub fn describe_worker(&self) -> Value {
         let busy = self.is_busy();
+        let queued = self.store.queued();
         let world = self.world();
         json!({
             "busy": busy,
             "running": world.running,
-            "queued": world.queue.len(),
+            "queued": queued,
             "progress": progress(&world.doing),
         })
     }
 
     /// The model this program serves, and what a job of it can be asked for.
     pub fn describe_model(&self) -> Value {
+        let (used, limit) = (self.store.used(), self.store.limit());
         let world = self.world();
         let model = world.model.as_ref().map(|model| {
             json!({
@@ -664,23 +637,9 @@ impl Shared {
             "model": model,
             "voice": voice,
             "starting_picture": self.starting_picture,
-            "output": {
-                "used": self.store.used(),
-                "limit": self.store.limit(),
-            },
+            "output": { "used": used, "limit": limit },
         })
     }
-}
-
-/// What asking a job to stop came to.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Cancelled {
-    /// It was waiting, and is not any more.
-    Dequeued,
-    /// It is running, and will stop after the step it is on.
-    Stopping,
-    /// It is neither: finished already, or never was.
-    NotGoing,
 }
 
 /// How far along the worker is, as a bar draws it.
@@ -940,26 +899,30 @@ mod tests {
         assert!(from_one.parameters().contains("From a recording: yes"));
     }
 
+    /// A job posted a moment after the last, so that which came first is the order they were
+    /// posted in: two in the same millisecond go in an order of their own, by id.
+    fn a_job(shared: &Shared) -> Job {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        shared.store().submit(Kind::Image, json!({})).unwrap()
+    }
+
     #[test]
     fn jobs_are_run_in_the_order_they_were_asked_for() {
         let shared = a_program("order");
-        let first = shared.store().submit(Kind::Image, json!({})).unwrap();
-        let second = shared.store().submit(Kind::Image, json!({})).unwrap();
-        shared.enqueue(&first.id);
-        shared.enqueue(&second.id);
+        let first = a_job(&shared);
+        let second = a_job(&shared);
 
-        assert_eq!(shared.position(&first.id), Some(0));
-        assert_eq!(shared.position(&second.id), Some(1));
+        assert_eq!(shared.describe_job(&first)["position"], 0);
         assert_eq!(shared.describe_job(&second)["position"], 1);
         assert_eq!(shared.describe_worker()["queued"], 2);
 
-        assert_eq!(shared.next(), first.id);
+        assert_eq!(shared.next().id, first.id);
         assert_eq!(shared.world().running.as_deref(), Some(first.id.as_str()));
-        assert_eq!(shared.position(&second.id), Some(0));
+        assert_eq!(shared.store().position(&second.id), Some(0));
         assert!(shared.is_busy());
 
         shared.finished();
-        assert_eq!(shared.next(), second.id);
+        assert_eq!(shared.next().id, second.id);
         shared.finished();
         assert!(!shared.is_busy());
     }
@@ -967,19 +930,17 @@ mod tests {
     #[test]
     fn a_waiting_job_is_taken_out_of_line_and_a_running_one_asked_to_stop() {
         let shared = a_program("cancel");
-        let running = shared.store().submit(Kind::Image, json!({})).unwrap();
-        let waiting = shared.store().submit(Kind::Image, json!({})).unwrap();
-        shared.enqueue(&running.id);
-        shared.enqueue(&waiting.id);
+        let running = a_job(&shared);
+        let waiting = a_job(&shared);
         shared.next();
-        shared.store().start(&running.id);
 
         assert_eq!(shared.cancel(&waiting.id), Cancelled::Dequeued);
-        assert_eq!(shared.position(&waiting.id), None);
+        assert_eq!(shared.store().position(&waiting.id), None);
         assert_eq!(
             shared.store().find(&waiting.id).unwrap().status,
             Status::Cancelled
         );
+        assert_eq!(shared.store().queued(), 0);
 
         assert!(!shared.interrupted());
         assert_eq!(shared.cancel(&running.id), Cancelled::Stopping);
@@ -993,20 +954,20 @@ mod tests {
             .contains("3 of 8"));
 
         assert_eq!(shared.cancel(&"0".repeat(32)), Cancelled::NotGoing);
+        assert_eq!(shared.cancel(&waiting.id), Cancelled::NotGoing);
     }
 
     #[test]
     fn a_stop_left_over_from_the_last_job_is_not_the_next_one_s() {
         let shared = a_program("stale-stop");
-        let first = shared.store().submit(Kind::Image, json!({})).unwrap();
-        let second = shared.store().submit(Kind::Image, json!({})).unwrap();
-        shared.enqueue(&first.id);
+        let first = a_job(&shared);
         shared.next();
         shared.cancel(&first.id);
         assert!(shared.interrupted());
+        shared.store().cancelled(&first.id);
         shared.finished();
 
-        shared.enqueue(&second.id);
+        a_job(&shared);
         shared.next();
         assert!(!shared.interrupted());
     }
@@ -1014,7 +975,6 @@ mod tests {
     #[test]
     fn the_worker_waits_for_a_job_when_there_is_none() {
         let shared = std::sync::Arc::new(a_program("wait"));
-        let job = shared.store().submit(Kind::Image, json!({})).unwrap();
 
         let waiting = std::thread::spawn({
             let shared = std::sync::Arc::clone(&shared);
@@ -1023,8 +983,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert!(!waiting.is_finished());
 
-        shared.enqueue(&job.id);
-        assert_eq!(waiting.join().unwrap(), job.id);
+        let job = a_job(&shared);
+        assert_eq!(waiting.join().unwrap().id, job.id);
     }
 
     #[test]
