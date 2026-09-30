@@ -840,6 +840,15 @@ int32_t fl_upsample_nearest2d(
       [&]() { return publish(deref(operators)->upsampleNearest2d(deref(input), scale), out); });
 }
 
+int32_t fl_upsample_nearest1d(
+    fl_operators_t operators,
+    fl_tensor_t input,
+    int32_t size,
+    fl_tensor_t *out) {
+  return guard(
+      [&]() { return publish(deref(operators)->upsampleNearest1d(deref(input), size), out); });
+}
+
 int32_t fl_layer_norm(
     fl_operators_t operators,
     fl_tensor_t input,

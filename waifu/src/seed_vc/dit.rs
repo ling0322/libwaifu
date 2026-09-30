@@ -49,7 +49,7 @@
 //!
 //! with `a` the intelligibility rate and `b` the similarity one. The three go through as one batch.
 
-use crate::flint::{DType, Device, Extent, Graph, Tensor, Value};
+use crate::flint::{DType, Device, Extent, Graph, Value};
 use crate::indextts::s2mel::{mish, rotate};
 use crate::layers::Linear;
 use crate::Result;
@@ -98,39 +98,17 @@ pub const CONDITION_DIM: i32 = 512;
 pub const CODEBOOK: i32 = 2048;
 const REGULATOR_STAGES: i32 = 4;
 
-/// The one-hot matrix that resizes a time axis from `from` to `to` as `F.interpolate(mode=
-/// "nearest")` does, `(from, to)`.
-///
-/// Not [`crate::indextts::s2mel::nearest_selection`]'s exact `floor(i * from / to)`: torch works
-/// the scale out in float32 and multiplies in float32, and where `i * from / to` is a whole number
-/// that product can land a hair under it and floor one frame early. This computes it torch's way,
-/// so a regulated condition picks the frames upstream's does.
-pub fn nearest_selection(from: i32, to: i32, device: Device) -> Result<Tensor> {
-    let mut values = vec![0.0f32; (from * to) as usize];
-    let scale = from as f32 / to as f32;
-
-    for out in 0..to {
-        let source = match (from, to) {
-            _ if from == to => out,
-            _ if to == 2 * from => out >> 1,
-            _ => ((out as f32 * scale).floor() as i32).min(from - 1),
-        };
-        values[(source * to + out) as usize] = 1.0;
-    }
-
-    Ok(Tensor::from_f32(&[from, to], &values)?.to_device(device)?)
-}
-
 /// The CFM's length regulator: wide `tokens` `(tokens)` onto `frames` mel frames,
 /// `(1, frames, 512)`.
 ///
-/// An embedding, the nearest-neighbour resize as a matrix (`selection`, [`nearest_selection`]
-/// from the token count to `frames`), and four convolution-group norm-Mish stages. The fifth
-/// module of upstream's `Sequential` is an identity, since it is 512 in and out.
+/// An embedding, upstream's `F.interpolate(size=frames, mode="nearest")` -- which
+/// [`Graph::upsample_nearest1d`] reproduces index for index, float32 rounding included -- and four
+/// convolution-group norm-Mish stages. The fifth module of upstream's `Sequential` is an identity,
+/// since it is 512 in and out.
 pub fn regulator(
     g: &Graph,
     tokens: Value,
-    selection: Value,
+    frames: i32,
     dtype: DType,
     device: Device,
 ) -> Result<Value> {
@@ -141,7 +119,7 @@ pub fn regulator(
     let embedded = g.cast(g.unsqueeze(g.lookup(table, tokens), 0), dtype);
 
     let over_time = g.contiguous(g.transpose(embedded, 1, 2));
-    let mut running = g.matmul(over_time, selection);
+    let mut running = g.upsample_nearest1d(over_time, frames);
 
     let model = g.subgraph("model");
     for stage in 0..REGULATOR_STAGES {
@@ -522,23 +500,6 @@ mod tests {
             similarity: 0.0,
         };
         assert_eq!(passes(none), vec![(true, true)]);
-    }
-
-    #[test]
-    fn nearest_matches_torch_where_the_ratio_is_whole() {
-        // 3 onto 6 is torch's doubling shortcut; 299 onto 516 is the fixture's reference.
-        let selection = nearest_selection(3, 6, Device::Cpu)
-            .unwrap()
-            .to_vec_f32()
-            .unwrap();
-        let picked: Vec<usize> = (0..6)
-            .map(|out| {
-                (0..3)
-                    .find(|from| selection[from * 6 + out] == 1.0)
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(picked, vec![0, 0, 1, 1, 2, 2]);
     }
 
     #[test]

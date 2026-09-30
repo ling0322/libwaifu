@@ -501,6 +501,18 @@ CATCH_TEST_CASE("test Vulkan shape operators", "[op][vulkan]") {
       1e-6f,
       1e-6f));
 
+  Tensor frames = randn({2, 3, 90});
+  CATCH_REQUIRE(close(
+      vk()->upsampleNearest1d(toVulkan(frames), 154),
+      cpu()->upsampleNearest1d(frames, 154),
+      1e-6f,
+      1e-6f));
+  CATCH_REQUIRE(close(
+      vk()->upsampleNearest1d(toVulkan(frames), 41),
+      cpu()->upsampleNearest1d(frames, 41),
+      1e-6f,
+      1e-6f));
+
   Tensor gated = randn({3, 4, 16});
   CATCH_REQUIRE(close(vk()->geglu(toVulkan(gated)), cpu()->geglu(gated), 1e-5f, 1e-5f));
   CATCH_REQUIRE(close(vk()->swiglu(toVulkan(gated)), cpu()->swiglu(gated), 1e-5f, 1e-5f));

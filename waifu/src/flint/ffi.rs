@@ -262,6 +262,12 @@ extern "C" {
         scale: i32,
         out: *mut FlTensor,
     ) -> i32;
+    pub fn fl_upsample_nearest1d(
+        operators: FlOperators,
+        input: FlTensor,
+        size: i32,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_paged_attention_available(out: *mut i32) -> i32;
     pub fn fl_fp8_available(device: FlDeviceType, out: *mut i32) -> i32;
     pub fn fl_fp8_quantize(x: FlTensor, data: *mut FlTensor, channel_scale: *mut FlTensor) -> i32;

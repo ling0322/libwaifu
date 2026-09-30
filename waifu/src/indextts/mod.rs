@@ -345,7 +345,7 @@ impl IndexTts {
         let (mel, prompt_frames) = features::reference_mel(&wave)?;
         let prompt_frames = prompt_frames as i32;
         let prompt_mel = self.upload(&[1, 80, prompt_frames], &mel)?;
-        let prompt_condition = self.regulate(&features, frames, prompt_frames)?;
+        let prompt_condition = self.regulate(&features, prompt_frames)?;
 
         Ok(Reference {
             features,
@@ -443,14 +443,11 @@ impl IndexTts {
     }
 
     /// S2Mel's length regulator: `(1, from, 1024)` features stretched onto `to` mel frames.
-    fn regulate(&self, features: &Tensor, from: i32, to: i32) -> Result<Tensor> {
-        let selection = s2mel::nearest_selection(from, to, self.device)?.cast(self.dtype)?;
-
+    fn regulate(&self, features: &Tensor, to: i32) -> Result<Tensor> {
         let g = Graph::new();
         let regulated = s2mel::length_regulator(
             &g.subgraph(S2MEL).subgraph("length_regulator"),
             g.input("x"),
-            g.input("selection"),
             &s2mel::RegulatorConfig::indextts(),
             to,
             self.dtype,
@@ -458,9 +455,7 @@ impl IndexTts {
         )?;
         g.output("regulated", regulated);
 
-        Ok(self
-            .run(&g, &[("x", features), ("selection", &selection)])?
-            .remove(0))
+        Ok(self.run(&g, &[("x", features)])?.remove(0))
     }
 
     /// The semantic tokens back to the codec's features, two frames each.
@@ -657,7 +652,7 @@ impl IndexTts {
 
         let speed = if speed > 0.0 { speed } else { 1.0 };
         let target = ((decoded_frames as f32 * self.settings.length_ratio / speed) as i32).max(1);
-        let condition = self.regulate(&decoded, decoded_frames, target)?;
+        let condition = self.regulate(&decoded, target)?;
 
         // The prompt's condition in front of the sentence's, which is what S2Mel continues.
         let frames = reference.prompt_frames + target;

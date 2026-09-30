@@ -49,6 +49,12 @@ class Operators {
   /// Repeat each pixel of `input` <float16>(N, C, H, W) `scale` times along both spatial axes.
   virtual Tensor upsampleNearest2d(Tensor input, int scale);
 
+  /// Resize the last dimension of `input` to `size` by taking, for output `j`, the input element
+  /// `min(floor(j * scale), length - 1)` with `scale = float(length) / size` worked out and
+  /// multiplied in float32 -- `F.interpolate(size=..., mode="nearest")`, frame for frame,
+  /// including where the float32 product floors one below an exact integer.
+  virtual Tensor upsampleNearest1d(Tensor input, int size);
+
   /// The gated linear unit of `swiglu` with a GELU in place of the SiLU.
   virtual Tensor geglu(Tensor input);
 

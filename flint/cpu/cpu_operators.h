@@ -98,6 +98,7 @@ class CPUOperators : public Operators {
   Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) override;
   Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) override;
   Tensor upsampleNearest2d(Tensor input, int scale) override;
+  Tensor upsampleNearest1d(Tensor input, int size) override;
   Tensor conv2d(
       Tensor input,
       Tensor weight,

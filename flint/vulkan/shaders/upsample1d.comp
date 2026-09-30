@@ -1,3 +1,4 @@
+#version 460
 // The MIT License (MIT)
 //
 // Copyright (c) 2026 Xiaoyang Chen
@@ -16,29 +17,32 @@
 // NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#extension GL_GOOGLE_include_directive : require
+// Resizing the last dimension of a contiguous A (rows, width) to C (rows, size), each output
+// element copying input min(floor(j * scale), width - 1) with scale = float(width) / size --
+// torch's `F.interpolate(size=size, mode="nearest")`. `precise` keeps the product one rounded
+// float32 multiply, so the index is torch's even where it lands a hair under a whole number.
+#include "common.glsl"
 
-#pragma once
+layout(local_size_x = 256) in;
 
-#include "flint/tensor.h"
+layout(push_constant) uniform Push {
+  uint64_t c;
+  uint64_t a;
+  uint numel;  // of C
+  uint width;  // of A's rows; `length` is a method in GLSL
+  uint size;
+  float scale;
+} pc;
 
-namespace fl {
-namespace op {
-namespace cuda {
+void main() {
+  uint i = globalIndex();
+  if (i >= pc.numel) return;
 
-/// @brief Repeat each pixel `scale` times along both spatial axes. This is the upsampling a
-///        diffusion U-Net and its VAE decoder do before the convolution that follows, and nearest
-///        is what they ask for: no interpolation, each output pixel is a copy of one input pixel.
-/// @param input <half>(N, C, H, W), contiguous.
-/// @return <half>(N, C, H * scale, W * scale).
-Tensor upsampleNearest2d(const Tensor &input, int scale);
+  uint j = i % pc.size;
+  uint row = i / pc.size;
 
-/// @brief Resize the last dimension to `size` the way `F.interpolate(size=size, mode="nearest")`
-///        does: output `j` copies input `min(floorf(j * scale), length - 1)`, `scale` being
-///        `float(length) / size`, which is the index torch's own kernel computes.
-/// @param input <half> or <float>, contiguous, of any rank from one up.
-/// @return the same type and leading dimensions, the last one `size` long.
-Tensor upsampleNearest1d(const Tensor &input, int size);
-
-}  // namespace cuda
-}  // namespace op
-}  // namespace fl
+  precise float position = float(j) * pc.scale;
+  uint source = min(uint(floor(position)), pc.width - 1u);
+  STORE_C_RAW(pc.c, i, LOAD_A_RAW(pc.a, row * pc.width + source));
+}

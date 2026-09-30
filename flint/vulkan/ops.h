@@ -98,6 +98,7 @@ Tensor groupNorm(
 // shape.cc
 Tensor lookup(const Tensor &table, const Tensor &indices);
 Tensor upsampleNearest2d(const Tensor &input, int scale);
+Tensor upsampleNearest1d(const Tensor &input, int size);
 Tensor geglu(const Tensor &input);
 Tensor swiglu(const Tensor &input);
 void rotaryEmbedding(

@@ -474,6 +474,14 @@ FLAPI int32_t fl_upsample_nearest2d(
     int32_t scale,
     fl_tensor_t *out);
 
+/// Resize the last dimension of `input` <float|float16>(..., L) to `size`, each output `j` copying
+/// input `min(floor(j * float(L) / size), L - 1)` in float32 -- `F.interpolate(mode="nearest")`.
+FLAPI int32_t fl_upsample_nearest1d(
+    fl_operators_t operators,
+    fl_tensor_t input,
+    int32_t size,
+    fl_tensor_t *out);
+
 /// Matrix multiplication, batched over the leading dimensions.
 FLAPI int32_t fl_matmul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out);
 

@@ -873,6 +873,9 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
             *groups,
         )?,
         Op::UpsampleNearest2d { input, scale } => F::upsample_nearest2d(get(input), *scale)?,
+        Op::UpsampleNearest1d { input, size } => {
+            F::upsample_nearest1d(get(input), self::size(slots, *size)?)?
+        }
         Op::Conv1d {
             input,
             weight,

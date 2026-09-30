@@ -19,6 +19,8 @@
 
 #include <cuda_fp16.h>
 
+#include <vector>
+
 #include "lutil/error.h"
 #include "lutil/strings.h"
 #include "flint/cuda/common.h"
@@ -94,7 +96,72 @@ Tensor upsampleNearest2dImpl(const Tensor &input, int scale) {
   return output;
 }
 
+/// One thread per output element, working out the position it copies from itself the way torch's
+/// `upsample_nearest1d` kernel does: `floorf(j * scale)`, with `scale` the float32 ratio of the
+/// two lengths. `__fmul_rn` keeps the product a rounded float32 multiply that nvcc cannot contract
+/// into anything else, so the index is torch's even where the product lands a hair under a whole
+/// number.
+template<typename T>
+__global__ void upsampleNearest1dKernel(
+    const T *__restrict__ input,
+    T *__restrict__ output,
+    int length,
+    float scale,
+    FastDivmod sizeDivmod,
+    uint32_t numel) {
+  uint32_t stride = blockDim.x * gridDim.x;
+
+  for (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < numel; idx += stride) {
+    uint32_t row, j;
+    sizeDivmod.divmod(idx, row, j);
+
+    int source = min(static_cast<int>(floorf(__fmul_rn(static_cast<float>(j), scale))), length - 1);
+    output[idx] = input[static_cast<int64_t>(row) * length + source];
+  }
+}
+
+template<typename T>
+Tensor upsampleNearest1dImpl(const Tensor &input, int size) {
+  int length = input.getShape(-1);
+
+  std::vector<int> shape = input.getShape();
+  shape.back() = size;
+  Tensor output = createCudaTensor<T>(shape);
+  int64_t numel = output.getNumEl();
+  if (numel > std::numeric_limits<int32_t>::max()) {
+    THROW(InvalidArg, "upsampleNearest1d: the result is too large");
+  }
+  if (numel == 0) return output;
+
+  constexpr int kBlockSize = 256;
+  dim3 grid = getGrid1D(static_cast<int>(numel), kBlockSize);
+  upsampleNearest1dKernel<T><<<grid, kBlockSize>>>(
+      getDataPtrCuda<T>(input),
+      getDataPtrCuda<T>(output),
+      length,
+      static_cast<float>(length) / static_cast<float>(size),
+      FastDivmod(size),
+      static_cast<uint32_t>(numel));
+
+  LL_CUDA_SYNCHRONIZE();
+  LL_CHECK_CUDA_STATUS(cudaGetLastError());
+
+  return output;
+}
+
 }  // namespace
+
+Tensor upsampleNearest1d(const Tensor &input, int size) {
+  if (input.getDim() < 1) THROW(InvalidArg, "upsampleNearest1d takes at least one dimension");
+  if (size < 1) THROW(InvalidArg, "upsampleNearest1d: the size is below one");
+  if (input.getShape(-1) < 1) THROW(InvalidArg, "upsampleNearest1d: the input is empty");
+  LL_CHECK_CONTIGUOUS(input);
+
+  if (input.getDType() == DType::kFloat16) return upsampleNearest1dImpl<half>(input, size);
+  if (input.getDType() == DType::kFloat) return upsampleNearest1dImpl<float>(input, size);
+
+  THROW(InvalidArg, "upsampleNearest1d takes a <half> or <float> input");
+}
 
 Tensor upsampleNearest2d(const Tensor &input, int scale) {
   if (input.getDim() != 4) {

@@ -21,6 +21,7 @@
 // Each is checked against the same arithmetic written out plainly here, rather than against the
 // CUDA kernel: the two are meant to agree, so comparing them would hide a misreading they share.
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -223,6 +224,38 @@ CATCH_TEST_CASE("test upsampleNearest2d", "[core][nn][operators]") {
       of({1, 1, 3, 6}, {5, 5, 5, 6, 6, 6, 5, 5, 5, 6, 6, 6, 5, 5, 5, 6, 6, 6}),
       1e-6f,
       1e-6f));
+}
+
+CATCH_TEST_CASE("test upsampleNearest1d", "[core][nn][operators]") {
+  // Indices `torch.nn.functional.interpolate(size=..., mode="nearest")` picks, printed by torch
+  // itself: up, down, and one length the same.
+  CATCH_REQUIRE(nearestSources(5, 8) == std::vector<int>{0, 0, 1, 1, 2, 3, 3, 4});
+  CATCH_REQUIRE(nearestSources(8, 3) == std::vector<int>{0, 2, 5});
+  CATCH_REQUIRE(nearestSources(3, 3) == std::vector<int>{0, 1, 2});
+
+  // 77 * 90 / 154 is exactly 45, and the float32 product is a hair under it, so torch copies
+  // frame 44 there; an exact integer division would copy 45. Summed, torch's are 6808.
+  std::vector<int> sources = nearestSources(90, 154);
+  CATCH_REQUIRE(sources[77] == 44);
+  int total = 0;
+  for (int source : sources) total += source;
+  CATCH_REQUIRE(total == 6808);
+
+  // Two rows of five, to eight: each row read through the same table.
+  std::vector<float> x;
+  for (int i = 0; i < 10; ++i) x.push_back(float(i));
+  std::vector<float> expected = {0, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 6, 7, 8, 8, 9};
+  Tensor out = cpuOps()->upsampleNearest1d(of({1, 2, 5}, x), 8);
+  CATCH_REQUIRE(out.getShape() == std::vector<int>{1, 2, 8});
+  const float *p = out.getInternalData()->getData<float>(out.getInternalOffset());
+  CATCH_REQUIRE(std::equal(p, p + out.getNumEl(), expected.begin()));
+
+  // Half is only copied, so it works wherever the CPU can hold it, not only where it computes.
+  Tensor half = cpuOps()->upsampleNearest1d(cpuOps()->cast(of({1, 2, 5}, x), DType::kFloat16), 8);
+  CATCH_REQUIRE(half.getDType() == DType::kFloat16);
+  Tensor back = cpuOps()->cast(half, DType::kFloat);
+  const float *q = back.getInternalData()->getData<float>(back.getInternalOffset());
+  CATCH_REQUIRE(std::equal(q, q + back.getNumEl(), expected.begin()));
 }
 
 }  // namespace cpu

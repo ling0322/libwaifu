@@ -283,10 +283,9 @@ fn the_transformer_trunk_is_the_reference_trunk() {
 
 /// The length regulator, which turns one vector per semantic token into one per mel frame.
 ///
-/// Its own test because it is its own module in the reference, and because the resize in the
-/// middle of it is the one place a gather had to be written as a matrix — see
-/// `nearest_selection`. Nine tokens onto twenty-four frames is deliberately not a whole ratio, so
-/// that a resize which only handles integer scaling would be caught.
+/// Its own test because it is its own module in the reference, and because of the resize in the
+/// middle of it. Nine tokens onto twenty-four frames is deliberately not a whole ratio, so that a
+/// resize which only handles integer scaling would be caught.
 #[test]
 fn the_length_regulator_is_the_reference_regulator() {
     let config = s2mel::RegulatorConfig {
@@ -297,29 +296,15 @@ fn the_length_regulator_is_the_reference_regulator() {
     };
 
     let tokens = tensor("tokens", &[1, TOKENS, REGULATOR_IN]);
-    let selection = s2mel::nearest_selection(TOKENS, FRAMES, CPU).unwrap();
 
     let g = Graph::new();
-    let out = s2mel::length_regulator(
-        &g,
-        g.input("tokens"),
-        g.input("selection"),
-        &config,
-        FRAMES,
-        F32,
-        CPU,
-    )
-    .unwrap();
+    let out = s2mel::length_regulator(&g, g.input("tokens"), &config, FRAMES, F32, CPU).unwrap();
     g.output("out", out);
 
     let filled = Filled;
     let ir = Ir::compile(&g);
     let outputs = ir
-        .run(
-            &RunContext::new(&filled)
-                .input("tokens", &tokens)
-                .input("selection", &selection),
-        )
+        .run(&RunContext::new(&filled).input("tokens", &tokens))
         .unwrap();
 
     let result = outputs[0].1.to_device(CPU).unwrap();

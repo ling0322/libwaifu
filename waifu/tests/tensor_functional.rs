@@ -5,7 +5,9 @@
 //! they accept: the operators check their arguments with the C++ library's fatal check, so a test
 //! that fed one a shape it cannot use would abort the whole test binary rather than fail.
 
-use waifu::flint::{functional as F, DType, Device, Tensor};
+use std::collections::HashMap;
+
+use waifu::flint::{functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor};
 
 fn cpu_f32(shape: &[i32], data: &[f32]) -> Tensor {
     Tensor::from_f32(shape, data).unwrap()
@@ -423,4 +425,43 @@ fn reduces_to_a_minimum() {
         F::max(&a, F::LAST_DIM).unwrap().to_vec_f32().unwrap(),
         vec![4.0, -1.0]
     );
+}
+
+#[test]
+fn resizes_the_last_dimension_the_way_torch_interpolate_does() {
+    // Two rows of their own positions, so what comes back is the frame each output copied.
+    // `F.interpolate(size=8, mode="nearest")` of five frames picks these, and so does this.
+    let positions: Vec<f32> = (0..10).map(|i| (i % 5) as f32).collect();
+    let x = cpu_f32(&[1, 2, 5], &positions);
+    let out = F::upsample_nearest1d(&x, 8).unwrap();
+    assert_eq!(out.shape(), vec![1, 2, 8]);
+    assert_eq!(
+        out.to_vec_f32().unwrap(),
+        vec![0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 3.0, 4.0, 0.0, 0.0, 1.0, 1.0, 2.0, 3.0, 3.0, 4.0]
+    );
+
+    // Through a graph, with the size read off another value the way a regulator is handed the
+    // mel's length. Ninety onto 154 is where torch's float32 product floors below the exact
+    // quotient: position 77 copies frame 44, not 45.
+    let g = Graph::new();
+    let x = g.input("x");
+    let like = g.input("like");
+    g.output("out", g.upsample_nearest1d(x, Extent::of(like, -1)));
+
+    let frames: Vec<f32> = (0..90).map(|i| i as f32).collect();
+    let x = cpu_f32(&[1, 90], &frames);
+    let like = Tensor::zeros(&[154], DType::Float, Device::Cpu).unwrap();
+    let weights: HashMap<String, Tensor> = HashMap::new();
+    let out = Ir::compile(&g)
+        .run(
+            &RunContext::new(&weights)
+                .input("x", &x)
+                .input("like", &like),
+        )
+        .unwrap();
+
+    let picked = out[0].1.to_vec_f32().unwrap();
+    assert_eq!(picked.len(), 154);
+    assert_eq!(picked[76..79], [44.0, 44.0, 45.0]);
+    assert_eq!(picked.iter().sum::<f32>(), 6808.0);
 }

@@ -480,6 +480,10 @@ Tensor CPUOperators::upsampleNearest2d(Tensor input, int scale) {
   return cpu::upsampleNearest2d(input, scale);
 }
 
+Tensor CPUOperators::upsampleNearest1d(Tensor input, int size) {
+  return cpu::upsampleNearest1d(input, size);
+}
+
 Tensor CPUOperators::conv2d(
     Tensor input,
     Tensor weight,

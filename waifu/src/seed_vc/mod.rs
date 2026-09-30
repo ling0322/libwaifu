@@ -560,8 +560,6 @@ impl SeedVc {
         if tokens.is_empty() {
             return Err(Error::model("there are no tokens to lay onto frames"));
         }
-        let selection =
-            dit::nearest_selection(tokens.len() as i32, frames, self.device)?.cast(self.dtype)?;
         let ids: Vec<i64> = tokens.iter().map(|token| i64::from(*token)).collect();
         let ids = Tensor::from_i64(&[tokens.len() as i32], &ids)?.to_device(self.device)?;
 
@@ -569,15 +567,13 @@ impl SeedVc {
         let regulated = dit::regulator(
             &g.subgraph(CFM_REGULATOR),
             g.input("tokens"),
-            g.input("selection"),
+            frames,
             self.dtype,
             self.device,
         )?;
         g.output("regulated", regulated);
 
-        Ok(self
-            .run(&g, &[("tokens", &ids), ("selection", &selection)])?
-            .remove(0))
+        Ok(self.run(&g, &[("tokens", &ids)])?.remove(0))
     }
 
     /// The DiT compiled for `frames` frames and `batch` rows.

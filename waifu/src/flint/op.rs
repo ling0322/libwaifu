@@ -506,6 +506,11 @@ pub enum Op {
         input: Value,
         scale: i32,
     },
+    /// Resize the last dimension to `size` by nearest neighbour, as torch's `F.interpolate` does.
+    UpsampleNearest1d {
+        input: Value,
+        size: Extent,
+    },
     /// Scaled dot product attention over `(N, nHead, L, D)` queries.
     Attention {
         query: Value,
@@ -597,6 +602,7 @@ impl Op {
             Op::Stft { .. } => "stft",
             Op::Istft { .. } => "istft",
             Op::UpsampleNearest2d { .. } => "upsample_nearest2d",
+            Op::UpsampleNearest1d { .. } => "upsample_nearest1d",
             Op::Attention { .. } => "attention",
             Op::Cat { .. } => "cat",
             Op::View { .. } => "view",
@@ -634,6 +640,7 @@ impl Op {
             Op::View { shape, .. } => shape.clone(),
             Op::CausalMask { max_len, .. } => vec![*max_len],
             Op::Slice { begin, end, .. } => vec![*begin, *end],
+            Op::UpsampleNearest1d { size, .. } => vec![*size],
             _ => Vec::new(),
         }
     }
@@ -658,6 +665,7 @@ impl Op {
             | Op::Reduce { input, .. }
             | Op::Cumsum { input, .. }
             | Op::UpsampleNearest2d { input, .. }
+            | Op::UpsampleNearest1d { input, .. }
             | Op::View { input, .. }
             | Op::Transpose { input, .. }
             | Op::Slice { input, .. }
@@ -823,6 +831,7 @@ impl fmt::Display for Op {
                 call.arg(format_args!("groups={groups}"))?;
             }
             Op::UpsampleNearest2d { scale, .. } => call.arg(format_args!("scale={scale}"))?,
+            Op::UpsampleNearest1d { size, .. } => call.arg(format_args!("size={size}"))?,
             Op::Conv1d {
                 stride,
                 padding,

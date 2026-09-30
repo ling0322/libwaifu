@@ -723,26 +723,6 @@ pub fn graph(
 // The length regulator, and the sampler that drives the denoiser
 // -------------------------------------------------------------------------------------------
 
-/// The matrix that resizes a time axis from `from` to `to` by taking the nearest frame.
-///
-/// Nearest-neighbour interpolation picks input frame `floor(i * from / to)` for output frame `i`,
-/// which is a permutation-with-repeats -- a gather, and there is no gather here. As a matrix it
-/// is one-hot per row, and `x @ selection` is that gather.
-///
-/// It costs a GEMM of `channels * from * to` rather than a copy of `channels * to`, which for a
-/// long utterance is not nothing; it is once per utterance and the denoiser after it runs many
-/// times, so it has not been worth a kernel.
-pub fn nearest_selection(from: i32, to: i32, device: Device) -> Result<Tensor> {
-    let mut values = vec![0.0f32; (from * to) as usize];
-
-    for out in 0..to {
-        let source = ((out as i64 * from as i64) / to as i64) as i32;
-        values[(source * to + out) as usize] = 1.0;
-    }
-
-    Ok(Tensor::from_f32(&[from, to], &values)?.to_device(device)?)
-}
-
 /// `x * tanh(softplus(x))`, the activation the length regulator uses between its convolutions.
 ///
 /// Written without a logarithm, because there is no logarithm here. With `u = exp(x)`,
@@ -776,13 +756,12 @@ pub fn mish(g: &Graph, x: Value, dtype: DType, device: Device) -> Result<Value> 
 /// the denoiser reads. Between the two: one projection, a nearest-neighbour resize onto the mel's
 /// frame rate, and four convolutions each followed by a group normalization and a [`mish`].
 ///
-/// `selection` is [`nearest_selection`] from however many tokens there are to `frames`.
+/// The resize is upstream's `F.interpolate(size=frames, mode="nearest")`, and
+/// [`Graph::upsample_nearest1d`] picks the frames torch does -- float32 index arithmetic included.
 #[track_caller]
-#[allow(clippy::too_many_arguments)]
 pub fn length_regulator(
     g: &Graph,
     x: Value,
-    selection: Value,
     config: &RegulatorConfig,
     frames: i32,
     dtype: DType,
@@ -799,9 +778,9 @@ pub fn length_regulator(
         true,
     );
 
-    // (N, tokens, C) -> (N, C, tokens) -> (N, C, frames), by the gather written as a matrix.
+    // (N, tokens, C) -> (N, C, tokens) -> (N, C, frames).
     let over_time = g.contiguous(g.transpose(projected, 1, 2));
-    let mut running = g.matmul(over_time, selection);
+    let mut running = g.upsample_nearest1d(over_time, frames);
 
     let model = g.subgraph("model");
     for stage in 0..config.stages {
