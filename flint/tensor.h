@@ -49,6 +49,12 @@ class TensorData {
   // get the pointer of raw data
   virtual std::byte *getRawData() const = 0;
 
+  /// @brief Whether the bytes may only be read. True of storage borrowed from a read-only
+  /// mapping, where a write is a fault rather than a changed weight; see ExternalTensorData.
+  virtual bool isReadOnly() const {
+    return false;
+  }
+
   /// @brief Get data pointer of n-th element in slot[0] as type `T`.
   /// @tparam T the type of underlying data.
   /// @param offset the offset `n`.

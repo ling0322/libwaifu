@@ -38,21 +38,36 @@
 //!
 //! # What reading costs
 //!
-//! One file at a time. A file is read whole, each of its tensors is handed on as it is built, and
-//! the file's bytes are let go of before the next file is read. So what a caller keeps is the
-//! caller's -- a model puts each weight on the card, or keeps it on the host, as it arrives -- and the
-//! reading itself costs one file on top of that, not the whole package.
+//! Nothing is copied. Each file is mapped into memory, and each of its tensors is a CPU tensor
+//! whose storage is that mapping -- the page cache itself; see [`Tensor::borrowing`]. So what a
+//! caller keeps is the caller's: a model that puts its weights on the card copies each one there
+//! straight out of the mapping, and one that keeps them on the host -- low-vram, or the CPU --
+//! keeps the mapping and nothing else. The host holds no copy the caller did not ask for, and a
+//! package two processes have open is in memory once.
+//!
+//! Two things follow. The disk is read when a page is first touched rather than when the package
+//! is opened, and a mapping touched out of order is, on a spinning disk, a seek for every weight.
+//! So tensors are taken out of a file in the order they lie in it, and each is read then: a weight
+//! moved to the card is read by the move, and one kept on the host is read through by
+//! [`Weights`](crate::flint::Weights) as it arrives. And a file must not change while it is
+//! mapped -- one truncated or rewritten in place faults the next time a weight in it is read.
 //!
 //! There is no object in between that holds a model's files. A model is read once, into the
-//! [`ParamSource`](crate::flint::ParamSource) it runs from, and nothing afterwards reads the disk.
+//! [`ParamSource`](crate::flint::ParamSource) it runs from; the mappings go with the last tensor
+//! on them.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
+
+use memmap2::Mmap;
 
 use safetensors::tensor::{Dtype, SafeTensors};
 
 use crate::error::{Error, Result};
-use crate::flint::{DType, Tensor, CHANNEL_SCALE_SUFFIX};
+use crate::flint::{DType, Device, Residency, Tensor, Weights, CHANNEL_SCALE_SUFFIX};
 
 /// The largest rank and dimension a stored tensor may have, which keep a corrupt file from asking
 /// for an unreasonable allocation.
@@ -69,68 +84,128 @@ const HEADER_LENGTH_BYTES: usize = 8;
 /// [`Weights::from_files`](crate::flint::Weights::from_files) instead, which puts each
 /// weight where it will be used as it is read rather than holding all of them here first.
 pub fn read_safetensors(paths: &[impl AsRef<Path>]) -> Result<HashMap<String, Tensor>> {
-    collect(paths, &mut Ok)
+    let mut tensors = HashMap::new();
+    each_mapped(paths, &mut |name, tensor| keep(&mut tensors, name, tensor))?;
+    check_fp8_pairs(&tensors)?;
+    Ok(tensors)
 }
 
 /// The same, out of one file's bytes already in hand rather than off the disk.
 pub fn parse_safetensors(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
-    collect_bytes(bytes, &mut Ok)
+    let mut tensors = HashMap::new();
+    each_copied(bytes, &mut |name, tensor| keep(&mut tensors, name, tensor))?;
+    check_fp8_pairs(&tensors)?;
+    Ok(tensors)
 }
 
-/// Every tensor of the files at `paths`, each passed through `place` as it is read, keyed by its
-/// whole name.
+/// A model's weights out of the files at `paths`, for a model running on `device` with its
+/// weights held the way `residency` says -- what [`Weights::from_files`] is.
 ///
-/// One file at a time: its bytes are gone before the next one is read, so the high-water mark is
-/// what `place` keeps and one file, not the package twice over.
-///
-/// A name in two files is refused rather than replaced -- a model whose weights depend on the
-/// order its files were listed in is worse than one that will not load -- and every quantized
-/// weight has to have its scales beside it; see [`check_fp8_pairs`].
+/// Each tensor borrows its file's mapping rather than a copy of it, and [`Weights::insert`] puts
+/// it where it waits as it arrives, so what the host holds is what the weights keep: nothing, for
+/// a weight moved to the card. Every quantized weight has to have its scales beside it; see
+/// [`check_fp8_pairs`].
 pub(crate) fn collect(
     paths: &[impl AsRef<Path>],
-    place: &mut dyn FnMut(Tensor) -> Result<Tensor>,
-) -> Result<HashMap<String, Tensor>> {
-    let mut tensors = HashMap::new();
+    device: Device,
+    residency: Residency,
+) -> Result<Weights> {
+    let mut weights = Weights::empty(device, residency)?;
+    each_mapped(paths, &mut |name, tensor| weights.insert(name, tensor))?;
+    check_fp8_pairs(weights.tensors())?;
+    Ok(weights)
+}
 
+/// [`collect`], for one file whose bytes are already in hand.
+pub(crate) fn collect_bytes(bytes: &[u8], device: Device, residency: Residency) -> Result<Weights> {
+    let mut weights = Weights::empty(device, residency)?;
+    each_copied(bytes, &mut |name, tensor| weights.insert(name, tensor))?;
+    check_fp8_pairs(weights.tensors())?;
+    Ok(weights)
+}
+
+/// Hand every tensor of the files at `paths` to `each`, file by file and in the order each file
+/// lies in, each one borrowing its file's mapping.
+fn each_mapped(
+    paths: &[impl AsRef<Path>],
+    each: &mut dyn FnMut(String, Tensor) -> Result<()>,
+) -> Result<()> {
     for path in paths {
         let path = path.as_ref();
         let blame = |error: Error| Error::format(format!("{}: {}", path.display(), error));
 
-        let bytes = std::fs::read(path)
-            .map_err(|error| Error::format(format!("{}: {error}", path.display())))?;
-        each_in(&bytes, &mut |name, tensor| {
-            keep(&mut tensors, name, place(tensor)?)
+        let map = Arc::new(map(path).map_err(blame)?);
+        each_in(&map, &mut |name, stored| {
+            let tensor = borrowed(&map, stored)
+                .map_err(|error| Error::format(format!("tensor {name:?}: {error}")))?;
+            each(name, tensor)
         })
         .map_err(blame)?;
     }
-
-    check_fp8_pairs(&tensors)?;
-    Ok(tensors)
+    Ok(())
 }
 
-/// [`collect`], for one file whose bytes are already in hand.
-pub(crate) fn collect_bytes(
-    bytes: &[u8],
-    place: &mut dyn FnMut(Tensor) -> Result<Tensor>,
-) -> Result<HashMap<String, Tensor>> {
-    let mut tensors = HashMap::new();
-    each_in(bytes, &mut |name, tensor| {
-        keep(&mut tensors, name, place(tensor)?)
-    })?;
+/// Hand every tensor of one file's `bytes` to `each`, in the order it lies in, each one a copy.
+fn each_copied(bytes: &[u8], each: &mut dyn FnMut(String, Tensor) -> Result<()>) -> Result<()> {
+    each_in(bytes, &mut |name, stored| {
+        let tensor = Tensor::from_bytes(&stored.shape, stored.dtype, &bytes[stored.range])
+            .map_err(|error| Error::format(format!("tensor {name:?}: {error}")))?;
+        each(name, tensor)
+    })
+}
 
-    check_fp8_pairs(&tensors)?;
-    Ok(tensors)
+/// `path`, mapped read-only.
+///
+/// Nothing is read here: a page is read when it is first touched, which is why the tensors are
+/// handed on in file order -- see the module documentation. `madvise(MADV_WILLNEED)` would ask the
+/// kernel to start reading ahead, and does not do it: it reads one readahead window, 8 MB of a
+/// 6.5 GB file, measured.
+fn map(path: &Path) -> Result<Mmap> {
+    let file = File::open(path).map_err(|error| Error::format(error.to_string()))?;
+
+    // SAFETY: the mapping is only read, and stays valid for as long as the file's contents do.
+    // What would break it is the file being truncated or rewritten in place while it is held --
+    // the module documentation says why a package is not -- and that is a fault on the read that
+    // finds it, not memory that silently changes under a weight.
+    unsafe { Mmap::map(&file) }.map_err(|error| Error::format(error.to_string()))
+}
+
+/// A tensor out of `map`, as a view of it where its elements are aligned and as a copy where they
+/// are not.
+///
+/// The safetensors writers align every tensor to its element size, but the format does not
+/// promise it, and the CPU kernels read elements as their own type. A mapping starts on a page, so
+/// whether a tensor is aligned is whether its offset into the file is.
+fn borrowed(map: &Arc<Mmap>, stored: Stored) -> Result<Tensor> {
+    let alignment = stored.dtype.total_size(1).max(1) as usize;
+    if stored.range.start % alignment == 0 {
+        Ok(Tensor::borrowing(&stored.shape, stored.dtype, map, stored.range)?)
+    } else {
+        Ok(Tensor::from_bytes(&stored.shape, stored.dtype, &map[stored.range])?)
+    }
+}
+
+/// One tensor as a header describes it: what it is, and where its bytes are in the file.
+struct Stored {
+    shape: Vec<i32>,
+    dtype: DType,
+    range: Range<usize>,
 }
 
 /// Hand every tensor one file holds to `each`, in the order its header lists them.
-fn each_in(bytes: &[u8], each: &mut dyn FnMut(String, Tensor) -> Result<()>) -> Result<()> {
+fn each_in(bytes: &[u8], each: &mut dyn FnMut(String, Stored) -> Result<()>) -> Result<()> {
     let (header_length, metadata) = SafeTensors::read_metadata(bytes)
         .map_err(|error| Error::format(format!("not a safetensors file: {error}")))?;
 
     // Where the data section begins, which the header's offsets are relative to.
     let base = HEADER_LENGTH_BYTES + header_length;
 
-    for (name, info) in metadata.tensors() {
+    // In the order they lie in the file, not the order the header's index happens to hand them
+    // out in: taking a mapped file apart out of order is a seek for every tensor.
+    let mut stored: Vec<_> = metadata.tensors().into_iter().collect();
+    stored.sort_by_key(|(_, info)| info.data_offsets.0);
+
+    for (name, info) in stored {
         let blame = |error: Error| Error::format(format!("tensor {name:?}: {error}"));
 
         let shape = dimensions(&info.shape).map_err(blame)?;
@@ -138,17 +213,15 @@ fn each_in(bytes: &[u8], each: &mut dyn FnMut(String, Tensor) -> Result<()>) -> 
         let range = base + info.data_offsets.0..base + info.data_offsets.1;
 
         // `read_metadata` has already checked that the offsets lie inside the file and that they
-        // account for it exactly, so this cannot fail -- but the slice below would panic rather
-        // than fail if it ever did, which is not what a corrupt package should do.
+        // account for it exactly, so this cannot fail -- but the slice a caller takes of it would
+        // panic rather than fail if it ever did, which is not what a corrupt package should do.
         if range.end > bytes.len() {
             return Err(blame(Error::format(
                 "its bytes are not inside the file".to_string(),
             )));
         }
 
-        let tensor = Tensor::from_bytes(&shape, dtype, &bytes[range])
-            .map_err(|error| Error::format(format!("tensor {name:?}: {error}")))?;
-        each(name, tensor)?;
+        each(name, Stored { shape, dtype, range })?;
     }
 
     Ok(())

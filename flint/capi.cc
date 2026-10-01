@@ -21,6 +21,7 @@
 
 #include <string.h>
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -30,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "flint/cpu/external_tensor_data.h"
 #include "flint/fp8.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
@@ -345,23 +347,94 @@ int32_t fl_tensor_from_data(
   });
 }
 
+int32_t fl_tensor_from_external(
+    const int32_t *shape,
+    int32_t ndim,
+    fl_dtype_t dtype,
+    const void *data,
+    int64_t data_size,
+    fl_release_fn release,
+    void *context,
+    fl_tensor_t *out) {
+  // Set once the storage owns `context`. Before that, a failure gives it back here; after it, the
+  // storage does, when whatever went wrong destroys it.
+  bool handedOver = false;
+
+  int32_t status = guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    if (!data) throw lut::InvalidArgError("data is null");
+
+    std::vector<int> dims = toShape(shape, ndim);
+    auto tensorShape = std::make_shared<fl::TensorShape>(lut::makeConstSpan(dims));
+    int64_t numel = tensorShape->getNumEl();
+    if (numel <= 0) throw lut::InvalidArgError("a borrowed tensor has at least one element");
+
+    fl::DType type = toDType(dtype);
+    int64_t expected = type.getTotalSize(numel);
+    if (data_size != expected) {
+      throw lut::InvalidArgError(
+          "data_size does not match the shape and dtype: expected " + std::to_string(expected) +
+          " bytes, got " + std::to_string(data_size));
+    }
+
+    // The CPU kernels read elements as their own type. A tensor the allocator made is always
+    // aligned for that; one at an arbitrary offset into a file need not be, and is refused rather
+    // than read misaligned.
+    int64_t alignment = std::max<int64_t>(1, type.getTotalSize(1));
+    if (reinterpret_cast<uintptr_t>(data) % alignment != 0) {
+      throw lut::InvalidArgError(
+          "data is not aligned to its " + std::to_string(alignment) + "-byte elements");
+    }
+
+    std::shared_ptr<fl::TensorData> storage =
+        fl::op::cpu::ExternalTensorData::create(data, numel, type, release, context);
+    handedOver = true;
+    return publish(fl::Tensor::create(tensorShape, storage), out);
+  });
+
+  if (!handedOver && release) release(context);
+  return status;
+}
+
+namespace {
+
+/// The one run of bytes a host tensor's elements are, for the two calls that hand it out.
+const fl::Tensor &hostRun(fl_tensor_t tensor, const void *out, int64_t *nbytes) {
+  if (!out) throw lut::InvalidArgError("out is null");
+  if (!nbytes) throw lut::InvalidArgError("nbytes is null");
+
+  const fl::Tensor &x = deref(tensor);
+  if (!x.getDevice().isHost()) {
+    throw lut::InvalidArgError(
+        "the bytes of a tensor on " + x.getDevice().getName() +
+        " have no address the caller may touch");
+  }
+  if (!x.isContiguous()) {
+    throw lut::InvalidArgError("a non-contiguous tensor's bytes are not one run");
+  }
+  *nbytes = getPackedSize(x);
+  return x;
+}
+
+}  // namespace
+
 int32_t fl_tensor_host_data(fl_tensor_t tensor, void **out, int64_t *nbytes) {
   return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    if (!nbytes) throw lut::InvalidArgError("nbytes is null");
-
-    const fl::Tensor &x = deref(tensor);
-    if (!x.getDevice().isHost()) {
+    const fl::Tensor &x = hostRun(tensor, out, nbytes);
+    if (x.getInternalData()->isReadOnly()) {
       throw lut::InvalidArgError(
-          "the bytes of a tensor on " + x.getDevice().getName() +
-          " have no address the caller may touch");
-    }
-    if (!x.isContiguous()) {
-      throw lut::InvalidArgError("a non-contiguous tensor's bytes are not one run");
+          "the tensor's bytes are borrowed read-only, so there is no writable pointer to hand out");
     }
 
     *out = x.getInternalData()->getData<void>(x.getInternalOffset());
-    *nbytes = getPackedSize(x);
+    return FL_OK;
+  });
+}
+
+int32_t fl_tensor_host_bytes(fl_tensor_t tensor, const void **out, int64_t *nbytes) {
+  return guard([&]() {
+    const fl::Tensor &x = hostRun(tensor, out, nbytes);
+    *out = x.getInternalData()->getData<void>(x.getInternalOffset());
     return FL_OK;
   });
 }

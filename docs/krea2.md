@@ -387,13 +387,13 @@ picture as a float one.
 ## Shape of the work
 
 The denoiser is 24 GB in fp16 and the encoder 7.8 GB, so a float package is 33.8 GB: that much on
-the card under `cuda` (33.6 GB of it, measured). The host holds one file of the package at a time
-while it is read -- each weight is moved as it arrives and the file let go of before the next -- so
-reading it costs about 4 GB of host memory rather than the package. An fp8 one is 17.3 GB on disk
-and 17.9 GB on the card, and draws the same picture.
-`cuda_cpu_offload` draws on a smaller card by keeping the package in host memory instead -- 33.8
-GB of it for the float package, for as long as the model is held -- and moves the whole model across the bus once per step, which at this size is not a small thing to
-ask of it.
+the card under `cuda` (33.6 GB of it, measured). The package is mapped rather than read, and each
+weight goes to the card straight out of the mapping, so reading it holds no copy on the host. An
+fp8 one is 17.3 GB on disk and 17.9 GB on the card, and draws the same picture.
+`cuda_cpu_offload` draws on a smaller card by keeping the package on the host instead -- the 33.8
+GB mapping of the float package, in the page cache, for as long as the model is held -- and moves
+the whole model across the bus once per step, which at this size is not a small thing to ask of
+it.
 
 A test that reads the package pays that once per test, so `waifu/tests/krea2.rs` and
 `waifu/tests/krea2_pipeline.rs` are one test each: the harness gives every test its own thread and

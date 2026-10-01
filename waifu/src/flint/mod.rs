@@ -502,6 +502,46 @@ impl Tensor {
         Tensor::from_elements(shape, data, dtype)
     }
 
+    /// A CPU tensor of `dtype` that *is* `range` of `owner`'s bytes, rather than a copy of them.
+    ///
+    /// For a weight file mapped into memory: the mapping becomes the tensor's storage, so reading
+    /// a package copies nothing. `owner` is kept alive by the tensor and every view of it, and let
+    /// go of when the last one is dropped.
+    ///
+    /// The tensor is read-only -- [`Tensor::host_bytes_mut`] refuses it -- and the range has to
+    /// start on a multiple of the element size, which a safetensors writer arranges and this
+    /// refuses otherwise; [`tensor_file`](crate::tensor_file) copies such a tensor instead.
+    pub(crate) fn borrowing<T>(
+        shape: &[i32],
+        dtype: DType,
+        owner: &std::sync::Arc<T>,
+        range: std::ops::Range<usize>,
+    ) -> Result<Tensor>
+    where
+        T: AsRef<[u8]> + Send + Sync + 'static,
+    {
+        unsafe extern "C" fn release<T>(context: *mut c_void) {
+            drop(unsafe { Box::from_raw(context as *mut std::sync::Arc<T>) });
+        }
+
+        let bytes = &owner.as_ref().as_ref()[range];
+        // Handed to flint whatever happens: it gives the context back exactly once, when the last
+        // tensor on these bytes goes or, on a refusal, before the call returns.
+        let context = Box::into_raw(Box::new(std::sync::Arc::clone(owner))) as *mut c_void;
+        Tensor::produce(|out| unsafe {
+            ffi::fl_tensor_from_external(
+                shape.as_ptr(),
+                shape.len() as i32,
+                dtype as i32,
+                bytes.as_ptr() as *const c_void,
+                bytes.len() as i64,
+                Some(release::<T>),
+                context,
+                out,
+            )
+        })
+    }
+
     fn from_elements<T>(shape: &[i32], data: &[T], dtype: DType) -> Result<Tensor> {
         // The bytes are copied in here and now, so this is the CPU's whatever else is about.
         let operators = raw_operators(Device::Cpu)?;
@@ -528,6 +568,7 @@ impl Tensor {
     ///
     /// Only a contiguous tensor on the host, which is the CPU's memory or the page-locked host
     /// memory CUDA hands out. One on the device is refused: it has no address this side may touch.
+    /// So is one [`borrowing`](Tensor::borrowing) a mapped file, whose bytes may only be read.
     ///
     /// # What the borrow does and does not say
     ///
@@ -543,6 +584,20 @@ impl Tensor {
         // Non-null and as long as it says: the call above refuses every case where it would not
         // be, and a tensor of no elements is the one that comes back as an empty slice.
         Ok(unsafe { std::slice::from_raw_parts_mut(data as *mut u8, nbytes as usize) })
+    }
+
+    /// The tensor's own bytes, to be read where they lie.
+    ///
+    /// [`Tensor::host_bytes_mut`] for reading, and so given for a tensor
+    /// [`borrowing`](Tensor::borrowing) a mapped file too. The same refusals otherwise: a tensor on
+    /// the device, and a non-contiguous one.
+    pub fn host_bytes(&self) -> Result<&[u8]> {
+        let mut data: *const c_void = std::ptr::null();
+        let mut nbytes: i64 = 0;
+        check(unsafe { ffi::fl_tensor_host_bytes(self.raw, &mut data, &mut nbytes) })?;
+
+        // As in host_bytes_mut: non-null and as long as it says whenever the call succeeds.
+        Ok(unsafe { std::slice::from_raw_parts(data as *const u8, nbytes as usize) })
     }
 
     /// Number of dimensions.

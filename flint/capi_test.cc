@@ -385,3 +385,118 @@ CATCH_TEST_CASE("flint C API refuses tensors from another device", "[core][flint
   CATCH_REQUIRE(fl_copy(cpu, host, locked) == FL_OK);
   CATCH_REQUIRE(readFloats(cpu, locked) == std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f});
 }
+
+namespace {
+
+/// Counts how often fl_tensor_from_external() gave its memory back.
+void countRelease(void *context) {
+  *static_cast<int *>(context) += 1;
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("flint C API borrows external bytes without copying", "[core][flint][capi]") {
+  ScopedOperators cpu;
+  makeCpu(&cpu);
+
+  alignas(16) float data[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  const std::vector<int32_t> shape{2, 3};
+  int released = 0;
+
+  fl_tensor_t tensor = nullptr;
+  CATCH_REQUIRE(
+      fl_tensor_from_external(
+          shape.data(),
+          2,
+          FL_DTYPE_FLOAT,
+          data,
+          sizeof(data),
+          countRelease,
+          &released,
+          &tensor) == FL_OK);
+
+  // Borrowed, not copied: a change to the lender's bytes is a change to the tensor.
+  data[0] = 10.0f;
+  CATCH_REQUIRE(readFloats(cpu, tensor) == std::vector<float>{10.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+
+  // An operator reads it like any CPU tensor, and what it makes is its own.
+  ScopedTensor sum;
+  CATCH_REQUIRE(fl_add(cpu, tensor, tensor, &sum) == FL_OK);
+  CATCH_REQUIRE(readFloats(cpu, sum) == std::vector<float>{20.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f});
+
+  // Read-only: there is no writable pointer to be had.
+  void *bytes = nullptr;
+  int64_t nbytes = 0;
+  CATCH_REQUIRE(fl_tensor_host_data(tensor, &bytes, &nbytes) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("read-only") != std::string::npos);
+
+  // But its bytes may be read where they lie: they are the lender's.
+  const void *readable = nullptr;
+  CATCH_REQUIRE(fl_tensor_host_bytes(tensor, &readable, &nbytes) == FL_OK);
+  CATCH_REQUIRE(readable == data);
+  CATCH_REQUIRE(nbytes == static_cast<int64_t>(sizeof(data)));
+
+  // Given back once, when the last of the tensor, a clone and a slice goes -- not before.
+  fl_tensor_t clone = nullptr;
+  fl_tensor_t slice = nullptr;
+  CATCH_REQUIRE(fl_tensor_clone(tensor, &clone) == FL_OK);
+  CATCH_REQUIRE(fl_tensor_slice(tensor, 1, 1, 3, &slice) == FL_OK);
+  fl_tensor_destroy(tensor);
+  fl_tensor_destroy(clone);
+  CATCH_REQUIRE(released == 0);
+  CATCH_REQUIRE(readFloats(cpu, slice) == std::vector<float>{2.0f, 3.0f, 5.0f, 6.0f});
+  fl_tensor_destroy(slice);
+  CATCH_REQUIRE(released == 1);
+}
+
+CATCH_TEST_CASE("flint C API gives borrowed bytes back when it refuses them", "[core][flint][capi]") {
+  alignas(16) unsigned char data[32] = {};
+  const std::vector<int32_t> shape{2, 2};
+  int released = 0;
+
+  // The wrong size.
+  ScopedTensor mismatched;
+  CATCH_REQUIRE(
+      fl_tensor_from_external(
+          shape.data(),
+          2,
+          FL_DTYPE_FLOAT,
+          data,
+          12,
+          countRelease,
+          &released,
+          &mismatched) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("data_size") != std::string::npos);
+  CATCH_REQUIRE(released == 1);
+
+  // Floats that do not start on a float.
+  ScopedTensor misaligned;
+  CATCH_REQUIRE(
+      fl_tensor_from_external(
+          shape.data(),
+          2,
+          FL_DTYPE_FLOAT,
+          data + 2,
+          16,
+          countRelease,
+          &released,
+          &misaligned) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("aligned") != std::string::npos);
+  CATCH_REQUIRE(released == 2);
+
+  // Bytes are aligned wherever they start.
+  fl_tensor_t bytes = nullptr;
+  CATCH_REQUIRE(
+      fl_tensor_from_external(
+          shape.data(),
+          2,
+          FL_DTYPE_UINT8,
+          data + 3,
+          4,
+          countRelease,
+          &released,
+          &bytes) == FL_OK);
+  CATCH_REQUIRE(released == 2);
+  fl_tensor_destroy(bytes);
+  CATCH_REQUIRE(released == 3);
+}
