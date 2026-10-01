@@ -169,6 +169,30 @@ FLAPI int32_t fl_tensor_from_data(
     int64_t data_size,
     fl_tensor_t *out);
 
+/// Gives back memory lent to fl_tensor_from_external().
+typedef void (*fl_release_fn)(void *context);
+
+/// Create a CPU tensor over `data_size` bytes at `data` without copying them: the tensor is those
+/// bytes, borrowed. For a weight file mapped into memory, which this makes the tensor's storage
+/// with no copy at all.
+///
+/// The bytes are read and never written -- the tensor is read-only, and fl_tensor_host_data()
+/// refuses it -- and must stay valid until `release(context)` is called. That call happens exactly
+/// once: when the last handle on the tensor or any view of it is destroyed, or, if this fails,
+/// before it returns. So the caller hands `context` over either way and never frees it itself.
+/// @param data_size size of `data` in bytes; must match the shape and dtype exactly.
+/// @param data must be aligned to the size of one element, which is what the CPU kernels read.
+/// @param release may be NULL when there is nothing to give back.
+FLAPI int32_t fl_tensor_from_external(
+    const int32_t *shape,
+    int32_t ndim,
+    fl_dtype_t dtype,
+    const void *data,
+    int64_t data_size,
+    fl_release_fn release,
+    void *context,
+    fl_tensor_t *out);
+
 /// Create another handle on the same tensor. The storage is shared rather than copied, exactly as
 /// it is between a tensor and its views.
 /// The bytes of a host tensor, to be read or written where they lie.
@@ -184,6 +208,13 @@ FLAPI int32_t fl_tensor_from_data(
 /// function's business, since what differs between them is who may DMA from the result.
 /// @param nbytes how many bytes the pointer addresses, which is the packed size of the tensor.
 FLAPI int32_t fl_tensor_host_data(fl_tensor_t tensor, void **out, int64_t *nbytes);
+
+/// The bytes of a host tensor, to be read where they lie.
+///
+/// fl_tensor_host_data() for reading only, and so accepted for a tensor borrowing read-only
+/// memory -- a mapped weight file -- which that one refuses. The same refusals otherwise: a
+/// tensor on the device, and a non-contiguous one.
+FLAPI int32_t fl_tensor_host_bytes(fl_tensor_t tensor, const void **out, int64_t *nbytes);
 
 FLAPI int32_t fl_tensor_clone(fl_tensor_t tensor, fl_tensor_t *out);
 

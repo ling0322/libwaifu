@@ -80,8 +80,23 @@ extern "C" {
         data_size: i64,
         out: *mut FlTensor,
     ) -> i32;
+    pub fn fl_tensor_from_external(
+        shape: *const i32,
+        ndim: i32,
+        dtype: FlDType,
+        data: *const c_void,
+        data_size: i64,
+        release: Option<unsafe extern "C" fn(context: *mut c_void)>,
+        context: *mut c_void,
+        out: *mut FlTensor,
+    ) -> i32;
     pub fn fl_tensor_clone(tensor: FlTensor, out: *mut FlTensor) -> i32;
     pub fn fl_tensor_host_data(tensor: FlTensor, out: *mut *mut c_void, nbytes: *mut i64) -> i32;
+    pub fn fl_tensor_host_bytes(
+        tensor: FlTensor,
+        out: *mut *const c_void,
+        nbytes: *mut i64,
+    ) -> i32;
 
     pub fn fl_tensor_destroy(tensor: FlTensor);
 

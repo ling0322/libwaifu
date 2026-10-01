@@ -316,26 +316,34 @@ impl<'a> RunContext<'a> {
 /// step. So it is slower than keeping the weights on the card and always will be; it is the mode
 /// for when the alternative is not drawing at all.
 ///
-/// And the model's size in host memory, for as long as the model is held -- ordinary memory, not
-/// page-locked. It used to be locked, because the driver sends a pageable source at well under
-/// the bus's rate. Flint's own upload does not (see `flint/cuda/staged_upload.h`): it stages
+/// And the model's size in host memory, for as long as the model is held -- the page cache the
+/// package is mapped from, which is not page-locked and is not a copy: the kernel may drop it
+/// under pressure and read it again from the file. It used to be locked, because the driver sends
+/// a pageable source at well under the bus's rate. Flint's own upload does not (see `flint/cuda/staged_upload.h`): it stages
 /// through two small locked buffers filled by several threads and sends as fast as a locked
 /// source. Locking the model therefore bought nothing, and cost a limit: Windows locks no more
-/// than half of RAM for the GPU, so a 32 GB machine could not hold a 17 GB model this way.
+/// than half of RAM for the GPU, so a 32 GB machine could not hold a 17 GB model this way. And it
+/// cost a copy: locked memory is the process's own, where the mapping is shared with the page
+/// cache the file is already in.
 pub struct Weights {
     /// Keyed the way the package keys them, which is what a graph's `load` asks for.
     tensors: HashMap<String, Tensor>,
     /// Where a run wants a weight, which is the device the model was built for.
     device: Device,
+    /// Where a weight waits between runs: `device` itself, or the host for a low-vram model.
+    kept_on: Device,
+    /// What `device` computes in, which a half vector is widened to; see [`retype`].
+    computes_in: DType,
 }
 
 impl Weights {
     /// Every weight of the safetensors files at `paths`, for a model running on `device` with its
     /// weights held the way `residency` says.
     ///
-    /// The one way a model's weights are read. Each file is read in turn and each of its weights
-    /// is put where it is going as it is read, so what the host holds on top of that at any moment
-    /// is one file, and nothing afterwards reads the disk.
+    /// The one way a model's weights are read. Each file is mapped rather than read, and each of
+    /// its weights is put where it is going straight out of the mapping, so the host holds no
+    /// copy of its own: a weight moved to the card leaves nothing behind, and one kept on the host
+    /// is the page cache. See [`tensor_file`](crate::tensor_file).
     ///
     /// A low-vram run on anything but CUDA is refused before a byte is read.
     pub fn from_files(
@@ -343,16 +351,12 @@ impl Weights {
         device: Device,
         residency: Residency,
     ) -> Result<Weights> {
-        Weights::read(device, residency, &mut |place| {
-            tensor_file::collect(paths, place)
-        })
+        tensor_file::collect(paths, device, residency)
     }
 
     /// The same, out of one file's bytes already in hand rather than off the disk.
     pub fn from_bytes(bytes: &[u8], device: Device, residency: Residency) -> Result<Weights> {
-        Weights::read(device, residency, &mut |place| {
-            tensor_file::collect_bytes(bytes, place)
-        })
+        tensor_file::collect_bytes(bytes, device, residency)
     }
 
     /// How many weights there are.
@@ -364,12 +368,12 @@ impl Weights {
         self.tensors.is_empty()
     }
 
-    /// The weights `read` hands over, each `retype`d and put where `residency` keeps it as it
-    /// arrives.
+    /// No weights yet, for a model running on `device` with its weights held the way `residency`
+    /// says. [`tensor_file`](crate::tensor_file) fills it with [`Weights::insert`].
     ///
-    /// `retype` runs before the move rather than after it, because a conversion is cheaper on a
-    /// tensor that has not been sent anywhere.
-    fn read(device: Device, residency: Residency, read: &mut Read<'_>) -> Result<Weights> {
+    /// Refuses a low-vram run on anything but CUDA, which is how the reading is refused before a
+    /// byte of it is done.
+    pub(crate) fn empty(device: Device, residency: Residency) -> Result<Weights> {
         if !residency.works_on(device) {
             return Err(Error::model(format!(
                 "a low-vram run sends each weight across the bus through cuda's staged upload, \
@@ -378,22 +382,46 @@ impl Weights {
             )));
         }
 
-        let computes_in = F::default_float_type(device)?;
-        let kept_on = match residency {
-            Residency::Device => device,
-            Residency::LowVram => Device::Cpu,
-        };
-
         Ok(Weights {
-            tensors: read(&mut |tensor| Ok(retype(tensor, computes_in)?.to_device(kept_on)?))?,
+            tensors: HashMap::new(),
             device,
+            kept_on: match residency {
+                Residency::Device => device,
+                Residency::LowVram => Device::Cpu,
+            },
+            computes_in: F::default_float_type(device)?,
         })
     }
-}
 
-/// How a package is read, handed the step that puts each tensor where it is kept.
-type Read<'a> =
-    dyn FnMut(&mut dyn FnMut(Tensor) -> Result<Tensor>) -> Result<HashMap<String, Tensor>> + 'a;
+    /// Keep `tensor` under `name`, `retype`d and put where it waits.
+    ///
+    /// `retype` runs before the move rather than after it, because a conversion is cheaper on a
+    /// tensor that has not been sent anywhere. A name already held is refused rather than
+    /// replaced -- a model whose weights depend on the order its files were listed in is worse
+    /// than one that will not load -- and refused before anything is moved.
+    pub(crate) fn insert(&mut self, name: String, tensor: Tensor) -> Result<()> {
+        if self.tensors.contains_key(&name) {
+            return Err(Error::format(format!(
+                "tensor {name:?} is in more than one file of this model"
+            )));
+        }
+
+        let tensor = retype(tensor, self.computes_in)?.to_device(self.kept_on)?;
+        // Kept on the host, a weight is its file's mapping, and nothing below reads it until a
+        // run does -- so it is read here, in the order the package lies in.
+        if self.kept_on == Device::Cpu {
+            read_through(&tensor)?;
+        }
+
+        self.tensors.insert(name, tensor);
+        Ok(())
+    }
+
+    /// Every weight, by name, for the checks made over the whole package once it is read.
+    pub(crate) fn tensors(&self) -> &HashMap<String, Tensor> {
+        &self.tensors
+    }
+}
 
 impl ParamSource for Weights {
     /// The weight, where the run wants it: a handle on it if it is already there, and the copy
@@ -505,6 +533,27 @@ pub fn check_parameters(graph: &Graph, weights: &dyn ParamSource) -> Result<()> 
 /// computes in half leaves a half package alone, and a package written in float is left alone
 /// everywhere -- which is what keeps the autoencoder, written in float32 while the rest of SDXL
 /// is half, from being narrowed to meet a type it does not run in.
+/// Read every page of a host tensor's bytes once.
+///
+/// For a weight that is its file's mapping: the disk is read when a page is first touched, and
+/// left to the run that would be in the order the graph asks for weights -- on a spinning disk, a
+/// seek for each. Read as the package is taken apart, the file goes in front to back instead, at
+/// the disk's rate. A weight already in the page cache costs a walk over its page tables.
+///
+/// A weight moved to the card needs none of this: moving it reads it, in the same order.
+fn read_through(tensor: &Tensor) -> Result<()> {
+    const PAGE: usize = 4096;
+
+    let bytes = tensor.host_bytes()?;
+    // One byte of each page faults the page in; the sum keeps the reads from being dropped.
+    let mut sum = 0u8;
+    for at in (0..bytes.len()).step_by(PAGE) {
+        sum = sum.wrapping_add(unsafe { std::ptr::read_volatile(bytes.as_ptr().add(at)) });
+    }
+    std::hint::black_box(sum);
+    Ok(())
+}
+
 fn retype(tensor: Tensor, computes_in: DType) -> Result<Tensor> {
     if tensor.dtype() != DType::Float16 || computes_in == DType::Float16 || tensor.dim()? >= 2 {
         return Ok(tensor);

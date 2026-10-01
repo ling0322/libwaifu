@@ -710,3 +710,115 @@ fn handing_the_memory_back_is_a_second_thing_after_dropping_it() {
 fn bytes_of(tensor: &Tensor) -> i64 {
     tensor.nbytes().unwrap()
 }
+
+/// A safetensors file laid out exactly as given: tensors in this order, and the header padded with
+/// spaces so that the data section starts on eight bytes, which is what the writers do. Offsets
+/// into the data are then offsets into an aligned block, so a test can say which tensors are
+/// aligned and which are not.
+fn write_laid_out(tensors: &[(&str, &str, &[i32], Vec<u8>)]) -> Vec<u8> {
+    let mut entries = Vec::new();
+    let mut data = Vec::new();
+    for (name, dtype, shape, bytes) in tensors {
+        let begin = data.len();
+        data.extend_from_slice(bytes);
+        let dimensions: Vec<String> = shape.iter().map(|size| size.to_string()).collect();
+        entries.push(format!(
+            "{name:?}:{{\"dtype\":{dtype:?},\"shape\":[{}],\"data_offsets\":[{begin},{}]}}",
+            dimensions.join(","),
+            data.len()
+        ));
+    }
+
+    let mut header = format!("{{{}}}", entries.join(","));
+    while (8 + header.len()) % 8 != 0 {
+        header.push(' ');
+    }
+    let mut out = (header.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(&data);
+    out
+}
+
+/// `bytes` written to a file of its own, removed when this goes.
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn new(bytes: &[u8]) -> TempFile {
+        static WRITTEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let which = WRITTEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "waifu-mapped-{}-{which}.safetensors",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        TempFile(path)
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn a_file_is_mapped_and_a_misaligned_tensor_copied() {
+    // `a` starts the data, `b` is bytes and so aligned wherever it is, and `c` follows three of
+    // them: floats that do not start on a float.
+    let file = TempFile::new(&write_laid_out(&[
+        ("a", "F32", &[2], f32_bytes(&[1.5, -2.0])),
+        ("b", "U8", &[3], vec![7, 8, 9]),
+        ("c", "F32", &[2], f32_bytes(&[0.25, 4.0])),
+    ]));
+    let mut tensors = read_safetensors(&[&file.0]).unwrap();
+
+    let mut a = tensors.remove("a").unwrap();
+    let mut b = tensors.remove("b").unwrap();
+    let mut c = tensors.remove("c").unwrap();
+    assert_eq!(a.to_vec_f32().unwrap(), vec![1.5, -2.0]);
+    assert_eq!(c.to_vec_f32().unwrap(), vec![0.25, 4.0]);
+
+    // The aligned two are the mapping -- read-only, so there is no writable view of them -- and
+    // the misaligned one is a copy of its own.
+    assert!(a.host_bytes_mut().is_err(), "an aligned tensor is the mapping");
+    assert!(b.host_bytes_mut().is_err(), "bytes are aligned wherever they are");
+    assert!(c.host_bytes_mut().is_ok(), "a misaligned tensor is copied");
+    // Read-only is still readable, where it lies.
+    assert_eq!(a.host_bytes().unwrap(), &f32_bytes(&[1.5, -2.0])[..]);
+
+    // What a tensor reads is the file, however the file is let go of: removing it leaves the
+    // mapping, which lives as long as the tensors on it.
+    drop(file);
+    assert_eq!(a.to_vec_f32().unwrap(), vec![1.5, -2.0]);
+}
+
+/// A package read off the disk -- mapped -- runs like the same bytes read out of a buffer, kept on
+/// the card or sent across the bus from the mapping.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_mapped_package_runs_like_one_read_into_memory() {
+    let values: Vec<f32> = (0..256 * 256).map(|i| ((i % 17) as f32 - 8.0) / 16.0).collect();
+    let bytes = write_laid_out(&[("big.weight", "F32", &[256, 256], f32_bytes(&values))]);
+    let file = TempFile::new(&bytes);
+
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let weight = graph.load("big.weight", &[256, 256]);
+    graph.output("y", graph.matmul(x, weight));
+    let ir = Ir::compile(&graph);
+
+    let x = Tensor::from_f32(&[256, 256], &values)
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap();
+    let run = |source: &dyn ParamSource| {
+        let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
+        to_host(&out[0].1)
+    };
+
+    let expected = run(&Weights::from_bytes(&bytes, Device::Cuda, Residency::Device).unwrap());
+    for residency in [Residency::Device, Residency::LowVram] {
+        let mapped = Weights::from_files(&[&file.0], Device::Cuda, residency).unwrap();
+        assert_eq!(run(&mapped), expected, "{residency:?}");
+    }
+}

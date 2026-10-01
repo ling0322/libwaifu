@@ -118,6 +118,11 @@ image = { version = "0.25", default-features = false, features = [
 # No features beyond the default `std`: this reads a header and hands back slices of a buffer.
 safetensors = "0.8"
 
+# Mapping those files into memory, so that a weight is the page cache rather than a copy of it:
+# reading a package copies nothing, and a model kept on the host is in memory once however many
+# processes have it open.
+memmap2 = "0.9"
+
 # Turning a prompt into ids, from the `tokenizer.json` the model's authors published.
 #
 # The vocabulary, the normalizer, the pre-tokenizer and the merge ranks all live in that one file,

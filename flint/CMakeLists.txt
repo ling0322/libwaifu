@@ -18,6 +18,7 @@ set(flint_SOURCES
     "cpu/copy.cc"
     "cpu/cpu_operators.cc"
     "cpu/cpu_tensor_data.cc"
+    "cpu/external_tensor_data.cc"
     "cpu/fill.cc"
     "cpu/gated_delta_net.cc"
     "cpu/glu.cc"
