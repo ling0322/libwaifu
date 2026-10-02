@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-#include "flint/functional.h"
+#include "flint/test_functional.h"
 #include "flint/bench.h"
 #include "flint/device.h"
 #include "flint/operators.h"

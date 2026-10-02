@@ -132,7 +132,7 @@ inline cudaError_t llynCudaMalloc(void **ptr, size_t size, cudaStream_t stream =
 /// hands it to the next allocation while the right stream is still reading it.
 ///
 /// Reported and not checked, because both callers are destructors -- `CudaTensorData`'s and the
-/// deleter below -- and a destructor is no place to throw. `FutureTensor`'s says the same thing
+/// deleter below -- and a destructor is no place to throw. fl_transfer_destroy() says the same thing
 /// about `cudaEventDestroy`, and `CudaHostTensorData`'s about `cudaFreeHost`; this is the third
 /// of the three and the one that did not.
 ///
@@ -157,50 +157,44 @@ lut::c_ptr<T> llynCudaAlloc(int64_t n) {
   return {p, [](void *ptr) { llynCudaFree(ptr); }};
 }
 
-Tensor createCudaTensorHalf(lut::Span<const int> shape);
-Tensor createCudaTensorLong(lut::Span<const int> shape);
-Tensor createCudaTensorInt32(lut::Span<const int> shape);
-Tensor createCudaTensorFloat(lut::Span<const int> shape);
-Tensor createCudaTensorFp4x2(lut::Span<const int> shape);
-Tensor createCudaTensorFp8E4M3(lut::Span<const int> shape);
-Tensor createCudaTensorUInt8(lut::Span<const int> shape);
-Tensor createCudaTensorBool(lut::Span<const int> shape);
-Tensor tensorLike(const TensorView &tensor);
+/// @brief An uninitialized contiguous tensor of `shape` and `dtype` on the CUDA device.
+Tensor createCudaTensor(lut::Span<const int> shape, DType dtype);
 
+/// @brief The same, with the dtype named by the element type a kernel reads it as.
 template<typename T>
 inline Tensor createCudaTensor(lut::Span<const int> shape);
 
 template<>
 inline Tensor createCudaTensor<half>(lut::Span<const int> shape) {
-  return createCudaTensorHalf(shape);
+  return createCudaTensor(shape, DType::kFloat16);
 }
 template<>
 inline Tensor createCudaTensor<LongType>(lut::Span<const int> shape) {
-  return createCudaTensorLong(shape);
+  return createCudaTensor(shape, DType::kLong);
 }
 template<>
 inline Tensor createCudaTensor<IntType>(lut::Span<const int> shape) {
-  return createCudaTensorInt32(shape);
+  return createCudaTensor(shape, DType::kInt32);
 }
 template<>
 inline Tensor createCudaTensor<float>(lut::Span<const int> shape) {
-  return createCudaTensorFloat(shape);
+  return createCudaTensor(shape, DType::kFloat);
 }
 template<>
 inline Tensor createCudaTensor<Fp4E2M0x2>(lut::Span<const int> shape) {
-  return createCudaTensorFp4x2(shape);
+  return createCudaTensor(shape, DType::kFp4E2M0x2);
 }
 template<>
 inline Tensor createCudaTensor<Fp8E4M3>(lut::Span<const int> shape) {
-  return createCudaTensorFp8E4M3(shape);
+  return createCudaTensor(shape, DType::kFp8E4M3);
 }
 template<>
 inline Tensor createCudaTensor<UInt8>(lut::Span<const int> shape) {
-  return createCudaTensorUInt8(shape);
+  return createCudaTensor(shape, DType::kUInt8);
 }
 template<>
 inline Tensor createCudaTensor<BoolType>(lut::Span<const int> shape) {
-  return createCudaTensorBool(shape);
+  return createCudaTensor(shape, DType::kBool);
 }
 
 /// @brief Split a index into dim3 object according to the shape info in `size`. TODO: remove

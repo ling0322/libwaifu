@@ -40,7 +40,6 @@ layout(local_size_x = 256) in;
 #define OP_QUICK_GELU 13
 #define OP_MUL_SCALAR 14
 #define OP_DIV_SCALAR 15
-#define OP_ADD_SCALAR 16
 #define OP_LOG 17
 #define OP_ROUND 18
 
@@ -103,7 +102,6 @@ void main() {
     case OP_QUICK_GELU: y = x / (1.0 + exp(-1.702 * x)); break;
     case OP_MUL_SCALAR: y = x * pc.scalar; break;
     case OP_DIV_SCALAR: y = x / pc.scalar; break;
-    case OP_ADD_SCALAR: y = x + pc.scalar; break;
     default: y = x; break;
   }
 

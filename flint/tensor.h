@@ -25,7 +25,6 @@
 #include <memory>
 
 #include "lutil/fixed_array.h"
-#include "lutil/reader.h"
 #include "lutil/span.h"
 #include "flint/device.h"
 #include "flint/dtype.h"
@@ -103,9 +102,6 @@ class TensorShape {
     ShapeType stride;
   };
 
-  // read tensor shape from file.
-  static std::shared_ptr<TensorShape> read(lut::Reader *fp);
-
   // from shape.
   TensorShape(lut::Span<const ShapeType> shape);
   TensorShape(lut::Span<const Elem> shape);
@@ -181,9 +177,6 @@ class Tensor {
   Tensor();
   ~Tensor();
 
-  // Read the tensor from fp.
-  void read(lut::Reader *fp);
-
   // copy and move constructors.
   Tensor(const Tensor &tensor);
   Tensor &operator=(const Tensor &tensor);
@@ -240,9 +233,6 @@ class Tensor {
 
   // return true if the tensor is contigous.
   bool isContiguous() const;
-
-  // get operators for this tensor.
-  Operators *getOperators() const;
 
   // Check the shape of a tensor. If shape of `tensor` does not match `shape`, return AbortedError
   // with message "invalid shape".

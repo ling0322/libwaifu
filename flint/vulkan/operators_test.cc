@@ -24,7 +24,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/time.h"
-#include "flint/functional.h"
+#include "flint/test_functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -52,9 +52,16 @@ Tensor toCpu(const Tensor &a) {
   return F::toDevice(vk(), x, Device::getCpu());
 }
 
+// `x + value` on the CPU, the value broadcast over `x`.
+Tensor plus(const Tensor &x, float value) {
+  Tensor scalar = F::zeros(Device::getCpu(), {1}, x.getDType());
+  cpu()->fill(scalar, value);
+  return F::add(cpu(), x, scalar);
+}
+
 // A random float tensor on the CPU, spread over [-2, 2) so that signs and saturation are seen.
 Tensor randn(std::initializer_list<int> shape) {
-  return F::subFloat(cpu(), F::mul(cpu(), F::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), 2.0f);
+  return plus(F::mul(cpu(), F::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), -2.0f);
 }
 
 bool close(const Tensor &vulkan, const Tensor &reference, float rtol, float atol) {
@@ -114,7 +121,6 @@ CATCH_TEST_CASE("test Vulkan binary operators", "[op][vulkan]") {
     CATCH_REQUIRE(close(F::divTensor(vk(), x, y), F::divTensor(cpu(), at, b), 1e-2f, tol));
     CATCH_REQUIRE(close(F::mul(vk(), x, 0.1f), F::mul(cpu(), at, 0.1f), tol, tol));
     CATCH_REQUIRE(close(F::div(vk(), x, 4.0f), F::div(cpu(), at, 4.0f), tol, tol));
-    CATCH_REQUIRE(close(F::subFloat(vk(), x, 0.5f), F::subFloat(cpu(), at, 0.5f), tol, tol));
 
     // A bias broadcast over (N, C, H, W), the pattern a convolution adds its bias in.
     Tensor image = randn({2, 3, 4, 5});
@@ -149,7 +155,7 @@ CATCH_TEST_CASE("test Vulkan unary operators", "[op][vulkan]") {
   SKIP_WITHOUT_VULKAN();
 
   Tensor a = randn({2, 5, 10});
-  Tensor positive = F::subFloat(cpu(), F::abs(cpu(), a), -0.1f);
+  Tensor positive = plus(F::abs(cpu(), a), 0.1f);
   Tensor at = a.transpose(2, 1).slice(1, {1, 9});
 
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {

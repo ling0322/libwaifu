@@ -332,13 +332,17 @@ FlashInfer has the same state-pool indirection this operator has -- `state_indic
 pool-shaped `initial_state` -- but only on its SM100/SM103 kernel: on sm120 it raises
 `NotImplementedError`. The comparison above is against its packed, sequence-ordered path.
 
-## `CudaOperators::zeros` ignores the dtype it is asked for
+## ~~`CudaOperators::zeros` ignores the dtype it is asked for~~ (moot 2026-10-02)
+
+`CudaOperators::zeros` is gone -- the caller allocates every result now -- and `op::cuda::fill`
+takes both float types, so a float zero tensor on the card is `<float>`. What was found:
 
 `flint/cuda/cuda_operators.cc` builds the tensor with `createCudaTensorHalf` whatever `dtype`
 says, so `zeros(shape, DType::kFloat)` hands back a `<half>` and the next operator to look at it
 fails a dtype check. Found while writing the gated DeltaNet benchmark, which now builds its
 FP32 state on the host and copies it over instead. `op::cuda::fill` is half-only, which is
 presumably why it was written this way, so fixing it means giving `fill` the other types first.
+
 ## The slow and fast CLIP tokenizers disagree, and the package follows the fast one
 
 `CLIPTokenizer` runs its input through `ftfy.fix_text` before matching its pattern.
@@ -496,7 +500,7 @@ cmake -S . -B build -DWITH_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120a-real
 
 That builds and runs, but produces cubins for sm_120a only.
 
-### Unverified, found while reading the same file
+### ~~Unverified, found while reading the same file~~ (moot 2026-10-02: the MXFP4 code was deleted)
 
 `quantHalfToMxfp4` and `dequandMxfp4ToHalf` are host functions, and both are wrapped in
 `#if __CUDA_ARCH__ >= 1200` with `NOT_IMPL()` in the `#else`. `__CUDA_ARCH__` is not defined in

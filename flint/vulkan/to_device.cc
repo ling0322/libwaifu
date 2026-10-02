@@ -63,8 +63,7 @@ void transfer(const TensorView &src, const TensorView &dest) {
 }
 
 Tensor toCpu(const TensorView &tensor) {
-  Tensor keep;
-  TensorView x = makeContiguous(tensor, &keep);
+  Contiguous x(tensor);
   Tensor output = F::empty(Device::getCpu(), x.getShape(), x.getDType());
   transfer(x, output);
   return output;

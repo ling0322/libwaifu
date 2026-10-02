@@ -70,6 +70,8 @@ class Tensor {
 
   fl_tensor_data_t data = nullptr;
   fl_tensor_view_t view = nullptr;
+  /// How many elements the view holds. A binding keeps this itself; the library does not say.
+  int64_t numel = 0;
 };
 
 /// Row-major strides for `shape`.
@@ -96,6 +98,7 @@ void makeEmpty(
     fl_dtype_t dtype,
     Tensor *out) {
   CATCH_REQUIRE(fl_tensor_data_create(device, dtype, numelOf(shape), &out->data) == FL_OK);
+  out->numel = numelOf(shape);
   std::vector<int32_t> stride = stridesOf(shape);
   CATCH_REQUIRE(
       fl_tensor_view_create(
@@ -121,27 +124,25 @@ void makeFloats(const std::vector<int32_t> &shape, const std::vector<float> &val
   memcpy(bytes, values.data(), values.size() * sizeof(float));
 }
 
-/// The elements of a contiguous float view of host storage, read where they lie.
+/// The elements of a float tensor makeEmpty() or makeFloats() made on the host, read where they
+/// lie: contiguous, from the start of the storage.
 std::vector<float> readFloats(const Tensor &tensor) {
-  int32_t contiguous = 0;
-  CATCH_REQUIRE(fl_tensor_view_is_contiguous(tensor, &contiguous) == FL_OK);
-  CATCH_REQUIRE(contiguous == 1);
-
-  int32_t dim = 0;
-  int64_t numel = 1;
-  CATCH_REQUIRE(fl_tensor_view_get_dim(tensor, &dim) == FL_OK);
-  for (int32_t d = 0; d < dim; ++d) {
-    int32_t size = 0;
-    CATCH_REQUIRE(fl_tensor_view_get_shape(tensor, d, &size) == FL_OK);
-    numel *= size;
-  }
-  int64_t offset = 0;
-  CATCH_REQUIRE(fl_tensor_view_get_offset(tensor, &offset) == FL_OK);
-
   void *bytes = nullptr;
   CATCH_REQUIRE(fl_tensor_data_get_host_ptr(tensor.data, &bytes) == FL_OK);
-  const float *first = static_cast<const float *>(bytes) + offset;
-  return std::vector<float>(first, first + numel);
+  const float *first = static_cast<const float *>(bytes);
+  return std::vector<float>(first, first + tensor.numel);
+}
+
+/// The elements `view` sees, packed in row-major order by copying them into a fresh tensor of
+/// `shape`: what the view's shape, strides and offset select, checked by what they select.
+std::vector<float> packFloats(
+    fl_operators_t operators,
+    fl_tensor_view_t view,
+    const std::vector<int32_t> &shape) {
+  Tensor packed;
+  makeEmpty(FL_DEVICE_CPU, shape, FL_DTYPE_FLOAT, &packed);
+  CATCH_REQUIRE(fl_copy(operators, view, packed) == FL_OK);
+  return readFloats(packed);
 }
 
 }  // namespace
@@ -175,67 +176,51 @@ CATCH_TEST_CASE("flint C API hands out operators per device", "[core][flint][cap
 }
 
 CATCH_TEST_CASE("flint C API makes storage and views over it", "[core][flint][capi]") {
-  fl_init();
+  ScopedOperators cpu;
+  makeCpu(&cpu);
 
-  fl_tensor_data_t data = nullptr;
-  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_FLOAT, 24, &data) == FL_OK);
-
-  int64_t numel = 0;
-  fl_dtype_t dtype;
-  fl_device_type_t device;
-  CATCH_REQUIRE(fl_tensor_data_get_numel(data, &numel) == FL_OK);
-  CATCH_REQUIRE(fl_tensor_data_get_dtype(data, &dtype) == FL_OK);
-  CATCH_REQUIRE(fl_tensor_data_get_device(data, &device) == FL_OK);
-  CATCH_REQUIRE(numel == 24);
-  CATCH_REQUIRE(dtype == FL_DTYPE_FLOAT);
-  CATCH_REQUIRE(device == FL_DEVICE_CPU);
+  // Storage of 24 floats holding their own positions, so that what a view selects can be read off
+  // the values it gives.
+  std::vector<float> positions(24);
+  for (int i = 0; i < 24; ++i) positions[i] = static_cast<float>(i);
+  Tensor storage;
+  makeFloats({24}, positions, &storage);
+  fl_tensor_data_t data = storage.data;
 
   // A (3, 4) block of a (4, 5) layout, transposed: shape (4, 3), strides (1, 5), starting at 2.
   const int32_t shape[] = {4, 3};
   const int32_t stride[] = {1, 5};
   fl_tensor_view_t view = nullptr;
   CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 2, &view) == FL_OK);
-
-  int32_t value = 0;
-  int64_t offset = 0;
-  CATCH_REQUIRE(fl_tensor_view_get_dim(view, &value) == FL_OK);
-  CATCH_REQUIRE(value == 2);
-  CATCH_REQUIRE(fl_tensor_view_get_shape(view, -1, &value) == FL_OK);
-  CATCH_REQUIRE(value == 3);
-  CATCH_REQUIRE(fl_tensor_view_get_stride(view, 1, &value) == FL_OK);
-  CATCH_REQUIRE(value == 5);
-  CATCH_REQUIRE(fl_tensor_view_get_offset(view, &offset) == FL_OK);
-  CATCH_REQUIRE(offset == 2);
-  CATCH_REQUIRE(fl_tensor_view_get_dtype(view, &dtype) == FL_OK);
-  CATCH_REQUIRE(dtype == FL_DTYPE_FLOAT);
-  CATCH_REQUIRE(fl_tensor_view_get_device(view, &device) == FL_OK);
-  CATCH_REQUIRE(device == FL_DEVICE_CPU);
-  CATCH_REQUIRE(fl_tensor_view_is_contiguous(view, &value) == FL_OK);
-  CATCH_REQUIRE(value == 0);
+  std::vector<float> expected;
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 3; ++j) expected.push_back(static_cast<float>(2 + i + 5 * j));
+  }
+  CATCH_REQUIRE(packFloats(cpu, view, {4, 3}) == expected);
   fl_tensor_view_destroy(view);
 
+  // The whole storage, contiguous.
   const int32_t flat[] = {24};
   const int32_t one[] = {1};
   CATCH_REQUIRE(fl_tensor_view_create(data, flat, one, 1, 0, &view) == FL_OK);
-  CATCH_REQUIRE(fl_tensor_view_is_contiguous(view, &value) == FL_OK);
-  CATCH_REQUIRE(value == 1);
+  CATCH_REQUIRE(packFloats(cpu, view, {24}) == positions);
   fl_tensor_view_destroy(view);
 
   // A zero stride repeats one element, and reaches no further than it.
   const int32_t wide[] = {1000};
   const int32_t zero[] = {0};
   CATCH_REQUIRE(fl_tensor_view_create(data, wide, zero, 1, 23, &view) == FL_OK);
+  CATCH_REQUIRE(packFloats(cpu, view, {1000}) == std::vector<float>(1000, 23.0f));
   fl_tensor_view_destroy(view);
 
   // A view of no dimensions, which needs no shape to be handed over.
   CATCH_REQUIRE(fl_tensor_view_create(data, nullptr, nullptr, 0, 0, &view) == FL_OK);
-  CATCH_REQUIRE(fl_tensor_view_get_dim(view, &value) == FL_OK);
-  CATCH_REQUIRE(value == 0);
   fl_tensor_view_destroy(view);
 
   // The view spans 3 * 1 + 2 * 5 = 13 elements past its start: offset 10 ends on the last
   // element, 11 one past it.
   CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 10, &view) == FL_OK);
+  CATCH_REQUIRE(packFloats(cpu, view, {4, 3}).back() == 23.0f);
   fl_tensor_view_destroy(view);
   fl_tensor_view_t refused = nullptr;
   CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 11, &refused) == FL_ERROR_INVALID_ARG);
@@ -251,7 +236,6 @@ CATCH_TEST_CASE("flint C API makes storage and views over it", "[core][flint][ca
   CATCH_REQUIRE(fl_tensor_view_create(data, big, bigStride, 1, 0, &refused) == FL_ERROR_INVALID_ARG);
   CATCH_REQUIRE(refused == nullptr);
 
-  fl_tensor_data_destroy(data);
   fl_tensor_data_destroy(nullptr);
   fl_tensor_view_destroy(nullptr);
 
@@ -364,8 +348,8 @@ CATCH_TEST_CASE("flint C API reports errors instead of throwing", "[core][flint]
   CATCH_REQUIRE(fl_add(nullptr, a, b, a) == FL_ERROR_INVALID_ARG);
   CATCH_REQUIRE(fl_fill(cpu, nullptr, 1.0f) == FL_ERROR_INVALID_ARG);
   CATCH_REQUIRE(fl_causal_mask(nullptr, a) == FL_ERROR_INVALID_ARG);
-  int32_t dim = 0;
-  CATCH_REQUIRE(fl_tensor_view_get_dim(nullptr, &dim) == FL_ERROR_INVALID_ARG);
+  void *bytes = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_get_host_ptr(nullptr, &bytes) == FL_ERROR_INVALID_ARG);
 
   // An operation that succeeds clears what the last one left.
   CATCH_REQUIRE(fl_add(cpu, a, b, a) == FL_OK);
@@ -416,20 +400,70 @@ CATCH_TEST_CASE("flint C API makes storage on the cuda device", "[core][flint][c
   CATCH_REQUIRE(fl_is_device_available(FL_DEVICE_CUDA, &available) == FL_OK);
   if (!available) CATCH_SKIP("cuda device not available");
 
-  for (fl_device_type_t type : {FL_DEVICE_CUDA, FL_DEVICE_CUDA_HOST}) {
-    Tensor tensor;
-    makeEmpty(type, {32, 32}, FL_DTYPE_FLOAT16, &tensor);
-    fl_device_type_t device;
-    CATCH_REQUIRE(fl_tensor_data_get_device(tensor.data, &device) == FL_OK);
-    CATCH_REQUIRE(device == type);
-    CATCH_REQUIRE(fl_tensor_view_get_device(tensor, &device) == FL_OK);
-    CATCH_REQUIRE(device == type);
+  ScopedOperators cpu;
+  makeCpu(&cpu);
+  ScopedOperators cuda;
+  CATCH_REQUIRE(fl_operators_create(FL_DEVICE_CUDA, &cuda) == FL_OK);
 
-    // Page-locked memory is the host's to touch; the card's is not.
-    void *bytes = nullptr;
-    int32_t status = fl_tensor_data_get_host_ptr(tensor.data, &bytes);
-    CATCH_REQUIRE(status == (type == FL_DEVICE_CUDA_HOST ? FL_OK : FL_ERROR_INVALID_ARG));
-  }
+  // Storage on the card is the card's operators' to touch, and has no address the host may.
+  Tensor there;
+  makeEmpty(FL_DEVICE_CUDA, {32, 32}, FL_DTYPE_FLOAT16, &there);
+  CATCH_REQUIRE(fl_fill(cuda, there, 1.0f) == FL_OK);
+  CATCH_REQUIRE(fl_fill(cpu, there, 1.0f) == FL_ERROR_INVALID_ARG);
+  void *bytes = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_get_host_ptr(there.data, &bytes) == FL_ERROR_INVALID_ARG);
+
+  // Page-locked memory is the host's to touch, and has no operators of its own.
+  Tensor locked;
+  makeEmpty(FL_DEVICE_CUDA_HOST, {32, 32}, FL_DTYPE_FLOAT16, &locked);
+  CATCH_REQUIRE(fl_tensor_data_get_host_ptr(locked.data, &bytes) == FL_OK);
+  CATCH_REQUIRE(bytes != nullptr);
+  CATCH_REQUIRE(fl_fill(cuda, locked, 1.0f) == FL_ERROR_INVALID_ARG);
+}
+
+CATCH_TEST_CASE("flint C API checks an fp8 weight before the kernel does", "[core][flint][capi]") {
+  fl_init();
+
+  int32_t available = 0;
+  CATCH_REQUIRE(fl_fp8_available(FL_DEVICE_CUDA, &available) == FL_OK);
+  if (!available) CATCH_SKIP("no fp8 kernels on this machine");
+
+  ScopedOperators cuda;
+  CATCH_REQUIRE(fl_operators_create(FL_DEVICE_CUDA, &cuda) == FL_OK);
+
+  // A weight of 8 rows by 32, its scales, an activation of 4 rows and where the product goes.
+  Tensor x, codes, scales, a, out;
+  makeEmpty(FL_DEVICE_CUDA, {8, 32}, FL_DTYPE_FLOAT16, &x);
+  makeEmpty(FL_DEVICE_CUDA, {8, 32}, FL_DTYPE_FP8E4M3, &codes);
+  makeEmpty(FL_DEVICE_CUDA, {8}, FL_DTYPE_FLOAT, &scales);
+  makeEmpty(FL_DEVICE_CUDA, {4, 32}, FL_DTYPE_FLOAT16, &a);
+  makeEmpty(FL_DEVICE_CUDA, {4, 8}, FL_DTYPE_FLOAT16, &out);
+  CATCH_REQUIRE(fl_fill(cuda, x, 0.5f) == FL_OK);
+  CATCH_REQUIRE(fl_fill(cuda, a, 1.0f) == FL_OK);
+
+  CATCH_REQUIRE(fl_fp8_quantize(x, codes, scales) == FL_OK);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, scales, out) == FL_OK);
+
+  // The scales where the codes belong.
+  CATCH_REQUIRE(fl_fp8_matmul(a, scales, scales, out) == FL_ERROR_INVALID_ARG);
+
+  // One scale for a weight that has eight rows.
+  const int32_t first[] = {1};
+  const int32_t unit[] = {1};
+  fl_tensor_view_t oneScale = nullptr;
+  CATCH_REQUIRE(fl_tensor_view_create(scales.data, first, unit, 1, 0, &oneScale) == FL_OK);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, oneScale, out) == FL_ERROR_INVALID_ARG);
+  fl_tensor_view_destroy(oneScale);
+
+  // Scales on the host, which would reach the kernel as an address it may not touch.
+  Tensor hostScales;
+  makeEmpty(FL_DEVICE_CPU, {8}, FL_DTYPE_FLOAT, &hostScales);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, hostScales, out) == FL_ERROR_INVALID_ARG);
+
+  // A product written somewhere of another shape.
+  Tensor wrong;
+  makeEmpty(FL_DEVICE_CUDA, {4, 16}, FL_DTYPE_FLOAT16, &wrong);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, scales, wrong) == FL_ERROR_INVALID_ARG);
 }
 
 CATCH_TEST_CASE("flint C API moves views between devices", "[core][flint][capi]") {

@@ -187,12 +187,15 @@ bool collapse(
   return true;
 }
 
-TensorView makeContiguous(const TensorView &tensor, Tensor *keep) {
-  if (tensor.isContiguous()) return tensor;
+Contiguous::Contiguous(const TensorView &tensor) {
+  if (tensor.empty() || tensor.isContiguous()) {
+    TensorView::operator=(tensor);
+    return;
+  }
 
-  *keep = createTensor(tensor.getShape(), tensor.getDType());
-  copy(tensor, *keep);
-  return *keep;
+  _copy = createTensor(tensor.getShape(), tensor.getDType());
+  copy(tensor, _copy);
+  TensorView::operator=(_copy);
 }
 
 }  // namespace vulkan

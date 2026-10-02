@@ -26,7 +26,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
-#include "flint/functional.h"
+#include "flint/test_functional.h"
 #include "flint/cuda/conv2d.h"
 #include "flint/cuda/conv2d_cutlass.h"
 #include "flint/device.h"

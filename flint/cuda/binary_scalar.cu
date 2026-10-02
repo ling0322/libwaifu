@@ -31,8 +31,6 @@ template<typename T, BinaryScalarOp OP>
 __forceinline__ __device__ T applyBinaryScalarOp(T a, T b) {
   if constexpr (OP == BinaryScalarOp::ADD) {
     return a + b;
-  } else if constexpr (OP == BinaryScalarOp::SUB) {
-    return a - b;
   } else if constexpr (OP == BinaryScalarOp::MUL) {
     return a * b;
   } else if constexpr (OP == BinaryScalarOp::DIV) {
@@ -118,16 +116,12 @@ void applyBinaryScalarOp(
 
   if (op == BinaryScalarOp::ADD && dtype == DType::kFloat16)
     return binaryScalarImpl<half, BinaryScalarOp::ADD>(tensor, __float2half(rhs), C);
-  if (op == BinaryScalarOp::SUB && dtype == DType::kFloat16)
-    return binaryScalarImpl<half, BinaryScalarOp::SUB>(tensor, __float2half(rhs), C);
   if (op == BinaryScalarOp::MUL && dtype == DType::kFloat16)
     return binaryScalarImpl<half, BinaryScalarOp::MUL>(tensor, __float2half(rhs), C);
   if (op == BinaryScalarOp::DIV && dtype == DType::kFloat16)
     return binaryScalarImpl<half, BinaryScalarOp::DIV>(tensor, __float2half(rhs), C);
   if (op == BinaryScalarOp::ADD && dtype == DType::kFloat)
     return binaryScalarImpl<float, BinaryScalarOp::ADD>(tensor, rhs, C);
-  if (op == BinaryScalarOp::SUB && dtype == DType::kFloat)
-    return binaryScalarImpl<float, BinaryScalarOp::SUB>(tensor, rhs, C);
   if (op == BinaryScalarOp::MUL && dtype == DType::kFloat)
     return binaryScalarImpl<float, BinaryScalarOp::MUL>(tensor, rhs, C);
   if (op == BinaryScalarOp::DIV && dtype == DType::kFloat)

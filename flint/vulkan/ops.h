@@ -48,7 +48,6 @@ enum class UnaryOp {
   kQuickGelu = 13,
   kMulScalar = 14,
   kDivScalar = 15,
-  kAddScalar = 16,
   kLog = 17,
   kRound = 18,
 };

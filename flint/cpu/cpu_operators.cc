@@ -112,10 +112,6 @@ void CPUOperators::sub(TensorView input, TensorView other, TensorView out) {
   cpu::binaryOp(input, other, BinaryOp::SUB, out);
 }
 
-void CPUOperators::subFloat(TensorView input, float other, TensorView out) {
-  op::cpu::transform(input, 1.0f, -other, out);
-}
-
 void CPUOperators::softmax(TensorView input, TensorView out) {
   cpu::softmax(input, out);
 }

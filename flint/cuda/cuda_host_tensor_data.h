@@ -52,12 +52,6 @@ class CudaHostTensorData : public TensorData {
   void *_data;
 };
 
-/// @brief Create an uninitialized tensor in page-locked host memory.
-/// @param shape the shape of the tensor.
-/// @param dtype the element type.
-/// @return the tensor created.
-Tensor createCudaHostTensor(lut::Span<const int> shape, DType dtype);
-
 }  // namespace cuda
 }  // namespace op
 }  // namespace fl

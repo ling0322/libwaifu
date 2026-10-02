@@ -40,7 +40,6 @@ void divTensor(const TensorView &a, const TensorView &b, const TensorView &out);
 void eq(const TensorView &a, const TensorView &b, const TensorView &out);
 void mulScalar(const TensorView &a, float other, const TensorView &out);
 void divScalar(const TensorView &a, float other, const TensorView &out);
-void subScalar(const TensorView &a, float other, const TensorView &out);
 void neg(const TensorView &a, const TensorView &out);
 void abs(const TensorView &a, const TensorView &out);
 void exp(const TensorView &a, const TensorView &out);

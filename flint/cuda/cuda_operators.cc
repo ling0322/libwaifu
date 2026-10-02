@@ -195,10 +195,6 @@ void CudaOperators::quickGelu(TensorView input, TensorView out) {
   op::cuda::applyUnaryOp(op::cuda::UnaryOp::QUICK_GELU, input, out);
 }
 
-void CudaOperators::subFloat(TensorView input, float other, TensorView out) {
-  op::cuda::applyBinaryScalarOp(BinaryScalarOp::SUB, input, other, out);
-}
-
 bool CudaOperators::allClose(TensorView A, TensorView B, float rtol, float atol) {
   // The comparison itself is a host-side reduction over both tensors, so bring them over and let
   // the CPU backend do it rather than growing a kernel that would only be used by tests. The cast

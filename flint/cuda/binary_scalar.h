@@ -26,7 +26,7 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-enum class BinaryScalarOp { ADD, MUL, SUB, DIV, MOD };
+enum class BinaryScalarOp { ADD, MUL, DIV, MOD };
 
 void applyBinaryScalarOp(
     BinaryScalarOp op,

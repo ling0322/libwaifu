@@ -30,7 +30,6 @@
 #include "flint/cuda/common.h"
 #include "flint/cuda/copy_stream.h"
 #include "flint/cuda/cuda_tensor_data.h"
-#include "flint/cuda/future_tensor.h"
 #include "flint/cuda/staged_upload.h"
 #include "flint/functional.h"
 #include "flint/tensor.h"
@@ -130,14 +129,6 @@ void transfer(const TensorView &src, const TensorView &dest) {
   }
 }
 
-Tensor toCpu(const Tensor &tensor) {
-  if (tensor.getDevice().getType() == Device::kCpu) return tensor;
-
-  Tensor dest = F::empty(Device::getCpu(), tensor.getShape(), tensor.getDType());
-  transfer(tensor, dest);
-  return dest;
-}
-
 PendingTransfer startTransferAsync(Device device, const TensorView &tensor) {
   // One direction only, and a narrow one: page-locked host memory to the GPU. The others are
   // refused rather than quietly done synchronously, because a copy that says it is asynchronous
@@ -191,8 +182,9 @@ PendingTransfer startTransferAsync(Device device, const TensorView &tensor) {
 }
 
 void completeTransfer(TensorData *dest, cudaEvent_t event, bool sync) {
-  // As FutureTensor::take() and takeSync(): the compute stream waits rather than the host, unless
-  // the host is about to read the bytes itself.
+  // The compute stream waits rather than the host, unless the host is about to read the bytes
+  // itself: the dependency is what the reader needs, and making the host stand here as well would
+  // give up exactly the overlap the copy was issued early for.
   if (sync) {
     LL_CHECK_CUDA_STATUS(cudaEventSynchronize(event));
   } else {
@@ -200,16 +192,6 @@ void completeTransfer(TensorData *dest, cudaEvent_t event, bool sync) {
   }
   static_cast<CudaTensorData *>(dest)->setOwningStream(0);
   LL_CHECK_CUDA_STATUS(cudaEventDestroy(event));
-}
-
-FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
-  PendingTransfer pending = startTransferAsync(device, tensor);
-
-  // From here the copy belongs to the future, which holds the event that marks its end and the
-  // source it reads, and hands the tensor out only once it has been seen through.
-  auto shape = std::make_shared<TensorShape>(tensor.getShape());
-  std::shared_ptr<TensorData> destData = std::move(pending.dest);
-  return FutureTensor(Tensor::create(shape, destData), pending.event, tensor.getInternalData());
 }
 
 }  // namespace cuda

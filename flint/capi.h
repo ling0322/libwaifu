@@ -161,11 +161,6 @@ FLAPI int32_t fl_tensor_data_borrow(
 /// no effect.
 FLAPI void fl_tensor_data_destroy(fl_tensor_data_t data);
 
-/// How many elements the storage holds.
-FLAPI int32_t fl_tensor_data_get_numel(fl_tensor_data_t data, int64_t *out);
-FLAPI int32_t fl_tensor_data_get_dtype(fl_tensor_data_t data, fl_dtype_t *out);
-FLAPI int32_t fl_tensor_data_get_device(fl_tensor_data_t data, fl_device_type_t *out);
-
 /// The address of the first element of storage on the host -- the CPU's memory or page-locked
 /// memory -- for the caller to read or fill. Storage on a device has no address the caller may
 /// touch and is refused. Storage made by fl_tensor_data_borrow() is handed back as it was given,
@@ -192,18 +187,6 @@ FLAPI int32_t fl_tensor_view_create(
 
 /// Release a view. The storage it was made from is not touched. Passing NULL has no effect.
 FLAPI void fl_tensor_view_destroy(fl_tensor_view_t view);
-
-FLAPI int32_t fl_tensor_view_get_dim(fl_tensor_view_t view, int32_t *out);
-
-/// Size and stride of dimension `dim`, which may be negative to count from the back.
-FLAPI int32_t fl_tensor_view_get_shape(fl_tensor_view_t view, int32_t dim, int32_t *out);
-FLAPI int32_t fl_tensor_view_get_stride(fl_tensor_view_t view, int32_t dim, int32_t *out);
-
-/// Where the view's first element is in its storage, in elements.
-FLAPI int32_t fl_tensor_view_get_offset(fl_tensor_view_t view, int64_t *out);
-FLAPI int32_t fl_tensor_view_get_dtype(fl_tensor_view_t view, fl_dtype_t *out);
-FLAPI int32_t fl_tensor_view_get_device(fl_tensor_view_t view, fl_device_type_t *out);
-FLAPI int32_t fl_tensor_view_is_contiguous(fl_tensor_view_t view, int32_t *out);
 
 // --- Operations -------------------------------------------------------------------------------
 //

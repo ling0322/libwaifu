@@ -4,14 +4,17 @@ A weight held in E4M3 with one scale per output channel, multiplied by an activa
 full width.
 
 ```cpp
-Fp8Operand w = op::cuda::quantizeFp8(weightFp16);   // once, at load
-Tensor y = op::cuda::gemmFp8(xFp16, w);             // per layer: half in, half out
+op::cuda::quantizeFp8(weightFp16, codes, channelScale);   // once, at load
+op::cuda::gemmFp8(xFp16, codes, channelScale, y);         // per layer: half in, half out
 ```
+
+Both write into views the caller allocated -- `codes` `<fp8e4m3>(rows, k)`, `channelScale`
+`<float>(rows)`, `y` `<half>(..., rows)` -- as every operator does.
 
 Needs `WITH_CUDA=ON` and an sm_80 or newer device, which is everything from Ampere on. `isFp8GemmAvailable()` reports it.
 
-**The card is the only device that has it.** Nothing about the format is the card's -- `Fp8Operand`
-and the bytes it holds are device agnostic, and a package that stores a weight quantized says
+**The card is the only device that has it.** Nothing about the format is the card's -- the codes
+and the scales beside them are device agnostic, and a package that stores a weight quantized says
 nothing about where it will be multiplied -- but the kernels that read those bytes are CUDA's, so
 `fl_fp8_available` answers no everywhere else and the C interface refuses an operand that is not on
 a card. A processor path existed and was taken back out; see "What a processor would need" at the
@@ -36,21 +39,20 @@ let y = F::fp8_matmul(&x, w.data(), w.channel_scale())?;    // float16 in, float
 
 Two arguments rather than one pair, because a weight a package stored quantized never becomes a
 pair: it arrives as two ordinary tensors under two ordinary names. See "In a package" below. The
-C interface has always been this shape -- `fl_fp8_matmul` takes two handles and puts them together
-on the other side.
+C interface has always been this shape -- `fl_fp8_matmul` takes the two as two views.
 
 `Fp8Tensor::is_available(device)` answers whether that device can run it, which today is CUDA and
 nothing else. `k` has to be a multiple of 16 and the weight's row count a multiple of 8, which the
 C interface checks rather than leaving to the kernel.
 
-The C interface is `fl_fp8_available`, `fl_fp8_quantize`, `fl_fp8_dequantize` and `fl_fp8_matmul`.
-All four dispatch on the device the tensors are already on -- one entry point per operation rather
+The C interface is `fl_fp8_available`, `fl_fp8_quantize`, `fl_fp8_dequantize`, `fl_fp8_matmul`
+and `fl_fp8_matmul_tensor_scale`. All of them dispatch on the device the tensors are already on -- one entry point per operation rather
 than one per backend, which is the shape to keep whether there is one backend or two.
 
 The kernels assert their preconditions with `CHECK`, which reports a broken invariant as
 `FL_ERROR_ABORTED`. The C interface checks device, type, contiguity and shape itself first even
-so, and `makeFp8Operand` checks what a caller hands back: those are the caller's mistakes rather
-than the library's, so they come back as `FL_ERROR_INVALID_ARG` naming what was wrong, instead of
+so -- of the weight and its scales as much as of the activation and the result: those are the
+caller's mistakes rather than the library's, so they come back as `FL_ERROR_INVALID_ARG` naming what was wrong, instead of
 as an internal failure with a stack trace behind it.
 
 ## In a package

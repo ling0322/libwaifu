@@ -7,7 +7,6 @@ set(lutil_SOURCES
     "is_debug.cc"
     "path.cc"
     "random.cc"
-    "reader.cc"
     "strings.cc"
     "time.cc")
 

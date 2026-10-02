@@ -19,11 +19,15 @@
 
 #pragma once
 
-#include "flint/fp8.h"
 #include "flint/tensor.h"
 #include "flint/tensor_view.h"
 
 namespace fl {
+
+/// E4M3's largest finite magnitude. A row scaled by rowAmax / 448 has its largest element land
+/// exactly on it, so the format's whole range is used and nothing saturates.
+constexpr float kFp8E4M3Max = 448.0f;
+
 namespace op {
 namespace cuda {
 
@@ -32,19 +36,20 @@ namespace cuda {
 /// The scale is `rowAmax / 448` -- E4M3's largest finite magnitude -- so the largest element of
 /// each row lands exactly on the top of the format's range. A row that is all zero gets a zero
 /// scale and quantizes to zeros rather than to NaN.
+///
+/// One scale per row rather than one per tensor, because a projection's output channels do not
+/// share a magnitude -- a single outlier channel would otherwise push every other channel down
+/// into E4M3's subnormals. It is also the coarsest scaling a multiply can undo for free: a scale
+/// that is constant down a column of the result is one pass over the result.
 /// @param x <half>(rows, k), contiguous, k a multiple of 16.
-Fp8Operand quantizeFp8(const Tensor &x);
-
-/// @brief quantizeFp8 writing the codes into `data` <fp8e4m3>(rows, k) and the scales into
-///        `channelScale` <float>(rows), both contiguous and on the device.
+/// @param data <fp8e4m3>(rows, k), contiguous: the codes. Row `r` of `x` is
+///             `data[r] * channelScale[r]`.
+/// @param channelScale <float>(rows), contiguous.
 void quantizeFp8(TensorView x, TensorView data, TensorView channelScale);
 
 /// @brief Inverse of quantizeFp8, which is what a caller wants to see the quantization error on
 ///        its own.
-/// @return <half>(rows, k).
-Tensor dequantFp8ToHalf(const Fp8Operand &operand);
-
-/// @brief dequantFp8ToHalf writing into `out` <half>(rows, k), contiguous.
+/// @param out <half>(rows, k), contiguous.
 void dequantFp8ToHalf(TensorView data, TensorView channelScale, TensorView out);
 
 }  // namespace cuda
