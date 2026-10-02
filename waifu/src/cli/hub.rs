@@ -149,8 +149,9 @@ impl Watching<'_> {
     }
 }
 
-/// What a name resolves to, once fetched: something that draws pictures, or something that reads
-/// sentences. The two are never offered in the same list -- [`listed`] is pictures and
+/// What a name resolves to, once fetched: something that draws pictures, something that reads
+/// sentences, or something that turns one voice into another. The first two are never offered in
+/// the same list -- [`listed`] is pictures and
 /// [`listed_voices`] is voices, and which one the terminal shows is the task's -- but they are
 /// fetched, cached and named through the one table and the one set of functions, since none of
 /// that differs by kind.
@@ -158,6 +159,9 @@ impl Watching<'_> {
 enum Kind {
     Picture,
     Voice,
+    /// Voice conversion. It has no page and no task: it is fetched by name for the library and
+    /// the `convert` example, and neither [`listed`] nor [`listed_voices`] offers it.
+    Conversion,
 }
 
 /// A model that has a name, and where it is published.
@@ -290,6 +294,16 @@ const CATALOG: &[Published] = &[
         explicit: false,
         kind: Kind::Voice,
     },
+    // Seed-VC v2, which is GPL-3.0 where the rest is not -- see docs/seed_vc.md. Named the way a
+    // voice is, `<family>:<version>`, since there is only the one.
+    Published {
+        name: "seed-vc:v2",
+        full_name: "Seed-VC v2",
+        repo: "ling0322/libwaifu-seed-vc",
+        manifest: "seed_vc.yaml",
+        explicit: false,
+        kind: Kind::Conversion,
+    },
 ];
 
 /// Where a package is fetched from.
@@ -419,6 +433,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("qwen-image:2.1", "qwen-image:2.1:v1.0"),
     ("qwen-image:2.1-fp8", "qwen-image:2.1-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
+    ("seed-vc", "seed-vc:v2"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1578,6 +1593,8 @@ mod tests {
         assert!(names.contains(&"anima:turbo:v1.1"));
         assert!(names.contains(&"anima:miaomiao"));
         assert!(names.contains(&"anima:miaomiao:v1.6"));
+        assert!(names.contains(&"seed-vc"));
+        assert!(names.contains(&"seed-vc:v2"));
 
         // The spellings these replaced are answered but not offered: one name each.
         assert!(!names.contains(&"sdxl:base:v1"));
@@ -1608,6 +1625,15 @@ mod tests {
 
         // And the two names for one set of weights say the same thing about them.
         assert_eq!(said("krea2:turbo"), said("krea2:turbo-fp8"));
+    }
+
+    #[test]
+    fn a_conversion_model_is_fetched_by_name_and_offered_nowhere() {
+        // Seed-VC takes two recordings rather than a sentence, and no page asks for it.
+        assert_eq!(full_name("seed-vc"), Some("Seed-VC v2"));
+        assert!(!is_voice("seed-vc"));
+        assert!(!listed().iter().any(|model| model.name == "seed-vc"));
+        assert!(!listed_voices().iter().any(|voice| voice.name == "seed-vc"));
     }
 
     #[test]
@@ -1678,13 +1704,13 @@ mod tests {
         // all: a name is what someone types before they have the model, so it should say what
         // they are about to fetch. Add to this list when the runtime learns another -- of a
         // picture model or, as `indextts` did, of a voice.
-        const FAMILIES: [&str; 5] = ["sdxl", "anima", "krea2", "qwen-image", "indextts"];
+        const FAMILIES: [&str; 6] = ["sdxl", "anima", "krea2", "qwen-image", "indextts", "seed-vc"];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
             let expected = match model.kind {
                 Kind::Picture => 3,
-                Kind::Voice => 2,
+                Kind::Voice | Kind::Conversion => 2,
             };
             assert_eq!(
                 fields.len(),
