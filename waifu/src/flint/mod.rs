@@ -117,7 +117,6 @@ pub enum DType {
     UInt8 = 3,
     Float16 = 4,
     Int8 = 6,
-    Fp4E2M0x2 = 7,
     Bool = 8,
     Int32 = 9,
     Fp8E4M3 = 10,
@@ -135,15 +134,12 @@ impl DType {
     }
 
     /// The number of bytes `numel` elements of this type occupy once packed together.
-    ///
-    /// Not always `numel` times a fixed width: [`DType::Fp4E2M0x2`] counts a packed pair of
-    /// quantized values as one element, so a pair takes one byte.
     pub fn total_size(self, numel: i64) -> i64 {
         match self {
             DType::Float | DType::Int32 => 4 * numel,
             DType::Float16 => 2 * numel,
             DType::Long => 8 * numel,
-            DType::UInt8 | DType::Int8 | DType::Bool | DType::Fp4E2M0x2 | DType::Fp8E4M3 => numel,
+            DType::UInt8 | DType::Int8 | DType::Bool | DType::Fp8E4M3 => numel,
         }
     }
 
@@ -154,7 +150,6 @@ impl DType {
             3 => Ok(DType::UInt8),
             4 => Ok(DType::Float16),
             6 => Ok(DType::Int8),
-            7 => Ok(DType::Fp4E2M0x2),
             8 => Ok(DType::Bool),
             9 => Ok(DType::Int32),
             10 => Ok(DType::Fp8E4M3),

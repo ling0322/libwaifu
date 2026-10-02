@@ -98,17 +98,19 @@ if(WITH_CUDA)
         if(CUDA_ARCH_NATIVE)
             set(CMAKE_CUDA_ARCHITECTURES native)
         else()
-            # Volta through Ada. Kernels needing newer hardware are guarded by __CUDA_ARCH__.
-            set(CMAKE_CUDA_ARCHITECTURES 70-real 75-real 80-real 86-real 89-real)
+            # One cubin per major version: every kernel is sm_80 class (mma.sync, cp.async), and a
+            # cubin runs on any later minor of its major, so 80 covers 8.6 and 8.9 too. Nothing
+            # older than 8.0: CUTLASS's Sm80 MMA compiles to an empty assert there, and a 7.x card
+            # is better told "no kernel image" than handed a GEMM that returns garbage.
+            set(CMAKE_CUDA_ARCHITECTURES 80-real)
             # PTX for the newest non arch-conditional target, so future GPUs can JIT.
-            set(_libwaifu_ptx_arch 89-virtual)
+            set(_libwaifu_ptx_arch 80-virtual)
             if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 11.8)
                 list(APPEND CMAKE_CUDA_ARCHITECTURES 90-real)
                 set(_libwaifu_ptx_arch 90-virtual)
             endif()
             if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-                # 120a (not 120): the mxfp4 kernels use sm_120a-only PTX.
-                list(APPEND CMAKE_CUDA_ARCHITECTURES 100-real 120a-real)
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 100-real 120-real)
                 set(_libwaifu_ptx_arch 100-virtual)
             endif()
             list(APPEND CMAKE_CUDA_ARCHITECTURES ${_libwaifu_ptx_arch})

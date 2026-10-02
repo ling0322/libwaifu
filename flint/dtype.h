@@ -52,12 +52,6 @@ struct UInt8 {
 };
 static_assert(sizeof(Int8) == 1, "invalid size of UInt8");
 
-struct Fp4E2M0x2 {
-  uint8_t v0 : 4;
-  uint8_t v1 : 4;
-};
-static_assert(sizeof(Fp4E2M0x2) == 1, "invalid size of Fp4E2M0x2");
-
 /// One E4M3 code: a sign bit, four exponent bits and three mantissa bits, the largest finite
 /// magnitude being 448. The type carries no scale of its own -- whatever holds a tensor of these
 /// holds the scale beside it.
@@ -79,7 +73,6 @@ class DType {
   static constexpr int16_t kUInt8 = 3;
   static constexpr int16_t kFloat16 = 4;
   static constexpr int16_t kInt8 = 6;
-  static constexpr int16_t kFp4E2M0x2 = 7;
   static constexpr int16_t kBool = 8;
   static constexpr int16_t kInt32 = 9;
   static constexpr int16_t kFp8E4M3 = 10;
