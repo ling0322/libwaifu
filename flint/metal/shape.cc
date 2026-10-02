@@ -17,11 +17,11 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include <iostream>
 #include <vector>
 
 #include "lutil/error.h"
 #include "lutil/log.h"
+#include "flint/functional.h"
 #include "flint/metal/common.h"
 #include "flint/metal/ops.h"
 #include "flint/metal/to_device.h"
@@ -33,34 +33,26 @@ namespace metal {
 
 namespace {
 
-mlx::core::Shape toMlxShape(lut::Span<const int> shape) {
-  mlx::core::Shape result;
-  for (int dim : shape) {
-    result.push_back(dim);
-  }
-  return result;
-}
-
 /// The gated linear units differ only in which activation gates the other half, so they share
 /// everything but that one call.
 template<typename Activation>
-Tensor gatedLinearUnit(const Tensor &input, Activation activation) {
+void gatedLinearUnit(const TensorView &input, Activation activation, const TensorView &out) {
   mlx::core::array x = toMlxArray(input);
   CHECK(x.shape(-1) % 2 == 0) << "a gated linear unit needs an even last dimension";
 
   std::vector<mlx::core::array> halves = mlx::core::split(x, 2, -1);
-  return fromMlxArray(mlx::core::multiply(activation(halves[0]), halves[1]));
+  writeInto(mlx::core::multiply(activation(halves[0]), halves[1]), out);
 }
 
 }  // namespace
 
-Tensor lookup(const Tensor &table, const Tensor &indices) {
+void lookup(const TensorView &table, const TensorView &indices, const TensorView &out) {
   // take() along the vocabulary axis is the embedding lookup: the index tensor's shape becomes
   // the leading dimensions and the embedding width comes along on the end.
-  return fromMlxArray(mlx::core::take(toMlxArray(table), toMlxArray(indices), /*axis=*/0));
+  writeInto(mlx::core::take(toMlxArray(table), toMlxArray(indices), /*axis=*/0), out);
 }
 
-Tensor upsampleNearest2d(const Tensor &input, int scale) {
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &out) {
   CHECK(input.getDim() == 4) << "upsampleNearest2d expects (N, C, H, W)";
   int n = input.getShape(0);
   int c = input.getShape(1);
@@ -72,110 +64,67 @@ Tensor upsampleNearest2d(const Tensor &input, int scale) {
   mlx::core::array x = mlx::core::reshape(toMlxArray(input), {n, c, h, 1, w, 1});
   x = mlx::core::broadcast_to(x, {n, c, h, scale, w, scale});
 
-  return fromMlxArray(mlx::core::reshape(x, {n, c, h * scale, w * scale}));
+  writeInto(mlx::core::reshape(x, {n, c, h * scale, w * scale}), out);
 }
 
-Tensor geglu(const Tensor &input) {
-  return gatedLinearUnit(input, [](const mlx::core::array &a) {
-    mlx::core::array half = mlx::core::array(0.5f, a.dtype());
-    mlx::core::array one = mlx::core::array(1.0f, a.dtype());
-    mlx::core::array invSqrt2 = mlx::core::array(0.7071067811865475f, a.dtype());
-    return mlx::core::multiply(
-        mlx::core::multiply(half, a),
-        mlx::core::add(one, mlx::core::erf(mlx::core::multiply(a, invSqrt2))));
-  });
+void geglu(const TensorView &input, const TensorView &out) {
+  gatedLinearUnit(
+      input,
+      [](const mlx::core::array &a) {
+        mlx::core::array half = mlx::core::array(0.5f, a.dtype());
+        mlx::core::array one = mlx::core::array(1.0f, a.dtype());
+        mlx::core::array invSqrt2 = mlx::core::array(0.7071067811865475f, a.dtype());
+        return mlx::core::multiply(
+            mlx::core::multiply(half, a),
+            mlx::core::add(one, mlx::core::erf(mlx::core::multiply(a, invSqrt2))));
+      },
+      out);
 }
 
-Tensor swiglu(const Tensor &input) {
-  return gatedLinearUnit(input, [](const mlx::core::array &a) {
-    return mlx::core::multiply(a, mlx::core::sigmoid(a));
-  });
+void swiglu(const TensorView &input, const TensorView &out) {
+  gatedLinearUnit(
+      input,
+      [](const mlx::core::array &a) { return mlx::core::multiply(a, mlx::core::sigmoid(a)); },
+      out);
 }
 
-Tensor cast(const Tensor &input, DType dtype) {
-  return fromMlxArray(mlx::core::astype(toMlxArray(input), toMlxDtype(dtype)));
+void cast(const TensorView &input, const TensorView &out) {
+  // The target type is `out`'s: functional decides it, and never asks for a cast to the type the
+  // input already has.
+  writeInto(mlx::core::astype(toMlxArray(input), toMlxDtype(out.getDType())), out);
 }
 
-Tensor createTensor(lut::Span<const int> shape, DType dtype) {
-  // MLX has no uninitialized allocation in its public API, and zeros costs one pass over memory
-  // that a caller about to overwrite the tensor does not need. It is still the safe default.
-  return zeros(shape, dtype);
-}
-
-Tensor zeros(lut::Span<const int> shape, DType dtype) {
-  return fromMlxArray(mlx::core::zeros(toMlxShape(shape), toMlxDtype(dtype)));
-}
-
-void fill(Tensor input, float value) {
+void fill(const TensorView &input, float value) {
   // flint's fill mutates in place, while MLX only builds new arrays, so the value is written
-  // through the raw pointer that unified memory already gives us.
-  mlx::core::array filled = mlx::core::full(
-      toMlxShape(input),
-      mlx::core::array(value, toMlxDtype(input.getDType())),
-      toMlxDtype(input.getDType()));
-  mlx::core::eval(filled);
-
-  copy(fromMlxArray(filled), input);
+  // through the raw pointer that unified memory already gives us -- into whatever view `input`
+  // is, a slice included.
+  mlx::core::Dtype dtype = toMlxDtype(input.getDType());
+  writeInto(mlx::core::full(toMlxShape(input), mlx::core::array(value, dtype), dtype), input);
 }
 
-void copy(const Tensor &src, Tensor dest) {
+void copy(const TensorView &src, const TensorView &dest) {
   CHECK(src.getDType() == dest.getDType()) << "copy: dtype mismatch";
+  CHECK(src.getNumEl() == dest.getNumEl()) << "copy: the two sides differ in size";
 
-  // contiguous() resolves whatever view the source is, so a transposed or sliced tensor lands in
-  // the destination in the destination's own layout rather than carrying its strides along.
-  mlx::core::array resolved =
-      mlx::core::contiguous(mlx::core::reshape(toMlxArray(src), toMlxShape(dest)));
-  mlx::core::eval(resolved);
-
-  DType dtype = dest.getDType();
-  int64_t elemSize = dtype.getTotalSize(1);
-  std::byte *base =
-      dest.getInternalData()->getRawData() + dtype.getTotalSize(dest.getInternalOffset());
-  const std::byte *from = resolved.data<std::byte>();
-
-  if (dest.isContiguous()) {
-    memcpy(base, from, static_cast<size_t>(dtype.getTotalSize(dest.getNumEl())));
-    return;
-  }
-
-  // A strided destination is what `Operators::cat` asks for: it allocates the joined tensor and
-  // copies each half into a slice of it. MLX arrays are values and cannot be written through, so
-  // the scatter goes through the pointer that unified memory already exposes. Everything is
-  // evaluated by the time we get here, so no GPU work is in flight over this buffer.
-  int ndim = dest.getDim();
-  std::vector<int> shape(ndim);
-  std::vector<int64_t> stride(ndim);
-  for (int d = 0; d < ndim; ++d) {
-    shape[d] = dest.getShape(d);
-    stride[d] = dest.getStride(d);
-  }
-
-  // Whole rows move at once whenever the last dimension is dense, which is the case for a slice
-  // taken along any earlier axis -- so concatenating feature maps stays memcpy-shaped.
-  int64_t rowLen = (ndim > 0 && stride[ndim - 1] == 1) ? shape[ndim - 1] : 1;
-  int64_t rows = dest.getNumEl() / rowLen;
-
-  std::vector<int> index(ndim, 0);
-  for (int64_t row = 0; row < rows; ++row) {
-    int64_t offset = 0;
-    for (int d = 0; d < ndim; ++d) {
-      offset += static_cast<int64_t>(index[d]) * stride[d];
-    }
-    memcpy(
-        base + offset * elemSize,
-        from + row * rowLen * elemSize,
-        static_cast<size_t>(rowLen * elemSize));
-
-    // Step the odometer over every axis the row does not already cover.
-    for (int d = (rowLen > 1 ? ndim - 2 : ndim - 1); d >= 0; --d) {
-      if (++index[d] < shape[d]) break;
-      index[d] = 0;
-    }
-  }
+  // writeInto resolves whatever view the source is, so a transposed or sliced tensor lands in the
+  // destination in the destination's own layout rather than carrying its strides along.
+  writeInto(toMlxArray(src), dest);
 }
 
-void print(const Tensor &tensor) {
-  getOperators(Device::kCpu)->print(toCpu(tensor));
+void print(const TensorView &tensor) {
+  // Packed on the card first if it is a strided view, since a transfer is one run of bytes, then
+  // printed by the CPU operators, which know how.
+  Tensor packed;
+  TensorView source = tensor;
+  if (!tensor.isContiguous()) {
+    packed = F::emptyLike(tensor);
+    copy(tensor, packed);
+    source = packed;
+  }
+
+  Tensor host = F::empty(Device::getCpu(), source.getShape(), source.getDType());
+  transfer(source, host);
+  getOperators(Device::kCpu)->print(host);
 }
 
 }  // namespace metal

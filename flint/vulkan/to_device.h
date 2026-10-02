@@ -21,18 +21,18 @@
 
 #include "flint/device.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace vulkan {
 
-/// Copy `tensor` to `device`, which must be the CPU or the Vulkan device, with the other end the
-/// Vulkan device. A tensor already on `device` is returned as it is; a non-contiguous one is made
-/// contiguous on whichever end can do that.
-Tensor toDevice(Device device, const Tensor &tensor);
+/// Copy contiguous `src` into contiguous `dest` of the same shape and dtype, one of them on the
+/// host (the CPU, or page-locked memory) and the other on the Vulkan device.
+void transfer(const TensorView &src, const TensorView &dest);
 
-Tensor toCpu(const Tensor &tensor);
-Tensor toVulkan(const Tensor &tensor);
+/// A contiguous copy, in CPU memory, of `tensor` on the Vulkan device.
+Tensor toCpu(const TensorView &tensor);
 
 }  // namespace vulkan
 }  // namespace op

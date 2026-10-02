@@ -20,18 +20,20 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor castFloatToHalf(const Tensor &tensor);
-Tensor castHalfToFloat(const Tensor &tensor);
-/// Float or half to int64, truncated toward zero as torch's .long() is. NaN and values outside
-/// int64's range are undefined, as they are there.
-Tensor castToLong(const Tensor &tensor);
+/// Convert contiguous `input` to the type of contiguous `out`, of the same shape: float <-> half,
+/// and float or half to int64, truncated toward zero as torch's .long() is (NaN and values outside
+/// int64's range are undefined, as they are there).
+void cast(const TensorView &input, const TensorView &out);
 
-Tensor cast(const Tensor &tensor, DType dtype);
+/// A new contiguous tensor holding contiguous `input` converted to `dtype`. For temporaries a
+/// kernel needs for itself.
+Tensor castTo(const TensorView &input, DType dtype);
 
 }  // namespace cuda
 }  // namespace op

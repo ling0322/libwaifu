@@ -27,7 +27,7 @@
 #include "lutil/strings.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/cpu_tensor_data.h"
-#include "flint/cpu/view.h"
+#include "flint/tensor_view.h"
 #include "flint/operators.h"
 
 namespace fl {
@@ -119,26 +119,28 @@ void Tensor::read(lut::Reader *fp) {
     throw lut::AbortedError("tensor data and shape mismatch.");
 }
 
+namespace {
+
+/// The tensor a view of `data` is, which shares the storage with whatever it was taken of.
+Tensor fromView(std::shared_ptr<TensorData> data, const TensorView &view) {
+  return Tensor::create(view.getInternalShape(), std::move(data), view.getInternalOffset());
+}
+
+}  // namespace
+
+// Every view is worked out by TensorView, which is where the rules for shapes and strides live;
+// a tensor only adds the reference that keeps the storage alive.
+
 Tensor Tensor::view(lut::Span<const int> shape) const {
-  return op::cpu::view(*this, shape);
+  return fromView(_data, TensorView(*this).view(shape));
 }
 
 Tensor Tensor::expand(lut::Span<const int> shape) const {
-  CHECK(!getDType().isQuantized());
-  Tensor x;
-  x._data = _data;
-  x._offset = _offset;
-  x._shape = _shape->expand(shape);
-
-  return x;
+  return fromView(_data, TensorView(*this).expand(shape));
 }
 
 std::vector<int> Tensor::getShape() const {
-  std::vector<int> shape;
-  for (int d = 0; d < getDim(); ++d) {
-    shape.push_back(getShape(d));
-  }
-  return shape;
+  return TensorView(*this).getShape();
 }
 
 std::string Tensor::getShapeString() const {
@@ -146,148 +148,35 @@ std::string Tensor::getShapeString() const {
 }
 
 bool Tensor::isContiguous() const {
-  int numel = 1;
-  for (int i = getDim() - 1; i >= 0; --i) {
-    if (numel != getStride(i) && getShape(i) != 1) return false;
-    numel *= getShape(i);
-  }
-
-  return true;
+  return TensorView(*this).isContiguous();
 }
 
 Tensor Tensor::slice(int dim, std::pair<int, int> range) const {
-  CHECK(!getDType().isQuantized());
-
-  dim = _shape->getRealDim(dim);
-  if (dim < 0 || dim >= this->getDim()) {
-    THROW(InvalidArg, lut::sprintf("slice: no dimension %d in a %d-D tensor", dim, getDim()));
-  }
-
-  int begin = range.first;
-  int end = range.second;
-
-  if (begin == None) begin = 0;
-  if (end == None) end = getShape(dim);
-
-  begin = _shape->getRealIndex(dim, begin);
-  end = _shape->getRealIndex(dim, end);
-  if (begin < 0 || begin >= end || end > getShape(dim)) {
-    THROW(
-        InvalidArg,
-        lut::sprintf(
-            "slice: [%d, %d) is not within a dimension of %d",
-            begin,
-            end,
-            getShape(dim)));
-  }
-
-  Tensor tensor;
-  tensor._data = _data;
-  tensor._shape = std::make_shared<TensorShape>(*_shape);
-  tensor._shape->setShape(dim, end - begin);
-  tensor._offset = _offset + _shape->getStride(dim) * begin;
-
-  return tensor;
+  return fromView(_data, TensorView(*this).slice(dim, range));
 }
 
 Tensor Tensor::slice(std::pair<int, int> range) const {
-  CHECK(!getDType().isQuantized());
-
-  int begin = range.first;
-  int end = range.second;
-  return slice(0, {begin, end});
+  return fromView(_data, TensorView(*this).slice(range));
 }
 
 Tensor Tensor::subtensor(int index) const {
-  CHECK(!getDType().isQuantized());
-
-  index = _shape->getRealIndex(0, index);
-  if (index < 0 || index >= getShape(0)) {
-    THROW(
-        InvalidArg,
-        lut::sprintf("subtensor: %d is not within a dimension of %d", index, getShape(0)));
-  }
-
-  Tensor tensor;
-  tensor._data = _data;
-  tensor._shape = _shape->subsize(1);
-  tensor._offset = _offset + _shape->getStride(0) * index;
-
-  return tensor;
+  return fromView(_data, TensorView(*this).subtensor(index));
 }
 
 Tensor Tensor::transpose(int dim0, int dim1) const {
-  Tensor tensor;
-  tensor._data = _data;
-  tensor._offset = _offset;
-  tensor._shape = _shape->transpose(dim0, dim1);
-
-  return tensor;
+  return fromView(_data, TensorView(*this).transpose(dim0, dim1));
 }
 
 Tensor Tensor::unsqueeze(int dim) const {
-  Tensor tensor;
-  tensor._data = _data;
-  tensor._offset = _offset;
-  tensor._shape = _shape->unsqueeze(dim);
-
-  return tensor;
+  return fromView(_data, TensorView(*this).unsqueeze(dim));
 }
 
 Tensor Tensor::squeeze(int dim) const {
-  Tensor tensor;
-  tensor._data = _data;
-  tensor._offset = _offset;
-  tensor._shape = _shape->squeeze(dim);
-
-  return tensor;
+  return fromView(_data, TensorView(*this).squeeze(dim));
 }
 
 void Tensor::throwIfInvalidShape(lut::Span<const int> shape, const std::string &name) const {
-  if (shape.size() != getDim()) {
-    throw lut::AbortedError(
-        lut::sprintf(
-            "%s: invalid shape. dim=%d expected, but %d got.",
-            name,
-            shape.size(),
-            getDim()));
-  }
-
-  int i = 0;
-  bool correct = true;
-  for (int s : shape) {
-    if (this->getShape(i) != s) {
-      correct = false;
-    }
-    ++i;
-  }
-
-  if (!correct) {
-    std::ostringstream actual;
-    actual << "(";
-    for (int i = 0; i < getDim(); ++i) {
-      if (i) actual << ", ";
-      actual << this->getShape(i);
-    }
-    actual << ")";
-
-    std::ostringstream expected;
-    bool first = true;
-    expected << "(";
-    for (int s : shape) {
-      if (!first) expected << ", ";
-      expected << s;
-      first = false;
-    }
-    expected << ")";
-
-    throw lut::AbortedError(
-        lut::sprintf(
-            "%s: invalid shape: %s expected, but %s found.",
-            name,
-            expected.str(),
-            actual.str()));
-  }
+  TensorView(*this).throwIfInvalidShape(shape, name);
 }
 
 int Tensor::getDim() const {

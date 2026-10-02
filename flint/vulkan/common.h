@@ -28,6 +28,7 @@
 #include "lutil/span.h"
 #include "flint/dtype.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 #include "flint/vulkan/context.h"
 
 namespace fl {
@@ -37,19 +38,25 @@ namespace vulkan {
 /// The most dimensions a strided kernel takes, after collapse() has merged what it can.
 constexpr int kMaxDims = 6;
 
-/// A contiguous, uninitialized tensor on the Vulkan device.
+/// A contiguous, uninitialized tensor on the Vulkan device, for a kernel's own temporaries.
 Tensor createTensor(lut::Span<const int> shape, DType dtype);
+
+/// A view of `base`'s storage, from its first element, laid out as `elems` say.
+TensorView restride(const TensorView &base, lut::Span<const TensorShape::Elem> elems);
+
+/// Throws unless `out` is contiguous, of `shape` and of `dtype`: what every kernel here writes.
+void checkOutput(const TensorView &out, lut::Span<const int> shape, DType dtype, const char *op);
 
 /// The device `tensor` lives on.
 /// @throw lut::AbortedError if it is not a Vulkan tensor.
-Context *getContext(const Tensor &tensor);
+Context *getContext(const TensorView &tensor);
 
 /// The device address of `tensor`'s first element, which is what a kernel is handed.
-uint64_t getAddress(const Tensor &tensor);
+uint64_t getAddress(const TensorView &tensor);
 
 /// The buffer holding `tensor`, and the byte offset of its first element in it.
-const Buffer &getBuffer(const Tensor &tensor);
-int64_t getByteOffset(const Tensor &tensor);
+const Buffer &getBuffer(const TensorView &tensor);
+int64_t getByteOffset(const TensorView &tensor);
 
 /// The suffix that names `dtype` in a kernel's name: f32, f16, i64, i32, u8, i8 or bool.
 /// @throw lut::NotImplementedError for a dtype no kernel is built for.
@@ -78,10 +85,11 @@ bool collapse(
     Layout *layout);
 
 /// The strides of `tensor`, as a vector.
-std::vector<int> getStrides(const Tensor &tensor);
+std::vector<int> getStrides(const TensorView &tensor);
 
-/// `tensor` as it is if it is contiguous, and otherwise a contiguous copy of it.
-Tensor makeContiguous(const Tensor &tensor);
+/// `tensor` as it is if it is contiguous, and otherwise a contiguous copy of it, which `keep`
+/// holds for as long as the view returned is used.
+TensorView makeContiguous(const TensorView &tensor, Tensor *keep);
 
 }  // namespace vulkan
 }  // namespace op

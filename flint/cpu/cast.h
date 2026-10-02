@@ -19,20 +19,21 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor cast(Tensor A, DType dtype);
-Tensor castFp32ToQ4(Tensor A);
-Tensor castQ4ToFp32(Tensor A);
-Tensor castFp16ToFp32(Tensor A);
-Tensor castFp32ToFp16(Tensor A);
+/// @brief Convert contiguous `A` into contiguous `C` of the same shape and the type it is cast to:
+///        half and float either way, and either of them to int64.
+void cast(const TensorView &A, const TensorView &C);
+
+void castFp16ToFp32(const TensorView &A, const TensorView &C);
+void castFp32ToFp16(const TensorView &A, const TensorView &C);
 /// Float to int64, truncated toward zero as torch's .long() is. NaN and values outside int64's
 /// range are undefined, as they are there.
-Tensor castFp32ToLong(Tensor A);
+void castFp32ToLong(const TensorView &A, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

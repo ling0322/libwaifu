@@ -20,14 +20,16 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
 /// Inclusive prefix sum along the last dimension of a contiguous float32 or float16 tensor, the
-/// result in the same dtype. Accumulated in float32 either way.
-Tensor cumsumLastDim(const Tensor &A);
+/// result written into contiguous `C` of the same shape and dtype. Accumulated in float32 either
+/// way.
+void cumsumLastDim(const TensorView &A, const TensorView &C);
 
 }  // namespace cuda
 }  // namespace op

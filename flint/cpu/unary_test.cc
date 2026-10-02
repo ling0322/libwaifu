@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -68,28 +69,28 @@ void checkAgainst(Tensor actual, float (*reference)(float), const char *name) {
 CATCH_TEST_CASE("test CPU unary operators", "[core][nn][operators]") {
   Tensor x = probeTensor();
 
-  checkAgainst(cpuOps()->neg(x), [](float v) { return -v; }, "neg");
-  checkAgainst(cpuOps()->abs(x), [](float v) { return std::fabs(v); }, "abs");
-  checkAgainst(cpuOps()->exp(x), [](float v) { return std::exp(v); }, "exp");
-  checkAgainst(cpuOps()->square(x), [](float v) { return v * v; }, "square");
-  checkAgainst(cpuOps()->tanh(x), [](float v) { return std::tanh(v); }, "tanh");
-  checkAgainst(cpuOps()->relu(x), [](float v) { return v > 0.0f ? v : 0.0f; }, "relu");
+  checkAgainst(F::neg(cpuOps(), x), [](float v) { return -v; }, "neg");
+  checkAgainst(F::abs(cpuOps(), x), [](float v) { return std::fabs(v); }, "abs");
+  checkAgainst(F::exp(cpuOps(), x), [](float v) { return std::exp(v); }, "exp");
+  checkAgainst(F::square(cpuOps(), x), [](float v) { return v * v; }, "square");
+  checkAgainst(F::tanh(cpuOps(), x), [](float v) { return std::tanh(v); }, "tanh");
+  checkAgainst(F::relu(cpuOps(), x), [](float v) { return v > 0.0f ? v : 0.0f; }, "relu");
   checkAgainst(
-      cpuOps()->sigmoid(x),
+      F::sigmoid(cpuOps(), x),
       [](float v) { return 1.0f / (1.0f + std::exp(-v)); },
       "sigmoid");
   checkAgainst(
-      cpuOps()->silu(x),
+      F::silu(cpuOps(), x),
       [](float v) { return v / (1.0f + std::exp(-v)); },
       "silu");
   checkAgainst(
-      cpuOps()->gelu(x),
+      F::gelu(cpuOps(), x),
       [](float v) { return v * 0.5f * (1.0f + std::erf(v * 0.70710678118654752f)); },
       "gelu");
-  checkAgainst(cpuOps()->sin(x), [](float v) { return std::sin(v); }, "sin");
-  checkAgainst(cpuOps()->cos(x), [](float v) { return std::cos(v); }, "cos");
+  checkAgainst(F::sin(cpuOps(), x), [](float v) { return std::sin(v); }, "sin");
+  checkAgainst(F::cos(cpuOps(), x), [](float v) { return std::cos(v); }, "cos");
   checkAgainst(
-      cpuOps()->quickGelu(x),
+      F::quickGelu(cpuOps(), x),
       [](float v) { return v / (1.0f + std::exp(-1.702f * v)); },
       "quickGelu");
 }
@@ -100,8 +101,8 @@ CATCH_TEST_CASE("test CPU unary operators (positive domain)", "[core][nn][operat
   std::vector<float> values = {0.25f, 1.0f, 2.0f, 9.0f, 1e-4f};
   Tensor x = Tensor::create<float>({static_cast<int>(values.size())}, values);
 
-  Tensor rootTensor = cpuOps()->sqrt(x);
-  Tensor invRootTensor = cpuOps()->rsqrt(x);
+  Tensor rootTensor = F::sqrt(cpuOps(), x);
+  Tensor invRootTensor = F::rsqrt(cpuOps(), x);
   const float *root = rootTensor.getInternalData()->getData<float>(rootTensor.getInternalOffset());
   const float *invRoot =
       invRootTensor.getInternalData()->getData<float>(invRootTensor.getInternalOffset());
@@ -112,7 +113,7 @@ CATCH_TEST_CASE("test CPU unary operators (positive domain)", "[core][nn][operat
     CATCH_REQUIRE(std::fabs(invRoot[i] - 1.0f / std::sqrt(values[i])) < 1e-3f);
   }
 
-  Tensor logTensor = cpuOps()->log(x);
+  Tensor logTensor = F::log(cpuOps(), x);
   const float *logged = logTensor.getInternalData()->getData<float>(logTensor.getInternalOffset());
   for (size_t i = 0; i < values.size(); ++i) {
     CATCH_INFO("log at x = " << values[i]);
@@ -121,35 +122,35 @@ CATCH_TEST_CASE("test CPU unary operators (positive domain)", "[core][nn][operat
 
   // The edges a spectrogram floors its energies to stay away from: log(0) is -inf, and a negative
   // number is NaN rather than anything that could pass for a value.
-  Tensor edges = cpuOps()->log(Tensor::create<float>({2}, {0.0f, -1.0f}));
+  Tensor edges = F::log(cpuOps(), Tensor::create<float>({2}, {0.0f, -1.0f}));
   const float *edge = edges.getInternalData()->getData<float>(edges.getInternalOffset());
   CATCH_REQUIRE(std::isinf(edge[0]));
   CATCH_REQUIRE(edge[0] < 0.0f);
   CATCH_REQUIRE(std::isnan(edge[1]));
 
   // sqrt(0) is 0 rather than NaN. Read the value directly: elem() has no CPU implementation.
-  Tensor zero = cpuOps()->sqrt(Tensor::create<float>({1}, {0.0f}));
+  Tensor zero = F::sqrt(cpuOps(), Tensor::create<float>({1}, {0.0f}));
   CATCH_REQUIRE(zero.getInternalData()->getData<float>(zero.getInternalOffset())[0] == 0.0f);
 }
 
 CATCH_TEST_CASE("test CPU unary operators (shapes)", "[core][nn][operators]") {
   // The kernel walks the tensor a row at a time, so a shape has to survive unchanged and every
   // element has to be visited, including in a strided view.
-  Tensor a = cpuOps()->rand({2, 3, 4}, DType::kFloat);
-  Tensor negated = cpuOps()->neg(a);
+  Tensor a = F::rand(Device::getCpu(), {2, 3, 4}, DType::kFloat);
+  Tensor negated = F::neg(cpuOps(), a);
   CATCH_REQUIRE(negated.getShape() == std::vector<int>{2, 3, 4});
   CATCH_REQUIRE(
-      cpuOps()->allClose(cpuOps()->add(a, negated), cpuOps()->zeros({2, 3, 4}, DType::kFloat)));
+      cpuOps()->allClose(F::add(cpuOps(), a, negated), F::zeros(Device::getCpu(), {2, 3, 4}, DType::kFloat)));
 
   Tensor strided = a.transpose(0, 2);
-  Tensor stridedNeg = cpuOps()->neg(strided);
+  Tensor stridedNeg = F::neg(cpuOps(), strided);
   CATCH_REQUIRE(stridedNeg.getShape() == std::vector<int>{4, 3, 2});
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->add(strided, stridedNeg),
-      cpuOps()->zeros({4, 3, 2}, DType::kFloat)));
+      F::add(cpuOps(), strided, stridedNeg),
+      F::zeros(Device::getCpu(), {4, 3, 2}, DType::kFloat)));
 
   // applying a function twice is not the same as applying it once, so a no-op kernel fails here.
-  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->neg(negated), a));
+  CATCH_REQUIRE(cpuOps()->allClose(F::neg(cpuOps(), negated), a));
 }
 
 CATCH_TEST_CASE("test CPU div and min", "[core][nn][operators]") {
@@ -157,27 +158,27 @@ CATCH_TEST_CASE("test CPU div and min", "[core][nn][operators]") {
   Tensor b = Tensor::create<float>({2, 3}, {2.0f, 4.0f, 4.0f, 8.0f, 10.0f, 3.0f});
 
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->divTensor(a, b),
+      F::divTensor(cpuOps(), a, b),
       Tensor::create<float>({2, 3}, {0.5f, 0.5f, 0.75f, 0.5f, 0.5f, 2.0f})));
 
   // the divisor is broadcast over the leading dimensions the way mul does it.
   Tensor row = Tensor::create<float>({3}, {1.0f, 2.0f, 4.0f});
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->divTensor(a, row),
+      F::divTensor(cpuOps(), a, row),
       Tensor::create<float>({2, 3}, {1.0f, 1.0f, 0.75f, 4.0f, 2.5f, 1.5f})));
 
   // min drops the last dimension the way max does, and must not report the initial +inf.
   Tensor c = Tensor::create<float>({2, 4}, {1.0f, 2.0f, 3.0f, 4.0f, -1.0f, -2.0f, -3.0f, -4.0f});
-  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->min(c), Tensor::create<float>({2}, {1.0f, -4.0f})));
-  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->max(c), Tensor::create<float>({2}, {4.0f, -1.0f})));
+  CATCH_REQUIRE(cpuOps()->allClose(F::min(cpuOps(), c), Tensor::create<float>({2}, {1.0f, -4.0f})));
+  CATCH_REQUIRE(cpuOps()->allClose(F::max(cpuOps(), c), Tensor::create<float>({2}, {4.0f, -1.0f})));
 
   // a single-element row is both the min and the max.
   Tensor one = Tensor::create<float>({2, 1}, {7.0f, -7.0f});
-  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->min(one), Tensor::create<float>({2}, {7.0f, -7.0f})));
+  CATCH_REQUIRE(cpuOps()->allClose(F::min(cpuOps(), one), Tensor::create<float>({2}, {7.0f, -7.0f})));
 }
 
 CATCH_TEST_CASE("test CPU arange", "[core][nn][operators]") {
-  Tensor x = cpuOps()->arangeLong(0, 10, 2);
+  Tensor x = F::arangeLong(Device::getCpu(), 0, 10, 2);
   CATCH_REQUIRE(x.getShape() == std::vector<int>{5});
   CATCH_REQUIRE(x.getDType() == DType::kLong);
 
@@ -189,8 +190,8 @@ CATCH_TEST_CASE("test CPU arange", "[core][nn][operators]") {
 
   // a step that does not divide the span evenly stops short rather than overshooting, and a
   // negative step counts down.
-  CATCH_REQUIRE(cpuOps()->arangeLong(0, 10, 3).getShape() == std::vector<int>{3});
-  Tensor down = cpuOps()->arangeLong(10, 0, -2);
+  CATCH_REQUIRE(F::arangeLong(Device::getCpu(), 0, 10, 3).getShape() == std::vector<int>{3});
+  Tensor down = F::arangeLong(Device::getCpu(), 10, 0, -2);
   CATCH_REQUIRE(down.getShape() == std::vector<int>{5});
   CATCH_REQUIRE(
       down.getInternalData()->getData<LongType>(down.getInternalOffset())[0] == 10);
@@ -199,13 +200,13 @@ CATCH_TEST_CASE("test CPU arange", "[core][nn][operators]") {
 CATCH_TEST_CASE("test CPU randn", "[core][nn][operators]") {
   // An odd element count is the case the pair-at-a-time Gaussian fill has to pad for.
   for (int count : {1, 2, 3, 4096}) {
-    Tensor x = cpuOps()->randNormal({count});
+    Tensor x = F::randNormal(Device::getCpu(), {count});
     CATCH_INFO("count = " << count);
     CATCH_REQUIRE(x.getShape() == std::vector<int>{count});
     CATCH_REQUIRE(x.getDType() == DType::kFloat);
   }
 
-  Tensor x = cpuOps()->randNormal({8192});
+  Tensor x = F::randNormal(Device::getCpu(), {8192});
   const float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
   double sum = 0.0;
   double sumSquare = 0.0;
@@ -228,15 +229,15 @@ CATCH_TEST_CASE("test CPU elem and scalar div", "[core][nn][operators]") {
 
   Tensor a = Tensor::create<float>({2, 2}, {1.0f, 2.0f, 4.0f, 8.0f});
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->div(a, 2.0f),
+      F::div(cpuOps(), a, 2.0f),
       Tensor::create<float>({2, 2}, {0.5f, 1.0f, 2.0f, 4.0f})));
   // dividing by one leaves the tensor alone.
-  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->div(a, 1.0f), a));
+  CATCH_REQUIRE(cpuOps()->allClose(F::div(cpuOps(), a, 1.0f), a));
 }
 
 CATCH_TEST_CASE("test CPU mod", "[core][nn][operators]") {
   Tensor ids = Tensor::create<LongType>({2, 4}, {0, 3, 4, 5, 7, 8, 99, 100});
-  Tensor x = cpuOps()->mod(ids, 4);
+  Tensor x = F::mod(cpuOps(), ids, 4);
 
   const LongType *data = x.getInternalData()->getData<LongType>(x.getInternalOffset());
   const LongType expected[] = {0, 3, 0, 1, 3, 0, 3, 0};
@@ -250,7 +251,7 @@ CATCH_TEST_CASE("test CPU eq and all", "[core][nn][operators]") {
   // Tensor::create is not instantiated for UInt8, so build these through the allocator and
   // write the bytes in.
   auto makeUInt8 = [](std::vector<uint8_t> values) {
-    Tensor x = cpuOps()->tensor({static_cast<int>(values.size())}, DType::kUInt8);
+    Tensor x = F::empty(Device::getCpu(), {static_cast<int>(values.size())}, DType::kUInt8);
     UInt8 *data = x.getInternalData()->getData<UInt8>(x.getInternalOffset());
     for (size_t i = 0; i < values.size(); ++i) data[i].v = values[i];
     return x;
@@ -260,11 +261,11 @@ CATCH_TEST_CASE("test CPU eq and all", "[core][nn][operators]") {
   Tensor same = makeUInt8({1, 2, 3, 4});
   Tensor different = makeUInt8({1, 2, 9, 4});
 
-  CATCH_REQUIRE(cpuOps()->all(cpuOps()->eq(a, same)));
-  CATCH_REQUIRE(!cpuOps()->all(cpuOps()->eq(a, different)));
+  CATCH_REQUIRE(cpuOps()->all(F::eq(cpuOps(), a, same)));
+  CATCH_REQUIRE(!cpuOps()->all(F::eq(cpuOps(), a, different)));
 
   // eq answers per element, so the one mismatch has to be the only false.
-  Tensor mask = cpuOps()->eq(a, different);
+  Tensor mask = F::eq(cpuOps(), a, different);
   CATCH_REQUIRE(mask.getDType() == DType::kBool);
   const BoolType *data = mask.getInternalData()->getData<BoolType>(mask.getInternalOffset());
   CATCH_REQUIRE(data[0]);
@@ -281,7 +282,7 @@ CATCH_TEST_CASE("test CPU round", "[core][nn][operators]") {
   std::vector<float> want = {-2.0f, -2.0f, 0.0f, 0.0f, 2.0f, 2.0f, 0.0f, 1.0f, -1.0f, 4.0f};
   Tensor x = Tensor::create<float>({static_cast<int>(in.size())}, in);
 
-  Tensor rounded = cpuOps()->round(x);
+  Tensor rounded = F::round(cpuOps(), x);
   CATCH_REQUIRE(rounded.getDType() == DType::kFloat);
   const float *got = rounded.getInternalData()->getData<float>(rounded.getInternalOffset());
   for (size_t i = 0; i < in.size(); ++i) {
@@ -298,8 +299,8 @@ CATCH_TEST_CASE("test CPU cast to int64", "[core][nn][operators]") {
   Tensor x = Tensor::create<float>({2, 3}, in);
 
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
-    Tensor source = cpuOps()->cast(x, dtype);
-    Tensor ids = cpuOps()->cast(source, DType::kLong);
+    Tensor source = F::cast(cpuOps(), x, dtype);
+    Tensor ids = F::cast(cpuOps(), source, DType::kLong);
     CATCH_REQUIRE(ids.getDType() == DType::kLong);
     CATCH_REQUIRE(ids.getShape() == std::vector<int>{2, 3});
 

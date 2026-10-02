@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "flint/functional.h"
 #include "flint/bench.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -71,7 +72,7 @@ double fastestMs(Fn &&fn) {
 }
 
 Tensor randHalf(std::initializer_list<int> shape) {
-  return getOperators(Device::kMetal)->rand(shape, DType::kFloat16);
+  return F::rand(Device(Device::kMetal), shape, DType::kFloat16);
 }
 
 /// Wait for the Metal GPU to finish all queued work, so the wall clock measures computation
@@ -110,7 +111,8 @@ void benchmarkConv2d(
   Tensor bias = randHalf({outChannel});
 
   double milliseconds = fastestMs([&] {
-    Tensor out = getOperators(Device::kMetal)->conv2d(input, weight, bias, stride, padding, 1, 1);
+    Tensor out =
+        F::conv2d(getOperators(Device::kMetal), input, weight, bias, stride, padding, 1, 1);
     sync();
   });
 
@@ -150,7 +152,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL GEMM") {
     Tensor weight = randHalf({shape.n, shape.k}).transpose(0, 1);
 
     double milliseconds = fastestMs([&] {
-      Tensor out = getOperators(Device::kMetal)->matmul(input, weight);
+      Tensor out = F::matmul(getOperators(Device::kMetal), input, weight);
       sync();
     });
     printMatmul(shape.what, milliseconds, shape.m, shape.n, shape.k);
@@ -182,14 +184,14 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     printBandwidth(
         std::string("group_norm   ") + level.what,
         fastestMs([&] {
-          Tensor out = getOperators(Device::kMetal)->groupNorm(x, scale, shift, 32, 1e-5f);
+          Tensor out = F::groupNorm(getOperators(Device::kMetal), x, scale, shift, 32, 1e-5f);
           sync();
         }),
         moved);
     printBandwidth(
         std::string("silu         ") + level.what,
         fastestMs([&] {
-          Tensor out = getOperators(Device::kMetal)->silu(x);
+          Tensor out = F::silu(getOperators(Device::kMetal), x);
           sync();
         }),
         moved);
@@ -198,7 +200,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     printBandwidth(
         std::string("add          ") + level.what,
         fastestMs([&] {
-          Tensor out = getOperators(Device::kMetal)->add(x, other);
+          Tensor out = F::add(getOperators(Device::kMetal), x, other);
           sync();
         }),
         1.5 * moved);
@@ -219,7 +221,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     printBandwidth(
         std::string("layer_norm   ") + attention.what,
         fastestMs([&] {
-          Tensor out = getOperators(Device::kMetal)->layerNorm(hidden, scale, shift, 1e-5f);
+          Tensor out = F::layerNorm(getOperators(Device::kMetal), hidden, scale, shift, 1e-5f);
           sync();
         }),
         2 * halfBytes({1, attention.tokens, width}));
@@ -229,7 +231,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     Tensor v = randHalf({1, attention.heads, attention.tokens, 64});
     double flop = 4.0 * attention.heads * attention.tokens * attention.tokens * 64;
     double milliseconds = fastestMs([&] {
-      Tensor out = getOperators(Device::kMetal)->attention(q, k, v, false);
+      Tensor out = F::attention(getOperators(Device::kMetal), q, k, v, false);
       sync();
     });
     bench::print(
@@ -242,7 +244,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     Tensor cv = randHalf({1, attention.heads, 77, 64});
     double crossFlop = 4.0 * attention.heads * attention.tokens * 77 * 64;
     milliseconds = fastestMs([&] {
-      Tensor out = getOperators(Device::kMetal)->attention(q, ck, cv, false);
+      Tensor out = F::attention(getOperators(Device::kMetal), q, ck, cv, false);
       sync();
     });
     bench::print(
@@ -256,7 +258,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     printBandwidth(
         std::string("geglu        ") + attention.what,
         fastestMs([&] {
-          Tensor out = getOperators(Device::kMetal)->geglu(gated);
+          Tensor out = F::geglu(getOperators(Device::kMetal), gated);
           sync();
         }),
         1.5 * halfBytes({1, attention.tokens, 2 * inner}));
@@ -268,7 +270,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     printBandwidth(
         std::string("upsample     ") + level.what,
         fastestMs([&] {
-          Tensor out = getOperators(Device::kMetal)->upsampleNearest2d(x, 2);
+          Tensor out = F::upsampleNearest2d(getOperators(Device::kMetal), x, 2);
           sync();
         }),
         5 * halfBytes({1, level.channels, level.size, level.size}));

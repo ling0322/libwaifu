@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -30,7 +31,7 @@ namespace cuda {
 /// @param input <half>(..., D).
 /// @param weight <half>(D).
 /// @return a tensor shaped like `input`.
-Tensor rmsNorm(const Tensor &input, const Tensor &weight, float eps);
+void rmsNorm(const TensorView &input, const TensorView &weight, float eps, const TensorView &out);
 
 /// @brief Normalize each row of `input` to zero mean and unit variance, then scale and shift it.
 ///        Unlike an RMS norm this subtracts the mean, which is what every transformer outside the
@@ -39,7 +40,12 @@ Tensor rmsNorm(const Tensor &input, const Tensor &weight, float eps);
 /// @param weight <half>(D), or empty for no scaling.
 /// @param bias <half>(D), or empty for no shift.
 /// @return a tensor shaped like `input`.
-Tensor layerNorm(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps);
+void layerNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &out);
 
 /// @brief Normalize over each group of channels together with the space they cover, then scale
 ///        and shift per channel. This is the normalization a diffusion U-Net and its VAE use,
@@ -48,12 +54,13 @@ Tensor layerNorm(const Tensor &input, const Tensor &weight, const Tensor &bias, 
 /// @param weight <half>(C), or empty for no scaling.
 /// @param bias <half>(C), or empty for no shift.
 /// @return a tensor shaped like `input`.
-Tensor groupNorm(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void groupNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps);
+    float eps,
+    const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

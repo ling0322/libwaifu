@@ -73,10 +73,10 @@ __global__ void rotaryEmbeddingHalfKernel(
 }
 
 void rotaryEmbedding(
-    const Tensor &positions,
-    Tensor &query,
-    Tensor &key,
-  const Tensor &rotaryCache) {
+    const TensorView &positions,
+    const TensorView &query,
+    const TensorView &key,
+    const TensorView &rotaryCache) {
   CHECK(positions.getDevice().getType() == Device::kCuda);
   CHECK(query.getDevice().getType() == Device::kCuda);
   CHECK(key.getDevice().getType() == Device::kCuda);

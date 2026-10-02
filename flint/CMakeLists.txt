@@ -36,13 +36,14 @@ set(flint_SOURCES
     "cpu/upsample.cc"
     "cpu/triangular_solve.cc"
     "cpu/unary.cc"
-    "cpu/view.cc"
     "device.cc"
     "dtype.cc"
     "fp8.cc"
+    "functional.cc"
     "memory.cc"
     "operators.cc"
     "tensor.cc"
+    "tensor_view.cc"
     "../third_party/ruapu/ruapu.cc")
 
 set(flint_test_SOURCES

@@ -17,6 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include <vector>
+
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
@@ -74,17 +76,19 @@ struct RotaryPush {
   uint32_t cacheStride;
 };
 
-Tensor glu(const Tensor &input, uint32_t op, const char *name) {
+void glu(const TensorView &input, uint32_t op, const char *name, const TensorView &output) {
   checkFloat(input.getDType(), name);
   if (input.getDim() < 1 || input.getShape(-1) % 2 != 0) {
     throw lut::InvalidArgError(lut::sprintf("%s needs an even last dimension", name));
   }
 
-  Tensor x = makeContiguous(input);
-  std::vector<int> shape = x.getShape();
+  std::vector<int> shape = input.getShape();
   shape.back() /= 2;
-  Tensor output = createTensor(shape, x.getDType());
+  checkOutput(output, shape, input.getDType(), name);
+  if (output.getNumEl() == 0) return;
 
+  Tensor keep;
+  TensorView x = makeContiguous(input, &keep);
   GluPush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
@@ -96,10 +100,9 @@ Tensor glu(const Tensor &input, uint32_t op, const char *name) {
       &push,
       sizeof(push),
       push.numel);
-  return output;
 }
 
-void rotate(const Tensor &positions, const Tensor &x, const Tensor &cache) {
+void rotate(const TensorView &positions, const TensorView &x, const TensorView &cache) {
   if (x.getDim() != 3 || x.getStride(2) != 1 || x.getStride(1) != x.getShape(2)) {
     throw lut::InvalidArgError(
         "rotaryEmbedding takes (T, heads, headDim) with each row's heads contiguous");
@@ -127,18 +130,19 @@ void rotate(const Tensor &positions, const Tensor &x, const Tensor &cache) {
 
 }  // namespace
 
-Tensor lookup(const Tensor &table, const Tensor &indices) {
+void lookup(const TensorView &table, const TensorView &indices, const TensorView &output) {
   if (indices.getDType() != DType::kLong) throw lut::InvalidArgError("lookup takes int64 indices");
   if (table.getDim() != 2) throw lut::InvalidArgError("lookup takes a table of (rows, width)");
   checkFloat(table.getDType(), "lookup");
 
-  Tensor t = makeContiguous(table);
-  Tensor ids = makeContiguous(indices);
-  std::vector<int> shape = ids.getShape();
-  shape.push_back(t.getShape(1));
-  Tensor output = createTensor(shape, t.getDType());
-  if (output.getNumEl() == 0) return output;
+  std::vector<int> shape = indices.getShape();
+  shape.push_back(table.getShape(1));
+  checkOutput(output, shape, table.getDType(), "lookup");
+  if (output.getNumEl() == 0) return;
 
+  Tensor keepTable, keepIndices;
+  TensorView t = makeContiguous(table, &keepTable);
+  TensorView ids = makeContiguous(indices, &keepIndices);
   LookupPush push{};
   push.c = getAddress(output);
   push.table = getAddress(t);
@@ -150,22 +154,24 @@ Tensor lookup(const Tensor &table, const Tensor &indices) {
       &push,
       sizeof(push),
       push.numel);
-  return output;
 }
 
-Tensor upsampleNearest2d(const Tensor &input, int scale) {
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &output) {
   checkFloat(input.getDType(), "upsampleNearest2d");
   if (input.getDim() != 4) throw lut::InvalidArgError("upsampleNearest2d takes (N, C, H, W)");
   if (scale < 1) throw lut::InvalidArgError("upsampleNearest2d: the scale must be positive");
 
-  Tensor x = makeContiguous(input);
-  int height = x.getShape(2);
-  int width = x.getShape(3);
-  Tensor output = createTensor(
-      {x.getShape(0), x.getShape(1), height * scale, width * scale},
-      x.getDType());
-  if (output.getNumEl() == 0) return output;
+  int height = input.getShape(2);
+  int width = input.getShape(3);
+  checkOutput(
+      output,
+      {input.getShape(0), input.getShape(1), height * scale, width * scale},
+      input.getDType(),
+      "upsampleNearest2d");
+  if (output.getNumEl() == 0) return;
 
+  Tensor keep;
+  TensorView x = makeContiguous(input, &keep);
   UpsamplePush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
@@ -178,24 +184,26 @@ Tensor upsampleNearest2d(const Tensor &input, int scale) {
       &push,
       sizeof(push),
       push.numel);
-  return output;
 }
 
-Tensor upsampleNearest1d(const Tensor &input, int size) {
+void upsampleNearest1d(const TensorView &input, const TensorView &output) {
   checkFloat(input.getDType(), "upsampleNearest1d");
   if (input.getDim() < 1) {
     throw lut::InvalidArgError("upsampleNearest1d takes at least one dimension");
   }
+  if (output.getDim() < 1) throw lut::InvalidArgError("upsampleNearest1d: the output is a scalar");
+  int size = output.getShape(-1);
   if (size < 1) throw lut::InvalidArgError("upsampleNearest1d: the size must be positive");
   if (input.getShape(-1) < 1) throw lut::InvalidArgError("upsampleNearest1d: the input is empty");
 
-  Tensor x = makeContiguous(input);
-  int length = x.getShape(-1);
-  std::vector<int> shape = x.getShape();
+  int length = input.getShape(-1);
+  std::vector<int> shape = input.getShape();
   shape.back() = size;
-  Tensor output = createTensor(shape, x.getDType());
-  if (output.getNumEl() == 0) return output;
+  checkOutput(output, shape, input.getDType(), "upsampleNearest1d");
+  if (output.getNumEl() == 0) return;
 
+  Tensor keep;
+  TensorView x = makeContiguous(input, &keep);
   Upsample1dPush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
@@ -208,22 +216,21 @@ Tensor upsampleNearest1d(const Tensor &input, int size) {
       &push,
       sizeof(push),
       push.numel);
-  return output;
 }
 
-Tensor geglu(const Tensor &input) {
-  return glu(input, 1, "geglu");
+void geglu(const TensorView &input, const TensorView &out) {
+  glu(input, 1, "geglu", out);
 }
 
-Tensor swiglu(const Tensor &input) {
-  return glu(input, 0, "swiglu");
+void swiglu(const TensorView &input, const TensorView &out) {
+  glu(input, 0, "swiglu", out);
 }
 
 void rotaryEmbedding(
-    const Tensor &positions,
-    const Tensor &query,
-    const Tensor &key,
-    const Tensor &rotaryCache) {
+    const TensorView &positions,
+    const TensorView &query,
+    const TensorView &key,
+    const TensorView &rotaryCache) {
   if (positions.getDType() != DType::kLong || positions.getDim() != 1) {
     throw lut::InvalidArgError("rotaryEmbedding takes a vector of int64 positions");
   }
@@ -233,7 +240,8 @@ void rotaryEmbedding(
   checkFloat(query.getDType(), "rotaryEmbedding");
   if (positions.getShape(0) == 0) return;
 
-  Tensor ids = makeContiguous(positions);
+  Tensor keep;
+  TensorView ids = makeContiguous(positions, &keep);
   rotate(ids, query, rotaryCache);
   rotate(ids, key, rotaryCache);
 }

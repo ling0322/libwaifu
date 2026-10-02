@@ -21,7 +21,7 @@
 
 #include <vector>
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -31,15 +31,15 @@ namespace cpu {
 ///        pixel is a copy of one input pixel, which is what a diffusion U-Net and its decoder ask
 ///        for before the convolution that follows.
 /// @param input <float>(N, C, H, W), contiguous, or <float16> where the CPU has it natively.
-/// @return the same type, (N, C, H * scale, W * scale).
-Tensor upsampleNearest2d(const Tensor &input, int scale);
+/// @param output where the result goes: the same type, (N, C, H * scale, W * scale), contiguous.
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &output);
 
-/// @brief Resize the last dimension to `size` the way `F.interpolate(size=size, mode="nearest")`
-///        does: output `j` copies input `min(floor(j * scale), length - 1)`, `scale` being
-///        `float(length) / size` and the product taken in float32 as torch takes it.
+/// @brief Resize the last dimension to `output`'s the way `F.interpolate(size=size,
+///        mode="nearest")` does: output `j` copies input `min(floor(j * scale), length - 1)`,
+///        `scale` being `float(length) / size` and the product taken in float32 as torch takes it.
 /// @param input <float> or <float16>, contiguous, of any rank from one up.
-/// @return the same type and leading dimensions, the last one `size` long.
-Tensor upsampleNearest1d(const Tensor &input, int size);
+/// @param output the same type and leading dimensions, the last one `size` long, contiguous.
+void upsampleNearest1d(const TensorView &input, const TensorView &output);
 
 /// @brief The input position each of `size` outputs copies from a row `length` long, as
 ///        [`upsampleNearest1d`] reads them.

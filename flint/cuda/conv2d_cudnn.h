@@ -26,6 +26,7 @@
 
 #include "flint/cuda/conv2d.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -44,11 +45,12 @@ bool isConv2dCudnnAvailable();
 /// @param weight <half|float>(K, C / groups, R, S), contiguous and of the same type as `input`.
 /// @param bias <half|float>(K), or an empty tensor for no bias.
 /// @return <half|float>(N, K, outH, outW).
-Tensor conv2dCudnn(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    const Conv2dOptions &options);
+void conv2dCudnn(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const Conv2dOptions &options,
+    const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

@@ -21,15 +21,13 @@
 
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-void fillKernel(Tensor A, float value) {
+void fillKernel(const TensorView &A, float value) {
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(A);
   int numRows = vC.getLength();
 #pragma omp parallel for schedule(dynamic, 1)
@@ -42,7 +40,7 @@ void fillKernel(Tensor A, float value) {
   }
 }
 
-void fill(Tensor src, float value) {
+void fill(const TensorView &src, float value) {
   if (src.getDType() == DType::kFloat) {
     if (src.getNumEl() == 1) {
       *getDataPtrCpu<float>(src) = value;

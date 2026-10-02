@@ -28,20 +28,25 @@ namespace fl {
 namespace op {
 namespace metal {
 
-Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, bool causal) {
+void attention(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    bool causal,
+    const TensorView &out) {
   CHECK(q.getDim() == 4) << "attention expects (batch, numHeads, length, headDim)";
 
   // MLX takes the same [batch, heads, length, headDim] layout flint documents, and handles
   // grouped-query attention by broadcasting the key and value heads, so no expansion here.
   float scale = 1.0f / sqrtf(static_cast<float>(q.getShape(-1)));
 
-  return fromMlxArray(
-      mlx::core::fast::scaled_dot_product_attention(
-          toMlxArray(q),
-          toMlxArray(k),
-          toMlxArray(v),
-          scale,
-          causal ? "causal" : ""));
+  mlx::core::array result = mlx::core::fast::scaled_dot_product_attention(
+      toMlxArray(q),
+      toMlxArray(k),
+      toMlxArray(v),
+      scale,
+      causal ? "causal" : "");
+  writeInto(result, out);
 }
 
 }  // namespace metal

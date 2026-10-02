@@ -27,6 +27,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
+#include "flint/functional.h"
 #include "flint/cpu/upsample.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
@@ -94,7 +95,7 @@ CATCH_TEST_CASE("test layerNorm", "[core][nn][operators]") {
   }
 
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->layerNorm(of({kRows, kWidth}, x), of({kWidth}, weight), of({kWidth}, bias), kEps),
+      F::layerNorm(cpuOps(), of({kRows, kWidth}, x), of({kWidth}, weight), of({kWidth}, bias), kEps),
       of({kRows, kWidth}, expected),
       1e-4f));
 
@@ -117,7 +118,7 @@ CATCH_TEST_CASE("test layerNorm", "[core][nn][operators]") {
   }
 
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->layerNorm(of({kRows, kWidth}, x), Tensor(), Tensor(), kEps),
+      F::layerNorm(cpuOps(), of({kRows, kWidth}, x), Tensor(), Tensor(), kEps),
       of({kRows, kWidth}, bare),
       1e-4f));
 }
@@ -164,7 +165,7 @@ CATCH_TEST_CASE("test groupNorm", "[core][nn][operators]") {
   }
 
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->groupNorm(
+      F::groupNorm(cpuOps(), 
           of({kBatch, kChannels, kHeight, kWidth}, x),
           of({kChannels}, weight),
           of({kChannels}, bias),
@@ -175,14 +176,14 @@ CATCH_TEST_CASE("test groupNorm", "[core][nn][operators]") {
 
   // One group is a normalization over the whole image, and one group per channel is a
   // normalization of each channel on its own. Both are ends the arithmetic has to reach.
-  CATCH_REQUIRE_NOTHROW(cpuOps()->groupNorm(
+  CATCH_REQUIRE_NOTHROW(F::groupNorm(cpuOps(), 
       of({kBatch, kChannels, kHeight, kWidth}, x), Tensor(), Tensor(), 1, kEps));
-  CATCH_REQUIRE_NOTHROW(cpuOps()->groupNorm(
+  CATCH_REQUIRE_NOTHROW(F::groupNorm(cpuOps(), 
       of({kBatch, kChannels, kHeight, kWidth}, x), Tensor(), Tensor(), kChannels, kEps));
 
   // Channels that do not divide into the groups is a caller's mistake rather than something to
   // round off.
-  CATCH_REQUIRE_THROWS(cpuOps()->groupNorm(
+  CATCH_REQUIRE_THROWS(F::groupNorm(cpuOps(), 
       of({kBatch, kChannels, kHeight, kWidth}, x), Tensor(), Tensor(), 3, kEps));
 }
 
@@ -209,15 +210,15 @@ CATCH_TEST_CASE("test upsampleNearest2d", "[core][nn][operators]") {
     }
   }
 
-  Tensor out = cpuOps()->upsampleNearest2d(of({1, kChannels, kHeight, kWidth}, x), kScale);
+  Tensor out = F::upsampleNearest2d(cpuOps(), of({1, kChannels, kHeight, kWidth}, x), kScale);
   CATCH_REQUIRE(out.getShape() == std::vector<int>{1, kChannels, outH, outW});
   CATCH_REQUIRE(cpuOps()->allClose(out, of({1, kChannels, outH, outW}, expected), 1e-6f, 1e-6f));
 
   // A scale of one hands the image back as it was, and a scale of three is not a power of two.
-  Tensor same = cpuOps()->upsampleNearest2d(of({1, 1, 2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}), 1);
+  Tensor same = F::upsampleNearest2d(cpuOps(), of({1, 1, 2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}), 1);
   CATCH_REQUIRE(cpuOps()->allClose(same, of({1, 1, 2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}), 1e-6f, 1e-6f));
 
-  Tensor thrice = cpuOps()->upsampleNearest2d(of({1, 1, 1, 2}, {5.0f, 6.0f}), 3);
+  Tensor thrice = F::upsampleNearest2d(cpuOps(), of({1, 1, 1, 2}, {5.0f, 6.0f}), 3);
   CATCH_REQUIRE(thrice.getShape() == std::vector<int>{1, 1, 3, 6});
   CATCH_REQUIRE(cpuOps()->allClose(
       thrice,
@@ -245,15 +246,15 @@ CATCH_TEST_CASE("test upsampleNearest1d", "[core][nn][operators]") {
   std::vector<float> x;
   for (int i = 0; i < 10; ++i) x.push_back(float(i));
   std::vector<float> expected = {0, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 6, 7, 8, 8, 9};
-  Tensor out = cpuOps()->upsampleNearest1d(of({1, 2, 5}, x), 8);
+  Tensor out = F::upsampleNearest1d(cpuOps(), of({1, 2, 5}, x), 8);
   CATCH_REQUIRE(out.getShape() == std::vector<int>{1, 2, 8});
   const float *p = out.getInternalData()->getData<float>(out.getInternalOffset());
   CATCH_REQUIRE(std::equal(p, p + out.getNumEl(), expected.begin()));
 
   // Half is only copied, so it works wherever the CPU can hold it, not only where it computes.
-  Tensor half = cpuOps()->upsampleNearest1d(cpuOps()->cast(of({1, 2, 5}, x), DType::kFloat16), 8);
+  Tensor half = F::upsampleNearest1d(cpuOps(), F::cast(cpuOps(), of({1, 2, 5}, x), DType::kFloat16), 8);
   CATCH_REQUIRE(half.getDType() == DType::kFloat16);
-  Tensor back = cpuOps()->cast(half, DType::kFloat);
+  Tensor back = F::cast(cpuOps(), half, DType::kFloat);
   const float *q = back.getInternalData()->getData<float>(back.getInternalOffset());
   CATCH_REQUIRE(std::equal(q, q + back.getNumEl(), expected.begin()));
 }

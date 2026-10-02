@@ -24,7 +24,6 @@
 #include <math.h>
 
 #include "flint/cpu/accessor.h"
-#include "flint/cpu/tensor.h"
 
 namespace fl {
 namespace op {
@@ -45,10 +44,10 @@ inline float applyGate(float x) {
 }
 
 template<typename T, GateOp OP>
-Tensor gatedLinearKernel(const Tensor &A) {
+void gatedLinearKernel(const TensorView &A, const TensorView &C) {
   std::vector<int> shapeC = A.getShape();
   shapeC.back() /= 2;
-  Tensor C = tensor(shapeC, DType::getType<T>());
+  C.throwIfInvalidShape(shapeC, "glu");
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
@@ -66,28 +65,26 @@ Tensor gatedLinearKernel(const Tensor &A) {
       c[i] = static_cast<T>(gate * static_cast<float>(a[i + n]));
     }
   }
-
-  return C;
 }
 
 template<GateOp OP>
-Tensor gatedLinear(const Tensor &A) {
+void gatedLinear(const TensorView &A, const TensorView &C) {
   CHECK(A.getShape(-1) % 2 == 0);
 
-  if (A.getDType() == DType::kFloat) return gatedLinearKernel<float, OP>(A);
+  if (A.getDType() == DType::kFloat) return gatedLinearKernel<float, OP>(A, C);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (A.getDType() == DType::kFloat16) return gatedLinearKernel<Float16, OP>(A);
+  if (A.getDType() == DType::kFloat16) return gatedLinearKernel<Float16, OP>(A, C);
 #endif
 
   NOT_IMPL();
 }
 
-Tensor swiglu(const Tensor &A) {
-  return gatedLinear<GateOp::SILU>(A);
+void swiglu(const TensorView &A, const TensorView &C) {
+  gatedLinear<GateOp::SILU>(A, C);
 }
 
-Tensor geglu(const Tensor &A) {
-  return gatedLinear<GateOp::GELU>(A);
+void geglu(const TensorView &A, const TensorView &C) {
+  gatedLinear<GateOp::GELU>(A, C);
 }
 
 }  // namespace cpu

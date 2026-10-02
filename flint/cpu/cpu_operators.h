@@ -33,7 +33,6 @@ namespace cpu {
 
 constexpr float Pi = 3.14159f;
 
-// the CPU implementation of Operators
 class CPUOperators : public Operators {
  public:
   CPUOperators();
@@ -43,88 +42,103 @@ class CPUOperators : public Operators {
   static std::unique_ptr<Operators> createFp32Only();
 
   // implement interface Operators
-  Tensor add(Tensor a, Tensor b) override;
-  Tensor sub(Tensor a, Tensor b) override;
-  Tensor subFloat(Tensor input, float other) override;
-  bool allClose(Tensor A, Tensor B, float rtol, float atol) override;
-  Tensor cast(Tensor tensor, DType dtype) override;
-  Tensor causalMask(int max_len) override;
-  void copy(Tensor src, Tensor dest) override;
-  void fill(Tensor input, float value) override;
-  Tensor lookup(Tensor table, Tensor indices) override;
-  Tensor matmul(Tensor a, Tensor b) override;
-  Tensor gatedDeltaNetPrefill(
-      Tensor q,
-      Tensor k,
-      Tensor v,
-      Tensor g,
-      Tensor beta,
-      Tensor cuSeqlens,
-      Tensor stateSlots,
-      Tensor state) override;
-  Tensor max(Tensor inputs) override;
-  Tensor min(Tensor inputs) override;
-  Tensor square(Tensor input) override;
-  Tensor divTensor(Tensor input, Tensor other) override;
-  Tensor neg(Tensor input) override;
-  Tensor abs(Tensor input) override;
-  Tensor exp(Tensor input) override;
-  Tensor log(Tensor input) override;
-  Tensor round(Tensor input) override;
-  Tensor sqrt(Tensor input) override;
-  Tensor rsqrt(Tensor input) override;
-  Tensor sigmoid(Tensor input) override;
-  Tensor tanh(Tensor input) override;
-  Tensor relu(Tensor input) override;
-  Tensor gelu(Tensor input) override;
-  Tensor silu(Tensor input) override;
-  Tensor sin(Tensor input) override;
-  Tensor cos(Tensor input) override;
-  Tensor quickGelu(Tensor input) override;
-  Tensor arangeLong(LongType begin, LongType end, LongType step) override;
-  Tensor randNormal(lut::Span<const int> shape) override;
-  Tensor div(Tensor input, float other) override;
-  float elem(Tensor tensor) override;
-  bool elemBool(Tensor tensor) override;
-  Tensor mod(Tensor input, LongType other) override;
-  Tensor eq(Tensor input, Tensor other) override;
-  bool all(Tensor A) override;
-  Tensor mul(Tensor input, float other) override;
-  Tensor mul(Tensor input, Tensor other) override;
-  void print(Tensor tensor) override;
-  Tensor rand(lut::Span<const int> shape, DType dtype) override;
-  void repetitionPenalty(Tensor logits, Tensor history, float weight) override;
-  Tensor rmsNorm(Tensor input, Tensor weight, float eps) override;
-  Tensor layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) override;
-  Tensor groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) override;
-  Tensor upsampleNearest2d(Tensor input, int scale) override;
-  Tensor upsampleNearest1d(Tensor input, int size) override;
-  Tensor conv2d(
-      Tensor input,
-      Tensor weight,
-      Tensor bias,
+  void add(TensorView a, TensorView b, TensorView out) override;
+  void sub(TensorView a, TensorView b, TensorView out) override;
+  void subFloat(TensorView input, float other, TensorView out) override;
+  bool allClose(TensorView A, TensorView B, float rtol, float atol) override;
+  void cast(TensorView input, TensorView out) override;
+  void causalMask(TensorView out) override;
+  void copy(TensorView src, TensorView dest) override;
+  void fill(TensorView input, float value) override;
+  void lookup(TensorView table, TensorView indices, TensorView out) override;
+  void matmul(TensorView a, TensorView b, TensorView out) override;
+  void gatedDeltaNetPrefill(
+      TensorView q,
+      TensorView k,
+      TensorView v,
+      TensorView g,
+      TensorView beta,
+      TensorView cuSeqlens,
+      TensorView stateSlots,
+      TensorView state,
+      TensorView out) override;
+  void max(TensorView input, TensorView out) override;
+  void min(TensorView input, TensorView out) override;
+  void square(TensorView input, TensorView out) override;
+  void divTensor(TensorView input, TensorView other, TensorView out) override;
+  void neg(TensorView input, TensorView out) override;
+  void abs(TensorView input, TensorView out) override;
+  void exp(TensorView input, TensorView out) override;
+  void log(TensorView input, TensorView out) override;
+  void round(TensorView input, TensorView out) override;
+  void sqrt(TensorView input, TensorView out) override;
+  void rsqrt(TensorView input, TensorView out) override;
+  void sigmoid(TensorView input, TensorView out) override;
+  void tanh(TensorView input, TensorView out) override;
+  void relu(TensorView input, TensorView out) override;
+  void gelu(TensorView input, TensorView out) override;
+  void silu(TensorView input, TensorView out) override;
+  void sin(TensorView input, TensorView out) override;
+  void cos(TensorView input, TensorView out) override;
+  void quickGelu(TensorView input, TensorView out) override;
+  void arangeLong(LongType begin, LongType step, TensorView out) override;
+  void randNormal(TensorView out) override;
+  void div(TensorView input, float other, TensorView out) override;
+  float elem(TensorView tensor) override;
+  bool elemBool(TensorView tensor) override;
+  void mod(TensorView input, LongType other, TensorView out) override;
+  void eq(TensorView input, TensorView other, TensorView out) override;
+  bool all(TensorView A) override;
+  void mul(TensorView input, float other, TensorView out) override;
+  void mul(TensorView input, TensorView other, TensorView out) override;
+  void print(TensorView tensor) override;
+  void rand(TensorView out) override;
+  void repetitionPenalty(TensorView logits, TensorView history, float weight) override;
+  void rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) override;
+  void layerNorm(
+      TensorView input,
+      TensorView weight,
+      TensorView bias,
+      float eps,
+      TensorView out) override;
+  void groupNorm(
+      TensorView input,
+      TensorView weight,
+      TensorView bias,
+      int groups,
+      float eps,
+      TensorView out) override;
+  void upsampleNearest2d(TensorView input, int scale, TensorView out) override;
+  void upsampleNearest1d(TensorView input, TensorView out) override;
+  void conv2d(
+      TensorView input,
+      TensorView weight,
+      TensorView bias,
       int stride,
       int padding,
       int dilation,
-      int groups) override;
-  Tensor conv1d(
-      Tensor input,
-      Tensor weight,
-      Tensor bias,
+      int groups,
+      TensorView out) override;
+  void conv1d(
+      TensorView input,
+      TensorView weight,
+      TensorView bias,
       int stride,
       int padding,
       int dilation,
-      int groups) override;
-  Tensor sample(Tensor logits, Tensor temperatures, Tensor topKs, Tensor topPs) override;
-  Tensor softmax(Tensor input) override;
-  Tensor sum(Tensor inputs, int dim) override;
-  Tensor cumsum(Tensor input, int dim) override;
-  Tensor swiglu(Tensor A) override;
-  Tensor geglu(Tensor input) override;
-  Tensor tensor(lut::Span<const int> shape, DType dtype) override;
-  Tensor tensorLike(Tensor input) override;
-  Tensor toDevice(Device device, Tensor tensor) override;
-  Tensor zeros(lut::Span<const int> shape, DType dtype) override;
+      int groups,
+      TensorView out) override;
+  void sample(
+      TensorView logits,
+      TensorView temperatures,
+      TensorView topKs,
+      TensorView topPs,
+      TensorView out) override;
+  void softmax(TensorView input, TensorView out) override;
+  void sum(TensorView input, int dim, TensorView out) override;
+  void cumsum(TensorView input, int dim, TensorView out) override;
+  void swiglu(TensorView A, TensorView out) override;
+  void geglu(TensorView input, TensorView out) override;
   void manualSeed(uint64_t seed) override;
 
   DType getDefaultFloatType() override;

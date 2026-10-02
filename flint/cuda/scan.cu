@@ -84,13 +84,14 @@ __global__ void cumsumRowsKernel(const T *__restrict__ in, T *__restrict__ out, 
 }
 
 template<typename T>
-Tensor cumsumImpl(const Tensor &A) {
-  CHECK(A.isContiguous());
+void cumsumImpl(const TensorView &A, const TensorView &C) {
+  CHECK(A.isContiguous() && C.isContiguous());
   CHECK(A.getDim() >= 1);
+  CHECK(C.getDType() == A.getDType());
+  C.throwIfInvalidShape(A.getShape(), "cumsum");
 
-  Tensor C = createCudaTensor<T>(A.getShape());
   int64_t length = A.getShape(-1);
-  if (length == 0 || A.getNumEl() == 0) return C;
+  if (length == 0 || A.getNumEl() == 0) return;
 
   int64_t rows = A.getNumEl() / length;
   CHECK(rows <= std::numeric_limits<int>::max());
@@ -103,14 +104,13 @@ Tensor cumsumImpl(const Tensor &A) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
 }  // namespace
 
-Tensor cumsumLastDim(const Tensor &A) {
-  if (A.getDType() == DType::kFloat) return cumsumImpl<float>(A);
-  if (A.getDType() == DType::kFloat16) return cumsumImpl<half>(A);
+void cumsumLastDim(const TensorView &A, const TensorView &C) {
+  if (A.getDType() == DType::kFloat) return cumsumImpl<float>(A, C);
+  if (A.getDType() == DType::kFloat16) return cumsumImpl<half>(A, C);
 
   NOT_IMPL();
 }

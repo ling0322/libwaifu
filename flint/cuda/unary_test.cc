@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -42,14 +43,14 @@ Operators *cpuOps() {
 }
 
 Tensor toCuda(const Tensor &a) {
-  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
+  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
-using UnaryFn = Tensor (Operators::*)(Tensor);
+using UnaryFn = Tensor (*)(Operators *, TensorView);
 
 struct Case {
   const char *name;
@@ -60,18 +61,18 @@ struct Case {
 /// rather than at a call site.
 const std::vector<Case> &allUnary() {
   static const std::vector<Case> cases = {
-      {"neg", &Operators::neg},
-      {"abs", &Operators::abs},
-      {"exp", &Operators::exp},
-      {"square", &Operators::square},
-      {"sigmoid", &Operators::sigmoid},
-      {"tanh", &Operators::tanh},
-      {"relu", &Operators::relu},
-      {"gelu", &Operators::gelu},
-      {"silu", &Operators::silu},
-      {"sin", &Operators::sin},
-      {"cos", &Operators::cos},
-      {"quickGelu", &Operators::quickGelu},
+      {"neg", &F::neg},
+      {"abs", &F::abs},
+      {"exp", &F::exp},
+      {"square", &F::square},
+      {"sigmoid", &F::sigmoid},
+      {"tanh", &F::tanh},
+      {"relu", &F::relu},
+      {"gelu", &F::gelu},
+      {"silu", &F::silu},
+      {"sin", &F::sin},
+      {"cos", &F::cos},
+      {"quickGelu", &F::quickGelu},
   };
   return cases;
 }
@@ -91,8 +92,8 @@ CATCH_TEST_CASE("test CUDA unary operators", "[op][cuda]") {
   for (const Case &c : allUnary()) {
     CATCH_INFO("op = " << c.name);
     CATCH_REQUIRE(cpuOps()->allClose(
-        toCpu((cudaOps()->*c.fn)(x)),
-        (cpuOps()->*c.fn)(a),
+        toCpu(c.fn(cudaOps(), x)),
+        c.fn(cpuOps(), a),
         5e-3,
         5e-3));
   }
@@ -106,10 +107,10 @@ CATCH_TEST_CASE("test CUDA unary operators (positive domain)", "[op][cuda]") {
   Tensor x = toCuda(a);
 
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(cudaOps()->sqrt(x)), cpuOps()->sqrt(a), 5e-3, 5e-3));
+      cpuOps()->allClose(toCpu(F::sqrt(cudaOps(), x)), F::sqrt(cpuOps(), a), 5e-3, 5e-3));
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(cudaOps()->rsqrt(x)), cpuOps()->rsqrt(a), 5e-3, 5e-3));
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->log(x)), cpuOps()->log(a), 5e-3, 5e-3));
+      cpuOps()->allClose(toCpu(F::rsqrt(cudaOps(), x)), F::rsqrt(cpuOps(), a), 5e-3, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::log(cudaOps(), x)), F::log(cpuOps(), a), 5e-3, 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA log", "[op][cuda]") {
@@ -120,19 +121,19 @@ CATCH_TEST_CASE("test CUDA log", "[op][cuda]") {
   std::vector<float> values;
   for (int i = 0; i < 300; ++i) values.push_back(std::pow(10.0f, -10.0f + i * 0.045f));
   Tensor a = Tensor::create<float>({3, 100}, values);
-  Tensor got = cudaOps()->log(cudaOps()->toDevice(Device::getCuda(), a));
+  Tensor got = F::log(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()));
   CATCH_REQUIRE(got.getDType() == DType::kFloat);
   CATCH_REQUIRE(cpuOps()->allClose(
-      cudaOps()->toDevice(Device::getCpu(), got), cpuOps()->log(a), 1e-6, 1e-5));
+      F::toDevice(cudaOps(), got, Device::getCpu()), F::log(cpuOps(), a), 1e-6, 1e-5));
 
   // A strided view, and log(0) = -inf, as on the CPU.
-  Tensor strided = cudaOps()->log(cudaOps()->toDevice(Device::getCuda(), a).transpose(0, 1));
+  Tensor strided = F::log(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()).transpose(0, 1));
   CATCH_REQUIRE(cpuOps()->allClose(
-      cudaOps()->toDevice(Device::getCpu(), cudaOps()->contiguous(strided)),
-      cpuOps()->log(cpuOps()->contiguous(a.transpose(0, 1))),
+      F::toDevice(cudaOps(), F::contiguous(cudaOps(), strided), Device::getCpu()),
+      F::log(cpuOps(), F::contiguous(cpuOps(), a.transpose(0, 1))),
       1e-6,
       1e-5));
-  Tensor zero = cudaOps()->log(cudaOps()->toDevice(Device::getCuda(), Tensor::create<float>({1}, {0.0f})));
+  Tensor zero = F::log(cudaOps(), F::toDevice(cudaOps(), Tensor::create<float>({1}, {0.0f}), Device::getCuda()));
   float value = cudaOps()->elem(zero);
   CATCH_REQUIRE(std::isinf(value));
   CATCH_REQUIRE(value < 0.0f);
@@ -150,21 +151,21 @@ CATCH_TEST_CASE("test CUDA unary operators (shapes and strides)", "[op][cuda]") 
            {2, 3, 4},
            {2, 3, 4, 5},
            {256, 1024}}) {
-    Tensor a = cpuOps()->rand(shape, DType::kFloat);
+    Tensor a = F::rand(Device::getCpu(), shape, DType::kFloat);
     CATCH_INFO("shape rank = " << shape.size());
     CATCH_REQUIRE(
-        cpuOps()->allClose(toCpu(cudaOps()->neg(toCuda(a))), cpuOps()->neg(a), 5e-3, 5e-3));
+        cpuOps()->allClose(toCpu(F::neg(cudaOps(), toCuda(a))), F::neg(cpuOps(), a), 5e-3, 5e-3));
     CATCH_REQUIRE(
-        cpuOps()->allClose(toCpu(cudaOps()->silu(toCuda(a))), cpuOps()->silu(a), 5e-3, 5e-3));
+        cpuOps()->allClose(toCpu(F::silu(cudaOps(), toCuda(a))), F::silu(cpuOps(), a), 5e-3, 5e-3));
   }
 
   // a strided view has to be read through its strides, not as a flat buffer.
-  Tensor a = cpuOps()->rand({2, 3, 4}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {2, 3, 4}, DType::kFloat);
   Tensor strided = toCuda(a).transpose(0, 2);
   CATCH_REQUIRE(!strided.isContiguous());
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(cudaOps()->neg(strided)),
-      cpuOps()->neg(a.transpose(0, 2)),
+      toCpu(F::neg(cudaOps(), strided)),
+      F::neg(cpuOps(), a.transpose(0, 2)),
       5e-3,
       5e-3));
 }
@@ -173,17 +174,17 @@ CATCH_TEST_CASE("test CUDA unary operators (float tensors)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   // The kernels are instantiated for float as well as half; moving without a cast selects it.
-  Tensor a = cpuOps()->rand({3, 8}, DType::kFloat);
-  Tensor x = cudaOps()->toDevice(Device::getCuda(), a);
+  Tensor a = F::rand(Device::getCpu(), {3, 8}, DType::kFloat);
+  Tensor x = F::toDevice(cudaOps(), a, Device::getCuda());
   CATCH_REQUIRE(x.getDType() == DType::kFloat);
 
   for (const Case &c : allUnary()) {
-    Tensor actual = (cudaOps()->*c.fn)(x);
+    Tensor actual = c.fn(cudaOps(), x);
     CATCH_INFO("op = " << c.name);
     CATCH_REQUIRE(actual.getDType() == DType::kFloat);
     CATCH_REQUIRE(cpuOps()->allClose(
-        cudaOps()->toDevice(Device::getCpu(), actual),
-        (cpuOps()->*c.fn)(a),
+        F::toDevice(cudaOps(), actual, Device::getCpu()),
+        c.fn(cpuOps(), a),
         1e-4,
         1e-5));
   }
@@ -197,21 +198,21 @@ CATCH_TEST_CASE("test CUDA unary operators (known values)", "[op][cuda]") {
   Tensor a = Tensor::create<float>({3}, {0.0f, -10.0f, 1.0f});
   Tensor x = toCuda(a);
 
-  Tensor reluOut = toCpu(cudaOps()->relu(x));
+  Tensor reluOut = toCpu(F::relu(cudaOps(), x));
   const float *relu = reluOut.getInternalData()->getData<float>(reluOut.getInternalOffset());
   CATCH_REQUIRE(relu[0] == 0.0f);
   CATCH_REQUIRE(relu[1] == 0.0f);
   CATCH_REQUIRE(std::fabs(relu[2] - 1.0f) < 1e-2f);
 
-  Tensor sigmoidOut = toCpu(cudaOps()->sigmoid(x));
+  Tensor sigmoidOut = toCpu(F::sigmoid(cudaOps(), x));
   const float *sigmoid =
       sigmoidOut.getInternalData()->getData<float>(sigmoidOut.getInternalOffset());
   CATCH_REQUIRE(std::fabs(sigmoid[0] - 0.5f) < 1e-2f);
   CATCH_REQUIRE(sigmoid[1] < 1e-2f);
 
   // gelu and silu both pass through the origin, unlike sigmoid.
-  Tensor geluOut = toCpu(cudaOps()->gelu(x));
-  Tensor siluOut = toCpu(cudaOps()->silu(x));
+  Tensor geluOut = toCpu(F::gelu(cudaOps(), x));
+  Tensor siluOut = toCpu(F::silu(cudaOps(), x));
   CATCH_REQUIRE(geluOut.getInternalData()->getData<float>(geluOut.getInternalOffset())[0] == 0.0f);
   CATCH_REQUIRE(siluOut.getInternalData()->getData<float>(siluOut.getInternalOffset())[0] == 0.0f);
 }
@@ -222,22 +223,22 @@ CATCH_TEST_CASE("test CUDA div (element-wise)", "[op][cuda]") {
   Tensor a = Tensor::create<float>({2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
   Tensor b = Tensor::create<float>({2, 3}, {2.0f, 4.0f, 4.0f, 8.0f, 10.0f, 3.0f});
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(cudaOps()->divTensor(toCuda(a), toCuda(b))),
-      cpuOps()->divTensor(a, b),
+      toCpu(F::divTensor(cudaOps(), toCuda(a), toCuda(b))),
+      F::divTensor(cpuOps(), a, b),
       5e-3,
       5e-3));
 
   // the divisor broadcasts over the leading dimensions, which takes the strided kernel.
   Tensor row = Tensor::create<float>({3}, {1.0f, 2.0f, 4.0f});
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(cudaOps()->divTensor(toCuda(a), toCuda(row))),
-      cpuOps()->divTensor(a, row),
+      toCpu(F::divTensor(cudaOps(), toCuda(a), toCuda(row))),
+      F::divTensor(cpuOps(), a, row),
       5e-3,
       5e-3));
 
   // dividing by itself is 1 everywhere, which a kernel that dropped the divisor would not give.
-  Tensor ones = toCpu(cudaOps()->divTensor(toCuda(a), toCuda(a)));
-  Tensor expected = cpuOps()->tensor({2, 3}, DType::kFloat);
+  Tensor ones = toCpu(F::divTensor(cudaOps(), toCuda(a), toCuda(a)));
+  Tensor expected = F::empty(Device::getCpu(), {2, 3}, DType::kFloat);
   cpuOps()->fill(expected, 1.0f);
   CATCH_REQUIRE(cpuOps()->allClose(ones, expected, 5e-3, 5e-3));
 }
@@ -249,16 +250,16 @@ CATCH_TEST_CASE("test CUDA min", "[op][cuda]") {
   // element is larger, so include a row that is entirely negative.
   Tensor a = Tensor::create<float>({2, 4}, {1.0f, 2.0f, 3.0f, 4.0f, -1.0f, -2.0f, -3.0f, -4.0f});
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(cudaOps()->min(toCuda(a))), cpuOps()->min(a), 5e-3, 5e-3));
+      cpuOps()->allClose(toCpu(F::min(cudaOps(), toCuda(a))), F::min(cpuOps(), a), 5e-3, 5e-3));
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(cudaOps()->max(toCuda(a))), cpuOps()->max(a), 5e-3, 5e-3));
+      cpuOps()->allClose(toCpu(F::max(cudaOps(), toCuda(a))), F::max(cpuOps(), a), 5e-3, 5e-3));
 
   // widths either side of the block size, where the reduction loops.
   for (int width : {1, 255, 256, 257, 1000}) {
-    Tensor b = cpuOps()->rand({2, 3, width}, DType::kFloat);
+    Tensor b = F::rand(Device::getCpu(), {2, 3, width}, DType::kFloat);
     CATCH_INFO("width = " << width);
     CATCH_REQUIRE(
-        cpuOps()->allClose(toCpu(cudaOps()->min(toCuda(b))), cpuOps()->min(b), 5e-3, 5e-3));
+        cpuOps()->allClose(toCpu(F::min(cudaOps(), toCuda(b))), F::min(cpuOps(), b), 5e-3, 5e-3));
   }
 }
 
@@ -274,10 +275,10 @@ CATCH_TEST_CASE("test CUDA round and cast to int64", "[op][cuda]") {
 
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
     CATCH_INFO("from " << dtype.toString());
-    Tensor onCard = cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), x), dtype);
+    Tensor onCard = F::cast(cudaOps(), F::toDevice(cudaOps(), x, Device::getCuda()), dtype);
 
     // Exact, element by element: allClose compares with a strict `<`, so no tolerance says "equal".
-    Tensor r = cudaOps()->round(onCard);
+    Tensor r = F::round(cudaOps(), onCard);
     CATCH_REQUIRE(r.getDType() == dtype);
     Tensor back = toCpu(r);
     const float *values = back.getInternalData()->getData<float>(back.getInternalOffset());
@@ -287,19 +288,19 @@ CATCH_TEST_CASE("test CUDA round and cast to int64", "[op][cuda]") {
     }
 
     auto asLongs = [](const Tensor &ids) {
-      Tensor host = cudaOps()->toDevice(Device::getCpu(), ids);
+      Tensor host = F::toDevice(cudaOps(), ids, Device::getCpu());
       const LongType *data = host.getInternalData()->getData<LongType>(host.getInternalOffset());
       return std::vector<LongType>(data, data + host.getNumEl());
     };
 
-    Tensor ids = cudaOps()->cast(r, DType::kLong);
+    Tensor ids = F::cast(cudaOps(), r, DType::kLong);
     CATCH_REQUIRE(ids.getDType() == DType::kLong);
     CATCH_REQUIRE(ids.getShape() == std::vector<int>{2, 5});
     std::vector<LongType> got = asLongs(ids);
     for (size_t i = 0; i < in.size(); ++i) CATCH_REQUIRE(got[i] == LongType(rounded[i]));
 
     // Cast alone truncates toward zero.
-    got = asLongs(cudaOps()->cast(onCard, DType::kLong));
+    got = asLongs(F::cast(cudaOps(), onCard, DType::kLong));
     for (size_t i = 0; i < in.size(); ++i) {
       CATCH_INFO(in[i]);
       CATCH_REQUIRE(got[i] == LongType(truncated[i]));
@@ -307,12 +308,11 @@ CATCH_TEST_CASE("test CUDA round and cast to int64", "[op][cuda]") {
   }
 
   // Ids off the card go straight into lookup, which is what the cast is for.
-  Tensor table = cudaOps()->toDevice(
-      Device::getCuda(), Tensor::create<float>({3, 2}, {0.0f, 0.0f, 1.0f, 1.0f, 2.0f, 2.0f}));
-  Tensor idsFloat = cudaOps()->toDevice(Device::getCuda(), Tensor::create<float>({2}, {2.4f, 0.6f}));
-  Tensor rows = cudaOps()->lookup(table, cudaOps()->cast(cudaOps()->round(idsFloat), DType::kLong));
+  Tensor table = F::toDevice(cudaOps(), Tensor::create<float>({3, 2}, {0.0f, 0.0f, 1.0f, 1.0f, 2.0f, 2.0f}), Device::getCuda());
+  Tensor idsFloat = F::toDevice(cudaOps(), Tensor::create<float>({2}, {2.4f, 0.6f}), Device::getCuda());
+  Tensor rows = F::lookup(cudaOps(), table, F::cast(cudaOps(), F::round(cudaOps(), idsFloat), DType::kLong));
   CATCH_REQUIRE(cpuOps()->allClose(
-      cudaOps()->toDevice(Device::getCpu(), rows),
+      F::toDevice(cudaOps(), rows, Device::getCpu()),
       Tensor::create<float>({2, 2}, {2.0f, 2.0f, 1.0f, 1.0f})));
 }
 

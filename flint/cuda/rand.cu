@@ -22,6 +22,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <limits>
 #include <memory>
 
 #include "flint/cuda/cast.h"
@@ -193,8 +194,8 @@ class Rand::Impl {
   ~Impl() = default;
   static std::unique_ptr<Impl> newImpl();
 
-  Tensor randNormal(lut::Span<const int> shape);
-  Tensor rand(lut::Span<const int> shape);
+  void randNormal(const TensorView &out);
+  void rand(const TensorView &out);
   void setSeed(uint64_t seed);
 
  private:
@@ -207,9 +208,11 @@ class Rand::Impl {
   uint64_t _position = 0;
 };
 
-Tensor Rand::Impl::randNormal(lut::Span<const int> shape) {
-  Tensor result = createCudaTensorFloat(shape);
+void Rand::Impl::randNormal(const TensorView &result) {
+  CHECK(result.getDType() == DType::kFloat && result.isContiguous());
+  CHECK(result.getNumEl() < std::numeric_limits<int>::max());
   int numel = static_cast<int>(result.getNumEl());
+  if (numel == 0) return;
 
   constexpr int blockSize = 256;
   dim3 grid = getGrid1D(static_cast<int>(blocksFor(numel)), blockSize);
@@ -219,13 +222,13 @@ Tensor Rand::Impl::randNormal(lut::Span<const int> shape) {
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
   _position += blocksFor(numel);
-
-  return castFloatToHalf(result);
 }
 
-Tensor Rand::Impl::rand(lut::Span<const int> shape) {
-  Tensor result = createCudaTensorFloat(shape);
+void Rand::Impl::rand(const TensorView &result) {
+  CHECK(result.getDType() == DType::kFloat && result.isContiguous());
+  CHECK(result.getNumEl() < std::numeric_limits<int>::max());
   int numel = static_cast<int>(result.getNumEl());
+  if (numel == 0) return;
 
   constexpr int blockSize = 256;
   dim3 grid = getGrid1D(static_cast<int>(blocksFor(numel)), blockSize);
@@ -235,8 +238,6 @@ Tensor Rand::Impl::rand(lut::Span<const int> shape) {
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
   _position += blocksFor(numel);
-
-  return result;
 }
 
 void Rand::Impl::setSeed(uint64_t seed) {
@@ -258,12 +259,12 @@ std::shared_ptr<Rand> Rand::newRand() {
   return rand;
 }
 
-Tensor Rand::randNormal(lut::Span<const int> shape) {
-  return _impl->randNormal(shape);
+void Rand::randNormal(const TensorView &out) {
+  _impl->randNormal(out);
 }
 
-Tensor Rand::rand(lut::Span<const int> shape) {
-  return _impl->rand(shape);
+void Rand::rand(const TensorView &out) {
+  _impl->rand(out);
 }
 
 void Rand::setSeed(uint64_t seed) {

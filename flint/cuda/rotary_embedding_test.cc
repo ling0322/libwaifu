@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -41,7 +42,7 @@ Operators *cpuOps() {
 }
 
 Tensor toCpuFloat(Tensor tensor) {
-  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(tensor, DType::kFloat));
+  return F::toDevice(cudaOps(), F::cast(cudaOps(), tensor, DType::kFloat), Device::getCpu());
 }
 
 Tensor baselineRotaryEmbedding(Tensor input, Tensor roPE) {
@@ -51,15 +52,15 @@ Tensor baselineRotaryEmbedding(Tensor input, Tensor roPE) {
   sin = sin.expand({sin.getShape(0), input.getShape(1), sin.getShape(2)});
 
   int halfDim = input.getShape(-1) / 2;
-  Tensor rotated = cudaOps()->tensorLike(input);
+  Tensor rotated = F::emptyLike(input);
   Tensor first = input.slice(-1, {0, halfDim});
-  Tensor second = cudaOps()->mul(input.slice(-1, {halfDim, None}), -1.0f);
+  Tensor second = F::mul(cudaOps(), input.slice(-1, {halfDim, None}), -1.0f);
   cudaOps()->copy(first, rotated.slice(-1, {halfDim, None}));
   cudaOps()->copy(second, rotated.slice(-1, {0, halfDim}));
 
-  return cudaOps()->add(
-      cudaOps()->mul(input, cudaOps()->contiguous(cos)),
-      cudaOps()->mul(rotated, cudaOps()->contiguous(sin)));
+  return F::add(cudaOps(), 
+      F::mul(cudaOps(), input, F::contiguous(cudaOps(), cos)),
+      F::mul(cudaOps(), rotated, F::contiguous(cudaOps(), sin)));
 }
 
 bool runCase(int numQueryHeads, int numKeyHeads, int headDim) {
@@ -67,20 +68,18 @@ bool runCase(int numQueryHeads, int numKeyHeads, int headDim) {
   int numTokens = static_cast<int>(positionValues.size());
   Device device = Device::getCuda();
 
-  Tensor positions = cudaOps()->toDevice(
-      device,
-      Tensor::create<LongType>({numTokens}, positionValues));
-  Tensor query = cudaOps()->rand({numTokens, numQueryHeads, headDim}, DType::kFloat16);
-  Tensor key = cudaOps()->rand({numTokens, numKeyHeads, headDim}, DType::kFloat16);
-  Tensor cache = cudaOps()->rand({64, 2 * headDim}, DType::kFloat16);
+  Tensor positions = F::toDevice(cudaOps(), Tensor::create<LongType>({numTokens}, positionValues), device);
+  Tensor query = F::rand(Device::getCuda(), {numTokens, numQueryHeads, headDim}, DType::kFloat16);
+  Tensor key = F::rand(Device::getCuda(), {numTokens, numKeyHeads, headDim}, DType::kFloat16);
+  Tensor cache = F::rand(Device::getCuda(), {64, 2 * headDim}, DType::kFloat16);
 
-  Tensor gathered = cudaOps()->lookup(cache, positions);
+  Tensor gathered = F::lookup(cudaOps(), cache, positions);
   gathered = gathered.view({numTokens, 2, 1, headDim}).transpose(0, 1);
   Tensor expectedQuery = baselineRotaryEmbedding(query, gathered);
   Tensor expectedKey = baselineRotaryEmbedding(key, gathered);
 
-  Tensor actualQuery = cudaOps()->contiguous(query);
-  Tensor actualKey = cudaOps()->contiguous(key);
+  Tensor actualQuery = F::contiguous(cudaOps(), query);
+  Tensor actualKey = F::contiguous(cudaOps(), key);
   cudaOps()->rotaryEmbedding(positions, actualQuery, actualKey, cache);
 
   return cpuOps()->allClose(toCpuFloat(actualQuery), toCpuFloat(expectedQuery), 5e-3f) &&

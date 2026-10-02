@@ -24,10 +24,12 @@ namespace fl {
 namespace op {
 namespace metal {
 
-Tensor matmul(const Tensor &a, const Tensor &b) {
+void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
   // mlx::core::matmul broadcasts the batch dimensions the same way flint does, so a 4-D activation
   // against a 2-D weight needs no reshaping here.
-  return fromMlxArray(mlx::core::matmul(toMlxArray(a), toMlxArray(b)));
+  // The result is A's type, as functional has it, even against a B that would have MLX promote.
+  mlx::core::array result = mlx::core::matmul(toMlxArray(a), toMlxArray(b));
+  writeInto(mlx::core::astype(result, toMlxDtype(out.getDType())), out);
 }
 
 }  // namespace metal

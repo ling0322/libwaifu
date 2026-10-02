@@ -24,6 +24,7 @@
 #include <memory>
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -34,8 +35,10 @@ class Rand {
   ~Rand() = default;
   static std::shared_ptr<Rand> newRand();
 
-  Tensor randNormal(lut::Span<const int> shape);
-  Tensor rand(lut::Span<const int> shape);
+  /// Fill `out` <float>, contiguous, from the standard normal distribution.
+  void randNormal(const TensorView &out);
+  /// Fill `out` <float>, contiguous, uniformly from [0, 1).
+  void rand(const TensorView &out);
   void setSeed(uint64_t seed);
 
  private:

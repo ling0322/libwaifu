@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -42,7 +43,7 @@ Operators *cpuOps() {
 }
 
 Tensor toCpu(const Tensor &a) {
-  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
+  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 }  // namespace
@@ -51,8 +52,8 @@ CATCH_TEST_CASE("test CUDA causalMask", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   constexpr int Dim = 129;
-  Tensor xr = cpuOps()->softmax(cpuOps()->causalMask(Dim));
-  Tensor x = cudaOps()->softmax(cudaOps()->causalMask(Dim));
+  Tensor xr = F::softmax(cpuOps(), F::causalMask(Device::getCpu(), Dim));
+  Tensor x = F::softmax(cudaOps(), F::causalMask(Device::getCuda(), Dim));
 
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), xr, 1e-3, 1e-4));
 }
@@ -63,7 +64,7 @@ CATCH_TEST_CASE("test CUDA causalMask (structure)", "[op][cuda]") {
   // Comparing through softmax hides which side of the diagonal is masked, so check the raw mask:
   // zero on and below the diagonal, -inf strictly above it.
   constexpr int Dim = 5;
-  Tensor mask = toCpu(cudaOps()->causalMask(Dim));
+  Tensor mask = toCpu(F::causalMask(Device::getCuda(), Dim));
   CATCH_REQUIRE(mask.getShape() == std::vector<int>{Dim, Dim});
 
   const float *data = mask.getInternalData()->getData<float>(mask.getInternalOffset());
@@ -86,7 +87,7 @@ CATCH_TEST_CASE("test CUDA causalMask (sizes)", "[op][cuda]") {
   // Rows are filled by a grid 256 threads wide, so sizes either side of that boundary decide
   // whether the far end of a row is written at all. Size 1 is the single unmasked element.
   for (int size : {1, 2, 255, 256, 257}) {
-    Tensor mask = toCpu(cudaOps()->causalMask(size));
+    Tensor mask = toCpu(F::causalMask(Device::getCuda(), size));
     CATCH_INFO("size = " << size);
     CATCH_REQUIRE(mask.getShape() == std::vector<int>{size, size});
 

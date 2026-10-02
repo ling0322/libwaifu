@@ -26,31 +26,39 @@ namespace fl {
 namespace op {
 namespace metal {
 
-Tensor sum(const Tensor &input, int dim) {
-  return fromMlxArray(mlx::core::sum(toMlxArray(input), dim, /*keepdims=*/false));
+void sum(const TensorView &input, int dim, const TensorView &out) {
+  // `dim` is already non-negative and `out` is the input without it -- (1) for a vector, which
+  // the scalar MLX gives back fills just the same. MLX promotes a sum of booleans or of small
+  // integers; the result keeps the input's type, as functional says it does on every device.
+  mlx::core::array x = toMlxArray(input);
+  mlx::core::array result = mlx::core::sum(x, dim, /*keepdims=*/false);
+  writeInto(mlx::core::astype(result, x.dtype()), out);
 }
 
-Tensor cumsum(const Tensor &input, int dim) {
+void cumsum(const TensorView &input, int dim, const TensorView &out) {
   // MLX's own scan: forward, and inclusive of the element itself, which is what torch.cumsum is.
-  return fromMlxArray(mlx::core::cumsum(toMlxArray(input), dim, /*reverse=*/false,
-                                        /*inclusive=*/true));
+  mlx::core::array x = toMlxArray(input);
+  mlx::core::array result = mlx::core::cumsum(x, dim, /*reverse=*/false, /*inclusive=*/true);
+  writeInto(mlx::core::astype(result, x.dtype()), out);
 }
 
-Tensor max(const Tensor &input) {
-  return fromMlxArray(mlx::core::max(toMlxArray(input)));
+void max(const TensorView &input, const TensorView &out) {
+  // Over the last dimension only, as functional asks of every device: `out` is the input without
+  // it, (1) for a vector.
+  writeInto(mlx::core::max(toMlxArray(input), /*axis=*/-1, /*keepdims=*/false), out);
 }
 
-Tensor min(const Tensor &input) {
-  return fromMlxArray(mlx::core::min(toMlxArray(input)));
+void min(const TensorView &input, const TensorView &out) {
+  writeInto(mlx::core::min(toMlxArray(input), /*axis=*/-1, /*keepdims=*/false), out);
 }
 
-bool all(const Tensor &input) {
+bool all(const TensorView &input) {
   mlx::core::array result = mlx::core::all(toMlxArray(input));
   mlx::core::eval(result);
   return result.item<bool>();
 }
 
-bool allClose(const Tensor &a, const Tensor &b, float rtol, float atol) {
+bool allClose(const TensorView &a, const TensorView &b, float rtol, float atol) {
   mlx::core::array x = toMlxArray(a);
   mlx::core::array y = toMlxArray(b);
 
@@ -65,7 +73,7 @@ bool allClose(const Tensor &a, const Tensor &b, float rtol, float atol) {
   return result.item<bool>();
 }
 
-float elem(const Tensor &tensor) {
+float elem(const TensorView &tensor) {
   CHECK(tensor.getNumEl() == 1) << "elem: expected a tensor of one element";
 
   mlx::core::array value = mlx::core::astype(toMlxArray(tensor), mlx::core::float32);
@@ -73,7 +81,7 @@ float elem(const Tensor &tensor) {
   return value.item<float>();
 }
 
-bool elemBool(const Tensor &tensor) {
+bool elemBool(const TensorView &tensor) {
   CHECK(tensor.getNumEl() == 1) << "elemBool: expected a tensor of one element";
 
   mlx::core::array value = mlx::core::astype(toMlxArray(tensor), mlx::core::bool_);

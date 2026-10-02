@@ -87,7 +87,7 @@ Tensor createCudaTensorFloat(lut::Span<const int> shape) {
   return Tensor::create(tensorShape, data);
 }
 
-Tensor tensorLike(const Tensor &tensor) {
+Tensor tensorLike(const TensorView &tensor) {
   CHECK(tensor.getDevice().getType() == Device::kCuda);
 
   if (tensor.getDType() == DType::kFloat16) return createCudaTensorHalf(tensor.getShape());
@@ -99,13 +99,13 @@ Tensor tensorLike(const Tensor &tensor) {
 }
 
 template<typename T>
-float elemImpl(const Tensor &tensor) {
+float elemImpl(const TensorView &tensor) {
   T v;
   LL_CHECK_CUDA_STATUS(
       cudaMemcpy(&v, getDataPtrCuda<T>(tensor), sizeof(T), cudaMemcpyDeviceToHost));
   return v;
 }
-float elem(const Tensor &tensor) {
+float elem(const TensorView &tensor) {
   CHECK(tensor.getDim() == 1 && tensor.getShape(0) == 1);
 
   if (tensor.getDType() == DType::kFloat16) return elemImpl<half>(tensor);
@@ -114,7 +114,7 @@ float elem(const Tensor &tensor) {
   NOT_IMPL();
 }
 
-bool elemBool(const Tensor &tensor) {
+bool elemBool(const TensorView &tensor) {
   CHECK(tensor.getDim() == 1 && tensor.getShape(0) == 1);
   CHECK(tensor.getDType() == DType::kBool);
 

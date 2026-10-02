@@ -25,8 +25,6 @@
 #include "lutil/attributes.h"
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
@@ -80,8 +78,8 @@ inline float applyUnaryOpFloat(float x, UnaryOp op) {
 }  // namespace
 
 template<typename T>
-Tensor unaryOpKernel(const Tensor &A, UnaryOp op) {
-  Tensor C = tensorLike(A);
+void unaryOpKernel(const TensorView &A, UnaryOp op, const TensorView &C) {
+  C.throwIfInvalidShape(A.getShape(), "unaryOp");
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
@@ -96,14 +94,12 @@ Tensor unaryOpKernel(const Tensor &A, UnaryOp op) {
       c[i] = static_cast<T>(applyUnaryOpFloat(static_cast<float>(a[i]), op));
     }
   }
-
-  return C;
 }
 
-Tensor unaryOp(const Tensor &A, UnaryOp op) {
-  if (A.getDType() == DType::kFloat) return unaryOpKernel<float>(A, op);
+void unaryOp(const TensorView &A, UnaryOp op, const TensorView &C) {
+  if (A.getDType() == DType::kFloat) return unaryOpKernel<float>(A, op, C);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (A.getDType() == DType::kFloat16) return unaryOpKernel<Float16>(A, op);
+  if (A.getDType() == DType::kFloat16) return unaryOpKernel<Float16>(A, op, C);
 #endif
 
   NOT_IMPL();

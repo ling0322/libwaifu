@@ -22,23 +22,20 @@
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/copy.h"
-#include "flint/cpu/kernel/interface.h"
-#include "flint/cpu/print.h"
-#include "flint/cpu/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-Tensor lookupKernel2D(const Tensor &table, const Tensor &indices) {
+void lookupKernel2D(const TensorView &table, const TensorView &indices, const TensorView &xC) {
   CHECK(table.getDim() == 2 && indices.getDim() == 2);
 
   int vocabSize = table.getShape(0);
   int d0 = indices.getShape(0);
   int d1 = indices.getShape(1);
   int embdDim = table.getShape(1);
-  Tensor xC = tensor(lut::makeConstSpan({d0, d1, embdDim}), DType::getType<T>());
+  xC.throwIfInvalidShape({d0, d1, embdDim}, "lookup");
 
   TensorAccessor<const T, 2> A = table;
   TensorAccessor<const LongType, 2> B = indices;
@@ -52,18 +49,16 @@ Tensor lookupKernel2D(const Tensor &table, const Tensor &indices) {
       copyVector(C[i][j], A[index]);
     }
   }
-
-  return xC;
 }
 
 template<typename T>
-Tensor lookupKernel1D(const Tensor &table, const Tensor &indices) {
+void lookupKernel1D(const TensorView &table, const TensorView &indices, const TensorView &xC) {
   CHECK(table.getDim() == 2 && indices.getDim() == 1);
 
   int vocabSize = table.getShape(0);
   int d0 = indices.getShape(0);
   int embdDim = table.getShape(1);
-  Tensor xC = tensor(lut::makeConstSpan({d0, embdDim}), DType::getType<T>());
+  xC.throwIfInvalidShape({d0, embdDim}, "lookup");
 
   TensorAccessor<const T, 2> A = table;
   TensorAccessor<const LongType, 1> B = indices;
@@ -75,50 +70,22 @@ Tensor lookupKernel1D(const Tensor &table, const Tensor &indices) {
 
     copyVector(C[i], A[index]);
   }
-
-  return xC;
 }
 
-template<typename SrcT, typename DestT>
-Tensor lookupQuantizedKernel2D(const Tensor &table, const Tensor &indices) {
-  CHECK(table.getDim() == 2 && table.getShape(1) % DType::getType<SrcT>().getGroupSize() == 0);
-  const TensorData *embdData = table.getInternalData().get();
-
-  int vocabSize = table.getShape(0);
-  int d0 = indices.getShape(0);
-  int d1 = indices.getShape(1);
-  int embdDim = table.getShape(1);
-  Tensor xC = tensor(lut::makeConstSpan({d0, d1, embdDim}), DType::getType<DestT>());
-
-  TensorAccessor<const LongType, 2> B = indices;
-  TensorAccessor<DestT, 3> C = xC;
-
-  for (int i = 0; i < d0; ++i) {
-    for (int j = 0; j < d1; ++j) {
-      int64_t index = B[i][j];
-      CHECK(index < vocabSize) << "indices out of range";
-
-      applyDequant(embdDim * index, embdDim, embdData, C[i][j].getData());
-    }
-  }
-
-  return xC;
-}
-
-Tensor lookup(const Tensor &table, const Tensor &indices) {
+void lookup(const TensorView &table, const TensorView &indices, const TensorView &C) {
   // a packed batch of ids is 1D, one embedding row comes out per id.
   if (indices.getDim() == 1) {
-    if (table.getDType() == DType::kFloat) return lookupKernel1D<float>(table, indices);
+    if (table.getDType() == DType::kFloat) return lookupKernel1D<float>(table, indices, C);
 
     // A lookup copies a row; it does no arithmetic on it, so a half table needs nothing of the
     // architecture and hands back half. What to do with that is the caller's -- an embedding layer
     // converts to whatever it works in, which is where the decision belongs.
-    if (table.getDType() == DType::kFloat16) return lookupKernel1D<Float16>(table, indices);
+    if (table.getDType() == DType::kFloat16) return lookupKernel1D<Float16>(table, indices, C);
     NOT_IMPL();
   }
 
-  if (table.getDType() == DType::kFloat) return lookupKernel2D<float>(table, indices);
-  if (table.getDType() == DType::kFloat16) return lookupKernel2D<Float16>(table, indices);
+  if (table.getDType() == DType::kFloat) return lookupKernel2D<float>(table, indices, C);
+  if (table.getDType() == DType::kFloat16) return lookupKernel2D<Float16>(table, indices, C);
   NOT_IMPL();
 }
 

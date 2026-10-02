@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -43,8 +44,8 @@ namespace cpu {
 CATCH_TEST_CASE("test CPU reductions", "[core][nn][operators]") {
   Tensor a = Tensor::create<float>({2, 3}, {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f});
 
-  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->sum(a, -1), Tensor::create<float>({2}, {0.6f, 1.5f})));
-  CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->max(a), Tensor::create<float>({2}, {0.3f, 0.6f})));
+  CATCH_REQUIRE(cpuOps()->allClose(F::sum(cpuOps(), a, -1), Tensor::create<float>({2}, {0.6f, 1.5f})));
+  CATCH_REQUIRE(cpuOps()->allClose(F::max(cpuOps(), a), Tensor::create<float>({2}, {0.3f, 0.6f})));
 }
 
 CATCH_TEST_CASE("test CPU sum over every dimension of a rank-4 tensor", "[core][nn][operators]") {
@@ -78,11 +79,11 @@ CATCH_TEST_CASE("test CPU sum over every dimension of a rank-4 tensor", "[core][
             want[slot] += values[flat];
           }
 
-    Tensor got = cpuOps()->sum(a, dim);
+    Tensor got = F::sum(cpuOps(), a, dim);
     CATCH_INFO("dim = " << dim);
     CATCH_REQUIRE(got.getShape() == kept);
     CATCH_REQUIRE(cpuOps()->allClose(got, Tensor::create<float>({kept[0], kept[1], kept[2]}, want)));
-    CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->sum(a, dim - 4), got));
+    CATCH_REQUIRE(cpuOps()->allClose(F::sum(cpuOps(), a, dim - 4), got));
   }
 }
 

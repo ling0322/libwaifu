@@ -19,101 +19,117 @@
 
 #pragma once
 
-#include "lutil/span.h"
+#include <stdint.h>
+
 #include "flint/dtype.h"
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace metal {
 
+// Every function here reads the views it is given and writes its result into `out`, which the
+// caller (flint/functional.cc) has already allocated on the Metal device with the right shape and
+// dtype. None of them allocates a tensor anyone else sees.
+
 // elementwise.cc
-Tensor add(const Tensor &a, const Tensor &b);
-Tensor sub(const Tensor &a, const Tensor &b);
-Tensor mul(const Tensor &a, const Tensor &b);
-Tensor divTensor(const Tensor &a, const Tensor &b);
-Tensor eq(const Tensor &a, const Tensor &b);
-Tensor mulScalar(const Tensor &a, float other);
-Tensor divScalar(const Tensor &a, float other);
-Tensor subScalar(const Tensor &a, float other);
-Tensor neg(const Tensor &a);
-Tensor abs(const Tensor &a);
-Tensor exp(const Tensor &a);
-Tensor log(const Tensor &a);
-Tensor round(const Tensor &a);
-Tensor sqrt(const Tensor &a);
-Tensor rsqrt(const Tensor &a);
-Tensor square(const Tensor &a);
-Tensor sigmoid(const Tensor &a);
-Tensor tanh(const Tensor &a);
-Tensor relu(const Tensor &a);
-Tensor gelu(const Tensor &a);
-Tensor silu(const Tensor &a);
-Tensor quickGelu(const Tensor &a);
-Tensor sin(const Tensor &a);
-Tensor cos(const Tensor &a);
-Tensor softmax(const Tensor &a);
+void add(const TensorView &a, const TensorView &b, const TensorView &out);
+void sub(const TensorView &a, const TensorView &b, const TensorView &out);
+void mul(const TensorView &a, const TensorView &b, const TensorView &out);
+void divTensor(const TensorView &a, const TensorView &b, const TensorView &out);
+void eq(const TensorView &a, const TensorView &b, const TensorView &out);
+void mulScalar(const TensorView &a, float other, const TensorView &out);
+void divScalar(const TensorView &a, float other, const TensorView &out);
+void subScalar(const TensorView &a, float other, const TensorView &out);
+void neg(const TensorView &a, const TensorView &out);
+void abs(const TensorView &a, const TensorView &out);
+void exp(const TensorView &a, const TensorView &out);
+void log(const TensorView &a, const TensorView &out);
+void round(const TensorView &a, const TensorView &out);
+void sqrt(const TensorView &a, const TensorView &out);
+void rsqrt(const TensorView &a, const TensorView &out);
+void square(const TensorView &a, const TensorView &out);
+void sigmoid(const TensorView &a, const TensorView &out);
+void tanh(const TensorView &a, const TensorView &out);
+void relu(const TensorView &a, const TensorView &out);
+void gelu(const TensorView &a, const TensorView &out);
+void silu(const TensorView &a, const TensorView &out);
+void quickGelu(const TensorView &a, const TensorView &out);
+void sin(const TensorView &a, const TensorView &out);
+void cos(const TensorView &a, const TensorView &out);
+void softmax(const TensorView &a, const TensorView &out);
 
 // matmul.cc
-Tensor matmul(const Tensor &a, const Tensor &b);
+void matmul(const TensorView &a, const TensorView &b, const TensorView &out);
 
 // norm.cc
-Tensor layerNorm(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps);
-Tensor groupNorm(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void layerNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &out);
+void groupNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps);
+    float eps,
+    const TensorView &out);
 
 // attention.cc
-Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, bool causal);
+void attention(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    bool causal,
+    const TensorView &out);
 
 // conv1d.cc
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups);
+    int groups,
+    const TensorView &out);
 
 // conv2d.cc
-Tensor conv2d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv2d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups);
+    int groups,
+    const TensorView &out);
 
 // shape.cc
-Tensor lookup(const Tensor &table, const Tensor &indices);
-Tensor upsampleNearest2d(const Tensor &input, int scale);
-Tensor geglu(const Tensor &input);
-Tensor swiglu(const Tensor &input);
-Tensor cast(const Tensor &input, DType dtype);
-Tensor createTensor(lut::Span<const int> shape, DType dtype);
-Tensor zeros(lut::Span<const int> shape, DType dtype);
-void fill(Tensor input, float value);
-void copy(const Tensor &src, Tensor dest);
-void print(const Tensor &tensor);
+void lookup(const TensorView &table, const TensorView &indices, const TensorView &out);
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &out);
+void geglu(const TensorView &input, const TensorView &out);
+void swiglu(const TensorView &input, const TensorView &out);
+void cast(const TensorView &input, const TensorView &out);
+void fill(const TensorView &input, float value);
+void copy(const TensorView &src, const TensorView &dest);
+void print(const TensorView &tensor);
 
 // reduce.cc
-Tensor sum(const Tensor &input, int dim);
-Tensor cumsum(const Tensor &input, int dim);
-Tensor max(const Tensor &input);
-Tensor min(const Tensor &input);
-bool all(const Tensor &input);
-bool allClose(const Tensor &a, const Tensor &b, float rtol, float atol);
-float elem(const Tensor &tensor);
-bool elemBool(const Tensor &tensor);
+void sum(const TensorView &input, int dim, const TensorView &out);
+void cumsum(const TensorView &input, int dim, const TensorView &out);
+void max(const TensorView &input, const TensorView &out);
+void min(const TensorView &input, const TensorView &out);
+bool all(const TensorView &input);
+bool allClose(const TensorView &a, const TensorView &b, float rtol, float atol);
+float elem(const TensorView &tensor);
+bool elemBool(const TensorView &tensor);
 
 // rand.cc
-Tensor rand(lut::Span<const int> shape, DType dtype);
-Tensor randNormal(lut::Span<const int> shape);
+void rand(const TensorView &out);
+void randNormal(const TensorView &out);
 void manualSeed(uint64_t seed);
 
 }  // namespace metal

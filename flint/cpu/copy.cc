@@ -21,14 +21,13 @@
 
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-void copyKernel(const Tensor &src, Tensor &dest) {
+void copyKernel(const TensorView &src, const TensorView &dest) {
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(src);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(dest);
   CHECK(vA.getLength() == vC.getLength());
@@ -43,7 +42,7 @@ void copyKernel(const Tensor &src, Tensor &dest) {
   }
 }
 
-void copy(const Tensor &src, Tensor &dest) {
+void copy(const TensorView &src, const TensorView &dest) {
   if (src.getDType() == DType::kFloat) {
     copyKernel<float>(src, dest);
   } else if (src.getDType() == DType::kFloat16) {

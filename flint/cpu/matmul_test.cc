@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/cpu/common.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
@@ -48,7 +49,7 @@ Tensor RefMatMulFp32(const Tensor &A, const Tensor &B) {
   CATCH_REQUIRE(A.getShape(1) == B.getShape(0));
   CATCH_REQUIRE(A.getDType() == DType::kFloat);
 
-  Tensor C = cpuOps()->zeros({A.getShape(0), B.getShape(1)}, DType::kFloat);
+  Tensor C = F::zeros(Device::getCpu(), {A.getShape(0), B.getShape(1)}, DType::kFloat);
   float *dataC = getDataPtrCpu<float>(C);
   const float *dataA = getDataPtrCpu<float>(A), *dataB = getDataPtrCpu<float>(B);
   int stride0A = A.getStride(0);
@@ -71,25 +72,25 @@ Tensor RefMatMulFp32(const Tensor &A, const Tensor &B) {
 }
 
 void testGEMM(int m, int k, int n, bool transa, bool transb) {
-  Tensor A = transa ? cpuOps()->rand({k, m}, DType::kFloat) : cpuOps()->rand({m, k}, DType::kFloat);
-  Tensor B = transb ? cpuOps()->rand({n, k}, DType::kFloat) : cpuOps()->rand({k, n}, DType::kFloat);
+  Tensor A = transa ? F::rand(Device::getCpu(), {k, m}, DType::kFloat) : F::rand(Device::getCpu(), {m, k}, DType::kFloat);
+  Tensor B = transb ? F::rand(Device::getCpu(), {n, k}, DType::kFloat) : F::rand(Device::getCpu(), {k, n}, DType::kFloat);
 
   if (transa) A = A.transpose(0, 1);
   if (transb) B = B.transpose(0, 1);
 
-  Tensor C = cpuOps()->matmul(A, B);
+  Tensor C = F::matmul(cpuOps(), A, B);
   Tensor C_ref = RefMatMulFp32(A, B);
 
   CATCH_REQUIRE(cpuOps()->allClose(C, C_ref));
 }
 
 void testGEMV(int M, int N, bool TransA) {
-  Tensor A = TransA ? cpuOps()->rand({N, M}, DType::kFloat) : cpuOps()->rand({M, N}, DType::kFloat);
-  Tensor x = cpuOps()->rand({N, 1}, DType::kFloat);
+  Tensor A = TransA ? F::rand(Device::getCpu(), {N, M}, DType::kFloat) : F::rand(Device::getCpu(), {M, N}, DType::kFloat);
+  Tensor x = F::rand(Device::getCpu(), {N, 1}, DType::kFloat);
 
   if (TransA) A = A.transpose(0, 1);
 
-  Tensor C = cpuOps()->matmul(A, x);
+  Tensor C = F::matmul(cpuOps(), A, x);
   Tensor C_ref = RefMatMulFp32(A, x);
 
   CATCH_REQUIRE(cpuOps()->allClose(C, C_ref));

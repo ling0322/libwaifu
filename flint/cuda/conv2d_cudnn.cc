@@ -415,11 +415,12 @@ bool isConv2dCudnnAvailable() {
   return Cudnn::get() != nullptr;
 }
 
-Tensor conv2dCudnn(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    const Conv2dOptions &options) {
+void conv2dCudnn(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const Conv2dOptions &options,
+    const TensorView &output) {
   Cudnn *cudnn = Cudnn::get();
 
   // No fallback. This is the reference a benchmark measures against, and a reference that
@@ -468,9 +469,8 @@ Tensor conv2dCudnn(
       static_cast<int>(toCudnnDataType(input.getDType()))};
   const Plan &plan = getPlan(cudnn, key);
 
-  Tensor output = input.getDType() == DType::kFloat16
-                      ? createCudaTensorHalf({plan.outN, plan.outC, plan.outH, plan.outW})
-                      : createCudaTensorFloat({plan.outN, plan.outC, plan.outH, plan.outW});
+  CHECK(output.getDType() == input.getDType() && output.isContiguous());
+  output.throwIfInvalidShape({plan.outN, plan.outC, plan.outH, plan.outW}, "conv2dCudnn");
 
   lut::c_ptr<int8_t> workspace;
   if (plan.workspaceSize) workspace = llynCudaAlloc<int8_t>(plan.workspaceSize);
@@ -519,8 +519,6 @@ Tensor conv2dCudnn(
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return output;
 }
 
 }  // namespace cuda

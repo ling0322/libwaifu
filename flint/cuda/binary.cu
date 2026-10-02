@@ -89,14 +89,14 @@ __global__ void binaryGenericKernel(
   }
 }
 
-Tensor broadcastTensor(const Tensor &a, lut::Span<const Tensor::ShapeType> targetShape) {
-  Tensor x = op::cpu::expandBatchDims(a, targetShape);
+TensorView broadcastTensor(const TensorView &a, lut::Span<const Tensor::ShapeType> targetShape) {
+  TensorView x = op::cpu::expandBatchDims(a, targetShape);
   return x.expand(targetShape);
 }
 
 template<typename TIn, typename TOut, BinaryOp OP>
-Tensor binaryImpl(const Tensor &A, const Tensor &B) {
-  Tensor xB = broadcastTensor(B, A.getShape());
+void binaryImpl(const TensorView &A, const TensorView &B, const TensorView &C) {
+  TensorView xB = broadcastTensor(B, A.getShape());
   CHECK(A.getDType() == DType::getType<TIn>() && xB.getDType() == DType::getType<TIn>());
   xB.throwIfInvalidShape(A.getShape(), "B");
 
@@ -105,9 +105,11 @@ Tensor binaryImpl(const Tensor &A, const Tensor &B) {
   int numel = static_cast<int>(numel64);
 
   int d = A.getDim();
-  Tensor C = createCudaTensor<TOut>(A.getShape());
+  CHECK(C.getDType() == DType::getType<TOut>() && C.isContiguous());
+  C.throwIfInvalidShape(A.getShape(), "binaryOp");
+  if (numel == 0) return;
   const TIn *pA = getDataPtrCuda<TIn>(A);
-  const TIn *pB = getDataPtrCuda<TIn>(B);
+  const TIn *pB = getDataPtrCuda<TIn>(xB);
   TOut *pC = getDataPtrCuda<TOut>(C);
 
   constexpr int blockSize = 256;
@@ -131,31 +133,30 @@ Tensor binaryImpl(const Tensor &A, const Tensor &B) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
-Tensor applyBinaryOp(BinaryOp op, const Tensor &A, const Tensor &B) {
+void applyBinaryOp(BinaryOp op, const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDevice().getType() == Device::kCuda && B.getDevice().getType() == Device::kCuda);
   DType dtype = A.getDType();
 
   if (op == BinaryOp::ADD && dtype == DType::kFloat16)
-    return binaryImpl<half, half, BinaryOp::ADD>(A, B);
+    return binaryImpl<half, half, BinaryOp::ADD>(A, B, C);
   if (op == BinaryOp::SUB && dtype == DType::kFloat16)
-    return binaryImpl<half, half, BinaryOp::SUB>(A, B);
+    return binaryImpl<half, half, BinaryOp::SUB>(A, B, C);
   if (op == BinaryOp::MUL && dtype == DType::kFloat16)
-    return binaryImpl<half, half, BinaryOp::MUL>(A, B);
+    return binaryImpl<half, half, BinaryOp::MUL>(A, B, C);
   if (op == BinaryOp::ADD && dtype == DType::kFloat)
-    return binaryImpl<float, float, BinaryOp::ADD>(A, B);
+    return binaryImpl<float, float, BinaryOp::ADD>(A, B, C);
   if (op == BinaryOp::SUB && dtype == DType::kFloat)
-    return binaryImpl<float, float, BinaryOp::SUB>(A, B);
+    return binaryImpl<float, float, BinaryOp::SUB>(A, B, C);
   if (op == BinaryOp::MUL && dtype == DType::kFloat)
-    return binaryImpl<float, float, BinaryOp::MUL>(A, B);
+    return binaryImpl<float, float, BinaryOp::MUL>(A, B, C);
   if (op == BinaryOp::DIV && dtype == DType::kFloat16)
-    return binaryImpl<half, half, BinaryOp::DIV>(A, B);
+    return binaryImpl<half, half, BinaryOp::DIV>(A, B, C);
   if (op == BinaryOp::DIV && dtype == DType::kFloat)
-    return binaryImpl<float, float, BinaryOp::DIV>(A, B);
+    return binaryImpl<float, float, BinaryOp::DIV>(A, B, C);
   if (op == BinaryOp::EQUAL && dtype == DType::kUInt8)
-    return binaryImpl<UInt8, BoolType, BinaryOp::EQUAL>(A, B);
+    return binaryImpl<UInt8, BoolType, BinaryOp::EQUAL>(A, B, C);
 
   NOT_IMPL();
 }

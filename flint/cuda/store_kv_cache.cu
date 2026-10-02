@@ -65,11 +65,11 @@ __global__ void storeKVCacheHalfKernel(
 }
 
 void storeKVCache(
-    const Tensor &k,
-    const Tensor &v,
-    Tensor &keyCache,
-    Tensor &valueCache,
-    const Tensor &slotMapping) {
+    const TensorView &k,
+    const TensorView &v,
+    const TensorView &keyCache,
+    const TensorView &valueCache,
+    const TensorView &slotMapping) {
   CHECK(k.getDevice().getType() == Device::kCuda);
   CHECK(v.getDevice().getType() == Device::kCuda);
   CHECK(keyCache.getDevice().getType() == Device::kCuda);

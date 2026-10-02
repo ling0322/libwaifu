@@ -22,68 +22,52 @@
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
-#include "flint/cpu/cpu_tensor_data.h"
-#include "flint/operators.h"
+#include "flint/functional.h"
 #include "flint/vulkan/common.h"
 #include "flint/vulkan/ops.h"
-#include "flint/vulkan/vulkan_tensor_data.h"
 
 namespace fl {
 namespace op {
 namespace vulkan {
 
-namespace {
-
-Tensor upload(const Tensor &tensor) {
-  // Host memory is packed by the CPU before it goes: a strided copy is cheaper there than as a
-  // second pass on the device, and it is one upload of exactly the bytes wanted either way.
-  Tensor x = tensor.isContiguous() ? tensor : getOperators(Device::kCpu)->contiguous(tensor);
-
-  Tensor output = createTensor(x.getShape(), x.getDType());
-  int64_t bytes = x.getDType().getTotalSize(x.getNumEl());
-  if (bytes > 0) {
-    const void *src = x.getInternalData()->getData<void>(x.getInternalOffset());
-    getContext(output)->upload(src, getBuffer(output), getByteOffset(output), bytes);
+void transfer(const TensorView &src, const TensorView &dest) {
+  if (src.getDType() != dest.getDType()) {
+    throw lut::InvalidArgError("transfer: the source and the destination differ in dtype");
   }
-  return output;
-}
-
-Tensor download(const Tensor &tensor) {
-  Tensor x = makeContiguous(tensor);
-
-  auto shape = std::make_shared<TensorShape>(x.getShape());
-  int64_t numel = std::max<int64_t>(shape->getNumEl(), 1);
-  std::shared_ptr<TensorData> data = cpu::CpuTensorData::create(numel, x.getDType());
-  int64_t bytes = x.getDType().getTotalSize(x.getNumEl());
-  if (bytes > 0) {
-    getContext(x)->download(getBuffer(x), getByteOffset(x), data->getData<void>(0), bytes);
+  src.throwIfInvalidShape(dest.getShape(), "transfer");
+  if (!src.isContiguous() || !dest.isContiguous()) {
+    throw lut::InvalidArgError("transfer: the source and the destination must be contiguous");
   }
-  return Tensor::create(shape, data);
-}
 
-}  // namespace
-
-Tensor toDevice(Device device, const Tensor &tensor) {
-  Device from = tensor.getDevice();
-  if (from.getType() == device.getType()) return tensor;
-
-  if (device.getType() == Device::kVulkan && from.isHost()) return upload(tensor);
-  if (device.getType() == Device::kCpu && from.getType() == Device::kVulkan) {
-    return download(tensor);
+  // Exactly the elements of `src`, from where it starts: never the rest of its storage.
+  int64_t bytes = src.getDType().getTotalSize(src.getNumEl());
+  Device from = src.getDevice();
+  Device to = dest.getDevice();
+  if (to.getType() == Device::kVulkan && from.isHost()) {
+    if (bytes == 0) return;
+    const void *data = src.getInternalData()->getData<void>(src.getInternalOffset());
+    getContext(dest)->upload(data, getBuffer(dest), getByteOffset(dest), bytes);
+    return;
+  }
+  if (from.getType() == Device::kVulkan && to.isHost()) {
+    if (bytes == 0) return;
+    void *data = dest.getInternalData()->getData<void>(dest.getInternalOffset());
+    getContext(src)->download(getBuffer(src), getByteOffset(src), data, bytes);
+    return;
   }
 
   throw lut::InvalidArgError(lut::sprintf(
       "the Vulkan operators do not copy from %s to %s",
       from.getName(),
-      device.getName()));
+      to.getName()));
 }
 
-Tensor toCpu(const Tensor &tensor) {
-  return toDevice(Device(Device::kCpu), tensor);
-}
-
-Tensor toVulkan(const Tensor &tensor) {
-  return toDevice(Device(Device::kVulkan), tensor);
+Tensor toCpu(const TensorView &tensor) {
+  Tensor keep;
+  TensorView x = makeContiguous(tensor, &keep);
+  Tensor output = F::empty(Device::getCpu(), x.getShape(), x.getDType());
+  transfer(x, output);
+  return output;
 }
 
 }  // namespace vulkan

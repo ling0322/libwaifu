@@ -1,6 +1,7 @@
 #include <cmath>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -19,11 +20,11 @@ Operators *cpuOps() {
 }
 
 Tensor toCpu(const Tensor &a) {
-  return metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat));
+  return F::toDevice(metalOps(), F::cast(metalOps(), a, DType::kFloat), Device::getCpu());
 }
 
 std::vector<float> readFloats(const Tensor &a) {
-  Tensor c = cpuOps()->contiguous(toCpu(a));
+  Tensor c = F::contiguous(cpuOps(), toCpu(a));
   const float *data = c.getInternalData()->getData<float>(c.getInternalOffset());
   return std::vector<float>(data, data + c.getNumEl());
 }
@@ -33,7 +34,7 @@ std::vector<float> readFloats(const Tensor &a) {
 CATCH_TEST_CASE("test Metal rand", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
-  Tensor a = metalOps()->rand({100, 100}, DType::kFloat16);
+  Tensor a = F::rand(Device(Device::kMetal), {100, 100}, DType::kFloat16);
   CATCH_REQUIRE(a.getDevice().getType() == Device::kMetal);
 
   std::vector<float> v = readFloats(a);
@@ -48,7 +49,7 @@ CATCH_TEST_CASE("test Metal randn", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
   metalOps()->manualSeed(42);
-  Tensor a = metalOps()->randNormal({2, 3, 4});
+  Tensor a = F::randNormal(Device(Device::kMetal), {2, 3, 4});
   CATCH_REQUIRE(a.getDevice().getType() == Device::kMetal);
   CATCH_REQUIRE(a.getNumEl() == 24);
 
@@ -64,10 +65,10 @@ CATCH_TEST_CASE("test Metal manualSeed reproducibility", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
   metalOps()->manualSeed(123);
-  Tensor a = metalOps()->randNormal({10, 10});
+  Tensor a = F::randNormal(Device(Device::kMetal), {10, 10});
 
   metalOps()->manualSeed(123);
-  Tensor b = metalOps()->randNormal({10, 10});
+  Tensor b = F::randNormal(Device(Device::kMetal), {10, 10});
 
   CATCH_REQUIRE(metalOps()->allClose(a, b, 0, 0));
 }

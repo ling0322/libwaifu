@@ -30,6 +30,7 @@
 #include "lutil/strings.h"
 #include "flint/dtype.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 #define LL_CHECK_CONTIGUOUS(x)                                           \
   {                                                                      \
@@ -164,7 +165,7 @@ Tensor createCudaTensorFp4x2(lut::Span<const int> shape);
 Tensor createCudaTensorFp8E4M3(lut::Span<const int> shape);
 Tensor createCudaTensorUInt8(lut::Span<const int> shape);
 Tensor createCudaTensorBool(lut::Span<const int> shape);
-Tensor tensorLike(const Tensor &tensor);
+Tensor tensorLike(const TensorView &tensor);
 
 template<typename T>
 inline Tensor createCudaTensor(lut::Span<const int> shape);
@@ -233,14 +234,14 @@ int getCudaDeviceCount();
 int getCudaArch();
 
 /// @brief Get element from a scalar tensor (1D tensor which has only 1 element)
-float elem(const Tensor &tensor);
-bool elemBool(const Tensor &tensor);
+float elem(const TensorView &tensor);
+bool elemBool(const TensorView &tensor);
 
 /// get grid for 1D kernel for a specified numel.
 dim3 getGrid1D(int numel, int blockSize);
 
 template<typename T>
-inline T *getDataPtrCuda(const Tensor &input) {
+inline T *getDataPtrCuda(const TensorView &input) {
   return input.getInternalData()->getData<T>(input.getInternalOffset());
 }
 

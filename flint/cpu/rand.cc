@@ -27,22 +27,24 @@
 #endif
 
 #include <algorithm>
+#include <vector>
 
 #include "lutil/half.h"
 #include "lutil/random.h"
 #include "lutil/time.h"
 #include "flint/cpu/cast.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
+#include "flint/functional.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor randFp32(lut::Span<const int> shape, lut::Random *generator, float min, float max) {
-  Tensor x = op::cpu::tensor(shape, DType::kFloat);
-  lut::Span<float> tensorData(getDataPtrCpu<float>(x), x.getNumEl());
+namespace {
+
+void randFp32(const TensorView &out, lut::Random *generator, float min, float max) {
+  CHECK(out.isContiguous());
+  lut::Span<float> tensorData(getDataPtrCpu<float>(out), out.getNumEl());
 
   if (generator) {
     generator->fill(tensorData, min, max);
@@ -74,21 +76,20 @@ Tensor randFp32(lut::Span<const int> shape, lut::Random *generator, float min, f
       }
     }
   }
-
-  return x;
 }
 
-Tensor randFp16(lut::Span<const int> shape, lut::Random *generator, float min, float max) {
-  Tensor x = randFp32(shape, generator, min, max);
-  return castFp32ToFp16(x);
-}
+}  // namespace
 
-Tensor rand(lut::Span<const int> shape, DType dtype, lut::Random *generator, float min, float max) {
-  switch (int16_t(dtype)) {
+void rand(const TensorView &out, lut::Random *generator, float min, float max) {
+  switch (int16_t(out.getDType())) {
     case DType::kFloat:
-      return randFp32(shape, generator, min, max);
-    case DType::kFloat16:
-      return randFp16(shape, generator, min, max);
+      return randFp32(out, generator, min, max);
+    case DType::kFloat16: {
+      // Drawn in float and narrowed, so that a seed draws the same numbers in either type.
+      Tensor wide = F::empty(Device::getCpu(), out.getShape(), DType::kFloat);
+      randFp32(wide, generator, min, max);
+      return castFp32ToFp16(wide, out);
+    }
     default:
       NOT_IMPL();
   }

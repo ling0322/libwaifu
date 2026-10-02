@@ -31,28 +31,36 @@ namespace metal {
 namespace {
 
 /// flint spells "no weight" and "no bias" as an empty tensor; MLX wants an empty optional.
-std::optional<mlx::core::array> optionalArray(const Tensor &tensor) {
+std::optional<mlx::core::array> optionalArray(const TensorView &tensor) {
   if (tensor.empty()) return std::nullopt;
   return toMlxArray(tensor);
 }
 
 }  // namespace
 
-Tensor layerNorm(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps) {
-  return fromMlxArray(
-      mlx::core::fast::layer_norm(
-          toMlxArray(input),
-          optionalArray(weight),
-          optionalArray(bias),
-          eps));
+void layerNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &out) {
+  mlx::core::array result = mlx::core::fast::layer_norm(
+      toMlxArray(input),
+      optionalArray(weight),
+      optionalArray(bias),
+      eps);
+  // The result is the input's type, as functional has it, even where a weight or a bias of
+  // another type would have MLX promote it. A no-op when they agree, which is the usual case.
+  writeInto(mlx::core::astype(result, toMlxDtype(out.getDType())), out);
 }
 
-Tensor groupNorm(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void groupNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps) {
+    float eps,
+    const TensorView &out) {
   CHECK(input.getDim() == 4) << "groupNorm expects (N, C, H, W)";
   int n = input.getShape(0);
   int c = input.getShape(1);
@@ -92,7 +100,9 @@ Tensor groupNorm(
     result = mlx::core::add(result, mlx::core::reshape(toMlxArray(bias), {1, c, 1, 1}));
   }
 
-  return fromMlxArray(result);
+  // The result is the input's type, as functional has it, even where a weight or a bias of
+  // another type would have MLX promote it. A no-op when they agree, which is the usual case.
+  writeInto(mlx::core::astype(result, toMlxDtype(out.getDType())), out);
 }
 
 }  // namespace metal

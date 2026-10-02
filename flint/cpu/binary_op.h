@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -27,8 +27,8 @@ namespace cpu {
 
 enum class BinaryOp { ADD, MUL, SUB, DIV };
 
-// apply C <- BinaryOp(A, B)
-Tensor binaryOp(const Tensor &A, const Tensor &B, BinaryOp op);
+/// C = A op B, elementwise, B broadcast to A's shape; C is of A's shape and type.
+void binaryOp(const TensorView &A, const TensorView &B, BinaryOp op, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

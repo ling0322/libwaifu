@@ -20,11 +20,8 @@
 #include "flint/operators.h"
 
 #include <atomic>
-#include <cmath>
 #include <mutex>
 #include <string>
-#include <thread>
-#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -35,7 +32,10 @@
 #include "lutil/strings.h"
 #include "flint/cpu/cpu_operators.h"
 #include "flint/cpu/kernel/interface.h"
+#ifdef LIBWAIFU_CUDA_ENABLED
 #include "flint/cuda/cuda_operators.h"
+#endif
+#include "flint/functional.h"
 #ifdef LIBWAIFU_MLX_ENABLED
 #include "flint/metal/metal_operators.h"
 #endif
@@ -45,360 +45,359 @@
 
 namespace fl {
 
-namespace {
+// What a device that has no kernel for something says when asked for it. NOT_IMPL() aborts, which
+// is right for a case nobody can act on; the THROWs are the cases a caller can work around.
 
-Tensor expandKeyValueHeads(Operators *op, Tensor input, int numHeads) {
-  int batchSize = input.getShape(0);
-  int numKeyValueHeads = input.getShape(1);
-  int length = input.getShape(2);
-  int headDim = input.getShape(3);
-  int groupSize = numHeads / numKeyValueHeads;
-
-  Tensor expanded =
-      input.unsqueeze(2).expand({batchSize, numKeyValueHeads, groupSize, length, headDim});
-  Tensor output = op->tensorLike(expanded);
-  op->copy(expanded, output);
-
-  return output.view({batchSize, numHeads, length, headDim});
-}
-
-}  // namespace
-
-Tensor Operators::arangeLong(LongType begin, LongType end, LongType step) {
+void Operators::arangeLong(LongType begin, LongType step, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::lookup(Tensor table, Tensor indices) {
+void Operators::lookup(TensorView table, TensorView indices, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::matmul(Tensor a, Tensor b) {
+void Operators::rotaryEmbedding(
+    TensorView positions,
+    TensorView query,
+    TensorView key,
+    TensorView rotaryCache) {
   NOT_IMPL();
 }
 
-Tensor Operators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
+void Operators::rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::layerNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    float eps,
+    TensorView out) {
   THROW(NotImplemented, "layerNorm is only available on the CUDA device");
-  return Tensor();
 }
 
-Tensor Operators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
+void Operators::groupNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int groups,
+    float eps,
+    TensorView out) {
   THROW(NotImplemented, "groupNorm is only available on the CUDA device");
-  return Tensor();
 }
 
-Tensor Operators::upsampleNearest2d(Tensor input, int scale) {
+void Operators::upsampleNearest2d(TensorView input, int scale, TensorView out) {
   THROW(NotImplemented, "upsampleNearest2d is only available on the CUDA device");
-  return Tensor();
 }
 
-Tensor Operators::upsampleNearest1d(Tensor input, int size) {
+void Operators::upsampleNearest1d(TensorView input, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::geglu(Tensor input) {
+void Operators::geglu(TensorView input, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::conv2d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void Operators::matmul(TensorView A, TensorView B, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::conv2d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  // A device that has no convolution is something a caller can work around, so it is told rather
-  // than killed. NOT_IMPL() aborts, which is right for a case nobody can act on and wrong here.
+    int groups,
+    TensorView out) {
   THROW(NotImplemented, "conv2d is only available on the CUDA device, in a build with cuDNN");
-  return Tensor();
 }
 
-Tensor Operators::gatedDeltaNetPrefill(
-    Tensor q,
-    Tensor k,
-    Tensor v,
-    Tensor g,
-    Tensor beta,
-    Tensor cuSeqlens,
-    Tensor stateSlots,
-    Tensor state) {
-  NOT_IMPL();
-}
-
-Tensor Operators::mul(Tensor input, float other) {
-  NOT_IMPL();
-}
-
-Tensor Operators::div(Tensor input, float other) {
-  NOT_IMPL();
-}
-
-Tensor Operators::mod(Tensor input, LongType other) {
-  NOT_IMPL();
-}
-
-Tensor Operators::eq(Tensor input, Tensor other) {
-  NOT_IMPL();
-}
-
-Tensor Operators::mul(Tensor input, Tensor other) {
-  NOT_IMPL();
-}
-
-Tensor Operators::softmax(Tensor input) {
-  NOT_IMPL();
-}
-
-/// How many score elements one block of queries may hold at once, counting every head and every
-/// sequence in the batch -- the whole tensor the two matmuls hand each other, not one head's
-/// share of it. 128M of them is 256MB in half, and the softmax needs a second copy of it.
-///
-/// This is a bound on memory and nothing else. Blocking was measured on every shape SDXL runs and
-/// a bigger block was faster every time, cache or no cache: the score matrix is streamed once
-/// either way, and what the block size really moves is which kernel cuBLAS picks for the second
-/// matmul, which is not something to steer by. So the budget is set where it stops an allocation
-/// nobody meant to make, and left clear of everything that runs.
-constexpr int64_t kAttentionScoreLimit = 128 * 1024 * 1024;
-
-Tensor Operators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
-  CHECK(q.getDim() == 4 && k.getDim() == 4 && v.getDim() == 4);
-
-  int numHeads = q.getShape(1);
-  int numKeyValueHeads = k.getShape(1);
-  int queryLength = q.getShape(2);
-  int keyValueLength = k.getShape(2);
-  int headDim = q.getShape(3);
-  CHECK(numHeads % numKeyValueHeads == 0);
-
-  if (numHeads != numKeyValueHeads) {
-    k = expandKeyValueHeads(this, k, numHeads);
-    v = expandKeyValueHeads(this, v, numHeads);
-  }
-
-  // Scaling both q and k keeps the scores in range for half precision.
-  float scale = sqrtf(1.0f / sqrtf(1.0f * headDim));
-  Tensor scaledK = mul(k, scale).transpose(-2, -1);
-
-  // The score matrix is the whole cost of doing it this way: a VAE decoding a 1024 by 1024 image
-  // attends over 16384 positions, and holding all of that at once is half a gigabyte before the
-  // softmax needs a second copy. Since each output row depends only on its own row of scores, the
-  // queries are taken a block at a time instead once that gets out of hand. The answer is the
-  // same to the bit -- no running maximum is needed, because a block still sees every key.
-  //
-  // What a row of queries costs is a row of scores in every head of every sequence, so that is
-  // what the budget is divided by. Dividing by the key length alone, as this once did, left the
-  // heads out, so the thing it called a limit was not one: ten heads held ten times it, and forty
-  // would have held forty.
-  int64_t scoresPerQuery = static_cast<int64_t>(q.getShape(0)) * numHeads * keyValueLength;
-
-  // What the budget affords is then rounded down to a power of two rather than taken where the
-  // division landed. The second matmul takes its kernel from the number of query rows handed to
-  // it, and the choice is not monotone in that number: 640 rows of scores against the values
-  // measured 837us where 512 measured 219, for a quarter more work. The powers of two were
-  // uniformly among the good ones.
-  int blockSize = queryLength;
-  if (scoresPerQuery * queryLength > kAttentionScoreLimit) {
-    int64_t budget = kAttentionScoreLimit / scoresPerQuery;
-    blockSize = 1;
-    while (blockSize * 2 <= budget) blockSize *= 2;
-  }
-
-  auto attendBlock = [&](Tensor blockQ, int begin, int end) {
-    Tensor scores = matmul(mul(blockQ, scale), scaledK);
-
-    // A single query attends to the whole history, so it needs no mask. A block of them is masked
-    // against where it sits, not where the whole query is.
-    if (causal && queryLength > 1) {
-      Tensor mask = causalMask(keyValueLength)
-                        .slice(0, {keyValueLength - queryLength + begin,
-                                   keyValueLength - queryLength + end});
-
-      // The mask comes back in the device's *default* float type, which is not always the type
-      // the scores are in: on aarch64 that default is half, and a model running in float32 has
-      // float32 scores. Adding the two without this fails a dtype check inside the accessor
-      // rather than anywhere useful, which is how it was found -- a causal attention in float32
-      // passed on x86, where the default is float32 too, and aborted on a Mac.
-      if (mask.getDType() != scores.getDType()) mask = cast(mask, scores.getDType());
-
-      scores = add(scores, mask);
-    }
-
-    return matmul(softmax(scores), v);
-  };
-
-  if (blockSize >= queryLength) return attendBlock(q, 0, queryLength);
-
-  // The answer is made once and each block written into the rows it belongs to. Joining the
-  // blocks as they arrive copies everything finished so far on every pass, which is quadratic in
-  // the number of blocks: the VAE's 64 of them spent 1.7ms of an 18ms call doing nothing else.
-  Tensor output = tensor({q.getShape(0), numHeads, queryLength, headDim}, q.getDType());
-  for (int begin = 0; begin < queryLength; begin += blockSize) {
-    int end = std::min(begin + blockSize, queryLength);
-    Tensor blockOutput = attendBlock(q.slice(-2, {begin, end}), begin, end);
-    Tensor destination = output.slice(-2, {begin, end});
-    copy(blockOutput, destination);
-  }
-
-  return output;
-}
-
-Tensor Operators::sum(Tensor input, int dim) {
-  NOT_IMPL();
-}
-
-Tensor Operators::max(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::cumsum(Tensor input, int dim) {
-  NOT_IMPL();
-}
-
-Tensor Operators::square(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::min(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::divTensor(Tensor input, Tensor other) {
-  NOT_IMPL();
-}
-
-Tensor Operators::neg(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::abs(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::round(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::log(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::exp(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::sqrt(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::rsqrt(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::sigmoid(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::tanh(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::relu(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::gelu(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::silu(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::sin(Tensor input) {
-  NOT_IMPL();
-}
-Tensor Operators::cos(Tensor input) {
-  NOT_IMPL();
-}
-
-Tensor Operators::conv1d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void Operators::conv1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
+    int groups,
+    TensorView out) {
   THROW(
       NotImplemented,
       "conv1d is not available on this device; the CPU, CUDA and Metal all have it");
 }
 
-Tensor Operators::convTranspose1d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void Operators::convTranspose1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int outputPadding,
-    int groups) {
+    int groups,
+    TensorView out) {
   THROW(
       NotImplemented,
       "convTranspose1d: no device has this kernel; waifu::audio::conv_transpose1d composes one");
 }
 
-Tensor Operators::snake(Tensor input, Tensor alpha, Tensor beta, float eps) {
+void Operators::snake(
+    TensorView input,
+    TensorView alpha,
+    TensorView beta,
+    float eps,
+    TensorView out) {
   THROW(NotImplemented, "snake: no device has this kernel; waifu::audio::snake composes one");
 }
 
-Tensor Operators::stft(Tensor input, Tensor window, int nFft, int hop, bool centered) {
+void Operators::stft(
+    TensorView input,
+    TensorView window,
+    int nFft,
+    int hop,
+    bool centered,
+    TensorView out) {
   THROW(NotImplemented, "stft: no device has this kernel; waifu::audio::stft composes one");
 }
 
-Tensor Operators::istft(Tensor spectrum, Tensor window, int nFft, int hop, bool centered) {
+void Operators::istft(
+    TensorView spectrum,
+    TensorView window,
+    int nFft,
+    int hop,
+    bool centered,
+    TensorView out) {
   THROW(NotImplemented, "istft: no device has this kernel; waifu::audio::istft composes one");
 }
-Tensor Operators::quickGelu(Tensor input) {
+
+void Operators::mul(TensorView input, float other, TensorView out) {
   NOT_IMPL();
 }
 
-void Operators::fill(Tensor input, float value) {
+void Operators::div(TensorView input, float other, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::add(Tensor a, Tensor b) {
+void Operators::mod(TensorView input, LongType other, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::sub(Tensor a, Tensor b) {
+void Operators::mul(TensorView input, TensorView other, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::subFloat(Tensor input, float other) {
+void Operators::softmax(TensorView input, TensorView out) {
   NOT_IMPL();
 }
 
-float Operators::elem(Tensor tensor) {
+void Operators::attention(TensorView q, TensorView k, TensorView v, bool causal, TensorView out) {
+  F::composedAttention(this, q, k, v, causal, out);
+}
+
+void Operators::pagedAttention(
+    TensorView q,
+    TensorView keyCache,
+    TensorView valueCache,
+    TensorView blockTable,
+    TensorView cuSeqlensQ,
+    TensorView seqlensK,
+    int maxQLen,
+    int maxKLen,
+    bool causal,
+    TensorView out) {
   NOT_IMPL();
 }
 
-bool Operators::elemBool(Tensor tensor) {
+void Operators::storeKVCache(
+    TensorView k,
+    TensorView v,
+    TensorView keyCache,
+    TensorView valueCache,
+    TensorView slotMapping) {
   NOT_IMPL();
 }
 
-Tensor Operators::tensor(lut::Span<const int> shape, DType dtype) {
+void Operators::gatedDeltaNetPrefill(
+    TensorView q,
+    TensorView k,
+    TensorView v,
+    TensorView g,
+    TensorView beta,
+    TensorView cuSeqlens,
+    TensorView stateSlots,
+    TensorView state,
+    TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::hostTensor(lut::Span<const int> shape, DType dtype) {
+void Operators::sample(
+    TensorView logits,
+    TensorView temperatures,
+    TensorView topKs,
+    TensorView topPs,
+    TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::tensorLike(Tensor input) {
+void Operators::add(TensorView input, TensorView other, TensorView out) {
   NOT_IMPL();
 }
 
-Tensor Operators::zeros(lut::Span<const int> shape, DType dtype) {
+void Operators::sub(TensorView input, TensorView other, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::subFloat(TensorView input, float other, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::sum(TensorView input, int dim, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::cumsum(TensorView input, int dim, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::max(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::eq(TensorView input, TensorView other, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::square(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::min(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::divTensor(TensorView input, TensorView other, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::neg(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::abs(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::exp(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::log(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::round(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::sqrt(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::rsqrt(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::sigmoid(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::tanh(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::relu(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::gelu(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::silu(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::sin(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::cos(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::quickGelu(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::fill(TensorView input, float value) {
+  NOT_IMPL();
+}
+
+bool Operators::all(TensorView A) {
+  NOT_IMPL();
+}
+
+bool Operators::allClose(TensorView A, TensorView B, float rtol, float atol) {
+  NOT_IMPL();
+}
+
+void Operators::print(TensorView tensor) {
+  NOT_IMPL();
+}
+
+void Operators::causalMask(TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::copy(TensorView src, TensorView dest) {
+  NOT_IMPL();
+}
+
+void Operators::swiglu(TensorView A, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::transfer(TensorView src, TensorView dest) {
+  NOT_IMPL();
+}
+
+float Operators::elem(TensorView tensor) {
+  NOT_IMPL();
+}
+
+bool Operators::elemBool(TensorView tensor) {
+  NOT_IMPL();
+}
+
+void Operators::repetitionPenalty(TensorView logits, TensorView history, float weight) {
+  NOT_IMPL();
+}
+
+void Operators::cast(TensorView input, TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::rand(TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::randNormal(TensorView out) {
+  NOT_IMPL();
+}
+
+void Operators::manualSeed(uint64_t seed) {
   NOT_IMPL();
 }
 
@@ -415,76 +414,6 @@ void Operators::resetPeakMemoryStats() {
 void Operators::releaseUnusedMemory() {
 }
 
-bool Operators::allClose(Tensor A, Tensor B, float rtol, float atol) {
-  NOT_IMPL();
-}
-
-bool Operators::all(Tensor A) {
-  NOT_IMPL();
-}
-
-void Operators::print(Tensor tensor) {
-  NOT_IMPL();
-}
-
-Tensor Operators::rmsNorm(Tensor input, Tensor weight, float eps) {
-  NOT_IMPL();
-}
-
-void Operators::rotaryEmbedding(Tensor positions, Tensor query, Tensor key, Tensor rotaryCache) {
-  NOT_IMPL();
-}
-
-Tensor Operators::pagedAttention(
-    Tensor q,
-    Tensor keyCache,
-    Tensor valueCache,
-    Tensor blockTable,
-    Tensor cuSeqlensQ,
-    Tensor seqlensK,
-    int maxQLen,
-    int maxKLen,
-    bool causal) {
-  NOT_IMPL();
-}
-
-void Operators::storeKVCache(
-    Tensor k,
-    Tensor v,
-    Tensor keyCache,
-    Tensor valueCache,
-    Tensor slotMapping) {
-  NOT_IMPL();
-}
-
-Tensor Operators::sample(Tensor logits, Tensor temperatures, Tensor topKs, Tensor topPs) {
-  NOT_IMPL();
-}
-
-Tensor Operators::causalMask(int max_len) {
-  NOT_IMPL();
-}
-
-void Operators::copy(Tensor src, Tensor dest) {
-  NOT_IMPL();
-}
-
-Tensor Operators::swiglu(Tensor A) {
-  NOT_IMPL();
-}
-
-Tensor Operators::toDevice(Device device, Tensor tensor) {
-  NOT_IMPL();
-}
-
-void Operators::repetitionPenalty(Tensor logits, Tensor history, float weight) {
-  NOT_IMPL();
-}
-
-Tensor Operators::cast(Tensor tensor, DType dtype) {
-  NOT_IMPL();
-}
-
 DType Operators::getDefaultFloatType() {
   NOT_IMPL();
 }
@@ -492,47 +421,6 @@ DType Operators::getDefaultFloatType() {
 void Operators::synchronize() {
 }
 
-void Operators::manualSeed(uint64_t seed) {
-  NOT_IMPL();
-}
-
-Tensor Operators::rand(lut::Span<const int> shape, DType dtype) {
-  NOT_IMPL();
-}
-
-Tensor Operators::randNormal(lut::Span<const int> shape) {
-  NOT_IMPL();
-}
-
-Tensor Operators::contiguous(Tensor input) {
-  Tensor x = tensorLike(input);
-  copy(input, x);
-
-  return x;
-}
-
-Tensor Operators::cat(Tensor A, Tensor B, int dim) {
-  CHECK(A.getDType() == B.getDType());
-  dim = A.getInternalShape()->getRealDim(dim);
-  CHECK(A.getDim() == B.getDim() && dim < A.getDim());
-
-  std::vector<int> shape = A.getShape();
-  int dA = A.getShape(dim);
-  int dB = B.getShape(dim);
-  shape[dim] = dA + dB;
-
-  Tensor C = tensor(shape, A.getDType());
-  Tensor sA = C.slice(dim, {0, dA});
-  Tensor sB = C.slice(dim, {dA, dA + dB});
-
-  copy(A, sA);
-  copy(B, sB);
-
-  return C;
-}
-
-// One per Device::Type, and cuda-host is deliberately left empty: it names memory rather than a
-// processor, so every operator asked for on it should report that it is not implemented.
 std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {
     nullptr,
     nullptr,

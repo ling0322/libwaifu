@@ -34,88 +34,88 @@ mlx::core::array scalarLike(float value, const mlx::core::array &a) {
 
 }  // namespace
 
-Tensor add(const Tensor &a, const Tensor &b) {
-  return fromMlxArray(mlx::core::add(toMlxArray(a), toMlxArray(b)));
+void add(const TensorView &a, const TensorView &b, const TensorView &out) {
+  writeInto(mlx::core::add(toMlxArray(a), toMlxArray(b)), out);
 }
 
-Tensor sub(const Tensor &a, const Tensor &b) {
-  return fromMlxArray(mlx::core::subtract(toMlxArray(a), toMlxArray(b)));
+void sub(const TensorView &a, const TensorView &b, const TensorView &out) {
+  writeInto(mlx::core::subtract(toMlxArray(a), toMlxArray(b)), out);
 }
 
-Tensor mul(const Tensor &a, const Tensor &b) {
-  return fromMlxArray(mlx::core::multiply(toMlxArray(a), toMlxArray(b)));
+void mul(const TensorView &a, const TensorView &b, const TensorView &out) {
+  writeInto(mlx::core::multiply(toMlxArray(a), toMlxArray(b)), out);
 }
 
-Tensor divTensor(const Tensor &a, const Tensor &b) {
-  return fromMlxArray(mlx::core::divide(toMlxArray(a), toMlxArray(b)));
+void divTensor(const TensorView &a, const TensorView &b, const TensorView &out) {
+  writeInto(mlx::core::divide(toMlxArray(a), toMlxArray(b)), out);
 }
 
-Tensor eq(const Tensor &a, const Tensor &b) {
-  return fromMlxArray(mlx::core::equal(toMlxArray(a), toMlxArray(b)));
+void eq(const TensorView &a, const TensorView &b, const TensorView &out) {
+  writeInto(mlx::core::equal(toMlxArray(a), toMlxArray(b)), out);
 }
 
-Tensor mulScalar(const Tensor &a, float other) {
+void mulScalar(const TensorView &a, float other, const TensorView &out) {
   mlx::core::array x = toMlxArray(a);
-  return fromMlxArray(mlx::core::multiply(x, scalarLike(other, x)));
+  writeInto(mlx::core::multiply(x, scalarLike(other, x)), out);
 }
 
-Tensor divScalar(const Tensor &a, float other) {
+void divScalar(const TensorView &a, float other, const TensorView &out) {
   mlx::core::array x = toMlxArray(a);
-  return fromMlxArray(mlx::core::divide(x, scalarLike(other, x)));
+  writeInto(mlx::core::divide(x, scalarLike(other, x)), out);
 }
 
-Tensor subScalar(const Tensor &a, float other) {
+void subScalar(const TensorView &a, float other, const TensorView &out) {
   mlx::core::array x = toMlxArray(a);
-  return fromMlxArray(mlx::core::subtract(x, scalarLike(other, x)));
+  writeInto(mlx::core::subtract(x, scalarLike(other, x)), out);
 }
 
-Tensor neg(const Tensor &a) {
-  return fromMlxArray(mlx::core::negative(toMlxArray(a)));
+void neg(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::negative(toMlxArray(a)), out);
 }
 
-Tensor abs(const Tensor &a) {
-  return fromMlxArray(mlx::core::abs(toMlxArray(a)));
+void abs(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::abs(toMlxArray(a)), out);
 }
 
-Tensor exp(const Tensor &a) {
-  return fromMlxArray(mlx::core::exp(toMlxArray(a)));
+void exp(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::exp(toMlxArray(a)), out);
 }
 
-Tensor log(const Tensor &a) {
-  return fromMlxArray(mlx::core::log(toMlxArray(a)));
+void log(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::log(toMlxArray(a)), out);
 }
 
-Tensor round(const Tensor &a) {
+void round(const TensorView &a, const TensorView &out) {
   // MLX's round at zero decimals is rint, ties to even, as torch.round is.
-  return fromMlxArray(mlx::core::round(toMlxArray(a), 0));
+  writeInto(mlx::core::round(toMlxArray(a), 0), out);
 }
 
-Tensor sqrt(const Tensor &a) {
-  return fromMlxArray(mlx::core::sqrt(toMlxArray(a)));
+void sqrt(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::sqrt(toMlxArray(a)), out);
 }
 
-Tensor rsqrt(const Tensor &a) {
-  return fromMlxArray(mlx::core::rsqrt(toMlxArray(a)));
+void rsqrt(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::rsqrt(toMlxArray(a)), out);
 }
 
-Tensor square(const Tensor &a) {
-  return fromMlxArray(mlx::core::square(toMlxArray(a)));
+void square(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::square(toMlxArray(a)), out);
 }
 
-Tensor sigmoid(const Tensor &a) {
-  return fromMlxArray(mlx::core::sigmoid(toMlxArray(a)));
+void sigmoid(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::sigmoid(toMlxArray(a)), out);
 }
 
-Tensor tanh(const Tensor &a) {
-  return fromMlxArray(mlx::core::tanh(toMlxArray(a)));
+void tanh(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::tanh(toMlxArray(a)), out);
 }
 
-Tensor relu(const Tensor &a) {
+void relu(const TensorView &a, const TensorView &out) {
   mlx::core::array x = toMlxArray(a);
-  return fromMlxArray(mlx::core::maximum(x, scalarLike(0.0f, x)));
+  writeInto(mlx::core::maximum(x, scalarLike(0.0f, x)), out);
 }
 
-Tensor gelu(const Tensor &a) {
+void gelu(const TensorView &a, const TensorView &out) {
   // The exact form, 0.5x(1 + erf(x/sqrt(2))), rather than the tanh approximation: the CPU
   // reference these are tested against uses the exact one, and MLX's core has no gelu of its own.
   mlx::core::array x = toMlxArray(a);
@@ -123,33 +123,33 @@ Tensor gelu(const Tensor &a) {
   mlx::core::array one = scalarLike(1.0f, x);
   mlx::core::array invSqrt2 = scalarLike(0.7071067811865475f, x);
 
-  return fromMlxArray(
+  writeInto(
       mlx::core::multiply(
           mlx::core::multiply(half, x),
-          mlx::core::add(one, mlx::core::erf(mlx::core::multiply(x, invSqrt2)))));
+          mlx::core::add(one, mlx::core::erf(mlx::core::multiply(x, invSqrt2)))), out);
 }
 
-Tensor silu(const Tensor &a) {
+void silu(const TensorView &a, const TensorView &out) {
   mlx::core::array x = toMlxArray(a);
-  return fromMlxArray(mlx::core::multiply(x, mlx::core::sigmoid(x)));
+  writeInto(mlx::core::multiply(x, mlx::core::sigmoid(x)), out);
 }
 
-Tensor quickGelu(const Tensor &a) {
+void quickGelu(const TensorView &a, const TensorView &out) {
   mlx::core::array x = toMlxArray(a);
-  return fromMlxArray(
-      mlx::core::multiply(x, mlx::core::sigmoid(mlx::core::multiply(x, scalarLike(1.702f, x)))));
+  mlx::core::array gate = mlx::core::sigmoid(mlx::core::multiply(x, scalarLike(1.702f, x)));
+  writeInto(mlx::core::multiply(x, gate), out);
 }
 
-Tensor sin(const Tensor &a) {
-  return fromMlxArray(mlx::core::sin(toMlxArray(a)));
+void sin(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::sin(toMlxArray(a)), out);
 }
 
-Tensor cos(const Tensor &a) {
-  return fromMlxArray(mlx::core::cos(toMlxArray(a)));
+void cos(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::cos(toMlxArray(a)), out);
 }
 
-Tensor softmax(const Tensor &a) {
-  return fromMlxArray(mlx::core::softmax(toMlxArray(a), -1));
+void softmax(const TensorView &a, const TensorView &out) {
+  writeInto(mlx::core::softmax(toMlxArray(a), -1), out);
 }
 
 }  // namespace metal

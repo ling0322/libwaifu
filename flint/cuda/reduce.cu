@@ -29,7 +29,9 @@
 
 #include "flint/cuda/accessor.h"
 #include "flint/cuda/common.h"
+#include "flint/cuda/copy.h"
 #include "flint/cuda/reduce.h"
+#include "flint/functional.h"
 #include "flint/operators.h"
 
 namespace fl {
@@ -130,7 +132,7 @@ __global__ void reduceRowsKernel(
 }
 
 template<MapReduceType MR_TYPE, typename TIn, typename TOut>
-Tensor reduceAllImpl(const Tensor &A) {
+Tensor reduceAllImpl(const TensorView &A) {
   CHECK(A.isContiguous());
   CHECK(A.getDType() == DType::getType<TIn>());
 
@@ -173,8 +175,9 @@ Tensor reduceAllImpl(const Tensor &A) {
 }
 
 template<MapReduceType MR_TYPE, typename TIn, typename TOut>
-Tensor reduceLastDim3DImpl(Tensor A) {
+void reduceLastDim3DImpl(const TensorView &A, const TensorView &out) {
   CHECK(A.getDType() == DType::getType<TIn>());
+  CHECK(out.getDType() == DType::getType<TOut>() && out.isContiguous());
   CHECK(A.getDim() >= 1);
 
   // Everything before the last axis is one axis of rows. Folding them needs them laid out as one,
@@ -186,10 +189,15 @@ Tensor reduceLastDim3DImpl(Tensor A) {
   int rows = 1;
   for (int size : shape) rows *= size;
 
-  Tensor flat = A.isContiguous() ? A : getOperators(Device::kCuda)->contiguous(A);
-  flat = flat.view({rows, last});
+  Tensor packed;
+  if (!A.isContiguous()) {
+    packed = F::emptyLike(A);
+    copy(A, packed);
+  }
+  TensorView flat = (A.isContiguous() ? A : TensorView(packed)).view({rows, last});
 
-  Tensor C = createCudaTensor<TOut>({rows});
+  CHECK(out.getNumEl() == rows);
+  TensorView C = out.view({rows});
   if (rows > 0) {
     constexpr int blockSize = 256;
     reduceRowsKernel<TIn, TOut, MR_TYPE, blockSize><<<rows, blockSize>>>(flat, C);
@@ -197,42 +205,38 @@ Tensor reduceLastDim3DImpl(Tensor A) {
     LL_CUDA_SYNCHRONIZE();
     LL_CHECK_CUDA_STATUS(cudaGetLastError());
   }
-
-  // The reduced axis is gone and the rest come back. A 1D input reduces to one element, which
-  // stays a 1D tensor of one rather than becoming a scalar -- what it always was.
-  if (shape.empty()) return C;
-  return C.view(shape);
 }
 
-Tensor reduceLastDim(Tensor A, DType outType, MapReduceType reduceType) {
+void reduceLastDim(const TensorView &A, MapReduceType reduceType, const TensorView &C) {
   DType inType = A.getDType();
+  DType outType = C.getDType();
 
   if (inType == DType::kFloat16 && outType == DType::kFloat && reduceType == MapReduceType::SUM_EXP)
-    return reduceLastDim3DImpl<MapReduceType::SUM_EXP, half, float>(A);
+    return reduceLastDim3DImpl<MapReduceType::SUM_EXP, half, float>(A, C);
   if (inType == DType::kFloat16 && outType == DType::kFloat && reduceType == MapReduceType::SUM)
-    return reduceLastDim3DImpl<MapReduceType::SUM, half, float>(A);
+    return reduceLastDim3DImpl<MapReduceType::SUM, half, float>(A, C);
   if (inType == DType::kFloat16 && outType == DType::kFloat &&
       reduceType == MapReduceType::SUM_SQUARE)
-    return reduceLastDim3DImpl<MapReduceType::SUM_SQUARE, half, float>(A);
+    return reduceLastDim3DImpl<MapReduceType::SUM_SQUARE, half, float>(A, C);
   if (inType == DType::kFloat16 && outType == DType::kFloat16 && reduceType == MapReduceType::MAX)
-    return reduceLastDim3DImpl<MapReduceType::MAX, half, half>(A);
+    return reduceLastDim3DImpl<MapReduceType::MAX, half, half>(A, C);
   if (inType == DType::kFloat16 && outType == DType::kFloat16 && reduceType == MapReduceType::MIN)
-    return reduceLastDim3DImpl<MapReduceType::MIN, half, half>(A);
+    return reduceLastDim3DImpl<MapReduceType::MIN, half, half>(A, C);
 
   // The same reductions over float32, for a model that runs in full precision on the card -- the
   // kernels were always generic over the type, and only this dispatch was half-only.
   if (inType == DType::kFloat && outType == DType::kFloat) {
     switch (reduceType) {
       case MapReduceType::SUM_EXP:
-        return reduceLastDim3DImpl<MapReduceType::SUM_EXP, float, float>(A);
+        return reduceLastDim3DImpl<MapReduceType::SUM_EXP, float, float>(A, C);
       case MapReduceType::SUM:
-        return reduceLastDim3DImpl<MapReduceType::SUM, float, float>(A);
+        return reduceLastDim3DImpl<MapReduceType::SUM, float, float>(A, C);
       case MapReduceType::SUM_SQUARE:
-        return reduceLastDim3DImpl<MapReduceType::SUM_SQUARE, float, float>(A);
+        return reduceLastDim3DImpl<MapReduceType::SUM_SQUARE, float, float>(A, C);
       case MapReduceType::MAX:
-        return reduceLastDim3DImpl<MapReduceType::MAX, float, float>(A);
+        return reduceLastDim3DImpl<MapReduceType::MAX, float, float>(A, C);
       case MapReduceType::MIN:
-        return reduceLastDim3DImpl<MapReduceType::MIN, float, float>(A);
+        return reduceLastDim3DImpl<MapReduceType::MIN, float, float>(A, C);
       default:
         break;
     }
@@ -241,7 +245,7 @@ Tensor reduceLastDim(Tensor A, DType outType, MapReduceType reduceType) {
   NOT_IMPL();
 }
 
-Tensor reduceAll(Tensor A, DType outType, MapReduceType reduceType) {
+Tensor reduceAll(const TensorView &A, DType outType, MapReduceType reduceType) {
   DType inType = A.getDType();
 
   if (inType == DType::kFloat16 && outType == DType::kFloat && reduceType == MapReduceType::SUM)

@@ -25,6 +25,7 @@
 
 #include "flint/cuda/accessor.h"
 #include "flint/cuda/common.h"
+#include "flint/cuda/softmax.h"
 
 namespace fl {
 namespace op {
@@ -202,55 +203,24 @@ __global__ void softmaxStridedKernel(
 }
 
 template<typename T>
-Tensor softmaxStrided3D(Tensor A) {
+void softmaxStrided3D(const TensorView &A, const TensorView &C) {
   CHECK(A.getDType() == DType::getType<T>());
   CHECK(A.getDim() == 3);
-
-  Tensor C = createCudaTensor<T>(A.getShape());
 
   constexpr int blockSize = 256;
   int rows = A.getShape(0) * A.getShape(1);
   softmaxStridedKernel<T, blockSize><<<rows, blockSize>>>(A, C);
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return C;
 }
 
 template<typename T>
-Tensor softmax1D(Tensor A) {
-  Tensor xA = A.view({1, 1, A.getShape(0)});
-  Tensor C = softmaxStrided3D<T>(xA);
-
-  return C.view({C.getShape(2)});
-}
-
-template<typename T>
-Tensor softmax2D(Tensor A) {
-  Tensor xA = A.view({1, A.getShape(0), A.getShape(1)});
-  Tensor C = softmaxStrided3D<T>(xA);
-
-  return C.view({C.getShape(1), C.getShape(2)});
-}
-
-template<typename T>
-Tensor softmax4D(Tensor A) {
-  std::vector<int> shape = A.getShape();
-
-  Tensor xA = A.view({-1, A.getShape(2), A.getShape(3)});
-  Tensor C = softmaxStrided3D<T>(xA);
-
-  return C.view(shape);
-}
-
-template<typename T>
-Tensor softmaxContiguous(Tensor A) {
+void softmaxContiguous(const TensorView &A, const TensorView &C) {
   int width = A.getShape(-1);
   int64_t numel = A.getNumEl();
   CHECK(numel < std::numeric_limits<int>::max());
   int rows = static_cast<int>(numel / width);
 
-  Tensor C = createCudaTensor<T>(A.getShape());
   const T *input = getDataPtrCuda<T>(A);
   T *output = getDataPtrCuda<T>(C);
 
@@ -264,7 +234,7 @@ Tensor softmaxContiguous(Tensor A) {
     softmaxWarpKernel<T, rowsPerBlock, perThread><<<blocks, block>>>(input, output, width, rows);
     LL_CUDA_SYNCHRONIZE();
     LL_CHECK_CUDA_STATUS(cudaGetLastError());
-    return C;
+    return;
   }
 
   constexpr int blockSize = 256;
@@ -280,23 +250,38 @@ Tensor softmaxContiguous(Tensor A) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
 template<typename T>
-Tensor softmaxImpl(Tensor A) {
-  if (A.isContiguous()) return softmaxContiguous<T>(A);
-  if (A.getDim() == 1) return softmax1D<T>(A);
-  if (A.getDim() == 2) return softmax2D<T>(A);
-  if (A.getDim() == 3) return softmaxStrided3D<T>(A);
-  if (A.getDim() == 4) return softmax4D<T>(A);
+void softmaxImpl(const TensorView &A, const TensorView &C) {
+  if (A.getNumEl() == 0) return;
+  if (A.isContiguous()) return softmaxContiguous<T>(A, C);
+
+  // A strided input is read through its strides as (batch, rows, width); `C` is packed, so any
+  // view of it of the same shape is too.
+  int d = A.getDim();
+  if (d == 1) return softmaxStrided3D<T>(A.view({1, 1, A.getShape(0)}), C.view({1, 1, A.getShape(0)}));
+  if (d == 2) {
+    return softmaxStrided3D<T>(
+        A.view({1, A.getShape(0), A.getShape(1)}),
+        C.view({1, A.getShape(0), A.getShape(1)}));
+  }
+  if (d == 3) return softmaxStrided3D<T>(A, C);
+  if (d == 4) {
+    return softmaxStrided3D<T>(
+        A.view({-1, A.getShape(2), A.getShape(3)}),
+        C.view({-1, A.getShape(2), A.getShape(3)}));
+  }
 
   NOT_IMPL();
 }
 
-Tensor softmax(Tensor A) {
-  if (A.getDType() == DType::kFloat16) return softmaxImpl<half>(A);
-  if (A.getDType() == DType::kFloat) return softmaxImpl<float>(A);
+void softmax(const TensorView &A, const TensorView &C) {
+  CHECK(C.getDType() == A.getDType() && C.isContiguous());
+  C.throwIfInvalidShape(A.getShape(), "softmax");
+
+  if (A.getDType() == DType::kFloat16) return softmaxImpl<half>(A, C);
+  if (A.getDType() == DType::kFloat) return softmaxImpl<float>(A, C);
 
   NOT_IMPL();
 }

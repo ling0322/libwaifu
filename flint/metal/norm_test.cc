@@ -2,6 +2,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -20,18 +21,18 @@ Operators *cpuOps() {
 }
 
 Tensor toMetal(const Tensor &a) {
-  return metalOps()->cast(metalOps()->toDevice(Device::getMetal(), a), DType::kFloat16);
+  return F::cast(metalOps(), F::toDevice(metalOps(), a, Device::getMetal()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat));
+  return F::toDevice(metalOps(), F::cast(metalOps(), a, DType::kFloat), Device::getCpu());
 }
 
 std::vector<float> readFloats(const Tensor &a) {
   // Called on the CPU inputs as well as on what the card gave back, so a tensor already on the
   // CPU stays where it is: the Metal operators take only their own.
   Tensor host = a.getDevice().getType() == Device::kCpu ? a : toCpu(a);
-  Tensor c = cpuOps()->contiguous(host);
+  Tensor c = F::contiguous(cpuOps(), host);
   const float *data = c.getInternalData()->getData<float>(c.getInternalOffset());
   return std::vector<float>(data, data + c.getNumEl());
 }
@@ -46,9 +47,9 @@ CATCH_TEST_CASE("test Metal layerNorm", "[op][metal]") {
     constexpr int kRows = 4;
     constexpr float kEps = 1e-5f;
 
-    Tensor a = cpuOps()->rand({kRows, cols}, DType::kFloat);
-    Tensor weight = cpuOps()->rand({cols}, DType::kFloat);
-    Tensor bias = cpuOps()->rand({cols}, DType::kFloat);
+    Tensor a = F::rand(Device::getCpu(), {kRows, cols}, DType::kFloat);
+    Tensor weight = F::rand(Device::getCpu(), {cols}, DType::kFloat);
+    Tensor bias = F::rand(Device::getCpu(), {cols}, DType::kFloat);
 
     std::vector<float> x = readFloats(a);
     std::vector<float> w = readFloats(weight);
@@ -70,7 +71,7 @@ CATCH_TEST_CASE("test Metal layerNorm", "[op][metal]") {
       }
     }
 
-    Tensor got = metalOps()->layerNorm(toMetal(a), toMetal(weight), toMetal(bias), kEps);
+    Tensor got = F::layerNorm(metalOps(), toMetal(a), toMetal(weight), toMetal(bias), kEps);
     std::vector<float> actual = readFloats(got);
     for (size_t i = 0; i < expected.size(); ++i) {
       CATCH_INFO("element " << i << ": " << actual[i] << " vs " << expected[i]);
@@ -83,9 +84,9 @@ CATCH_TEST_CASE("test Metal layerNorm (no weight, no bias)", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
   constexpr int kHidden = 64;
-  Tensor a = cpuOps()->rand({1, kHidden}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {1, kHidden}, DType::kFloat);
 
-  Tensor out = metalOps()->layerNorm(toMetal(a), Tensor(), Tensor(), 1e-5f);
+  Tensor out = F::layerNorm(metalOps(), toMetal(a), Tensor(), Tensor(), 1e-5f);
   std::vector<float> data = readFloats(out);
 
   double mean = 0.0;
@@ -102,11 +103,11 @@ CATCH_TEST_CASE("test Metal layerNorm (3D input)", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
   // The transformer path: [batch, tokens, hidden].
-  Tensor a = cpuOps()->rand({2, 64, 640}, DType::kFloat);
-  Tensor w = cpuOps()->rand({640}, DType::kFloat);
-  Tensor b = cpuOps()->rand({640}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {2, 64, 640}, DType::kFloat);
+  Tensor w = F::rand(Device::getCpu(), {640}, DType::kFloat);
+  Tensor b = F::rand(Device::getCpu(), {640}, DType::kFloat);
 
-  Tensor got = metalOps()->layerNorm(toMetal(a), toMetal(w), toMetal(b), 1e-5f);
+  Tensor got = F::layerNorm(metalOps(), toMetal(a), toMetal(w), toMetal(b), 1e-5f);
   CATCH_REQUIRE(got.getShape() == std::vector<int>{2, 64, 640});
 
   std::vector<float> data = readFloats(got);
@@ -129,9 +130,9 @@ CATCH_TEST_CASE("test Metal groupNorm", "[op][metal]") {
   constexpr int kPerGroup = kChannels / kGroups;
   constexpr float kEps = 1e-5f;
 
-  Tensor a = cpuOps()->rand({kBatch, kChannels, kHeight, kWidth}, DType::kFloat);
-  Tensor weight = cpuOps()->rand({kChannels}, DType::kFloat);
-  Tensor bias = cpuOps()->rand({kChannels}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {kBatch, kChannels, kHeight, kWidth}, DType::kFloat);
+  Tensor weight = F::rand(Device::getCpu(), {kChannels}, DType::kFloat);
+  Tensor bias = F::rand(Device::getCpu(), {kChannels}, DType::kFloat);
 
   std::vector<float> x = readFloats(a);
   std::vector<float> w = readFloats(weight);
@@ -159,7 +160,7 @@ CATCH_TEST_CASE("test Metal groupNorm", "[op][metal]") {
     }
   }
 
-  Tensor got = metalOps()->groupNorm(toMetal(a), toMetal(weight), toMetal(bias), kGroups, kEps);
+  Tensor got = F::groupNorm(metalOps(), toMetal(a), toMetal(weight), toMetal(bias), kGroups, kEps);
   std::vector<float> actual = readFloats(got);
   for (size_t i = 0; i < expected.size(); ++i) {
     CATCH_INFO("element " << i << ": " << actual[i] << " vs " << expected[i]);
@@ -170,9 +171,9 @@ CATCH_TEST_CASE("test Metal groupNorm", "[op][metal]") {
 CATCH_TEST_CASE("test Metal groupNorm (one group, and one per channel)", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
-  Tensor input = toMetal(cpuOps()->rand({1, 4, 3, 3}, DType::kFloat));
-  Tensor one = metalOps()->groupNorm(input, Tensor(), Tensor(), 1, 1e-5f);
-  Tensor each = metalOps()->groupNorm(input, Tensor(), Tensor(), 4, 1e-5f);
+  Tensor input = toMetal(F::rand(Device::getCpu(), {1, 4, 3, 3}, DType::kFloat));
+  Tensor one = F::groupNorm(metalOps(), input, Tensor(), Tensor(), 1, 1e-5f);
+  Tensor each = F::groupNorm(metalOps(), input, Tensor(), Tensor(), 4, 1e-5f);
 
   CATCH_REQUIRE(one.getShape() == std::vector<int>{1, 4, 3, 3});
   CATCH_REQUIRE(each.getShape() == std::vector<int>{1, 4, 3, 3});
@@ -184,11 +185,11 @@ CATCH_TEST_CASE("test Metal groupNorm (large plane, VAE scale)", "[op][metal]") 
   // A VAE decoder normalizes 128 channels over 256x256 in 32 groups. The sum of squares is
   // over 260k elements per group, which is where fp16 runs out if the accumulation is not
   // widened.
-  Tensor a = cpuOps()->rand({1, 128, 256, 256}, DType::kFloat);
-  Tensor w = cpuOps()->rand({128}, DType::kFloat);
-  Tensor b = cpuOps()->rand({128}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {1, 128, 256, 256}, DType::kFloat);
+  Tensor w = F::rand(Device::getCpu(), {128}, DType::kFloat);
+  Tensor b = F::rand(Device::getCpu(), {128}, DType::kFloat);
 
-  Tensor got = metalOps()->groupNorm(toMetal(a), toMetal(w), toMetal(b), 32, 1e-5);
+  Tensor got = F::groupNorm(metalOps(), toMetal(a), toMetal(w), toMetal(b), 32, 1e-5);
   std::vector<float> data = readFloats(got);
   int nanCount = 0;
   for (float v : data) {

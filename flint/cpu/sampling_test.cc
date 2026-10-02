@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -51,7 +52,7 @@ CATCH_TEST_CASE("test CPU batched sampling parameters", "[fl][op][cpu][sampling]
   Tensor topKs = Tensor::create<IntType>({3}, {0, 1, 0});
   Tensor topPs = Tensor::create<float>({3}, {1.0f, 1.0f, 0.1f});
 
-  Tensor sampled = cpuOps()->sample(logits, temperatures, topKs, topPs);
+  Tensor sampled = F::sample(cpuOps(), logits, temperatures, topKs, topPs);
   CATCH_REQUIRE(sampled.getShape() == std::vector<int>{3});
   const LongType *data = sampled.getInternalData()->getData<LongType>(
       sampled.getInternalOffset());

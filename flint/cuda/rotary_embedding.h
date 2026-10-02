@@ -23,6 +23,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -30,10 +31,10 @@ namespace cuda {
 
 /// Apply NeoX-style rotary embedding to query and key in place.
 void rotaryEmbedding(
-    const Tensor &positions,
-    Tensor &query,
-    Tensor &key,
-    const Tensor &rotaryCache);
+    const TensorView &positions,
+    const TensorView &query,
+    const TensorView &key,
+    const TensorView &rotaryCache);
 
 }  // namespace cuda
 }  // namespace op

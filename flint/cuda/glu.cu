@@ -24,7 +24,8 @@
 
 #include "flint/cuda/common.h"
 #include "flint/cuda/glu.h"
-#include "flint/operators.h"
+#include "flint/cuda/copy.h"
+#include "flint/functional.h"
 
 namespace fl {
 namespace op {
@@ -148,15 +149,11 @@ bool alignedForHalf2(const T *pointer) {
 
 /// Any rank, contiguous: every leading dimension folded into rows.
 template<typename T, GateOp OP>
-Tensor gatedLinearContiguous(const Tensor &tensor) {
-  std::vector<Tensor::ShapeType> shapeC = tensor.getShape();
-  shapeC.back() /= 2;
-  Tensor C = createCudaTensor<T>(shapeC);
-
+void gatedLinearContiguous(const TensorView &tensor, const TensorView &C) {
   int inputWidth = tensor.getShape(-1);
   int outputWidth = inputWidth / 2;
   int64_t rows = inputWidth == 0 ? 0 : tensor.getNumEl() / inputWidth;
-  if (rows == 0 || outputWidth == 0) return C;
+  if (rows == 0 || outputWidth == 0) return;
 
   constexpr int blockSize = 256;
   constexpr int64_t gridLimit = 65535;
@@ -186,16 +183,12 @@ Tensor gatedLinearContiguous(const Tensor &tensor) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
 /// Rank 3 and strided, read through its strides without a copy.
 template<typename T, GateOp OP>
-Tensor gatedLinearStrided3D(const Tensor &tensor) {
-  std::vector<Tensor::ShapeType> shapeC = tensor.getShape();
-  shapeC.back() /= 2;
-  Tensor C = createCudaTensor<T>(shapeC);
-  if (C.getNumEl() == 0) return C;
+void gatedLinearStrided3D(const TensorView &tensor, const TensorView &C) {
+  if (C.getNumEl() == 0) return;
 
   constexpr int blockSize = 256;
   dim3 d;
@@ -229,40 +222,47 @@ Tensor gatedLinearStrided3D(const Tensor &tensor) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
 template<typename T, GateOp OP>
-Tensor gatedLinearOf(const Tensor &tensor) {
-  if (tensor.isContiguous()) return gatedLinearContiguous<T, OP>(tensor);
+void gatedLinearOf(const TensorView &tensor, const TensorView &C) {
+  if (tensor.isContiguous()) return gatedLinearContiguous<T, OP>(tensor, C);
 
   // A strided view of rank 3 is read through its strides; rank 2 is that with one leading row.
-  if (tensor.getDim() == 3) return gatedLinearStrided3D<T, OP>(tensor);
-  if (tensor.getDim() == 2) return gatedLinearStrided3D<T, OP>(tensor.unsqueeze(0)).subtensor(0);
+  if (tensor.getDim() == 3) return gatedLinearStrided3D<T, OP>(tensor, C);
+  if (tensor.getDim() == 2) {
+    return gatedLinearStrided3D<T, OP>(tensor.unsqueeze(0), C.unsqueeze(0));
+  }
 
   // Any other strided rank is copied whole first.
-  return gatedLinearContiguous<T, OP>(getOperators(Device::kCuda)->contiguous(tensor));
+  Tensor packed = F::emptyLike(tensor);
+  copy(tensor, packed);
+  gatedLinearContiguous<T, OP>(packed, C);
 }
 
 template<GateOp OP>
-Tensor gatedLinear(const Tensor &tensor) {
+void gatedLinear(const TensorView &tensor, const TensorView &C) {
   CHECK(tensor.getDevice().getType() == Device::kCuda);
   CHECK(tensor.getDim() >= 1);
   CHECK(tensor.getShape(-1) % 2 == 0);
+  CHECK(C.getDType() == tensor.getDType() && C.isContiguous());
+  std::vector<int> shapeC = tensor.getShape();
+  shapeC.back() /= 2;
+  C.throwIfInvalidShape(shapeC, "gatedLinear");
 
   // Checked rather than assumed: a float32 tensor read as half is garbage, not an error.
-  if (tensor.getDType() == DType::kFloat16) return gatedLinearOf<half, OP>(tensor);
-  if (tensor.getDType() == DType::kFloat) return gatedLinearOf<float, OP>(tensor);
+  if (tensor.getDType() == DType::kFloat16) return gatedLinearOf<half, OP>(tensor, C);
+  if (tensor.getDType() == DType::kFloat) return gatedLinearOf<float, OP>(tensor, C);
 
   THROW(InvalidArg, "swiglu and geglu take a float16 or float tensor on CUDA");
 }
 
-Tensor swiglu(const Tensor &tensor) {
-  return gatedLinear<GateOp::SILU>(tensor);
+void swiglu(const TensorView &tensor, const TensorView &out) {
+  gatedLinear<GateOp::SILU>(tensor, out);
 }
 
-Tensor geglu(const Tensor &tensor) {
-  return gatedLinear<GateOp::GELU>(tensor);
+void geglu(const TensorView &tensor, const TensorView &out) {
+  gatedLinear<GateOp::GELU>(tensor, out);
 }
 
 }  // namespace cuda

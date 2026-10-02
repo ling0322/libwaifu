@@ -17,6 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -93,7 +94,7 @@ CATCH_TEST_CASE("test subtensor and slice", "[core][nn][tensor]") {
 }
 
 CATCH_TEST_CASE("test view infers a dimension", "[core][nn][tensor]") {
-  Tensor tensor = cpuOps()->rand({2, 3, 4, 5}, DType::kFloat);
+  Tensor tensor = F::rand(Device::getCpu(), {2, 3, 4, 5}, DType::kFloat);
 
   // A contiguous tensor and a strided one take different code paths, and only the contiguous one
   // resolves the inferred -1 before walking the strides.

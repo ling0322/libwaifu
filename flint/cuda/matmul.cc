@@ -93,14 +93,21 @@ std::shared_ptr<MatMul> MatMul::createCutlass() {
   return mm;
 }
 
-Tensor MatMul::apply(const Tensor &A, const Tensor &B) {
+void MatMul::apply(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDevice().getType() == Device::kCuda);
   CHECK(B.getDevice().getType() == Device::kCuda);
+  CHECK(C.getDevice().getType() == Device::kCuda);
+  CHECK(C.getDType() == A.getDType() && C.isContiguous());
+  CHECK(A.getDim() >= 2 && B.getDim() >= 2);
+  std::vector<int> shapeC = A.getShape();
+  shapeC.back() = B.getShape(-1);
+  C.throwIfInvalidShape(shapeC, "matmul");
+  if (C.getNumEl() == 0) return;
 
   if (A.getDType() == DType::kFloat16 && B.getDType() == DType::kFloat16) {
-    return matmulFloat<half>(A, B);
+    matmulFloat<half>(A, B, C);
   } else if (A.getDType() == DType::kFloat && B.getDType() == DType::kFloat) {
-    return matmulFloat<float>(A, B);
+    matmulFloat<float>(A, B, C);
   } else {
     NOT_IMPL();
   }
@@ -224,7 +231,7 @@ void callGemmArray<float>(
 }
 
 template<typename T>
-Tensor MatMul::matmulFloat(const Tensor &A, const Tensor &B) {
+void MatMul::matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDType() == B.getDType() && A.getDType() == DType::getType<T>());
   if (A.getDim() == 2 && B.getDim() == 2) {
     // A single row against a transposed weight is the decode-step shape, and the vector kernel
@@ -235,21 +242,21 @@ Tensor MatMul::matmulFloat(const Tensor &A, const Tensor &B) {
     if constexpr (std::is_same<T, half>::value) {
       if (A.getShape(0) == 1 && A.getStride(1) == 1 && B.getStride(0) == 1 &&
           B.getStride(1) == B.getShape(0) && B.getShape(0) % 8 == 0) {
-        return gemvHalf(A.subtensor(0), B);
+        return gemvHalf(A.subtensor(0), B, C);
       }
     }
-    return gemm<T>(A, B);
+    return gemm<T>(A, B, C);
   } else if (A.getDim() > 2 && B.getDim() == 2 && A.isContiguous()) {
-    return bmmToGemm<T>(A, B);
+    return bmmToGemm<T>(A, B, C);
   } else if (A.getDim() >= 2 && B.getDim() >= 2 && A.getDim() >= B.getDim()) {
-    return bmm<T>(A, B);
+    return bmm<T>(A, B, C);
   } else {
     NOT_IMPL();
   }
 }
 
 template<typename T>
-std::vector<const T *> getBatchImpl1(const Tensor &A) {
+std::vector<const T *> getBatchImpl1(const TensorView &A) {
   const T *base = getDataPtrCuda<T>(A);
 
   int stride0 = A.getStride(0);
@@ -261,7 +268,7 @@ std::vector<const T *> getBatchImpl1(const Tensor &A) {
 }
 
 template<typename T>
-std::vector<const T *> getBatchImpl2(const Tensor &A) {
+std::vector<const T *> getBatchImpl2(const TensorView &A) {
   const T *base = getDataPtrCuda<T>(A);
 
   int stride0 = A.getStride(0);
@@ -276,7 +283,7 @@ std::vector<const T *> getBatchImpl2(const Tensor &A) {
 }
 
 template<typename T>
-std::vector<const T *> MatMul::getBatch(const Tensor &A, int nBatchDim) {
+std::vector<const T *> MatMul::getBatch(const TensorView &A, int nBatchDim) {
   if (nBatchDim == 1) return getBatchImpl1<T>(A);
   if (nBatchDim == 2) return getBatchImpl2<T>(A);
 
@@ -284,23 +291,19 @@ std::vector<const T *> MatMul::getBatch(const Tensor &A, int nBatchDim) {
 }
 
 template<typename T>
-Tensor MatMul::bmmToGemm(const Tensor &A, const Tensor &B) {
-  std::vector<int> shape = A.getShape();
-
-  Tensor xA = A.view({-1, A.getShape(-1)});
-  Tensor xC = gemm<T>(xA, B);
-
-  shape.back() = B.getShape(1);
-  return xC.view(shape);
+void MatMul::bmmToGemm(const TensorView &A, const TensorView &B, const TensorView &C) {
+  TensorView xA = A.view({-1, A.getShape(-1)});
+  TensorView xC = C.view({-1, C.getShape(-1)});
+  gemm<T>(xA, B, xC);
 }
 
 template<typename T>
-Tensor MatMul::bmm(Tensor A, Tensor B) {
-  Tensor xB = B;
+void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
+  TensorView xB = B;
   if (A.getDim() != B.getDim()) xB = op::cpu::expandBatchDims(B, A.getShape());
 
   std::vector<int> shapeC = op::cpu::getBmmOutputShape(A, xB);
-  Tensor C = createCudaTensor<T>(shapeC);
+  C.throwIfInvalidShape(shapeC, "bmm");
 
   int nBatchDim = A.getDim() - 2;
 
@@ -338,13 +341,12 @@ Tensor MatMul::bmm(Tensor A, Tensor B) {
       nb);
 
   LL_CUDA_SYNCHRONIZE();
-  return C;
 }
 
 template<typename T>
-Tensor MatMul::gemm(Tensor A, Tensor B) {
+void MatMul::gemm(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDim() == B.getDim() && A.getDim() == 2);
-  Tensor C = createCudaTensor<T>({A.getShape(0), B.getShape(1)});
+  C.throwIfInvalidShape({A.getShape(0), B.getShape(1)}, "gemm");
 
   op::cpu::GEMMArgs gemmArgs = op::cpu::generateGemmArgs(A, B, C);
   callGemm<T>(
@@ -363,8 +365,6 @@ Tensor MatMul::gemm(Tensor A, Tensor B) {
       getDataPtrCuda<T>(C),
       gemmArgs.ldc);
   LL_CUDA_SYNCHRONIZE();
-
-  return C;
 }
 
 }  // namespace cuda

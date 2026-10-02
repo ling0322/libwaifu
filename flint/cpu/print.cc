@@ -57,7 +57,7 @@ struct CpuPrinterImpl {
 #endif
 };
 
-void print(const Tensor &tensor) {
+void print(const TensorView &tensor) {
   TensorPrinter<CpuPrinterImpl> printer;
 
   if (tensor.getDType() == DType::kFloat) printer.print<float>(tensor);

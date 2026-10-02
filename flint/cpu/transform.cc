@@ -21,16 +21,14 @@
 
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-Tensor transformKernel(const Tensor &A, float alpha, float beta) {
-  Tensor C = tensorLike(A);
+void transformKernel(const TensorView &A, float alpha, float beta, const TensorView &C) {
+  C.throwIfInvalidShape(A.getShape(), "transform");
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
@@ -46,14 +44,12 @@ Tensor transformKernel(const Tensor &A, float alpha, float beta) {
       c[i] = a[i] * static_cast<T>(alpha) + static_cast<T>(beta);
     }
   }
-
-  return C;
 }
 
-Tensor transform(const Tensor &src, float alpha, float beta) {
-  if (src.getDType() == DType::kFloat) return transformKernel<float>(src, alpha, beta);
+void transform(const TensorView &A, float alpha, float beta, const TensorView &C) {
+  if (A.getDType() == DType::kFloat) return transformKernel<float>(A, alpha, beta, C);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (src.getDType() == DType::kFloat16) return transformKernel<Float16>(src, alpha, beta);
+  if (A.getDType() == DType::kFloat16) return transformKernel<Float16>(A, alpha, beta, C);
 #endif
 
   NOT_IMPL();

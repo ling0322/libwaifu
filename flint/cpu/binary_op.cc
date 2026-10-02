@@ -24,22 +24,16 @@
 #include "lutil/attributes.h"
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor broadcastTensor(const Tensor &a, lut::Span<const Tensor::ShapeType> targetShape) {
-  Tensor x = expandBatchDims(a, targetShape);
-  return x.expand(targetShape);
-}
-
 template<typename T>
-Tensor binaryOpKernel(const Tensor &A, const Tensor &B, BinaryOp op) {
-  Tensor xB = broadcastTensor(B, A.getShape());
-  Tensor C = tensorLike(A);
+void binaryOpKernel(const TensorView &A, const TensorView &B, BinaryOp op, const TensorView &C) {
+  std::vector<int> shape = A.getShape();
+  TensorView xB = expandBatchDims(B, shape).expand(shape);
+  C.throwIfInvalidShape(shape, "binaryOp");
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
   TensorList<const T, 1> vB = TensorList<const T, 1>::fromTensor(xB);
@@ -66,15 +60,12 @@ Tensor binaryOpKernel(const Tensor &A, const Tensor &B, BinaryOp op) {
       }
     }
   }
-
-  return C;
 }
 
-// apply C <- BinaryOp(A, B)
-Tensor binaryOp(const Tensor &A, const Tensor &B, BinaryOp op) {
-  if (A.getDType() == DType::kFloat) return binaryOpKernel<float>(A, B, op);
+void binaryOp(const TensorView &A, const TensorView &B, BinaryOp op, const TensorView &C) {
+  if (A.getDType() == DType::kFloat) return binaryOpKernel<float>(A, B, op, C);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (A.getDType() == DType::kFloat16) return binaryOpKernel<Float16>(A, B, op);
+  if (A.getDType() == DType::kFloat16) return binaryOpKernel<Float16>(A, B, op, C);
 #endif
 
   NOT_IMPL();

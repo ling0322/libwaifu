@@ -33,6 +33,7 @@
 
 #include "flint/cpu/external_tensor_data.h"
 #include "flint/fp8.h"
+#include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
 #include "lutil/internal/log.h"
@@ -155,6 +156,12 @@ OperatorsHandle &derefHandle(fl_operators_t operators) {
 fl::Operators *deref(fl_operators_t operators) {
   return derefHandle(operators).operators.get();
 }
+
+/// The device an fl_operators_t was asked for, which is where what it makes is allocated.
+fl::Device handleDevice(fl_operators_t operators) {
+  return toDevice(derefHandle(operators).device);
+}
+
 
 /// Every tensor an operation reads has to be on the operators' own device. The kernels check that
 /// with the library's fatal check, which ends the process; asked here first, a caller that mixed
@@ -285,7 +292,7 @@ int32_t fl_tensor_zeros(
     fl_tensor_t *out) {
   return guard([&]() {
     std::vector<int> dims = toShape(shape, ndim);
-    return publish(deref(operators)->zeros(dims, toDType(dtype)), out);
+    return publish(fl::F::zeros(handleDevice(operators), dims, toDType(dtype)), out);
   });
 }
 
@@ -297,7 +304,7 @@ int32_t fl_tensor_empty(
     fl_tensor_t *out) {
   return guard([&]() {
     std::vector<int> dims = toShape(shape, ndim);
-    return publish(deref(operators)->tensor(dims, toDType(dtype)), out);
+    return publish(fl::F::empty(handleDevice(operators), dims, toDType(dtype)), out);
   });
 }
 
@@ -309,7 +316,7 @@ int32_t fl_tensor_host_empty(
     fl_tensor_t *out) {
   return guard([&]() {
     std::vector<int> dims = toShape(shape, ndim);
-    return publish(deref(operators)->hostTensor(dims, toDType(dtype)), out);
+    return publish(fl::F::empty(fl::Device(fl::Device::kCudaHost), dims, toDType(dtype)), out);
   });
 }
 
@@ -331,7 +338,7 @@ int32_t fl_tensor_from_data(
     }
 
     std::vector<int> dims = toShape(shape, ndim);
-    fl::Tensor tensor = deref(operators)->tensor(dims, toDType(dtype));
+    fl::Tensor tensor = fl::F::empty(handleDevice(operators), dims, toDType(dtype));
     int64_t expected = getPackedSize(tensor);
     if (data_size != expected) {
       throw lut::InvalidArgError(
@@ -546,7 +553,7 @@ int32_t fl_tensor_squeeze(fl_tensor_t tensor, int32_t dim, fl_tensor_t *out) {
 }
 
 int32_t fl_tensor_contiguous(fl_operators_t operators, fl_tensor_t tensor, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->contiguous(deref(tensor)), out); });
+  return guard([&]() { return publish(fl::F::contiguous(deref(operators), deref(tensor)), out); });
 }
 
 int32_t fl_tensor_to_device(
@@ -561,7 +568,7 @@ int32_t fl_tensor_to_device(
     // about the two ends rather than about a backend.
     if (source.getDevice().getType() == toDevice(device).getType()) return publish(source, out);
 
-    return publish(deref(operators)->toDevice(toDevice(device), source), out);
+    return publish(fl::F::toDevice(deref(operators), source, toDevice(device)), out);
   });
 }
 
@@ -627,7 +634,7 @@ int32_t fl_tensor_cast(
     fl_dtype_t dtype,
     fl_tensor_t *out) {
   return guard(
-      [&]() { return publish(deref(operators)->cast(deref(tensor), toDType(dtype)), out); });
+      [&]() { return publish(fl::F::cast(deref(operators), deref(tensor), toDType(dtype)), out); });
 }
 
 int32_t fl_tensor_get_nbytes(fl_tensor_t tensor, int64_t *out) {
@@ -657,12 +664,12 @@ int32_t fl_tensor_copy_to_host(
     // Packed where it lies and moved afterwards, rather than the other way round: a transfer
     // reads one contiguous run, so a strided tensor has to be packed on the device it is on --
     // which is the device whose operators were handed in.
-    if (!source.isContiguous()) source = deref(operators)->contiguous(source);
+    if (!source.isContiguous()) source = fl::F::contiguous(deref(operators), source);
 
     // Only what is not already host memory crosses the bus. Page-locked host memory is read
     // where it lies, and the operators for it are the CPU's rather than the card's.
     if (!source.getDevice().isHost()) {
-      source = deref(operators)->toDevice(fl::Device::getCpu(), source);
+      source = fl::F::toDevice(deref(operators), source, fl::Device::getCpu());
     }
 
     const void *data = source.getInternalData()->getData<void>(source.getInternalOffset());
@@ -677,7 +684,7 @@ int32_t fl_arange(
     int64_t end,
     int64_t step,
     fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->arangeLong(begin, end, step), out); });
+  return guard([&]() { return publish(fl::F::arangeLong(handleDevice(operators), begin, end, step), out); });
 }
 
 int32_t fl_rand(
@@ -688,14 +695,14 @@ int32_t fl_rand(
     fl_tensor_t *out) {
   return guard([&]() {
     std::vector<int> dims = toShape(shape, ndim);
-    return publish(deref(operators)->rand(dims, toDType(dtype)), out);
+    return publish(fl::F::rand(handleDevice(operators), dims, toDType(dtype)), out);
   });
 }
 
 int32_t fl_randn(fl_operators_t operators, const int32_t *shape, int32_t ndim, fl_tensor_t *out) {
   return guard([&]() {
     std::vector<int> dims = toShape(shape, ndim);
-    return publish(deref(operators)->randNormal(dims), out);
+    return publish(fl::F::randNormal(handleDevice(operators), dims), out);
   });
 }
 
@@ -712,7 +719,7 @@ int32_t fl_lookup(
     fl_tensor_t indices,
     fl_tensor_t *out) {
   return guard(
-      [&]() { return publish(deref(operators)->lookup(deref(table), deref(indices)), out); });
+      [&]() { return publish(fl::F::lookup(deref(operators), deref(table), deref(indices)), out); });
 }
 
 int32_t fl_rotary_embedding(
@@ -738,7 +745,7 @@ int32_t fl_rms_norm(
     float eps,
     fl_tensor_t *out) {
   return guard(
-      [&]() { return publish(deref(operators)->rmsNorm(deref(input), deref(weight), eps), out); });
+      [&]() { return publish(fl::F::rmsNorm(deref(operators), deref(input), deref(weight), eps), out); });
 }
 
 int32_t fl_conv2d(
@@ -762,7 +769,7 @@ int32_t fl_conv2d(
     const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
 
     return publish(
-        deref(operators)->conv2d(deref(input), deref(weight), b, stride, padding, dilation, groups),
+        fl::F::conv2d(deref(operators), deref(input), deref(weight), b, stride, padding, dilation, groups),
         out);
   });
 }
@@ -788,7 +795,7 @@ int32_t fl_conv1d(
     const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
 
     return publish(
-        deref(operators)->conv1d(deref(input), deref(weight), b, stride, padding, dilation, groups),
+        fl::F::conv1d(deref(operators), deref(input), deref(weight), b, stride, padding, dilation, groups),
         out);
   });
 }
@@ -814,8 +821,7 @@ int32_t fl_conv_transpose1d(
     const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
 
     return publish(
-        deref(operators)->convTranspose1d(
-            deref(input),
+        fl::F::convTranspose1d(deref(operators), deref(input),
             deref(weight),
             b,
             stride,
@@ -843,7 +849,7 @@ int32_t fl_snake(
     fl::Tensor emptyTensor;
     const fl::Tensor &b = beta ? deref(beta) : emptyTensor;
 
-    return publish(deref(operators)->snake(deref(input), deref(alpha), b, eps), out);
+    return publish(fl::F::snake(deref(operators), deref(input), deref(alpha), b, eps), out);
   });
 }
 
@@ -862,7 +868,7 @@ int32_t fl_stft(
     checkOnDevice(deref(window), operators, "the window");
 
     return publish(
-        deref(operators)->stft(deref(input), deref(window), n_fft, hop, centered != 0),
+        fl::F::stft(deref(operators), deref(input), deref(window), n_fft, hop, centered != 0),
         out);
   });
 }
@@ -882,7 +888,7 @@ int32_t fl_istft(
     checkOnDevice(deref(window), operators, "the window");
 
     return publish(
-        deref(operators)->istft(deref(spectrum), deref(window), n_fft, hop, centered != 0),
+        fl::F::istft(deref(operators), deref(spectrum), deref(window), n_fft, hop, centered != 0),
         out);
   });
 }
@@ -900,7 +906,7 @@ int32_t fl_group_norm(
     const fl::Tensor &w = weight ? deref(weight) : emptyTensor;
     const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
 
-    return publish(deref(operators)->groupNorm(deref(input), w, b, groups, eps), out);
+    return publish(fl::F::groupNorm(deref(operators), deref(input), w, b, groups, eps), out);
   });
 }
 
@@ -910,7 +916,7 @@ int32_t fl_upsample_nearest2d(
     int32_t scale,
     fl_tensor_t *out) {
   return guard(
-      [&]() { return publish(deref(operators)->upsampleNearest2d(deref(input), scale), out); });
+      [&]() { return publish(fl::F::upsampleNearest2d(deref(operators), deref(input), scale), out); });
 }
 
 int32_t fl_upsample_nearest1d(
@@ -919,7 +925,7 @@ int32_t fl_upsample_nearest1d(
     int32_t size,
     fl_tensor_t *out) {
   return guard(
-      [&]() { return publish(deref(operators)->upsampleNearest1d(deref(input), size), out); });
+      [&]() { return publish(fl::F::upsampleNearest1d(deref(operators), deref(input), size), out); });
 }
 
 int32_t fl_layer_norm(
@@ -936,12 +942,12 @@ int32_t fl_layer_norm(
     const fl::Tensor &w = weight ? deref(weight) : emptyTensor;
     const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
 
-    return publish(deref(operators)->layerNorm(deref(input), w, b, eps), out);
+    return publish(fl::F::layerNorm(deref(operators), deref(input), w, b, eps), out);
   });
 }
 
 int32_t fl_quick_gelu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->quickGelu(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::quickGelu(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_matmul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
@@ -951,7 +957,7 @@ int32_t fl_matmul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_ten
     checkOnDevice(deref(a), operators, "the left operand");
     checkOnDevice(deref(b), operators, "the right operand");
 
-    return publish(deref(operators)->matmul(deref(a), deref(b)), out);
+    return publish(fl::F::matmul(deref(operators), deref(a), deref(b)), out);
   });
 }
 
@@ -1147,31 +1153,31 @@ int32_t fl_fp8_matmul_tensor_scale(
 }
 
 int32_t fl_mul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->mul(deref(a), deref(b)), out); });
+  return guard([&]() { return publish(fl::F::mul(deref(operators), deref(a), deref(b)), out); });
 }
 
 int32_t fl_add(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->add(deref(a), deref(b)), out); });
+  return guard([&]() { return publish(fl::F::add(deref(operators), deref(a), deref(b)), out); });
 }
 
 int32_t fl_sub(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->sub(deref(a), deref(b)), out); });
+  return guard([&]() { return publish(fl::F::sub(deref(operators), deref(a), deref(b)), out); });
 }
 
 int32_t fl_eq(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->eq(deref(a), deref(b)), out); });
+  return guard([&]() { return publish(fl::F::eq(deref(operators), deref(a), deref(b)), out); });
 }
 
 int32_t fl_div(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->divTensor(deref(a), deref(b)), out); });
+  return guard([&]() { return publish(fl::F::divTensor(deref(operators), deref(a), deref(b)), out); });
 }
 
 int32_t fl_mul_scalar(fl_operators_t operators, fl_tensor_t input, float other, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->mul(deref(input), other), out); });
+  return guard([&]() { return publish(fl::F::mul(deref(operators), deref(input), other), out); });
 }
 
 int32_t fl_div_scalar(fl_operators_t operators, fl_tensor_t input, float other, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->div(deref(input), other), out); });
+  return guard([&]() { return publish(fl::F::div(deref(operators), deref(input), other), out); });
 }
 
 int32_t fl_mod_scalar(
@@ -1179,83 +1185,83 @@ int32_t fl_mod_scalar(
     fl_tensor_t input,
     int64_t other,
     fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->mod(deref(input), other), out); });
+  return guard([&]() { return publish(fl::F::mod(deref(operators), deref(input), other), out); });
 }
 
 int32_t fl_square(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->square(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::square(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_neg(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->neg(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::neg(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_abs(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->abs(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::abs(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_exp(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->exp(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::exp(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_log(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->log(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::log(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_round(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->round(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::round(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_sqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->sqrt(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::sqrt(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_rsqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->rsqrt(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::rsqrt(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_sigmoid(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->sigmoid(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::sigmoid(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_tanh(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->tanh(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::tanh(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_relu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->relu(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::relu(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_gelu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->gelu(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::gelu(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_silu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->silu(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::silu(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_sin(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->sin(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::sin(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_cos(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->cos(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::cos(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_softmax(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->softmax(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::softmax(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_swiglu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->swiglu(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::swiglu(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_geglu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->geglu(deref(input)), out); });
+  return guard([&]() { return publish(fl::F::geglu(deref(operators), deref(input)), out); });
 }
 
 int32_t fl_sum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->sum(deref(input), dim), out); });
+  return guard([&]() { return publish(fl::F::sum(deref(operators), deref(input), dim), out); });
 }
 
 int32_t fl_cumsum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
@@ -1267,21 +1273,21 @@ int32_t fl_cumsum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_t
           "fl_cumsum: dimension " + std::to_string(dim) + " of a tensor of rank " +
           std::to_string(rank));
     }
-    return publish(deref(operators)->cumsum(tensor, dim), out);
+    return publish(fl::F::cumsum(deref(operators), tensor, dim), out);
   });
 }
 
 int32_t fl_max(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
   return guard([&]() {
     checkLastDim(deref(input), dim, "fl_max");
-    return publish(deref(operators)->max(deref(input)), out);
+    return publish(fl::F::max(deref(operators), deref(input)), out);
   });
 }
 
 int32_t fl_min(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
   return guard([&]() {
     checkLastDim(deref(input), dim, "fl_min");
-    return publish(deref(operators)->min(deref(input)), out);
+    return publish(fl::F::min(deref(operators), deref(input)), out);
   });
 }
 
@@ -1291,11 +1297,11 @@ int32_t fl_cat(
     fl_tensor_t b,
     int32_t dim,
     fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->cat(deref(a), deref(b), dim), out); });
+  return guard([&]() { return publish(fl::F::cat(deref(operators), deref(a), deref(b), dim), out); });
 }
 
 int32_t fl_causal_mask(fl_operators_t operators, int32_t max_len, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(operators)->causalMask(max_len), out); });
+  return guard([&]() { return publish(fl::F::causalMask(handleDevice(operators), max_len), out); });
 }
 
 int32_t fl_attention(
@@ -1306,7 +1312,7 @@ int32_t fl_attention(
     int32_t causal,
     fl_tensor_t *out) {
   return guard([&]() {
-    return publish(deref(operators)->attention(deref(q), deref(k), deref(v), causal != 0), out);
+    return publish(fl::F::attention(deref(operators), deref(q), deref(k), deref(v), causal != 0), out);
   });
 }
 
@@ -1336,8 +1342,7 @@ int32_t fl_paged_attention(
     fl_tensor_t *out) {
   return guard([&]() {
     return publish(
-        deref(operators)->pagedAttention(
-            deref(q),
+        fl::F::pagedAttention(deref(operators), deref(q),
             deref(key_cache),
             deref(value_cache),
             deref(block_table),
@@ -1382,7 +1387,7 @@ int32_t fl_sample_with_params(
     checkOnDevice(deref(top_ps), operators, "the top-p values");
 
     return publish(
-        deref(operators)->sample(deref(logits), deref(temperatures), deref(top_ks), deref(top_ps)),
+        fl::F::sample(deref(operators), deref(logits), deref(temperatures), deref(top_ks), deref(top_ps)),
         out);
   });
 }

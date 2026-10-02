@@ -2,6 +2,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -20,7 +21,7 @@ Operators *cpuOps() {
 }
 
 Tensor toMetal(const Tensor &a) {
-  return metalOps()->cast(metalOps()->toDevice(Device::getMetal(), a), DType::kFloat16);
+  return F::cast(metalOps(), F::toDevice(metalOps(), a, Device::getMetal()), DType::kFloat16);
 }
 
 std::vector<float> readFloats(const Tensor &a) {
@@ -28,8 +29,8 @@ std::vector<float> readFloats(const Tensor &a) {
   // CPU stays where it is: the Metal operators take only their own.
   Tensor host = a.getDevice().getType() == Device::kCpu
       ? a
-      : metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat));
-  Tensor c = cpuOps()->contiguous(host);
+      : F::toDevice(metalOps(), F::cast(metalOps(), a, DType::kFloat), Device::getCpu());
+  Tensor c = F::contiguous(cpuOps(), host);
   const float *data = c.getInternalData()->getData<float>(c.getInternalOffset());
   return std::vector<float>(data, data + c.getNumEl());
 }
@@ -73,9 +74,10 @@ std::vector<float> referenceConv2d(
 }
 
 bool matchesReference(Shape4 in, Shape4 filter, bool withBias, int stride, int padding) {
-  Tensor input = cpuOps()->rand({in.n, in.c, in.h, in.w}, DType::kFloat);
-  Tensor weight = cpuOps()->rand({filter.n, filter.c, filter.h, filter.w}, DType::kFloat);
-  Tensor bias = withBias ? cpuOps()->rand({filter.n}, DType::kFloat) : Tensor();
+  Tensor input = F::rand(Device::getCpu(), {in.n, in.c, in.h, in.w}, DType::kFloat);
+  Tensor weight =
+      F::rand(Device::getCpu(), {filter.n, filter.c, filter.h, filter.w}, DType::kFloat);
+  Tensor bias = withBias ? F::rand(Device::getCpu(), {filter.n}, DType::kFloat) : Tensor();
 
   std::vector<float> x = readFloats(input);
   std::vector<float> w = readFloats(weight);
@@ -85,7 +87,7 @@ bool matchesReference(Shape4 in, Shape4 filter, bool withBias, int stride, int p
   std::vector<float> expected =
       referenceConv2d(x, in, w, filter, withBias ? &b : nullptr, stride, padding, out);
 
-  Tensor got = metalOps()->conv2d(
+  Tensor got = F::conv2d(metalOps(),
       toMetal(input), toMetal(weight), withBias ? toMetal(bias) : Tensor(),
       stride, padding, 1, 1);
   if (got.getShape() != std::vector<int>{out.n, out.c, out.h, out.w}) return false;

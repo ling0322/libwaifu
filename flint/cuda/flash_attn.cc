@@ -76,7 +76,7 @@ int chooseNumSplits(int numTiles, int numSm, int numKeyValueBlocks, int maxSplit
   return 1;
 }
 
-bool isSupported(const Tensor &q, const Tensor &k, const Tensor &v) {
+bool isSupported(const TensorView &q, const TensorView &k, const TensorView &v) {
   if (q.getDType() != DType::kFloat16) return false;
   if (k.getDType() != DType::kFloat16 || v.getDType() != DType::kFloat16) return false;
   if (q.getDim() != 4 || k.getDim() != 4 || v.getDim() != 4) return false;
@@ -96,7 +96,10 @@ bool isSupported(const Tensor &q, const Tensor &k, const Tensor &v) {
   return true;
 }
 
-bool isPagedSupported(const Tensor &q, const Tensor &keyCache, const Tensor &valueCache) {
+bool isPagedSupported(
+    const TensorView &q,
+    const TensorView &keyCache,
+    const TensorView &valueCache) {
   if (q.getDType() != DType::kFloat16) return false;
   if (keyCache.getDType() != DType::kFloat16 || valueCache.getDType() != DType::kFloat16)
     return false;
@@ -120,8 +123,13 @@ bool isPagedSupported(const Tensor &q, const Tensor &keyCache, const Tensor &val
 
 }  // namespace
 
-Tensor flashAttention(Tensor q, Tensor k, Tensor v, bool causal) {
-  if (!isSupported(q, k, v)) return Tensor();
+bool flashAttention(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    bool causal,
+    const TensorView &output) {
+  if (!isSupported(q, k, v)) return false;
 
   int batchSize = q.getShape(0);
   int numHeads = q.getShape(1);
@@ -130,7 +138,8 @@ Tensor flashAttention(Tensor q, Tensor k, Tensor v, bool causal) {
   int numKeyValueHeads = k.getShape(1);
   int keyValueLength = k.getShape(2);
 
-  Tensor output = createCudaTensorHalf({batchSize, numHeads, queryLength, headDim});
+  CHECK(output.getDType() == DType::kFloat16 && output.isContiguous());
+  output.throwIfInvalidShape({batchSize, numHeads, queryLength, headDim}, "flashAttention");
   Tensor softmaxLse = createCudaTensorFloat({batchSize, numHeads, queryLength});
 
   FLASH_NAMESPACE::Flash_fwd_params params{};
@@ -201,23 +210,24 @@ Tensor flashAttention(Tensor q, Tensor k, Tensor v, bool causal) {
   }
   params.num_splits = numSplits;
 
-  if (!FLASH_NAMESPACE::run_mha_fwd(params, nullptr)) return Tensor();
+  if (!FLASH_NAMESPACE::run_mha_fwd(params, nullptr)) return false;
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
-  return output;
+  return true;
 }
 
-Tensor pagedFlashAttention(
-    Tensor q,
-    Tensor keyCache,
-    Tensor valueCache,
-    Tensor blockTable,
-    Tensor cuSeqlensQ,
-    Tensor seqlensK,
+bool pagedFlashAttention(
+    const TensorView &q,
+    const TensorView &keyCache,
+    const TensorView &valueCache,
+    const TensorView &blockTable,
+    const TensorView &cuSeqlensQ,
+    const TensorView &seqlensK,
     int maxQLen,
     int maxKLen,
-    bool causal) {
-  if (!isPagedSupported(q, keyCache, valueCache)) return Tensor();
+    bool causal,
+    const TensorView &output) {
+  if (!isPagedSupported(q, keyCache, valueCache)) return false;
   CHECK(blockTable.getDType() == DType::kInt32);
   CHECK(cuSeqlensQ.getDType() == DType::kInt32);
   CHECK(seqlensK.getDType() == DType::kInt32);
@@ -234,7 +244,8 @@ Tensor pagedFlashAttention(
   CHECK(blockTable.getShape(0) == numSequences);
   CHECK(maxKLen <= blockTable.getShape(1) * blockSize);
 
-  Tensor output = createCudaTensorHalf({totalQ, numHeads, headDim});
+  CHECK(output.getDType() == DType::kFloat16 && output.isContiguous());
+  output.throwIfInvalidShape({totalQ, numHeads, headDim}, "pagedFlashAttention");
   Tensor softmaxLse = createCudaTensorFloat({numHeads, totalQ});
 
   FLASH_NAMESPACE::Flash_fwd_params params{};
@@ -303,10 +314,10 @@ Tensor pagedFlashAttention(
   // no meaningful value for, so the split kernel runs with a single split.
   params.num_splits = 1;
 
-  if (!FLASH_NAMESPACE::run_mha_fwd(params, nullptr, /*force_split_kernel=*/true)) return Tensor();
+  if (!FLASH_NAMESPACE::run_mha_fwd(params, nullptr, /*force_split_kernel=*/true)) return false;
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 
-  return output;
+  return true;
 }
 
 }  // namespace cuda

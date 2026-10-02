@@ -20,8 +20,6 @@
 #include "flint/cpu/reduce.h"
 
 #include "flint/cpu/accessor.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
@@ -71,10 +69,11 @@ T getReduceInitial() {
 }
 
 template<typename T, ReduceType REDUCE_TYPE>
-Tensor reduceKernel(Tensor A) {
+void reduceKernel(const TensorView &A, const TensorView &out) {
   std::vector<int> shape = A.getShape();
   shape.back() = 1;
-  Tensor C = tensor(shape, A.getDType());
+  CHECK(out.isContiguous() && out.getNumEl() * A.getShape(-1) == A.getNumEl());
+  TensorView C = out.view(shape);
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
@@ -101,27 +100,22 @@ Tensor reduceKernel(Tensor A) {
 
     c[0] = accumulator;
   }
-
-  shape.pop_back();
-  if (shape.empty()) return C;
-
-  return C.view(shape);
 }
 
-Tensor reduce(const Tensor &A, MapReduceType reduceType) {
+void reduce(const TensorView &A, MapReduceType reduceType, const TensorView &out) {
   if (A.getDType() == DType::kFloat && reduceType == MapReduceType::SUM)
-    return reduceKernel<float, ReduceType::SUM>(A);
+    return reduceKernel<float, ReduceType::SUM>(A, out);
   if (A.getDType() == DType::kFloat && reduceType == MapReduceType::MAX)
-    return reduceKernel<float, ReduceType::MAX>(A);
+    return reduceKernel<float, ReduceType::MAX>(A, out);
   if (A.getDType() == DType::kFloat && reduceType == MapReduceType::MIN)
-    return reduceKernel<float, ReduceType::MIN>(A);
+    return reduceKernel<float, ReduceType::MIN>(A, out);
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16 && reduceType == MapReduceType::SUM)
-    return reduceKernel<Float16, ReduceType::SUM>(A);
+    return reduceKernel<Float16, ReduceType::SUM>(A, out);
   if (A.getDType() == DType::kFloat16 && reduceType == MapReduceType::MAX)
-    return reduceKernel<Float16, ReduceType::MAX>(A);
+    return reduceKernel<Float16, ReduceType::MAX>(A, out);
   if (A.getDType() == DType::kFloat16 && reduceType == MapReduceType::MIN)
-    return reduceKernel<Float16, ReduceType::MIN>(A);
+    return reduceKernel<Float16, ReduceType::MIN>(A, out);
 #endif
 
   NOT_IMPL();

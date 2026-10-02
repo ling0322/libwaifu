@@ -20,12 +20,13 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-void print(const Tensor &A);
+void print(const TensorView &A);
 
 }  // namespace cuda
 }  // namespace op

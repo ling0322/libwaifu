@@ -21,46 +21,32 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
 #include "lutil/strings.h"
 
-#include "flint/cpu/cpu_tensor_data.h"
-#include "flint/cpu/tensor.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/copy_stream.h"
-#include "flint/cuda/cuda_host_tensor_data.h"
 #include "flint/cuda/cuda_tensor_data.h"
 #include "flint/cuda/future_tensor.h"
 #include "flint/cuda/staged_upload.h"
+#include "flint/functional.h"
 #include "flint/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-template<Device::Type DEVICE>
-std::shared_ptr<TensorData> createData(int64_t numel, DType dtype);
-template<>
-std::shared_ptr<TensorData> createData<Device::kCpu>(int64_t numel, DType dtype) {
-  return op::cpu::CpuTensorData::create(numel, dtype);
-}
-template<>
-std::shared_ptr<TensorData> createData<Device::kCuda>(int64_t numel, DType dtype) {
-  return CudaTensorData::create(numel, dtype);
-}
-template<>
-std::shared_ptr<TensorData> createData<Device::kCudaHost>(int64_t numel, DType dtype) {
-  return CudaHostTensorData::create(numel, dtype);
-}
+namespace {
 
 /// Copy `n` bytes, in whichever direction the two ends call for.
 ///
 /// The direction cannot be read off the destination alone once there are two host devices: a copy
 /// into the CPU may come from the GPU or from page-locked host memory, and those are a transfer
 /// and a memcpy respectively. So both ends are asked.
-inline void copyData(
+void copyData(
     Device::Type destDevice,
     Device::Type srcDevice,
     void *dest,
@@ -73,38 +59,11 @@ inline void copyData(
     std::memcpy(dest, src, n);
   } else if (destIsHost) {
     LL_CHECK_CUDA_STATUS(cudaMemcpy(dest, src, n, cudaMemcpyDeviceToHost));
-  } else {
+  } else if (srcIsHost) {
     LL_CHECK_CUDA_STATUS(cudaMemcpy(dest, src, n, cudaMemcpyHostToDevice));
+  } else {
+    LL_CHECK_CUDA_STATUS(cudaMemcpy(dest, src, n, cudaMemcpyDeviceToDevice));
   }
-}
-
-template<Device::Type DEVICE>
-Tensor toDevice(const Tensor &tensor) {
-  CHECK(tensor.getDevice().getType() != DEVICE);
-  CHECK(tensor.isContiguous()) << "only contiguous tensor is allowed to copy between devices";
-  std::shared_ptr<TensorData> srcData = tensor.getInternalData();
-
-  // create data object.
-  int64_t numel = srcData->getNumEl();
-  DType dtype = srcData->getDType();
-
-  std::shared_ptr<TensorData> destData = createData<DEVICE>(numel, dtype);
-
-  // copy data.
-  int64_t srcOffset = tensor.getInternalOffset();
-  void *src = srcData->getRawData() + dtype.getTotalSize(srcOffset);
-  void *dest = destData->getRawData();
-  int64_t nbytes = dtype.getTotalSize(destData->getNumEl());
-  copyData(DEVICE, tensor.getDevice().getType(), dest, src, nbytes);
-
-  // create dest tesnor.
-  auto shape = std::make_shared<TensorShape>(tensor.getShape());
-  return Tensor::create(shape, destData);
-}
-
-Tensor toCpu(const Tensor &tensor) {
-  if (tensor.getDevice().getType() == Device::kCpu) return tensor;
-  return toDevice<Device::kCpu>(tensor);
 }
 
 /// Pageable host memory to the GPU through StagedUpload, on the copy stream.
@@ -115,51 +74,68 @@ Tensor toCpu(const Tensor &tensor) {
 /// for the staging buffers, and the kernels already queued go on running while the next weight
 /// crosses. The compute stream is made to wait for the copy instead, which is the one ordering the
 /// reader needs.
-Tensor toCudaStaged(const Tensor &tensor) {
-  CHECK(tensor.isContiguous()) << "only contiguous tensor is allowed to copy between devices";
-  std::shared_ptr<TensorData> srcData = tensor.getInternalData();
-  DType dtype = srcData->getDType();
-  int64_t numel = tensor.getNumEl();
-
+///
+/// `dest` was allocated in the compute stream's order -- `F::empty` allocates on the legacy
+/// stream -- so the block is only ours where stream 0 has reached that allocation. The copy stream
+/// is non-blocking and would otherwise write it while whatever last owned the block may still be
+/// running, so it waits on an event recorded on stream 0 first. The block stays stream 0's to
+/// give back, which is right: stream 0 waits for the copy below before anything else touches it.
+void transferStaged(void *dest, const void *src, int64_t nbytes) {
   cudaStream_t stream = CopyStream::getInstance()->getStream();
 
-  // Allocated in the copy stream's order, which is where it is written first -- the same
-  // arrangement as toDeviceAsync().
-  std::shared_ptr<TensorData> destData = CudaTensorData::create(numel, dtype, stream);
+  cudaEvent_t allocated = nullptr;
+  LL_CHECK_CUDA_STATUS(cudaEventCreateWithFlags(&allocated, cudaEventDisableTiming));
+  LL_CHECK_CUDA_STATUS(cudaEventRecord(allocated, 0));
+  LL_CHECK_CUDA_STATUS(cudaStreamWaitEvent(stream, allocated, 0));
+  LL_CHECK_CUDA_STATUS(cudaEventDestroy(allocated));
 
-  const void *src = srcData->getRawData() + dtype.getTotalSize(tensor.getInternalOffset());
-  StagedUpload::getInstance()->copy(
-      destData->getRawData(),
-      src,
-      dtype.getTotalSize(numel),
-      stream);
+  StagedUpload::getInstance()->copy(dest, src, nbytes, stream);
 
-  cudaEvent_t event = nullptr;
-  LL_CHECK_CUDA_STATUS(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
-  LL_CHECK_CUDA_STATUS(cudaEventRecord(event, stream));
-  LL_CHECK_CUDA_STATUS(cudaStreamWaitEvent(0, event, 0));
-  LL_CHECK_CUDA_STATUS(cudaEventDestroy(event));
-
-  // The compute stream is ordered after the copy now, so it owns the bytes and is where they go
-  // back -- as in FutureTensor::finish().
-  static_cast<CudaTensorData *>(destData.get())->setOwningStream(0);
-
-  auto shape = std::make_shared<TensorShape>(tensor.getShape());
-  return Tensor::create(shape, destData);
+  cudaEvent_t copied = nullptr;
+  LL_CHECK_CUDA_STATUS(cudaEventCreateWithFlags(&copied, cudaEventDisableTiming));
+  LL_CHECK_CUDA_STATUS(cudaEventRecord(copied, stream));
+  LL_CHECK_CUDA_STATUS(cudaStreamWaitEvent(0, copied, 0));
+  LL_CHECK_CUDA_STATUS(cudaEventDestroy(copied));
 }
 
-Tensor toCuda(const Tensor &tensor) {
-  if (tensor.getDevice().getType() == Device::kCuda) return tensor;
-  if (tensor.getDevice().getType() == Device::kCpu &&
-      tensor.getDType().getTotalSize(tensor.getNumEl()) >= StagedUpload::MinBytes) {
-    return toCudaStaged(tensor);
+bool isCudaSide(Device::Type type) {
+  return type == Device::kCpu || type == Device::kCuda || type == Device::kCudaHost;
+}
+
+}  // namespace
+
+void transfer(const TensorView &src, const TensorView &dest) {
+  Device::Type srcType = src.getDevice().getType();
+  Device::Type destType = dest.getDevice().getType();
+  CHECK(isCudaSide(srcType) && isCudaSide(destType));
+  CHECK(srcType != destType);
+  CHECK(srcType != Device::kCpu || destType != Device::kCpu);
+  CHECK(src.getDType() == dest.getDType());
+  CHECK(src.isContiguous() && dest.isContiguous())
+      << "only contiguous tensor is allowed to copy between devices";
+  dest.throwIfInvalidShape(src.getShape(), "transfer");
+
+  DType dtype = src.getDType();
+  int64_t nbytes = dtype.getTotalSize(src.getNumEl());
+  if (nbytes == 0) return;
+
+  const void *from = src.getInternalData()->getRawData() +
+                     dtype.getTotalSize(src.getInternalOffset());
+  void *to = dest.getInternalData()->getRawData() + dtype.getTotalSize(dest.getInternalOffset());
+
+  if (srcType == Device::kCpu && destType == Device::kCuda && nbytes >= StagedUpload::MinBytes) {
+    transferStaged(to, from, nbytes);
+  } else {
+    copyData(destType, srcType, to, from, nbytes);
   }
-  return toDevice<Device::kCuda>(tensor);
 }
 
-Tensor toCudaHost(const Tensor &tensor) {
-  if (tensor.getDevice().getType() == Device::kCudaHost) return tensor;
-  return toDevice<Device::kCudaHost>(tensor);
+Tensor toCpu(const Tensor &tensor) {
+  if (tensor.getDevice().getType() == Device::kCpu) return tensor;
+
+  Tensor dest = F::empty(Device::getCpu(), tensor.getShape(), tensor.getDType());
+  transfer(tensor, dest);
+  return dest;
 }
 
 FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
@@ -183,18 +159,23 @@ FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
 
   std::shared_ptr<TensorData> srcData = tensor.getInternalData();
   DType dtype = srcData->getDType();
-  int64_t numel = srcData->getNumEl();
+
+  // The tensor's own elements, not its whole storage: a view of part of a larger page-locked
+  // block copies only what it sees.
+  int64_t numel = tensor.getNumEl();
 
   // Allocated in the copy stream's order, so that the copy below may write it with no dependency
   // to arrange: the allocator hands the block over at this point in this stream, and this stream
   // is where the writing happens.
-  std::shared_ptr<TensorData> destData = CudaTensorData::create(numel, dtype, stream);
+  std::shared_ptr<TensorData> destData =
+      CudaTensorData::create(std::max<int64_t>(numel, 1), dtype, stream);
 
   const void *src = srcData->getRawData() + dtype.getTotalSize(tensor.getInternalOffset());
   void *dest = destData->getRawData();
   int64_t nbytes = dtype.getTotalSize(numel);
-  LL_CHECK_CUDA_STATUS(
-      cudaMemcpyAsync(dest, src, nbytes, cudaMemcpyHostToDevice, stream));
+  if (nbytes > 0) {
+    LL_CHECK_CUDA_STATUS(cudaMemcpyAsync(dest, src, nbytes, cudaMemcpyHostToDevice, stream));
+  }
 
   // Made and thrown away per copy rather than kept in a pool. The pair measures 238 ns against
   // the 2.2 us it takes to launch the copy above, so a pool buys a tenth of one launch and costs
@@ -208,15 +189,6 @@ FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
   // source it reads, and hands the tensor out only once it has been seen through.
   auto shape = std::make_shared<TensorShape>(tensor.getShape());
   return FutureTensor(Tensor::create(shape, destData), event, srcData);
-}
-
-Tensor toDevice(Device device, const Tensor &tensor) {
-  if (Device::kCpu == device.getType()) return toCpu(tensor);
-  if (Device::kCuda == device.getType()) return toCuda(tensor);
-  if (Device::kCudaHost == device.getType()) return toCudaHost(tensor);
-
-  NOT_IMPL();
-  return Tensor();
 }
 
 }  // namespace cuda

@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -27,7 +27,9 @@ namespace cpu {
 
 enum class MapReduceType { SUM, MAX, MIN };
 
-Tensor reduce(const Tensor &A, MapReduceType reduceType);
+/// Reduce the last dimension of `A` into `out`, which holds the remaining dimensions -- (1) for
+/// a vector -- contiguously.
+void reduce(const TensorView &A, MapReduceType reduceType, const TensorView &out);
 
 }  // namespace cpu
 }  // namespace op

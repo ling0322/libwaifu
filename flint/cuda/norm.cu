@@ -220,7 +220,7 @@ __global__ void groupNormKernel(
 
 /// The weight and the bias are read in the input's own type rather than converted, so a norm is
 /// asked for in one precision throughout.
-void checkNormOperand(const Tensor &x, const char *what, int expected, DType dtype) {
+void checkNormOperand(const TensorView &x, const char *what, int expected, DType dtype) {
   if (x.empty()) return;
 
   if (x.getDType() != dtype) {
@@ -239,12 +239,12 @@ void checkNormOperand(const Tensor &x, const char *what, int expected, DType dty
 /// A norm's weight and bias are read one element per position, so a view of a wider tensor works
 /// as long as its step is carried along. A stride of one is the ordinary case and the only one the
 /// vectorized arm can take.
-int strideOf(const Tensor &x) {
+int strideOf(const TensorView &x) {
   return x.empty() ? 1 : x.getStride(0);
 }
 
 template<typename T>
-const T *dataOrNull(const Tensor &x) {
+const T *dataOrNull(const TensorView &x) {
   return x.empty() ? nullptr : getDataPtrCuda<T>(x);
 }
 
@@ -255,11 +255,12 @@ bool isHalf2Aligned(const T *p) {
 
 /// Normalize over the last dimension, which is what layerNorm and rmsNorm both do.
 template<typename T, bool SUBTRACT_MEAN>
-Tensor normOverLastDimImpl(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    float eps) {
+void normOverLastDimImpl(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &output) {
   DType dtype = DType::getType<T>();
   int hiddenSize = input.getShape(-1);
   checkNormOperand(weight, "the norm weight", hiddenSize, dtype);
@@ -269,7 +270,9 @@ Tensor normOverLastDimImpl(
   if (numRow64 > std::numeric_limits<int32_t>::max()) THROW(InvalidArg, "this norm: too many rows");
   int numRow = static_cast<int>(numRow64);
 
-  Tensor output = createCudaTensor<T>(input.getShape());
+  CHECK(output.getDType() == dtype && output.isContiguous());
+  output.throwIfInvalidShape(input.getShape(), "norm");
+  if (numRow == 0) return;
   const T *weightData = dataOrNull<T>(weight);
   const T *biasData = dataOrNull<T>(bias);
 
@@ -278,8 +281,8 @@ Tensor normOverLastDimImpl(
 
   if (!input.isContiguous()) {
     // The strided kernel indexes three dimensions, so anything else is folded into them first.
-    Tensor input3D = input.getDim() == 3 ? input : input.unsqueeze(0);
-    Tensor output3D = output.getDim() == 3 ? output : output.unsqueeze(0);
+    TensorView input3D = input.getDim() == 3 ? input : input.unsqueeze(0);
+    TensorView output3D = output.getDim() == 3 ? output : output.unsqueeze(0);
     if (input3D.getDim() != 3) THROW(InvalidArg, "this norm: an input of this rank is not strided");
 
     normRowStridedKernel<T, kBlockSize, SUBTRACT_MEAN><<<numRow, kBlockSize>>>(
@@ -313,31 +316,35 @@ Tensor normOverLastDimImpl(
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return output;
 }
 
 template<bool SUBTRACT_MEAN>
-Tensor normOverLastDim(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps) {
+void normOverLastDim(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &output) {
   if (input.getDim() < 1) THROW(InvalidArg, "this norm takes an input of at least one dimension");
 
   if (input.getDType() == DType::kFloat16) {
-    return normOverLastDimImpl<half, SUBTRACT_MEAN>(input, weight, bias, eps);
+    return normOverLastDimImpl<half, SUBTRACT_MEAN>(input, weight, bias, eps, output);
   }
   if (input.getDType() == DType::kFloat) {
-    return normOverLastDimImpl<float, SUBTRACT_MEAN>(input, weight, bias, eps);
+    return normOverLastDimImpl<float, SUBTRACT_MEAN>(input, weight, bias, eps, output);
   }
 
   THROW(InvalidArg, "this norm takes a <half> or <float> input");
 }
 
 template<typename T>
-Tensor groupNormImpl(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void groupNormImpl(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps) {
+    float eps,
+    const TensorView &output) {
   int batch = input.getShape(0);
   int channel = input.getShape(1);
   if (groups < 1 || channel % groups != 0) {
@@ -351,7 +358,9 @@ Tensor groupNormImpl(
   checkNormOperand(bias, "the groupNorm bias", channel, dtype);
 
   int spatial = input.getShape(2) * input.getShape(3);
-  Tensor output = createCudaTensor<T>(input.getShape());
+  CHECK(output.getDType() == dtype && output.isContiguous());
+  output.throwIfInvalidShape(input.getShape(), "groupNorm");
+  if (output.getNumEl() == 0) return;
 
   groupNormKernel<T, kBlockSize><<<batch * groups, kBlockSize>>>(
       getDataPtrCuda<T>(input),
@@ -365,36 +374,40 @@ Tensor groupNormImpl(
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return output;
 }
 
 }  // namespace
 
-Tensor rmsNorm(const Tensor &input, const Tensor &weight, float eps) {
+void rmsNorm(const TensorView &input, const TensorView &weight, float eps, const TensorView &out) {
   if (weight.empty()) THROW(InvalidArg, "rmsNorm needs a weight");
 
-  return normOverLastDim<false>(input, weight, Tensor(), eps);
+  normOverLastDim<false>(input, weight, TensorView(), eps, out);
 }
 
-Tensor layerNorm(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps) {
-  return normOverLastDim<true>(input, weight, bias, eps);
+void layerNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &out) {
+  normOverLastDim<true>(input, weight, bias, eps, out);
 }
 
-Tensor groupNorm(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void groupNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps) {
+    float eps,
+    const TensorView &out) {
   if (input.getDim() != 4) THROW(InvalidArg, "groupNorm takes a 4-D input, as (N, C, H, W)");
   LL_CHECK_CONTIGUOUS(input);
 
   if (input.getDType() == DType::kFloat16) {
-    return groupNormImpl<half>(input, weight, bias, groups, eps);
+    return groupNormImpl<half>(input, weight, bias, groups, eps, out);
   }
   if (input.getDType() == DType::kFloat) {
-    return groupNormImpl<float>(input, weight, bias, groups, eps);
+    return groupNormImpl<float>(input, weight, bias, groups, eps, out);
   }
 
   THROW(InvalidArg, "groupNorm takes a <half> or <float> input");

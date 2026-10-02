@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/cpu/common.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
@@ -63,41 +64,41 @@ CATCH_TEST_CASE("test CPU cumsum", "[core][operators]") {
   Tensor a = Tensor::create<float>({2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
 
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->cumsum(a, -1),
+      F::cumsum(cpuOps(), a, -1),
       Tensor::create<float>({2, 3}, {1.0f, 3.0f, 6.0f, 4.0f, 9.0f, 15.0f})));
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->cumsum(a, 0),
+      F::cumsum(cpuOps(), a, 0),
       Tensor::create<float>({2, 3}, {1.0f, 2.0f, 3.0f, 5.0f, 7.0f, 9.0f})));
 }
 
 CATCH_TEST_CASE("test CPU cumsum along every dimension", "[core][operators]") {
-  Tensor a = cpuOps()->rand({3, 7, 33}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {3, 7, 33}, DType::kFloat);
 
   for (int dim = 0; dim < 3; ++dim) {
-    CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->cumsum(a, dim), longhand(a, dim), 1e-5, 1e-5));
-    CATCH_REQUIRE(cpuOps()->allClose(cpuOps()->cumsum(a, dim - 3), longhand(a, dim), 1e-5, 1e-5));
+    CATCH_REQUIRE(cpuOps()->allClose(F::cumsum(cpuOps(), a, dim), longhand(a, dim), 1e-5, 1e-5));
+    CATCH_REQUIRE(cpuOps()->allClose(F::cumsum(cpuOps(), a, dim - 3), longhand(a, dim), 1e-5, 1e-5));
   }
 }
 
 CATCH_TEST_CASE("test CPU cumsum of a strided view", "[core][operators]") {
-  Tensor a = cpuOps()->rand({5, 9, 4}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {5, 9, 4}, DType::kFloat);
   Tensor viewed = a.transpose(0, 2);
 
   // The same numbers scanned from a view and from a copy of it.
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->cumsum(viewed, 1),
-      cpuOps()->cumsum(cpuOps()->contiguous(viewed), 1)));
+      F::cumsum(cpuOps(), viewed, 1),
+      F::cumsum(cpuOps(), F::contiguous(cpuOps(), viewed), 1)));
 }
 
 CATCH_TEST_CASE("test CPU cumsum in float16", "[core][operators]") {
-  Tensor a = cpuOps()->rand({4, 50}, DType::kFloat);
-  Tensor half = cpuOps()->cast(a, DType::kFloat16);
+  Tensor a = F::rand(Device::getCpu(), {4, 50}, DType::kFloat);
+  Tensor half = F::cast(cpuOps(), a, DType::kFloat16);
 
-  Tensor scanned = cpuOps()->cumsum(half, -1);
+  Tensor scanned = F::cumsum(cpuOps(), half, -1);
   CATCH_REQUIRE(scanned.getDType() == DType::kFloat16);
   CATCH_REQUIRE(cpuOps()->allClose(
-      cpuOps()->cast(scanned, DType::kFloat),
-      cpuOps()->cumsum(cpuOps()->cast(half, DType::kFloat), -1),
+      F::cast(cpuOps(), scanned, DType::kFloat),
+      F::cumsum(cpuOps(), F::cast(cpuOps(), half, DType::kFloat), -1),
       5e-3,
       5e-3));
 }
@@ -106,7 +107,7 @@ CATCH_TEST_CASE("test CPU cumsum of a long row", "[core][operators]") {
   // A hundred thousand ones: exact in double, and what a float accumulator reaches too.
   std::vector<float> ones(100000, 1.0f);
   Tensor a = Tensor::create<float>({1, 100000}, ones);
-  Tensor scanned = cpuOps()->cumsum(a, -1);
+  Tensor scanned = F::cumsum(cpuOps(), a, -1);
 
   CATCH_REQUIRE(op::cpu::getDataPtrCpu<float>(scanned)[99999] == 100000.0f);
 }

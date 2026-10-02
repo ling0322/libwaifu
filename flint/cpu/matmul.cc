@@ -23,13 +23,13 @@
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/kernel/interface.h"
-#include "flint/cpu/tensor.h"
+#include "flint/cpu/fill.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-std::vector<int> getBmmOutputShape(const Tensor &A, const Tensor &B) {
+std::vector<int> getBmmOutputShape(const TensorView &A, const TensorView &B) {
   CHECK(A.getDim() >= B.getDim());
   CHECK(A.getDim() > 2 && A.getDim() <= 4 && B.getDim() >= 2);
   std::vector<int> shape;
@@ -53,7 +53,7 @@ std::vector<int> getBmmOutputShape(const Tensor &A, const Tensor &B) {
   return shape;
 }
 
-GEMMArgs generateGemmArgs(const Tensor &A, const Tensor &B, const Tensor &C) {
+GEMMArgs generateGemmArgs(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDim() >= B.getDim() && A.getDim() == C.getDim());
   CHECK(B.getDim() >= 2);
   CHECK(A.getShape(-2) == C.getShape(-2));
@@ -153,10 +153,12 @@ inline void callGemm<Float16>(
 }
 
 template<typename T>
-Tensor gemm(const Tensor &A, const Tensor &B) {
+void gemm(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDim() == B.getDim() && A.getDim() == 2);
+  C.throwIfInvalidShape({A.getShape(0), B.getShape(1)}, "gemm");
 
-  Tensor C = op::cpu::zeros({A.getShape(0), B.getShape(1)}, DType::getType<T>());
+  // The kernels accumulate into C rather than overwrite it.
+  fill(C, 0.0f);
 
   GEMMArgs gemmArgs = generateGemmArgs(A, B, C);
   callGemm<T>(
@@ -172,8 +174,6 @@ Tensor gemm(const Tensor &A, const Tensor &B) {
       getDataPtrCpu<T>(C),
       gemmArgs.ldc,
       kernel::Mode::OMP);
-
-  return C;
 }
 
 /// A float activation against a half weight, which is how a model is held on the CPU: the weight
@@ -183,11 +183,13 @@ Tensor gemm(const Tensor &A, const Tensor &B) {
 /// read, which doubles the model -- 13.74 GB against 6.97 for SDXL. The micro-kernel converts the
 /// weight as it packs it, so nothing is widened in memory and the arithmetic is the float32 it
 /// would have been anyway.
-Tensor gemmHalfWeight(const Tensor &A, const Tensor &B) {
+void gemmHalfWeight(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDim() == 2 && B.getDim() == 2);
   CHECK(A.getDType() == DType::kFloat && B.getDType() == DType::kFloat16);
+  C.throwIfInvalidShape({A.getShape(0), B.getShape(1)}, "gemm");
 
-  Tensor C = op::cpu::zeros({A.getShape(0), B.getShape(1)}, DType::kFloat);
+  // The kernel accumulates into C rather than overwrite it.
+  fill(C, 0.0f);
 
   GEMMArgs gemmArgs = generateGemmArgs(A, B, C);
   kernel::gemmHalfWeightFloat(
@@ -203,20 +205,15 @@ Tensor gemmHalfWeight(const Tensor &A, const Tensor &B) {
       getDataPtrCpu<float>(C),
       gemmArgs.ldc,
       kernel::Mode::OMP);
-
-  return C;
 }
 
 /// The same for an activation of any rank against a two dimensional weight, which is what a
 /// linear layer hands over: everything but the last axis is one long batch of rows.
-Tensor matmulHalfWeight(const Tensor &A, const Tensor &B) {
-  if (A.getDim() == 2) return gemmHalfWeight(A, B);
+void matmulHalfWeight(const TensorView &A, const TensorView &B, const TensorView &C) {
+  if (A.getDim() == 2) return gemmHalfWeight(A, B, C);
 
-  if (A.getDim() > 2 && B.getDim() == 2 && A.isContiguous()) {
-    std::vector<int> shape = A.getShape();
-    Tensor xC = gemmHalfWeight(A.view({-1, A.getShape(-1)}), B);
-    shape.back() = B.getShape(1);
-    return xC.view(shape);
+  if (A.getDim() > 2 && B.getDim() == 2 && A.isContiguous() && C.isContiguous()) {
+    return gemmHalfWeight(A.view({-1, A.getShape(-1)}), B, C.view({-1, B.getShape(1)}));
   }
 
   // Two batched operands are two activations -- attention's scores by its values -- and neither
@@ -225,23 +222,19 @@ Tensor matmulHalfWeight(const Tensor &A, const Tensor &B) {
 }
 
 template<typename T>
-Tensor bmmNx2(const Tensor &A, const Tensor &B) {
-  std::vector<int> shape = A.getShape();
-
-  Tensor xA = A.view({-1, A.getShape(-1)});
-  Tensor xC = gemm<T>(xA, B);
-
-  shape.back() = B.getShape(1);
-  return xC.view(shape);
+void bmmNx2(const TensorView &A, const TensorView &B, const TensorView &C) {
+  CHECK(C.isContiguous());
+  gemm<T>(A.view({-1, A.getShape(-1)}), B, C.view({-1, B.getShape(1)}));
 }
 
 template<typename T>
-Tensor bmm(const Tensor &A, const Tensor &B) {
-  Tensor xB = B;
+void bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
+  TensorView xB = B;
   if (A.getDim() != B.getDim()) xB = expandBatchDims(B, A.getShape());
-  std::vector<int> shapeC = getBmmOutputShape(A, xB);
+  C.throwIfInvalidShape(getBmmOutputShape(A, xB), "bmm");
 
-  Tensor C = op::cpu::zeros(shapeC, DType::getType<T>());
+  // The kernels accumulate into C rather than overwrite it.
+  fill(C, 0.0f);
 
   TensorList<const T, 2> mA = TensorList<const T, 2>::fromTensor(A);
   TensorList<const T, 2> mB = TensorList<const T, 2>::fromTensor(xB);
@@ -274,34 +267,30 @@ Tensor bmm(const Tensor &A, const Tensor &B) {
         gemmArgs.ldc,
         kernel::Mode::SingleThread);
   }
-
-  return C;
 }
 
 template<typename T>
-Tensor matmulFloat(const Tensor &A, const Tensor &B) {
+void matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C) {
   if (A.getDim() == 2 && B.getDim() == 2) {
-    return gemm<T>(A, B);
-  } else if (A.getDim() > 2 && A.isContiguous() && B.getDim() == 2) {
-    return bmmNx2<T>(A, B);
+    gemm<T>(A, B, C);
+  } else if (A.getDim() > 2 && A.isContiguous() && B.getDim() == 2 && C.isContiguous()) {
+    bmmNx2<T>(A, B, C);
   } else if (A.getDim() >= 2 && B.getDim() >= 2) {
-    return bmm<T>(A, B);
+    bmm<T>(A, B, C);
   } else {
     NOT_IMPL();
   }
-
-  return Tensor();
 }
 
-Tensor matmul(const Tensor &A, const Tensor &B) {
+void matmul(const TensorView &A, const TensorView &B, const TensorView &C) {
   DType typeA = A.getDType();
   DType typeB = B.getDType();
 
-  if (typeA == DType::kFloat && typeB == DType::kFloat) return matmulFloat<float>(A, B);
-  if (typeA == DType::kFloat && typeB == DType::kFloat16) return matmulHalfWeight(A, B);
+  if (typeA == DType::kFloat && typeB == DType::kFloat) return matmulFloat<float>(A, B, C);
+  if (typeA == DType::kFloat && typeB == DType::kFloat16) return matmulHalfWeight(A, B, C);
 
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (typeA == DType::kFloat16 && typeB == DType::kFloat16) return matmulFloat<Float16>(A, B);
+  if (typeA == DType::kFloat16 && typeB == DType::kFloat16) return matmulFloat<Float16>(A, B, C);
 #endif
 
   NOT_IMPL();

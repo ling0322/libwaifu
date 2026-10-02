@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "flint/cuda/common.h"
-#include "flint/cuda/fill.h"
+#include "flint/cuda/arange.h"
 
 namespace fl {
 namespace op {
@@ -33,12 +33,13 @@ __global__ void arangeKernel(T *__restrict__ out, int n, T start, T step) {
   }
 }
 
-Tensor arangeLong(LongType begin, LongType end, LongType step) {
-  int64_t numel64 = (end - begin) / step;
+void arangeLong(LongType begin, LongType step, const TensorView &tensor) {
+  CHECK(tensor.getDevice().getType() == Device::kCuda);
+  CHECK(tensor.getDType() == DType::kLong && tensor.getDim() == 1 && tensor.isContiguous());
+  int64_t numel64 = tensor.getNumEl();
   CHECK(numel64 < std::numeric_limits<int32_t>::max());
   int numel = static_cast<int>(numel64);
-
-  Tensor tensor = createCudaTensorLong({numel});
+  if (numel == 0) return;
 
   constexpr int blockSize = 256;
   dim3 grid = getGrid1D(numel, blockSize);
@@ -46,8 +47,6 @@ Tensor arangeLong(LongType begin, LongType end, LongType step) {
   arangeKernel<LongType><<<grid, blockSize>>>(getDataPtrCuda<LongType>(tensor), numel, begin, step);
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return tensor;
 }
 
 }  // namespace cuda

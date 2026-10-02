@@ -19,6 +19,9 @@
 
 #include <math.h>
 
+#include <string>
+#include <vector>
+
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
@@ -90,50 +93,28 @@ struct ArangePush {
   uint32_t numel;
 };
 
-uint32_t checkedNumel(const Tensor &tensor) {
+uint32_t checkedNumel(const TensorView &tensor) {
   int64_t numel = tensor.getNumEl();
   CHECK(numel >= 0 && numel <= TensorData::MaxNumEl);
   return static_cast<uint32_t>(numel);
 }
 
-// `other` given A's rank, by prepending broadcast dimensions, and then expanded to A's shape:
-// the one-directional broadcast the other devices do, where only the right operand grows.
-Tensor broadcastTo(const Tensor &other, const Tensor &a) {
-  if (other.getDim() > a.getDim()) {
-    throw lut::InvalidArgError(lut::sprintf(
-        "unable to broadcast %s into %s",
-        other.getShapeString(),
-        a.getShapeString()));
-  }
-
-  std::vector<TensorShape::Elem> elems;
-  for (int d = 0; d < a.getDim() - other.getDim(); ++d) elems.push_back({a.getShape(d), 0});
-  for (int d = 0; d < other.getDim(); ++d) {
-    elems.push_back({other.getShape(d), other.getStride(d)});
-  }
-
-  Tensor expanded = Tensor::create(
-      std::make_shared<TensorShape>(lut::makeConstSpan(elems)),
-      other.getInternalData(),
-      other.getInternalOffset());
-  expanded = expanded.expand(a.getShape());
-  expanded.throwIfInvalidShape(a.getShape(), "broadcast");
-  return expanded;
-}
-
 }  // namespace
 
-Tensor unary(UnaryOp op, const Tensor &input, float scalar) {
+void unary(UnaryOp op, const TensorView &input, float scalar, const TensorView &out) {
   checkFloat(input.getDType(), "an elementwise operator");
+  checkOutput(out, input.getShape(), input.getDType(), "an elementwise operator");
+  if (input.getNumEl() == 0) return;
 
   Layout layout;
   if (!collapse(input.getShape(), {getStrides(input)}, &layout)) {
-    return unary(op, makeContiguous(input), scalar);
+    Tensor keep;
+    unary(op, makeContiguous(input, &keep), scalar, out);
+    return;
   }
 
-  Tensor output = createTensor(input.getShape(), input.getDType());
   UnaryPush push{};
-  push.c = getAddress(output);
+  push.c = getAddress(out);
   push.a = getAddress(input);
   push.numel = checkedNumel(input);
   push.ndim = layout.ndim;
@@ -149,30 +130,44 @@ Tensor unary(UnaryOp op, const Tensor &input, float scalar) {
       &push,
       sizeof(push),
       push.numel);
-  return output;
 }
 
 namespace {
 
-Tensor binaryKernel(const char *base, DType outputType, int op, const Tensor &a, const Tensor &b) {
+void binaryKernel(
+    const char *base,
+    DType outputType,
+    int op,
+    const TensorView &a,
+    const TensorView &b,
+    const TensorView &out) {
   if (a.getDType() != b.getDType()) {
     throw lut::InvalidArgError(lut::sprintf(
         "an elementwise operator on the Vulkan device takes two of one dtype, not %s and %s",
         a.getDType().toString(),
         b.getDType().toString()));
   }
+  b.throwIfInvalidShape(a.getShape(), "an elementwise operator");
+  checkOutput(out, a.getShape(), outputType, "an elementwise operator");
+  if (a.getNumEl() == 0) return;
 
-  Tensor expanded = broadcastTo(b, a);
   Layout layout;
-  if (!collapse(a.getShape(), {getStrides(a), getStrides(expanded)}, &layout)) {
-    return binaryKernel(base, outputType, op, makeContiguous(a), makeContiguous(expanded));
+  if (!collapse(a.getShape(), {getStrides(a), getStrides(b)}, &layout)) {
+    Tensor keepA, keepB;
+    binaryKernel(
+        base,
+        outputType,
+        op,
+        makeContiguous(a, &keepA),
+        makeContiguous(b, &keepB),
+        out);
+    return;
   }
 
-  Tensor output = createTensor(a.getShape(), outputType);
   BinaryPush push{};
-  push.c = getAddress(output);
+  push.c = getAddress(out);
   push.a = getAddress(a);
-  push.b = getAddress(expanded);
+  push.b = getAddress(b);
   push.numel = checkedNumel(a);
   push.ndim = layout.ndim;
   push.op = static_cast<uint32_t>(op);
@@ -187,45 +182,56 @@ Tensor binaryKernel(const char *base, DType outputType, int op, const Tensor &a,
       &push,
       sizeof(push),
       push.numel);
-  return output;
 }
 
 }  // namespace
 
-Tensor binary(BinaryOp op, const Tensor &a, const Tensor &b) {
+void binary(BinaryOp op, const TensorView &a, const TensorView &b, const TensorView &out) {
   if (a.getDType() != DType::kLong) checkFloat(a.getDType(), "an elementwise operator");
-  return binaryKernel("binary", a.getDType(), static_cast<int>(op), a, b);
+  binaryKernel("binary", a.getDType(), static_cast<int>(op), a, b, out);
 }
 
-Tensor eq(const Tensor &a, const Tensor &b) {
+void eq(const TensorView &a, const TensorView &b, const TensorView &out) {
   DType dtype = a.getDType();
   if (dtype != DType::kFloat && dtype != DType::kFloat16 && dtype != DType::kLong &&
       dtype != DType::kUInt8) {
     throw lut::InvalidArgError(lut::sprintf("eq on the Vulkan device does not take %s",
                                             dtype.toString()));
   }
-  return binaryKernel("equal", DType::kBool, 0, a, b);
+  binaryKernel("equal", DType::kBool, 0, a, b, out);
 }
 
-Tensor mod(const Tensor &input, int64_t other) {
+void mod(const TensorView &input, int64_t other, const TensorView &out) {
   if (input.getDType() != DType::kLong) {
     throw lut::InvalidArgError("mod on the Vulkan device takes int64 only");
   }
   if (other == 0) throw lut::InvalidArgError("mod by zero");
+  checkOutput(out, input.getShape(), DType::kLong, "mod");
+  if (input.getNumEl() == 0) return;
 
-  Tensor x = makeContiguous(input);
-  Tensor output = createTensor(x.getShape(), DType::kLong);
+  Tensor keep;
+  TensorView x = makeContiguous(input, &keep);
   ModPush push{};
-  push.c = getAddress(output);
+  push.c = getAddress(out);
   push.a = getAddress(x);
   push.other = other;
   push.numel = checkedNumel(x);
   getContext(x)->dispatchLinear("mod_i64", &push, sizeof(push), push.numel);
-  return output;
 }
 
-void fill(const Tensor &tensor, float value) {
+void fill(const TensorView &tensor, float value) {
   if (tensor.getNumEl() == 0) return;
+
+  // Zero is zero bits in every type there is, so a contiguous run of whole words is cleared
+  // rather than filled.
+  if (value == 0.0f && tensor.isContiguous()) {
+    int64_t bytes = tensor.getDType().getTotalSize(tensor.getNumEl());
+    int64_t offset = getByteOffset(tensor);
+    if (bytes % 4 == 0 && offset % 4 == 0) {
+      getContext(tensor)->fillBuffer(getBuffer(tensor), offset, bytes, 0);
+      return;
+    }
+  }
 
   Layout layout;
   if (!collapse(tensor.getShape(), {getStrides(tensor)}, &layout)) {
@@ -253,7 +259,7 @@ void fill(const Tensor &tensor, float value) {
 
 namespace {
 
-void copyKernel(const Tensor &src, const Tensor &dest) {
+void copyKernel(const TensorView &src, const TensorView &dest) {
   // Contiguous both ends and of one type is a plain buffer copy, which is as fast as the device
   // moves memory -- and the only copy there is for a type no kernel is built for.
   if (src.getDType() == dest.getDType() && src.isContiguous() && dest.isContiguous()) {
@@ -291,36 +297,38 @@ void copyKernel(const Tensor &src, const Tensor &dest) {
 
 }  // namespace
 
-void copy(const Tensor &src, const Tensor &dest) {
+void copy(const TensorView &src, const TensorView &dest) {
   src.throwIfInvalidShape(dest.getShape(), "copy");
   if (src.getNumEl() == 0) return;
   copyKernel(src, dest);
 }
 
-Tensor cast(const Tensor &input, DType dtype) {
-  if (input.getDType() == dtype) return input;
-
-  Tensor output = createTensor(input.getShape(), dtype);
-  copy(input, output);
-  return output;
+void cast(const TensorView &input, const TensorView &out) {
+  checkOutput(out, input.getShape(), out.getDType(), "cast");
+  copy(input, out);
 }
 
-Tensor arangeLong(int64_t begin, int64_t end, int64_t step) {
-  if (step == 0) throw lut::InvalidArgError("arange with a step of zero");
-  int64_t numel = std::max<int64_t>(0, (end - begin) / step);
-  CHECK(numel <= TensorData::MaxNumEl);
+void arangeLong(int64_t begin, int64_t step, const TensorView &out) {
+  if (out.getDim() != 1) throw lut::InvalidArgError("arangeLong writes a vector");
+  checkOutput(out, out.getShape(), DType::kLong, "arangeLong");
+  if (out.getNumEl() == 0) return;
 
-  Tensor output = createTensor({static_cast<int>(numel)}, DType::kLong);
   ArangePush push{};
-  push.c = getAddress(output);
+  push.c = getAddress(out);
   push.begin = begin;
   push.step = step;
-  push.numel = static_cast<uint32_t>(numel);
-  getContext(output)->dispatchLinear("arange_i64", &push, sizeof(push), push.numel);
-  return output;
+  push.numel = checkedNumel(out);
+  getContext(out)->dispatchLinear("arange_i64", &push, sizeof(push), push.numel);
 }
 
-Tensor causalMask(int length, DType dtype) {
+void causalMask(const TensorView &out) {
+  if (out.getDim() != 2 || out.getShape(0) != out.getShape(1)) {
+    throw lut::InvalidArgError("causalMask writes a square matrix");
+  }
+  checkFloat(out.getDType(), "causalMask");
+  checkOutput(out, out.getShape(), out.getDType(), "causalMask");
+  int length = out.getShape(0);
+
   // Built once on the host and copied up: it is small, asked for rarely, and a kernel that wrote
   // it would be one more thing to keep in step with the CPU's.
   std::vector<float> mask(static_cast<size_t>(length) * length);
@@ -330,13 +338,19 @@ Tensor causalMask(int length, DType dtype) {
     }
   }
 
-  Tensor output = createTensor({length, length}, DType::kFloat);
-  getContext(output)->upload(
+  // Uploaded as float, and converted on the device when `out` is of another type.
+  Tensor wide;
+  TensorView target = out;
+  if (out.getDType() != DType::kFloat) {
+    wide = createTensor(out.getShape(), DType::kFloat);
+    target = wide;
+  }
+  getContext(target)->upload(
       mask.data(),
-      getBuffer(output),
-      getByteOffset(output),
+      getBuffer(target),
+      getByteOffset(target),
       static_cast<int64_t>(mask.size() * sizeof(float)));
-  return cast(output, dtype);
+  if (!wide.empty()) copy(wide, out);
 }
 
 }  // namespace vulkan

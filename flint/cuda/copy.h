@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -28,10 +29,10 @@ namespace cuda {
 // copy operator has multiple implementations. If the sec and dest is contiguous, it will call
 // memcpy directly. If both src and dest are sub-4D tensor with float/half, it will call
 // op::cuda::transform. Otherwise, it will fallback here.
-void copy(const Tensor &src, Tensor &dest);
+void copy(const TensorView &src, const TensorView &dest);
 
 /// @brief Copy contiguous tensors by cudaMemcpy.
-void copyContig(const Tensor &src, Tensor &dest);
+void copyContig(const TensorView &src, const TensorView &dest);
 
 }  // namespace cuda
 }  // namespace op

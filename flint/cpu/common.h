@@ -22,6 +22,7 @@
 #include "lutil/span.h"
 #include "flint/cpu/kernel/interface.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -33,15 +34,14 @@ typedef Float16 DefaultFloatType;
 typedef float DefaultFloatType;
 #endif
 
-Tensor expandBatchDims(const Tensor &input, lut::Span<const Tensor::ShapeType> shape);
-bool isShapeMatch(const Tensor &A, const Tensor &B);
+TensorView expandBatchDims(const TensorView &input, lut::Span<const Tensor::ShapeType> shape);
 
 // Check whether the given tensor can become contiguous by applying a permutation(transpose) of its
 // dimensions.
-bool isLooselyContiguous(const Tensor &tensor);
+bool isLooselyContiguous(const TensorView &tensor);
 
 template<typename T>
-inline T *getDataPtrCpu(const Tensor &input) {
+inline T *getDataPtrCpu(const TensorView &input) {
   return input.getInternalData()->getData<T>(input.getInternalOffset());
 }
 

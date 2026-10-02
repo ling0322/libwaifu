@@ -22,7 +22,8 @@
 #include "flint/cuda/accessor.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/lookup.h"
-#include "flint/operators.h"
+#include "flint/cuda/copy.h"
+#include "flint/functional.h"
 
 namespace fl {
 namespace op {
@@ -58,20 +59,29 @@ __global__ void lookupKernel(
 // Every id at once, whatever shape they arrive in: one row of `embdTable` per id, the result shaped
 // like `input` with the row's width after it.
 template<typename T>
-Tensor lookupRows(const Tensor &embdTable, const Tensor &input) {
+void lookupRows(const TensorView &embdTable, const TensorView &input, const TensorView &dst) {
   std::vector<Tensor::ShapeType> shape = input.getShape();
   shape.push_back(embdTable.getShape(1));
-  Tensor dst = createCudaTensor<T>(shape);
+  CHECK(dst.getDType() == DType::getType<T>() && dst.isContiguous());
+  dst.throwIfInvalidShape(shape, "lookup");
 
   // Both are read as flat arrays, so both have to be laid out as one.
-  Operators *ops = getOperators(Device::kCuda);
-  Tensor table = embdTable.isContiguous() ? embdTable : ops->contiguous(embdTable);
-  Tensor ids = input.isContiguous() ? input : ops->contiguous(input);
+  Tensor packedTable, packedIds;
+  if (!embdTable.isContiguous()) {
+    packedTable = F::emptyLike(embdTable);
+    copy(embdTable, packedTable);
+  }
+  if (!input.isContiguous()) {
+    packedIds = F::emptyLike(input);
+    copy(input, packedIds);
+  }
+  TensorView table = embdTable.isContiguous() ? embdTable : TensorView(packedTable);
+  TensorView ids = input.isContiguous() ? input : TensorView(packedIds);
 
   int64_t rows = ids.getNumEl();
   int64_t width = table.getShape(1);
   int64_t total = rows * width;
-  if (total == 0) return dst;
+  if (total == 0) return;
 
   constexpr int blockSize = 256;
   int64_t blocks = (total + blockSize - 1) / blockSize;
@@ -85,11 +95,9 @@ Tensor lookupRows(const Tensor &embdTable, const Tensor &input) {
       table.getShape(0));
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return dst;
 }
 
-Tensor lookup(const Tensor &embdTable, const Tensor &input) {
+void lookup(const TensorView &embdTable, const TensorView &input, const TensorView &out) {
   CHECK(input.getDType() == DType::kLong);
   CHECK(input.getDevice().getType() == Device::kCuda);
   CHECK(embdTable.getDevice().getType() == Device::kCuda);
@@ -98,8 +106,8 @@ Tensor lookup(const Tensor &embdTable, const Tensor &input) {
   // Ids are 2D for a batch of sequences and 1D for a packed one; either way one embedding row
   // comes out per id.
   if (input.getDim() == 1 || input.getDim() == 2) {
-    if (embdTable.getDType() == DType::kFloat16) return lookupRows<half>(embdTable, input);
-    if (embdTable.getDType() == DType::kFloat) return lookupRows<float>(embdTable, input);
+    if (embdTable.getDType() == DType::kFloat16) return lookupRows<half>(embdTable, input, out);
+    if (embdTable.getDType() == DType::kFloat) return lookupRows<float>(embdTable, input, out);
   }
 
   NOT_IMPL();

@@ -19,7 +19,9 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include <vector>
+
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -36,24 +38,14 @@ struct GEMMArgs {
   int ldc;
 };
 
-std::vector<int> getBmmOutputShape(const Tensor &A, const Tensor &B);
+std::vector<int> getBmmOutputShape(const TensorView &A, const TensorView &B);
 
 // generate GEMMArgs from the input tensor A, B and output tensor C. dimensions of A could be
 // greater than 2 (for BMM). throw exception if shape mismatch.
-GEMMArgs generateGemmArgs(const Tensor &A, const Tensor &B, const Tensor &C);
+GEMMArgs generateGemmArgs(const TensorView &A, const TensorView &B, const TensorView &C);
 
-Tensor matmul(const Tensor &A, const Tensor &B);
-
-// q4
-Tensor matmulFp32Q4Fp32(const Tensor &A, const Tensor &B);
-Tensor gemmFp32Q4Fp32(const Tensor &A, const Tensor &B);
-Tensor bmmNx2Fp32Q4Fp32(const Tensor &A, const Tensor &B);
-
-/// @brief An implememntation of float32 matmul for aarch64
-/// @param A
-/// @param B
-/// @return
-Tensor matmulFp32Aarch64(const Tensor &A, const Tensor &B);
+/// C = A @ B. C is A's batch, A's rows and B's columns, of A's type, contiguous.
+void matmul(const TensorView &A, const TensorView &B, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

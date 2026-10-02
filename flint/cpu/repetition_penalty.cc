@@ -20,15 +20,14 @@
 #include "flint/cpu/repetition_penalty.h"
 
 #include "flint/cpu/accessor.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-void repetitionPenalty2DKernel(Tensor logits, Tensor history, float weight) {
+void repetitionPenalty2DKernel(const TensorView &logits, const TensorView &history, float weight) {
   CHECK(logits.getDim() == 2 && history.getDim() == 2);
   CHECK(logits.getShape(0) == history.getShape(0));
 
@@ -66,7 +65,7 @@ void repetitionPenalty2DKernel(Tensor logits, Tensor history, float weight) {
   }
 }
 
-void repetitionPenalty(Tensor logits, Tensor history, float weight) {
+void repetitionPenalty(const TensorView &logits, const TensorView &history, float weight) {
   if (logits.getDType() == DType::kFloat && logits.getDim() == 2)
     repetitionPenalty2DKernel<float>(logits, history, weight);
   else if (logits.getDType() == DType::kFloat && logits.getDim() == 1)

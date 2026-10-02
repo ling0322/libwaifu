@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -27,8 +28,16 @@ namespace cuda {
 
 enum class BinaryScalarOp { ADD, MUL, SUB, DIV, MOD };
 
-Tensor applyBinaryScalarOp(BinaryScalarOp op, const Tensor &tensor, float rhs);
-Tensor applyBinaryScalarOpLong(BinaryScalarOp op, const Tensor &tensor, LongType rhs);
+void applyBinaryScalarOp(
+    BinaryScalarOp op,
+    const TensorView &tensor,
+    float rhs,
+    const TensorView &C);
+void applyBinaryScalarOpLong(
+    BinaryScalarOp op,
+    const TensorView &tensor,
+    LongType rhs,
+    const TensorView &C);
 
 }  // namespace cuda
 }  // namespace op

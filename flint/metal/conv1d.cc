@@ -26,14 +26,15 @@ namespace fl {
 namespace op {
 namespace metal {
 
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
+    int groups,
+    const TensorView &out) {
   CHECK(input.getDim() == 3) << "conv1d expects (N, C, L)";
   CHECK(weight.getDim() == 3) << "conv1d expects a (K, C / groups, R) weight";
 
@@ -48,7 +49,7 @@ Tensor conv1d(
   mlx::core::array x = mlx::core::transpose(toMlxArray(input), {0, 2, 1});
   mlx::core::array w = mlx::core::transpose(toMlxArray(weight), {0, 2, 1});
 
-  mlx::core::array out = mlx::core::conv1d(
+  mlx::core::array result = mlx::core::conv1d(
       x,
       w,
       /*stride=*/stride,
@@ -56,14 +57,16 @@ Tensor conv1d(
       /*dilation=*/dilation,
       groups);
 
-  out = mlx::core::transpose(out, {0, 2, 1});
+  result = mlx::core::transpose(result, {0, 2, 1});
 
   if (!bias.empty()) {
     int k = weight.getShape(0);
-    out = mlx::core::add(out, mlx::core::reshape(toMlxArray(bias), {1, k, 1}));
+    result = mlx::core::add(result, mlx::core::reshape(toMlxArray(bias), {1, k, 1}));
   }
 
-  return fromMlxArray(out);
+  // The result is the input's type, as functional has it, even where a weight or a bias of
+  // another type would have MLX promote it. A no-op when they agree, which is the usual case.
+  writeInto(mlx::core::astype(result, toMlxDtype(out.getDType())), out);
 }
 
 }  // namespace metal

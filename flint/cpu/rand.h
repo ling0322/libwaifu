@@ -20,15 +20,15 @@
 #pragma once
 
 #include "lutil/random.h"
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor rand(lut::Span<const int> shape, DType dtype, lut::Random *generator, float min, float max);
-Tensor randFp32(lut::Span<const int> shape, lut::Random *generator, float min, float max);
-Tensor randQ4(lut::Span<const int> shape, lut::Random *generator, float min, float max);
+/// @brief Fill contiguous `out` <float|float16> with numbers drawn uniformly from [min, max).
+///        Without a generator the draw is spread across threads, each with a seed of its own.
+void rand(const TensorView &out, lut::Random *generator, float min, float max);
 
 }  // namespace cpu
 }  // namespace op

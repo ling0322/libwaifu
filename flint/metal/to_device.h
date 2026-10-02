@@ -19,22 +19,20 @@
 
 #pragma once
 
-#include "flint/device.h"
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace metal {
 
-/// @brief Move `tensor` onto `device`, which has to be the CPU or Metal.
+/// @brief Copy contiguous `src` into contiguous `dest`, one on the CPU and the other on Metal,
+/// both of one dtype and one number of elements.
 ///
 /// Both sides address the same unified memory, so this is a memcpy rather than the staged
 /// transfer a discrete GPU needs. It still copies: the two devices own their buffers separately,
 /// and sharing one would make a CPU write visible to a tensor nobody expected to change.
-Tensor toDevice(Device device, const Tensor &tensor);
-
-Tensor toCpu(const Tensor &tensor);
-Tensor toMetal(const Tensor &tensor);
+/// Exactly `src.getNumEl()` elements move, from `src`'s offset to `dest`'s.
+void transfer(const TensorView &src, const TensorView &dest);
 
 }  // namespace metal
 }  // namespace op

@@ -41,7 +41,7 @@ __global__ void copyNDKernel(
 }
 
 template<typename T, int DIM>
-void copyND(const Tensor &src, Tensor &dest) {
+void copyND(const TensorView &src, const TensorView &dest) {
   src.throwIfInvalidShape(dest.getShape(), "copyND");
 
   PackedTensorAccessor<const T, DIM> sA(src);
@@ -58,9 +58,10 @@ void copyND(const Tensor &src, Tensor &dest) {
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 }
 
-void copy(const Tensor &src, Tensor &dest) {
+void copy(const TensorView &src, const TensorView &dest) {
   CHECK(src.getDevice().getType() == Device::kCuda);
   CHECK(dest.getDevice().getType() == Device::kCuda);
+  if (src.getNumEl() == 0) return;
 
   if (src.getDType() == DType::kFloat16 && src.getDim() == 5) return copyND<half, 5>(src, dest);
   if (src.getDType() == DType::kFloat16 && src.getDim() == 4) return copyND<half, 4>(src, dest);
@@ -82,7 +83,7 @@ void copy(const Tensor &src, Tensor &dest) {
   NOT_IMPL();
 }
 
-void copyContig(const Tensor &src, Tensor &dest) {
+void copyContig(const TensorView &src, const TensorView &dest) {
   LL_CHECK_CUDA_STATUS(cudaMemcpy(
       getDataPtrCuda<void>(dest),
       getDataPtrCuda<void>(src),

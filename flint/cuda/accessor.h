@@ -30,6 +30,7 @@
 #include "flint/cuda/common.h"
 #include "flint/cuda/cuda_tensor_data.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -89,17 +90,7 @@ class TensorAccessor<T, 1> : public TensorAccessorBase<T, 1> {
 template<typename T, int DIM>
 class PackedTensorAccessorBase {
  public:
-  __host__ explicit PackedTensorAccessorBase(Tensor &tensor) {
-    CHECK(tensor.getDim() == DIM);
-    _data = getDataPtrCuda<T>(tensor);
-    for (int i = 0; i < DIM; ++i) {
-      CHECK(tensor.getShape(i) > 0);
-      _size[i] = Size{
-          tensor.getShape(i), tensor.getStride(i), FastDivmod(tensor.getShape(i))};
-    }
-  }
-
-  __host__ explicit PackedTensorAccessorBase(const Tensor &tensor) {
+  __host__ explicit PackedTensorAccessorBase(const TensorView &tensor) {
     CHECK(tensor.getDim() == DIM);
     _data = getDataPtrCuda<T>(tensor);
     for (int i = 0; i < DIM; ++i) {
@@ -144,11 +135,11 @@ class PackedTensorAccessorBase {
 template<typename T, int DIM>
 class PackedTensorAccessor : public PackedTensorAccessorBase<T, DIM> {
  public:
-  __host__ PackedTensorAccessor(Tensor &tensor)
+  __host__ PackedTensorAccessor(const TensorView &tensor)
       : PackedTensorAccessorBase<T, DIM>(tensor) {
   }
   __host__ PackedTensorAccessor(const Tensor &tensor)
-      : PackedTensorAccessorBase<T, DIM>(tensor) {
+      : PackedTensorAccessorBase<T, DIM>(TensorView(tensor)) {
   }
 
   __device__ TensorAccessor<T, DIM - 1> operator[](int index) {
@@ -164,11 +155,11 @@ class PackedTensorAccessor : public PackedTensorAccessorBase<T, DIM> {
 template<typename T>
 class PackedTensorAccessor<T, 1> : public PackedTensorAccessorBase<T, 1> {
  public:
-  __host__ PackedTensorAccessor(Tensor &tensor)
+  __host__ PackedTensorAccessor(const TensorView &tensor)
       : PackedTensorAccessorBase<T, 1>(tensor) {
   }
   __host__ PackedTensorAccessor(const Tensor &tensor)
-      : PackedTensorAccessorBase<T, 1>(tensor) {
+      : PackedTensorAccessorBase<T, 1>(TensorView(tensor)) {
   }
 
   __device__ T &operator[](int index) {

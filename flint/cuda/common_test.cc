@@ -24,6 +24,7 @@
 #include <cstdint>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/cuda/common.h"
 #include "flint/device.h"
 #include "flint/memory.h"
@@ -53,7 +54,7 @@ CATCH_TEST_CASE("test CUDA memory snapshot", "[fl][cuda][memory]") {
 
   int64_t bytes = 0;
   {
-    Tensor x = cudaOps()->tensor({1024, 1024}, DType::kFloat16);
+    Tensor x = F::empty(Device::getCuda(), {1024, 1024}, DType::kFloat16);
     bytes = x.getNumEl() * 2;
 
     MemorySnapshot allocated = MemorySnapshot::capture(Device::getCuda());
@@ -93,7 +94,7 @@ CATCH_TEST_CASE("test CUDA memory release", "[fl][cuda][memory]") {
   // Large enough to be unmistakable against an allocator that rounds its blocks up.
   constexpr int64_t kBytes = 32 * 1024 * 1024;
   {
-    Tensor x = cudaOps()->tensor({4096, 4096}, DType::kFloat16);
+    Tensor x = F::empty(Device::getCuda(), {4096, 4096}, DType::kFloat16);
     CATCH_REQUIRE(x.getNumEl() * 2 == kBytes);
   }
 

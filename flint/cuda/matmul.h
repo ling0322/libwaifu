@@ -27,6 +27,7 @@
 #include "flint/cuda/gemm.h"
 #include "flint/cuda/matvec.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -38,7 +39,8 @@ class MatMul {
   static std::shared_ptr<MatMul> createCutlass();
   static std::shared_ptr<MatMul> createCublas();
 
-  Tensor apply(const Tensor &A, const Tensor &B);
+  /// C = A @ B, written into `C`: contiguous, A's batch and rows by B's columns, of A's type.
+  void apply(const TensorView &A, const TensorView &B, const TensorView &C);
 
  protected:
   std::shared_ptr<Gemm> _gemm;
@@ -48,19 +50,15 @@ class MatMul {
   // shapes is the same, so they are one body rather than two. Defined in matmul.cc and used only
   // there.
   template<typename T>
-  Tensor gemm(Tensor A, Tensor B);
+  void gemm(const TensorView &A, const TensorView &B, const TensorView &C);
   template<typename T>
-  Tensor bmm(Tensor A, Tensor B);
+  void bmm(const TensorView &A, const TensorView &B, const TensorView &C);
   template<typename T>
-  Tensor matmulFloat(const Tensor &A, const Tensor &B);
+  void matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C);
   template<typename T>
-  Tensor bmmToGemm(const Tensor &A, const Tensor &B);
+  void bmmToGemm(const TensorView &A, const TensorView &B, const TensorView &C);
   template<typename T>
-  std::vector<const T *> getBatch(const Tensor &A, int nBatchDim);
-
-  Tensor matmulQ4(const Tensor &A, const Tensor &B);
-  Tensor gemmQ4(const Tensor &A, const Tensor &B);
-  Tensor bmmToGemmQ4(const Tensor &A, const Tensor &B);
+  std::vector<const T *> getBatch(const TensorView &A, int nBatchDim);
 };
 
 }  // namespace cuda

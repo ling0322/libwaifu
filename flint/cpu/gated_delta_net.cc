@@ -25,7 +25,6 @@
 
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
 #include "flint/cpu/triangular_solve.h"
 
 namespace fl {
@@ -151,15 +150,16 @@ void runHead(
 
 }  // namespace
 
-Tensor gatedDeltaNetPrefill(
-    const Tensor &q,
-    const Tensor &k,
-    const Tensor &v,
-    const Tensor &g,
-    const Tensor &beta,
-    const Tensor &cuSeqlens,
-    const Tensor &stateSlots,
-    Tensor &state) {
+void gatedDeltaNetPrefill(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    const TensorView &g,
+    const TensorView &beta,
+    const TensorView &cuSeqlens,
+    const TensorView &stateSlots,
+    const TensorView &state,
+    const TensorView &o) {
   CHECK(q.getDType() == DType::kFloat && k.getDType() == DType::kFloat);
   CHECK(v.getDType() == DType::kFloat && state.getDType() == DType::kFloat);
   CHECK(g.getDType() == DType::kFloat && beta.getDType() == DType::kFloat);
@@ -186,7 +186,8 @@ Tensor gatedDeltaNetPrefill(
   CHECK(state.getShape(2) == headDim && state.getShape(3) == headDim);
 
   int headRatio = numVHead / numKHead;
-  Tensor o = tensor({numTokens, numVHead, headDim}, DType::kFloat);
+  CHECK(o.getDType() == DType::kFloat);
+  o.throwIfInvalidShape({numTokens, numVHead, headDim}, "gatedDeltaNetPrefill");
 
   TensorAccessor<const float, 3> aQ(q);
   TensorAccessor<const float, 3> aK(k);
@@ -216,8 +217,6 @@ Tensor gatedDeltaNetPrefill(
     runHead(aQ, aK, aV, aG, aBeta, aState[slot][head], aO, begin, end, head, head / headRatio,
             headDim);
   }
-
-  return o;
 }
 
 }  // namespace cpu

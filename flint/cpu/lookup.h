@@ -19,13 +19,15 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor lookup(const Tensor &table, const Tensor &indices);
+/// @brief Row `indices[...]` of `table` (V, D) for every index, into `C` of indices' shape plus
+///        (D) and the table's type.
+void lookup(const TensorView &table, const TensorView &indices, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

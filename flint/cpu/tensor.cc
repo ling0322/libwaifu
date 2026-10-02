@@ -19,43 +19,26 @@
 
 #include "flint/cpu/tensor.h"
 
+#include <limits>
+
 #include "flint/cpu/common.h"
-#include "flint/cpu/cpu_tensor_data.h"
-#include "flint/cpu/print.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor tensor(lut::Span<const int> shape, DType dtype) {
-  Tensor tensor;
-
-  auto tensorShape = std::make_shared<TensorShape>(lut::makeConstSpan(shape));
-
-  int64_t numel = tensorShape->getNumEl();
-  auto tensorData = CpuTensorData::create(numel, dtype);
-
-  return Tensor::create(tensorShape, tensorData);
-}
-
-Tensor tensorLike(const Tensor &input) {
-  return tensor(input.getShape(), input.getDType());
-}
-
 template<typename T>
-void fillZeroKernel(Tensor tensor) {
-  // make sure tensor is contiguous.
+void fillZeroKernel(const TensorView &tensor) {
   CHECK(tensor.isContiguous());
 
   T *data = getDataPtrCpu<T>(tensor);
   int64_t numel = tensor.getNumEl();
-
   for (int64_t i = 0; i < numel; ++i) {
     data[i] = T(0);
   }
 }
 
-void fillZero(Tensor tensor) {
+void fillZero(const TensorView &tensor) {
   if (tensor.getDType() == DType::kFloat) {
     fillZeroKernel<float>(tensor);
   }
@@ -69,27 +52,14 @@ void fillZero(Tensor tensor) {
   }
 }
 
-Tensor zeros(lut::Span<const int> shape, DType dtype) {
-  Tensor x = tensor(shape, dtype);
-  fillZero(x);
-
-  return x;
-}
-
-Tensor zerosLike(const Tensor &input) {
-  Tensor x = tensorLike(input);
-  fillZero(x);
-
-  return x;
-}
-
 template<typename T>
-Tensor causalMaskKernel(int length) {
-  Tensor mask = tensor({length, length}, DType::getType<T>());
+void causalMaskKernel(const TensorView &mask) {
+  CHECK(mask.getDim() == 2 && mask.getShape(0) == mask.getShape(1) && mask.isContiguous());
+  int length = mask.getShape(0);
 
   T *data = getDataPtrCpu<T>(mask);
   for (int i = 0; i < length; ++i) {
-    T *row = data + i * length;
+    T *row = data + static_cast<int64_t>(i) * length;
     for (int j = 0; j <= i; ++j) {
       row[j] = 0.0f;
     }
@@ -97,14 +67,12 @@ Tensor causalMaskKernel(int length) {
       row[j] = -std::numeric_limits<float>::infinity();
     }
   }
-
-  return mask;
 }
 
-Tensor causalMask(int length, DType dtype) {
-  if (dtype == DType::kFloat) return causalMaskKernel<float>(length);
+void causalMask(const TensorView &out) {
+  if (out.getDType() == DType::kFloat) return causalMaskKernel<float>(out);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (dtype == DType::kFloat16) return causalMaskKernel<Float16>(length);
+  if (out.getDType() == DType::kFloat16) return causalMaskKernel<Float16>(out);
 #endif
 
   NOT_IMPL();

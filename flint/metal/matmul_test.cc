@@ -1,4 +1,5 @@
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -17,11 +18,11 @@ Operators *cpuOps() {
 }
 
 Tensor toMetal(const Tensor &a) {
-  return metalOps()->cast(metalOps()->toDevice(Device::getMetal(), a), DType::kFloat16);
+  return F::cast(metalOps(), F::toDevice(metalOps(), a, Device::getMetal()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat));
+  return F::toDevice(metalOps(), F::cast(metalOps(), a, DType::kFloat), Device::getCpu());
 }
 
 }  // namespace
@@ -29,12 +30,12 @@ Tensor toCpu(const Tensor &a) {
 CATCH_TEST_CASE("test Metal matmul", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
-  Tensor a = cpuOps()->rand({10, 20}, DType::kFloat);
-  Tensor b = cpuOps()->rand({20, 40}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {10, 20}, DType::kFloat);
+  Tensor b = F::rand(Device::getCpu(), {20, 40}, DType::kFloat);
   CATCH_REQUIRE(
       cpuOps()->allClose(
-          toCpu(metalOps()->matmul(toMetal(a), toMetal(b))),
-          cpuOps()->matmul(a, b),
+          toCpu(F::matmul(metalOps(), toMetal(a), toMetal(b))),
+          F::matmul(cpuOps(), a, b),
           5e-2,
           5e-2));
 }
@@ -43,24 +44,24 @@ CATCH_TEST_CASE("test Metal matmul (transposed B)", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
   // Linear layers store weight as (out, in) and multiply A @ W^T.
-  Tensor a = cpuOps()->rand({8, 64}, DType::kFloat);
-  Tensor w = cpuOps()->rand({128, 64}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {8, 64}, DType::kFloat);
+  Tensor w = F::rand(Device::getCpu(), {128, 64}, DType::kFloat);
   CATCH_REQUIRE(
       cpuOps()->allClose(
-          toCpu(metalOps()->matmul(toMetal(a), toMetal(w).transpose(-1, -2))),
-          cpuOps()->matmul(a, w.transpose(-1, -2)),
+          toCpu(F::matmul(metalOps(), toMetal(a), toMetal(w).transpose(-1, -2))),
+          F::matmul(cpuOps(), a, w.transpose(-1, -2)),
           5e-2, 5e-2));
 }
 
 CATCH_TEST_CASE("test Metal matmul (batched)", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
-  Tensor c = cpuOps()->rand({5, 10, 20}, DType::kFloat);
-  Tensor d = cpuOps()->rand({40, 20}, DType::kFloat);
+  Tensor c = F::rand(Device::getCpu(), {5, 10, 20}, DType::kFloat);
+  Tensor d = F::rand(Device::getCpu(), {40, 20}, DType::kFloat);
   CATCH_REQUIRE(
       cpuOps()->allClose(
-          toCpu(metalOps()->matmul(toMetal(c), toMetal(d).transpose(-1, -2))),
-          cpuOps()->matmul(c, d.transpose(-1, -2)),
+          toCpu(F::matmul(metalOps(), toMetal(c), toMetal(d).transpose(-1, -2))),
+          F::matmul(cpuOps(), c, d.transpose(-1, -2)),
           5e-2, 5e-2));
 }
 
@@ -78,12 +79,12 @@ CATCH_TEST_CASE("test Metal matmul (SDXL shapes)", "[op][metal]") {
 
   for (const Shape &s : shapes) {
     CATCH_INFO("shape " << s.m << "x" << s.n << "x" << s.k);
-    Tensor a = cpuOps()->rand({s.m, s.k}, DType::kFloat);
-    Tensor b = cpuOps()->rand({s.n, s.k}, DType::kFloat);
+    Tensor a = F::rand(Device::getCpu(), {s.m, s.k}, DType::kFloat);
+    Tensor b = F::rand(Device::getCpu(), {s.n, s.k}, DType::kFloat);
     CATCH_REQUIRE(
         cpuOps()->allClose(
-            toCpu(metalOps()->matmul(toMetal(a), toMetal(b).transpose(-1, -2))),
-            cpuOps()->matmul(a, b.transpose(-1, -2)),
+            toCpu(F::matmul(metalOps(), toMetal(a), toMetal(b).transpose(-1, -2))),
+            F::matmul(cpuOps(), a, b.transpose(-1, -2)),
             5e-2, 5e-2));
   }
 }

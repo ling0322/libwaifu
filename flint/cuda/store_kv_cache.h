@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -31,11 +32,11 @@ namespace cuda {
 /// <int>(numTokens) holding blockId * blockSize + offsetInBlock for each token. blockSize must be
 /// a power of two.
 void storeKVCache(
-    const Tensor &k,
-    const Tensor &v,
-    Tensor &keyCache,
-    Tensor &valueCache,
-    const Tensor &slotMapping);
+    const TensorView &k,
+    const TensorView &v,
+    const TensorView &keyCache,
+    const TensorView &valueCache,
+    const TensorView &slotMapping);
 
 }  // namespace cuda
 }  // namespace op

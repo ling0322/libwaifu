@@ -20,7 +20,7 @@
 #pragma once
 
 #include "flint/cpu/accessor.h"
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -34,7 +34,7 @@ inline void copyVector(TensorAccessor<T, 1> dest, TensorAccessor<const T, 1> src
   }
 }
 
-void copy(const Tensor &src, Tensor &dest);
+void copy(const TensorView &src, const TensorView &dest);
 
 }  // namespace cpu
 }  // namespace op
