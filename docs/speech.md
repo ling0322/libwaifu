@@ -29,8 +29,8 @@ means text2speech -- is read off its manifest's `model.type`.
 | | |
 | --- | --- |
 | the page | a third tab: a box to type in, a recording to sound like, speed, temperature, a seed |
-| the run | a command on the worker thread, a bar that moves, a button that stops it |
-| the clip | `waifu-NNNN.wav` beside the pictures, played on the page, saved, deleted, said again |
+| the run | a job posted to `/api/jobs`, run in turn by the worker thread; a bar that moves, a button that stops it |
+| the clip | `waifu-output/jobs/<id>/output.wav`, kept until it is deleted; played on the page, saved, deleted, said again |
 | the voice | [`Voice`](../waifu/src/speech.rs), a trait with five methods |
 | what implements it | [`IndexTts`](../waifu/src/indextts/mod.rs), chosen in the terminal or by `-m`; [`CosyVoice3`](../waifu/src/cosyvoice3/mod.rs), by a manifest path; and `Tones`, the stand-in, by `-m tones` |
 

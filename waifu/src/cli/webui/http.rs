@@ -19,22 +19,42 @@
 
 //! The requests, and what each one answers with.
 //!
-//! Three of them serve the page itself, and the rest are the conversation the page holds with the
-//! worker: what is loaded, what is happening, draw this, say this, stop. None of
-//! them waits for a model -- a request that did would hold its socket open for minutes -- so each
-//! one posts a command and answers with what is true at that moment. The page asks again.
+//! A REST API over two kinds of thing, jobs and uploads, and three things there is one of:
+//!
+//! | method | path                       |                                                   |
+//! | ------ | -------------------------- | ------------------------------------------------- |
+//! | GET    | `/api/model`               | the model this program serves, and its defaults   |
+//! | GET    | `/api/machine`             | the processor, the memory, the card               |
+//! | GET    | `/api/worker`              | whether it is busy, how far along, how many wait  |
+//! | POST   | `/api/jobs`                | a new job: 202, and where to ask after it         |
+//! | GET    | `/api/jobs`                | every job, or `?ids=a,b` for those                |
+//! | GET    | `/api/jobs/{id}`           | one job: where it is in line, how far along       |
+//! | GET    | `/api/jobs/{id}/output`    | what it made                                      |
+//! | POST   | `/api/jobs/{id}/cancel`    | out of line, or stopped after the step it is on   |
+//! | DELETE | `/api/jobs/{id}`           | gone, and what it made with it                    |
+//! | POST   | `/api/uploads`             | a picture or a WAV for a job to start from: 201   |
+//! | GET    | `/api/uploads/{id}`        | the file                                          |
+//! | DELETE | `/api/uploads/{id}`        | gone                                              |
+//!
+//! None of them waits for a model -- a request that did would hold its socket open for minutes --
+//! so a job is posted and answered with where it is, and asked after until it is done.
+//!
+//! Nothing here knows who is asking. There are no sessions and no users: an id is 128 random bits
+//! and whoever holds one can read and delete what it names. Which ids are whose is for whatever
+//! sits in front of this to keep -- the page keeps its own in the browser. What is checked is only
+//! that a request came from this machine's own pages and not from some other site open in a
+//! browser on it, which a server on the loopback address is otherwise open to: see
+//! [`from_here`].
 
 use std::io::{Cursor, Read};
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response};
 
 use crate::cli::webui::machine;
-use crate::cli::webui::state::{Chosen, Doing, Session, Shared};
-use crate::cli::webui::worker::{Command, Job, SayJob};
-use crate::{GenerationOptions, SpeechOptions};
+use crate::cli::webui::state::{Chosen, Shared, Spoken};
+use crate::cli::webui::store::{Cancelled, Kind, Refused, Status};
 
 /// The page, built into the binary. There is no directory of files to find at runtime and no
 /// order the program has to be started from: a single executable is the whole of it.
@@ -54,56 +74,76 @@ const VENDOR: [(&str, &str); 3] = [
     ("/vendor/htm.js", include_str!("assets/vendor/htm.js")),
 ];
 
-/// How much of a posted picture to read before giving up on it.
+/// How much of a posted file to read before giving up on it.
 ///
 /// A photograph off a phone is a few megabytes and this is a good deal more than that. What it is
 /// for is the request that is not a picture at all: the body is read into memory before anything
 /// looks at it, and without a limit "read it all" is as long as whatever is sending it likes.
-const MOST_OF_A_PICTURE: u64 = 64 << 20;
+const MOST_OF_A_FILE: u64 = 64 << 20;
 
-/// And how much of a posted recording.
-///
-/// Smaller than a picture on purpose. What a speech model wants to hear of somebody is seconds,
-/// not minutes -- the page trims to half a minute before it posts -- and what arrives here is
-/// uncompressed samples rather than a compressed file, so the number that is generous for a
-/// recording is smaller than the one that is generous for a photograph.
-const MOST_OF_A_RECORDING: u64 = 16 << 20;
+/// How much of a JSON body to read. A job's settings are a few hundred bytes; a prompt that is a
+/// megabyte long is not one anybody typed.
+const MOST_OF_A_REQUEST: u64 = 1 << 20;
+
+/// How many jobs may wait at once. Past this a new one is refused rather than taken: a line of
+/// hundreds is somebody's script gone wrong, and every one of them would be kept on the disk.
+const MOST_QUEUED: usize = 64;
 
 /// What every answer is: bytes, with a type on them. One shape rather than a dozen, because a
 /// route that could answer with any of several would otherwise need them boxed.
 type Reply = Response<Cursor<Vec<u8>>>;
 
 /// Reads one request and answers it.
-pub fn answer(shared: &Arc<Shared>, commands: &Sender<Command>, request: &mut Request) -> Reply {
-    // What was asked for, without anything after a question mark. Nothing here reads a query
-    // string -- what a request carries, it carries in its body -- but a browser appends one to
-    // defeat its own cache, and a path that kept it would match nothing.
-    let path = request.url().split('?').next().unwrap_or("/").to_string();
+pub fn answer(shared: &Arc<Shared>, request: &mut Request) -> Reply {
+    // What was asked for, and the query after it -- which only the list of jobs reads. A browser
+    // appends one to defeat its own cache elsewhere, and a path that kept it would match nothing.
+    let url = request.url().to_string();
+    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
 
-    // The files the page is built from are the same for everybody, and asking for one is not
-    // opening a page: nothing is looked up for them and no session is started by them.
     if *request.method() == Method::Get {
-        if let Some(reply) = static_file(&path) {
+        if let Some(reply) = static_file(path) {
             return reply;
         }
     }
-
-    // Everything else is some page's, and which page is the cookie. A browser that brought none,
-    // or one this program did not give out, is a new session and is handed its key.
-    let visit = shared.session_for(cookies_of(request));
-    let mut reply = answer_for(shared, &visit.session, commands, request, &path);
-
-    // Handed back with the page itself as well as with a new session's first answer. What that
-    // buys is the expiry: a cookie that is only ever set once runs out a day after the first
-    // visit, however often the page has been opened since.
-    if visit.new || path == "/" {
-        let set = shared.set_cookie(&visit.key);
-        if let Ok(header) = Header::from_bytes(&b"Set-Cookie"[..], set.as_bytes()) {
-            reply.add_header(header);
-        }
+    if let Err(refusal) = from_here(request) {
+        return refusal;
     }
 
-    reply
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    match (request.method(), parts.as_slice()) {
+        (Method::Get, [""]) => page(INDEX, "text/html; charset=utf-8"),
+
+        (Method::Get, ["", "api", "model"]) => json(200, shared.describe_model()),
+        (Method::Get, ["", "api", "worker"]) => json(200, shared.describe_worker()),
+        // Apart from the rest because it answers a different question: what the machine has
+        // left changes on its own, with nothing here having done anything.
+        (Method::Get, ["", "api", "machine"]) => json(200, machine::describe(shared.runtime())),
+
+        (Method::Get, ["", "api", "jobs"]) => list_jobs(shared, query),
+        (Method::Post, ["", "api", "jobs"]) => submit(shared, request),
+        (Method::Get, ["", "api", "jobs", id]) => match shared.store().find(id) {
+            Some(job) => json(200, shared.describe_job(&job)),
+            None => no_such_job(),
+        },
+        (Method::Get, ["", "api", "jobs", id, "output"]) => output(shared, id, range_of(request)),
+        (Method::Post, ["", "api", "jobs", id, "cancel"]) => cancel(shared, id),
+        (Method::Delete, ["", "api", "jobs", id]) => delete_job(shared, id),
+
+        (Method::Post, ["", "api", "uploads"]) => upload(shared, request),
+        (Method::Get, ["", "api", "uploads", id]) => match shared.store().upload_file(id) {
+            Some((mime, path)) => match std::fs::read(path) {
+                Ok(bytes) => media(mime, bytes, range_of(request).as_deref()),
+                Err(error) => refused(410, &format!("that upload can no longer be read: {error}")),
+            },
+            None => refused(404, "there is no upload by that id"),
+        },
+        (Method::Delete, ["", "api", "uploads", id]) => match shared.store().delete_upload(id) {
+            true => no_content(),
+            false => refused(404, "there is no upload by that id"),
+        },
+
+        _ => refused(404, "no such page"),
+    }
 }
 
 /// One of the files the page is drawn from, if that is what `path` names.
@@ -120,460 +160,343 @@ fn static_file(path: &str) -> Option<Reply> {
     Some(page(said, mime))
 }
 
-/// The `Cookie` header a request carried, if it carried one.
-fn cookies_of(request: &Request) -> Option<&str> {
-    request
-        .headers()
-        .iter()
-        .find(|header| header.field.equiv("Cookie"))
-        .map(|header| header.value.as_str())
-}
+/// Refuses a request that did not come from a page this program served.
+///
+/// Not a question of who is asking -- nothing here knows that -- but of where from. The server
+/// listens on the loopback address, and every site open in a browser on this machine can send a
+/// request there: a form on some page posting a job, or a name that resolves to 127.0.0.1 after
+/// the page on it has loaded. Three things between them close that:
+///
+/// - `Host` has to be the loopback address by name or number, which a name some other site
+///   rebound to it is not;
+/// - `Origin`, where a browser sent one, has to be this server's own;
+/// - a POST has to say what it carries, and say something a plain form cannot. A browser only
+///   sends another site's request without asking first when it is one of those, and this server
+///   never answers the asking -- so the request is never sent.
+fn from_here(request: &Request) -> Result<(), Reply> {
+    let header = |name: &'static str| {
+        request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv(name))
+            .map(|header| header.value.as_str().to_string())
+    };
 
-/// Answers a request from `session`'s page.
-fn answer_for(
-    shared: &Arc<Shared>,
-    session: &Arc<Session>,
-    commands: &Sender<Command>,
-    request: &mut Request,
-    path: &str,
-) -> Reply {
-    match (request.method(), path) {
-        (Method::Get, "/") => page(INDEX, "text/html; charset=utf-8"),
-
-        (Method::Get, "/api/state") => json(shared.describe(session)),
-        (Method::Get, "/api/progress") => json(shared.progress(session)),
-        // Apart from the state rather than inside it, because it answers a different question.
-        // The state is what this session has done and is a new one every time anything happens;
-        // what the machine has left changes on its own, with nothing here having done anything,
-        // and a revision counted up for every megabyte of memory somebody else's browser took
-        // would have the page reading the gallery back several times a second.
-        (Method::Get, "/api/machine") => json(machine::describe(shared.runtime())),
-
-        // Nothing here chooses a model, fetches one or moves it to another device. All three were
-        // settled in the terminal before this server was listening, and the page is served for
-        // what was settled.
-        (Method::Post, "/api/generate") => generate(shared, session, commands, request),
-        (Method::Post, "/api/speak") => speak(shared, session, commands, request),
-        (Method::Post, "/api/interrupt") => match shared.interrupt(session) {
-            true => json(json!({ "ok": true })),
-            false => refused(
-                409,
-                "what is running is another page's, and only that page can stop it",
-            ),
-        },
-
-        (Method::Delete, "/api/picture") => forget_picture(session, request),
-        (Method::Delete, "/api/clip") => forget_clip(session, request),
-
-        (Method::Post, "/api/upload") => upload(session, request),
-        (Method::Get, "/api/upload") => held_picture(session),
-        (Method::Delete, "/api/upload") => {
-            session.forget_upload();
-            json(json!({ "ok": true }))
-        }
-
-        // The recording a reading is to sound like. The same three doors the picture has, and
-        // its own box behind them: they are two different runs' inputs, and dropping one should
-        // not throw away the other.
-        (Method::Post, "/api/voice") => hold_recording(session, request),
-        (Method::Get, "/api/voice") => held_recording(session, range_of(request)),
-        (Method::Delete, "/api/voice") => {
-            session.forget_recording();
-            json(json!({ "ok": true }))
-        }
-
-        // What is left of a GET: the pictures and clips this session made. Each goes by the name
-        // it was written under and no other -- a path out of a request is otherwise a way to read
-        // any file this process can, and a server on the loopback address is still reachable by
-        // anything else running on the machine.
-        (Method::Get, path) => {
-            match (path.strip_prefix("/picture/"), path.strip_prefix("/clip/")) {
-                (Some(file), _) => picture(session, file),
-                (_, Some(file)) => clip(session, file, range_of(request)),
-                _ => refused(404, "no such page"),
-            }
-        }
-
-        _ => refused(404, "no such page"),
+    let host = header("Host").unwrap_or_default();
+    if !is_loopback(&host) {
+        return Err(refused(
+            403,
+            "this server only answers requests addressed to this machine",
+        ));
     }
+    if let Some(origin) = header("Origin") {
+        if origin != format!("http://{host}") {
+            return Err(refused(403, "this server only answers its own pages"));
+        }
+    }
+
+    if *request.method() == Method::Post {
+        let kind = header("Content-Type").unwrap_or_default();
+        let essence = kind
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let plain = [
+            "",
+            "text/plain",
+            "application/x-www-form-urlencoded",
+            "multipart/form-data",
+        ];
+        if plain.contains(&essence.as_str()) {
+            return Err(refused(
+                415,
+                "say what the body is: application/json for a job, the file's own type for an upload",
+            ));
+        }
+    }
+
+    Ok(())
 }
 
-/// Starts a run, if there is a model and nothing else is happening.
-fn generate(
-    shared: &Arc<Shared>,
-    session: &Arc<Session>,
-    commands: &Sender<Command>,
-    request: &mut Request,
-) -> Reply {
+/// Whether a `Host` header names this machine: `localhost`, `127.0.0.1` or `[::1]`, with a port
+/// or without one.
+fn is_loopback(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// The jobs, oldest first: every one, or those `?ids=` names, in the order they were made.
+fn list_jobs(shared: &Arc<Shared>, query: &str) -> Reply {
+    let wanted: Option<Vec<&str>> = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("ids="))
+        .map(|ids| ids.split(',').filter(|id| !id.is_empty()).collect());
+
+    let jobs: Vec<Value> = shared
+        .store()
+        .jobs()
+        .iter()
+        .filter(|job| {
+            wanted
+                .as_ref()
+                .is_none_or(|wanted| wanted.contains(&job.id.as_str()))
+        })
+        .map(|job| shared.describe_job(job))
+        .collect();
+
+    json(200, json!({ "jobs": jobs }))
+}
+
+/// Takes a job: checks what it asks for, fills in what it left to the model, keeps it, and puts it
+/// in line. Answered with 202 and where to ask after it.
+fn submit(shared: &Arc<Shared>, request: &mut Request) -> Reply {
     let asked = match body(request) {
         Ok(body) => body,
         Err(error) => return refused(400, &error),
     };
 
+    let kind = shared.kind();
+    if let Some(named) = asked.get("kind").and_then(Value::as_str) {
+        if Kind::named(named) != Some(kind) {
+            return refused(
+                400,
+                &format!("this program runs {} jobs, not {named}", kind.name()),
+            );
+        }
+    }
+
+    let settled = match kind {
+        Kind::Image => match shared.world().model.clone() {
+            Some(chosen) => image_settings(shared, &asked, &chosen),
+            None => Err("this program has no model to draw with".to_string()),
+        },
+        Kind::Speech => match shared.world().voice.clone() {
+            Some(voice) => speech_settings(shared, &asked, &voice),
+            None => Err("this program has no voice to speak with".to_string()),
+        },
+    };
+    let settled = match settled {
+        Ok(settled) => settled,
+        Err(error) => return refused(400, &error),
+    };
+
+    if shared.store().queued() >= MOST_QUEUED {
+        return refused(
+            503,
+            &format!("{MOST_QUEUED} jobs are already waiting: ask again when fewer are"),
+        );
+    }
+
+    let job = match shared.store().submit(kind, settled) {
+        Ok(job) => job,
+        Err(error) => return refused(500, &format!("the job could not be kept: {error}")),
+    };
+
+    let mut reply = json(202, shared.describe_job(&job));
+    add_header(&mut reply, "Location", &format!("/api/jobs/{}", job.id));
+    reply
+}
+
+/// A picture job's settings, every one of them: what was asked for, checked, and the model's own
+/// for what was not.
+fn image_settings(shared: &Shared, asked: &Value, chosen: &Chosen) -> Result<Value, String> {
     let prompt = asked
         .get("prompt")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+        .unwrap_or_default();
     if prompt.trim().is_empty() {
-        return refused(400, "there is nothing to draw: type a prompt");
+        return Err("there is nothing to draw: give it a prompt".to_string());
     }
 
-    // The worker is taken before anything else is asked of the state, so that what a second
-    // request is told is what is actually happening -- "no model is loaded" is a true sentence
-    // while one is being read and a baffling thing to be told at that moment.
-    if !shared.claim(Some(Arc::clone(session))) {
-        return refused(409, &already(shared, session));
-    }
-
-    let Some(chosen) = shared.world().model.clone() else {
-        return give_up(
-            shared,
-            409,
-            "this session has no model to draw with: run waifu again and pick one",
-        );
+    let init_image = match asked.get("init_image").and_then(Value::as_str) {
+        Some(id) => {
+            let upload = shared
+                .store()
+                .find_upload(id)
+                .ok_or_else(|| format!("there is no upload {id} to draw from"))?;
+            if !upload.mime.starts_with("image/") {
+                return Err(format!("upload {id} is not a picture"));
+            }
+            if let Some(why) = &chosen.no_picture_because {
+                return Err(why.clone());
+            }
+            Some(upload.id)
+        }
+        None => None,
     };
 
-    // Whether this run starts from a picture, which is the img2img tab having one in it. Asked of
-    // the request and then of what is actually held: a page that was left open while the picture
-    // was cleared would otherwise ask for a run from a picture there is none of.
-    let from_a_picture = asked
-        .get("from_picture")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let from = match from_a_picture {
-        true => match session.upload() {
-            Some(bytes) => Some(bytes),
-            None => return give_up(shared, 400, "there is no picture to draw from"),
-        },
-        false => None,
-    };
-    if let (true, Some(why)) = (from.is_some(), &chosen.no_picture_because) {
-        return give_up(shared, 409, why);
-    }
-
-    let (guidance, negative) = steering(&asked, &chosen);
-
-    let options = GenerationOptions {
-        width: pixels(asked.get("width"), chosen.defaults.width),
-        height: pixels(asked.get("height"), chosen.defaults.height),
-        num_steps: whole(asked.get("steps"), chosen.defaults.num_steps).clamp(1, 150),
-        guidance_scale: guidance,
-        negative_prompt: negative,
-        // Never left open. A run asked for without a seed is given a fresh one rather than left
-        // to whatever the device's generator was last used for, so that what comes out says which
-        // number drew it and can be drawn again.
-        seed: Some(seed(asked.get("seed"))),
-        strength: decimal(asked.get("strength"), 0.8).clamp(0.0, 1.0),
-    };
-
-    post(
-        shared,
-        commands,
-        Command::Draw(Job {
-            session: Arc::clone(session),
-            // Which model to draw with travels with the run rather than being read off the
-            // session by the worker: what was chosen when the button was pressed is what this
-            // run is of, whatever gets chosen while it waits its turn.
-            model: chosen.name,
-            prompt,
-            options,
-            from,
-        }),
-    )
+    let (guidance, negative) = steering(asked, chosen);
+    Ok(json!({
+        "prompt": prompt,
+        "negative": negative,
+        "width": pixels(asked.get("width"), chosen.defaults.width),
+        "height": pixels(asked.get("height"), chosen.defaults.height),
+        "steps": whole(asked.get("steps"), chosen.defaults.num_steps).clamp(1, 150),
+        "guidance": guidance,
+        // Never left open. A job asked for without a seed is given a fresh one rather than left
+        // to whatever the device's generator was last used for, so that what comes out says
+        // which number drew it and can be drawn again. A string: it is sixty-four bits.
+        "seed": seed(asked.get("seed")).to_string(),
+        "strength": decimal(asked.get("strength"), 0.8).clamp(0.0, 1.0),
+        "init_image": init_image,
+        "model": chosen.name,
+    }))
 }
 
-/// Starts a reading, if there is anything to read and nothing else is happening.
-///
-/// The mirror of [`generate`], including the order it refuses in: what is wrong with an empty
-/// page is that there is nothing to say, and that is the thing somebody can act on.
-fn speak(
-    shared: &Arc<Shared>,
-    session: &Arc<Session>,
-    commands: &Sender<Command>,
-    request: &mut Request,
-) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
-    };
-
+/// The same, for something to read out.
+fn speech_settings(shared: &Shared, asked: &Value, voice: &Spoken) -> Result<Value, String> {
     let text = asked
         .get("text")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+        .unwrap_or_default();
     if text.trim().is_empty() {
-        return refused(400, "there is nothing to say: type something to read out");
+        return Err("there is nothing to say: give it some text to read out".to_string());
     }
 
-    // Taken before anything else is asked of the state, for the same reason a picture's run takes
-    // it first: what a second request is told should be what is actually happening.
-    if !shared.claim(Some(Arc::clone(session))) {
-        return refused(409, &already(shared, session));
-    }
-
-    let Some(voice) = shared.world().voice.clone() else {
-        return give_up(shared, 409, "there is no voice to speak with");
+    let reference = match asked.get("reference").and_then(Value::as_str) {
+        Some(id) => {
+            let upload = shared
+                .store()
+                .find_upload(id)
+                .ok_or_else(|| format!("there is no upload {id} to sound like"))?;
+            if upload.mime != "audio/wav" {
+                return Err(format!("upload {id} is not a WAV recording"));
+            }
+            if let Some(why) = &voice.no_likeness_because {
+                return Err(why.clone());
+            }
+            Some(upload.id)
+        }
+        None => None,
     };
 
-    // Whether this reading is given a recording to sound like. Asked of the request and then of
-    // what is actually held, so that a page left open while the recording was cleared does not
-    // ask for a run from one there is none of.
-    let from_a_recording = asked
-        .get("from_recording")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let like = match from_a_recording {
-        true => match session.recording() {
-            Some(bytes) => Some(bytes),
-            None => return give_up(shared, 400, "there is no recording to sound like"),
-        },
-        false => None,
-    };
-    if let (true, Some(why)) = (like.is_some(), &voice.no_likeness_because) {
-        return give_up(shared, 409, why);
-    }
-
-    let options = SpeechOptions {
-        speed: decimal(asked.get("speed"), voice.defaults.speed).clamp(0.25, 4.0),
-        temperature: decimal(asked.get("temperature"), voice.defaults.temperature).clamp(0.0, 2.0),
-        // Never left open, for the same reason a picture's is not: what comes out should say
-        // which number said it, so that it can be said again.
-        seed: Some(seed(asked.get("seed"))),
-    };
-
-    post(
-        shared,
-        commands,
-        Command::Speak(SayJob {
-            session: Arc::clone(session),
-            voice: voice.name,
-            text,
-            options,
-            like,
-        }),
-    )
+    Ok(json!({
+        "text": text,
+        "speed": decimal(asked.get("speed"), voice.defaults.speed).clamp(0.25, 4.0),
+        "temperature": decimal(asked.get("temperature"), voice.defaults.temperature).clamp(0.0, 2.0),
+        "seed": seed(asked.get("seed")).to_string(),
+        "reference": reference,
+        "voice": voice.name,
+    }))
 }
 
-/// Holds the recording a reading is to sound like.
-///
-/// Posted as the bytes of a WAV file and nothing else. The page decodes whatever was dropped on
-/// it -- the browser has a decoder for every format it will play, and this program has one for
-/// none of them -- so what arrives is samples this program can actually read, whatever the file
-/// on the far side was.
-fn hold_recording(session: &Session, request: &mut Request) -> Reply {
-    let mut bytes = Vec::new();
-    if let Err(error) = request
-        .as_reader()
-        .take(MOST_OF_A_RECORDING)
-        .read_to_end(&mut bytes)
-    {
-        return refused(400, &format!("the recording did not arrive whole: {error}"));
-    }
-    if bytes.is_empty() {
-        return refused(400, "the recording was empty");
-    }
+/// What a finished job made.
+fn output(shared: &Arc<Shared>, id: &str, range: Option<String>) -> Reply {
+    let Some(job) = shared.store().find(id) else {
+        return no_such_job();
+    };
+    let Some((mime, path)) = shared.store().output_file(id) else {
+        return refused(
+            404,
+            &format!("it has not made anything: it is {}", job.status.name()),
+        );
+    };
 
-    // Read here rather than at the run, alone among the things this server is posted. A picture
-    // that is not one is found out about by an image decoder that says so in a sentence; a WAV
-    // that is not one is found out about here, where there is still a request to refuse -- and
-    // refusing at the door is how somebody who dropped the wrong file learns it now rather than
-    // after pressing the button.
-    if let Err(error) = crate::wav::read(&bytes) {
-        return refused(400, &error.to_string());
-    }
-
-    session.hold_recording(bytes);
-    json(json!({ "ok": true }))
-}
-
-/// Hands back the recording being held, so that a page opening fresh can play what is in the box.
-fn held_recording(session: &Session, range: Option<String>) -> Reply {
-    match session.recording() {
-        Some(bytes) => media("audio/wav", bytes, range.as_deref()),
-        None => refused(404, "no recording is being held"),
+    match std::fs::read(path) {
+        Ok(bytes) => media(mime, bytes, range.as_deref()),
+        Err(error) => refused(410, &format!("what it made can no longer be read: {error}")),
     }
 }
 
-/// One of the clips this session said.
-fn clip(session: &Session, file: &str, range: Option<String>) -> Reply {
-    let Some(path) = session.spoke(file) else {
-        return refused(404, "this session did not say that");
+/// Takes a waiting job out of line, or asks a running one to stop after the step it is on.
+fn cancel(shared: &Arc<Shared>, id: &str) -> Reply {
+    let Some(job) = shared.store().find(id) else {
+        return no_such_job();
     };
 
-    match std::fs::read(&path) {
-        Ok(bytes) => media("audio/wav", bytes, range.as_deref()),
-        Err(error) => refused(410, &format!("{file} can no longer be read: {error}")),
+    match shared.cancel(id) {
+        // Answered with how it is now, which for a job taken out of line is cancelled.
+        Cancelled::Dequeued => json(
+            200,
+            shared.describe_job(&shared.store().find(id).unwrap_or(job)),
+        ),
+        // Asked, and not done yet: the job says it is stopping until it has.
+        Cancelled::Stopping => json(202, shared.describe_job(&job)),
+        Cancelled::NotGoing => refused(
+            409,
+            &format!("there is nothing to stop: it is {}", job.status.name()),
+        ),
     }
 }
 
-/// Deletes one of the clips this session said, file and row alike.
-///
-/// The same door as a picture's and the same rule through it: by the name it was written under
-/// and no other.
-fn forget_clip(session: &Session, request: &mut Request) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
+/// Deletes a job and what it made, stopping it first if it has not finished.
+fn delete_job(shared: &Arc<Shared>, id: &str) -> Reply {
+    let Some(job) = shared.store().find(id) else {
+        return no_such_job();
     };
-    let Some(file) = asked.get("file").and_then(Value::as_str) else {
-        return refused(400, "no clip was named");
-    };
-    let Some(path) = session.spoke(file) else {
-        return refused(404, "this session did not say that");
-    };
-
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return refused(500, &format!("{file} could not be deleted: {error}")),
+    if matches!(job.status, Status::Queued | Status::Running) {
+        shared.cancel(id);
     }
 
-    session.forget_clip(file);
-    json(json!({ "ok": true }))
-}
-
-/// Deletes one of the pictures this session drew, file and row alike.
-///
-/// By the name it was written under and no other, like every other way this program is asked for
-/// a picture: the gallery is the whole of what a request may name, and a path that came out of a
-/// request is otherwise a way to delete any file this process can reach.
-fn forget_picture(session: &Session, request: &mut Request) -> Reply {
-    let asked = match body(request) {
-        Ok(body) => body,
-        Err(error) => return refused(400, &error),
-    };
-    let Some(file) = asked.get("file").and_then(Value::as_str) else {
-        return refused(400, "no picture was named");
-    };
-    let Some(path) = session.wrote(file) else {
-        return refused(404, "this session did not draw that");
-    };
-
-    // A file that is already gone is not an error: that is the state being asked for, and it is
-    // already the state. Anything else -- a permission, a directory read-only -- is worth saying,
-    // and the row stays so that what it says can be acted on.
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return refused(500, &format!("{file} could not be deleted: {error}")),
+    match shared.store().delete(id) {
+        true => no_content(),
+        false => no_such_job(),
     }
-
-    session.forget_picture(file);
-    json(json!({ "ok": true }))
 }
 
-/// Holds the picture an img2img run starts from.
+/// Keeps a picture or a recording for a job to start from.
 ///
 /// Posted as the bytes of the file and nothing else -- no form, no boundary, no field names. What
 /// crosses is one file, the page knows which, and a multipart body would be a parser this program
-/// owns in order to unwrap something it already has.
-fn upload(session: &Session, request: &mut Request) -> Reply {
+/// owns in order to unwrap something it already has. What kind of file it is is read off the
+/// bytes rather than taken from the request: that is the one part of it that cannot be wrong.
+fn upload(shared: &Arc<Shared>, request: &mut Request) -> Reply {
     let mut bytes = Vec::new();
     if let Err(error) = request
         .as_reader()
-        .take(MOST_OF_A_PICTURE)
+        .take(MOST_OF_A_FILE + 1)
         .read_to_end(&mut bytes)
     {
-        return refused(400, &format!("the picture did not arrive whole: {error}"));
+        return refused(400, &format!("the file did not arrive whole: {error}"));
+    }
+    if bytes.len() as u64 > MOST_OF_A_FILE {
+        return refused(413, "that file is bigger than anything a job starts from");
     }
     if bytes.is_empty() {
-        return refused(400, "the picture was empty");
+        return refused(400, "the file was empty");
     }
 
-    session.hold_upload(bytes);
-    json(json!({ "ok": true }))
-}
-
-/// Hands back the picture being held, so that a page opening fresh can show what `-i` named.
-fn held_picture(session: &Session) -> Reply {
-    match session.upload() {
-        // Read off the first bytes rather than off a name: what is held arrived either as a file
-        // this program opened or as a body a browser posted, and only one of those ever had a
-        // name on it.
-        Some(bytes) => reply(200, looks_like(&bytes), bytes),
-        None => refused(404, "no picture is being held"),
-    }
-}
-
-/// Which of the two formats a picture is in, from the bytes every file of it starts with.
-fn looks_like(bytes: &[u8]) -> &'static str {
-    match bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        true => "image/png",
-        false => "image/jpeg",
-    }
-}
-
-/// One of the pictures this session drew.
-fn picture(session: &Session, file: &str) -> Reply {
-    let Some(path) = session.wrote(file) else {
-        return refused(404, "this session did not draw that");
-    };
-
-    match std::fs::read(&path) {
-        Ok(bytes) => reply(200, "image/png", bytes),
-        // It was written, and now it is not readable: deleted from under the program, most
-        // likely, which is a thing someone tidying a directory does.
-        Err(error) => refused(410, &format!("{file} can no longer be read: {error}")),
-    }
-}
-
-/// What is happening, for a request that has just been told it cannot have the worker.
-///
-/// The commonest of these is a second click on a button, where "there is already a picture being
-/// drawn" is the whole answer. The others are worth naming: waiting on a fetch of several
-/// gigabytes looks exactly like a program that has ignored the click -- and so is waiting on
-/// somebody else's run, which this page did nothing to start and cannot stop.
-fn already(shared: &Arc<Shared>, session: &Arc<Session>) -> String {
-    let world = shared.world();
-    let theirs = world
-        .owner
-        .as_ref()
-        .is_some_and(|owner| !Arc::ptr_eq(owner, session));
-    if theirs {
-        return match &world.doing {
-            Doing::Drawing(_) => "another page is drawing a picture: wait for it to finish",
-            Doing::Speaking(_) => "another page is reading something out: wait for it to finish",
-            _ => "the model is busy with another page's run: wait for it to finish",
+    // A recording is read here rather than at the job, alone among the things this server keeps:
+    // a WAV that is not one is found out about where there is still a request to refuse, rather
+    // than as a job that fails after waiting its turn.
+    if bytes.starts_with(b"RIFF") {
+        if let Err(error) = crate::wav::read(&bytes) {
+            return refused(400, &error.to_string());
         }
-        .to_string();
     }
 
-    match &world.doing {
-        Doing::Drawing(_) => "there is already a picture being drawn".to_string(),
-        Doing::Speaking(_) => "there is already something being said".to_string(),
-        Doing::Reading { model } => format!("{model} is still being read"),
-        Doing::Fetching(fetch) => {
-            format!(
-                "{} is still being fetched: wait for it, or stop it",
-                fetch.model
-            )
+    match shared.store().upload(&bytes) {
+        Ok(upload) => {
+            let mut reply = json(201, upload.json());
+            add_header(
+                &mut reply,
+                "Location",
+                &format!("/api/uploads/{}", upload.id),
+            );
+            reply
         }
-        // Claimed, and not yet picked up -- the moment between a request posting a command and
-        // the worker starting on it.
-        Doing::Nothing => "something is already happening: wait for it, or stop it".to_string(),
+        Err(Refused::NotAFile) => refused(415, &Refused::NotAFile.to_string()),
+        Err(error) => refused(500, &format!("the file could not be kept: {error}")),
     }
 }
 
-/// Posts a claimed command to the worker, or says that there is no longer one to post to.
-fn post(shared: &Arc<Shared>, commands: &Sender<Command>, command: Command) -> Reply {
-    match commands.send(command) {
-        Ok(()) => json(json!({ "ok": true })),
-        // The worker gives the claim back as it finishes each command; one it never received is
-        // one nothing would ever give back.
-        Err(_) => give_up(shared, 500, "the model thread is no longer there"),
-    }
+fn no_such_job() -> Reply {
+    refused(404, "there is no job by that id")
 }
 
-/// Refuses, and hands the worker back to whoever asks next.
-///
-/// For the refusals that happen after the claim rather than before it: what they have found is a
-/// request that cannot be carried out, not a program that is busy.
-fn give_up(shared: &Arc<Shared>, status: u16, said: &str) -> Reply {
-    shared.release();
+fn no_content() -> Reply {
+    Response::from_data(Vec::new()).with_status_code(204)
+}
 
-    refused(status, said)
+fn add_header(reply: &mut Reply, name: &str, value: &str) {
+    if let Ok(header) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+        reply.add_header(header);
+    }
 }
 
 /// The JSON a request carried, or what was wrong with it.
@@ -581,7 +504,7 @@ fn body(request: &mut Request) -> Result<Value, String> {
     let mut said = String::new();
     request
         .as_reader()
-        .take(MOST_OF_A_PICTURE)
+        .take(MOST_OF_A_REQUEST)
         .read_to_string(&mut said)
         .map_err(|error| format!("the request did not arrive whole: {error}"))?;
 
@@ -672,8 +595,8 @@ fn page(said: &str, mime: &str) -> Reply {
     reply(200, mime, said.as_bytes().to_vec())
 }
 
-fn json(value: Value) -> Reply {
-    reply(200, "application/json", value.to_string().into_bytes())
+fn json(status: u16, value: Value) -> Reply {
+    reply(status, "application/json", value.to_string().into_bytes())
 }
 
 /// An answer that is not the one that was asked for, with the reason in the same shape everything
@@ -911,14 +834,5 @@ mod tests {
         let (guidance, negative) = steering(&json!({}), &sdxl);
         assert_eq!(guidance, sdxl.defaults.guidance_scale);
         assert_eq!(negative, "");
-    }
-
-    #[test]
-    fn a_picture_is_recognised_by_what_it_starts_with() {
-        // Rather than by what a browser said it was called: that is the name of a file on
-        // somebody else's machine, and it is the one part of an upload that can be wrong.
-        assert_eq!(looks_like(&[0x89, b'P', b'N', b'G', 13, 10]), "image/png");
-        assert_eq!(looks_like(&[0xff, 0xd8, 0xff]), "image/jpeg");
-        assert_eq!(looks_like(&[]), "image/jpeg");
     }
 }

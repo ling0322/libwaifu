@@ -246,6 +246,12 @@ impl Runtime {
     }
 }
 
+/// Where jobs are kept when `-output` does not say.
+pub const DEFAULT_OUTPUT: &str = "waifu-output";
+
+/// How much they may take up when `-output-limit` does not say: a gigabyte.
+pub const DEFAULT_OUTPUT_LIMIT: u64 = 1 << 30;
+
 /// The flags a command was given.
 #[derive(Debug, Default)]
 pub struct Args {
@@ -254,6 +260,7 @@ pub struct Args {
     image: Option<String>,
     port: Option<String>,
     output: Option<String>,
+    output_limit: Option<String>,
     task: Option<String>,
     help: bool,
 }
@@ -287,6 +294,9 @@ impl Args {
                 "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
                 "-port" | "--port" => args.port = Some(value("-port")?),
                 "-output" | "--output" => args.output = Some(value("-output")?),
+                "-output-limit" | "--output-limit" => {
+                    args.output_limit = Some(value("-output-limit")?)
+                }
                 "-task" | "--task" => args.task = Some(value("-task")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
                 other => return Err(ArgError(format!("flag provided but not defined: {other}"))),
@@ -347,13 +357,6 @@ impl Args {
     /// None is not an error: without it the tool takes the usual port, or the first free one near
     /// it. Zero is refused rather than passed on -- the operating system reads it as "any port at
     /// all", which is a fine thing for a test to ask for and not something anybody types.
-    /// The directory the pictures and clips are written under: each page's in a folder of its
-    /// own inside it. Left out, the directory the program was started in, which is where they
-    /// always went.
-    pub fn output(&self) -> &str {
-        self.output.as_deref().unwrap_or(".")
-    }
-
     pub fn port(&self) -> Result<Option<u16>, ArgError> {
         let Some(port) = &self.port else {
             return Ok(None);
@@ -365,6 +368,53 @@ impl Args {
             ))),
             Ok(port) => Ok(Some(port)),
         }
+    }
+
+    /// The directory jobs and what they made are kept in. Left out, `waifu-output` in the
+    /// directory the program was started in.
+    pub fn output(&self) -> &str {
+        self.output.as_deref().unwrap_or(DEFAULT_OUTPUT)
+    }
+
+    /// How many bytes the output directory may hold before the oldest of it is deleted, or None
+    /// for no limit, which is what `0` asks for. Left out, a gigabyte.
+    ///
+    /// Written the way somebody would say it: `1GB`, `512MB`, `1.5GB`, or a plain number of
+    /// bytes. A gigabyte is 2^30 bytes here, which is what a file manager means by one too.
+    pub fn output_limit(&self) -> Result<Option<u64>, ArgError> {
+        let Some(said) = &self.output_limit else {
+            return Ok(Some(DEFAULT_OUTPUT_LIMIT));
+        };
+        let refused = || {
+            ArgError(format!(
+                "invalid output limit \"{said}\": say it like 1GB, 512MB or 0 for no limit"
+            ))
+        };
+
+        let trimmed = said.trim().to_ascii_uppercase();
+        let trimmed = trimmed.trim_end_matches("IB").trim_end_matches('B');
+        let (number, unit) = match trimmed
+            .char_indices()
+            .find(|(_, c)| c.is_ascii_alphabetic())
+        {
+            Some((at, _)) => trimmed.split_at(at),
+            None => (trimmed, ""),
+        };
+        let scale: u64 = match unit {
+            "" => 1,
+            "K" => 1 << 10,
+            "M" => 1 << 20,
+            "G" => 1 << 30,
+            "T" => 1 << 40,
+            _ => return Err(refused()),
+        };
+        let number: f64 = number.trim().parse().map_err(|_| refused())?;
+        if !number.is_finite() || number < 0.0 {
+            return Err(refused());
+        }
+
+        let bytes = (number * scale as f64).round() as u64;
+        Ok((bytes > 0).then_some(bytes))
     }
 
     pub fn device(&self) -> Result<DeviceOption, ArgError> {
@@ -435,10 +485,13 @@ pub fn print_options() {
          still starts. The page is served to this machine and no further."
     );
     eprintln!(
-        "  -output string\n    \twhere pictures and clips are written (default \".\", the directory \
-         this was started in). Each browser that opens the page writes into a folder of its own \
-         inside it -- session-0001, session-0002 and on -- so that two people's pictures are not \
-         one list."
+        "  -output string\n    \twhere jobs and what they made are kept (default \"waifu-output\"). \
+         Everything posted to the server is kept there until it is deleted, and is still there \
+         after a restart."
+    );
+    eprintln!(
+        "  -output-limit size\n    \thow much the output directory may hold, like 1GB or 512MB, \
+         or 0 for no limit (default 1GB). Past it the oldest finished jobs are deleted first."
     );
 }
 
@@ -654,11 +707,33 @@ mod tests {
     }
 
     #[test]
-    fn reads_where_to_write() {
-        // Left out, where it has always been: the directory the program was started in.
-        assert_eq!(args(&[]).unwrap().output(), ".");
+    fn reads_where_to_keep_what_is_made() {
+        assert_eq!(args(&[]).unwrap().output(), "waifu-output");
         assert_eq!(args(&["-output", "out"]).unwrap().output(), "out");
         assert_eq!(args(&["--output=/tmp/w"]).unwrap().output(), "/tmp/w");
+    }
+
+    #[test]
+    fn reads_how_much_the_output_may_hold() {
+        let limit = |typed: &str| args(&["-output-limit", typed]).unwrap().output_limit();
+
+        assert_eq!(args(&[]).unwrap().output_limit().unwrap(), Some(1 << 30));
+        assert_eq!(limit("1GB").unwrap(), Some(1 << 30));
+        assert_eq!(limit("1gb").unwrap(), Some(1 << 30));
+        assert_eq!(limit("512MB").unwrap(), Some(512 << 20));
+        assert_eq!(limit("1.5G").unwrap(), Some(3 << 29));
+        assert_eq!(limit("2GiB").unwrap(), Some(2 << 30));
+        assert_eq!(limit("4096").unwrap(), Some(4096));
+        // Nothing at all is no limit, rather than a directory that can hold nothing.
+        assert_eq!(limit("0").unwrap(), None);
+
+        for typed in ["", "lots", "-1GB", "1PB", "1.2.3GB"] {
+            let error = limit(typed).unwrap_err();
+            assert!(
+                error.to_string().contains("invalid output limit"),
+                "{typed}"
+            );
+        }
     }
 
     #[test]
