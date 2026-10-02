@@ -19,35 +19,14 @@
 
 #include "flint/capi.h"
 
+#include <string.h>
+
 #include <string>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
 
 namespace {
-
-/// Destroys a handle however the test leaves the scope, so a failed assertion does not leak.
-class ScopedTensor {
- public:
-  ScopedTensor() = default;
-  ScopedTensor(const ScopedTensor &) = delete;
-  ScopedTensor &operator=(const ScopedTensor &) = delete;
-
-  ~ScopedTensor() {
-    fl_tensor_destroy(_tensor);
-  }
-
-  fl_tensor_t *operator&() {
-    return &_tensor;
-  }
-
-  operator fl_tensor_t() const {
-    return _tensor;
-  }
-
- private:
-  fl_tensor_t _tensor = nullptr;
-};
 
 /// The same for the operators every operation is asked of.
 class ScopedOperators {
@@ -72,33 +51,97 @@ class ScopedOperators {
   fl_operators_t _operators = nullptr;
 };
 
+/// What a binding builds a tensor out of: storage it owns and a view over it. Destroys both
+/// however the test leaves the scope, the view first.
+class Tensor {
+ public:
+  Tensor() = default;
+  Tensor(const Tensor &) = delete;
+  Tensor &operator=(const Tensor &) = delete;
+
+  ~Tensor() {
+    fl_tensor_view_destroy(view);
+    fl_tensor_data_destroy(data);
+  }
+
+  operator fl_tensor_view_t() const {
+    return view;
+  }
+
+  fl_tensor_data_t data = nullptr;
+  fl_tensor_view_t view = nullptr;
+};
+
+/// Row-major strides for `shape`.
+std::vector<int32_t> stridesOf(const std::vector<int32_t> &shape) {
+  std::vector<int32_t> stride(shape.size());
+  int32_t step = 1;
+  for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+    stride[d] = step;
+    step *= shape[d];
+  }
+  return stride;
+}
+
+int64_t numelOf(const std::vector<int32_t> &shape) {
+  int64_t numel = 1;
+  for (int32_t n : shape) numel *= n;
+  return numel;
+}
+
+/// Fresh storage on `device` with a contiguous view of `shape` over it.
+void makeEmpty(
+    fl_device_type_t device,
+    const std::vector<int32_t> &shape,
+    fl_dtype_t dtype,
+    Tensor *out) {
+  CATCH_REQUIRE(fl_tensor_data_create(device, dtype, numelOf(shape), &out->data) == FL_OK);
+  std::vector<int32_t> stride = stridesOf(shape);
+  CATCH_REQUIRE(
+      fl_tensor_view_create(
+          out->data,
+          shape.data(),
+          stride.data(),
+          static_cast<int32_t>(shape.size()),
+          0,
+          &out->view) == FL_OK);
+}
+
 /// The CPU operators, which every test here starts by asking for.
 void makeCpu(fl_operators_t *out) {
   fl_init();
   CATCH_REQUIRE(fl_operators_create(FL_DEVICE_CPU, out) == FL_OK);
 }
 
-/// Creates a CPU float tensor holding `data`, the input every operator test starts from.
-void makeFloats(fl_operators_t operators, const std::vector<int32_t> &shape,
-                const std::vector<float> &data, fl_tensor_t *out) {
-  CATCH_REQUIRE(
-      fl_tensor_from_data(
-          operators,
-          shape.data(),
-          static_cast<int32_t>(shape.size()),
-          FL_DTYPE_FLOAT,
-          data.data(),
-          static_cast<int64_t>(data.size() * sizeof(float)),
-          out) == FL_OK);
+/// A CPU float tensor holding `values`, written in through the storage's own address.
+void makeFloats(const std::vector<int32_t> &shape, const std::vector<float> &values, Tensor *out) {
+  makeEmpty(FL_DEVICE_CPU, shape, FL_DTYPE_FLOAT, out);
+  void *bytes = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_get_host_ptr(out->data, &bytes) == FL_OK);
+  memcpy(bytes, values.data(), values.size() * sizeof(float));
 }
 
-std::vector<float> readFloats(fl_operators_t operators, fl_tensor_t tensor) {
-  int64_t nbytes = 0;
-  CATCH_REQUIRE(fl_tensor_get_nbytes(tensor, &nbytes) == FL_OK);
+/// The elements of a contiguous float view of host storage, read where they lie.
+std::vector<float> readFloats(const Tensor &tensor) {
+  int32_t contiguous = 0;
+  CATCH_REQUIRE(fl_tensor_view_is_contiguous(tensor, &contiguous) == FL_OK);
+  CATCH_REQUIRE(contiguous == 1);
 
-  std::vector<float> values(static_cast<size_t>(nbytes) / sizeof(float));
-  CATCH_REQUIRE(fl_tensor_copy_to_host(operators, tensor, values.data(), nbytes) == FL_OK);
-  return values;
+  int32_t dim = 0;
+  int64_t numel = 1;
+  CATCH_REQUIRE(fl_tensor_view_get_dim(tensor, &dim) == FL_OK);
+  for (int32_t d = 0; d < dim; ++d) {
+    int32_t size = 0;
+    CATCH_REQUIRE(fl_tensor_view_get_shape(tensor, d, &size) == FL_OK);
+    numel *= size;
+  }
+  int64_t offset = 0;
+  CATCH_REQUIRE(fl_tensor_view_get_offset(tensor, &offset) == FL_OK);
+
+  void *bytes = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_get_host_ptr(tensor.data, &bytes) == FL_OK);
+  const float *first = static_cast<const float *>(bytes) + offset;
+  return std::vector<float>(first, first + numel);
 }
 
 }  // namespace
@@ -129,376 +172,6 @@ CATCH_TEST_CASE("flint C API hands out operators per device", "[core][flint][cap
   // Destroying a null handle is allowed, which is what lets callers clean up unconditionally.
   fl_operators_destroy(nullptr);
   CATCH_REQUIRE(fl_operators_get_device(nullptr, &device) == FL_ERROR_INVALID_ARG);
-}
-
-CATCH_TEST_CASE("flint C API reports tensor metadata", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  const std::vector<int32_t> shape{2, 3};
-  ScopedTensor tensor;
-  CATCH_REQUIRE(fl_tensor_zeros(cpu, shape.data(), 2, FL_DTYPE_FLOAT, &tensor) == FL_OK);
-
-  int32_t dim = 0;
-  CATCH_REQUIRE(fl_tensor_get_dim(tensor, &dim) == FL_OK);
-  CATCH_REQUIRE(dim == 2);
-
-  int32_t size = 0;
-  CATCH_REQUIRE(fl_tensor_get_shape(tensor, 0, &size) == FL_OK);
-  CATCH_REQUIRE(size == 2);
-  CATCH_REQUIRE(fl_tensor_get_shape(tensor, -1, &size) == FL_OK);
-  CATCH_REQUIRE(size == 3);
-
-  int64_t numel = 0;
-  CATCH_REQUIRE(fl_tensor_get_numel(tensor, &numel) == FL_OK);
-  CATCH_REQUIRE(numel == 6);
-
-  fl_dtype_t dtype = FL_DTYPE_UNKNOWN;
-  CATCH_REQUIRE(fl_tensor_get_dtype(tensor, &dtype) == FL_OK);
-  CATCH_REQUIRE(dtype == FL_DTYPE_FLOAT);
-
-  fl_device_type_t device = FL_DEVICE_UNKNOWN;
-  CATCH_REQUIRE(fl_tensor_get_device(tensor, &device) == FL_OK);
-  CATCH_REQUIRE(device == FL_DEVICE_CPU);
-
-  int32_t contiguous = 0;
-  CATCH_REQUIRE(fl_tensor_is_contiguous(tensor, &contiguous) == FL_OK);
-  CATCH_REQUIRE(contiguous == 1);
-
-  CATCH_REQUIRE(readFloats(cpu, tensor) == std::vector<float>(6, 0.0f));
-}
-
-CATCH_TEST_CASE("flint C API round-trips element data", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  const std::vector<int32_t> shape{2, 2};
-  const std::vector<float> data{1.0f, 2.0f, 3.0f, 4.0f};
-  ScopedTensor tensor;
-  CATCH_REQUIRE(
-      fl_tensor_from_data(
-          cpu,
-          shape.data(),
-          2,
-          FL_DTYPE_FLOAT,
-          data.data(),
-          static_cast<int64_t>(data.size() * sizeof(float)),
-          &tensor) == FL_OK);
-
-  CATCH_REQUIRE(readFloats(cpu, tensor) == data);
-}
-
-CATCH_TEST_CASE("flint C API packs a transposed tensor on copy", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  const std::vector<int32_t> shape{2, 2};
-  const std::vector<float> data{1.0f, 2.0f, 3.0f, 4.0f};
-  ScopedTensor tensor;
-  makeFloats(cpu, shape, data, &tensor);
-
-  ScopedTensor transposed;
-  CATCH_REQUIRE(fl_tensor_transpose(tensor, 0, 1, &transposed) == FL_OK);
-
-  int32_t contiguous = 1;
-  CATCH_REQUIRE(fl_tensor_is_contiguous(transposed, &contiguous) == FL_OK);
-  CATCH_REQUIRE(contiguous == 0);
-
-  // The copy has to make it contiguous, so the caller sees the transposed order.
-  CATCH_REQUIRE(readFloats(cpu, transposed) == std::vector<float>{1.0f, 3.0f, 2.0f, 4.0f});
-}
-
-CATCH_TEST_CASE("flint C API reshapes and slices a tensor", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  const std::vector<float> data{0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
-  ScopedTensor tensor;
-  makeFloats(cpu, {6}, data, &tensor);
-
-  const std::vector<int32_t> viewShape{2, 3};
-  ScopedTensor view;
-  CATCH_REQUIRE(fl_tensor_view(tensor, viewShape.data(), 2, &view) == FL_OK);
-  int32_t dim = 0;
-  CATCH_REQUIRE(fl_tensor_get_dim(view, &dim) == FL_OK);
-  CATCH_REQUIRE(dim == 2);
-
-  ScopedTensor row;
-  CATCH_REQUIRE(fl_tensor_subtensor(view, 1, &row) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, row) == std::vector<float>{3.0f, 4.0f, 5.0f});
-
-  // FL_NONE leaves that end of the range where it is.
-  ScopedTensor tail;
-  CATCH_REQUIRE(fl_tensor_slice(tensor, 0, 4, FL_NONE, &tail) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, tail) == std::vector<float>{4.0f, 5.0f});
-
-  ScopedTensor unsqueezed;
-  CATCH_REQUIRE(fl_tensor_unsqueeze(tensor, 0, &unsqueezed) == FL_OK);
-  CATCH_REQUIRE(fl_tensor_get_dim(unsqueezed, &dim) == FL_OK);
-  CATCH_REQUIRE(dim == 2);
-
-  ScopedTensor squeezed;
-  CATCH_REQUIRE(fl_tensor_squeeze(unsqueezed, 0, &squeezed) == FL_OK);
-  CATCH_REQUIRE(fl_tensor_get_dim(squeezed, &dim) == FL_OK);
-  CATCH_REQUIRE(dim == 1);
-}
-
-CATCH_TEST_CASE("flint C API shares storage between handles", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  const std::vector<float> data{7.0f, 8.0f};
-  ScopedTensor tensor;
-  makeFloats(cpu, {2}, data, &tensor);
-
-  ScopedTensor clone;
-  CATCH_REQUIRE(fl_tensor_clone(tensor, &clone) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, clone) == data);
-
-  // Destroying one handle leaves the storage alive for the other.
-  fl_tensor_destroy(tensor);
-  *(&tensor) = nullptr;
-  CATCH_REQUIRE(readFloats(cpu, clone) == data);
-}
-
-CATCH_TEST_CASE("flint C API reports errors instead of throwing", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  const std::vector<int32_t> shape{2, 2};
-  const std::vector<float> data{1.0f, 2.0f, 3.0f, 4.0f};
-
-  // A size that does not match the shape is rejected before anything is allocated.
-  ScopedTensor mismatched;
-  CATCH_REQUIRE(
-      fl_tensor_from_data(cpu, shape.data(), 2, FL_DTYPE_FLOAT, data.data(), 8, &mismatched) ==
-      FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(fl_get_last_error_code() == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("data_size") != std::string::npos);
-
-  ScopedTensor invalidDtype;
-  CATCH_REQUIRE(
-      fl_tensor_zeros(cpu, shape.data(), 2, FL_DTYPE_UNKNOWN, &invalidDtype) ==
-      FL_ERROR_INVALID_ARG);
-
-  int32_t dim = 0;
-  CATCH_REQUIRE(fl_tensor_get_dim(nullptr, &dim) == FL_ERROR_INVALID_ARG);
-
-  // An operation with no operators to run on is a bad argument like any other.
-  ScopedTensor noOperators;
-  CATCH_REQUIRE(
-      fl_tensor_zeros(nullptr, shape.data(), 2, FL_DTYPE_FLOAT, &noOperators) ==
-      FL_ERROR_INVALID_ARG);
-
-  ScopedTensor tensor;
-  CATCH_REQUIRE(fl_tensor_zeros(cpu, shape.data(), 2, FL_DTYPE_FLOAT, &tensor) == FL_OK);
-  CATCH_REQUIRE(fl_get_last_error_code() == FL_OK);
-
-  std::vector<float> tooSmall(2);
-  CATCH_REQUIRE(
-      fl_tensor_copy_to_host(cpu, tensor, tooSmall.data(), 8) == FL_ERROR_INVALID_ARG);
-
-  // Destroying a null handle is allowed, which is what lets callers clean up unconditionally.
-  fl_tensor_destroy(nullptr);
-}
-
-CATCH_TEST_CASE("flint C API runs the operators it is handed", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  ScopedTensor a;
-  ScopedTensor b;
-  makeFloats(cpu, {2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}, &a);
-  makeFloats(cpu, {2, 2}, {10.0f, 20.0f, 30.0f, 40.0f}, &b);
-
-  ScopedTensor sum;
-  CATCH_REQUIRE(fl_add(cpu, a, b, &sum) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, sum) == std::vector<float>{11.0f, 22.0f, 33.0f, 44.0f});
-
-  ScopedTensor scaled;
-  CATCH_REQUIRE(fl_mul_scalar(cpu, a, 2.0f, &scaled) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, scaled) == std::vector<float>{2.0f, 4.0f, 6.0f, 8.0f});
-
-  ScopedTensor identity;
-  makeFloats(cpu, {2, 2}, {1.0f, 0.0f, 0.0f, 1.0f}, &identity);
-  ScopedTensor product;
-  CATCH_REQUIRE(fl_matmul(cpu, a, identity, &product) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, product) == readFloats(cpu, a));
-
-  // The rows of a softmax sum to one, which is what fl_sum() should find.
-  ScopedTensor probabilities;
-  ScopedTensor rowSums;
-  ScopedTensor ones;
-  CATCH_REQUIRE(fl_softmax(cpu, a, &probabilities) == FL_OK);
-  CATCH_REQUIRE(fl_sum(cpu, probabilities, -1, &rowSums) == FL_OK);
-  makeFloats(cpu, {2}, {1.0f, 1.0f}, &ones);
-
-  int32_t close = 0;
-  CATCH_REQUIRE(fl_all_close(cpu, rowSums, ones, 1e-3f, 1e-5f, &close) == FL_OK);
-  CATCH_REQUIRE(close == 1);
-
-  ScopedTensor filled;
-  CATCH_REQUIRE(
-      fl_tensor_zeros(cpu, std::vector<int32_t>{2}.data(), 1, FL_DTYPE_FLOAT, &filled) == FL_OK);
-  CATCH_REQUIRE(fl_fill(cpu, filled, 3.0f) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, filled) == std::vector<float>{3.0f, 3.0f});
-
-  // A null handle is still reported rather than dereferenced.
-  ScopedTensor unused;
-  CATCH_REQUIRE(fl_add(cpu, nullptr, b, &unused) == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(fl_fill(cpu, nullptr, 1.0f) == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(fl_causal_mask(nullptr, 4, &unused) == FL_ERROR_INVALID_ARG);
-}
-
-CATCH_TEST_CASE("flint C API refuses tensors from another device", "[core][flint][capi]") {
-  fl_init();
-
-  int32_t available = 0;
-  CATCH_REQUIRE(fl_is_device_available(FL_DEVICE_CUDA, &available) == FL_OK);
-  if (!available) CATCH_SKIP("cuda device not available");
-
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-  ScopedOperators cuda;
-  CATCH_REQUIRE(fl_operators_create(FL_DEVICE_CUDA, &cuda) == FL_OK);
-
-  ScopedTensor host;
-  makeFloats(cpu, {2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}, &host);
-
-  ScopedTensor there;
-  CATCH_REQUIRE(fl_tensor_to_device(cuda, host, FL_DEVICE_CUDA, &there) == FL_OK);
-
-  // The kernels check this with a fatal check, so it is checked here first and reported.
-  ScopedTensor mixed;
-  CATCH_REQUIRE(fl_matmul(cuda, host, there, &mixed) == FL_ERROR_INVALID_ARG);
-
-  // Page-locked host memory comes from the CUDA operators, which are the ones that know how.
-  ScopedTensor locked;
-  CATCH_REQUIRE(
-      fl_tensor_host_empty(cuda, std::vector<int32_t>{2, 2}.data(), 2, FL_DTYPE_FLOAT, &locked) ==
-      FL_OK);
-  fl_device_type_t device = FL_DEVICE_UNKNOWN;
-  CATCH_REQUIRE(fl_tensor_get_device(locked, &device) == FL_OK);
-  CATCH_REQUIRE(device == FL_DEVICE_CUDA_HOST);
-
-  // And the bytes are the host's to write, whoever page-locked them.
-  CATCH_REQUIRE(fl_copy(cpu, host, locked) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, locked) == std::vector<float>{1.0f, 2.0f, 3.0f, 4.0f});
-}
-
-namespace {
-
-/// Counts how often fl_tensor_from_external() gave its memory back.
-void countRelease(void *context) {
-  *static_cast<int *>(context) += 1;
-}
-
-}  // namespace
-
-CATCH_TEST_CASE("flint C API borrows external bytes without copying", "[core][flint][capi]") {
-  ScopedOperators cpu;
-  makeCpu(&cpu);
-
-  alignas(16) float data[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-  const std::vector<int32_t> shape{2, 3};
-  int released = 0;
-
-  fl_tensor_t tensor = nullptr;
-  CATCH_REQUIRE(
-      fl_tensor_from_external(
-          shape.data(),
-          2,
-          FL_DTYPE_FLOAT,
-          data,
-          sizeof(data),
-          countRelease,
-          &released,
-          &tensor) == FL_OK);
-
-  // Borrowed, not copied: a change to the lender's bytes is a change to the tensor.
-  data[0] = 10.0f;
-  CATCH_REQUIRE(readFloats(cpu, tensor) == std::vector<float>{10.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
-
-  // An operator reads it like any CPU tensor, and what it makes is its own.
-  ScopedTensor sum;
-  CATCH_REQUIRE(fl_add(cpu, tensor, tensor, &sum) == FL_OK);
-  CATCH_REQUIRE(readFloats(cpu, sum) == std::vector<float>{20.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f});
-
-  // Read-only: there is no writable pointer to be had.
-  void *bytes = nullptr;
-  int64_t nbytes = 0;
-  CATCH_REQUIRE(fl_tensor_host_data(tensor, &bytes, &nbytes) == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("read-only") != std::string::npos);
-
-  // But its bytes may be read where they lie: they are the lender's.
-  const void *readable = nullptr;
-  CATCH_REQUIRE(fl_tensor_host_bytes(tensor, &readable, &nbytes) == FL_OK);
-  CATCH_REQUIRE(readable == data);
-  CATCH_REQUIRE(nbytes == static_cast<int64_t>(sizeof(data)));
-
-  // Given back once, when the last of the tensor, a clone and a slice goes -- not before.
-  fl_tensor_t clone = nullptr;
-  fl_tensor_t slice = nullptr;
-  CATCH_REQUIRE(fl_tensor_clone(tensor, &clone) == FL_OK);
-  CATCH_REQUIRE(fl_tensor_slice(tensor, 1, 1, 3, &slice) == FL_OK);
-  fl_tensor_destroy(tensor);
-  fl_tensor_destroy(clone);
-  CATCH_REQUIRE(released == 0);
-  CATCH_REQUIRE(readFloats(cpu, slice) == std::vector<float>{2.0f, 3.0f, 5.0f, 6.0f});
-  fl_tensor_destroy(slice);
-  CATCH_REQUIRE(released == 1);
-}
-
-CATCH_TEST_CASE("flint C API gives borrowed bytes back when it refuses them", "[core][flint][capi]") {
-  alignas(16) unsigned char data[32] = {};
-  const std::vector<int32_t> shape{2, 2};
-  int released = 0;
-
-  // The wrong size.
-  ScopedTensor mismatched;
-  CATCH_REQUIRE(
-      fl_tensor_from_external(
-          shape.data(),
-          2,
-          FL_DTYPE_FLOAT,
-          data,
-          12,
-          countRelease,
-          &released,
-          &mismatched) == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("data_size") != std::string::npos);
-  CATCH_REQUIRE(released == 1);
-
-  // Floats that do not start on a float.
-  ScopedTensor misaligned;
-  CATCH_REQUIRE(
-      fl_tensor_from_external(
-          shape.data(),
-          2,
-          FL_DTYPE_FLOAT,
-          data + 2,
-          16,
-          countRelease,
-          &released,
-          &misaligned) == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("aligned") != std::string::npos);
-  CATCH_REQUIRE(released == 2);
-
-  // Bytes are aligned wherever they start.
-  fl_tensor_t bytes = nullptr;
-  CATCH_REQUIRE(
-      fl_tensor_from_external(
-          shape.data(),
-          2,
-          FL_DTYPE_UINT8,
-          data + 3,
-          4,
-          countRelease,
-          &released,
-          &bytes) == FL_OK);
-  CATCH_REQUIRE(released == 2);
-  fl_tensor_destroy(bytes);
-  CATCH_REQUIRE(released == 3);
 }
 
 CATCH_TEST_CASE("flint C API makes storage and views over it", "[core][flint][capi]") {
@@ -554,13 +227,19 @@ CATCH_TEST_CASE("flint C API makes storage and views over it", "[core][flint][ca
   CATCH_REQUIRE(fl_tensor_view_create(data, wide, zero, 1, 23, &view) == FL_OK);
   fl_tensor_view_destroy(view);
 
+  // A view of no dimensions, which needs no shape to be handed over.
+  CATCH_REQUIRE(fl_tensor_view_create(data, nullptr, nullptr, 0, 0, &view) == FL_OK);
+  CATCH_REQUIRE(fl_tensor_view_get_dim(view, &value) == FL_OK);
+  CATCH_REQUIRE(value == 0);
+  fl_tensor_view_destroy(view);
+
   // The view spans 3 * 1 + 2 * 5 = 13 elements past its start: offset 10 ends on the last
   // element, 11 one past it.
   CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 10, &view) == FL_OK);
   fl_tensor_view_destroy(view);
   fl_tensor_view_t refused = nullptr;
   CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 11, &refused) == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(fl_tensor_view_create(data, flat, one, 0, 0, &refused) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_tensor_view_create(data, flat, one, -1, 0, &refused) == FL_ERROR_INVALID_ARG);
   CATCH_REQUIRE(fl_tensor_view_create(data, flat, one, 1, -1, &refused) == FL_ERROR_INVALID_ARG);
   const int32_t negative[] = {-1};
   CATCH_REQUIRE(fl_tensor_view_create(data, flat, negative, 1, 0, &refused) == FL_ERROR_INVALID_ARG);
@@ -578,7 +257,156 @@ CATCH_TEST_CASE("flint C API makes storage and views over it", "[core][flint][ca
 
   fl_tensor_data_t none = nullptr;
   CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_FLOAT, 0, &none) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_UNKNOWN, 4, &none) == FL_ERROR_INVALID_ARG);
   CATCH_REQUIRE(none == nullptr);
+}
+
+CATCH_TEST_CASE("flint C API runs the operators it is handed", "[core][flint][capi]") {
+  ScopedOperators cpu;
+  makeCpu(&cpu);
+
+  Tensor a, b;
+  makeFloats({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}, &a);
+  makeFloats({2, 2}, {10.0f, 20.0f, 30.0f, 40.0f}, &b);
+
+  Tensor sum;
+  makeEmpty(FL_DEVICE_CPU, {2, 2}, FL_DTYPE_FLOAT, &sum);
+  CATCH_REQUIRE(fl_add(cpu, a, b, sum) == FL_OK);
+  CATCH_REQUIRE(readFloats(sum) == std::vector<float>{11.0f, 22.0f, 33.0f, 44.0f});
+
+  Tensor scaled;
+  makeEmpty(FL_DEVICE_CPU, {2, 2}, FL_DTYPE_FLOAT, &scaled);
+  CATCH_REQUIRE(fl_mul_scalar(cpu, a, 2.0f, scaled) == FL_OK);
+  CATCH_REQUIRE(readFloats(scaled) == std::vector<float>{2.0f, 4.0f, 6.0f, 8.0f});
+
+  Tensor identity, product;
+  makeFloats({2, 2}, {1.0f, 0.0f, 0.0f, 1.0f}, &identity);
+  makeEmpty(FL_DEVICE_CPU, {2, 2}, FL_DTYPE_FLOAT, &product);
+  CATCH_REQUIRE(fl_matmul(cpu, a, identity, product) == FL_OK);
+  CATCH_REQUIRE(readFloats(product) == readFloats(a));
+
+  // The rows of a softmax sum to one, which is what fl_sum() should find.
+  Tensor probabilities, rowSums, ones;
+  makeEmpty(FL_DEVICE_CPU, {2, 2}, FL_DTYPE_FLOAT, &probabilities);
+  makeEmpty(FL_DEVICE_CPU, {2}, FL_DTYPE_FLOAT, &rowSums);
+  makeFloats({2}, {1.0f, 1.0f}, &ones);
+  CATCH_REQUIRE(fl_softmax(cpu, a, probabilities) == FL_OK);
+  CATCH_REQUIRE(fl_sum(cpu, probabilities, 1, rowSums) == FL_OK);
+
+  int32_t close = 0;
+  CATCH_REQUIRE(fl_all_close(cpu, rowSums, ones, 1e-3f, 1e-5f, &close) == FL_OK);
+  CATCH_REQUIRE(close == 1);
+
+  CATCH_REQUIRE(fl_fill(cpu, ones, 3.0f) == FL_OK);
+  CATCH_REQUIRE(readFloats(ones) == std::vector<float>{3.0f, 3.0f});
+
+  // A broadcast operand is a view the caller expanded: (2) seen as (2, 2) by a zero stride.
+  const int32_t shape[] = {2, 2};
+  const int32_t stride[] = {0, 1};
+  fl_tensor_view_t row = nullptr;
+  CATCH_REQUIRE(fl_tensor_view_create(ones.data, shape, stride, 2, 0, &row) == FL_OK);
+  CATCH_REQUIRE(fl_add(cpu, a, row, sum) == FL_OK);
+  fl_tensor_view_destroy(row);
+  CATCH_REQUIRE(readFloats(sum) == std::vector<float>{4.0f, 5.0f, 6.0f, 7.0f});
+}
+
+CATCH_TEST_CASE("flint C API packs a transposed view on copy", "[core][flint][capi]") {
+  ScopedOperators cpu;
+  makeCpu(&cpu);
+
+  Tensor tensor;
+  makeFloats({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}, &tensor);
+
+  const int32_t shape[] = {2, 2};
+  const int32_t stride[] = {1, 2};
+  fl_tensor_view_t transposed = nullptr;
+  CATCH_REQUIRE(fl_tensor_view_create(tensor.data, shape, stride, 2, 0, &transposed) == FL_OK);
+
+  Tensor packed;
+  makeEmpty(FL_DEVICE_CPU, {2, 2}, FL_DTYPE_FLOAT, &packed);
+  CATCH_REQUIRE(fl_copy(cpu, transposed, packed) == FL_OK);
+  fl_tensor_view_destroy(transposed);
+  CATCH_REQUIRE(readFloats(packed) == std::vector<float>{1.0f, 3.0f, 2.0f, 4.0f});
+
+  // A slice of a row is a view at an offset, and is read from there.
+  const int32_t tail[] = {1};
+  const int32_t unit[] = {1};
+  fl_tensor_view_t last = nullptr;
+  CATCH_REQUIRE(fl_tensor_view_create(tensor.data, tail, unit, 1, 3, &last) == FL_OK);
+  Tensor copied;
+  makeEmpty(FL_DEVICE_CPU, {1}, FL_DTYPE_FLOAT, &copied);
+  CATCH_REQUIRE(fl_copy(cpu, last, copied) == FL_OK);
+  fl_tensor_view_destroy(last);
+  CATCH_REQUIRE(readFloats(copied) == std::vector<float>{4.0f});
+}
+
+CATCH_TEST_CASE("flint C API reports errors instead of throwing", "[core][flint][capi]") {
+  ScopedOperators cpu;
+  makeCpu(&cpu);
+
+  Tensor a, b, wrong;
+  makeFloats({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}, &a);
+  makeFloats({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}, &b);
+  makeEmpty(FL_DEVICE_CPU, {3}, FL_DTYPE_FLOAT, &wrong);
+
+  // An out of another shape would be written past its end, so it is refused.
+  CATCH_REQUIRE(fl_add(cpu, a, b, wrong) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_get_last_error_code() == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("out") != std::string::npos);
+  CATCH_REQUIRE(fl_exp(cpu, a, wrong) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_copy(cpu, a, wrong) == FL_ERROR_INVALID_ARG);
+
+  // So is an operand that was not broadcast to the other's shape.
+  CATCH_REQUIRE(fl_add(cpu, a, wrong, b) == FL_ERROR_INVALID_ARG);
+
+  // Null handles are reported rather than dereferenced.
+  CATCH_REQUIRE(fl_add(cpu, nullptr, b, a) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_add(nullptr, a, b, a) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_fill(cpu, nullptr, 1.0f) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_causal_mask(nullptr, a) == FL_ERROR_INVALID_ARG);
+  int32_t dim = 0;
+  CATCH_REQUIRE(fl_tensor_view_get_dim(nullptr, &dim) == FL_ERROR_INVALID_ARG);
+
+  // An operation that succeeds clears what the last one left.
+  CATCH_REQUIRE(fl_add(cpu, a, b, a) == FL_OK);
+  CATCH_REQUIRE(fl_get_last_error_code() == FL_OK);
+  CATCH_REQUIRE(readFloats(a) == std::vector<float>{2.0f, 4.0f, 6.0f, 8.0f});
+}
+
+CATCH_TEST_CASE("flint C API borrows external bytes without copying", "[core][flint][capi]") {
+  ScopedOperators cpu;
+  makeCpu(&cpu);
+
+  alignas(16) float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+  Tensor tensor;
+  CATCH_REQUIRE(fl_tensor_data_borrow(values, FL_DTYPE_FLOAT, 6, &tensor.data) == FL_OK);
+  const int32_t shape[] = {2, 3};
+  const int32_t stride[] = {3, 1};
+  CATCH_REQUIRE(fl_tensor_view_create(tensor.data, shape, stride, 2, 0, &tensor.view) == FL_OK);
+
+  // Borrowed, not copied: the storage's address is the lender's, and a change to the lender's
+  // bytes is a change to what an operator reads.
+  void *bytes = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_get_host_ptr(tensor.data, &bytes) == FL_OK);
+  CATCH_REQUIRE(bytes == values);
+  values[0] = 10.0f;
+
+  Tensor sum;
+  makeEmpty(FL_DEVICE_CPU, {2, 3}, FL_DTYPE_FLOAT, &sum);
+  CATCH_REQUIRE(fl_add(cpu, tensor, tensor, sum) == FL_OK);
+  CATCH_REQUIRE(readFloats(sum) == std::vector<float>{20.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f});
+
+  // Floats that do not start on a float are refused; bytes are aligned wherever they start.
+  alignas(16) unsigned char raw[32] = {};
+  fl_tensor_data_t refused = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_borrow(raw + 2, FL_DTYPE_FLOAT, 4, &refused) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(std::string(fl_get_last_error_message()).find("aligned") != std::string::npos);
+  CATCH_REQUIRE(fl_tensor_data_borrow(nullptr, FL_DTYPE_FLOAT, 4, &refused) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(refused == nullptr);
+
+  fl_tensor_data_t unaligned = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_borrow(raw + 3, FL_DTYPE_UINT8, 4, &unaligned) == FL_OK);
+  fl_tensor_data_destroy(unaligned);
 }
 
 CATCH_TEST_CASE("flint C API makes storage on the cuda device", "[core][flint][capi]") {
@@ -589,19 +417,70 @@ CATCH_TEST_CASE("flint C API makes storage on the cuda device", "[core][flint][c
   if (!available) CATCH_SKIP("cuda device not available");
 
   for (fl_device_type_t type : {FL_DEVICE_CUDA, FL_DEVICE_CUDA_HOST}) {
-    fl_tensor_data_t data = nullptr;
-    CATCH_REQUIRE(fl_tensor_data_create(type, FL_DTYPE_FLOAT16, 1024, &data) == FL_OK);
+    Tensor tensor;
+    makeEmpty(type, {32, 32}, FL_DTYPE_FLOAT16, &tensor);
     fl_device_type_t device;
-    CATCH_REQUIRE(fl_tensor_data_get_device(data, &device) == FL_OK);
+    CATCH_REQUIRE(fl_tensor_data_get_device(tensor.data, &device) == FL_OK);
+    CATCH_REQUIRE(device == type);
+    CATCH_REQUIRE(fl_tensor_view_get_device(tensor, &device) == FL_OK);
     CATCH_REQUIRE(device == type);
 
-    const int32_t shape[] = {32, 32};
-    const int32_t stride[] = {32, 1};
-    fl_tensor_view_t view = nullptr;
-    CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 0, &view) == FL_OK);
-    CATCH_REQUIRE(fl_tensor_view_get_device(view, &device) == FL_OK);
-    CATCH_REQUIRE(device == type);
-    fl_tensor_view_destroy(view);
-    fl_tensor_data_destroy(data);
+    // Page-locked memory is the host's to touch; the card's is not.
+    void *bytes = nullptr;
+    int32_t status = fl_tensor_data_get_host_ptr(tensor.data, &bytes);
+    CATCH_REQUIRE(status == (type == FL_DEVICE_CUDA_HOST ? FL_OK : FL_ERROR_INVALID_ARG));
   }
+}
+
+CATCH_TEST_CASE("flint C API moves views between devices", "[core][flint][capi]") {
+  fl_init();
+
+  int32_t available = 0;
+  CATCH_REQUIRE(fl_is_device_available(FL_DEVICE_CUDA, &available) == FL_OK);
+  if (!available) CATCH_SKIP("cuda device not available");
+
+  ScopedOperators cpu;
+  makeCpu(&cpu);
+  ScopedOperators cuda;
+  CATCH_REQUIRE(fl_operators_create(FL_DEVICE_CUDA, &cuda) == FL_OK);
+
+  const std::vector<float> values{1.0f, 2.0f, 3.0f, 4.0f};
+  Tensor host, there, sum, back;
+  makeFloats({2, 2}, values, &host);
+  makeEmpty(FL_DEVICE_CUDA, {2, 2}, FL_DTYPE_FLOAT, &there);
+  makeEmpty(FL_DEVICE_CUDA, {2, 2}, FL_DTYPE_FLOAT, &sum);
+  makeEmpty(FL_DEVICE_CPU, {2, 2}, FL_DTYPE_FLOAT, &back);
+
+  CATCH_REQUIRE(fl_transfer(cuda, host, there) == FL_OK);
+  CATCH_REQUIRE(fl_add(cuda, there, there, sum) == FL_OK);
+  CATCH_REQUIRE(fl_transfer(cuda, sum, back) == FL_OK);
+  CATCH_REQUIRE(readFloats(back) == std::vector<float>{2.0f, 4.0f, 6.0f, 8.0f});
+
+  // The kernels check this with a fatal check, so it is checked here first and reported.
+  CATCH_REQUIRE(fl_matmul(cuda, host, there, sum) == FL_ERROR_INVALID_ARG);
+
+  // And the bytes of page-locked memory are the host's to write, whoever page-locked them.
+  Tensor locked;
+  makeEmpty(FL_DEVICE_CUDA_HOST, {2, 2}, FL_DTYPE_FLOAT, &locked);
+  CATCH_REQUIRE(fl_copy(cpu, host, locked) == FL_OK);
+  CATCH_REQUIRE(readFloats(locked) == values);
+
+  // From there a copy can be started and waited on later; what it fills is the caller's.
+  Tensor arrived;
+  fl_transfer_t transfer = nullptr;
+  CATCH_REQUIRE(fl_transfer_async(locked, FL_DEVICE_CUDA, &arrived.data, &transfer) == FL_OK);
+  const int32_t shape[] = {2, 2};
+  const int32_t stride[] = {2, 1};
+  CATCH_REQUIRE(fl_tensor_view_create(arrived.data, shape, stride, 2, 0, &arrived.view) == FL_OK);
+  CATCH_REQUIRE(fl_transfer_wait(transfer) == FL_OK);
+  CATCH_REQUIRE(fl_transfer_wait_sync(transfer) == FL_OK);
+  fl_transfer_destroy(transfer);
+  CATCH_REQUIRE(fl_transfer(cuda, arrived, back) == FL_OK);
+  CATCH_REQUIRE(readFloats(back) == values);
+
+  // Only page-locked memory to the card goes asynchronously; a pageable source is refused.
+  fl_tensor_data_t refused = nullptr;
+  CATCH_REQUIRE(fl_transfer_async(host, FL_DEVICE_CUDA, &refused, &transfer) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(refused == nullptr);
+  fl_transfer_destroy(nullptr);
 }

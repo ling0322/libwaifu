@@ -25,40 +25,15 @@ namespace fl {
 namespace op {
 namespace cpu {
 
-ExternalTensorData::ExternalTensorData(
-    const void *data,
-    int64_t numel,
-    DType dtype,
-    ReleaseFn release,
-    void *context)
-    : _data(static_cast<const std::byte *>(data)),
-      _release(release),
-      _context(context) {
+ExternalTensorData::ExternalTensorData(const void *data, int64_t numel, DType dtype)
+    : _data(static_cast<const std::byte *>(data)) {
   _numel = numel;
   _dtype = dtype;
 }
 
-std::shared_ptr<TensorData> ExternalTensorData::create(
-    const void *data,
-    int64_t numel,
-    DType dtype,
-    ReleaseFn release,
-    void *context) {
+std::unique_ptr<TensorData> ExternalTensorData::create(const void *data, int64_t numel, DType dtype) {
   CHECK(numel > 0);
-
-  // Built without the release and handed it only once the shared_ptr owns the object: if making
-  // the control block throws, the object is destroyed on the way out, and it must not give back
-  // what the caller still thinks is the caller's.
-  std::shared_ptr<ExternalTensorData> tensorData(
-      new ExternalTensorData(data, numel, dtype, nullptr, nullptr));
-  tensorData->_release = release;
-  tensorData->_context = context;
-  return tensorData;
-}
-
-ExternalTensorData::~ExternalTensorData() {
-  if (_release) _release(_context);
-  _release = nullptr;
+  return std::unique_ptr<TensorData>(new ExternalTensorData(data, numel, dtype));
 }
 
 Device ExternalTensorData::getDevice() const {
@@ -67,7 +42,7 @@ Device ExternalTensorData::getDevice() const {
 
 std::byte *ExternalTensorData::getRawData() const {
   // TensorData hands out a mutable pointer to every kind of storage; this one is not to be written
-  // through, which isReadOnly() says and fl_tensor_host_data() enforces.
+  // through, which isReadOnly() says.
   return const_cast<std::byte *>(_data);
 }
 

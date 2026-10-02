@@ -21,6 +21,7 @@
 
 #include "flint/fp8.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -34,10 +35,17 @@ namespace cuda {
 /// @param x <half>(rows, k), contiguous, k a multiple of 16.
 Fp8Operand quantizeFp8(const Tensor &x);
 
+/// @brief quantizeFp8 writing the codes into `data` <fp8e4m3>(rows, k) and the scales into
+///        `channelScale` <float>(rows), both contiguous and on the device.
+void quantizeFp8(TensorView x, TensorView data, TensorView channelScale);
+
 /// @brief Inverse of quantizeFp8, which is what a caller wants to see the quantization error on
 ///        its own.
 /// @return <half>(rows, k).
 Tensor dequantFp8ToHalf(const Fp8Operand &operand);
+
+/// @brief dequantFp8ToHalf writing into `out` <half>(rows, k), contiguous.
+void dequantFp8ToHalf(TensorView data, TensorView channelScale, TensorView out);
 
 }  // namespace cuda
 }  // namespace op

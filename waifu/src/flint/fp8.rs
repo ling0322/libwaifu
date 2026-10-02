@@ -19,7 +19,7 @@
 
 //! A weight held in E4M3 with one scale per output channel.
 
-use super::{check, ffi, init, Device, Result, Tensor};
+use super::{check, ffi, init, DType, Device, Error, Result, Tensor};
 
 /// What a package calls the scale beside a weight it stored quantized: the elements are
 /// `"…weight"` and the scale is `"…weight.scale"`.
@@ -76,18 +76,19 @@ impl Fp8Tensor {
 
     /// Quantize a contiguous two dimensional `<float16>` CUDA tensor whose `k` 16 divides.
     pub fn quantize(x: &Tensor) -> Result<Fp8Tensor> {
-        let mut data: ffi::FlTensor = std::ptr::null_mut();
-        let mut channel_scale: ffi::FlTensor = std::ptr::null_mut();
+        // The codes and the scales are made here, at the shape the quantizer writes, and on the
+        // device it runs on; what x has to be is the C side's to check.
+        if x.dim()? != 2 {
+            return Err(Error::invalid("the tensor to quantize is not two dimensional"));
+        }
+        let (rows, k) = (x.shape_at(0)?, x.shape_at(1)?);
+        let data = Tensor::empty(&[rows, k], DType::Fp8E4M3, x.device())?;
+        let channel_scale = Tensor::empty(&[rows], DType::Float, x.device())?;
 
-        check(unsafe { ffi::fl_fp8_quantize(x.raw, &mut data, &mut channel_scale) })?;
-
-        // The C side hands over both handles or neither, so there is no half-owned state here to
-        // unwind.
-        Ok(unsafe {
-            Fp8Tensor {
-                data: Tensor::from_raw(data),
-                channel_scale: Tensor::from_raw(channel_scale),
-            }
+        check(unsafe { ffi::fl_fp8_quantize(x.raw(), data.raw(), channel_scale.raw()) })?;
+        Ok(Fp8Tensor {
+            data,
+            channel_scale,
         })
     }
 
@@ -109,8 +110,11 @@ impl Fp8Tensor {
     /// Back to `<float16>(rows, k)`, carrying the quantization error with it. Mostly useful for
     /// seeing how much of that error there is.
     pub fn dequantize(&self) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe {
-            ffi::fl_fp8_dequantize(self.data.raw, self.channel_scale.raw, out)
-        })
+        let (rows, k) = self.shape()?;
+        let out = Tensor::empty(&[rows, k], DType::Float16, self.data.device())?;
+        check(unsafe {
+            ffi::fl_fp8_dequantize(self.data.raw(), self.channel_scale.raw(), out.raw())
+        })?;
+        Ok(out)
     }
 }

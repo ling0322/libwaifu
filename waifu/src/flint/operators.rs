@@ -125,17 +125,6 @@ pub(crate) fn transfer_operators(from: Device, to: Device) -> Result<ffi::FlOper
     }
 }
 
-/// The handle that reads a tensor's bytes back out to the host.
-///
-/// Host memory is the CPU's to pack and to read, whoever page-locked it. Anything on a device has
-/// to cross the bus first, and that transfer is the device's own.
-pub(crate) fn readback_operators(tensor: &super::Tensor) -> Result<ffi::FlOperators> {
-    match tensor.try_device()? {
-        Device::Cpu | Device::CudaHost => raw_operators(Device::Cpu),
-        device => raw_operators(device),
-    }
-}
-
 /// The handle that owns a copy between two tensors that are already where they belong.
 ///
 /// Host memory is host memory whoever page-locked it, so a copy with host at both ends is the

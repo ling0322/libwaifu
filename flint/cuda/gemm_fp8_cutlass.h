@@ -41,6 +41,10 @@ bool isFp8GemmAvailable();
 ///         writes, and k a multiple of 16, which is how wide the mainloop reads the weight.
 Tensor gemmFp8(const Tensor &A, const Fp8Operand &B);
 
+/// @brief gemmFp8 writing into `D` <half>(..., n), contiguous, rather than allocating it. `B` is
+///        the <fp8e4m3>(n, k) codes and `channelScale` the <float>(n) scales beside them.
+void gemmFp8(TensorView A, TensorView B, TensorView channelScale, TensorView D);
+
 /// @brief gemmFp8 for a weight with one scale for the whole tensor rather than one per channel:
 ///        D = A * transpose(B) * scale.
 ///
@@ -54,6 +58,9 @@ Tensor gemmFp8(const Tensor &A, const Fp8Operand &B);
 ///              launch does not wait for it.
 /// @return <half>(..., n).
 Tensor gemmFp8TensorScale(const Tensor &A, const Tensor &B, const Tensor &scale);
+
+/// @brief gemmFp8TensorScale writing into `D` <half>(..., n), contiguous.
+void gemmFp8TensorScale(TensorView A, TensorView B, TensorView scale, TensorView D);
 
 }  // namespace cuda
 }  // namespace op

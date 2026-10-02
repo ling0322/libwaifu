@@ -138,7 +138,7 @@ Tensor toCpu(const Tensor &tensor) {
   return dest;
 }
 
-FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
+PendingTransfer startTransferAsync(Device device, const TensorView &tensor) {
   // One direction only, and a narrow one: page-locked host memory to the GPU. The others are
   // refused rather than quietly done synchronously, because a copy that says it is asynchronous
   // and is not costs nothing to write and 2.4 times the time to run. A pageable source is the
@@ -152,12 +152,14 @@ FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
         tensor.getDevice().getName().c_str(),
         device.getName().c_str()));
   }
-  CHECK(tensor.isContiguous()) << "only contiguous tensor is allowed to copy between devices";
+  if (!tensor.isContiguous()) {
+    throw lut::InvalidArgError("an asynchronous copy reads one contiguous run");
+  }
 
   CopyStream *copies = CopyStream::getInstance();
   cudaStream_t stream = copies->getStream();
 
-  std::shared_ptr<TensorData> srcData = tensor.getInternalData();
+  TensorData *srcData = tensor.getInternalData();
   DType dtype = srcData->getDType();
 
   // The tensor's own elements, not its whole storage: a view of part of a larger page-locked
@@ -167,7 +169,7 @@ FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
   // Allocated in the copy stream's order, so that the copy below may write it with no dependency
   // to arrange: the allocator hands the block over at this point in this stream, and this stream
   // is where the writing happens.
-  std::shared_ptr<TensorData> destData =
+  std::unique_ptr<TensorData> destData =
       CudaTensorData::create(std::max<int64_t>(numel, 1), dtype, stream);
 
   const void *src = srcData->getRawData() + dtype.getTotalSize(tensor.getInternalOffset());
@@ -185,10 +187,29 @@ FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
   LL_CHECK_CUDA_STATUS(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
   LL_CHECK_CUDA_STATUS(cudaEventRecord(event, stream));
 
+  return PendingTransfer{std::move(destData), event};
+}
+
+void completeTransfer(TensorData *dest, cudaEvent_t event, bool sync) {
+  // As FutureTensor::take() and takeSync(): the compute stream waits rather than the host, unless
+  // the host is about to read the bytes itself.
+  if (sync) {
+    LL_CHECK_CUDA_STATUS(cudaEventSynchronize(event));
+  } else {
+    LL_CHECK_CUDA_STATUS(cudaStreamWaitEvent(0, event, 0));
+  }
+  static_cast<CudaTensorData *>(dest)->setOwningStream(0);
+  LL_CHECK_CUDA_STATUS(cudaEventDestroy(event));
+}
+
+FutureTensor toDeviceAsync(Device device, const Tensor &tensor) {
+  PendingTransfer pending = startTransferAsync(device, tensor);
+
   // From here the copy belongs to the future, which holds the event that marks its end and the
   // source it reads, and hands the tensor out only once it has been seen through.
   auto shape = std::make_shared<TensorShape>(tensor.getShape());
-  return FutureTensor(Tensor::create(shape, destData), event, srcData);
+  std::shared_ptr<TensorData> destData = std::move(pending.dest);
+  return FutureTensor(Tensor::create(shape, destData), pending.event, tensor.getInternalData());
 }
 
 }  // namespace cuda
