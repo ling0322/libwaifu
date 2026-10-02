@@ -84,7 +84,6 @@ typedef enum fl_dtype_t {
   FL_DTYPE_UINT8 = 3,
   FL_DTYPE_FLOAT16 = 4,
   FL_DTYPE_INT8 = 6,
-  FL_DTYPE_FP4E2M0X2 = 7,
   FL_DTYPE_BOOL = 8,
   FL_DTYPE_INT32 = 9,
   FL_DTYPE_FP8E4M3 = 10,

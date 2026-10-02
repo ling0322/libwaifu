@@ -81,11 +81,6 @@ DType DType::getTypeImpl<half>() {
 #endif
 
 template<>
-DType DType::getTypeImpl<Fp4E2M0x2>() {
-  return DType::kFp4E2M0x2;
-}
-
-template<>
 DType DType::getTypeImpl<Fp8E4M3>() {
   return DType::kFp8E4M3;
 }
@@ -99,7 +94,6 @@ int64_t DType::getTotalSize(int64_t numel) const {
       return 2 * numel;
     case DType::kLong:
       return 8 * numel;
-    case DType::kFp4E2M0x2:
     case DType::kFp8E4M3:
     case DType::kInt8:
     case DType::kUInt8:
@@ -118,7 +112,6 @@ bool DType::isValid() const {
     case DType::kInt32:
     case DType::kLong:
     case DType::kUInt8:
-    case DType::kFp4E2M0x2:
     case DType::kFp8E4M3:
     case DType::kInt8:
     case DType::kBool:
@@ -130,7 +123,6 @@ bool DType::isValid() const {
 
 bool DType::isQuantized() const {
   switch (_dtype) {
-    case DType::kFp4E2M0x2:
     case DType::kFp8E4M3:
       return true;
     default:
@@ -158,8 +150,6 @@ std::string DType::toString() const {
       return "int64";
     case DType::kUInt8:
       return "uint8";
-    case DType::kFp4E2M0x2:
-      return "fp4";
     case DType::kFp8E4M3:
       return "fp8e4m3";
     case DType::kBool:

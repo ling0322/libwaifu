@@ -32,8 +32,6 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-const float e2m1Fp4Values[] = {0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6};
-
 struct CudaPrinterImpl {
   template<typename T, int DIM>
   using accessor_type = op::cpu::TensorAccessor<T, DIM>;
@@ -77,14 +75,6 @@ struct CudaPrinterImpl {
     printf("%" PRId64, v);
   }
 
-  static void printValue(accessor_type<const Fp4E2M0x2, 1> valAcc, int index) {
-    Fp4E2M0x2 hvalue;
-    LL_CHECK_CUDA_STATUS(
-        cudaMemcpy(&hvalue, &valAcc[index], sizeof(Fp4E2M0x2), cudaMemcpyDeviceToHost));
-
-    printf("(%+.1f, %+.1f)", e2m1Fp4Values[hvalue.v0], e2m1Fp4Values[hvalue.v1]);
-  }
-
   static void printValue(accessor_type<const Fp8E4M3, 1> valAcc, int index) {
     Fp8E4M3 hvalue;
     LL_CHECK_CUDA_STATUS(
@@ -117,8 +107,6 @@ void print(const TensorView &tensor) {
     printer.print<float>(tensor);
   else if (tensor.getDType() == DType::kUInt8)
     printer.print<UInt8>(tensor);
-  else if (tensor.getDType() == DType::kFp4E2M0x2)
-    printer.print<Fp4E2M0x2>(tensor);
   else if (tensor.getDType() == DType::kFp8E4M3)
     printer.print<Fp8E4M3>(tensor);
   else if (tensor.getDType() == DType::kLong)

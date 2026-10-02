@@ -439,7 +439,10 @@ what later allowed cuBLAS to be put behind `FLINT_ENABLE_CUBLAS` and CUTLASS to 
 plain run uses. `LIBWAIFU_GEMM`, which is what this entry originally said to set, no longer
 exists.
 
-## `CUDA_ARCH_NATIVE=ON` does not build on an RTX 50 series card
+## ~~`CUDA_ARCH_NATIVE=ON` does not build on an RTX 50 series card~~ (fixed 2026-10-02)
+
+Fixed by deleting the MXFP4 code: nothing left needs an arch-conditional target, so the default
+build asks for plain `120-real` and native's plain `120` assembles. Kept for the record.
 
 The CUDA build README recommends fails on sm_120, in ptxas, sixteen times over:
 

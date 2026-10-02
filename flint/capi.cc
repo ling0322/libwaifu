@@ -69,7 +69,6 @@ fl::DType toDType(fl_dtype_t dtype) {
     case FL_DTYPE_UINT8:
     case FL_DTYPE_FLOAT16:
     case FL_DTYPE_INT8:
-    case FL_DTYPE_FP4E2M0X2:
     case FL_DTYPE_BOOL:
     case FL_DTYPE_INT32:
     // A caller may name this one because a package may hold it: the elements of a weight stored
