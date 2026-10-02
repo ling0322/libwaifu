@@ -87,7 +87,7 @@ __global__ void mat_vec_kernel(
 }
 
 // computes C = x^T B, where B is a transposed weight (its buffer holds d rows of n elements).
-Tensor gemvHalf(const Tensor &x, const Tensor &B) {
+void gemvHalf(const TensorView &x, const TensorView &B, const TensorView &C) {
   CHECK(1 == x.getDim() && 1 == x.getStride(0));
 
   int n = x.getShape(0);
@@ -97,7 +97,7 @@ Tensor gemvHalf(const Tensor &x, const Tensor &B) {
   // the kernel reads 8 half values per thread.
   CHECK(n % 8 == 0);
 
-  Tensor C = createCudaTensorHalf({1, d});
+  CHECK(C.getDType() == DType::kFloat16 && C.isContiguous() && C.getNumEl() == d);
 
   dim3 block_dim(32, 4);
   dim3 grid_dim(divUp(d, 4), 1);
@@ -110,7 +110,7 @@ Tensor gemvHalf(const Tensor &x, const Tensor &B) {
       d,
       n);
   LL_CUDA_SYNCHRONIZE();
-  return C;
+  LL_CHECK_CUDA_STATUS(cudaGetLastError());
 }
 
 }  // namespace cuda

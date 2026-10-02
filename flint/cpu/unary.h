@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -50,7 +50,8 @@ enum class UnaryOp {
 };
 
 /// apply C <- UnaryOp(A)
-Tensor unaryOp(const Tensor &A, UnaryOp op);
+/// C = op(A), elementwise; C is of A's shape and type.
+void unaryOp(const TensorView &A, UnaryOp op, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

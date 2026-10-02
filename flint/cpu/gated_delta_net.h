@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -29,16 +29,18 @@ namespace cpu {
 /// system each chunk solves, so both backends have to agree on it for their results to line up.
 constexpr int kGatedDeltaNetChunkSize = 64;
 
-/// Gated DeltaNet linear attention over a packed (varlen) batch. See `Operators::gatedDeltaNetPrefill`.
-Tensor gatedDeltaNetPrefill(
-    const Tensor &q,
-    const Tensor &k,
-    const Tensor &v,
-    const Tensor &g,
-    const Tensor &beta,
-    const Tensor &cuSeqlens,
-    const Tensor &stateSlots,
-    Tensor &state);
+/// Gated DeltaNet linear attention over a packed (varlen) batch, into `o` <float>(T, VH, D). See
+/// `Operators::gatedDeltaNetPrefill`.
+void gatedDeltaNetPrefill(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    const TensorView &g,
+    const TensorView &beta,
+    const TensorView &cuSeqlens,
+    const TensorView &stateSlots,
+    const TensorView &state,
+    const TensorView &o);
 
 }  // namespace cpu
 }  // namespace op

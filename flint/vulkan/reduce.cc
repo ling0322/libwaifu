@@ -17,6 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include <vector>
+
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
@@ -40,7 +42,11 @@ struct RowPush {
 // A kernel that gives each row a workgroup of this many threads, as rows.glsl does.
 constexpr int kRowThreads = 256;
 
-void dispatchRows(const char *kernel, const Tensor &input, const Tensor &output, uint32_t op) {
+void dispatchRows(
+    const char *kernel,
+    const TensorView &input,
+    const TensorView &output,
+    uint32_t op) {
   int rowLength = input.getShape(-1);
   RowPush push{};
   push.c = getAddress(output);
@@ -57,93 +63,113 @@ void dispatchRows(const char *kernel, const Tensor &input, const Tensor &output,
       kRowThreads);
 }
 
-std::vector<int> withoutLastDim(const Tensor &input) {
+std::vector<int> withoutLastDim(const TensorView &input) {
   std::vector<int> shape = input.getShape();
   shape.pop_back();
   if (shape.empty()) shape.push_back(1);
   return shape;
 }
 
+int realDim(const TensorView &input, int dim) {
+  int rank = input.getDim();
+  if (dim < 0) dim += rank;
+  CHECK(dim >= 0 && dim < rank);
+  return dim;
+}
+
 }  // namespace
 
-Tensor reduceLastDim(const Tensor &input, ReduceOp op) {
+void reduceLastDim(const TensorView &input, ReduceOp op, const TensorView &out) {
   checkFloat(input.getDType(), "a reduction");
   CHECK(input.getDim() >= 1 && input.getShape(-1) > 0);
+  checkOutput(out, withoutLastDim(input), input.getDType(), "a reduction");
+  if (input.getNumEl() == 0) return;
 
-  Tensor x = makeContiguous(input);
-  Tensor output = createTensor(withoutLastDim(x), x.getDType());
-  if (x.getNumEl() == 0) return output;
-
-  dispatchRows(kernelName("reduce", x.getDType()).c_str(), x, output, static_cast<uint32_t>(op));
-  return output;
+  Tensor keep;
+  TensorView x = makeContiguous(input, &keep);
+  dispatchRows(kernelName("reduce", x.getDType()).c_str(), x, out, static_cast<uint32_t>(op));
 }
 
-Tensor sum(const Tensor &input, int dim) {
-  if (dim == None) return reduceLastDim(makeContiguous(input).view({1, -1}), ReduceOp::kSum);
+void sum(const TensorView &input, int dim, const TensorView &out) {
+  dim = realDim(input, dim);
+  if (dim == input.getDim() - 1) {
+    reduceLastDim(input, ReduceOp::kSum, out);
+    return;
+  }
 
-  int realDim = input.getInternalShape()->getRealDim(dim);
-  if (realDim == input.getDim() - 1) return reduceLastDim(input, ReduceOp::kSum);
-
-  // Any other dimension is moved to the end and summed there, as the CPU does it.
-  Tensor moved = input.transpose(realDim, -1);
-  Tensor summed = reduceLastDim(moved, ReduceOp::kSum);
-  if (input.getDim() == 1) return summed;
-  Tensor restored = summed.unsqueeze(summed.getDim()).transpose(realDim, -1).squeeze(realDim);
-  return makeContiguous(restored);
+  // Any other dimension is moved to the end and summed there, as the CPU does it, and the
+  // result is turned back as it is written out.
+  TensorView moved = input.transpose(dim, -1);
+  Tensor summed = createTensor(withoutLastDim(moved), input.getDType());
+  reduceLastDim(moved, ReduceOp::kSum, summed);
+  TensorView restored = TensorView(summed).unsqueeze(summed.getDim()).transpose(dim, -1).squeeze(
+      dim);
+  copy(restored, out);
 }
 
-Tensor cumsum(const Tensor &input, int dim) {
+void cumsum(const TensorView &input, int dim, const TensorView &out) {
   checkFloat(input.getDType(), "cumsum");
   CHECK(input.getDim() >= 1);
+  checkOutput(out, input.getShape(), input.getDType(), "cumsum");
+  if (input.getNumEl() == 0) return;
 
   // The scan runs along the last dimension; any other is moved there and back, which leaves the
   // shape as it was.
-  int realDim = input.getInternalShape()->getRealDim(dim);
-  bool moved = realDim != input.getDim() - 1;
-  Tensor x = makeContiguous(moved ? input.transpose(realDim, -1) : input);
+  dim = realDim(input, dim);
+  bool moved = dim != input.getDim() - 1;
+  Tensor keep;
+  TensorView x = makeContiguous(moved ? input.transpose(dim, -1) : input, &keep);
 
-  Tensor output = createTensor(x.getShape(), x.getDType());
-  if (x.getNumEl() > 0 && x.getShape(-1) > 0) {
-    dispatchRows(kernelName("scan", x.getDType()).c_str(), x, output, 0);
+  if (!moved) {
+    dispatchRows(kernelName("scan", x.getDType()).c_str(), x, out, 0);
+    return;
   }
 
-  return moved ? makeContiguous(output.transpose(realDim, -1)) : output;
+  Tensor scanned = createTensor(x.getShape(), x.getDType());
+  dispatchRows(kernelName("scan", x.getDType()).c_str(), x, scanned, 0);
+  copy(TensorView(scanned).transpose(dim, -1), out);
 }
 
-Tensor softmax(const Tensor &input) {
+void softmax(const TensorView &input, const TensorView &out) {
   checkFloat(input.getDType(), "softmax");
   CHECK(input.getDim() >= 1);
+  checkOutput(out, input.getShape(), input.getDType(), "softmax");
+  if (input.getNumEl() == 0) return;
 
-  Tensor x = makeContiguous(input);
-  Tensor output = createTensor(x.getShape(), x.getDType());
-  if (x.getNumEl() == 0) return output;
-
-  dispatchRows(kernelName("softmax", x.getDType()).c_str(), x, output, 0);
-  return output;
+  Tensor keep;
+  TensorView x = makeContiguous(input, &keep);
+  dispatchRows(kernelName("softmax", x.getDType()).c_str(), x, out, 0);
 }
 
-bool all(const Tensor &input) {
+bool all(const TensorView &input) {
   if (input.getDType() != DType::kBool) throw lut::InvalidArgError("all takes a bool tensor");
   if (input.getNumEl() == 0) return true;
 
-  Tensor x = makeContiguous(input).view({1, -1});
+  Tensor keep;
+  TensorView x = makeContiguous(input, &keep).view({1, -1});
   Tensor output = createTensor({1}, DType::kBool);
   dispatchRows("reduce_bool", x, output, 0);
   return elemBool(output);
 }
 
-float elem(const Tensor &tensor) {
+float elem(const TensorView &tensor) {
   if (tensor.getNumEl() != 1) {
     throw lut::InvalidArgError("elem takes a tensor of exactly one element");
   }
 
-  Tensor x = cast(tensor, DType::kFloat);
+  Tensor wide;
+  TensorView x = tensor;
+  if (tensor.getDType() != DType::kFloat) {
+    wide = createTensor(tensor.getShape(), DType::kFloat);
+    copy(tensor, wide);
+    x = wide;
+  }
   float value = 0.0f;
   getContext(x)->download(getBuffer(x), getByteOffset(x), &value, sizeof(float));
   return value;
 }
 
-bool elemBool(const Tensor &tensor) {
+bool elemBool(const TensorView &tensor) {
   if (tensor.getNumEl() != 1 || tensor.getDType() != DType::kBool) {
     throw lut::InvalidArgError("elemBool takes a bool tensor of exactly one element");
   }

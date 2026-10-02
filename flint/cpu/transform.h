@@ -19,14 +19,15 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 // apply C <- alpha * A + beta
-Tensor transform(const Tensor &src, float alpha, float beta);
+/// C = A * alpha + beta, elementwise; C is of A's shape and type.
+void transform(const TensorView &A, float alpha, float beta, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

@@ -23,12 +23,15 @@
 
 #include "flint/cuda/common.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor gemvHalf(const Tensor &x, const Tensor &B);
+/// C = x^T B into `C` <half>, contiguous, of d elements (any shape), where B is a transposed
+/// weight (its buffer holds d rows of n elements).
+void gemvHalf(const TensorView &x, const TensorView &B, const TensorView &C);
 
 }  // namespace cuda
 }  // namespace op

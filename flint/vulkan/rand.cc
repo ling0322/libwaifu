@@ -38,9 +38,10 @@ struct RandPush {
 
 }  // namespace
 
-Tensor Rand::draw(lut::Span<const int> shape, bool normal) {
-  Tensor output = createTensor(shape, DType::kFloat);
+void Rand::draw(const TensorView &output, bool normal) {
+  checkOutput(output, output.getShape(), DType::kFloat, normal ? "randNormal" : "rand");
   int64_t numel = output.getNumEl();
+  if (numel == 0) return;
   int64_t numBlocks = (numel + 3) / 4;
 
   RandPush push{};
@@ -52,15 +53,14 @@ Tensor Rand::draw(lut::Span<const int> shape, bool normal) {
   getContext(output)->dispatchLinear("rand_f32", &push, sizeof(push), numBlocks);
 
   _position += static_cast<uint64_t>(numBlocks);
-  return output;
 }
 
-Tensor Rand::uniform(lut::Span<const int> shape) {
-  return draw(shape, false);
+void Rand::uniform(const TensorView &out) {
+  draw(out, false);
 }
 
-Tensor Rand::normal(lut::Span<const int> shape) {
-  return draw(shape, true);
+void Rand::normal(const TensorView &out) {
+  draw(out, true);
 }
 
 void Rand::setSeed(uint64_t seed) {

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/cuda/matvec.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -47,20 +48,21 @@ Operators *cpuOps() {
 CATCH_TEST_CASE("test gemv", "[fl][op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor w = cpuOps()->rand({8000, 4096}, DType::kFloat);
-  Tensor x = cpuOps()->rand({1, 4096}, DType::kFloat);
+  Tensor w = F::rand(Device::getCpu(), {8000, 4096}, DType::kFloat);
+  Tensor x = F::rand(Device::getCpu(), {1, 4096}, DType::kFloat);
 
-  w = cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), w), DType::kFloat16);
-  x = cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), x), DType::kFloat16);
+  w = F::cast(cudaOps(), F::toDevice(cudaOps(), w, Device::getCuda()), DType::kFloat16);
+  x = F::cast(cudaOps(), F::toDevice(cudaOps(), x, Device::getCuda()), DType::kFloat16);
 
   // the layout Linear::forward feeds to matmul: a transposed weight, so getStride(0) == 1.
   Tensor wT = w.transpose(0, 1);
 
-  Tensor xr = cudaOps()->matmul(x, cudaOps()->contiguous(wT));
-  Tensor xv = op::cuda::gemvHalf(x.subtensor(0), wT);
+  Tensor xr = F::matmul(cudaOps(), x, F::contiguous(cudaOps(), wT));
+  Tensor xv = F::empty(Device::getCuda(), {1, wT.getShape(1)}, DType::kFloat16);
+  op::cuda::gemvHalf(x.subtensor(0), wT, xv);
 
-  xr = cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(xr, DType::kFloat));
-  xv = cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(xv, DType::kFloat));
+  xr = F::toDevice(cudaOps(), F::cast(cudaOps(), xr, DType::kFloat), Device::getCpu());
+  xv = F::toDevice(cudaOps(), F::cast(cudaOps(), xv, DType::kFloat), Device::getCpu());
 
   CATCH_REQUIRE(cpuOps()->allClose(xr, xv, 5e-3f));
 }
@@ -72,21 +74,22 @@ CATCH_TEST_CASE("test gemv (shapes)", "[fl][op][cuda]") {
   // count that is not a multiple of four leaves a partly idle block whose extra rows must not be
   // written. n is stepped in units of 8 because each thread loads eight halves at a time.
   auto runCase = [](int n, int d) {
-    Tensor w = cpuOps()->rand({d, n}, DType::kFloat);
-    Tensor x = cpuOps()->rand({1, n}, DType::kFloat);
+    Tensor w = F::rand(Device::getCpu(), {d, n}, DType::kFloat);
+    Tensor x = F::rand(Device::getCpu(), {1, n}, DType::kFloat);
 
-    w = cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), w), DType::kFloat16);
-    x = cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), x), DType::kFloat16);
+    w = F::cast(cudaOps(), F::toDevice(cudaOps(), w, Device::getCuda()), DType::kFloat16);
+    x = F::cast(cudaOps(), F::toDevice(cudaOps(), x, Device::getCuda()), DType::kFloat16);
 
     Tensor wT = w.transpose(0, 1);
-    Tensor expected = cudaOps()->matmul(x, cudaOps()->contiguous(wT));
-    Tensor actual = op::cuda::gemvHalf(x.subtensor(0), wT);
+    Tensor expected = F::matmul(cudaOps(), x, F::contiguous(cudaOps(), wT));
+    Tensor actual = F::empty(Device::getCuda(), {1, d}, DType::kFloat16);
+    op::cuda::gemvHalf(x.subtensor(0), wT, actual);
 
     CATCH_INFO("n = " << n << ", d = " << d);
     CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, d});
     return cpuOps()->allClose(
-        cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(expected, DType::kFloat)),
-        cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(actual, DType::kFloat)),
+        F::toDevice(cudaOps(), F::cast(cudaOps(), expected, DType::kFloat), Device::getCpu()),
+        F::toDevice(cudaOps(), F::cast(cudaOps(), actual, DType::kFloat), Device::getCpu()),
         5e-3f);
   };
 

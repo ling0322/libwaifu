@@ -28,27 +28,34 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-__global__ void causalMaskKernel(PackedTensorAccessor<half, 2> mask) {
+template<typename T>
+__global__ void causalMaskKernel(PackedTensorAccessor<T, 2> mask) {
   int x = blockIdx.x * blockDim.x + threadIdx.x;
   int y = blockIdx.y * blockDim.y + threadIdx.y;
 
   if (y < mask.getShape(0) && x < mask.getShape(1)) {
-    mask[y][x] = x > y ? -INFINITY : 0;
+    mask[y][x] = x > y ? T(-INFINITY) : T(0.0f);
   }
 }
 
-Tensor causalMask(int size) {
-  Tensor C = createCudaTensorHalf({size, size});
+void causalMask(const TensorView &C) {
+  CHECK(C.getDevice().getType() == Device::kCuda);
+  CHECK(C.getDim() == 2 && C.getShape(0) == C.getShape(1));
 
   constexpr int blockSize = 256;
   dim3 d;
   d.y = C.getShape(0);
   d.x = (C.getShape(1) + blockSize - 1) / blockSize;
 
-  causalMaskKernel<<<d, blockSize>>>(C);
+  if (C.getDType() == DType::kFloat16) {
+    causalMaskKernel<half><<<d, blockSize>>>(C);
+  } else if (C.getDType() == DType::kFloat) {
+    causalMaskKernel<float><<<d, blockSize>>>(C);
+  } else {
+    NOT_IMPL();
+  }
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
 }  // namespace cuda

@@ -42,7 +42,6 @@
 #include "lutil/strings.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/kernel/interface.h"
-#include "flint/cpu/tensor.h"
 #include "flint/tensor.h"
 
 namespace fl {
@@ -124,14 +123,17 @@ void im2col(
 /// the image, which is a strided read of something small enough to stay in cache. The two matched
 /// cases have no such trouble and are computed the way they read.
 template<typename T>
-Tensor conv2dImpl(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    const Problem &p) {
+void conv2dImpl(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const Problem &p,
+    const TensorView &output) {
   // Only a float activation is ever handed a weight of the other type.
   bool halfWeight = std::is_same<T, float>::value && weight.getDType() == DType::kFloat16;
-  Tensor output = tensor({p.batch, p.outChannels, p.outH, p.outW}, input.getDType());
+  // Written as (N, K, outH, outW), one run: a 1-D convolution's (N, K, Lout) is the same bytes.
+  CHECK(output.isContiguous());
+  CHECK(output.getNumEl() == static_cast<int64_t>(p.batch) * p.outChannels * p.outH * p.outW);
 
   const T *in = input.getInternalData()->getData<T>(input.getInternalOffset());
   const void *w = halfWeight
@@ -259,20 +261,19 @@ int64_t groupOffset = static_cast<int64_t>(group) * filtersPerGroup * columnHeig
       }
     }
   }
-
-  return output;
 }
 
 }  // namespace
 
-Tensor conv2d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv2d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
+    int groups,
+    const TensorView &output) {
   if (input.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D input, as (N, C, H, W)");
   if (weight.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D weight, as (K, C, R, S)");
   // A float activation may be multiplied by a half weight, which is how a model is held here.
@@ -330,24 +331,25 @@ Tensor conv2d(
     THROW(InvalidArg, "conv2d: the input is smaller than the kernel reaches");
   }
 
-  if (input.getDType() == DType::kFloat) return conv2dImpl<float>(input, weight, bias, p);
+  if (input.getDType() == DType::kFloat) return conv2dImpl<float>(input, weight, bias, p, output);
 #if LUT_CPU_ARCH == LUT_AARCH64
   // Half throughout, which is what the default float type is on this architecture. The GEMM sums
   // in float, so the reduction over the filter and the channel depth is no worse for it.
-  if (input.getDType() == DType::kFloat16) return conv2dImpl<Float16>(input, weight, bias, p);
+  if (input.getDType() == DType::kFloat16) return conv2dImpl<Float16>(input, weight, bias, p, output);
 #endif
 
   NOT_IMPL();
 }
 
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
+    int groups,
+    const TensorView &output) {
   if (input.getDim() != 3) THROW(InvalidArg, "conv1d takes a 3-D input, as (N, C, L)");
   if (weight.getDim() != 3) THROW(InvalidArg, "conv1d takes a 3-D weight, as (K, C, R)");
   if (input.getDType() != weight.getDType() &&
@@ -405,15 +407,15 @@ Tensor conv1d(
   if (p.outW < 1) THROW(InvalidArg, "conv1d: the input is smaller than the kernel reaches");
 
   // `conv2dImpl` reads the data and takes every shape off the problem, so the tensors go in as
-  // they are and only what comes back has to be given the shape a 1-D caller asked for.
-  std::vector<int> shape{p.batch, p.outChannels, p.outW};
+  // they are, the output included: one row tall, it is the same bytes either way.
+  output.throwIfInvalidShape({p.batch, p.outChannels, p.outW}, "conv1d");
 
   if (input.getDType() == DType::kFloat) {
-    return conv2dImpl<float>(input, weight, bias, p).view(shape);
+    return conv2dImpl<float>(input, weight, bias, p, output);
   }
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (input.getDType() == DType::kFloat16) {
-    return conv2dImpl<Float16>(input, weight, bias, p).view(shape);
+    return conv2dImpl<Float16>(input, weight, bias, p, output);
   }
 #endif
 

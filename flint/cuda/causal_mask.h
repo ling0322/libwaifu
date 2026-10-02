@@ -20,12 +20,15 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor causalMask(int size);
+/// Write the causal mask into `out` <float16|float>(n, n): zero on and below the diagonal, minus
+/// infinity above it.
+void causalMask(const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

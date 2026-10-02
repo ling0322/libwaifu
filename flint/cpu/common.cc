@@ -23,12 +23,11 @@ namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor expandBatchDims(const Tensor &input, lut::Span<const Tensor::ShapeType> shape) {
+TensorView expandBatchDims(const TensorView &input, lut::Span<const Tensor::ShapeType> shape) {
   CHECK(shape.size() >= input.getDim());
   if (input.getDim() == shape.size()) return input;
   int nBroadcastDim = static_cast<int>(shape.size()) - input.getDim();
 
-  Tensor x = input;
   std::vector<TensorShape::Elem> broadcastShape;
   for (int i = 0; i < nBroadcastDim; ++i) {
     TensorShape::Elem shapeElem;
@@ -44,13 +43,13 @@ Tensor expandBatchDims(const Tensor &input, lut::Span<const Tensor::ShapeType> s
     broadcastShape.push_back(shapeElem);
   }
 
-  return Tensor::create(
-      std::make_shared<TensorShape>(broadcastShape),
+  return TensorView(
       input.getInternalData(),
+      std::make_shared<TensorShape>(lut::makeConstSpan(broadcastShape)),
       input.getInternalOffset());
 }
 
-bool isLooselyContiguous(const Tensor &tensor) {
+bool isLooselyContiguous(const TensorView &tensor) {
   CHECK(!tensor.empty());
 
   lut::Span<const TensorShape::Elem> sizes = tensor.getInternalShape()->getData_();

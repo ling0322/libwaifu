@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -43,11 +44,11 @@ Operators *cpuOps() {
 }
 
 Tensor toCuda(const Tensor &a) {
-  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
+  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 bool equalLong(Tensor a, Tensor b) {
@@ -63,17 +64,15 @@ bool equalLong(Tensor a, Tensor b) {
 CATCH_TEST_CASE("test CUDA scalar operators", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = cpuOps()->rand({2, 5, 10}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(cudaOps()->div(toCuda(a), 8.0f)),
-      cpuOps()->mul(a, 1.0f / 8.0f),
+      toCpu(F::div(cudaOps(), toCuda(a), 8.0f)),
+      F::mul(cpuOps(), a, 1.0f / 8.0f),
       5e-3));
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->square(toCuda(a))), cpuOps()->mul(a, a), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::square(cudaOps(), toCuda(a))), F::mul(cpuOps(), a, a), 5e-3));
 
   Tensor ids = Tensor::create<LongType>({2, 3}, {0, 1, 2, 3, 4, 5});
-  Tensor mod = cudaOps()->toDevice(
-      Device::getCpu(),
-      cudaOps()->mod(cudaOps()->toDevice(Device::getCuda(), ids), 3));
+  Tensor mod = F::toDevice(cudaOps(), F::mod(cudaOps(), F::toDevice(cudaOps(), ids, Device::getCuda()), 3), Device::getCpu());
   CATCH_REQUIRE(equalLong(mod, Tensor::create<LongType>({2, 3}, {0, 1, 2, 0, 1, 2})));
 
   CATCH_REQUIRE(cudaOps()->elem(toCuda(Tensor::create<float>({1}, {1.5f}))) == 1.5f);
@@ -84,9 +83,9 @@ CATCH_TEST_CASE("test CUDA scalar operators (strided ranks)", "[op][cuda]") {
 
   // The generic kernel is instantiated per rank, 1 through 4. A transposed view of each rank
   // walks all four instantiations; anything higher would fall off the dispatch chain.
-  Tensor a4 = cpuOps()->rand({2, 3, 4, 5}, DType::kFloat);
-  Tensor a3 = cpuOps()->rand({2, 3, 4}, DType::kFloat);
-  Tensor a2 = cpuOps()->rand({4, 5}, DType::kFloat);
+  Tensor a4 = F::rand(Device::getCpu(), {2, 3, 4, 5}, DType::kFloat);
+  Tensor a3 = F::rand(Device::getCpu(), {2, 3, 4}, DType::kFloat);
+  Tensor a2 = F::rand(Device::getCpu(), {4, 5}, DType::kFloat);
 
   struct Case {
     Tensor host;
@@ -105,16 +104,16 @@ CATCH_TEST_CASE("test CUDA scalar operators (strided ranks)", "[op][cuda]") {
     CATCH_INFO("case " << i << ", rank " << c.host.getDim());
     CATCH_REQUIRE(!c.device.isContiguous());
     CATCH_REQUIRE(cpuOps()->allClose(
-        toCpu(cudaOps()->mul(c.device, 2.0f)),
-        cpuOps()->mul(c.host, 2.0f),
+        toCpu(F::mul(cudaOps(), c.device, 2.0f)),
+        F::mul(cpuOps(), c.host, 2.0f),
         5e-3));
     CATCH_REQUIRE(cpuOps()->allClose(
-        toCpu(cudaOps()->div(c.device, 4.0f)),
-        cpuOps()->mul(c.host, 0.25f),
+        toCpu(F::div(cudaOps(), c.device, 4.0f)),
+        F::mul(cpuOps(), c.host, 0.25f),
         5e-3));
     CATCH_REQUIRE(cpuOps()->allClose(
-        toCpu(cudaOps()->square(c.device)),
-        cpuOps()->mul(c.host, c.host),
+        toCpu(F::square(cudaOps(), c.device)),
+        F::mul(cpuOps(), c.host, c.host),
         5e-3));
   }
 }
@@ -122,15 +121,15 @@ CATCH_TEST_CASE("test CUDA scalar operators (strided ranks)", "[op][cuda]") {
 CATCH_TEST_CASE("test CUDA scalar operators (identity and zero scalars)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = cpuOps()->rand({3, 7}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {3, 7}, DType::kFloat);
   Tensor x = toCuda(a);
 
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->mul(x, 1.0f)), a, 5e-3));
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->div(x, 1.0f)), a, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::mul(cudaOps(), x, 1.0f)), a, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::div(cudaOps(), x, 1.0f)), a, 5e-3));
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(cudaOps()->mul(x, 0.0f)), cpuOps()->zeros({3, 7}, DType::kFloat)));
+      cpuOps()->allClose(toCpu(F::mul(cudaOps(), x, 0.0f)), F::zeros(Device::getCpu(), {3, 7}, DType::kFloat)));
   // negative scalars flip the sign rather than the magnitude.
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(cudaOps()->mul(x, -1.0f)), cpuOps()->mul(a, -1.0f), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::mul(cudaOps(), x, -1.0f)), F::mul(cpuOps(), a, -1.0f), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA scalar mod", "[op][cuda]") {
@@ -138,16 +137,12 @@ CATCH_TEST_CASE("test CUDA scalar mod", "[op][cuda]") {
 
   // Values on both sides of the divisor, plus exact multiples where the remainder is 0.
   Tensor ids = Tensor::create<LongType>({2, 4}, {0, 3, 4, 5, 7, 8, 99, 100});
-  Tensor mod = cudaOps()->toDevice(
-      Device::getCpu(),
-      cudaOps()->mod(cudaOps()->toDevice(Device::getCuda(), ids), 4));
+  Tensor mod = F::toDevice(cudaOps(), F::mod(cudaOps(), F::toDevice(cudaOps(), ids, Device::getCuda()), 4), Device::getCpu());
   CATCH_REQUIRE(
       equalLong(mod, Tensor::create<LongType>({2, 4}, {0, 3, 0, 1, 3, 0, 3, 0})));
 
   // a divisor of 1 leaves nothing behind.
-  Tensor one = cudaOps()->toDevice(
-      Device::getCpu(),
-      cudaOps()->mod(cudaOps()->toDevice(Device::getCuda(), ids), 1));
+  Tensor one = F::toDevice(cudaOps(), F::mod(cudaOps(), F::toDevice(cudaOps(), ids, Device::getCuda()), 1), Device::getCpu());
   CATCH_REQUIRE(equalLong(one, Tensor::create<LongType>({2, 4}, {0, 0, 0, 0, 0, 0, 0, 0})));
 }
 
@@ -159,7 +154,7 @@ CATCH_TEST_CASE("test CUDA elem", "[op][cuda]") {
   CATCH_REQUIRE(cudaOps()->elem(toCuda(Tensor::create<float>({1}, {-2.5f}))) == -2.5f);
 
   // it also reads the single element of a 1x1 tensor that came out of an operator.
-  Tensor scaled = cudaOps()->mul(toCuda(Tensor::create<float>({1}, {3.0f})), 0.5f);
+  Tensor scaled = F::mul(cudaOps(), toCuda(Tensor::create<float>({1}, {3.0f})), 0.5f);
   CATCH_REQUIRE(cudaOps()->elem(scaled) == 1.5f);
 }
 

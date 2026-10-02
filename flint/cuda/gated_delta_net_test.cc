@@ -25,6 +25,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
+#include "flint/functional.h"
 #include "flint/cuda/gated_delta_net.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -72,15 +73,15 @@ void normalizeRows(std::vector<float> &data, int rows, int dim) {
 }
 
 Tensor toCudaHalf(const Tensor &a) {
-  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), a), DType::kFloat16);
+  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCudaFloat(const Tensor &a) {
-  return cudaOps()->toDevice(Device::getCuda(), a);
+  return F::toDevice(cudaOps(), a, Device::getCuda());
 }
 
 Tensor toCpuFloat(const Tensor &a) {
-  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
+  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 // The regimes the decays and the write strengths are drawn from. The default is what a trained
@@ -201,7 +202,7 @@ void compareBackends(
 
   // The path is forced rather than left to kAuto: these head counts are far below what kAuto reads
   // as enough CTAs to fuse, so kAuto alone would never reach the fused kernel here.
-  Tensor expected = cpuOps()->gatedDeltaNetPrefill(
+  Tensor expected = F::gatedDeltaNetPrefill(cpuOps(), 
       q,
       k,
       v,
@@ -210,7 +211,8 @@ void compareBackends(
       seqlensTensor,
       slotsTensor,
       stateCpu);
-  Tensor actual = op::cuda::gatedDeltaNetPrefill(
+  Tensor actual = F::empty(Device::getCuda(), {numTokens, numVHead, headDim}, DType::kFloat16);
+  op::cuda::gatedDeltaNetPrefill(
       toCudaHalf(q),
       toCudaHalf(k),
       toCudaHalf(v),
@@ -219,6 +221,7 @@ void compareBackends(
       toCudaFloat(seqlensTensor),
       toCudaFloat(slotsTensor),
       stateCuda,
+      actual,
       path);
 
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{numTokens, numVHead, headDim});

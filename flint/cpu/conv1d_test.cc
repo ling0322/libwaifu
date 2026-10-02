@@ -26,6 +26,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -119,7 +120,7 @@ bool matchesReference(Shape3 in, Shape3 filter, bool withBias, Options options) 
   std::vector<float> expected =
       reference(x, in, w, filter, withBias ? &b : nullptr, options, out);
 
-  Tensor actual = cpuOps()->conv1d(
+  Tensor actual = F::conv1d(cpuOps(), 
       Tensor::create<float>({in.n, in.c, in.l}, lut::makeConstSpan(x)),
       Tensor::create<float>({filter.n, filter.c, filter.l}, lut::makeConstSpan(w)),
       withBias ? Tensor::create<float>({filter.n}, lut::makeConstSpan(b)) : Tensor(),
@@ -177,19 +178,19 @@ CATCH_TEST_CASE("test conv1d on the CPU (more samples than one block)", "[core][
 }
 
 CATCH_TEST_CASE("test conv1d on the CPU (a shape it cannot take)", "[core][nn][operators]") {
-  Tensor x = cpuOps()->rand({2, 4, 8}, DType::kFloat);
-  Tensor w = cpuOps()->rand({8, 4, 3}, DType::kFloat);
+  Tensor x = F::rand(Device::getCpu(), {2, 4, 8}, DType::kFloat);
+  Tensor w = F::rand(Device::getCpu(), {8, 4, 3}, DType::kFloat);
 
   // A 4-D input, channels that do not match the weight, a kernel longer than the input, a group
   // count the channels do not divide into, and a bias of the wrong width.
   CATCH_REQUIRE_THROWS(
-      cpuOps()->conv1d(cpuOps()->rand({2, 4, 8, 8}, DType::kFloat), w, Tensor(), 1, 1, 1, 1));
+      F::conv1d(cpuOps(), F::rand(Device::getCpu(), {2, 4, 8, 8}, DType::kFloat), w, Tensor(), 1, 1, 1, 1));
   CATCH_REQUIRE_THROWS(
-      cpuOps()->conv1d(cpuOps()->rand({2, 5, 8}, DType::kFloat), w, Tensor(), 1, 1, 1, 1));
+      F::conv1d(cpuOps(), F::rand(Device::getCpu(), {2, 5, 8}, DType::kFloat), w, Tensor(), 1, 1, 1, 1));
   CATCH_REQUIRE_THROWS(
-      cpuOps()->conv1d(cpuOps()->rand({1, 4, 2}, DType::kFloat), w, Tensor(), 1, 0, 1, 1));
-  CATCH_REQUIRE_THROWS(cpuOps()->conv1d(x, w, Tensor(), 1, 1, 1, 3));
-  CATCH_REQUIRE_THROWS(cpuOps()->conv1d(x, w, cpuOps()->rand({4}, DType::kFloat), 1, 1, 1, 1));
+      F::conv1d(cpuOps(), F::rand(Device::getCpu(), {1, 4, 2}, DType::kFloat), w, Tensor(), 1, 0, 1, 1));
+  CATCH_REQUIRE_THROWS(F::conv1d(cpuOps(), x, w, Tensor(), 1, 1, 1, 3));
+  CATCH_REQUIRE_THROWS(F::conv1d(cpuOps(), x, w, F::rand(Device::getCpu(), {4}, DType::kFloat), 1, 1, 1, 1));
 }
 
 }  // namespace cpu

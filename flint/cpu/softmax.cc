@@ -22,15 +22,14 @@
 #include <cmath>
 
 #include "flint/cpu/accessor.h"
-#include "flint/cpu/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-Tensor softmaxKernel(Tensor A) {
-  Tensor C = tensorLike(A);
+void softmaxKernel(const TensorView &A, const TensorView &C) {
+  C.throwIfInvalidShape(A.getShape(), "softmax");
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
   CHECK(vA.getLength() == vC.getLength());
@@ -55,14 +54,12 @@ Tensor softmaxKernel(Tensor A) {
       c[i] = static_cast<T>(expf(x - m[a.getShape(0)]) / d[a.getShape(0)]);
     }
   }
-
-  return C;
 }
 
-Tensor softmax(Tensor A) {
-  if (A.getDType() == DType::kFloat) return softmaxKernel<float>(A);
+void softmax(const TensorView &A, const TensorView &C) {
+  if (A.getDType() == DType::kFloat) return softmaxKernel<float>(A, C);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (A.getDType() == DType::kFloat16) return softmaxKernel<Float16>(A);
+  if (A.getDType() == DType::kFloat16) return softmaxKernel<Float16>(A, C);
 #endif
 
   NOT_IMPL();

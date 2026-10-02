@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -49,7 +50,7 @@ enum class UnaryOp {
   QUICK_GELU,
 };
 
-Tensor applyUnaryOp(UnaryOp op, const Tensor &tensor);
+void applyUnaryOp(UnaryOp op, const TensorView &tensor, const TensorView &C);
 
 }  // namespace cuda
 }  // namespace op

@@ -25,8 +25,6 @@
 
 #include "lutil/error.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
@@ -37,7 +35,7 @@ namespace {
 /// each input row is read `scale` times in a row while it is still warm. The value is only ever
 /// copied, never arithmetic on, so the element type is carried through rather than widened.
 template<typename T>
-Tensor upsampleNearest2dKernel(const Tensor &input, int scale) {
+void upsampleNearest2dKernel(const TensorView &input, int scale, const TensorView &output) {
   int batch = input.getShape(0);
   int channels = input.getShape(1);
   int inputH = input.getShape(2);
@@ -45,7 +43,8 @@ Tensor upsampleNearest2dKernel(const Tensor &input, int scale) {
   int outputH = inputH * scale;
   int outputW = inputW * scale;
 
-  Tensor output = tensor({batch, channels, outputH, outputW}, input.getDType());
+  output.throwIfInvalidShape({batch, channels, outputH, outputW}, "upsampleNearest2d");
+  CHECK(output.isContiguous());
   const T *in = input.getInternalData()->getData<T>(input.getInternalOffset());
   T *out = output.getInternalData()->getData<T>(output.getInternalOffset());
 
@@ -65,20 +64,16 @@ Tensor upsampleNearest2dKernel(const Tensor &input, int scale) {
       }
     }
   }
-
-  return output;
 }
 
 /// Each row read through one table of source positions, worked out once: the rows are many and
 /// the table is the same for all of them. Only copied, so the element is moved as its bytes.
 template<typename T>
-Tensor upsampleNearest1dKernel(const Tensor &input, int size) {
+void upsampleNearest1dKernel(const TensorView &input, const TensorView &output) {
   int length = input.getShape(-1);
+  int size = output.getShape(-1);
   int64_t rows = input.getNumEl() / length;
-
-  std::vector<int> shape = input.getShape();
-  shape.back() = size;
-  Tensor output = tensor(shape, input.getDType());
+  CHECK(output.isContiguous() && output.getNumEl() == rows * size);
   const T *in = reinterpret_cast<const T *>(input.getInternalData()->getData<void>(
       input.getInternalOffset()));
   T *out = reinterpret_cast<T *>(output.getInternalData()->getData<void>(
@@ -92,8 +87,6 @@ Tensor upsampleNearest1dKernel(const Tensor &input, int size) {
     T *outRow = out + row * size;
     for (int j = 0; j < size; ++j) outRow[j] = inRow[source[j]];
   }
-
-  return output;
 }
 
 }  // namespace
@@ -111,28 +104,29 @@ std::vector<int> nearestSources(int length, int size) {
   return source;
 }
 
-Tensor upsampleNearest1d(const Tensor &input, int size) {
+void upsampleNearest1d(const TensorView &input, const TensorView &output) {
+  int size = output.getShape(-1);
   if (input.getDim() < 1) THROW(InvalidArg, "upsampleNearest1d takes at least one dimension");
   if (!input.isContiguous()) THROW(InvalidArg, "upsampleNearest1d takes a contiguous input");
   if (size < 1) THROW(InvalidArg, "upsampleNearest1d: the size is below one");
   if (input.getShape(-1) < 1) THROW(InvalidArg, "upsampleNearest1d: the input is empty");
 
-  if (input.getDType() == DType::kFloat) return upsampleNearest1dKernel<uint32_t>(input, size);
-  if (input.getDType() == DType::kFloat16) return upsampleNearest1dKernel<uint16_t>(input, size);
+  if (input.getDType() == DType::kFloat) return upsampleNearest1dKernel<uint32_t>(input, output);
+  if (input.getDType() == DType::kFloat16) return upsampleNearest1dKernel<uint16_t>(input, output);
 
   NOT_IMPL();
 }
 
-Tensor upsampleNearest2d(const Tensor &input, int scale) {
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &output) {
   if (input.getDim() != 4) {
     THROW(InvalidArg, "upsampleNearest2d takes a 4-D input, as (N, C, H, W)");
   }
   if (!input.isContiguous()) THROW(InvalidArg, "upsampleNearest2d takes a contiguous input");
   if (scale < 1) THROW(InvalidArg, "upsampleNearest2d: the scale is below one");
 
-  if (input.getDType() == DType::kFloat) return upsampleNearest2dKernel<float>(input, scale);
+  if (input.getDType() == DType::kFloat) return upsampleNearest2dKernel<float>(input, scale, output);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (input.getDType() == DType::kFloat16) return upsampleNearest2dKernel<Float16>(input, scale);
+  if (input.getDType() == DType::kFloat16) return upsampleNearest2dKernel<Float16>(input, scale, output);
 #endif
 
   NOT_IMPL();

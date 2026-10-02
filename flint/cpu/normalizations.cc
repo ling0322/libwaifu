@@ -25,19 +25,20 @@
 #include "lutil/strings.h"
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-Tensor rmsNormKernel(const Tensor &tensor, const Tensor &weight, float eps) {
+void rmsNormKernel(
+    const TensorView &tensor,
+    const TensorView &weight,
+    float eps,
+    const TensorView &C) {
   CHECK(weight.getDim() == 1);
   CHECK(tensor.getShape(-1) == weight.getShape(0));
-
-  Tensor C = tensorLike(tensor);
+  C.throwIfInvalidShape(tensor.getShape(), "rmsNorm");
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(tensor);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
@@ -66,18 +67,16 @@ Tensor rmsNormKernel(const Tensor &tensor, const Tensor &weight, float eps) {
       c[i] = static_cast<T>(a[i] * w[i] / rms);
     }
   }
-
-  return C;
 }
 
 /// The weight and the bias are optional and read one value per position, so an empty tensor
 /// stands for "leave this alone" rather than for a tensor of ones or zeros.
 template<typename T>
-const T *dataOrNull(const Tensor &x) {
+const T *dataOrNull(const TensorView &x) {
   return x.empty() ? nullptr : x.getInternalData()->getData<T>(x.getInternalOffset());
 }
 
-void checkNormOperand(const Tensor &x, const char *what, int expected, DType dtype) {
+void checkNormOperand(const TensorView &x, const char *what, int expected, DType dtype) {
   if (x.empty()) return;
 
   if (x.getDType() != dtype) {
@@ -96,12 +95,16 @@ void checkNormOperand(const Tensor &x, const char *what, int expected, DType dty
 /// the cancellation in `E[x^2] - E[x]^2` well away from anything half could tell apart, and a
 /// negative result can still fall out of rounding, which the epsilon covers.
 template<typename T>
-Tensor layerNormKernel(const Tensor &tensor, const Tensor &weight, const Tensor &bias, float eps) {
+void layerNormKernel(
+    const TensorView &tensor,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &C) {
   int hiddenSize = tensor.getShape(-1);
   checkNormOperand(weight, "the layerNorm weight", hiddenSize, tensor.getDType());
   checkNormOperand(bias, "the layerNorm bias", hiddenSize, tensor.getDType());
-
-  Tensor C = tensorLike(tensor);
+  C.throwIfInvalidShape(tensor.getShape(), "layerNorm");
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(tensor);
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(C);
@@ -136,20 +139,19 @@ Tensor layerNormKernel(const Tensor &tensor, const Tensor &weight, const Tensor 
       c[i] = static_cast<T>(value);
     }
   }
-
-  return C;
 }
 
 /// One (image, group) at a time. A group covers `channelPerGroup` channels of `spatial` pixels
 /// each and they are contiguous, so the whole group is one run of memory -- which is why this
 /// indexes the buffer rather than going through TensorList, whose rows are the last dimension.
 template<typename T>
-Tensor groupNormKernel(
-    const Tensor &tensor,
-    const Tensor &weight,
-    const Tensor &bias,
+void groupNormKernel(
+    const TensorView &tensor,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps) {
+    float eps,
+    const TensorView &C) {
   int batch = tensor.getShape(0);
   int channels = tensor.getShape(1);
   int spatial = tensor.getShape(2) * tensor.getShape(3);
@@ -157,7 +159,8 @@ Tensor groupNormKernel(
   checkNormOperand(weight, "the groupNorm weight", channels, tensor.getDType());
   checkNormOperand(bias, "the groupNorm bias", channels, tensor.getDType());
 
-  Tensor C = tensorLike(tensor);
+  C.throwIfInvalidShape(tensor.getShape(), "groupNorm");
+  CHECK(C.isContiguous());
   const T *in = tensor.getInternalData()->getData<T>(tensor.getInternalOffset());
   T *out = C.getInternalData()->getData<T>(C.getInternalOffset());
   const T *w = dataOrNull<T>(weight);
@@ -195,37 +198,46 @@ Tensor groupNormKernel(
       y[i] = static_cast<T>(value);
     }
   }
-
-  return C;
 }
 
-Tensor rmsNorm(Tensor tensor, Tensor weight, float eps) {
-  if (tensor.getDType() == DType::kFloat) return rmsNormKernel<float>(tensor, weight, eps);
+void rmsNorm(const TensorView &tensor, const TensorView &weight, float eps, const TensorView &C) {
+  if (tensor.getDType() == DType::kFloat) return rmsNormKernel<float>(tensor, weight, eps, C);
 #if LUT_CPU_ARCH == LUT_AARCH64
-  if (tensor.getDType() == DType::kFloat16) return rmsNormKernel<Float16>(tensor, weight, eps);
+  if (tensor.getDType() == DType::kFloat16) return rmsNormKernel<Float16>(tensor, weight, eps, C);
 #endif
 
   NOT_IMPL();
 }
 
-Tensor layerNorm(Tensor tensor, Tensor weight, Tensor bias, float eps) {
+void layerNorm(
+    const TensorView &tensor,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &C) {
   if (tensor.getDim() < 1) {
     THROW(InvalidArg, "layerNorm takes an input of at least one dimension");
   }
 
   if (tensor.getDType() == DType::kFloat) {
-    return layerNormKernel<float>(tensor, weight, bias, eps);
+    return layerNormKernel<float>(tensor, weight, bias, eps, C);
   }
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (tensor.getDType() == DType::kFloat16) {
-    return layerNormKernel<Float16>(tensor, weight, bias, eps);
+    return layerNormKernel<Float16>(tensor, weight, bias, eps, C);
   }
 #endif
 
   NOT_IMPL();
 }
 
-Tensor groupNorm(Tensor tensor, Tensor weight, Tensor bias, int groups, float eps) {
+void groupNorm(
+    const TensorView &tensor,
+    const TensorView &weight,
+    const TensorView &bias,
+    int groups,
+    float eps,
+    const TensorView &C) {
   if (tensor.getDim() != 4) THROW(InvalidArg, "groupNorm takes a 4-D input, as (N, C, H, W)");
   if (!tensor.isContiguous()) THROW(InvalidArg, "groupNorm takes a contiguous input");
   if (groups < 1 || tensor.getShape(1) % groups != 0) {
@@ -238,11 +250,11 @@ Tensor groupNorm(Tensor tensor, Tensor weight, Tensor bias, int groups, float ep
   }
 
   if (tensor.getDType() == DType::kFloat) {
-    return groupNormKernel<float>(tensor, weight, bias, groups, eps);
+    return groupNormKernel<float>(tensor, weight, bias, groups, eps, C);
   }
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (tensor.getDType() == DType::kFloat16) {
-    return groupNormKernel<Float16>(tensor, weight, bias, groups, eps);
+    return groupNormKernel<Float16>(tensor, weight, bias, groups, eps, C);
   }
 #endif
 

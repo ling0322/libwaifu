@@ -108,7 +108,7 @@ struct CudaPrinterImpl {
   }
 };
 
-void print(const Tensor &tensor) {
+void print(const TensorView &tensor) {
   op::cpu::TensorPrinter<CudaPrinterImpl> printer;
 
   if (tensor.getDType() == DType::kFloat16)

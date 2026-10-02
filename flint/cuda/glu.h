@@ -20,16 +20,17 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor swiglu(const Tensor &tensor);
+void swiglu(const TensorView &tensor, const TensorView &out);
 
 /// The same gating with a GELU, which is what a diffusion U-Net's feed forward uses. As in swiglu
 /// the first half of the last dimension is the gate and the second is the value.
-Tensor geglu(const Tensor &tensor);
+void geglu(const TensorView &tensor, const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

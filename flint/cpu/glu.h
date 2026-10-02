@@ -19,18 +19,19 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor swiglu(const Tensor &A);
+/// SiLU(gate) * value into `C`, the gate being the first half of `A`'s last dimension and the
+/// value the second; `C` is `A`'s shape with the last dimension halved.
+void swiglu(const TensorView &A, const TensorView &C);
 
 /// The same gating with a GELU. As in swiglu the first half of the last dimension is the gate and
 /// the second is the value.
-Tensor geglu(const Tensor &A);
-Tensor swigluFp32(const Tensor &A);
+void geglu(const TensorView &A, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

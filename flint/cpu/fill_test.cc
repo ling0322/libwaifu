@@ -21,6 +21,7 @@
 // SOFTWARE.
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -39,10 +40,10 @@ namespace op {
 namespace cpu {
 
 CATCH_TEST_CASE("test CPU tensor creation", "[core][nn][operators]") {
-  Tensor zeros = cpuOps()->zeros({2, 3}, DType::kFloat);
+  Tensor zeros = F::zeros(Device::getCpu(), {2, 3}, DType::kFloat);
   CATCH_REQUIRE(cpuOps()->allClose(zeros, Tensor::create<float>({2, 3}, {0, 0, 0, 0, 0, 0})));
 
-  Tensor filled = cpuOps()->tensor({2, 3}, DType::kFloat);
+  Tensor filled = F::empty(Device::getCpu(), {2, 3}, DType::kFloat);
   cpuOps()->fill(filled, 1.5f);
   CATCH_REQUIRE(
       cpuOps()->allClose(

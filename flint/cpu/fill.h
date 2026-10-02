@@ -19,14 +19,14 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 // fill tensor with value
-void fill(Tensor tensor, float value);
+void fill(const TensorView &tensor, float value);
 
 }  // namespace cpu
 }  // namespace op

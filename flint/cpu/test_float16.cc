@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -39,51 +40,51 @@ namespace {
 
 // the CPU fp16 kernels are checked against the fp32 kernels on the same device.
 Tensor toFp16(const Tensor &a) {
-  return cpuOps()->cast(a, DType::kFloat16);
+  return F::cast(cpuOps(), a, DType::kFloat16);
 }
 
 Tensor toFp32(const Tensor &a) {
-  return cpuOps()->cast(a, DType::kFloat);
+  return F::cast(cpuOps(), a, DType::kFloat);
 }
 
 }  // namespace
 
 CATCH_TEST_CASE("test CPU fp16 binary operators", "[op][cpu][float16]") {
-  Tensor a = cpuOps()->rand({2, 5, 10}, DType::kFloat);
-  Tensor b = cpuOps()->rand({5}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
+  Tensor b = F::rand(Device::getCpu(), {5}, DType::kFloat);
   Tensor at = a.transpose(2, 1).slice(1, {1, 9});
   Tensor xt = toFp16(a).transpose(2, 1).slice(1, {1, 9});
   Tensor y = toFp16(b);
 
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(cpuOps()->add(xt, y)), cpuOps()->add(at, b), 5e-3));
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(cpuOps()->mul(xt, y)), cpuOps()->mul(at, b), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(F::add(cpuOps(), xt, y)), F::add(cpuOps(), at, b), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(F::mul(cpuOps(), xt, y)), F::mul(cpuOps(), at, b), 5e-3));
 }
 
 CATCH_TEST_CASE("test CPU fp16 copy operators", "[op][cpu][float16]") {
-  Tensor a = cpuOps()->rand({2, 10, 50}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {2, 10, 50}, DType::kFloat);
   Tensor x = toFp16(a).transpose(1, 0);
-  Tensor dest = cpuOps()->tensorLike(x);
+  Tensor dest = F::emptyLike(x);
   cpuOps()->copy(x, dest);
   CATCH_REQUIRE(cpuOps()->allClose(toFp32(dest).transpose(1, 0), a));
 
-  Tensor b = cpuOps()->rand({10, 2, 5, 20}, DType::kFloat);
+  Tensor b = F::rand(Device::getCpu(), {10, 2, 5, 20}, DType::kFloat);
   Tensor expanded = toFp16(b).unsqueeze(1).expand({10, 4, 2, 5, 20});
-  Tensor dest5d = cpuOps()->tensorLike(expanded);
+  Tensor dest5d = F::emptyLike(expanded);
   cpuOps()->copy(expanded, dest5d);
   CATCH_REQUIRE(
       cpuOps()->allClose(
           toFp32(dest5d),
-          cpuOps()->contiguous(b.unsqueeze(1).expand({10, 4, 2, 5, 20}))));
+          F::contiguous(cpuOps(), b.unsqueeze(1).expand({10, 4, 2, 5, 20}))));
 }
 
 CATCH_TEST_CASE("test CPU fp16 matmul operators", "[op][cpu][float16]") {
   auto runCase = [](std::initializer_list<int> shapeA, std::initializer_list<int> shapeB) {
-    Tensor a = cpuOps()->rand(shapeA, DType::kFloat);
-    Tensor b = cpuOps()->rand(shapeB, DType::kFloat);
-    Tensor xr = cpuOps()->matmul(a, b.slice(-1, {8, 28}).transpose(-1, -2));
+    Tensor a = F::rand(Device::getCpu(), shapeA, DType::kFloat);
+    Tensor b = F::rand(Device::getCpu(), shapeB, DType::kFloat);
+    Tensor xr = F::matmul(cpuOps(), a, b.slice(-1, {8, 28}).transpose(-1, -2));
 
     Tensor y = toFp16(b).slice(-1, {8, 28}).transpose(-1, -2);
-    Tensor x = cpuOps()->matmul(toFp16(a), y);
+    Tensor x = F::matmul(cpuOps(), toFp16(a), y);
 
     return cpuOps()->allClose(toFp32(x), xr, 5e-2);
   };
@@ -94,19 +95,19 @@ CATCH_TEST_CASE("test CPU fp16 matmul operators", "[op][cpu][float16]") {
 }
 
 CATCH_TEST_CASE("test CPU fp16 rmsNorm operator", "[op][cpu][float16]") {
-  Tensor a = cpuOps()->rand({2, 5, 10}, DType::kFloat);
-  Tensor w = cpuOps()->rand({10}, DType::kFloat);
-  Tensor x = cpuOps()->rmsNorm(toFp16(a), toFp16(w), 1e-5);
+  Tensor a = F::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
+  Tensor w = F::rand(Device::getCpu(), {10}, DType::kFloat);
+  Tensor x = F::rmsNorm(cpuOps(), toFp16(a), toFp16(w), 1e-5);
 
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(x), cpuOps()->rmsNorm(a, w, 1e-5), 5e-2));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(x), F::rmsNorm(cpuOps(), a, w, 1e-5), 5e-2));
 }
 
 CATCH_TEST_CASE("test CPU fp16 activation operators", "[op][cpu][float16]") {
-  Tensor a = cpuOps()->rand({2, 5, 150}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {2, 5, 150}, DType::kFloat);
 
   CATCH_REQUIRE(
-      cpuOps()->allClose(toFp32(cpuOps()->softmax(toFp16(a))), cpuOps()->softmax(a), 5e-2));
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(cpuOps()->swiglu(toFp16(a))), cpuOps()->swiglu(a), 5e-2));
+      cpuOps()->allClose(toFp32(F::softmax(cpuOps(), toFp16(a))), F::softmax(cpuOps(), a), 5e-2));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(F::swiglu(cpuOps(), toFp16(a))), F::swiglu(cpuOps(), a), 5e-2));
 }
 
 }  // namespace cpu

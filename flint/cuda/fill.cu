@@ -46,7 +46,7 @@ __global__ void fillGenericKernel(PackedTensorAccessor<scalar_t, DIM> A, int num
 }
 
 template<typename T>
-void fillImpl(Tensor &tensor, T v) {
+void fillImpl(const TensorView &tensor, T v) {
   int64_t numel64 = tensor.getNumEl();
   CHECK(numel64 < std::numeric_limits<int>::max());
   int numel = static_cast<int>(numel64);
@@ -73,8 +73,9 @@ void fillImpl(Tensor &tensor, T v) {
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 }
-void fill(Tensor A, float value) {
+void fill(const TensorView &A, float value) {
   CHECK(A.getDevice().getType() == Device::kCuda);
+  if (A.getNumEl() == 0) return;
 
   // Both float types, so that zeros() on this device can honour the dtype it was asked for
   // rather than only the one it used to assume. The integer types refuse here the way the CPU's

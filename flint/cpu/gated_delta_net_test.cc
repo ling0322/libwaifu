@@ -25,6 +25,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -265,7 +266,7 @@ void checkAgainstRecurrence(const Inputs &in, float tolerance) {
   referenceRecurrence(in, &expectedO, &expectedState);
 
   Tensors t = toTensors(in);
-  Tensor o = cpuOps()->gatedDeltaNetPrefill(
+  Tensor o = F::gatedDeltaNetPrefill(cpuOps(), 
       t.q,
       t.k,
       t.v,

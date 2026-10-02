@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -46,15 +47,15 @@ namespace metal {
 namespace {
 
 Tensor toMetal(const Tensor &a) {
-  return metalOps()->cast(metalOps()->toDevice(Device::getMetal(), a), DType::kFloat16);
+  return F::cast(metalOps(), F::toDevice(metalOps(), a, Device::getMetal()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return metalOps()->toDevice(Device::getCpu(), metalOps()->cast(a, DType::kFloat));
+  return F::toDevice(metalOps(), F::cast(metalOps(), a, DType::kFloat), Device::getCpu());
 }
 
 std::vector<float> readFloats(const Tensor &a) {
-  Tensor c = cpuOps()->contiguous(toCpu(a));
+  Tensor c = F::contiguous(cpuOps(), toCpu(a));
   const float *data = c.getInternalData()->getData<float>(c.getInternalOffset());
   return std::vector<float>(data, data + c.getNumEl());
 }
@@ -64,26 +65,29 @@ std::vector<float> readFloats(const Tensor &a) {
 CATCH_TEST_CASE("test Metal covers what SDXL calls", "[op][metal]") {
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
 
-  Tensor a = cpuOps()->rand({2, 4, 6}, DType::kFloat);
-  Tensor b = cpuOps()->rand({2, 4, 6}, DType::kFloat);
+  Tensor a = F::rand(Device::getCpu(), {2, 4, 6}, DType::kFloat);
+  Tensor b = F::rand(Device::getCpu(), {2, 4, 6}, DType::kFloat);
   Tensor xa = toMetal(a);
   Tensor xb = toMetal(b);
 
   CATCH_SECTION("cat") {
     CATCH_REQUIRE(cpuOps()->allClose(
-        toCpu(metalOps()->cat(xa, xb, -1)),
-        cpuOps()->cat(a, b, -1),
+        toCpu(F::cat(metalOps(), xa, xb, -1)),
+        F::cat(cpuOps(), a, b, -1),
         5e-3,
         5e-3));
-    CATCH_REQUIRE(
-        cpuOps()->allClose(toCpu(metalOps()->cat(xa, xb, 1)), cpuOps()->cat(a, b, 1), 5e-3, 5e-3));
+    CATCH_REQUIRE(cpuOps()->allClose(
+        toCpu(F::cat(metalOps(), xa, xb, 1)),
+        F::cat(cpuOps(), a, b, 1),
+        5e-3,
+        5e-3));
   }
 
   CATCH_SECTION("contiguous of a view") {
     CATCH_REQUIRE(
         cpuOps()->allClose(
-            toCpu(metalOps()->contiguous(xa.transpose(0, 2))),
-            cpuOps()->contiguous(a.transpose(0, 2)),
+            toCpu(F::contiguous(metalOps(), xa.transpose(0, 2))),
+            F::contiguous(cpuOps(), a.transpose(0, 2)),
             5e-3,
             5e-3));
   }
@@ -95,7 +99,7 @@ CATCH_TEST_CASE("test Metal covers what SDXL calls", "[op][metal]") {
 
   CATCH_SECTION("randn and manualSeed") {
     metalOps()->manualSeed(42);
-    Tensor noise = metalOps()->randNormal({2, 3, 4});
+    Tensor noise = F::randNormal(Device(Device::kMetal), {2, 3, 4});
     CATCH_REQUIRE(noise.getDevice().getType() == Device::kMetal);
     CATCH_REQUIRE(noise.getNumEl() == 24);
   }
@@ -110,30 +114,30 @@ CATCH_TEST_CASE("test Metal at VAE scale in fp16", "[op][metal][probe]") {
   };
 
   CATCH_SECTION("groupNorm over a large plane") {
-    Tensor a = cpuOps()->rand({1, 128, 256, 256}, DType::kFloat);
-    Tensor w = cpuOps()->rand({128}, DType::kFloat);
-    Tensor b = cpuOps()->rand({128}, DType::kFloat);
+    Tensor a = F::rand(Device::getCpu(), {1, 128, 256, 256}, DType::kFloat);
+    Tensor w = F::rand(Device::getCpu(), {128}, DType::kFloat);
+    Tensor b = F::rand(Device::getCpu(), {128}, DType::kFloat);
 
-    Tensor got = metalOps()->groupNorm(toMetal(a), toMetal(w), toMetal(b), 32, 1e-5);
+    Tensor got = F::groupNorm(metalOps(), toMetal(a), toMetal(w), toMetal(b), 32, 1e-5);
     CATCH_INFO("groupNorm NaN count " << countNaN(got));
     CATCH_REQUIRE(countNaN(got) == 0);
   }
 
   CATCH_SECTION("layerNorm over a wide row") {
-    Tensor a = cpuOps()->rand({2, 64, 8192}, DType::kFloat);
-    Tensor w = cpuOps()->rand({8192}, DType::kFloat);
-    Tensor b = cpuOps()->rand({8192}, DType::kFloat);
-    Tensor got = metalOps()->layerNorm(toMetal(a), toMetal(w), toMetal(b), 1e-5);
+    Tensor a = F::rand(Device::getCpu(), {2, 64, 8192}, DType::kFloat);
+    Tensor w = F::rand(Device::getCpu(), {8192}, DType::kFloat);
+    Tensor b = F::rand(Device::getCpu(), {8192}, DType::kFloat);
+    Tensor got = F::layerNorm(metalOps(), toMetal(a), toMetal(w), toMetal(b), 1e-5);
     CATCH_INFO("layerNorm NaN count " << countNaN(got));
     CATCH_REQUIRE(countNaN(got) == 0);
   }
 
   CATCH_SECTION("attention over a long sequence") {
-    Tensor q = cpuOps()->rand({1, 1, 4096, 64}, DType::kFloat);
-    Tensor k = cpuOps()->rand({1, 1, 4096, 64}, DType::kFloat);
-    Tensor v = cpuOps()->rand({1, 1, 4096, 64}, DType::kFloat);
+    Tensor q = F::rand(Device::getCpu(), {1, 1, 4096, 64}, DType::kFloat);
+    Tensor k = F::rand(Device::getCpu(), {1, 1, 4096, 64}, DType::kFloat);
+    Tensor v = F::rand(Device::getCpu(), {1, 1, 4096, 64}, DType::kFloat);
 
-    Tensor got = metalOps()->attention(toMetal(q), toMetal(k), toMetal(v), false);
+    Tensor got = F::attention(metalOps(), toMetal(q), toMetal(k), toMetal(v), false);
     CATCH_INFO("attention NaN count " << countNaN(got));
     CATCH_REQUIRE(countNaN(got) == 0);
   }

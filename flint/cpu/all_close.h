@@ -19,16 +19,16 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-bool allClose(Tensor A, Tensor B, float rtol, float atol);
+bool allClose(const TensorView &A, const TensorView &B, float rtol, float atol);
 
-float meanAbs(Tensor A);
-float maxDiff(Tensor A, Tensor B);
+float meanAbs(const TensorView &A);
+float maxDiff(const TensorView &A, const TensorView &B);
 
 }  // namespace cpu
 }  // namespace op

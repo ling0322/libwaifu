@@ -22,6 +22,7 @@
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
+#include "flint/functional.h"
 #include "flint/vulkan/ops.h"
 #include "flint/vulkan/vulkan_tensor_data.h"
 
@@ -31,9 +32,8 @@ namespace vulkan {
 
 namespace {
 
-const VulkanTensorData *getData(const Tensor &tensor) {
-  const VulkanTensorData *data = dynamic_cast<const VulkanTensorData *>(
-      tensor.getInternalData().get());
+const VulkanTensorData *getData(const TensorView &tensor) {
+  const VulkanTensorData *data = dynamic_cast<const VulkanTensorData *>(tensor.getInternalData());
   if (!data) {
     throw lut::AbortedError(lut::sprintf(
         "expected a tensor on the Vulkan device, got one on %s",
@@ -45,27 +45,46 @@ const VulkanTensorData *getData(const Tensor &tensor) {
 }  // namespace
 
 Tensor createTensor(lut::Span<const int> shape, DType dtype) {
-  auto tensorShape = std::make_shared<TensorShape>(shape);
-  int64_t numel = tensorShape->getNumEl();
-
-  // A tensor with nothing in it still needs somewhere to be, so it gets the smallest buffer.
-  std::shared_ptr<TensorData> data = VulkanTensorData::create(std::max<int64_t>(numel, 1), dtype);
-  return Tensor::create(tensorShape, data);
+  return F::empty(Device(Device::kVulkan), shape, dtype);
 }
 
-Context *getContext(const Tensor &tensor) {
+TensorView restride(const TensorView &base, lut::Span<const TensorShape::Elem> elems) {
+  return TensorView(
+      base.getInternalData(),
+      std::make_shared<TensorShape>(elems),
+      base.getInternalOffset());
+}
+
+void checkOutput(const TensorView &out, lut::Span<const int> shape, DType dtype, const char *op) {
+  if (out.getDevice().getType() != Device::kVulkan) {
+    throw lut::AbortedError(lut::sprintf("%s: the output is not on the Vulkan device", op));
+  }
+  if (!out.isContiguous()) {
+    throw lut::AbortedError(lut::sprintf("%s: the output is not contiguous", op));
+  }
+  if (out.getDType() != dtype) {
+    throw lut::AbortedError(lut::sprintf(
+        "%s: the output is %s, expected %s",
+        op,
+        out.getDType().toString(),
+        dtype.toString()));
+  }
+  out.throwIfInvalidShape(shape, op);
+}
+
+Context *getContext(const TensorView &tensor) {
   return getData(tensor)->getContext();
 }
 
-const Buffer &getBuffer(const Tensor &tensor) {
+const Buffer &getBuffer(const TensorView &tensor) {
   return getData(tensor)->getBuffer();
 }
 
-int64_t getByteOffset(const Tensor &tensor) {
+int64_t getByteOffset(const TensorView &tensor) {
   return tensor.getDType().getTotalSize(tensor.getInternalOffset());
 }
 
-uint64_t getAddress(const Tensor &tensor) {
+uint64_t getAddress(const TensorView &tensor) {
   return getBuffer(tensor).address + static_cast<uint64_t>(getByteOffset(tensor));
 }
 
@@ -104,7 +123,7 @@ void checkFloat(DType dtype, const char *op) {
   }
 }
 
-std::vector<int> getStrides(const Tensor &tensor) {
+std::vector<int> getStrides(const TensorView &tensor) {
   std::vector<int> strides;
   for (int d = 0; d < tensor.getDim(); ++d) strides.push_back(tensor.getStride(d));
   return strides;
@@ -168,12 +187,12 @@ bool collapse(
   return true;
 }
 
-Tensor makeContiguous(const Tensor &tensor) {
+TensorView makeContiguous(const TensorView &tensor, Tensor *keep) {
   if (tensor.isContiguous()) return tensor;
 
-  Tensor output = createTensor(tensor.getShape(), tensor.getDType());
-  copy(tensor, output);
-  return output;
+  *keep = createTensor(tensor.getShape(), tensor.getDType());
+  copy(tensor, *keep);
+  return *keep;
 }
 
 }  // namespace vulkan

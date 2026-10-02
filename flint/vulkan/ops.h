@@ -24,6 +24,7 @@
 #include "lutil/span.h"
 #include "flint/dtype.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -59,15 +60,17 @@ enum class BinaryOp {
   kDiv = 3,
 };
 
-Tensor unary(UnaryOp op, const Tensor &input, float scalar = 0.0f);
-Tensor binary(BinaryOp op, const Tensor &a, const Tensor &b);
-Tensor eq(const Tensor &a, const Tensor &b);
-Tensor mod(const Tensor &input, int64_t other);
-void fill(const Tensor &tensor, float value);
-void copy(const Tensor &src, const Tensor &dest);
-Tensor cast(const Tensor &input, DType dtype);
-Tensor arangeLong(int64_t begin, int64_t end, int64_t step);
-Tensor causalMask(int length, DType dtype);
+void unary(UnaryOp op, const TensorView &input, float scalar, const TensorView &out);
+
+/// `b` is already of `a`'s shape -- broadcast, if it was, as a view with strides of zero.
+void binary(BinaryOp op, const TensorView &a, const TensorView &b, const TensorView &out);
+void eq(const TensorView &a, const TensorView &b, const TensorView &out);
+void mod(const TensorView &input, int64_t other, const TensorView &out);
+void fill(const TensorView &tensor, float value);
+void copy(const TensorView &src, const TensorView &dest);
+void cast(const TensorView &input, const TensorView &out);
+void arangeLong(int64_t begin, int64_t step, const TensorView &out);
+void causalMask(const TensorView &out);
 
 // reduce.cc
 enum class ReduceOp {
@@ -76,69 +79,78 @@ enum class ReduceOp {
   kMin = 2,
 };
 
-/// Reduce the last dimension, which the result drops -- a vector becomes a vector of one.
-Tensor reduceLastDim(const Tensor &input, ReduceOp op);
-Tensor sum(const Tensor &input, int dim);
-Tensor cumsum(const Tensor &input, int dim);
-Tensor softmax(const Tensor &input);
-bool all(const Tensor &input);
-float elem(const Tensor &tensor);
-bool elemBool(const Tensor &tensor);
+/// Reduce the last dimension into `out`, which is the input without it -- (1) for a vector.
+void reduceLastDim(const TensorView &input, ReduceOp op, const TensorView &out);
+void sum(const TensorView &input, int dim, const TensorView &out);
+void cumsum(const TensorView &input, int dim, const TensorView &out);
+void softmax(const TensorView &input, const TensorView &out);
+bool all(const TensorView &input);
+float elem(const TensorView &tensor);
+bool elemBool(const TensorView &tensor);
 
 // norm.cc
-Tensor layerNorm(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps);
-Tensor rmsNorm(const Tensor &input, const Tensor &weight, float eps);
-Tensor groupNorm(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void layerNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &out);
+void rmsNorm(const TensorView &input, const TensorView &weight, float eps, const TensorView &out);
+void groupNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps);
+    float eps,
+    const TensorView &out);
 
 // shape.cc
-Tensor lookup(const Tensor &table, const Tensor &indices);
-Tensor upsampleNearest2d(const Tensor &input, int scale);
-Tensor upsampleNearest1d(const Tensor &input, int size);
-Tensor geglu(const Tensor &input);
-Tensor swiglu(const Tensor &input);
+void lookup(const TensorView &table, const TensorView &indices, const TensorView &out);
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &out);
+void upsampleNearest1d(const TensorView &input, const TensorView &out);
+void geglu(const TensorView &input, const TensorView &out);
+void swiglu(const TensorView &input, const TensorView &out);
 void rotaryEmbedding(
-    const Tensor &positions,
-    const Tensor &query,
-    const Tensor &key,
-    const Tensor &rotaryCache);
+    const TensorView &positions,
+    const TensorView &query,
+    const TensorView &key,
+    const TensorView &rotaryCache);
 
 // matmul.cc
-Tensor matmul(const Tensor &a, const Tensor &b);
-Tensor conv2d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void matmul(const TensorView &a, const TensorView &b, const TensorView &out);
+void conv2d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups);
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+    int groups,
+    const TensorView &out);
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups);
+    int groups,
+    const TensorView &out);
 
 // rand.cc
 /// Philox4x32-10, drawing the same numbers for a seed as the CUDA operators do.
 class Rand {
  public:
-  Tensor uniform(lut::Span<const int> shape);
-  Tensor normal(lut::Span<const int> shape);
+  /// Fill `out`, contiguous float32, from [0, 1) or from the standard normal distribution.
+  void uniform(const TensorView &out);
+  void normal(const TensorView &out);
   void setSeed(uint64_t seed);
 
  private:
   uint64_t _seed = 0;
   uint64_t _position = 0;
 
-  Tensor draw(lut::Span<const int> shape, bool normal);
+  void draw(const TensorView &out, bool normal);
 };
 
 }  // namespace vulkan

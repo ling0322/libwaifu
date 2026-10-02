@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -34,7 +34,7 @@ class TensorPrinter {
   using accessor_type = typename TPrinterImpl::template accessor_type<const T, DIM>;
 
   template<typename T>
-  void print(const Tensor &x) {
+  void print(const TensorView &x) {
     if (x.getDim() == 1)
       printTensorAndInfo<T, 1>(x);
     else if (x.getDim() == 2)

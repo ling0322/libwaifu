@@ -17,6 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include "lutil/error.h"
+#include "lutil/log.h"
 #include "flint/metal/common.h"
 #include "flint/metal/ops.h"
 
@@ -24,25 +26,13 @@ namespace fl {
 namespace op {
 namespace metal {
 
-namespace {
-
-mlx::core::Shape toMlxShape(lut::Span<const int> shape) {
-  mlx::core::Shape result;
-  for (int dim : shape) {
-    result.push_back(dim);
-  }
-  return result;
+void rand(const TensorView &out) {
+  writeInto(mlx::core::random::uniform(toMlxShape(out), toMlxDtype(out.getDType())), out);
 }
 
-}  // namespace
-
-Tensor rand(lut::Span<const int> shape, DType dtype) {
-  return fromMlxArray(mlx::core::random::uniform(toMlxShape(shape), toMlxDtype(dtype)));
-}
-
-Tensor randNormal(lut::Span<const int> shape) {
-  return fromMlxArray(
-      mlx::core::random::normal(toMlxShape(shape), mlx::core::float32, 0.0f, 1.0f));
+void randNormal(const TensorView &out) {
+  CHECK(out.getDType() == DType::kFloat) << "randNormal: the output must be float32";
+  writeInto(mlx::core::random::normal(toMlxShape(out), mlx::core::float32, 0.0f, 1.0f), out);
 }
 
 void manualSeed(uint64_t seed) {

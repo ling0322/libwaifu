@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -43,11 +44,12 @@ struct Conv1dOptions {
 /// @param bias <half|float>(K), or an empty tensor for no bias.
 /// @return <half|float>(N, K, Lout), where Lout is
 ///         (L + 2 * padding - dilation * (R - 1) - 1) / stride + 1.
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    const Conv1dOptions &options);
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const Conv1dOptions &options,
+    const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

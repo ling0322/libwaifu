@@ -19,23 +19,38 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor rmsNorm(Tensor tensor, Tensor weight, float eps);
+/// @brief RMS-normalize over the last dimension and scale by `weight`, into `C` of the input's
+///        shape and type.
+void rmsNorm(const TensorView &tensor, const TensorView &weight, float eps, const TensorView &C);
 
 /// @brief Normalize over the last dimension, subtracting the mean as well as dividing by the
 ///        spread. `weight` and `bias` are one value per position and either may be empty.
 /// @param tensor <float>(..., hiddenSize), or <float16> where the CPU has it natively.
-Tensor layerNorm(Tensor tensor, Tensor weight, Tensor bias, float eps);
+/// @param C where the result goes, of the input's shape and type.
+void layerNorm(
+    const TensorView &tensor,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &C);
 
 /// @brief Normalize each image's group of channels over the channels and the space they cover,
 ///        which is what a diffusion model normalizes with.
 /// @param tensor <float>(N, C, H, W), contiguous. `weight` and `bias` are one value per channel.
-Tensor groupNorm(Tensor tensor, Tensor weight, Tensor bias, int groups, float eps);
+/// @param C where the result goes, contiguous, of the input's shape and type.
+void groupNorm(
+    const TensorView &tensor,
+    const TensorView &weight,
+    const TensorView &bias,
+    int groups,
+    float eps,
+    const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

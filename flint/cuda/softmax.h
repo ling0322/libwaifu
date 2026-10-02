@@ -20,12 +20,14 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor softmax(Tensor A);
+/// Softmax over the last dimension of `A`, written into contiguous `C` of A's shape and dtype.
+void softmax(const TensorView &A, const TensorView &C);
 
 }  // namespace cuda
 }  // namespace op

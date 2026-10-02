@@ -20,7 +20,9 @@
 #include "flint/device.h"
 
 #include "lutil/log.h"
+#ifdef LIBWAIFU_CUDA_ENABLED
 #include "flint/cuda/cuda_operators.h"
+#endif
 #ifdef LIBWAIFU_MLX_ENABLED
 #include "flint/metal/metal_operators.h"
 #endif

@@ -274,12 +274,13 @@ __global__ void sampleTopPFromSortedCandidatesKernel(
 }
 
 template<typename T>
-Tensor sampleLogitsImpl(
-    const Tensor &logits,
-    const Tensor &uniformNoise,
-    const Tensor &temperatures,
-    const Tensor &topKs,
-    const Tensor &topPs) {
+void sampleLogitsImpl(
+    const TensorView &logits,
+    const TensorView &uniformNoise,
+    const TensorView &temperatures,
+    const TensorView &topKs,
+    const TensorView &topPs,
+    const TensorView &result) {
   int rows = logits.getShape(0);
   int vocabSize = logits.getShape(1);
   int64_t candidateCount64 = static_cast<int64_t>(rows) * vocabSize;
@@ -343,7 +344,6 @@ Tensor sampleLogitsImpl(
       beginOffsets.get(),
       endOffsets.get()));
 
-  Tensor result = createCudaTensorLong({rows});
   sampleTopPFromSortedCandidatesKernel<<<rows, BlockSize>>>(
       candidateLogitsOut.get(),
       candidateLabelsOut.get(),
@@ -355,17 +355,17 @@ Tensor sampleLogitsImpl(
       vocabSize,
       getDataPtrCuda<LongType>(result));
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return result;
 }
 
 }  // namespace
 
-Tensor sample(
-    const Tensor &logits,
-    const Tensor &uniformNoise,
-    const Tensor &temperatures,
-    const Tensor &topKs,
-    const Tensor &topPs) {
+void sample(
+    const TensorView &logits,
+    const TensorView &uniformNoise,
+    const TensorView &temperatures,
+    const TensorView &topKs,
+    const TensorView &topPs,
+    const TensorView &out) {
   CHECK(logits.getDevice().getType() == Device::kCuda && logits.getDim() == 2 &&
         logits.isContiguous());
   int rows = logits.getShape(0);
@@ -381,12 +381,16 @@ Tensor sample(
   CHECK(topPs.getDevice().getType() == Device::kCuda &&
         topPs.getDType() == DType::kFloat && topPs.isContiguous() &&
         topPs.getShape() == std::vector<int>({rows}));
+  CHECK(out.getDevice().getType() == Device::kCuda && out.getDType() == DType::kLong &&
+        out.isContiguous());
+  out.throwIfInvalidShape({rows}, "sample");
+  if (rows == 0) return;
 
   if (logits.getDType() == DType::kFloat16) {
-    return sampleLogitsImpl<half>(logits, uniformNoise, temperatures, topKs, topPs);
+    return sampleLogitsImpl<half>(logits, uniformNoise, temperatures, topKs, topPs, out);
   }
   if (logits.getDType() == DType::kFloat) {
-    return sampleLogitsImpl<float>(logits, uniformNoise, temperatures, topKs, topPs);
+    return sampleLogitsImpl<float>(logits, uniformNoise, temperatures, topKs, topPs, out);
   }
   NOT_IMPL();
 }

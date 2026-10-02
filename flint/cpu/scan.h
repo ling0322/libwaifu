@@ -19,16 +19,16 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-/// Inclusive prefix sum along the last dimension of a contiguous float32 tensor. Every row is
-/// accumulated in double, the way torch accumulates a float32 cumsum on the CPU, so a long row does
-/// not drift by the rounding of every partial sum before it.
-Tensor cumsumLastDim(const Tensor &A);
+/// Inclusive prefix sum along the last dimension of a contiguous float32 tensor, into contiguous `C`
+/// of its shape. Every row is accumulated in double, the way torch accumulates a float32 cumsum on
+/// the CPU, so a long row does not drift by the rounding of every partial sum before it.
+void cumsumLastDim(const TensorView &A, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

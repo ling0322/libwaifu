@@ -58,7 +58,7 @@ struct GroupNormPush {
 // empty, which the kernels take to mean there is none. Made contiguous first when it is not, and
 // kept alive through `keep` until the kernel is recorded.
 uint64_t getOperand(
-    const Tensor &operand,
+    const TensorView &operand,
     DType dtype,
     int size,
     const char *op,
@@ -83,24 +83,25 @@ uint64_t getOperand(
         size));
   }
 
-  *keep = makeContiguous(operand);
-  return getAddress(*keep);
+  return getAddress(makeContiguous(operand, keep));
 }
 
-Tensor normOverLastDim(
+void normOverLastDim(
     const char *base,
     const char *op,
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    float eps) {
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &output) {
   checkFloat(input.getDType(), op);
   CHECK(input.getDim() >= 1);
+  checkOutput(output, input.getShape(), input.getDType(), op);
+  if (input.getNumEl() == 0) return;
 
-  Tensor x = makeContiguous(input);
+  Tensor keepInput;
+  TensorView x = makeContiguous(input, &keepInput);
   int rowLength = x.getShape(-1);
-  Tensor output = createTensor(x.getShape(), x.getDType());
-  if (x.getNumEl() == 0) return output;
 
   Tensor keepWeight;
   Tensor keepBias;
@@ -119,26 +120,31 @@ Tensor normOverLastDim(
       sizeof(push),
       static_cast<int64_t>(push.numRows) * kRowThreads,
       kRowThreads);
-  return output;
 }
 
 }  // namespace
 
-Tensor layerNorm(const Tensor &input, const Tensor &weight, const Tensor &bias, float eps) {
-  return normOverLastDim("layer_norm", "layerNorm", input, weight, bias, eps);
+void layerNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    float eps,
+    const TensorView &out) {
+  normOverLastDim("layer_norm", "layerNorm", input, weight, bias, eps, out);
 }
 
-Tensor rmsNorm(const Tensor &input, const Tensor &weight, float eps) {
+void rmsNorm(const TensorView &input, const TensorView &weight, float eps, const TensorView &out) {
   if (weight.empty()) throw lut::InvalidArgError("rmsNorm needs a weight");
-  return normOverLastDim("rms_norm", "rmsNorm", input, weight, Tensor(), eps);
+  normOverLastDim("rms_norm", "rmsNorm", input, weight, TensorView(), eps, out);
 }
 
-Tensor groupNorm(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void groupNorm(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int groups,
-    float eps) {
+    float eps,
+    const TensorView &output) {
   checkFloat(input.getDType(), "groupNorm");
   if (input.getDim() != 4) throw lut::InvalidArgError("groupNorm takes (N, C, H, W)");
 
@@ -150,10 +156,11 @@ Tensor groupNorm(
         groups));
   }
 
-  Tensor x = makeContiguous(input);
-  Tensor output = createTensor(x.getShape(), x.getDType());
-  if (x.getNumEl() == 0) return output;
+  checkOutput(output, input.getShape(), input.getDType(), "groupNorm");
+  if (input.getNumEl() == 0) return;
 
+  Tensor keepInput;
+  TensorView x = makeContiguous(input, &keepInput);
   int spatial = x.getShape(2) * x.getShape(3);
   int channelsPerGroup = channels / groups;
 
@@ -177,7 +184,6 @@ Tensor groupNorm(
       sizeof(push),
       static_cast<int64_t>(push.numGroups) * kRowThreads,
       kRowThreads);
-  return output;
 }
 
 }  // namespace vulkan

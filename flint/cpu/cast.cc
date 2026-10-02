@@ -26,62 +26,63 @@
 
 #include "lutil/half.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/cpu_tensor_data.h"
 #include "flint/cpu/kernel/interface.h"
-#include "flint/cpu/lookup.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
+#include "flint/functional.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor cast(Tensor A, DType dtype) {
-  if (A.getDType() == dtype) {
-    return A;
-  } else if (A.getDType() == DType::kFloat16 && dtype == DType::kFloat) {
-    return castFp16ToFp32(A);
-  } else if (A.getDType() == DType::kFloat && dtype == DType::kFloat16) {
-    return castFp32ToFp16(A);
-  } else if (A.getDType() == DType::kFloat && dtype == DType::kLong) {
-    return castFp32ToLong(A);
-  } else if (A.getDType() == DType::kFloat16 && dtype == DType::kLong) {
+namespace {
+
+void checkCastPair(const TensorView &A, const TensorView &C, const char *what) {
+  CHECK(A.isContiguous() && C.isContiguous()) << "unable to cast " << what << " not contiguous";
+  C.throwIfInvalidShape(A.getShape(), "cast");
+}
+
+}  // namespace
+
+void cast(const TensorView &A, const TensorView &C) {
+  DType from = A.getDType();
+  DType to = C.getDType();
+  if (from == DType::kFloat16 && to == DType::kFloat) {
+    castFp16ToFp32(A, C);
+  } else if (from == DType::kFloat && to == DType::kFloat16) {
+    castFp32ToFp16(A, C);
+  } else if (from == DType::kFloat && to == DType::kLong) {
+    castFp32ToLong(A, C);
+  } else if (from == DType::kFloat16 && to == DType::kLong) {
     // Every half is exactly a float, so going through one changes nothing.
-    return castFp32ToLong(castFp16ToFp32(A));
+    Tensor wide = F::empty(Device::getCpu(), A.getShape(), DType::kFloat);
+    castFp16ToFp32(A, wide);
+    castFp32ToLong(wide, C);
   } else {
     NOT_IMPL();
   }
 }
 
-Tensor castFp16ToFp32(Tensor A) {
-  CHECK(A.isContiguous()) << "unable to cast a non-contiguous half tensor to float";
-  Tensor C = op::cpu::tensor(A.getShape(), DType::kFloat);
+void castFp16ToFp32(const TensorView &A, const TensorView &C) {
+  checkCastPair(A, C, "a half tensor to float,");
   kernel::convertHalfToFloat(
       A.getNumEl(),
       reinterpret_cast<const kernel::Float16 *>(getDataPtrCpu<Float16>(A)),
       getDataPtrCpu<float>(C),
       kernel::Mode::OMP,
       kernel::CpuMathBackend::DEFAULT);
-
-  return C;
 }
 
-Tensor castFp32ToFp16(Tensor A) {
-  CHECK(A.isContiguous()) << "unable to cast a non-contiguous half tensor to float";
-  Tensor C = op::cpu::tensor(A.getShape(), DType::kFloat16);
+void castFp32ToFp16(const TensorView &A, const TensorView &C) {
+  checkCastPair(A, C, "a float tensor to half,");
   kernel::convertFloatToHalf(
       A.getNumEl(),
       getDataPtrCpu<float>(A),
       reinterpret_cast<kernel::Float16 *>(getDataPtrCpu<Float16>(C)),
       kernel::Mode::OMP,
       kernel::CpuMathBackend::DEFAULT);
-
-  return C;
 }
 
-Tensor castFp32ToLong(Tensor A) {
-  CHECK(A.isContiguous()) << "unable to cast a non-contiguous float tensor to int64";
-  Tensor C = op::cpu::tensor(A.getShape(), DType::kLong);
+void castFp32ToLong(const TensorView &A, const TensorView &C) {
+  checkCastPair(A, C, "a float tensor to int64,");
   const float *src = getDataPtrCpu<float>(A);
   LongType *dest = getDataPtrCpu<LongType>(C);
 
@@ -90,8 +91,6 @@ Tensor castFp32ToLong(Tensor A) {
   for (int64_t i = 0; i < numel; ++i) {
     dest[i] = static_cast<LongType>(src[i]);
   }
-
-  return C;
 }
 
 }  // namespace cpu

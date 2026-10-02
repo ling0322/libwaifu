@@ -33,7 +33,6 @@
 #include "flint/cpu/cast.h"
 #include "flint/cpu/common.h"
 #include "flint/cpu/copy.h"
-#include "flint/cpu/cpu_tensor_data.h"
 #include "flint/cpu/fill.h"
 #include "flint/cpu/gated_delta_net.h"
 #include "flint/cpu/kernel/interface.h"
@@ -53,6 +52,7 @@
 #include "flint/cpu/tensor.h"
 #include "flint/cpu/transform.h"
 #include "flint/cpu/unary.h"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -60,68 +60,72 @@ namespace fl {
 namespace op {
 namespace cpu {
 
+namespace {
+
+/// A packed copy of `input`, or `input` itself if it is packed already, so the loops below can
+/// walk it as a flat array. A temporary of this backend's own.
+TensorView contiguousCpu(const TensorView &input, Tensor &holder) {
+  if (input.isContiguous()) return input;
+
+  holder = F::emptyLike(input);
+  op::cpu::copy(input, holder);
+  return holder;
+}
+
+}  // namespace
+
 CPUOperators::CPUOperators() {
-}
-
-Tensor CPUOperators::tensor(lut::Span<const int> shape, DType dtype) {
-  return op::cpu::tensor(shape, dtype);
-}
-
-Tensor CPUOperators::tensorLike(Tensor input) {
-  return op::cpu::tensorLike(input);
 }
 
 // -- class CPUOperators ----------
 
-Tensor CPUOperators::rand(lut::Span<const int> shape, DType dtype) {
-  return op::cpu::rand(shape, dtype, &_rand, 0, 1);
+void CPUOperators::rand(TensorView out) {
+  op::cpu::rand(out, &_rand, 0, 1);
 }
 
-Tensor CPUOperators::zeros(lut::Span<const int> shape, DType dtype) {
-  return op::cpu::zeros(shape, dtype);
+void CPUOperators::matmul(TensorView A, TensorView B, TensorView out) {
+  cpu::matmul(A, B, out);
 }
 
-Tensor CPUOperators::matmul(Tensor A, Tensor B) {
-  return cpu::matmul(A, B);
+void CPUOperators::gatedDeltaNetPrefill(
+    TensorView q,
+    TensorView k,
+    TensorView v,
+    TensorView g,
+    TensorView beta,
+    TensorView cuSeqlens,
+    TensorView stateSlots,
+    TensorView state,
+    TensorView out) {
+  cpu::gatedDeltaNetPrefill(q, k, v, g, beta, cuSeqlens, stateSlots, state, out);
 }
 
-Tensor CPUOperators::gatedDeltaNetPrefill(
-    Tensor q,
-    Tensor k,
-    Tensor v,
-    Tensor g,
-    Tensor beta,
-    Tensor cuSeqlens,
-    Tensor stateSlots,
-    Tensor state) {
-  return cpu::gatedDeltaNetPrefill(q, k, v, g, beta, cuSeqlens, stateSlots, state);
+void CPUOperators::print(TensorView tensor) {
+  cpu::print(tensor);
 }
 
-void CPUOperators::print(Tensor tensor) {
-  return cpu::print(tensor);
+void CPUOperators::add(TensorView input, TensorView other, TensorView out) {
+  cpu::binaryOp(input, other, BinaryOp::ADD, out);
 }
 
-Tensor CPUOperators::add(Tensor input, Tensor other) {
-  return cpu::binaryOp(input, other, BinaryOp::ADD);
+void CPUOperators::sub(TensorView input, TensorView other, TensorView out) {
+  cpu::binaryOp(input, other, BinaryOp::SUB, out);
 }
 
-Tensor CPUOperators::sub(Tensor input, Tensor other) {
-  return cpu::binaryOp(input, other, BinaryOp::SUB);
+void CPUOperators::subFloat(TensorView input, float other, TensorView out) {
+  op::cpu::transform(input, 1.0f, -other, out);
 }
 
-Tensor CPUOperators::subFloat(Tensor input, float other) {
-  return op::cpu::transform(input, 1.0f, -other);
+void CPUOperators::softmax(TensorView input, TensorView out) {
+  cpu::softmax(input, out);
 }
 
-Tensor CPUOperators::softmax(Tensor input) {
-  return cpu::softmax(input);
-}
-
-Tensor CPUOperators::sample(
-    Tensor logits,
-    Tensor temperatures,
-    Tensor topKs,
-    Tensor topPs) {
+void CPUOperators::sample(
+    TensorView logits,
+    TensorView temperatures,
+    TensorView topKs,
+    TensorView topPs,
+    TensorView out) {
   CHECK(logits.getDevice().isHost() && logits.getDim() == 2);
   CHECK(logits.isContiguous());
   int rows = logits.getShape(0);
@@ -135,9 +139,13 @@ Tensor CPUOperators::sample(
   CHECK(topPs.getDevice().isHost() &&
         topPs.getDType() == DType::kFloat && topPs.isContiguous() &&
         topPs.getShape() == std::vector<int>{rows});
+  CHECK(out.getDType() == DType::kLong && out.isContiguous());
+  out.throwIfInvalidShape({rows}, "sample");
 
   if (logits.getDType() == DType::kFloat16) {
-    return sample(cast(logits, DType::kFloat), temperatures, topKs, topPs);
+    Tensor wide = F::empty(Device::getCpu(), logits.getShape(), DType::kFloat);
+    cpu::cast(logits, wide);
+    return sample(wide, temperatures, topKs, topPs, out);
   }
   CHECK(logits.getDType() == DType::kFloat);
 
@@ -145,7 +153,7 @@ Tensor CPUOperators::sample(
   const float *temperatureData = getDataPtrCpu<float>(temperatures);
   const IntType *topKData = getDataPtrCpu<IntType>(topKs);
   const float *topPData = getDataPtrCpu<float>(topPs);
-  std::vector<LongType> sampled(rows);
+  LongType *sampled = getDataPtrCpu<LongType>(out);
   std::vector<int> labels(vocabSize);
   std::vector<float> weights(vocabSize);
 
@@ -206,56 +214,55 @@ Tensor CPUOperators::sample(
       }
     }
   }
-
-  return Tensor::create<LongType>({rows}, sampled);
 }
 
-bool CPUOperators::allClose(Tensor A, Tensor B, float rtol, float atol) {
+bool CPUOperators::allClose(TensorView A, TensorView B, float rtol, float atol) {
   return cpu::allClose(A, B, rtol, atol);
 }
 
-Tensor CPUOperators::mul(Tensor A, float k) {
-  return op::cpu::transform(A, k, 0.0f);
+void CPUOperators::mul(TensorView A, float k, TensorView out) {
+  op::cpu::transform(A, k, 0.0f, out);
 }
 
-Tensor CPUOperators::mul(Tensor A, Tensor B) {
-  return op::cpu::binaryOp(A, B, BinaryOp::MUL);
+void CPUOperators::mul(TensorView A, TensorView B, TensorView out) {
+  op::cpu::binaryOp(A, B, BinaryOp::MUL, out);
 }
 
-Tensor CPUOperators::lookup(Tensor table, Tensor indices) {
-  return cpu::lookup(table, indices);
+void CPUOperators::lookup(TensorView table, TensorView indices, TensorView out) {
+  cpu::lookup(table, indices, out);
 }
 
-void CPUOperators::fill(Tensor input, float value) {
-  return cpu::fill(input, value);
+void CPUOperators::fill(TensorView input, float value) {
+  cpu::fill(input, value);
 }
 
-Tensor CPUOperators::sum(Tensor inputs, int dim) {
-  int ndim = inputs.getDim();
+void CPUOperators::sum(TensorView input, int dim, TensorView out) {
+  int ndim = input.getDim();
   if (dim < 0) dim += ndim;
   CHECK(dim >= 0 && dim < ndim);
 
   if (dim == ndim - 1) {
-    return cpu::reduce(inputs, MapReduceType::SUM);
+    cpu::reduce(input, MapReduceType::SUM, out);
+    return;
   }
 
   // Not a single transpose of `dim` with the last: swapping them back afterwards puts the old last
   // dimension in the wrong place on any rank-4 input summed over a dimension before the third from
   // the end. (.., D, ..) is viewed as (outer, D, inner) instead, turned to (outer, inner, D), and
-  // viewed back without D, which keeps every other dimension where it was.
-  std::vector<int> shape = inputs.getShape();
+  // reduced to (outer, inner), which is `out` with every other dimension where it was.
+  std::vector<int> shape = input.getShape();
   int outer = 1, inner = 1;
   for (int d = 0; d < dim; ++d) outer *= shape[d];
   for (int d = dim + 1; d < ndim; ++d) inner *= shape[d];
 
-  Tensor grouped = contiguous(inputs).view({outer, shape[dim], inner});
-  Tensor reduced = cpu::reduce(contiguous(grouped.transpose(1, 2)), MapReduceType::SUM);
-
-  shape.erase(shape.begin() + dim);
-  return reduced.view(shape);
+  Tensor packed;
+  TensorView grouped = contiguousCpu(input, packed).view({outer, shape[dim], inner});
+  Tensor turned = F::emptyLike(grouped.transpose(1, 2));
+  cpu::copy(grouped.transpose(1, 2), turned);
+  cpu::reduce(turned, MapReduceType::SUM, out.view({outer, inner}));
 }
 
-Tensor CPUOperators::cumsum(Tensor input, int dim) {
+void CPUOperators::cumsum(TensorView input, int dim, TensorView out) {
   int ndim = input.getDim();
   if (dim < 0) dim += ndim;
   CHECK(dim >= 0 && dim < ndim);
@@ -263,117 +270,131 @@ Tensor CPUOperators::cumsum(Tensor input, int dim) {
   // Float16 arithmetic is an aarch64 feature on this backend, so a half tensor is scanned in
   // float32 and narrowed once at the end -- which is also where the precision is wanted.
   DType dtype = input.getDType();
-  if (dtype == DType::kFloat16) input = cast(input, DType::kFloat);
-
-  Tensor scanned;
-  if (dim == ndim - 1) {
-    scanned = cpu::cumsumLastDim(contiguous(input));
-  } else {
-    Tensor transposed = contiguous(input.transpose(dim, ndim - 1));
-    scanned = contiguous(cpu::cumsumLastDim(transposed).transpose(dim, ndim - 1));
+  Tensor packed;
+  TensorView source = contiguousCpu(input, packed);
+  Tensor wide;
+  if (dtype == DType::kFloat16) {
+    wide = F::empty(Device::getCpu(), source.getShape(), DType::kFloat);
+    cpu::cast(source, wide);
+    source = wide;
   }
 
-  return dtype == DType::kFloat16 ? cast(scanned, DType::kFloat16) : scanned;
+  // The scan is along the last dimension of a packed tensor, so any other is turned to the last
+  // first, and the result turned back as it is written out.
+  Tensor turned;
+  if (dim != ndim - 1) {
+    turned = F::emptyLike(source.transpose(dim, ndim - 1));
+    cpu::copy(source.transpose(dim, ndim - 1), turned);
+    source = turned;
+  }
+
+  Tensor scanned = F::emptyLike(source);
+  cpu::cumsumLastDim(source, scanned);
+  TensorView result = dim == ndim - 1 ? TensorView(scanned) : scanned.transpose(dim, ndim - 1);
+
+  if (dtype == DType::kFloat16) {
+    Tensor narrow = F::empty(Device::getCpu(), result.getShape(), DType::kFloat);
+    cpu::copy(result, narrow);
+    cpu::cast(narrow, out);
+  } else {
+    cpu::copy(result, out);
+  }
 }
 
-Tensor CPUOperators::max(Tensor inputs) {
-  return cpu::reduce(inputs, MapReduceType::MAX);
+void CPUOperators::max(TensorView input, TensorView out) {
+  cpu::reduce(input, MapReduceType::MAX, out);
 }
 
-Tensor CPUOperators::min(Tensor inputs) {
-  return cpu::reduce(inputs, MapReduceType::MIN);
+void CPUOperators::min(TensorView input, TensorView out) {
+  cpu::reduce(input, MapReduceType::MIN, out);
 }
 
-Tensor CPUOperators::square(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::SQUARE);
+void CPUOperators::square(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::SQUARE, out);
 }
 
-Tensor CPUOperators::divTensor(Tensor input, Tensor other) {
-  return cpu::binaryOp(input, other, BinaryOp::DIV);
+void CPUOperators::divTensor(TensorView input, TensorView other, TensorView out) {
+  cpu::binaryOp(input, other, BinaryOp::DIV, out);
 }
 
-Tensor CPUOperators::neg(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::NEG);
+void CPUOperators::neg(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::NEG, out);
 }
 
-Tensor CPUOperators::abs(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::ABS);
+void CPUOperators::abs(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::ABS, out);
 }
 
-Tensor CPUOperators::exp(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::EXP);
+void CPUOperators::exp(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::EXP, out);
 }
 
-Tensor CPUOperators::log(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::LOG);
+void CPUOperators::log(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::LOG, out);
 }
 
-Tensor CPUOperators::round(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::ROUND);
+void CPUOperators::round(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::ROUND, out);
 }
 
-Tensor CPUOperators::sqrt(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::SQRT);
+void CPUOperators::sqrt(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::SQRT, out);
 }
 
-Tensor CPUOperators::rsqrt(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::RSQRT);
+void CPUOperators::rsqrt(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::RSQRT, out);
 }
 
-Tensor CPUOperators::sigmoid(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::SIGMOID);
+void CPUOperators::sigmoid(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::SIGMOID, out);
 }
 
-Tensor CPUOperators::tanh(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::TANH);
+void CPUOperators::tanh(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::TANH, out);
 }
 
-Tensor CPUOperators::relu(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::RELU);
+void CPUOperators::relu(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::RELU, out);
 }
 
-Tensor CPUOperators::gelu(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::GELU);
+void CPUOperators::gelu(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::GELU, out);
 }
 
-Tensor CPUOperators::silu(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::SILU);
+void CPUOperators::silu(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::SILU, out);
 }
 
-Tensor CPUOperators::sin(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::SIN);
+void CPUOperators::sin(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::SIN, out);
 }
 
-Tensor CPUOperators::cos(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::COS);
+void CPUOperators::cos(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::COS, out);
 }
 
-Tensor CPUOperators::quickGelu(Tensor input) {
-  return cpu::unaryOp(input, cpu::UnaryOp::QUICK_GELU);
+void CPUOperators::quickGelu(TensorView input, TensorView out) {
+  cpu::unaryOp(input, cpu::UnaryOp::QUICK_GELU, out);
 }
 
-Tensor CPUOperators::div(Tensor input, float other) {
-  return op::cpu::transform(input, 1.0f / other, 0.0f);
+void CPUOperators::div(TensorView input, float other, TensorView out) {
+  op::cpu::transform(input, 1.0f / other, 0.0f, out);
 }
 
-Tensor CPUOperators::arangeLong(LongType begin, LongType end, LongType step) {
-  CHECK(step != 0);
-  int64_t numel = (end - begin) / step;
-  CHECK(numel >= 0 && numel < std::numeric_limits<int32_t>::max());
+void CPUOperators::arangeLong(LongType begin, LongType step, TensorView out) {
+  CHECK(out.getDType() == DType::kLong && out.getDim() == 1 && out.isContiguous());
 
-  Tensor x = op::cpu::tensor({static_cast<int>(numel)}, DType::kLong);
-  LongType *data = getDataPtrCpu<LongType>(x);
+  LongType *data = getDataPtrCpu<LongType>(out);
+  int64_t numel = out.getNumEl();
   for (int64_t i = 0; i < numel; ++i) {
     data[i] = begin + step * i;
   }
-
-  return x;
 }
 
-Tensor CPUOperators::randNormal(lut::Span<const int> shape) {
-  Tensor x = op::cpu::tensor(shape, DType::kFloat);
-  int64_t numel = x.getNumEl();
-  float *data = getDataPtrCpu<float>(x);
+void CPUOperators::randNormal(TensorView out) {
+  CHECK(out.getDType() == DType::kFloat && out.isContiguous());
+  int64_t numel = out.getNumEl();
+  float *data = getDataPtrCpu<float>(out);
 
   // fillGaussian works in pairs, so an odd count is filled one element long and truncated.
   if (numel % 2 == 0) {
@@ -383,71 +404,61 @@ Tensor CPUOperators::randNormal(lut::Span<const int> shape) {
     _rand.fillGaussian(lut::makeSpan(padded));
     std::copy(padded.begin(), padded.begin() + numel, data);
   }
-
-  return x;
 }
 
-float CPUOperators::elem(Tensor tensor) {
+float CPUOperators::elem(TensorView tensor) {
   CHECK(tensor.getNumEl() == 1);
   CHECK(tensor.getDType() == DType::kFloat);
 
   return getDataPtrCpu<float>(tensor)[0];
 }
 
-bool CPUOperators::elemBool(Tensor tensor) {
+bool CPUOperators::elemBool(TensorView tensor) {
   CHECK(tensor.getNumEl() == 1);
   CHECK(tensor.getDType() == DType::kBool);
 
   return getDataPtrCpu<BoolType>(tensor)[0];
 }
 
-/// A packed copy of `input`, so the loops below can walk it as a flat array.
-static Tensor contiguousCpu(const Tensor &input) {
-  if (input.isContiguous()) return input;
-
-  Tensor packed = op::cpu::tensorLike(input);
-  op::cpu::copy(input, packed);
-  return packed;
-}
-
-Tensor CPUOperators::mod(Tensor input, LongType other) {
-  CHECK(input.getDType() == DType::kLong);
+void CPUOperators::mod(TensorView input, LongType other, TensorView out) {
+  CHECK(input.getDType() == DType::kLong && out.getDType() == DType::kLong);
   CHECK(other != 0);
+  CHECK(out.isContiguous());
+  out.throwIfInvalidShape(input.getShape(), "mod");
 
-  Tensor x = contiguousCpu(input);
-  Tensor c = op::cpu::tensorLike(x);
+  Tensor packed;
+  TensorView x = contiguousCpu(input, packed);
   const LongType *src = getDataPtrCpu<LongType>(x);
-  LongType *dest = getDataPtrCpu<LongType>(c);
-  for (int64_t i = 0; i < c.getNumEl(); ++i) {
+  LongType *dest = getDataPtrCpu<LongType>(out);
+  for (int64_t i = 0; i < out.getNumEl(); ++i) {
     dest[i] = src[i] % other;
   }
-
-  return c;
 }
 
-Tensor CPUOperators::eq(Tensor input, Tensor other) {
+void CPUOperators::eq(TensorView input, TensorView other, TensorView out) {
   // Matches the CUDA backend, which compares <uint8> tensors and answers in <bool>.
   CHECK(input.getDType() == DType::kUInt8 && other.getDType() == DType::kUInt8);
+  CHECK(out.getDType() == DType::kBool && out.isContiguous());
   input.throwIfInvalidShape(other.getShape(), "eq");
+  out.throwIfInvalidShape(input.getShape(), "eq");
 
-  Tensor a = contiguousCpu(input);
-  Tensor b = contiguousCpu(other);
-  Tensor c = op::cpu::tensor(a.getShape(), DType::kBool);
+  Tensor packedA, packedB;
+  TensorView a = contiguousCpu(input, packedA);
+  TensorView b = contiguousCpu(other, packedB);
 
   const UInt8 *pa = getDataPtrCpu<UInt8>(a);
   const UInt8 *pb = getDataPtrCpu<UInt8>(b);
-  BoolType *pc = getDataPtrCpu<BoolType>(c);
-  for (int64_t i = 0; i < c.getNumEl(); ++i) {
+  BoolType *pc = getDataPtrCpu<BoolType>(out);
+  for (int64_t i = 0; i < out.getNumEl(); ++i) {
     pc[i] = pa[i] == pb[i];
   }
-
-  return c;
 }
 
-bool CPUOperators::all(Tensor A) {
+bool CPUOperators::all(TensorView A) {
   CHECK(A.getDType() == DType::kBool);
 
-  Tensor x = contiguousCpu(A);
+  Tensor packed;
+  TensorView x = contiguousCpu(A, packed);
   const BoolType *data = getDataPtrCpu<BoolType>(x);
   for (int64_t i = 0; i < x.getNumEl(); ++i) {
     if (!data[i]) return false;
@@ -456,80 +467,87 @@ bool CPUOperators::all(Tensor A) {
   return true;
 }
 
-void CPUOperators::repetitionPenalty(Tensor logits, Tensor history, float weight) {
+void CPUOperators::repetitionPenalty(TensorView logits, TensorView history, float weight) {
   CHECK(history.getDType() == DType::kLong);
 
-  return cpu::repetitionPenalty(logits, history, weight);
+  cpu::repetitionPenalty(logits, history, weight);
 }
 
-Tensor CPUOperators::rmsNorm(Tensor input, Tensor weight, float eps) {
+void CPUOperators::rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) {
   CHECK(input.getDType() == weight.getDType());
 
-  return cpu::rmsNorm(input, weight, eps);
+  cpu::rmsNorm(input, weight, eps, out);
 }
 
-Tensor CPUOperators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
-  return cpu::layerNorm(input, weight, bias, eps);
+void CPUOperators::layerNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    float eps,
+    TensorView out) {
+  cpu::layerNorm(input, weight, bias, eps, out);
 }
 
-Tensor CPUOperators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
-  return cpu::groupNorm(input, weight, bias, groups, eps);
+void CPUOperators::groupNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int groups,
+    float eps,
+    TensorView out) {
+  cpu::groupNorm(input, weight, bias, groups, eps, out);
 }
 
-Tensor CPUOperators::upsampleNearest2d(Tensor input, int scale) {
-  return cpu::upsampleNearest2d(input, scale);
+void CPUOperators::upsampleNearest2d(TensorView input, int scale, TensorView out) {
+  cpu::upsampleNearest2d(input, scale, out);
 }
 
-Tensor CPUOperators::upsampleNearest1d(Tensor input, int size) {
-  return cpu::upsampleNearest1d(input, size);
+void CPUOperators::upsampleNearest1d(TensorView input, TensorView out) {
+  cpu::upsampleNearest1d(input, out);
 }
 
-Tensor CPUOperators::conv2d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void CPUOperators::conv2d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return cpu::conv2d(input, weight, bias, stride, padding, dilation, groups);
+    int groups,
+    TensorView out) {
+  cpu::conv2d(input, weight, bias, stride, padding, dilation, groups, out);
 }
 
-Tensor CPUOperators::conv1d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void CPUOperators::conv1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return cpu::conv1d(input, weight, bias, stride, padding, dilation, groups);
+    int groups,
+    TensorView out) {
+  cpu::conv1d(input, weight, bias, stride, padding, dilation, groups, out);
 }
 
-Tensor CPUOperators::causalMask(int max_len) {
-  return op::cpu::causalMask(max_len, getDefaultFloatType());
+void CPUOperators::causalMask(TensorView out) {
+  op::cpu::causalMask(out);
 }
 
-void CPUOperators::copy(Tensor src, Tensor dest) {
-  return cpu::copy(src, dest);
+void CPUOperators::copy(TensorView src, TensorView dest) {
+  cpu::copy(src, dest);
 }
 
-Tensor CPUOperators::swiglu(Tensor A) {
-  return cpu::swiglu(A);
+void CPUOperators::swiglu(TensorView A, TensorView out) {
+  cpu::swiglu(A, out);
 }
 
-Tensor CPUOperators::geglu(Tensor input) {
-  return cpu::geglu(input);
+void CPUOperators::geglu(TensorView input, TensorView out) {
+  cpu::geglu(input, out);
 }
 
-Tensor CPUOperators::toDevice(Device device, Tensor tensor) {
-  if (device.getType() == Device::kCpu) return tensor;
-
-  NOT_IMPL();
-}
-
-Tensor CPUOperators::cast(Tensor tensor, DType dtype) {
-  return cpu::cast(tensor, dtype);
+void CPUOperators::cast(TensorView input, TensorView out) {
+  cpu::cast(input, out);
 }
 
 void CPUOperators::manualSeed(uint64_t seed) {

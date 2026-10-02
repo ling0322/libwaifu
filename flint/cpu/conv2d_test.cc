@@ -24,6 +24,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
+#include "flint/functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 
@@ -127,7 +128,7 @@ bool matchesReference(Shape4 in, Shape4 filter, bool withBias, Options options) 
   std::vector<float> expected =
       reference(x, in, w, filter, withBias ? &b : nullptr, options, out);
 
-  Tensor actual = cpuOps()->conv2d(
+  Tensor actual = F::conv2d(cpuOps(), 
       Tensor::create<float>({in.n, in.c, in.h, in.w}, lut::makeConstSpan(x)),
       Tensor::create<float>({filter.n, filter.c, filter.h, filter.w}, lut::makeConstSpan(w)),
       withBias ? Tensor::create<float>({filter.n}, lut::makeConstSpan(b)) : Tensor(),
@@ -185,17 +186,17 @@ CATCH_TEST_CASE("test conv2d on the CPU (more pixels than one block)", "[core][n
 }
 
 CATCH_TEST_CASE("test conv2d on the CPU (a shape it cannot take)", "[core][nn][operators]") {
-  Tensor x = cpuOps()->rand({2, 4, 8, 8}, DType::kFloat);
-  Tensor w = cpuOps()->rand({8, 4, 3, 3}, DType::kFloat);
+  Tensor x = F::rand(Device::getCpu(), {2, 4, 8, 8}, DType::kFloat);
+  Tensor w = F::rand(Device::getCpu(), {8, 4, 3, 3}, DType::kFloat);
 
   // Channels that do not match the weight, a kernel larger than the input, and a group count the
   // channels do not divide into: all a caller's to fix rather than to guess at.
   CATCH_REQUIRE_THROWS(
-      cpuOps()->conv2d(cpuOps()->rand({2, 5, 8, 8}, DType::kFloat), w, Tensor(), 1, 1, 1, 1));
+      F::conv2d(cpuOps(), F::rand(Device::getCpu(), {2, 5, 8, 8}, DType::kFloat), w, Tensor(), 1, 1, 1, 1));
   CATCH_REQUIRE_THROWS(
-      cpuOps()->conv2d(cpuOps()->rand({1, 4, 2, 2}, DType::kFloat), w, Tensor(), 1, 0, 1, 1));
-  CATCH_REQUIRE_THROWS(cpuOps()->conv2d(x, w, Tensor(), 1, 1, 1, 3));
-  CATCH_REQUIRE_THROWS(cpuOps()->conv2d(x, w, cpuOps()->rand({4}, DType::kFloat), 1, 1, 1, 1));
+      F::conv2d(cpuOps(), F::rand(Device::getCpu(), {1, 4, 2, 2}, DType::kFloat), w, Tensor(), 1, 0, 1, 1));
+  CATCH_REQUIRE_THROWS(F::conv2d(cpuOps(), x, w, Tensor(), 1, 1, 1, 3));
+  CATCH_REQUIRE_THROWS(F::conv2d(cpuOps(), x, w, F::rand(Device::getCpu(), {4}, DType::kFloat), 1, 1, 1, 1));
 }
 
 CATCH_TEST_CASE("test conv2d on the CPU (half weight)", "[core][nn][operators]") {
@@ -229,12 +230,12 @@ CATCH_TEST_CASE("test conv2d on the CPU (half weight)", "[core][nn][operators]")
         lut::makeConstSpan(w));
     Tensor bT = Tensor::create<float>({c.filter.n}, lut::makeConstSpan(b));
 
-    Tensor half = cpuOps()->cast(wT, DType::kFloat16);
-    Tensor widened = cpuOps()->cast(half, DType::kFloat);
+    Tensor half = F::cast(cpuOps(), wT, DType::kFloat16);
+    Tensor widened = F::cast(cpuOps(), half, DType::kFloat);
 
-    Tensor expected = cpuOps()->conv2d(
+    Tensor expected = F::conv2d(cpuOps(), 
         xT, widened, bT, c.options.stride, c.options.padding, c.options.dilation, c.options.groups);
-    Tensor actual = cpuOps()->conv2d(
+    Tensor actual = F::conv2d(cpuOps(), 
         xT, half, bT, c.options.stride, c.options.padding, c.options.dilation, c.options.groups);
 
     CATCH_REQUIRE(actual.getShape() == expected.getShape());
@@ -271,25 +272,25 @@ CATCH_TEST_CASE("test conv2d on the CPU (half throughout)", "[core][nn][operator
     Shape4 out{};
     std::vector<float> expected = reference(x, c.in, w, c.filter, &b, c.options, out);
 
-    Tensor xT = cpuOps()->cast(
+    Tensor xT = F::cast(cpuOps(), 
         Tensor::create<float>({c.in.n, c.in.c, c.in.h, c.in.w}, lut::makeConstSpan(x)),
         DType::kFloat16);
-    Tensor wT = cpuOps()->cast(
+    Tensor wT = F::cast(cpuOps(), 
         Tensor::create<float>(
             {c.filter.n, c.filter.c, c.filter.h, c.filter.w},
             lut::makeConstSpan(w)),
         DType::kFloat16);
     Tensor bT =
-        cpuOps()->cast(Tensor::create<float>({c.filter.n}, lut::makeConstSpan(b)), DType::kFloat16);
+        F::cast(cpuOps(), Tensor::create<float>({c.filter.n}, lut::makeConstSpan(b)), DType::kFloat16);
 
-    Tensor actual = cpuOps()->conv2d(
+    Tensor actual = F::conv2d(cpuOps(), 
         xT, wT, bT, c.options.stride, c.options.padding, c.options.dilation, c.options.groups);
 
     CATCH_REQUIRE(actual.getDType() == DType::kFloat16);
     CATCH_REQUIRE(actual.getShape() == std::vector<int>{out.n, out.c, out.h, out.w});
     CATCH_REQUIRE(
         cpuOps()->allClose(
-            cpuOps()->cast(actual, DType::kFloat),
+            F::cast(cpuOps(), actual, DType::kFloat),
             Tensor::create<float>({out.n, out.c, out.h, out.w}, lut::makeConstSpan(expected)),
             5e-3f,
             5e-3f));

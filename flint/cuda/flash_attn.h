@@ -20,30 +20,39 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-/// Runs FlashAttention on q [b, nHead, L, D] and k, v [b, nKvHead, S, D]. Returns an empty tensor
-/// if no compiled kernel matches the inputs.
-Tensor flashAttention(Tensor q, Tensor k, Tensor v, bool causal);
+/// Runs FlashAttention on q [b, nHead, L, D] and k, v [b, nKvHead, S, D], writing `out`
+/// <half>[b, nHead, L, D], contiguous. Returns false, with `out` untouched, if no compiled kernel
+/// matches the inputs.
+bool flashAttention(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    bool causal,
+    const TensorView &out);
 
 /// Runs FlashAttention of a packed batch of queries over a paged KV cache. q is
 /// [totalQLen, nHead, D], keyCache and valueCache are [nBlock, blockSize, nKvHead, D], blockTable
 /// is <int>[nSeq, maxNumBlock], cuSeqlensQ is <int>[nSeq + 1] and seqlensK is <int>[nSeq].
 /// maxQLen and maxKLen bound the per-sequence lengths; the kernel sizes its grid from them.
-/// Returns an empty tensor if no compiled kernel matches the inputs.
-Tensor pagedFlashAttention(
-    Tensor q,
-    Tensor keyCache,
-    Tensor valueCache,
-    Tensor blockTable,
-    Tensor cuSeqlensQ,
-    Tensor seqlensK,
+/// The result is written into `out` <half>[totalQLen, nHead, D], contiguous. Returns false if no
+/// compiled kernel matches the inputs.
+bool pagedFlashAttention(
+    const TensorView &q,
+    const TensorView &keyCache,
+    const TensorView &valueCache,
+    const TensorView &blockTable,
+    const TensorView &cuSeqlensQ,
+    const TensorView &seqlensK,
     int maxQLen,
     int maxKLen,
-    bool causal);
+    bool causal,
+    const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

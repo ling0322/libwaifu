@@ -39,15 +39,16 @@ bool tensorCoreAvailable() {
   return available;
 }
 
-Tensor gatedDeltaNetPrefill(
-    const Tensor &q,
-    const Tensor &k,
-    const Tensor &v,
-    const Tensor &g,
-    const Tensor &beta,
-    const Tensor &cuSeqlens,
-    const Tensor &stateSlots,
-    Tensor &state,
+void gatedDeltaNetPrefill(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    const TensorView &g,
+    const TensorView &beta,
+    const TensorView &cuSeqlens,
+    const TensorView &stateSlots,
+    const TensorView &state,
+    const TensorView &o,
     GatedDeltaNetPath path) {
   CHECK(q.getDevice().getType() == Device::kCuda);
   CHECK(k.getDevice().getType() == Device::kCuda);
@@ -102,8 +103,10 @@ Tensor gatedDeltaNetPrefill(
       << "dimension " << headDim << " on a device that "
       << (tensorCoreAvailable() ? "is new enough" : "is not");
 
-  Tensor o = createCudaTensorHalf({numTokens, numVHead, headDim});
-  if (numSeq == 0 || numTokens == 0) return o;
+  CHECK(o.getDevice().getType() == Device::kCuda && o.getDType() == DType::kFloat16);
+  LL_CHECK_CONTIGUOUS(o);
+  o.throwIfInvalidShape({numTokens, numVHead, headDim}, "gatedDeltaNetPrefill");
+  if (numSeq == 0 || numTokens == 0) return;
 
   // kAuto and kTensorCoreMma are the same thing now that there is one implementation; what is left
   // of `path` is whether the short sequences get stepped or chunked.
@@ -128,7 +131,6 @@ Tensor gatedDeltaNetPrefill(
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return o;
 }
 
 }  // namespace cuda

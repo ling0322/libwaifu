@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -45,8 +46,12 @@ enum class MapReduceType {
   ALL
 };
 
-Tensor reduceLastDim(Tensor A, DType outType, MapReduceType reduceType);
-Tensor reduceAll(Tensor A, DType outType, MapReduceType reduceType);
+/// Reduce the last dimension of `A` into `C`, contiguous, holding one element per row of `A` in
+/// whatever shape; the reduction's output type is C's.
+void reduceLastDim(const TensorView &A, MapReduceType reduceType, const TensorView &C);
+
+/// Reduce every element of contiguous `A` into a new <outType>(1) temporary.
+Tensor reduceAll(const TensorView &A, DType outType, MapReduceType reduceType);
 
 }  // namespace cuda
 }  // namespace op

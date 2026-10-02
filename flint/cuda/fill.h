@@ -20,13 +20,13 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-void fill(Tensor tensor, float value);
-Tensor arangeLong(LongType begin, LongType end, LongType step);
+void fill(const TensorView &tensor, float value);
 
 }  // namespace cuda
 }  // namespace op

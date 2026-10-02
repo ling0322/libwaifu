@@ -32,13 +32,7 @@ namespace cpu {
 template<typename T, int DIM>
 class TensorAccessorBase {
  public:
-  explicit TensorAccessorBase(Tensor &tensor) {
-    CHECK(tensor.getDim() == DIM);
-    _data = getDataPtrCpu<T>(tensor);
-    _size = tensor.getInternalShape()->getData_().data();
-  }
-
-  explicit TensorAccessorBase(const Tensor &tensor) {
+  explicit TensorAccessorBase(const TensorView &tensor) {
     CHECK(tensor.getDim() == DIM);
     _data = getDataPtrCpu<T>(tensor);
     _size = tensor.getInternalShape()->getData_().data();
@@ -66,10 +60,7 @@ class TensorAccessorBase {
 template<typename T, int DIM>
 class TensorAccessor : public TensorAccessorBase<T, DIM> {
  public:
-  TensorAccessor(Tensor &tensor)
-      : TensorAccessorBase<T, DIM>(tensor) {
-  }
-  TensorAccessor(const Tensor &tensor)
+  TensorAccessor(const TensorView &tensor)
       : TensorAccessorBase<T, DIM>(tensor) {
   }
 
@@ -90,10 +81,7 @@ class TensorAccessor : public TensorAccessorBase<T, DIM> {
 template<typename T>
 class TensorAccessor<T, 1> : public TensorAccessorBase<T, 1> {
  public:
-  TensorAccessor(Tensor &tensor)
-      : TensorAccessorBase<T, 1>(tensor) {
-  }
-  TensorAccessor(const Tensor &tensor)
+  TensorAccessor(const TensorView &tensor)
       : TensorAccessorBase<T, 1>(tensor) {
   }
 
@@ -114,8 +102,7 @@ class TensorAccessor<T, 1> : public TensorAccessorBase<T, 1> {
 template<typename T, int DIM>
 class TensorList {
  public:
-  static TensorList<T, DIM> fromTensor(const Tensor &src);
-  static TensorList<T, DIM> fromTensor(Tensor &src);
+  static TensorList<T, DIM> fromTensor(const TensorView &src);
 
   lut::Span<const TensorShape::Elem> getShape() const {
     return lut::Span<const TensorShape::Elem>(_shape, DIM);
@@ -197,7 +184,7 @@ void getDataPointerList(
 }
 
 template<typename T, int DIM>
-TensorList<T, DIM> TensorList<T, DIM>::fromTensor(const Tensor &src) {
+TensorList<T, DIM> TensorList<T, DIM>::fromTensor(const TensorView &src) {
   lut::Span<const TensorShape::Elem> shape = src.getInternalShape()->getData_();
 
   const TensorShape::Elem *tensorShape = shape.data() + (shape.size() - DIM);
@@ -216,30 +203,6 @@ TensorList<T, DIM> TensorList<T, DIM>::fromTensor(const Tensor &src) {
   } else {
     std::vector<T *> pointerList;
     getDataPointerList<T, DIM>(getDataPtrCpu<T>(src), shape, pointerList);
-    return TensorList<T, DIM>(tensorShape, std::move(pointerList));
-  }
-}
-
-template<typename T, int DIM>
-TensorList<T, DIM> TensorList<T, DIM>::fromTensor(Tensor &src) {
-  std::vector<T *> pointerList;
-  lut::Span<const TensorShape::Elem> shape = src.getInternalShape()->getData_();
-  getDataPointerList<T, DIM>(getDataPtrCpu<T>(src), shape, pointerList);
-
-  const TensorShape::Elem *tensorShape = shape.data() + (shape.size() - DIM);
-  if (src.isContiguous()) {
-    int numTensor = 1;
-    for (int i = 0; i < src.getDim() - DIM; ++i) {
-      numTensor *= src.getShape(i);
-    }
-
-    int stride = 1;
-    for (int i = 0; i < DIM; ++i) {
-      stride *= tensorShape[i].shape;
-    }
-
-    return TensorList<T, DIM>(tensorShape, getDataPtrCpu<T>(src), numTensor, stride);
-  } else {
     return TensorList<T, DIM>(tensorShape, std::move(pointerList));
   }
 }

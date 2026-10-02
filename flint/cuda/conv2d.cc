@@ -32,12 +32,13 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor conv2d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    const Conv2dOptions &options) {
-  return conv2dCutlass(input, weight, bias, options);
+void conv2d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const Conv2dOptions &options,
+    const TensorView &out) {
+  conv2dCutlass(input, weight, bias, options, out);
 }
 
 }  // namespace cuda

@@ -17,6 +17,9 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include <string>
+#include <vector>
+
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
@@ -96,7 +99,7 @@ uint32_t ceilDiv(int64_t a, int64_t b) {
 
 // Whether the cooperative matrix kernels may take `tensor`: half precision, on a device that has
 // them, and starting on sixteen bytes, which is what their eight-element loads need.
-bool coopmatOperand(const Tensor &tensor) {
+bool coopmatOperand(const TensorView &tensor) {
   return tensor.getDType() == DType::kFloat16 &&
          getContext(tensor)->getInfo().cooperativeMatrix && getAddress(tensor) % 16 == 0;
 }
@@ -105,11 +108,11 @@ bool coopmatOperand(const Tensor &tensor) {
 // eight elements at a time: every stride but the unit one a multiple of eight, A along K and B
 // along either. Returns false, having done nothing, when they are not.
 bool coopmatGemm(
-    const Tensor &a,
-    const Tensor &b,
+    const TensorView &a,
+    const TensorView &b,
     const GemmPush &gemm,
     uint32_t numBatches,
-    const Tensor &output) {
+    const TensorView &output) {
   if (!coopmatOperand(a) || !coopmatOperand(b)) return false;
 
   auto eighths = [](uint32_t stride) { return stride % 8 == 0; };
@@ -147,16 +150,20 @@ bool coopmatGemm(
 }
 
 // Batched GEMM over batch dimensions that have already been collapsed to at most two.
-Tensor gemm(const Tensor &a, const Tensor &b, const Layout &batch, const std::vector<int> &shape) {
+// `output` is contiguous, each batch's (M, N) after the one before.
+void gemm(
+    const TensorView &a,
+    const TensorView &b,
+    const Layout &batch,
+    const TensorView &output) {
   int M = a.getShape(-2);
   int K = a.getShape(-1);
   int N = b.getShape(-1);
 
-  Tensor output = createTensor(shape, a.getDType());
-  if (output.getNumEl() == 0) return output;
+  if (output.getNumEl() == 0) return;
   if (K == 0) {
     fill(output, 0.0f);
-    return output;
+    return;
   }
 
   GemmPush push{};
@@ -187,7 +194,7 @@ Tensor gemm(const Tensor &a, const Tensor &b, const Layout &batch, const std::ve
     numBatches = batch.shape[0];
   }
 
-  if (coopmatGemm(a, b, push, numBatches, output)) return output;
+  if (coopmatGemm(a, b, push, numBatches, output)) return;
 
   getContext(a)->dispatch(
       kernelName("gemm", a.getDType()).c_str(),
@@ -196,39 +203,31 @@ Tensor gemm(const Tensor &a, const Tensor &b, const Layout &batch, const std::ve
       ceilDiv(N, kTile),
       ceilDiv(M, kTile),
       numBatches);
-  return output;
 }
 
 // The same prefix of dimensions prepended to `b` that `a` has and it lacks, with a stride of zero.
-Tensor expandBatch(const Tensor &b, const Tensor &a) {
+TensorView expandBatch(const TensorView &b, const TensorView &a) {
   std::vector<TensorShape::Elem> elems;
   for (int d = 0; d < a.getDim() - b.getDim(); ++d) elems.push_back({a.getShape(d), 0});
   for (int d = 0; d < b.getDim(); ++d) elems.push_back({b.getShape(d), b.getStride(d)});
-  return Tensor::create(
-      std::make_shared<TensorShape>(lut::makeConstSpan(elems)),
-      b.getInternalData(),
-      b.getInternalOffset());
+  return restride(b, lut::makeConstSpan(elems));
 }
 
 // (N, C, H, W) as (N, H, W, C), contiguous: channels last, the layout conv2d_coopmat.comp reads
 // eight channels at a time from. The same permutation takes a weight (K, C, R, S) to (K, R, S, C).
-Tensor channelsLast(const Tensor &tensor) {
+TensorView channelsLast(const TensorView &tensor, Tensor *keep) {
   std::vector<TensorShape::Elem> elems = {
       {tensor.getShape(0), tensor.getStride(0)},
       {tensor.getShape(2), tensor.getStride(2)},
       {tensor.getShape(3), tensor.getStride(3)},
       {tensor.getShape(1), tensor.getStride(1)}};
-  Tensor permuted = Tensor::create(
-      std::make_shared<TensorShape>(lut::makeConstSpan(elems)),
-      tensor.getInternalData(),
-      tensor.getInternalOffset());
-  return makeContiguous(permuted);
+  return makeContiguous(restride(tensor, lut::makeConstSpan(elems)), keep);
 }
 
-Tensor conv(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int strideH,
     int strideW,
     int paddingH,
@@ -236,7 +235,8 @@ Tensor conv(
     int dilationH,
     int dilationW,
     int groups,
-    const char *name) {
+    const char *name,
+    const TensorView &output) {
   checkFloat(input.getDType(), name);
   if (weight.getDType() != input.getDType()) {
     throw lut::InvalidArgError(lut::sprintf("%s: the weight and input differ in dtype", name));
@@ -272,8 +272,12 @@ Tensor conv(
   // copy of the input and the weight and is what lets the product read them eight at a time.
   bool coopmat = input.getDType() == DType::kFloat16 &&
                  getContext(input)->getInfo().cooperativeMatrix && (C / groups) % 8 == 0;
-  Tensor x = coopmat ? channelsLast(input) : makeContiguous(input);
-  Tensor w = coopmat ? channelsLast(weight) : makeContiguous(weight);
+  checkOutput(output, {N, K, P, Q}, input.getDType(), name);
+  if (output.getNumEl() == 0) return;
+
+  Tensor keepInput, keepWeight;
+  TensorView x = coopmat ? channelsLast(input, &keepInput) : makeContiguous(input, &keepInput);
+  TensorView w = coopmat ? channelsLast(weight, &keepWeight) : makeContiguous(weight, &keepWeight);
   Tensor keepBias;
   uint64_t biasAddress = 0;
   if (!bias.empty()) {
@@ -283,11 +287,9 @@ Tensor conv(
           name,
           K));
     }
-    keepBias = makeContiguous(bias);
-    biasAddress = getAddress(keepBias);
+    biasAddress = getAddress(makeContiguous(bias, &keepBias));
   }
 
-  Tensor output = createTensor({N, K, P, Q}, input.getDType());
   ConvPush push{};
   push.c = getAddress(output);
   push.input = getAddress(x);
@@ -318,12 +320,11 @@ Tensor conv(
       ceilDiv(K / groups, tile),
       ceilDiv(static_cast<int64_t>(P) * Q, tile),
       static_cast<uint32_t>(N * groups));
-  return output;
 }
 
 }  // namespace
 
-Tensor matmul(const Tensor &a, const Tensor &b) {
+void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
   checkFloat(a.getDType(), "matmul");
   if (a.getDType() != b.getDType()) {
     throw lut::InvalidArgError(lut::sprintf(
@@ -346,17 +347,19 @@ Tensor matmul(const Tensor &a, const Tensor &b) {
 
   std::vector<int> shape = a.getShape();
   shape.back() = b.getShape(-1);
+  checkOutput(out, shape, a.getDType(), "matmul");
 
   // A stack of rows times one matrix is one taller product, when the rows stack evenly.
   if (b.getDim() == 2 && a.getDim() > 2 && a.isContiguous()) {
-    Tensor flat = a.view({-1, a.getShape(-1)});
+    TensorView flat = a.view({-1, a.getShape(-1)});
     Layout single{};
     single.ndim = 1;
     single.shape[0] = 1;
-    return gemm(flat, b, single, {flat.getShape(0), b.getShape(-1)}).view(shape);
+    gemm(flat, b, single, out.view({flat.getShape(0), b.getShape(-1)}));
+    return;
   }
 
-  Tensor expanded = expandBatch(b, a);
+  TensorView expanded = expandBatch(b, a);
   std::vector<int> batchShape;
   std::vector<int> stridesA;
   std::vector<int> stridesB;
@@ -376,28 +379,28 @@ Tensor matmul(const Tensor &a, const Tensor &b) {
   if (!collapse(batchShape, {stridesA, stridesB}, &batch) || batch.ndim > 2) {
     // More batch dimensions than the kernel walks, which do not merge: one leading slice at a
     // time into the rows of the answer.
-    Tensor output = createTensor(shape, a.getDType());
     for (int i = 0; i < a.getShape(0); ++i) {
-      copy(matmul(a.subtensor(i), expanded.subtensor(i)), output.subtensor(i));
+      matmul(a.subtensor(i), expanded.subtensor(i), out.subtensor(i));
     }
-    return output;
+    return;
   }
 
-  return gemm(a, expanded, batch, shape);
+  gemm(a, expanded, batch, out);
 }
 
-Tensor conv2d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv2d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
+    int groups,
+    const TensorView &out) {
   if (input.getDim() != 4 || weight.getDim() != 4) {
     throw lut::InvalidArgError("conv2d takes an input (N, C, H, W) and a weight (K, C, R, S)");
   }
-  return conv(
+  conv(
       input,
       weight,
       bias,
@@ -408,22 +411,25 @@ Tensor conv2d(
       dilation,
       dilation,
       groups,
-      "conv2d");
+      "conv2d",
+      out);
 }
 
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
+    int groups,
+    const TensorView &out) {
   if (input.getDim() != 3 || weight.getDim() != 3) {
     throw lut::InvalidArgError("conv1d takes an input (N, C, L) and a weight (K, C, R)");
   }
+  if (out.getDim() != 3) throw lut::InvalidArgError("conv1d writes (N, K, Lout)");
 
-  Tensor output = conv(
+  conv(
       input.unsqueeze(2),
       weight.unsqueeze(2),
       bias,
@@ -434,8 +440,8 @@ Tensor conv1d(
       1,
       dilation,
       groups,
-      "conv1d");
-  return output.squeeze(2);
+      "conv1d",
+      out.unsqueeze(2));
 }
 
 }  // namespace vulkan

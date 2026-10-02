@@ -9,6 +9,7 @@
 
 #include <chrono>
 
+#include "flint/functional.h"
 #include "flint/bench.h"
 #include "lutil/span.h"
 #include "lutil/strings.h"
@@ -61,7 +62,7 @@ void printMatmul(const std::string &name, float milliseconds, int m, int n, int 
 }
 
 Tensor randHalf(const std::shared_ptr<Operators> &operators, std::initializer_list<int> shape) {
-  return operators->rand(shape, DType::kFloat16);
+  return F::rand(Device::getCuda(), shape, DType::kFloat16);
 }
 
 /// The bytes an operator has to move at least once: what it reads plus what it writes. A norm or
@@ -97,10 +98,11 @@ void benchmarkConv2d(
   Tensor bias = randHalf(operators, {outChannel});
 
   int outSize = (size + 2 * padding - kernel) / stride + 1;
+  Tensor output = F::empty(Device::getCuda(), {batch, outChannel, outSize, outSize}, DType::kFloat16);
   double flop = 2.0 * batch * outChannel * outSize * outSize * inChannel * kernel * kernel;
 
   float milliseconds = benchmarkCuda(
-      [&] { op::cuda::conv2d(input, weight, bias, {stride, padding, 1, 1}); });
+      [&] { op::cuda::conv2d(input, weight, bias, {stride, padding, 1, 1}, output); });
   std::string line = lut::sprintf("%-36s", name.c_str());
   line += lut::sprintf(" %10.1f us %10.2f", milliseconds * 1000.0f, flop / (milliseconds * 1.0e9));
 
@@ -112,7 +114,7 @@ void benchmarkConv2d(
   // three different things.
   if (op::cuda::isConv2dCudnnAvailable()) {
     float reference = benchmarkCuda(
-        [&] { op::cuda::conv2dCudnn(input, weight, bias, {stride, padding, 1, 1}); });
+        [&] { op::cuda::conv2dCudnn(input, weight, bias, {stride, padding, 1, 1}, output); });
     line += lut::sprintf(" %10.1f us %10.2f", reference * 1000.0f, flop / (reference * 1.0e9));
   }
 #endif  // LIBWAIFU_CUDNN_ENABLED
@@ -194,7 +196,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL GEMM") {
     for (const std::shared_ptr<Operators> &backend : {cublas, cutlass}) {
       if (!backend) continue;
 
-      float milliseconds = benchmarkCuda([&] { backend->matmul(input, weight); });
+      float milliseconds = benchmarkCuda([&] { F::matmul(backend.get(), input, weight); });
       line += lut::sprintf(
           " %10.1f us %10.2f",
           milliseconds * 1000.0f,
@@ -240,18 +242,18 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
 
     printBandwidth(
         std::string("group_norm   ") + level.what,
-        benchmarkCuda([&] { operators->groupNorm(x, scale, shift, 32, 1e-5f); }),
+        benchmarkCuda([&] { F::groupNorm(operators.get(), x, scale, shift, 32, 1e-5f); }),
         moved);
     printBandwidth(
         std::string("silu         ") + level.what,
-        benchmarkCuda([&] { operators->silu(x); }),
+        benchmarkCuda([&] { F::silu(operators.get(), x); }),
         moved);
 
     // Three tensors rather than two: a residual reads both of its inputs.
     Tensor other = randHalf(operators, {1, level.channels, level.size, level.size});
     printBandwidth(
         std::string("add          ") + level.what,
-        benchmarkCuda([&] { operators->add(x, other); }),
+        benchmarkCuda([&] { F::add(operators.get(), x, other); }),
         1.5 * moved);
   }
 
@@ -271,14 +273,14 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor shift = randHalf(operators, {width});
     printBandwidth(
         std::string("layer_norm   ") + attention.what,
-        benchmarkCuda([&] { operators->layerNorm(hidden, scale, shift, 1e-5f); }),
+        benchmarkCuda([&] { F::layerNorm(operators.get(), hidden, scale, shift, 1e-5f); }),
         2 * halfBytes({1, attention.tokens, width}));
 
     Tensor q = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     Tensor k = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     Tensor v = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     double flop = 4.0 * attention.heads * attention.tokens * attention.tokens * 64;
-    float milliseconds = benchmarkCuda([&] { operators->attention(q, k, v, false); });
+    float milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, k, v, false); });
     bench::print(
         "%-44s %10.3f us  %8.2f TFLOP/s\n",
         (std::string("self attention ") + attention.what).c_str(),
@@ -289,7 +291,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor ck = randHalf(operators, {1, attention.heads, 77, 64});
     Tensor cv = randHalf(operators, {1, attention.heads, 77, 64});
     double crossFlop = 4.0 * attention.heads * attention.tokens * 77 * 64;
-    milliseconds = benchmarkCuda([&] { operators->attention(q, ck, cv, false); });
+    milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, ck, cv, false); });
     bench::print(
         "%-44s %10.3f us  %8.2f TFLOP/s\n",
         (std::string("cross attention ") + attention.what).c_str(),
@@ -301,7 +303,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor gated = randHalf(operators, {1, attention.tokens, 2 * inner});
     printBandwidth(
         std::string("geglu        ") + attention.what,
-        benchmarkCuda([&] { operators->geglu(gated); }),
+        benchmarkCuda([&] { F::geglu(operators.get(), gated); }),
         1.5 * halfBytes({1, attention.tokens, 2 * inner}));
   }
 
@@ -311,7 +313,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor x = randHalf(operators, {1, level.channels, level.size, level.size});
     printBandwidth(
         std::string("upsample     ") + level.what,
-        benchmarkCuda([&] { operators->upsampleNearest2d(x, 2); }),
+        benchmarkCuda([&] { F::upsampleNearest2d(operators.get(), x, 2); }),
         5 * halfBytes({1, level.channels, level.size, level.size}));
   }
 }

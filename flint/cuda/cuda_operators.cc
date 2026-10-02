@@ -50,6 +50,7 @@
 #include "flint/cuda/glu.h"
 #include "flint/cuda/to_device.h"
 #include "flint/cuda/unary.h"
+#include "flint/functional.h"
 #include "lutil/error.h"
 
 namespace fl {
@@ -100,294 +101,344 @@ std::shared_ptr<Operators> CudaOperators::create(int options) {
   return op;
 }
 
-void CudaOperators::fill(Tensor input, float value) {
-  return op::cuda::fill(input, value);
+namespace {
+
+/// `input` itself if it is packed, otherwise a packed copy of it kept alive in `holder`. A
+/// temporary of this backend's own, for the kernels that walk their input as a flat array.
+TensorView contiguousCuda(const TensorView &input, Tensor &holder) {
+  if (input.isContiguous()) return input;
+
+  holder = F::emptyLike(input);
+  op::cuda::copy(input, holder);
+  return holder;
 }
 
-Tensor CudaOperators::square(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SQUARE, input);
+}  // namespace
+
+void CudaOperators::fill(TensorView input, float value) {
+  op::cuda::fill(input, value);
 }
 
-Tensor CudaOperators::max(Tensor inputs) {
-  return op::cuda::reduceLastDim(inputs, inputs.getDType(), MapReduceType::MAX);
+void CudaOperators::square(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::SQUARE, input, out);
 }
 
-Tensor CudaOperators::min(Tensor inputs) {
-  return op::cuda::reduceLastDim(inputs, inputs.getDType(), MapReduceType::MIN);
+void CudaOperators::max(TensorView input, TensorView out) {
+  op::cuda::reduceLastDim(input, MapReduceType::MAX, out);
 }
 
-Tensor CudaOperators::divTensor(Tensor input, Tensor other) {
-  return op::cuda::applyBinaryOp(BinaryOp::DIV, input, other);
+void CudaOperators::min(TensorView input, TensorView out) {
+  op::cuda::reduceLastDim(input, MapReduceType::MIN, out);
 }
 
-Tensor CudaOperators::neg(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::NEG, input);
+void CudaOperators::divTensor(TensorView input, TensorView other, TensorView out) {
+  op::cuda::applyBinaryOp(BinaryOp::DIV, input, other, out);
 }
 
-Tensor CudaOperators::abs(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::ABS, input);
+void CudaOperators::neg(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::NEG, input, out);
 }
 
-Tensor CudaOperators::exp(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::EXP, input);
+void CudaOperators::abs(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::ABS, input, out);
 }
 
-Tensor CudaOperators::log(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::LOG, input);
+void CudaOperators::exp(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::EXP, input, out);
 }
 
-Tensor CudaOperators::round(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::ROUND, input);
+void CudaOperators::log(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::LOG, input, out);
 }
 
-Tensor CudaOperators::sqrt(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SQRT, input);
+void CudaOperators::round(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::ROUND, input, out);
 }
 
-Tensor CudaOperators::rsqrt(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::RSQRT, input);
+void CudaOperators::sqrt(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::SQRT, input, out);
 }
 
-Tensor CudaOperators::sigmoid(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SIGMOID, input);
+void CudaOperators::rsqrt(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::RSQRT, input, out);
 }
 
-Tensor CudaOperators::tanh(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::TANH, input);
+void CudaOperators::sigmoid(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::SIGMOID, input, out);
 }
 
-Tensor CudaOperators::relu(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::RELU, input);
+void CudaOperators::tanh(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::TANH, input, out);
 }
 
-Tensor CudaOperators::gelu(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::GELU, input);
+void CudaOperators::relu(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::RELU, input, out);
 }
 
-Tensor CudaOperators::silu(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SILU, input);
+void CudaOperators::gelu(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::GELU, input, out);
 }
 
-Tensor CudaOperators::sin(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::SIN, input);
+void CudaOperators::silu(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::SILU, input, out);
 }
 
-Tensor CudaOperators::cos(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::COS, input);
+void CudaOperators::sin(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::SIN, input, out);
 }
 
-Tensor CudaOperators::quickGelu(Tensor input) {
-  return op::cuda::applyUnaryOp(op::cuda::UnaryOp::QUICK_GELU, input);
+void CudaOperators::cos(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::COS, input, out);
 }
 
-Tensor CudaOperators::subFloat(Tensor input, float other) {
-  return op::cuda::applyBinaryScalarOp(BinaryScalarOp::SUB, input, other);
+void CudaOperators::quickGelu(TensorView input, TensorView out) {
+  op::cuda::applyUnaryOp(op::cuda::UnaryOp::QUICK_GELU, input, out);
 }
 
-bool CudaOperators::allClose(Tensor A, Tensor B, float rtol, float atol) {
+void CudaOperators::subFloat(TensorView input, float other, TensorView out) {
+  op::cuda::applyBinaryScalarOp(BinaryScalarOp::SUB, input, other, out);
+}
+
+bool CudaOperators::allClose(TensorView A, TensorView B, float rtol, float atol) {
   // The comparison itself is a host-side reduction over both tensors, so bring them over and let
   // the CPU backend do it rather than growing a kernel that would only be used by tests. The cast
   // to float is what the CPU comparison expects; half tensors go through it on the device, where
   // the copy is cheaper.
-  auto toHostFloat = [](const Tensor &x) {
-    return op::cuda::toCpu(x.getDType() == DType::kFloat ? x : op::cuda::cast(x, DType::kFloat));
+  auto toHostFloat = [](const TensorView &x) {
+    Tensor packed;
+    TensorView source = contiguousCuda(x, packed);
+    Tensor wide = F::empty(Device::getCpu(), x.getShape(), DType::kFloat);
+    if (x.getDType() == DType::kFloat) {
+      op::cuda::transfer(source, wide);
+    } else {
+      op::cuda::transfer(op::cuda::castTo(source, DType::kFloat), wide);
+    }
+    return wide;
   };
 
   return op::cpu::allClose(toHostFloat(A), toHostFloat(B), rtol, atol);
 }
 
-bool CudaOperators::all(Tensor A) {
-  return op::cuda::elemBool(op::cuda::reduceAll(A, DType::kBool, MapReduceType::ALL));
+bool CudaOperators::all(TensorView A) {
+  Tensor packed;
+  TensorView source = contiguousCuda(A, packed);
+  return op::cuda::elemBool(op::cuda::reduceAll(source, DType::kBool, MapReduceType::ALL));
 }
 
-Tensor CudaOperators::sum(Tensor inputs, int dim) {
-  Tensor C;
+void CudaOperators::sum(TensorView input, int dim, TensorView out) {
+  int ndim = input.getDim();
+  if (dim < 0) dim += ndim;
+  CHECK(dim >= 0 && dim < ndim);
+  CHECK(out.getDType() == input.getDType() && out.isContiguous());
 
-  if (dim == None) {
-    C = op::cuda::reduceAll(inputs, DType::kFloat, MapReduceType::SUM);
+  // The summed dimension has to be the last for the row reduction. (.., D, ..) is viewed as
+  // (outer, D, inner) and turned to (outer, inner, D), so that every other dimension keeps its
+  // place and the rows come out in `out`'s order.
+  TensorView source = input;
+  Tensor packed, moved;
+  if (dim != ndim - 1) {
+    std::vector<int> shape = input.getShape();
+    int outer = 1, inner = 1;
+    for (int d = 0; d < dim; ++d) outer *= shape[d];
+    for (int d = dim + 1; d < ndim; ++d) inner *= shape[d];
+
+    TensorView grouped = contiguousCuda(input, packed).view({outer, shape[dim], inner});
+    moved = F::emptyLike(grouped.transpose(1, 2));
+    op::cuda::copy(grouped.transpose(1, 2), moved);
+    source = moved;
+  }
+
+  // Half is summed in float and narrowed once at the end, which is where the precision is wanted.
+  if (input.getDType() == DType::kFloat16) {
+    Tensor wide = F::empty(out.getDevice(), out.getShape(), DType::kFloat);
+    op::cuda::reduceLastDim(source, MapReduceType::SUM, wide);
+    op::cuda::cast(wide, out);
   } else {
-    int ndim = inputs.getDim();
-    if (dim < 0) dim += ndim;
-    CHECK(dim >= 0 && dim < ndim);
-
-    if (dim == ndim - 1) {
-      C = op::cuda::reduceLastDim(inputs, DType::kFloat, MapReduceType::SUM);
-    } else {
-      // (.., D, ..) viewed as (outer, D, inner) and turned to (outer, inner, D), so that the
-      // summed dimension is last and every other one keeps its place; then viewed back without it.
-      std::vector<int> shape = inputs.getShape();
-      int outer = 1, inner = 1;
-      for (int d = 0; d < dim; ++d) outer *= shape[d];
-      for (int d = dim + 1; d < ndim; ++d) inner *= shape[d];
-
-      Tensor grouped = contiguous(inputs).view({outer, shape[dim], inner});
-      Tensor moved = contiguous(grouped.transpose(1, 2));
-      C = op::cuda::reduceLastDim(moved, DType::kFloat, MapReduceType::SUM);
-
-      shape.erase(shape.begin() + dim);
-      C = C.view(shape);
-    }
+    op::cuda::reduceLastDim(source, MapReduceType::SUM, out);
   }
-
-  if (inputs.getDType() == DType::kFloat16) {
-    C = castFloatToHalf(C);
-  }
-  return C;
 }
 
-Tensor CudaOperators::cumsum(Tensor input, int dim) {
+void CudaOperators::cumsum(TensorView input, int dim, TensorView out) {
   int ndim = input.getDim();
   if (dim < 0) dim += ndim;
   CHECK(dim >= 0 && dim < ndim);
 
-  if (dim == ndim - 1) return op::cuda::cumsumLastDim(contiguous(input));
+  Tensor packed;
+  if (dim == ndim - 1) {
+    op::cuda::cumsumLastDim(contiguousCuda(input, packed), out);
+    return;
+  }
 
-  Tensor transposed = contiguous(input.transpose(dim, ndim - 1));
-  return contiguous(op::cuda::cumsumLastDim(transposed).transpose(dim, ndim - 1));
+  // Any other dimension is turned to the last, scanned, and turned back as it is written out.
+  TensorView turned = input.transpose(dim, ndim - 1);
+  Tensor transposed = F::emptyLike(turned);
+  op::cuda::copy(turned, transposed);
+  Tensor scanned = F::emptyLike(transposed);
+  op::cuda::cumsumLastDim(transposed, scanned);
+  op::cuda::copy(scanned.transpose(dim, ndim - 1), out);
 }
 
-Tensor CudaOperators::lookup(Tensor table, Tensor indices) {
-  return cuda::lookup(table, indices);
+void CudaOperators::lookup(TensorView table, TensorView indices, TensorView out) {
+  cuda::lookup(table, indices, out);
 }
 
 void CudaOperators::rotaryEmbedding(
-    Tensor positions,
-    Tensor query,
-    Tensor key,
-    Tensor rotaryCache) {
+    TensorView positions,
+    TensorView query,
+    TensorView key,
+    TensorView rotaryCache) {
   cuda::rotaryEmbedding(positions, query, key, rotaryCache);
 }
 
-Tensor CudaOperators::matmul(Tensor a, Tensor b) {
-  return _matmul->apply(a, b);
+void CudaOperators::matmul(TensorView A, TensorView B, TensorView out) {
+  _matmul->apply(A, B, out);
 }
 
-Tensor CudaOperators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
-  return cuda::layerNorm(input, weight, bias, eps);
+void CudaOperators::layerNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    float eps,
+    TensorView out) {
+  cuda::layerNorm(input, weight, bias, eps, out);
 }
 
-Tensor CudaOperators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
-  return cuda::groupNorm(input, weight, bias, groups, eps);
+void CudaOperators::groupNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int groups,
+    float eps,
+    TensorView out) {
+  cuda::groupNorm(input, weight, bias, groups, eps, out);
 }
 
-Tensor CudaOperators::upsampleNearest2d(Tensor input, int scale) {
-  return cuda::upsampleNearest2d(input, scale);
+void CudaOperators::upsampleNearest2d(TensorView input, int scale, TensorView out) {
+  cuda::upsampleNearest2d(input, scale, out);
 }
 
-Tensor CudaOperators::upsampleNearest1d(Tensor input, int size) {
-  return cuda::upsampleNearest1d(input, size);
+void CudaOperators::upsampleNearest1d(TensorView input, TensorView out) {
+  cuda::upsampleNearest1d(input, out);
 }
 
-Tensor CudaOperators::geglu(Tensor input) {
-  return cuda::geglu(input);
+void CudaOperators::geglu(TensorView input, TensorView out) {
+  cuda::geglu(input, out);
 }
 
-Tensor CudaOperators::conv2d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void CudaOperators::conv2d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return cuda::conv2d(input, weight, bias, {stride, padding, dilation, groups});
+    int groups,
+    TensorView out) {
+  cuda::conv2d(input, weight, bias, {stride, padding, dilation, groups}, out);
 }
 
-Tensor CudaOperators::conv1d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void CudaOperators::conv1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return cuda::conv1d(input, weight, bias, {stride, padding, dilation, groups});
+    int groups,
+    TensorView out) {
+  cuda::conv1d(input, weight, bias, {stride, padding, dilation, groups}, out);
 }
 
-Tensor CudaOperators::gatedDeltaNetPrefill(
-    Tensor q,
-    Tensor k,
-    Tensor v,
-    Tensor g,
-    Tensor beta,
-    Tensor cuSeqlens,
-    Tensor stateSlots,
-    Tensor state) {
-  return op::cuda::gatedDeltaNetPrefill(q, k, v, g, beta, cuSeqlens, stateSlots, state);
+void CudaOperators::gatedDeltaNetPrefill(
+    TensorView q,
+    TensorView k,
+    TensorView v,
+    TensorView g,
+    TensorView beta,
+    TensorView cuSeqlens,
+    TensorView stateSlots,
+    TensorView state,
+    TensorView out) {
+  op::cuda::gatedDeltaNetPrefill(q, k, v, g, beta, cuSeqlens, stateSlots, state, out);
 }
 
-Tensor CudaOperators::mul(Tensor input, float other) {
-  return op::cuda::applyBinaryScalarOp(BinaryScalarOp::MUL, input, other);
+void CudaOperators::mul(TensorView input, float other, TensorView out) {
+  op::cuda::applyBinaryScalarOp(BinaryScalarOp::MUL, input, other, out);
 }
 
-Tensor CudaOperators::div(Tensor input, float other) {
-  return op::cuda::applyBinaryScalarOp(BinaryScalarOp::DIV, input, other);
+void CudaOperators::div(TensorView input, float other, TensorView out) {
+  op::cuda::applyBinaryScalarOp(BinaryScalarOp::DIV, input, other, out);
 }
 
-Tensor CudaOperators::mod(Tensor input, LongType other) {
-  return op::cuda::applyBinaryScalarOpLong(BinaryScalarOp::MOD, input, other);
+void CudaOperators::mod(TensorView input, LongType other, TensorView out) {
+  op::cuda::applyBinaryScalarOpLong(BinaryScalarOp::MOD, input, other, out);
 }
 
-Tensor CudaOperators::mul(Tensor input, Tensor other) {
-  return op::cuda::applyBinaryOp(BinaryOp::MUL, input, other);
+void CudaOperators::mul(TensorView input, TensorView other, TensorView out) {
+  op::cuda::applyBinaryOp(BinaryOp::MUL, input, other, out);
 }
 
-Tensor CudaOperators::softmax(Tensor input) {
-  return op::cuda::softmax(input);
+void CudaOperators::softmax(TensorView input, TensorView out) {
+  op::cuda::softmax(input, out);
 }
 
-Tensor CudaOperators::add(Tensor input, Tensor other) {
-  return op::cuda::applyBinaryOp(BinaryOp::ADD, input, other);
+void CudaOperators::add(TensorView input, TensorView other, TensorView out) {
+  op::cuda::applyBinaryOp(BinaryOp::ADD, input, other, out);
 }
 
-Tensor CudaOperators::sub(Tensor input, Tensor other) {
-  return op::cuda::applyBinaryOp(BinaryOp::SUB, input, other);
+void CudaOperators::sub(TensorView input, TensorView other, TensorView out) {
+  op::cuda::applyBinaryOp(BinaryOp::SUB, input, other, out);
 }
 
-void CudaOperators::repetitionPenalty(Tensor logits, Tensor history, float weight) {
+void CudaOperators::repetitionPenalty(TensorView logits, TensorView history, float weight) {
   CHECK(history.getDType() == DType::kLong);
 
-  return op::cuda::repetitionPenalty(logits, history, weight);
+  op::cuda::repetitionPenalty(logits, history, weight);
 }
 
-Tensor CudaOperators::rmsNorm(Tensor input, Tensor weight, float eps) {
-  return op::cuda::rmsNorm(input, weight, eps);
+void CudaOperators::rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) {
+  op::cuda::rmsNorm(input, weight, eps, out);
 }
 
-Tensor CudaOperators::causalMask(int max_len) {
-  return op::cuda::causalMask(max_len);
+void CudaOperators::causalMask(TensorView out) {
+  op::cuda::causalMask(out);
 }
 
-Tensor CudaOperators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
+void CudaOperators::attention(
+    TensorView q,
+    TensorView k,
+    TensorView v,
+    bool causal,
+    TensorView out) {
 #ifdef LIBWAIFU_FLASH_ATTN_ENABLED
-  Tensor output = op::cuda::flashAttention(q, k, v, causal);
-  if (!output.empty()) return output;
+  if (op::cuda::flashAttention(q, k, v, causal, out)) return;
 #endif
 
-  return Operators::attention(q, k, v, causal);
+  F::composedAttention(this, q, k, v, causal, out);
 }
 
 void CudaOperators::storeKVCache(
-    Tensor k,
-    Tensor v,
-    Tensor keyCache,
-    Tensor valueCache,
-    Tensor slotMapping) {
+    TensorView k,
+    TensorView v,
+    TensorView keyCache,
+    TensorView valueCache,
+    TensorView slotMapping) {
   op::cuda::storeKVCache(k, v, keyCache, valueCache, slotMapping);
 }
 
-Tensor CudaOperators::pagedAttention(
-    Tensor q,
-    Tensor keyCache,
-    Tensor valueCache,
-    Tensor blockTable,
-    Tensor cuSeqlensQ,
-    Tensor seqlensK,
+void CudaOperators::pagedAttention(
+    TensorView q,
+    TensorView keyCache,
+    TensorView valueCache,
+    TensorView blockTable,
+    TensorView cuSeqlensQ,
+    TensorView seqlensK,
     int maxQLen,
     int maxKLen,
-    bool causal) {
+    bool causal,
+    TensorView out) {
 #ifdef LIBWAIFU_FLASH_ATTN_ENABLED
-  Tensor output = op::cuda::pagedFlashAttention(
+  bool done = op::cuda::pagedFlashAttention(
       q,
       keyCache,
       valueCache,
@@ -396,8 +447,9 @@ Tensor CudaOperators::pagedAttention(
       seqlensK,
       maxQLen,
       maxKLen,
-      causal);
-  if (!output.empty()) return output;
+      causal,
+      out);
+  if (done) return;
 
   // Unlike attention above, there is no portable paged attention to fall back to. Throw the
   // way conv2d.cc does rather than aborting the process.
@@ -405,22 +457,6 @@ Tensor CudaOperators::pagedAttention(
 #else
   throw lut::AbortedError("this build has no paged attention (needs WITH_FLASH_ATTN=ON)");
 #endif
-}
-
-Tensor CudaOperators::tensor(lut::Span<const int> shape, DType dtype) {
-  if (dtype == DType::kFloat16) return createCudaTensorHalf(shape);
-  if (dtype == DType::kFloat) return createCudaTensorFloat(shape);
-  if (dtype == DType::kUInt8) return createCudaTensorUInt8(shape);
-
-  NOT_IMPL();
-}
-
-Tensor CudaOperators::hostTensor(lut::Span<const int> shape, DType dtype) {
-  return op::cuda::createCudaHostTensor(shape, dtype);
-}
-
-Tensor CudaOperators::tensorLike(Tensor input) {
-  return op::cuda::tensorLike(input);
 }
 
 MemorySnapshot CudaOperators::captureMemorySnapshot() {
@@ -476,7 +512,7 @@ void CudaOperators::releaseUnusedMemory() {
 #endif
 }
 
-void CudaOperators::copy(Tensor src, Tensor dest) {
+void CudaOperators::copy(TensorView src, TensorView dest) {
   CHECK(src.getDevice().getType() == Device::kCuda);
   CHECK(dest.getDevice().getType() == Device::kCuda);
   CHECK(src.getDType() == dest.getDType());
@@ -489,68 +525,73 @@ void CudaOperators::copy(Tensor src, Tensor dest) {
   }
 }
 
-void CudaOperators::print(Tensor tensor) {
+void CudaOperators::transfer(TensorView src, TensorView dest) {
+  op::cuda::transfer(src, dest);
+}
+
+void CudaOperators::print(TensorView tensor) {
   op::cuda::print(tensor);
 }
 
-Tensor CudaOperators::swiglu(Tensor A) {
-  return op::cuda::swiglu(A);
+void CudaOperators::swiglu(TensorView input, TensorView out) {
+  op::cuda::swiglu(input, out);
 }
 
-Tensor CudaOperators::sample(
-    Tensor logits,
-    Tensor temperatures,
-    Tensor topKs,
-    Tensor topPs) {
+void CudaOperators::sample(
+    TensorView logits,
+    TensorView temperatures,
+    TensorView topKs,
+    TensorView topPs,
+    TensorView out) {
   CHECK(logits.getDim() == 2);
   int rows = logits.getShape(0);
-  Tensor uniformNoise = _rand->rand({rows});
-  return op::cuda::sample(logits, uniformNoise, temperatures, topKs, topPs);
+  Tensor uniformNoise = F::empty(Device::getCuda(), {rows}, DType::kFloat);
+  _rand->rand(uniformNoise);
+  op::cuda::sample(logits, uniformNoise, temperatures, topKs, topPs, out);
 }
 
-Tensor CudaOperators::toDevice(Device device, Tensor tensor) {
-  return cuda::toDevice(device, tensor);
-}
-
-Tensor CudaOperators::cast(Tensor tensor, DType dtype) {
-  CHECK(tensor.getDevice().getType() == Device::kCuda);
-  return cuda::cast(tensor, dtype);
+void CudaOperators::cast(TensorView input, TensorView out) {
+  CHECK(input.getDevice().getType() == Device::kCuda);
+  Tensor packed;
+  cuda::cast(contiguousCuda(input, packed), out);
 }
 
 DType CudaOperators::getDefaultFloatType() {
   return DType::kFloat16;
 }
 
-Tensor CudaOperators::zeros(lut::Span<const int> shape, DType dtype) {
-  Tensor zeroed = tensor(shape, dtype);
-  op::cuda::fill(zeroed, 0.0);
-
-  return zeroed;
+void CudaOperators::randNormal(TensorView out) {
+  CHECK(out.getDevice().getType() == Device::kCuda);
+  _rand->randNormal(out);
 }
 
-Tensor CudaOperators::randNormal(lut::Span<const int> shape) {
-  return _rand->randNormal(shape);
+void CudaOperators::rand(TensorView out) {
+  CHECK(out.getDevice().getType() == Device::kCuda);
+  if (out.getDType() == DType::kFloat) {
+    _rand->rand(out);
+    return;
+  }
+
+  // The generator draws float32; any other type is that, converted.
+  Tensor drawn = F::empty(out.getDevice(), out.getShape(), DType::kFloat);
+  _rand->rand(drawn);
+  cuda::cast(drawn, out);
 }
 
-Tensor CudaOperators::rand(lut::Span<const int> shape, DType dtype) {
-  Tensor r = _rand->rand(shape);
-  return cuda::cast(r, dtype);
+void CudaOperators::arangeLong(LongType begin, LongType step, TensorView out) {
+  cuda::arangeLong(begin, step, out);
 }
 
-Tensor CudaOperators::arangeLong(LongType begin, LongType end, LongType step) {
-  return cuda::arangeLong(begin, end, step);
-}
-
-float CudaOperators::elem(Tensor tensor) {
+float CudaOperators::elem(TensorView tensor) {
   return op::cuda::elem(tensor);
 }
 
-bool CudaOperators::elemBool(Tensor tensor) {
+bool CudaOperators::elemBool(TensorView tensor) {
   return op::cuda::elemBool(tensor);
 }
 
-Tensor CudaOperators::eq(Tensor input, Tensor other) {
-  return op::cuda::applyBinaryOp(BinaryOp::EQUAL, input, other);
+void CudaOperators::eq(TensorView input, TensorView other, TensorView out) {
+  op::cuda::applyBinaryOp(BinaryOp::EQUAL, input, other, out);
 }
 
 void CudaOperators::manualSeed(uint64_t seed) {

@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -98,15 +99,18 @@ bool tensorCoreAvailable();
 /// sequence keeping its position in the batch: every read and write of the state goes through
 /// `stateSlots[seq]`, so a slot survives across the prefill chunks of one sequence and the pool
 /// can be allocated and recycled by the same block manager that owns the paged cache.
-Tensor gatedDeltaNetPrefill(
-    const Tensor &q,
-    const Tensor &k,
-    const Tensor &v,
-    const Tensor &g,
-    const Tensor &beta,
-    const Tensor &cuSeqlens,
-    const Tensor &stateSlots,
-    Tensor &state,
+///
+/// The attention output is written into `out` <half>(tokens, nVHead, D), contiguous.
+void gatedDeltaNetPrefill(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    const TensorView &g,
+    const TensorView &beta,
+    const TensorView &cuSeqlens,
+    const TensorView &stateSlots,
+    const TensorView &state,
+    const TensorView &out,
     GatedDeltaNetPath path = GatedDeltaNetPath::kAuto);
 
 /// The kernel behind the operator above, which lives in gated_delta_net_mma.cu and is reached only
@@ -140,15 +144,15 @@ constexpr int kMaxRecurrentLen = 16;
 constexpr int kDefaultRecurrentLen = 12;
 
 void run(
-    const Tensor &q,
-    const Tensor &k,
-    const Tensor &v,
-    const Tensor &g,
-    const Tensor &beta,
-    const Tensor &cuSeqlens,
-    const Tensor &stateSlots,
-    Tensor &state,
-    Tensor &o,
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    const TensorView &g,
+    const TensorView &beta,
+    const TensorView &cuSeqlens,
+    const TensorView &stateSlots,
+    const TensorView &state,
+    const TensorView &o,
     int numKHead,
     int numVHead,
     int headDim,

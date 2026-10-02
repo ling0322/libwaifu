@@ -42,234 +42,236 @@ std::shared_ptr<Operators> MetalOperators::create() {
   return std::shared_ptr<MetalOperators>(new MetalOperators());
 }
 
-Tensor MetalOperators::lookup(Tensor table, Tensor indices) {
-  return metal::lookup(table, indices);
+void MetalOperators::lookup(TensorView table, TensorView indices, TensorView out) {
+  metal::lookup(table, indices, out);
 }
 
-Tensor MetalOperators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
-  return metal::layerNorm(input, weight, bias, eps);
+void MetalOperators::layerNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    float eps,
+    TensorView out) {
+  metal::layerNorm(input, weight, bias, eps, out);
 }
 
-Tensor MetalOperators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
-  return metal::groupNorm(input, weight, bias, groups, eps);
+void MetalOperators::groupNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int groups,
+    float eps,
+    TensorView out) {
+  metal::groupNorm(input, weight, bias, groups, eps, out);
 }
 
-Tensor MetalOperators::upsampleNearest2d(Tensor input, int scale) {
-  return metal::upsampleNearest2d(input, scale);
+void MetalOperators::upsampleNearest2d(TensorView input, int scale, TensorView out) {
+  metal::upsampleNearest2d(input, scale, out);
 }
 
-Tensor MetalOperators::geglu(Tensor input) {
-  return metal::geglu(input);
+void MetalOperators::geglu(TensorView input, TensorView out) {
+  metal::geglu(input, out);
 }
 
-Tensor MetalOperators::swiglu(Tensor input) {
-  return metal::swiglu(input);
+void MetalOperators::swiglu(TensorView input, TensorView out) {
+  metal::swiglu(input, out);
 }
 
-Tensor MetalOperators::matmul(Tensor A, Tensor B) {
-  return metal::matmul(A, B);
+void MetalOperators::matmul(TensorView A, TensorView B, TensorView out) {
+  metal::matmul(A, B, out);
 }
 
-Tensor MetalOperators::conv2d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void MetalOperators::conv2d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return metal::conv2d(input, weight, bias, stride, padding, dilation, groups);
+    int groups,
+    TensorView out) {
+  metal::conv2d(input, weight, bias, stride, padding, dilation, groups, out);
 }
 
-Tensor MetalOperators::conv1d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void MetalOperators::conv1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return metal::conv1d(input, weight, bias, stride, padding, dilation, groups);
+    int groups,
+    TensorView out) {
+  metal::conv1d(input, weight, bias, stride, padding, dilation, groups, out);
 }
 
-Tensor MetalOperators::softmax(Tensor input) {
-  return metal::softmax(input);
+void MetalOperators::softmax(TensorView input, TensorView out) {
+  metal::softmax(input, out);
 }
 
-Tensor MetalOperators::attention(Tensor q, Tensor k, Tensor v, bool causal) {
-  return metal::attention(q, k, v, causal);
+void MetalOperators::attention(
+    TensorView q,
+    TensorView k,
+    TensorView v,
+    bool causal,
+    TensorView out) {
+  metal::attention(q, k, v, causal, out);
 }
 
-Tensor MetalOperators::add(Tensor input, Tensor other) {
-  return metal::add(input, other);
+void MetalOperators::add(TensorView input, TensorView other, TensorView out) {
+  metal::add(input, other, out);
 }
 
-Tensor MetalOperators::sub(Tensor input, Tensor other) {
-  return metal::sub(input, other);
+void MetalOperators::sub(TensorView input, TensorView other, TensorView out) {
+  metal::sub(input, other, out);
 }
 
-Tensor MetalOperators::subFloat(Tensor input, float other) {
-  return metal::subScalar(input, other);
+void MetalOperators::subFloat(TensorView input, float other, TensorView out) {
+  metal::subScalar(input, other, out);
 }
 
-Tensor MetalOperators::mul(Tensor input, Tensor other) {
-  return metal::mul(input, other);
+void MetalOperators::mul(TensorView input, TensorView other, TensorView out) {
+  metal::mul(input, other, out);
 }
 
-Tensor MetalOperators::mul(Tensor input, float other) {
-  return metal::mulScalar(input, other);
+void MetalOperators::mul(TensorView input, float other, TensorView out) {
+  metal::mulScalar(input, other, out);
 }
 
-Tensor MetalOperators::div(Tensor input, float other) {
-  return metal::divScalar(input, other);
+void MetalOperators::div(TensorView input, float other, TensorView out) {
+  metal::divScalar(input, other, out);
 }
 
-Tensor MetalOperators::divTensor(Tensor input, Tensor other) {
-  return metal::divTensor(input, other);
+void MetalOperators::divTensor(TensorView input, TensorView other, TensorView out) {
+  metal::divTensor(input, other, out);
 }
 
-Tensor MetalOperators::eq(Tensor input, Tensor other) {
-  return metal::eq(input, other);
+void MetalOperators::eq(TensorView input, TensorView other, TensorView out) {
+  metal::eq(input, other, out);
 }
 
-Tensor MetalOperators::neg(Tensor input) {
-  return metal::neg(input);
+void MetalOperators::neg(TensorView input, TensorView out) {
+  metal::neg(input, out);
 }
 
-Tensor MetalOperators::abs(Tensor input) {
-  return metal::abs(input);
+void MetalOperators::abs(TensorView input, TensorView out) {
+  metal::abs(input, out);
 }
 
-Tensor MetalOperators::exp(Tensor input) {
-  return metal::exp(input);
+void MetalOperators::exp(TensorView input, TensorView out) {
+  metal::exp(input, out);
 }
 
-Tensor MetalOperators::log(Tensor input) {
-  return metal::log(input);
+void MetalOperators::log(TensorView input, TensorView out) {
+  metal::log(input, out);
 }
 
-Tensor MetalOperators::round(Tensor input) {
-  return metal::round(input);
+void MetalOperators::round(TensorView input, TensorView out) {
+  metal::round(input, out);
 }
 
-Tensor MetalOperators::sqrt(Tensor input) {
-  return metal::sqrt(input);
+void MetalOperators::sqrt(TensorView input, TensorView out) {
+  metal::sqrt(input, out);
 }
 
-Tensor MetalOperators::rsqrt(Tensor input) {
-  return metal::rsqrt(input);
+void MetalOperators::rsqrt(TensorView input, TensorView out) {
+  metal::rsqrt(input, out);
 }
 
-Tensor MetalOperators::square(Tensor input) {
-  return metal::square(input);
+void MetalOperators::square(TensorView input, TensorView out) {
+  metal::square(input, out);
 }
 
-Tensor MetalOperators::sigmoid(Tensor input) {
-  return metal::sigmoid(input);
+void MetalOperators::sigmoid(TensorView input, TensorView out) {
+  metal::sigmoid(input, out);
 }
 
-Tensor MetalOperators::tanh(Tensor input) {
-  return metal::tanh(input);
+void MetalOperators::tanh(TensorView input, TensorView out) {
+  metal::tanh(input, out);
 }
 
-Tensor MetalOperators::relu(Tensor input) {
-  return metal::relu(input);
+void MetalOperators::relu(TensorView input, TensorView out) {
+  metal::relu(input, out);
 }
 
-Tensor MetalOperators::gelu(Tensor input) {
-  return metal::gelu(input);
+void MetalOperators::gelu(TensorView input, TensorView out) {
+  metal::gelu(input, out);
 }
 
-Tensor MetalOperators::silu(Tensor input) {
-  return metal::silu(input);
+void MetalOperators::silu(TensorView input, TensorView out) {
+  metal::silu(input, out);
 }
 
-Tensor MetalOperators::quickGelu(Tensor input) {
-  return metal::quickGelu(input);
+void MetalOperators::quickGelu(TensorView input, TensorView out) {
+  metal::quickGelu(input, out);
 }
 
-Tensor MetalOperators::sin(Tensor input) {
-  return metal::sin(input);
+void MetalOperators::sin(TensorView input, TensorView out) {
+  metal::sin(input, out);
 }
 
-Tensor MetalOperators::cos(Tensor input) {
-  return metal::cos(input);
+void MetalOperators::cos(TensorView input, TensorView out) {
+  metal::cos(input, out);
 }
 
-Tensor MetalOperators::sum(Tensor input, int dim) {
-  return metal::sum(input, dim);
+void MetalOperators::sum(TensorView input, int dim, TensorView out) {
+  metal::sum(input, dim, out);
 }
 
-Tensor MetalOperators::cumsum(Tensor input, int dim) {
-  return metal::cumsum(input, dim);
+void MetalOperators::cumsum(TensorView input, int dim, TensorView out) {
+  metal::cumsum(input, dim, out);
 }
 
-Tensor MetalOperators::max(Tensor input) {
-  return metal::max(input);
+void MetalOperators::max(TensorView input, TensorView out) {
+  metal::max(input, out);
 }
 
-Tensor MetalOperators::min(Tensor input) {
-  return metal::min(input);
+void MetalOperators::min(TensorView input, TensorView out) {
+  metal::min(input, out);
 }
 
-bool MetalOperators::all(Tensor input) {
+bool MetalOperators::all(TensorView input) {
   return metal::all(input);
 }
 
-bool MetalOperators::allClose(Tensor A, Tensor B, float rtol, float atol) {
+bool MetalOperators::allClose(TensorView A, TensorView B, float rtol, float atol) {
   return metal::allClose(A, B, rtol, atol);
 }
 
-Tensor MetalOperators::tensor(lut::Span<const int> shape, DType dtype) {
-  return metal::createTensor(shape, dtype);
-}
-
-Tensor MetalOperators::tensorLike(Tensor input) {
-  std::vector<int> shape;
-  for (int d = 0; d < input.getDim(); ++d) {
-    shape.push_back(input.getShape(d));
-  }
-  return metal::createTensor(lut::makeConstSpan(shape), input.getDType());
-}
-
-Tensor MetalOperators::zeros(lut::Span<const int> shape, DType dtype) {
-  return metal::zeros(shape, dtype);
-}
-
-void MetalOperators::fill(Tensor input, float value) {
+void MetalOperators::fill(TensorView input, float value) {
   metal::fill(input, value);
 }
 
-void MetalOperators::copy(Tensor src, Tensor dest) {
+void MetalOperators::copy(TensorView src, TensorView dest) {
   metal::copy(src, dest);
 }
 
-Tensor MetalOperators::cast(Tensor tensor, DType dtype) {
-  return metal::cast(tensor, dtype);
+void MetalOperators::cast(TensorView input, TensorView out) {
+  metal::cast(input, out);
 }
 
-Tensor MetalOperators::toDevice(Device device, Tensor tensor) {
-  return metal::toDevice(device, tensor);
+void MetalOperators::transfer(TensorView src, TensorView dest) {
+  metal::transfer(src, dest);
 }
 
-void MetalOperators::print(Tensor tensor) {
+void MetalOperators::print(TensorView tensor) {
   metal::print(tensor);
 }
 
-float MetalOperators::elem(Tensor tensor) {
+float MetalOperators::elem(TensorView tensor) {
   return metal::elem(tensor);
 }
 
-bool MetalOperators::elemBool(Tensor tensor) {
+bool MetalOperators::elemBool(TensorView tensor) {
   return metal::elemBool(tensor);
 }
 
-Tensor MetalOperators::rand(lut::Span<const int> shape, DType dtype) {
-  return metal::rand(shape, dtype);
+void MetalOperators::rand(TensorView out) {
+  metal::rand(out);
 }
 
-Tensor MetalOperators::randNormal(lut::Span<const int> shape) {
-  return metal::randNormal(shape);
+void MetalOperators::randNormal(TensorView out) {
+  metal::randNormal(out);
 }
 
 void MetalOperators::manualSeed(uint64_t seed) {

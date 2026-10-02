@@ -19,6 +19,8 @@
 
 #include "flint/metal/common.h"
 
+#include <string.h>
+
 #include <vector>
 
 #include "lutil/error.h"
@@ -59,7 +61,7 @@ DType fromMlxDtype(mlx::core::Dtype dtype) {
   throw lut::NotImplementedError("no flint dtype for this MLX dtype");
 }
 
-mlx::core::Shape toMlxShape(const Tensor &tensor) {
+mlx::core::Shape toMlxShape(const TensorView &tensor) {
   mlx::core::Shape shape;
   for (int d = 0; d < tensor.getDim(); ++d) {
     shape.push_back(tensor.getShape(d));
@@ -67,7 +69,8 @@ mlx::core::Shape toMlxShape(const Tensor &tensor) {
   return shape;
 }
 
-mlx::core::array toMlxArray(const Tensor &tensor) {
+mlx::core::array toMlxArray(const TensorView &tensor) {
+  CHECK(!tensor.empty()) << "toMlxArray: an empty view";
   if (tensor.getDevice().getType() != Device::kMetal) {
     throw lut::AbortedError(
         lut::sprintf(
@@ -75,7 +78,7 @@ mlx::core::array toMlxArray(const Tensor &tensor) {
             tensor.getDevice().getName().c_str()));
   }
 
-  const auto *data = static_cast<const MetalTensorData *>(tensor.getInternalData().get());
+  const auto *data = static_cast<const MetalTensorData *>(tensor.getInternalData());
 
   mlx::core::Strides strides;
   for (int d = 0; d < tensor.getDim(); ++d) {
@@ -91,25 +94,66 @@ mlx::core::array toMlxArray(const Tensor &tensor) {
       static_cast<size_t>(tensor.getInternalOffset()));
 }
 
-Tensor fromMlxArray(mlx::core::array array) {
-  mlx::core::Shape shape = array.shape();
+void writeInto(const mlx::core::array &result, const TensorView &out) {
+  CHECK(!out.empty()) << "writeInto: an empty output view";
+  CHECK(out.getDevice().getType() == Device::kMetal) << "writeInto: the output is not on Metal";
+  CHECK(static_cast<int64_t>(result.size()) == out.getNumEl())
+      << "writeInto: " << result.size() << " elements into an output of " << out.getNumEl();
+  CHECK(result.dtype() == toMlxDtype(out.getDType()))
+      << "writeInto: the result is not of the output's type, " << out.getDType().toString();
 
-  // Storage is always a flat, contiguous buffer; the shape rides along in TensorShape. contiguous()
-  // is a no-op when the array already is one, so an op that produced a dense result pays nothing.
-  mlx::core::array flat = mlx::core::flatten(mlx::core::contiguous(array));
-  mlx::core::eval(flat);
+  // contiguous() is a no-op when the result already is row-major, so an op that produced a dense
+  // array pays only the copy below. A scalar from a reduction is one element like any other.
+  mlx::core::array resolved = mlx::core::contiguous(result);
+  mlx::core::eval(resolved);
+  if (out.getNumEl() == 0) return;
 
-  std::vector<TensorShape::ShapeType> dims;
-  for (mlx::core::ShapeElem dim : shape) {
-    dims.push_back(static_cast<TensorShape::ShapeType>(dim));
+  DType dtype = out.getDType();
+  int64_t elemSize = dtype.getTotalSize(1);
+  std::byte *base =
+      out.getInternalData()->getRawData() + dtype.getTotalSize(out.getInternalOffset());
+  const std::byte *from = resolved.data<std::byte>();
+
+  // memmove rather than memcpy: a copy between two views of the same storage resolves, when the
+  // source is contiguous, to the source's own bytes, which may overlap the destination's.
+  if (out.isContiguous()) {
+    memmove(base, from, static_cast<size_t>(dtype.getTotalSize(out.getNumEl())));
+    return;
   }
-  // MLX reductions can drop to a scalar, which flint has no tensor for; the 1-element vector is
-  // the same value and is what elem() expects to read.
-  if (dims.empty()) dims.push_back(1);
 
-  return Tensor::create(
-      std::make_shared<TensorShape>(lut::makeConstSpan(dims)),
-      MetalTensorData::wrap(std::move(flat)));
+  // A strided output is what `F::cat` hands `copy`: it allocates the joined tensor and copies
+  // each half into a slice of it. MLX arrays are values and cannot be written through, so the
+  // scatter goes through the pointer that unified memory already exposes.
+  int ndim = out.getDim();
+  std::vector<int> shape(ndim);
+  std::vector<int64_t> stride(ndim);
+  for (int d = 0; d < ndim; ++d) {
+    shape[d] = out.getShape(d);
+    stride[d] = out.getStride(d);
+  }
+
+  // Whole rows move at once whenever the last dimension is dense, which is the case for a slice
+  // taken along any earlier axis -- so concatenating feature maps stays memcpy-shaped.
+  int64_t rowLen = (ndim > 0 && stride[ndim - 1] == 1) ? shape[ndim - 1] : 1;
+  int64_t rows = out.getNumEl() / rowLen;
+
+  std::vector<int> index(ndim, 0);
+  for (int64_t row = 0; row < rows; ++row) {
+    int64_t offset = 0;
+    for (int d = 0; d < ndim; ++d) {
+      offset += static_cast<int64_t>(index[d]) * stride[d];
+    }
+    memmove(
+        base + offset * elemSize,
+        from + row * rowLen * elemSize,
+        static_cast<size_t>(rowLen * elemSize));
+
+    // Step the odometer over every axis the row does not already cover.
+    for (int d = (rowLen > 1 ? ndim - 2 : ndim - 1); d >= 0; --d) {
+      if (++index[d] < shape[d]) break;
+      index[d] = 0;
+    }
+  }
 }
 
 }  // namespace metal

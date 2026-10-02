@@ -20,15 +20,15 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor lookup2DHalf(const Tensor &embdTable, const Tensor &input);
-Tensor lookup2DQ4(const Tensor &embdTable, const Tensor &input);
-
-Tensor lookup(const Tensor &embdTable, const Tensor &input);
+/// One row of `embdTable` per id of `input` <int64>, written into contiguous `out`, shaped like
+/// `input` with the row's width after it.
+void lookup(const TensorView &embdTable, const TensorView &input, const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

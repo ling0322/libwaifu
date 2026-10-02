@@ -19,13 +19,13 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-void repetitionPenalty(Tensor logits, Tensor history, float weight);
+void repetitionPenalty(const TensorView &logits, const TensorView &history, float weight);
 
 }  // namespace cpu
 }  // namespace op

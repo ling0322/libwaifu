@@ -21,15 +21,14 @@
 
 #include "flint/cpu/accessor.h"
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
 template<typename T>
-float maxDiffKernel(Tensor A, Tensor B) {
+float maxDiffKernel(const TensorView &A, const TensorView &B) {
   A.throwIfInvalidShape(B.getShape(), "maxDiffKernel");
 
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
@@ -51,7 +50,7 @@ float maxDiffKernel(Tensor A, Tensor B) {
 }
 
 template<typename T>
-float meanAbsKernel(Tensor A) {
+float meanAbsKernel(const TensorView &A) {
   TensorList<const T, 1> vA = TensorList<const T, 1>::fromTensor(A);
 
   bool ok = true;
@@ -68,7 +67,7 @@ float meanAbsKernel(Tensor A) {
 }
 
 template<typename T>
-bool allCloseKernel(Tensor A, Tensor B, float rtol, float atol) {
+bool allCloseKernel(const TensorView &A, const TensorView &B, float rtol, float atol) {
   bool ok = maxDiffKernel<T>(A, B) / meanAbsKernel<T>(B) < rtol || maxDiffKernel<T>(A, B) < atol;
   if (!ok) {
     LOG(INFO) << "maxDiffKernel<T>(A, B)=" << maxDiffKernel<T>(A, B);
@@ -79,7 +78,7 @@ bool allCloseKernel(Tensor A, Tensor B, float rtol, float atol) {
   return ok;
 }
 
-bool allClose(Tensor A, Tensor B, float rtol, float atol) {
+bool allClose(const TensorView &A, const TensorView &B, float rtol, float atol) {
   if (A.getDType() == DType::kFloat) return allCloseKernel<float>(A, B, rtol, atol);
 #if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16) return allCloseKernel<Float16>(A, B, rtol, atol);

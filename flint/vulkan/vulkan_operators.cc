@@ -23,6 +23,7 @@
 #include "lutil/log.h"
 #include "flint/cpu/all_close.h"
 #include "flint/cpu/print.h"
+#include "flint/functional.h"
 #include "flint/vulkan/common.h"
 #include "flint/vulkan/to_device.h"
 
@@ -40,265 +41,273 @@ std::shared_ptr<Operators> VulkanOperators::create() {
   return operators;
 }
 
-Tensor VulkanOperators::arangeLong(LongType begin, LongType end, LongType step) {
-  return vulkan::arangeLong(begin, end, step);
+void VulkanOperators::arangeLong(LongType begin, LongType step, TensorView out) {
+  vulkan::arangeLong(begin, step, out);
 }
 
-Tensor VulkanOperators::lookup(Tensor table, Tensor indices) {
-  return vulkan::lookup(table, indices);
+void VulkanOperators::lookup(TensorView table, TensorView indices, TensorView out) {
+  vulkan::lookup(table, indices, out);
 }
 
 void VulkanOperators::rotaryEmbedding(
-    Tensor positions,
-    Tensor query,
-    Tensor key,
-    Tensor rotaryCache) {
+    TensorView positions,
+    TensorView query,
+    TensorView key,
+    TensorView rotaryCache) {
   vulkan::rotaryEmbedding(positions, query, key, rotaryCache);
 }
 
-Tensor VulkanOperators::rmsNorm(Tensor input, Tensor weight, float eps) {
-  return vulkan::rmsNorm(input, weight, eps);
+void VulkanOperators::rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) {
+  vulkan::rmsNorm(input, weight, eps, out);
 }
 
-Tensor VulkanOperators::layerNorm(Tensor input, Tensor weight, Tensor bias, float eps) {
-  return vulkan::layerNorm(input, weight, bias, eps);
+void VulkanOperators::layerNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    float eps,
+    TensorView out) {
+  vulkan::layerNorm(input, weight, bias, eps, out);
 }
 
-Tensor VulkanOperators::groupNorm(Tensor input, Tensor weight, Tensor bias, int groups, float eps) {
-  return vulkan::groupNorm(input, weight, bias, groups, eps);
+void VulkanOperators::groupNorm(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int groups,
+    float eps,
+    TensorView out) {
+  vulkan::groupNorm(input, weight, bias, groups, eps, out);
 }
 
-Tensor VulkanOperators::upsampleNearest2d(Tensor input, int scale) {
-  return vulkan::upsampleNearest2d(input, scale);
+void VulkanOperators::upsampleNearest2d(TensorView input, int scale, TensorView out) {
+  vulkan::upsampleNearest2d(input, scale, out);
 }
 
-Tensor VulkanOperators::upsampleNearest1d(Tensor input, int size) {
-  return vulkan::upsampleNearest1d(input, size);
+void VulkanOperators::upsampleNearest1d(TensorView input, TensorView out) {
+  vulkan::upsampleNearest1d(input, out);
 }
 
-Tensor VulkanOperators::geglu(Tensor input) {
-  return vulkan::geglu(input);
+void VulkanOperators::geglu(TensorView input, TensorView out) {
+  vulkan::geglu(input, out);
 }
 
-Tensor VulkanOperators::swiglu(Tensor input) {
-  return vulkan::swiglu(input);
+void VulkanOperators::swiglu(TensorView input, TensorView out) {
+  vulkan::swiglu(input, out);
 }
 
-Tensor VulkanOperators::matmul(Tensor A, Tensor B) {
-  return vulkan::matmul(A, B);
+void VulkanOperators::matmul(TensorView A, TensorView B, TensorView out) {
+  vulkan::matmul(A, B, out);
 }
 
-Tensor VulkanOperators::conv2d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void VulkanOperators::conv2d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return vulkan::conv2d(input, weight, bias, stride, padding, dilation, groups);
+    int groups,
+    TensorView out) {
+  vulkan::conv2d(input, weight, bias, stride, padding, dilation, groups, out);
 }
 
-Tensor VulkanOperators::conv1d(
-    Tensor input,
-    Tensor weight,
-    Tensor bias,
+void VulkanOperators::conv1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
     int stride,
     int padding,
     int dilation,
-    int groups) {
-  return vulkan::conv1d(input, weight, bias, stride, padding, dilation, groups);
+    int groups,
+    TensorView out) {
+  vulkan::conv1d(input, weight, bias, stride, padding, dilation, groups, out);
 }
 
-Tensor VulkanOperators::softmax(Tensor input) {
-  return vulkan::softmax(input);
+void VulkanOperators::softmax(TensorView input, TensorView out) {
+  vulkan::softmax(input, out);
 }
 
-Tensor VulkanOperators::add(Tensor input, Tensor other) {
-  return binary(BinaryOp::kAdd, input, other);
+void VulkanOperators::add(TensorView input, TensorView other, TensorView out) {
+  binary(BinaryOp::kAdd, input, other, out);
 }
 
-Tensor VulkanOperators::sub(Tensor input, Tensor other) {
-  return binary(BinaryOp::kSub, input, other);
+void VulkanOperators::sub(TensorView input, TensorView other, TensorView out) {
+  binary(BinaryOp::kSub, input, other, out);
 }
 
-Tensor VulkanOperators::subFloat(Tensor input, float other) {
-  return unary(UnaryOp::kAddScalar, input, -other);
+void VulkanOperators::subFloat(TensorView input, float other, TensorView out) {
+  unary(UnaryOp::kAddScalar, input, -other, out);
 }
 
-Tensor VulkanOperators::mul(Tensor input, Tensor other) {
-  return binary(BinaryOp::kMul, input, other);
+void VulkanOperators::mul(TensorView input, TensorView other, TensorView out) {
+  binary(BinaryOp::kMul, input, other, out);
 }
 
-Tensor VulkanOperators::mul(Tensor input, float other) {
-  return unary(UnaryOp::kMulScalar, input, other);
+void VulkanOperators::mul(TensorView input, float other, TensorView out) {
+  unary(UnaryOp::kMulScalar, input, other, out);
 }
 
-Tensor VulkanOperators::div(Tensor input, float other) {
-  return unary(UnaryOp::kDivScalar, input, other);
+void VulkanOperators::div(TensorView input, float other, TensorView out) {
+  unary(UnaryOp::kDivScalar, input, other, out);
 }
 
-Tensor VulkanOperators::mod(Tensor input, LongType other) {
-  return vulkan::mod(input, other);
+void VulkanOperators::mod(TensorView input, LongType other, TensorView out) {
+  vulkan::mod(input, other, out);
 }
 
-Tensor VulkanOperators::divTensor(Tensor input, Tensor other) {
-  return binary(BinaryOp::kDiv, input, other);
+void VulkanOperators::divTensor(TensorView input, TensorView other, TensorView out) {
+  binary(BinaryOp::kDiv, input, other, out);
 }
 
-Tensor VulkanOperators::eq(Tensor input, Tensor other) {
-  return vulkan::eq(input, other);
+void VulkanOperators::eq(TensorView input, TensorView other, TensorView out) {
+  vulkan::eq(input, other, out);
 }
 
-Tensor VulkanOperators::neg(Tensor input) {
-  return unary(UnaryOp::kNeg, input);
+void VulkanOperators::neg(TensorView input, TensorView out) {
+  unary(UnaryOp::kNeg, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::abs(Tensor input) {
-  return unary(UnaryOp::kAbs, input);
+void VulkanOperators::abs(TensorView input, TensorView out) {
+  unary(UnaryOp::kAbs, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::exp(Tensor input) {
-  return unary(UnaryOp::kExp, input);
+void VulkanOperators::exp(TensorView input, TensorView out) {
+  unary(UnaryOp::kExp, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::log(Tensor input) {
-  return unary(UnaryOp::kLog, input);
+void VulkanOperators::log(TensorView input, TensorView out) {
+  unary(UnaryOp::kLog, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::round(Tensor input) {
-  return unary(UnaryOp::kRound, input);
+void VulkanOperators::round(TensorView input, TensorView out) {
+  unary(UnaryOp::kRound, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::sqrt(Tensor input) {
-  return unary(UnaryOp::kSqrt, input);
+void VulkanOperators::sqrt(TensorView input, TensorView out) {
+  unary(UnaryOp::kSqrt, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::rsqrt(Tensor input) {
-  return unary(UnaryOp::kRsqrt, input);
+void VulkanOperators::rsqrt(TensorView input, TensorView out) {
+  unary(UnaryOp::kRsqrt, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::square(Tensor input) {
-  return unary(UnaryOp::kSquare, input);
+void VulkanOperators::square(TensorView input, TensorView out) {
+  unary(UnaryOp::kSquare, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::sigmoid(Tensor input) {
-  return unary(UnaryOp::kSigmoid, input);
+void VulkanOperators::sigmoid(TensorView input, TensorView out) {
+  unary(UnaryOp::kSigmoid, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::tanh(Tensor input) {
-  return unary(UnaryOp::kTanh, input);
+void VulkanOperators::tanh(TensorView input, TensorView out) {
+  unary(UnaryOp::kTanh, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::relu(Tensor input) {
-  return unary(UnaryOp::kRelu, input);
+void VulkanOperators::relu(TensorView input, TensorView out) {
+  unary(UnaryOp::kRelu, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::gelu(Tensor input) {
-  return unary(UnaryOp::kGelu, input);
+void VulkanOperators::gelu(TensorView input, TensorView out) {
+  unary(UnaryOp::kGelu, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::silu(Tensor input) {
-  return unary(UnaryOp::kSilu, input);
+void VulkanOperators::silu(TensorView input, TensorView out) {
+  unary(UnaryOp::kSilu, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::quickGelu(Tensor input) {
-  return unary(UnaryOp::kQuickGelu, input);
+void VulkanOperators::quickGelu(TensorView input, TensorView out) {
+  unary(UnaryOp::kQuickGelu, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::sin(Tensor input) {
-  return unary(UnaryOp::kSin, input);
+void VulkanOperators::sin(TensorView input, TensorView out) {
+  unary(UnaryOp::kSin, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::cos(Tensor input) {
-  return unary(UnaryOp::kCos, input);
+void VulkanOperators::cos(TensorView input, TensorView out) {
+  unary(UnaryOp::kCos, input, 0.0f, out);
 }
 
-Tensor VulkanOperators::sum(Tensor input, int dim) {
-  return vulkan::sum(input, dim);
+void VulkanOperators::sum(TensorView input, int dim, TensorView out) {
+  vulkan::sum(input, dim, out);
 }
 
-Tensor VulkanOperators::cumsum(Tensor input, int dim) {
-  return vulkan::cumsum(input, dim);
+void VulkanOperators::cumsum(TensorView input, int dim, TensorView out) {
+  vulkan::cumsum(input, dim, out);
 }
 
-Tensor VulkanOperators::max(Tensor input) {
-  return reduceLastDim(input, ReduceOp::kMax);
+void VulkanOperators::max(TensorView input, TensorView out) {
+  reduceLastDim(input, ReduceOp::kMax, out);
 }
 
-Tensor VulkanOperators::min(Tensor input) {
-  return reduceLastDim(input, ReduceOp::kMin);
+void VulkanOperators::min(TensorView input, TensorView out) {
+  reduceLastDim(input, ReduceOp::kMin, out);
 }
 
-bool VulkanOperators::all(Tensor input) {
+bool VulkanOperators::all(TensorView input) {
   return vulkan::all(input);
 }
 
-bool VulkanOperators::allClose(Tensor A, Tensor B, float rtol, float atol) {
+bool VulkanOperators::allClose(TensorView A, TensorView B, float rtol, float atol) {
   // A comparison for tests, so it is the CPU's, on copies brought over as float.
-  auto toHostFloat = [](const Tensor &x) {
-    return toCpu(x.getDType() == DType::kFloat ? x : vulkan::cast(x, DType::kFloat));
+  auto toHostFloat = [](const TensorView &x) {
+    if (x.getDType() == DType::kFloat) return toCpu(x);
+    Tensor wide = createTensor(x.getShape(), DType::kFloat);
+    vulkan::copy(x, wide);
+    return toCpu(wide);
   };
-  return cpu::allClose(toHostFloat(A), toHostFloat(B), rtol, atol);
+  Tensor a = toHostFloat(A);
+  Tensor b = toHostFloat(B);
+  return cpu::allClose(a, b, rtol, atol);
 }
 
-Tensor VulkanOperators::tensor(lut::Span<const int> shape, DType dtype) {
-  return createTensor(shape, dtype);
-}
-
-Tensor VulkanOperators::tensorLike(Tensor input) {
-  return createTensor(input.getShape(), input.getDType());
-}
-
-Tensor VulkanOperators::zeros(lut::Span<const int> shape, DType dtype) {
-  Tensor output = createTensor(shape, dtype);
-
-  // Zero is zero bits in every type there is, so the buffer is cleared rather than filled. The
-  // fill is in words, and every buffer is a whole number of them.
-  int64_t bytes = dtype.getTotalSize(output.getNumEl());
-  bytes = (bytes + 3) / 4 * 4;
-  if (bytes > 0) _context->fillBuffer(getBuffer(output), getByteOffset(output), bytes, 0);
-  return output;
-}
-
-void VulkanOperators::fill(Tensor input, float value) {
+void VulkanOperators::fill(TensorView input, float value) {
   vulkan::fill(input, value);
 }
 
-void VulkanOperators::copy(Tensor src, Tensor dest) {
+void VulkanOperators::copy(TensorView src, TensorView dest) {
   vulkan::copy(src, dest);
 }
 
-Tensor VulkanOperators::cast(Tensor tensor, DType dtype) {
-  return vulkan::cast(tensor, dtype);
+void VulkanOperators::cast(TensorView input, TensorView out) {
+  vulkan::cast(input, out);
 }
 
-Tensor VulkanOperators::toDevice(Device device, Tensor tensor) {
-  return vulkan::toDevice(device, tensor);
+void VulkanOperators::transfer(TensorView src, TensorView dest) {
+  vulkan::transfer(src, dest);
 }
 
-Tensor VulkanOperators::causalMask(int maxLen) {
-  return vulkan::causalMask(maxLen, getDefaultFloatType());
+void VulkanOperators::causalMask(TensorView out) {
+  vulkan::causalMask(out);
 }
 
-void VulkanOperators::print(Tensor tensor) {
-  cpu::print(toCpu(tensor));
+void VulkanOperators::print(TensorView tensor) {
+  Tensor host = toCpu(tensor);
+  cpu::print(host);
 }
 
-float VulkanOperators::elem(Tensor tensor) {
+float VulkanOperators::elem(TensorView tensor) {
   return vulkan::elem(tensor);
 }
 
-bool VulkanOperators::elemBool(Tensor tensor) {
+bool VulkanOperators::elemBool(TensorView tensor) {
   return vulkan::elemBool(tensor);
 }
 
-Tensor VulkanOperators::rand(lut::Span<const int> shape, DType dtype) {
-  return vulkan::cast(_rand.uniform(shape), dtype);
+void VulkanOperators::rand(TensorView out) {
+  // Drawn in float32, as on CUDA, and converted when `out` is of another type.
+  if (out.getDType() == DType::kFloat) {
+    _rand.uniform(out);
+    return;
+  }
+
+  Tensor wide = createTensor(out.getShape(), DType::kFloat);
+  _rand.uniform(wide);
+  vulkan::cast(wide, out);
 }
 
-Tensor VulkanOperators::randNormal(lut::Span<const int> shape) {
-  return _rand.normal(shape);
+void VulkanOperators::randNormal(TensorView out) {
+  _rand.normal(out);
 }
 
 void VulkanOperators::manualSeed(uint64_t seed) {

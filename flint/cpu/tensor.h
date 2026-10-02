@@ -19,18 +19,17 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor tensor(lut::Span<const int> shape, DType dtype);
-Tensor zeros(lut::Span<const int> shape, DType dtype);
-Tensor causalMask(int length, DType dtype);
+/// Write zero into every element of contiguous `tensor`.
+void fillZero(const TensorView &tensor);
 
-Tensor tensorLike(const Tensor &input);
-Tensor zerosLike(const Tensor &input);
+/// Write the causal mask into `out` (L, L): zero on and below the diagonal, minus infinity above.
+void causalMask(const TensorView &out);
 
 }  // namespace cpu
 }  // namespace op

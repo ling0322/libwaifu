@@ -21,6 +21,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/span.h"
+#include "flint/functional.h"
 #include "flint/cuda/conv1d.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -97,11 +98,30 @@ std::vector<float> referenceConv1d(
 }
 
 Tensor toCuda(const Tensor &x, DType dtype) {
-  return cudaOps()->cast(cudaOps()->toDevice(Device::getCuda(), x), dtype);
+  return F::cast(cudaOps(), F::toDevice(cudaOps(), x, Device::getCuda()), dtype);
 }
 
 Tensor toCpuFloat(const Tensor &x) {
-  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(x, DType::kFloat));
+  return F::toDevice(cudaOps(), F::cast(cudaOps(), x, DType::kFloat), Device::getCpu());
+}
+
+/// op::cuda::conv1d with an output allocated at the shape the arguments ask for -- or a placeholder
+/// where they cannot ask for one, which is what the refusals below are handed.
+Tensor conv1dDirect(
+    const Tensor &x,
+    const Tensor &w,
+    const Tensor &b,
+    const op::cuda::Conv1dOptions &options) {
+  std::vector<int> shape{1, 1, 1};
+  if (x.getDim() == 3 && w.getDim() == 3 && options.stride >= 1) {
+    int length = (x.getShape(2) + 2 * options.padding - options.dilation * (w.getShape(2) - 1) - 1) /
+                     options.stride +
+                 1;
+    shape = {x.getShape(0), w.getShape(0), std::max(length, 1)};
+  }
+  Tensor out = F::empty(x.getDevice(), shape, x.getDType());
+  op::cuda::conv1d(x, w, b, options, out);
+  return out;
 }
 
 /// Runs one case on the card and says whether it agrees with the definition.
@@ -119,7 +139,7 @@ bool matchesReference(const Case &cs, DType dtype) {
   Tensor bCuda = cs.withBias ? toCuda(Tensor::create<float>({cs.k}, lut::makeConstSpan(b)), dtype)
                              : Tensor();
 
-  Tensor actual = op::cuda::conv1d(xCuda, wCuda, bCuda, cs.options);
+  Tensor actual = conv1dDirect(xCuda, wCuda, bCuda, cs.options);
   if (actual.getShape() != std::vector<int>{cs.n, cs.k, outL}) return false;
 
   Tensor reference = Tensor::create<float>({cs.n, cs.k, outL}, lut::makeConstSpan(expected));
@@ -198,42 +218,42 @@ CATCH_TEST_CASE("test conv1d (groups)", "[fl][op][cuda][conv1d]") {
 CATCH_TEST_CASE("test conv1d (a shape it cannot take)", "[fl][op][cuda][conv1d]") {
   if (skipUnavailable()) CATCH_SKIP("cuda device not available");
 
-  Tensor x = toCuda(cpuOps()->rand({1, 8, 16}, DType::kFloat), DType::kFloat16);
-  Tensor w = toCuda(cpuOps()->rand({8, 8, 3}, DType::kFloat), DType::kFloat16);
+  Tensor x = toCuda(F::rand(Device::getCpu(), {1, 8, 16}, DType::kFloat), DType::kFloat16);
+  Tensor w = toCuda(F::rand(Device::getCpu(), {8, 8, 3}, DType::kFloat), DType::kFloat16);
   Tensor noBias;
 
   // Every one of these is something a caller can recover from, so none may end the process.
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(x.view({1, 8, 4, 4}), w, noBias, {1, 1, 1, 1}));
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(x, w.view({8, 8, 3, 1}), noBias, {1, 1, 1, 1}));
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(x, w, noBias, {1, 1, 1, 3}));
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(x, w, noBias, {1, 1, 1, 2}));
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(x, w, noBias, {0, 1, 1, 1}));
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(x, w, noBias, {1, -1, 1, 1}));
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(
-      toCuda(cpuOps()->rand({1, 8, 2}, DType::kFloat), DType::kFloat16),
+  CATCH_REQUIRE_THROWS(conv1dDirect(x.view({1, 8, 4, 4}), w, noBias, {1, 1, 1, 1}));
+  CATCH_REQUIRE_THROWS(conv1dDirect(x, w.view({8, 8, 3, 1}), noBias, {1, 1, 1, 1}));
+  CATCH_REQUIRE_THROWS(conv1dDirect(x, w, noBias, {1, 1, 1, 3}));
+  CATCH_REQUIRE_THROWS(conv1dDirect(x, w, noBias, {1, 1, 1, 2}));
+  CATCH_REQUIRE_THROWS(conv1dDirect(x, w, noBias, {0, 1, 1, 1}));
+  CATCH_REQUIRE_THROWS(conv1dDirect(x, w, noBias, {1, -1, 1, 1}));
+  CATCH_REQUIRE_THROWS(conv1dDirect(
+      toCuda(F::rand(Device::getCpu(), {1, 8, 2}, DType::kFloat), DType::kFloat16),
       w,
       noBias,
       {1, 0, 1, 1}));
-  CATCH_REQUIRE_THROWS(op::cuda::conv1d(
+  CATCH_REQUIRE_THROWS(conv1dDirect(
       x,
       w,
-      toCuda(cpuOps()->rand({4}, DType::kFloat), DType::kFloat16),
+      toCuda(F::rand(Device::getCpu(), {4}, DType::kFloat), DType::kFloat16),
       {1, 1, 1, 1}));
 
   // And it still works afterwards.
-  CATCH_REQUIRE(op::cuda::conv1d(x, w, noBias, {1, 1, 1, 1}).getShape() ==
+  CATCH_REQUIRE(conv1dDirect(x, w, noBias, {1, 1, 1, 1}).getShape() ==
                 std::vector<int>{1, 8, 16});
 }
 
 CATCH_TEST_CASE("test conv1d (through the operator interface)", "[fl][op][cuda][conv1d]") {
   if (skipUnavailable()) CATCH_SKIP("cuda device not available");
 
-  Tensor x = toCuda(cpuOps()->rand({2, 16, 24}, DType::kFloat), DType::kFloat16);
-  Tensor w = toCuda(cpuOps()->rand({16, 1, 5}, DType::kFloat), DType::kFloat16);
-  Tensor b = toCuda(cpuOps()->rand({16}, DType::kFloat), DType::kFloat16);
+  Tensor x = toCuda(F::rand(Device::getCpu(), {2, 16, 24}, DType::kFloat), DType::kFloat16);
+  Tensor w = toCuda(F::rand(Device::getCpu(), {16, 1, 5}, DType::kFloat), DType::kFloat16);
+  Tensor b = toCuda(F::rand(Device::getCpu(), {16}, DType::kFloat), DType::kFloat16);
 
-  Tensor viaOperators = cudaOps()->conv1d(x, w, b, 1, 2, 1, 16);
-  Tensor direct = op::cuda::conv1d(x, w, b, {1, 2, 1, 16});
+  Tensor viaOperators = F::conv1d(cudaOps(), x, w, b, 1, 2, 1, 16);
+  Tensor direct = conv1dDirect(x, w, b, {1, 2, 1, 16});
 
   CATCH_REQUIRE(viaOperators.getShape() == std::vector<int>{2, 16, 24});
   CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(viaOperators), toCpuFloat(direct), 1e-6f, 1e-6f));

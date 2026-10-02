@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -36,16 +36,17 @@ namespace cpu {
 /// @param weight <float|half>(K, C / groups, R), contiguous, and of the input's type or half to
 ///        its float.
 /// @param bias <float|half>(K), or an empty tensor for no bias.
-/// @return <float|half>(N, K, Lout), where Lout is
+/// @param output where the result goes, contiguous: <float|half>(N, K, Lout), where Lout is
 ///         (L + 2 * padding - dilation * (R - 1) - 1) / stride + 1.
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     int stride,
     int padding,
     int dilation,
-    int groups);
+    int groups,
+    const TensorView &output);
 
 }  // namespace cpu
 }  // namespace op

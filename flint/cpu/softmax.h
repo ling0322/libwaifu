@@ -19,13 +19,14 @@
 
 #pragma once
 
-#include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor softmax(Tensor A);
+/// C = softmax(A) along the last dimension; C is of A's shape and type.
+void softmax(const TensorView &A, const TensorView &C);
 
 }  // namespace cpu
 }  // namespace op

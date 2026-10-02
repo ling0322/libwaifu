@@ -77,7 +77,7 @@ __global__ void scatterPenalizedKernel(
 }
 
 template<typename T>
-void repetitionPenalty2DImpl(Tensor logits, Tensor history, float weight) {
+void repetitionPenalty2DImpl(const TensorView &logits, const TensorView &history, float weight) {
   CHECK(logits.getShape(0) == history.getShape(0));
 
   int rows = history.getShape(0);
@@ -98,18 +98,18 @@ void repetitionPenalty2DImpl(Tensor logits, Tensor history, float weight) {
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 }
 
-void repetitionPenalty2D(Tensor logits, Tensor history, float weight) {
+void repetitionPenalty2D(const TensorView &logits, const TensorView &history, float weight) {
   if (logits.getDType() == DType::kFloat) return repetitionPenalty2DImpl<float>(logits, history, weight);
   if (logits.getDType() == DType::kFloat16) return repetitionPenalty2DImpl<half>(logits, history, weight);
 
   NOT_IMPL();
 }
 
-void repetitionPenalty1D(const Tensor &logits, const Tensor &history, float weight) {
+void repetitionPenalty1D(const TensorView &logits, const TensorView &history, float weight) {
   repetitionPenalty2D(logits.unsqueeze(0), history.unsqueeze(0), weight);
 }
 
-void repetitionPenalty(Tensor logits, Tensor history, float weight) {
+void repetitionPenalty(const TensorView &logits, const TensorView &history, float weight) {
   if (logits.getDim() == 2)
     repetitionPenalty2D(logits, history, weight);
   else if (logits.getDim() == 1)

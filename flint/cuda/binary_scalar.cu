@@ -74,13 +74,15 @@ __global__ void binaryScalarGenericKernel(
 }
 
 template<typename T, BinaryScalarOp OP>
-Tensor binaryScalarImpl(const Tensor &tensor, T rhs) {
+void binaryScalarImpl(const TensorView &tensor, T rhs, const TensorView &C) {
   int64_t numel64 = tensor.getNumEl();
   CHECK(numel64 < std::numeric_limits<int>::max());
   int numel = static_cast<int>(numel64);
 
   int d = tensor.getDim();
-  Tensor C = createCudaTensor<T>(tensor.getShape());
+  CHECK(C.getDType() == DType::getType<T>() && C.isContiguous());
+  C.throwIfInvalidShape(tensor.getShape(), "binaryScalarOp");
+  if (numel == 0) return;
   T *dataC = getDataPtrCuda<T>(C);
 
   constexpr int blockSize = 256;
@@ -104,39 +106,46 @@ Tensor binaryScalarImpl(const Tensor &tensor, T rhs) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
-Tensor applyBinaryScalarOp(BinaryScalarOp op, const Tensor &tensor, float rhs) {
+void applyBinaryScalarOp(
+    BinaryScalarOp op,
+    const TensorView &tensor,
+    float rhs,
+    const TensorView &C) {
   CHECK(tensor.getDevice().getType() == Device::kCuda);
   DType dtype = tensor.getDType();
 
   if (op == BinaryScalarOp::ADD && dtype == DType::kFloat16)
-    return binaryScalarImpl<half, BinaryScalarOp::ADD>(tensor, __float2half(rhs));
+    return binaryScalarImpl<half, BinaryScalarOp::ADD>(tensor, __float2half(rhs), C);
   if (op == BinaryScalarOp::SUB && dtype == DType::kFloat16)
-    return binaryScalarImpl<half, BinaryScalarOp::SUB>(tensor, __float2half(rhs));
+    return binaryScalarImpl<half, BinaryScalarOp::SUB>(tensor, __float2half(rhs), C);
   if (op == BinaryScalarOp::MUL && dtype == DType::kFloat16)
-    return binaryScalarImpl<half, BinaryScalarOp::MUL>(tensor, __float2half(rhs));
+    return binaryScalarImpl<half, BinaryScalarOp::MUL>(tensor, __float2half(rhs), C);
   if (op == BinaryScalarOp::DIV && dtype == DType::kFloat16)
-    return binaryScalarImpl<half, BinaryScalarOp::DIV>(tensor, __float2half(rhs));
+    return binaryScalarImpl<half, BinaryScalarOp::DIV>(tensor, __float2half(rhs), C);
   if (op == BinaryScalarOp::ADD && dtype == DType::kFloat)
-    return binaryScalarImpl<float, BinaryScalarOp::ADD>(tensor, rhs);
+    return binaryScalarImpl<float, BinaryScalarOp::ADD>(tensor, rhs, C);
   if (op == BinaryScalarOp::SUB && dtype == DType::kFloat)
-    return binaryScalarImpl<float, BinaryScalarOp::SUB>(tensor, rhs);
+    return binaryScalarImpl<float, BinaryScalarOp::SUB>(tensor, rhs, C);
   if (op == BinaryScalarOp::MUL && dtype == DType::kFloat)
-    return binaryScalarImpl<float, BinaryScalarOp::MUL>(tensor, rhs);
+    return binaryScalarImpl<float, BinaryScalarOp::MUL>(tensor, rhs, C);
   if (op == BinaryScalarOp::DIV && dtype == DType::kFloat)
-    return binaryScalarImpl<float, BinaryScalarOp::DIV>(tensor, rhs);
+    return binaryScalarImpl<float, BinaryScalarOp::DIV>(tensor, rhs, C);
 
   NOT_IMPL();
 }
 
-Tensor applyBinaryScalarOpLong(BinaryScalarOp op, const Tensor &tensor, LongType rhs) {
+void applyBinaryScalarOpLong(
+    BinaryScalarOp op,
+    const TensorView &tensor,
+    LongType rhs,
+    const TensorView &C) {
   CHECK(tensor.getDevice().getType() == Device::kCuda);
   DType dtype = tensor.getDType();
 
   if (op == BinaryScalarOp::MOD && dtype == DType::kLong)
-    return binaryScalarImpl<LongType, BinaryScalarOp::MOD>(tensor, rhs);
+    return binaryScalarImpl<LongType, BinaryScalarOp::MOD>(tensor, rhs, C);
 
   NOT_IMPL();
 }

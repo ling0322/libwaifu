@@ -20,20 +20,20 @@
 #include "flint/cpu/scan.h"
 
 #include "flint/cpu/common.h"
-#include "flint/cpu/tensor.h"
 
 namespace fl {
 namespace op {
 namespace cpu {
 
-Tensor cumsumLastDim(const Tensor &A) {
+void cumsumLastDim(const TensorView &A, const TensorView &C) {
   CHECK(A.getDType() == DType::kFloat);
   CHECK(A.isContiguous());
   CHECK(A.getDim() >= 1);
 
-  Tensor C = tensor(A.getShape(), DType::kFloat);
+  CHECK(C.getDType() == DType::kFloat && C.isContiguous());
+  C.throwIfInvalidShape(A.getShape(), "cumsum");
   int64_t length = A.getShape(-1);
-  if (length == 0) return C;
+  if (length == 0) return;
   int64_t rows = A.getNumEl() / length;
 
   const float *a = getDataPtrCpu<float>(A);
@@ -50,8 +50,6 @@ Tensor cumsumLastDim(const Tensor &A) {
       out[i] = static_cast<float>(running);
     }
   }
-
-  return C;
 }
 
 }  // namespace cpu

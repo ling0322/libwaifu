@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "flint/functional.h"
 #include "flint/cuda/rand.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -40,7 +41,7 @@ Operators *cudaOps() {
 }
 
 Tensor toCpu(const Tensor &a) {
-  return cudaOps()->toDevice(Device::getCpu(), cudaOps()->cast(a, DType::kFloat));
+  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 std::vector<float> values(const Tensor &a) {
@@ -88,7 +89,7 @@ CATCH_TEST_CASE("test Philox4x32-10 against the published vectors", "[op][cuda]"
 CATCH_TEST_CASE("test CUDA randNormal", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor x = toCpu(getOperators(Device::kCuda)->randNormal({4096}));
+  Tensor x = toCpu(F::randNormal(Device(Device::kCuda), {4096}));
 
   const float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
   double sum = 0.0;
@@ -107,7 +108,7 @@ CATCH_TEST_CASE("test CUDA randNormal", "[op][cuda]") {
 CATCH_TEST_CASE("test CUDA rand is uniform over the unit interval", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  std::vector<float> x = values(getOperators(Device::kCuda)->rand({8192}, DType::kFloat));
+  std::vector<float> x = values(F::rand(Device(Device::kCuda), {8192}, DType::kFloat));
 
   // Sixteen even buckets. With 8192 draws each expects 512, and the bound is loose enough that a
   // fair generator will not trip it and tight enough to catch a stuck or clipped word.
@@ -133,13 +134,13 @@ CATCH_TEST_CASE("test CUDA manualSeed repeats a draw", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   cudaOps()->manualSeed(42);
-  std::vector<float> first = values(getOperators(Device::kCuda)->randNormal({1024}));
+  std::vector<float> first = values(F::randNormal(Device(Device::kCuda), {1024}));
 
   cudaOps()->manualSeed(42);
-  std::vector<float> again = values(getOperators(Device::kCuda)->randNormal({1024}));
+  std::vector<float> again = values(F::randNormal(Device(Device::kCuda), {1024}));
 
   cudaOps()->manualSeed(43);
-  std::vector<float> other = values(getOperators(Device::kCuda)->randNormal({1024}));
+  std::vector<float> other = values(F::randNormal(Device(Device::kCuda), {1024}));
 
   CATCH_REQUIRE(first == again);
   CATCH_REQUIRE(first != other);
@@ -152,8 +153,8 @@ CATCH_TEST_CASE("test CUDA rand advances between draws", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   cudaOps()->manualSeed(7);
-  std::vector<float> first = values(getOperators(Device::kCuda)->rand({257}, DType::kFloat));
-  std::vector<float> second = values(getOperators(Device::kCuda)->rand({257}, DType::kFloat));
+  std::vector<float> first = values(F::rand(Device(Device::kCuda), {257}, DType::kFloat));
+  std::vector<float> second = values(F::rand(Device(Device::kCuda), {257}, DType::kFloat));
 
   CATCH_REQUIRE(first != second);
 

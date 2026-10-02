@@ -68,17 +68,20 @@ __global__ void upsampleNearest2dKernel(
 /// The pixel is only ever copied, never arithmetic on, so the element type is carried through
 /// rather than converted at either end.
 template<typename T>
-Tensor upsampleNearest2dImpl(const Tensor &input, int scale) {
+void upsampleNearest2dImpl(const TensorView &input, int scale, const TensorView &output) {
   int inputH = input.getShape(2);
   int inputW = input.getShape(3);
   int outputH = inputH * scale;
   int outputW = inputW * scale;
 
-  Tensor output = createCudaTensor<T>({input.getShape(0), input.getShape(1), outputH, outputW});
+  CHECK(output.getDType() == input.getDType() && output.isContiguous());
+  output.throwIfInvalidShape(
+      {input.getShape(0), input.getShape(1), outputH, outputW}, "upsampleNearest2d");
   int64_t numel = output.getNumEl();
   if (numel > std::numeric_limits<int32_t>::max()) {
     THROW(InvalidArg, "upsampleNearest2d: the result is too large");
   }
+  if (numel == 0) return;
 
   constexpr int kBlockSize = 256;
   dim3 grid = getGrid1D(static_cast<int>(numel), kBlockSize);
@@ -92,8 +95,6 @@ Tensor upsampleNearest2dImpl(const Tensor &input, int scale) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return output;
 }
 
 /// One thread per output element, working out the position it copies from itself the way torch's
@@ -121,17 +122,19 @@ __global__ void upsampleNearest1dKernel(
 }
 
 template<typename T>
-Tensor upsampleNearest1dImpl(const Tensor &input, int size) {
+void upsampleNearest1dImpl(const TensorView &input, const TensorView &output) {
   int length = input.getShape(-1);
+  int size = output.getShape(-1);
 
   std::vector<int> shape = input.getShape();
   shape.back() = size;
-  Tensor output = createCudaTensor<T>(shape);
+  CHECK(output.getDType() == input.getDType() && output.isContiguous());
+  output.throwIfInvalidShape(shape, "upsampleNearest1d");
   int64_t numel = output.getNumEl();
   if (numel > std::numeric_limits<int32_t>::max()) {
     THROW(InvalidArg, "upsampleNearest1d: the result is too large");
   }
-  if (numel == 0) return output;
+  if (numel == 0) return;
 
   constexpr int kBlockSize = 256;
   dim3 grid = getGrid1D(static_cast<int>(numel), kBlockSize);
@@ -145,33 +148,33 @@ Tensor upsampleNearest1dImpl(const Tensor &input, int size) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return output;
 }
 
 }  // namespace
 
-Tensor upsampleNearest1d(const Tensor &input, int size) {
+void upsampleNearest1d(const TensorView &input, const TensorView &out) {
   if (input.getDim() < 1) THROW(InvalidArg, "upsampleNearest1d takes at least one dimension");
+  if (out.getDim() != input.getDim()) THROW(InvalidArg, "upsampleNearest1d: out has another rank");
+  int size = out.getShape(-1);
   if (size < 1) THROW(InvalidArg, "upsampleNearest1d: the size is below one");
   if (input.getShape(-1) < 1) THROW(InvalidArg, "upsampleNearest1d: the input is empty");
   LL_CHECK_CONTIGUOUS(input);
 
-  if (input.getDType() == DType::kFloat16) return upsampleNearest1dImpl<half>(input, size);
-  if (input.getDType() == DType::kFloat) return upsampleNearest1dImpl<float>(input, size);
+  if (input.getDType() == DType::kFloat16) return upsampleNearest1dImpl<half>(input, out);
+  if (input.getDType() == DType::kFloat) return upsampleNearest1dImpl<float>(input, out);
 
   THROW(InvalidArg, "upsampleNearest1d takes a <half> or <float> input");
 }
 
-Tensor upsampleNearest2d(const Tensor &input, int scale) {
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &out) {
   if (input.getDim() != 4) {
     THROW(InvalidArg, "upsampleNearest2d takes a 4-D input, as (N, C, H, W)");
   }
   if (scale < 1) THROW(InvalidArg, "upsampleNearest2d: the scale is below one");
   LL_CHECK_CONTIGUOUS(input);
 
-  if (input.getDType() == DType::kFloat16) return upsampleNearest2dImpl<half>(input, scale);
-  if (input.getDType() == DType::kFloat) return upsampleNearest2dImpl<float>(input, scale);
+  if (input.getDType() == DType::kFloat16) return upsampleNearest2dImpl<half>(input, scale, out);
+  if (input.getDType() == DType::kFloat) return upsampleNearest2dImpl<float>(input, scale, out);
 
   THROW(InvalidArg, "upsampleNearest2d takes a <half> or <float> input");
 }

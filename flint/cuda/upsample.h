@@ -20,6 +20,7 @@
 #pragma once
 
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
@@ -30,14 +31,14 @@ namespace cuda {
 ///        is what they ask for: no interpolation, each output pixel is a copy of one input pixel.
 /// @param input <half>(N, C, H, W), contiguous.
 /// @return <half>(N, C, H * scale, W * scale).
-Tensor upsampleNearest2d(const Tensor &input, int scale);
+void upsampleNearest2d(const TensorView &input, int scale, const TensorView &out);
 
 /// @brief Resize the last dimension to `size` the way `F.interpolate(size=size, mode="nearest")`
 ///        does: output `j` copies input `min(floorf(j * scale), length - 1)`, `scale` being
 ///        `float(length) / size`, which is the index torch's own kernel computes.
 /// @param input <half> or <float>, contiguous, of any rank from one up.
 /// @return the same type and leading dimensions, the last one `size` long.
-Tensor upsampleNearest1d(const Tensor &input, int size);
+void upsampleNearest1d(const TensorView &input, const TensorView &out);
 
 }  // namespace cuda
 }  // namespace op

@@ -21,6 +21,7 @@
 
 #include "flint/dtype.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 #include "mlx/mlx.h"
 
 namespace fl {
@@ -39,16 +40,20 @@ DType fromMlxDtype(mlx::core::Dtype dtype);
 /// flint's shape, stride and offset triple maps straight onto mlx::core::as_strided, so a
 /// transposed or sliced tensor goes to MLX as it is rather than being made contiguous first.
 /// @throw lut::AbortedError if `tensor` does not live on the Metal device.
-mlx::core::array toMlxArray(const Tensor &tensor);
+mlx::core::array toMlxArray(const TensorView &tensor);
 
-/// @brief Wrap an MLX array as a flint tensor on the Metal device.
+/// @brief Evaluate `result` and write its elements into `out`, in row-major order.
 ///
-/// Evaluates `array` -- flint hands out raw pointers, so nothing may stay lazy past the edge of
-/// an operator -- and makes it contiguous if it is not already.
-Tensor fromMlxArray(mlx::core::array array);
+/// What every operator ends with: MLX builds a new array, and flint wants the result in the
+/// tensor it was handed. `result` must have as many elements as `out` and be of its dtype -- no
+/// conversion happens here, so a promotion an operator did not mean shows up as an error rather
+/// than as a silently different result. The bytes go through unified memory, the same pointer
+/// MetalTensorData::getRawData() hands out; `out` may be strided (a slice `F::cat` copies into).
+/// Everything is evaluated before the write, so no GPU work is in flight over `out`'s buffer.
+void writeInto(const mlx::core::array &result, const TensorView &out);
 
 /// @brief The MLX shape of `tensor`, for ops that need the shape without the data.
-mlx::core::Shape toMlxShape(const Tensor &tensor);
+mlx::core::Shape toMlxShape(const TensorView &tensor);
 
 }  // namespace metal
 }  // namespace op

@@ -23,55 +23,31 @@
 
 #include "lutil/error.h"
 #include "lutil/log.h"
-#include "flint/cpu/cpu_tensor_data.h"
-#include "flint/metal/common.h"
-#include "flint/metal/metal_tensor_data.h"
 
 namespace fl {
 namespace op {
 namespace metal {
 
-namespace {
+void transfer(const TensorView &src, const TensorView &dest) {
+  Device::Type from = src.getDevice().getType();
+  Device::Type to = dest.getDevice().getType();
+  CHECK((from == Device::kCpu && to == Device::kMetal) ||
+        (from == Device::kMetal && to == Device::kCpu))
+      << "transfer: Metal moves between the CPU and itself only, not from "
+      << src.getDevice().getName() << " to " << dest.getDevice().getName();
+  CHECK(src.isContiguous() && dest.isContiguous())
+      << "only contiguous tensor is allowed to copy between devices";
+  CHECK(src.getDType() == dest.getDType()) << "transfer: dtype mismatch";
+  CHECK(src.getNumEl() == dest.getNumEl()) << "transfer: the two sides differ in size";
 
-std::shared_ptr<TensorData> createData(Device::Type device, int64_t numel, DType dtype) {
-  switch (device) {
-    case Device::kCpu:
-      return op::cpu::CpuTensorData::create(numel, dtype);
-    case Device::kMetal:
-      return MetalTensorData::create(numel, dtype);
-    default:
-      NOT_IMPL();
-  }
-}
-
-}  // namespace
-
-Tensor toDevice(Device device, const Tensor &tensor) {
-  Device::Type destType = device.getType();
-  if (tensor.getDevice().getType() == destType) return tensor;
-
-  CHECK(tensor.isContiguous()) << "only contiguous tensor is allowed to copy between devices";
-
-  std::shared_ptr<TensorData> srcData = tensor.getInternalData();
-  DType dtype = srcData->getDType();
-  int64_t numel = srcData->getNumEl();
-
-  std::shared_ptr<TensorData> destData = createData(destType, numel, dtype);
-
-  const std::byte *src = srcData->getRawData() + dtype.getTotalSize(tensor.getInternalOffset());
-  std::byte *dest = destData->getRawData();
-  memcpy(dest, src, static_cast<size_t>(dtype.getTotalSize(destData->getNumEl())));
-
-  auto shape = std::make_shared<TensorShape>(tensor.getShape());
-  return Tensor::create(shape, destData);
-}
-
-Tensor toCpu(const Tensor &tensor) {
-  return toDevice(Device(Device::kCpu), tensor);
-}
-
-Tensor toMetal(const Tensor &tensor) {
-  return toDevice(Device(Device::kMetal), tensor);
+  // The tensor's own elements, from its own offset -- not the whole storage it sits in, which is
+  // what this used to copy, reading past the end of a view of part of a buffer.
+  DType dtype = src.getDType();
+  const std::byte *source =
+      src.getInternalData()->getRawData() + dtype.getTotalSize(src.getInternalOffset());
+  std::byte *target =
+      dest.getInternalData()->getRawData() + dtype.getTotalSize(dest.getInternalOffset());
+  memcpy(target, source, static_cast<size_t>(dtype.getTotalSize(src.getNumEl())));
 }
 
 }  // namespace metal

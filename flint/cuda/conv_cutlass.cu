@@ -53,6 +53,7 @@
 
 #include "lutil/error.h"
 #include "lutil/strings.h"
+#include "flint/cuda/binary.h"
 #include "flint/cuda/common.h"
 #include "flint/operators.h"
 
@@ -251,7 +252,7 @@ __global__ void addBiasNhwcKernel(T *data, const T *bias, int channels, int64_t 
 }
 
 template<typename T>
-void addBiasNhwc(Tensor &nhwc, const Tensor &bias, int channels) {
+void addBiasNhwc(const TensorView &nhwc, const TensorView &bias, int channels) {
   int64_t numel = nhwc.getNumEl();
   constexpr int kBlock = 256;
   dim3 grid = getGrid1D(static_cast<int>(std::min<int64_t>(numel, 1 << 20)), kBlock);
@@ -337,12 +338,13 @@ struct Geometry {
 /// checked by the caller; what is left to refuse here is a kernel that reaches past the input.
 /// `name` is the operator the caller asked for, for the message that refusal carries.
 template<typename T>
-Tensor convNchw(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void convNchw(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     const Geometry &g,
-    const char *name) {
+    const char *name,
+    const TensorView &output) {
   int n = input.getShape(0);
   int c = input.getShape(1);
   int h = input.getShape(2);
@@ -358,6 +360,8 @@ Tensor convNchw(
   if (h + 2 * g.padH < g.dilationH * (r - 1) + 1 || w + 2 * g.padW < g.dilationW * (s - 1) + 1) {
     THROW(InvalidArg, lut::sprintf("%s: the input is smaller than the kernel reaches", name));
   }
+  CHECK(output.getDType() == input.getDType() && output.isContiguous());
+  output.throwIfInvalidShape({n, k, outH, outW}, name);
 
   // The filter is (K, C / groups, R, S) and CUTLASS reads (K, R, S, C / groups), which is the same
   // transpose the activation needs, once per output channel. It is done on every call: a weight
@@ -440,13 +444,10 @@ Tensor convNchw(
 
   if (!bias.empty()) addBiasNhwc<T>(nhwcOutput, bias, k);
 
-  Tensor output = createCudaTensor<T>({n, k, outH, outW});
   transpose<T>(getDataPtrCuda<T>(nhwcOutput), getDataPtrCuda<T>(output), n, outH * outW, k);
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-
-  return output;
 }
 
 /// A 1x1 convolution with unit stride and no padding, which is a matrix multiply wearing a hat.
@@ -454,53 +455,61 @@ Tensor convNchw(
 /// In NCHW the pixels of one image are already (C, H * W) and the weight is already (K, C), so
 /// the product is (K, H * W), which is the answer in the layout it was wanted in. No permute, no
 /// convolution kernel, and it is a quarter of the convolutions SDXL runs.
-Tensor conv1x1(const Tensor &input, const Tensor &weight, const Tensor &bias) {
+void conv1x1(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const TensorView &output) {
   int n = input.getShape(0);
   int c = input.getShape(1);
   int h = input.getShape(2);
   int w = input.getShape(3);
   int k = weight.getShape(0);
+  CHECK(output.getDType() == input.getDType() && output.isContiguous());
+  output.throwIfInvalidShape({n, k, h, w}, "conv1x1");
 
-  // Everything here is on the card, so the multiply and the join are the card's own operators'.
+  // Everything here is on the card, so the multiply is the card's own operator's.
   Operators *ops = getOperators(Device::kCuda);
 
-  // (K, C) by (C, H * W), which is (K, H * W): the answer, already in NCHW. One image at a time,
-  // because the weight is the same for all of them and matmul does not broadcast a smaller left
-  // operand over a batched right one.
-  Tensor flatWeight = weight.view({k, c});
-  Tensor result;
+  // (K, C) by (C, H * W), which is (K, H * W): the answer, already in NCHW, written straight into
+  // its image of the output. One image at a time, because the weight is the same for all of them
+  // and matmul does not broadcast a smaller left operand over a batched right one.
+  TensorView flatWeight = weight.view({k, c});
   for (int i = 0; i < n; ++i) {
-    Tensor image = n == 1 ? input.view({c, h * w}) : input.subtensor(i).view({c, h * w});
-    Tensor product = ops->matmul(flatWeight, image);
-    result = result.empty() ? product : ops->cat(result, product, 0);
+    TensorView image = input.subtensor(i).view({c, h * w});
+    ops->matmul(flatWeight, image, output.subtensor(i).view({k, h * w}));
   }
 
-  result = result.view({n, k, h, w});
-  if (!bias.empty()) result = ops->add(result, bias.view({1, k, 1, 1}));
-
-  return result;
+  // The bias is added in place, each element read and written by the one thread.
+  if (!bias.empty()) applyBinaryOp(BinaryOp::ADD, output, bias.view({1, k, 1, 1}), output);
 }
 
 /// `convNchw` for whichever of the two types `input` is in.
-Tensor convNchwAnyType(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
+void convNchwAnyType(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
     const Geometry &g,
-    const char *name) {
-  if (input.getDType() == DType::kFloat16) return convNchw<half>(input, weight, bias, g, name);
-  if (input.getDType() == DType::kFloat) return convNchw<float>(input, weight, bias, g, name);
+    const char *name,
+    const TensorView &output) {
+  if (input.getDType() == DType::kFloat16) {
+    return convNchw<half>(input, weight, bias, g, name, output);
+  }
+  if (input.getDType() == DType::kFloat) {
+    return convNchw<float>(input, weight, bias, g, name, output);
+  }
 
   THROW(InvalidArg, lut::sprintf("%s takes a <half> or <float> input", name));
 }
 
 }  // namespace
 
-Tensor conv2dCutlass(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    const Conv2dOptions &options) {
+void conv2dCutlass(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const Conv2dOptions &options,
+    const TensorView &output) {
   if (input.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D input, as (N, C, H, W)");
   if (weight.getDim() != 4) THROW(InvalidArg, "conv2d takes a 4-D weight, as (K, C, R, S)");
   if (input.getDType() != weight.getDType()) {
@@ -535,7 +544,7 @@ Tensor conv2dCutlass(
 
   bool isPointwise = weight.getShape(2) == 1 && weight.getShape(3) == 1 && options.stride == 1 &&
                      options.padding == 0 && options.dilation == 1;
-  if (isPointwise) return conv1x1(input, weight, bias);
+  if (isPointwise) return conv1x1(input, weight, bias, output);
 
   Geometry geometry{
       options.padding,
@@ -545,14 +554,15 @@ Tensor conv2dCutlass(
       options.dilation,
       options.dilation,
       1};
-  return convNchwAnyType(input, weight, bias, geometry, "conv2d");
+  convNchwAnyType(input, weight, bias, geometry, "conv2d", output);
 }
 
-Tensor conv1d(
-    const Tensor &input,
-    const Tensor &weight,
-    const Tensor &bias,
-    const Conv1dOptions &options) {
+void conv1d(
+    const TensorView &input,
+    const TensorView &weight,
+    const TensorView &bias,
+    const Conv1dOptions &options,
+    const TensorView &output) {
   if (input.getDim() != 3) THROW(InvalidArg, "conv1d takes a 3-D input, as (N, C, L)");
   if (weight.getDim() != 3) THROW(InvalidArg, "conv1d takes a 3-D weight, as (K, C / groups, R)");
   if (input.getDType() != weight.getDType()) {
@@ -600,19 +610,18 @@ Tensor conv1d(
 
   // A signal is an image one row tall and a kernel one tap tall, and the height is neither padded
   // nor stepped over.
-  Tensor image = input.view({n, c, 1, l});
-  Tensor filter = weight.view({k, c / groups, 1, r});
+  TensorView image = input.view({n, c, 1, l});
+  TensorView filter = weight.view({k, c / groups, 1, r});
+  if (output.getDim() != 3) THROW(InvalidArg, "conv1d: the output is not 3-D");
+  TensorView image2d = output.view({n, k, 1, output.getShape(2)});
 
-  Tensor output;
   bool isPointwise = groups == 1 && r == 1 && options.stride == 1 && options.padding == 0;
   if (isPointwise) {
-    output = conv1x1(image, filter, bias);
+    conv1x1(image, filter, bias, image2d);
   } else {
     Geometry geometry{0, options.padding, 1, options.stride, 1, options.dilation, groups};
-    output = convNchwAnyType(image, filter, bias, geometry, "conv1d");
+    convNchwAnyType(image, filter, bias, geometry, "conv1d", image2d);
   }
-
-  return output.view({n, k, output.getShape(3)});
 }
 
 }  // namespace cuda

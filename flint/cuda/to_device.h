@@ -21,16 +21,24 @@
 
 #include "flint/cuda/future_tensor.h"
 #include "flint/tensor.h"
+#include "flint/tensor_view.h"
 
 namespace fl {
 namespace op {
 namespace cuda {
 
-Tensor toCpu(const Tensor &tensor);
-Tensor toCuda(const Tensor &tensor);
-Tensor toCudaHost(const Tensor &tensor);
+/// @brief Copy contiguous `src` into contiguous `dest`, of the same shape and type, between any
+/// two of the CPU, the CUDA device and page-locked (CUDA host) memory.
+///
+/// Exactly `src.getNumEl()` elements are copied, starting at each view's own offset. A pageable
+/// CPU source of at least `StagedUpload::MinBytes` going to the device is sent through
+/// StagedUpload on the copy stream; the compute stream waits for it before anything after the
+/// call runs.
+void transfer(const TensorView &src, const TensorView &dest);
 
-Tensor toDevice(Device device, const Tensor &tensor);
+/// @brief A contiguous copy of contiguous `tensor` on the CPU, or `tensor` itself if it is there.
+/// For a backend that reads a result on the host.
+Tensor toCpu(const Tensor &tensor);
 
 /// @brief Start a copy from page-locked host memory to the GPU and return before it is done.
 ///

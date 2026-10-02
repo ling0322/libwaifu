@@ -99,13 +99,15 @@ __global__ void unaryGenericKernel(
 }
 
 template<typename T, UnaryOp OP>
-Tensor unaryImpl(const Tensor &tensor) {
+void unaryImpl(const TensorView &tensor, const TensorView &C) {
   int64_t numel64 = tensor.getNumEl();
   CHECK(numel64 < std::numeric_limits<int>::max());
   int numel = static_cast<int>(numel64);
 
   int d = tensor.getDim();
-  Tensor C = createCudaTensor<T>(tensor.getShape());
+  CHECK(C.getDType() == DType::getType<T>() && C.isContiguous());
+  C.throwIfInvalidShape(tensor.getShape(), "unaryOp");
+  if (numel == 0) return;
   T *dataC = getDataPtrCuda<T>(C);
 
   constexpr int blockSize = 256;
@@ -128,17 +130,16 @@ Tensor unaryImpl(const Tensor &tensor) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-  return C;
 }
 
-Tensor applyUnaryOp(UnaryOp op, const Tensor &tensor) {
+void applyUnaryOp(UnaryOp op, const TensorView &tensor, const TensorView &C) {
   CHECK(tensor.getDevice().getType() == Device::kCuda);
   DType dtype = tensor.getDType();
 
 #define LL_DISPATCH_UNARY(NAME)                                        \
   if (op == UnaryOp::NAME) {                                           \
-    if (dtype == DType::kFloat16) return unaryImpl<half, UnaryOp::NAME>(tensor);   \
-    if (dtype == DType::kFloat) return unaryImpl<float, UnaryOp::NAME>(tensor);    \
+    if (dtype == DType::kFloat16) return unaryImpl<half, UnaryOp::NAME>(tensor, C);   \
+    if (dtype == DType::kFloat) return unaryImpl<float, UnaryOp::NAME>(tensor, C);    \
   }
 
   LL_DISPATCH_UNARY(NEG)
