@@ -24,31 +24,22 @@
 //! - [`Features::speech_mel`] is what the flow continues: Matcha's `mel_spectrogram` at 24 kHz,
 //!   1920 wide with a hop of 480 -- fifty frames a second, two per speech token.
 //! - [`Features::kaldi_fbank`] is what CAMPPlus reads: `torchaudio.compliance.kaldi.fbank` of the
-//!   16 kHz recording, each band's mean over time removed.
+//!   16 kHz recording, each band's mean over time removed. It is the very feature IndexTTS-2.5
+//!   hands the same CAMPPlus, so it is IndexTTS's [`Spectrograms::campplus`], whose module note
+//!   says how Kaldi's frame processing becomes one convolution.
 //!
 //! Each is a strided convolution by a bank of windowed sinusoids -- [`crate::audio::stft`] -- and
 //! then a filterbank and a logarithm, as a graph. The banks and filterbanks depend on nothing but
 //! the transform, so they are built once, when the model is read, and kept on the device.
-//!
-//! # Kaldi's frame is one matrix
-//!
-//! Kaldi does four things to a frame before its transform: removes its mean, runs a pre-emphasis
-//! filter along it, multiplies by Povey's window, and pads it to 512. Every one is linear in the
-//! frame's samples, so together with the transform they are one `(512, 400)` matrix -- the real and
-//! imaginary part of each of 256 bins, as sums over the frame's 400 samples. [`kaldi_basis`] works
-//! that matrix out, and the graph convolves by it at Kaldi's hop, which is the whole of the frame
-//! processing in one operator. The 257th bin, Nyquist's, is left out: Kaldi's filterbank gives it no
-//! weight.
 
 use std::collections::HashMap;
-use std::f64::consts::PI;
 
 use crate::audio::{
-    apply_filterbank, conv1d, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis,
-    MelScale, Padding,
+    apply_filterbank, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis, MelScale,
+    Padding,
 };
 use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value};
-use crate::indextts::features::{filterbank, povey_window, Analysis};
+use crate::indextts::features::Spectrograms;
 use crate::{Error, Result};
 
 /// What Matcha's `mel_spectrogram` is configured with in `cosyvoice3.yaml`.
@@ -68,8 +59,7 @@ pub struct Features {
     speech_filterbank: Tensor,
     whisper_basis: Tensor,
     whisper_filterbank: Tensor,
-    kaldi_basis: Tensor,
-    kaldi_filterbank: Tensor,
+    kaldi: Spectrograms,
 }
 
 /// `max(x, floor)`, as `floor + relu(x - floor)`; `floor` is a one-element constant.
@@ -81,58 +71,6 @@ fn scalar(g: &Graph, value: f32, device: Device) -> Result<Value> {
     Ok(g.constant(Tensor::from_f32(&[1], &[value])?.to_device(device)?))
 }
 
-/// Kaldi's frame processing and transform as one `(512, 1, 400)` bank. See the module note.
-pub fn kaldi_basis(analysis: &Analysis) -> Result<Tensor> {
-    let length = analysis.frame_length;
-    let bins = analysis.fft_length / 2;
-    let window = povey_window(length);
-
-    // `frame[m]` to `windowed[n]`: the mean removed, pre-emphasis walked backwards so each sample
-    // reads its neighbour as it was, then the window.
-    let centred = |n: usize, m: usize| -> f64 {
-        let identity = if n == m { 1.0 } else { 0.0 };
-        (identity - 1.0 / length as f64) * analysis.scale
-    };
-    let mut frame = vec![0.0f64; length * length];
-    for n in 0..length {
-        for m in 0..length {
-            let emphasised = match n {
-                0 => (1.0 - analysis.preemphasis) * centred(0, m),
-                _ => centred(n, m) - analysis.preemphasis * centred(n - 1, m),
-            };
-            frame[n * length + m] = window[n] * emphasised;
-        }
-    }
-
-    // Row `bin` of the transform times `frame`, a row of the frame matrix at a time so that each
-    // angle is worked out once.
-    let mut values = vec![0.0f32; 2 * bins * length];
-    let mut real = vec![0.0f64; length];
-    let mut imaginary = vec![0.0f64; length];
-    for bin in 0..bins {
-        real.fill(0.0);
-        imaginary.fill(0.0);
-        for n in 0..length {
-            let angle = 2.0 * PI * (bin * n) as f64 / analysis.fft_length as f64;
-            let (cos, sin) = (angle.cos(), angle.sin());
-            let row = &frame[n * length..(n + 1) * length];
-            for m in 0..length {
-                real[m] += cos * row[m];
-                imaginary[m] -= sin * row[m];
-            }
-        }
-        for m in 0..length {
-            values[bin * length + m] = real[m] as f32;
-            values[(bins + bin) * length + m] = imaginary[m] as f32;
-        }
-    }
-
-    Ok(Tensor::from_f32(
-        &[2 * bins as i32, 1, length as i32],
-        &values,
-    )?)
-}
-
 impl Features {
     /// Every bank and filterbank, worked out on the host once and moved to `device`.
     pub fn new(device: Device) -> Result<Features> {
@@ -140,15 +78,6 @@ impl Features {
 
         let speech_window = hann_window(SPEECH_FFT);
         let whisper_window = hann_window(WHISPER_FFT);
-
-        let kaldi = Analysis::kaldi();
-        let bins = kaldi.fft_length / 2;
-        // `filterbank` is `(bins, bands)`; the graph wants `(bands, bins)`.
-        let weights = filterbank(&kaldi);
-        let transposed: Vec<f32> = (0..kaldi.bins)
-            .flat_map(|band| (0..bins).map(move |bin| (band, bin)))
-            .map(|(band, bin)| weights[bin * kaldi.bins + band] as f32)
-            .collect();
 
         Ok(Features {
             device,
@@ -172,11 +101,7 @@ impl Features {
                 MelScale::Slaney,
                 true,
             )?)?,
-            kaldi_basis: on(kaldi_basis(&kaldi)?)?,
-            kaldi_filterbank: on(Tensor::from_f32(
-                &[kaldi.bins as i32, bins as i32],
-                &transposed,
-            )?)?,
+            kaldi: Spectrograms::new(device)?,
         })
     }
 
@@ -283,52 +208,10 @@ impl Features {
     }
 
     /// `kaldi.fbank(num_mel_bins=80, dither=0)` of a 16 kHz recording with each band's mean over
-    /// time removed, as CosyVoice's frontend hands it to CAMPPlus: `(1, frames, 80)`.
-    ///
-    /// Frames of 400 with a hop of 160 and none that runs off the end; the whole of Kaldi's frame
-    /// processing is [`kaldi_basis`]. Then the power spectrum, Kaldi's filterbank and
-    /// `ln(max(x, eps))`.
+    /// time removed, as CosyVoice's frontend hands it to CAMPPlus: `(1, frames, 80)`. IndexTTS's
+    /// frontend hands its CAMPPlus the same thing -- see [`Spectrograms::campplus`].
     pub fn kaldi_fbank(&self, wave: &[f32]) -> Result<Tensor> {
-        let analysis = Analysis::kaldi();
-        let frames = analysis.frames(wave.len());
-        if frames == 0 {
-            return Err(Error::model(
-                "the recording is too short to hear a voice in",
-            ));
-        }
-        let bins = (analysis.fft_length / 2) as i32;
-        let (dtype, device) = (DType::Float, self.device);
-
-        let g = Graph::new();
-        let spectrum = conv1d(
-            &g,
-            g.input("wave"),
-            g.constant(self.kaldi_basis.clone()),
-            None,
-            analysis.hop as i32,
-            0,
-            1,
-            1,
-            dtype,
-            device,
-        )?;
-        let real = g.slice(spectrum, 1, 0, bins);
-        let imaginary = g.slice(spectrum, 1, bins, 2 * bins);
-        let power = g.add(g.square(real), g.square(imaginary));
-        let mel = apply_filterbank(&g, power, g.constant(self.kaldi_filterbank.clone()));
-        let logged = g.log(at_least(
-            &g,
-            mel,
-            scalar(&g, analysis.mel_floor as f32, device)?,
-        ));
-
-        // Frame-major, and each band's mean over the frames taken away.
-        let framewise = g.contiguous(g.transpose(logged, 1, 2));
-        let mean = g.mul_scalar(g.sum(framewise, 1), 1.0 / frames as f32);
-        let mean = g.view(mean, [analysis.bins as i32]);
-        g.output("fbank", g.sub(framewise, mean));
-
-        self.run(&g, &self.upload(wave)?)
+        self.kaldi.campplus(wave)
     }
 }
 

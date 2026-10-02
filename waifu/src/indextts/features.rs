@@ -25,21 +25,26 @@
 //! the same triangles -- and they differ only in what is done to the result afterwards.
 //!
 //! ```text
-//! let (features, frames) = features::w2v_bert(&wave_16k);   // (frames, 160)
-//! let (energies, frames) = features::campplus(&wave_16k);   // (frames, 80)
+//! let spectrograms = Spectrograms::new(device)?;
+//! let features = spectrograms.w2v_bert(&wave_16k)?;       // (1, frames / 2, 160), on the device
+//! let energies = spectrograms.campplus(&wave_16k)?;       // (1, frames, 80)
+//! let mel = spectrograms.reference_mel(&wave_22k)?;       // (1, 80, frames)
 //! ```
 //!
-//! # Why this is on the host and not in a graph
+//! [`Spectrograms`] is what the pipeline runs. The host functions -- [`w2v_bert`], [`campplus`],
+//! [`reference_mel`] -- walk a frame sample by sample, are what the tests hold against torch, and
+//! are what the device graphs are held against in turn.
 //!
-//! [`crate::audio`] puts a short-time Fourier transform in the graph, and this does not use it.
-//! The reason is the three things Kaldi does to a frame *before* it is windowed: the mean is
-//! removed, a pre-emphasis filter is run along it, and the filter reads the sample before the one
-//! it is writing. None of that is a matrix multiply, all of it is per-frame, and expressing it as
-//! graph nodes would be several operators invented for one caller.
+//! # Kaldi's frame is one matrix
 //!
-//! What it costs is nothing worth measuring. Fifteen seconds of speech is about 1,500 frames of
-//! 512 points; the transform below is radix-2 and the whole analysis is some tens of
-//! milliseconds, against a GPT that will spend seconds deciding what to say.
+//! Kaldi does three things to a frame before its transform: removes its mean, runs a pre-emphasis
+//! filter along it -- one that reads the sample before the one it writes -- and multiplies by
+//! Povey's window. None of those is a transform on its own, but every one of them is linear in the
+//! frame's 400 samples, and so is the 512-point DFT after them. Together they are one `(512, 400)`
+//! matrix -- the real and imaginary part of each of 256 bins, as sums over the frame -- which
+//! [`kaldi_basis`] works out once, and a graph convolves the recording by at Kaldi's hop. The whole
+//! of the frame processing is one operator. The 257th bin, Nyquist's, is left out: Kaldi's
+//! filterbank gives it no weight.
 //!
 //! # The two differences, and why neither is the obvious one
 //!
@@ -63,8 +68,15 @@
 //! non-periodic -- the denominator is `n - 1` and not `n`. Both of those are the kind of thing
 //! that is off by a hair everywhere and wrong nowhere in particular.
 
-use crate::audio::{mel_filterbank, MelScale};
-use crate::Result;
+use std::collections::HashMap;
+use std::f64::consts::PI;
+
+use crate::audio::{
+    apply_filterbank, conv1d, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis,
+    MelScale, Padding,
+};
+use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value};
+use crate::{Error, Result};
 
 /// How a waveform is cut into frames and turned into log mel energies.
 ///
@@ -590,5 +602,285 @@ fn greatest_common_divisor(a: u32, b: u32) -> u32 {
     match b {
         0 => a,
         _ => greatest_common_divisor(b, a % b),
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// On the device
+// -------------------------------------------------------------------------------------------
+
+/// Kaldi's frame processing and transform as one `(512, 1, 400)` bank, the waveform unscaled. See
+/// the module note.
+pub fn kaldi_basis(analysis: &Analysis) -> Result<Tensor> {
+    let length = analysis.frame_length;
+    let bins = analysis.fft_length / 2;
+    let window = povey_window(length);
+
+    // `frame[m]` to `windowed[n]`: the mean removed, pre-emphasis walked backwards so each sample
+    // reads its neighbour as it was, then the window.
+    let centred = |n: usize, m: usize| -> f64 {
+        let identity = if n == m { 1.0 } else { 0.0 };
+        (identity - 1.0 / length as f64) * analysis.scale
+    };
+    let mut frame = vec![0.0f64; length * length];
+    for n in 0..length {
+        for m in 0..length {
+            let emphasised = match n {
+                0 => (1.0 - analysis.preemphasis) * centred(0, m),
+                _ => centred(n, m) - analysis.preemphasis * centred(n - 1, m),
+            };
+            frame[n * length + m] = window[n] * emphasised;
+        }
+    }
+
+    // Row `bin` of the transform times `frame`, a row of the frame matrix at a time so that each
+    // angle is worked out once.
+    let mut values = vec![0.0f32; 2 * bins * length];
+    let mut real = vec![0.0f64; length];
+    let mut imaginary = vec![0.0f64; length];
+    for bin in 0..bins {
+        real.fill(0.0);
+        imaginary.fill(0.0);
+        for n in 0..length {
+            let angle = 2.0 * PI * (bin * n) as f64 / analysis.fft_length as f64;
+            let (cos, sin) = (angle.cos(), angle.sin());
+            let row = &frame[n * length..(n + 1) * length];
+            for m in 0..length {
+                real[m] += cos * row[m];
+                imaginary[m] -= sin * row[m];
+            }
+        }
+        for m in 0..length {
+            values[bin * length + m] = real[m] as f32;
+            values[(bins + bin) * length + m] = imaginary[m] as f32;
+        }
+    }
+
+    Ok(Tensor::from_f32(
+        &[2 * bins as i32, 1, length as i32],
+        &values,
+    )?)
+}
+
+/// What [`reference_mel`] is configured with: BigVGAN's `mel_spectrogram` at 22.05 kHz.
+const REFERENCE_RATE: u32 = 22050;
+const REFERENCE_FFT: usize = 1024;
+const REFERENCE_HOP: i32 = 256;
+const REFERENCE_BANDS: usize = 80;
+
+/// `max(x, floor)`, as `floor + relu(x - floor)`; `floor` is a one-element constant.
+fn at_least(g: &Graph, x: Value, floor: Value) -> Value {
+    g.add(g.relu(g.sub(x, floor)), floor)
+}
+
+fn scalar(g: &Graph, value: f32, device: Device) -> Result<Value> {
+    Ok(g.constant(Tensor::from_f32(&[1], &[value])?.to_device(device)?))
+}
+
+/// The three analyses as graphs on the device, their banks and filterbanks built once.
+///
+/// Each takes a waveform as the host has it -- the recording is read and resampled there -- and
+/// gives back a tensor on the device, ready for the model that reads it: nothing but the samples
+/// crosses the bus.
+pub struct Spectrograms {
+    device: Device,
+    kaldi_basis: Tensor,
+    kaldi_filterbank: Tensor,
+    mel_basis: Tensor,
+    mel_filterbank: Tensor,
+}
+
+impl Spectrograms {
+    /// Every bank and filterbank, worked out on the host and moved to `device`.
+    pub fn new(device: Device) -> Result<Spectrograms> {
+        let on = |tensor: Tensor| -> Result<Tensor> { Ok(tensor.to_device(device)?) };
+
+        let kaldi = Analysis::kaldi();
+        let bins = kaldi.fft_length / 2;
+        // `filterbank` is `(bins, bands)` with the Nyquist bin; the graph wants `(bands, bins)`
+        // without it, which it never weighs.
+        let weights = filterbank(&kaldi);
+        let transposed: Vec<f32> = (0..kaldi.bins)
+            .flat_map(|band| (0..bins).map(move |bin| (band, bin)))
+            .map(|(band, bin)| weights[bin * kaldi.bins + band] as f32)
+            .collect();
+
+        // Periodic: `torch.hann_window`'s default, and the opposite of Povey's.
+        let window = hann_window(REFERENCE_FFT);
+
+        Ok(Spectrograms {
+            device,
+            kaldi_basis: on(kaldi_basis(&kaldi)?)?,
+            kaldi_filterbank: on(Tensor::from_f32(
+                &[kaldi.bins as i32, bins as i32],
+                &transposed,
+            )?)?,
+            mel_basis: on(stft_basis(REFERENCE_FFT, &window)?)?,
+            mel_filterbank: on(mel_filterbank(
+                REFERENCE_RATE,
+                REFERENCE_FFT,
+                REFERENCE_BANDS,
+                0.0,
+                f64::from(REFERENCE_RATE) / 2.0,
+                MelScale::Slaney,
+                true,
+            )?)?,
+        })
+    }
+
+    fn upload(&self, wave: &[f32]) -> Result<Tensor> {
+        Ok(Tensor::from_f32(&[1, 1, wave.len() as i32], wave)?.to_device(self.device)?)
+    }
+
+    /// Run a graph that reads no weights, only the wave it is handed.
+    fn run(&self, g: &Graph, wave: &[f32]) -> Result<Tensor> {
+        let nothing: HashMap<String, Tensor> = HashMap::new();
+        let wave = self.upload(wave)?;
+        let context = RunContext::new(&nothing).input("wave", &wave);
+        Ir::compile(g)
+            .run(&context)?
+            .into_iter()
+            .next()
+            .map(|(_, tensor)| tensor)
+            .ok_or_else(|| Error::model("a feature graph produced nothing"))
+    }
+
+    /// [`log_mel`] as nodes: the graph's `"wave"` `(1, 1, samples)` to Kaldi's log mel energies,
+    /// frame-major, `(1, frames, 80)`. The scale is applied to the samples, as Kaldi applies it.
+    fn kaldi_log_mel(&self, g: &Graph, analysis: &Analysis) -> Result<Value> {
+        let bins = (analysis.fft_length / 2) as i32;
+        let (dtype, device) = (DType::Float, self.device);
+
+        let wave = match analysis.scale == 1.0 {
+            true => g.input("wave"),
+            false => g.mul_scalar(g.input("wave"), analysis.scale as f32),
+        };
+        let spectrum = conv1d(
+            g,
+            wave,
+            g.constant(self.kaldi_basis.clone()),
+            None,
+            analysis.hop as i32,
+            0,
+            1,
+            1,
+            dtype,
+            device,
+        )?;
+        let real = g.slice(spectrum, 1, 0, bins);
+        let imaginary = g.slice(spectrum, 1, bins, 2 * bins);
+        let power = g.add(g.square(real), g.square(imaginary));
+        let mel = apply_filterbank(g, power, g.constant(self.kaldi_filterbank.clone()));
+        let logged = g.log(at_least(
+            g,
+            mel,
+            scalar(g, analysis.mel_floor as f32, device)?,
+        ));
+
+        Ok(g.contiguous(g.transpose(logged, 1, 2)))
+    }
+
+    fn frames(analysis: &Analysis, wave: &[f32]) -> Result<usize> {
+        match analysis.frames(wave.len()) {
+            0 => Err(Error::model(
+                "the recording is too short to hear a voice in",
+            )),
+            frames => Ok(frames),
+        }
+    }
+
+    /// [`campplus`] on the device: Kaldi's log mel energies of a 16 kHz recording, unscaled, with
+    /// each band's mean over time removed, `(1, frames, 80)`.
+    pub fn campplus(&self, wave: &[f32]) -> Result<Tensor> {
+        let analysis = Analysis::kaldi();
+        let frames = Self::frames(&analysis, wave)?;
+
+        let g = Graph::new();
+        let framewise = self.kaldi_log_mel(&g, &analysis)?;
+        let mean = g.mul_scalar(g.sum(framewise, 1), 1.0 / frames as f32);
+        let mean = g.view(mean, [analysis.bins as i32]);
+        g.output("fbank", g.sub(framewise, mean));
+
+        self.run(&g, wave)
+    }
+
+    /// [`w2v_bert`] on the device: Kaldi's log mel energies of a 16 kHz recording scaled by
+    /// `2^15`, each band standardized over time with the sample deviation, then frames stacked in
+    /// pairs, `(1, frames / 2, 160)`. An odd last frame counts towards the statistics and is then
+    /// dropped, as the host's is.
+    pub fn w2v_bert(&self, wave: &[f32]) -> Result<Tensor> {
+        let analysis = Analysis::seamless();
+        let frames = Self::frames(&analysis, wave)?;
+        let pairs = (frames / 2) as i32;
+        if pairs == 0 {
+            return Err(Error::model(
+                "the recording is too short to hear a voice in",
+            ));
+        }
+        let bands = analysis.bins as i32;
+
+        let g = Graph::new();
+        let framewise = self.kaldi_log_mel(&g, &analysis)?;
+        let mean = g.mul_scalar(g.sum(framewise, 1), 1.0 / frames as f32);
+        let centred = g.sub(framewise, g.view(mean, [bands]));
+
+        // `n - 1`, which is what torch divides by and numpy does not.
+        let spread = g.mul_scalar(
+            g.sum(g.square(centred), 1),
+            1.0 / (frames.max(2) - 1) as f32,
+        );
+        let scale = g.sqrt(g.add(spread, scalar(&g, 1e-7, self.device)?));
+        let standardized = g.div(centred, g.view(scale, [bands]));
+
+        let kept = g.contiguous(g.slice(standardized, 1, 0, 2 * pairs));
+        g.output(
+            "features",
+            g.view(
+                kept,
+                [Extent::At(1), Extent::At(pairs), Extent::At(2 * bands)],
+            ),
+        );
+
+        self.run(&g, wave)
+    }
+
+    /// [`reference_mel`] on the device: BigVGAN's mel of a 22.05 kHz recording, `(1, 80, frames)`.
+    ///
+    /// Reflected by `(1024 - 256) / 2` at each end and not centred, a periodic Hann of 1024, the
+    /// magnitude `sqrt(re^2 + im^2 + 1e-9)`, Slaney's filterbank to 11.025 kHz, `ln(max(x, 1e-5))`.
+    pub fn reference_mel(&self, wave: &[f32]) -> Result<Tensor> {
+        let pad = (REFERENCE_FFT as i32 - REFERENCE_HOP) / 2;
+        if wave.len() <= pad as usize {
+            return Err(Error::model(
+                "the recording is too short to take a spectrogram of",
+            ));
+        }
+        let (dtype, device) = (DType::Float, self.device);
+
+        let g = Graph::new();
+        let x = pad1d(
+            &g,
+            g.input("wave"),
+            pad,
+            pad,
+            Padding::Reflect,
+            dtype,
+            device,
+        )?;
+        let (real, imaginary) = stft(
+            &g,
+            x,
+            g.constant(self.mel_basis.clone()),
+            REFERENCE_FFT as i32,
+            REFERENCE_HOP,
+            None,
+            dtype,
+            device,
+        )?;
+        let magnitude = magnitude(&g, real, imaginary, 1e-9, dtype, device)?;
+        let mel = apply_filterbank(&g, magnitude, g.constant(self.mel_filterbank.clone()));
+        g.output("mel", g.log(at_least(&g, mel, scalar(&g, 1e-5, device)?)));
+
+        self.run(&g, wave)
     }
 }

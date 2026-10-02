@@ -493,3 +493,27 @@ fn no_guidance_is_one_pass() {
 
     assert_eq!(passes, 3, "three steps, one pass each");
 }
+
+/// The table the loop reads a row a step from is the embedding of each step's own time, row for
+/// row and bit for bit -- the time being the solver's, `step * (1 / steps)` in float32.
+#[test]
+fn the_time_table_is_each_steps_embedding() {
+    let steps = 25;
+    let table = s2mel::timestep_table(steps, 256, CPU).unwrap();
+    assert_eq!(table.shape(), vec![steps, 256]);
+    let table = table.to_vec_f32().unwrap();
+
+    for step in 0..steps {
+        let t = step as f32 * (1.0 / steps as f32);
+        assert_eq!(s2mel::step_time(step, steps), t);
+
+        let one = s2mel::timestep_embedding(t, 256, CPU)
+            .unwrap()
+            .to_vec_f32()
+            .unwrap();
+        assert_eq!(
+            table[step as usize * 256..(step as usize + 1) * 256],
+            one[..]
+        );
+    }
+}

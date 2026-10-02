@@ -56,7 +56,7 @@
 //! the projection always is. This follows the code rather than the configuration.
 
 use crate::audio::conv1d;
-use crate::flint::{DType, Device, Extent, Graph, Tensor, Value};
+use crate::flint::{functional as F, DType, Device, Extent, Graph, Tensor, Value};
 use crate::layers::Linear;
 use crate::Result;
 
@@ -148,6 +148,27 @@ pub fn timestep_embedding(t: f32, size: i32, device: Device) -> Result<Tensor> {
     }
 
     Ok(Tensor::from_f32(&[1, size], &values)?.to_device(device)?)
+}
+
+/// Every step's [`timestep_embedding`] at once, `(steps, size)`: row `step` is the embedding of
+/// [`step_time`]`(step, steps)`. Built once for a trajectory and read a row at a time, so the loop
+/// hands the network a slice rather than a fresh upload for each of its passes.
+pub fn timestep_table(steps: i32, size: i32, device: Device) -> Result<Tensor> {
+    let half = (size / 2) as usize;
+    let mut values = vec![0.0f32; steps as usize * size as usize];
+
+    for (step, row) in values.chunks_mut(size as usize).enumerate() {
+        let t = step_time(step as i32, steps);
+        for index in 0..half {
+            let frequency = (-(10000.0f64).ln() * index as f64 / half as f64).exp();
+            let angle = 1000.0 * t as f64 * frequency;
+
+            row[index] = angle.cos() as f32;
+            row[half + index] = angle.sin() as f32;
+        }
+    }
+
+    Ok(Tensor::from_f32(&[steps, size], &values)?.to_device(device)?)
 }
 
 /// The rotary tables this model turns by: cosine and sine, `(frames, head_dim / 2)` each.
@@ -847,6 +868,12 @@ impl RegulatorConfig {
 // The sampler
 // -------------------------------------------------------------------------------------------
 
+/// The time step `step` of `steps` starts at: `step * (1 / steps)`, in float32 and in that order,
+/// which is how the reference's `t_span` rounds.
+pub fn step_time(step: i32, steps: i32) -> f32 {
+    step as f32 * (1.0 / steps as f32)
+}
+
 /// Walk the trajectory from noise to a mel, calling `evaluate` once or twice per step.
 ///
 /// This is the reference's `solve_euler`: `steps` even steps from 0 to 1, moving the mel at each
@@ -862,100 +889,84 @@ impl RegulatorConfig {
 /// second time with its conditioning removed, and the two are combined as
 /// `(1 + rate) * conditioned - rate * unconditioned`. The caller does the removing, because what
 /// has to be zeroed -- the style and the semantic tokens -- is held in the graph the caller
-/// built; `evaluate` is told which of the two passes it is being asked for.
+/// built; `evaluate` is told which of the two passes it is being asked for, and which step, whose
+/// time is [`step_time`].
 ///
 /// **The direction is not the answer.** What comes back from the network is a velocity, and the
 /// mel is what integrating it produces. A model that returned the mel directly would need a
 /// different loop.
 ///
+/// All of it stays where `z` is: the mixing, the step and the zeroing are tensor operations, so on
+/// a card nothing crosses the bus between the network's passes.
+///
 /// The reference stacks the two passes into one batch of two rather than running the network
 /// twice. That is the same arithmetic -- attention does not mix batch entries -- and two passes
 /// keep the graph at a batch of one, which is what everything else here assumes.
-pub fn solve_euler<F>(
+pub fn solve_euler<E>(
     z: &Tensor,
     prompt: &Tensor,
     prompt_len: i32,
     steps: i32,
     cfg_rate: f32,
-    mut evaluate: F,
+    mut evaluate: E,
 ) -> Result<Tensor>
 where
-    F: FnMut(&Tensor, &Tensor, f32, bool) -> Result<Tensor>,
+    E: FnMut(&Tensor, &Tensor, i32, bool) -> Result<Tensor>,
 {
     assert!(steps >= 1, "a trajectory needs at least one step");
 
     let shape = z.shape();
     assert!(shape.len() == 3, "the noise is (N, C, T)");
 
-    let (channels, frames) = (shape[1], shape[2]);
-    let prompt_len = prompt_len.min(frames);
+    let (batch, channels, frames) = (shape[0], shape[1], shape[2]);
+    let prompt_len = prompt_len.min(frames).max(0);
+    let (device, dtype) = (z.device(), z.dtype());
+    let zeros = |length: i32| Tensor::zeros(&[batch, channels, length], dtype, device);
 
-    let mut x = z.to_device(Device::Cpu)?.to_vec_f32()?;
-    let prompt_values = prompt.to_device(Device::Cpu)?.to_vec_f32()?;
-    let prompt_frames = prompt.shape()[2];
-
-    // The prompt, laid into a tensor the length of the whole utterance and zero after it.
-    let mut held = vec![0.0f32; x.len()];
-    for row in 0..(shape[0] * channels) as usize {
-        for frame in 0..prompt_len as usize {
-            held[row * frames as usize + frame] =
-                prompt_values[row * prompt_frames as usize + frame];
+    // `x` with the frames the prompt covers put back to zero, and the prompt laid into a tensor the
+    // length of the whole utterance, zero after it.
+    let masked = |x: &Tensor| -> Result<Tensor> {
+        match prompt_len {
+            0 => Ok(x.clone()),
+            _ if prompt_len == frames => Ok(zeros(frames)?),
+            _ => Ok(F::cat(
+                &zeros(prompt_len)?,
+                &x.slice(2, prompt_len, frames)?,
+                2,
+            )?),
         }
-    }
-
-    let zero = |values: &mut Vec<f32>| {
-        for row in 0..(shape[0] * channels) as usize {
-            for frame in 0..prompt_len as usize {
-                values[row * frames as usize + frame] = 0.0;
+    };
+    let held = match prompt_len {
+        0 => zeros(frames)?,
+        _ => {
+            let own = prompt.slice(2, 0, prompt_len)?.cast(dtype)?;
+            match prompt_len == frames {
+                true => own.contiguous()?,
+                false => F::cat(&own, &zeros(frames - prompt_len)?, 2)?,
             }
         }
     };
+    let empty = zeros(frames)?;
 
-    zero(&mut x);
-
-    let device = z.device();
-    let dtype = z.dtype();
-    let make = |values: &[f32]| -> Result<Tensor> {
-        Ok(Tensor::from_f32(&shape, values)?
-            .to_device(device)?
-            .cast(dtype)?)
-    };
-
-    let held_tensor = make(&held)?;
-    let empty = make(&vec![0.0f32; x.len()])?;
+    let mut x = masked(&z.contiguous()?)?;
 
     let dt = 1.0 / steps as f32;
     for step in 0..steps {
-        let t = step as f32 * dt;
-        let current = make(&x)?;
-
-        let conditioned = evaluate(&current, &held_tensor, t, true)?
-            .to_device(Device::Cpu)?
-            .cast(DType::Float)?
-            .to_vec_f32()?;
+        let conditioned = evaluate(&x, &held, step, true)?.cast(dtype)?;
 
         let direction = match cfg_rate > 0.0 {
             false => conditioned,
             true => {
-                let free = evaluate(&current, &empty, t, false)?
-                    .to_device(Device::Cpu)?
-                    .cast(DType::Float)?
-                    .to_vec_f32()?;
-
-                conditioned
-                    .iter()
-                    .zip(&free)
-                    .map(|(a, b)| (1.0 + cfg_rate) * a - cfg_rate * b)
-                    .collect()
+                let free = evaluate(&x, &empty, step, false)?.cast(dtype)?;
+                F::sub(
+                    &F::mul_scalar(&conditioned, 1.0 + cfg_rate)?,
+                    &F::mul_scalar(&free, cfg_rate)?,
+                )?
             }
         };
 
-        for (value, step) in x.iter_mut().zip(&direction) {
-            *value += dt * step;
-        }
-
-        zero(&mut x);
+        x = masked(&F::add(&x, &F::mul_scalar(&direction, dt)?)?)?;
     }
 
-    make(&x)
+    Ok(x)
 }

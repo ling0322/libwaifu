@@ -232,6 +232,11 @@ pub struct IndexTts {
     tokenizer: Tokenizer,
     device: Device,
     dtype: DType,
+    /// The three spectrograms a recording is heard as, on the device.
+    spectrograms: features::Spectrograms,
+    /// S2Mel's rotary rows for [`Self::S2MEL_POSITIONS`] frames, cosine and sine, on the device: a
+    /// trajectory `frames` long reads the first `frames` of them.
+    s2mel_rotary: (Tensor, Tensor),
     /// The last recording listened to, by fingerprint, and what was heard in it. The page sends
     /// the same recording with every sentence, and listening again would spend a second of the
     /// card on an answer that is already here.
@@ -255,6 +260,10 @@ impl IndexTts {
     /// required argument; there is no voice of its own for this to fall back on.
     pub const NEEDS_A_RECORDING: &'static str = "IndexTTS-2.5 speaks in the voice of a recording \
          -- drop one on the page, a few seconds of somebody speaking, and say the sentence again";
+
+    /// How many frames S2Mel's rotary rows are built for at load: a fifteen-second prompt and some
+    /// forty seconds of speech at 86 frames a second. A longer trajectory builds its own.
+    const S2MEL_POSITIONS: i32 = 4800;
 
     /// Read the whole model `manifest` describes, onto `device`.
     pub fn from_manifest(
@@ -292,6 +301,8 @@ impl IndexTts {
             weights,
             device,
             dtype,
+            s2mel_rotary: Self::s2mel_rotary_for(Self::S2MEL_POSITIONS, device, dtype)?,
+            spectrograms: features::Spectrograms::new(device)?,
             heard: RefCell::new(None),
         })
     }
@@ -325,12 +336,6 @@ impl IndexTts {
             .collect())
     }
 
-    fn upload(&self, shape: &[i32], values: &[f32]) -> Result<Tensor> {
-        Ok(Tensor::from_f32(shape, values)?
-            .to_device(self.device)?
-            .cast(self.dtype)?)
-    }
-
     /// Everything the voice in `recording` contributes, worked out once.
     pub fn listen(&self, recording: &Sound) -> Result<Reference> {
         // Upstream reads the recording at 22.05 kHz and cuts it there, then resamples the cut.
@@ -342,9 +347,8 @@ impl IndexTts {
         let speaker = self.speaker(&listening)?;
         let emotion = self.emotion(&features, frames)?;
 
-        let (mel, prompt_frames) = features::reference_mel(&wave)?;
-        let prompt_frames = prompt_frames as i32;
-        let prompt_mel = self.upload(&[1, 80, prompt_frames], &mel)?;
+        let prompt_mel = self.spectrograms.reference_mel(&wave)?.cast(self.dtype)?;
+        let prompt_frames = prompt_mel.shape_at(2)?;
         let prompt_condition = self.regulate(&features, prompt_frames)?;
 
         Ok(Reference {
@@ -360,8 +364,8 @@ impl IndexTts {
 
     /// w2v-bert's `hidden_states[17]`, standardized by the release's own mean and deviation.
     fn features(&self, wave: &[f32]) -> Result<(Tensor, i32)> {
-        let (values, pairs) = features::w2v_bert(wave);
-        let frames = pairs as i32;
+        let input = self.spectrograms.w2v_bert(wave)?.cast(self.dtype)?;
+        let frames = input.shape_at(1)?;
         if frames < 3 {
             return Err(Error::model(
                 "the recording is too short to hear a voice in -- a fraction of a second at least",
@@ -370,7 +374,6 @@ impl IndexTts {
 
         let config = w2v_bert::Config::w2v_bert_2();
         let distances = w2v_bert::distance_indices(frames, &config, self.device)?;
-        let input = self.upload(&[1, frames, config.feature_dim], &values)?;
 
         let g = Graph::new();
         let sub = g.subgraph(W2V_BERT);
@@ -396,9 +399,8 @@ impl IndexTts {
 
     /// CAMPPlus's embedding of who is speaking.
     fn speaker(&self, wave: &[f32]) -> Result<Tensor> {
-        let (values, frames) = features::campplus(wave);
-        let frames = frames as i32;
-        let input = self.upload(&[1, frames, 80], &values)?;
+        let input = self.spectrograms.campplus(wave)?.cast(self.dtype)?;
+        let frames = input.shape_at(1)?;
 
         let g = Graph::new();
         let embedding = campplus::graph(
@@ -480,6 +482,18 @@ impl IndexTts {
 
     /// Twenty-five steps of S2Mel over `condition`, continuing `reference`'s mel. `(1, 80, frames)`
     /// with the prompt's frames still on the front.
+    /// S2Mel's rotary rows for `frames` positions, cosine and sine, `(frames, head_dim / 2)`.
+    fn s2mel_rotary_for(frames: i32, device: Device, dtype: DType) -> Result<(Tensor, Tensor)> {
+        let config = s2mel::Config::indextts();
+        let (cos, sin) = s2mel::rotary_tables(
+            frames,
+            config.hidden_dim / config.num_heads,
+            10000.0,
+            device,
+        )?;
+        Ok((cos.cast(dtype)?, sin.cast(dtype)?))
+    }
+
     fn draw_mel(&self, reference: &Reference, condition: &Tensor, frames: i32) -> Result<Tensor> {
         let config = s2mel::Config::indextts();
 
@@ -503,24 +517,24 @@ impl IndexTts {
 
         let ir = Ir::compile(&g);
 
-        let (cos, sin) = s2mel::rotary_tables(
-            frames,
-            config.hidden_dim / config.num_heads,
-            10000.0,
-            self.device,
-        )?;
-        let (cos, sin) = (cos.cast(self.dtype)?, sin.cast(self.dtype)?);
+        let (cos, sin) = match frames <= Self::S2MEL_POSITIONS {
+            true => (
+                self.s2mel_rotary.0.slice(0, 0, frames)?,
+                self.s2mel_rotary.1.slice(0, 0, frames)?,
+            ),
+            false => Self::s2mel_rotary_for(frames, self.device, self.dtype)?,
+        };
+
+        // Every step's time embedding, once, read a row a step.
+        let steps = self.settings.diffusion_steps;
+        let times = s2mel::timestep_table(steps, config.frequency_embedding_size, self.device)?
+            .cast(self.dtype)?;
 
         // What the unguided pass is handed instead: no content, no speaker. The prompt it is
         // handed is `solve_euler`'s to zero.
-        let empty_condition = self.upload(
-            &[1, frames, config.content_dim],
-            &vec![0.0; (frames * config.content_dim) as usize],
-        )?;
-        let empty_style = self.upload(
-            &[1, config.style_dim],
-            &vec![0.0; config.style_dim as usize],
-        )?;
+        let empty_condition =
+            Tensor::zeros(&[1, frames, config.content_dim], self.dtype, self.device)?;
+        let empty_style = Tensor::zeros(&[1, config.style_dim], self.dtype, self.device)?;
 
         let noise = F::randn(&[1, config.in_channels, frames], self.device)?.cast(self.dtype)?;
 
@@ -528,12 +542,10 @@ impl IndexTts {
             &noise,
             &reference.prompt_mel,
             reference.prompt_frames,
-            self.settings.diffusion_steps,
+            steps,
             self.settings.cfg_rate,
-            |x, prompt_x, t, guided| {
-                let time =
-                    s2mel::timestep_embedding(t, config.frequency_embedding_size, self.device)?
-                        .cast(self.dtype)?;
+            |x, prompt_x, step, guided| {
+                let time = times.slice(0, step, step + 1)?;
                 let (cond, style) = match guided {
                     true => (condition, &reference.speaker),
                     false => (&empty_condition, &empty_style),
@@ -656,8 +668,7 @@ impl IndexTts {
 
         // The prompt's condition in front of the sentence's, which is what S2Mel continues.
         let frames = reference.prompt_frames + target;
-        let joined = concatenate_frames(&reference.prompt_condition, &condition)?;
-        let joined = self.upload(&[1, frames, joined.1], &joined.0)?;
+        let joined = F::cat(&reference.prompt_condition, &condition, 1)?;
 
         let mel = self.draw_mel(reference, &joined, frames)?;
         let mel = mel
@@ -848,29 +859,6 @@ pub fn clean_punctuation(text: &str) -> String {
     }
 
     out
-}
-
-/// Two `(1, frames, width)` tensors end to end along the frames, on the host: `(values, width)`.
-fn concatenate_frames(first: &Tensor, second: &Tensor) -> Result<(Vec<f32>, i32)> {
-    let width = first.shape_at(2)?;
-    if second.shape_at(2)? != width {
-        return Err(Error::model(
-            "two conditions of different widths cannot be joined",
-        ));
-    }
-
-    let mut values = first
-        .to_device(Device::Cpu)?
-        .cast(DType::Float)?
-        .to_vec_f32()?;
-    values.extend(
-        second
-            .to_device(Device::Cpu)?
-            .cast(DType::Float)?
-            .to_vec_f32()?,
-    );
-
-    Ok((values, width))
 }
 
 /// `text` packed into pieces of at most `budget` tokens, breaking after punctuation where it can
