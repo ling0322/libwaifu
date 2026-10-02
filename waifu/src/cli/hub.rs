@@ -279,14 +279,22 @@ const CATALOG: &[Published] = &[
         explicit: false,
         kind: Kind::Picture,
     },
-    // The only voice here so far, and named `<family>:<version>` rather than
-    // `<family>:<model>:<version>`: there is no second IndexTTS variant to tell it apart from, so
-    // a `model` slot would name nothing.
+    // Voices are named `<family>:<version>` rather than `<family>:<model>:<version>`: there is no
+    // second IndexTTS or CosyVoice3 variant to tell it apart from, so a `model` slot would name
+    // nothing. CosyVoice3's version is the model's own, `v3` (Fun-CosyVoice 3.0).
     Published {
         name: "indextts:v2.5",
         full_name: "IndexTTS 2.5",
         repo: "ling0322/libwaifu-indextts-2.5",
         manifest: "indextts25.yaml",
+        explicit: false,
+        kind: Kind::Voice,
+    },
+    Published {
+        name: "cosyvoice:v3",
+        full_name: "Fun-CosyVoice3 0.5B",
+        repo: "ling0322/libwaifu-cosyvoice-3",
+        manifest: "cosyvoice3.yaml",
         explicit: false,
         kind: Kind::Voice,
     },
@@ -419,6 +427,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("qwen-image:2.1", "qwen-image:2.1:v1.0"),
     ("qwen-image:2.1-fp8", "qwen-image:2.1-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
+    ("cosyvoice", "cosyvoice:v3"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1629,9 +1638,10 @@ mod tests {
         let voices = listed_voices();
         assert_eq!(
             voices.iter().map(|voice| voice.name).collect::<Vec<_>>(),
-            ["indextts"]
+            ["cosyvoice", "indextts"]
         );
-        assert_eq!(voices[0].full_name, "IndexTTS 2.5");
+        assert_eq!(voices[0].full_name, "Fun-CosyVoice3 0.5B");
+        assert_eq!(voices[1].full_name, "IndexTTS 2.5");
     }
 
     #[test]
@@ -1677,8 +1687,15 @@ mod tests {
         // The family is one of the kinds this build can fetch a model of rather than anything at
         // all: a name is what someone types before they have the model, so it should say what
         // they are about to fetch. Add to this list when the runtime learns another -- of a
-        // picture model or, as `indextts` did, of a voice.
-        const FAMILIES: [&str; 5] = ["sdxl", "anima", "krea2", "qwen-image", "indextts"];
+        // picture model or, as `indextts` and `cosyvoice` did, of a voice.
+        const FAMILIES: [&str; 6] = [
+            "sdxl",
+            "anima",
+            "krea2",
+            "qwen-image",
+            "indextts",
+            "cosyvoice",
+        ];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();

@@ -31,6 +31,7 @@ the disk -- and a voice named that way opens the text2speech page on its own.
 | name | model | published as |
 |---|---|---|
 | `indextts` | IndexTTS 2.5 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-indextts-2.5)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-indextts-2.5)\] |
+| `cosyvoice` | Fun-CosyVoice3 0.5B | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-cosyvoice-3)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-cosyvoice-3)\] |
 
 ## Low memory mode
 
@@ -72,6 +73,8 @@ $ waifu -task img2img -m sdxl:noob -i cat.png
 
 ## Recent updates
 
+- [2026-10-02] Fun-CosyVoice3-0.5B-2512 is published, as `cosyvoice:v3` -- the second voice, Apache 2.0.
+  See [docs/cosyvoice3.md](docs/cosyvoice3.md).
 - [2026-09-23] Qwen-Image 2.1 is published, as `qwen-image:2.1` and `qwen-image:2.1-fp8` -- a
   fourth architecture, Built with Qwen. Its licence is non-commercial (research and evaluation)
   only; see [docs/qwen_image.md](docs/qwen_image.md#licensing).
