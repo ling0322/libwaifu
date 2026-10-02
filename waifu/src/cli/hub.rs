@@ -1588,7 +1588,7 @@ mod tests {
     fn what_a_model_draws_travels_out_with_it() {
         // The list offers the unversioned names, and the label is written beside the versioned
         // one. A lookup that stopped at the alias would report every model as drawing nothing
-        // explicit, which is a screen that quietly stops hiding anything.
+        // explicit, which is a list that never asks before using one.
         let listed = listed();
         let said = |name: &str| {
             listed
