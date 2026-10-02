@@ -82,13 +82,11 @@ pub fn can_take_the_screen() -> bool {
 pub fn choose(task: Option<Task>, device: DeviceOption) -> Result<Option<Launch>, Error> {
     // Asked before the screen is taken, not when the device list comes up. The first question
     // put to a device starts the tensor library, which says what hardware it found on stderr --
-    // straight over whatever is on the screen at that moment. The cards are measured only for
-    // `auto`: a device that was named is not second-guessed, so there is nothing to measure for.
+    // straight over whatever is on the screen at that moment. The cards are measured whatever
+    // `-device` said: a device that was named is not second-guessed, but a run on it that is
+    // going to run out of memory is still worth a warning before it is started.
     let available = Runtime::available();
-    let room = match device {
-        DeviceOption::Auto => Room::measure(&available),
-        _ => Room::default(),
-    };
+    let room = Room::measure(&available);
     let machine = Machine {
         device,
         available,
@@ -175,6 +173,8 @@ fn walk(
                 runtime,
                 why,
                 &machine.available,
+                hub::model_bytes(&picked.model),
+                machine.room,
             )? {
                 Step::Next(runtime) => {
                     return Ok(Some(Launch {
