@@ -249,10 +249,6 @@ void Operators::sub(TensorView input, TensorView other, TensorView out) {
   NOT_IMPL();
 }
 
-void Operators::subFloat(TensorView input, float other, TensorView out) {
-  NOT_IMPL();
-}
-
 void Operators::sum(TensorView input, int dim, TensorView out) {
   NOT_IMPL();
 }

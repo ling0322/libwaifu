@@ -87,8 +87,7 @@ void glu(const TensorView &input, uint32_t op, const char *name, const TensorVie
   checkOutput(output, shape, input.getDType(), name);
   if (output.getNumEl() == 0) return;
 
-  Tensor keep;
-  TensorView x = makeContiguous(input, &keep);
+  Contiguous x(input);
   GluPush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
@@ -140,9 +139,8 @@ void lookup(const TensorView &table, const TensorView &indices, const TensorView
   checkOutput(output, shape, table.getDType(), "lookup");
   if (output.getNumEl() == 0) return;
 
-  Tensor keepTable, keepIndices;
-  TensorView t = makeContiguous(table, &keepTable);
-  TensorView ids = makeContiguous(indices, &keepIndices);
+  Contiguous t(table);
+  Contiguous ids(indices);
   LookupPush push{};
   push.c = getAddress(output);
   push.table = getAddress(t);
@@ -170,8 +168,7 @@ void upsampleNearest2d(const TensorView &input, int scale, const TensorView &out
       "upsampleNearest2d");
   if (output.getNumEl() == 0) return;
 
-  Tensor keep;
-  TensorView x = makeContiguous(input, &keep);
+  Contiguous x(input);
   UpsamplePush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
@@ -202,8 +199,7 @@ void upsampleNearest1d(const TensorView &input, const TensorView &output) {
   checkOutput(output, shape, input.getDType(), "upsampleNearest1d");
   if (output.getNumEl() == 0) return;
 
-  Tensor keep;
-  TensorView x = makeContiguous(input, &keep);
+  Contiguous x(input);
   Upsample1dPush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
@@ -240,8 +236,7 @@ void rotaryEmbedding(
   checkFloat(query.getDType(), "rotaryEmbedding");
   if (positions.getShape(0) == 0) return;
 
-  Tensor keep;
-  TensorView ids = makeContiguous(positions, &keep);
+  Contiguous ids(positions);
   rotate(ids, query, rotaryCache);
   rotate(ids, key, rotaryCache);
 }

@@ -108,8 +108,7 @@ void unary(UnaryOp op, const TensorView &input, float scalar, const TensorView &
 
   Layout layout;
   if (!collapse(input.getShape(), {getStrides(input)}, &layout)) {
-    Tensor keep;
-    unary(op, makeContiguous(input, &keep), scalar, out);
+    unary(op, Contiguous(input), scalar, out);
     return;
   }
 
@@ -153,14 +152,7 @@ void binaryKernel(
 
   Layout layout;
   if (!collapse(a.getShape(), {getStrides(a), getStrides(b)}, &layout)) {
-    Tensor keepA, keepB;
-    binaryKernel(
-        base,
-        outputType,
-        op,
-        makeContiguous(a, &keepA),
-        makeContiguous(b, &keepB),
-        out);
+    binaryKernel(base, outputType, op, Contiguous(a), Contiguous(b), out);
     return;
   }
 
@@ -209,8 +201,7 @@ void mod(const TensorView &input, int64_t other, const TensorView &out) {
   checkOutput(out, input.getShape(), DType::kLong, "mod");
   if (input.getNumEl() == 0) return;
 
-  Tensor keep;
-  TensorView x = makeContiguous(input, &keep);
+  Contiguous x(input);
   ModPush push{};
   push.c = getAddress(out);
   push.a = getAddress(x);

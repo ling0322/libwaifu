@@ -23,7 +23,6 @@
 
 #include <memory>
 
-#include "flint/cuda/future_tensor.h"
 #include "flint/tensor.h"
 #include "flint/tensor_view.h"
 
@@ -40,17 +39,6 @@ namespace cuda {
 /// call runs.
 void transfer(const TensorView &src, const TensorView &dest);
 
-/// @brief A contiguous copy of contiguous `tensor` on the CPU, or `tensor` itself if it is there.
-/// For a backend that reads a result on the host.
-Tensor toCpu(const Tensor &tensor);
-
-/// @brief Start a copy from page-locked host memory to the GPU and return before it is done.
-///
-/// What comes back is a tensor whose memory is allocated and whose bytes are on their way. It
-/// is held in a FutureTensor until take() has been called on it, which orders the
-/// compute stream after the copy without stopping the host.
-FutureTensor toDeviceAsync(Device device, const Tensor &tensor);
-
 /// @brief A copy issued and not yet seen through: the storage it fills and the event that marks
 /// its end.
 struct PendingTransfer {
@@ -60,9 +48,8 @@ struct PendingTransfer {
   cudaEvent_t event;
 };
 
-/// @brief What toDeviceAsync() does, without wrapping the result in a FutureTensor: start copying
-/// contiguous `src` from page-locked host memory to `device`, which has to be the GPU, into fresh
-/// storage of exactly its elements. The caller keeps `src`'s storage alive until the copy has been
+/// @brief Start copying contiguous `src` from page-locked host memory to `device`, which has to be
+/// the GPU, into fresh storage of exactly its elements, and return before it is done. The caller keeps `src`'s storage alive until the copy has been
 /// completed or the event destroyed.
 PendingTransfer startTransferAsync(Device device, const TensorView &src);
 

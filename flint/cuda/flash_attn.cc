@@ -140,7 +140,7 @@ bool flashAttention(
 
   CHECK(output.getDType() == DType::kFloat16 && output.isContiguous());
   output.throwIfInvalidShape({batchSize, numHeads, queryLength, headDim}, "flashAttention");
-  Tensor softmaxLse = createCudaTensorFloat({batchSize, numHeads, queryLength});
+  Tensor softmaxLse = createCudaTensor<float>({batchSize, numHeads, queryLength});
 
   FLASH_NAMESPACE::Flash_fwd_params params{};
 
@@ -202,9 +202,9 @@ bool flashAttention(
   Tensor outputAccum;
   Tensor softmaxLseAccum;
   if (numSplits > 1) {
-    outputAccum = createCudaTensorFloat(
+    outputAccum = createCudaTensor<float>(
         {numSplits, batchSize, numHeads, queryLength, params.d_rounded});
-    softmaxLseAccum = createCudaTensorFloat({numSplits, batchSize, numHeads, queryLength});
+    softmaxLseAccum = createCudaTensor<float>({numSplits, batchSize, numHeads, queryLength});
     params.oaccum_ptr = getDataPtrCuda<float>(outputAccum);
     params.softmax_lseaccum_ptr = getDataPtrCuda<float>(softmaxLseAccum);
   }
@@ -246,7 +246,7 @@ bool pagedFlashAttention(
 
   CHECK(output.getDType() == DType::kFloat16 && output.isContiguous());
   output.throwIfInvalidShape({totalQ, numHeads, headDim}, "pagedFlashAttention");
-  Tensor softmaxLse = createCudaTensorFloat({numHeads, totalQ});
+  Tensor softmaxLse = createCudaTensor<float>({numHeads, totalQ});
 
   FLASH_NAMESPACE::Flash_fwd_params params{};
 

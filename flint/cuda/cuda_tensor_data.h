@@ -47,14 +47,13 @@ class CudaTensorData : public TensorData {
   Device getDevice() const override;
 
   /// @brief The pointer to the memory. Whether the bytes in it are worth reading is not this
-  /// class's to answer: a block still being filled by an asynchronous copy is held inside a
-  /// FutureTensor until that copy has been seen through, and no Tensor reaches an operator before
-  /// then.
+  /// class's to answer: a block still being filled by an asynchronous copy is not to be
+  /// read until completeTransfer() has seen that copy through.
   std::byte *getRawData() const override;
 
   /// @brief Say which stream owns these bytes from now on, which is the stream they will be
-  /// given back in. FutureTensor calls this when it hands the tensor over, because that is the
-  /// moment the compute stream becomes ordered after the copy and takes ownership from it.
+  /// given back in. completeTransfer() calls this, because that is the moment the compute
+  /// stream becomes ordered after the copy and takes ownership from it.
   void setOwningStream(cudaStream_t stream);
 
  private:
@@ -66,8 +65,8 @@ class CudaTensorData : public TensorData {
   ///
   /// It starts as the stream the block was allocated in, which is also the stream that writes it
   /// first: zero for an ordinary tensor, the copy stream for one being fetched. It stays with the
-  /// memory rather than with the pending copy because it outlives the copy -- the tensor handed
-  /// out by FutureTensor::take() is freed long after, and by then this is the only record of
+  /// memory rather than with the pending copy because it outlives the copy -- the storage a
+  /// transfer filled is freed long after it was waited on, and by then this is the only record of
   /// where the block came from.
   cudaStream_t _stream;
 };

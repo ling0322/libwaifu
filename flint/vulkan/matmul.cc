@@ -215,13 +215,13 @@ TensorView expandBatch(const TensorView &b, const TensorView &a) {
 
 // (N, C, H, W) as (N, H, W, C), contiguous: channels last, the layout conv2d_coopmat.comp reads
 // eight channels at a time from. The same permutation takes a weight (K, C, R, S) to (K, R, S, C).
-TensorView channelsLast(const TensorView &tensor, Tensor *keep) {
+Contiguous channelsLast(const TensorView &tensor) {
   std::vector<TensorShape::Elem> elems = {
       {tensor.getShape(0), tensor.getStride(0)},
       {tensor.getShape(2), tensor.getStride(2)},
       {tensor.getShape(3), tensor.getStride(3)},
       {tensor.getShape(1), tensor.getStride(1)}};
-  return makeContiguous(restride(tensor, lut::makeConstSpan(elems)), keep);
+  return Contiguous(restride(tensor, lut::makeConstSpan(elems)));
 }
 
 void conv(
@@ -275,10 +275,9 @@ void conv(
   checkOutput(output, {N, K, P, Q}, input.getDType(), name);
   if (output.getNumEl() == 0) return;
 
-  Tensor keepInput, keepWeight;
-  TensorView x = coopmat ? channelsLast(input, &keepInput) : makeContiguous(input, &keepInput);
-  TensorView w = coopmat ? channelsLast(weight, &keepWeight) : makeContiguous(weight, &keepWeight);
-  Tensor keepBias;
+  Contiguous x = coopmat ? channelsLast(input) : Contiguous(input);
+  Contiguous w = coopmat ? channelsLast(weight) : Contiguous(weight);
+  Contiguous b;
   uint64_t biasAddress = 0;
   if (!bias.empty()) {
     if (bias.getNumEl() != K || bias.getDType() != input.getDType()) {
@@ -287,7 +286,8 @@ void conv(
           name,
           K));
     }
-    biasAddress = getAddress(makeContiguous(bias, &keepBias));
+    b = Contiguous(bias);
+    biasAddress = getAddress(b);
   }
 
   ConvPush push{};

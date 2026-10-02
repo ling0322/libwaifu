@@ -54,17 +54,16 @@ struct GroupNormPush {
   float eps;
 };
 
-// The address of a weight or bias, which must be `size` elements of `dtype` -- or zero when it is
-// empty, which the kernels take to mean there is none. Made contiguous first when it is not, and
-// kept alive through `keep` until the kernel is recorded.
-uint64_t getOperand(
+// A weight or bias, checked to be `size` elements of `dtype` and made contiguous when it is not,
+// to be held until the kernel is recorded. An empty one stays empty: addressOf() gives it zero,
+// which the kernels take to mean there is none.
+Contiguous getOperand(
     const TensorView &operand,
     DType dtype,
     int size,
     const char *op,
-    const char *what,
-    Tensor *keep) {
-  if (operand.empty()) return 0;
+    const char *what) {
+  if (operand.empty()) return Contiguous();
 
   if (operand.getDType() != dtype) {
     throw lut::InvalidArgError(lut::sprintf(
@@ -83,7 +82,12 @@ uint64_t getOperand(
         size));
   }
 
-  return getAddress(makeContiguous(operand, keep));
+  return Contiguous(operand);
+}
+
+/// Where an operand a kernel may be given or not is, or zero where it is not.
+uint64_t addressOf(const TensorView &operand) {
+  return operand.empty() ? 0 : getAddress(operand);
 }
 
 void normOverLastDim(
@@ -99,17 +103,16 @@ void normOverLastDim(
   checkOutput(output, input.getShape(), input.getDType(), op);
   if (input.getNumEl() == 0) return;
 
-  Tensor keepInput;
-  TensorView x = makeContiguous(input, &keepInput);
+  Contiguous x(input);
   int rowLength = x.getShape(-1);
+  Contiguous w = getOperand(weight, x.getDType(), rowLength, op, "weight");
+  Contiguous b = getOperand(bias, x.getDType(), rowLength, op, "bias");
 
-  Tensor keepWeight;
-  Tensor keepBias;
   NormPush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
-  push.weight = getOperand(weight, x.getDType(), rowLength, op, "weight", &keepWeight);
-  push.bias = getOperand(bias, x.getDType(), rowLength, op, "bias", &keepBias);
+  push.weight = addressOf(w);
+  push.bias = addressOf(b);
   push.numRows = static_cast<uint32_t>(x.getNumEl() / rowLength);
   push.rowLength = static_cast<uint32_t>(rowLength);
   push.eps = eps;
@@ -159,18 +162,17 @@ void groupNorm(
   checkOutput(output, input.getShape(), input.getDType(), "groupNorm");
   if (input.getNumEl() == 0) return;
 
-  Tensor keepInput;
-  TensorView x = makeContiguous(input, &keepInput);
+  Contiguous x(input);
   int spatial = x.getShape(2) * x.getShape(3);
   int channelsPerGroup = channels / groups;
+  Contiguous w = getOperand(weight, x.getDType(), channels, "groupNorm", "weight");
+  Contiguous b = getOperand(bias, x.getDType(), channels, "groupNorm", "bias");
 
-  Tensor keepWeight;
-  Tensor keepBias;
   GroupNormPush push{};
   push.c = getAddress(output);
   push.a = getAddress(x);
-  push.weight = getOperand(weight, x.getDType(), channels, "groupNorm", "weight", &keepWeight);
-  push.bias = getOperand(bias, x.getDType(), channels, "groupNorm", "bias", &keepBias);
+  push.weight = addressOf(w);
+  push.bias = addressOf(b);
   push.numGroups = static_cast<uint32_t>(x.getShape(0) * groups);
   push.groupLength = static_cast<uint32_t>(channelsPerGroup * spatial);
   push.spatial = static_cast<uint32_t>(spatial);

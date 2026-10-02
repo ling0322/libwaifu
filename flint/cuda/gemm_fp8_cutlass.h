@@ -30,19 +30,17 @@ namespace cuda {
 ///        sm_80 kernel, so this is true on anything from Ampere on.
 bool isFp8GemmAvailable();
 
-/// @brief D = A * transpose(B) in half, with A read as half and B as E4M3 upcast in registers.
+/// @brief D = A * transpose(B) * channelScale in half, with A read as half and B as E4M3 upcast
+///        in registers.
 ///
 /// The activation stays in half: what the tensor cores run is an HMMA either way, so quantizing
 /// it would buy nothing here. What the narrow weight buys is the traffic between global memory
 /// and the tensor cores, which is what a projection is bound by.
 /// @param A <half>(..., k), contiguous. Leading batch axes are folded into the row count.
-/// @param B the weight, one output channel per row, quantized once at load.
-/// @return <half>(..., B.rows). B.rows has to be a multiple of 8, which is how wide the epilogue
-///         writes, and k a multiple of 16, which is how wide the mainloop reads the weight.
-Tensor gemmFp8(const Tensor &A, const Fp8Operand &B);
-
-/// @brief gemmFp8 writing into `D` <half>(..., n), contiguous, rather than allocating it. `B` is
-///        the <fp8e4m3>(n, k) codes and `channelScale` the <float>(n) scales beside them.
+/// @param B <fp8e4m3>(n, k), contiguous, one output channel per row, quantized once at load.
+/// @param channelScale <float>(n), one scale per row of B.
+/// @param D <half>(..., n), contiguous. n has to be a multiple of 8, which is how wide the
+///          epilogue writes, and k a multiple of 16, which is how wide the mainloop reads B.
 void gemmFp8(TensorView A, TensorView B, TensorView channelScale, TensorView D);
 
 /// @brief gemmFp8 for a weight with one scale for the whole tensor rather than one per channel:
@@ -51,15 +49,8 @@ void gemmFp8(TensorView A, TensorView B, TensorView channelScale, TensorView D);
 /// The same mainloop and tiles as gemmFp8; only the epilogue differs. This is the layout a
 /// checkpoint quantized elsewhere arrives in -- a `weight` of E4M3 codes and a single
 /// `weight_scale` -- so it is multiplied as it was stored rather than requantized per channel.
-/// @param A <half>(..., k), contiguous. Leading batch axes are folded into the row count.
-/// @param B <fp8e4m3>(n, k), contiguous, one output channel per row. n has to be a multiple of 8
-///          and k a multiple of 16, as in gemmFp8.
 /// @param scale <float> with one element, on the device. It is read there by the kernel, so the
 ///              launch does not wait for it.
-/// @return <half>(..., n).
-Tensor gemmFp8TensorScale(const Tensor &A, const Tensor &B, const Tensor &scale);
-
-/// @brief gemmFp8TensorScale writing into `D` <half>(..., n), contiguous.
 void gemmFp8TensorScale(TensorView A, TensorView B, TensorView scale, TensorView D);
 
 }  // namespace cuda

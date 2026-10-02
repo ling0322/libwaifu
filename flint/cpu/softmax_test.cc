@@ -23,7 +23,7 @@
 #include <limits>
 
 #include "catch2/catch_amalgamated.hpp"
-#include "flint/functional.h"
+#include "flint/test_functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 

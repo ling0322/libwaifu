@@ -64,11 +64,6 @@ void divScalar(const TensorView &a, float other, const TensorView &out) {
   writeInto(mlx::core::divide(x, scalarLike(other, x)), out);
 }
 
-void subScalar(const TensorView &a, float other, const TensorView &out) {
-  mlx::core::array x = toMlxArray(a);
-  writeInto(mlx::core::subtract(x, scalarLike(other, x)), out);
-}
-
 void neg(const TensorView &a, const TensorView &out) {
   writeInto(mlx::core::negative(toMlxArray(a)), out);
 }

@@ -126,7 +126,6 @@ class CudaOperators : public Operators {
   void sin(TensorView input, TensorView out) override;
   void cos(TensorView input, TensorView out) override;
   void quickGelu(TensorView input, TensorView out) override;
-  void subFloat(TensorView input, float other, TensorView out) override;
   bool allClose(TensorView A, TensorView B, float rtol, float atol) override;
   void mul(TensorView input, float other, TensorView out) override;
   bool all(TensorView A) override;

@@ -27,9 +27,8 @@
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/error.h"
 #include "lutil/span.h"
-#include "flint/functional.h"
+#include "flint/test_functional.h"
 #include "flint/cuda/fp8.h"
-#include "flint/fp8.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -105,6 +104,47 @@ std::vector<float> exactE4m3Row(float rowScale) {
   return row;
 }
 
+/// What quantizing a weight gives: the E4M3 codes and one scale per row.
+struct Fp8Weight {
+  Tensor data;
+  Tensor channelScale;
+};
+
+Fp8Weight quantize(const Tensor &x) {
+  int rows = x.getShape(0);
+  int k = x.getShape(1);
+  Fp8Weight weight{
+      F::empty(Device::getCuda(), {rows, k}, DType::kFp8E4M3),
+      F::empty(Device::getCuda(), {rows}, DType::kFloat)};
+  op::cuda::quantizeFp8(x, weight.data, weight.channelScale);
+  return weight;
+}
+
+Tensor dequantize(const Fp8Weight &weight) {
+  Tensor out = F::empty(Device::getCuda(), weight.data.getShape(), DType::kFloat16);
+  op::cuda::dequantFp8ToHalf(weight.data, weight.channelScale, out);
+  return out;
+}
+
+/// What `A` (..., k) times a weight of `rows` rows is written into.
+Tensor gemmResult(const Tensor &A, int rows) {
+  std::vector<int> shape = A.getShape();
+  shape.back() = rows;
+  return F::empty(Device::getCuda(), shape, DType::kFloat16);
+}
+
+Tensor gemm(const Tensor &A, const Fp8Weight &weight) {
+  Tensor D = gemmResult(A, weight.data.getShape(0));
+  op::cuda::gemmFp8(A, weight.data, weight.channelScale, D);
+  return D;
+}
+
+Tensor gemmTensorScale(const Tensor &A, const Tensor &codes, const Tensor &scale) {
+  Tensor D = gemmResult(A, codes.getShape(0));
+  op::cuda::gemmFp8TensorScale(A, codes, scale, D);
+  return D;
+}
+
 bool skipUnavailable() {
   if (!isOperatorsAvailable(Device::kCuda)) return true;
   return !op::cuda::isFp8GemmAvailable();
@@ -114,10 +154,10 @@ bool skipUnavailable() {
 /// the weight in both and what is compared is the mainloop and the epilogue.
 bool gemmMatchesReference(const Tensor &a, const Tensor &w) {
   Tensor ha = toCudaHalf(a);
-  Fp8Operand qw = op::cuda::quantizeFp8(toCudaHalf(w));
+  Fp8Weight qw = quantize(toCudaHalf(w));
 
-  Tensor expected = F::matmul(cudaOps(), ha, op::cuda::dequantFp8ToHalf(qw).transpose(0, 1));
-  Tensor actual = op::cuda::gemmFp8(ha, qw);
+  Tensor expected = F::matmul(cudaOps(), ha, dequantize(qw).transpose(0, 1));
+  Tensor actual = gemm(ha, qw);
 
   if (actual.getShape() != std::vector<int>{a.getShape(0), w.getShape(0)}) return false;
   if (!allFinite(actual)) return false;
@@ -135,7 +175,7 @@ Tensor cudaFilled(int n, float value) {
 /// The E4M3 codes of a random (n, k) weight, which is all gemmFp8TensorScale reads of it. Their
 /// own per channel scales are thrown away: the scale the tests multiply by is theirs to choose.
 Tensor randomFp8Codes(int n, int k) {
-  return op::cuda::quantizeFp8(toCudaHalf(F::randNormal(Device::getCpu(), {n, k}))).data;
+  return quantize(toCudaHalf(F::randNormal(Device::getCpu(), {n, k}))).data;
 }
 
 }  // namespace
@@ -152,7 +192,7 @@ CATCH_TEST_CASE("test fp8 quantizer round trip", "[fl][op][cuda][cutlass][fp8]")
   }
   Tensor w = Tensor::create<float>({4, 32}, lut::makeConstSpan(data));
 
-  Fp8Operand q = op::cuda::quantizeFp8(toCudaHalf(w));
+  Fp8Weight q = quantize(toCudaHalf(w));
   CATCH_REQUIRE(q.data.getShape() == std::vector<int>{4, 32});
   CATCH_REQUIRE(q.data.getDType() == DType::kFp8E4M3);
   CATCH_REQUIRE(q.channelScale.getShape() == std::vector<int>{4});
@@ -161,7 +201,7 @@ CATCH_TEST_CASE("test fp8 quantizer round trip", "[fl][op][cuda][cutlass][fp8]")
   Tensor scale = Tensor::create<float>({4}, {1.0f, 8.0f, 0.03125f, 64.0f});
   CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(q.channelScale), scale, 1e-6f, 1e-6f));
 
-  Tensor x = op::cuda::dequantFp8ToHalf(q);
+  Tensor x = dequantize(q);
   CATCH_REQUIRE(x.getShape() == std::vector<int>{4, 32});
   CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
 }
@@ -180,12 +220,12 @@ CATCH_TEST_CASE("test fp8 quantizer shapes", "[fl][op][cuda][cutlass][fp8]") {
   for (const Case &c : cases) {
     CATCH_INFO("rows = " << c.rows << ", k = " << c.k);
     Tensor w = F::randNormal(Device::getCpu(), {c.rows, c.k});
-    Fp8Operand q = op::cuda::quantizeFp8(toCudaHalf(w));
+    Fp8Weight q = quantize(toCudaHalf(w));
 
     CATCH_REQUIRE(q.data.getShape() == std::vector<int>{c.rows, c.k});
     CATCH_REQUIRE(q.channelScale.getShape() == std::vector<int>{c.rows});
 
-    Tensor x = op::cuda::dequantFp8ToHalf(q);
+    Tensor x = dequantize(q);
     CATCH_REQUIRE(x.getShape() == std::vector<int>{c.rows, c.k});
     CATCH_REQUIRE(allFinite(x));
 
@@ -204,16 +244,16 @@ CATCH_TEST_CASE("test fp8 quantizer zero row", "[fl][op][cuda][cutlass][fp8]") {
   for (int i = 32; i < 64; ++i) data[i] = 1.0f;
 
   Tensor w = Tensor::create<float>({2, 32}, lut::makeConstSpan(data));
-  Fp8Operand q = op::cuda::quantizeFp8(toCudaHalf(w));
+  Fp8Weight q = quantize(toCudaHalf(w));
 
-  Tensor x = op::cuda::dequantFp8ToHalf(q);
+  Tensor x = dequantize(q);
   CATCH_REQUIRE(allFinite(x));
   CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
 
   // And a GEMM against it comes back as zeros rather than as NaN.
   Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {8, 32}));
-  Fp8Operand qZero = op::cuda::quantizeFp8(toCudaHalf(F::zeros(Device::getCpu(), {8, 32}, DType::kFloat)));
-  Tensor out = op::cuda::gemmFp8(a, qZero);
+  Fp8Weight qZero = quantize(toCudaHalf(F::zeros(Device::getCpu(), {8, 32}, DType::kFloat)));
+  Tensor out = gemm(a, qZero);
   CATCH_REQUIRE(allFinite(out));
   CATCH_REQUIRE(
       cpuOps()->allClose(toCpuFloat(out), F::zeros(Device::getCpu(), {8, 8}, DType::kFloat), 1e-6f, 1e-6f));
@@ -234,8 +274,8 @@ CATCH_TEST_CASE("test fp8 quantizer dynamic range", "[fl][op][cuda][cutlass][fp8
   }
 
   Tensor w = Tensor::create<float>({4, 64}, lut::makeConstSpan(data));
-  Fp8Operand q = op::cuda::quantizeFp8(toCudaHalf(w));
-  Tensor x = op::cuda::dequantFp8ToHalf(q);
+  Fp8Weight q = quantize(toCudaHalf(w));
+  Tensor x = dequantize(q);
 
   CATCH_REQUIRE(allFinite(x));
   for (int r = 0; r < 4; ++r) {
@@ -279,19 +319,19 @@ CATCH_TEST_CASE("test gemmFp8 (shapes)", "[fl][op][cuda][cutlass][fp8]") {
 CATCH_TEST_CASE("test gemmFp8 (batch axes)", "[fl][op][cuda][cutlass][fp8]") {
   if (skipUnavailable()) CATCH_SKIP("no cuda device available");
 
-  Fp8Operand qw = op::cuda::quantizeFp8(toCudaHalf(F::randNormal(Device::getCpu(), {64, 128})));
+  Fp8Weight qw = quantize(toCudaHalf(F::randNormal(Device::getCpu(), {64, 128})));
 
   Tensor a3 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 128}));
-  Tensor out3 = op::cuda::gemmFp8(a3, qw);
+  Tensor out3 = gemm(a3, qw);
   CATCH_REQUIRE(out3.getShape() == std::vector<int>{2, 3, 64});
   CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(out3.view({-1, 64})),
-      toCpuFloat(op::cuda::gemmFp8(a3.view({-1, 128}), qw)),
+      toCpuFloat(gemm(a3.view({-1, 128}), qw)),
       1e-6f,
       1e-6f));
 
   Tensor a4 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 5, 128}));
-  CATCH_REQUIRE(op::cuda::gemmFp8(a4, qw).getShape() == std::vector<int>{2, 3, 5, 64});
+  CATCH_REQUIRE(gemm(a4, qw).getShape() == std::vector<int>{2, 3, 5, 64});
 }
 
 CATCH_TEST_CASE("test gemmFp8 (reused weight)", "[fl][op][cuda][cutlass][fp8]") {
@@ -299,13 +339,13 @@ CATCH_TEST_CASE("test gemmFp8 (reused weight)", "[fl][op][cuda][cutlass][fp8]") 
 
   // A weight is quantized once at load and multiplied for the rest of the process, so the operand
   // has to survive being used again, and by a different row count than the first time.
-  Fp8Operand qw = op::cuda::quantizeFp8(toCudaHalf(F::randNormal(Device::getCpu(), {128, 256})));
-  Tensor reference = op::cuda::dequantFp8ToHalf(qw).transpose(0, 1);
+  Fp8Weight qw = quantize(toCudaHalf(F::randNormal(Device::getCpu(), {128, 256})));
+  Tensor reference = dequantize(qw).transpose(0, 1);
 
   for (int m : {1, 7, 64}) {
     CATCH_INFO("m = " << m);
     Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {m, 256}));
-    CATCH_REQUIRE(relativeRmse(op::cuda::gemmFp8(a, qw), F::matmul(cudaOps(), a, reference)) < 5e-3);
+    CATCH_REQUIRE(relativeRmse(gemm(a, qw), F::matmul(cudaOps(), a, reference)) < 5e-3);
   }
 }
 
@@ -323,11 +363,11 @@ CATCH_TEST_CASE("test gemmFp8 (channel scale per column)", "[fl][op][cuda][cutla
   }
 
   Tensor w = Tensor::create<float>({16, 16}, lut::makeConstSpan(data));
-  Fp8Operand qw = op::cuda::quantizeFp8(toCudaHalf(w));
+  Fp8Weight qw = quantize(toCudaHalf(w));
 
   std::vector<float> ones(4 * 16, 1.0f);
   Tensor a = toCudaHalf(Tensor::create<float>({4, 16}, lut::makeConstSpan(ones)));
-  Tensor out = op::cuda::gemmFp8(a, qw);
+  Tensor out = gemm(a, qw);
 
   std::vector<float> expected(4 * 16);
   for (int m = 0; m < 4; ++m) {
@@ -360,14 +400,14 @@ CATCH_TEST_CASE("test gemmFp8TensorScale (shapes)", "[fl][op][cuda][cutlass][fp8
     CATCH_INFO("m = " << m << ", n = " << n << ", k = " << k);
     Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {m, k}));
     Tensor codes = randomFp8Codes(n, k);
-    Fp8Operand uniform = makeFp8Operand(codes, cudaFilled(n, kScale));
+    Fp8Weight uniform{codes, cudaFilled(n, kScale)};
 
-    Tensor actual = op::cuda::gemmFp8TensorScale(a, codes, scale);
+    Tensor actual = gemmTensorScale(a, codes, scale);
     if (actual.getShape() != std::vector<int>{m, n}) return false;
     if (!allFinite(actual)) return false;
 
     // Against a half GEMM on the dequantized weight, as gemmFp8 is checked.
-    Tensor reference = F::matmul(cudaOps(), a, op::cuda::dequantFp8ToHalf(uniform).transpose(0, 1));
+    Tensor reference = F::matmul(cudaOps(), a, dequantize(uniform).transpose(0, 1));
     if (relativeRmse(actual, reference) >= 5e-3) return false;
 
     // And against gemmFp8 with the same scale on every channel, which is the same mainloop and the
@@ -375,7 +415,7 @@ CATCH_TEST_CASE("test gemmFp8TensorScale (shapes)", "[fl][op][cuda][cutlass][fp8
     // Element by element, since allClose's comparison is strict and a tolerance of zero fails
     // even two identical tensors.
     Tensor x = toCpuFloat(actual);
-    Tensor y = toCpuFloat(op::cuda::gemmFp8(a, uniform));
+    Tensor y = toCpuFloat(gemm(a, uniform));
     const float *px = x.getInternalData()->getData<float>(x.getInternalOffset());
     const float *py = y.getInternalData()->getData<float>(y.getInternalOffset());
     return std::equal(px, px + x.getNumEl(), py);
@@ -402,7 +442,7 @@ CATCH_TEST_CASE("test gemmFp8TensorScale (scale applied)", "[fl][op][cuda][cutla
   std::vector<float> data;
   for (int r = 0; r < 8; ++r) data.insert(data.end(), row.begin(), row.end());
   Tensor w = Tensor::create<float>({8, 32}, lut::makeConstSpan(data));
-  Tensor codes = op::cuda::quantizeFp8(toCudaHalf(w)).data;
+  Tensor codes = quantize(toCudaHalf(w)).data;
 
   float rowSum = 0.0f;
   for (float v : row) rowSum += v;
@@ -412,7 +452,7 @@ CATCH_TEST_CASE("test gemmFp8TensorScale (scale applied)", "[fl][op][cuda][cutla
 
   for (float scale : {0.001953125f, 3.0f}) {
     CATCH_INFO("scale = " << scale);
-    Tensor out = op::cuda::gemmFp8TensorScale(a, codes, cudaFilled(1, scale));
+    Tensor out = gemmTensorScale(a, codes, cudaFilled(1, scale));
     CATCH_REQUIRE(allFinite(out));
 
     Tensor actual = toCpuFloat(out);
@@ -432,31 +472,13 @@ CATCH_TEST_CASE("test gemmFp8TensorScale (batch axes)", "[fl][op][cuda][cutlass]
   Tensor scale = cudaFilled(1, 0.5f);
 
   Tensor a3 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 128}));
-  Tensor out3 = op::cuda::gemmFp8TensorScale(a3, codes, scale);
+  Tensor out3 = gemmTensorScale(a3, codes, scale);
   CATCH_REQUIRE(out3.getShape() == std::vector<int>{2, 3, 64});
   CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(out3.view({-1, 64})),
-      toCpuFloat(op::cuda::gemmFp8TensorScale(a3.view({-1, 128}), codes, scale)),
+      toCpuFloat(gemmTensorScale(a3.view({-1, 128}), codes, scale)),
       1e-6f,
       1e-6f));
-}
-
-CATCH_TEST_CASE("test makeFp8Operand rejects what it cannot use", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  Fp8Operand q = op::cuda::quantizeFp8(toCudaHalf(F::randNormal(Device::getCpu(), {8, 32})));
-
-  CATCH_REQUIRE_NOTHROW(makeFp8Operand(q.data, q.channelScale));
-  // The data where the scale belongs.
-  CATCH_REQUIRE_THROWS_AS(makeFp8Operand(q.channelScale, q.channelScale), lut::Error);
-  // One scale for a weight that has eight channels.
-  CATCH_REQUIRE_THROWS_AS(
-      makeFp8Operand(q.data, q.channelScale.slice(0, {0, 1})),
-      lut::Error);
-  // A host side weight, which would otherwise reach the kernel as an address it may not touch.
-  CATCH_REQUIRE_THROWS_AS(
-      makeFp8Operand(q.data, F::toDevice(cudaOps(), q.channelScale, Device::getCpu())),
-      lut::Error);
 }
 
 }  // namespace fl

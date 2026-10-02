@@ -104,21 +104,6 @@ Tensor &Tensor::operator=(Tensor &&tensor) {
   return *this;
 }
 
-void Tensor::read(lut::Reader *fp) {
-  std::string s = fp->readString(4);
-  if (s != "tnsr") {
-    throw lut::AbortedError("bad tensor format");
-  }
-
-  _shape = TensorShape::read(fp);
-  _data = op::cpu::CpuTensorData::read(fp);
-  _offset = 0;
-
-  // check
-  if (_shape->getNumEl() != _data->getNumEl())
-    throw lut::AbortedError("tensor data and shape mismatch.");
-}
-
 namespace {
 
 /// The tensor a view of `data` is, which shares the storage with whatever it was taken of.
@@ -215,10 +200,6 @@ std::shared_ptr<TensorData> Tensor::getInternalData() const {
   return _data;
 }
 
-Operators *Tensor::getOperators() const {
-  return fl::getOperators(getDevice().getType());
-}
-
 TensorShape::TensorShape(const TensorShape &size)
     : _data(size._data.copy()) {
 }
@@ -263,25 +244,6 @@ std::shared_ptr<TensorShape> TensorShape::subsize(int d) const {
   std::copy(_data.begin() + d, _data.end(), subsize->_data.begin());
 
   return subsize;
-}
-
-std::shared_ptr<TensorShape> TensorShape::read(lut::Reader *fp) {
-  // rank
-  int16_t rank = fp->readValue<int16_t>();
-  if (rank > 16 || rank < 0) {
-    throw lut::AbortedError("invalid rank.");
-  }
-
-  // shape
-  std::vector<ShapeType> shape;
-  for (int16_t d = 0; d < rank; ++d) {
-    int32_t size = fp->readValue<int32_t>();
-    if (size >= 1048576 || size <= 0) throw lut::AbortedError("invalid size in shape.");
-
-    shape.push_back(size);
-  }
-
-  return std::make_shared<TensorShape>(lut::makeConstSpan(shape));
 }
 
 std::shared_ptr<TensorShape> TensorShape::transpose(int dim0, int dim1) const {

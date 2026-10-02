@@ -136,10 +136,6 @@ void VulkanOperators::sub(TensorView input, TensorView other, TensorView out) {
   binary(BinaryOp::kSub, input, other, out);
 }
 
-void VulkanOperators::subFloat(TensorView input, float other, TensorView out) {
-  unary(UnaryOp::kAddScalar, input, -other, out);
-}
-
 void VulkanOperators::mul(TensorView input, TensorView other, TensorView out) {
   binary(BinaryOp::kMul, input, other, out);
 }

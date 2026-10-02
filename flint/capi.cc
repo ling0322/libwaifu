@@ -103,23 +103,6 @@ fl::Device toDevice(fl_device_type_t device) {
   }
 }
 
-fl_device_type_t fromDevice(fl::Device device) {
-  switch (device.getType()) {
-    case fl::Device::kCpu:
-      return FL_DEVICE_CPU;
-    case fl::Device::kCuda:
-      return FL_DEVICE_CUDA;
-    case fl::Device::kCudaHost:
-      return FL_DEVICE_CUDA_HOST;
-    case fl::Device::kMetal:
-      return FL_DEVICE_METAL;
-    case fl::Device::kVulkan:
-      return FL_DEVICE_VULKAN;
-    default:
-      return FL_DEVICE_UNKNOWN;
-  }
-}
-
 fl::TensorData &deref(fl_tensor_data_t data) {
   if (!data) throw lut::InvalidArgError("data is null");
   return *reinterpret_cast<fl::TensorData *>(data);
@@ -370,30 +353,6 @@ void fl_tensor_data_destroy(fl_tensor_data_t data) {
   delete reinterpret_cast<fl::TensorData *>(data);
 }
 
-int32_t fl_tensor_data_get_numel(fl_tensor_data_t data, int64_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(data).getNumEl();
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_data_get_dtype(fl_tensor_data_t data, fl_dtype_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = fromDType(deref(data).getDType());
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_data_get_device(fl_tensor_data_t data, fl_device_type_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = fromDevice(deref(data).getDevice());
-    return clearError();
-  });
-}
-
 int32_t fl_tensor_data_get_host_ptr(fl_tensor_data_t data, void **out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
@@ -451,62 +410,6 @@ int32_t fl_tensor_view_create(
 
 void fl_tensor_view_destroy(fl_tensor_view_t view) {
   delete reinterpret_cast<fl::TensorView *>(view);
-}
-
-int32_t fl_tensor_view_get_dim(fl_tensor_view_t view, int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(view).getDim();
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_view_get_shape(fl_tensor_view_t view, int32_t dim, int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(view).getShape(dim);
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_view_get_stride(fl_tensor_view_t view, int32_t dim, int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(view).getStride(dim);
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_view_get_offset(fl_tensor_view_t view, int64_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(view).getInternalOffset();
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_view_get_dtype(fl_tensor_view_t view, fl_dtype_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = fromDType(deref(view).getDType());
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_view_get_device(fl_tensor_view_t view, fl_device_type_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = fromDevice(deref(view).getDevice());
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_view_is_contiguous(fl_tensor_view_t view, int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(view).isContiguous() ? 1 : 0;
-    return clearError();
-  });
 }
 
 // --- Copies and conversions -------------------------------------------------------------------

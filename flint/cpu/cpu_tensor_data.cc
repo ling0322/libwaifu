@@ -37,23 +37,6 @@ std::byte *CpuTensorData::getRawData() const {
   return reinterpret_cast<std::byte *>(_data);
 }
 
-void CpuTensorData::readSlot(lut::Reader *fp) {
-  _dtype = fp->readValue<int16_t>();
-  if (!_dtype.isValid()) THROW(Aborted, "invalid dtype.");
-
-  _numel = fp->readValue<int64_t>();
-  if (_numel > MaxNumEl) throw lut::AbortedError("tensor too big");
-
-  int64_t size = _dtype.getTotalSize(_numel);
-
-  CHECK(_data == nullptr);
-  _data = lut::alloc32ByteAlignedMem(size);
-  fp->readSpan(lut::makeSpan(reinterpret_cast<int8_t *>(_data), size));
-
-  int magicNumber = fp->readValue<int16_t>();
-  if (magicNumber != 0x55aa) throw lut::AbortedError("bad tensor data format (magic number).");
-}
-
 std::unique_ptr<TensorData> CpuTensorData::create(int64_t numel, DType dtype) {
   auto tensorData = std::make_unique<CpuTensorData>();
 
@@ -63,19 +46,6 @@ std::unique_ptr<TensorData> CpuTensorData::create(int64_t numel, DType dtype) {
   tensorData->_numel = numel;
   tensorData->_dtype = dtype;
 
-  return tensorData;
-}
-
-std::shared_ptr<TensorData> CpuTensorData::read(lut::Reader *fp) {
-  std::shared_ptr<CpuTensorData> tensorData = std::make_shared<CpuTensorData>();
-
-  if (fp->readString(4) != "tdat") throw lut::AbortedError("bad tensor data format.");
-
-  int32_t numSlot = fp->readValue<int32_t>();
-  CHECK(numSlot == 1);
-
-  // slot 0
-  tensorData->readSlot(fp);
   return tensorData;
 }
 

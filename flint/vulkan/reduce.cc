@@ -85,8 +85,7 @@ void reduceLastDim(const TensorView &input, ReduceOp op, const TensorView &out) 
   checkOutput(out, withoutLastDim(input), input.getDType(), "a reduction");
   if (input.getNumEl() == 0) return;
 
-  Tensor keep;
-  TensorView x = makeContiguous(input, &keep);
+  Contiguous x(input);
   dispatchRows(kernelName("reduce", x.getDType()).c_str(), x, out, static_cast<uint32_t>(op));
 }
 
@@ -117,8 +116,7 @@ void cumsum(const TensorView &input, int dim, const TensorView &out) {
   // shape as it was.
   dim = realDim(input, dim);
   bool moved = dim != input.getDim() - 1;
-  Tensor keep;
-  TensorView x = makeContiguous(moved ? input.transpose(dim, -1) : input, &keep);
+  Contiguous x(moved ? input.transpose(dim, -1) : input);
 
   if (!moved) {
     dispatchRows(kernelName("scan", x.getDType()).c_str(), x, out, 0);
@@ -136,8 +134,7 @@ void softmax(const TensorView &input, const TensorView &out) {
   checkOutput(out, input.getShape(), input.getDType(), "softmax");
   if (input.getNumEl() == 0) return;
 
-  Tensor keep;
-  TensorView x = makeContiguous(input, &keep);
+  Contiguous x(input);
   dispatchRows(kernelName("softmax", x.getDType()).c_str(), x, out, 0);
 }
 
@@ -145,8 +142,8 @@ bool all(const TensorView &input) {
   if (input.getDType() != DType::kBool) throw lut::InvalidArgError("all takes a bool tensor");
   if (input.getNumEl() == 0) return true;
 
-  Tensor keep;
-  TensorView x = makeContiguous(input, &keep).view({1, -1});
+  Contiguous packed(input);
+  TensorView x = packed.view({1, -1});
   Tensor output = createTensor({1}, DType::kBool);
   dispatchRows("reduce_bool", x, output, 0);
   return elemBool(output);

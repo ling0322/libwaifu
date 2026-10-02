@@ -28,7 +28,6 @@
 #include "flint/cpu/common.h"
 #include "flint/cpu/matmul.h"
 #include "flint/cuda/common.h"
-#include "flint/cuda/dequant.h"
 #include "flint/cuda/fill.h"
 #include "flint/cuda/gemm_cublas.h"
 #include "flint/cuda/gemm_cutlass.h"

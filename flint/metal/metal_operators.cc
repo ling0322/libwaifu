@@ -126,10 +126,6 @@ void MetalOperators::sub(TensorView input, TensorView other, TensorView out) {
   metal::sub(input, other, out);
 }
 
-void MetalOperators::subFloat(TensorView input, float other, TensorView out) {
-  metal::subScalar(input, other, out);
-}
-
 void MetalOperators::mul(TensorView input, TensorView other, TensorView out) {
   metal::mul(input, other, out);
 }

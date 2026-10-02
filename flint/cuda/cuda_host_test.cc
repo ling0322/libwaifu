@@ -24,10 +24,9 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
-#include "flint/functional.h"
+#include "flint/test_functional.h"
 #include "flint/device.h"
 #include "flint/capi.h"
-#include "flint/cuda/future_tensor.h"
 #include "flint/cuda/to_device.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
@@ -101,21 +100,36 @@ CATCH_TEST_CASE("cuda-host memory makes the round trip to the GPU unchanged", "[
   CATCH_REQUIRE(equalFloat(host, back));
 }
 
-CATCH_TEST_CASE("an asynchronous copy arrives, once taken", "[op][cuda]") {
+namespace {
+
+/// A copy of `src` started on the copy stream, seen through, and handed over as a tensor: what a
+/// binding does with fl_transfer_async() and fl_transfer_wait().
+Tensor arrive(op::cuda::PendingTransfer pending, const Tensor &src, bool sync) {
+  op::cuda::completeTransfer(pending.dest.get(), pending.event, sync);
+  std::shared_ptr<TensorData> data = std::move(pending.dest);
+  return Tensor::create(std::make_shared<TensorShape>(src.getShape()), data);
+}
+
+Tensor arrive(const Tensor &src, bool sync = false) {
+  return arrive(op::cuda::startTransferAsync(Device::getCuda(), src), src, sync);
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("an asynchronous copy arrives, once waited on", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   Tensor host = F::rand(Device::getCpu(), {32, 32}, DType::kFloat);
   Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
 
-  FutureTensor pending = op::cuda::toDeviceAsync(Device::getCuda(), locked);
-  Tensor there = pending.take();
+  Tensor there = arrive(locked);
 
   CATCH_REQUIRE(there.getDevice().getType() == Device::kCuda);
   CATCH_REQUIRE_NOTHROW(there.getInternalData()->getRawData());
   CATCH_REQUIRE(equalFloat(host, F::toDevice(cudaOps(), there, Device::getCpu())));
 }
 
-CATCH_TEST_CASE("takeSync waits for the copy rather than ordering it", "[op][cuda]") {
+CATCH_TEST_CASE("a synchronous wait waits for the copy rather than ordering it", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   Tensor host = F::rand(Device::getCpu(), {32, 32}, DType::kFloat);
@@ -124,7 +138,7 @@ CATCH_TEST_CASE("takeSync waits for the copy rather than ordering it", "[op][cud
   // The bytes are there when this returns, not merely ordered to be. Nothing here can tell the
   // two apart -- reading through cudaMemcpy would be correct either way -- so what this pins down
   // is that the path works at all, and the difference is the host's, not the result's.
-  Tensor there = op::cuda::toDeviceAsync(Device::getCuda(), locked).takeSync();
+  Tensor there = arrive(locked, true);
 
   CATCH_REQUIRE_NOTHROW(there.getInternalData()->getRawData());
   CATCH_REQUIRE(equalFloat(host, F::toDevice(cudaOps(), there, Device::getCpu())));
@@ -133,39 +147,41 @@ CATCH_TEST_CASE("takeSync waits for the copy rather than ordering it", "[op][cud
 CATCH_TEST_CASE("many copies in flight all land where they belong", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  // Many copies issued before any of them is taken, which is the shape a model's weights arrive
-  // in: each carries an event of its own, and none of them is the one taken next.
+  // Many copies issued before any of them is waited on, which is the shape a model's weights
+  // arrive in: each carries an event of its own, and none of them is the one waited on next.
   constexpr int kCount = 64;
   std::vector<Tensor> sources;
-  std::vector<FutureTensor> flying;
+  std::vector<Tensor> locked;
+  std::vector<op::cuda::PendingTransfer> flying;
   for (int index = 0; index < kCount; ++index) {
     Tensor host = F::rand(Device::getCpu(), {16, 16}, DType::kFloat);
     sources.push_back(host);
-    flying.push_back(op::cuda::toDeviceAsync(
-        Device::getCuda(),
-        F::toDevice(cudaOps(), host, Device::getCudaHost())));
+    locked.push_back(F::toDevice(cudaOps(), host, Device::getCudaHost()));
+    flying.push_back(op::cuda::startTransferAsync(Device::getCuda(), locked.back()));
   }
 
   for (int index = 0; index < kCount; ++index) {
-    Tensor landed = flying[index].take();
+    Tensor landed = arrive(std::move(flying[index]), locked[index], false);
     CATCH_REQUIRE(equalFloat(sources[index], F::toDevice(cudaOps(), landed, Device::getCpu())));
   }
 }
 
-CATCH_TEST_CASE("an asynchronous copy nobody took is thrown away safely", "[op][cuda]") {
+CATCH_TEST_CASE("an asynchronous copy nobody waited on is thrown away safely", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  // What a fetch that turned out not to be wanted looks like: a FutureTensor that goes out of
-  // scope. The memory goes back in the copy stream's order rather than the compute stream's, so
-  // it cannot be handed to the next allocation while the copy engine is still writing it.
+  // What a fetch that turned out not to be wanted looks like, as fl_transfer_destroy() does it:
+  // the event destroyed while pending, and the storage freed. The memory goes back in the copy
+  // stream's order rather than the compute stream's, so it cannot be handed to the next
+  // allocation while the copy engine is still writing it.
   Tensor host = F::rand(Device::getCpu(), {64, 64}, DType::kFloat);
   Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
   for (int index = 0; index < 32; ++index) {
-    FutureTensor discarded = op::cuda::toDeviceAsync(Device::getCuda(), locked);
+    op::cuda::PendingTransfer discarded = op::cuda::startTransferAsync(Device::getCuda(), locked);
+    cudaEventDestroy(discarded.event);
   }
 
   // Whatever was reused afterwards is still correct.
-  Tensor kept = op::cuda::toDeviceAsync(Device::getCuda(), locked).take();
+  Tensor kept = arrive(locked);
   CATCH_REQUIRE(equalFloat(host, F::toDevice(cudaOps(), kept, Device::getCpu())));
 }
 
@@ -178,10 +194,13 @@ CATCH_TEST_CASE("an asynchronous copy refuses every direction but one", "[op][cu
 
   // Pageable host memory is the one that matters: the driver would stage it through a buffer of
   // its own and the copy would be synchronous under an asynchronous name.
-  CATCH_REQUIRE_THROWS(op::cuda::toDeviceAsync(Device::getCuda(), host));
-  CATCH_REQUIRE_THROWS(op::cuda::toDeviceAsync(Device::getCudaHost(), there));
-  CATCH_REQUIRE_THROWS(op::cuda::toDeviceAsync(Device::getCpu(), there));
-  CATCH_REQUIRE_THROWS(op::cuda::toDeviceAsync(Device::getCuda(), there));
+  CATCH_REQUIRE_THROWS(op::cuda::startTransferAsync(Device::getCuda(), host));
+  CATCH_REQUIRE_THROWS(op::cuda::startTransferAsync(Device::getCudaHost(), there));
+  CATCH_REQUIRE_THROWS(op::cuda::startTransferAsync(Device::getCpu(), there));
+  CATCH_REQUIRE_THROWS(op::cuda::startTransferAsync(Device::getCuda(), there));
+
+  // And so is a source that is not one run of bytes.
+  CATCH_REQUIRE_THROWS(op::cuda::startTransferAsync(Device::getCuda(), locked.transpose(0, 1)));
 }
 
 CATCH_TEST_CASE("the C interface hands the copy over to be waited on", "[op][cuda]") {

@@ -44,7 +44,6 @@ class CPUOperators : public Operators {
   // implement interface Operators
   void add(TensorView a, TensorView b, TensorView out) override;
   void sub(TensorView a, TensorView b, TensorView out) override;
-  void subFloat(TensorView input, float other, TensorView out) override;
   bool allClose(TensorView A, TensorView B, float rtol, float atol) override;
   void cast(TensorView input, TensorView out) override;
   void causalMask(TensorView out) override;

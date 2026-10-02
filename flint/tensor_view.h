@@ -33,7 +33,6 @@
 
 namespace fl {
 
-class Operators;
 
 /// @brief A tensor's elements as an operator sees them: which storage, where in it, and how its
 /// dimensions are laid out -- and nothing that keeps any of it alive.
@@ -79,9 +78,6 @@ class TensorView {
   Device getDevice() const {
     return _device;
   }
-
-  /// @brief The operators of the device the elements are on.
-  Operators *getOperators() const;
 
   /// @brief Throw lut::AbortedError, naming `name`, unless the shape is exactly `shape`.
   void throwIfInvalidShape(lut::Span<const int> shape, const std::string &name) const;

@@ -246,7 +246,6 @@ class Operators {
       TensorView out);
   virtual void add(TensorView input, TensorView other, TensorView out);
   virtual void sub(TensorView input, TensorView other, TensorView out);
-  virtual void subFloat(TensorView input, float other, TensorView out);
   virtual void sum(TensorView input, int dim, TensorView out);
 
   /// Inclusive prefix sum along `dim`, which may be negative to count from the back: element `i`

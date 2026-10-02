@@ -38,7 +38,6 @@ set(flint_SOURCES
     "cpu/unary.cc"
     "device.cc"
     "dtype.cc"
-    "fp8.cc"
     "functional.cc"
     "memory.cc"
     "operators.cc"
@@ -48,6 +47,7 @@ set(flint_SOURCES
 
 set(flint_test_SOURCES
     "capi_test.cc"
+    "test_functional.cc"
     "cpu/conv1d_test.cc"
     "cpu/conv2d_test.cc"
     "cpu/fill_test.cc"
@@ -64,6 +64,7 @@ set(flint_test_SOURCES
     "tensor_test.cc")
 
 set(flint_benchmark_SOURCES
+    "test_functional.cc"
     "bench.cc"
     "cpu/benchmark.cc"
     "cpu/kernel/benchmark.cc")
@@ -93,8 +94,6 @@ if (WITH_CUDA)
         "cuda/cuda_host_tensor_data.cc"
         "cuda/cuda_operators.cc"
         "cuda/cuda_tensor_data.cc"
-        "cuda/future_tensor.cc"
-        "cuda/dequant.cu"
         "cuda/fill.cu"
         "cuda/gated_delta_net.cu"
         "cuda/gated_delta_net_mma.cu"

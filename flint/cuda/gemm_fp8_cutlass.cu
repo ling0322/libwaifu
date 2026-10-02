@@ -47,7 +47,6 @@
 #include "flint/cuda/common.h"
 #include "flint/cuda/fp8.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
-#include "flint/functional.h"
 
 #define CUTLASS_CHECK(x)                                                                     \
   {                                                                                          \
@@ -421,21 +420,6 @@ void quantizeFp8(TensorView x, TensorView data, TensorView channelScale) {
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 }
 
-Fp8Operand quantizeFp8(const Tensor &x) {
-  CHECK(x.getDim() == 2);
-  int rows = x.getShape(0);
-  int k = x.getShape(1);
-
-  Fp8Operand operand;
-  operand.rows = rows;
-  operand.k = k;
-  operand.data = createCudaTensorFp8E4M3({rows, k});
-  operand.channelScale = createCudaTensorFloat({rows});
-  quantizeFp8(x, operand.data, operand.channelScale);
-
-  return operand;
-}
-
 void dequantFp8ToHalf(TensorView data, TensorView channelScale, TensorView out) {
   CHECK(data.getDim() == 2 && data.isContiguous() && channelScale.isContiguous());
   int rows = data.getShape(0);
@@ -456,12 +440,6 @@ void dequantFp8ToHalf(TensorView data, TensorView channelScale, TensorView out) 
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
-}
-
-Tensor dequantFp8ToHalf(const Fp8Operand &operand) {
-  Tensor x = createCudaTensorHalf({operand.rows, operand.k});
-  dequantFp8ToHalf(operand.data, operand.channelScale, x);
-  return x;
 }
 
 namespace {
@@ -514,29 +492,10 @@ void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
 }
 
-/// The result a GEMM of `A` (..., k) by `B` (n, k) writes: (..., n) in half.
-Tensor gemmFp8Result(TensorView A, TensorView B) {
-  std::vector<int> shape = A.getShape();
-  shape.back() = B.getShape(0);
-  return F::empty(Device::getCuda(), shape, DType::kFloat16);
-}
-
 }  // namespace
 
 void gemmFp8(TensorView A, TensorView B, TensorView channelScale, TensorView D) {
   gemmFp8Impl<Fp8Scale::kChannel>(A, B, channelScale, D);
-}
-
-Tensor gemmFp8(const Tensor &A, const Fp8Operand &B) {
-  Tensor D = gemmFp8Result(A, B.data);
-  gemmFp8(A, B.data, B.channelScale, D);
-  return D;
-}
-
-Tensor gemmFp8TensorScale(const Tensor &A, const Tensor &B, const Tensor &scale) {
-  Tensor D = gemmFp8Result(A, B);
-  gemmFp8TensorScale(A, B, scale, D);
-  return D;
 }
 
 void gemmFp8TensorScale(TensorView A, TensorView B, TensorView scale, TensorView D) {

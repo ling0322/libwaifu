@@ -79,13 +79,6 @@ std::byte *CudaHostTensorData::getRawData() const {
   return reinterpret_cast<std::byte *>(_data);
 }
 
-Tensor createCudaHostTensor(lut::Span<const int> shape, DType dtype) {
-  auto tensorShape = std::make_shared<TensorShape>(shape);
-  auto data = CudaHostTensorData::create(tensorShape->getNumEl(), dtype);
-
-  return Tensor::create(tensorShape, std::move(data));
-}
-
 }  // namespace cuda
 }  // namespace op
 }  // namespace fl

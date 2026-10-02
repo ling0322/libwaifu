@@ -9,7 +9,7 @@
 
 #include <chrono>
 
-#include "flint/functional.h"
+#include "flint/test_functional.h"
 #include "flint/bench.h"
 #include "lutil/span.h"
 #include "lutil/strings.h"

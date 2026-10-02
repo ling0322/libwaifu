@@ -87,9 +87,20 @@ bool collapse(
 /// The strides of `tensor`, as a vector.
 std::vector<int> getStrides(const TensorView &tensor);
 
-/// `tensor` as it is if it is contiguous, and otherwise a contiguous copy of it, which `keep`
-/// holds for as long as the view returned is used.
-TensorView makeContiguous(const TensorView &tensor, Tensor *keep);
+/// `tensor`'s elements as one contiguous run: `tensor` itself if they already are one, and
+/// otherwise a packed copy, which this holds for as long as it lives.
+///
+/// It is a TensorView, so it goes wherever one is expected, a temporary one included -- it lives
+/// to the end of the call it was made for. What it must not be is copied into a plain TensorView
+/// that outlives it, which keeps the view and drops the copy. An empty view stays empty.
+class Contiguous : public TensorView {
+ public:
+  Contiguous() = default;
+  explicit Contiguous(const TensorView &tensor);
+
+ private:
+  Tensor _copy;
+};
 
 }  // namespace vulkan
 }  // namespace op

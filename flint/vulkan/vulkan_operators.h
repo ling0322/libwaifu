@@ -93,7 +93,6 @@ class VulkanOperators : public Operators {
 
   void add(TensorView input, TensorView other, TensorView out) override;
   void sub(TensorView input, TensorView other, TensorView out) override;
-  void subFloat(TensorView input, float other, TensorView out) override;
   void mul(TensorView input, TensorView other, TensorView out) override;
   void mul(TensorView input, float other, TensorView out) override;
   void div(TensorView input, float other, TensorView out) override;

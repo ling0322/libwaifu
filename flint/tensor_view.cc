@@ -24,7 +24,6 @@
 
 #include "lutil/error.h"
 #include "lutil/strings.h"
-#include "flint/operators.h"
 
 namespace fl {
 
@@ -168,10 +167,6 @@ bool TensorView::isContiguous() const {
     numel *= getShape(i);
   }
   return true;
-}
-
-Operators *TensorView::getOperators() const {
-  return fl::getOperators(getDevice().getType());
 }
 
 void TensorView::throwIfInvalidShape(lut::Span<const int> shape, const std::string &name) const {
