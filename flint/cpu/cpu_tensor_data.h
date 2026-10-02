@@ -29,7 +29,7 @@ namespace cpu {
 
 class CpuTensorData : public TensorData {
  public:
-  static std::shared_ptr<TensorData> create(int64_t numel0, DType dtype0);
+  static std::unique_ptr<TensorData> create(int64_t numel0, DType dtype0);
   static std::shared_ptr<TensorData> read(lut::Reader *fp);
 
   /// @brief Create a new instance of CpuTensorData with the same size and slots as `tensorData`.

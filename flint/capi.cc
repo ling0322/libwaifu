@@ -140,6 +140,16 @@ fl::Tensor &deref(fl_tensor_t tensor) {
   return *reinterpret_cast<fl::Tensor *>(tensor);
 }
 
+fl::TensorData &deref(fl_tensor_data_t data) {
+  if (!data) throw lut::InvalidArgError("data is null");
+  return *reinterpret_cast<fl::TensorData *>(data);
+}
+
+fl::TensorView &deref(fl_tensor_view_t view) {
+  if (!view) throw lut::InvalidArgError("view is null");
+  return *reinterpret_cast<fl::TensorView *>(view);
+}
+
 /// What an fl_operators_t points at: the operators of one device, held by shared pointer so that
 /// a handle keeps them alive, and the device they were asked for, so that a handle can say what
 /// it is without the operators having to carry the answer.
@@ -443,6 +453,148 @@ int32_t fl_tensor_host_bytes(fl_tensor_t tensor, const void **out, int64_t *nbyt
     const fl::Tensor &x = hostRun(tensor, out, nbytes);
     *out = x.getInternalData()->getData<void>(x.getInternalOffset());
     return FL_OK;
+  });
+}
+
+int32_t fl_tensor_data_create(
+    fl_device_type_t device,
+    fl_dtype_t dtype,
+    int64_t numel,
+    fl_tensor_data_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    if (numel < 1) throw lut::InvalidArgError("storage holds at least one element");
+
+    *out = reinterpret_cast<fl_tensor_data_t>(
+        fl::F::allocate(toDevice(device), numel, toDType(dtype)).release());
+    return clearError();
+  });
+}
+
+void fl_tensor_data_destroy(fl_tensor_data_t data) {
+  delete reinterpret_cast<fl::TensorData *>(data);
+}
+
+int32_t fl_tensor_data_get_numel(fl_tensor_data_t data, int64_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = deref(data).getNumEl();
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_data_get_dtype(fl_tensor_data_t data, fl_dtype_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = static_cast<fl_dtype_t>(static_cast<int16_t>(deref(data).getDType()));
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_data_get_device(fl_tensor_data_t data, fl_device_type_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = fromDevice(deref(data).getDevice());
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_view_create(
+    fl_tensor_data_t data,
+    const int32_t *shape,
+    const int32_t *stride,
+    int32_t ndim,
+    int64_t offset,
+    fl_tensor_view_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    fl::TensorData *storage = &deref(data);
+    if (ndim < 1) throw lut::InvalidArgError("a view has at least one dimension");
+    if (!shape || !stride) throw lut::InvalidArgError("shape or stride is null");
+    if (offset < 0) throw lut::InvalidArgError("offset must not be negative");
+
+    // The furthest element the view reaches, which has to be inside the storage. Worked out in 64
+    // bits: a large stride times a large size is exactly where a 32-bit product would wrap.
+    std::vector<fl::TensorShape::Elem> elems(static_cast<size_t>(ndim));
+    int64_t last = offset;
+    bool empty = false;
+    for (int32_t d = 0; d < ndim; ++d) {
+      if (shape[d] < 0) throw lut::InvalidArgError("shape must not be negative");
+      if (stride[d] < 0) throw lut::InvalidArgError("stride must not be negative");
+      elems[d].shape = shape[d];
+      elems[d].stride = stride[d];
+      if (shape[d] == 0) empty = true;
+      last += static_cast<int64_t>(std::max(shape[d] - 1, 0)) * stride[d];
+    }
+    if (!empty && last >= storage->getNumEl()) {
+      throw lut::InvalidArgError(
+          "the view reaches element " + std::to_string(last) + " of storage holding " +
+          std::to_string(storage->getNumEl()));
+    }
+
+    auto tensorShape = std::make_shared<fl::TensorShape>(lut::makeConstSpan(elems));
+    *out = reinterpret_cast<fl_tensor_view_t>(new fl::TensorView(storage, tensorShape, offset));
+    return clearError();
+  });
+}
+
+void fl_tensor_view_destroy(fl_tensor_view_t view) {
+  delete reinterpret_cast<fl::TensorView *>(view);
+}
+
+int32_t fl_tensor_view_get_dim(fl_tensor_view_t view, int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = deref(view).getDim();
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_view_get_shape(fl_tensor_view_t view, int32_t dim, int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = deref(view).getShape(dim);
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_view_get_stride(fl_tensor_view_t view, int32_t dim, int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = deref(view).getStride(dim);
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_view_get_offset(fl_tensor_view_t view, int64_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = deref(view).getInternalOffset();
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_view_get_dtype(fl_tensor_view_t view, fl_dtype_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = static_cast<fl_dtype_t>(static_cast<int16_t>(deref(view).getDType()));
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_view_get_device(fl_tensor_view_t view, fl_device_type_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = fromDevice(deref(view).getDevice());
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_view_is_contiguous(fl_tensor_view_t view, int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = deref(view).isContiguous() ? 1 : 0;
+    return clearError();
   });
 }
 

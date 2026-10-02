@@ -32,8 +32,8 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-std::shared_ptr<TensorData> CudaHostTensorData::create(int64_t numel, DType dtype) {
-  auto tensorData = std::make_shared<CudaHostTensorData>();
+std::unique_ptr<TensorData> CudaHostTensorData::create(int64_t numel, DType dtype) {
+  auto tensorData = std::make_unique<CudaHostTensorData>();
 
   CHECK(numel > 0);
   int64_t size = dtype.getTotalSize(numel);
@@ -83,7 +83,7 @@ Tensor createCudaHostTensor(lut::Span<const int> shape, DType dtype) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaHostTensorData::create(tensorShape->getNumEl(), dtype);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 }  // namespace cuda

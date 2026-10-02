@@ -500,3 +500,108 @@ CATCH_TEST_CASE("flint C API gives borrowed bytes back when it refuses them", "[
   fl_tensor_destroy(bytes);
   CATCH_REQUIRE(released == 3);
 }
+
+CATCH_TEST_CASE("flint C API makes storage and views over it", "[core][flint][capi]") {
+  fl_init();
+
+  fl_tensor_data_t data = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_FLOAT, 24, &data) == FL_OK);
+
+  int64_t numel = 0;
+  fl_dtype_t dtype;
+  fl_device_type_t device;
+  CATCH_REQUIRE(fl_tensor_data_get_numel(data, &numel) == FL_OK);
+  CATCH_REQUIRE(fl_tensor_data_get_dtype(data, &dtype) == FL_OK);
+  CATCH_REQUIRE(fl_tensor_data_get_device(data, &device) == FL_OK);
+  CATCH_REQUIRE(numel == 24);
+  CATCH_REQUIRE(dtype == FL_DTYPE_FLOAT);
+  CATCH_REQUIRE(device == FL_DEVICE_CPU);
+
+  // A (3, 4) block of a (4, 5) layout, transposed: shape (4, 3), strides (1, 5), starting at 2.
+  const int32_t shape[] = {4, 3};
+  const int32_t stride[] = {1, 5};
+  fl_tensor_view_t view = nullptr;
+  CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 2, &view) == FL_OK);
+
+  int32_t value = 0;
+  int64_t offset = 0;
+  CATCH_REQUIRE(fl_tensor_view_get_dim(view, &value) == FL_OK);
+  CATCH_REQUIRE(value == 2);
+  CATCH_REQUIRE(fl_tensor_view_get_shape(view, -1, &value) == FL_OK);
+  CATCH_REQUIRE(value == 3);
+  CATCH_REQUIRE(fl_tensor_view_get_stride(view, 1, &value) == FL_OK);
+  CATCH_REQUIRE(value == 5);
+  CATCH_REQUIRE(fl_tensor_view_get_offset(view, &offset) == FL_OK);
+  CATCH_REQUIRE(offset == 2);
+  CATCH_REQUIRE(fl_tensor_view_get_dtype(view, &dtype) == FL_OK);
+  CATCH_REQUIRE(dtype == FL_DTYPE_FLOAT);
+  CATCH_REQUIRE(fl_tensor_view_get_device(view, &device) == FL_OK);
+  CATCH_REQUIRE(device == FL_DEVICE_CPU);
+  CATCH_REQUIRE(fl_tensor_view_is_contiguous(view, &value) == FL_OK);
+  CATCH_REQUIRE(value == 0);
+  fl_tensor_view_destroy(view);
+
+  const int32_t flat[] = {24};
+  const int32_t one[] = {1};
+  CATCH_REQUIRE(fl_tensor_view_create(data, flat, one, 1, 0, &view) == FL_OK);
+  CATCH_REQUIRE(fl_tensor_view_is_contiguous(view, &value) == FL_OK);
+  CATCH_REQUIRE(value == 1);
+  fl_tensor_view_destroy(view);
+
+  // A zero stride repeats one element, and reaches no further than it.
+  const int32_t wide[] = {1000};
+  const int32_t zero[] = {0};
+  CATCH_REQUIRE(fl_tensor_view_create(data, wide, zero, 1, 23, &view) == FL_OK);
+  fl_tensor_view_destroy(view);
+
+  // The view spans 3 * 1 + 2 * 5 = 13 elements past its start: offset 10 ends on the last
+  // element, 11 one past it.
+  CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 10, &view) == FL_OK);
+  fl_tensor_view_destroy(view);
+  fl_tensor_view_t refused = nullptr;
+  CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 11, &refused) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_tensor_view_create(data, flat, one, 0, 0, &refused) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_tensor_view_create(data, flat, one, 1, -1, &refused) == FL_ERROR_INVALID_ARG);
+  const int32_t negative[] = {-1};
+  CATCH_REQUIRE(fl_tensor_view_create(data, flat, negative, 1, 0, &refused) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_tensor_view_create(nullptr, flat, one, 1, 0, &refused) == FL_ERROR_INVALID_ARG);
+
+  // A size and stride whose product overflows 32 bits is still caught.
+  const int32_t big[] = {65537};
+  const int32_t bigStride[] = {65536};
+  CATCH_REQUIRE(fl_tensor_view_create(data, big, bigStride, 1, 0, &refused) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(refused == nullptr);
+
+  fl_tensor_data_destroy(data);
+  fl_tensor_data_destroy(nullptr);
+  fl_tensor_view_destroy(nullptr);
+
+  fl_tensor_data_t none = nullptr;
+  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_FLOAT, 0, &none) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(none == nullptr);
+}
+
+CATCH_TEST_CASE("flint C API makes storage on the cuda device", "[core][flint][capi]") {
+  fl_init();
+
+  int32_t available = 0;
+  CATCH_REQUIRE(fl_is_device_available(FL_DEVICE_CUDA, &available) == FL_OK);
+  if (!available) CATCH_SKIP("cuda device not available");
+
+  for (fl_device_type_t type : {FL_DEVICE_CUDA, FL_DEVICE_CUDA_HOST}) {
+    fl_tensor_data_t data = nullptr;
+    CATCH_REQUIRE(fl_tensor_data_create(type, FL_DTYPE_FLOAT16, 1024, &data) == FL_OK);
+    fl_device_type_t device;
+    CATCH_REQUIRE(fl_tensor_data_get_device(data, &device) == FL_OK);
+    CATCH_REQUIRE(device == type);
+
+    const int32_t shape[] = {32, 32};
+    const int32_t stride[] = {32, 1};
+    fl_tensor_view_t view = nullptr;
+    CATCH_REQUIRE(fl_tensor_view_create(data, shape, stride, 2, 0, &view) == FL_OK);
+    CATCH_REQUIRE(fl_tensor_view_get_device(view, &device) == FL_OK);
+    CATCH_REQUIRE(device == type);
+    fl_tensor_view_destroy(view);
+    fl_tensor_data_destroy(data);
+  }
+}

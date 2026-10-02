@@ -54,8 +54,8 @@ void CpuTensorData::readSlot(lut::Reader *fp) {
   if (magicNumber != 0x55aa) throw lut::AbortedError("bad tensor data format (magic number).");
 }
 
-std::shared_ptr<TensorData> CpuTensorData::create(int64_t numel, DType dtype) {
-  std::shared_ptr<CpuTensorData> tensorData = std::make_shared<CpuTensorData>();
+std::unique_ptr<TensorData> CpuTensorData::create(int64_t numel, DType dtype) {
+  auto tensorData = std::make_unique<CpuTensorData>();
 
   CHECK(numel > 0);
   int64_t size = dtype.getTotalSize(numel);

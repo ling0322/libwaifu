@@ -35,7 +35,7 @@ namespace vulkan {
 /// rather than returning a pointer; the bytes come and go through toDevice(), which stages them.
 class VulkanTensorData : public TensorData {
  public:
-  static std::shared_ptr<TensorData> create(int64_t numel, DType dtype);
+  static std::unique_ptr<TensorData> create(int64_t numel, DType dtype);
 
   ~VulkanTensorData();
 

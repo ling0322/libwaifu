@@ -40,7 +40,7 @@ namespace cuda {
 /// and the allocation itself is slow enough to be worth doing once at load rather than per use.
 class CudaHostTensorData : public TensorData {
  public:
-  static std::shared_ptr<TensorData> create(int64_t numel, DType dtype);
+  static std::unique_ptr<TensorData> create(int64_t numel, DType dtype);
 
   CudaHostTensorData();
   ~CudaHostTensorData();

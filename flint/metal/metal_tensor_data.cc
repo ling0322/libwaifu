@@ -33,7 +33,7 @@ MetalTensorData::MetalTensorData(mlx::core::array array)
   _dtype = fromMlxDtype(_array.dtype());
 }
 
-std::shared_ptr<TensorData> MetalTensorData::create(int64_t numel, DType dtype) {
+std::unique_ptr<TensorData> MetalTensorData::create(int64_t numel, DType dtype) {
   CHECK(numel > 0);
 
   mlx::core::array array = mlx::core::zeros({static_cast<int>(numel)}, toMlxDtype(dtype));
@@ -42,7 +42,7 @@ std::shared_ptr<TensorData> MetalTensorData::create(int64_t numel, DType dtype) 
   return wrap(std::move(array));
 }
 
-std::shared_ptr<TensorData> MetalTensorData::wrap(mlx::core::array array) {
+std::unique_ptr<TensorData> MetalTensorData::wrap(mlx::core::array array) {
   CHECK(array.ndim() == 1);
   CHECK(array.flags().contiguous);
 
@@ -51,7 +51,7 @@ std::shared_ptr<TensorData> MetalTensorData::wrap(mlx::core::array array) {
   // landmine for the caller.
   mlx::core::eval(array);
 
-  return std::shared_ptr<MetalTensorData>(new MetalTensorData(std::move(array)));
+  return std::unique_ptr<MetalTensorData>(new MetalTensorData(std::move(array)));
 }
 
 Device MetalTensorData::getDevice() const {

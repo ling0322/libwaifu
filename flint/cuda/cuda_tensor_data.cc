@@ -33,11 +33,11 @@ namespace fl {
 namespace op {
 namespace cuda {
 
-std::shared_ptr<TensorData> CudaTensorData::create(
+std::unique_ptr<TensorData> CudaTensorData::create(
     int64_t numel,
     DType dtype,
     cudaStream_t stream) {
-  auto tensorData = std::make_shared<CudaTensorData>();
+  auto tensorData = std::make_unique<CudaTensorData>();
 
   CHECK(numel > 0);
   int64_t size = dtype.getTotalSize(numel);

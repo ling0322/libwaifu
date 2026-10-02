@@ -37,11 +37,11 @@ class MetalTensorData : public TensorData {
  public:
   /// @brief Storage for `numel` elements, zeroed and evaluated. What `F::empty` allocates on
   ///        Metal; every operator then writes its result into it (see writeInto in common.h).
-  static std::shared_ptr<TensorData> create(int64_t numel, DType dtype);
+  static std::unique_ptr<TensorData> create(int64_t numel, DType dtype);
 
   /// @brief Adopt `array` as tensor storage. It must be one dimensional, contiguous and already
   ///        evaluated -- create() is what arranges that.
-  static std::shared_ptr<TensorData> wrap(mlx::core::array array);
+  static std::unique_ptr<TensorData> wrap(mlx::core::array array);
 
   Device getDevice() const override;
   std::byte *getRawData() const override;
