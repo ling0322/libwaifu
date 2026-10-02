@@ -56,37 +56,6 @@ int64_t numelOf(lut::Span<const int> shape) {
   return numel;
 }
 
-/// Storage for `numel` elements on `device`, uninitialized. At least one element is allocated, so
-/// that a tensor with a dimension of zero still has storage to point at.
-std::shared_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype) {
-  if (numel > TensorData::MaxNumEl) {
-    THROW(InvalidArg, lut::sprintf("a tensor of %d elements is too large", numel));
-  }
-  numel = std::max<int64_t>(numel, 1);
-
-  switch (device.getType()) {
-    case Device::kCpu:
-      return op::cpu::CpuTensorData::create(numel, dtype);
-#ifdef LIBWAIFU_CUDA_ENABLED
-    case Device::kCuda:
-      return op::cuda::CudaTensorData::create(numel, dtype);
-    case Device::kCudaHost:
-      return op::cuda::CudaHostTensorData::create(numel, dtype);
-#endif
-#ifdef LIBWAIFU_MLX_ENABLED
-    case Device::kMetal:
-      return op::metal::MetalTensorData::create(numel, dtype);
-#endif
-#ifdef LIBWAIFU_VULKAN_ENABLED
-    case Device::kVulkan:
-      return op::vulkan::VulkanTensorData::create(numel, dtype);
-#endif
-    default:
-      THROW(
-          NotImplemented,
-          lut::sprintf("this build cannot allocate on the %s device", device.getName()));
-  }
-}
 
 /// `input`'s shape with dimension `dim` -- already non-negative -- dropped. A tensor with nothing
 /// left is (1), which is what every reduction of a vector has always given.
@@ -188,6 +157,36 @@ constexpr int64_t kAttentionScoreLimit = 128 * 1024 * 1024;
 }  // namespace
 
 // --- Allocation -----------------------------------------------------------------------------
+
+std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype) {
+  if (numel > TensorData::MaxNumEl) {
+    THROW(InvalidArg, lut::sprintf("a tensor of %d elements is too large", numel));
+  }
+  numel = std::max<int64_t>(numel, 1);
+
+  switch (device.getType()) {
+    case Device::kCpu:
+      return op::cpu::CpuTensorData::create(numel, dtype);
+#ifdef LIBWAIFU_CUDA_ENABLED
+    case Device::kCuda:
+      return op::cuda::CudaTensorData::create(numel, dtype);
+    case Device::kCudaHost:
+      return op::cuda::CudaHostTensorData::create(numel, dtype);
+#endif
+#ifdef LIBWAIFU_MLX_ENABLED
+    case Device::kMetal:
+      return op::metal::MetalTensorData::create(numel, dtype);
+#endif
+#ifdef LIBWAIFU_VULKAN_ENABLED
+    case Device::kVulkan:
+      return op::vulkan::VulkanTensorData::create(numel, dtype);
+#endif
+    default:
+      THROW(
+          NotImplemented,
+          lut::sprintf("this build cannot allocate on the %s device", device.getName()));
+  }
+}
 
 Tensor empty(Device device, lut::Span<const int> shape, DType dtype) {
   int64_t numel = numelOf(shape);

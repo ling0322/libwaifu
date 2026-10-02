@@ -26,10 +26,10 @@ namespace fl {
 namespace op {
 namespace vulkan {
 
-std::shared_ptr<TensorData> VulkanTensorData::create(int64_t numel, DType dtype) {
+std::unique_ptr<TensorData> VulkanTensorData::create(int64_t numel, DType dtype) {
   CHECK(numel > 0 && numel <= MaxNumEl);
 
-  std::shared_ptr<VulkanTensorData> data(new VulkanTensorData());
+  std::unique_ptr<VulkanTensorData> data(new VulkanTensorData());
   data->_context = Context::get();
   data->_buffer = data->_context->allocate(dtype.getTotalSize(numel));
   data->_numel = numel;

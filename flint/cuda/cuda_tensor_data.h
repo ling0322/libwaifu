@@ -39,7 +39,7 @@ class CudaTensorData : public TensorData {
   /// work enqueued before it was freed, and it becomes this tensor's only where `stream` has
   /// reached the call. Pass the stream that will write it first. It is remembered, because
   /// giving the block back has the same requirement -- see `_stream`.
-  static std::shared_ptr<TensorData> create(int64_t numel, DType dtype, cudaStream_t stream = 0);
+  static std::unique_ptr<TensorData> create(int64_t numel, DType dtype, cudaStream_t stream = 0);
 
   CudaTensorData();
   ~CudaTensorData();

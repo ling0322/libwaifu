@@ -35,56 +35,56 @@ Tensor createCudaTensorHalf(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kFloat16);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor createCudaTensorFp4x2(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kFp4E2M0x2);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor createCudaTensorFp8E4M3(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kFp8E4M3);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor createCudaTensorUInt8(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kUInt8);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor createCudaTensorBool(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kBool);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor createCudaTensorLong(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kLong);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor createCudaTensorInt32(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kInt32);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor createCudaTensorFloat(lut::Span<const int> shape) {
   auto tensorShape = std::make_shared<TensorShape>(shape);
   auto data = CudaTensorData::create(tensorShape->getNumEl(), DType::kFloat);
 
-  return Tensor::create(tensorShape, data);
+  return Tensor::create(tensorShape, std::move(data));
 }
 
 Tensor tensorLike(const TensorView &tensor) {

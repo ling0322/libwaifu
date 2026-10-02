@@ -53,6 +53,20 @@ extern "C" {
 /// A tensor. Holds a shape and a reference to storage that other tensors may share.
 typedef struct fl_tensor_impl_t *fl_tensor_t;
 
+/// Storage: a run of elements of one dtype on one device, and nothing about their shape.
+///
+/// Made by fl_tensor_data_create() and freed by fl_tensor_data_destroy(). The caller owns it:
+/// destroying it frees the memory at once, so every view made from it has to be finished with
+/// first.
+typedef struct fl_tensor_data_impl_t *fl_tensor_data_t;
+
+/// A shape, strides and an offset over some storage -- what an operator reads and writes.
+///
+/// Made by fl_tensor_view_create() and released by fl_tensor_view_destroy(). A view owns nothing:
+/// the fl_tensor_data_t it was made from has to outlive it, and destroying that first leaves the
+/// view pointing at freed memory.
+typedef struct fl_tensor_view_impl_t *fl_tensor_view_t;
+
 /// A copy that is still on its way, and the tensor it is filling.
 ///
 /// Made by fl_tensor_to_device_async(). The tensor inside comes out of fl_future_tensor_take() or
@@ -192,6 +206,55 @@ FLAPI int32_t fl_tensor_from_external(
     fl_release_fn release,
     void *context,
     fl_tensor_t *out);
+
+/// Allocate uninitialized storage for `numel` elements of `dtype` on `device`. FL_DEVICE_CUDA_HOST
+/// is page-locked host memory, which only a CUDA build can allocate.
+/// @param numel at least one.
+FLAPI int32_t fl_tensor_data_create(
+    fl_device_type_t device,
+    fl_dtype_t dtype,
+    int64_t numel,
+    fl_tensor_data_t *out);
+
+/// Free the storage. Views made from it dangle afterwards and must not be used. Passing NULL has
+/// no effect.
+FLAPI void fl_tensor_data_destroy(fl_tensor_data_t data);
+
+/// How many elements the storage holds.
+FLAPI int32_t fl_tensor_data_get_numel(fl_tensor_data_t data, int64_t *out);
+FLAPI int32_t fl_tensor_data_get_dtype(fl_tensor_data_t data, fl_dtype_t *out);
+FLAPI int32_t fl_tensor_data_get_device(fl_tensor_data_t data, fl_device_type_t *out);
+
+/// Make a view of `data`: `ndim` dimensions of sizes `shape` and strides `stride`, starting
+/// `offset` elements into the storage. Strides and the offset count elements, not bytes, and a
+/// stride may be zero to repeat elements along a dimension.
+///
+/// Refused unless every element the view can reach lies inside the storage: `offset` plus the sum
+/// of `(shape[i] - 1) * stride[i]` has to be below the storage's element count. The view does not
+/// keep `data` alive; see fl_tensor_view_t.
+/// @param ndim at least one.
+FLAPI int32_t fl_tensor_view_create(
+    fl_tensor_data_t data,
+    const int32_t *shape,
+    const int32_t *stride,
+    int32_t ndim,
+    int64_t offset,
+    fl_tensor_view_t *out);
+
+/// Release a view. The storage it was made from is not touched. Passing NULL has no effect.
+FLAPI void fl_tensor_view_destroy(fl_tensor_view_t view);
+
+FLAPI int32_t fl_tensor_view_get_dim(fl_tensor_view_t view, int32_t *out);
+
+/// Size and stride of dimension `dim`, which may be negative to count from the back.
+FLAPI int32_t fl_tensor_view_get_shape(fl_tensor_view_t view, int32_t dim, int32_t *out);
+FLAPI int32_t fl_tensor_view_get_stride(fl_tensor_view_t view, int32_t dim, int32_t *out);
+
+/// Where the view's first element is in its storage, in elements.
+FLAPI int32_t fl_tensor_view_get_offset(fl_tensor_view_t view, int64_t *out);
+FLAPI int32_t fl_tensor_view_get_dtype(fl_tensor_view_t view, fl_dtype_t *out);
+FLAPI int32_t fl_tensor_view_get_device(fl_tensor_view_t view, fl_device_type_t *out);
+FLAPI int32_t fl_tensor_view_is_contiguous(fl_tensor_view_t view, int32_t *out);
 
 /// Create another handle on the same tensor. The storage is shared rather than copied, exactly as
 /// it is between a tensor and its views.
