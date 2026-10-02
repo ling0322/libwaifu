@@ -99,12 +99,13 @@ pub use ir::{check_parameters, Inst, Ir, ParamSource, Residency, RunContext, Wei
 pub use operators::Operators;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
 
-use operators::{operators_of, raw_operators, readback_operators, transfer_operators};
+use operators::{operators_of, transfer_operators};
 
+use std::cell::RefCell;
 use std::ffi::CStr;
 use std::fmt;
-use std::marker::PhantomData;
 use std::os::raw::c_void;
+use std::rc::Rc;
 use std::sync::Once;
 
 /// Element type of a tensor.
@@ -221,15 +222,6 @@ pub enum Bound {
     End,
 }
 
-impl Bound {
-    fn to_raw(self) -> i32 {
-        match self {
-            Bound::At(index) => index,
-            Bound::End => ffi::FL_NONE,
-        }
-    }
-}
-
 impl From<i32> for Bound {
     fn from(index: i32) -> Bound {
         Bound::At(index)
@@ -266,6 +258,14 @@ impl Error {
 
     fn unsupported(message: String) -> Error {
         Error { code: 0, message }
+    }
+
+    /// An argument the binding refused before asking the library, reported as the library would.
+    fn invalid(message: impl Into<String>) -> Error {
+        Error {
+            code: ffi::FL_ERROR_INVALID_ARG,
+            message: message.into(),
+        }
     }
 
     /// Reads the error the last C call left on this thread. Only called right after one failed.
@@ -395,50 +395,174 @@ impl MemorySnapshot {
     }
 }
 
-/// A tensor: a shape over storage that other tensors may share.
-///
-/// Dropping a tensor releases its handle; the storage goes away once the last tensor referring to
-/// it is gone.
-pub struct Tensor {
-    raw: ffi::FlTensor,
-    /// Keeps the type off `Send`/`Sync`, since the operators behind it are not ready for either.
-    _not_sync: PhantomData<*const ()>,
+/// Storage: a run of elements of one dtype on one device, owned here and shared by every tensor
+/// over it. Freed when the last of them goes.
+struct Storage {
+    raw: ffi::FlTensorData,
+    dtype: DType,
+    device: Device,
+    /// Whether the elements are somebody else's bytes, borrowed to be read where they lie.
+    read_only: bool,
+    /// What borrowed storage reads from. Dropped after `raw` is destroyed, which is what keeps the
+    /// bytes alive for exactly as long as anything may read them.
+    _owner: Option<Box<dyn std::any::Any>>,
 }
 
-impl Tensor {
-    /// Wraps a handle a C call just produced.
-    ///
-    /// # Safety
-    ///
-    /// `raw` must be non-null and freshly owned; the tensor takes over destroying it.
-    unsafe fn from_raw(raw: ffi::FlTensor) -> Tensor {
-        Tensor {
+impl Storage {
+    /// Uninitialized storage for `numel` elements, at least one.
+    fn allocate(numel: i64, dtype: DType, device: Device) -> Result<Rc<Storage>> {
+        init();
+        let mut raw: ffi::FlTensorData = std::ptr::null_mut();
+        check(unsafe {
+            ffi::fl_tensor_data_create(device as i32, dtype as i32, numel.max(1), &mut raw)
+        })?;
+        Ok(Rc::new(Storage {
             raw,
-            _not_sync: PhantomData,
+            dtype,
+            device,
+            read_only: false,
+            _owner: None,
+        }))
+    }
+
+    /// The address of the first element, for storage on the host.
+    fn host_ptr(&self) -> Result<*mut u8> {
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        check(unsafe { ffi::fl_tensor_data_get_host_ptr(self.raw, &mut ptr) })?;
+        Ok(ptr as *mut u8)
+    }
+}
+
+impl Drop for Storage {
+    fn drop(&mut self) {
+        // Safety: made by a successful C call and destroyed exactly once, here. Every view of it
+        // belongs to a tensor that holds this storage, so none outlives it.
+        unsafe { ffi::fl_tensor_data_destroy(self.raw) };
+    }
+}
+
+/// Where a tensor's elements are in its storage, and the view handle that says so to the library.
+struct Layout {
+    shape: Vec<i32>,
+    stride: Vec<i32>,
+    offset: i64,
+    raw: ffi::FlTensorView,
+}
+
+impl Drop for Layout {
+    fn drop(&mut self) {
+        // Safety: made by a successful C call and destroyed exactly once, here.
+        unsafe { ffi::fl_tensor_view_destroy(self.raw) };
+    }
+}
+
+/// Row-major strides for `shape`.
+fn contiguous_strides(shape: &[i32]) -> Vec<i32> {
+    let mut stride = vec![0; shape.len()];
+    let mut step: i64 = 1;
+    for d in (0..shape.len()).rev() {
+        stride[d] = step as i32;
+        step *= shape[d] as i64;
+    }
+    stride
+}
+
+/// The number of elements `shape` holds, counted the way flint counts them: a shape of no
+/// dimensions holds none.
+fn numel_of(shape: &[i32]) -> i64 {
+    if shape.is_empty() {
+        0
+    } else {
+        shape.iter().map(|&n| n as i64).product()
+    }
+}
+
+/// `shape` with a dimension of -1 worked out from `numel`, refused if it cannot be.
+fn real_shape(numel: i64, shape: &[i32]) -> Result<Vec<i32>> {
+    let mut real = shape.to_vec();
+    let mut infer = None;
+    let mut known: i64 = 1;
+    for (d, &n) in shape.iter().enumerate() {
+        if n < 0 {
+            if infer.is_some() {
+                return Err(Error::invalid("a view infers more than one dimension"));
+            }
+            infer = Some(d);
+        } else {
+            known *= n as i64;
         }
     }
 
-    /// Runs a C call that produces a tensor, handing back the handle it wrote.
-    fn produce(call: impl FnOnce(*mut ffi::FlTensor) -> i32) -> Result<Tensor> {
-        let mut raw: ffi::FlTensor = std::ptr::null_mut();
-        check(call(&mut raw))?;
-        debug_assert!(!raw.is_null(), "a successful call must produce a handle");
-        Ok(unsafe { Tensor::from_raw(raw) })
+    match infer {
+        Some(d) => {
+            if known == 0 || numel % known != 0 {
+                return Err(Error::invalid(format!(
+                    "a view of {numel} elements cannot infer a dimension of {known}"
+                )));
+            }
+            real[d] = (numel / known) as i32;
+        }
+        None if numel != known => {
+            return Err(Error::invalid(format!(
+                "invalid view: {numel} elements cannot be seen as {known}"
+            )));
+        }
+        None => {}
+    }
+    Ok(real)
+}
+
+/// A tensor: a shape over storage that other tensors may share.
+///
+/// The storage goes away once the last tensor referring to it is gone. A tensor is a reference to
+/// that storage plus where its elements are in it, so cloning one, or taking a view of it, copies
+/// neither the elements nor the storage.
+#[derive(Clone)]
+pub struct Tensor {
+    storage: Rc<Storage>,
+    layout: Rc<Layout>,
+}
+
+impl Tensor {
+    /// A tensor over `storage` with the given layout, checked by the library against the storage.
+    fn over(storage: Rc<Storage>, shape: Vec<i32>, stride: Vec<i32>, offset: i64) -> Result<Tensor> {
+        let mut raw: ffi::FlTensorView = std::ptr::null_mut();
+        check(unsafe {
+            ffi::fl_tensor_view_create(
+                storage.raw,
+                shape.as_ptr(),
+                stride.as_ptr(),
+                shape.len() as i32,
+                offset,
+                &mut raw,
+            )
+        })?;
+        Ok(Tensor {
+            storage,
+            layout: Rc::new(Layout {
+                shape,
+                stride,
+                offset,
+                raw,
+            }),
+        })
     }
 
-    /// Runs a C call that reports a value about this tensor.
-    fn query<T: Default>(&self, call: impl FnOnce(ffi::FlTensor, *mut T) -> i32) -> Result<T> {
-        let mut value = T::default();
-        check(call(self.raw, &mut value))?;
-        Ok(value)
+    /// The same storage seen through another layout.
+    fn with_layout(&self, shape: Vec<i32>, stride: Vec<i32>, offset: i64) -> Result<Tensor> {
+        Tensor::over(Rc::clone(&self.storage), shape, stride, offset)
+    }
+
+    /// The view handle the C interface reads and writes this tensor through.
+    pub(crate) fn raw(&self) -> ffi::FlTensorView {
+        self.layout.raw
     }
 
     /// Create a tensor filled with zeros.
     pub fn zeros(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
-        let operators = raw_operators(device)?;
-        Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_zeros(operators, shape.as_ptr(), shape.len() as i32, dtype as i32, out)
-        })
+        let mut tensor = Tensor::empty(shape, dtype, device)?;
+        functional::fill(&mut tensor, 0.0)?;
+        Ok(tensor)
     }
 
     /// Create a tensor without writing anything into it.
@@ -448,25 +572,12 @@ impl Tensor {
     /// for it. Reading an element before writing it gives whatever the allocator handed back, so
     /// this is only worth using when every element is written first.
     pub fn empty(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
-        // Page-locked host memory is made by the device that reads it rather than by the host it
-        // sits on, so this one shape goes to the CUDA operators and to a call of its own.
-        if device == Device::CudaHost {
-            let operators = raw_operators(Device::Cuda)?;
-            return Tensor::produce(|out| unsafe {
-                ffi::fl_tensor_host_empty(
-                    operators,
-                    shape.as_ptr(),
-                    shape.len() as i32,
-                    dtype as i32,
-                    out,
-                )
-            });
+        if let Some(&n) = shape.iter().find(|&&n| n < 0) {
+            return Err(Error::invalid(format!("a tensor cannot have a dimension of {n}")));
         }
-
-        let operators = raw_operators(device)?;
-        Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_empty(operators, shape.as_ptr(), shape.len() as i32, dtype as i32, out)
-        })
+        let numel: i64 = shape.iter().map(|&n| n as i64).product();
+        let storage = Storage::allocate(numel, dtype, device)?;
+        Tensor::over(storage, shape.to_vec(), contiguous_strides(shape), 0)
     }
 
     /// Create a CPU tensor holding a copy of `data`, laid out row-major.
@@ -505,8 +616,8 @@ impl Tensor {
     /// A CPU tensor of `dtype` that *is* `range` of `owner`'s bytes, rather than a copy of them.
     ///
     /// For a weight file mapped into memory: the mapping becomes the tensor's storage, so reading
-    /// a package copies nothing. `owner` is kept alive by the tensor and every view of it, and let
-    /// go of when the last one is dropped.
+    /// a package copies nothing. The storage holds a reference to `owner`, so the bytes live as
+    /// long as the tensor and every view of it.
     ///
     /// The tensor is read-only -- [`Tensor::host_bytes_mut`] refuses it -- and the range has to
     /// start on a multiple of the element size, which a safetensors writer arranges and this
@@ -520,43 +631,70 @@ impl Tensor {
     where
         T: AsRef<[u8]> + Send + Sync + 'static,
     {
-        unsafe extern "C" fn release<T>(context: *mut c_void) {
-            drop(unsafe { Box::from_raw(context as *mut std::sync::Arc<T>) });
+        init();
+        let bytes = &owner.as_ref().as_ref()[range];
+        let numel = numel_of(shape);
+        if numel <= 0 {
+            return Err(Error::invalid("a borrowed tensor has at least one element"));
+        }
+        let expected = dtype.total_size(numel);
+        if bytes.len() as i64 != expected {
+            return Err(Error::invalid(format!(
+                "{} bytes do not hold {:?} of {dtype:?}: expected {expected}",
+                bytes.len(),
+                shape
+            )));
         }
 
-        let bytes = &owner.as_ref().as_ref()[range];
-        // Handed to flint whatever happens: it gives the context back exactly once, when the last
-        // tensor on these bytes goes or, on a refusal, before the call returns.
-        let context = Box::into_raw(Box::new(std::sync::Arc::clone(owner))) as *mut c_void;
-        Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_from_external(
-                shape.as_ptr(),
-                shape.len() as i32,
-                dtype as i32,
-                bytes.as_ptr() as *const c_void,
-                bytes.len() as i64,
-                Some(release::<T>),
-                context,
-                out,
-            )
-        })
+        let mut raw: ffi::FlTensorData = std::ptr::null_mut();
+        check(unsafe {
+            ffi::fl_tensor_data_borrow(bytes.as_ptr() as *const c_void, dtype as i32, numel, &mut raw)
+        })?;
+        let storage = Rc::new(Storage {
+            raw,
+            dtype,
+            device: Device::Cpu,
+            read_only: true,
+            _owner: Some(Box::new(std::sync::Arc::clone(owner))),
+        });
+        Tensor::over(storage, shape.to_vec(), contiguous_strides(shape), 0)
     }
 
     fn from_elements<T>(shape: &[i32], data: &[T], dtype: DType) -> Result<Tensor> {
-        // The bytes are copied in here and now, so this is the CPU's whatever else is about.
-        let operators = raw_operators(Device::Cpu)?;
-        let size = std::mem::size_of_val(data) as i64;
-        Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_from_data(
-                operators,
-                shape.as_ptr(),
-                shape.len() as i32,
-                dtype as i32,
-                data.as_ptr() as *const c_void,
-                size,
-                out,
-            )
-        })
+        let mut tensor = Tensor::empty(shape, dtype, Device::Cpu)?;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        };
+        let dest = tensor.host_bytes_mut()?;
+        if dest.len() != bytes.len() {
+            return Err(Error::invalid(format!(
+                "data_size does not match the shape and dtype: expected {} bytes, got {}",
+                dest.len(),
+                bytes.len()
+            )));
+        }
+        dest.copy_from_slice(bytes);
+        Ok(tensor)
+    }
+
+    /// The bytes of a contiguous host tensor, where they lie.
+    fn host_run(&self) -> Result<(*mut u8, usize)> {
+        if !matches!(self.storage.device, Device::Cpu | Device::CudaHost) {
+            return Err(Error::invalid(format!(
+                "the bytes of a tensor on {} have no address the caller may touch",
+                self.storage.device.name()
+            )));
+        }
+        if !self.is_contiguous() {
+            return Err(Error::invalid("a non-contiguous tensor's bytes are not one run"));
+        }
+        let nbytes = self.nbytes()? as usize;
+        if nbytes == 0 {
+            return Ok((std::ptr::NonNull::dangling().as_ptr(), 0));
+        }
+        let start = self.storage.host_ptr()?;
+        let skip = self.storage.dtype.total_size(self.layout.offset) as usize;
+        Ok((unsafe { start.add(skip) }, nbytes))
     }
 
     /// The tensor's own bytes, to be written where they lie.
@@ -577,13 +715,13 @@ impl Tensor {
     /// handle's: storage is shared between handles, so a tensor cloned beforehand still addresses
     /// them. What this is for is filling storage that nothing else has seen yet.
     pub fn host_bytes_mut(&mut self) -> Result<&mut [u8]> {
-        let mut data: *mut c_void = std::ptr::null_mut();
-        let mut nbytes: i64 = 0;
-        check(unsafe { ffi::fl_tensor_host_data(self.raw, &mut data, &mut nbytes) })?;
-
-        // Non-null and as long as it says: the call above refuses every case where it would not
-        // be, and a tensor of no elements is the one that comes back as an empty slice.
-        Ok(unsafe { std::slice::from_raw_parts_mut(data as *mut u8, nbytes as usize) })
+        if self.storage.read_only {
+            return Err(Error::invalid(
+                "the tensor's bytes are borrowed read-only, so there is no writable pointer to hand out",
+            ));
+        }
+        let (ptr, len) = self.host_run()?;
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, len) })
     }
 
     /// The tensor's own bytes, to be read where they lie.
@@ -592,77 +730,167 @@ impl Tensor {
     /// [`borrowing`](Tensor::borrowing) a mapped file too. The same refusals otherwise: a tensor on
     /// the device, and a non-contiguous one.
     pub fn host_bytes(&self) -> Result<&[u8]> {
-        let mut data: *const c_void = std::ptr::null();
-        let mut nbytes: i64 = 0;
-        check(unsafe { ffi::fl_tensor_host_bytes(self.raw, &mut data, &mut nbytes) })?;
+        let (ptr, len) = self.host_run()?;
+        Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
 
-        // As in host_bytes_mut: non-null and as long as it says whenever the call succeeds.
-        Ok(unsafe { std::slice::from_raw_parts(data as *const u8, nbytes as usize) })
+    /// Dimension `dim`, which may be negative to count from the back, as an index.
+    fn real_dim(&self, dim: i32) -> Result<usize> {
+        let rank = self.layout.shape.len() as i32;
+        let real = if dim < 0 { dim + rank } else { dim };
+        if real < 0 || real >= rank {
+            return Err(Error::invalid(format!("no dimension {dim} in a {rank}-D tensor")));
+        }
+        Ok(real as usize)
+    }
+
+    /// Position `index` of dimension `dim`, which may be negative to count from the back and may
+    /// be one past the end.
+    fn real_index(&self, dim: usize, index: i32) -> Result<i32> {
+        let size = self.layout.shape[dim];
+        let real = if index >= 0 { index } else { size + index };
+        if real < 0 || real > size {
+            return Err(Error::invalid(format!(
+                "index {index} is outside a dimension of {size}"
+            )));
+        }
+        Ok(real)
     }
 
     /// Number of dimensions.
     pub fn dim(&self) -> Result<i32> {
-        self.query(|t, out| unsafe { ffi::fl_tensor_get_dim(t, out) })
+        Ok(self.layout.shape.len() as i32)
     }
 
     /// Size of dimension `dim`, which may be negative to count from the back.
     pub fn shape_at(&self, dim: i32) -> Result<i32> {
-        self.query(|t, out| unsafe { ffi::fl_tensor_get_shape(t, dim, out) })
+        Ok(self.layout.shape[self.real_dim(dim)?])
     }
 
     /// Sizes of every dimension.
     pub fn shape(&self) -> Vec<i32> {
-        let dim = self.dim().unwrap_or(0);
-        (0..dim).filter_map(|d| self.shape_at(d).ok()).collect()
+        self.layout.shape.clone()
     }
 
     /// Stride of dimension `dim`, in elements.
     pub fn stride(&self, dim: i32) -> Result<i32> {
-        self.query(|t, out| unsafe { ffi::fl_tensor_get_stride(t, dim, out) })
+        Ok(self.layout.stride[self.real_dim(dim)?])
     }
 
     /// Total number of elements.
     pub fn numel(&self) -> i64 {
-        self.query(|t, out| unsafe { ffi::fl_tensor_get_numel(t, out) })
-            .unwrap_or(0)
+        numel_of(&self.layout.shape)
     }
 
     pub fn dtype(&self) -> DType {
-        self.try_dtype().expect("a live tensor has a known dtype")
+        self.storage.dtype
     }
 
     pub fn try_dtype(&self) -> Result<DType> {
-        let raw: i32 = self.query(|t, out| unsafe { ffi::fl_tensor_get_dtype(t, out) })?;
-        DType::from_raw(raw)
+        Ok(self.storage.dtype)
     }
 
     pub fn device(&self) -> Device {
-        self.try_device().expect("a live tensor has a known device")
+        self.storage.device
     }
 
     pub fn try_device(&self) -> Result<Device> {
-        let raw: i32 = self.query(|t, out| unsafe { ffi::fl_tensor_get_device(t, out) })?;
-        Device::from_raw(raw)
+        Ok(self.storage.device)
     }
 
-    /// Whether the elements sit next to each other in memory, which is what [`Tensor::view`]
-    /// requires.
+    /// Whether the elements sit next to each other in memory, in row-major order.
     pub fn is_contiguous(&self) -> bool {
-        self.query(|t, out| unsafe { ffi::fl_tensor_is_contiguous(t, out) })
-            .map(|flag: i32| flag != 0)
-            .unwrap_or(false)
+        let mut numel: i64 = 1;
+        for d in (0..self.layout.shape.len()).rev() {
+            let size = self.layout.shape[d];
+            if numel != self.layout.stride[d] as i64 && size != 1 {
+                return false;
+            }
+            numel *= size as i64;
+        }
+        true
     }
 
-    /// Read the same elements under a new shape, sharing the storage.
+    /// Read the same elements under a new shape, sharing the storage. One dimension may be -1 to
+    /// be worked out from the others. A tensor that is not contiguous can still be viewed as long
+    /// as no new dimension straddles a gap in its layout.
     pub fn view(&self, shape: &[i32]) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_view(self.raw, shape.as_ptr(), shape.len() as i32, out)
-        })
+        let shape = real_shape(self.numel(), shape)?;
+        if self.is_contiguous() {
+            let stride = contiguous_strides(&shape);
+            return self.with_layout(shape, stride, self.layout.offset);
+        }
+
+        // Runs of dimensions that are contiguous with each other, merged into one, from the back.
+        let mut merged: Vec<(i32, i32)> = Vec::new();
+        for d in (0..self.layout.shape.len()).rev() {
+            let (size, stride) = (self.layout.shape[d], self.layout.stride[d]);
+            if stride == 0 {
+                return Err(Error::invalid("unable to change the view of an expanded tensor"));
+            }
+            let joins = d + 1 < self.layout.shape.len()
+                && self.layout.stride[d + 1] as i64 * self.layout.shape[d + 1] as i64
+                    == stride as i64;
+            match merged.last_mut() {
+                Some(last) if joins => last.0 *= size,
+                _ => merged.push((size, stride)),
+            }
+        }
+
+        // Each merged run split into the requested dimensions that fill it exactly.
+        let mut view: Vec<(i32, i32)> = Vec::new();
+        let mut requested = shape.iter().rev().peekable();
+        for &(size, stride) in &merged {
+            let mut numel = 1;
+            while let Some(&&n) = requested.peek() {
+                if n * numel > size {
+                    break;
+                }
+                view.push((n, numel * stride));
+                numel *= n;
+                requested.next();
+            }
+            if numel != size {
+                return Err(Error::invalid("unable to get this view of the tensor"));
+            }
+        }
+        view.reverse();
+        let (shape, stride) = view.into_iter().unzip();
+        self.with_layout(shape, stride, self.layout.offset)
+    }
+
+    /// See every dimension of one at `shape`'s size by repeating its element, sharing the storage.
+    /// `shape` has as many dimensions as the tensor, and only a dimension of one may grow.
+    pub fn expand(&self, shape: &[i32]) -> Result<Tensor> {
+        if shape.len() != self.layout.shape.len() {
+            return Err(Error::invalid(format!(
+                "expand: {:?} has another rank than {:?}",
+                shape, self.layout.shape
+            )));
+        }
+        let mut stride = self.layout.stride.clone();
+        for d in 0..shape.len() {
+            if shape[d] != self.layout.shape[d] {
+                if self.layout.shape[d] != 1 {
+                    return Err(Error::invalid(format!(
+                        "expand: dimension {d} holds {} elements, and only a single one can grow",
+                        self.layout.shape[d]
+                    )));
+                }
+                stride[d] = 0;
+            }
+        }
+        self.with_layout(shape.to_vec(), stride, self.layout.offset)
     }
 
     /// Exchange two dimensions, sharing the storage. The result is usually not contiguous.
     pub fn transpose(&self, dim0: i32, dim1: i32) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_transpose(self.raw, dim0, dim1, out) })
+        let (d0, d1) = (self.real_dim(dim0)?, self.real_dim(dim1)?);
+        let mut shape = self.layout.shape.clone();
+        let mut stride = self.layout.stride.clone();
+        shape.swap(d0, d1);
+        stride.swap(d0, d1);
+        self.with_layout(shape, stride, self.layout.offset)
     }
 
     /// Take the half-open range `[begin, end)` of dimension `dim`, sharing the storage.
@@ -675,37 +903,105 @@ impl Tensor {
         begin: impl Into<Bound>,
         end: impl Into<Bound>,
     ) -> Result<Tensor> {
-        let (begin, end) = (begin.into().to_raw(), end.into().to_raw());
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_slice(self.raw, dim, begin, end, out) })
+        let d = self.real_dim(dim)?;
+        let size = self.layout.shape[d];
+        let begin = match begin.into() {
+            Bound::At(index) => self.real_index(d, index)?,
+            Bound::End => 0,
+        };
+        let end = match end.into() {
+            Bound::At(index) => self.real_index(d, index)?,
+            Bound::End => size,
+        };
+        if begin >= end {
+            return Err(Error::invalid(format!(
+                "slice: [{begin}, {end}) is not within a dimension of {size}"
+            )));
+        }
+
+        let mut shape = self.layout.shape.clone();
+        shape[d] = end - begin;
+        let offset = self.layout.offset + self.layout.stride[d] as i64 * begin as i64;
+        self.with_layout(shape, self.layout.stride.clone(), offset)
     }
 
     /// Take one entry of the first dimension, dropping that dimension.
     pub fn subtensor(&self, index: i32) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_subtensor(self.raw, index, out) })
+        let d = self.real_dim(0)?;
+        let index = self.real_index(d, index)?;
+        if index >= self.layout.shape[0] {
+            return Err(Error::invalid(format!(
+                "subtensor: {index} is not within a dimension of {}",
+                self.layout.shape[0]
+            )));
+        }
+        let offset = self.layout.offset + self.layout.stride[0] as i64 * index as i64;
+        self.with_layout(
+            self.layout.shape[1..].to_vec(),
+            self.layout.stride[1..].to_vec(),
+            offset,
+        )
     }
 
     /// Add a dimension of size one at `dim`.
     pub fn unsqueeze(&self, dim: i32) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_unsqueeze(self.raw, dim, out) })
+        let rank = self.layout.shape.len();
+        let d = if dim == rank as i32 { rank } else { self.real_dim(dim)? };
+        let stride = if rank == 0 {
+            1
+        } else if d == 0 {
+            self.layout.stride[0] * self.layout.shape[0]
+        } else {
+            self.layout.stride[d - 1]
+        };
+
+        let mut shapes = self.layout.shape.clone();
+        let mut strides = self.layout.stride.clone();
+        shapes.insert(d, 1);
+        strides.insert(d, stride);
+        self.with_layout(shapes, strides, self.layout.offset)
     }
 
     /// Remove the dimension at `dim`, which must have size one.
     pub fn squeeze(&self, dim: i32) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_squeeze(self.raw, dim, out) })
+        let d = self.real_dim(dim)?;
+        if self.layout.shape[d] != 1 {
+            return Err(Error::invalid(format!(
+                "squeeze: dimension {dim} holds {} elements, not one",
+                self.layout.shape[d]
+            )));
+        }
+        let mut shape = self.layout.shape.clone();
+        let mut stride = self.layout.stride.clone();
+        shape.remove(d);
+        stride.remove(d);
+        self.with_layout(shape, stride, self.layout.offset)
     }
 
     /// Return a contiguous tensor with the same elements, copying only if needed.
     pub fn contiguous(&self) -> Result<Tensor> {
-        let operators = operators_of(self)?;
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_contiguous(operators, self.raw, out) })
+        if self.is_contiguous() {
+            return Ok(self.clone());
+        }
+        let mut out = Tensor::empty(&self.layout.shape, self.dtype(), self.device())?;
+        functional::copy(self, &mut out)?;
+        Ok(out)
     }
 
     /// Copy the tensor to another device.
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
-        let operators = transfer_operators(self.try_device()?, device)?;
-        Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_to_device(operators, self.raw, device as i32, out)
-        })
+        // Already there, so nothing is copied and no operator is asked anything.
+        if self.device() == device {
+            return Ok(self.clone());
+        }
+
+        // A transfer is a plain copy of one run of bytes, so a strided tensor is packed first, on
+        // the side it is on -- the host's operators for either kind of host memory.
+        let source = self.contiguous()?;
+        let dest = Tensor::empty(&source.layout.shape, source.dtype(), device)?;
+        let operators = transfer_operators(source.device(), device)?;
+        check(unsafe { ffi::fl_transfer(operators, source.raw(), dest.raw()) })?;
+        Ok(dest)
     }
 
     /// Start copying to `device` and return before the bytes have arrived.
@@ -715,26 +1011,44 @@ impl Tensor {
     /// [`FutureTensor`] that comes back and is had by taking it, which is also what sees the copy
     /// through.
     pub fn to_device_async(&self, device: Device) -> Result<FutureTensor> {
-        let mut raw: ffi::FlFutureTensor = std::ptr::null_mut();
-        check(unsafe { ffi::fl_tensor_to_device_async(self.raw, device as i32, &mut raw) })?;
-        debug_assert!(!raw.is_null(), "a successful call must produce a handle");
+        let mut data: ffi::FlTensorData = std::ptr::null_mut();
+        let mut transfer: ffi::FlTransfer = std::ptr::null_mut();
+        check(unsafe {
+            ffi::fl_transfer_async(self.raw(), device as i32, &mut data, &mut transfer)
+        })?;
+
+        // Owned from here, whatever happens next: the storage by its Rc and the copy by the future.
+        let storage = Rc::new(Storage {
+            raw: data,
+            dtype: self.dtype(),
+            device,
+            read_only: false,
+            _owner: None,
+        });
+        let pending = PendingTransfer(transfer);
+        let shape = self.layout.shape.clone();
+        let tensor = Tensor::over(storage, shape.clone(), contiguous_strides(&shape), 0)?;
         Ok(FutureTensor {
-            raw,
-            _not_sync: PhantomData,
+            pending,
+            tensor,
+            source: RefCell::new(Some(self.clone())),
         })
     }
 
     /// Convert the elements to another data type.
     pub fn cast(&self, dtype: DType) -> Result<Tensor> {
+        if self.dtype() == dtype {
+            return Ok(self.clone());
+        }
+        let out = Tensor::empty(&self.layout.shape, dtype, self.device())?;
         let operators = operators_of(self)?;
-        Tensor::produce(|out| unsafe {
-            ffi::fl_tensor_cast(operators, self.raw, dtype as i32, out)
-        })
+        check(unsafe { ffi::fl_cast(operators, self.raw(), out.raw()) })?;
+        Ok(out)
     }
 
     /// Number of bytes the elements occupy once packed together.
     pub fn nbytes(&self) -> Result<i64> {
-        self.query(|t, out| unsafe { ffi::fl_tensor_get_nbytes(t, out) })
+        Ok(self.dtype().total_size(self.numel()))
     }
 
     /// Copy the elements out in row-major order, bringing them back from the device and packing
@@ -775,28 +1089,33 @@ impl Tensor {
             )));
         }
 
-        let nbytes = self.nbytes()?;
-        let count = nbytes as usize / std::mem::size_of::<T>();
-        let mut values = vec![T::default(); count];
-        let operators = readback_operators(self)?;
-        check(unsafe {
-            ffi::fl_tensor_copy_to_host(
-                operators,
-                self.raw,
-                values.as_mut_ptr() as *mut c_void,
-                nbytes,
-            )
-        })?;
+        let nbytes = self.nbytes()? as usize;
+        let mut values = vec![T::default(); nbytes / std::mem::size_of::<T>()];
+        if nbytes == 0 {
+            return Ok(values);
+        }
+
+        // Packed where it lies and moved afterwards, rather than the other way round: a transfer
+        // reads one contiguous run, so a strided tensor is packed on the device it is on.
+        let mut source = self.contiguous()?;
+        if !matches!(source.device(), Device::Cpu | Device::CudaHost) {
+            source = source.to_device(Device::Cpu)?;
+        }
+        let bytes = source.host_bytes()?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), values.as_mut_ptr() as *mut u8, nbytes)
+        };
         Ok(values)
     }
 }
 
-impl Clone for Tensor {
-    /// Makes another handle on the same storage rather than copying the elements. Use
-    /// [`Tensor::contiguous`] on a tensor you want to own outright.
-    fn clone(&self) -> Tensor {
-        Tensor::produce(|out| unsafe { ffi::fl_tensor_clone(self.raw, out) })
-            .expect("cloning a live tensor cannot fail")
+/// The handle of a copy still on its way, destroyed once whatever holds it is done with it.
+struct PendingTransfer(ffi::FlTransfer);
+
+impl Drop for PendingTransfer {
+    fn drop(&mut self) {
+        // Safety: made by a successful C call and destroyed exactly once, here.
+        unsafe { ffi::fl_transfer_destroy(self.0) };
     }
 }
 
@@ -807,9 +1126,11 @@ impl Clone for Tensor {
 /// have not arrived cannot be handed to an operator. Dropping one without taking it is a fetch
 /// that turned out not to be wanted: it costs the bandwidth already spent and nothing else.
 pub struct FutureTensor {
-    raw: ffi::FlFutureTensor,
-    /// Keeps the type off `Send`/`Sync`, since the operators behind it are not ready for either.
-    _not_sync: PhantomData<*const ()>,
+    // Declared first so that it goes first: the copy's handle before the storage it writes.
+    pending: PendingTransfer,
+    tensor: Tensor,
+    /// What the copy reads, held until it has been seen through.
+    source: RefCell<Option<Tensor>>,
 }
 
 impl FutureTensor {
@@ -819,35 +1140,23 @@ impl FutureTensor {
     /// after the copy. Take it where the tensor is about to be used rather than where the copy
     /// was started, since that is where the dependency lands.
     pub fn take(&self) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_future_tensor_take(self.raw, out) })
+        check(unsafe { ffi::fl_transfer_wait(self.pending.0) })?;
+        self.source.borrow_mut().take();
+        Ok(self.tensor.clone())
     }
 
     /// The same, except that it does not return until the copy has finished. For a caller about
     /// to read the bytes itself rather than enqueue work that reads them.
     pub fn take_sync(&self) -> Result<Tensor> {
-        Tensor::produce(|out| unsafe { ffi::fl_future_tensor_take_sync(self.raw, out) })
-    }
-}
-
-impl Drop for FutureTensor {
-    fn drop(&mut self) {
-        // Safety: the handle came from a successful C call and is destroyed exactly once, since
-        // FutureTensor is neither Copy nor Clone.
-        unsafe { ffi::fl_future_tensor_destroy(self.raw) };
+        check(unsafe { ffi::fl_transfer_wait_sync(self.pending.0) })?;
+        self.source.borrow_mut().take();
+        Ok(self.tensor.clone())
     }
 }
 
 impl fmt::Debug for FutureTensor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FutureTensor").finish_non_exhaustive()
-    }
-}
-
-impl Drop for Tensor {
-    fn drop(&mut self) {
-        // Safety: the handle came from a successful C call and is destroyed exactly once, since
-        // Tensor is not Copy and every clone makes its own handle.
-        unsafe { ffi::fl_tensor_destroy(self.raw) };
     }
 }
 

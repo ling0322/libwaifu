@@ -29,8 +29,8 @@ namespace fl {
 namespace op {
 namespace cpu {
 
-/// @brief CPU storage that is somebody else's memory: the bytes are not copied in, and are given
-/// back through `release` when the last tensor on them goes.
+/// @brief CPU storage that is somebody else's memory: the bytes are not copied in, and whoever
+/// handed them over keeps them alive for as long as this storage lives.
 ///
 /// What it exists for is a weight file mapped into memory. The mapping is the storage, so reading
 /// a package copies nothing, and the bytes are the page cache's -- shared with every other process
@@ -38,23 +38,15 @@ namespace cpu {
 /// than written out to swap.
 ///
 /// Read-only, because a mapping of a file opened for reading is: a write through it is a fault.
-/// isReadOnly() says so, and the one entry point that hands out a writable pointer refuses it.
+/// isReadOnly() says so.
 class ExternalTensorData : public TensorData {
  public:
-  typedef void (*ReleaseFn)(void *context);
-
-  /// @brief Wrap `numel` elements of `dtype` at `data`. `release(context)` is called exactly once,
-  /// when the last reference goes, and not at all if this throws.
-  static std::shared_ptr<TensorData> create(
-      const void *data,
-      int64_t numel,
-      DType dtype,
-      ReleaseFn release,
-      void *context);
+  /// @brief Storage that *is* `numel` elements of `dtype` at `data`, rather than a copy of them.
+  /// The bytes stay the caller's: they have to outlive this, and they are only ever read.
+  static std::unique_ptr<TensorData> create(const void *data, int64_t numel, DType dtype);
 
   ExternalTensorData(const ExternalTensorData &) = delete;
   ExternalTensorData &operator=(const ExternalTensorData &) = delete;
-  ~ExternalTensorData();
 
   Device getDevice() const override;
   std::byte *getRawData() const override;
@@ -64,10 +56,8 @@ class ExternalTensorData : public TensorData {
 
  private:
   const std::byte *_data;
-  ReleaseFn _release;
-  void *_context;
 
-  ExternalTensorData(const void *data, int64_t numel, DType dtype, ReleaseFn release, void *context);
+  ExternalTensorData(const void *data, int64_t numel, DType dtype);
 };
 
 }  // namespace cpu

@@ -19,10 +19,9 @@
 
 #include "flint/capi.h"
 
-#include <string.h>
-
 #include <algorithm>
 #include <exception>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -32,22 +31,17 @@
 #include <vector>
 
 #include "flint/cpu/external_tensor_data.h"
-#include "flint/fp8.h"
 #include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
+#include "flint/tensor_view.h"
+#include "lutil/error.h"
 #include "lutil/internal/log.h"
-#ifdef LIBWAIFU_CUDA_ENABLED
-#include "flint/cuda/future_tensor.h"
-#include "flint/cuda/to_device.h"
-#endif  // LIBWAIFU_CUDA_ENABLED
-
 #ifdef LIBWAIFU_CUDA_ENABLED
 #include "flint/cuda/fp8.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
+#include "flint/cuda/to_device.h"
 #endif  // LIBWAIFU_CUDA_ENABLED
-#include "flint/tensor.h"
-#include "lutil/error.h"
 
 namespace {
 
@@ -88,6 +82,10 @@ fl::DType toDType(fl_dtype_t dtype) {
   }
 }
 
+fl_dtype_t fromDType(fl::DType dtype) {
+  return static_cast<fl_dtype_t>(static_cast<int16_t>(dtype));
+}
+
 fl::Device toDevice(fl_device_type_t device) {
   switch (device) {
     case FL_DEVICE_CPU:
@@ -122,32 +120,20 @@ fl_device_type_t fromDevice(fl::Device device) {
   }
 }
 
-std::vector<int> toShape(const int32_t *shape, int32_t ndim) {
-  if (ndim < 0) throw lut::InvalidArgError("ndim must not be negative");
-  if (ndim > 0 && !shape) throw lut::InvalidArgError("shape is null");
-
-  std::vector<int> result;
-  result.reserve(static_cast<size_t>(ndim));
-  for (int32_t i = 0; i < ndim; ++i) {
-    if (shape[i] < 0) throw lut::InvalidArgError("shape must not be negative");
-    result.push_back(shape[i]);
-  }
-  return result;
-}
-
-fl::Tensor &deref(fl_tensor_t tensor) {
-  if (!tensor) throw lut::InvalidArgError("tensor is null");
-  return *reinterpret_cast<fl::Tensor *>(tensor);
-}
-
 fl::TensorData &deref(fl_tensor_data_t data) {
   if (!data) throw lut::InvalidArgError("data is null");
   return *reinterpret_cast<fl::TensorData *>(data);
 }
 
-fl::TensorView &deref(fl_tensor_view_t view) {
+const fl::TensorView &deref(fl_tensor_view_t view) {
   if (!view) throw lut::InvalidArgError("view is null");
   return *reinterpret_cast<fl::TensorView *>(view);
+}
+
+/// A view an operation may be given or not: NULL is the empty view, which is how the operators
+/// are told there is none.
+fl::TensorView optional(fl_tensor_view_t view) {
+  return view ? deref(view) : fl::TensorView();
 }
 
 /// What an fl_operators_t points at: the operators of one device, held by shared pointer so that
@@ -167,62 +153,36 @@ fl::Operators *deref(fl_operators_t operators) {
   return derefHandle(operators).operators.get();
 }
 
-/// The device an fl_operators_t was asked for, which is where what it makes is allocated.
-fl::Device handleDevice(fl_operators_t operators) {
-  return toDevice(derefHandle(operators).device);
-}
-
-
-/// Every tensor an operation reads has to be on the operators' own device. The kernels check that
-/// with the library's fatal check, which ends the process; asked here first, a caller that mixed
-/// two devices is told about it instead.
-void checkOnDevice(const fl::Tensor &tensor, fl_operators_t operators, const char *what) {
+/// Every view an operation reads or writes has to be on the operators' own device. The kernels
+/// check that with the library's fatal check, which ends the process; asked here first, a caller
+/// that mixed two devices is told about it instead.
+void checkOnDevice(const fl::TensorView &view, fl_operators_t operators, const char *what) {
   fl::Device::Type device = toDevice(derefHandle(operators).device).getType();
-  if (tensor.getDevice().getType() != device) {
+  if (view.getDevice().getType() != device) {
     throw lut::InvalidArgError(
-        std::string(what) + " is on " + tensor.getDevice().getName() + ", and these are the " +
+        std::string(what) + " is on " + view.getDevice().getName() + ", and these are the " +
         fl::Device(device).getName() + " operators");
   }
 }
 
-/// The same for a tensor an operation may be given or not, which is a null handle when it is not.
-void checkOptionalOnDevice(fl_tensor_t tensor, fl_operators_t operators, const char *what) {
-  if (tensor) checkOnDevice(deref(tensor), operators, what);
+/// The same for a view an operation may be given or not.
+void checkOptionalOnDevice(fl_tensor_view_t view, fl_operators_t operators, const char *what) {
+  if (view) checkOnDevice(deref(view), operators, what);
 }
 
-/// An operation with nothing to say about a tensor that holds no elements.
-void checkNotEmpty(const fl::Tensor &tensor, const char *what) {
-  if (tensor.empty()) throw lut::InvalidArgError(std::string(what) + " is empty");
+/// An operation with nothing to say about a view that holds no elements.
+void checkNotEmpty(const fl::TensorView &view, const char *what) {
+  if (view.getNumEl() == 0) throw lut::InvalidArgError(std::string(what) + " is empty");
 }
 
-/// max() and min() reduce the last dimension and no other, so a caller that named a different one
-/// is told rather than quietly handed the last.
-void checkLastDim(const fl::Tensor &tensor, int32_t dim, const char *what) {
-  if (dim != -1 && dim != tensor.getDim() - 1) {
+/// `view` has to have `shape`. What an elementwise operation writes is as large as what it reads,
+/// so an `out` of any other shape is a write past its end rather than a wrong answer.
+void checkShape(const fl::TensorView &view, const std::vector<int> &shape, const char *what) {
+  if (view.getShape() != shape) {
     throw lut::InvalidArgError(
-        std::string(what) + " reduces the last dimension, not dimension " + std::to_string(dim));
+        std::string(what) + " is " + view.getShapeString() + " where " +
+        fl::TensorShape(lut::makeConstSpan(shape)).toString() + " was expected");
   }
-}
-
-#ifdef LIBWAIFU_CUDA_ENABLED
-fl::FutureTensor &deref(fl_future_tensor_t future) {
-  if (!future) throw lut::InvalidArgError("future is null");
-  return *reinterpret_cast<fl::FutureTensor *>(future);
-}
-#endif  // LIBWAIFU_CUDA_ENABLED
-
-/// Number of bytes the elements of `tensor` occupy once packed together.
-int64_t getPackedSize(const fl::Tensor &tensor) {
-  return tensor.getDType().getTotalSize(tensor.getNumEl());
-}
-
-/// Hand a freshly made tensor back as a handle. Only called once the operation itself succeeded,
-/// so `out` is left untouched on every failure path.
-int32_t publish(fl::Tensor tensor, fl_tensor_t *out) {
-  if (!out) throw lut::InvalidArgError("out is null");
-
-  *out = reinterpret_cast<fl_tensor_t>(new fl::Tensor(std::move(tensor)));
-  return clearError();
 }
 
 /// Runs `body` and turns whatever it throws into an error code, so that no exception crosses the
@@ -242,7 +202,67 @@ int32_t guard(Body &&body) {
   }
 }
 
+/// An operation of `operators` that reads `input` and writes `out` of the same shape.
+template<typename Body>
+int32_t elementwise(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    fl_tensor_view_t out,
+    Body &&body) {
+  return guard([&]() {
+    const fl::TensorView &x = deref(input);
+    const fl::TensorView &y = deref(out);
+    checkOnDevice(x, operators, "the input");
+    checkOnDevice(y, operators, "out");
+    checkShape(y, x.getShape(), "out");
+    body(deref(operators), x, y);
+    return clearError();
+  });
+}
+
+/// An operation of `operators` that reads `a` and `b`, both of the same shape, and writes `out` of
+/// that shape too.
+template<typename Body>
+int32_t binary(
+    fl_operators_t operators,
+    fl_tensor_view_t a,
+    fl_tensor_view_t b,
+    fl_tensor_view_t out,
+    Body &&body) {
+  return guard([&]() {
+    const fl::TensorView &x = deref(a);
+    const fl::TensorView &y = deref(b);
+    const fl::TensorView &z = deref(out);
+    checkOnDevice(x, operators, "the left operand");
+    checkOnDevice(y, operators, "the right operand");
+    checkOnDevice(z, operators, "out");
+    if (x.getDType() != y.getDType()) {
+      throw lut::InvalidArgError("the two operands differ in type");
+    }
+    checkShape(y, x.getShape(), "the right operand");
+    checkShape(z, x.getShape(), "out");
+    body(deref(operators), x, y, z);
+    return clearError();
+  });
+}
+
+/// An operation of `operators` on the views it names, checked to be on its device, with nothing
+/// else to check here.
+template<typename Body>
+int32_t onDevice(
+    fl_operators_t operators,
+    std::initializer_list<std::pair<fl_tensor_view_t, const char *>> views,
+    Body &&body) {
+  return guard([&]() {
+    for (const auto &[view, what] : views) checkOnDevice(deref(view), operators, what);
+    body(deref(operators));
+    return clearError();
+  });
+}
+
 }  // namespace
+
+// --- Setup and errors -------------------------------------------------------------------------
 
 void fl_init() {
   guard([]() {
@@ -282,6 +302,14 @@ int32_t fl_operators_get_device(fl_operators_t operators, fl_device_type_t *out)
   });
 }
 
+int32_t fl_get_default_float_type(fl_operators_t operators, fl_dtype_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = fromDType(deref(operators)->getDefaultFloatType());
+    return clearError();
+  });
+}
+
 int32_t fl_get_last_error_code() {
   return gErrorCode;
 }
@@ -294,167 +322,7 @@ void fl_set_fatal_handler(fl_fatal_handler_t handler) {
   lut::internal::setFatalHandler(handler);
 }
 
-int32_t fl_tensor_zeros(
-    fl_operators_t operators,
-    const int32_t *shape,
-    int32_t ndim,
-    fl_dtype_t dtype,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    std::vector<int> dims = toShape(shape, ndim);
-    return publish(fl::F::zeros(handleDevice(operators), dims, toDType(dtype)), out);
-  });
-}
-
-int32_t fl_tensor_empty(
-    fl_operators_t operators,
-    const int32_t *shape,
-    int32_t ndim,
-    fl_dtype_t dtype,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    std::vector<int> dims = toShape(shape, ndim);
-    return publish(fl::F::empty(handleDevice(operators), dims, toDType(dtype)), out);
-  });
-}
-
-int32_t fl_tensor_host_empty(
-    fl_operators_t operators,
-    const int32_t *shape,
-    int32_t ndim,
-    fl_dtype_t dtype,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    std::vector<int> dims = toShape(shape, ndim);
-    return publish(fl::F::empty(fl::Device(fl::Device::kCudaHost), dims, toDType(dtype)), out);
-  });
-}
-
-int32_t fl_tensor_from_data(
-    fl_operators_t operators,
-    const int32_t *shape,
-    int32_t ndim,
-    fl_dtype_t dtype,
-    const void *data,
-    int64_t data_size,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    if (!data && data_size != 0) throw lut::InvalidArgError("data is null");
-    if (data_size < 0) throw lut::InvalidArgError("data_size must not be negative");
-
-    if (derefHandle(operators).device != FL_DEVICE_CPU) {
-      throw lut::InvalidArgError(
-          "the bytes are copied in here and now, so this takes the CPU operators");
-    }
-
-    std::vector<int> dims = toShape(shape, ndim);
-    fl::Tensor tensor = fl::F::empty(handleDevice(operators), dims, toDType(dtype));
-    int64_t expected = getPackedSize(tensor);
-    if (data_size != expected) {
-      throw lut::InvalidArgError(
-          "data_size does not match the shape and dtype: expected " + std::to_string(expected) +
-          " bytes, got " + std::to_string(data_size));
-    }
-
-    // Freshly created, so it is contiguous and starts at offset zero.
-    if (expected > 0) {
-      memcpy(tensor.getInternalData()->getData<void>(0), data, static_cast<size_t>(expected));
-    }
-    return publish(std::move(tensor), out);
-  });
-}
-
-int32_t fl_tensor_from_external(
-    const int32_t *shape,
-    int32_t ndim,
-    fl_dtype_t dtype,
-    const void *data,
-    int64_t data_size,
-    fl_release_fn release,
-    void *context,
-    fl_tensor_t *out) {
-  // Set once the storage owns `context`. Before that, a failure gives it back here; after it, the
-  // storage does, when whatever went wrong destroys it.
-  bool handedOver = false;
-
-  int32_t status = guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    if (!data) throw lut::InvalidArgError("data is null");
-
-    std::vector<int> dims = toShape(shape, ndim);
-    auto tensorShape = std::make_shared<fl::TensorShape>(lut::makeConstSpan(dims));
-    int64_t numel = tensorShape->getNumEl();
-    if (numel <= 0) throw lut::InvalidArgError("a borrowed tensor has at least one element");
-
-    fl::DType type = toDType(dtype);
-    int64_t expected = type.getTotalSize(numel);
-    if (data_size != expected) {
-      throw lut::InvalidArgError(
-          "data_size does not match the shape and dtype: expected " + std::to_string(expected) +
-          " bytes, got " + std::to_string(data_size));
-    }
-
-    // The CPU kernels read elements as their own type. A tensor the allocator made is always
-    // aligned for that; one at an arbitrary offset into a file need not be, and is refused rather
-    // than read misaligned.
-    int64_t alignment = std::max<int64_t>(1, type.getTotalSize(1));
-    if (reinterpret_cast<uintptr_t>(data) % alignment != 0) {
-      throw lut::InvalidArgError(
-          "data is not aligned to its " + std::to_string(alignment) + "-byte elements");
-    }
-
-    std::shared_ptr<fl::TensorData> storage =
-        fl::op::cpu::ExternalTensorData::create(data, numel, type, release, context);
-    handedOver = true;
-    return publish(fl::Tensor::create(tensorShape, storage), out);
-  });
-
-  if (!handedOver && release) release(context);
-  return status;
-}
-
-namespace {
-
-/// The one run of bytes a host tensor's elements are, for the two calls that hand it out.
-const fl::Tensor &hostRun(fl_tensor_t tensor, const void *out, int64_t *nbytes) {
-  if (!out) throw lut::InvalidArgError("out is null");
-  if (!nbytes) throw lut::InvalidArgError("nbytes is null");
-
-  const fl::Tensor &x = deref(tensor);
-  if (!x.getDevice().isHost()) {
-    throw lut::InvalidArgError(
-        "the bytes of a tensor on " + x.getDevice().getName() +
-        " have no address the caller may touch");
-  }
-  if (!x.isContiguous()) {
-    throw lut::InvalidArgError("a non-contiguous tensor's bytes are not one run");
-  }
-  *nbytes = getPackedSize(x);
-  return x;
-}
-
-}  // namespace
-
-int32_t fl_tensor_host_data(fl_tensor_t tensor, void **out, int64_t *nbytes) {
-  return guard([&]() {
-    const fl::Tensor &x = hostRun(tensor, out, nbytes);
-    if (x.getInternalData()->isReadOnly()) {
-      throw lut::InvalidArgError(
-          "the tensor's bytes are borrowed read-only, so there is no writable pointer to hand out");
-    }
-
-    *out = x.getInternalData()->getData<void>(x.getInternalOffset());
-    return FL_OK;
-  });
-}
-
-int32_t fl_tensor_host_bytes(fl_tensor_t tensor, const void **out, int64_t *nbytes) {
-  return guard([&]() {
-    const fl::Tensor &x = hostRun(tensor, out, nbytes);
-    *out = x.getInternalData()->getData<void>(x.getInternalOffset());
-    return FL_OK;
-  });
-}
+// --- Storage ----------------------------------------------------------------------------------
 
 int32_t fl_tensor_data_create(
     fl_device_type_t device,
@@ -467,6 +335,33 @@ int32_t fl_tensor_data_create(
 
     *out = reinterpret_cast<fl_tensor_data_t>(
         fl::F::allocate(toDevice(device), numel, toDType(dtype)).release());
+    return clearError();
+  });
+}
+
+int32_t fl_tensor_data_borrow(
+    const void *data,
+    fl_dtype_t dtype,
+    int64_t numel,
+    fl_tensor_data_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    if (!data) throw lut::InvalidArgError("data is null");
+    if (numel < 1) throw lut::InvalidArgError("storage holds at least one element");
+    if (numel > fl::TensorData::MaxNumEl) throw lut::InvalidArgError("too many elements");
+
+    // The CPU kernels read elements as their own type. Storage the allocator made is always
+    // aligned for that; bytes at an arbitrary offset into a file need not be, and are refused
+    // rather than read misaligned.
+    fl::DType type = toDType(dtype);
+    int64_t alignment = std::max<int64_t>(1, type.getTotalSize(1));
+    if (reinterpret_cast<uintptr_t>(data) % alignment != 0) {
+      throw lut::InvalidArgError(
+          "data is not aligned to its " + std::to_string(alignment) + "-byte elements");
+    }
+
+    *out = reinterpret_cast<fl_tensor_data_t>(
+        fl::op::cpu::ExternalTensorData::create(data, numel, type).release());
     return clearError();
   });
 }
@@ -486,7 +381,7 @@ int32_t fl_tensor_data_get_numel(fl_tensor_data_t data, int64_t *out) {
 int32_t fl_tensor_data_get_dtype(fl_tensor_data_t data, fl_dtype_t *out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
-    *out = static_cast<fl_dtype_t>(static_cast<int16_t>(deref(data).getDType()));
+    *out = fromDType(deref(data).getDType());
     return clearError();
   });
 }
@@ -499,6 +394,22 @@ int32_t fl_tensor_data_get_device(fl_tensor_data_t data, fl_device_type_t *out) 
   });
 }
 
+int32_t fl_tensor_data_get_host_ptr(fl_tensor_data_t data, void **out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    fl::TensorData &storage = deref(data);
+    if (!storage.getDevice().isHost()) {
+      throw lut::InvalidArgError(
+          "storage on " + storage.getDevice().getName() + " has no address the caller may touch");
+    }
+
+    *out = storage.getRawData();
+    return clearError();
+  });
+}
+
+// --- Views ------------------------------------------------------------------------------------
+
 int32_t fl_tensor_view_create(
     fl_tensor_data_t data,
     const int32_t *shape,
@@ -509,8 +420,8 @@ int32_t fl_tensor_view_create(
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
     fl::TensorData *storage = &deref(data);
-    if (ndim < 1) throw lut::InvalidArgError("a view has at least one dimension");
-    if (!shape || !stride) throw lut::InvalidArgError("shape or stride is null");
+    if (ndim < 0) throw lut::InvalidArgError("ndim must not be negative");
+    if (ndim > 0 && (!shape || !stride)) throw lut::InvalidArgError("shape or stride is null");
     if (offset < 0) throw lut::InvalidArgError("offset must not be negative");
 
     // The furthest element the view reaches, which has to be inside the storage. Worked out in 64
@@ -577,7 +488,7 @@ int32_t fl_tensor_view_get_offset(fl_tensor_view_t view, int64_t *out) {
 int32_t fl_tensor_view_get_dtype(fl_tensor_view_t view, fl_dtype_t *out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
-    *out = static_cast<fl_dtype_t>(static_cast<int16_t>(deref(view).getDType()));
+    *out = fromDType(deref(view).getDType());
     return clearError();
   });
 }
@@ -598,263 +509,164 @@ int32_t fl_tensor_view_is_contiguous(fl_tensor_view_t view, int32_t *out) {
   });
 }
 
-int32_t fl_tensor_clone(fl_tensor_t tensor, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(tensor), out); });
-}
+// --- Copies and conversions -------------------------------------------------------------------
 
-void fl_tensor_destroy(fl_tensor_t tensor) {
-  delete reinterpret_cast<fl::Tensor *>(tensor);
-}
-
-int32_t fl_tensor_get_dim(fl_tensor_t tensor, int32_t *out) {
+int32_t fl_copy(fl_operators_t operators, fl_tensor_view_t src, fl_tensor_view_t dest) {
   return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(tensor).getDim();
+    const fl::TensorView &from = deref(src);
+    const fl::TensorView &to = deref(dest);
+
+    // The CPU operators copy between any two kinds of host memory, page-locked or not; every
+    // other device copies within itself.
+    if (derefHandle(operators).device == FL_DEVICE_CPU) {
+      if (!from.getDevice().isHost() || !to.getDevice().isHost()) {
+        throw lut::InvalidArgError("the CPU operators copy between host memory only");
+      }
+    } else {
+      checkOnDevice(from, operators, "the source");
+      checkOnDevice(to, operators, "the destination");
+    }
+    if (from.getDType() != to.getDType()) {
+      throw lut::InvalidArgError("the source and the destination hold different types");
+    }
+    checkShape(to, from.getShape(), "the destination");
+
+    deref(operators)->copy(from, to);
     return clearError();
   });
 }
 
-int32_t fl_tensor_get_shape(fl_tensor_t tensor, int32_t dim, int32_t *out) {
+int32_t fl_cast(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [](fl::Operators *op, auto x, auto y) {
+    op->cast(x, y);
+  });
+}
+
+int32_t fl_transfer(fl_operators_t operators, fl_tensor_view_t src, fl_tensor_view_t dest) {
   return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(tensor).getShape(dim);
+    const fl::TensorView &from = deref(src);
+    const fl::TensorView &to = deref(dest);
+    if (!from.isContiguous() || !to.isContiguous()) {
+      throw lut::InvalidArgError("a transfer copies one contiguous run into another");
+    }
+    if (from.getDType() != to.getDType()) {
+      throw lut::InvalidArgError("the source and the destination hold different types");
+    }
+    checkShape(to, from.getShape(), "the destination");
+
+    deref(operators)->transfer(from, to);
     return clearError();
-  });
-}
-
-int32_t fl_tensor_get_stride(fl_tensor_t tensor, int32_t dim, int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(tensor).getStride(dim);
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_get_numel(fl_tensor_t tensor, int64_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(tensor).getNumEl();
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_get_dtype(fl_tensor_t tensor, fl_dtype_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = static_cast<fl_dtype_t>(static_cast<int16_t>(deref(tensor).getDType()));
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_get_device(fl_tensor_t tensor, fl_device_type_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = fromDevice(deref(tensor).getDevice());
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_is_contiguous(fl_tensor_t tensor, int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = deref(tensor).isContiguous() ? 1 : 0;
-    return clearError();
-  });
-}
-
-int32_t fl_tensor_view(
-    fl_tensor_t tensor,
-    const int32_t *shape,
-    int32_t ndim,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    std::vector<int> dims = toShape(shape, ndim);
-    return publish(deref(tensor).view(dims), out);
-  });
-}
-
-int32_t fl_tensor_transpose(
-    fl_tensor_t tensor,
-    int32_t dim0,
-    int32_t dim1,
-    fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(tensor).transpose(dim0, dim1), out); });
-}
-
-int32_t fl_tensor_slice(
-    fl_tensor_t tensor,
-    int32_t dim,
-    int32_t begin,
-    int32_t end,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    return publish(deref(tensor).slice(dim, {begin, end}), out);
-  });
-}
-
-int32_t fl_tensor_subtensor(fl_tensor_t tensor, int32_t index, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(tensor).subtensor(index), out); });
-}
-
-int32_t fl_tensor_unsqueeze(fl_tensor_t tensor, int32_t dim, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(tensor).unsqueeze(dim), out); });
-}
-
-int32_t fl_tensor_squeeze(fl_tensor_t tensor, int32_t dim, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(tensor).squeeze(dim), out); });
-}
-
-int32_t fl_tensor_contiguous(fl_operators_t operators, fl_tensor_t tensor, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::contiguous(deref(operators), deref(tensor)), out); });
-}
-
-int32_t fl_tensor_to_device(
-    fl_operators_t operators,
-    fl_tensor_t tensor,
-    fl_device_type_t device,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    const fl::Tensor &source = deref(tensor);
-
-    // Already there, so nothing is copied and no operator is asked anything. This is a question
-    // about the two ends rather than about a backend.
-    if (source.getDevice().getType() == toDevice(device).getType()) return publish(source, out);
-
-    return publish(fl::F::toDevice(deref(operators), source, toDevice(device)), out);
   });
 }
 
 #ifdef LIBWAIFU_CUDA_ENABLED
 
-int32_t fl_tensor_to_device_async(
-    fl_tensor_t tensor,
-    fl_device_type_t device,
-    fl_future_tensor_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
+namespace {
 
-    fl::FutureTensor future = fl::op::cuda::toDeviceAsync(toDevice(device), deref(tensor));
-    *out = reinterpret_cast<fl_future_tensor_t>(new fl::FutureTensor(std::move(future)));
+/// What an fl_transfer_t points at: the event marking the end of the copy, cleared once it has
+/// been seen through, and the storage the copy fills, which the caller owns.
+struct TransferHandle {
+  cudaEvent_t event;
+  fl::TensorData *dest;
+};
+
+TransferHandle &deref(fl_transfer_t transfer) {
+  if (!transfer) throw lut::InvalidArgError("transfer is null");
+  return *reinterpret_cast<TransferHandle *>(transfer);
+}
+
+int32_t waitTransfer(fl_transfer_t transfer, bool sync) {
+  return guard([&]() {
+    TransferHandle &handle = deref(transfer);
+    if (handle.event) {
+      fl::op::cuda::completeTransfer(handle.dest, handle.event, sync);
+      handle.event = nullptr;
+    }
     return clearError();
   });
 }
 
-int32_t fl_future_tensor_take(fl_future_tensor_t future, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(future).take(), out); });
+}  // namespace
+
+int32_t fl_transfer_async(
+    fl_tensor_view_t src,
+    fl_device_type_t device,
+    fl_tensor_data_t *dest,
+    fl_transfer_t *out) {
+  return guard([&]() {
+    if (!dest || !out) throw lut::InvalidArgError("out is null");
+
+    fl::op::cuda::PendingTransfer pending =
+        fl::op::cuda::startTransferAsync(toDevice(device), deref(src));
+    auto handle = std::make_unique<TransferHandle>(TransferHandle{pending.event, pending.dest.get()});
+    *dest = reinterpret_cast<fl_tensor_data_t>(pending.dest.release());
+    *out = reinterpret_cast<fl_transfer_t>(handle.release());
+    return clearError();
+  });
 }
 
-int32_t fl_future_tensor_take_sync(fl_future_tensor_t future, fl_tensor_t *out) {
-  return guard([&]() { return publish(deref(future).takeSync(), out); });
+int32_t fl_transfer_wait(fl_transfer_t transfer) {
+  return waitTransfer(transfer, false);
 }
 
-void fl_future_tensor_destroy(fl_future_tensor_t future) {
-  delete reinterpret_cast<fl::FutureTensor *>(future);
+int32_t fl_transfer_wait_sync(fl_transfer_t transfer) {
+  return waitTransfer(transfer, true);
+}
+
+void fl_transfer_destroy(fl_transfer_t transfer) {
+  auto *handle = reinterpret_cast<TransferHandle *>(transfer);
+  if (!handle) return;
+
+  // A fetch nobody waited on. Destroying a pending event is allowed: the call returns at once and
+  // the event goes once the device has reached it. The storage the copy writes is the caller's,
+  // and goes back in the copy stream's order whenever the caller lets go of it.
+  if (handle->event) cudaEventDestroy(handle->event);
+  delete handle;
 }
 
 #else  // LIBWAIFU_CUDA_ENABLED
 
 namespace {
 
-/// The one thing every entry point below has to say. Kept in one place so that a build without
-/// CUDA says it the same way each time.
 int32_t noCuda() {
   return setError(FL_ERROR_ABORTED, "this build has no CUDA support (needs WITH_CUDA=ON)");
 }
 
 }  // namespace
 
-int32_t fl_tensor_to_device_async(fl_tensor_t, fl_device_type_t, fl_future_tensor_t *) {
+int32_t fl_transfer_async(fl_tensor_view_t, fl_device_type_t, fl_tensor_data_t *, fl_transfer_t *) {
   return noCuda();
 }
 
-int32_t fl_future_tensor_take(fl_future_tensor_t, fl_tensor_t *) {
+int32_t fl_transfer_wait(fl_transfer_t) {
   return noCuda();
 }
 
-int32_t fl_future_tensor_take_sync(fl_future_tensor_t, fl_tensor_t *) {
+int32_t fl_transfer_wait_sync(fl_transfer_t) {
   return noCuda();
 }
 
-void fl_future_tensor_destroy(fl_future_tensor_t) {
+void fl_transfer_destroy(fl_transfer_t) {
 }
 
 #endif  // LIBWAIFU_CUDA_ENABLED
 
-int32_t fl_tensor_cast(
-    fl_operators_t operators,
-    fl_tensor_t tensor,
-    fl_dtype_t dtype,
-    fl_tensor_t *out) {
-  return guard(
-      [&]() { return publish(fl::F::cast(deref(operators), deref(tensor), toDType(dtype)), out); });
-}
+// --- Filling ----------------------------------------------------------------------------------
 
-int32_t fl_tensor_get_nbytes(fl_tensor_t tensor, int64_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = getPackedSize(deref(tensor));
-    return clearError();
+int32_t fl_fill(fl_operators_t operators, fl_tensor_view_t tensor, float value) {
+  return onDevice(operators, {{tensor, "the tensor"}}, [&](fl::Operators *op) {
+    op->fill(deref(tensor), value);
   });
 }
 
-int32_t fl_tensor_copy_to_host(
-    fl_operators_t operators,
-    fl_tensor_t tensor,
-    void *buffer,
-    int64_t buffer_size) {
-  return guard([&]() {
-    fl::Tensor source = deref(tensor);
-    int64_t nbytes = getPackedSize(source);
-    if (!buffer && nbytes != 0) throw lut::InvalidArgError("buffer is null");
-    if (buffer_size < nbytes) {
-      throw lut::InvalidArgError(
-          "buffer is too small: need " + std::to_string(nbytes) + " bytes, got " +
-          std::to_string(buffer_size));
-    }
-    if (nbytes == 0) return clearError();
-
-    // Packed where it lies and moved afterwards, rather than the other way round: a transfer
-    // reads one contiguous run, so a strided tensor has to be packed on the device it is on --
-    // which is the device whose operators were handed in.
-    if (!source.isContiguous()) source = fl::F::contiguous(deref(operators), source);
-
-    // Only what is not already host memory crosses the bus. Page-locked host memory is read
-    // where it lies, and the operators for it are the CPU's rather than the card's.
-    if (!source.getDevice().isHost()) {
-      source = fl::F::toDevice(deref(operators), source, fl::Device::getCpu());
-    }
-
-    const void *data = source.getInternalData()->getData<void>(source.getInternalOffset());
-    memcpy(buffer, data, static_cast<size_t>(nbytes));
-    return clearError();
-  });
+int32_t fl_rand(fl_operators_t operators, fl_tensor_view_t out) {
+  return onDevice(operators, {{out, "out"}}, [&](fl::Operators *op) { op->rand(deref(out)); });
 }
 
-int32_t fl_arange(
-    fl_operators_t operators,
-    int64_t begin,
-    int64_t end,
-    int64_t step,
-    fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::arangeLong(handleDevice(operators), begin, end, step), out); });
-}
-
-int32_t fl_rand(
-    fl_operators_t operators,
-    const int32_t *shape,
-    int32_t ndim,
-    fl_dtype_t dtype,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    std::vector<int> dims = toShape(shape, ndim);
-    return publish(fl::F::rand(handleDevice(operators), dims, toDType(dtype)), out);
-  });
-}
-
-int32_t fl_randn(fl_operators_t operators, const int32_t *shape, int32_t ndim, fl_tensor_t *out) {
-  return guard([&]() {
-    std::vector<int> dims = toShape(shape, ndim);
-    return publish(fl::F::randNormal(handleDevice(operators), dims), out);
+int32_t fl_randn(fl_operators_t operators, fl_tensor_view_t out) {
+  return onDevice(operators, {{out, "out"}}, [&](fl::Operators *op) {
+    if (deref(out).getDType() != fl::DType::kFloat) throw lut::InvalidArgError("out is not <float>");
+    op->randNormal(deref(out));
   });
 }
 
@@ -865,264 +677,271 @@ int32_t fl_manual_seed(fl_operators_t operators, uint64_t seed) {
   });
 }
 
+int32_t fl_arange(fl_operators_t operators, int64_t begin, int64_t step, fl_tensor_view_t out) {
+  return onDevice(operators, {{out, "out"}}, [&](fl::Operators *op) {
+    const fl::TensorView &y = deref(out);
+    if (y.getDType() != fl::DType::kLong || y.getDim() != 1) {
+      throw lut::InvalidArgError("out is not a <long> vector");
+    }
+    if (y.getNumEl() > 0) op->arangeLong(begin, step, y);
+  });
+}
+
+int32_t fl_causal_mask(fl_operators_t operators, fl_tensor_view_t out) {
+  return onDevice(operators, {{out, "out"}}, [&](fl::Operators *op) {
+    const fl::TensorView &y = deref(out);
+    if (y.getDim() != 2 || y.getShape(0) != y.getShape(1) || y.getShape(0) < 1) {
+      throw lut::InvalidArgError("out is not a square matrix");
+    }
+    op->causalMask(y);
+  });
+}
+
+// --- Layers -----------------------------------------------------------------------------------
+
 int32_t fl_lookup(
     fl_operators_t operators,
-    fl_tensor_t table,
-    fl_tensor_t indices,
-    fl_tensor_t *out) {
-  return guard(
-      [&]() { return publish(fl::F::lookup(deref(operators), deref(table), deref(indices)), out); });
+    fl_tensor_view_t table,
+    fl_tensor_view_t indices,
+    fl_tensor_view_t out) {
+  return onDevice(
+      operators,
+      {{table, "the table"}, {indices, "the indices"}, {out, "out"}},
+      [&](fl::Operators *op) { op->lookup(deref(table), deref(indices), deref(out)); });
 }
 
 int32_t fl_rotary_embedding(
     fl_operators_t operators,
-    fl_tensor_t positions,
-    fl_tensor_t query,
-    fl_tensor_t key,
-    fl_tensor_t rotary_cache) {
-  return guard([&]() {
-    deref(operators)->rotaryEmbedding(
-        deref(positions),
-        deref(query),
-        deref(key),
-        deref(rotary_cache));
-    return clearError();
-  });
+    fl_tensor_view_t positions,
+    fl_tensor_view_t query,
+    fl_tensor_view_t key,
+    fl_tensor_view_t rotary_cache) {
+  return onDevice(
+      operators,
+      {{positions, "the positions"}, {query, "the query"}, {key, "the key"},
+       {rotary_cache, "the rotary cache"}},
+      [&](fl::Operators *op) {
+        op->rotaryEmbedding(deref(positions), deref(query), deref(key), deref(rotary_cache));
+      });
 }
 
 int32_t fl_rms_norm(
     fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t weight,
+    fl_tensor_view_t input,
+    fl_tensor_view_t weight,
     float eps,
-    fl_tensor_t *out) {
-  return guard(
-      [&]() { return publish(fl::F::rmsNorm(deref(operators), deref(input), deref(weight), eps), out); });
-}
-
-int32_t fl_conv2d(
-    fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t weight,
-    fl_tensor_t bias,
-    int32_t stride,
-    int32_t padding,
-    int32_t dilation,
-    int32_t groups,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    checkNotEmpty(deref(input), "the input");
-    checkNotEmpty(deref(weight), "the weight");
-    checkOnDevice(deref(input), operators, "the input");
+    fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
     checkOnDevice(deref(weight), operators, "the weight");
-    checkOptionalOnDevice(bias, operators, "the bias");
-
-    fl::Tensor emptyTensor;
-    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
-
-    return publish(
-        fl::F::conv2d(deref(operators), deref(input), deref(weight), b, stride, padding, dilation, groups),
-        out);
+    op->rmsNorm(x, deref(weight), eps, y);
   });
 }
 
-int32_t fl_conv1d(
+int32_t fl_layer_norm(
     fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t weight,
-    fl_tensor_t bias,
-    int32_t stride,
-    int32_t padding,
-    int32_t dilation,
-    int32_t groups,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    checkNotEmpty(deref(input), "the input");
-    checkNotEmpty(deref(weight), "the weight");
-    checkOnDevice(deref(input), operators, "the input");
-    checkOnDevice(deref(weight), operators, "the weight");
-    checkOptionalOnDevice(bias, operators, "the bias");
-
-    fl::Tensor emptyTensor;
-    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
-
-    return publish(
-        fl::F::conv1d(deref(operators), deref(input), deref(weight), b, stride, padding, dilation, groups),
-        out);
-  });
-}
-
-int32_t fl_conv_transpose1d(
-    fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t weight,
-    fl_tensor_t bias,
-    int32_t stride,
-    int32_t padding,
-    int32_t output_padding,
-    int32_t groups,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    checkNotEmpty(deref(input), "the input");
-    checkNotEmpty(deref(weight), "the weight");
-    checkOnDevice(deref(input), operators, "the input");
-    checkOnDevice(deref(weight), operators, "the weight");
-    checkOptionalOnDevice(bias, operators, "the bias");
-
-    fl::Tensor emptyTensor;
-    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
-
-    return publish(
-        fl::F::convTranspose1d(deref(operators), deref(input),
-            deref(weight),
-            b,
-            stride,
-            padding,
-            output_padding,
-            groups),
-        out);
-  });
-}
-
-int32_t fl_snake(
-    fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t alpha,
-    fl_tensor_t beta,
+    fl_tensor_view_t input,
+    fl_tensor_view_t weight,
+    fl_tensor_view_t bias,
     float eps,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    checkNotEmpty(deref(input), "the input");
-    checkNotEmpty(deref(alpha), "alpha");
-    checkOnDevice(deref(input), operators, "the input");
-    checkOnDevice(deref(alpha), operators, "alpha");
-    checkOptionalOnDevice(beta, operators, "beta");
-
-    fl::Tensor emptyTensor;
-    const fl::Tensor &b = beta ? deref(beta) : emptyTensor;
-
-    return publish(fl::F::snake(deref(operators), deref(input), deref(alpha), b, eps), out);
-  });
-}
-
-int32_t fl_stft(
-    fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t window,
-    int32_t n_fft,
-    int32_t hop,
-    int32_t centered,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    checkNotEmpty(deref(input), "the input");
-    checkNotEmpty(deref(window), "the window");
-    checkOnDevice(deref(input), operators, "the input");
-    checkOnDevice(deref(window), operators, "the window");
-
-    return publish(
-        fl::F::stft(deref(operators), deref(input), deref(window), n_fft, hop, centered != 0),
-        out);
-  });
-}
-
-int32_t fl_istft(
-    fl_operators_t operators,
-    fl_tensor_t spectrum,
-    fl_tensor_t window,
-    int32_t n_fft,
-    int32_t hop,
-    int32_t centered,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    checkNotEmpty(deref(spectrum), "the spectrum");
-    checkNotEmpty(deref(window), "the window");
-    checkOnDevice(deref(spectrum), operators, "the spectrum");
-    checkOnDevice(deref(window), operators, "the window");
-
-    return publish(
-        fl::F::istft(deref(operators), deref(spectrum), deref(window), n_fft, hop, centered != 0),
-        out);
+    fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    checkOptionalOnDevice(weight, operators, "the weight");
+    checkOptionalOnDevice(bias, operators, "the bias");
+    op->layerNorm(x, optional(weight), optional(bias), eps, y);
   });
 }
 
 int32_t fl_group_norm(
     fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t weight,
-    fl_tensor_t bias,
+    fl_tensor_view_t input,
+    fl_tensor_view_t weight,
+    fl_tensor_view_t bias,
     int32_t groups,
     float eps,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    fl::Tensor emptyTensor;
-    const fl::Tensor &w = weight ? deref(weight) : emptyTensor;
-    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
+    fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    checkOptionalOnDevice(weight, operators, "the weight");
+    checkOptionalOnDevice(bias, operators, "the bias");
+    op->groupNorm(x, optional(weight), optional(bias), groups, eps, y);
+  });
+}
 
-    return publish(fl::F::groupNorm(deref(operators), deref(input), w, b, groups, eps), out);
+namespace {
+
+/// What every convolution checks before it reaches a kernel.
+void checkConvolutionViews(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    fl_tensor_view_t weight,
+    fl_tensor_view_t bias,
+    fl_tensor_view_t out) {
+  checkNotEmpty(deref(input), "the input");
+  checkNotEmpty(deref(weight), "the weight");
+  checkOnDevice(deref(input), operators, "the input");
+  checkOnDevice(deref(weight), operators, "the weight");
+  checkOptionalOnDevice(bias, operators, "the bias");
+  checkOnDevice(deref(out), operators, "out");
+}
+
+}  // namespace
+
+int32_t fl_conv2d(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    fl_tensor_view_t weight,
+    fl_tensor_view_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups,
+    fl_tensor_view_t out) {
+  return guard([&]() {
+    checkConvolutionViews(operators, input, weight, bias, out);
+    deref(operators)->conv2d(
+        deref(input), deref(weight), optional(bias), stride, padding, dilation, groups, deref(out));
+    return clearError();
+  });
+}
+
+int32_t fl_conv1d(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    fl_tensor_view_t weight,
+    fl_tensor_view_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t dilation,
+    int32_t groups,
+    fl_tensor_view_t out) {
+  return guard([&]() {
+    checkConvolutionViews(operators, input, weight, bias, out);
+    deref(operators)->conv1d(
+        deref(input), deref(weight), optional(bias), stride, padding, dilation, groups, deref(out));
+    return clearError();
+  });
+}
+
+int32_t fl_conv_transpose1d(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    fl_tensor_view_t weight,
+    fl_tensor_view_t bias,
+    int32_t stride,
+    int32_t padding,
+    int32_t output_padding,
+    int32_t groups,
+    fl_tensor_view_t out) {
+  return guard([&]() {
+    checkConvolutionViews(operators, input, weight, bias, out);
+    deref(operators)->convTranspose1d(
+        deref(input),
+        deref(weight),
+        optional(bias),
+        stride,
+        padding,
+        output_padding,
+        groups,
+        deref(out));
+    return clearError();
+  });
+}
+
+int32_t fl_snake(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    fl_tensor_view_t alpha,
+    fl_tensor_view_t beta,
+    float eps,
+    fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    checkNotEmpty(x, "the input");
+    checkNotEmpty(deref(alpha), "alpha");
+    checkOnDevice(deref(alpha), operators, "alpha");
+    checkOptionalOnDevice(beta, operators, "beta");
+    op->snake(x, deref(alpha), optional(beta), eps, y);
+  });
+}
+
+int32_t fl_stft(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    fl_tensor_view_t window,
+    int32_t n_fft,
+    int32_t hop,
+    int32_t centered,
+    fl_tensor_view_t out) {
+  return guard([&]() {
+    checkNotEmpty(deref(input), "the input");
+    checkNotEmpty(deref(window), "the window");
+    checkOnDevice(deref(input), operators, "the input");
+    checkOnDevice(deref(window), operators, "the window");
+    checkOnDevice(deref(out), operators, "out");
+    deref(operators)->stft(deref(input), deref(window), n_fft, hop, centered != 0, deref(out));
+    return clearError();
+  });
+}
+
+int32_t fl_istft(
+    fl_operators_t operators,
+    fl_tensor_view_t spectrum,
+    fl_tensor_view_t window,
+    int32_t n_fft,
+    int32_t hop,
+    int32_t centered,
+    fl_tensor_view_t out) {
+  return guard([&]() {
+    checkNotEmpty(deref(spectrum), "the spectrum");
+    checkNotEmpty(deref(window), "the window");
+    checkOnDevice(deref(spectrum), operators, "the spectrum");
+    checkOnDevice(deref(window), operators, "the window");
+    checkOnDevice(deref(out), operators, "out");
+    deref(operators)->istft(deref(spectrum), deref(window), n_fft, hop, centered != 0, deref(out));
+    return clearError();
   });
 }
 
 int32_t fl_upsample_nearest2d(
     fl_operators_t operators,
-    fl_tensor_t input,
+    fl_tensor_view_t input,
     int32_t scale,
-    fl_tensor_t *out) {
-  return guard(
-      [&]() { return publish(fl::F::upsampleNearest2d(deref(operators), deref(input), scale), out); });
+    fl_tensor_view_t out) {
+  return onDevice(operators, {{input, "the input"}, {out, "out"}}, [&](fl::Operators *op) {
+    op->upsampleNearest2d(deref(input), scale, deref(out));
+  });
 }
 
 int32_t fl_upsample_nearest1d(
     fl_operators_t operators,
-    fl_tensor_t input,
-    int32_t size,
-    fl_tensor_t *out) {
-  return guard(
-      [&]() { return publish(fl::F::upsampleNearest1d(deref(operators), deref(input), size), out); });
-}
-
-int32_t fl_layer_norm(
-    fl_operators_t operators,
-    fl_tensor_t input,
-    fl_tensor_t weight,
-    fl_tensor_t bias,
-    float eps,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    // An absent weight or bias is a null handle rather than an empty tensor, which is what a
-    // caller with nothing to pass has.
-    fl::Tensor emptyTensor;
-    const fl::Tensor &w = weight ? deref(weight) : emptyTensor;
-    const fl::Tensor &b = bias ? deref(bias) : emptyTensor;
-
-    return publish(fl::F::layerNorm(deref(operators), deref(input), w, b, eps), out);
+    fl_tensor_view_t input,
+    fl_tensor_view_t out) {
+  return onDevice(operators, {{input, "the input"}, {out, "out"}}, [&](fl::Operators *op) {
+    op->upsampleNearest1d(deref(input), deref(out));
   });
 }
 
-int32_t fl_quick_gelu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::quickGelu(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_matmul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
+int32_t fl_matmul(
+    fl_operators_t operators,
+    fl_tensor_view_t a,
+    fl_tensor_view_t b,
+    fl_tensor_view_t out) {
   return guard([&]() {
     checkNotEmpty(deref(a), "the left operand");
     checkNotEmpty(deref(b), "the right operand");
     checkOnDevice(deref(a), operators, "the left operand");
     checkOnDevice(deref(b), operators, "the right operand");
-
-    return publish(fl::F::matmul(deref(operators), deref(a), deref(b)), out);
+    checkOnDevice(deref(out), operators, "out");
+    deref(operators)->matmul(deref(a), deref(b), deref(out));
+    return clearError();
   });
 }
+
+// --- FP8 --------------------------------------------------------------------------------------
 
 namespace {
 
 /// Whether `device` has the kernels, asked without touching one. On CUDA `isFp8GemmAvailable()`
 /// reads the card's architecture, which fails where there is no card, and answering that without
 /// failing is this call's whole job.
-///
-/// CUDA is the only device that answers yes. Nothing about the format is specific to it -- the
-/// bytes would mean the same on a processor, and `Fp8Operand` is device agnostic for that reason --
-/// but the kernels that read them are the card's, so every other device is asked and says no here
-/// rather than further in.
 bool fp8Available(fl::Device::Type device) {
   if (!fl::isOperatorsAvailable(device)) return false;
 
@@ -1135,7 +954,33 @@ bool fp8Available(fl::Device::Type device) {
 
 /// The kernels assert their preconditions with CHECK, which reports a broken invariant of ours.
 /// What a caller could get wrong is checked here first, where it can be named as a bad argument.
-void checkFp8Activation(const fl::Tensor &x, fl::Device::Type device, const char *what) {
+void checkFp8Weight(const fl::TensorView &data, const fl::TensorView &scale, bool perRow) {
+  if (data.getDType() != fl::DType::kFp8E4M3 || data.getDim() != 2) {
+    throw lut::InvalidArgError("fp8 operand: data is not <fp8e4m3>(rows, k)");
+  }
+  if (perRow) {
+    if (scale.getDType() != fl::DType::kFloat || scale.getDim() != 1 ||
+        scale.getShape(0) != data.getShape(0)) {
+      throw lut::InvalidArgError("fp8 operand: channel scale is not <float>(rows)");
+    }
+  } else if (scale.getDType() != fl::DType::kFloat || scale.getNumEl() != 1) {
+    throw lut::InvalidArgError("fp8 operand: the tensor scale is not a single <float>");
+  }
+  // A weight and its scales on different devices would reach a kernel as one pointer it may touch
+  // and one it may not, and nothing would say so.
+  if (data.getDevice().getType() != scale.getDevice().getType()) {
+    throw lut::InvalidArgError("fp8 operand: the data and the scale are on different devices");
+  }
+  if (!data.isContiguous() || !scale.isContiguous()) {
+    throw lut::InvalidArgError("fp8 operand: not contiguous");
+  }
+  // The kernels index the operand in int.
+  if (data.getNumEl() >= std::numeric_limits<int32_t>::max()) {
+    throw lut::InvalidArgError("fp8 operand: more elements than the kernels can index");
+  }
+}
+
+void checkFp8Activation(const fl::TensorView &x, fl::Device::Type device, const char *what) {
   if (x.getDevice().getType() != device) {
     throw lut::InvalidArgError(std::string(what) + " is not on the same device as the weight");
   }
@@ -1154,6 +999,59 @@ void checkFp8Activation(const fl::Tensor &x, fl::Device::Type device, const char
   }
 }
 
+/// `out` (..., rows) <float16>, contiguous, on `device`: what a product of `a` (..., k) by a weight
+/// of `rows` rows writes.
+void checkFp8Result(const fl::TensorView &out, const fl::TensorView &a, int rows, fl::Device::Type device) {
+  if (out.getDevice().getType() != device || out.getDType() != fl::DType::kFloat16) {
+    throw lut::InvalidArgError("out is not <float16> on the weight's device");
+  }
+  if (!out.isContiguous()) throw lut::InvalidArgError("out is not contiguous");
+  std::vector<int> shape = a.getShape();
+  shape.back() = rows;
+  checkShape(out, shape, "out");
+}
+
+/// What the CUTLASS instantiation can read, rather than what the format can hold.
+void checkFp8Tiles(int rows, int k) {
+  if (rows % 8 != 0) throw lut::InvalidArgError("the fp8 operand's row count is not a multiple of 8");
+  if (k % 16 != 0) throw lut::InvalidArgError("the fp8 operand's k is not a multiple of 16");
+}
+
+/// The product of `a` and the FP8 weight `data` with `scale`, per row or for the whole tensor.
+int32_t fp8Matmul(
+    fl_tensor_view_t a,
+    fl_tensor_view_t data,
+    fl_tensor_view_t scale,
+    fl_tensor_view_t out,
+    bool perRow) {
+  // The return type is written down because a build without CUDA has nothing but the throw left
+  // in here, and a lambda that only throws deduces void.
+  return guard([&]() -> int32_t {
+    const fl::TensorView &weight = deref(data);
+    checkFp8Weight(weight, deref(scale), perRow);
+    fl::Device::Type device = weight.getDevice().getType();
+    int rows = weight.getShape(0);
+    int k = weight.getShape(1);
+
+    checkFp8Activation(deref(a), device, "the left operand");
+    if (deref(a).getShape(-1) != k) throw lut::InvalidArgError("the two operands disagree about k");
+    checkFp8Result(deref(out), deref(a), rows, device);
+
+#ifdef LIBWAIFU_CUDA_ENABLED
+    if (device == fl::Device::kCuda) {
+      checkFp8Tiles(rows, k);
+      if (perRow) {
+        fl::op::cuda::gemmFp8(deref(a), weight, deref(scale), deref(out));
+      } else {
+        fl::op::cuda::gemmFp8TensorScale(deref(a), weight, deref(scale), deref(out));
+      }
+      return clearError();
+    }
+#endif
+    throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
+  });
+}
+
 }  // namespace
 
 int32_t fl_fp8_available(fl_device_type_t device, int32_t *out) {
@@ -1164,55 +1062,57 @@ int32_t fl_fp8_available(fl_device_type_t device, int32_t *out) {
   });
 }
 
-int32_t fl_fp8_quantize(fl_tensor_t x, fl_tensor_t *data, fl_tensor_t *channel_scale) {
-  return guard([&]() {
-    if (!data || !channel_scale) throw lut::InvalidArgError("out is null");
-
-    const fl::Tensor &tensor = deref(x);
-    if (!tensor.isContiguous()) {
-      throw lut::InvalidArgError("the tensor to quantize is not contiguous");
-    }
+int32_t fl_fp8_quantize(fl_tensor_view_t x, fl_tensor_view_t data, fl_tensor_view_t channel_scale) {
+  return guard([&]() -> int32_t {
+    const fl::TensorView &tensor = deref(x);
+    if (!tensor.isContiguous()) throw lut::InvalidArgError("the tensor to quantize is not contiguous");
     if (tensor.getDim() != 2) {
       throw lut::InvalidArgError("the tensor to quantize is not two dimensional");
     }
-
-    fl::Fp8Operand operand;
-    if (tensor.getDevice().getType() == fl::Device::kCuda) {
-#ifdef LIBWAIFU_CUDA_ENABLED
-      if (tensor.getDType() != fl::DType::kFloat16) {
-        throw lut::InvalidArgError("the tensor to quantize is not <float16>");
-      }
-      if (tensor.getShape(-1) % 16 != 0) {
-        throw lut::InvalidArgError("the tensor to quantize: k is not a multiple of 16");
-      }
-      operand = fl::op::cuda::quantizeFp8(tensor);
-#else
-      throw lut::InvalidArgError("this build has no CUDA support (needs WITH_CUDA=ON)");
-#endif
-    } else {
+    if (tensor.getDevice().getType() != fl::Device::kCuda) {
       throw lut::InvalidArgError("the tensor to quantize is on a device with no FP8 kernels");
     }
 
-    // Two handles have to appear together or not at all, and publish() is what allocates, so they
-    // are made here and only handed over once both exist.
-    std::unique_ptr<fl::Tensor> ownedData{new fl::Tensor(std::move(operand.data))};
-    std::unique_ptr<fl::Tensor> ownedScale{new fl::Tensor(std::move(operand.channelScale))};
+#ifdef LIBWAIFU_CUDA_ENABLED
+    if (tensor.getDType() != fl::DType::kFloat16) {
+      throw lut::InvalidArgError("the tensor to quantize is not <float16>");
+    }
+    if (tensor.getShape(-1) % 16 != 0) {
+      throw lut::InvalidArgError("the tensor to quantize: k is not a multiple of 16");
+    }
 
-    *data = reinterpret_cast<fl_tensor_t>(ownedData.release());
-    *channel_scale = reinterpret_cast<fl_tensor_t>(ownedScale.release());
+    const fl::TensorView &codes = deref(data);
+    const fl::TensorView &scales = deref(channel_scale);
+    checkFp8Weight(codes, scales, true);
+    if (codes.getDevice().getType() != fl::Device::kCuda) {
+      throw lut::InvalidArgError("the codes are not on the tensor's device");
+    }
+    checkShape(codes, tensor.getShape(), "the codes");
+
+    fl::op::cuda::quantizeFp8(tensor, codes, scales);
     return clearError();
+#else
+    throw lut::InvalidArgError("this build has no CUDA support (needs WITH_CUDA=ON)");
+#endif
   });
 }
 
-int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor_t *out) {
-  // The return type is written down because a build without CUDA has nothing but the throw left
-  // in here, and a lambda that only throws deduces void.
+int32_t fl_fp8_dequantize(fl_tensor_view_t data, fl_tensor_view_t channel_scale, fl_tensor_view_t out) {
   return guard([&]() -> int32_t {
-    fl::Fp8Operand operand = fl::makeFp8Operand(deref(data), deref(channel_scale));
+    const fl::TensorView &codes = deref(data);
+    checkFp8Weight(codes, deref(channel_scale), true);
 
 #ifdef LIBWAIFU_CUDA_ENABLED
-    if (operand.data.getDevice().getType() == fl::Device::kCuda) {
-      return publish(fl::op::cuda::dequantFp8ToHalf(operand), out);
+    if (codes.getDevice().getType() == fl::Device::kCuda) {
+      const fl::TensorView &y = deref(out);
+      if (y.getDevice().getType() != fl::Device::kCuda || y.getDType() != fl::DType::kFloat16 ||
+          !y.isContiguous()) {
+        throw lut::InvalidArgError("out is not contiguous <float16> on the device");
+      }
+      checkShape(y, codes.getShape(), "out");
+
+      fl::op::cuda::dequantFp8ToHalf(codes, deref(channel_scale), y);
+      return clearError();
     }
 #endif
     throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
@@ -1220,252 +1120,149 @@ int32_t fl_fp8_dequantize(fl_tensor_t data, fl_tensor_t channel_scale, fl_tensor
 }
 
 int32_t fl_fp8_matmul(
-    fl_tensor_t a,
-    fl_tensor_t data,
-    fl_tensor_t channel_scale,
-    fl_tensor_t *out) {
-  // As in fl_fp8_dequantize: without CUDA every path out of here throws.
-  return guard([&]() -> int32_t {
-    fl::Fp8Operand operand = fl::makeFp8Operand(deref(data), deref(channel_scale));
-    fl::Device::Type device = operand.data.getDevice().getType();
-
-    checkFp8Activation(deref(a), device, "the left operand");
-    if (deref(a).getShape(-1) != operand.k) {
-      throw lut::InvalidArgError("the two operands disagree about k");
-    }
-
-#ifdef LIBWAIFU_CUDA_ENABLED
-    if (device == fl::Device::kCuda) {
-      // What the CUTLASS instantiation can read, rather than what the format can hold.
-      if (operand.rows % 8 != 0) {
-        throw lut::InvalidArgError("the fp8 operand's row count is not a multiple of 8");
-      }
-      if (operand.k % 16 != 0) {
-        throw lut::InvalidArgError("the fp8 operand's k is not a multiple of 16");
-      }
-      return publish(fl::op::cuda::gemmFp8(deref(a), operand), out);
-    }
-#endif
-    throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
-  });
+    fl_tensor_view_t a,
+    fl_tensor_view_t data,
+    fl_tensor_view_t channel_scale,
+    fl_tensor_view_t out) {
+  return fp8Matmul(a, data, channel_scale, out, true);
 }
 
 int32_t fl_fp8_matmul_tensor_scale(
-    fl_tensor_t a,
-    fl_tensor_t data,
-    fl_tensor_t scale,
-    fl_tensor_t *out) {
-  // As in fl_fp8_dequantize: without CUDA every path out of here throws.
-  return guard([&]() -> int32_t {
-    const fl::Tensor &weight = deref(data);
-    const fl::Tensor &tensorScale = deref(scale);
+    fl_tensor_view_t a,
+    fl_tensor_view_t data,
+    fl_tensor_view_t scale,
+    fl_tensor_view_t out) {
+  return fp8Matmul(a, data, scale, out, false);
+}
 
-    // What makeFp8Operand checks of the pair, with one scale in place of a row of them. The
-    // kernel CHECKs all of this too, but a caller's mistake should come back as an error rather
-    // than end the process.
-    if (weight.getDType() != fl::DType::kFp8E4M3 || weight.getDim() != 2) {
-      throw lut::InvalidArgError("fp8 operand: data is not <fp8e4m3>(rows, k)");
-    }
-    if (tensorScale.getDType() != fl::DType::kFloat || tensorScale.getNumEl() != 1) {
-      throw lut::InvalidArgError("fp8 operand: the tensor scale is not a single <float>");
-    }
-    if (weight.getDevice().getType() != tensorScale.getDevice().getType()) {
-      throw lut::InvalidArgError("fp8 operand: the data and the scale are on different devices");
-    }
-    if (!weight.isContiguous()) {
-      throw lut::InvalidArgError("fp8 operand: not contiguous");
-    }
-    if (weight.getNumEl() >= std::numeric_limits<int32_t>::max()) {
-      throw lut::InvalidArgError("fp8 operand: more elements than the kernels can index");
-    }
+// --- Elementwise ------------------------------------------------------------------------------
 
-    fl::Device::Type device = weight.getDevice().getType();
-    int rows = weight.getShape(0);
-    int k = weight.getShape(1);
+#define FL_CAPI_BINARY(name, method)                                                             \
+  int32_t name(fl_operators_t operators, fl_tensor_view_t a, fl_tensor_view_t b, fl_tensor_view_t out) { \
+    return binary(operators, a, b, out, [](fl::Operators *op, auto x, auto y, auto z) {         \
+      op->method(x, y, z);                                                                      \
+    });                                                                                         \
+  }
 
-    checkFp8Activation(deref(a), device, "the left operand");
-    if (deref(a).getShape(-1) != k) {
-      throw lut::InvalidArgError("the two operands disagree about k");
-    }
+FL_CAPI_BINARY(fl_add, add)
+FL_CAPI_BINARY(fl_sub, sub)
+FL_CAPI_BINARY(fl_mul, mul)
+FL_CAPI_BINARY(fl_div, divTensor)
+FL_CAPI_BINARY(fl_eq, eq)
 
-#ifdef LIBWAIFU_CUDA_ENABLED
-    if (device == fl::Device::kCuda) {
-      // What the CUTLASS instantiation can read, rather than what the format can hold.
-      if (rows % 8 != 0) {
-        throw lut::InvalidArgError("the fp8 operand's row count is not a multiple of 8");
-      }
-      if (k % 16 != 0) {
-        throw lut::InvalidArgError("the fp8 operand's k is not a multiple of 16");
-      }
-      return publish(fl::op::cuda::gemmFp8TensorScale(deref(a), weight, tensorScale), out);
-    }
-#endif
-    throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
+#undef FL_CAPI_BINARY
+
+int32_t fl_mul_scalar(fl_operators_t operators, fl_tensor_view_t input, float other, fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    op->mul(x, other, y);
   });
 }
 
-int32_t fl_mul(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::mul(deref(operators), deref(a), deref(b)), out); });
-}
-
-int32_t fl_add(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::add(deref(operators), deref(a), deref(b)), out); });
-}
-
-int32_t fl_sub(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::sub(deref(operators), deref(a), deref(b)), out); });
-}
-
-int32_t fl_eq(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::eq(deref(operators), deref(a), deref(b)), out); });
-}
-
-int32_t fl_div(fl_operators_t operators, fl_tensor_t a, fl_tensor_t b, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::divTensor(deref(operators), deref(a), deref(b)), out); });
-}
-
-int32_t fl_mul_scalar(fl_operators_t operators, fl_tensor_t input, float other, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::mul(deref(operators), deref(input), other), out); });
-}
-
-int32_t fl_div_scalar(fl_operators_t operators, fl_tensor_t input, float other, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::div(deref(operators), deref(input), other), out); });
-}
-
-int32_t fl_mod_scalar(
-    fl_operators_t operators,
-    fl_tensor_t input,
-    int64_t other,
-    fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::mod(deref(operators), deref(input), other), out); });
-}
-
-int32_t fl_square(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::square(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_neg(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::neg(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_abs(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::abs(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_exp(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::exp(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_log(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::log(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_round(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::round(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_sqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::sqrt(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_rsqrt(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::rsqrt(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_sigmoid(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::sigmoid(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_tanh(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::tanh(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_relu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::relu(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_gelu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::gelu(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_silu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::silu(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_sin(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::sin(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_cos(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::cos(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_softmax(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::softmax(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_swiglu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::swiglu(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_geglu(fl_operators_t operators, fl_tensor_t input, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::geglu(deref(operators), deref(input)), out); });
-}
-
-int32_t fl_sum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::sum(deref(operators), deref(input), dim), out); });
-}
-
-int32_t fl_cumsum(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
-  return guard([&]() {
-    const fl::Tensor &tensor = deref(input);
-    int32_t rank = tensor.getDim();
-    if (dim < -rank || dim >= rank) {
-      throw lut::InvalidArgError(
-          "fl_cumsum: dimension " + std::to_string(dim) + " of a tensor of rank " +
-          std::to_string(rank));
-    }
-    return publish(fl::F::cumsum(deref(operators), tensor, dim), out);
+int32_t fl_div_scalar(fl_operators_t operators, fl_tensor_view_t input, float other, fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    op->div(x, other, y);
   });
 }
 
-int32_t fl_max(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
-  return guard([&]() {
-    checkLastDim(deref(input), dim, "fl_max");
-    return publish(fl::F::max(deref(operators), deref(input)), out);
+int32_t fl_mod_scalar(fl_operators_t operators, fl_tensor_view_t input, int64_t other, fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    if (other == 0) throw lut::InvalidArgError("mod: by zero");
+    op->mod(x, other, y);
   });
 }
 
-int32_t fl_min(fl_operators_t operators, fl_tensor_t input, int32_t dim, fl_tensor_t *out) {
-  return guard([&]() {
-    checkLastDim(deref(input), dim, "fl_min");
-    return publish(fl::F::min(deref(operators), deref(input)), out);
+#define FL_CAPI_UNARY(name, method)                                                           \
+  int32_t name(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out) {     \
+    return elementwise(operators, input, out, [](fl::Operators *op, auto x, auto y) {        \
+      op->method(x, y);                                                                       \
+    });                                                                                       \
+  }
+
+FL_CAPI_UNARY(fl_square, square)
+FL_CAPI_UNARY(fl_neg, neg)
+FL_CAPI_UNARY(fl_abs, abs)
+FL_CAPI_UNARY(fl_exp, exp)
+FL_CAPI_UNARY(fl_log, log)
+FL_CAPI_UNARY(fl_round, round)
+FL_CAPI_UNARY(fl_sqrt, sqrt)
+FL_CAPI_UNARY(fl_rsqrt, rsqrt)
+FL_CAPI_UNARY(fl_sigmoid, sigmoid)
+FL_CAPI_UNARY(fl_tanh, tanh)
+FL_CAPI_UNARY(fl_relu, relu)
+FL_CAPI_UNARY(fl_gelu, gelu)
+FL_CAPI_UNARY(fl_silu, silu)
+FL_CAPI_UNARY(fl_sin, sin)
+FL_CAPI_UNARY(fl_cos, cos)
+FL_CAPI_UNARY(fl_quick_gelu, quickGelu)
+FL_CAPI_UNARY(fl_softmax, softmax)
+
+#undef FL_CAPI_UNARY
+
+int32_t fl_swiglu(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out) {
+  return onDevice(operators, {{input, "the input"}, {out, "out"}}, [&](fl::Operators *op) {
+    op->swiglu(deref(input), deref(out));
   });
 }
 
-int32_t fl_cat(
-    fl_operators_t operators,
-    fl_tensor_t a,
-    fl_tensor_t b,
-    int32_t dim,
-    fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::cat(deref(operators), deref(a), deref(b), dim), out); });
+int32_t fl_geglu(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out) {
+  return onDevice(operators, {{input, "the input"}, {out, "out"}}, [&](fl::Operators *op) {
+    op->geglu(deref(input), deref(out));
+  });
 }
 
-int32_t fl_causal_mask(fl_operators_t operators, int32_t max_len, fl_tensor_t *out) {
-  return guard([&]() { return publish(fl::F::causalMask(handleDevice(operators), max_len), out); });
+// --- Reductions -------------------------------------------------------------------------------
+
+namespace {
+
+void checkDim(const fl::TensorView &input, int32_t dim, const char *what) {
+  if (dim < 0 || dim >= input.getDim()) {
+    throw lut::InvalidArgError(
+        std::string(what) + ": no dimension " + std::to_string(dim) + " in a " +
+        std::to_string(input.getDim()) + "-D tensor");
+  }
 }
+
+}  // namespace
+
+int32_t fl_sum(fl_operators_t operators, fl_tensor_view_t input, int32_t dim, fl_tensor_view_t out) {
+  return onDevice(operators, {{input, "the input"}, {out, "out"}}, [&](fl::Operators *op) {
+    checkDim(deref(input), dim, "fl_sum");
+    op->sum(deref(input), dim, deref(out));
+  });
+}
+
+int32_t fl_cumsum(fl_operators_t operators, fl_tensor_view_t input, int32_t dim, fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    checkDim(x, dim, "fl_cumsum");
+    op->cumsum(x, dim, y);
+  });
+}
+
+int32_t fl_max(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out) {
+  return onDevice(operators, {{input, "the input"}, {out, "out"}}, [&](fl::Operators *op) {
+    op->max(deref(input), deref(out));
+  });
+}
+
+int32_t fl_min(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out) {
+  return onDevice(operators, {{input, "the input"}, {out, "out"}}, [&](fl::Operators *op) {
+    op->min(deref(input), deref(out));
+  });
+}
+
+// --- Attention and sampling -------------------------------------------------------------------
 
 int32_t fl_attention(
     fl_operators_t operators,
-    fl_tensor_t q,
-    fl_tensor_t k,
-    fl_tensor_t v,
+    fl_tensor_view_t q,
+    fl_tensor_view_t k,
+    fl_tensor_view_t v,
     int32_t causal,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    return publish(fl::F::attention(deref(operators), deref(q), deref(k), deref(v), causal != 0), out);
-  });
+    fl_tensor_view_t out) {
+  return onDevice(
+      operators,
+      {{q, "q"}, {k, "k"}, {v, "v"}, {out, "out"}},
+      [&](fl::Operators *op) { op->attention(deref(q), deref(k), deref(v), causal != 0, deref(out)); });
 }
 
 int32_t fl_paged_attention_available(int32_t *out) {
@@ -1482,72 +1279,65 @@ int32_t fl_paged_attention_available(int32_t *out) {
 
 int32_t fl_paged_attention(
     fl_operators_t operators,
-    fl_tensor_t q,
-    fl_tensor_t key_cache,
-    fl_tensor_t value_cache,
-    fl_tensor_t block_table,
-    fl_tensor_t cu_seqlens_q,
-    fl_tensor_t seqlens_k,
+    fl_tensor_view_t q,
+    fl_tensor_view_t key_cache,
+    fl_tensor_view_t value_cache,
+    fl_tensor_view_t block_table,
+    fl_tensor_view_t cu_seqlens_q,
+    fl_tensor_view_t seqlens_k,
     int32_t max_q_len,
     int32_t max_k_len,
     int32_t causal,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    return publish(
-        fl::F::pagedAttention(deref(operators), deref(q),
-            deref(key_cache),
-            deref(value_cache),
-            deref(block_table),
-            deref(cu_seqlens_q),
-            deref(seqlens_k),
-            max_q_len,
-            max_k_len,
-            causal != 0),
-        out);
+    fl_tensor_view_t out) {
+  return elementwise(operators, q, out, [&](fl::Operators *op, auto x, auto y) {
+    op->pagedAttention(
+        x,
+        deref(key_cache),
+        deref(value_cache),
+        deref(block_table),
+        deref(cu_seqlens_q),
+        deref(seqlens_k),
+        max_q_len,
+        max_k_len,
+        causal != 0,
+        y);
   });
 }
 
 int32_t fl_store_kv_cache(
     fl_operators_t operators,
-    fl_tensor_t k,
-    fl_tensor_t v,
-    fl_tensor_t key_cache,
-    fl_tensor_t value_cache,
-    fl_tensor_t slot_mapping) {
+    fl_tensor_view_t k,
+    fl_tensor_view_t v,
+    fl_tensor_view_t key_cache,
+    fl_tensor_view_t value_cache,
+    fl_tensor_view_t slot_mapping) {
   return guard([&]() {
     deref(operators)->storeKVCache(
-        deref(k),
-        deref(v),
-        deref(key_cache),
-        deref(value_cache),
-        deref(slot_mapping));
+        deref(k), deref(v), deref(key_cache), deref(value_cache), deref(slot_mapping));
     return clearError();
   });
 }
 
 int32_t fl_sample_with_params(
     fl_operators_t operators,
-    fl_tensor_t logits,
-    fl_tensor_t temperatures,
-    fl_tensor_t top_ks,
-    fl_tensor_t top_ps,
-    fl_tensor_t *out) {
-  return guard([&]() {
-    checkOnDevice(deref(logits), operators, "the logits");
-    checkOnDevice(deref(temperatures), operators, "the temperatures");
-    checkOnDevice(deref(top_ks), operators, "the top-k values");
-    checkOnDevice(deref(top_ps), operators, "the top-p values");
-
-    return publish(
-        fl::F::sample(deref(operators), deref(logits), deref(temperatures), deref(top_ks), deref(top_ps)),
-        out);
-  });
+    fl_tensor_view_t logits,
+    fl_tensor_view_t temperatures,
+    fl_tensor_view_t top_ks,
+    fl_tensor_view_t top_ps,
+    fl_tensor_view_t out) {
+  return onDevice(
+      operators,
+      {{logits, "the logits"}, {temperatures, "the temperatures"}, {top_ks, "the top-k values"},
+       {top_ps, "the top-p values"}, {out, "out"}},
+      [&](fl::Operators *op) {
+        op->sample(deref(logits), deref(temperatures), deref(top_ks), deref(top_ps), deref(out));
+      });
 }
 
 int32_t fl_repetition_penalty(
     fl_operators_t operators,
-    fl_tensor_t logits,
-    fl_tensor_t history,
+    fl_tensor_view_t logits,
+    fl_tensor_view_t history,
     float weight) {
   return guard([&]() {
     deref(operators)->repetitionPenalty(deref(logits), deref(history), weight);
@@ -1555,29 +1345,12 @@ int32_t fl_repetition_penalty(
   });
 }
 
-int32_t fl_copy(fl_operators_t operators, fl_tensor_t src, fl_tensor_t dest) {
-  return guard([&]() {
-    if (deref(src).getDType() != deref(dest).getDType()) {
-      throw lut::InvalidArgError("the source and the destination hold different types");
-    }
-    deref(src).throwIfInvalidShape(deref(dest).getShape(), "fl_copy");
-
-    deref(operators)->copy(deref(src), deref(dest));
-    return clearError();
-  });
-}
-
-int32_t fl_fill(fl_operators_t operators, fl_tensor_t tensor, float value) {
-  return guard([&]() {
-    deref(operators)->fill(deref(tensor), value);
-    return clearError();
-  });
-}
+// --- Reading results --------------------------------------------------------------------------
 
 int32_t fl_all_close(
     fl_operators_t operators,
-    fl_tensor_t a,
-    fl_tensor_t b,
+    fl_tensor_view_t a,
+    fl_tensor_view_t b,
     float rtol,
     float atol,
     int32_t *out) {
@@ -1588,7 +1361,7 @@ int32_t fl_all_close(
   });
 }
 
-int32_t fl_all(fl_operators_t operators, fl_tensor_t tensor, int32_t *out) {
+int32_t fl_all(fl_operators_t operators, fl_tensor_view_t tensor, int32_t *out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
     *out = deref(operators)->all(deref(tensor)) ? 1 : 0;
@@ -1596,7 +1369,7 @@ int32_t fl_all(fl_operators_t operators, fl_tensor_t tensor, int32_t *out) {
   });
 }
 
-int32_t fl_elem(fl_operators_t operators, fl_tensor_t tensor, float *out) {
+int32_t fl_elem(fl_operators_t operators, fl_tensor_view_t tensor, float *out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
     *out = deref(operators)->elem(deref(tensor));
@@ -1604,21 +1377,14 @@ int32_t fl_elem(fl_operators_t operators, fl_tensor_t tensor, float *out) {
   });
 }
 
-int32_t fl_get_default_float_type(fl_operators_t operators, fl_dtype_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    fl::DType dtype = deref(operators)->getDefaultFloatType();
-    *out = static_cast<fl_dtype_t>(static_cast<int16_t>(dtype));
-    return clearError();
-  });
-}
-
-int32_t fl_print(fl_operators_t operators, fl_tensor_t tensor) {
+int32_t fl_print(fl_operators_t operators, fl_tensor_view_t tensor) {
   return guard([&]() {
     deref(operators)->print(deref(tensor));
     return clearError();
   });
 }
+
+// --- Memory -----------------------------------------------------------------------------------
 
 int32_t fl_memory_capture(fl_device_type_t device, fl_memory_snapshot_t *out) {
   return guard([&]() {

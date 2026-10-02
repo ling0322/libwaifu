@@ -184,37 +184,43 @@ CATCH_TEST_CASE("an asynchronous copy refuses every direction but one", "[op][cu
   CATCH_REQUIRE_THROWS(op::cuda::toDeviceAsync(Device::getCuda(), there));
 }
 
-CATCH_TEST_CASE("the C interface hands the copy over as a future", "[op][cuda]") {
+CATCH_TEST_CASE("the C interface hands the copy over to be waited on", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   Tensor host = F::rand(Device::getCpu(), {16, 16}, DType::kFloat);
   Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
 
-  fl_tensor_t source = reinterpret_cast<fl_tensor_t>(&locked);
+  TensorView lockedView(locked);
+  fl_tensor_view_t source = reinterpret_cast<fl_tensor_view_t>(&lockedView);
 
-  fl_future_tensor_t future = nullptr;
-  CATCH_REQUIRE(fl_tensor_to_device_async(source, FL_DEVICE_CUDA, &future) == FL_OK);
-  CATCH_REQUIRE(future != nullptr);
+  fl_tensor_data_t dest = nullptr;
+  fl_transfer_t transfer = nullptr;
+  CATCH_REQUIRE(fl_transfer_async(source, FL_DEVICE_CUDA, &dest, &transfer) == FL_OK);
+  CATCH_REQUIRE(dest != nullptr);
+  CATCH_REQUIRE(transfer != nullptr);
+  CATCH_REQUIRE(fl_transfer_wait(transfer) == FL_OK);
 
-  fl_tensor_t taken = nullptr;
-  CATCH_REQUIRE(fl_future_tensor_take(future, &taken) == FL_OK);
-  CATCH_REQUIRE(equalFloat(
-      host,
-      F::toDevice(cudaOps(), *reinterpret_cast<Tensor *>(taken), Device::getCpu())));
+  // The storage is the caller's: seen through a view of the source's shape, it holds its bytes.
+  TensorView arrived(
+      reinterpret_cast<TensorData *>(dest), std::make_shared<TensorShape>(locked.getShape()), 0);
+  Tensor back = F::empty(Device::getCpu(), {16, 16}, DType::kFloat);
+  cudaOps()->transfer(arrived, back);
+  CATCH_REQUIRE(equalFloat(host, back));
 
-  // Taking does not free the future, and destroying one is fine whether it was taken or not.
-  fl_tensor_destroy(taken);
-  fl_future_tensor_destroy(future);
+  // Waiting does not free the handle, and destroying one is fine whether it was waited on or not.
+  fl_transfer_destroy(transfer);
+  fl_tensor_data_destroy(dest);
 
-  // A future nobody took, freed the same way.
-  fl_future_tensor_t dropped = nullptr;
-  CATCH_REQUIRE(fl_tensor_to_device_async(source, FL_DEVICE_CUDA, &dropped) == FL_OK);
-  fl_future_tensor_destroy(dropped);
+  // A copy nobody waited on, freed the same way.
+  CATCH_REQUIRE(fl_transfer_async(source, FL_DEVICE_CUDA, &dest, &transfer) == FL_OK);
+  fl_transfer_destroy(transfer);
+  fl_tensor_data_destroy(dest);
 
   // The one pair that is allowed is still the only one.
-  fl_future_tensor_t refused = nullptr;
-  fl_tensor_t pageable = reinterpret_cast<fl_tensor_t>(&host);
-  CATCH_REQUIRE(fl_tensor_to_device_async(pageable, FL_DEVICE_CUDA, &refused) != FL_OK);
+  TensorView hostView(host);
+  fl_tensor_data_t refused = nullptr;
+  fl_tensor_view_t pageable = reinterpret_cast<fl_tensor_view_t>(&hostView);
+  CATCH_REQUIRE(fl_transfer_async(pageable, FL_DEVICE_CUDA, &refused, &transfer) != FL_OK);
   CATCH_REQUIRE(refused == nullptr);
 }
 

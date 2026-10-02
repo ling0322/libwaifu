@@ -47,6 +47,7 @@
 #include "flint/cuda/common.h"
 #include "flint/cuda/fp8.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
+#include "flint/functional.h"
 
 #define CUTLASS_CHECK(x)                                                                     \
   {                                                                                          \
@@ -388,11 +389,11 @@ bool isFp8GemmAvailable() {
   return available;
 }
 
-Fp8Operand quantizeFp8(const Tensor &x) {
+void quantizeFp8(TensorView x, TensorView data, TensorView channelScale) {
   CHECK(x.getDevice().getType() == Device::kCuda);
   CHECK(x.getDType() == DType::kFloat16);
   CHECK(x.getDim() == 2);
-  LL_CHECK_CONTIGUOUS(x);
+  CHECK(x.isContiguous());
 
   int rows = x.getShape(0);
   int k = x.getShape(1);
@@ -402,43 +403,64 @@ Fp8Operand quantizeFp8(const Tensor &x) {
   CHECK(k % 16 == 0);
   CHECK(x.getNumEl() < std::numeric_limits<int32_t>::max());
 
-  Fp8Operand operand;
-  operand.rows = rows;
-  operand.k = k;
-  operand.data = createCudaTensorFp8E4M3({rows, k});
-  operand.channelScale = createCudaTensorFloat({rows});
+  CHECK(data.getDevice().getType() == Device::kCuda && data.getDType() == DType::kFp8E4M3);
+  CHECK(data.isContiguous() && data.getShape() == std::vector<int>({rows, k}));
+  CHECK(channelScale.getDevice().getType() == Device::kCuda);
+  CHECK(channelScale.getDType() == DType::kFloat);
+  CHECK(channelScale.isContiguous() && channelScale.getShape() == std::vector<int>({rows}));
 
   // One block a row, capped where a row is shorter than the block would be wide.
   int blockSize = std::min(256, std::max(32, (k / kElementPerThread + 31) / 32 * 32));
   quantizeFp8Kernel<<<rows, blockSize>>>(
       getDataPtrCuda<half>(x),
       k,
-      reinterpret_cast<uint8_t *>(getDataPtrCuda<Fp8E4M3>(operand.data)),
-      getDataPtrCuda<float>(operand.channelScale));
+      reinterpret_cast<uint8_t *>(getDataPtrCuda<Fp8E4M3>(data)),
+      getDataPtrCuda<float>(channelScale));
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
+}
+
+Fp8Operand quantizeFp8(const Tensor &x) {
+  CHECK(x.getDim() == 2);
+  int rows = x.getShape(0);
+  int k = x.getShape(1);
+
+  Fp8Operand operand;
+  operand.rows = rows;
+  operand.k = k;
+  operand.data = createCudaTensorFp8E4M3({rows, k});
+  operand.channelScale = createCudaTensorFloat({rows});
+  quantizeFp8(x, operand.data, operand.channelScale);
 
   return operand;
 }
 
-Tensor dequantFp8ToHalf(const Fp8Operand &operand) {
-  Tensor x = createCudaTensorHalf({operand.rows, operand.k});
+void dequantFp8ToHalf(TensorView data, TensorView channelScale, TensorView out) {
+  CHECK(data.getDim() == 2 && data.isContiguous() && channelScale.isContiguous());
+  int rows = data.getShape(0);
+  int k = data.getShape(1);
+  CHECK(out.getDevice().getType() == Device::kCuda && out.getDType() == DType::kFloat16);
+  CHECK(out.isContiguous() && out.getShape() == std::vector<int>({rows, k}));
 
   constexpr int kBlockSize = 256;
-  int numPack = operand.rows * (operand.k / kElementPerThread);
+  int numPack = rows * (k / kElementPerThread);
   dim3 grid = getGrid1D(numPack, kBlockSize);
 
   dequantizeFp8Kernel<<<grid, kBlockSize>>>(
-      reinterpret_cast<const uint8_t *>(getDataPtrCuda<Fp8E4M3>(operand.data)),
-      getDataPtrCuda<float>(operand.channelScale),
-      getDataPtrCuda<half>(x),
-      operand.rows,
-      operand.k);
+      reinterpret_cast<const uint8_t *>(getDataPtrCuda<Fp8E4M3>(data)),
+      getDataPtrCuda<float>(channelScale),
+      getDataPtrCuda<half>(out),
+      rows,
+      k);
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
+}
 
+Tensor dequantFp8ToHalf(const Fp8Operand &operand) {
+  Tensor x = createCudaTensorHalf({operand.rows, operand.k});
+  dequantFp8ToHalf(operand.data, operand.channelScale, x);
   return x;
 }
 
@@ -447,19 +469,21 @@ namespace {
 /// What the two public entry points share once each has checked its own scale: A (..., k) times
 /// the transpose of B (n, k), with `scale` read as Fp8Scale says.
 template<Fp8Scale kScale>
-Tensor gemmFp8Impl(const Tensor &A, const Tensor &B, const Tensor &scale) {
+void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
   CHECK(A.getDevice().getType() == Device::kCuda);
   CHECK(A.getDType() == DType::kFloat16);
   CHECK(A.isContiguous());
   CHECK(A.getDim() >= 2);
   CHECK(A.getShape(-1) == B.getShape(1));
 
-  if (A.getDim() > 2) {
-    std::vector<int> shape = A.getShape();
-    Tensor D = gemmFp8Impl<kScale>(A.view({-1, A.getShape(-1)}), B, scale);
+  std::vector<int> shapeD = A.getShape();
+  shapeD.back() = B.getShape(0);
+  CHECK(D.getDevice().getType() == Device::kCuda && D.getDType() == DType::kFloat16);
+  CHECK(D.isContiguous() && D.getShape() == shapeD);
 
-    shape.back() = B.getShape(0);
-    return D.view(shape);
+  if (A.getDim() > 2) {
+    gemmFp8Impl<kScale>(A.view({-1, A.getShape(-1)}), B, scale, D.view({-1, B.getShape(0)}));
+    return;
   }
 
   if (!isFp8GemmAvailable()) {
@@ -475,8 +499,6 @@ Tensor gemmFp8Impl(const Tensor &A, const Tensor &B, const Tensor &scale) {
   CHECK(n % kAlignmentC == 0);
   CHECK(k % kAlignmentB == 0);
 
-  Tensor D = createCudaTensorHalf({m, n});
-
   const half *ptrA = getDataPtrCuda<half>(A);
   const Fp8E4M3 *ptrB = getDataPtrCuda<Fp8E4M3>(B);
   const float *ptrScale = getDataPtrCuda<float>(scale);
@@ -490,17 +512,34 @@ Tensor gemmFp8Impl(const Tensor &A, const Tensor &B, const Tensor &scale) {
 
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
+}
 
-  return D;
+/// The result a GEMM of `A` (..., k) by `B` (n, k) writes: (..., n) in half.
+Tensor gemmFp8Result(TensorView A, TensorView B) {
+  std::vector<int> shape = A.getShape();
+  shape.back() = B.getShape(0);
+  return F::empty(Device::getCuda(), shape, DType::kFloat16);
 }
 
 }  // namespace
 
+void gemmFp8(TensorView A, TensorView B, TensorView channelScale, TensorView D) {
+  gemmFp8Impl<Fp8Scale::kChannel>(A, B, channelScale, D);
+}
+
 Tensor gemmFp8(const Tensor &A, const Fp8Operand &B) {
-  return gemmFp8Impl<Fp8Scale::kChannel>(A, B.data, B.channelScale);
+  Tensor D = gemmFp8Result(A, B.data);
+  gemmFp8(A, B.data, B.channelScale, D);
+  return D;
 }
 
 Tensor gemmFp8TensorScale(const Tensor &A, const Tensor &B, const Tensor &scale) {
+  Tensor D = gemmFp8Result(A, B);
+  gemmFp8TensorScale(A, B, scale, D);
+  return D;
+}
+
+void gemmFp8TensorScale(TensorView A, TensorView B, TensorView scale, TensorView D) {
   CHECK(B.getDevice().getType() == Device::kCuda);
   CHECK(B.getDType() == DType::kFp8E4M3);
   CHECK(B.getDim() == 2);
@@ -513,7 +552,7 @@ Tensor gemmFp8TensorScale(const Tensor &A, const Tensor &B, const Tensor &scale)
   CHECK(scale.getDType() == DType::kFloat);
   CHECK(scale.getNumEl() == 1);
 
-  return gemmFp8Impl<Fp8Scale::kTensor>(A, B, scale);
+  gemmFp8Impl<Fp8Scale::kTensor>(A, B, scale, D);
 }
 
 }  // namespace cuda
