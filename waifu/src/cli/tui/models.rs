@@ -208,8 +208,8 @@ enum Asking {
 /// What the box asking about a model marked not for all audiences says under its title.
 fn warning(name: &str) -> String {
     format!(
-        "The author marked {name} Not for all audiences. It may contain potentially harmful or \
-         sensitive information. Continue?"
+        "The author marked {name} as not-for-all-audiences. It may contain potentially harmful \
+         or sensitive information. Continue?"
     )
 }
 
@@ -441,7 +441,7 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
                 if explicit {
                     asking = Some((
                         Asking::Proceed(name),
-                        Confirm::ask("Not for all audiences").saying(&warning(name)),
+                        Confirm::ask("not-for-all-audiences").saying(&warning(name)),
                     ));
                     continue;
                 }
@@ -680,7 +680,7 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
             spans.push(Span::raw(entry.describe()).dim());
             if entry.explicit() {
                 spans.push(Span::styled(
-                    "  not for all audiences",
+                    "  not-for-all-audiences",
                     Style::new().fg(Color::Magenta),
                 ));
             }
@@ -893,7 +893,7 @@ mod tests {
         assert!(drawn.contains("sdxl:wai"), "{drawn}");
         assert!(drawn.contains("sdxl:noob"), "{drawn}");
         assert!(drawn.contains("sdxl:base"), "{drawn}");
-        assert_eq!(drawn.matches("not for all audiences").count(), 1, "{drawn}");
+        assert_eq!(drawn.matches("not-for-all-audiences").count(), 1, "{drawn}");
         assert!(!drawn.contains("explicit"), "{drawn}");
         assert!(!drawn.contains("show all"), "{drawn}");
     }
@@ -902,7 +902,7 @@ mod tests {
     fn the_warning_names_the_model_and_asks_whether_to_go_on() {
         let said = warning("sdxl:noob");
         assert!(said.contains("sdxl:noob"), "{said}");
-        assert!(said.contains("Not for all audiences"), "{said}");
+        assert!(said.contains("as not-for-all-audiences"), "{said}");
         assert!(said.contains("potentially harmful"), "{said}");
         assert!(said.ends_with("Continue?"), "{said}");
     }
@@ -966,7 +966,7 @@ mod tests {
         choices.entries = vec![row("indextts", false, false), Entry::OnDisk];
         let drawn = screen(&choices);
         assert!(drawn.contains("voices"), "{drawn}");
-        assert!(!drawn.contains("not for all audiences"), "{drawn}");
+        assert!(!drawn.contains("not-for-all-audiences"), "{drawn}");
     }
 
     #[test]
