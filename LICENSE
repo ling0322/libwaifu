@@ -1,3 +1,27 @@
+libwaifu is licensed under the MIT License below, with one exception.
+
+The Seed-VC v2 voice conversion port is licensed under the GNU General Public License,
+version 3 (GPL-3.0-only; the full text is in LICENSE-GPL-3.0), because Seed-VC and its ASTRAL
+tokenizers are GPL-3.0 and the port is written from their source. It is made of these files,
+each of which says so in its header:
+
+    waifu/src/seed_vc/            the port itself
+    waifu/tests/seed_vc.rs        its tests
+    waifu/examples/convert.rs     its command line example
+    tools/seed_vc_exporter.py     the tool that builds its package
+    tools/seed_vc_reference.py    the tool that records upstream's output for its tests
+
+Everything else is MIT.
+
+The GPL files are compiled only with the `gpl` Cargo feature (CMake: -DENABLE_GPL=ON), which
+is off by default. A default build contains none of them and may be distributed under the MIT
+License; a build with them is covered by the GPL version 3 as a whole. `waifu -h` says which
+of the two a build is.
+
+Code under third_party/ keeps the license of the project it comes from.
+
+--------------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2023 Xiaoyang Chen
