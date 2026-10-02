@@ -253,13 +253,13 @@ mod tests {
 
     #[test]
     fn what_is_said_under_the_question_is_wrapped_inside_the_box() {
-        let box_ = Confirm::ask("not for all audiences").saying(
-            "The author of sdxl:noob marked it Not for all audiences. It may contain potentially \
+        let box_ = Confirm::ask("not-for-all-audiences").saying(
+            "The author of sdxl:noob marked it as not-for-all-audiences. It may contain potentially \
              harmful or sensitive content. Continue?",
         );
         let screen = drawn(|frame| box_.render(frame, frame.area()));
 
-        assert!(screen.contains("not for all audiences"), "{screen}");
+        assert!(screen.contains("not-for-all-audiences"), "{screen}");
         assert!(screen.contains("potentially"), "{screen}");
         assert!(screen.contains("Continue?"), "{screen}");
         assert!(screen.contains("enter takes it"), "{screen}");
