@@ -33,6 +33,16 @@ the disk -- and a voice named that way opens the text2speech page on its own.
 | `indextts` | IndexTTS 2.5 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-indextts-2.5)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-indextts-2.5)\] |
 | `cosyvoice` | Fun-CosyVoice3 0.5B | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-cosyvoice-3)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-cosyvoice-3)\] |
 
+## Voice conversion
+
+Seed-VC v2 turns one recording into another voice. It is library and command line only -- no page
+-- and **GPL-3.0**, so it is built only with the `gpl` feature (see [docs/seed_vc.md](docs/seed_vc.md)).
+`waifu -m seed-vc` fetches the package off the same two hubs.
+
+| name | model | published as |
+|---|---|---|
+| `seed-vc` | Seed-VC v2 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-seed-vc)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-seed-vc)\] |
+
 ## Low memory mode
 
 `-device cuda_cpu_offload` keeps the weights in host memory and moves each one onto the card as it
@@ -75,6 +85,8 @@ $ waifu -task img2img -m sdxl:noob -i cat.png
 
 - [2026-10-02] Fun-CosyVoice3-0.5B-2512 is published, as `cosyvoice:v3` -- the second voice, Apache 2.0.
   See [docs/cosyvoice3.md](docs/cosyvoice3.md).
+- [2026-10-02] Seed-VC v2 is published, as `seed-vc` -- voice conversion for the library and the
+  `convert` example, GPL-3.0; see [docs/seed_vc.md](docs/seed_vc.md).
 - [2026-09-23] Qwen-Image 2.1 is published, as `qwen-image:2.1` and `qwen-image:2.1-fp8` -- a
   fourth architecture, Built with Qwen. Its licence is non-commercial (research and evaluation)
   only; see [docs/qwen_image.md](docs/qwen_image.md#licensing).

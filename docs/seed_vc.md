@@ -25,14 +25,15 @@ libwaifu is MIT.
 
 It is compiled only with the `gpl` feature -- `-DENABLE_GPL=ON` to CMake -- which is off by
 default. Without it none of the GPL code is built and what comes out is MIT; with it, the build as
-a whole is covered by the GPL -- the same arrangement as FFmpeg's `--enable-gpl`. The weights the exporter reads are GPL-3.0 as
-well; the exporter reads them from the HuggingFace cache and nothing here redistributes them.
+a whole is covered by the GPL -- the same arrangement as FFmpeg's `--enable-gpl`. The weights are GPL-3.0 as
+well, and are redistributed under it: the exported package carries the licence in its card.
 
 ## Where it runs
 
 It is library and command line only: the web page's tasks are text to picture and text to
-speech, and a conversion takes two recordings rather than a sentence. It is not published to
-the hubs; build the package below.
+speech, and a conversion takes two recordings rather than a sentence. The package is published
+as `ling0322/libwaifu-seed-vc` on Hugging Face and ModelScope, and `waifu -m seed-vc` fetches it;
+or build it yourself, below.
 
 ## Building the package
 

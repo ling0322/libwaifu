@@ -73,8 +73,8 @@ enum Entry {
         cached: bool,
         /// What is on disk for it, which is most of a model for one that was interrupted.
         bytes: u64,
-        /// Whether it draws explicit pictures readily, which keeps it off the list until somebody
-        /// says they want to see those.
+        /// Whether its author marked it not for all audiences, which is said beside it and asked
+        /// about before it is used.
         explicit: bool,
     },
     /// Not a model but a way out of the list: a manifest already somewhere on the disk, which is
@@ -196,47 +196,42 @@ enum Doing {
     },
 }
 
+/// What the box over the list is asking about.
+#[derive(Clone, Copy)]
+enum Asking {
+    /// Whether to throw away what is on disk of this model.
+    Delete(&'static str),
+    /// Whether to go on with a model its author marked not for all audiences.
+    Proceed(&'static str),
+}
+
+/// What the box asking about a model marked not for all audiences says under its title.
+fn warning(name: &str) -> String {
+    format!(
+        "The author marked {name} as not-for-all-audiences. It may contain potentially harmful \
+         or sensitive information. Continue?"
+    )
+}
+
 /// Everything the screen shows that is not the fetch.
 struct Choices {
     task: Task,
-    /// Every row there is, hidden ones included; [`Choices::shown`] is what is on screen.
+    /// Every row there is, all of them on screen.
     entries: Vec<Entry>,
-    /// Where the cursor is, counted over the shown rows.
+    /// Where the cursor is.
     selected: usize,
-    /// Whether the models that draw explicit pictures are on the list. Off until somebody asks,
-    /// and asked about before it is turned on.
-    explicit: bool,
 }
 
 impl Choices {
-    /// The rows on screen, as indices into `entries`.
-    fn shown(&self) -> Vec<usize> {
-        (0..self.entries.len())
-            .filter(|index| self.explicit || !self.entries[*index].explicit())
-            .collect()
-    }
-
-    fn hidden(&self) -> usize {
-        match self.explicit {
-            true => 0,
-            false => self.entries.iter().filter(|entry| entry.explicit()).count(),
-        }
-    }
-
     fn current(&self) -> &Entry {
-        let shown = self.shown();
-        &self.entries[shown[self.selected.min(shown.len() - 1)]]
+        &self.entries[self.selected.min(self.entries.len() - 1)]
     }
 
-    /// Puts the cursor on the row `name` is on, where it is on screen.
-    fn select(&mut self, name: &str) {
-        if let Some(at) = self
-            .shown()
-            .iter()
-            .position(|index| self.entries[*index].name() == name)
-        {
-            self.selected = at;
-        }
+    /// Whether `name` is on disk already, as its row says.
+    fn cached(&self, name: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(entry, Entry::Published { name: here, cached: true, .. } if *here == name)
+        })
     }
 
     /// Asks the cache again what it holds, for every row that is a model this build can fetch.
@@ -266,27 +261,20 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
         task,
         entries: entries_for(task),
         selected: 0,
-        explicit: false,
     };
 
     // Something already on disk is the one most likely to be wanted, so start there.
     choices.selected = choices
-        .shown()
+        .entries
         .iter()
-        .position(|index| {
-            matches!(
-                choices.entries[*index],
-                Entry::Published { cached: true, .. }
-            )
-        })
+        .position(|entry| matches!(entry, Entry::Published { cached: true, .. }))
         .unwrap_or(0);
 
     let mut doing = Doing::Choosing;
     let mut failure: Option<String> = None;
     let mut browsing: Option<FilePicker> = None;
-    // What the question on screen is about, kept beside the question: a name for a delete, and
-    // nothing for the question about showing the explicit models.
-    let mut asking: Option<(Option<&'static str>, Confirm)> = None;
+    // What the question on screen is about, kept beside the question.
+    let mut asking: Option<(Asking, Confirm)> = None;
 
     loop {
         terminal.draw(|frame| {
@@ -342,13 +330,14 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
             match (question.key(key), *about) {
                 (Answer::Open, _) => {}
                 (Answer::Cancelled | Answer::Given(false), _) => asking = None,
-                (Answer::Given(true), None) => {
+                (Answer::Given(true), Asking::Proceed(name)) => {
                     asking = None;
-                    let on = choices.current().name().to_string();
-                    choices.explicit = true;
-                    choices.select(&on);
+                    if choices.cached(name) {
+                        return Ok(Step::Next(published(name)));
+                    }
+                    doing = start_fetching(name);
                 }
-                (Answer::Given(true), Some(name)) => {
+                (Answer::Given(true), Asking::Delete(name)) => {
                     asking = None;
                     match hub::remove(name) {
                         // Read back off the disk rather than assumed: what the row says about a
@@ -392,7 +381,7 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
             continue;
         }
 
-        let last = choices.shown().len() - 1;
+        let last = choices.entries.len() - 1;
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 choices.selected = choices.selected.saturating_sub(1);
@@ -414,7 +403,7 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
                     }
                     Entry::Published { name, bytes, .. } => {
                         asking = Some((
-                            Some(name),
+                            Asking::Delete(name),
                             Confirm::ask(&format!("delete {name}? {} on disk", gigabytes(*bytes))),
                         ));
                     }
@@ -426,29 +415,17 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
                     }
                 }
             }
-            // All of them, or back to the ones that do not draw explicit pictures. Showing them is
-            // asked about first and hiding them is not: one of the two is a thing somebody might
-            // not want on their screen, and the other is the list as it opened.
-            KeyCode::Char('a') if !choices.task.speaks() => {
-                failure = None;
-                if choices.explicit {
-                    let on = choices.current().name().to_string();
-                    choices.explicit = false;
-                    choices.selected = 0;
-                    choices.select(&on);
-                } else if choices.hidden() > 0 {
-                    asking = Some((
-                        None,
-                        Confirm::ask("show models that draw explicit pictures?"),
-                    ));
-                }
-            }
             KeyCode::Enter | KeyCode::Right => {
                 failure = None;
 
                 // The row that is not a model: nothing to fetch, so what opens is the disk.
-                let (name, cached) = match *choices.current() {
-                    Entry::Published { name, cached, .. } => (name, cached),
+                let (name, cached, explicit) = match *choices.current() {
+                    Entry::Published {
+                        name,
+                        cached,
+                        explicit,
+                        ..
+                    } => (name, cached, explicit),
                     Entry::OnDisk => {
                         browsing = Some(FilePicker::open(
                             "a model manifest",
@@ -458,6 +435,16 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
                         continue;
                     }
                 };
+
+                // Its author's label, said before anything is fetched or opened. The box starts on
+                // no like every other one.
+                if explicit {
+                    asking = Some((
+                        Asking::Proceed(name),
+                        Confirm::ask("not-for-all-audiences").saying(&warning(name)),
+                    ));
+                    continue;
+                }
 
                 // Here already: nothing to wait for, and nothing to show a bar for.
                 if cached {
@@ -652,27 +639,28 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
         told,
     );
 
-    let shown = choices.shown();
-    let name_width = shown
+    let name_width = choices
+        .entries
         .iter()
-        .map(|index| choices.entries[*index].name().len())
+        .map(|entry| entry.name().len())
         .max()
         .unwrap_or(0)
         .max(14);
-    let full_name_width = shown
+    let full_name_width = choices
+        .entries
         .iter()
-        .map(|index| match &choices.entries[*index] {
+        .map(|entry| match entry {
             Entry::Published { full_name, .. } => full_name.len(),
             Entry::OnDisk => 0,
         })
         .max()
         .unwrap_or(0);
 
-    let rows: Vec<Line> = shown
+    let rows: Vec<Line> = choices
+        .entries
         .iter()
         .enumerate()
-        .map(|(at, index)| {
-            let entry = &choices.entries[*index];
+        .map(|(at, entry)| {
             let chosen = at == choices.selected;
             let mut spans = vec![
                 Span::raw(if chosen { "> " } else { "  " }),
@@ -691,19 +679,16 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
             spans.push(Span::raw("  "));
             spans.push(Span::raw(entry.describe()).dim());
             if entry.explicit() {
-                spans.push(Span::styled("  explicit", Style::new().fg(Color::Magenta)));
+                spans.push(Span::styled(
+                    "  not-for-all-audiences",
+                    Style::new().fg(Color::Magenta),
+                ));
             }
             Line::from(spans)
         })
         .collect();
 
-    // How many are left off, in the frame where the list is: a list that silently holds some of
-    // itself back is a list somebody concludes is all there is.
-    let title = match choices.hidden() {
-        0 => format!(" {what}s "),
-        1 => format!(" {what}s -- 1 more draws explicit pictures: a shows it "),
-        hidden => format!(" {what}s -- {hidden} more draw explicit pictures: a shows them "),
-    };
+    let title = format!(" {what}s ");
     frame.render_widget(Paragraph::new(rows).block(bordered(&title)), list);
 
     let enter = match choices.current() {
@@ -711,16 +696,7 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
         entry if entry.ready() => "use",
         _ => "fetch and use",
     };
-    let explicit = match (
-        choices.task.speaks(),
-        choices.explicit,
-        choices.hidden() > 0,
-    ) {
-        (false, true, _) => "   a hide explicit",
-        (false, false, true) => "   a show all",
-        _ => "",
-    };
-    draw_foot(frame, foot, doing, enter, explicit, failure);
+    draw_foot(frame, foot, doing, enter, failure);
 }
 
 /// The bar at the foot: the fetch while there is one, and otherwise the keys or what went wrong.
@@ -733,7 +709,6 @@ fn draw_foot(
     area: Rect,
     doing: &Doing,
     enter: &str,
-    explicit: &str,
     failure: Option<&str>,
 ) {
     match doing {
@@ -812,7 +787,7 @@ fn draw_foot(
                 )),
                 None => Line::from(
                     format!(
-                        " up/down choose   enter {enter}   d delete{explicit}   esc back   q quit"
+                        " up/down choose   enter {enter}   d delete   esc back   q quit"
                     )
                     .dim(),
                 ),
@@ -858,7 +833,7 @@ mod tests {
     fn foot(doing: &Doing) -> String {
         let mut terminal = ratatui::Terminal::new(TestBackend::new(110, 3)).unwrap();
         terminal
-            .draw(|frame| draw_foot(frame, frame.area(), doing, "fetch and use", "", None))
+            .draw(|frame| draw_foot(frame, frame.area(), doing, "fetch and use", None))
             .unwrap();
         screen_text(&terminal)
     }
@@ -900,7 +875,6 @@ mod tests {
                 Entry::OnDisk,
             ],
             selected: 0,
-            explicit: false,
         }
     }
 
@@ -914,33 +888,23 @@ mod tests {
     }
 
     #[test]
-    fn the_explicit_models_are_left_off_until_they_are_asked_for_and_the_frame_says_so() {
-        let mut choices = choices(Task::Txt2Img);
-        let drawn = screen(&choices);
-        assert!(!drawn.contains("sdxl:noob"), "{drawn}");
-        assert!(drawn.contains("1 more draws explicit pictures"), "{drawn}");
-        assert!(drawn.contains("a show all"), "{drawn}");
-
-        choices.explicit = true;
-        let drawn = screen(&choices);
+    fn every_model_is_listed_and_the_marked_ones_say_so() {
+        let drawn = screen(&choices(Task::Txt2Img));
+        assert!(drawn.contains("sdxl:wai"), "{drawn}");
         assert!(drawn.contains("sdxl:noob"), "{drawn}");
-        assert!(drawn.contains("explicit"), "{drawn}");
-        assert!(drawn.contains("a hide explicit"), "{drawn}");
-        assert!(!drawn.contains("more draws"), "{drawn}");
+        assert!(drawn.contains("sdxl:base"), "{drawn}");
+        assert_eq!(drawn.matches("not-for-all-audiences").count(), 1, "{drawn}");
+        assert!(!drawn.contains("explicit"), "{drawn}");
+        assert!(!drawn.contains("show all"), "{drawn}");
     }
 
     #[test]
-    fn the_cursor_is_counted_over_what_is_shown() {
-        // With the explicit model hidden, the second row on screen is the third in the list.
-        let mut choices = choices(Task::Txt2Img);
-        choices.selected = 1;
-        assert_eq!(choices.current().name(), "sdxl:base");
-
-        // And showing it keeps the cursor on the model it was on, not on the row number.
-        choices.explicit = true;
-        choices.select("sdxl:base");
-        assert_eq!(choices.current().name(), "sdxl:base");
-        assert_eq!(choices.selected, 2);
+    fn the_warning_names_the_model_and_asks_whether_to_go_on() {
+        let said = warning("sdxl:noob");
+        assert!(said.contains("sdxl:noob"), "{said}");
+        assert!(said.contains("as not-for-all-audiences"), "{said}");
+        assert!(said.contains("potentially harmful"), "{said}");
+        assert!(said.ends_with("Continue?"), "{said}");
     }
 
     #[test]
@@ -981,8 +945,8 @@ mod tests {
 
     #[test]
     fn the_catalogue_says_which_models_draw_explicit_pictures() {
-        // The list leaves those out until somebody asks, and it has nothing to go on but this: a
-        // catalogue that answered without the label would be a list showing everything.
+        // The list asks before using those, and it has nothing to go on but this: a catalogue that
+        // answered without the label would be a list that never asks.
         let entries = entries_for(Task::Txt2Img);
         let explicit = |name: &str| {
             entries
@@ -1002,7 +966,7 @@ mod tests {
         choices.entries = vec![row("indextts", false, false), Entry::OnDisk];
         let drawn = screen(&choices);
         assert!(drawn.contains("voices"), "{drawn}");
-        assert!(!drawn.contains("show all"), "{drawn}");
+        assert!(!drawn.contains("not-for-all-audiences"), "{drawn}");
     }
 
     #[test]
@@ -1015,7 +979,7 @@ mod tests {
 
         assert!(foot(0).contains("enter use"), "{}", foot(0));
         assert!(foot(1).contains("enter fetch and use"), "{}", foot(1));
-        assert!(foot(2).contains("enter look for one"), "{}", foot(2));
+        assert!(foot(3).contains("enter look for one"), "{}", foot(3));
     }
 
     #[test]
@@ -1049,7 +1013,7 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 3)).unwrap();
         let doing = fetching(1_240_000_000, Some(1_740_000_000), None);
         terminal
-            .draw(|frame| draw_foot(frame, frame.area(), &doing, "fetch and use", "", None))
+            .draw(|frame| draw_foot(frame, frame.area(), &doing, "fetch and use", None))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
 

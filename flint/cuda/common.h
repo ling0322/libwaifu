@@ -181,10 +181,6 @@ inline Tensor createCudaTensor<float>(lut::Span<const int> shape) {
   return createCudaTensor(shape, DType::kFloat);
 }
 template<>
-inline Tensor createCudaTensor<Fp4E2M0x2>(lut::Span<const int> shape) {
-  return createCudaTensor(shape, DType::kFp4E2M0x2);
-}
-template<>
 inline Tensor createCudaTensor<Fp8E4M3>(lut::Span<const int> shape) {
   return createCudaTensor(shape, DType::kFp8E4M3);
 }

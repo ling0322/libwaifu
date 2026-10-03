@@ -32,10 +32,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::cli::args::Runtime;
+use crate::cli::args::{Room, Runtime};
 use crate::cli::task::Task;
-use crate::cli::tui::ask::Answer;
-use crate::cli::tui::{bordered, heading, quits, row_style, Step};
+use crate::cli::tui::ask::{Answer, Confirm};
+use crate::cli::tui::{bordered, gigabytes, heading, quits, row_style, Step};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -45,6 +45,9 @@ struct Choice {
     /// Asked once, before the screens went up. The answer cannot change while they are up, and
     /// asking is a call across the C boundary that a redraw has no business making.
     available: bool,
+    /// What the model wants of this device's card and what the card had free, where the card is
+    /// too small for it. Measured before anything was put on the card.
+    short: Option<(u64, u64)>,
 }
 
 /// The screen: the rows, the cursor, and why the last enter did nothing.
@@ -57,9 +60,13 @@ struct Devices {
     /// Why the cursor started where it did, where `auto` chose by the size of the model.
     why: Option<String>,
     refused: Option<String>,
+    /// Open over the list after enter on a device the model is likely to run out of memory on.
+    warning: Option<Confirm>,
 }
 
-/// Offers every device, starting on `runtime`, and waits for one of `available`.
+/// Offers every device, starting on `runtime`, and waits for one of `available`. A device a model
+/// of `weights` bytes does not fit on, by `room`, asks before it is taken.
+#[allow(clippy::too_many_arguments)]
 pub fn choose(
     terminal: &mut DefaultTerminal,
     task: Task,
@@ -67,11 +74,14 @@ pub fn choose(
     runtime: Runtime,
     why: Option<String>,
     available: &[Runtime],
+    weights: Option<u64>,
+    room: Room,
 ) -> Result<Step<Runtime>, Error> {
     let choices: Vec<Choice> = Runtime::ALL
         .into_iter()
         .map(|runtime| Choice {
             available: available.contains(&runtime),
+            short: runtime.short_of(weights, room),
             runtime,
         })
         .collect();
@@ -85,6 +95,7 @@ pub fn choose(
         choices,
         why,
         refused: None,
+        warning: None,
     };
 
     loop {
@@ -108,6 +119,22 @@ pub fn choose(
 
 impl Devices {
     fn key(&mut self, key: KeyEvent) -> Answer<Runtime> {
+        // The box has every key while it is open. Escape in it is no to the box, not back to the
+        // model list: what somebody escaping out of a warning wants is the list it came up over.
+        if let Some(warning) = &mut self.warning {
+            return match warning.key(key) {
+                Answer::Open => Answer::Open,
+                Answer::Given(true) => {
+                    self.warning = None;
+                    Answer::Given(self.choices[self.selected].runtime)
+                }
+                Answer::Given(false) | Answer::Cancelled => {
+                    self.warning = None;
+                    Answer::Open
+                }
+            };
+        }
+
         let last = self.choices.len() - 1;
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
@@ -124,6 +151,12 @@ impl Devices {
                     ));
                     return Answer::Open;
                 }
+                // Asked rather than refused. The figure is a guess at what a run makes beside the
+                // weights, and the card may have been busy with something else when it was read.
+                if let Some((wanted, free)) = chosen.short {
+                    self.warning = Some(self.warn(chosen.runtime, wanted, free));
+                    return Answer::Open;
+                }
                 return Answer::Given(chosen.runtime);
             }
             KeyCode::Esc | KeyCode::Left => return Answer::Cancelled,
@@ -133,6 +166,35 @@ impl Devices {
 
         self.refused = None;
         Answer::Open
+    }
+
+    /// The box put up before a run on `runtime`, whose card has `free` bytes of the `wanted`.
+    fn warn(&self, runtime: Runtime, wanted: u64, free: u64) -> Confirm {
+        let name = runtime.name();
+        // The way out, where this machine has one: the same card with the weights on the host.
+        let instead = self
+            .choices
+            .iter()
+            .find(|choice| {
+                choice.available
+                    && choice.short.is_none()
+                    && choice.runtime == Runtime::CUDA_CPU_OFFLOAD
+                    && choice.runtime.device() == runtime.device()
+            })
+            .map(|choice| {
+                format!(
+                    " {} keeps the weights on the host and finishes.",
+                    choice.runtime.name()
+                )
+            })
+            .unwrap_or_default();
+        Confirm::ask("may run out of memory").saying(&format!(
+            "{} wants about {} on the card and {} of it is free, so a run on {name} is likely to \
+             abort.{instead} Run on {name} anyway?",
+            self.model,
+            gigabytes(wanted),
+            gigabytes(free),
+        ))
     }
 
     fn render(&self, frame: &mut Frame) {
@@ -171,11 +233,18 @@ impl Devices {
                         row_style(chosen, choice.available),
                     ),
                     Span::raw("  "),
-                    Span::raw(match choice.available {
-                        true => choice.runtime.about(),
-                        false => "not available on this machine",
-                    })
-                    .dim(),
+                    match (choice.available, choice.short) {
+                        (false, _) => Span::raw("not available on this machine").dim(),
+                        (true, Some((wanted, free))) => Span::styled(
+                            format!(
+                                "may run out of memory: {} wanted, {} free",
+                                gigabytes(wanted),
+                                gigabytes(free)
+                            ),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                        (true, None) => Span::raw(choice.runtime.about()).dim(),
+                    },
                 ])
             })
             .collect();
@@ -189,6 +258,10 @@ impl Devices {
             None => Line::from(" up/down choose   enter open the page   esc back   q quit".dim()),
         };
         frame.render_widget(Paragraph::new(line).block(bordered("")), foot);
+
+        if let Some(warning) = &self.warning {
+            warning.render(frame, frame.area());
+        }
     }
 }
 
@@ -216,13 +289,79 @@ mod tests {
                     // Said rather than asked, so that what the screen draws is the same on a
                     // machine with a card and on one without.
                     available: runtime.device() != Device::Metal,
+                    short: None,
                     runtime,
                 })
                 .collect(),
             selected: 0,
             why: None,
             refused: None,
+            warning: None,
         }
+    }
+
+    /// The list for a model of 15 GB on a card with 8 free, which is short on cuda and vulkan.
+    fn too_big() -> Devices {
+        const GB: u64 = 1_000_000_000;
+        let room = Room {
+            cuda: Some(8 * GB),
+            vulkan: Some(8 * GB),
+        };
+        let mut devices = devices();
+        for choice in &mut devices.choices {
+            choice.short = choice.runtime.short_of(Some(15 * GB), room);
+        }
+        devices.selected = Runtime::ALL
+            .iter()
+            .position(|runtime| runtime.device() == Device::Cuda)
+            .unwrap();
+        devices
+    }
+
+    #[test]
+    fn a_device_the_model_does_not_fit_on_says_so_and_asks_before_it_is_taken() {
+        let mut devices = too_big();
+        let drawn = screen(&devices);
+        assert!(
+            drawn.contains("may run out of memory: 18.65 GB wanted"),
+            "{drawn}"
+        );
+
+        // Enter puts the question up instead of starting the run, and says what to do instead.
+        assert_eq!(devices.key(press(KeyCode::Enter)), Answer::Open);
+        let drawn = screen(&devices);
+        assert!(drawn.contains("may run out of memory ━"), "{drawn}");
+        assert!(drawn.contains("a run on cuda is"), "{drawn}");
+        assert!(drawn.contains("cuda_cpu_offload keeps the"), "{drawn}");
+        assert!(drawn.contains("anyway?"), "{drawn}");
+
+        // No, or escape, closes it and leaves the list where it was.
+        assert_eq!(devices.key(press(KeyCode::Char('n'))), Answer::Open);
+        assert!(devices.warning.is_none());
+        devices.key(press(KeyCode::Enter));
+        assert_eq!(devices.key(press(KeyCode::Esc)), Answer::Open);
+        assert!(devices.warning.is_none());
+
+        // Yes runs it there all the same.
+        devices.key(press(KeyCode::Enter));
+        assert_eq!(
+            devices.key(press(KeyCode::Char('y'))),
+            Answer::Given(Runtime::ALL[devices.selected])
+        );
+    }
+
+    #[test]
+    fn a_device_the_model_fits_on_is_taken_without_asking() {
+        let mut devices = too_big();
+        devices.selected = Runtime::ALL
+            .iter()
+            .position(|runtime| *runtime == Runtime::CUDA_CPU_OFFLOAD)
+            .unwrap();
+        assert_eq!(
+            devices.key(press(KeyCode::Enter)),
+            Answer::Given(Runtime::CUDA_CPU_OFFLOAD)
+        );
+        assert!(devices.warning.is_none());
     }
 
     fn screen(devices: &Devices) -> String {

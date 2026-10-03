@@ -212,6 +212,22 @@ impl Runtime {
             .collect()
     }
 
+    /// What a model of `weights` bytes wants of this runtime's card and what the card has free,
+    /// where the one is more than the other: a run there is likely to abort out of memory.
+    ///
+    /// Only a runtime that puts the weights on a card that was measured can be short. The offload
+    /// one keeps them on the host, Metal's memory is the machine's, and a size or a card that is
+    /// not known is taken as one that fits.
+    pub fn short_of(self, weights: Option<u64>, room: Room) -> Option<(u64, u64)> {
+        let free = match (self.device, self.residency) {
+            (Device::Cuda, Residency::Device) => room.cuda,
+            (Device::Vulkan, Residency::Device) => room.vulkan,
+            _ => None,
+        }?;
+        let wanted = wanted_on_the_card(weights?);
+        (wanted > free).then_some((wanted, free))
+    }
+
     /// The fastest of `available` a model of `weights` bytes will run on, given `room`.
     ///
     /// CUDA where the model fits on the card, and CUDA with the weights on the host where it does
@@ -220,16 +236,12 @@ impl Runtime {
     /// so is only the answer where the model fits. The processor otherwise. A size that is not
     /// known is taken as one that fits.
     pub fn best(weights: Option<u64>, available: &[Runtime], room: Room) -> Runtime {
-        let fits = |free: Option<u64>| match (weights, free) {
-            (Some(weights), Some(free)) => wanted_on_the_card(weights) <= free,
-            _ => true,
-        };
         let cuda = Runtime::on(Device::Cuda);
         let metal = Runtime::on(Device::Metal);
         let vulkan = Runtime::on(Device::Vulkan);
 
         if available.contains(&cuda) {
-            if fits(room.cuda) {
+            if cuda.short_of(weights, room).is_none() {
                 return cuda;
             }
             if available.contains(&Runtime::CUDA_CPU_OFFLOAD) {
@@ -239,7 +251,7 @@ impl Runtime {
         if available.contains(&metal) {
             return metal;
         }
-        if available.contains(&vulkan) && fits(room.vulkan) {
+        if available.contains(&vulkan) && vulkan.short_of(weights, room).is_none() {
             return vulkan;
         }
         Runtime::on(Device::Cpu)
@@ -549,6 +561,34 @@ mod tests {
             Runtime::on(Device::Metal)
         );
         assert_eq!(Runtime::best(Some(1), &[cpu], Room::default()), cpu);
+    }
+
+    #[test]
+    fn only_a_card_the_weights_go_on_can_be_short_of_room() {
+        let eight = Room {
+            cuda: Some(8 * GB),
+            vulkan: Some(8 * GB),
+        };
+        let cuda = Runtime::on(Device::Cuda);
+
+        assert_eq!(cuda.short_of(Some(3 * GB), eight), None);
+        assert_eq!(
+            cuda.short_of(Some(7 * GB), eight),
+            Some((wanted_on_the_card(7 * GB), 8 * GB))
+        );
+        assert!(Runtime::on(Device::Vulkan)
+            .short_of(Some(7 * GB), eight)
+            .is_some());
+
+        // The offload one keeps the weights on the host, and the processor has no card at all.
+        assert_eq!(
+            Runtime::CUDA_CPU_OFFLOAD.short_of(Some(7 * GB), eight),
+            None
+        );
+        assert_eq!(Runtime::on(Device::Cpu).short_of(Some(7 * GB), eight), None);
+        // Nor is anything short of what was never measured.
+        assert_eq!(cuda.short_of(None, eight), None);
+        assert_eq!(cuda.short_of(Some(7 * GB), Room::default()), None);
     }
 
     #[test]
