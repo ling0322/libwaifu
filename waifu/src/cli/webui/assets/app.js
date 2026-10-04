@@ -1195,8 +1195,8 @@ function Bar({ progress }) {
 }
 
 function Output({ state, pictures, progress, note, showing, onShow, onSend, onReuse, onDelete }) {
-  // The newest is what somebody is looking at, unless they have clicked another and it is still
-  // there: a run that finishes while an older picture is up should not snatch the frame away.
+  // The newest is what somebody is looking at, unless they have clicked another since it came in
+  // and it is still there: a run that finishes takes the frame back (useNewestWins).
   const picture = pictures.find((one) => one.id === showing) ?? pictures[0] ?? null;
 
   return html`
@@ -1368,6 +1368,19 @@ function asMade(job) {
     created: job.finished ?? job.created,
     kind: job.kind === "speech" ? "clip" : "picture",
   };
+}
+
+/** Lets go of the one picked out of `made` whenever something turns up in it that was not there
+ *  before, so the frame falls back to the newest. A deletion adds nothing and keeps the pick. */
+function useNewestWins(made, choose) {
+  const seen = useRef(null);
+  const ids = made.map((one) => one.id).join(",");
+  useEffect(() => {
+    const now = ids ? ids.split(",") : [];
+    // Before the first run there is nothing to compare with, and nothing picked to let go of.
+    if (seen.current && now.some((id) => !seen.current.has(id))) choose(null);
+    seen.current = new Set(now);
+  }, [ids, choose]);
 }
 
 // -- the whole of it ----------------------------------------------------------------------------
@@ -1593,6 +1606,11 @@ function App() {
   const done = jobs.filter((job) => job.status === "done" && job.output);
   const pictures = done.filter((job) => job.kind === "image").map(asMade);
   const clips = done.filter((job) => job.kind === "speech").map(asMade);
+
+  // A picture or clip that has just come in takes the frame back from one picked out of the
+  // strip: what was asked for last is what the page should be showing.
+  useNewestWins(pictures, setShowing);
+  useNewestWins(clips, setPlaying);
 
   // What this page has to say beats what the last job came to: a complaint is about the click
   // that was just made.
