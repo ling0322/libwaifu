@@ -22,12 +22,13 @@
 //! ```text
 //! cargo run --release --example speak -- models/indextts25.yaml voice.wav "Hello there." out.wav
 //! cargo run --release --example speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav 7 "它的文字稿。"
+//! cargo run --release --example speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav 7 --style=请非常开心地说一句话。
 //! ```
 //!
 //! The whole pipeline from the command line, with nothing of the web page in the way: what each
 //! stage took is printed as it finishes, which is what this is for. Which model runs is the
-//! manifest's `model.type`. CosyVoice3 takes a sixth argument, the transcript of the recording,
-//! and reads zero-shot when it is given one.
+//! manifest's `model.type`. CosyVoice3 takes a sixth argument: the transcript of the recording,
+//! which reads zero-shot, or `--style=` and an instruction, which reads instruct2.
 
 use std::ops::ControlFlow;
 use std::time::Instant;
@@ -39,12 +40,16 @@ use waifu::{wav, Device, Manifest, Residency, Sound, SpeechOptions, SpeechProgre
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().collect();
     if arguments.len() < 5 {
-        eprintln!("usage: speak <manifest.yaml> <voice.wav> <text> <out.wav> [seed] [transcript]");
+        eprintln!(
+            "usage: speak <manifest.yaml> <voice.wav> <text> <out.wav> [seed] \
+             [transcript | --style=<instruction>]"
+        );
         std::process::exit(2);
     }
     let (manifest, voice, text, out) = (&arguments[1], &arguments[2], &arguments[3], &arguments[4]);
     let seed = arguments.get(5).map(|seed| seed.parse()).transpose()?;
-    let transcript = arguments.get(6);
+    let style = arguments.get(6).and_then(|it| it.strip_prefix("--style="));
+    let transcript = arguments.get(6).filter(|_| style.is_none());
 
     let manifest = Manifest::open(manifest)?;
     let recording = wav::read(&std::fs::read(voice)?)?;
@@ -84,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let options = SpeechOptions {
                 seed,
+                style: style.map(str::to_string),
                 ..CosyVoice3::DEFAULTS.options()
             };
             match transcript {
@@ -110,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 speed: 1.0,
                 temperature: tts.settings().temperature,
                 seed,
+                style: None,
             };
             tts.say(text, &reference, &options, &mut report)?
         }

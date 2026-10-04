@@ -846,6 +846,48 @@ function FromRecording({ holding, revision, why, onHold, onClear }) {
   `;
 }
 
+/** How to say it, for a voice that was taught some ways: a list of those, and the instruction
+ *  itself in a box under it. The list writes into the box rather than standing beside it, so
+ *  what is sent is always what can be read, and one of the list's can be changed by hand. */
+function StyleCard({ styles, style, onChange }) {
+  const chosen = styles.find((one) => one.instruction === style.trim());
+  return html`
+    <div className="card">
+      <div className="card-title">Style</div>
+      <div className="row">
+        <${Field} label="Say it" kind="grow">
+          <select
+            value=${!style.trim() ? "" : chosen ? chosen.instruction : "custom"}
+            onChange=${(e) => e.target.value !== "custom" && onChange(e.target.value)}
+          >
+            <option value="">the voice's own way</option>
+            ${!!style.trim() && !chosen && html`<option value="custom">as written below</option>`}
+            ${styles.map(
+              (one) =>
+                html`<option key=${one.instruction} value=${one.instruction}>${one.label}</option>`,
+            )}
+          </select>
+        <//>
+      </div>
+      <div className="row">
+        <${Field} label="Instruction" kind="grow">
+          <input
+            type="text"
+            value=${style}
+            placeholder="none"
+            onChange=${(e) => onChange(e.target.value)}
+          />
+        <//>
+      </div>
+      <p className="about">
+        Words the model follows rather than reads. The list is what it was taught, in its own
+        words; anything else written here is a guess at what it might follow. With a style, the
+        recording gives the voice and the instruction gives the manner.
+      </p>
+    </div>
+  `;
+}
+
 /** text2speech: everything a reading is asked for that is not the text itself. */
 function SpeechSettings({
   state,
@@ -886,6 +928,13 @@ function SpeechSettings({
         onHold=${onHold}
         onClear=${onClear}
       />
+
+      ${!!voice?.styles?.length &&
+      html`<${StyleCard}
+        styles=${voice.styles}
+        style=${form.style}
+        onChange=${(value) => change("style", value)}
+      />`}
 
       <div className="card">
         <div className="row">
@@ -1418,6 +1467,8 @@ function App() {
     text: "",
     speed: 1,
     temperature: 0.8,
+    // The instruction a reading follows, for a voice that offers styles. Empty is none.
+    style: "",
   });
 
   /** The model whose numbers have been put in the boxes, so that they go in once rather than on
@@ -1558,7 +1609,8 @@ function App() {
   useEffect(() => {
     if (!voice || adopted.current === voice.name) return;
     adopted.current = voice.name;
-    setForm((form) => ({ ...form, speed: voice.speed, temperature: voice.temperature }));
+    // A style is in one voice's words, and another voice would refuse it or not know it.
+    setForm((form) => ({ ...form, speed: voice.speed, temperature: voice.temperature, style: "" }));
   }, [voice]);
 
   const tabs = tabsFor(state);
@@ -1647,8 +1699,9 @@ function App() {
       temperature: Number(form.temperature),
       seed: String(form.seed).trim(),
       ...(inputs.voice ? { reference: inputs.voice } : {}),
+      ...(voice?.styles?.length && form.style.trim() ? { style: form.style.trim() } : {}),
     });
-  }, [form, inputs, post]);
+  }, [form, inputs, voice, post]);
 
   /** Stops this page's running job, or takes the one waiting out of line. */
   const interrupt = useCallback(async () => {
@@ -1757,6 +1810,7 @@ function App() {
       speed: clip.speed,
       temperature: clip.temperature,
       seed: String(clip.seed),
+      style: clip.style ?? "",
     }));
   }, []);
 

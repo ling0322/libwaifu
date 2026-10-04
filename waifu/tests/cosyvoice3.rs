@@ -463,6 +463,7 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
         speed: 1.0,
         temperature: 1.0,
         seed: Some(7),
+        style: None,
     };
     let mut carry_on = |_: SpeechProgress| ControlFlow::Continue(());
 

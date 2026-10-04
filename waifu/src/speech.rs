@@ -52,7 +52,7 @@ use crate::Result;
 /// Deliberately small, and deliberately not the union of every knob every speech model has. A
 /// model that samples has a temperature; one that does not ignores it. What is here is what a
 /// page can reasonably put in front of somebody without knowing which model is behind it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SpeechOptions {
     /// How fast to read it, as a multiple of the voice's own pace. Below one is slower.
     pub speed: f32,
@@ -62,6 +62,10 @@ pub struct SpeechOptions {
     /// Always filled in by the time a run starts, for the same reason a picture's is: a clip that
     /// came out well is asked about later, and by then nobody remembers the number.
     pub seed: Option<u64>,
+    /// How to say it, in the words the model was taught to follow -- one of its
+    /// [`styles`](Voice::styles)' `instruction`, or something written in the same manner. `None`
+    /// is the voice's own way of reading. A voice that offers no styles ignores it.
+    pub style: Option<String>,
 }
 
 impl Default for SpeechOptions {
@@ -97,7 +101,24 @@ impl SpeechDefaults {
             speed: self.speed,
             temperature: self.temperature,
             seed: None,
+            style: None,
         }
+    }
+}
+
+/// A way of saying something that a voice was taught, as it offers it to a page.
+///
+/// The instruction is what goes to the model, in the model's own words: these are trained
+/// phrases, and one reworded is one the model has not seen. The label is only what a list shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Style {
+    pub label: &'static str,
+    pub instruction: &'static str,
+}
+
+impl Style {
+    pub const fn new(label: &'static str, instruction: &'static str) -> Style {
+        Style { label, instruction }
     }
 }
 
@@ -167,6 +188,12 @@ pub trait Voice {
     /// that greys a box out without saying why is a page that cannot be asked.
     fn no_likeness_because(&self) -> Option<&'static str> {
         None
+    }
+
+    /// The ways of saying something it was taught to follow, for a page to offer. Empty where it
+    /// takes no [`SpeechOptions::style`], which is most voices.
+    fn styles(&self) -> &'static [Style] {
+        &[]
     }
 
     /// Why what comes out is not a voice, for the implementation where it is not.
@@ -588,6 +615,9 @@ mod tests {
         }
         assert_eq!(Real.not_a_voice_because(), None);
         assert_eq!(Real.no_likeness_because(), None);
+        // And it is told how to say nothing: a style is something a voice opts into.
+        assert!(Real.styles().is_empty());
+        assert!(tones.styles().is_empty());
     }
 
     #[test]
