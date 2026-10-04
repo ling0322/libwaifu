@@ -48,6 +48,8 @@ use serde_json::{json, Value};
 pub enum Kind {
     Image,
     Speech,
+    /// One recording said again in the voice of another.
+    Conversion,
 }
 
 impl Kind {
@@ -55,6 +57,7 @@ impl Kind {
         match self {
             Kind::Image => "image",
             Kind::Speech => "speech",
+            Kind::Conversion => "conversion",
         }
     }
 
@@ -62,6 +65,7 @@ impl Kind {
         match name {
             "image" => Some(Kind::Image),
             "speech" => Some(Kind::Speech),
+            "conversion" => Some(Kind::Conversion),
             _ => None,
         }
     }
@@ -70,7 +74,7 @@ impl Kind {
     fn output(self) -> (&'static str, &'static str) {
         match self {
             Kind::Image => ("output.png", "image/png"),
-            Kind::Speech => ("output.wav", "audio/wav"),
+            Kind::Speech | Kind::Conversion => ("output.wav", "audio/wav"),
         }
     }
 }
@@ -725,7 +729,7 @@ impl Store {
 
 /// The uploads a job's settings name, which are what it will read when it runs.
 fn uploads_named(asked: &Value) -> Vec<String> {
-    ["init_image", "reference"]
+    ["init_image", "reference", "source"]
         .into_iter()
         .filter_map(|field| asked.get(field).and_then(Value::as_str))
         .map(str::to_string)
@@ -1055,6 +1059,33 @@ mod tests {
         assert!(store.find(&second).is_some());
         assert!(store.find(&third).is_some());
         assert!(store.used() <= 10);
+    }
+
+    #[test]
+    fn every_kind_is_kept_under_a_name_it_is_read_back_by() {
+        for kind in [Kind::Image, Kind::Speech, Kind::Conversion] {
+            assert_eq!(Kind::named(kind.name()), Some(kind));
+        }
+        // A conversion makes a recording, as a reading does.
+        assert_eq!(Kind::Conversion.output(), Kind::Speech.output());
+    }
+
+    #[test]
+    fn the_recordings_a_waiting_conversion_needs_are_not_what_the_limit_takes() {
+        let store = a_store("limit-conversion", Some(20));
+        let source = store.upload(PNG).unwrap();
+        let reference = store.upload(PNG).unwrap();
+        store
+            .submit(
+                Kind::Conversion,
+                json!({"source": source.id, "reference": reference.id}),
+            )
+            .unwrap();
+
+        a_done_job(&store, 3);
+        a_done_job(&store, 3);
+        assert!(store.find_upload(&source.id).is_some());
+        assert!(store.find_upload(&reference.id).is_some());
     }
 
     #[test]

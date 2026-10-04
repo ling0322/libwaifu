@@ -90,7 +90,10 @@ use crate::flint::{
 };
 use crate::indextts::bigvgan::{BigVgan, BigVganConfig};
 use crate::indextts::{campplus, features};
-use crate::{Error, Manifest, Result, Sound, SpeechProgress};
+use crate::{
+    ConversionDefaults, ConversionOptions, ConversionProgress, Converter, Error, Manifest, Result,
+    Sound,
+};
 
 use self::ar::{Ar, Sampler, Sampling};
 use self::dit::Guidance;
@@ -627,6 +630,24 @@ impl SeedVc {
         steps: i32,
         guidance: Guidance,
     ) -> Result<Vec<f32>> {
+        let mel =
+            self.draw_mel_reporting(noise, condition, reference, steps, guidance, &mut || {
+                ControlFlow::Continue(())
+            })?;
+        Ok(mel.expect("nothing stops this run"))
+    }
+
+    /// [`SeedVc::draw_mel`], calling `step` after each step and stopping -- `None` -- where it
+    /// says to.
+    fn draw_mel_reporting(
+        &self,
+        noise: &[f32],
+        condition: &Tensor,
+        reference: &Reference,
+        steps: i32,
+        guidance: Guidance,
+        step: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<Option<Vec<f32>>> {
         let config = dit::Config::seed_vc();
         let channels = config.in_channels as usize;
         let frames = condition.shape_at(1)? as usize;
@@ -675,13 +696,23 @@ impl SeedVc {
         let styles = self.upload(&[n, config.style_dim], &styles)?;
         let row = channels * frames;
 
-        dit::solve_euler(noise, channels, frames, prompt, steps, |x, t| {
+        // A stop lets the steps that are left run as no-ops rather than threading a way out
+        // through the solver: they are a copy each, and the mel they make is thrown away.
+        let mut stopped = false;
+        let mel = dit::solve_euler(noise, channels, frames, prompt, steps, |x, t| {
+            if stopped {
+                return Ok(vec![0.0; row]);
+            }
             let repeated: Vec<f32> = x.iter().copied().cycle().take(batch * row).collect();
             let x = self.upload(&[n, channels_i, frames_i], &repeated)?;
             let direction =
                 denoiser.direction(&x, &prompts, &conditions, &styles, &vec![t; batch])?;
-            Ok(dit::combine(guidance, &Self::host(&direction)?, row))
-        })
+            let direction = dit::combine(guidance, &Self::host(&direction)?, row);
+            stopped = step().is_break();
+            Ok(direction)
+        })?;
+
+        Ok((!stopped).then_some(mel))
     }
 
     /// Mel frames a 22.05 kHz wave of `samples` samples makes, as the mel function frames it.
@@ -699,7 +730,7 @@ impl SeedVc {
         source: &Sound,
         reference: &Reference,
         conversion: &Conversion,
-        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        report: &mut dyn FnMut(ConversionProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
         let wave = features::resample(&source.samples, source.rate, RATE);
         let listening = features::resample(&wave, RATE, LISTENING_RATE);
@@ -713,7 +744,7 @@ impl SeedVc {
         listening: &[f32],
         reference: &Reference,
         conversion: &Conversion,
-        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        report: &mut dyn FnMut(ConversionProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
         let seed = conversion.seed.unwrap_or_else(|| {
             std::time::SystemTime::now()
@@ -724,7 +755,7 @@ impl SeedVc {
         F::manual_seed(self.device, seed)?;
         let mut sampler = Sampler::new(seed);
 
-        if report(SpeechProgress::Reading).is_break() {
+        if report(ConversionProgress::Listening).is_break() {
             return Ok(None);
         }
 
@@ -737,6 +768,9 @@ impl SeedVc {
         let mut stitch = Stitch::new(OVERLAP_FRAMES * HOP);
         let window = (RATE as usize / HOP) * self.settings.context_seconds as usize;
         let prompt = reference.frames as usize;
+        let steps = conversion.diffusion_steps.max(1);
+        // Steps drawn and windows sounded so far, across every window, for the bar.
+        let (mut drawn_steps, mut sounded) = (0, 0);
 
         match conversion.convert_style {
             false => {
@@ -747,6 +781,8 @@ impl SeedVc {
                 let condition = self.regulate(&source_wide, source_frames as i32)?;
                 let condition = Self::host(&condition)?;
                 let width = condition.len() / source_frames;
+                let count = windows(source_frames, window) as i32;
+                let total = count * steps;
 
                 let mut processed = 0;
                 while processed < source_frames {
@@ -754,13 +790,37 @@ impl SeedVc {
                     let last = processed + window >= source_frames;
                     let chunk = &condition[processed * width..end * width];
 
-                    let mel = self.window(chunk, width, reference, conversion)?;
-                    let drawn = mel.len() / 80;
-                    stitch.push(self.sound(&mel, drawn)?, last);
-
-                    if report(SpeechProgress::Sounding).is_break() {
+                    let mut step = || {
+                        drawn_steps += 1;
+                        report(ConversionProgress::Drawing {
+                            done: drawn_steps,
+                            total,
+                        })
+                    };
+                    let Some(mel) = self.window(chunk, width, reference, conversion, &mut step)?
+                    else {
+                        return Ok(None);
+                    };
+                    if report(ConversionProgress::Sounding {
+                        done: sounded,
+                        total: count,
+                    })
+                    .is_break()
+                    {
                         return Ok(None);
                     }
+                    let drawn = mel.len() / 80;
+                    stitch.push(self.sound(&mel, drawn)?, last);
+                    sounded += 1;
+                    if report(ConversionProgress::Sounding {
+                        done: sounded,
+                        total: count,
+                    })
+                    .is_break()
+                    {
+                        return Ok(None);
+                    }
+
                     if last {
                         break;
                     }
@@ -780,6 +840,8 @@ impl SeedVc {
                     })?;
 
                 let expected = source.len() as i32;
+                let count = source.len().div_ceil(piece) as i32;
+                let total = count * steps;
                 let mut done = 0;
                 for (index, chunk) in source.chunks(piece).enumerate() {
                     let last = (index + 1) * piece >= source.len();
@@ -792,7 +854,7 @@ impl SeedVc {
                         &conversion.sampling,
                         &mut sampler,
                         &mut |count| {
-                            report(SpeechProgress::Saying {
+                            report(ConversionProgress::Saying {
                                 done: done + count,
                                 expected: expected.max(done + count),
                             })
@@ -803,6 +865,9 @@ impl SeedVc {
                     };
                     done += said.len() as i32;
                     if said.is_empty() {
+                        // A piece with nothing to draw is a window the bar will not see.
+                        drawn_steps += steps;
+                        sounded += 1;
                         continue;
                     }
 
@@ -815,12 +880,37 @@ impl SeedVc {
                     let condition = Self::host(&self.regulate(&said, frames.max(1))?)?;
                     let width = condition.len() / frames.max(1) as usize;
 
-                    if report(SpeechProgress::Sounding).is_break() {
+                    let mut step = || {
+                        drawn_steps += 1;
+                        report(ConversionProgress::Drawing {
+                            done: drawn_steps,
+                            total,
+                        })
+                    };
+                    let Some(mel) =
+                        self.window(&condition, width, reference, conversion, &mut step)?
+                    else {
+                        return Ok(None);
+                    };
+                    if report(ConversionProgress::Sounding {
+                        done: sounded,
+                        total: count,
+                    })
+                    .is_break()
+                    {
                         return Ok(None);
                     }
-                    let mel = self.window(&condition, width, reference, conversion)?;
                     let drawn = mel.len() / 80;
                     stitch.push(self.sound(&mel, drawn)?, last);
+                    sounded += 1;
+                    if report(ConversionProgress::Sounding {
+                        done: sounded,
+                        total: count,
+                    })
+                    .is_break()
+                    {
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -829,14 +919,15 @@ impl SeedVc {
     }
 
     /// One window: `chunk` `(frames * width)` after the reference's prompt, drawn and cut back to
-    /// its own frames, band-major `(80 * frames)`.
+    /// its own frames, band-major `(80 * frames)`. `None` where `step` asked to stop.
     fn window(
         &self,
         chunk: &[f32],
         width: usize,
         reference: &Reference,
         conversion: &Conversion,
-    ) -> Result<Vec<f32>> {
+        step: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<Option<Vec<f32>>> {
         let prompt = reference.frames as usize;
         let own = chunk.len() / width;
         let frames = prompt + own;
@@ -848,19 +939,23 @@ impl SeedVc {
         let noise = F::randn(&[1, 80, frames as i32], self.device)?;
         let noise = Self::host(&noise)?;
 
-        let mel = self.draw_mel(
+        let Some(mel) = self.draw_mel_reporting(
             &noise,
             &condition,
             reference,
             conversion.diffusion_steps,
             conversion.guidance,
-        )?;
+            step,
+        )?
+        else {
+            return Ok(None);
+        };
 
         let mut out = Vec::with_capacity(80 * own);
         for channel in 0..80 {
             out.extend_from_slice(&mel[channel * frames + prompt..(channel + 1) * frames]);
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
     /// A band-major mel `(80 * frames)` to 22.05 kHz audio.
@@ -871,6 +966,54 @@ impl SeedVc {
             .into_iter()
             .map(|sample| sample.clamp(-1.0, 1.0))
             .collect())
+    }
+}
+
+/// What the web page converts with: a reference recording heard afresh each time, and the
+/// package's own guidance and sampling.
+impl Converter for SeedVc {
+    fn convert(
+        &self,
+        source: &Sound,
+        reference: &Sound,
+        options: &ConversionOptions,
+        report: &mut dyn FnMut(ConversionProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>> {
+        if report(ConversionProgress::Listening).is_break() {
+            return Ok(None);
+        }
+        let reference = self.listen(reference)?;
+        let conversion = Conversion {
+            convert_style: options.convert_style,
+            diffusion_steps: options.steps.max(1),
+            seed: options.seed,
+            ..self.conversion()
+        };
+
+        SeedVc::convert(self, source, &reference, &conversion, report)
+    }
+
+    fn rate(&self) -> u32 {
+        RATE
+    }
+
+    fn defaults(&self) -> ConversionDefaults {
+        ConversionDefaults {
+            steps: self.settings.diffusion_steps,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+}
+
+/// How many windows of `window` frames, each overlapping the last by [`OVERLAP_FRAMES`], it takes
+/// to cover `frames`: the timbre path's loop, counted before it runs.
+fn windows(frames: usize, window: usize) -> usize {
+    match frames > window {
+        true => 1 + (frames - window).div_ceil(window - OVERLAP_FRAMES),
+        false => 1,
     }
 }
 
@@ -952,6 +1095,31 @@ mod tests {
         // Six seconds at 22.05 kHz: upstream's mel has 516 frames.
         assert_eq!(SeedVc::mel_frames(132_300), 516);
         assert_eq!(SeedVc::mel_frames(256), 1);
+    }
+
+    #[test]
+    fn the_windows_are_counted_the_way_the_loop_walks_them() {
+        // The timbre path's loop, with each window drawing what is left up to `window`.
+        let walked = |frames: usize, window: usize| {
+            let (mut processed, mut count) = (0, 0);
+            loop {
+                count += 1;
+                let end = (processed + window).min(frames);
+                if processed + window >= frames {
+                    return count;
+                }
+                processed += (end - processed) - OVERLAP_FRAMES;
+            }
+        };
+        for window in [OVERLAP_FRAMES + 1, 100, 2253] {
+            for frames in 1..3 * window {
+                assert_eq!(
+                    windows(frames, window),
+                    walked(frames, window),
+                    "{frames} {window}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -121,9 +121,10 @@ impl Entry {
 
 /// The published models a task can run, in the catalogue's order, and the file row under them.
 fn entries_for(task: Task) -> Vec<Entry> {
-    let listed = match task.speaks() {
-        true => hub::listed_voices(),
-        false => hub::listed(),
+    let listed = match task {
+        Task::Text2Speech => hub::listed_voices(),
+        Task::Speech2Speech => hub::listed_conversions(),
+        Task::Txt2Img | Task::Img2Img => hub::listed(),
     };
 
     let mut entries: Vec<Entry> = listed
@@ -622,9 +623,10 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
     ])
     .areas(frame.area());
 
-    let what = match choices.task.speaks() {
-        true => "voice",
-        false => "model",
+    let what = match choices.task {
+        Task::Text2Speech => "voice",
+        Task::Speech2Speech => "converter",
+        Task::Txt2Img | Task::Img2Img => "model",
     };
 
     frame.render_widget(Paragraph::new(heading(&[choices.task.name()])), top);
@@ -931,6 +933,14 @@ mod tests {
         let names: Vec<&str> = pictures.iter().map(Entry::name).collect();
         assert!(names.contains(&"sdxl:base"), "{names:?}");
         assert!(!names.contains(&"indextts"), "{names:?}");
+        assert!(!names.contains(&"seed-vc"), "{names:?}");
+
+        // Converters for converting, and nothing that only speaks or draws.
+        let converters = entries_for(Task::Speech2Speech);
+        let names: Vec<&str> = converters.iter().map(Entry::name).collect();
+        assert!(names.contains(&"seed-vc"), "{names:?}");
+        assert!(!names.contains(&"indextts"), "{names:?}");
+        assert!(!names.contains(&"sdxl:base"), "{names:?}");
 
         // And only what can start from a picture, for the task that starts from one. Anima
         // cannot, and says so out of its kind, before a package has been looked at.

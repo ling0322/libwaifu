@@ -206,6 +206,80 @@ pub trait Voice {
     }
 }
 
+/// What a conversion is asked for, beyond the two recordings.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConversionOptions {
+    /// How many steps the mel is drawn in. Fewer is quicker and rougher.
+    pub steps: i32,
+    /// Re-say the source in the reference's accent and pacing as well, rather than only changing
+    /// whose voice it is in.
+    pub convert_style: bool,
+    /// Always filled in by the time a run starts, as a clip's is.
+    pub seed: Option<u64>,
+}
+
+/// What the boxes start at for a conversion, which is the converter's to say.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConversionDefaults {
+    pub steps: i32,
+}
+
+impl ConversionDefaults {
+    /// These defaults as a run's options: timbre only, and no seed in them yet.
+    pub fn options(&self) -> ConversionOptions {
+        ConversionOptions {
+            steps: self.steps,
+            convert_style: false,
+            seed: None,
+        }
+    }
+}
+
+/// How far along a conversion is, as the reporter given to [`Converter::convert`] is told.
+///
+/// The counts are for the whole conversion rather than the piece it is on, so that a bar drawn
+/// from them only ever moves forward: a long recording is converted a window at a time, and the
+/// style path reads the source a piece at a time before it draws any of it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConversionProgress {
+    /// Hearing the two recordings. Once, before anything else.
+    Listening,
+    /// The style path only: re-saying the source in the reference's manner, so far and out of
+    /// about how much. `expected` is an estimate, as [`SpeechProgress::Saying`]'s is.
+    Saying { done: i32, expected: i32 },
+    /// Drawing the sound, step `done` of `total` across every window.
+    Drawing { done: i32, total: i32 },
+    /// Turning a window into a waveform, which is the vocoder, once its steps are drawn: said as
+    /// it starts and again as it finishes, `done` counting the windows already sounded. It is a
+    /// pass over the whole window and not a small one.
+    Sounding { done: i32, total: i32 },
+}
+
+/// Something that says one recording again in the voice of another.
+///
+/// What [`Voice`] is for text, and the seam between the screen and voice conversion: the page, the
+/// worker and the clip on the disk are written against it and know nothing else about the model.
+/// Not `Send`, for the reason a voice is not.
+pub trait Converter {
+    /// `source` said in the voice of `reference` -- or `None`, where `report` asked it to stop.
+    fn convert(
+        &self,
+        source: &Sound,
+        reference: &Sound,
+        options: &ConversionOptions,
+        report: &mut dyn FnMut(ConversionProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>>;
+
+    /// The rate it writes at.
+    fn rate(&self) -> u32;
+
+    /// What the boxes start at.
+    fn defaults(&self) -> ConversionDefaults;
+
+    /// What it is called on screen.
+    fn name(&self) -> &'static str;
+}
+
 /// What [`Tones`] says about itself, which is the whole of what it is for.
 const NOT_A_VOICE: &str = "this is not a speech model. No voice has been published for libwaifu \
      yet, and what is speaking is a stand-in built into the binary: it reads the text as a run of \

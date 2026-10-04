@@ -70,6 +70,13 @@ function room(bytes) {
 const RECORDING_SECONDS = 30;
 
 /**
+ * And how much of a recording to convert. Longer, because this one is not a sample of a voice but
+ * the thing being said again -- a converter works through it a window at a time -- and still a
+ * limit, because five minutes of 16-bit samples at 48 kHz is already 29 MB on the wire.
+ */
+const SOURCE_SECONDS = 300;
+
+/**
  * Turns whatever file was dropped into a WAV the program can read.
  *
  * The browser has a decoder for every format it will play -- mp3, m4a, ogg, flac, webm -- and the
@@ -80,7 +87,7 @@ const RECORDING_SECONDS = 30;
  * Down to one channel and to half a minute on the way, which are the two things the far side
  * would otherwise have to do to a file it did not ask for the size of.
  */
-async function asWav(file) {
+async function asWav(file, seconds = RECORDING_SECONDS) {
   const context = new (window.AudioContext || window.webkitAudioContext)();
   let decoded;
   try {
@@ -96,7 +103,7 @@ async function asWav(file) {
     channels.push(decoded.getChannelData(channel));
   }
 
-  const length = Math.min(decoded.length, Math.floor(decoded.sampleRate * RECORDING_SECONDS));
+  const length = Math.min(decoded.length, Math.floor(decoded.sampleRate * seconds));
   const mono = new Float32Array(length);
   for (let at = 0; at < length; at++) {
     let sum = 0;
@@ -141,6 +148,11 @@ function asWavBytes(samples, rate) {
   }
 
   return new Blob([bytes], { type: "audio/wav" });
+}
+
+/** A limit in seconds, in the words it is said in: "30 seconds", "5 minutes". */
+function howLong(seconds) {
+  return seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`;
 }
 
 /** How long something is, in the shape a clip's length is read in. */
@@ -214,6 +226,7 @@ function TopBar({ state }) {
 /** The tabs that draw a picture, which there always are. */
 const DRAWS = ["txt2img", "img2img"];
 const SPEAKS = "text2speech";
+const CONVERTS = "speech2speech";
 
 /**
  * The tabs this session has, which the terminal decided: the task was chosen there, and the model
@@ -224,6 +237,7 @@ const SPEAKS = "text2speech";
 function tabsFor(state) {
   if (!state) return [];
   if (state.task === SPEAKS) return [SPEAKS];
+  if (state.task === CONVERTS) return [CONVERTS];
   return state.model?.draws_from_a_picture ? DRAWS : [DRAWS[0]];
 }
 
@@ -757,8 +771,19 @@ function Player({ src, className = "" }) {
   `;
 }
 
-/** text2speech: the recording a reading is to sound like. */
-function FromRecording({ holding, revision, why, onHold, onClear }) {
+/**
+ * A recording to hold: on text2speech the one a reading is to sound like, and on speech2speech
+ * both the one to convert and the voice to convert it to. `seconds` is how much of it is kept.
+ */
+function FromRecording({
+  holding,
+  revision,
+  why,
+  onHold,
+  onClear,
+  title = "Recording to sound like",
+  seconds = RECORDING_SECONDS,
+}) {
   const [over, setOver] = useState(false);
   const [reading, setReading] = useState(false);
 
@@ -789,7 +814,7 @@ function FromRecording({ holding, revision, why, onHold, onClear }) {
 
   return html`
     <div className="card drop">
-      <div className="card-title">Recording to sound like</div>
+      <div className="card-title">${title}</div>
       ${/* Above the box rather than inside it, which is where the picture's thumbnail goes. That
            box is a label around a file input, so everything inside it opens the file chooser when
            it is clicked -- which is what should happen to a thumbnail and is the opposite of what
@@ -828,7 +853,7 @@ function FromRecording({ holding, revision, why, onHold, onClear }) {
       </label>
       <p className="about">
         Any format this browser can play: it is decoded here and the samples are what cross, so
-        the program needs no codec of its own. The first ${RECORDING_SECONDS} seconds are kept.
+        the program needs no codec of its own. The first ${howLong(seconds)} of it are kept.
       </p>
       ${holding &&
       html`
@@ -986,6 +1011,145 @@ function SpeechSettings({
         </div>
       </div>
 
+        <//>
+      `}
+    </div>
+  `;
+}
+
+/** speech2speech: what converts, and where -- the head of the settings column. */
+function ConverterAndDevice({ state }) {
+  const converter = state?.converter;
+  return html`
+    <${Chosen}
+      label="Converter"
+      chosen=${converter}
+      device=${state?.device}
+      standing=${standingOf(converter, "at the first conversion")}
+    >
+      ${converter && html`<p className="about">${converter.rate} Hz</p>`}
+    <//>
+  `;
+}
+
+/**
+ * speech2speech: the recording to convert, and the button that converts it.
+ *
+ * Where the prompt is on the other tabs, because it is what the run is of: the voice it is turned
+ * into is a setting beside it, the way a picture to start from is.
+ */
+function ConvertBox({
+  state,
+  canConvert,
+  converting,
+  theirs,
+  onHold,
+  onClear,
+  onConvert,
+  onInterrupt,
+}) {
+  return html`
+    <section className="prompts">
+      <div className="prompt-boxes">
+        <${FromRecording}
+          title="Recording to convert"
+          seconds=${SOURCE_SECONDS}
+          holding=${!!state?.holding_a_source}
+          revision=${state?.source_upload}
+          onHold=${onHold}
+          onClear=${onClear}
+        />
+      </div>
+      <div className="go">
+        <button className="generate" disabled=${!canConvert} onClick=${onConvert}>Convert</button>
+        <button
+          className="interrupt"
+          disabled=${!converting}
+          title=${converting
+            ? "Stop after the step it is on. Nothing is kept: half a recording is not a clip"
+            : theirs
+              ? THEIRS
+              : "Nothing to stop"}
+          onClick=${onInterrupt}
+        >
+          Cancel
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+/** speech2speech: everything a conversion is asked for that is not the recording it converts. */
+function ConversionSettings({ state, form, change, onHold, onClear, onAnySeed }) {
+  const converter = state?.converter;
+
+  return html`
+    <div className="settings">
+      <${ConverterAndDevice} state=${state} />
+
+      ${!!converter?.on_disk &&
+      html`
+        <${Fragment}>
+          <${FromRecording}
+            title="Voice to convert it to"
+            holding=${!!state?.holding_a_recording}
+            revision=${state?.recording_upload}
+            onHold=${onHold}
+            onClear=${onClear}
+          />
+
+          <div className="card">
+            <div className="row">
+              <${NumberBox}
+                label="Steps"
+                kind="number"
+                box=${{ min: 1, max: 100, step: 1 }}
+                value=${form.conversionSteps}
+                onChange=${(value) => change("conversionSteps", value)}
+              />
+              <${Slider}
+                limits=${{ min: 1, max: 100, step: 1 }}
+                value=${form.conversionSteps}
+                onChange=${(value) => change("conversionSteps", value)}
+              />
+            </div>
+          </div>
+
+          <div className="card">
+            <label className="check">
+              <input
+                type="checkbox"
+                checked=${!!form.convertStyle}
+                onChange=${(e) => change("convertStyle", e.target.checked)}
+              />
+              <span>Convert the style too</span>
+            </label>
+            <p className="about">
+              Off, only whose voice it is changes: the timing and the accent are the recording's
+              own. On, it is said again with the accent and pacing of the voice as well, which
+              takes longer and keeps less of the original timing.
+            </p>
+          </div>
+
+          <div className="card">
+            <div className="row">
+              <${Field} label="Seed" kind="grow">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value=${form.seed}
+                  onChange=${(e) => change("seed", e.target.value)}
+                />
+              <//>
+              <button
+                className="plain"
+                title="A different conversion every time"
+                onClick=${onAnySeed}
+              >
+                🎲
+              </button>
+            </div>
+          </div>
         <//>
       `}
     </div>
@@ -1305,7 +1469,16 @@ function Output({ state, pictures, progress, note, showing, onShow, onSend, onRe
  * be shown the way a picture can, so what the strip holds is the first words of each rather than
  * a thumbnail of it.
  */
-function ClipOutput({ clips, progress, note, showing, onShow, onReuse, onDelete }) {
+function ClipOutput({
+  clips,
+  progress,
+  note,
+  showing,
+  onShow,
+  onReuse,
+  onDelete,
+  nothing = "Nothing said yet.",
+}) {
   const clip = clips.find((one) => one.id === showing) ?? clips[0] ?? null;
 
   return html`
@@ -1327,7 +1500,7 @@ function ClipOutput({ clips, progress, note, showing, onShow, onReuse, onDelete 
               <${Player} key=${clip.id} src=${clip.url} />
               <p className="said">${clip.text}</p>
             `
-          : html`<div className="nothing">Nothing said yet.</div>`}
+          : html`<div className="nothing">${nothing}</div>`}
       </div>
 
       ${clip &&
@@ -1408,14 +1581,24 @@ function fileName(one) {
   return `waifu-${stamp}.${one.kind === "clip" ? "wav" : "png"}`;
 }
 
+/**
+ * What a conversion is called in the strip, which has no words of its own to show. Not the seed:
+ * it arrives as a JSON number, which is a double, and a sixty-four bit one would be shown wrong.
+ */
+function conversionSaid(made) {
+  return `${made.style ? "Voice and style" : "Voice only"}, ${made.steps} steps`;
+}
+
 /** A finished job, as the gallery shows it: what it made, and where to fetch it. */
 function asMade(job) {
+  const made = job.output.made;
   return {
-    ...job.output.made,
+    ...made,
     id: job.id,
     url: job.output.url,
     created: job.finished ?? job.created,
-    kind: job.kind === "speech" ? "clip" : "picture",
+    kind: job.kind === "image" ? "picture" : "clip",
+    ...(job.kind === "conversion" ? { text: conversionSaid(made) } : {}),
   };
 }
 
@@ -1433,7 +1616,9 @@ function App() {
   const [jobs, setJobs] = useState([]);
 
   /** The uploads this browser is holding to start from: a picture, and a recording. */
-  const [inputs, setInputs] = useState(() => readKept(KEPT_INPUTS, { image: null, voice: null }));
+  const [inputs, setInputs] = useState(() =>
+    readKept(KEPT_INPUTS, { image: null, voice: null, source: null }),
+  );
 
   /** What this page has to say about the last thing that was clicked, if it went wrong. */
   const [complaint, setComplaint] = useState(null);
@@ -1467,6 +1652,11 @@ function App() {
     text: "",
     speed: 1,
     temperature: 0.8,
+    // And the conversion tab's. Steps of its own, because a picture's twenty and a conversion's
+    // thirty are two different numbers that happen to share a name; and whether to convert the
+    // style too, which is a switch where the speech tab's style above is an instruction.
+    conversionSteps: 30,
+    convertStyle: false,
     // The instruction a reading follows, for a voice that offers styles. Empty is none.
     style: "",
   });
@@ -1522,8 +1712,8 @@ function App() {
       setModel(answer.said);
       setTab(answer.said.task);
 
-      const held = readKept(KEPT_INPUTS, { image: null, voice: null });
-      for (const which of ["image", "voice"]) {
+      const held = readKept(KEPT_INPUTS, { image: null, voice: null, source: null });
+      for (const which of ["image", "voice", "source"]) {
         if (held[which] && (await fetch(`/api/uploads/${held[which]}`)).status === 404) {
           held[which] = null;
         }
@@ -1541,7 +1731,9 @@ function App() {
     // Another tab of this browser posted or deleted something.
     const elsewhere = (event) => {
       if (event.key === KEPT_JOBS) readJobs();
-      if (event.key === KEPT_INPUTS) setInputs(readKept(KEPT_INPUTS, { image: null, voice: null }));
+      if (event.key === KEPT_INPUTS) {
+        setInputs(readKept(KEPT_INPUTS, { image: null, voice: null, source: null }));
+      }
     };
     window.addEventListener("storage", elsewhere);
     return () => window.removeEventListener("storage", elsewhere);
@@ -1582,6 +1774,8 @@ function App() {
     picture_upload: inputs.image,
     holding_a_recording: !!inputs.voice,
     recording_upload: inputs.voice,
+    holding_a_source: !!inputs.source,
+    source_upload: inputs.source,
   };
 
   // Puts the chosen model's own numbers in the boxes, and its card's suggestions in the prompts
@@ -1613,6 +1807,14 @@ function App() {
     setForm((form) => ({ ...form, speed: voice.speed, temperature: voice.temperature, style: "" }));
   }, [voice]);
 
+  // And the converter's, the same way again.
+  const converter = state?.converter ?? null;
+  useEffect(() => {
+    if (!converter || adopted.current === converter.name) return;
+    adopted.current = converter.name;
+    setForm((form) => ({ ...form, conversionSteps: converter.steps }));
+  }, [converter]);
+
   const tabs = tabsFor(state);
 
   // Which of this browser's jobs are going, and what the bar says about them.
@@ -1620,6 +1822,7 @@ function App() {
   const waiting = going.filter((job) => job.status === "queued");
   const mine = !!running && worker.running === running.id;
   const speaks = model?.kind === "speech";
+  const converts = model?.kind === "conversion";
   const theirs = worker.busy && !mine && !waiting.length;
   const doing = mine
     ? worker.progress.doing
@@ -1632,8 +1835,9 @@ function App() {
     busy: worker.busy || going.length > 0,
     mine,
     // Whether this page has something to stop: its running job, or one waiting its turn.
-    drawing: !speaks && going.length > 0,
+    drawing: !speaks && !converts && going.length > 0,
     speaking: speaks && going.length > 0,
+    converting: converts && going.length > 0,
     fetching: false,
     fraction: mine ? worker.progress.fraction ?? null : null,
     doing,
@@ -1645,6 +1849,7 @@ function App() {
   const done = jobs.filter((job) => job.status === "done" && job.output);
   const pictures = done.filter((job) => job.kind === "image").map(asMade);
   const clips = done.filter((job) => job.kind === "speech").map(asMade);
+  const conversions = done.filter((job) => job.kind === "conversion").map(asMade);
 
   // What this page has to say beats what the last job came to: a complaint is about the click
   // that was just made.
@@ -1662,6 +1867,8 @@ function App() {
   const canDraw =
     !!chosen?.on_disk && !waiting.length && !(tab === "img2img" && chosen.no_picture_because);
   const canSpeak = !!voice?.on_disk && !waiting.length && !!form.text.trim();
+  const canConvert =
+    !!converter?.on_disk && !waiting.length && !!inputs.source && !!inputs.voice;
 
   /** Posts a job, and keeps its id. */
   const post = useCallback(async (asked) => {
@@ -1703,6 +1910,17 @@ function App() {
     });
   }, [form, inputs, voice, post]);
 
+  const convert = useCallback(() => {
+    post({
+      kind: "conversion",
+      source: inputs.source,
+      reference: inputs.voice,
+      steps: Number(form.conversionSteps),
+      style: !!form.convertStyle,
+      seed: String(form.seed).trim(),
+    });
+  }, [form, inputs, post]);
+
   /** Stops this page's running job, or takes the one waiting out of line. */
   const interrupt = useCallback(async () => {
     const job = running ?? waiting[0];
@@ -1713,7 +1931,18 @@ function App() {
 
   // Ctrl-enter draws, from wherever the cursor is. The one keystroke every tool of this kind has.
   const draw = useRef(null);
-  draw.current = tab === SPEAKS ? (canSpeak ? speak : null) : canDraw ? generate : null;
+  draw.current =
+    tab === SPEAKS
+      ? canSpeak
+        ? speak
+        : null
+      : tab === CONVERTS
+        ? canConvert
+          ? convert
+          : null
+        : canDraw
+          ? generate
+          : null;
   useEffect(() => {
     const pressed = (key) => {
       if (key.key === "Enter" && (key.ctrlKey || key.metaKey)) {
@@ -1765,25 +1994,33 @@ function App() {
    * play and the program has one for none of them, so what crosses is samples. A file it cannot
    * decode is said so here, by name, rather than refused on the far side as "not a WAV file".
    */
-  const holdRecording = useCallback(
-    async (file) => {
+  const holdAudio = useCallback(
+    async (which, file, seconds) => {
       if (!file) return;
 
       let wav;
       try {
-        wav = await asWav(file);
+        wav = await asWav(file, seconds);
       } catch (failed) {
         return setComplaint(
           `${file.name} could not be read: this browser has no decoder for it. ` +
             `Anything it can play will work -- wav, mp3, m4a, ogg, flac`,
         );
       }
-      await upload("voice", wav);
+      await upload(which, wav);
     },
     [upload],
   );
 
+  const holdRecording = useCallback((file) => holdAudio("voice", file), [holdAudio]);
   const clearRecording = useCallback(() => letGo("voice"), [letGo]);
+
+  /** And the recording a conversion is of, which is kept for longer. */
+  const holdSource = useCallback(
+    (file) => holdAudio("source", file, SOURCE_SECONDS),
+    [holdAudio],
+  );
+  const clearSource = useCallback(() => letGo("source"), [letGo]);
 
   /**
    * Deletes a picture or a clip, from the server and from this browser's list. Asked about first:
@@ -1811,6 +2048,16 @@ function App() {
       temperature: clip.temperature,
       seed: String(clip.seed),
       style: clip.style ?? "",
+    }));
+  }, []);
+
+  /** Puts a conversion's own settings back in the boxes. The recordings are whatever is held. */
+  const reuseConversion = useCallback((clip) => {
+    setForm((form) => ({
+      ...form,
+      conversionSteps: clip.steps,
+      convertStyle: !!clip.style,
+      seed: String(clip.seed),
     }));
   }, []);
 
@@ -1860,7 +2107,42 @@ function App() {
            holds -- and a screen showing a prompt box over an audio player would be a screen
            that had swapped one of the three. */ ""}
       <main>
-        ${tab === SPEAKS
+        ${tab === CONVERTS
+          ? html`
+              ${!!state?.converter &&
+              html`<${ConvertBox}
+                state=${state}
+                canConvert=${canConvert}
+                converting=${!!progress.converting}
+                theirs=${theirs}
+                onHold=${holdSource}
+                onClear=${clearSource}
+                onConvert=${convert}
+                onInterrupt=${interrupt}
+              />`}
+
+              <section className="panes">
+                <${ConversionSettings}
+                  state=${state}
+                  form=${form}
+                  change=${change}
+                  onHold=${holdRecording}
+                  onClear=${clearRecording}
+                  onAnySeed=${() => change("seed", "-1")}
+                />
+                <${ClipOutput}
+                  clips=${conversions}
+                  progress=${progress}
+                  note=${note}
+                  showing=${playing}
+                  onShow=${setPlaying}
+                  onReuse=${reuseConversion}
+                  onDelete=${forget}
+                  nothing="Nothing converted yet."
+                />
+              </section>
+            `
+          : tab === SPEAKS
           ? html`
               ${!!state?.voice &&
               html`<${SayBox}

@@ -39,7 +39,10 @@ use serde_json::{json, Value};
 use crate::cli::args::Runtime;
 use crate::cli::task::Task;
 use crate::cli::webui::store::{Cancelled, Job, Kind, Refused, Status, Store};
-use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgress, Style};
+use crate::{
+    ConversionDefaults, ConversionProgress, GenerationDefaults, GenerationProgress, SpeechDefaults,
+    SpeechProgress, Style,
+};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
 ///
@@ -62,6 +65,12 @@ pub const VOCODER_RATIO: f64 = 1.0;
 /// Where the speech bar waits while the vocoder runs longer than the last one did: short of the
 /// end, which it reaches when there is a clip.
 const HELD: f64 = 0.99;
+
+/// And for a conversion, as shares of the whole. Measured on Seed-VC over 36 seconds on one card:
+/// re-saying the source in the reference's manner, where that was asked for, is about two fifths
+/// of the run; of the rest, the vocoder takes a little more than the steps it follows do.
+const SAYING: f64 = 0.4;
+const DRAWING: f64 = 0.45;
 
 /// The model the page is set to draw with, as the screen describes it.
 ///
@@ -144,6 +153,21 @@ pub struct Spoken {
     pub not_a_voice_because: Option<String>,
 }
 
+/// The converter the page is set to convert with, as the screen describes it: what [`Spoken`] is
+/// for a voice.
+#[derive(Clone)]
+pub struct ChosenConverter {
+    /// What to ask for when the time comes to read it, as a voice's name is.
+    pub name: String,
+    pub full_name: String,
+    pub on_disk: bool,
+    pub in_memory: bool,
+    /// What the boxes start at.
+    pub defaults: ConversionDefaults,
+    /// The rate it writes at.
+    pub rate: u32,
+}
+
 /// Which package of a model is being fetched, and how far into it.
 #[derive(Clone)]
 pub struct Fetch {
@@ -199,6 +223,45 @@ impl Say {
     }
 }
 
+/// A conversion in flight: the latest of each count it reports, which between them say how far
+/// along it is.
+#[derive(Clone)]
+pub struct Convert {
+    /// Whether it re-says the source as well, which is the part [`ConversionProgress::Saying`]
+    /// reports and the timbre-only path does not have.
+    pub style: bool,
+    pub said: (i32, i32),
+    pub drawn: (i32, i32),
+    pub sounded: (i32, i32),
+    /// The last thing it said it was doing, for the words on the bar.
+    pub progress: ConversionProgress,
+    pub started: Instant,
+}
+
+impl Convert {
+    pub fn new(style: bool) -> Convert {
+        Convert {
+            style,
+            said: (0, 0),
+            drawn: (0, 0),
+            sounded: (0, 0),
+            progress: ConversionProgress::Listening,
+            started: Instant::now(),
+        }
+    }
+
+    /// Takes in what the converter just reported.
+    pub fn heard(&mut self, progress: ConversionProgress) {
+        match progress {
+            ConversionProgress::Listening => {}
+            ConversionProgress::Saying { done, expected } => self.said = (done, expected),
+            ConversionProgress::Drawing { done, total } => self.drawn = (done, total),
+            ConversionProgress::Sounding { done, total } => self.sounded = (done, total),
+        }
+        self.progress = progress;
+    }
+}
+
 /// What the worker is busy with, which is the only thing on the screen that moves on its own.
 #[derive(Clone)]
 pub enum Doing {
@@ -211,6 +274,7 @@ pub enum Doing {
     },
     Drawing(Run),
     Speaking(Say),
+    Converting(Convert),
 }
 
 impl Doing {
@@ -233,6 +297,7 @@ impl Doing {
                 .map(|total| fetch.done as f64 / total as f64),
             Doing::Drawing(run) => Some(drawn(run.progress, run.steps)),
             Doing::Speaking(say) => Some(spoken(say, Instant::now())),
+            Doing::Converting(convert) => Some(converted(convert)),
         }
     }
 
@@ -264,6 +329,18 @@ impl Doing {
                     format!("token {done} of about {expected}")
                 }
                 SpeechProgress::Sounding => "making the sound".to_string(),
+            },
+            Doing::Converting(convert) => match convert.progress {
+                ConversionProgress::Listening => "listening to the recordings".to_string(),
+                ConversionProgress::Saying { done, expected } => {
+                    format!("token {done} of about {expected}")
+                }
+                ConversionProgress::Drawing { done, total } => format!("step {done} of {total}"),
+                // The window being sounded is the one after those already done.
+                ConversionProgress::Sounding { done, total } => match total {
+                    1 => "making the sound".to_string(),
+                    total => format!("making the sound, {} of {total}", (done + 1).min(total)),
+                },
             },
         }
     }
@@ -311,6 +388,22 @@ fn spoken(say: &Say, now: Instant) -> f64 {
             };
             (tokens + (1.0 - tokens) * sounded).min(HELD)
         }
+    }
+}
+
+/// How far along a conversion is, as a bar can show it: each of its counts as a share of the run.
+///
+/// Every count is over the whole conversion rather than the window it is on, so the bar only moves
+/// forward. A count with nothing in it yet is nothing done.
+fn converted(convert: &Convert) -> f64 {
+    let share = |(done, total): (i32, i32)| match total {
+        total if total > 0 => (f64::from(done.max(0)) / f64::from(total)).min(1.0),
+        _ => 0.0,
+    };
+    let sound = DRAWING * share(convert.drawn) + (1.0 - DRAWING) * share(convert.sounded);
+    match convert.style {
+        true => SAYING * share(convert.said) + (1.0 - SAYING) * sound,
+        false => sound,
     }
 }
 
@@ -442,12 +535,52 @@ impl Clip {
     }
 }
 
+/// What a finished conversion was asked for, kept with its job: what [`Clip`] is for a reading.
+pub struct Converted {
+    pub seconds: f64,
+    pub rate: u32,
+    pub steps: i32,
+    pub style: bool,
+    pub seed: u64,
+    pub converter: String,
+    pub elapsed: Duration,
+}
+
+impl Converted {
+    /// The line under the clip. There are no words to put first: what was said is the source's.
+    pub fn parameters(&self) -> String {
+        format!(
+            "Steps: {}, Style: {}, Seed: {}, Rate: {} Hz, Converter: {}",
+            self.steps,
+            if self.style { "yes" } else { "no" },
+            self.seed,
+            self.rate,
+            self.converter,
+        )
+    }
+
+    pub fn json(&self) -> Value {
+        json!({
+            "length": self.seconds,
+            "rate": self.rate,
+            "steps": self.steps,
+            "style": self.style,
+            "seed": self.seed,
+            "converter": self.converter,
+            "seconds": self.elapsed.as_secs_f64(),
+            "parameters": self.parameters(),
+        })
+    }
+}
+
 /// What the program is doing, which is the same whoever is asking.
 pub struct World {
     /// What the program draws with, for a program started to draw.
     pub model: Option<Chosen>,
     /// What it speaks with, for a program started to speak.
     pub voice: Option<Spoken>,
+    /// What it converts with, for a program started to convert.
+    pub converter: Option<ChosenConverter>,
     /// How long the vocoder took against everything before it, the last time anything was said.
     /// What the speech bar fills its last part by; see [`Say::ratio`].
     pub vocoder_ratio: f64,
@@ -488,6 +621,7 @@ impl Shared {
             world: Mutex::new(World {
                 model: None,
                 voice: None,
+                converter: None,
                 vocoder_ratio: VOCODER_RATIO,
                 doing: Doing::Nothing,
                 running: None,
@@ -533,9 +667,10 @@ impl Shared {
 
     /// What kind of job this program takes.
     pub fn kind(&self) -> Kind {
-        match self.task.speaks() {
-            true => Kind::Speech,
-            false => Kind::Image,
+        match self.task {
+            Task::Text2Speech => Kind::Speech,
+            Task::Speech2Speech => Kind::Conversion,
+            Task::Txt2Img | Task::Img2Img => Kind::Image,
         }
     }
 
@@ -685,6 +820,16 @@ impl Shared {
             })
         });
 
+        let converter = world.converter.as_ref().map(|converter| {
+            json!({
+                "name": converter.name,
+                "full_name": converter.full_name,
+                "on_disk": converter.on_disk,
+                "in_memory": converter.in_memory,
+                "steps": converter.defaults.steps,
+                "rate": converter.rate,
+            })
+        });
         json!({
             "built_from": crate::cli::REVISION,
             "task": self.task.name(),
@@ -692,6 +837,7 @@ impl Shared {
             "device": self.runtime.name(),
             "model": model,
             "voice": voice,
+            "converter": converter,
             "starting_picture": self.starting_picture,
             "output": { "used": used, "limit": limit },
         })
@@ -706,6 +852,7 @@ fn progress(doing: &Doing) -> Value {
         "seconds": match doing {
             Doing::Drawing(run) => Some(run.started.elapsed().as_secs_f64()),
             Doing::Speaking(say) => Some(say.started.elapsed().as_secs_f64()),
+            Doing::Converting(convert) => Some(convert.started.elapsed().as_secs_f64()),
             _ => None,
         },
         "fetching": matches!(doing, Doing::Fetching(_)),
@@ -787,6 +934,58 @@ mod tests {
             ) > 0.4,
             "half the steps is about half way"
         );
+    }
+
+    #[test]
+    fn the_conversion_bar_only_moves_forward_and_ends_full() {
+        // The style path: two pieces, each re-said and then drawn and sounded, in that order.
+        let mut convert = Convert::new(true);
+        let mut last = converted(&convert);
+        assert_eq!(last, 0.0);
+        for progress in [
+            ConversionProgress::Listening,
+            ConversionProgress::Saying {
+                done: 500,
+                expected: 900,
+            },
+            ConversionProgress::Drawing {
+                done: 15,
+                total: 60,
+            },
+            ConversionProgress::Drawing {
+                done: 30,
+                total: 60,
+            },
+            // Said as the vocoder starts on a window and again as it finishes it.
+            ConversionProgress::Sounding { done: 0, total: 2 },
+            ConversionProgress::Sounding { done: 1, total: 2 },
+            // The estimate was short: it grows with what is said, and the bar holds.
+            ConversionProgress::Saying {
+                done: 1000,
+                expected: 1000,
+            },
+            ConversionProgress::Drawing {
+                done: 60,
+                total: 60,
+            },
+            ConversionProgress::Sounding { done: 2, total: 2 },
+        ] {
+            convert.heard(progress);
+            let now = converted(&convert);
+            assert!(now >= last, "{progress:?}: {now} after {last}");
+            last = now;
+        }
+        assert!((last - 1.0).abs() < 1e-9, "{last}");
+
+        // Timbre only has nothing to re-say, so drawing and sounding are the whole of it.
+        let mut convert = Convert::new(false);
+        convert.heard(ConversionProgress::Drawing {
+            done: 30,
+            total: 30,
+        });
+        assert!((converted(&convert) - DRAWING).abs() < 1e-9);
+        let words = Doing::Converting(convert).words();
+        assert_eq!(words, "step 30 of 30");
     }
 
     #[test]

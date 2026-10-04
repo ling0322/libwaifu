@@ -39,15 +39,19 @@ use serde_json::Value;
 use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::log;
-use crate::cli::webui::state::{Chosen, Clip, Doing, Fetch, Picture, Run, Say, Shared, Spoken};
+use crate::cli::webui::state::{
+    Chosen, ChosenConverter, Clip, Convert, Converted, Doing, Fetch, Picture, Run, Say, Shared,
+    Spoken,
+};
 use crate::cli::webui::store::{self, Kind};
 use crate::cosyvoice3::{self, CosyVoice3};
 use crate::flint::Tensor;
 use crate::indextts::{self, IndexTts};
 use crate::wav;
 use crate::{
-    from_rgb8, to_rgb8, Anima, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2,
-    Manifest, QwenImage, Sdxl, SpeechOptions, SpeechProgress, Tones, Voice,
+    from_rgb8, to_rgb8, Anima, ConversionDefaults, ConversionOptions, Converter,
+    GenerationDefaults, GenerationOptions, GenerationProgress, Krea2, Manifest, QwenImage, Sdxl,
+    SpeechOptions, SpeechProgress, Tones, Voice,
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -88,6 +92,19 @@ const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 cannot start from
 /// noise where the syllables are, which is for checking the page and not for listening to.
 pub const TONES: &str = "tones";
 
+/// The `model.type` of a Seed-VC package, the one converter there is.
+///
+/// Spelled here rather than read from `seed_vc`, which an MIT build does not have: what this file
+/// needs is to recognise the package -- so that `-m` on one asks for speech2speech, and an MIT
+/// build can say why it will not read it -- and that is a word, not the model.
+const SEED_VC_TYPE: &str = "seed_vc";
+
+/// What Seed-VC v2 is called, starts at and writes, for the screen before its package is read: the
+/// same three things [`look_at_voice`] says of a voice from its kind.
+const SEED_VC_NAME: &str = "Seed-VC v2";
+const SEED_VC_DEFAULTS: ConversionDefaults = ConversionDefaults { steps: 30 };
+const SEED_VC_RATE: u32 = 22_050;
+
 /// How many sizes a model has to name before its list is used instead of the one above.
 ///
 /// One size is not a choice and two is barely one. A model that names fewer has not replaced the
@@ -98,6 +115,7 @@ const ENOUGH_SIZES: usize = 3;
 pub enum Load {
     Model(String),
     Voice(String),
+    Converter(String),
 }
 
 /// Reads the model, then runs jobs off the queue for as long as the program runs.
@@ -107,24 +125,34 @@ pub enum Load {
 /// terminal, and every job anybody posts is run with it. Nothing a request does takes it off the
 /// card -- a stop included. A stop ends one job, and the next one in line starts straight away.
 pub fn work(shared: &Shared, load: Load) {
-    let mut model: Option<Model> = None;
-    let mut voice: Option<Box<dyn Voice>> = None;
+    let mut loaded = Loaded::default();
 
     match load {
         Load::Model(asked) => {
-            read_model(shared, &asked, &mut model);
+            read_model(shared, &asked, &mut loaded.model);
         }
         Load::Voice(asked) => {
-            read_voice(shared, &asked, &mut voice);
+            read_voice(shared, &asked, &mut loaded.voice);
+        }
+        Load::Converter(asked) => {
+            read_converter(shared, &asked, &mut loaded.converter);
         }
     }
     shared.reading(false);
 
     loop {
         let job = shared.next();
-        run(shared, model.as_ref(), voice.as_deref(), &job);
+        run(shared, &loaded, &job);
         shared.finished();
     }
+}
+
+/// What the worker has read: one of the three, for the one task the program was started for.
+#[derive(Default)]
+struct Loaded {
+    model: Option<Model>,
+    voice: Option<Box<dyn Voice>>,
+    converter: Option<Box<dyn Converter>>,
 }
 
 /// How a job ended, where it did not fail.
@@ -138,7 +166,7 @@ enum Ran {
 }
 
 /// Runs one job, already marked as running, and writes down how it went.
-fn run(shared: &Shared, model: Option<&Model>, voice: Option<&dyn Voice>, job: &store::Job) {
+fn run(shared: &Shared, loaded: &Loaded, job: &store::Job) {
     let store = shared.store();
     let id = job.id.as_str();
 
@@ -146,13 +174,21 @@ fn run(shared: &Shared, model: Option<&Model>, voice: Option<&dyn Voice>, job: &
     let ran = if shared.interrupted() {
         Ok(Ran::Stopped)
     } else {
-        match (job.kind, model, voice) {
-            (Kind::Image, Some(model), _) => draw(shared, model, job),
-            (Kind::Speech, _, Some(voice)) => say(shared, voice, job),
-            // Not reachable through the API, which refuses a job of the other kind -- but a
-            // job is a job, and one with nothing to run it is said to have failed.
-            (Kind::Image, None, _) => Err("this program was not started to draw".into()),
-            (Kind::Speech, _, None) => Err("this program was not started to speak".into()),
+        // A job with nothing to run it is not reachable through the API, which refuses a job of
+        // another kind -- but a job is a job, and one with nothing to run it is said to have failed.
+        match job.kind {
+            Kind::Image => match &loaded.model {
+                Some(model) => draw(shared, model, job),
+                None => Err("this program was not started to draw".into()),
+            },
+            Kind::Speech => match loaded.voice.as_deref() {
+                Some(voice) => say(shared, voice, job),
+                None => Err("this program was not started to speak".into()),
+            },
+            Kind::Conversion => match loaded.converter.as_deref() {
+                Some(converter) => convert(shared, converter, job),
+                None => Err("this program was not started to convert".into()),
+            },
         }
     };
 
@@ -445,6 +481,126 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
         }
         _ => Box::new(IndexTts::from_manifest(device, residency, &manifest)?),
     })
+}
+
+/// The converter `asked` names, as the screen describes it, without reading any of it: what
+/// [`look_at_voice`] is for a voice.
+pub fn look_at_converter(asked: &str) -> ChosenConverter {
+    ChosenConverter {
+        name: asked.to_string(),
+        full_name: hub::full_name(asked).unwrap_or(SEED_VC_NAME).to_string(),
+        on_disk: on_disk(asked).is_some(),
+        in_memory: false,
+        defaults: SEED_VC_DEFAULTS,
+        rate: SEED_VC_RATE,
+    }
+}
+
+/// Whether `asked` turns one recording into another: a published converter, or a manifest on the
+/// disk whose `model.type` is Seed-VC's. What `-m` alone is taken to mean speech2speech by.
+pub fn is_a_converter(asked: &str) -> bool {
+    hub::is_conversion(asked) || on_disk(asked).as_deref().is_some_and(is_a_seed_vc)
+}
+
+/// Whether the manifest at `path` describes Seed-VC.
+fn is_a_seed_vc(path: &Path) -> bool {
+    Manifest::open(path)
+        .ok()
+        .and_then(|manifest| {
+            Some(manifest.section("model").ok()?.get_str("type").ok()? == SEED_VC_TYPE)
+        })
+        .unwrap_or(false)
+}
+
+/// Reads the converter `asked` names into `converter`, and says how it went: [`read_voice`] for a
+/// converter.
+fn read_converter(
+    shared: &Shared,
+    asked: &str,
+    converter: &mut Option<Box<dyn Converter>>,
+) -> bool {
+    match load_converter(shared, asked) {
+        Ok(read) => {
+            let described = ChosenConverter {
+                full_name: hub::full_name(asked).unwrap_or(read.name()).to_string(),
+                on_disk: true,
+                in_memory: true,
+                defaults: read.defaults(),
+                rate: read.rate(),
+                ..look_at_converter(asked)
+            };
+            *converter = Some(read);
+
+            shared.change(|world| {
+                world.converter = Some(described);
+                world.doing = Doing::Nothing;
+            });
+            shared.say("ready", false);
+            true
+        }
+        Err(error) => {
+            shared.change(|world| world.doing = Doing::Nothing);
+            shared.say(error.to_string(), !hub::stopped(&error));
+            false
+        }
+    }
+}
+
+/// Fetches the converter package `asked` names, if it is a name, and reads it onto the device.
+fn load_converter(shared: &Shared, asked: &str) -> Result<Box<dyn Converter>, Error> {
+    let name = match asked.rsplit_once('/') {
+        Some((_, file)) if !file.is_empty() => file.to_string(),
+        _ => asked.to_string(),
+    };
+
+    shared.change(|world| {
+        world.doing = Doing::Fetching(Fetch {
+            model: name.clone(),
+            hub: None,
+            file: String::new(),
+            done: 0,
+            total: None,
+            part: 0,
+            parts: 0,
+        })
+    });
+
+    let path = hub::resolve_reporting(
+        asked,
+        &mut |progress| report_fetch(shared, &name, progress),
+        &|| shared.interrupted(),
+    )?;
+    if !is_a_seed_vc(&path) {
+        return Err(format!("{asked} is not a converter: its manifest is not Seed-VC's").into());
+    }
+
+    shared.change(|world| {
+        world.doing = Doing::Reading {
+            model: name.clone(),
+        }
+    });
+
+    open_seed_vc(&Manifest::open(&path)?, shared.runtime())
+}
+
+/// Seed-VC, read onto the device: the one place an MIT file reaches into the GPL port, and only
+/// in a build that has it -- as FFmpeg's filter table names its GPL filters under `--enable-gpl`.
+#[cfg(feature = "gpl")]
+fn open_seed_vc(manifest: &Manifest, runtime: Runtime) -> Result<Box<dyn Converter>, Error> {
+    Ok(Box::new(crate::seed_vc::SeedVc::from_manifest(
+        runtime.device(),
+        runtime.residency(),
+        manifest,
+    )?))
+}
+
+/// What an MIT build says instead: the same refusal `-task speech2speech` is given.
+#[cfg(not(feature = "gpl"))]
+fn open_seed_vc(_: &Manifest, _: Runtime) -> Result<Box<dyn Converter>, Error> {
+    Err(crate::cli::task::Task::Speech2Speech
+        .not_built_because()
+        .unwrap_or("this build cannot convert voices")
+        .into())
 }
 
 /// What a kind of model implies for the screen before any of its weights are read: what to ask
@@ -887,6 +1043,85 @@ fn say(shared: &Shared, voice: &dyn Voice, job: &store::Job) -> Result<Ran, Erro
     })
 }
 
+/// Says one job's source recording again in the voice of its reference, and says what came of it.
+fn convert(shared: &Shared, converter: &dyn Converter, job: &store::Job) -> Result<Ran, Error> {
+    let recording = |field: &str, what: &str| -> Result<wav::Sound, Error> {
+        let bytes = upload_named(shared, &job.asked, field)?
+            .ok_or_else(|| format!("the job names no {what}"))?;
+        Ok(wav::read(&bytes).map_err(|error| format!("the {what}: {error}"))?)
+    };
+    let source = recording("source", "recording to convert")?;
+    let reference = recording("reference", "recording of the voice")?;
+
+    let options = ConversionOptions {
+        steps: job.asked.get("steps").and_then(Value::as_i64).unwrap_or(30) as i32,
+        convert_style: job
+            .asked
+            .get("style")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        seed: seed(&job.asked),
+    };
+
+    let started = Instant::now();
+    shared.change(|world| world.doing = Doing::Converting(Convert::new(options.convert_style)));
+    log::line(format_args!(
+        "job {}: converting {:.1}s of sound into a {:.1}s voice, {} steps{}, seed {}",
+        job.id,
+        source.seconds(),
+        reference.seconds(),
+        options.steps,
+        match options.convert_style {
+            true => ", style too",
+            false => "",
+        },
+        options.seed.unwrap_or_default(),
+    ));
+
+    let mut report = |progress| {
+        shared.change(|world| {
+            if let Doing::Converting(convert) = &mut world.doing {
+                convert.heard(progress);
+            }
+        });
+
+        match shared.interrupted() {
+            true => ControlFlow::Break(()),
+            false => ControlFlow::Continue(()),
+        }
+    };
+
+    let Some(sound) = converter.convert(&source, &reference, &options, &mut report)? else {
+        return Ok(Ran::Stopped);
+    };
+
+    let converted = Converted {
+        seconds: sound.seconds(),
+        rate: sound.rate,
+        steps: options.steps,
+        style: options.convert_style,
+        seed: options.seed.unwrap_or_default(),
+        converter: shared
+            .world()
+            .converter
+            .as_ref()
+            .map(|chosen| chosen.name.clone())
+            .unwrap_or_default(),
+        elapsed: started.elapsed(),
+    };
+    log::line(format_args!(
+        "job {}: converted {:.1}s of sound in {:.1}s",
+        job.id,
+        converted.seconds,
+        converted.elapsed.as_secs_f64()
+    ));
+
+    Ok(Ran::Made {
+        bytes: wav::write(&sound),
+        made: converted.json(),
+    })
+}
+
 pub enum Model {
     Sdxl(Sdxl),
     Anima(Anima),
@@ -1146,7 +1381,11 @@ mod tests {
         let job = shared.next();
         assert_eq!(job.id, stopped.id);
         shared.cancel(&job.id);
-        run(&shared, None, voice.as_deref(), &job);
+        let loaded = Loaded {
+            voice,
+            ..Loaded::default()
+        };
+        run(&shared, &loaded, &job);
         shared.finished();
         assert_eq!(
             shared.store().find(&job.id).unwrap().status,
@@ -1155,15 +1394,148 @@ mod tests {
 
         // Nothing was put down: the next job runs with what is loaded, and the stop before it is
         // not its own.
-        assert!(voice.is_some());
+        assert!(loaded.voice.is_some());
         assert!(shared.world().voice.as_ref().unwrap().in_memory);
         shared.store().submit(Kind::Speech, asked).unwrap();
         let job = shared.next();
-        run(&shared, None, voice.as_deref(), &job);
+        run(&shared, &loaded, &job);
         shared.finished();
         let done = shared.store().find(&job.id).unwrap();
         assert_eq!(done.status, Status::Done, "{:?}", done.error);
         assert_eq!(done.made.unwrap()["seed"], 7);
+    }
+
+    /// A converter that hands the source back as it came, saying each stage once: enough to run a
+    /// conversion job through the worker in a build without Seed-VC.
+    struct Echo;
+
+    impl Converter for Echo {
+        fn convert(
+            &self,
+            source: &wav::Sound,
+            _reference: &wav::Sound,
+            options: &ConversionOptions,
+            report: &mut dyn FnMut(crate::ConversionProgress) -> ControlFlow<()>,
+        ) -> crate::Result<Option<wav::Sound>> {
+            use crate::ConversionProgress::*;
+            for progress in [
+                Listening,
+                Drawing {
+                    done: options.steps,
+                    total: options.steps,
+                },
+                Sounding { done: 1, total: 1 },
+            ] {
+                if report(progress).is_break() {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(source.clone()))
+        }
+
+        fn rate(&self) -> u32 {
+            24_000
+        }
+
+        fn defaults(&self) -> ConversionDefaults {
+            ConversionDefaults { steps: 30 }
+        }
+
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+    }
+
+    #[test]
+    fn a_conversion_job_is_run_with_its_two_recordings_and_kept_as_a_clip() {
+        use crate::cli::args::DeviceOption;
+        use crate::cli::task::Task;
+        use crate::cli::webui::store::{Status, Store};
+
+        let root =
+            std::env::temp_dir().join(format!("libwaifu-worker-convert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let shared = Shared::new(
+            Task::Speech2Speech,
+            DeviceOption::Cpu.resolve(),
+            Store::open(&root, None).unwrap(),
+        );
+        shared.change(|world| world.converter = Some(look_at_converter("seed-vc")));
+        let loaded = Loaded {
+            converter: Some(Box::new(Echo)),
+            ..Loaded::default()
+        };
+
+        let source = wav::Sound::new(vec![0.25; 2400], 24_000);
+        let store = shared.store();
+        let source_id = store.upload(&wav::write(&source)).unwrap().id;
+        let reference = wav::Sound::new(vec![0.0; 1200], 16_000);
+        let reference_id = store.upload(&wav::write(&reference)).unwrap().id;
+
+        let asked = serde_json::json!({
+            "source": source_id, "reference": reference_id, "steps": 12, "style": true, "seed": "7",
+        });
+        store.submit(Kind::Conversion, asked).unwrap();
+        let job = shared.next();
+        run(&shared, &loaded, &job);
+        shared.finished();
+
+        let done = store.find(&job.id).unwrap();
+        assert_eq!(done.status, Status::Done, "{:?}", done.error);
+        let made = done.made.unwrap();
+        assert_eq!(made["steps"], 12);
+        assert_eq!(made["style"], true);
+        assert_eq!(made["seed"], 7);
+        assert_eq!(made["converter"], "seed-vc");
+        assert_eq!(made["length"], 0.1);
+
+        let (mime, path) = store.output_file(&job.id).unwrap();
+        assert_eq!(mime, "audio/wav");
+        let back = wav::read(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(back.samples.len(), source.samples.len());
+
+        // A job with nothing to run it fails rather than hangs: a conversion on a program that
+        // was started to speak.
+        store
+            .submit(
+                Kind::Conversion,
+                serde_json::json!({"source": source_id, "reference": reference_id}),
+            )
+            .unwrap();
+        let job = shared.next();
+        run(&shared, &Loaded::default(), &job);
+        shared.finished();
+        let failed = store.find(&job.id).unwrap();
+        assert_eq!(failed.status, Status::Failed);
+        assert!(failed.error.unwrap().contains("not started to convert"));
+    }
+
+    #[test]
+    fn a_converter_is_known_by_its_name_or_its_manifest() {
+        assert!(is_a_converter("seed-vc"));
+        assert!(!is_a_converter("indextts"));
+        assert!(!is_a_converter("sdxl:base"));
+
+        let manifest = a_manifest(
+            "seed-vc",
+            "weights:\n  - seed_vc.safetensors\nconfig:\n  model:\n    type: seed_vc\n",
+        );
+        assert!(is_a_converter(manifest.to_str().unwrap()));
+        assert!(!is_a_voice(manifest.to_str().unwrap()));
+
+        let described = look_at_converter("seed-vc");
+        assert_eq!(described.full_name, "Seed-VC v2");
+        assert_eq!(described.defaults.steps, 30);
+        assert!(!described.in_memory);
+    }
+
+    /// The word this file recognises a package by is the word the port writes.
+    #[cfg(feature = "gpl")]
+    #[test]
+    fn the_seed_vc_type_is_the_port_s_own() {
+        assert_eq!(SEED_VC_TYPE, crate::seed_vc::SeedVc::MODEL_TYPE);
+        assert_eq!(SEED_VC_NAME, crate::seed_vc::SeedVc::NAME);
+        assert_eq!(SEED_VC_RATE, crate::seed_vc::RATE);
     }
 
     #[test]

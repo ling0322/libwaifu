@@ -150,17 +150,16 @@ impl Watching<'_> {
 }
 
 /// What a name resolves to, once fetched: something that draws pictures, something that reads
-/// sentences, or something that turns one voice into another. The first two are never offered in
-/// the same list -- [`listed`] is pictures and
-/// [`listed_voices`] is voices, and which one the terminal shows is the task's -- but they are
-/// fetched, cached and named through the one table and the one set of functions, since none of
-/// that differs by kind.
+/// sentences, or something that turns one voice into another. No two are offered in the same
+/// list -- [`listed`] is pictures, [`listed_voices`] is voices and [`listed_conversions`] is
+/// converters, and which one the terminal shows is the task's -- but they are fetched, cached and
+/// named through the one table and the one set of functions, since none of that differs by kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kind {
     Picture,
     Voice,
-    /// Voice conversion. It has no page and no task: it is fetched by name for the library and
-    /// the `convert` example, and neither [`listed`] nor [`listed_voices`] offers it.
+    /// Voice conversion: the speech2speech task, offered by [`listed_conversions`]. GPL-3.0, so
+    /// only a build with the `gpl` feature runs one; the name is fetched in any build.
     Conversion,
 }
 
@@ -688,6 +687,12 @@ pub fn is_voice(name: &str) -> bool {
     published(name).is_some_and(|model| model.kind == Kind::Voice)
 }
 
+/// Whether a published name turns one recording into another: the speech2speech task. False for
+/// a path, as [`is_voice`] is.
+pub fn is_conversion(name: &str) -> bool {
+    published(name).is_some_and(|model| model.kind == Kind::Conversion)
+}
+
 /// One model a screen can offer, and what is on the disk for it.
 ///
 /// Pictures and voices alike, in two lists rather than one: [`listed`] feeds the picture picker
@@ -716,6 +721,11 @@ pub fn listed() -> Vec<Listed> {
 /// The voices to offer, the same way: `indextts` rather than `indextts:v2.5`.
 pub fn listed_voices() -> Vec<Listed> {
     listed_of(Kind::Voice)
+}
+
+/// And the converters, the same way again: `seed-vc`.
+pub fn listed_conversions() -> Vec<Listed> {
+    listed_of(Kind::Conversion)
 }
 
 /// Every unversioned name of one kind, which is every alias: each published model has one, and
@@ -1643,12 +1653,17 @@ mod tests {
     }
 
     #[test]
-    fn a_conversion_model_is_fetched_by_name_and_offered_nowhere() {
-        // Seed-VC takes two recordings rather than a sentence, and no page asks for it.
+    fn a_conversion_model_is_offered_in_its_own_list_only() {
+        // Seed-VC takes two recordings rather than a sentence: offered for speech2speech, and
+        // neither as a picture model nor as a voice.
         assert_eq!(full_name("seed-vc"), Some("Seed-VC v2"));
+        assert!(is_conversion("seed-vc"));
         assert!(!is_voice("seed-vc"));
+        assert!(!is_conversion("indextts"));
         assert!(!listed().iter().any(|model| model.name == "seed-vc"));
         assert!(!listed_voices().iter().any(|voice| voice.name == "seed-vc"));
+        let converters: Vec<&str> = listed_conversions().iter().map(|one| one.name).collect();
+        assert_eq!(converters, vec!["seed-vc"]);
     }
 
     #[test]

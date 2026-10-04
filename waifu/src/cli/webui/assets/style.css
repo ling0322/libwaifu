@@ -773,6 +773,20 @@ select:focus {
   width: 100%;
 }
 
+/* A setting that is on or off: the box and what it turns on, on one line. The box is the size
+   the browser draws one rather than a control's, which every other input here is stretched to. */
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+.check input {
+  width: auto;
+  height: auto;
+  accent-color: var(--accent);
+}
+
 /* The dropzone for a recording. Short, unlike the picture's: what goes in it is a line of text
    rather than a picture, and a box the height of one with a sentence floating in the middle of it
    is mostly empty box. */
