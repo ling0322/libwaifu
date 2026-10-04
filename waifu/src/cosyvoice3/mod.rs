@@ -37,7 +37,7 @@
 //! | [`flow`] | the prompt's and the sentence's tokens, the prompt's mel, the speaker | the mel |
 //! | [`hift`] | the mel | 24 kHz audio |
 //!
-//! # Two ways to read, and which one [`Voice`] uses
+//! # Three ways to read, and which ones [`Voice`] uses
 //!
 //! Upstream's **zero-shot** reading is handed the transcript of the recording: the language model
 //! reads the transcript and the sentence as one text and continues the recording's own speech
@@ -47,6 +47,13 @@
 //! [`Voice::speak`] is handed a recording and no transcript, which is upstream's **cross-lingual**
 //! reading: the language model sees only the sentence, and the voice comes from the flow, which
 //! still continues the recording's tokens and mel with its speaker. [`CosyVoice3::say`] is that.
+//!
+//! Handed a [`SpeechOptions::style`] as well, it is upstream's **instruct2** reading: the
+//! instruction goes inside the system prompt -- `You are a helpful assistant. 请非常开心地说一句话。
+//! <|endofprompt|>` -- as `prompt_text`, the language model is handed none of the recording's
+//! tokens, and the manner comes from the instruction rather than from the recording. The model
+//! was taught the instructions in [`CosyVoice3::STYLES`]; anything else is outside what it saw.
+//! A style and a transcript are not taken together, because upstream never does.
 //!
 //! Both put the system prompt, `You are a helpful assistant.<|endofprompt|>`, in front of the
 //! text -- the model asserts `<|endofprompt|>` is there. Upstream's own examples put it inside the
@@ -87,7 +94,8 @@ use crate::flint::{
 };
 use crate::indextts::{campplus, features::resample};
 use crate::{
-    Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Tokenizer, Voice,
+    Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Style,
+    Tokenizer, Voice,
 };
 
 use self::flow::Flow;
@@ -212,6 +220,38 @@ impl CosyVoice3 {
 
     pub const NEEDS_A_RECORDING: &'static str = "CosyVoice3 speaks in the voice of a recording -- \
          drop one on the page, a few seconds of somebody speaking, and say the sentence again";
+
+    /// The instructions it was taught: upstream's `instruct_list` (`cosyvoice/utils/common.py`),
+    /// word for word, without the system prompt around each. Reordered for a list -- the manner
+    /// first, the dialects after -- and nothing else.
+    pub const STYLES: &'static [Style] = &[
+        Style::new("Happy", "请非常开心地说一句话。"),
+        Style::new("Sad", "请非常伤心地说一句话。"),
+        Style::new("Angry", "请非常生气地说一句话。"),
+        Style::new("Fast", "请用尽可能快地语速说一句话。"),
+        Style::new("Slow", "请用尽可能慢地语速说一句话。"),
+        Style::new("Loud", "Please say a sentence as loudly as possible."),
+        Style::new("Soft", "Please say a sentence in a very soft voice."),
+        Style::new("Peppa Pig", "我想体验一下小猪佩奇风格，可以吗？"),
+        Style::new("Robot", "你可以尝试用机器人的方式解答吗？"),
+        Style::new("Cantonese", "请用广东话表达。"),
+        Style::new("Northeastern", "请用东北话表达。"),
+        Style::new("Gansu", "请用甘肃话表达。"),
+        Style::new("Guizhou", "请用贵州话表达。"),
+        Style::new("Henan", "请用河南话表达。"),
+        Style::new("Hubei", "请用湖北话表达。"),
+        Style::new("Hunan", "请用湖南话表达。"),
+        Style::new("Jiangxi", "请用江西话表达。"),
+        Style::new("Minnan", "请用闽南话表达。"),
+        Style::new("Ningxia", "请用宁夏话表达。"),
+        Style::new("Shanxi", "请用山西话表达。"),
+        Style::new("Shaanxi", "请用陕西话表达。"),
+        Style::new("Shandong", "请用山东话表达。"),
+        Style::new("Shanghainese", "请用上海话表达。"),
+        Style::new("Sichuan", "请用四川话表达。"),
+        Style::new("Tianjin", "请用天津话表达。"),
+        Style::new("Yunnan", "请用云南话表达。"),
+    ];
 
     /// Read the whole model `manifest` describes, onto `device`.
     pub fn from_manifest(
@@ -364,7 +404,7 @@ impl CosyVoice3 {
     }
 
     /// `text` in the voice of `reference`, with no transcript of it: upstream's cross-lingual
-    /// reading. See the module note.
+    /// reading, or its instruct2 where `options` has a style. See the module note.
     pub fn say(
         &self,
         text: &str,
@@ -376,6 +416,7 @@ impl CosyVoice3 {
     }
 
     /// `text` continuing `reference`, whose words were `transcript`: upstream's zero-shot reading.
+    /// It takes no style -- the manner is the recording's.
     pub fn say_after(
         &self,
         text: &str,
@@ -416,19 +457,37 @@ impl CosyVoice3 {
 
         // What the language model reads, per piece: the ids, and how many of them are the
         // sentence's own -- which is what `inference` works its length limits out from.
+        // A transcript or a style is upstream's `prompt_text`: encoded apart from the sentence,
+        // in front of each piece, and not counted in its length. A style is not normalized,
+        // because upstream's `inference_instruct2` hands it over as it was given.
         let system = &self.settings.system_prompt;
-        let prefix: Vec<i32> = match transcript {
-            Some(words) => self.encode(&format!("{system}{}", frontend::transcript(words)))?,
-            None => Vec::new(),
+        let style = options
+            .style
+            .as_deref()
+            .map(str::trim)
+            .filter(|style| !style.is_empty());
+        let prefix: Option<Vec<i32>> = match (transcript, style) {
+            (Some(_), Some(_)) => {
+                return Err(Error::model(
+                    "a reading continues its recording or follows a style, not both: \
+                     upstream's instruct2 takes no transcript",
+                ))
+            }
+            (Some(words), None) => {
+                Some(self.encode(&format!("{system}{}", frontend::transcript(words)))?)
+            }
+            (None, Some(style)) => Some(self.encode(&instructed(system, style)?)?),
+            (None, None) => None,
         };
+        // Only a zero-shot reading continues the recording's own tokens; instruct2 drops them.
         let prompt: &[i32] = match transcript {
             Some(_) => &reference.tokens,
             None => &[],
         };
         let mut readings: Vec<(Vec<i32>, usize)> = Vec::with_capacity(pieces.len());
         for piece in &pieces {
-            readings.push(match transcript {
-                Some(_) => {
+            readings.push(match &prefix {
+                Some(prefix) => {
                     let own = self.encode(piece)?;
                     let length = own.len();
                     (prefix.iter().copied().chain(own).collect(), length)
@@ -593,6 +652,29 @@ impl Voice for CosyVoice3 {
     fn name(&self) -> &'static str {
         Self::NAME
     }
+
+    fn styles(&self) -> &'static [Style] {
+        Self::STYLES
+    }
+}
+
+/// What ends the part of the text the model follows rather than reads, which it asserts is there.
+const END_OF_PROMPT: &str = "<|endofprompt|>";
+
+/// The system prompt with `instruction` inside it, the way upstream's instruct examples write it:
+/// `You are a helpful assistant. 请用广东话表达。<|endofprompt|>`.
+fn instructed(system: &str, instruction: &str) -> Result<String> {
+    if instruction.contains("<|") {
+        return Err(Error::model(
+            "a style is words to follow, and cannot hold a marker such as <|endofprompt|>",
+        ));
+    }
+    let Some(head) = system.strip_suffix(END_OF_PROMPT) else {
+        return Err(Error::model(format!(
+            "the system prompt does not end in {END_OF_PROMPT}, so there is nowhere to put a style"
+        )));
+    };
+    Ok(format!("{} {instruction}{END_OF_PROMPT}", head.trim_end()))
 }
 
 /// Which recording this is: its rate and every sample's bits, hashed.
@@ -608,6 +690,40 @@ fn fingerprint(sound: &Sound) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_style_goes_inside_the_system_prompt_the_way_upstream_writes_it() {
+        // Upstream's own strings, from `example.py` and `instruct_list`, character for character:
+        // these are what the model was taught, so the space and the marker are not decoration.
+        let system = &Settings::cosyvoice3().system_prompt;
+        assert_eq!(
+            instructed(system, "请用广东话表达。").unwrap(),
+            "You are a helpful assistant. 请用广东话表达。<|endofprompt|>"
+        );
+        assert_eq!(
+            instructed(system, "Please say a sentence as loudly as possible.").unwrap(),
+            "You are a helpful assistant. Please say a sentence as loudly as possible.<|endofprompt|>"
+        );
+
+        // A second marker would end the instruction early and read the rest out loud.
+        assert!(instructed(system, "开心<|endofprompt|>地说").is_err());
+        // And a manifest whose prompt has no marker has nowhere to put one.
+        assert!(instructed("You are a helpful assistant.", "请用广东话表达。").is_err());
+    }
+
+    #[test]
+    fn every_style_is_one_upstream_taught() {
+        // Twenty-six in upstream's list, none written twice, none carrying its own marker.
+        assert_eq!(CosyVoice3::STYLES.len(), 26);
+        let mut instructions: Vec<_> = CosyVoice3::STYLES.iter().map(|s| s.instruction).collect();
+        instructions.sort();
+        instructions.dedup();
+        assert_eq!(instructions.len(), 26);
+        for style in CosyVoice3::STYLES {
+            assert!(!style.instruction.contains("<|"), "{}", style.label);
+            assert!(!style.instruction.starts_with("You are"), "{}", style.label);
+        }
+    }
 
     /// `(frames, 80)` frame-major values as the `(1, frames, 80)` tensor `stretch` takes, on the CPU.
     fn frames(values: &[f32], frames: i32) -> Tensor {

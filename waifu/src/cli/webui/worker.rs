@@ -196,6 +196,10 @@ fn speech_options(asked: &Value) -> SpeechOptions {
         speed: decimal("speed"),
         temperature: decimal("temperature"),
         seed: seed(asked),
+        style: asked
+            .get("style")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -273,9 +277,20 @@ pub fn look_at_voice(asked: &str) -> Spoken {
     }
 
     let path = on_disk(asked);
-    let (kind_name, defaults, rate) = match path.as_deref().and_then(voice_kind) {
-        Some(VoiceKind::CosyVoice3) => (CosyVoice3::NAME, CosyVoice3::DEFAULTS, cosyvoice3::RATE),
-        _ => (IndexTts::NAME, IndexTts::DEFAULTS, indextts::RATE),
+    // The manifest says what it is where there is one; a published voice not yet fetched is
+    // known by its family, so the page offers its own settings before the download.
+    let kind = path
+        .as_deref()
+        .and_then(voice_kind)
+        .or_else(|| published_voice_kind(asked));
+    let (kind_name, defaults, rate, styles) = match kind {
+        Some(VoiceKind::CosyVoice3) => (
+            CosyVoice3::NAME,
+            CosyVoice3::DEFAULTS,
+            cosyvoice3::RATE,
+            CosyVoice3::STYLES,
+        ),
+        _ => (IndexTts::NAME, IndexTts::DEFAULTS, indextts::RATE, &[][..]),
     };
 
     Spoken {
@@ -287,6 +302,7 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         defaults,
         rate,
         no_likeness_because: None,
+        styles,
         not_a_voice_because: None,
     }
 }
@@ -304,6 +320,15 @@ pub fn is_a_voice(asked: &str) -> bool {
 enum VoiceKind {
     IndexTts,
     CosyVoice3,
+}
+
+/// Which speech model a published voice is, by the family its versioned name starts with.
+fn published_voice_kind(asked: &str) -> Option<VoiceKind> {
+    match hub::published_name(asked)?.split(':').next()? {
+        "indextts" => Some(VoiceKind::IndexTts),
+        "cosyvoice" => Some(VoiceKind::CosyVoice3),
+        _ => None,
+    }
 }
 
 /// Which speech model the manifest at `path` describes, by its `model.type`; `None` where it
@@ -329,6 +354,7 @@ fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken {
         defaults: voice.defaults(),
         rate: voice.rate(),
         no_likeness_because: voice.no_likeness_because().map(str::to_string),
+        styles: voice.styles(),
         not_a_voice_because: voice.not_a_voice_because().map(str::to_string),
     }
 }
@@ -827,6 +853,7 @@ fn say(shared: &Shared, voice: &dyn Voice, job: &store::Job) -> Result<Ran, Erro
             .map(|spoken| spoken.name.clone())
             .unwrap_or_default(),
         from_a_recording: like.is_some(),
+        style: options.style.clone(),
         elapsed: started.elapsed(),
     };
     log::line(format_args!(

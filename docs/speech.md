@@ -28,7 +28,7 @@ means text2speech -- is read off its manifest's `model.type`.
 
 | | |
 | --- | --- |
-| the page | a third tab: a box to type in, a recording to sound like, speed, temperature, a seed |
+| the page | a third tab: a box to type in, a recording to sound like, a style where the voice offers some, speed, temperature, a seed |
 | the run | a job posted to `/api/jobs`, run in turn by the worker thread; a bar that moves, a button that stops it |
 | the clip | `waifu-output/jobs/<id>/output.wav`, kept until it is deleted; played on the page, saved, deleted, said again |
 | the voice | [`Voice`](../waifu/src/speech.rs), a trait with five methods |
@@ -67,6 +67,7 @@ pub trait Voice: Send {
     fn defaults(&self) -> SpeechDefaults;
     fn name(&self) -> &'static str;
     fn no_likeness_because(&self) -> Option<&'static str> { None }
+    fn styles(&self) -> &'static [Style] { &[] }
     fn not_a_voice_because(&self) -> Option<&'static str> { None }
 }
 ```
@@ -110,6 +111,27 @@ Two things the prediction did not cover:
 - **A voice can refuse to speak without a recording.** IndexTTS-2.5 has no voice of its own; upstream
   takes the speaker's audio as a required argument. Asked to speak with none, it says so on the
   bar, in a sentence, rather than guessing at a voice.
+
+### Styles
+
+A voice that was taught to follow instructions lists them from `styles()`: a label for the page
+and the instruction itself, in the model's own words. `SpeechOptions::style` carries the
+instruction a reading is asked to follow, and a voice whose list is empty ignores it. Only
+[CosyVoice3](cosyvoice3.md#with-a-transcript-without-and-with-a-style) has one today -- the
+twenty-six of upstream's `instruct_list`. IndexTTS-2.5 has none: its manner is the recording's
+emotion vector.
+
+On the page the list writes into a box rather than standing beside it, so what is sent is what can
+be read and can be changed by hand. Over the API it is one more field of a speech job:
+
+```json
+{"kind": "speech", "text": "今天天气真好。", "reference": "<upload id>", "style": "请非常开心地说一句话。"}
+```
+
+Free text is taken, because an instruction written in the same manner is the caller's to try; the
+list is what the model was taught and the page says so. Refused at the door: a style for a voice
+with no list, anything over 200 characters, and anything holding `<|`, which would end the
+instruction early. The clip keeps the style it was read with, in its parameters and its JSON.
 
 ## Audio, and why there is no codec here
 

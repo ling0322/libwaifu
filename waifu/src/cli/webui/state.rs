@@ -39,7 +39,7 @@ use serde_json::{json, Value};
 use crate::cli::args::Runtime;
 use crate::cli::task::Task;
 use crate::cli::webui::store::{Cancelled, Job, Kind, Refused, Status, Store};
-use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgress};
+use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgress, Style};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
 ///
@@ -127,6 +127,9 @@ pub struct Spoken {
     pub rate: u32,
     /// Why it cannot be handed a recording to sound like, or None where it can.
     pub no_likeness_because: Option<String>,
+    /// The ways of saying something it was taught, for the page to list. Empty where it takes no
+    /// style, which is where the page offers none.
+    pub styles: &'static [Style],
     /// Why what comes out is not speech, for as long as that is true.
     ///
     /// The one sentence this whole tab is built around saying. It comes out of the voice itself
@@ -362,6 +365,8 @@ pub struct Clip {
     /// Whether it was given a recording to sound like. Not the recording itself -- that is
     /// megabytes, and it is held once where the page can ask for it.
     pub from_a_recording: bool,
+    /// The instruction it was read with, where it was given one.
+    pub style: Option<String>,
     pub elapsed: Duration,
 }
 
@@ -375,6 +380,9 @@ impl Clip {
         );
         if self.from_a_recording {
             settings.push_str(", From a recording: yes");
+        }
+        if let Some(style) = &self.style {
+            settings.push_str(&format!(", Style: {style}"));
         }
 
         format!("{}\n{settings}", self.text)
@@ -390,6 +398,7 @@ impl Clip {
             "seed": self.seed,
             "voice": self.voice,
             "from_a_recording": self.from_a_recording,
+            "style": self.style,
             "seconds": self.elapsed.as_secs_f64(),
             "parameters": self.parameters(),
         })
@@ -623,6 +632,12 @@ impl Shared {
                 "rate": voice.rate,
                 "takes_a_recording": voice.no_likeness_because.is_none(),
                 "no_likeness_because": voice.no_likeness_because,
+                // What the style list offers, in the model's own words beside the label. Empty
+                // for a voice that takes none, which is how the page knows to show no list.
+                "styles": voice.styles.iter().map(|style| json!({
+                    "label": style.label,
+                    "instruction": style.instruction,
+                })).collect::<Vec<_>>(),
                 // The sentence the speech tab is built around. Null for a real model, which is
                 // how the warning on that tab goes away by itself the day there is one.
                 "not_a_voice_because": voice.not_a_voice_because,
@@ -707,6 +722,7 @@ mod tests {
             seed,
             voice: "tones".to_string(),
             from_a_recording: false,
+            style: None,
             elapsed: Duration::from_millis(120),
         }
     }
