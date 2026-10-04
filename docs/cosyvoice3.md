@@ -71,7 +71,7 @@ characters (Chinese) or tokens (anything else), as upstream's `text_normalize` d
    excitation, and the mel and excitation through an upsampling filter to a 16-point spectrum,
    inverted to 24 kHz samples.
 
-### With a transcript, and without
+### With a transcript, without, and with a style
 
 The page hands a voice a recording and no transcript, so [`Voice::speak`](../waifu/src/speech.rs)
 reads the way upstream's `inference_cross_lingual` does: the language model sees the system prompt
@@ -79,6 +79,22 @@ and the sentence, and nothing of the recording; the voice comes from the flow. G
 the recording, `say_after` reads the way `inference_zero_shot` does: transcript and sentence as one
 text, continuing the recording's own tokens. Both sound like the recording; zero-shot also carries
 on its pace and manner.
+
+Given a style -- `SpeechOptions::style`, the Style card on the page -- it reads the way
+`inference_instruct2` does. Upstream builds that as a zero-shot reading with the instruction where
+the transcript would be and the recording's tokens taken out of the language model's input
+(`frontend_instruct2`), so here the instruction goes inside the system prompt,
+
+```text
+You are a helpful assistant. 请非常开心地说一句话。<|endofprompt|>
+```
+
+encoded as it was given, apart from each sentence and not counted in the sentence's length limits;
+the flow still continues the recording, so the voice is the recording's and the manner the
+instruction's. [`CosyVoice3::STYLES`](../waifu/src/cosyvoice3/mod.rs) is upstream's `instruct_list`
+word for word: happy, sad and angry, fast and slow, loud and soft, Peppa Pig, a robot, and
+seventeen dialects. Those are what the model was taught; other wording is taken and is a guess. A
+style and a transcript are refused together, because upstream never combines them.
 
 ## What was found on the way
 
@@ -132,5 +148,6 @@ that is the first thing to change if it needs to be faster.
 
 ## Not here
 
-Streaming, instruct mode (`inference_instruct2`), voice conversion, fp16, and a place on the
-page to type the recording's transcript.
+Streaming, voice conversion, fp16, and a place on the page to type the recording's transcript.
+The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
+are the zero-shot path's with a different prefix.

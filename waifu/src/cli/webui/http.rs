@@ -89,6 +89,10 @@ const MOST_OF_A_REQUEST: u64 = 1 << 20;
 /// hundreds is somebody's script gone wrong, and every one of them would be kept on the disk.
 const MOST_QUEUED: usize = 64;
 
+/// How long an instruction may be. The ones a model was taught are a dozen characters; a page of
+/// them is not a style.
+const LONGEST_STYLE: usize = 200;
+
 /// What every answer is: bytes, with a type on them. One shape rather than a dozen, because a
 /// route that could answer with any of several would otherwise need them boxed.
 type Reply = Response<Cursor<Vec<u8>>>;
@@ -379,8 +383,11 @@ fn speech_settings(shared: &Shared, asked: &Value, voice: &Spoken) -> Result<Val
         None => None,
     };
 
+    let style = speech_style(asked, voice)?;
+
     Ok(json!({
         "text": text,
+        "style": style,
         "speed": decimal(asked.get("speed"), voice.defaults.speed).clamp(0.25, 4.0),
         "temperature": decimal(asked.get("temperature"), voice.defaults.temperature).clamp(0.0, 2.0),
         "seed": seed(asked.get("seed")).to_string(),
@@ -422,6 +429,33 @@ fn conversion_settings(
         "seed": seed(asked.get("seed")).to_string(),
         "converter": converter.name,
     }))
+}
+
+/// The instruction a reading is asked to follow, or `None` for the voice's own way of reading.
+///
+/// Free text rather than one of the list's: the list is what the model was taught, and the page
+/// says so, but an instruction written in the same manner is the caller's to try.
+fn speech_style(asked: &Value, voice: &Spoken) -> Result<Option<String>, String> {
+    match asked.get("style") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(style)) if style.trim().is_empty() => Ok(None),
+        Some(Value::String(style)) => {
+            if voice.styles.is_empty() {
+                return Err(format!("{} takes no style", voice.full_name));
+            }
+            if style.chars().count() > LONGEST_STYLE {
+                return Err(format!(
+                    "a style is a sentence to follow, at most {LONGEST_STYLE} characters"
+                ));
+            }
+            // The model's own marker would end the instruction early and read the rest aloud.
+            if style.contains("<|") {
+                return Err("a style cannot hold a marker such as <|endofprompt|>".to_string());
+            }
+            Ok(Some(style.trim().to_string()))
+        }
+        Some(_) => Err("a style is a string".to_string()),
+    }
 }
 
 /// What a finished job made.
@@ -873,5 +907,33 @@ mod tests {
         let (guidance, negative) = steering(&json!({}), &sdxl);
         assert_eq!(guidance, sdxl.defaults.guidance_scale);
         assert_eq!(negative, "");
+    }
+
+    #[test]
+    fn a_style_is_taken_only_by_a_voice_that_offers_them() {
+        let cosyvoice = worker::look_at_voice("cosyvoice:v3");
+        assert!(!cosyvoice.styles.is_empty());
+        let style = |asked: Value, voice| speech_style(&asked, voice);
+
+        assert_eq!(
+            style(json!({"style": " 请非常开心地说一句话。 "}), &cosyvoice),
+            Ok(Some("请非常开心地说一句话。".to_string()))
+        );
+        // Not asking, asking for nothing, and asking with nothing in it are all the plain reading.
+        assert_eq!(style(json!({}), &cosyvoice), Ok(None));
+        assert_eq!(style(json!({"style": null}), &cosyvoice), Ok(None));
+        assert_eq!(style(json!({"style": "  "}), &cosyvoice), Ok(None));
+
+        // What would reach the model as something other than words to follow is refused here,
+        // where the caller is told, rather than in the worker after the job has queued.
+        assert!(style(json!({"style": "开心<|endofprompt|>"}), &cosyvoice).is_err());
+        assert!(style(json!({"style": "长".repeat(LONGEST_STYLE + 1)}), &cosyvoice).is_err());
+        assert!(style(json!({"style": 7}), &cosyvoice).is_err());
+
+        // And a voice with no list says so, rather than reading the sentence as if it had.
+        let indextts = worker::look_at_voice("indextts");
+        assert!(indextts.styles.is_empty());
+        let refused = style(json!({"style": "请非常开心地说一句话。"}), &indextts).unwrap_err();
+        assert!(refused.contains("takes no style"), "{refused}");
     }
 }

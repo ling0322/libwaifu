@@ -871,6 +871,48 @@ function FromRecording({
   `;
 }
 
+/** How to say it, for a voice that was taught some ways: a list of those, and the instruction
+ *  itself in a box under it. The list writes into the box rather than standing beside it, so
+ *  what is sent is always what can be read, and one of the list's can be changed by hand. */
+function StyleCard({ styles, style, onChange }) {
+  const chosen = styles.find((one) => one.instruction === style.trim());
+  return html`
+    <div className="card">
+      <div className="card-title">Style</div>
+      <div className="row">
+        <${Field} label="Say it" kind="grow">
+          <select
+            value=${!style.trim() ? "" : chosen ? chosen.instruction : "custom"}
+            onChange=${(e) => e.target.value !== "custom" && onChange(e.target.value)}
+          >
+            <option value="">the voice's own way</option>
+            ${!!style.trim() && !chosen && html`<option value="custom">as written below</option>`}
+            ${styles.map(
+              (one) =>
+                html`<option key=${one.instruction} value=${one.instruction}>${one.label}</option>`,
+            )}
+          </select>
+        <//>
+      </div>
+      <div className="row">
+        <${Field} label="Instruction" kind="grow">
+          <input
+            type="text"
+            value=${style}
+            placeholder="none"
+            onChange=${(e) => onChange(e.target.value)}
+          />
+        <//>
+      </div>
+      <p className="about">
+        Words the model follows rather than reads. The list is what it was taught, in its own
+        words; anything else written here is a guess at what it might follow. With a style, the
+        recording gives the voice and the instruction gives the manner.
+      </p>
+    </div>
+  `;
+}
+
 /** text2speech: everything a reading is asked for that is not the text itself. */
 function SpeechSettings({
   state,
@@ -911,6 +953,13 @@ function SpeechSettings({
         onHold=${onHold}
         onClear=${onClear}
       />
+
+      ${!!voice?.styles?.length &&
+      html`<${StyleCard}
+        styles=${voice.styles}
+        style=${form.style}
+        onChange=${(value) => change("style", value)}
+      />`}
 
       <div className="card">
         <div className="row">
@@ -1070,8 +1119,8 @@ function ConversionSettings({ state, form, change, onHold, onClear, onAnySeed })
             <label className="check">
               <input
                 type="checkbox"
-                checked=${!!form.style}
-                onChange=${(e) => change("style", e.target.checked)}
+                checked=${!!form.convertStyle}
+                onChange=${(e) => change("convertStyle", e.target.checked)}
               />
               <span>Convert the style too</span>
             </label>
@@ -1604,9 +1653,12 @@ function App() {
     speed: 1,
     temperature: 0.8,
     // And the conversion tab's. Steps of its own, because a picture's twenty and a conversion's
-    // thirty are two different numbers that happen to share a name.
+    // thirty are two different numbers that happen to share a name; and whether to convert the
+    // style too, which is a switch where the speech tab's style above is an instruction.
     conversionSteps: 30,
-    style: false,
+    convertStyle: false,
+    // The instruction a reading follows, for a voice that offers styles. Empty is none.
+    style: "",
   });
 
   /** The model whose numbers have been put in the boxes, so that they go in once rather than on
@@ -1751,7 +1803,8 @@ function App() {
   useEffect(() => {
     if (!voice || adopted.current === voice.name) return;
     adopted.current = voice.name;
-    setForm((form) => ({ ...form, speed: voice.speed, temperature: voice.temperature }));
+    // A style is in one voice's words, and another voice would refuse it or not know it.
+    setForm((form) => ({ ...form, speed: voice.speed, temperature: voice.temperature, style: "" }));
   }, [voice]);
 
   // And the converter's, the same way again.
@@ -1853,8 +1906,9 @@ function App() {
       temperature: Number(form.temperature),
       seed: String(form.seed).trim(),
       ...(inputs.voice ? { reference: inputs.voice } : {}),
+      ...(voice?.styles?.length && form.style.trim() ? { style: form.style.trim() } : {}),
     });
-  }, [form, inputs, post]);
+  }, [form, inputs, voice, post]);
 
   const convert = useCallback(() => {
     post({
@@ -1862,7 +1916,7 @@ function App() {
       source: inputs.source,
       reference: inputs.voice,
       steps: Number(form.conversionSteps),
-      style: !!form.style,
+      style: !!form.convertStyle,
       seed: String(form.seed).trim(),
     });
   }, [form, inputs, post]);
@@ -1993,6 +2047,7 @@ function App() {
       speed: clip.speed,
       temperature: clip.temperature,
       seed: String(clip.seed),
+      style: clip.style ?? "",
     }));
   }, []);
 
@@ -2001,7 +2056,7 @@ function App() {
     setForm((form) => ({
       ...form,
       conversionSteps: clip.steps,
-      style: !!clip.style,
+      convertStyle: !!clip.style,
       seed: String(clip.seed),
     }));
   }, []);

@@ -94,6 +94,7 @@ fn options(seed: u64) -> SpeechOptions {
         speed: 1.0,
         temperature: 0.8,
         seed: Some(seed),
+        style: None,
     }
 }
 

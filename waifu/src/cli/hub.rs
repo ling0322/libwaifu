@@ -665,6 +665,12 @@ fn canonical(name: &str) -> &str {
         .map_or(name, |(_, target)| *target)
 }
 
+/// The catalogue's versioned name for `name`, following an alias -- `cosyvoice` is
+/// `cosyvoice:v3` -- or `None` where the catalogue has no such model.
+pub fn published_name(name: &str) -> Option<&'static str> {
+    published(name).map(|model| model.name)
+}
+
 /// Every name that can be asked for, aliases included, for the usage text and for error messages.
 pub fn full_name(name: &str) -> Option<&'static str> {
     let versioned = canonical(name);

@@ -100,7 +100,7 @@ pub use mapping::Mapping;
 pub use reader::BinaryRead;
 pub use speech::{
     ConversionDefaults, ConversionOptions, ConversionProgress, Converter, SpeechDefaults,
-    SpeechOptions, SpeechProgress, Tones, Voice,
+    SpeechOptions, SpeechProgress, Style, Tones, Voice,
 };
 pub use sdxl::{
     from_rgb8, to_rgb8, ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler,

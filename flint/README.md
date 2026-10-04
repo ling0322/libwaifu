@@ -6,8 +6,7 @@ dispatch, CPU, CUDA, Metal and Vulkan operators, and stable C ABI used by the Ru
 
 Flint is intentionally focused on inference workloads rather than being a general-purpose tensor
 framework. Its operators cover the paths needed by the model runtime, including matrix
-multiplication, normalization, rotary embeddings, attention, paged KV cache updates, gated DeltaNet
-linear attention, and temperature/top-k/top-p sampling.
+multiplication, convolutions, normalization, rotary embeddings, attention and STFT.
 
 ## Architecture
 
@@ -21,21 +20,20 @@ waifu::flint safe bindings
 Flint C API (capi.h)
 	|
 	v
-Tensor + Operators dispatch
+TensorView + Operators dispatch
 	|             |              |               |
 	v             v              v               v
   CPU backend    CUDA backend   Metal backend   Vulkan backend
 ```
 
-- `Tensor` owns shape/stride metadata and shared storage.
-- `Operators` dispatches an operation to the backend for the tensor's device.
+- `TensorData` owns storage; a `TensorView` is shape, stride and offset over it.
+- `Operators` is one device's backend: it reads views and writes a caller-allocated `out`.
 - The CPU backend contains portable kernels plus AVX2, AVX-512, and ARM half-precision paths.
 - The CUDA backend contains custom inference kernels and optional FlashAttention/CUTLASS paths.
 - The Metal backend runs on MLX.
 - The Vulkan backend has GLSL compute kernels of its own, and runs on any GPU with a Vulkan 1.2
   driver. See [Vulkan](#vulkan).
-- The C API owns no tensor storage directly; callers receive opaque handles and destroy them with
-  `fl_tensor_destroy`.
+- The C API owns no tensors: callers own `fl_tensor_data_t` storage and pass `fl_tensor_view_t`s.
 - `lutil/` contains the small utility layer used by Flint and remains a separate CMake target.
 
 ## Directory layout
@@ -48,7 +46,8 @@ flint/
 |-- vulkan/          Vulkan tensors and kernels; vulkan/shaders/ holds the GLSL
 |-- lutil/           Utility code used by the native runtime
 |-- bin/             Native test and benchmark entry points
-|-- tensor.{h,cc}    Tensor metadata, views, and storage
+|-- tensor*.{h,cc}   Tensor, its storage, and views
+|-- *functional.{h,cc} fl::F: allocation, and result shapes for tests
 |-- operators.{h,cc} Backend operator interface and the per-device instances
 |-- capi.{h,cc}      Stable C ABI for language bindings
 `-- CMakeLists.txt
@@ -62,8 +61,8 @@ which `getOperators()` hands out; nothing works out which device to use from the
 given.
 
 ```cpp
+#include "flint/functional.h"
 #include "flint/operators.h"
-#include "flint/tensor.h"
 
 int main() {
   fl::initOperators();
@@ -73,7 +72,8 @@ int main() {
 
     fl::Tensor a = fl::Tensor::create<float>({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f});
     fl::Tensor b = fl::Tensor::create<float>({2, 2}, {4.0f, 3.0f, 2.0f, 1.0f});
-    fl::Tensor sum = cpu->add(a, b);
+    fl::Tensor sum = fl::F::empty(fl::Device::getCpu(), {2, 2}, fl::DType::kFloat);
+    cpu->add(a, b, sum);
     cpu->print(sum);
   }
 
@@ -81,22 +81,20 @@ int main() {
 }
 ```
 
-A tensor that lives on the card is the CUDA operators' to compute with, and a reference computed
-beside it on the host is the CPU operators': a test that checks one against the other holds both
-instances and says which line runs where.
+A test that checks CUDA against a CPU reference holds both instances and says which line runs where.
 
 The main public C++ surfaces are:
 
-- [`tensor.h`](tensor.h): tensor construction, metadata, slicing, views, and storage access.
+- [`tensor.h`](tensor.h) and [`tensor_view.h`](tensor_view.h): tensors, storage and views.
 - [`operators.h`](operators.h): the operations themselves, one instance per device.
 - [`device.h`](device.h) and [`dtype.h`](dtype.h): device and element type definitions.
 - [`memory.h`](memory.h): device memory statistics.
 
 ## C and Rust APIs
 
-[`capi.h`](capi.h) exposes opaque tensor handles and status-returning functions for language
-bindings. Call `fl_init()` once before using the C API, then `fl_operators_create()` for each
-device you compute on: every operation takes that handle, as the C++ side does. A failing call
+[`capi.h`](capi.h) exposes storage and view handles and status-returning functions for language
+bindings; the caller allocates every output. Call `fl_init()` once, then `fl_operators_create()`
+for each device you compute on: every operation takes that handle, as the C++ side does. A failing call
 returns an error code, and the thread-local details are available through
 `fl_get_last_error_code()` and `fl_get_last_error_message()`.
 
@@ -170,7 +168,7 @@ the tensor cores. Every other device runs the same products on plain shader arit
 conv2d, the norms, softmax, lookup, rotary embedding, upsampling, the GLUs, the reductions,
 rand/randn (the same Philox stream the CUDA operators draw, so a seed gives the same noise), cast,
 copy and the memory statistics. Attention is the base class's composition of matmul and softmax.
-The rest (paged attention, the KV cache, DeltaNet, sampling, fp8) is not implemented and says so.
+The rest (STFT, snake, transposed conv1d, paged attention, the KV cache, sampling) says unsupported.
 
 **Environment variables:**
 
@@ -223,6 +221,5 @@ An operator normally crosses these layers:
 2. Implement the CPU and/or CUDA backend and override the method in the backend `Operators`
    subclass.
 3. Add C API and `waifu::flint` functions when the operation is needed outside C++. The C function
-   takes an `fl_operators_t` first; the Rust wrapper gets it from the device of the tensor it
-   reads, which is what `waifu::flint::operators` is for.
-4. Add focused backend tests and run `./build/unittest`.
+   takes an `fl_operators_t`, the input views and an `out` view; the Rust wrapper allocates `out`.
+4. Give it a result-shape rule in `test_functional`, add backend tests, and run `./build/unittest`.
