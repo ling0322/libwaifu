@@ -29,7 +29,7 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use waifu::seed_vc::{Conversion, SeedVc};
-use waifu::{wav, Device, Manifest, Residency, SpeechProgress};
+use waifu::{wav, ConversionProgress, Device, Manifest, Residency};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().collect();
@@ -75,15 +75,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let converting = Instant::now();
-    let mut last = 0;
-    let mut report = |progress: SpeechProgress| {
+    let (mut last, mut sounded) = (0, 0);
+    let mut report = |progress: ConversionProgress| {
         match progress {
-            SpeechProgress::Saying { done, expected } if done >= last + 100 => {
+            ConversionProgress::Saying { done, expected } if done >= last + 100 => {
                 eprintln!("  token {done} of about {expected}");
                 last = done;
             }
-            SpeechProgress::Sounding => {
-                eprintln!("  window at {:.1} s", converting.elapsed().as_secs_f64())
+            ConversionProgress::Drawing { done, total }
+                if done % conversion.diffusion_steps == 0 =>
+            {
+                eprintln!(
+                    "  drawn at {:.1} s ({done} of {total} steps)",
+                    converting.elapsed().as_secs_f64()
+                )
+            }
+            ConversionProgress::Sounding { done, total } if done > sounded => {
+                eprintln!(
+                    "  window {done} of {total} at {:.1} s",
+                    converting.elapsed().as_secs_f64()
+                );
+                sounded = done;
             }
             _ => {}
         }

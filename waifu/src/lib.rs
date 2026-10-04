@@ -98,7 +98,10 @@ pub use layers::{Conv1d, Conv2d, ConvTranspose1d, Embedding, GroupNorm, LayerNor
 pub use manifest::Manifest;
 pub use mapping::Mapping;
 pub use reader::BinaryRead;
-pub use speech::{SpeechDefaults, SpeechOptions, SpeechProgress, Tones, Voice};
+pub use speech::{
+    ConversionDefaults, ConversionOptions, ConversionProgress, Converter, SpeechDefaults,
+    SpeechOptions, SpeechProgress, Tones, Voice,
+};
 pub use sdxl::{
     from_rgb8, to_rgb8, ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler,
     PromptEmbedding, SamplerConfig, Sdxl, SdxlConfig, Unet, UnetCondition, UnetConfig, VaeConfig,

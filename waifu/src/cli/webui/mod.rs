@@ -168,12 +168,14 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     serve_the_page(launch, picture, wanted_port, &output, limit)
 }
 
-/// The task `-m` asks for when `-task` does not say: a voice reads, and a picture model draws --
-/// from the picture, where `-i` named one. A manifest on the disk is a voice where its
-/// `model.type` names a speech model.
+/// The task `-m` asks for when `-task` does not say: a voice reads, a converter converts, and a
+/// picture model draws -- from the picture, where `-i` named one. A manifest on the disk is a
+/// voice or a converter where its `model.type` names one.
 fn task_for(model: &str, from_a_picture: bool) -> Task {
     if worker::is_a_voice(model) {
         Task::Text2Speech
+    } else if worker::is_a_converter(model) {
+        Task::Speech2Speech
     } else if from_a_picture {
         Task::Img2Img
     } else {
@@ -185,17 +187,32 @@ fn task_for(model: &str, from_a_picture: bool) -> Task {
 /// a voice or a picture model by its name, and a picture model can start from a picture or not by
 /// its kind. A manifest on the disk is taken at its word, and says so at the first run if not.
 fn fits(task: Task, model: &str) -> Result<(), String> {
+    // Before anything about the model: an MIT build has no voice conversion to offer it.
+    if let Some(why) = task.not_built_because() {
+        return Err(format!("cannot do {}: {why}", task.name()));
+    }
+
     let published = hub::full_name(model).is_some() || model == worker::TONES;
     let voice = model == worker::TONES || hub::is_voice(model);
+    let converter = hub::is_conversion(model);
 
-    if published && voice != task.speaks() {
-        return Err(match task.speaks() {
-            true => format!("{model} draws pictures: {} needs a voice", task.name()),
-            false => format!(
-                "{model} is a voice: {} needs a model that draws",
-                task.name()
-            ),
-        });
+    let fitting = match task {
+        Task::Text2Speech => voice,
+        Task::Speech2Speech => converter,
+        Task::Txt2Img | Task::Img2Img => !voice && !converter,
+    };
+    if published && !fitting {
+        let is = match (voice, converter) {
+            (true, _) => "is a voice",
+            (_, true) => "converts voices",
+            _ => "draws pictures",
+        };
+        let needs = match task {
+            Task::Text2Speech => "a voice",
+            Task::Speech2Speech => "a converter",
+            Task::Txt2Img | Task::Img2Img => "a model that draws",
+        };
+        return Err(format!("{model} {is}: {} needs {needs}", task.name()));
     }
     if task == Task::Img2Img && !voice {
         if let Some(why) = worker::look_at(model).no_picture_because {
@@ -292,12 +309,16 @@ fn serve_the_page(
     // Read onto the device before the page opens, on the worker -- the thread the weights have to
     // live on -- with this one waiting for it in the terminal. The page never opens on a model
     // that is still being read, and one that cannot be read is said here rather than on a page.
-    let load = match launch.task.speaks() {
-        true => {
+    let load = match launch.task {
+        Task::Text2Speech => {
             shared.change(|world| world.voice = Some(worker::look_at_voice(&launch.model)));
             Load::Voice(launch.model.clone())
         }
-        false => {
+        Task::Speech2Speech => {
+            shared.change(|world| world.converter = Some(worker::look_at_converter(&launch.model)));
+            Load::Converter(launch.model.clone())
+        }
+        Task::Txt2Img | Task::Img2Img => {
             shared.change(|world| world.model = Some(worker::look_at(&launch.model)));
             Load::Model(launch.model.clone())
         }
@@ -353,9 +374,13 @@ fn read_in_the_terminal(shared: &Shared, launch: &Launch) -> Result<(), Error> {
     eprintln!();
 
     let world = shared.world();
-    let read = match launch.task.speaks() {
-        true => world.voice.as_ref().is_some_and(|voice| voice.in_memory),
-        false => world.model.as_ref().is_some_and(|model| model.in_memory),
+    let read = match launch.task {
+        Task::Text2Speech => world.voice.as_ref().is_some_and(|voice| voice.in_memory),
+        Task::Speech2Speech => world
+            .converter
+            .as_ref()
+            .is_some_and(|converter| converter.in_memory),
+        Task::Txt2Img | Task::Img2Img => world.model.as_ref().is_some_and(|model| model.in_memory),
     };
     if read {
         eprintln!(
@@ -493,6 +518,8 @@ mod tests {
         assert_eq!(task_for(worker::TONES, true), Task::Text2Speech);
         assert_eq!(task_for("sdxl:base", false), Task::Txt2Img);
         assert_eq!(task_for("sdxl:base", true), Task::Img2Img);
+        // A converter converts, in any build: an MIT one then says why it cannot.
+        assert_eq!(task_for("seed-vc", false), Task::Speech2Speech);
         // A manifest that is not there, or says nothing of a speech model, draws until -task says
         // otherwise.
         assert_eq!(task_for("/somewhere/else.yaml", false), Task::Txt2Img);
@@ -518,6 +545,24 @@ mod tests {
 
         // A manifest on the disk is taken at its word.
         assert!(fits(Task::Text2Speech, "/somewhere/voice.yaml").is_ok());
+
+        // A converter is for speech2speech and nothing else, and speech2speech is for it.
+        let refused = fits(Task::Text2Speech, "seed-vc").unwrap_err();
+        assert!(refused.contains("converts voices"), "{refused}");
+        let refused = fits(Task::Txt2Img, "seed-vc").unwrap_err();
+        assert!(refused.contains("converts voices"), "{refused}");
+        match Task::Speech2Speech.not_built_because() {
+            // An MIT build says why before it looks at the model at all.
+            Some(why) => {
+                let refused = fits(Task::Speech2Speech, "seed-vc").unwrap_err();
+                assert!(refused.contains(why), "{refused}");
+            }
+            None => {
+                assert!(fits(Task::Speech2Speech, "seed-vc").is_ok());
+                let refused = fits(Task::Speech2Speech, "indextts").unwrap_err();
+                assert!(refused.contains("needs a converter"), "{refused}");
+            }
+        }
     }
 
     /// A program for `task`, keeping its jobs in a directory of the calling test's own, with
@@ -532,11 +577,14 @@ mod tests {
             DeviceOption::Cpu.resolve(),
             Store::open(&root, None).expect("a store"),
         );
-        match task.speaks() {
-            true => shared.change(|world| {
+        match task {
+            Task::Text2Speech => shared.change(|world| {
                 world.voice = Some(worker::look_at_voice(model.unwrap_or(worker::TONES)))
             }),
-            false => {
+            Task::Speech2Speech => shared.change(|world| {
+                world.converter = Some(worker::look_at_converter(model.unwrap_or("seed-vc")))
+            }),
+            Task::Txt2Img | Task::Img2Img => {
                 if let Some(model) = model {
                     shared.change(|world| world.model = Some(worker::look_at(model)));
                 }
@@ -1015,6 +1063,54 @@ mod tests {
             job,
         );
         assert_eq!(answer.status, 202, "{}", answer.text());
+    }
+
+    #[test]
+    fn a_conversion_is_taken_with_both_recordings_and_refused_without_either() {
+        let (address, _) = a_server(a_program("convert", Task::Speech2Speech, Some("seed-vc")));
+
+        let described = get(address, "/api/model").json();
+        assert_eq!(described["task"], "speech2speech");
+        assert_eq!(described["kind"], "conversion");
+        assert_eq!(described["converter"]["full_name"], "Seed-VC v2");
+        assert_eq!(described["converter"]["steps"], 30);
+
+        let source = post_file(address, "audio/wav", &a_recording()).json()["id"].clone();
+        let reference = post_file(address, "audio/wav", &a_recording()).json()["id"].clone();
+        let picture = post_file(address, "image/png", PNG).json()["id"].clone();
+
+        for (body, reason) in [
+            (json!({"reference": reference}), "nothing to convert"),
+            (json!({"source": source}), "nothing to convert"),
+            (
+                json!({"source": picture, "reference": reference}),
+                "not a WAV",
+            ),
+            (
+                json!({"kind": "speech", "text": "hello"}),
+                "runs conversion jobs",
+            ),
+        ] {
+            let answer = post(address, "/api/jobs", &body.to_string());
+            assert_eq!(answer.status, 400, "{body}");
+            assert!(answer.text().contains(reason), "{body}: {}", answer.text());
+        }
+
+        let posted = post(
+            address,
+            "/api/jobs",
+            &json!({"kind": "conversion", "source": source, "reference": reference, "steps": 500})
+                .to_string(),
+        );
+        assert_eq!(posted.status, 202, "{}", posted.text());
+        let asked = &posted.json()["asked"];
+        assert_eq!(asked["source"], source);
+        assert_eq!(asked["reference"], reference);
+        // Held to what a run can be asked for, and the rest filled in.
+        assert_eq!(asked["steps"], 100);
+        assert_eq!(asked["style"], false);
+        assert!(asked["seed"].as_str().unwrap().parse::<u64>().is_ok());
+        assert_eq!(asked["converter"], "seed-vc");
     }
 
     #[test]

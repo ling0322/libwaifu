@@ -53,7 +53,7 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response};
 
 use crate::cli::webui::machine;
-use crate::cli::webui::state::{Chosen, Shared, Spoken};
+use crate::cli::webui::state::{Chosen, ChosenConverter, Shared, Spoken};
 use crate::cli::webui::store::{Cancelled, Kind, Refused, Status};
 
 /// The page, built into the binary. There is no directory of files to find at runtime and no
@@ -279,6 +279,10 @@ fn submit(shared: &Arc<Shared>, request: &mut Request) -> Reply {
             Some(voice) => speech_settings(shared, &asked, &voice),
             None => Err("this program has no voice to speak with".to_string()),
         },
+        Kind::Conversion => match shared.world().converter.clone() {
+            Some(converter) => conversion_settings(shared, &asked, &converter),
+            None => Err("this program has nothing to convert with".to_string()),
+        },
     };
     let settled = match settled {
         Ok(settled) => settled,
@@ -382,6 +386,41 @@ fn speech_settings(shared: &Shared, asked: &Value, voice: &Spoken) -> Result<Val
         "seed": seed(asked.get("seed")).to_string(),
         "reference": reference,
         "voice": voice.name,
+    }))
+}
+
+/// The same, for a recording to say again in another voice.
+fn conversion_settings(
+    shared: &Shared,
+    asked: &Value,
+    converter: &ChosenConverter,
+) -> Result<Value, String> {
+    // Both recordings are needed, and both have to be WAVs: the page decodes whatever was dropped
+    // and posts the samples, and anything else posting here is asked for the same.
+    let recording = |field: &str, what: &str| -> Result<String, String> {
+        let id = asked
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("there is nothing to convert without {what}"))?;
+        let upload = shared
+            .store()
+            .find_upload(id)
+            .ok_or_else(|| format!("there is no upload {id} to use as {what}"))?;
+        if upload.mime != "audio/wav" {
+            return Err(format!("upload {id} is not a WAV recording"));
+        }
+        Ok(upload.id)
+    };
+    let source = recording("source", "a recording to convert")?;
+    let reference = recording("reference", "a recording of the voice to convert it to")?;
+
+    Ok(json!({
+        "source": source,
+        "reference": reference,
+        "steps": whole(asked.get("steps"), converter.defaults.steps).clamp(1, 100),
+        "style": asked.get("style").and_then(Value::as_bool).unwrap_or(false),
+        "seed": seed(asked.get("seed")).to_string(),
+        "converter": converter.name,
     }))
 }
 

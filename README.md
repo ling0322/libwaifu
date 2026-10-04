@@ -35,9 +35,11 @@ the disk -- and a voice named that way opens the text2speech page on its own.
 
 ## Voice conversion
 
-Seed-VC v2 turns one recording into another voice. It is library and command line only -- no page
--- and **GPL-3.0**, so it is built only with the `gpl` feature (see [docs/seed_vc.md](docs/seed_vc.md)).
-`waifu -m seed-vc` fetches the package off the same two hubs.
+Seed-VC v2 turns one recording into another voice, on the speech2speech page: a recording to
+convert, a recording of the voice to convert it to, and a clip out. It is **GPL-3.0**, so it is
+built only with the `gpl` feature (see [docs/seed_vc.md](docs/seed_vc.md)); a default build names
+the task and says why it cannot run it. `waifu -m seed-vc` fetches the package off the same two
+hubs.
 
 | name | model | published as |
 |---|---|---|
@@ -60,9 +62,9 @@ distilled release is for, seed 7:
 
 ## Run
 
-`waifu` asks three things in the terminal -- the task (txt2img, img2img or text2speech), the model
-for it, and the device -- fetches the model under a progress bar if it is not on the disk yet, and
-then opens a page in a browser for that task:
+`waifu` asks three things in the terminal -- the task (txt2img, img2img, text2speech, or
+speech2speech in a `gpl` build), the model for it, and the device -- fetches the model under a
+progress bar if it is not on the disk yet, and then opens a page in a browser for that task:
 
 ```bash
 $ waifu
@@ -78,11 +80,14 @@ the command line:
 ```bash
 $ waifu -m sdxl:wai -device cuda              # txt2img; img2img if -i names a picture
 $ waifu -m indextts                           # a voice: text2speech
+$ waifu -m seed-vc                            # a converter: speech2speech, gpl builds only
 $ waifu -task img2img -m sdxl:noob -i cat.png
 ```
 
 ## Recent updates
 
+- [2026-10-04] Seed-VC v2 has a page: speech2speech, in builds with the `gpl` feature. See
+  [docs/seed_vc.md](docs/seed_vc.md).
 - [2026-10-02] Fun-CosyVoice3-0.5B-2512 is published, as `cosyvoice:v3` -- the second voice, Apache 2.0.
   See [docs/cosyvoice3.md](docs/cosyvoice3.md).
 - [2026-10-02] Seed-VC v2 is published, as `seed-vc` -- voice conversion for the library and the

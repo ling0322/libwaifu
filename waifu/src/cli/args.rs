@@ -356,12 +356,16 @@ impl Args {
             return Ok(None);
         };
 
-        Task::named(task).map(Some).ok_or_else(|| {
+        let named = Task::named(task).ok_or_else(|| {
             ArgError(format!(
                 "invalid task \"{task}\": must be one of {}",
-                Task::ALL.map(Task::name).join(", ")
+                Task::names()
             ))
-        })
+        })?;
+        match named.not_built_because() {
+            Some(why) => Err(ArgError(format!("cannot do {task}: {why}"))),
+            None => Ok(Some(named)),
+        }
     }
 
     /// The port to serve the page on, if one was named.
@@ -487,9 +491,9 @@ pub fn print_options() {
     );
     eprintln!(
         "  -task string\n    \twhat the page is for, one of {}. Beside -m it can be left out: a \
-         voice reads -- a published one, or a manifest of IndexTTS-2.5 or Fun-CosyVoice3 -- and \
-         a picture model draws, from the picture where -i names one.",
-        Task::ALL.map(Task::name).join(", ")
+         voice reads -- a published one, or a manifest of IndexTTS-2.5 or Fun-CosyVoice3 -- a \
+         converter converts, and a picture model draws, from the picture where -i names one.",
+        Task::names()
     );
     eprintln!(
         "  -port int\n    \tthe port to serve the page on (default 7860). Left out, the first \
@@ -792,6 +796,13 @@ mod tests {
         let error = args(&["-task", "sing"]).unwrap().task().unwrap_err();
         for task in Task::ALL {
             assert!(error.to_string().contains(task.name()), "{error}");
+        }
+
+        // A task this build does not run is refused with the reason, rather than as no task.
+        let asked = args(&["-task", "speech2speech"]).unwrap().task();
+        match Task::Speech2Speech.not_built_because() {
+            Some(why) => assert!(asked.unwrap_err().to_string().contains(why)),
+            None => assert_eq!(asked.unwrap(), Some(Task::Speech2Speech)),
         }
     }
 

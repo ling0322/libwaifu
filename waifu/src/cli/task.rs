@@ -25,18 +25,38 @@
 //! answer, and the terminal is where the wait can be watched and stopped.
 
 use crate::cli::args::Runtime;
-
 /// One kind of session: a tab on the page, and a row in the terminal's first list.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Task {
     Txt2Img,
     Img2Img,
     Text2Speech,
+    /// Voice conversion, which is Seed-VC's and GPL-3.0: named in every build, so that asking
+    /// for it in an MIT one is told why rather than told there is no such word, and run only in a
+    /// build with the `gpl` feature.
+    Speech2Speech,
 }
 
+/// Why this build cannot convert voices: the one model that does is GPL-3.0, and is compiled in
+/// only on request.
+const NO_GPL: &str = "voice conversion is Seed-VC, which is GPL-3.0, and this build is MIT: build \
+     with `--features gpl` (CMake: -DENABLE_GPL=ON) to have it";
+
 impl Task {
-    /// Every task, in the order the terminal lists them and the usage names them.
-    pub const ALL: [Task; 3] = [Task::Txt2Img, Task::Img2Img, Task::Text2Speech];
+    /// Every task there is a word for, whether or not this build runs it.
+    const EVERY: [Task; 4] = [
+        Task::Txt2Img,
+        Task::Img2Img,
+        Task::Text2Speech,
+        Task::Speech2Speech,
+    ];
+
+    /// Every task this build runs, in the order the terminal lists them and the usage names them.
+    #[cfg(feature = "gpl")]
+    pub const ALL: &'static [Task] = &Task::EVERY;
+    /// Every task this build runs, in the order the terminal lists them and the usage names them.
+    #[cfg(not(feature = "gpl"))]
+    pub const ALL: &'static [Task] = &[Task::Txt2Img, Task::Img2Img, Task::Text2Speech];
 
     /// What it is called: on the command line, in the list, and on the page's tab.
     pub fn name(self) -> &'static str {
@@ -44,6 +64,7 @@ impl Task {
             Task::Txt2Img => "txt2img",
             Task::Img2Img => "img2img",
             Task::Text2Speech => "text2speech",
+            Task::Speech2Speech => "speech2speech",
         }
     }
 
@@ -53,20 +74,33 @@ impl Task {
             Task::Txt2Img => "Draw a picture from a prompt",
             Task::Img2Img => "Draw a picture from a prompt and a picture to start from",
             Task::Text2Speech => "Read some text out loud, in a voice",
+            Task::Speech2Speech => "Say a recording again in the voice of another one",
         }
     }
 
-    /// The task a word names, which is [`Task::name`] read backwards.
-    pub fn named(word: &str) -> Option<Task> {
+    /// The names of every task this build runs, as a usage lists them.
+    pub fn names() -> String {
         Task::ALL
+            .iter()
+            .map(|task| task.name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The task a word names, which is [`Task::name`] read backwards -- including one this build
+    /// does not run, which [`Task::not_built_because`] then says why of.
+    pub fn named(word: &str) -> Option<Task> {
+        Task::EVERY
             .into_iter()
             .find(|task| task.name() == word.trim().to_lowercase())
     }
 
-    /// Whether the model it runs is a voice rather than a picture model, which is which of the
-    /// catalogue's two lists it is offered from.
-    pub fn speaks(self) -> bool {
-        self == Task::Text2Speech
+    /// Why this build cannot run it, or None where it can.
+    pub fn not_built_because(self) -> Option<&'static str> {
+        match self {
+            Task::Speech2Speech if !cfg!(feature = "gpl") => Some(NO_GPL),
+            _ => None,
+        }
     }
 }
 
@@ -89,15 +123,28 @@ mod tests {
     #[test]
     fn every_task_is_a_word_the_command_line_takes() {
         for task in Task::ALL {
-            assert_eq!(Task::named(task.name()), Some(task), "{}", task.name());
+            assert_eq!(Task::named(task.name()), Some(*task), "{}", task.name());
+            assert_eq!(task.not_built_because(), None, "{}", task.name());
         }
         assert_eq!(Task::named("TXT2IMG"), Some(Task::Txt2Img));
         assert_eq!(Task::named("sing"), None);
     }
 
     #[test]
-    fn only_the_speech_task_runs_a_voice() {
-        let speaking: Vec<Task> = Task::ALL.into_iter().filter(|task| task.speaks()).collect();
-        assert_eq!(speaking, vec![Task::Text2Speech]);
+    fn voice_conversion_is_named_in_every_build_and_run_in_a_gpl_one() {
+        // Named, so that an MIT build asked for it says why rather than that there is no such task.
+        assert_eq!(Task::named("speech2speech"), Some(Task::Speech2Speech));
+        let built = Task::ALL.contains(&Task::Speech2Speech);
+        assert_eq!(built, cfg!(feature = "gpl"));
+        match Task::Speech2Speech.not_built_because() {
+            Some(why) => {
+                assert!(!built);
+                assert!(
+                    why.contains("GPL-3.0") && why.contains("--features gpl"),
+                    "{why}"
+                );
+            }
+            None => assert!(built),
+        }
     }
 }

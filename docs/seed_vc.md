@@ -30,10 +30,24 @@ well, and are redistributed under it: the exported package carries the licence i
 
 ## Where it runs
 
-It is library and command line only: the web page's tasks are text to picture and text to
-speech, and a conversion takes two recordings rather than a sentence. The package is published
-as `ling0322/libwaifu-seed-vc` on Hugging Face and ModelScope, and `waifu -m seed-vc` fetches it;
-or build it yourself, below.
+On the web page, as the speech2speech task, in a build with the `gpl` feature:
+
+```bash
+cargo run --release --manifest-path waifu/Cargo.toml --features cli,gpl -- -m seed-vc
+```
+
+The page takes a recording to convert (the first five minutes of it) and a recording of the voice
+to convert it to (the first thirty seconds), decoded in the browser from whatever format it can
+play; the steps, whether to convert the style too, and a seed. The bar counts the CFM's steps and
+the vocoder's windows across the whole recording, and a run stops after the step it is on.
+
+The page reaches the port through `waifu::Converter`, a trait in the MIT `speech` module that
+`SeedVc` implements; the webui opens a `SeedVc` in one function that is compiled only with `gpl`.
+A default build still knows the word speech2speech and the name `seed-vc`, and refuses both,
+before fetching anything, with the reason.
+
+The package is published as `ling0322/libwaifu-seed-vc` on Hugging Face and ModelScope, and
+`waifu -m seed-vc` fetches it; or build it yourself, below.
 
 ## Building the package
 
@@ -140,5 +154,4 @@ held, so a resampler difference cannot hide in a model's error.
 
 ## Still missing
 
-A page for it on the web UI, the anonymization mode (`anonymization_only`, which reads the AR
-without a reference), and fp16.
+The anonymization mode (`anonymization_only`, which reads the AR without a reference), and fp16.
