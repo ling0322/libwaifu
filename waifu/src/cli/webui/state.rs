@@ -49,13 +49,19 @@ use crate::{GenerationDefaults, GenerationProgress, SpeechDefaults, SpeechProgre
 const ENCODING: f64 = 1.0;
 const DECODING: f64 = 3.0;
 
-/// And the same weighing for a run that speaks rather than draws.
+/// How long a voice's vocoder takes, as a multiple of everything before it, until a reading has
+/// measured it.
 ///
-/// Reading the text is a tokenizer and is quick. The vocoder at the end is a pass over the whole
-/// utterance and is not: it is the part of a speech run that a bar drawn from the tokens alone
-/// would sit in front of, saying nothing, for a second or two.
-const TEXT: f64 = 1.0;
-const VOCODER: f64 = 4.0;
+/// A speech run cannot be weighed the way a picture is. The vocoder at the end is a pass over the
+/// whole utterance, so it grows with the token count rather than costing a fixed few steps, and
+/// how much of the run it is depends on the model and on the card: IndexTTS spends about twice as
+/// long on it as on its tokens, CosyVoice3 about half as long. One is a guess for the first
+/// reading; every reading after it uses what the last one took.
+pub const VOCODER_RATIO: f64 = 1.0;
+
+/// Where the speech bar waits while the vocoder runs longer than the last one did: short of the
+/// end, which it reaches when there is a clip.
+const HELD: f64 = 0.99;
 
 /// The model the page is set to draw with, as the screen describes it.
 ///
@@ -173,6 +179,21 @@ pub struct Say {
     /// model has an opinion.
     pub expected: i32,
     pub started: Instant,
+    /// When the vocoder started, which is when the tokens stopped saying how far along it is.
+    pub sounding: Option<Instant>,
+    /// How long the vocoder is expected to take, as a multiple of everything before it: what the
+    /// last reading with this program took, or [`VOCODER_RATIO`] before there was one.
+    pub ratio: f64,
+}
+
+impl Say {
+    /// How long the vocoder took against everything before it, for a reading that has finished.
+    pub fn measured_ratio(&self, finished: Instant) -> Option<f64> {
+        let sounding = self.sounding?;
+        let before = sounding.duration_since(self.started).as_secs_f64();
+        let after = finished.saturating_duration_since(sounding).as_secs_f64();
+        (before > 0.0).then(|| (after / before).clamp(0.05, 20.0))
+    }
 }
 
 /// What the worker is busy with, which is the only thing on the screen that moves on its own.
@@ -208,7 +229,7 @@ impl Doing {
                 .filter(|total| *total > 0)
                 .map(|total| fetch.done as f64 / total as f64),
             Doing::Drawing(run) => Some(drawn(run.progress, run.steps)),
-            Doing::Speaking(say) => Some(spoken(say.progress, say.expected)),
+            Doing::Speaking(say) => Some(spoken(say, Instant::now())),
         }
     }
 
@@ -257,20 +278,36 @@ fn drawn(progress: GenerationProgress, steps: i32) -> f64 {
 
 /// How far along a reading is, as a bar can show it.
 ///
-/// The same weighing the picture bar uses, over the three stages a speech run has. The token
-/// count is an estimate, so `done` can pass `expected` on a reading that runs long; what that has
-/// to not do is run the bar off the end and back round, so it is held at the last token instead
-/// -- which is where a run that is taking longer than expected actually is.
-fn spoken(progress: SpeechProgress, expected: i32) -> f64 {
-    let all = |expected: f64| TEXT + expected + VOCODER;
-    let expected = f64::from(expected.max(1));
+/// The tokens fill the bar's first `1 / (1 + ratio)` and the vocoder the rest. The vocoder says
+/// nothing while it runs, so its part is filled by the clock: the time everything before it took,
+/// times the ratio, is how long it should take, and the bar is held short of the end if it takes
+/// longer.
+///
+/// The token count is an estimate, so `done` can pass `expected` on a reading that runs long;
+/// what that has to not do is run the bar off the end and back round, so it is held at the last
+/// token instead -- which is where a run that is taking longer than expected actually is.
+fn spoken(say: &Say, now: Instant) -> f64 {
+    let tokens = 1.0 / (1.0 + say.ratio.max(0.0));
+    let expected = f64::from(say.expected.max(1));
 
-    match progress {
+    match say.progress {
         SpeechProgress::Reading => 0.0,
         SpeechProgress::Saying { done, .. } => {
-            (TEXT + f64::from(done.max(0)).min(expected)) / all(expected)
+            tokens * f64::from(done.max(0)).min(expected) / expected
         }
-        SpeechProgress::Sounding => (TEXT + expected) / all(expected),
+        SpeechProgress::Sounding => {
+            let Some(sounding) = say.sounding else {
+                return tokens;
+            };
+            let before = sounding.duration_since(say.started).as_secs_f64();
+            let after = now.saturating_duration_since(sounding).as_secs_f64();
+            let expected = before * say.ratio;
+            let sounded = match expected > 0.0 {
+                true => (after / expected).min(1.0),
+                false => 1.0,
+            };
+            (tokens + (1.0 - tokens) * sounded).min(HELD)
+        }
     }
 }
 
@@ -402,6 +439,9 @@ pub struct World {
     pub model: Option<Chosen>,
     /// What it speaks with, for a program started to speak.
     pub voice: Option<Spoken>,
+    /// How long the vocoder took against everything before it, the last time anything was said.
+    /// What the speech bar fills its last part by; see [`Say::ratio`].
+    pub vocoder_ratio: f64,
     pub doing: Doing,
     /// The job the worker is running, if it is running one. Set by the store as it hands the
     /// job over, under the store's own lock: see [`Store::take_next`].
@@ -439,6 +479,7 @@ impl Shared {
             world: Mutex::new(World {
                 model: None,
                 voice: None,
+                vocoder_ratio: VOCODER_RATIO,
                 doing: Doing::Nothing,
                 running: None,
                 note: None,
@@ -815,40 +856,86 @@ mod tests {
         assert!(said.contains("Denoising strength: 0.6"), "{said}");
     }
 
-    #[test]
-    fn the_speech_bar_weighs_the_vocoder_at_the_end() {
-        // The same weighing the picture bar has, and for the same reason: a bar drawn from the
-        // tokens alone fills up and then sits there while the vocoder runs.
-        let all_the_tokens = spoken(SpeechProgress::Sounding, 40);
-        assert!(all_the_tokens < 1.0, "{all_the_tokens}");
-        assert!(all_the_tokens > 0.8, "{all_the_tokens}");
+    /// A reading that started `before` seconds ago and is at `progress`, expecting the vocoder to
+    /// take `ratio` times as long as everything before it.
+    fn a_reading(progress: SpeechProgress, expected: i32, ratio: f64, before: u64) -> Say {
+        let now = Instant::now();
+        let started = now - Duration::from_secs(before);
+        Say {
+            progress,
+            expected,
+            started,
+            sounding: matches!(progress, SpeechProgress::Sounding).then_some(now),
+            ratio,
+        }
+    }
 
-        assert_eq!(spoken(SpeechProgress::Reading, 40), 0.0);
-        let half = spoken(
-            SpeechProgress::Saying {
-                done: 20,
-                expected: 40,
-            },
-            40,
-        );
-        assert!(half > 0.4 && half < 0.6, "{half}");
+    #[test]
+    fn the_speech_bar_gives_the_vocoder_the_share_it_last_took() {
+        // IndexTTS spends about twice as long sounding as saying. A bar that weighed the vocoder
+        // as a few tokens was at 97% with more than half the run still to go.
+        let reading = |progress| a_reading(progress, 40, 2.0, 4);
+        let at = |say: &Say| spoken(say, say.sounding.unwrap_or(say.started));
+
+        assert_eq!(at(&reading(SpeechProgress::Reading)), 0.0);
+        let half = at(&reading(SpeechProgress::Saying {
+            done: 20,
+            expected: 40,
+        }));
+        assert!((half - 1.0 / 6.0).abs() < 1e-9, "{half}");
+        let sounding = at(&reading(SpeechProgress::Sounding));
+        assert!((sounding - 1.0 / 3.0).abs() < 1e-9, "{sounding}");
+    }
+
+    #[test]
+    fn the_speech_bar_moves_by_the_clock_while_the_vocoder_runs() {
+        // Four seconds before the vocoder and a ratio of two: eight seconds of it expected.
+        let say = a_reading(SpeechProgress::Sounding, 40, 2.0, 4);
+        let sounding = say.sounding.unwrap();
+        let after = |seconds: u64| spoken(&say, sounding + Duration::from_secs(seconds));
+
+        assert!((after(4) - 2.0 / 3.0).abs() < 1e-9, "{}", after(4));
+        assert!(after(2) < after(4) && after(4) < after(6));
+        // And one that takes longer than the last waits short of the end rather than at it.
+        assert_eq!(after(8), HELD);
+        assert_eq!(after(60), HELD);
+    }
+
+    #[test]
+    fn what_a_reading_took_is_what_the_next_one_expects() {
+        let say = a_reading(SpeechProgress::Sounding, 40, 1.0, 4);
+        let sounding = say.sounding.unwrap();
+        let ratio = say
+            .measured_ratio(sounding + Duration::from_secs(6))
+            .unwrap();
+        assert!((ratio - 1.5).abs() < 1e-6, "{ratio}");
+
+        // A reading that never reached the vocoder measured nothing.
+        let stopped = a_reading(SpeechProgress::Reading, 40, 1.0, 4);
+        assert_eq!(stopped.measured_ratio(Instant::now()), None);
     }
 
     #[test]
     fn a_reading_that_runs_long_does_not_run_the_bar_off_the_end() {
         // The token count is an estimate, so a reading can pass it -- which is a bar that fills
         // up and starts again if nothing holds it.
-        let past = spoken(
+        let past = a_reading(
             SpeechProgress::Saying {
                 done: 400,
                 expected: 40,
             },
             40,
+            1.0,
+            4,
         );
-        assert!(past <= 1.0, "{past}");
-        assert_eq!(past, spoken(SpeechProgress::Sounding, 40));
+        let sounding = a_reading(SpeechProgress::Sounding, 40, 1.0, 4);
+        assert_eq!(
+            spoken(&past, past.started),
+            spoken(&sounding, sounding.sounding.unwrap())
+        );
 
-        // And a reading with no estimate yet does not divide by one that is not there.
+        // And a reading with no estimate yet, or no time before the vocoder, does not divide by
+        // one that is not there.
         for expected in [0, -1] {
             for progress in [
                 SpeechProgress::Reading,
@@ -858,7 +945,10 @@ mod tests {
                 },
                 SpeechProgress::Sounding,
             ] {
-                assert!(spoken(progress, expected).is_finite(), "{progress:?}");
+                for ratio in [0.0, 1.0] {
+                    let say = a_reading(progress, expected, ratio, 0);
+                    assert!(spoken(&say, Instant::now()).is_finite(), "{progress:?}");
+                }
             }
         }
     }
@@ -874,6 +964,8 @@ mod tests {
             },
             expected: 40,
             started: Instant::now(),
+            sounding: None,
+            ratio: VOCODER_RATIO,
         });
 
         assert!(saying.is_busy());
