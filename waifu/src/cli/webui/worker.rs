@@ -803,6 +803,8 @@ fn say(shared: &Shared, voice: &dyn Voice, job: &store::Job) -> Result<Ran, Erro
             // bar reads it as "no idea yet" and sits at the start, which is where the run is.
             expected: 0,
             started,
+            sounding: None,
+            ratio: world.vocoder_ratio,
         })
     });
     log::line(format_args!(
@@ -823,8 +825,14 @@ fn say(shared: &Shared, voice: &dyn Voice, job: &store::Job) -> Result<Ran, Erro
                 // The model's own estimate, taken as it arrives rather than once: a model that
                 // revises it upward mid-reading is a bar that should follow it rather than one
                 // that pins itself to the first guess.
-                if let SpeechProgress::Saying { expected, .. } = progress {
-                    say.expected = expected;
+                match progress {
+                    SpeechProgress::Saying { expected, .. } => say.expected = expected,
+                    // Once: a model that says it is still sounding after each sentence is still
+                    // in the stage that started at the first.
+                    SpeechProgress::Sounding if say.sounding.is_none() => {
+                        say.sounding = Some(Instant::now())
+                    }
+                    _ => {}
                 }
             }
         });
@@ -838,6 +846,16 @@ fn say(shared: &Shared, voice: &dyn Voice, job: &store::Job) -> Result<Ran, Erro
     let Some(sound) = voice.speak(&said, like.as_ref(), &options, &mut report)? else {
         return Ok(Ran::Stopped);
     };
+
+    // What the vocoder took this time is what the bar expects of it next time.
+    let finished = Instant::now();
+    shared.change(|world| {
+        if let Doing::Speaking(say) = &world.doing {
+            if let Some(ratio) = say.measured_ratio(finished) {
+                world.vocoder_ratio = ratio;
+            }
+        }
+    });
 
     let clip = Clip {
         text: said,

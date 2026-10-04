@@ -500,8 +500,17 @@ impl CosyVoice3 {
             });
         }
 
-        // About six speech tokens a text token, for the bar; a reading is free to run past it.
-        let expected: i32 = readings.iter().map(|(_, own)| (*own as i32) * 6).sum();
+        // How many speech tokens to expect, for the bar; a reading is free to run past it. From
+        // the sentence's own tokens, without the system prompt, at about seven speech tokens a
+        // text token in English and five in Chinese, whose text tokens are a character or two.
+        let mut expected = 0;
+        for piece in &pieces {
+            let rate = match frontend::contains_chinese(piece) {
+                true => 5,
+                false => 7,
+            };
+            expected += count(piece)? as i32 * rate;
+        }
 
         let mut said_all: Vec<Vec<i32>> = Vec::with_capacity(readings.len());
         let mut done = 0;
