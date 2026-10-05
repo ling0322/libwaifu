@@ -28,7 +28,7 @@ namespace metal {
 /// @brief Implementation of the Operators interface on the Metal device, through MLX.
 ///
 /// Covers what the SDXL pipeline calls plus the elementwise family, which MLX gives for free.
-/// Everything else keeps the NOT_IMPL() body it inherits, so an unimplemented operator says so
+/// Everything else keeps the throwing body it inherits, so an unimplemented operator says so
 /// rather than silently producing something wrong.
 class MetalOperators : public Operators {
  public:
@@ -50,6 +50,7 @@ class MetalOperators : public Operators {
       TensorView bias,
       float eps,
       TensorView out) override;
+  void rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) override;
   void groupNorm(
       TensorView input,
       TensorView weight,

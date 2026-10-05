@@ -5,6 +5,7 @@
 #include "flint/test_functional.h"
 #include "flint/device.h"
 #include "flint/operators.h"
+#include "lutil/error.h"
 
 namespace fl {
 
@@ -116,6 +117,40 @@ CATCH_TEST_CASE("test Metal layerNorm (3D input)", "[op][metal]") {
     if (std::isnan(v)) ++nanCount;
   }
   CATCH_REQUIRE(nanCount == 0);
+}
+
+CATCH_TEST_CASE("test Metal rmsNorm", "[op][metal]") {
+  if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
+
+  // 1024 is Qwen3-0.6B's hidden size and 128 its head dim, which Anima's text encoder
+  // normalizes over for the hidden states and for the queries and keys.
+  for (int cols : {16, 128, 1024}) {
+    CATCH_INFO("cols = " << cols);
+    constexpr int kRows = 4;
+    constexpr float kEps = 1e-6f;
+
+    Tensor a = F::rand(Device::getCpu(), {kRows, cols}, DType::kFloat);
+    Tensor weight = F::rand(Device::getCpu(), {cols}, DType::kFloat);
+
+    std::vector<float> expected = readFloats(F::rmsNorm(cpuOps(), a, weight, kEps));
+    Tensor got = F::rmsNorm(metalOps(), toMetal(a), toMetal(weight), kEps);
+    CATCH_REQUIRE(got.getShape() == std::vector<int>{kRows, cols});
+    std::vector<float> actual = readFloats(got);
+    for (size_t i = 0; i < expected.size(); ++i) {
+      CATCH_INFO("element " << i << ": " << actual[i] << " vs " << expected[i]);
+      CATCH_REQUIRE(std::fabs(actual[i] - expected[i]) < 5e-3f);
+    }
+  }
+}
+
+CATCH_TEST_CASE("test a kernel Metal does not have throws", "[op][metal]") {
+  if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available");
+
+  // It used to abort, which took a whole server down with the one job that asked.
+  Tensor positions = toMetal(F::rand(Device::getCpu(), {4}, DType::kFloat));
+  CATCH_REQUIRE_THROWS_AS(
+      metalOps()->rotaryEmbedding(positions, positions, positions, positions),
+      lut::NotImplementedError);
 }
 
 CATCH_TEST_CASE("test Metal groupNorm", "[op][metal]") {

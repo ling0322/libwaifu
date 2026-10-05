@@ -55,6 +55,10 @@ void MetalOperators::layerNorm(
   metal::layerNorm(input, weight, bias, eps, out);
 }
 
+void MetalOperators::rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) {
+  metal::rmsNorm(input, weight, eps, out);
+}
+
 void MetalOperators::groupNorm(
     TensorView input,
     TensorView weight,

@@ -68,6 +68,7 @@ void layerNorm(
     const TensorView &bias,
     float eps,
     const TensorView &out);
+void rmsNorm(const TensorView &input, const TensorView &weight, float eps, const TensorView &out);
 void groupNorm(
     const TensorView &input,
     const TensorView &weight,
