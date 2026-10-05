@@ -45,15 +45,18 @@
 
 namespace fl {
 
-// What a device that has no kernel for something says when asked for it. NOT_IMPL() aborts, which
-// is right for a case nobody can act on; the THROWs are the cases a caller can work around.
+// What a device that has no kernel for something says when asked for it: a NotImplementedError
+// naming the operator, which the C API hands back as an error rather than letting it abort the
+// process. A missing kernel is a fact about the device and not a broken invariant, so whoever is
+// driving it -- a server running one job of many -- gets to fail that job and carry on.
+#define NO_KERNEL() THROW(NotImplemented, std::string(__func__) + " has no kernel on this device")
 
 void Operators::arangeLong(LongType begin, LongType step, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::lookup(TensorView table, TensorView indices, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::rotaryEmbedding(
@@ -61,11 +64,11 @@ void Operators::rotaryEmbedding(
     TensorView query,
     TensorView key,
     TensorView rotaryCache) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::rmsNorm(TensorView input, TensorView weight, float eps, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::layerNorm(
@@ -92,15 +95,15 @@ void Operators::upsampleNearest2d(TensorView input, int scale, TensorView out) {
 }
 
 void Operators::upsampleNearest1d(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::geglu(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::matmul(TensorView A, TensorView B, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::conv2d(
@@ -173,23 +176,23 @@ void Operators::istft(
 }
 
 void Operators::mul(TensorView input, float other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::div(TensorView input, float other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::mod(TensorView input, LongType other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::mul(TensorView input, TensorView other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::softmax(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::attention(TensorView q, TensorView k, TensorView v, bool causal, TensorView out) {
@@ -207,7 +210,7 @@ void Operators::pagedAttention(
     int maxKLen,
     bool causal,
     TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::storeKVCache(
@@ -216,7 +219,7 @@ void Operators::storeKVCache(
     TensorView keyCache,
     TensorView valueCache,
     TensorView slotMapping) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::gatedDeltaNetPrefill(
@@ -229,7 +232,7 @@ void Operators::gatedDeltaNetPrefill(
     TensorView stateSlots,
     TensorView state,
     TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::sample(
@@ -238,180 +241,180 @@ void Operators::sample(
     TensorView topKs,
     TensorView topPs,
     TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::add(TensorView input, TensorView other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::sub(TensorView input, TensorView other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::sum(TensorView input, int dim, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::cumsum(TensorView input, int dim, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::max(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::eq(TensorView input, TensorView other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::square(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::min(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::divTensor(TensorView input, TensorView other, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::neg(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::abs(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::exp(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::log(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::round(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::sqrt(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::rsqrt(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::sigmoid(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::tanh(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::relu(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::gelu(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::silu(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::sin(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::cos(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::quickGelu(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::fill(TensorView input, float value) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 bool Operators::all(TensorView A) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 bool Operators::allClose(TensorView A, TensorView B, float rtol, float atol) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::print(TensorView tensor) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::causalMask(TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::copy(TensorView src, TensorView dest) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::swiglu(TensorView A, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::transfer(TensorView src, TensorView dest) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 float Operators::elem(TensorView tensor) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 bool Operators::elemBool(TensorView tensor) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::repetitionPenalty(TensorView logits, TensorView history, float weight) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::cast(TensorView input, TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::rand(TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::randNormal(TensorView out) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::manualSeed(uint64_t seed) {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 MemorySnapshot Operators::captureMemorySnapshot() {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::resetPeakMemoryStats() {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
-// Not NOT_IMPL(): a device whose allocator holds nothing back has nothing to hand over, and has
+// Not NO_KERNEL(): a device whose allocator holds nothing back has nothing to hand over, and has
 // answered this question by already having done it.
 void Operators::releaseUnusedMemory() {
 }
 
 DType Operators::getDefaultFloatType() {
-  NOT_IMPL();
+  NO_KERNEL();
 }
 
 void Operators::synchronize() {

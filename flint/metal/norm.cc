@@ -54,6 +54,13 @@ void layerNorm(
   writeInto(mlx::core::astype(result, toMlxDtype(out.getDType())), out);
 }
 
+void rmsNorm(const TensorView &input, const TensorView &weight, float eps, const TensorView &out) {
+  if (weight.empty()) THROW(InvalidArg, "rmsNorm needs a weight");
+  mlx::core::array result = mlx::core::fast::rms_norm(toMlxArray(input), toMlxArray(weight), eps);
+  // As in layerNorm: the input's type, even where a weight of another type would promote it.
+  writeInto(mlx::core::astype(result, toMlxDtype(out.getDType())), out);
+}
+
 void groupNorm(
     const TensorView &input,
     const TensorView &weight,

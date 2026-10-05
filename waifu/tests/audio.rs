@@ -1037,9 +1037,8 @@ fn depthwise_conv1d_is_conv1d_with_one_group_per_channel() {
 /// runs -- which is five links, from `Graph` through `Op` and `ir` and the C interface down to
 /// `Operators`, every one of which has to be connected for the message to come back.
 ///
-/// The bases throw rather than abort, which is what makes this a test at all. `NOT_IMPL()` --
-/// what the other sixty-one unimplemented operators use -- is `LOG(FATAL)` and `abort()`, and an
-/// operator that kills the process cannot be asked whether it is there.
+/// The bases throw rather than abort, which is what makes this a test at all: an operator that
+/// kills the process cannot be asked whether it is there.
 ///
 /// When a backend grows one of these kernels its line here stops failing, and that is the signal
 /// to delete the line rather than a reason to doubt it.
