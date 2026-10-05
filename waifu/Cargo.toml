@@ -36,7 +36,15 @@ gpl = []
 # The command line tool. Off by default: what it pulls in -- a terminal stack, a web server, an
 # HTTP client, an image encoder -- is the binary's to need, and nothing the library does asks for
 # any of it.
-cli = ["dep:hf-hub", "dep:image", "dep:ratatui", "dep:serde_json", "dep:tiny_http", "dep:ureq"]
+cli = [
+    "dep:hf-hub",
+    "dep:image",
+    "dep:ratatui",
+    "dep:serde_json",
+    "dep:tiny_http",
+    "dep:toml",
+    "dep:ureq",
+]
 
 [dependencies]
 # What the command line tool needs.
@@ -70,6 +78,12 @@ tiny_http = { version = "0.12", default-features = false, optional = true }
 # checked as it is read, and a derive would buy the checking back at the cost of a second
 # description of every one of them.
 serde_json = { version = "1", optional = true }
+
+# The settings file, `config.toml`, which today says one thing: where fetched models go. It is a
+# file for people to open in an editor, so it is in the format that lets them write a comment and
+# a Windows path without escaping every backslash -- and reading that properly is a parser, which
+# is not something to write again here.
+toml = { version = "1", optional = true }
 
 # Fetching from ModelScope, which hf-hub does not speak, and probing whether the machine can
 # reach the outside at all. Rust has no HTTP in its standard library, so this is the one thing the

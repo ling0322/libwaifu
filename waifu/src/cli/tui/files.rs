@@ -462,8 +462,9 @@ fn row_style(on: bool, directory: bool) -> Style {
     }
 }
 
-/// The last `width` characters of `text`, marked as cut where anything was.
-fn tail(text: &str, width: usize) -> String {
+/// The last `width` characters of `text`, marked as cut where anything was. For a path, whose tail
+/// is the part that says which one it is; the model list draws its directories with it too.
+pub fn tail(text: &str, width: usize) -> String {
     let characters: Vec<char> = text.chars().collect();
     if characters.len() <= width {
         return text.to_string();
