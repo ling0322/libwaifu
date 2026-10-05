@@ -150,11 +150,6 @@ function asWavBytes(samples, rate) {
   return new Blob([bytes], { type: "audio/wav" });
 }
 
-/** A limit in seconds, in the words it is said in: "30 seconds", "5 minutes". */
-function howLong(seconds) {
-  return seconds < 120 ? `${seconds} seconds` : `${Math.round(seconds / 60)} minutes`;
-}
-
 /** How long something is, in the shape a clip's length is read in. */
 function clock(seconds) {
   const whole = Math.max(0, Math.round(seconds));
@@ -814,7 +809,19 @@ function FromRecording({
 
   return html`
     <div className="card drop">
-      <div className="card-title">${title}</div>
+      <div className="card-head">
+        <div className="card-title">${title}</div>
+        ${holding &&
+        html`<button
+          className="plain small"
+          onClick=${(event) => {
+            event.preventDefault();
+            onClear();
+          }}
+        >
+          Remove
+        </button>`}
+      </div>
       ${/* Above the box rather than inside it, which is where the picture's thumbnail goes. That
            box is a label around a file input, so everything inside it opens the file chooser when
            it is clicked -- which is what should happen to a thumbnail and is the opposite of what
@@ -851,22 +858,6 @@ function FromRecording({
             ? html`<span>Drop another one here, or click to choose one</span>`
             : html`<span>Drop a recording here, or click to choose one</span>`}
       </label>
-      <p className="about">
-        Any format this browser can play: it is decoded here and the samples are what cross, so
-        the program needs no codec of its own. The first ${howLong(seconds)} of it are kept.
-      </p>
-      ${holding &&
-      html`
-        <button
-          className="plain wide"
-          onClick=${(event) => {
-            event.preventDefault();
-            onClear();
-          }}
-        >
-          Remove the recording
-        </button>
-      `}
     </div>
   `;
 }
@@ -1115,21 +1106,24 @@ function ConversionSettings({ state, form, change, onHold, onClear, onAnySeed })
             </div>
           </div>
 
-          <div className="card">
-            <label className="check">
-              <input
-                type="checkbox"
-                checked=${!!form.convertStyle}
-                onChange=${(e) => change("convertStyle", e.target.checked)}
-              />
-              <span>Convert the style too</span>
-            </label>
-            <p className="about">
-              Off, only whose voice it is changes: the timing and the accent are the recording's
-              own. On, it is said again with the accent and pacing of the voice as well, which
-              takes longer and keeps less of the original timing.
-            </p>
-          </div>
+          ${converter.converts_style &&
+          html`
+                <div className="card">
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked=${!!form.convertStyle}
+                      onChange=${(e) => change("convertStyle", e.target.checked)}
+                    />
+                    <span>Convert the style too</span>
+                  </label>
+                  <p className="about">
+                    Off, only whose voice it is changes: the timing and the accent are the
+                    recording's own. On, it is said again with the accent and pacing of the voice
+                    as well, which takes longer and keeps less of the original timing.
+                  </p>
+                </div>
+              `}
 
           <div className="card">
             <div className="row">
@@ -1435,12 +1429,6 @@ function Output({ state, pictures, progress, note, showing, onShow, onSend, onRe
           ${/* Off to the side of the three that keep it, because it is the one that does not. */ ""}
           <button className="plain away last" onClick=${() => onDelete(picture)}>Delete</button>
         </div>
-        <textarea
-          className="parameters"
-          rows="4"
-          readOnly
-          value=${`${picture.parameters}\nTime taken: ${picture.seconds.toFixed(2)}s`}
-        ></textarea>
       `}
 
       <div className="gallery">
@@ -1510,14 +1498,6 @@ function ClipOutput({
           <button className="plain" onClick=${() => onReuse(clip)}>Reuse these settings</button>
           <button className="plain away last" onClick=${() => onDelete(clip)}>Delete</button>
         </div>
-        <textarea
-          className="parameters"
-          rows="4"
-          readOnly
-          value=${`${clip.parameters}\nTime taken: ${clip.seconds.toFixed(2)}s -- ${clock(
-            clip.length,
-          )} long`}
-        ></textarea>
       `}
 
       <div className="clips">
@@ -1916,10 +1896,11 @@ function App() {
       source: inputs.source,
       reference: inputs.voice,
       steps: Number(form.conversionSteps),
-      style: !!form.convertStyle,
+      // Only to a converter that can: another refuses the job outright.
+      style: !!converter?.converts_style && !!form.convertStyle,
       seed: String(form.seed).trim(),
     });
-  }, [form, inputs, post]);
+  }, [form, inputs, converter, post]);
 
   /** Stops this page's running job, or takes the one waiting out of line. */
   const interrupt = useCallback(async () => {

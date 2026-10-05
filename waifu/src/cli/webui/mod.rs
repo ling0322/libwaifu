@@ -187,11 +187,6 @@ fn task_for(model: &str, from_a_picture: bool) -> Task {
 /// a voice or a picture model by its name, and a picture model can start from a picture or not by
 /// its kind. A manifest on the disk is taken at its word, and says so at the first run if not.
 fn fits(task: Task, model: &str) -> Result<(), String> {
-    // Before anything about the model: an MIT build has no voice conversion to offer it.
-    if let Some(why) = task.not_built_because() {
-        return Err(format!("cannot do {}: {why}", task.name()));
-    }
-
     let published = hub::full_name(model).is_some() || model == worker::TONES;
     let voice = model == worker::TONES || hub::is_voice(model);
     let converter = hub::is_conversion(model);
@@ -213,6 +208,10 @@ fn fits(task: Task, model: &str) -> Result<(), String> {
             Task::Txt2Img | Task::Img2Img => "a model that draws",
         };
         return Err(format!("{model} {is}: {} needs {needs}", task.name()));
+    }
+    // Seed-VC is GPL-3.0, and an MIT build asked to convert with it says so before fetching.
+    if task == Task::Speech2Speech && !cfg!(feature = "gpl") && hub::needs_gpl(model) {
+        return Err(format!("cannot use {model}: {}", crate::cli::task::NO_GPL));
     }
     if task == Task::Img2Img && !voice {
         if let Some(why) = worker::look_at(model).no_picture_because {
@@ -551,18 +550,21 @@ mod tests {
         assert!(refused.contains("converts voices"), "{refused}");
         let refused = fits(Task::Txt2Img, "seed-vc").unwrap_err();
         assert!(refused.contains("converts voices"), "{refused}");
-        match Task::Speech2Speech.not_built_because() {
-            // An MIT build says why before it looks at the model at all.
-            Some(why) => {
+        match cfg!(feature = "gpl") {
+            true => assert!(fits(Task::Speech2Speech, "seed-vc").is_ok()),
+            // An MIT build says why before it fetches anything.
+            false => {
                 let refused = fits(Task::Speech2Speech, "seed-vc").unwrap_err();
-                assert!(refused.contains(why), "{refused}");
-            }
-            None => {
-                assert!(fits(Task::Speech2Speech, "seed-vc").is_ok());
-                let refused = fits(Task::Speech2Speech, "indextts").unwrap_err();
-                assert!(refused.contains("needs a converter"), "{refused}");
+                assert!(refused.contains(crate::cli::task::NO_GPL), "{refused}");
             }
         }
+        let refused = fits(Task::Speech2Speech, "indextts").unwrap_err();
+        assert!(refused.contains("needs a converter"), "{refused}");
+
+        // CosyVoice3 does both, in every build: it reads, and it converts.
+        assert!(fits(Task::Text2Speech, "cosyvoice").is_ok());
+        assert!(fits(Task::Speech2Speech, "cosyvoice").is_ok());
+        assert_eq!(task_for("cosyvoice", false), Task::Text2Speech);
     }
 
     /// A program for `task`, keeping its jobs in a directory of the calling test's own, with

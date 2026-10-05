@@ -35,11 +35,16 @@ the disk -- and a voice named that way opens the text2speech page on its own.
 
 ## Voice conversion
 
-Seed-VC v2 turns one recording into another voice, on the speech2speech page: a recording to
-convert, a recording of the voice to convert it to, and a clip out. It is **GPL-3.0**, so it is
-built only with the `gpl` feature (see [docs/seed_vc.md](docs/seed_vc.md)); a default build names
-the task and says why it cannot run it. `waifu -m seed-vc` fetches the package off the same two
-hubs.
+The speech2speech page turns one recording into another voice: a recording to convert, a
+recording of the voice to convert it to, and a clip out. Two models do it:
+
+- **Fun-CosyVoice3**, in every build: `waifu -task speech2speech -m cosyvoice`, the same package
+  that reads text. It changes whose voice it is and keeps the words, timing and accent (see
+  [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion)).
+- **Seed-VC v2**, which can convert the style as well. It is **GPL-3.0**, so it is built only with
+  the `gpl` feature (see [docs/seed_vc.md](docs/seed_vc.md)); a default build knows the name
+  `seed-vc` and says why it cannot run it. `waifu -m seed-vc` fetches the package off the same two
+  hubs.
 
 | name | model | published as |
 |---|---|---|
@@ -62,8 +67,8 @@ distilled release is for, seed 7:
 
 ## Run
 
-`waifu` asks three things in the terminal -- the task (txt2img, img2img, text2speech, or
-speech2speech in a `gpl` build), the model for it, and the device -- fetches the model under a
+`waifu` asks three things in the terminal -- the task (txt2img, img2img, text2speech or
+speech2speech), the model for it, and the device -- fetches the model under a
 progress bar if it is not on the disk yet, and then opens a page in a browser for that task:
 
 ```bash
@@ -80,12 +85,15 @@ the command line:
 ```bash
 $ waifu -m sdxl:wai -device cuda              # txt2img; img2img if -i names a picture
 $ waifu -m indextts                           # a voice: text2speech
+$ waifu -task speech2speech -m cosyvoice      # voice conversion, in every build
 $ waifu -m seed-vc                            # a converter: speech2speech, gpl builds only
 $ waifu -task img2img -m sdxl:noob -i cat.png
 ```
 
 ## Recent updates
 
+- [2026-10-04] Fun-CosyVoice3 converts voices on the speech2speech page, in every build:
+  `waifu -task speech2speech -m cosyvoice`. See [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion).
 - [2026-10-04] Seed-VC v2 has a page: speech2speech, in builds with the `gpl` feature. See
   [docs/seed_vc.md](docs/seed_vc.md).
 - [2026-10-02] Fun-CosyVoice3-0.5B-2512 is published, as `cosyvoice:v3` -- the second voice, Apache 2.0.

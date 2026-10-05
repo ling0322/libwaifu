@@ -96,6 +96,34 @@ word for word: happy, sad and angry, fast and slow, loud and soft, Peppa Pig, a 
 seventeen dialects. Those are what the model was taught; other wording is taken and is a guess. A
 style and a transcript are refused together, because upstream never combines them.
 
+## Voice conversion
+
+The same package converts one recording into the voice of another, as upstream's `inference_vc`
+does: the source's speech tokens are what is said, and the flow draws them continuing the
+reference -- its tokens, its mel, its speaker -- so the words and their timing are the source's and
+the voice is the reference's. The language model is not run. It is `impl Converter for
+CosyVoice3`, and the webui's speech2speech task in every build -- CosyVoice3 is not GPL:
+
+```bash
+waifu -task speech2speech -m cosyvoice
+```
+
+Upstream refuses a source over thirty seconds, which is as far as the speech tokenizer reads. A
+longer one is cut into pieces of at most that, each at the quietest 20 ms of its last eight
+seconds, so a cut falls between words; each piece is converted on its own and the pieces joined.
+The page's steps are the flow's Euler steps (10 by default). There is no style conversion -- the
+accent and pacing stay the source's -- so the page leaves out the box Seed-VC has for it.
+
+On the RTX 5060 Ti, upstream's `cross_lingual_prompt.wav` (13.75 s) into the voice of
+`zero_shot_prompt.wav`, 10 steps: 1.3 s; the same source three times over (41.9 s, two pieces):
+4.0 s. Speaker similarity by upstream's own CAMPPlus, and Whisper large-v3 on the result:
+
+| | to the reference | to the source | Whisper |
+| --- | --- | --- | --- |
+| source itself | 0.100 | 1 | -- |
+| converted, 13.8 s | 0.679 | 0.241 | the source's words exactly |
+| converted, 41.9 s | 0.694 | 0.250 | the source's words exactly, three times |
+
 ## What was found on the way
 
 - **CosyVoice's `campplus.onnx` is `funasr/campplus`.** Embeddings of one input agree to 4e-6, so
@@ -148,6 +176,6 @@ that is the first thing to change if it needs to be faster.
 
 ## Not here
 
-Streaming, voice conversion, fp16, and a place on the page to type the recording's transcript.
+Streaming, fp16, and a place on the page to type the recording's transcript.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
 are the zero-shot path's with a different prefix.

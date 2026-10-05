@@ -421,11 +421,17 @@ fn conversion_settings(
     let source = recording("source", "a recording to convert")?;
     let reference = recording("reference", "a recording of the voice to convert it to")?;
 
+    // Refused here rather than in the worker, where it would be a job that waited its turn first.
+    let style = asked.get("style").and_then(Value::as_bool).unwrap_or(false);
+    if let (true, Some(why)) = (style, &converter.no_style_because) {
+        return Err(why.clone());
+    }
+
     Ok(json!({
         "source": source,
         "reference": reference,
         "steps": whole(asked.get("steps"), converter.defaults.steps).clamp(1, 100),
-        "style": asked.get("style").and_then(Value::as_bool).unwrap_or(false),
+        "style": style,
         "seed": seed(asked.get("seed")).to_string(),
         "converter": converter.name,
     }))

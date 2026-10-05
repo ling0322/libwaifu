@@ -690,7 +690,23 @@ pub fn is_voice(name: &str) -> bool {
 /// Whether a published name turns one recording into another: the speech2speech task. False for
 /// a path, as [`is_voice`] is.
 pub fn is_conversion(name: &str) -> bool {
-    published(name).is_some_and(|model| model.kind == Kind::Conversion)
+    published(name).is_some_and(converts)
+}
+
+/// Voices whose package converts as well as reads. CosyVoice3's flow draws a recording's speech
+/// tokens as readily as its language model's, so one package does both: `-m` alone reads, and
+/// speech2speech lists it too.
+const CONVERTING_VOICES: &[&str] = &["cosyvoice:v3"];
+
+/// Whether a published model can be run for speech2speech.
+fn converts(model: &Published) -> bool {
+    model.kind == Kind::Conversion || CONVERTING_VOICES.contains(&model.name)
+}
+
+/// Whether a published name is Seed-VC, the converter that is GPL-3.0 and runs only in a build
+/// with the `gpl` feature. Known by name in every build, so an MIT one can say why it will not.
+pub fn needs_gpl(name: &str) -> bool {
+    published(name).is_some_and(|model| model.name.starts_with("seed-vc:"))
 }
 
 /// One model a screen can offer, and what is on the disk for it.
@@ -723,18 +739,24 @@ pub fn listed_voices() -> Vec<Listed> {
     listed_of(Kind::Voice)
 }
 
-/// And the converters, the same way again: `seed-vc`.
+/// And the converters, the same way again -- those this build can run: `cosyvoice` in every
+/// build, and `seed-vc` in one with the `gpl` feature.
 pub fn listed_conversions() -> Vec<Listed> {
-    listed_of(Kind::Conversion)
+    listed_where(|model| converts(model) && (cfg!(feature = "gpl") || !needs_gpl(model.name)))
 }
 
 /// Every unversioned name of one kind, which is every alias: each published model has one, and
 /// counting colons would not do -- a voice's versioned name has as many as a picture's alias.
 fn listed_of(kind: Kind) -> Vec<Listed> {
+    listed_where(|model| model.kind == kind)
+}
+
+/// Every unversioned name whose model `wanted` says yes to.
+fn listed_where(wanted: impl Fn(&Published) -> bool) -> Vec<Listed> {
     names()
         .into_iter()
         .filter(|name| ALIASES.iter().any(|(alias, _)| alias == name))
-        .filter(|name| published(name).is_some_and(|model| model.kind == kind))
+        .filter(|name| published(name).is_some_and(&wanted))
         .map(|name| Listed {
             name,
             full_name: full_name(name).unwrap_or(""),
@@ -1662,8 +1684,18 @@ mod tests {
         assert!(!is_conversion("indextts"));
         assert!(!listed().iter().any(|model| model.name == "seed-vc"));
         assert!(!listed_voices().iter().any(|voice| voice.name == "seed-vc"));
+        assert!(needs_gpl("seed-vc"));
+
+        // CosyVoice3 is a voice that converts as well, and needs nothing but this build for it.
+        assert!(is_voice("cosyvoice") && is_conversion("cosyvoice"));
+        assert!(!needs_gpl("cosyvoice"));
+
+        // What speech2speech lists is what this build can run.
         let converters: Vec<&str> = listed_conversions().iter().map(|one| one.name).collect();
-        assert_eq!(converters, vec!["seed-vc"]);
+        match cfg!(feature = "gpl") {
+            true => assert_eq!(converters, vec!["cosyvoice", "seed-vc"]),
+            false => assert_eq!(converters, vec!["cosyvoice"]),
+        }
     }
 
     #[test]
