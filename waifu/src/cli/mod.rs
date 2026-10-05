@@ -29,6 +29,7 @@
 //! and then open a page in a browser for that one task.
 
 mod args;
+mod config;
 mod hub;
 mod task;
 mod tui;

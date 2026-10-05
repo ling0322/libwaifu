@@ -17,7 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! A question with two answers, as a box that opens over whatever screen wanted it.
+//! A question, as a box that opens over whatever screen wanted it: one with two answers
+//! ([`Confirm`]), or a line to type ([`Input`]).
 //!
 //! The same shape as the file picker next door and for the same reason: no terminal, no loop, no
 //! thread. The host keeps one in an `Option`, hands it the keys while it is there, gives it an
@@ -25,9 +26,9 @@
 //!
 //! The drawing screen that used to live beside this asked for numbers and text in boxes of the
 //! same kind. That screen is a page in a browser now, and what is left to ask in the terminal is
-//! whether somebody is sure.
+//! whether somebody is sure, and where models go.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -35,6 +36,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::cli::tui::centred;
+use crate::cli::tui::files::tail;
 
 /// How wide the box is drawn, before the room it is given decides.
 ///
@@ -172,6 +174,113 @@ impl Confirm {
     }
 }
 
+/// How wide a box with a line to type in is drawn: a path is long, and the part of it that says
+/// which one it is comes last.
+const INPUT_WIDTH: u16 = 78;
+
+/// A line of text to type, for something that has no list to pick it from -- a directory that
+/// does not exist yet, for one.
+///
+/// It starts holding whatever it is given, which is the answer as it stands, so that changing a
+/// little of it is a little typing. The cursor is always at the end: what is typed into it is a
+/// path, and paths are mended from the end.
+pub struct Input {
+    title: String,
+    /// What is said under the line, wrapped to the box.
+    body: Option<String>,
+    text: String,
+}
+
+impl Input {
+    pub fn ask(title: &str, text: &str) -> Input {
+        Input {
+            title: title.to_string(),
+            body: None,
+            text: text.to_string(),
+        }
+    }
+
+    pub fn saying(mut self, body: &str) -> Input {
+        self.body = Some(body.to_string());
+        self
+    }
+
+    pub fn key(&mut self, key: KeyEvent) -> Answer<String> {
+        match key.code {
+            KeyCode::Esc => return Answer::Cancelled,
+            KeyCode::Enter => return Answer::Given(self.text.trim().to_string()),
+            KeyCode::Backspace => {
+                self.text.pop();
+            }
+            // Ctrl-u, as in a shell: the whole line at once, for typing a different path rather
+            // than mending this one.
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.text.clear()
+            }
+            KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+            KeyCode::Char(character) => self.text.push(character),
+            _ => {}
+        }
+
+        Answer::Open
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let width = INPUT_WIDTH.min(area.width);
+        let body = match &self.body {
+            Some(body) => wrap(body, width.saturating_sub(4) as usize),
+            None => Vec::new(),
+        };
+        let said = match body.len() {
+            0 => 0,
+            lines => lines as u16 + 1,
+        };
+        let box_area = centred(area, INPUT_WIDTH, 4 + said);
+        frame.render_widget(Clear, box_area);
+
+        let outline = Block::bordered()
+            .border_type(BorderType::Thick)
+            .border_style(Style::new().fg(Color::Yellow))
+            .title(Span::styled(
+                format!(" {} ", self.title),
+                Style::new().fg(Color::Yellow),
+            ));
+        let inner = outline.inner(box_area);
+        frame.render_widget(outline, box_area);
+        if inner.height < 2 + said || inner.width < 2 {
+            return;
+        }
+
+        let [told, line, foot] = Layout::vertical([
+            Constraint::Length(said),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        let lines: Vec<Line> = body.into_iter().map(Line::from).collect();
+        frame.render_widget(Paragraph::new(lines), told);
+
+        // The end of the line and a cursor after it, which is where the typing goes.
+        let shown = tail(&self.text, inner.width as usize - 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(shown),
+                Span::styled(" ", Style::default().bg(Color::Cyan)),
+            ])),
+            line,
+        );
+
+        frame.render_widget(
+            Paragraph::new(Line::from(
+                "enter takes it   ctrl-u clears   esc leaves it as it was".fg(Color::DarkGray),
+            ))
+            .centered(),
+            foot,
+        );
+    }
+}
+
 /// `text` broken between words into lines no wider than `width`. A word longer than that is
 /// left whole on a line of its own and cut off by the box, which is less wrong than splitting it.
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -197,7 +306,6 @@ mod tests {
     use super::*;
 
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::KeyModifiers;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -271,11 +379,50 @@ mod tests {
     #[test]
     fn a_box_with_no_room_for_it_still_draws() {
         let confirm = Confirm::ask("delete sdxl:base?").saying("and everything in it");
+        let input = Input::ask("model folder", "/data/models").saying("and where it goes");
         for (width, height) in [(1u16, 1u16), (6, 2), (20, 3)] {
             let mut terminal = ratatui::Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|frame| confirm.render(frame, frame.area()))
+                .draw(|frame| {
+                    confirm.render(frame, frame.area());
+                    input.render(frame, frame.area());
+                })
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn a_line_starts_as_it_was_given_and_is_mended_from_the_end() {
+        let mut input = Input::ask("model folder", "/data/models");
+        input.key(press(KeyCode::Backspace));
+        input.key(press(KeyCode::Char('z')));
+        assert_eq!(
+            input.key(press(KeyCode::Enter)),
+            Answer::Given("/data/modelz".to_string())
+        );
+
+        // Ctrl-u is the whole line, and a control key is not a letter typed into it.
+        let mut input = Input::ask("model folder", "/data/models");
+        input.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        input.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        input.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            input.key(press(KeyCode::Enter)),
+            Answer::Given(String::new())
+        );
+
+        let mut input = Input::ask("model folder", "/data/models");
+        assert_eq!(input.key(press(KeyCode::Esc)), Answer::Cancelled);
+    }
+
+    #[test]
+    fn a_line_shows_what_it_holds_and_how_to_give_it() {
+        let input = Input::ask("model folder", "/data/models").saying("Fetched models go here.");
+        let screen = drawn(|frame| input.render(frame, frame.area()));
+
+        assert!(screen.contains("model folder"), "{screen}");
+        assert!(screen.contains("/data/models"), "{screen}");
+        assert!(screen.contains("Fetched models go here."), "{screen}");
+        assert!(screen.contains("enter takes it"), "{screen}");
     }
 }

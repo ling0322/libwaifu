@@ -28,8 +28,12 @@
 //! a channel. The screen stays live while it happens: a download that cannot be watched is
 //! indistinguishable from one that has hung, and one that cannot be stopped is a download somebody
 //! ends with ctrl-c and a `.part` file.
+//!
+//! Under the list is where things are: the directory models are fetched into, which `p` changes
+//! and `config.toml` keeps, and the directory the model under the cursor is in where any of it is
+//! on the disk -- so that somebody who wants the files, or wants the room back, can find them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -42,10 +46,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::cli::hub;
+use crate::cli::config;
+use crate::cli::hub::{self, Said};
 use crate::cli::task::Task;
-use crate::cli::tui::ask::{Answer, Confirm};
-use crate::cli::tui::files::{self, FilePicker};
+use crate::cli::tui::ask::{Answer, Confirm, Input};
+use crate::cli::tui::files::{self, tail, FilePicker};
 use crate::cli::tui::{bar, bordered, gigabytes, heading, quits, row_style, Picked, Step};
 
 type Error = Box<dyn std::error::Error>;
@@ -76,6 +81,8 @@ enum Entry {
         /// Whether its author marked it not for all audiences, which is said beside it and asked
         /// about before it is used.
         explicit: bool,
+        /// The directory it is in, where any of it is on the disk.
+        at: Option<PathBuf>,
     },
     /// Not a model but a way out of the list: a manifest already somewhere on the disk, which is
     /// where anything exported here rather than published lives.
@@ -140,6 +147,7 @@ fn entries_for(task: Task) -> Vec<Entry> {
             cached: model.cached,
             bytes: model.bytes,
             explicit: model.explicit,
+            at: hub::local_directory(model.name),
         })
         .collect();
 
@@ -221,6 +229,9 @@ struct Choices {
     entries: Vec<Entry>,
     /// Where the cursor is.
     selected: usize,
+    /// Where models are fetched into and who said so, or why that cannot be told -- a settings
+    /// file that does not read, most likely, which is said on the screen rather than guessed past.
+    directory: Result<(PathBuf, Said), String>,
 }
 
 impl Choices {
@@ -240,20 +251,78 @@ impl Choices {
     /// Called after anything that changes what is on disk -- a fetch that stopped partway, a model
     /// deleted -- rather than working the new state out from what just happened: the row says
     /// what is there, and the disk is the only thing that knows.
+    ///
+    /// The directory is asked for again too, since a new one is the other thing that changes what
+    /// every row says.
     fn read_the_cache_again(&mut self) {
+        self.directory = model_directory();
         for entry in &mut self.entries {
             if let Entry::Published {
                 name,
                 cached,
                 bytes,
+                at,
                 ..
             } = entry
             {
                 *cached = hub::is_cached(name);
                 *bytes = hub::cached_bytes(name);
+                *at = hub::local_directory(name);
             }
         }
     }
+}
+
+/// [`hub::model_directory`], with its error said the way the screen says one.
+fn model_directory() -> Result<(PathBuf, Said), String> {
+    hub::model_directory().map_err(|error| error.to_string())
+}
+
+/// The box that changes where models are fetched into, holding the directory as it stands.
+fn ask_for_a_directory(now: &Path) -> Input {
+    let file = config::path()
+        .map(|file| file.display().to_string())
+        .unwrap_or_else(|| config::FILE_NAME.to_string());
+    let default = hub::default_directory()
+        .map(|directory| directory.display().to_string())
+        .unwrap_or_else(|_| "the default".to_string());
+
+    Input::ask("where models are fetched into", &now.display().to_string()).saying(&format!(
+        "Models fetched from now on go here; ones already fetched stay where they are. Kept in \
+         {file}. Left empty, it goes back to {default}."
+    ))
+}
+
+/// What was typed into that box, as a directory to write down: `~` is the home directory, as it
+/// is in a shell, and anything else relative is relative to where the tool was started, which is
+/// where somebody typing it is standing. Written down whole, so that it does not depend on that.
+fn typed_directory(typed: &str) -> Result<PathBuf, String> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    let path = match (typed.strip_prefix('~'), home) {
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            PathBuf::from(home).join(rest.trim_start_matches(['/', '\\']))
+        }
+        _ => PathBuf::from(typed),
+    };
+    std::path::absolute(&path).map_err(|error| format!("{typed}: {error}"))
+}
+
+/// Makes `directory` the one models are fetched into, or, given an empty line, puts back the
+/// default. The directory is made here, so that one that cannot be is said now rather than at the
+/// first download into it.
+fn change_directory(typed: &str) -> Result<(), String> {
+    if typed.is_empty() {
+        return config::set_model_dir(None)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+    }
+
+    let directory = typed_directory(typed)?;
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("cannot make {}: {error}", directory.display()))?;
+    config::set_model_dir(Some(&directory))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Runs the list until a model is chosen and on the disk, or somebody goes back or leaves.
@@ -262,6 +331,7 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
         task,
         entries: entries_for(task),
         selected: 0,
+        directory: model_directory(),
     };
 
     // Something already on disk is the one most likely to be wanted, so start there.
@@ -276,6 +346,8 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
     let mut browsing: Option<FilePicker> = None;
     // What the question on screen is about, kept beside the question.
     let mut asking: Option<(Asking, Confirm)> = None;
+    // The box that changes where models are fetched into, while it is up.
+    let mut editing: Option<Input> = None;
 
     loop {
         terminal.draw(|frame| {
@@ -285,6 +357,9 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
             }
             if let Some((_, question)) = &asking {
                 question.render(frame, frame.area());
+            }
+            if let Some(input) = &editing {
+                input.render(frame, frame.area());
             }
         })?;
 
@@ -353,6 +428,27 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
             continue;
         }
 
+        // The same for the line a directory is typed into, where `q` is a letter and not a way out.
+        if let Some(input) = &mut editing {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(Step::Quit);
+            }
+
+            match input.key(key) {
+                Answer::Open => {}
+                Answer::Cancelled => editing = None,
+                Answer::Given(typed) => {
+                    editing = None;
+                    if let Err(gone_wrong) = change_directory(&typed) {
+                        failure = Some(gone_wrong);
+                    }
+                    // Every row is asked again: what is on the disk is what is in the new place.
+                    choices.read_the_cache_again();
+                }
+            }
+            continue;
+        }
+
         // While the file picker is up it has the keys, except the one that always ends the
         // program. Nothing behind it is running -- a fetch and the picker cannot both be on.
         if let Some(open) = &mut browsing {
@@ -413,6 +509,26 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
                     Entry::OnDisk => {
                         failure =
                             Some("that row is a file of your own, not a fetched model".into());
+                    }
+                }
+            }
+            // Where models are fetched into. Not while the environment says, since that wins over
+            // the file and a directory typed here would be written down and then not used.
+            KeyCode::Char('p') => {
+                failure = None;
+                match &choices.directory {
+                    Ok((_, Said::Environment)) => {
+                        failure = Some(format!(
+                            "{} is set, and it decides; unset it to choose here",
+                            Said::Environment.describe()
+                        ));
+                    }
+                    Ok((now, _)) => editing = Some(ask_for_a_directory(now)),
+                    // Asked anyway: a file that does not read is mended by writing a good one.
+                    Err(_) => {
+                        editing = Some(ask_for_a_directory(
+                            &hub::default_directory().unwrap_or_default(),
+                        ))
                     }
                 }
             }
@@ -615,10 +731,11 @@ fn listen(doing: &mut Doing) -> Option<Word> {
 }
 
 fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&str>) {
-    let [top, told, list, foot] = Layout::vertical([
+    let [top, told, list, folders, foot] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
+        Constraint::Length(4),
         Constraint::Length(3),
     ])
     .areas(frame.area());
@@ -692,6 +809,7 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
 
     let title = format!(" {what}s ");
     frame.render_widget(Paragraph::new(rows).block(bordered(&title)), list);
+    draw_folders(frame, folders, choices);
 
     let enter = match choices.current() {
         Entry::OnDisk => "look for one",
@@ -699,6 +817,47 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
         _ => "fetch and use",
     };
     draw_foot(frame, foot, doing, enter, failure);
+}
+
+/// Where models go, and where the one under the cursor is.
+///
+/// Paths are cut from the front where they do not fit, since the end of a path is the part that
+/// says which one it is.
+fn draw_folders(frame: &mut Frame, area: Rect, choices: &Choices) {
+    const LABEL: usize = 16;
+    let width = (area.width as usize).saturating_sub(2 + 1 + LABEL);
+    let label = |text: &str| Span::raw(format!(" {text:<LABEL$}")).dim();
+
+    let fetched_into = match &choices.directory {
+        Ok((directory, said)) => {
+            let said = format!("  ({})", said.describe());
+            let room = width.saturating_sub(said.chars().count());
+            Line::from(vec![
+                label("fetched into"),
+                Span::raw(tail(&directory.display().to_string(), room)),
+                Span::raw(said).dim(),
+            ])
+        }
+        Err(message) => Line::from(vec![
+            label("fetched into"),
+            Span::styled(tail(message, width), Style::default().fg(Color::Red)),
+        ]),
+    };
+
+    let this_one = match choices.current() {
+        Entry::Published { at: Some(at), .. } => Span::raw(tail(&at.display().to_string(), width)),
+        Entry::Published { .. } => Span::raw("not on the disk yet").dim(),
+        Entry::OnDisk => Span::raw("wherever you put it").dim(),
+    };
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            fetched_into,
+            Line::from(vec![label("this one is in"), this_one]),
+        ])
+        .block(bordered(" folders ")),
+        area,
+    );
 }
 
 /// The bar at the foot: the fetch while there is one, and otherwise the keys or what went wrong.
@@ -789,7 +948,8 @@ fn draw_foot(
                 )),
                 None => Line::from(
                     format!(
-                        " up/down choose   enter {enter}   d delete   esc back   q quit"
+                        " up/down choose   enter {enter}   d delete   p model folder   esc back   \
+                         q quit"
                     )
                     .dim(),
                 ),
@@ -864,6 +1024,7 @@ mod tests {
             cached,
             bytes: if cached { 6_970_000_000 } else { 0 },
             explicit,
+            at: cached.then(|| PathBuf::from(format!("/data/models/{}", name.replace(':', "--")))),
         }
     }
 
@@ -877,6 +1038,7 @@ mod tests {
                 Entry::OnDisk,
             ],
             selected: 0,
+            directory: Ok((PathBuf::from("/data/models"), Said::Config)),
         }
     }
 
@@ -1064,6 +1226,64 @@ mod tests {
             picked.model,
             "/home/someone/models/wai-illustrious-v17.yaml"
         );
+    }
+
+    #[test]
+    fn the_folders_say_where_models_go_and_where_this_one_is() {
+        let mut choices = choices(Task::Txt2Img);
+        let drawn = screen(&choices);
+        assert!(drawn.contains("fetched into"), "{drawn}");
+        assert!(drawn.contains("/data/models  (config.toml)"), "{drawn}");
+        assert!(drawn.contains("/data/models/sdxl--wai"), "{drawn}");
+        assert!(drawn.contains("p model folder"), "{drawn}");
+
+        choices.selected = 2;
+        let drawn = screen(&choices);
+        assert!(drawn.contains("not on the disk yet"), "{drawn}");
+
+        choices.selected = 3;
+        let drawn = screen(&choices);
+        assert!(drawn.contains("wherever you put it"), "{drawn}");
+
+        choices.directory = Ok((PathBuf::from("/x"), Said::Environment));
+        assert!(screen(&choices).contains("(WAIFU_CACHE)"));
+        choices.directory = Ok((PathBuf::from("/x"), Said::Default));
+        assert!(screen(&choices).contains("(default)"));
+    }
+
+    #[test]
+    fn a_settings_file_that_does_not_read_is_said_and_not_guessed_past() {
+        let mut choices = choices(Task::Txt2Img);
+        choices.directory = Err("config.toml is not valid TOML".to_string());
+        let drawn = screen(&choices);
+        assert!(drawn.contains("config.toml is not valid TOML"), "{drawn}");
+    }
+
+    #[test]
+    fn a_long_directory_keeps_its_end() {
+        let mut choices = choices(Task::Txt2Img);
+        let long = format!("/{}/models-end", "deep".repeat(60));
+        choices.directory = Ok((PathBuf::from(&long), Said::Config));
+        let drawn = screen(&choices);
+        assert!(drawn.contains("models-end  (config.toml)"), "{drawn}");
+        assert!(drawn.contains('…'), "{drawn}");
+    }
+
+    #[test]
+    fn a_typed_directory_is_written_down_whole() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(typed_directory("~/models").unwrap(), home.join("models"));
+        assert_eq!(typed_directory("~").unwrap(), home);
+        assert_eq!(
+            typed_directory("models").unwrap(),
+            std::env::current_dir().unwrap().join("models")
+        );
+        assert_eq!(
+            typed_directory("/data/models").unwrap(),
+            PathBuf::from("/data/models")
+        );
+        // Somebody's name, not somebody's home.
+        assert!(typed_directory("~someone").unwrap().ends_with("~someone"));
     }
 
     #[test]

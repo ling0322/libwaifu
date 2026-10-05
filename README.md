@@ -84,6 +84,16 @@ $ waifu -m seed-vc                            # a converter: speech2speech, gpl 
 $ waifu -task img2img -m sdxl:noob -i cat.png
 ```
 
+Fetched models go into `~/.cache/libwaifu/models` (`%LOCALAPPDATA%\libwaifu\models` on Windows).
+The model screen shows where that is and where each model is, and `p` there changes it. The
+choice is kept as `model_dir` in `config.toml`: next to `waifu.exe` on Windows, and in
+`~/.config/libwaifu/` everywhere else. A relative `model_dir` is relative to the file, and
+`WAIFU_CACHE`, when it is set, wins over both.
+
+```toml
+model_dir = 'D:\models'
+```
+
 ## Recent updates
 
 - [2026-10-04] Seed-VC v2 has a page: speech2speech, in builds with the `gpl` feature. See

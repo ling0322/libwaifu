@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 use hf_hub::progress::{DownloadEvent, Progress as Reported, ProgressEvent, ProgressHandler};
 use hf_hub::HFClientSync;
 
+use crate::cli::config;
 use crate::Manifest;
 
 type Error = Box<dyn std::error::Error>;
@@ -624,6 +625,16 @@ fn cached_bytes_in(published: &Published, cache: &Path) -> u64 {
         .sum()
 }
 
+/// The directory a published model is fetched into, where any of it is on the disk: what the model
+/// screen shows beside the row, so that somebody can go and find the files.
+pub fn local_directory(name: &str) -> Option<PathBuf> {
+    let (published, cache) = (published(name)?, cache_directory().ok()?);
+    match cached_bytes_in(published, &cache) {
+        0 => None,
+        _ => Some(cache.join(published.repo.replace('/', "--"))),
+    }
+}
+
 /// Throw away what has been fetched of a named model, packages and half-packages alike.
 ///
 /// The whole directory the model was fetched into, which is its own and holds nothing else: the
@@ -867,15 +878,49 @@ fn files_named_by(manifest: &Path) -> Result<Vec<String>, Error> {
     Ok(files)
 }
 
-/// Where fetched models are kept.
-///
-/// `WAIFU_CACHE` overrides it. Otherwise this is the ordinary cache directory for the platform,
-/// which is where something re-downloadable belongs: losing it costs a download and nothing else.
-fn cache_directory() -> Result<PathBuf, Error> {
-    if let Some(directory) = env::var_os(CACHE_ENV) {
-        return Ok(PathBuf::from(directory));
-    }
+/// Which of the three places that can name the model directory named it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Said {
+    /// `WAIFU_CACHE`, which wins over everything: it is what a script sets for one run.
+    Environment,
+    /// `model_dir` in `config.toml`, which is what the model screen writes.
+    Config,
+    /// Nobody: the platform's cache directory.
+    Default,
+}
 
+impl Said {
+    /// How the model screen says where the directory came from.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Said::Environment => CACHE_ENV,
+            Said::Config => config::FILE_NAME,
+            Said::Default => "default",
+        }
+    }
+}
+
+/// Where fetched models are kept, and who said so.
+///
+/// `WAIFU_CACHE` first, then `model_dir` in `config.toml`, and otherwise the ordinary cache
+/// directory for the platform, which is where something re-downloadable belongs: losing it costs a
+/// download and nothing else.
+pub fn model_directory() -> Result<(PathBuf, Said), Error> {
+    if let Some(directory) = env::var_os(CACHE_ENV) {
+        return Ok((PathBuf::from(directory), Said::Environment));
+    }
+    if let Some(directory) = config::model_dir()? {
+        return Ok((directory, Said::Config));
+    }
+    Ok((default_directory()?, Said::Default))
+}
+
+fn cache_directory() -> Result<PathBuf, Error> {
+    Ok(model_directory()?.0)
+}
+
+/// Where fetched models go when neither the environment nor the settings file says.
+pub fn default_directory() -> Result<PathBuf, Error> {
     let base = if cfg!(windows) {
         env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else {
