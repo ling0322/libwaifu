@@ -77,8 +77,6 @@ fn print_usage() {
     }
     eprintln!();
     eprintln!("Run 'waifu COMMAND -h' for more information on a command.");
-    eprintln!();
-    eprintln!("libwaifu {REVISION}, licensed {}.", crate::LICENSE);
 }
 
 /// Whether what was typed is a request for this usage rather than for a command.

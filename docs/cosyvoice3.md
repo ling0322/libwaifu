@@ -102,7 +102,7 @@ The same package converts one recording into the voice of another, as upstream's
 does: the source's speech tokens are what is said, and the flow draws them continuing the
 reference -- its tokens, its mel, its speaker -- so the words and their timing are the source's and
 the voice is the reference's. The language model is not run. It is `impl Converter for
-CosyVoice3`, and the webui's speech2speech task in every build -- CosyVoice3 is not GPL:
+CosyVoice3`, and the webui's speech2speech task:
 
 ```bash
 waifu -task speech2speech -m cosyvoice
@@ -112,7 +112,7 @@ Upstream refuses a source over thirty seconds, which is as far as the speech tok
 longer one is cut into pieces of at most that, each at the quietest 20 ms of its last eight
 seconds, so a cut falls between words; each piece is converted on its own and the pieces joined.
 The page's steps are the flow's Euler steps (10 by default). There is no style conversion -- the
-accent and pacing stay the source's -- so the page leaves out the box Seed-VC has for it.
+accent and pacing stay the source's -- so the page offers no box for it.
 
 On the RTX 5060 Ti, upstream's `cross_lingual_prompt.wav` (13.75 s) into the voice of
 `zero_shot_prompt.wav`, 10 steps: 1.3 s; the same source three times over (41.9 s, two pieces):

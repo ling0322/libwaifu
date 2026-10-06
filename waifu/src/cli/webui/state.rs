@@ -66,9 +66,9 @@ pub const VOCODER_RATIO: f64 = 1.0;
 /// end, which it reaches when there is a clip.
 const HELD: f64 = 0.99;
 
-/// And for a conversion, as shares of the whole. Measured on Seed-VC over 36 seconds on one card:
-/// re-saying the source in the reference's manner, where that was asked for, is about two fifths
-/// of the run; of the rest, the vocoder takes a little more than the steps it follows do.
+/// And for a conversion, as shares of the whole, measured over 36 seconds on one card: re-saying
+/// the source in the reference's manner, where that was asked for, is about two fifths of the
+/// run; of the rest, the vocoder takes a little more than the steps it follows do.
 const SAYING: f64 = 0.4;
 const DRAWING: f64 = 0.45;
 

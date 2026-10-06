@@ -31,14 +31,9 @@ pub enum Task {
     Txt2Img,
     Img2Img,
     Text2Speech,
-    /// Voice conversion: CosyVoice3's in every build, and Seed-VC's -- which is GPL-3.0 -- in a
-    /// build with the `gpl` feature.
+    /// Voice conversion: one recording said again in the voice of another.
     Speech2Speech,
 }
-
-/// Why an MIT build will not run Seed-VC, said wherever it is asked for.
-pub const NO_GPL: &str = "Seed-VC is GPL-3.0 and this build is MIT: build with `--features gpl` \
-     (CMake: -DENABLE_GPL=ON) to have it, or convert with cosyvoice, which every build has";
 
 impl Task {
     /// Every task, in the order the terminal lists them and the usage names them.
@@ -113,10 +108,8 @@ mod tests {
     }
 
     #[test]
-    fn voice_conversion_is_a_task_in_every_build() {
-        // CosyVoice3 converts in an MIT build; only Seed-VC needs the `gpl` feature, and says so.
+    fn voice_conversion_is_a_task() {
         assert_eq!(Task::named("speech2speech"), Some(Task::Speech2Speech));
         assert!(Task::ALL.contains(&Task::Speech2Speech));
-        assert!(NO_GPL.contains("GPL-3.0") && NO_GPL.contains("--features gpl"));
     }
 }

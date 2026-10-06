@@ -49,7 +49,7 @@ use crate::flint::Tensor;
 use crate::indextts::{self, IndexTts};
 use crate::wav;
 use crate::{
-    from_rgb8, to_rgb8, Anima, ConversionDefaults, ConversionOptions, Converter,
+    from_rgb8, to_rgb8, Anima, ConversionOptions, Converter,
     GenerationDefaults, GenerationOptions, GenerationProgress, Krea2, Manifest, QwenImage, Sdxl,
     SpeechOptions, SpeechProgress, Tones, Voice,
 };
@@ -91,19 +91,6 @@ const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 cannot start from
 /// fetched: it is in the binary. Only ever had by asking for it with `-m tones` -- it makes a
 /// noise where the syllables are, which is for checking the page and not for listening to.
 pub const TONES: &str = "tones";
-
-/// The `model.type` of a Seed-VC package, the one converter there is.
-///
-/// Spelled here rather than read from `seed_vc`, which an MIT build does not have: what this file
-/// needs is to recognise the package -- so that `-m` on one asks for speech2speech, and an MIT
-/// build can say why it will not read it -- and that is a word, not the model.
-const SEED_VC_TYPE: &str = "seed_vc";
-
-/// What Seed-VC v2 is called, starts at and writes, for the screen before its package is read: the
-/// same three things [`look_at_voice`] says of a voice from its kind.
-const SEED_VC_NAME: &str = "Seed-VC v2";
-const SEED_VC_DEFAULTS: ConversionDefaults = ConversionDefaults { steps: 30 };
-const SEED_VC_RATE: u32 = 22_050;
 
 /// How many sizes a model has to name before its list is used instead of the one above.
 ///
@@ -486,30 +473,15 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
 /// The converter `asked` names, as the screen describes it, without reading any of it: what
 /// [`look_at_voice`] is for a voice.
 pub fn look_at_converter(asked: &str) -> ChosenConverter {
-    let path = on_disk(asked);
-    // As a voice is: by the manifest where there is one, and by its family before it is fetched.
-    let kind = path
-        .as_deref()
-        .and_then(converter_kind)
-        .or_else(|| published_converter_kind(asked));
-    let (kind_name, defaults, rate, no_style_because) = match kind {
-        Some(ConverterKind::CosyVoice3) => (
-            CosyVoice3::NAME,
-            CosyVoice3::CONVERSION_DEFAULTS,
-            cosyvoice3::RATE,
-            Some(CosyVoice3::NO_STYLE_CONVERSION),
-        ),
-        _ => (SEED_VC_NAME, SEED_VC_DEFAULTS, SEED_VC_RATE, None),
-    };
-
+    // CosyVoice3 is the one converter there is, so there is no kind to tell apart yet.
     ChosenConverter {
         name: asked.to_string(),
-        full_name: hub::full_name(asked).unwrap_or(kind_name).to_string(),
-        on_disk: path.is_some(),
+        full_name: hub::full_name(asked).unwrap_or(CosyVoice3::NAME).to_string(),
+        on_disk: on_disk(asked).is_some(),
         in_memory: false,
-        defaults,
-        rate,
-        no_style_because: no_style_because.map(str::to_string),
+        defaults: CosyVoice3::CONVERSION_DEFAULTS,
+        rate: cosyvoice3::RATE,
+        no_style_because: Some(CosyVoice3::NO_STYLE_CONVERSION.to_string()),
     }
 }
 
@@ -523,7 +495,6 @@ pub fn is_a_converter(asked: &str) -> bool {
 /// The models a package can convert voices with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConverterKind {
-    SeedVc,
     CosyVoice3,
 }
 
@@ -531,17 +502,7 @@ enum ConverterKind {
 fn converter_kind(path: &Path) -> Option<ConverterKind> {
     let manifest = Manifest::open(path).ok()?;
     match manifest.section("model").ok()?.get_str("type").ok()? {
-        SEED_VC_TYPE => Some(ConverterKind::SeedVc),
         CosyVoice3::MODEL_TYPE => Some(ConverterKind::CosyVoice3),
-        _ => None,
-    }
-}
-
-/// Which converter a published name is, by the family its versioned name starts with.
-fn published_converter_kind(asked: &str) -> Option<ConverterKind> {
-    match hub::published_name(asked)?.split(':').next()? {
-        "seed-vc" => Some(ConverterKind::SeedVc),
-        "cosyvoice" => Some(ConverterKind::CosyVoice3),
         _ => None,
     }
 }
@@ -607,7 +568,7 @@ fn load_converter(shared: &Shared, asked: &str) -> Result<Box<dyn Converter>, Er
     )?;
     let Some(kind) = converter_kind(&path) else {
         return Err(format!(
-            "{asked} is not a converter: its manifest is neither Seed-VC's nor CosyVoice3's"
+            "{asked} is not a converter: its manifest is not CosyVoice3's"
         )
         .into());
     };
@@ -620,7 +581,6 @@ fn load_converter(shared: &Shared, asked: &str) -> Result<Box<dyn Converter>, Er
 
     let manifest = Manifest::open(&path)?;
     match kind {
-        ConverterKind::SeedVc => open_seed_vc(&manifest, shared.runtime()),
         ConverterKind::CosyVoice3 => {
             let runtime = shared.runtime();
             Ok(Box::new(CosyVoice3::from_manifest(
@@ -630,23 +590,6 @@ fn load_converter(shared: &Shared, asked: &str) -> Result<Box<dyn Converter>, Er
             )?))
         }
     }
-}
-
-/// Seed-VC, read onto the device: the one place an MIT file reaches into the GPL port, and only
-/// in a build that has it -- as FFmpeg's filter table names its GPL filters under `--enable-gpl`.
-#[cfg(feature = "gpl")]
-fn open_seed_vc(manifest: &Manifest, runtime: Runtime) -> Result<Box<dyn Converter>, Error> {
-    Ok(Box::new(crate::seed_vc::SeedVc::from_manifest(
-        runtime.device(),
-        runtime.residency(),
-        manifest,
-    )?))
-}
-
-/// What an MIT build says instead: the same refusal `-task speech2speech` is given.
-#[cfg(not(feature = "gpl"))]
-fn open_seed_vc(_: &Manifest, _: Runtime) -> Result<Box<dyn Converter>, Error> {
-    Err(crate::cli::task::NO_GPL.into())
 }
 
 /// What a kind of model implies for the screen before any of its weights are read: what to ask
@@ -1452,7 +1395,7 @@ mod tests {
     }
 
     /// A converter that hands the source back as it came, saying each stage once: enough to run a
-    /// conversion job through the worker in a build without Seed-VC.
+    /// conversion job through the worker without reading a model.
     struct Echo;
 
     impl Converter for Echo {
@@ -1483,8 +1426,8 @@ mod tests {
             24_000
         }
 
-        fn defaults(&self) -> ConversionDefaults {
-            ConversionDefaults { steps: 30 }
+        fn defaults(&self) -> crate::ConversionDefaults {
+            crate::ConversionDefaults { steps: 30 }
         }
 
         fn name(&self) -> &'static str {
@@ -1506,7 +1449,7 @@ mod tests {
             DeviceOption::Cpu.resolve(),
             Store::open(&root, None).unwrap(),
         );
-        shared.change(|world| world.converter = Some(look_at_converter("seed-vc")));
+        shared.change(|world| world.converter = Some(look_at_converter("cosyvoice")));
         let loaded = Loaded {
             converter: Some(Box::new(Echo)),
             ..Loaded::default()
@@ -1532,7 +1475,7 @@ mod tests {
         assert_eq!(made["steps"], 12);
         assert_eq!(made["style"], true);
         assert_eq!(made["seed"], 7);
-        assert_eq!(made["converter"], "seed-vc");
+        assert_eq!(made["converter"], "cosyvoice");
         assert_eq!(made["length"], 0.1);
 
         let (mime, path) = store.output_file(&job.id).unwrap();
@@ -1558,30 +1501,23 @@ mod tests {
 
     #[test]
     fn a_converter_is_known_by_its_name_or_its_manifest() {
-        assert!(is_a_converter("seed-vc"));
+        assert!(is_a_converter("cosyvoice"));
         assert!(!is_a_converter("indextts"));
         assert!(!is_a_converter("sdxl:base"));
 
         let manifest = a_manifest(
-            "seed-vc",
-            "weights:\n  - seed_vc.safetensors\nconfig:\n  model:\n    type: seed_vc\n",
+            "a-converter",
+            &format!(
+                "weights:\n  - cosyvoice3.safetensors\nconfig:\n  model:\n    type: {}\n",
+                CosyVoice3::MODEL_TYPE
+            ),
         );
         assert!(is_a_converter(manifest.to_str().unwrap()));
-        assert!(!is_a_voice(manifest.to_str().unwrap()));
 
-        let described = look_at_converter("seed-vc");
-        assert_eq!(described.full_name, "Seed-VC v2");
-        assert_eq!(described.defaults.steps, 30);
+        let described = look_at_converter("cosyvoice");
+        assert_eq!(described.full_name, "Fun-CosyVoice3 0.5B");
+        assert_eq!(described.defaults, CosyVoice3::CONVERSION_DEFAULTS);
         assert!(!described.in_memory);
-    }
-
-    /// The word this file recognises a package by is the word the port writes.
-    #[cfg(feature = "gpl")]
-    #[test]
-    fn the_seed_vc_type_is_the_port_s_own() {
-        assert_eq!(SEED_VC_TYPE, crate::seed_vc::SeedVc::MODEL_TYPE);
-        assert_eq!(SEED_VC_NAME, crate::seed_vc::SeedVc::NAME);
-        assert_eq!(SEED_VC_RATE, crate::seed_vc::RATE);
     }
 
     #[test]

@@ -32,10 +32,6 @@ else()
 endif()
 option(WITH_VULKAN "Vulkan compute support." ${_libwaifu_vulkan_default})
 option(CUDA_ARCH_NATIVE "Build CUDA kernels only for the GPUs in this machine." OFF)
-# The GPL-licensed parts of the `waifu` binary -- today the Seed-VC voice conversion port -- are
-# built only when this is on, as with FFmpeg's `--enable-gpl`. Off, the build is MIT; on, it is
-# covered by the GPL as a whole. It is the crate's `gpl` feature; see the README's License section.
-option(ENABLE_GPL "Build the GPL-licensed parts; the result is then GPL-3.0 rather than MIT." OFF)
 option(MKL_PREFIX "Prefix for MKL headers and libraries." "/opt/intel/mkl")
 
 # AppleClang implements the OpenMP pragmas but ships neither omp.h nor a runtime, so
@@ -637,14 +633,8 @@ find_program(CARGO_EXECUTABLE cargo REQUIRED)
 set(waifu_CARGO_DIR "${CMAKE_BINARY_DIR}/cargo")
 set(waifu_CLI "${waifu_CARGO_DIR}/release/waifu${CMAKE_EXECUTABLE_SUFFIX}")
 # `--features cli` is what builds the `waifu` binary: it is off by default so that using the crate
-# as a library does not drag in a terminal library. `gpl` joins it under ENABLE_GPL.
-if(ENABLE_GPL)
-    set(waifu_CARGO_FEATURES "cli,gpl")
-    message(STATUS "License: GPL-3.0 (ENABLE_GPL is on: the GPL-licensed parts are built)")
-else()
-    set(waifu_CARGO_FEATURES "cli")
-    message(STATUS "License: MIT (ENABLE_GPL is off; -DENABLE_GPL=ON adds the GPL-licensed parts)")
-endif()
+# as a library does not drag in a terminal library.
+set(waifu_CARGO_FEATURES "cli")
 add_custom_target(waifu-cli ALL
     COMMAND ${CMAKE_COMMAND} -E env "LIBWAIFU_LIB_DIR=${CMAKE_BINARY_DIR}"
             "CARGO_TARGET_DIR=${waifu_CARGO_DIR}"

@@ -62,9 +62,6 @@ pub mod indextts;
 /// of a Qwen3-VL encoder. `docs/krea2.md` is where the whole of it is written down.
 pub mod krea2;
 pub mod qwen_image;
-/// GPL-3.0, unlike the rest of the crate; compiled only with the `gpl` feature.
-#[cfg(feature = "gpl")]
-pub mod seed_vc;
 mod layers;
 mod manifest;
 mod mapping;
@@ -116,15 +113,6 @@ pub use wav::Sound;
 ///
 /// What a model is lives here, beside the files it names rather than inside one of them. See
 /// [`Manifest`].
-/// What this build may be distributed under: `MIT`, or `GPL-3.0` when the `gpl` feature compiled
-/// the GPL-licensed parts in. See the README's License section.
-#[cfg(not(feature = "gpl"))]
-pub const LICENSE: &str = "MIT";
-/// What this build may be distributed under: `MIT`, or `GPL-3.0` when the `gpl` feature compiled
-/// the GPL-licensed parts in. See the README's License section.
-#[cfg(feature = "gpl")]
-pub const LICENSE: &str = "GPL-3.0";
-
 pub const MANIFEST_SUFFIX: &str = Manifest::SUFFIX;
 
 /// The suffix a file of weights carries. See [`read_safetensors`].
