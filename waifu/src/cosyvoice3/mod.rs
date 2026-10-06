@@ -94,8 +94,8 @@ use crate::flint::{
 };
 use crate::indextts::{campplus, features::resample};
 use crate::{
-    Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Style,
-    Tokenizer, Voice,
+    ConversionDefaults, ConversionOptions, ConversionProgress, Converter, Error, Manifest, Result,
+    Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Style, Tokenizer, Voice,
 };
 
 use self::flow::Flow;
@@ -217,6 +217,12 @@ impl CosyVoice3 {
     /// How many positions the speech tokenizer's table holds: thirty seconds' worth -- the longest
     /// recording read -- after the two stride-two convolutions.
     const TOKENIZER_POSITIONS: i32 = 750;
+
+    /// What a converter is started at before its package is read.
+    pub const CONVERSION_DEFAULTS: ConversionDefaults = ConversionDefaults { steps: 10 };
+
+    pub const NO_STYLE_CONVERSION: &'static str = "CosyVoice3 converts whose voice it is and \
+         nothing else: the words, their timing and the accent stay the recording's own";
 
     pub const NEEDS_A_RECORDING: &'static str = "CosyVoice3 speaks in the voice of a recording -- \
          drop one on the page, a few seconds of somebody speaking, and say the sentence again";
@@ -553,16 +559,22 @@ impl CosyVoice3 {
     /// On the device from the flow's condition to the last sample, which is the one thing that
     /// comes back to the host.
     pub fn sound(&self, said: &[i32], reference: &Reference, speed: f32) -> Result<Vec<f32>> {
+        let mel = self.draw(said, reference, self.settings.diffusion_steps)?;
+        self.vocode(&mel, speed)
+    }
+
+    /// The flow's half of [`sound`](CosyVoice3::sound): `said` continuing `reference`, as the
+    /// `(1, frames, 80)` mel, drawn in `steps`.
+    fn draw(&self, said: &[i32], reference: &Reference, steps: usize) -> Result<Tensor> {
         let condition = self
             .flow
             .condition(&reference.tokens, said, &reference.speaker)?;
-        let mel = self.flow.draw(
-            &condition,
-            &reference.mel,
-            self.settings.diffusion_steps,
-            self.settings.cfg_rate,
-        )?;
+        self.flow
+            .draw(&condition, &reference.mel, steps, self.settings.cfg_rate)
+    }
 
+    /// HiFT's half: the flow's mel to samples, at `speed`.
+    fn vocode(&self, mel: &Tensor, speed: f32) -> Result<Vec<f32>> {
         // `(1, frames, 80)` to the vocoder's `(1, 80, frames)`, stretched on the way where the
         // reading is to be faster or slower.
         let mel = match speed > 0.0 && (speed - 1.0).abs() > 1e-6 {
@@ -638,16 +650,8 @@ impl Voice for CosyVoice3 {
             return Ok(None);
         }
 
-        let print = fingerprint(like);
-        let known = matches!(&*self.heard.borrow(), Some((held, _)) if *held == print);
-        if !known {
-            let reference = self.listen(like)?;
-            *self.heard.borrow_mut() = Some((print, reference));
-        }
-
-        let heard = self.heard.borrow();
-        let (_, reference) = heard.as_ref().expect("a recording was just listened to");
-        self.say(text, reference, options, report)
+        let reference = self.hear(like)?;
+        self.say(text, &reference, options, report)
     }
 
     fn rate(&self) -> u32 {
@@ -665,6 +669,141 @@ impl Voice for CosyVoice3 {
     fn styles(&self) -> &'static [Style] {
         Self::STYLES
     }
+}
+
+impl CosyVoice3 {
+    /// `like`, listened to -- or the last recording's, where it is the same one again: a page
+    /// that reads sentence after sentence in one voice hears it once.
+    fn hear(&self, like: &Sound) -> Result<std::cell::Ref<'_, Reference>> {
+        let print = fingerprint(like);
+        let known = matches!(&*self.heard.borrow(), Some((held, _)) if *held == print);
+        if !known {
+            let reference = self.listen(like)?;
+            *self.heard.borrow_mut() = Some((print, reference));
+        }
+        Ok(std::cell::Ref::map(self.heard.borrow(), |heard| {
+            &heard.as_ref().expect("a recording was just listened to").1
+        }))
+    }
+}
+
+/// Voice conversion, as upstream's `inference_vc` does it: the source's speech tokens are what is
+/// said, and the flow draws them continuing the reference -- its tokens, its mel, its speaker --
+/// so the words and their timing are the source's and the voice is the reference's. The
+/// language model is not run.
+///
+/// Upstream refuses a source over thirty seconds, which is as far as the speech tokenizer reads.
+/// A longer one is cut into pieces of at most that, each at the quietest moment of its last few
+/// seconds so that a cut falls between words, and each piece is converted on its own and the
+/// pieces joined.
+impl Converter for CosyVoice3 {
+    fn convert(
+        &self,
+        source: &Sound,
+        reference: &Sound,
+        options: &ConversionOptions,
+        report: &mut dyn FnMut(ConversionProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>> {
+        if options.convert_style {
+            return Err(Error::model(Self::NO_STYLE_CONVERSION));
+        }
+        if report(ConversionProgress::Listening).is_break() {
+            return Ok(None);
+        }
+        let target = self.hear(reference)?;
+
+        // The vocoder's noise is drawn on the device, from the conversion's seed.
+        F::manual_seed(self.device, options.seed.unwrap_or(0))?;
+        let steps = options.steps.max(1) as usize;
+        let pieces = pieces(&source.samples, source.rate);
+        let total = (pieces.len() * steps) as i32;
+        let windows = pieces.len() as i32;
+
+        let mut samples: Vec<f32> = Vec::new();
+        for (index, piece) in pieces.iter().enumerate() {
+            let done = (index * steps) as i32;
+            if report(ConversionProgress::Drawing { done, total }).is_break() {
+                return Ok(None);
+            }
+            let wave = resample(&source.samples[piece.clone()], source.rate, LISTENING_RATE);
+            let tokens = self.speech_tokens(&wave)?;
+            if tokens.is_empty() {
+                // Too short to hold a token: kept as the silence it nearly is, so the timing holds.
+                let length = piece.len() as u64 * u64::from(RATE) / u64::from(source.rate);
+                samples.extend(std::iter::repeat_n(0.0, length as usize));
+                continue;
+            }
+
+            let mel = self.draw(&tokens, &target, steps)?;
+            let drawn = done + steps as i32;
+            if report(ConversionProgress::Drawing { done: drawn, total }).is_break()
+                || report(ConversionProgress::Sounding {
+                    done: index as i32,
+                    total: windows,
+                })
+                .is_break()
+            {
+                return Ok(None);
+            }
+            samples.extend(self.vocode(&mel, 1.0)?);
+        }
+        if report(ConversionProgress::Sounding {
+            done: windows,
+            total: windows,
+        })
+        .is_break()
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(Sound::new(samples, RATE)))
+    }
+
+    fn rate(&self) -> u32 {
+        RATE
+    }
+
+    fn defaults(&self) -> ConversionDefaults {
+        ConversionDefaults {
+            steps: self.settings.diffusion_steps as i32,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn no_style_conversion_because(&self) -> Option<&'static str> {
+        Some(Self::NO_STYLE_CONVERSION)
+    }
+}
+
+/// How far back from a piece's thirty seconds a quiet place to cut it is looked for.
+const CUT_SEARCH: f32 = 8.0;
+
+/// `samples` at `rate` as pieces the speech tokenizer can each read whole: at most thirty
+/// seconds, cut at the quietest 20 ms of the last [`CUT_SEARCH`] seconds of each.
+fn pieces(samples: &[f32], rate: u32) -> Vec<std::ops::Range<usize>> {
+    let longest = (LONGEST_RECORDING * rate as f32) as usize;
+    let search = (CUT_SEARCH * rate as f32) as usize;
+    let frame = (rate as usize / 50).max(1);
+    let energy = |at: usize| samples[at..at + frame].iter().map(|x| x * x).sum::<f32>();
+
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while samples.len() - start > longest {
+        let end = start + longest;
+        let cut = (end - search..end - frame)
+            .step_by(frame)
+            .min_by(|a, b| energy(*a).total_cmp(&energy(*b)))
+            .map_or(end, |quiet| quiet + frame / 2);
+        pieces.push(start..cut);
+        start = cut;
+    }
+    if start < samples.len() {
+        pieces.push(start..samples.len());
+    }
+    pieces
 }
 
 /// What ends the part of the text the model follows rather than reads, which it asserts is there.
@@ -699,6 +838,45 @@ fn fingerprint(sound: &Sound) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_source_is_cut_where_it_is_quiet_and_nothing_is_lost() {
+        // Seventy seconds at 16 kHz of a tone, with a silent stretch at 25 s and one at 51 s.
+        let rate = 16_000;
+        let mut samples: Vec<f32> = (0..70 * rate).map(|i| (i as f32 * 0.05).sin()).collect();
+        for quiet in [25 * rate, 51 * rate] {
+            samples[quiet..quiet + rate / 10].fill(0.0);
+        }
+
+        let cut = pieces(&samples, rate as u32);
+        assert_eq!(cut.len(), 3);
+        // End to end, with nothing dropped or read twice.
+        assert_eq!(cut[0].start, 0);
+        assert_eq!(cut.last().unwrap().end, samples.len());
+        for pair in cut.windows(2) {
+            assert_eq!(pair[0].end, pair[1].start);
+        }
+        // Each within what the tokenizer reads, and cut inside the silences.
+        for piece in &cut {
+            assert!(piece.len() <= 30 * rate, "{piece:?}");
+        }
+        assert!(
+            (25 * rate..25 * rate + rate / 10).contains(&cut[0].end),
+            "{:?}",
+            cut[0]
+        );
+        assert!(
+            (51 * rate..51 * rate + rate / 10).contains(&cut[1].end),
+            "{:?}",
+            cut[1]
+        );
+
+        // And a short one is left whole.
+        assert_eq!(
+            pieces(&samples[..10 * rate], rate as u32),
+            vec![0..10 * rate]
+        );
+    }
 
     #[test]
     fn a_style_goes_inside_the_system_prompt_the_way_upstream_writes_it() {

@@ -427,6 +427,20 @@ select:focus {
   font-weight: 600;
 }
 
+/* A card's title with its buttons at the right end of the same line. */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.plain.small {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
 .row {
   display: flex;
   gap: 10px;
@@ -633,12 +647,6 @@ select:focus {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.parameters {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  color: var(--dim);
 }
 
 .gallery {

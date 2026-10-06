@@ -486,30 +486,64 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
 /// The converter `asked` names, as the screen describes it, without reading any of it: what
 /// [`look_at_voice`] is for a voice.
 pub fn look_at_converter(asked: &str) -> ChosenConverter {
+    let path = on_disk(asked);
+    // As a voice is: by the manifest where there is one, and by its family before it is fetched.
+    let kind = path
+        .as_deref()
+        .and_then(converter_kind)
+        .or_else(|| published_converter_kind(asked));
+    let (kind_name, defaults, rate, no_style_because) = match kind {
+        Some(ConverterKind::CosyVoice3) => (
+            CosyVoice3::NAME,
+            CosyVoice3::CONVERSION_DEFAULTS,
+            cosyvoice3::RATE,
+            Some(CosyVoice3::NO_STYLE_CONVERSION),
+        ),
+        _ => (SEED_VC_NAME, SEED_VC_DEFAULTS, SEED_VC_RATE, None),
+    };
+
     ChosenConverter {
         name: asked.to_string(),
-        full_name: hub::full_name(asked).unwrap_or(SEED_VC_NAME).to_string(),
-        on_disk: on_disk(asked).is_some(),
+        full_name: hub::full_name(asked).unwrap_or(kind_name).to_string(),
+        on_disk: path.is_some(),
         in_memory: false,
-        defaults: SEED_VC_DEFAULTS,
-        rate: SEED_VC_RATE,
+        defaults,
+        rate,
+        no_style_because: no_style_because.map(str::to_string),
     }
 }
 
 /// Whether `asked` turns one recording into another: a published converter, or a manifest on the
-/// disk whose `model.type` is Seed-VC's. What `-m` alone is taken to mean speech2speech by.
+/// disk whose `model.type` is one. What `-m` alone is taken to mean speech2speech by, after
+/// [`is_a_voice`] -- CosyVoice3 is both, and alone it reads.
 pub fn is_a_converter(asked: &str) -> bool {
-    hub::is_conversion(asked) || on_disk(asked).as_deref().is_some_and(is_a_seed_vc)
+    hub::is_conversion(asked) || on_disk(asked).as_deref().and_then(converter_kind).is_some()
 }
 
-/// Whether the manifest at `path` describes Seed-VC.
-fn is_a_seed_vc(path: &Path) -> bool {
-    Manifest::open(path)
-        .ok()
-        .and_then(|manifest| {
-            Some(manifest.section("model").ok()?.get_str("type").ok()? == SEED_VC_TYPE)
-        })
-        .unwrap_or(false)
+/// The models a package can convert voices with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConverterKind {
+    SeedVc,
+    CosyVoice3,
+}
+
+/// Which converter the manifest at `path` describes, by its `model.type`.
+fn converter_kind(path: &Path) -> Option<ConverterKind> {
+    let manifest = Manifest::open(path).ok()?;
+    match manifest.section("model").ok()?.get_str("type").ok()? {
+        SEED_VC_TYPE => Some(ConverterKind::SeedVc),
+        CosyVoice3::MODEL_TYPE => Some(ConverterKind::CosyVoice3),
+        _ => None,
+    }
+}
+
+/// Which converter a published name is, by the family its versioned name starts with.
+fn published_converter_kind(asked: &str) -> Option<ConverterKind> {
+    match hub::published_name(asked)?.split(':').next()? {
+        "seed-vc" => Some(ConverterKind::SeedVc),
+        "cosyvoice" => Some(ConverterKind::CosyVoice3),
+        _ => None,
+    }
 }
 
 /// Reads the converter `asked` names into `converter`, and says how it went: [`read_voice`] for a
@@ -527,6 +561,7 @@ fn read_converter(
                 in_memory: true,
                 defaults: read.defaults(),
                 rate: read.rate(),
+                no_style_because: read.no_style_conversion_because().map(str::to_string),
                 ..look_at_converter(asked)
             };
             *converter = Some(read);
@@ -570,9 +605,12 @@ fn load_converter(shared: &Shared, asked: &str) -> Result<Box<dyn Converter>, Er
         &mut |progress| report_fetch(shared, &name, progress),
         &|| shared.interrupted(),
     )?;
-    if !is_a_seed_vc(&path) {
-        return Err(format!("{asked} is not a converter: its manifest is not Seed-VC's").into());
-    }
+    let Some(kind) = converter_kind(&path) else {
+        return Err(format!(
+            "{asked} is not a converter: its manifest is neither Seed-VC's nor CosyVoice3's"
+        )
+        .into());
+    };
 
     shared.change(|world| {
         world.doing = Doing::Reading {
@@ -580,7 +618,18 @@ fn load_converter(shared: &Shared, asked: &str) -> Result<Box<dyn Converter>, Er
         }
     });
 
-    open_seed_vc(&Manifest::open(&path)?, shared.runtime())
+    let manifest = Manifest::open(&path)?;
+    match kind {
+        ConverterKind::SeedVc => open_seed_vc(&manifest, shared.runtime()),
+        ConverterKind::CosyVoice3 => {
+            let runtime = shared.runtime();
+            Ok(Box::new(CosyVoice3::from_manifest(
+                runtime.device(),
+                runtime.residency(),
+                &manifest,
+            )?))
+        }
+    }
 }
 
 /// Seed-VC, read onto the device: the one place an MIT file reaches into the GPL port, and only
@@ -597,10 +646,7 @@ fn open_seed_vc(manifest: &Manifest, runtime: Runtime) -> Result<Box<dyn Convert
 /// What an MIT build says instead: the same refusal `-task speech2speech` is given.
 #[cfg(not(feature = "gpl"))]
 fn open_seed_vc(_: &Manifest, _: Runtime) -> Result<Box<dyn Converter>, Error> {
-    Err(crate::cli::task::Task::Speech2Speech
-        .not_built_because()
-        .unwrap_or("this build cannot convert voices")
-        .into())
+    Err(crate::cli::task::NO_GPL.into())
 }
 
 /// What a kind of model implies for the screen before any of its weights are read: what to ask

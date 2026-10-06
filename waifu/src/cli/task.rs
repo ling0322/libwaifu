@@ -31,32 +31,23 @@ pub enum Task {
     Txt2Img,
     Img2Img,
     Text2Speech,
-    /// Voice conversion, which is Seed-VC's and GPL-3.0: named in every build, so that asking
-    /// for it in an MIT one is told why rather than told there is no such word, and run only in a
+    /// Voice conversion: CosyVoice3's in every build, and Seed-VC's -- which is GPL-3.0 -- in a
     /// build with the `gpl` feature.
     Speech2Speech,
 }
 
-/// Why this build cannot convert voices: the one model that does is GPL-3.0, and is compiled in
-/// only on request.
-const NO_GPL: &str = "voice conversion is Seed-VC, which is GPL-3.0, and this build is MIT: build \
-     with `--features gpl` (CMake: -DENABLE_GPL=ON) to have it";
+/// Why an MIT build will not run Seed-VC, said wherever it is asked for.
+pub const NO_GPL: &str = "Seed-VC is GPL-3.0 and this build is MIT: build with `--features gpl` \
+     (CMake: -DENABLE_GPL=ON) to have it, or convert with cosyvoice, which every build has";
 
 impl Task {
-    /// Every task there is a word for, whether or not this build runs it.
-    const EVERY: [Task; 4] = [
+    /// Every task, in the order the terminal lists them and the usage names them.
+    pub const ALL: &'static [Task] = &[
         Task::Txt2Img,
         Task::Img2Img,
         Task::Text2Speech,
         Task::Speech2Speech,
     ];
-
-    /// Every task this build runs, in the order the terminal lists them and the usage names them.
-    #[cfg(feature = "gpl")]
-    pub const ALL: &'static [Task] = &Task::EVERY;
-    /// Every task this build runs, in the order the terminal lists them and the usage names them.
-    #[cfg(not(feature = "gpl"))]
-    pub const ALL: &'static [Task] = &[Task::Txt2Img, Task::Img2Img, Task::Text2Speech];
 
     /// What it is called: on the command line, in the list, and on the page's tab.
     pub fn name(self) -> &'static str {
@@ -87,20 +78,12 @@ impl Task {
             .join(", ")
     }
 
-    /// The task a word names, which is [`Task::name`] read backwards -- including one this build
-    /// does not run, which [`Task::not_built_because`] then says why of.
+    /// The task a word names, which is [`Task::name`] read backwards.
     pub fn named(word: &str) -> Option<Task> {
-        Task::EVERY
-            .into_iter()
+        Task::ALL
+            .iter()
+            .copied()
             .find(|task| task.name() == word.trim().to_lowercase())
-    }
-
-    /// Why this build cannot run it, or None where it can.
-    pub fn not_built_because(self) -> Option<&'static str> {
-        match self {
-            Task::Speech2Speech if !cfg!(feature = "gpl") => Some(NO_GPL),
-            _ => None,
-        }
     }
 }
 
@@ -124,27 +107,16 @@ mod tests {
     fn every_task_is_a_word_the_command_line_takes() {
         for task in Task::ALL {
             assert_eq!(Task::named(task.name()), Some(*task), "{}", task.name());
-            assert_eq!(task.not_built_because(), None, "{}", task.name());
         }
         assert_eq!(Task::named("TXT2IMG"), Some(Task::Txt2Img));
         assert_eq!(Task::named("sing"), None);
     }
 
     #[test]
-    fn voice_conversion_is_named_in_every_build_and_run_in_a_gpl_one() {
-        // Named, so that an MIT build asked for it says why rather than that there is no such task.
+    fn voice_conversion_is_a_task_in_every_build() {
+        // CosyVoice3 converts in an MIT build; only Seed-VC needs the `gpl` feature, and says so.
         assert_eq!(Task::named("speech2speech"), Some(Task::Speech2Speech));
-        let built = Task::ALL.contains(&Task::Speech2Speech);
-        assert_eq!(built, cfg!(feature = "gpl"));
-        match Task::Speech2Speech.not_built_because() {
-            Some(why) => {
-                assert!(!built);
-                assert!(
-                    why.contains("GPL-3.0") && why.contains("--features gpl"),
-                    "{why}"
-                );
-            }
-            None => assert!(built),
-        }
+        assert!(Task::ALL.contains(&Task::Speech2Speech));
+        assert!(NO_GPL.contains("GPL-3.0") && NO_GPL.contains("--features gpl"));
     }
 }

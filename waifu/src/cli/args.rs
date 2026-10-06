@@ -362,10 +362,7 @@ impl Args {
                 Task::names()
             ))
         })?;
-        match named.not_built_because() {
-            Some(why) => Err(ArgError(format!("cannot do {task}: {why}"))),
-            None => Ok(Some(named)),
-        }
+        Ok(Some(named))
     }
 
     /// The port to serve the page on, if one was named.
@@ -798,12 +795,9 @@ mod tests {
             assert!(error.to_string().contains(task.name()), "{error}");
         }
 
-        // A task this build does not run is refused with the reason, rather than as no task.
+        // Voice conversion is a task in every build: which converter it runs is the model's.
         let asked = args(&["-task", "speech2speech"]).unwrap().task();
-        match Task::Speech2Speech.not_built_because() {
-            Some(why) => assert!(asked.unwrap_err().to_string().contains(why)),
-            None => assert_eq!(asked.unwrap(), Some(Task::Speech2Speech)),
-        }
+        assert_eq!(asked.unwrap(), Some(Task::Speech2Speech));
     }
 
     #[test]

@@ -43,8 +43,9 @@ the vocoder's windows across the whole recording, and a run stops after the step
 
 The page reaches the port through `waifu::Converter`, a trait in the MIT `speech` module that
 `SeedVc` implements; the webui opens a `SeedVc` in one function that is compiled only with `gpl`.
-A default build still knows the word speech2speech and the name `seed-vc`, and refuses both,
-before fetching anything, with the reason.
+A default build still knows the name `seed-vc`, and refuses it, before fetching anything, with the
+reason. The speech2speech task itself is in every build, run by
+[CosyVoice3](cosyvoice3.md#voice-conversion), which converts the voice but not the style.
 
 The package is published as `ling0322/libwaifu-seed-vc` on Hugging Face and ModelScope, and
 `waifu -m seed-vc` fetches it; or build it yourself, below.

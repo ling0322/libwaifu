@@ -278,6 +278,13 @@ pub trait Converter {
 
     /// What it is called on screen.
     fn name(&self) -> &'static str;
+
+    /// Why it cannot say the source again in the reference's manner as well
+    /// ([`ConversionOptions::convert_style`]), or `None` where it can. A sentence, as
+    /// [`Voice::no_likeness_because`] is, so the page can say why the box is not there.
+    fn no_style_conversion_because(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// What [`Tones`] says about itself, which is the whole of what it is for.

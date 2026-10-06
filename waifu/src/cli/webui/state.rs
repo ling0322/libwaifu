@@ -166,6 +166,9 @@ pub struct ChosenConverter {
     pub defaults: ConversionDefaults,
     /// The rate it writes at.
     pub rate: u32,
+    /// Why it cannot convert the style as well, or None where it can -- which is where the page
+    /// offers the box.
+    pub no_style_because: Option<String>,
 }
 
 /// Which package of a model is being fetched, and how far into it.
@@ -828,6 +831,8 @@ impl Shared {
                 "in_memory": converter.in_memory,
                 "steps": converter.defaults.steps,
                 "rate": converter.rate,
+                "converts_style": converter.no_style_because.is_none(),
+                "no_style_because": converter.no_style_because,
             })
         });
         json!({
