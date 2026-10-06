@@ -1095,18 +1095,11 @@ mod tests {
         let names: Vec<&str> = pictures.iter().map(Entry::name).collect();
         assert!(names.contains(&"sdxl:base"), "{names:?}");
         assert!(!names.contains(&"indextts"), "{names:?}");
-        assert!(!names.contains(&"seed-vc"), "{names:?}");
 
-        // Converters for converting, and nothing that only speaks or draws: CosyVoice3 in every
-        // build, and Seed-VC only in one that can run it.
+        // Converters for converting, and nothing that only speaks or draws.
         let converters = entries_for(Task::Speech2Speech);
         let names: Vec<&str> = converters.iter().map(Entry::name).collect();
         assert!(names.contains(&"cosyvoice"), "{names:?}");
-        assert_eq!(
-            names.contains(&"seed-vc"),
-            cfg!(feature = "gpl"),
-            "{names:?}"
-        );
         assert!(!names.contains(&"indextts"), "{names:?}");
         assert!(!names.contains(&"sdxl:base"), "{names:?}");
 

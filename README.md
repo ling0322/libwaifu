@@ -36,19 +36,10 @@ the disk -- and a voice named that way opens the text2speech page on its own.
 ## Voice conversion
 
 The speech2speech page turns one recording into another voice: a recording to convert, a
-recording of the voice to convert it to, and a clip out. Two models do it:
-
-- **Fun-CosyVoice3**, in every build: `waifu -task speech2speech -m cosyvoice`, the same package
-  that reads text. It changes whose voice it is and keeps the words, timing and accent (see
-  [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion)).
-- **Seed-VC v2**, which can convert the style as well. It is **GPL-3.0**, so it is built only with
-  the `gpl` feature (see [docs/seed_vc.md](docs/seed_vc.md)); a default build knows the name
-  `seed-vc` and says why it cannot run it. `waifu -m seed-vc` fetches the package off the same two
-  hubs.
-
-| name | model | published as |
-|---|---|---|
-| `seed-vc` | Seed-VC v2 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-seed-vc)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-seed-vc)\] |
+recording of the voice to convert it to, and a clip out. **Fun-CosyVoice3** does it:
+`waifu -task speech2speech -m cosyvoice`, the same package that reads text. It changes whose voice
+it is and keeps the words, timing and accent (see
+[docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion)).
 
 ## Low memory mode
 
@@ -85,8 +76,7 @@ the command line:
 ```bash
 $ waifu -m sdxl:wai -device cuda              # txt2img; img2img if -i names a picture
 $ waifu -m indextts                           # a voice: text2speech
-$ waifu -task speech2speech -m cosyvoice      # voice conversion, in every build
-$ waifu -m seed-vc                            # a converter: speech2speech, gpl builds only
+$ waifu -task speech2speech -m cosyvoice      # voice conversion
 $ waifu -task img2img -m sdxl:noob -i cat.png
 ```
 
@@ -102,14 +92,12 @@ model_dir = 'D:\models'
 
 ## Recent updates
 
-- [2026-10-04] Fun-CosyVoice3 converts voices on the speech2speech page, in every build:
+- [2026-10-06] Seed-VC is removed, and libwaifu is MIT throughout again: there is no `gpl` feature
+  or `-DENABLE_GPL`. Voice conversion is CosyVoice3's.
+- [2026-10-04] Fun-CosyVoice3 converts voices on the speech2speech page:
   `waifu -task speech2speech -m cosyvoice`. See [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion).
-- [2026-10-04] Seed-VC v2 has a page: speech2speech, in builds with the `gpl` feature. See
-  [docs/seed_vc.md](docs/seed_vc.md).
 - [2026-10-02] Fun-CosyVoice3-0.5B-2512 is published, as `cosyvoice:v3` -- the second voice, Apache 2.0.
   See [docs/cosyvoice3.md](docs/cosyvoice3.md).
-- [2026-10-02] Seed-VC v2 is published, as `seed-vc` -- voice conversion for the library and the
-  `convert` example, GPL-3.0; see [docs/seed_vc.md](docs/seed_vc.md).
 - [2026-09-23] Qwen-Image 2.1 is published, as `qwen-image:2.1` and `qwen-image:2.1-fp8` -- a
   fourth architecture, Built with Qwen. Its licence is non-commercial (research and evaluation)
   only; see [docs/qwen_image.md](docs/qwen_image.md#licensing).
@@ -355,14 +343,4 @@ memory`, which reads as a code failure and is not one.
 
 ## License
 
-MIT (see `LICENSE`), with one exception: the Seed-VC v2 voice conversion port (`waifu/src/seed_vc/`,
-[`docs/seed_vc.md`](docs/seed_vc.md)) is GPL-3.0, as Seed-VC itself is. It is compiled only with the
-`gpl` Cargo feature, off by default as FFmpeg's `--enable-gpl` is: a default build contains no GPL
-code and is MIT, and a build with it on is covered by the GPL (`LICENSE-GPL-3.0`) as a whole.
-
-```bash
-cmake -S . -B build -DENABLE_GPL=ON ...          # the waifu CMake builds, with the GPL parts
-cargo build --manifest-path waifu/Cargo.toml --features gpl   # the crate, the same
-```
-
-CMake prints which licence the build it configured is under, and `waifu -h` says which it was built as.
+MIT (see `LICENSE`).

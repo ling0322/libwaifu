@@ -209,10 +209,6 @@ fn fits(task: Task, model: &str) -> Result<(), String> {
         };
         return Err(format!("{model} {is}: {} needs {needs}", task.name()));
     }
-    // Seed-VC is GPL-3.0, and an MIT build asked to convert with it says so before fetching.
-    if task == Task::Speech2Speech && !cfg!(feature = "gpl") && hub::needs_gpl(model) {
-        return Err(format!("cannot use {model}: {}", crate::cli::task::NO_GPL));
-    }
     if task == Task::Img2Img && !voice {
         if let Some(why) = worker::look_at(model).no_picture_because {
             return Err(format!("{model} cannot do img2img: {why}"));
@@ -517,8 +513,6 @@ mod tests {
         assert_eq!(task_for(worker::TONES, true), Task::Text2Speech);
         assert_eq!(task_for("sdxl:base", false), Task::Txt2Img);
         assert_eq!(task_for("sdxl:base", true), Task::Img2Img);
-        // A converter converts, in any build: an MIT one then says why it cannot.
-        assert_eq!(task_for("seed-vc", false), Task::Speech2Speech);
         // A manifest that is not there, or says nothing of a speech model, draws until -task says
         // otherwise.
         assert_eq!(task_for("/somewhere/else.yaml", false), Task::Txt2Img);
@@ -545,23 +539,11 @@ mod tests {
         // A manifest on the disk is taken at its word.
         assert!(fits(Task::Text2Speech, "/somewhere/voice.yaml").is_ok());
 
-        // A converter is for speech2speech and nothing else, and speech2speech is for it.
-        let refused = fits(Task::Text2Speech, "seed-vc").unwrap_err();
-        assert!(refused.contains("converts voices"), "{refused}");
-        let refused = fits(Task::Txt2Img, "seed-vc").unwrap_err();
-        assert!(refused.contains("converts voices"), "{refused}");
-        match cfg!(feature = "gpl") {
-            true => assert!(fits(Task::Speech2Speech, "seed-vc").is_ok()),
-            // An MIT build says why before it fetches anything.
-            false => {
-                let refused = fits(Task::Speech2Speech, "seed-vc").unwrap_err();
-                assert!(refused.contains(crate::cli::task::NO_GPL), "{refused}");
-            }
-        }
+        // Speech2speech is for a converter.
         let refused = fits(Task::Speech2Speech, "indextts").unwrap_err();
         assert!(refused.contains("needs a converter"), "{refused}");
 
-        // CosyVoice3 does both, in every build: it reads, and it converts.
+        // CosyVoice3 does both: it reads, and it converts.
         assert!(fits(Task::Text2Speech, "cosyvoice").is_ok());
         assert!(fits(Task::Speech2Speech, "cosyvoice").is_ok());
         assert_eq!(task_for("cosyvoice", false), Task::Text2Speech);
@@ -584,7 +566,7 @@ mod tests {
                 world.voice = Some(worker::look_at_voice(model.unwrap_or(worker::TONES)))
             }),
             Task::Speech2Speech => shared.change(|world| {
-                world.converter = Some(worker::look_at_converter(model.unwrap_or("seed-vc")))
+                world.converter = Some(worker::look_at_converter(model.unwrap_or("cosyvoice")))
             }),
             Task::Txt2Img | Task::Img2Img => {
                 if let Some(model) = model {
@@ -1069,13 +1051,16 @@ mod tests {
 
     #[test]
     fn a_conversion_is_taken_with_both_recordings_and_refused_without_either() {
-        let (address, _) = a_server(a_program("convert", Task::Speech2Speech, Some("seed-vc")));
+        let (address, _) = a_server(a_program("convert", Task::Speech2Speech, Some("cosyvoice")));
 
         let described = get(address, "/api/model").json();
         assert_eq!(described["task"], "speech2speech");
         assert_eq!(described["kind"], "conversion");
-        assert_eq!(described["converter"]["full_name"], "Seed-VC v2");
-        assert_eq!(described["converter"]["steps"], 30);
+        assert_eq!(described["converter"]["full_name"], "Fun-CosyVoice3 0.5B");
+        assert_eq!(
+            described["converter"]["steps"],
+            crate::cosyvoice3::CosyVoice3::CONVERSION_DEFAULTS.steps
+        );
 
         let source = post_file(address, "audio/wav", &a_recording()).json()["id"].clone();
         let reference = post_file(address, "audio/wav", &a_recording()).json()["id"].clone();
@@ -1112,7 +1097,7 @@ mod tests {
         assert_eq!(asked["steps"], 100);
         assert_eq!(asked["style"], false);
         assert!(asked["seed"].as_str().unwrap().parse::<u64>().is_ok());
-        assert_eq!(asked["converter"], "seed-vc");
+        assert_eq!(asked["converter"], "cosyvoice");
     }
 
     #[test]

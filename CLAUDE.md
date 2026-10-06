@@ -18,16 +18,10 @@ LIBWAIFU_LIB_DIR="$PWD/build" cargo test --manifest-path waifu/Cargo.toml
 
 `LIBWAIFU_LIB_DIR` must be absolute because the Rust build script runs from `waifu/`.
 
-The plain `cargo test` does not compile `waifu/src/seed_vc/`, which is behind the off-by-default
-`gpl` feature. When a change touches it, also run
-`LIBWAIFU_LIB_DIR="$PWD/build" cargo test --manifest-path waifu/Cargo.toml --features gpl --lib seed_vc`.
-
 ## Licence
 
-libwaifu is MIT, except the Seed-VC port (`waifu/src/seed_vc/`, `waifu/tests/seed_vc.rs`,
-`waifu/examples/convert.rs`, `tools/seed_vc_*.py`), which is GPL-3.0-only and compiled only with
-the `gpl` feature (CMake: `-DENABLE_GPL=ON`). Keep GPL code out of every other file, keep MIT code
-from depending on `seed_vc`, and never make a default feature depend on `gpl`.
+libwaifu is MIT throughout. Do not add code ported from, or depending on, GPL or other copyleft
+sources.
 
 ### Model tests
 
@@ -60,11 +54,6 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 # needs models/cosyvoice3.yaml and models/cosyvoice3_test.safetensors; docs/cosyvoice3.md says how
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test cosyvoice3 -- --ignored --test-threads=1
-
-# waifu/src/seed_vc/, tools/seed_vc_* -- GPL-3.0, behind the `gpl` feature (docs/seed_vc.md)
-# needs models/seed_vc.yaml and models/seed_vc_test.safetensors; docs/seed_vc.md says how
-cargo test --release --manifest-path waifu/Cargo.toml --features gpl --no-fail-fast \
-    --test seed_vc -- --ignored --test-threads=1
 
 # waifu/src/indextts/, tools/indextts_* (campplus.rs and features.rs: run cosyvoice3's too)
 # needs models/indextts25.yaml and the two recordings tools/indextts_reference_voices.py writes

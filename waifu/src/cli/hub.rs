@@ -150,18 +150,15 @@ impl Watching<'_> {
     }
 }
 
-/// What a name resolves to, once fetched: something that draws pictures, something that reads
-/// sentences, or something that turns one voice into another. No two are offered in the same
-/// list -- [`listed`] is pictures, [`listed_voices`] is voices and [`listed_conversions`] is
-/// converters, and which one the terminal shows is the task's -- but they are fetched, cached and
-/// named through the one table and the one set of functions, since none of that differs by kind.
+/// What a name resolves to, once fetched: something that draws pictures or something that reads
+/// sentences. The two are not offered in the same list -- [`listed`] is pictures and
+/// [`listed_voices`] is voices, and which one the terminal shows is the task's -- but they are
+/// fetched, cached and named through the one table and the one set of functions, since none of
+/// that differs by kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Kind {
     Picture,
     Voice,
-    /// Voice conversion: the speech2speech task, offered by [`listed_conversions`]. GPL-3.0, so
-    /// only a build with the `gpl` feature runs one; the name is fetched in any build.
-    Conversion,
 }
 
 /// A model that has a name, and where it is published.
@@ -302,16 +299,6 @@ const CATALOG: &[Published] = &[
         explicit: false,
         kind: Kind::Voice,
     },
-    // Seed-VC v2, which is GPL-3.0 where the rest is not -- see docs/seed_vc.md. Named the way a
-    // voice is, `<family>:<version>`, since there is only the one.
-    Published {
-        name: "seed-vc:v2",
-        full_name: "Seed-VC v2",
-        repo: "ling0322/libwaifu-seed-vc",
-        manifest: "seed_vc.yaml",
-        explicit: false,
-        kind: Kind::Conversion,
-    },
 ];
 
 /// Where a package is fetched from.
@@ -442,7 +429,6 @@ const ALIASES: &[(&str, &str)] = &[
     ("qwen-image:2.1-fp8", "qwen-image:2.1-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
     ("cosyvoice", "cosyvoice:v3"),
-    ("seed-vc", "seed-vc:v2"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -711,13 +697,7 @@ const CONVERTING_VOICES: &[&str] = &["cosyvoice:v3"];
 
 /// Whether a published model can be run for speech2speech.
 fn converts(model: &Published) -> bool {
-    model.kind == Kind::Conversion || CONVERTING_VOICES.contains(&model.name)
-}
-
-/// Whether a published name is Seed-VC, the converter that is GPL-3.0 and runs only in a build
-/// with the `gpl` feature. Known by name in every build, so an MIT one can say why it will not.
-pub fn needs_gpl(name: &str) -> bool {
-    published(name).is_some_and(|model| model.name.starts_with("seed-vc:"))
+    CONVERTING_VOICES.contains(&model.name)
 }
 
 /// One model a screen can offer, and what is on the disk for it.
@@ -750,10 +730,9 @@ pub fn listed_voices() -> Vec<Listed> {
     listed_of(Kind::Voice)
 }
 
-/// And the converters, the same way again -- those this build can run: `cosyvoice` in every
-/// build, and `seed-vc` in one with the `gpl` feature.
+/// And the converters, the same way again: `cosyvoice`.
 pub fn listed_conversions() -> Vec<Listed> {
-    listed_where(|model| converts(model) && (cfg!(feature = "gpl") || !needs_gpl(model.name)))
+    listed_where(converts)
 }
 
 /// Every unversioned name of one kind, which is every alias: each published model has one, and
@@ -1685,8 +1664,6 @@ mod tests {
         assert!(names.contains(&"anima:turbo:v1.1"));
         assert!(names.contains(&"anima:miaomiao"));
         assert!(names.contains(&"anima:miaomiao:v1.6"));
-        assert!(names.contains(&"seed-vc"));
-        assert!(names.contains(&"seed-vc:v2"));
 
         // The spellings these replaced are answered but not offered: one name each.
         assert!(!names.contains(&"sdxl:base:v1"));
@@ -1720,27 +1697,14 @@ mod tests {
     }
 
     #[test]
-    fn a_conversion_model_is_offered_in_its_own_list_only() {
-        // Seed-VC takes two recordings rather than a sentence: offered for speech2speech, and
-        // neither as a picture model nor as a voice.
-        assert_eq!(full_name("seed-vc"), Some("Seed-VC v2"));
-        assert!(is_conversion("seed-vc"));
-        assert!(!is_voice("seed-vc"));
-        assert!(!is_conversion("indextts"));
-        assert!(!listed().iter().any(|model| model.name == "seed-vc"));
-        assert!(!listed_voices().iter().any(|voice| voice.name == "seed-vc"));
-        assert!(needs_gpl("seed-vc"));
-
-        // CosyVoice3 is a voice that converts as well, and needs nothing but this build for it.
+    fn a_converting_voice_is_offered_for_speech2speech() {
+        // CosyVoice3 is a voice that converts as well; IndexTTS only reads.
         assert!(is_voice("cosyvoice") && is_conversion("cosyvoice"));
-        assert!(!needs_gpl("cosyvoice"));
+        assert!(!is_conversion("indextts"));
+        assert!(!listed().iter().any(|model| model.name == "cosyvoice"));
 
-        // What speech2speech lists is what this build can run.
         let converters: Vec<&str> = listed_conversions().iter().map(|one| one.name).collect();
-        match cfg!(feature = "gpl") {
-            true => assert_eq!(converters, vec!["cosyvoice", "seed-vc"]),
-            false => assert_eq!(converters, vec!["cosyvoice"]),
-        }
+        assert_eq!(converters, vec!["cosyvoice"]);
     }
 
     #[test]
@@ -1812,21 +1776,20 @@ mod tests {
         // all: a name is what someone types before they have the model, so it should say what
         // they are about to fetch. Add to this list when the runtime learns another -- of a
         // picture model or, as `indextts` and `cosyvoice` did, of a voice.
-        const FAMILIES: [&str; 7] = [
+        const FAMILIES: [&str; 6] = [
             "sdxl",
             "anima",
             "krea2",
             "qwen-image",
             "indextts",
             "cosyvoice",
-            "seed-vc",
         ];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
             let expected = match model.kind {
                 Kind::Picture => 3,
-                Kind::Voice | Kind::Conversion => 2,
+                Kind::Voice => 2,
             };
             assert_eq!(
                 fields.len(),

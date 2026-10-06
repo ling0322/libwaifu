@@ -27,14 +27,6 @@ jobs:
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
 
-      # The GPL-licensed parts are off by default, so nothing above compiles them; this is what
-      # keeps them from rotting. One job is enough to prove they build: the ignored model tests
-      # need a package and a card, and the unit tests are platform-free.
-      - name: Test (Rust, --features gpl)
-        run: cargo test --manifest-path waifu/Cargo.toml --features gpl
-        env:
-          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
-
   macos-metal:
     name: macOS (CPU + Metal)
     runs-on: macos-latest
