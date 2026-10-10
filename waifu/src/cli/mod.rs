@@ -29,11 +29,12 @@
 //! and then open a page in a browser for that one task.
 
 mod args;
-mod config;
-mod hub;
 mod task;
 mod tui;
 mod webui;
+
+// In the library since the C API needed them; named here as well, where they used to be.
+pub(crate) use crate::{config, hub};
 
 use std::process::ExitCode;
 

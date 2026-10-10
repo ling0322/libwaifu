@@ -37,7 +37,7 @@
 
 mod http;
 mod log;
-mod machine;
+pub(crate) use crate::machine;
 mod state;
 mod store;
 mod worker;

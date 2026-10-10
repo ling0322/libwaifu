@@ -31,72 +31,34 @@
 
 use std::io::Cursor;
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde_json::Value;
 
-use crate::cli::args::Runtime;
 use crate::cli::hub;
 use crate::cli::webui::log;
 use crate::cli::webui::state::{
     Chosen, ChosenConverter, Clip, Convert, Converted, Doing, Fetch, Picture, Run, Say, Shared,
-    Spoken,
 };
 use crate::cli::webui::store::{self, Kind};
-use crate::cosyvoice3::{self, CosyVoice3};
+use crate::cosyvoice3::CosyVoice3;
+use crate::describe::{
+    converter_kind, describe_voice, voice_kind, ConverterKind, VoiceKind, ENOUGH_SIZES,
+};
+// Where they used to be defined, which is where the rest of the command line still asks for them.
+pub use crate::describe::{
+    is_a_converter, is_a_voice, look_at, look_at_converter, look_at_voice, SIZES, TONES,
+};
 use crate::flint::Tensor;
-use crate::indextts::{self, IndexTts};
+use crate::image_model::ImageModel as Model;
+use crate::indextts::IndexTts;
 use crate::wav;
 use crate::{
-    from_rgb8, to_rgb8, Anima, ConversionOptions, Converter,
-    GenerationDefaults, GenerationOptions, GenerationProgress, Krea2, Manifest, QwenImage, Sdxl,
-    SpeechOptions, SpeechProgress, Tones, Voice,
+    from_rgb8, to_rgb8, ConversionOptions, Converter, GenerationOptions, GenerationProgress,
+    Manifest, SpeechOptions, SpeechProgress, Tones, Voice,
 };
 
 type Error = Box<dyn std::error::Error>;
-
-/// The sizes offered for a model that does not name its own, which are the ones SDXL was trained
-/// at. Every one of them is a multiple of the 32 pixels the U-Net's own halvings need.
-pub const SIZES: &[(i32, i32)] = &[
-    (512, 512),
-    (640, 640),
-    (768, 768),
-    (896, 896),
-    (1024, 1024),
-    (832, 1216),
-    (1216, 832),
-    (768, 1344),
-    (1344, 768),
-];
-
-/// Why Anima cannot be handed a picture to start from. True of the kind rather than of any one
-/// package, which is what lets it be said before a package has been looked at.
-const ANIMA_DRAWS_FROM_NO_PICTURE: &str = "Anima cannot start from a picture yet: its package \
-     carries an image encoder, but the layer that reads one is not written";
-
-/// And why Krea 2 cannot either, which is the same reason: it draws through the same Qwen-Image
-/// autoencoder, and the half of it that reads a picture has no layer to run it.
-const KREA2_DRAWS_FROM_NO_PICTURE: &str = "Krea 2 cannot start from a picture yet: its package \
-     carries an image encoder, but the layer that reads one is not written";
-
-/// And why Qwen-Image 2.1 cannot, for a different reason: its model edits pictures by reading
-/// them as well as starting from them, and neither half of that is written here.
-const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 cannot start from a picture yet: \
-     it edits by reading the picture through its text encoder too, and that is not written";
-
-/// What the built-in stand-in voice is called where a name is asked for.
-///
-/// A constant rather than a catalogue entry, because it is not published anywhere and cannot be
-/// fetched: it is in the binary. Only ever had by asking for it with `-m tones` -- it makes a
-/// noise where the syllables are, which is for checking the page and not for listening to.
-pub const TONES: &str = "tones";
-
-/// How many sizes a model has to name before its list is used instead of the one above.
-///
-/// One size is not a choice and two is barely one. A model that names fewer has not replaced the
-/// list, it has emptied it, and the built-in one is the better thing to offer.
-const ENOUGH_SIZES: usize = 3;
 
 /// What the worker reads before the server is up: the one model this program serves.
 pub enum Load {
@@ -286,102 +248,6 @@ fn read_model(shared: &Shared, asked: &str, model: &mut Option<Model>) -> bool {
     }
 }
 
-/// The voice `asked` names, as the screen describes it, without reading any of it.
-///
-/// What [`look_at`] is for a picture model. [`TONES`] is [`Tones`], built into the binary, which
-/// can be constructed and asked about itself for nothing. Anything else is a package -- a manifest
-/// on the disk, or a published name -- and what can be said of one before minutes of reading is
-/// what its kind says: IndexTTS-2.5's rate and starting values, whether it is on the disk, and
-/// that it is not in memory. The read itself is [`read_voice`], at the first run that wants it,
-/// and it says so if the package turns out to be something else.
-pub fn look_at_voice(asked: &str) -> Spoken {
-    if asked == TONES {
-        return describe_voice(asked, &Tones::new(), false);
-    }
-
-    let path = on_disk(asked);
-    // The manifest says what it is where there is one; a published voice not yet fetched is
-    // known by its family, so the page offers its own settings before the download.
-    let kind = path
-        .as_deref()
-        .and_then(voice_kind)
-        .or_else(|| published_voice_kind(asked));
-    let (kind_name, defaults, rate, styles) = match kind {
-        Some(VoiceKind::CosyVoice3) => (
-            CosyVoice3::NAME,
-            CosyVoice3::DEFAULTS,
-            cosyvoice3::RATE,
-            CosyVoice3::STYLES,
-        ),
-        _ => (IndexTts::NAME, IndexTts::DEFAULTS, indextts::RATE, &[][..]),
-    };
-
-    Spoken {
-        name: asked.to_string(),
-        // The catalogue's name for it where it has one, and the kind's where it was named by path.
-        full_name: hub::full_name(asked).unwrap_or(kind_name).to_string(),
-        on_disk: path.is_some(),
-        in_memory: false,
-        defaults,
-        rate,
-        no_likeness_because: None,
-        styles,
-        not_a_voice_because: None,
-    }
-}
-
-/// Whether `asked` is a voice: the stand-in, a published voice, or a manifest on the disk whose
-/// `model.type` is one of the speech models. What `-m` alone is taken to mean text2speech by.
-pub fn is_a_voice(asked: &str) -> bool {
-    asked == TONES
-        || hub::is_voice(asked)
-        || on_disk(asked).as_deref().and_then(voice_kind).is_some()
-}
-
-/// The speech models a package can be.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum VoiceKind {
-    IndexTts,
-    CosyVoice3,
-}
-
-/// Which speech model a published voice is, by the family its versioned name starts with.
-fn published_voice_kind(asked: &str) -> Option<VoiceKind> {
-    match hub::published_name(asked)?.split(':').next()? {
-        "indextts" => Some(VoiceKind::IndexTts),
-        "cosyvoice" => Some(VoiceKind::CosyVoice3),
-        _ => None,
-    }
-}
-
-/// Which speech model the manifest at `path` describes, by its `model.type`; `None` where it
-/// cannot be read or is not a speech model this reads.
-fn voice_kind(path: &std::path::Path) -> Option<VoiceKind> {
-    let manifest = Manifest::open(path).ok()?;
-    match manifest.section("model").ok()?.get_str("type").ok()? {
-        IndexTts::MODEL_TYPE => Some(VoiceKind::IndexTts),
-        CosyVoice3::MODEL_TYPE => Some(VoiceKind::CosyVoice3),
-        _ => None,
-    }
-}
-
-/// What a voice says about itself, in the words the screen shows, under the name it was asked for.
-fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken {
-    Spoken {
-        name: name.to_string(),
-        // The catalogue's name first, so the button does not change its wording when it is read.
-        full_name: hub::full_name(name).unwrap_or(voice.name()).to_string(),
-        // Built in, or just read off the disk: either way there is nothing left to fetch.
-        on_disk: true,
-        in_memory,
-        defaults: voice.defaults(),
-        rate: voice.rate(),
-        no_likeness_because: voice.no_likeness_because().map(str::to_string),
-        styles: voice.styles(),
-        not_a_voice_because: voice.not_a_voice_because().map(str::to_string),
-    }
-}
-
 /// Whether the voice `asked` names has weights behind it -- which is to say, whether it can share
 /// the card with a picture model. [`Tones`] is two floats and can; a package cannot.
 fn voice_holds_weights(asked: &str) -> bool {
@@ -470,43 +336,6 @@ fn load_voice(shared: &Shared, asked: &str) -> Result<Box<dyn Voice>, Error> {
     })
 }
 
-/// The converter `asked` names, as the screen describes it, without reading any of it: what
-/// [`look_at_voice`] is for a voice.
-pub fn look_at_converter(asked: &str) -> ChosenConverter {
-    // CosyVoice3 is the one converter there is, so there is no kind to tell apart yet.
-    ChosenConverter {
-        name: asked.to_string(),
-        full_name: hub::full_name(asked).unwrap_or(CosyVoice3::NAME).to_string(),
-        on_disk: on_disk(asked).is_some(),
-        in_memory: false,
-        defaults: CosyVoice3::CONVERSION_DEFAULTS,
-        rate: cosyvoice3::RATE,
-        no_style_because: Some(CosyVoice3::NO_STYLE_CONVERSION.to_string()),
-    }
-}
-
-/// Whether `asked` turns one recording into another: a published converter, or a manifest on the
-/// disk whose `model.type` is one. What `-m` alone is taken to mean speech2speech by, after
-/// [`is_a_voice`] -- CosyVoice3 is both, and alone it reads.
-pub fn is_a_converter(asked: &str) -> bool {
-    hub::is_conversion(asked) || on_disk(asked).as_deref().and_then(converter_kind).is_some()
-}
-
-/// The models a package can convert voices with.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConverterKind {
-    CosyVoice3,
-}
-
-/// Which converter the manifest at `path` describes, by its `model.type`.
-fn converter_kind(path: &Path) -> Option<ConverterKind> {
-    let manifest = Manifest::open(path).ok()?;
-    match manifest.section("model").ok()?.get_str("type").ok()? {
-        CosyVoice3::MODEL_TYPE => Some(ConverterKind::CosyVoice3),
-        _ => None,
-    }
-}
-
 /// Reads the converter `asked` names into `converter`, and says how it went: [`read_voice`] for a
 /// converter.
 fn read_converter(
@@ -592,135 +421,6 @@ fn load_converter(shared: &Shared, asked: &str) -> Result<Box<dyn Converter>, Er
     }
 }
 
-/// What a kind of model implies for the screen before any of its weights are read: what to ask
-/// it for, what walks the noise back, why it cannot start from a picture, and whether guidance is
-/// a thing to offer at all.
-///
-/// One table for the three kinds, read twice -- once from a name that has not been fetched yet,
-/// and once from the `type` of a manifest that is already on the disk.
-///
-/// The last of the four is false for Krea 2 for the same reason its defaults are eight steps at a
-/// guidance of one: the only release of it this exports is the distilled one, and the distilled
-/// one has no second pass. A package's own `suggested:` overrides this, so the day there is an
-/// undistilled one it says `takes_guidance: "true"` and gets the dial back.
-fn about(kind: &str) -> (GenerationDefaults, &'static str, Option<&'static str>, bool) {
-    match kind {
-        Anima::MODEL_TYPE => (
-            Anima::DEFAULTS,
-            "Flow match Euler",
-            Some(ANIMA_DRAWS_FROM_NO_PICTURE),
-            true,
-        ),
-        Krea2::MODEL_TYPE => (
-            Krea2::DEFAULTS,
-            "Flow match Euler",
-            Some(KREA2_DRAWS_FROM_NO_PICTURE),
-            false,
-        ),
-        // Sampled without guidance by default, and able to take it: the reference's
-        // `true_cfg_scale` is a second pass on a negative prompt, which is this runtime's.
-        QwenImage::MODEL_TYPE => (
-            QwenImage::DEFAULTS,
-            "Flow match Euler",
-            Some(QWEN_IMAGE_DRAWS_FROM_NO_PICTURE),
-            true,
-        ),
-        // Everything else is SDXL, which is what `Model::from_manifest` decides too.
-        _ => (GenerationDefaults::default(), "Euler", None, true),
-    }
-}
-
-/// What can be said about a model that has not been read, which is what a choice is made from.
-///
-/// Guessed from the name where there is nothing else to go on, and read out of the manifest where
-/// the package is already here. Neither is the last word -- the moment a run reads the package,
-/// [`load`] describes it again out of what is actually in there, wrong guesses included.
-pub fn look_at(asked: &str) -> Chosen {
-    // The kinds are told apart by the catalogue's own naming. A package somebody exported
-    // themselves and named by path is taken as SDXL until the manifest below says otherwise,
-    // because the one thing this decides -- whether image to image is offered -- is a thing SDXL
-    // packages do.
-    let guessed = match asked {
-        name if name.starts_with("anima") => Anima::MODEL_TYPE,
-        name if name.starts_with("krea") => Krea2::MODEL_TYPE,
-        name if name.starts_with("qwen") => QwenImage::MODEL_TYPE,
-        _ => "",
-    };
-    let (defaults, sampler, no_picture, takes_guidance) = about(guessed);
-
-    let mut chosen = Chosen {
-        name: asked.to_string(),
-        // The catalogue's name for it, or the file name where a path was given: the whole path
-        // does not fit on screen and its tail is the part that identifies it.
-        full_name: hub::full_name(asked)
-            .map(str::to_string)
-            .unwrap_or_else(|| match asked.rsplit_once('/') {
-                Some((_, file)) if !file.is_empty() => file.to_string(),
-                _ => asked.to_string(),
-            }),
-        on_disk: hub::is_cached(asked),
-        in_memory: false,
-        defaults,
-        sizes: SIZES.to_vec(),
-        sampler,
-        // Not known until the package is read: what a card suggests be typed is written in it.
-        suggested_prompt: None,
-        suggested_avoid: None,
-        no_picture_because: no_picture.map(str::to_string),
-        takes_guidance,
-    };
-
-    // And where the package is already here, what it says about itself. The manifest is a few
-    // kilobytes of text beside gigabytes of weights, and reading it is what keeps the numbers in
-    // the boxes from changing under somebody later: a model described twice, once from its name
-    // and once from its package, is a model whose settings move while they are being used.
-    //
-    // The weights are still not touched. Whether this one can start from a picture is the guess
-    // above until a run opens the package.
-    let Some(path) = on_disk(asked) else {
-        return chosen;
-    };
-    let Ok(manifest) = Manifest::open(path) else {
-        return chosen;
-    };
-
-    // What kind it is, which the manifest states and a name only hints at. It matters most for a
-    // package named by its path, which is every package somebody exported themselves: `krea2` is
-    // not in the catalogue at all, so this is the only place its kind is ever read.
-    if let Ok(kind) = manifest
-        .section(Sdxl::MODEL_SECTION)
-        .and_then(|section| section.get_str("type").map(str::to_string))
-    {
-        let (defaults, sampler, no_picture, takes_guidance) = about(&kind);
-        chosen.defaults = defaults;
-        chosen.sampler = sampler;
-        chosen.no_picture_because = no_picture.map(str::to_string);
-        chosen.takes_guidance = takes_guidance;
-    }
-
-    let suggested = manifest.suggested();
-    chosen.defaults = suggested.over(chosen.defaults);
-    chosen.suggested_prompt = suggested.prompt.clone();
-    chosen.suggested_avoid = suggested.avoid.clone();
-    // Only where it says. A manifest written before there was a key for this is silent, and
-    // silence leaves the line above's answer alone rather than arguing with it.
-    chosen.takes_guidance = suggested.takes_guidance.unwrap_or(chosen.takes_guidance);
-    if suggested.sizes.len() >= ENOUGH_SIZES {
-        chosen.sizes = suggested.sizes.clone();
-    }
-
-    chosen
-}
-
-/// The manifest of a model that can be read without fetching anything: one already in the cache,
-/// or one that was named by the path of its manifest in the first place.
-fn on_disk(asked: &str) -> Option<PathBuf> {
-    hub::cached_manifest(asked).or_else(|| {
-        let path = PathBuf::from(asked);
-        path.is_file().then_some(path)
-    })
-}
-
 /// Fetches and reads the model `asked` names, saying how it is getting on as it goes.
 fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
     // The name the screen shows. As typed when it was named, because that is what someone would
@@ -770,7 +470,8 @@ fn load(shared: &Shared, asked: &str) -> Result<(Chosen, Model), Error> {
         false => SIZES.to_vec(),
     };
 
-    let opened = Model::from_manifest(&path, shared.runtime())?;
+    let runtime = shared.runtime();
+    let opened = Model::from_manifest(&path, runtime.device(), runtime.residency())?;
     let read = Chosen {
         defaults: suggested.over(opened.defaults()),
         sampler: opened.sampler(),
@@ -1111,135 +812,6 @@ fn convert(shared: &Shared, converter: &dyn Converter, job: &store::Job) -> Resu
     })
 }
 
-pub enum Model {
-    Sdxl(Sdxl),
-    Anima(Anima),
-    Krea2(Krea2),
-    QwenImage(QwenImage),
-}
-
-impl Model {
-    /// What kind of model a manifest describes, without reading the model.
-    ///
-    /// One line of a file that is a couple of kilobytes. The alternative is to try each kind in
-    /// turn and keep the one that does not complain, which reads gigabytes to answer a question
-    /// the manifest states.
-    ///
-    /// Either model's `MODEL_SECTION` would do -- the block that says what a model is, is the
-    /// same block whatever it turns out to be, which is the point of it.
-    fn kind(manifest: &Manifest) -> crate::Result<String> {
-        Ok(manifest
-            .section(Sdxl::MODEL_SECTION)?
-            .get_str("type")?
-            .to_string())
-    }
-
-    fn from_manifest(model_path: &Path, runtime: Runtime) -> crate::Result<Model> {
-        let manifest = Manifest::open(model_path)?;
-
-        match Self::kind(&manifest)?.as_str() {
-            Anima::MODEL_TYPE => Ok(Model::Anima(Anima::from_manifest(
-                runtime.device(),
-                runtime.residency(),
-                &manifest,
-            )?)),
-            Krea2::MODEL_TYPE => Ok(Model::Krea2(Krea2::from_manifest(
-                runtime.device(),
-                runtime.residency(),
-                &manifest,
-            )?)),
-            QwenImage::MODEL_TYPE => Ok(Model::QwenImage(QwenImage::from_manifest(
-                runtime.device(),
-                runtime.residency(),
-                &manifest,
-            )?)),
-            // Everything else goes to SDXL, which says what it makes of it. A model of a kind
-            // nobody here has heard of is its complaint to make rather than this one's, since it
-            // is the one that knows what it can read.
-            _ => Ok(Model::Sdxl(Sdxl::from_manifest(
-                runtime.device(),
-                runtime.residency(),
-                &manifest,
-            )?)),
-        }
-    }
-
-    /// What this build believes about the kind of model, which is what the manifest's own
-    /// suggestions are laid over. A distilled release wants eight steps at no guidance and comes
-    /// out burnt at the thirty and five SDXL likes.
-    fn defaults(&self) -> GenerationDefaults {
-        match self {
-            Model::Sdxl(_) => GenerationDefaults::default(),
-            Model::Anima(_) => Anima::DEFAULTS,
-            Model::Krea2(_) => Krea2::DEFAULTS,
-            Model::QwenImage(_) => QwenImage::DEFAULTS,
-        }
-    }
-
-    /// What walks the noise back, as the model's own reference implementation names it.
-    fn sampler(&self) -> &'static str {
-        match self {
-            Model::Sdxl(_) => "Euler",
-            Model::Anima(_) | Model::Krea2(_) | Model::QwenImage(_) => "Flow match Euler",
-        }
-    }
-
-    /// Why it cannot be handed a picture to start from, or None where it can.
-    ///
-    /// A sentence rather than a bool, because both answers of no are somebody's next move: one
-    /// is fetched away by taking the model down and bringing it back, and the other is not.
-    fn no_picture_because(&self) -> Option<&'static str> {
-        match self {
-            // Not a property of SDXL but of the copy on this disk: the encoder's weights are in
-            // packages exported since image to image landed, and in none written before it.
-            Model::Sdxl(model) => (!model.draws_from_a_picture()).then_some(
-                "this copy was packaged before image to image existed, so it carries no VAE \
-                 encoder. Deleting it below and fetching it again brings one down",
-            ),
-            // The weights for one are in the package; the layer that reads them is not written.
-            // See docs/anima.md and docs/krea2.md -- it is the same autoencoder and the same
-            // missing half.
-            Model::Anima(_) => Some(ANIMA_DRAWS_FROM_NO_PICTURE),
-            Model::Krea2(_) => Some(KREA2_DRAWS_FROM_NO_PICTURE),
-            Model::QwenImage(_) => Some(QWEN_IMAGE_DRAWS_FROM_NO_PICTURE),
-        }
-    }
-
-    fn generate_reporting(
-        &self,
-        prompt: &str,
-        options: &GenerationOptions,
-        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
-    ) -> crate::Result<Option<Tensor>> {
-        match self {
-            Model::Sdxl(model) => model.generate_reporting(prompt, options, report),
-            Model::Anima(model) => model.generate_reporting(prompt, options, report),
-            Model::Krea2(model) => model.generate_reporting(prompt, options, report),
-            Model::QwenImage(model) => model.generate_reporting(prompt, options, report),
-        }
-    }
-
-    fn generate_from_image_reporting(
-        &self,
-        image: &Tensor,
-        prompt: &str,
-        options: &GenerationOptions,
-        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
-    ) -> crate::Result<Option<Tensor>> {
-        match self {
-            Model::Sdxl(model) => {
-                model.generate_from_image_reporting(image, prompt, options, report)
-            }
-            // The same sentence the door turns a run away with, for the caller that is not the
-            // door: one wording for one refusal.
-            Model::Anima(_) | Model::Krea2(_) | Model::QwenImage(_) => Err(crate::Error::model(
-                self.no_picture_because()
-                    .unwrap_or("this model cannot start from a picture"),
-            )),
-        }
-    }
-}
-
 /// A picture, as the `(1, 3, height, width)` tensor a run can start from.
 ///
 /// Scaled to the size that was asked for rather than kept at its own: the model works at
@@ -1344,6 +916,8 @@ fn crc32(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::path::PathBuf;
 
     #[test]
     fn a_stop_ends_one_job_and_the_voice_is_still_there_for_the_next() {
@@ -1610,9 +1184,11 @@ mod tests {
         assert!(!turbo.takes_guidance);
         assert_eq!(turbo.defaults.num_steps, 8);
 
-        // And the models that do have a second pass, which is every other kind.
+        // And the models that do have a second pass, which is every other kind -- asked of a name
+        // nobody published, so that what the kind answers is not what a package that happens to
+        // be in the cache answers for itself.
         assert!(look_at("sdxl:base:v1.0").takes_guidance);
-        assert!(look_at("anima:turbo:v1.1").takes_guidance);
+        assert!(look_at("anima:never-published").takes_guidance);
     }
 
     #[test]
@@ -1626,6 +1202,15 @@ mod tests {
              suggested:\n  steps: 8\n  guidance: 1.0\n",
         );
         assert!(!look_at(quiet.to_str().expect("a path")).takes_guidance);
+
+        // Silence from a kind that does take it, with a card that asks for a guidance of one: the
+        // card has said no all the same. Anima Turbo is published like this.
+        let turbo = a_manifest(
+            "anima-turbo",
+            "weights:\n  - anima.0.safetensors\nconfig:\n  model:\n    type: anima\n\
+             suggested:\n  steps: 10\n  guidance: 1.0\n",
+        );
+        assert!(!look_at(turbo.to_str().expect("a path")).takes_guidance);
 
         // And a package that says so plainly is believed over the kind, in both directions: the
         // day there is an undistilled Krea 2, this is the line it gets its dial back with.

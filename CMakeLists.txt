@@ -646,6 +646,38 @@ add_custom_target(waifu-cli ALL
     COMMENT "cargo build -p waifu --features ${waifu_CARGO_FEATURES} --release"
     VERBATIM)
 
+# The C API, as a shared library an app links: libwaifu.dylib, libwaifu.so or waifu.dll, beside the
+# executables, and waifu.h under include/. See docs/ffi.md.
+#
+# Cargo names the library after its crate, waifu_ffi, so the copy gives it the name its install
+# name says it has. Its own build script puts the Metal kernels into it and writes the header.
+if (APPLE)
+    set(waifu_FFI_BUILT "${waifu_CARGO_DIR}/release/libwaifu_ffi.dylib")
+    set(waifu_FFI "${CMAKE_BINARY_DIR}/libwaifu.dylib")
+elseif (WIN32)
+    set(waifu_FFI_BUILT "${waifu_CARGO_DIR}/release/waifu_ffi.dll")
+    set(waifu_FFI "${CMAKE_BINARY_DIR}/waifu.dll")
+else()
+    set(waifu_FFI_BUILT "${waifu_CARGO_DIR}/release/libwaifu_ffi.so")
+    set(waifu_FFI "${CMAKE_BINARY_DIR}/libwaifu.so")
+endif()
+add_custom_target(waifu-ffi ALL
+    COMMAND ${CMAKE_COMMAND} -E env "LIBWAIFU_LIB_DIR=${CMAKE_BINARY_DIR}"
+            "CARGO_TARGET_DIR=${waifu_CARGO_DIR}"
+            ${CARGO_EXECUTABLE} build -p waifu-ffi --release
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${waifu_FFI_BUILT}" "${waifu_FFI}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/include"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/waifu-ffi/include/waifu.h"
+            "${CMAKE_BINARY_DIR}/include/waifu.h"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS flint "${CMAKE_BINARY_DIR}/flint_link_flags.txt" ${flint_CARGO_DEPENDS}
+    COMMENT "cargo build -p waifu-ffi --release"
+    VERBATIM)
+# One cargo at a time in one target directory: two would wait on each other's lock anyway, and
+# this way the second reuses what the first built.
+add_dependencies(waifu-ffi waifu-cli)
+
 set(unittest_LIBADD
     flint_test
     lutil_test

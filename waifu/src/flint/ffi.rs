@@ -255,6 +255,11 @@ extern "C" {
     pub fn fl_memory_reset_peak_stats(device: FlDeviceType) -> i32;
     pub fn fl_memory_release_unused(device: FlDeviceType) -> i32;
     pub fn fl_set_fatal_handler(handler: Option<extern "C" fn()>);
+    pub fn fl_set_log_sink(
+        sink: Option<extern "C" fn(level: i32, source: *const c_char, message: *const c_char)>,
+    );
+    pub fn fl_set_log_level(level: i32);
+    pub fn fl_release_memory();
 }
 
 /// Mirrors `fl_memory_snapshot_t`.

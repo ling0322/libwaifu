@@ -45,6 +45,22 @@ pub mod anima;
 pub mod audio;
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "hub")]
+pub mod config;
+#[cfg(feature = "engine")]
+pub mod describe;
+#[cfg(feature = "engine")]
+pub mod engine;
+#[cfg(feature = "hub")]
+pub mod hub;
+#[cfg(feature = "engine")]
+pub mod image_model;
+#[cfg(feature = "engine")]
+pub mod machine;
+#[cfg(feature = "engine")]
+pub mod progress;
+#[cfg(feature = "engine")]
+pub mod runtime;
 /// Fun-CosyVoice3-0.5B: a recording and a sentence in, the sentence in that voice out, at 24 kHz.
 /// A module for the reason [`indextts`] is one -- five models, two of them somebody else's.
 pub mod cosyvoice3;
@@ -63,6 +79,7 @@ pub mod indextts;
 pub mod krea2;
 pub mod qwen_image;
 mod layers;
+pub mod log;
 mod manifest;
 mod mapping;
 mod qwen_vae;

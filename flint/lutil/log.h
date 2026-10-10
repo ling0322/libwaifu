@@ -88,6 +88,17 @@ enum class LogSeverity { kDEBUG = 0, kINFO = 1, kWARN = 2, kERROR = 3, kFATAL = 
 
 void setLogLevel(LogSeverity level);
 
+/// Where a line goes instead of stdout: its severity, where it was written as "log.cc:84", and
+/// the line alone, with neither in front of it. Both strings are valid only for the call.
+///
+/// For a program with no console to print to -- an app, whose user would never see stdout. It is
+/// called on whichever thread wrote the line, so it has to be safe to call from any of them. A
+/// FATAL line reaches it just before the process aborts, after the fatal handler has run.
+typedef void (*LogSink)(LogSeverity severity, const char *source, const char *message);
+
+/// Sends every line to `sink` from now on, or back to stdout for nullptr.
+void setLogSink(LogSink sink);
+
 }  // namespace lut
 
 #include "lutil/internal/log.h"

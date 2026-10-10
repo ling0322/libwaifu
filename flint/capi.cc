@@ -20,6 +20,7 @@
 #include "flint/capi.h"
 
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <initializer_list>
 #include <limits>
@@ -42,6 +43,9 @@
 #include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/cuda/to_device.h"
 #endif  // LIBWAIFU_CUDA_ENABLED
+#ifdef LIBWAIFU_MLX_ENABLED
+#include "mlx/memory.h"
+#endif  // LIBWAIFU_MLX_ENABLED
 
 namespace {
 
@@ -302,6 +306,40 @@ const char *fl_get_last_error_message() {
 
 void fl_set_fatal_handler(fl_fatal_handler_t handler) {
   lut::internal::setFatalHandler(handler);
+}
+
+// The C API's levels are LogSeverity's, in the same order; a trampoline turns one into the other
+// rather than a cast of the function pointer, which is not a thing C++ allows to be called.
+static std::atomic<fl_log_sink_t> gCLogSink{nullptr};
+
+static void toCLogSink(lut::LogSeverity severity, const char *source, const char *message) {
+  fl_log_sink_t sink = gCLogSink.load(std::memory_order_acquire);
+  if (sink) sink(static_cast<int32_t>(severity), source, message);
+}
+
+void fl_set_log_sink(fl_log_sink_t sink) {
+  gCLogSink.store(sink, std::memory_order_release);
+  lut::setLogSink(sink ? toCLogSink : nullptr);
+}
+
+void fl_set_log_level(int32_t level) {
+  if (level < 0) level = 0;
+  if (level > static_cast<int32_t>(lut::LogSeverity::kFATAL)) {
+    level = static_cast<int32_t>(lut::LogSeverity::kFATAL);
+  }
+  lut::setLogLevel(static_cast<lut::LogSeverity>(level));
+}
+
+void fl_release_memory() {
+#ifdef LIBWAIFU_MLX_ENABLED
+  // MLX keeps a freed buffer for the next array of its size, up to the whole of memory: a model
+  // that has been dropped is still the process's until this hands it back.
+  try {
+    mlx::core::clear_cache();
+  } catch (const std::exception &e) {
+    LOG(WARN) << "could not release the Metal buffer cache: " << e.what();
+  }
+#endif  // LIBWAIFU_MLX_ENABLED
 }
 
 // --- Storage ----------------------------------------------------------------------------------

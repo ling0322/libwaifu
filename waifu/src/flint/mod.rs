@@ -104,7 +104,7 @@ use operators::{operators_of, transfer_operators};
 use std::cell::RefCell;
 use std::ffi::CStr;
 use std::fmt;
-use std::os::raw::c_void;
+use std::os::raw::{c_char, c_void};
 use std::rc::Rc;
 use std::sync::Once;
 
@@ -332,6 +332,28 @@ pub fn on_fatal(handler: extern "C" fn()) {
 
 pub fn init() {
     INIT.call_once(|| unsafe { ffi::fl_init() });
+}
+
+/// Sends the tensor library's log lines to `sink`, or back to stdout for `None`. See
+/// [`crate::log`], which is what calls this.
+///
+/// Not after [`init`], unlike the rest of this module: the first thing initialising does is write
+/// what hardware it found, and a sink set after that has already missed it.
+pub(crate) fn set_log_sink(
+    sink: Option<extern "C" fn(level: i32, source: *const c_char, message: *const c_char)>,
+) {
+    unsafe { ffi::fl_set_log_sink(sink) };
+}
+
+/// Writes no line below `level` -- 0 debug to 4 fatal.
+pub(crate) fn set_log_level(level: i32) {
+    unsafe { ffi::fl_set_log_level(level) };
+}
+
+/// Hands what the devices keep for reuse back to the system -- on Metal, the buffers MLX holds on
+/// to after a tensor is dropped. For after a model has been let go of.
+pub fn release_memory() {
+    unsafe { ffi::fl_release_memory() };
 }
 
 /// The memory usage of one device.

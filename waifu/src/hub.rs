@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use hf_hub::progress::{DownloadEvent, Progress as Reported, ProgressEvent, ProgressHandler};
 use hf_hub::HFClientSync;
 
-use crate::cli::config;
+use crate::config;
 use crate::Manifest;
 
 type Error = Box<dyn std::error::Error>;
@@ -379,9 +379,13 @@ fn mirror() -> Mirror {
             }
             // A name nobody knows is worth saying something about rather than quietly ignoring,
             // since the whole point of setting it was to be sure which one is used.
-            eprintln!(
-                "{MIRROR_ENV}={asked:?} names no mirror -- expected \"huggingface\" or \
-                 \"modelscope\". Working it out instead."
+            crate::log::write(
+                crate::log::Level::Warning,
+                "hub",
+                &format!(
+                    "{MIRROR_ENV}={asked:?} names no mirror -- expected \"huggingface\" or \
+                     \"modelscope\". Working it out instead."
+                ),
             );
         }
 
