@@ -259,6 +259,12 @@ char *waifu_modelmanager_directory(void);
 // Downloads go to `path` from now on, saved to config.toml; NULL or "" for the default.
 WaifuStatusCode waifu_modelmanager_set_directory(const char *path);
 
+// Reads the manifests of published models out of `directory` where the download directory has
+// none: an app built with every model's manifest (the `fetch_manifests` example fetches them)
+// can say what each model suggests before anything is downloaded. Laid out as the download
+// directory is, and only read. NULL or "" for none. Not saved.
+WaifuStatusCode waifu_modelmanager_set_bundled_manifests(const char *directory);
+
 // Deletes a downloaded package.
 WaifuStatusCode waifu_modelmanager_remove(const char *name);
 
@@ -269,6 +275,16 @@ WaifuModelFetch *waifu_modelmanager_fetch_async(const char *model,
                                                 void *user_data,
                                                 WaifuProgressCallback on_progress,
                                                 WaifuCompleteCallback on_complete);
+
+// Starts fetching the manifest of every published model that is not here yet -- a couple of
+// kilobytes each, and none of their packages -- on a thread of its own, and returns at once.
+// What a model suggests is in its manifest, so a screen that has called this can fill in a
+// model's settings the moment it is chosen. Each manifest is a part of the whole in the progress;
+// with every one already here it finishes at once. Cancelled and freed as a model's fetch is.
+// NULL, with waifu_last_error and no callback ever, where it cannot start.
+WaifuModelFetch *waifu_modelmanager_fetch_manifests_async(void *user_data,
+                                                          WaifuProgressCallback on_progress,
+                                                          WaifuCompleteCallback on_complete);
 
 void waifu_modelmanager_fetch_cancel(WaifuModelFetch *fetch);
 

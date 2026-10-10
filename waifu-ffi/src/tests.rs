@@ -129,6 +129,18 @@ fn what_is_published_and_what_a_model_is_are_json_and_freed_by_the_caller() {
 }
 
 #[test]
+fn bundled_manifests_are_a_directory_or_none() {
+    unsafe {
+        // Where they are is the caller's; what is read from them is hub's to test.
+        let directory = std::env::temp_dir();
+        let directory = std::ffi::CString::new(directory.to_str().expect("a UTF-8 path")).unwrap();
+        assert_eq!(waifu_modelmanager_set_bundled_manifests(directory.as_ptr()), WAIFU_OK);
+        assert_eq!(waifu_modelmanager_set_bundled_manifests(c"".as_ptr()), WAIFU_OK);
+        assert_eq!(waifu_modelmanager_set_bundled_manifests(ptr::null()), WAIFU_OK);
+    }
+}
+
+#[test]
 fn a_call_refused_at_the_door_returns_0_and_calls_nothing() {
     unsafe {
         let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);

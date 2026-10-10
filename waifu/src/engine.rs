@@ -601,6 +601,58 @@ pub fn fetch(asked: &str, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool)
     fetch_reporting(asked, &mut reporter, stop)
 }
 
+/// Fetches the manifest of every published model not yet here, and none of their packages: see
+/// [`hub::fetch_manifests`]. Each is reported as a part of the whole, under the model name
+/// "model metadata".
+pub fn fetch_manifests(on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<()> {
+    let mut reporter = Reporter {
+        on_progress,
+        started: Instant::now(),
+    };
+    let mut fetch = Fetch {
+        model: "model metadata".to_string(),
+        hub: None,
+        file: String::new(),
+        done: 0,
+        total: None,
+        part: 0,
+        parts: 0,
+    };
+    let fetched = hub::fetch_manifests(
+        &mut |progress| {
+            match progress {
+                hub::Progress::From { hub } => fetch.hub = Some(hub),
+                hub::Progress::Fetching {
+                    file,
+                    done,
+                    total,
+                    part,
+                    parts,
+                } => {
+                    fetch.file = file.to_string();
+                    (fetch.done, fetch.total, fetch.part, fetch.parts) = (done, total, part, parts);
+                }
+                hub::Progress::Fetched {
+                    file,
+                    bytes,
+                    part,
+                    parts,
+                } => {
+                    fetch.file = file.to_string();
+                    (fetch.done, fetch.total, fetch.part, fetch.parts) = (bytes, Some(bytes), part, parts);
+                }
+            }
+            reporter.tell(&Doing::Fetching(fetch.clone()));
+        },
+        stop,
+    );
+    match fetched {
+        Ok(()) => Ended::Done(()),
+        Err(error) if hub::stopped(&error) => Ended::Cancelled,
+        Err(error) => Ended::failed(Failure::Fetch, error.to_string()),
+    }
+}
+
 fn fetch_reporting(asked: &str, reporter: &mut Reporter, stop: &dyn Fn() -> bool) -> Ended<std::path::PathBuf> {
     if hub::full_name(asked).is_none() && !Path::new(asked).is_file() {
         return Ended::failed(
@@ -983,6 +1035,9 @@ pub fn catalog_json() -> serde_json::Value {
             "full_name": listed.full_name,
             "kind": kind,
             "cached": listed.cached,
+            // Whether its manifest is here, with or without its packages: what it suggests can
+            // be read from it. See waifu_modelmanager_fetch_manifests_async.
+            "manifest_here": hub::local_manifest(listed.name).is_some(),
             "bytes_on_disk": listed.bytes,
             "explicit": listed.explicit,
         })

@@ -444,6 +444,25 @@ pub unsafe extern "C" fn waifu_modelmanager_set_directory(path: *const c_char) -
     })
 }
 
+/// Reads the manifests of published models out of `directory` where the download directory has
+/// none: an app built with every model's manifest (the `fetch_manifests` example fetches them)
+/// can say what each model suggests before anything is downloaded. Laid out as the download
+/// directory is, and only read. NULL or "" for none. Not saved.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_modelmanager_set_bundled_manifests(directory: *const c_char) -> WaifuStatusCode {
+    caught(WAIFU_ERR_INTERNAL, || {
+        let directory = match string_in(directory, "directory") {
+            Ok(directory) => directory.filter(|directory| !directory.is_empty()),
+            Err(error) => {
+                set_last_error(&error);
+                return WAIFU_ERR_INVALID_ARGUMENT;
+            }
+        };
+        waifu::hub::set_bundled_manifests(directory.map(std::path::PathBuf::from));
+        WAIFU_OK
+    })
+}
+
 /// Deletes a downloaded package.
 #[no_mangle]
 pub unsafe extern "C" fn waifu_modelmanager_remove(name: *const c_char) -> WaifuStatusCode {
@@ -493,37 +512,67 @@ pub unsafe extern "C" fn waifu_modelmanager_fetch_async(
                 return ptr::null_mut();
             }
         };
-        let gate = Gate::default();
-        let user_data = UserData(user_data);
-        let mut on_progress = progress_to(&gate, user_data, on_progress);
-        let on_complete = completion_to::<std::path::PathBuf>(&gate, user_data, on_complete);
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let thread = thread::Builder::new().name("waifu-fetch".to_string()).spawn({
-            let stop = Arc::clone(&stop);
-            move || {
-                let ended = panic::catch_unwind(AssertUnwindSafe(|| {
-                    engine::fetch(&model, &mut on_progress, &|| stop.load(Ordering::Relaxed))
-                }))
-                .unwrap_or_else(|_| Ended::Failed(Failure::Internal, "a bug in the library: the fetch panicked".to_string()));
-                on_complete(ended);
-            }
-        });
-        match thread {
-            Ok(thread) => {
-                let fetch = Box::into_raw(Box::new(WaifuModelFetch {
-                    stop,
-                    thread: Some(thread),
-                }));
-                gate.open();
-                fetch
-            }
-            Err(error) => {
-                set_last_error(&format!("could not start the download's thread: {error}"));
-                ptr::null_mut()
-            }
-        }
+        spawn_fetch(user_data, on_progress, on_complete, move |on_progress, stop| {
+            engine::fetch(&model, on_progress, stop)
+        })
     })
+}
+
+/// Starts fetching the manifest of every published model that is not here yet -- a couple of
+/// kilobytes each, and none of their packages -- on a thread of its own, and returns at once.
+/// What a model suggests is in its manifest, so a screen that has called this can fill in a
+/// model's settings the moment it is chosen. Each manifest is a part of the whole in the progress;
+/// with every one already here it finishes at once. Cancelled and freed as a model's fetch is.
+/// NULL, with waifu_last_error and no callback ever, where it cannot start.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_modelmanager_fetch_manifests_async(
+    user_data: *mut c_void,
+    on_progress: WaifuProgressCallback,
+    on_complete: WaifuCompleteCallback,
+) -> *mut WaifuModelFetch {
+    caught(ptr::null_mut(), || {
+        spawn_fetch(user_data, on_progress, on_complete, engine::fetch_manifests)
+    })
+}
+
+/// Runs `work` on a thread of its own, with the callbacks it reports to and a stop it can be
+/// cancelled by, and hands back the handle that stop is reached through.
+fn spawn_fetch<T: 'static>(
+    user_data: *mut c_void,
+    on_progress: WaifuProgressCallback,
+    on_complete: WaifuCompleteCallback,
+    work: impl FnOnce(&mut engine::OnProgress, &dyn Fn() -> bool) -> Ended<T> + Send + 'static,
+) -> *mut WaifuModelFetch {
+    let gate = Gate::default();
+    let user_data = UserData(user_data);
+    let mut on_progress = progress_to(&gate, user_data, on_progress);
+    let on_complete = completion_to::<T>(&gate, user_data, on_complete);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let thread = thread::Builder::new().name("waifu-fetch".to_string()).spawn({
+        let stop = Arc::clone(&stop);
+        move || {
+            let ended = panic::catch_unwind(AssertUnwindSafe(|| {
+                work(&mut on_progress, &|| stop.load(Ordering::Relaxed))
+            }))
+            .unwrap_or_else(|_| Ended::Failed(Failure::Internal, "a bug in the library: the fetch panicked".to_string()));
+            on_complete(ended);
+        }
+    });
+    match thread {
+        Ok(thread) => {
+            let fetch = Box::into_raw(Box::new(WaifuModelFetch {
+                stop,
+                thread: Some(thread),
+            }));
+            gate.open();
+            fetch
+        }
+        Err(error) => {
+            set_last_error(&format!("could not start the download's thread: {error}"));
+            ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]

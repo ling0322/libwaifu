@@ -223,6 +223,11 @@ char *waifu_modelmanager_describe_json(const char *model);  // a published name 
 char *waifu_modelmanager_directory(void);
 WaifuStatusCode waifu_modelmanager_set_directory(const char *path);  // saved to config.toml
 WaifuStatusCode waifu_modelmanager_remove(const char *name);  // deletes a downloaded package
+// Reads published models' manifests out of `directory` where the download directory has none:
+// an app built with every model's manifest (waifu/examples/fetch_manifests.rs fetches them) can
+// say what each model suggests before anything is downloaded. Laid out as the download directory
+// is, and only read. NULL or "" for none; not saved.
+WaifuStatusCode waifu_modelmanager_set_bundled_manifests(const char *directory);
 
 typedef struct WaifuModelFetch WaifuModelFetch;
 
@@ -232,6 +237,13 @@ WaifuModelFetch *waifu_modelmanager_fetch_async(const char *model,
                                                 void *user_data,
                                                 WaifuProgressCallback on_progress,
                                                 WaifuCompleteCallback on_complete);
+// Fetches the manifest of every published model not here yet -- a couple of KB each, none of
+// their packages -- so that what a model suggests can be read the moment it is chosen. Each
+// manifest is a part of the whole in the progress; with all of them here it finishes at once.
+// Cancelled and freed as a model's fetch is.
+WaifuModelFetch *waifu_modelmanager_fetch_manifests_async(void *user_data,
+                                                          WaifuProgressCallback on_progress,
+                                                          WaifuCompleteCallback on_complete);
 void waifu_modelmanager_fetch_cancel(WaifuModelFetch *fetch);
 // After on_complete; cancels first if it has not had it.
 void waifu_modelmanager_fetch_free(WaifuModelFetch *fetch);
@@ -403,8 +415,14 @@ change. Everything a job is made of is a struct.
 ```json
 { "models": [
   { "name": "sdxl:noob", "full_name": "NoobAI XL 1.1", "kind": "image",
-    "cached": true, "bytes_on_disk": 6938000000, "explicit": false } ] }
+    "cached": true, "manifest_here": true, "bytes_on_disk": 6938000000, "explicit": false } ] }
 ```
+
+`cached` is every package on the disk; `manifest_here` is its manifest, with or without them --
+what `waifu_modelmanager_describe_json` reads a model's suggestions from. An app can be built with
+every manifest (`waifu/examples/fetch_manifests.rs`) and hand them over with
+`waifu_modelmanager_set_bundled_manifests`, or fetch them with
+`waifu_modelmanager_fetch_manifests_async`.
 
 `kind` is `image`, `speech` or `conversion`; a model that does two is listed twice.
 

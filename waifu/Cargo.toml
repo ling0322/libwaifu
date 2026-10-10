@@ -137,3 +137,8 @@ memmap2 = "0.9"
 tokenizers = { version = "0.23", default-features = false, features = [
     "fancy-regex",
 ] }
+
+# Fetches every published model's manifest into a directory, for an app to be built with.
+[[example]]
+name = "fetch_manifests"
+required-features = ["hub"]

@@ -186,7 +186,7 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         return describe_voice(asked, &Tones::new(), false);
     }
 
-    let path = on_disk(asked);
+    let path = manifest_of(asked);
     // The manifest says what it is where there is one; a published voice not yet fetched is
     // known by its family, so the page offers its own settings before the download.
     let kind = path
@@ -207,7 +207,7 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         name: asked.to_string(),
         // The catalogue's name for it where it has one, and the kind's where it was named by path.
         full_name: hub::full_name(asked).unwrap_or(kind_name).to_string(),
-        on_disk: path.is_some(),
+        on_disk: on_disk(asked).is_some(),
         in_memory: false,
         defaults,
         rate,
@@ -222,7 +222,7 @@ pub fn look_at_voice(asked: &str) -> Spoken {
 pub fn is_a_voice(asked: &str) -> bool {
     asked == TONES
         || hub::is_voice(asked)
-        || on_disk(asked).as_deref().and_then(voice_kind).is_some()
+        || manifest_of(asked).as_deref().and_then(voice_kind).is_some()
 }
 
 /// The speech models a package can be.
@@ -288,7 +288,7 @@ pub fn look_at_converter(asked: &str) -> ChosenConverter {
 /// disk whose `model.type` is one. What `-m` alone is taken to mean speech2speech by, after
 /// [`is_a_voice`] -- CosyVoice3 is both, and alone it reads.
 pub fn is_a_converter(asked: &str) -> bool {
-    hub::is_conversion(asked) || on_disk(asked).as_deref().and_then(converter_kind).is_some()
+    hub::is_conversion(asked) || manifest_of(asked).as_deref().and_then(converter_kind).is_some()
 }
 
 /// The models a package can convert voices with.
@@ -395,14 +395,15 @@ pub fn look_at(asked: &str) -> Chosen {
         takes_guidance,
     };
 
-    // And where the package is already here, what it says about itself. The manifest is a few
+    // And where its manifest is here -- with its packages or, fetched on its own, without them --
+    // what it says about itself. The manifest is a few
     // kilobytes of text beside gigabytes of weights, and reading it is what keeps the numbers in
     // the boxes from changing under somebody later: a model described twice, once from its name
     // and once from its package, is a model whose settings move while they are being used.
     //
     // The weights are still not touched. Whether this one can start from a picture is the guess
     // above until a run opens the package.
-    let Some(path) = on_disk(asked) else {
+    let Some(path) = manifest_of(asked) else {
         return chosen;
     };
     let Ok(manifest) = Manifest::open(path) else {
@@ -448,6 +449,16 @@ fn guided_by(suggested: &Suggestions, kind_does: bool) -> bool {
     suggested
         .takes_guidance
         .unwrap_or(kind_does && suggested.guidance != Some(1.0))
+}
+
+/// The manifest of `asked` wherever it is here, whether or not its packages are: what to read for
+/// what it is and what it suggests. A published model's comes down first, and on its own when a
+/// screen asks for every model's -- see [`hub::fetch_manifests`].
+pub fn manifest_of(asked: &str) -> Option<PathBuf> {
+    hub::local_manifest(asked).or_else(|| {
+        let path = PathBuf::from(asked);
+        path.is_file().then_some(path)
+    })
 }
 
 /// The manifest of a model that can be read without fetching anything: one already in the cache,
