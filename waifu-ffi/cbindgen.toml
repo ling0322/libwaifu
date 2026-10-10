@@ -1,0 +1,41 @@
+# How waifu.h is written from src/lib.rs. See docs/ffi.md for the contract it keeps.
+
+language = "C"
+include_guard = "LIBWAIFU_WAIFU_H"
+cpp_compat = true
+documentation = true
+documentation_style = "c99"
+style = "type"
+sys_includes = ["stdbool.h", "stddef.h", "stdint.h"]
+no_includes = true
+# size_t for a length, as C callers expect and Swift imports as Int.
+usize_is_size_t = true
+autogen_warning = "/* Written by cbindgen from waifu-ffi/src/lib.rs. Change that, not this. */"
+header = """/* The MIT License (MIT). Copyright (c) 2026 Xiaoyang Chen. See LICENSE. */"""
+
+[defines]
+
+[enum]
+# The variants are named in src/lib.rs as C names them: WAIFU_OK, not WaifuStatusCode_Ok.
+rename_variants = "None"
+prefix_with_name = false
+
+[export]
+include = [
+    "WaifuStatusCode",
+    "WaifuStatus",
+    "WaifuLogLevel",
+    "WaifuLogEvent",
+    "WaifuStage",
+    "WaifuProgressEvent",
+    "WaifuCompletionEvent",
+    "WaifuImage",
+    "WaifuImageInput",
+    "WaifuDrawRequest",
+    "WaifuImageCompletionEvent",
+    "WaifuAudio",
+    "WaifuSpeakRequest",
+    "WaifuVoiceConversionRequest",
+    "WaifuAudioCompletionEvent",
+    "WaifuDevice",
+]

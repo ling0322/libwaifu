@@ -1,0 +1,19 @@
+[package]
+name = "waifu-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The C API over libwaifu: what Swift imports and .NET calls through P/Invoke"
+
+# A dynamic library, libwaifu.dylib once CMake has named it: the Metal kernels are a section of
+# the image flint is in, and a dylib carries them wherever it goes. An rlib as well, for the tests,
+# which call the C functions the way C would.
+[lib]
+name = "waifu_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+waifu = { path = "../waifu", features = ["engine"] }
+
+[build-dependencies]
+cbindgen = { version = "0.29", default-features = false }

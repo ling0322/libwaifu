@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <atomic>
 #include <ctime>
 #include <string>
 
@@ -38,6 +39,9 @@ LogSeverity gLogLevel = LogSeverity::kINFO;
 /// at startup in practice, which is why a plain pointer rather than anything that would have to be
 /// safe to change while another thread is dying through it.
 FatalHandler gFatalHandler = nullptr;
+
+/// Atomic because a line can be written on any thread while somebody sets this on another.
+std::atomic<LogSink> gLogSink{nullptr};
 
 FatalHandler setFatalHandler(FatalHandler handler) {
   FatalHandler previous = gFatalHandler;
@@ -68,7 +72,14 @@ LogWrapper::~LogWrapper() {
   // screen back needs it before there is anything on it to read, and nothing runs after abort().
   if (severity_ == LogSeverity::kFATAL && gFatalHandler) gFatalHandler();
 
-  printf("%s %s %s:%d] %s\n", Severity(), Time(), source_file_, source_line_, message.c_str());
+  LogSink sink = gLogSink.load(std::memory_order_acquire);
+  if (sink) {
+    char source[256];
+    snprintf(source, sizeof(source), "%s:%d", source_file_, source_line_);
+    sink(severity_, source, message.c_str());
+  } else {
+    printf("%s %s %s:%d] %s\n", Severity(), Time(), source_file_, source_line_, message.c_str());
+  }
 
   if (severity_ == LogSeverity::kFATAL) {
     // Flushed rather than left to exit: abort() runs no atexit handler, so a stdout that is
@@ -136,6 +147,10 @@ namespace lut {
 
 void setLogLevel(LogSeverity level) {
   internal::gLogLevel = level;
+}
+
+void setLogSink(LogSink sink) {
+  internal::gLogSink.store(sink, std::memory_order_release);
 }
 
 }  // namespace lut

@@ -578,6 +578,27 @@ typedef void (*fl_fatal_handler_t)(void);
 /// the one thing it is there for and return. Passing NULL clears it.
 FLAPI void fl_set_fatal_handler(fl_fatal_handler_t handler);
 
+/// What fl_set_log_sink() registers: a line's level -- 0 debug, 1 info, 2 warning, 3 error,
+/// 4 fatal -- where it was written, as "interface.cc:84", and the line alone. Both strings are
+/// valid only for the call.
+typedef void (*fl_log_sink_t)(int32_t level, const char *source, const char *message);
+
+/// Send every line the library writes to `sink` rather than to stdout; NULL puts them back.
+///
+/// For a caller with no console, which an app is: what flint says about the hardware it found, a
+/// check that failed, and the line a fatal error ends the process with all reach it. It is called
+/// on whichever thread wrote the line, and must be safe to call from any of them.
+FLAPI void fl_set_log_sink(fl_log_sink_t sink);
+
+/// Write no line below `level`, on the same scale as fl_log_sink_t's. Lines below it are not
+/// formatted at all.
+FLAPI void fl_set_log_level(int32_t level);
+
+/// Hands memory the devices keep for reuse back to the system: what a dropped model's tensors
+/// were in. Call it after the last tensor of a model is gone. Nothing to do on a device that
+/// keeps no cache.
+FLAPI void fl_release_memory(void);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

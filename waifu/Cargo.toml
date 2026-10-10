@@ -22,14 +22,18 @@ required-features = ["cli"]
 # HTTP client, an image encoder -- is the binary's to need, and nothing the library does asks for
 # any of it.
 cli = [
-    "dep:hf-hub",
-    "dep:image",
+    "engine",
+    "image/png",
+    "image/jpeg",
     "dep:ratatui",
-    "dep:serde_json",
     "dep:tiny_http",
-    "dep:toml",
-    "dep:ureq",
 ]
+# Fetching published models, and where they are kept: the catalogue, the two hubs, config.toml.
+hub = ["dep:hf-hub", "dep:toml", "dep:ureq"]
+# What a program that is not the command line needs to run models for somebody: the engine, what
+# it says about models and the machine as JSON, and the resizing a picture to start from takes.
+# What the C API in waifu-ffi is built over.
+engine = ["hub", "dep:image", "dep:serde_json"]
 
 [dependencies]
 # What the command line tool needs.
@@ -105,10 +109,8 @@ hf-hub = { version = "1", default-features = false, features = [
 # Cargo.lock holds 0.25.9 rather than the newest 0.25: 0.25.10 asks for a rustc a minor version
 # ahead of the one this is built with. Nothing here needs what it added, so the lock is the place
 # that says so rather than a bound in the range.
-image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-], optional = true }
+# No codecs by default: the engine only resizes, and the command line turns on the two it reads.
+image = { version = "0.25", default-features = false, optional = true }
 
 # Reading the weights, which are safetensors: the format every other runtime already writes, so a
 # weight can be looked at with torch, with numpy, or with the viewer on the hub. It replaced two
@@ -135,3 +137,8 @@ memmap2 = "0.9"
 tokenizers = { version = "0.23", default-features = false, features = [
     "fancy-regex",
 ] }
+
+# Fetches every published model's manifest into a directory, for an app to be built with.
+[[example]]
+name = "fetch_manifests"
+required-features = ["hub"]

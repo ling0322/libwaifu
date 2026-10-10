@@ -50,7 +50,7 @@ use std::time::{Duration, Instant};
 use hf_hub::progress::{DownloadEvent, Progress as Reported, ProgressEvent, ProgressHandler};
 use hf_hub::HFClientSync;
 
-use crate::cli::config;
+use crate::config;
 use crate::Manifest;
 
 type Error = Box<dyn std::error::Error>;
@@ -379,9 +379,13 @@ fn mirror() -> Mirror {
             }
             // A name nobody knows is worth saying something about rather than quietly ignoring,
             // since the whole point of setting it was to be sure which one is used.
-            eprintln!(
-                "{MIRROR_ENV}={asked:?} names no mirror -- expected \"huggingface\" or \
-                 \"modelscope\". Working it out instead."
+            crate::log::write(
+                crate::log::Level::Warning,
+                "hub",
+                &format!(
+                    "{MIRROR_ENV}={asked:?} names no mirror -- expected \"huggingface\" or \
+                     \"modelscope\". Working it out instead."
+                ),
             );
         }
 
@@ -552,6 +556,98 @@ pub fn cached_manifest(name: &str) -> Option<PathBuf> {
         ),
         false => None,
     }
+}
+
+/// Where the manifest of `published` goes in `cache`.
+fn manifest_in(published: &Published, cache: &Path) -> PathBuf {
+    cache
+        .join(published.repo.replace('/', "--"))
+        .join(published.manifest)
+}
+
+/// The manifest of a published model, wherever it is here -- whether or not the packages it names
+/// are. What a model suggests and what kind it is are in it, and a screen can say both before
+/// anybody has fetched a gigabyte: see [`fetch_manifests`].
+pub fn local_manifest(name: &str) -> Option<PathBuf> {
+    let published = published(name)?;
+    manifest_among(published, cache_directory().ok().as_deref(), bundled_manifests().as_deref())
+}
+
+/// The manifest of `published` in `cache`, or else in `bundled`: one fetched with the model is
+/// the newer, and wins over the one an app was built with.
+fn manifest_among(published: &Published, cache: Option<&Path>, bundled: Option<&Path>) -> Option<PathBuf> {
+    cache
+        .and_then(|cache| local_manifest_in(published, cache))
+        .or_else(|| bundled.and_then(|bundled| local_manifest_in(published, bundled)))
+}
+
+/// Where an app keeps the manifests it was built with: laid out as the cache is, read-only, and
+/// asked after the cache. See [`set_bundled_manifests`].
+static BUNDLED: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Reads the manifests of published models out of `directory` -- laid out as the cache is, one
+/// directory per repository -- where the cache has none of its own. For an app that fetched every
+/// manifest when it was built, with [`fetch_manifests`], so that what a model suggests can be
+/// shown before anything is fetched. None stops it.
+pub fn set_bundled_manifests(directory: Option<PathBuf>) {
+    *BUNDLED.write().unwrap_or_else(|held| held.into_inner()) = directory;
+}
+
+fn bundled_manifests() -> Option<PathBuf> {
+    BUNDLED.read().unwrap_or_else(|held| held.into_inner()).clone()
+}
+
+fn local_manifest_in(published: &Published, cache: &Path) -> Option<PathBuf> {
+    let manifest = manifest_in(published, cache);
+    manifest.is_file().then_some(manifest)
+}
+
+/// The published releases in `cache` without a manifest, each once.
+fn missing_manifests_in(cache: &Path) -> Vec<&'static Published> {
+    let mut missing: Vec<&'static Published> = Vec::new();
+    for published in CATALOG {
+        let fetched = local_manifest_in(published, cache).is_some();
+        // Two names for one release share its manifest; it is fetched once.
+        let listed = missing
+            .iter()
+            .any(|other| (other.repo, other.manifest) == (published.repo, published.manifest));
+        if !fetched && !listed {
+            missing.push(published);
+        }
+    }
+    missing
+}
+
+/// Fetches the manifest of every published model that does not have one here, and none of their
+/// packages: a couple of kilobytes each, and what lets a screen fill in a model's suggestions the
+/// moment it is chosen rather than after its download. `report` is told each one as a part of the
+/// whole; one already here is skipped without touching the network.
+///
+/// A program embedding the library decides when it may touch the network, which is why this is
+/// asked for rather than done on the way to anything else.
+pub fn fetch_manifests(report: &mut dyn FnMut(Progress), stop: &dyn Fn() -> bool) -> Result<(), Error> {
+    let cache = cache_directory()?;
+    let missing = missing_manifests_in(&cache);
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut watching = Watching { report, stop };
+    watching.say(Progress::From {
+        hub: mirror().name(),
+    });
+    for (index, published) in missing.iter().enumerate() {
+        let manifest = manifest_in(published, &cache);
+        if let Some(directory) = manifest.parent() {
+            fs::create_dir_all(directory)?;
+        }
+        let part = Part {
+            at: index + 1,
+            of: missing.len(),
+        };
+        download(published.repo, published.manifest, &manifest, part, &mut watching)?;
+    }
+    Ok(())
 }
 
 /// How much of a cached model is on disk, for a screen that offers to fetch one.
@@ -1890,6 +1986,65 @@ mod tests {
         // And a name nobody published is not cached either, rather than a panic.
         assert!(!is_cached("sdxl:nope"));
         assert_eq!(cached_bytes("sdxl:nope"), 0);
+
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn a_bundled_manifest_is_read_where_the_cache_has_none() {
+        let root = std::env::temp_dir().join(format!("waifu-bundled-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (cache, bundled) = (root.join("cache"), root.join("bundled"));
+        let model = published("anima:turbo").expect("Anima Turbo");
+        let place = |under: &Path| {
+            let directory = under.join(model.repo.replace('/', "--"));
+            fs::create_dir_all(&directory).expect("a directory to put it in");
+            fs::write(directory.join(model.manifest), b"weights:\n  - a.safetensors\n").expect("the manifest");
+            directory.join(model.manifest)
+        };
+
+        // Neither has it.
+        assert_eq!(manifest_among(model, Some(&cache), Some(&bundled)), None);
+
+        // The app was built with it: read from there.
+        let built_with = place(&bundled);
+        assert_eq!(manifest_among(model, Some(&cache), Some(&bundled)), Some(built_with.clone()));
+        assert_eq!(manifest_among(model, None, Some(&bundled)), Some(built_with));
+
+        // And fetched since: the cache's is the newer, and wins.
+        let fetched = place(&cache);
+        assert_eq!(manifest_among(model, Some(&cache), Some(&bundled)), Some(fetched));
+        // A manifest the app was built with is not a downloaded model.
+        assert!(!is_cached_in(model, &bundled));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_manifest_alone_is_read_but_is_not_a_model() {
+        let cache = std::env::temp_dir().join(format!("waifu-manifests-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&cache);
+
+        // Nothing fetched: every release wants its manifest, each once.
+        let everything = missing_manifests_in(&cache);
+        assert!(!everything.is_empty());
+        let mut seen = std::collections::HashSet::new();
+        assert!(everything.iter().all(|published| seen.insert((published.repo, published.manifest))));
+
+        // Its manifest and nothing else, which is what fetching the manifests leaves: what it
+        // suggests can be read, and it is still not a model that is ready to draw with.
+        let model = published("anima:turbo").expect("Anima Turbo");
+        let directory = cache.join(model.repo.replace('/', "--"));
+        fs::create_dir_all(&directory).expect("a directory to put it in");
+        fs::write(directory.join(model.manifest), b"weights:\n  - a.safetensors\n").expect("the manifest");
+
+        assert_eq!(local_manifest_in(model, &cache), Some(directory.join(model.manifest)));
+        assert!(!is_cached_in(model, &cache));
+        // And it is not asked for again.
+        assert!(missing_manifests_in(&cache)
+            .iter()
+            .all(|published| published.manifest != model.manifest));
+        assert_eq!(missing_manifests_in(&cache).len(), everything.len() - 1);
 
         let _ = fs::remove_dir_all(&cache);
     }

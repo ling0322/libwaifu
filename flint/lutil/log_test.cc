@@ -129,4 +129,45 @@ CATCH_TEST_CASE("a failing CHECK unwinds what it passes", "[core][util][log]") {
   CATCH_REQUIRE(released);
 }
 
+namespace {
+
+LogSeverity gSunkSeverity = LogSeverity::kDEBUG;
+std::string gSunkSource;
+std::string gSunkMessage;
+int gSunkLines = 0;
+
+void sinkForTest(LogSeverity severity, const char *source, const char *message) {
+  gSunkSeverity = severity;
+  gSunkSource = source;
+  gSunkMessage = message;
+  ++gSunkLines;
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("a log sink is handed each line in place of stdout", "[core][util][log]") {
+  ScopedLogLevel level(LogSeverity::kINFO);
+  setLogSink(sinkForTest);
+  gSunkLines = 0;
+
+  LOG(WARN) << "the card is " << 15 << " of 16 GB full";
+  setLogSink(nullptr);
+
+  CATCH_REQUIRE(gSunkLines == 1);
+  CATCH_REQUIRE(gSunkSeverity == LogSeverity::kWARN);
+  // The line alone, with no level or time in front of it: those are the sink's to write.
+  CATCH_REQUIRE(gSunkMessage == "the card is 15 of 16 GB full");
+  CATCH_REQUIRE(gSunkSource.rfind("log_test.cc:", 0) == 0);
+
+  // And nothing below the level is made at all, sink or no sink.
+  setLogSink(sinkForTest);
+  LOG(DEBUG) << "not this";
+  setLogSink(nullptr);
+  CATCH_REQUIRE(gSunkLines == 1);
+
+  // Taken away, the next line goes to stdout again and not here.
+  LOG(INFO) << "back on the console";
+  CATCH_REQUIRE(gSunkLines == 1);
+}
+
 }  // namespace lut
