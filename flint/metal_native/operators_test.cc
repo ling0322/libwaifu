@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <random>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
@@ -28,6 +29,7 @@
 #include "flint/device.h"
 #include "flint/operators.h"
 #include "flint/metal_native/context.h"
+#include "flint/metal_native/ops.h"
 
 // Every operator the Metal device has, checked against the CPU's answer to the same question.
 // Half precision is checked against the CPU in float, which is what it approximates.
@@ -564,6 +566,93 @@ CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]
         toMetal(v, DType::kFloat16),
         c.causal);
     CATCH_REQUIRE(close(got, reference, 3e-2f, 3e-2f));
+  }
+}
+
+namespace {
+
+// What an E4M3 code means, worked out the long way: the kernel's bit trick is not what this
+// checks it against.
+float decodeE4M3(uint8_t code) {
+  int sign = code >> 7;
+  int exponent = (code >> 3) & 0xf;
+  int mantissa = code & 0x7;
+  float magnitude = exponent == 0 ? ldexpf(static_cast<float>(mantissa), -9)
+                                  : ldexpf(1.0f + mantissa / 8.0f, exponent - 7);
+  return sign ? -magnitude : magnitude;
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test Metal fp8 matmul", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  struct Case {
+    std::vector<int> shapeA;  // (..., k)
+    int rows;
+    bool perRow;
+  };
+  std::vector<Case> cases = {
+      {{37, 48}, 72, true},       // nothing a whole tile, nothing four wide
+      {{37, 50}, 72, true},       // k not a multiple of four: one element at a time
+      {{128, 256}, 128, true},    // whole tiles, read four at a time
+      {{2, 5, 64}, 96, false},    // a batch, and one scale for all of the weight
+      {{1, 3072}, 3072, true},    // one row of a long product, as a single token has it
+  };
+
+  std::mt19937 rng(7);
+  for (const Case &c : cases) {
+    int k = c.shapeA.back();
+    CATCH_INFO("a has " << c.shapeA.size() << " dimensions, k = " << k << ", rows = " << c.rows
+                        << ", per row = " << c.perRow);
+
+    // Codes from all of E4M3 but its NaNs, and scales a weight's would be.
+    Tensor codes = F::empty(Device::getCpu(), {c.rows, k}, DType::kFp8E4M3);
+    Fp8E4M3 *code = codes.getInternalData()->getData<Fp8E4M3>(0);
+    std::vector<float> weight(static_cast<size_t>(c.rows) * k);
+    for (size_t i = 0; i < weight.size(); ++i) {
+      uint8_t x = static_cast<uint8_t>(rng() % 256);
+      if ((x & 0x7f) == 0x7f) x = 0x3c;
+      code[i].v = x;
+      weight[i] = decodeE4M3(x);
+    }
+    int numScales = c.perRow ? c.rows : 1;
+    Tensor scales = F::empty(Device::getCpu(), {numScales}, DType::kFloat);
+    float *scale = scales.getInternalData()->getData<float>(0);
+    for (int i = 0; i < numScales; ++i) scale[i] = 0.001f * (1 + static_cast<int>(rng() % 100));
+
+    // The activation in half, from [-2, 2), and the product the long way, in float.
+    Tensor uniform = F::rand(Device::getCpu(), c.shapeA, DType::kFloat);
+    Tensor a = toMetal(plus(F::mul(cpu(), uniform, 4.0f), -2.0f), DType::kFloat16);
+    std::vector<float> activation = values(a);
+    int m = static_cast<int>(activation.size()) / k;
+    std::vector<float> reference(static_cast<size_t>(m) * c.rows);
+    for (int i = 0; i < m; ++i) {
+      for (int j = 0; j < c.rows; ++j) {
+        double sum = 0;
+        for (int l = 0; l < k; ++l) sum += double(activation[i * k + l]) * weight[j * k + l];
+        reference[i * c.rows + j] = static_cast<float>(sum * scale[c.perRow ? j : 0]);
+      }
+    }
+
+    std::vector<int> outShape = c.shapeA;
+    outShape.back() = c.rows;
+    Tensor out = F::empty(Device::getMetal(), outShape, DType::kFloat16);
+    op::metal_native::fp8Matmul(
+        a,
+        F::toDevice(mtl(), codes, Device::getMetal()),
+        F::toDevice(mtl(), scales, Device::getMetal()),
+        c.perRow,
+        out);
+    std::vector<float> got = values(out);
+
+    // Against the float product: what is left is the one rounding to half of the answer.
+    double err = 0, ref = 0;
+    for (size_t i = 0; i < got.size(); ++i) {
+      err += (double(got[i]) - reference[i]) * (double(got[i]) - reference[i]);
+      ref += double(reference[i]) * reference[i];
+    }
+    CATCH_CHECK(sqrt(err / ref) < 1e-3);
   }
 }
 

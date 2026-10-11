@@ -43,6 +43,9 @@
 #include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/cuda/to_device.h"
 #endif  // LIBWAIFU_CUDA_ENABLED
+#ifdef LIBWAIFU_METAL_ENABLED
+#include "flint/metal_native/ops.h"
+#endif  // LIBWAIFU_METAL_ENABLED
 
 namespace {
 
@@ -887,6 +890,11 @@ bool fp8Available(fl::Device::Type device) {
 #ifdef LIBWAIFU_CUDA_ENABLED
   if (device == fl::Device::kCuda) return fl::op::cuda::isFp8GemmAvailable();
 #endif
+#ifdef LIBWAIFU_METAL_ENABLED
+  // The product only: the weight is widened to half as the kernel reads it, which any Apple GPU
+  // the backend runs on can do. Quantizing is still CUDA's.
+  if (device == fl::Device::kMetal) return true;
+#endif
 
   return false;
 }
@@ -984,6 +992,12 @@ int32_t fp8Matmul(
       } else {
         fl::op::cuda::gemmFp8TensorScale(deref(a), weight, deref(scale), deref(out));
       }
+      return clearError();
+    }
+#endif
+#ifdef LIBWAIFU_METAL_ENABLED
+    if (device == fl::Device::kMetal) {
+      fl::op::metal_native::fp8Matmul(deref(a), weight, deref(scale), perRow, deref(out));
       return clearError();
     }
 #endif
