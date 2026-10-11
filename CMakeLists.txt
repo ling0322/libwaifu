@@ -577,9 +577,23 @@ endif()
 if(WITH_OPENMP)
     if(APPLE)
         # Static, so the binary carries its own OpenMP runtime rather than depending on a dylib
-        # that only exists on the machine that built it.
+        # that only exists on the machine that built it. Where libomp.a is: the one built from
+        # source or under LIBOMP_ROOT, as set above -- or, for an OpenMP configuration given by
+        # hand with -DOpenMP_CXX_FLAGS, which skips all that, beside the library it names.
+        if(LIBOMP_LIBRARY_DIR)
+            set(flint_OMP_LIBRARY_DIR "${LIBOMP_LIBRARY_DIR}")
+        elseif(OpenMP_omp_LIBRARY)
+            get_filename_component(flint_OMP_LIBRARY_DIR "${OpenMP_omp_LIBRARY}" DIRECTORY)
+        elseif(LIBOMP_ROOT)
+            set(flint_OMP_LIBRARY_DIR "${LIBOMP_ROOT}/lib")
+        else()
+            message(FATAL_ERROR
+              "WITH_OPENMP=ON with OpenMP_CXX_FLAGS given by hand: name the runtime as well, with "
+              "-DOpenMP_omp_LIBRARY=<path to libomp.a> or -DLIBOMP_ROOT=<prefix>, so that the Rust "
+              "link can find it.")
+        endif()
         list(APPEND flint_CARGO_FLAGS
-            "cargo:rustc-link-search=native=${LIBOMP_LIBRARY_DIR}"
+            "cargo:rustc-link-search=native=${flint_OMP_LIBRARY_DIR}"
             "cargo:rustc-link-lib=static=omp")
         if(libwaifu_LIBOMP_FROM_SOURCE)
             list(APPEND flint_CARGO_DEPENDS libomp_external)
