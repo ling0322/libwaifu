@@ -205,6 +205,7 @@ if(WITH_METAL)
         "metal_native/common.cc"
         "metal_native/context.cc"
         "metal_native/elementwise.cc"
+        "metal_native/fp8.cc"
         "metal_native/matmul.cc"
         "metal_native/metal_cpp.cc"
         "metal_native/metal_operators.cc"

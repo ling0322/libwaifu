@@ -118,6 +118,16 @@ void rotaryEmbedding(
 // matmul.cc
 void matmul(const TensorView &a, const TensorView &b, const TensorView &out);
 
+/// `a` <float16>(..., k) times the transpose of the E4M3 weight `data` (rows, k), scaled by
+/// `scale` <float> -- one a row of the weight where `perRow`, otherwise one for all of it -- into
+/// `out` <float16>(..., rows). Every operand contiguous: the C API's fl_fp8_matmul checks them.
+void fp8Matmul(
+    const TensorView &a,
+    const TensorView &data,
+    const TensorView &scale,
+    bool perRow,
+    const TensorView &out);
+
 /// Scaled dot product attention in one kernel, as Operators::attention has it, where the kernel
 /// takes these and is the faster: a head of 32, 64 or 128 in half precision or of 32 or 64 in
 /// float, every last dimension contiguous, `out` contiguous, and no more than a few hundred keys.
