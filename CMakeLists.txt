@@ -44,35 +44,89 @@ option(WITH_VULKAN "Vulkan compute support." ${_libwaifu_vulkan_default})
 option(CUDA_ARCH_NATIVE "Build CUDA kernels only for the GPUs in this machine." OFF)
 option(MKL_PREFIX "Prefix for MKL headers and libraries." "/opt/intel/mkl")
 
-# AppleClang implements the OpenMP pragmas but ships neither omp.h nor a runtime, so
-# FindOpenMP always comes up empty here. Point it at Homebrew's libomp, and at the static
-# archive specifically: a binary that needs a Homebrew dylib beside it is not one you can
-# hand to anybody else.
+# AppleClang implements the OpenMP pragmas but ships neither omp.h nor a runtime, so FindOpenMP
+# always comes up empty here. The runtime is linked in static, since a binary that needs a dylib
+# beside it is not one you can hand to anybody else -- and it is built from LLVM's source for this
+# build's deployment target, since a prebuilt one, Homebrew's, is built for the macOS it was
+# installed on, and a binary that carries it runs on no older one. LIBOMP_ROOT names a prefix
+# with lib/libomp.a and include/omp.h to use instead, built for whatever it was built for.
+set(libwaifu_LIBOMP_FROM_SOURCE OFF)
 if(APPLE AND WITH_OPENMP AND NOT DEFINED OpenMP_CXX_FLAGS)
-    if(NOT LIBOMP_ROOT)
-        find_program(BREW_EXECUTABLE brew)
-        if(BREW_EXECUTABLE)
-            execute_process(COMMAND "${BREW_EXECUTABLE}" --prefix libomp
-                            OUTPUT_VARIABLE LIBOMP_ROOT
-                            OUTPUT_STRIP_TRAILING_WHITESPACE
-                            ERROR_QUIET)
+    if(LIBOMP_ROOT)
+        if(NOT EXISTS "${LIBOMP_ROOT}/lib/libomp.a")
+            message(FATAL_ERROR "LIBOMP_ROOT=${LIBOMP_ROOT} has no lib/libomp.a")
         endif()
-    endif()
-    if(EXISTS "${LIBOMP_ROOT}/lib/libomp.a")
-        set(OpenMP_C_FLAGS "-Xclang -fopenmp -I${LIBOMP_ROOT}/include")
-        set(OpenMP_CXX_FLAGS "-Xclang -fopenmp -I${LIBOMP_ROOT}/include")
+        set(LIBOMP_INCLUDE_DIR "${LIBOMP_ROOT}/include")
+        set(LIBOMP_LIBRARY_DIR "${LIBOMP_ROOT}/lib")
+        set(OpenMP_C_FLAGS "-Xclang -fopenmp -I${LIBOMP_INCLUDE_DIR}")
+        set(OpenMP_CXX_FLAGS "-Xclang -fopenmp -I${LIBOMP_INCLUDE_DIR}")
         set(OpenMP_C_LIB_NAMES omp)
         set(OpenMP_CXX_LIB_NAMES omp)
-        set(OpenMP_omp_LIBRARY "${LIBOMP_ROOT}/lib/libomp.a")
+        set(OpenMP_omp_LIBRARY "${LIBOMP_LIBRARY_DIR}/libomp.a")
     else()
-        message(FATAL_ERROR
-          "WITH_OPENMP=ON needs libomp on macOS: run 'brew install libomp', or point "
-          "LIBOMP_ROOT at a prefix that has lib/libomp.a, or configure with "
-          "-DWITH_OPENMP=OFF.")
+        # LLVM's OpenMP runtime (Apache 2.0 with LLVM exceptions) on its own: the openmp
+        # directory of a release and the CMake modules it reads from beside it, a few megabytes
+        # rather than the whole of llvm-project, which configure and build in a dozen seconds.
+        include(ExternalProject)
+        set(LIBOMP_VERSION "21.1.0")
+        set(LIBOMP_RELEASE
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LIBOMP_VERSION}")
+        set(LIBOMP_SOURCE_ROOT "${CMAKE_BINARY_DIR}/libomp/src")
+        set(LIBOMP_BINARY_DIR "${CMAKE_BINARY_DIR}/libomp/build")
+        set(LIBOMP_INCLUDE_DIR "${LIBOMP_BINARY_DIR}/runtime/src")
+        set(LIBOMP_LIBRARY_DIR "${LIBOMP_BINARY_DIR}/runtime/src")
+
+        ExternalProject_Add(libomp_cmake_modules
+            URL             "${LIBOMP_RELEASE}/cmake-${LIBOMP_VERSION}.src.tar.xz"
+            URL_HASH        SHA256=528347c84c3571d9d387b825ef8b07c7ad93e9437243c32173838439c3b6028f
+            DOWNLOAD_EXTRACT_TIMESTAMP ON
+            SOURCE_DIR      "${LIBOMP_SOURCE_ROOT}/cmake"
+            CONFIGURE_COMMAND ""
+            BUILD_COMMAND   ""
+            INSTALL_COMMAND "")
+        ExternalProject_Add(libomp_external
+            URL             "${LIBOMP_RELEASE}/openmp-${LIBOMP_VERSION}.src.tar.xz"
+            URL_HASH        SHA256=60d6c4d2019d546aefc029c9b2c4006dc78419dba4cfd0a376ae025be8ff9778
+            DOWNLOAD_EXTRACT_TIMESTAMP ON
+            SOURCE_DIR      "${LIBOMP_SOURCE_ROOT}/openmp"
+            BINARY_DIR      "${LIBOMP_BINARY_DIR}"
+            DEPENDS         libomp_cmake_modules
+            CMAKE_ARGS
+                -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}
+                -DCMAKE_OSX_ARCHITECTURES=arm64
+                -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+                -DOPENMP_STANDALONE_BUILD=ON
+                -DLIBOMP_ENABLE_SHARED=OFF
+                -DOPENMP_ENABLE_LIBOMPTARGET=OFF
+                -DOPENMP_ENABLE_OMPT_TOOLS=OFF
+                -DLIBOMP_OMPT_SUPPORT=OFF
+                -DLIBOMP_OMPD_SUPPORT=OFF
+                -DLIBOMP_USE_HWLOC=OFF
+                -DCMAKE_MESSAGE_LOG_LEVEL=ERROR
+            BUILD_COMMAND   ${CMAKE_COMMAND} --build <BINARY_DIR> --target omp --parallel
+            INSTALL_COMMAND ""
+            BUILD_BYPRODUCTS "${LIBOMP_LIBRARY_DIR}/libomp.a")
+
+        # What FindOpenMP would have said, had there been a runtime for it to try at configure
+        # time: there is none until the build has made it.
+        set(libwaifu_LIBOMP_FROM_SOURCE ON)
+        set(OPENMP_FOUND TRUE)
+        set(OpenMP_C_FLAGS "-Xclang -fopenmp -I${LIBOMP_INCLUDE_DIR}")
+        set(OpenMP_CXX_FLAGS "-Xclang -fopenmp -I${LIBOMP_INCLUDE_DIR}")
+        set(OpenMP_CXX_INCLUDE_DIRS "${LIBOMP_INCLUDE_DIR}")
+        add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
+        set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
+            INTERFACE_LINK_LIBRARIES "${LIBOMP_LIBRARY_DIR}/libomp.a")
+        message(STATUS "libwaifu OpenMP: LLVM ${LIBOMP_VERSION}'s, built for macOS "
+                       "${CMAKE_OSX_DEPLOYMENT_TARGET}")
     endif()
 endif()
 
-find_package(OpenMP)
+if(NOT libwaifu_LIBOMP_FROM_SOURCE)
+    find_package(OpenMP)
+endif()
 
 set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -522,11 +576,28 @@ endif()
 
 if(WITH_OPENMP)
     if(APPLE)
-        # Static, so the binary carries its own OpenMP runtime rather than depending on a
-        # Homebrew dylib that only exists on the machine that built it.
+        # Static, so the binary carries its own OpenMP runtime rather than depending on a dylib
+        # that only exists on the machine that built it. Where libomp.a is: the one built from
+        # source or under LIBOMP_ROOT, as set above -- or, for an OpenMP configuration given by
+        # hand with -DOpenMP_CXX_FLAGS, which skips all that, beside the library it names.
+        if(LIBOMP_LIBRARY_DIR)
+            set(flint_OMP_LIBRARY_DIR "${LIBOMP_LIBRARY_DIR}")
+        elseif(OpenMP_omp_LIBRARY)
+            get_filename_component(flint_OMP_LIBRARY_DIR "${OpenMP_omp_LIBRARY}" DIRECTORY)
+        elseif(LIBOMP_ROOT)
+            set(flint_OMP_LIBRARY_DIR "${LIBOMP_ROOT}/lib")
+        else()
+            message(FATAL_ERROR
+              "WITH_OPENMP=ON with OpenMP_CXX_FLAGS given by hand: name the runtime as well, with "
+              "-DOpenMP_omp_LIBRARY=<path to libomp.a> or -DLIBOMP_ROOT=<prefix>, so that the Rust "
+              "link can find it.")
+        endif()
         list(APPEND flint_CARGO_FLAGS
-            "cargo:rustc-link-search=native=${LIBOMP_ROOT}/lib"
+            "cargo:rustc-link-search=native=${flint_OMP_LIBRARY_DIR}"
             "cargo:rustc-link-lib=static=omp")
+        if(libwaifu_LIBOMP_FROM_SOURCE)
+            list(APPEND flint_CARGO_DEPENDS libomp_external)
+        endif()
     else()
         foreach(flint_OMP_LIB ${OpenMP_CXX_LIB_NAMES})
             list(APPEND flint_CARGO_FLAGS "cargo:rustc-link-lib=dylib=${flint_OMP_LIB}")
