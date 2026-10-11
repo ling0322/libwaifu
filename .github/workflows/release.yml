@@ -214,3 +214,44 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash .github/attach_release.sh waifu-linux-cuda.tar.gz
+
+  macos-app:
+    name: macOS app (Metal)
+    # macOS 26 for Xcode 26, the first whose actool compiles the Icon Composer .icon build-app.sh
+    # asks it to. The app still runs on macOS 14: that is CMAKE_OSX_DEPLOYMENT_TARGET's business,
+    # and Package.swift's.
+    runs-on: macos-26
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No libomp to install: the configure builds LLVM's from source, for macOS 14.
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.ncpu)
+
+      - name: Test (C++)
+        run: ./build/unittest
+
+      - name: Build app
+        run: macos/build-app.sh
+
+      - name: Package
+        run: |
+          macos/package-dmg.sh
+          cp macos/build/Waifu.dmg waifu-macos.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: waifu-macos
+          path: waifu-macos.dmg
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/attach_release.sh waifu-macos.dmg

@@ -18,7 +18,17 @@ cmake --build build -j$(sysctl -n hw.ncpu)
 # Resources (fetched now, a few KB each), and its icon compiled in
 macos/build-app.sh
 open macos/build/Waifu.app
+
+# the disk image, macos/build/Waifu.dmg: the app beside an Applications link, at 128 pixels
+macos/package-dmg.sh
 ```
+
+`package-dmg.sh` lays the window out with `dmg_layout.py`, which writes the image's `.DS_Store`
+with the `ds_store` package; the script installs it the first time into `macos/build/dmg-venv`.
+The release workflow runs both scripts and attaches `waifu-macos.dmg` to the release.
+
+The app is signed for no one (`codesign --sign -`), so a downloaded copy is quarantined and macOS
+will not open it until `xattr -dr com.apple.quarantine /Applications/Waifu.app`.
 
 While working on it, `swift run --package-path macos Waifu` runs it without a bundle, against
 `build/libwaifu.dylib`; `swift test --package-path macos` checks WaifuKit against it.
