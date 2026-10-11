@@ -1,0 +1,203 @@
+// The MIT License (MIT)
+//
+// Copyright (c) 2026 Xiaoyang Chen
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+// and associated documentation files (the "Software"), to deal in the Software without
+// restriction, including without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
+// Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+#include "flint/metal_native/common.h"
+
+#include "lutil/error.h"
+#include "lutil/log.h"
+#include "lutil/strings.h"
+#include "flint/functional.h"
+#include "flint/metal_native/ops.h"
+#include "flint/metal_native/metal_tensor_data.h"
+
+namespace fl {
+namespace op {
+namespace metal_native {
+
+namespace {
+
+const MetalTensorData *getData(const TensorView &tensor) {
+  const MetalTensorData *data = dynamic_cast<const MetalTensorData *>(tensor.getInternalData());
+  if (!data) {
+    throw lut::AbortedError(lut::sprintf(
+        "expected a tensor on the Metal device, got one on %s",
+        tensor.getDevice().getName()));
+  }
+  return data;
+}
+
+}  // namespace
+
+Tensor createTensor(lut::Span<const int> shape, DType dtype) {
+  return F::empty(Device(Device::kMetal), shape, dtype);
+}
+
+TensorView restride(const TensorView &base, lut::Span<const TensorShape::Elem> elems) {
+  return TensorView(
+      base.getInternalData(),
+      std::make_shared<TensorShape>(elems),
+      base.getInternalOffset());
+}
+
+void checkOutput(const TensorView &out, lut::Span<const int> shape, DType dtype, const char *op) {
+  if (out.getDevice().getType() != Device::kMetal) {
+    throw lut::AbortedError(lut::sprintf("%s: the output is not on the Metal device", op));
+  }
+  if (!out.isContiguous()) {
+    throw lut::AbortedError(lut::sprintf("%s: the output is not contiguous", op));
+  }
+  if (out.getDType() != dtype) {
+    throw lut::AbortedError(lut::sprintf(
+        "%s: the output is %s, expected %s",
+        op,
+        out.getDType().toString(),
+        dtype.toString()));
+  }
+  out.throwIfInvalidShape(shape, op);
+}
+
+Context *getContext(const TensorView &tensor) {
+  return getData(tensor)->getContext();
+}
+
+const Buffer &getBuffer(const TensorView &tensor) {
+  return getData(tensor)->getBuffer();
+}
+
+int64_t getByteOffset(const TensorView &tensor) {
+  return tensor.getDType().getTotalSize(tensor.getInternalOffset());
+}
+
+Arg getArg(const TensorView &tensor) {
+  return Arg{&getBuffer(tensor), getByteOffset(tensor)};
+}
+
+std::string getTypeSuffix(DType dtype) {
+  switch (dtype) {
+    case DType::kFloat:
+      return "f32";
+    case DType::kFloat16:
+      return "f16";
+    case DType::kLong:
+      return "i64";
+    case DType::kInt32:
+      return "i32";
+    case DType::kUInt8:
+      return "u8";
+    case DType::kInt8:
+      return "i8";
+    case DType::kBool:
+      return "bool";
+    default:
+      throw lut::NotImplementedError(
+          lut::sprintf("the Metal device has no kernels for %s", dtype.toString()));
+  }
+}
+
+std::string kernelName(const char *base, DType dtype) {
+  return std::string(base) + "_" + getTypeSuffix(dtype);
+}
+
+void checkFloat(DType dtype, const char *op) {
+  if (dtype != DType::kFloat && dtype != DType::kFloat16) {
+    throw lut::InvalidArgError(lut::sprintf(
+        "%s on the Metal device takes float32 or float16, not %s",
+        op,
+        dtype.toString()));
+  }
+}
+
+std::vector<int> getStrides(const TensorView &tensor) {
+  std::vector<int> strides;
+  for (int d = 0; d < tensor.getDim(); ++d) strides.push_back(tensor.getStride(d));
+  return strides;
+}
+
+bool collapse(
+    const std::vector<int> &shape,
+    std::initializer_list<std::vector<int>> strides,
+    Layout *layout) {
+  int numTensors = static_cast<int>(strides.size());
+  CHECK(numTensors <= 3);
+
+  // Dimensions of size one go first: they add nothing to an index.
+  std::vector<int> dims;
+  for (int d = 0; d < static_cast<int>(shape.size()); ++d) {
+    if (shape[d] != 1) dims.push_back(d);
+  }
+
+  std::vector<int64_t> mergedShape;
+  std::vector<std::vector<int64_t>> mergedStrides(numTensors);
+  for (int d : dims) {
+    // Merge into the dimension before when every tensor steps over this one exactly as far as
+    // that one's stride says it should.
+    bool merge = !mergedShape.empty();
+    int t = 0;
+    for (const std::vector<int> &stride : strides) {
+      if (merge && mergedStrides[t].back() != static_cast<int64_t>(stride[d]) * shape[d]) {
+        merge = false;
+      }
+      ++t;
+    }
+
+    t = 0;
+    if (merge) {
+      mergedShape.back() *= shape[d];
+      for (const std::vector<int> &stride : strides) mergedStrides[t++].back() = stride[d];
+    } else {
+      mergedShape.push_back(shape[d]);
+      for (const std::vector<int> &stride : strides) mergedStrides[t++].push_back(stride[d]);
+    }
+  }
+
+  if (mergedShape.size() > kMaxDims) return false;
+
+  // A tensor of one element is still one dimension of one.
+  if (mergedShape.empty()) {
+    mergedShape.push_back(1);
+    for (int t = 0; t < numTensors; ++t) mergedStrides[t].push_back(0);
+  }
+
+  layout->ndim = static_cast<int>(mergedShape.size());
+  for (int d = 0; d < kMaxDims; ++d) {
+    bool used = d < layout->ndim;
+    layout->shape[d] = used ? static_cast<uint32_t>(mergedShape[d]) : 1;
+    for (int t = 0; t < 3; ++t) {
+      layout->strides[t][d] = (used && t < numTensors) ? static_cast<uint32_t>(
+                                                             mergedStrides[t][d])
+                                                       : 0;
+    }
+  }
+  return true;
+}
+
+Contiguous::Contiguous(const TensorView &tensor) {
+  if (tensor.empty() || tensor.isContiguous()) {
+    TensorView::operator=(tensor);
+    return;
+  }
+
+  _copy = createTensor(tensor.getShape(), tensor.getDType());
+  copy(tensor, _copy);
+  TensorView::operator=(_copy);
+}
+
+}  // namespace metal_native
+}  // namespace op
+}  // namespace fl

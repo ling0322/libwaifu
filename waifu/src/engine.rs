@@ -730,6 +730,10 @@ impl Worker {
                 on_complete,
             } => {
                 let ended = guarded(|| self.draw(&request, &mut on_progress, &stop));
+                // What a draw needed at its peak -- the decoder's, on Metal some 3 GB past the
+                // model -- is the device's again once it is over, done, stopped or failed, rather
+                // than the process's until the next. Only the model stays.
+                crate::flint::release_memory();
                 on_complete(ended);
             }
             Work::Speak {

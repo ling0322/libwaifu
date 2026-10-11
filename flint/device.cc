@@ -26,6 +26,9 @@
 #ifdef LIBWAIFU_MLX_ENABLED
 #include "flint/metal/metal_operators.h"
 #endif
+#ifdef LIBWAIFU_METAL_ENABLED
+#include "flint/metal_native/metal_operators.h"
+#endif
 #ifdef LIBWAIFU_VULKAN_ENABLED
 #include "flint/vulkan/vulkan_operators.h"
 #endif
@@ -68,8 +71,10 @@ bool Device::isCudaAvailable() {
 }
 
 bool Device::isMetalAvailable() {
-#ifdef LIBWAIFU_MLX_ENABLED
+#if defined(LIBWAIFU_MLX_ENABLED)
   return op::metal::MetalOperators::isAvailable();
+#elif defined(LIBWAIFU_METAL_ENABLED)
+  return op::metal_native::MetalOperators::isAvailable();
 #else
   return false;
 #endif

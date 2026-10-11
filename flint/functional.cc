@@ -36,6 +36,9 @@
 #ifdef LIBWAIFU_MLX_ENABLED
 #include "flint/metal/metal_tensor_data.h"
 #endif
+#ifdef LIBWAIFU_METAL_ENABLED
+#include "flint/metal_native/metal_tensor_data.h"
+#endif
 #ifdef LIBWAIFU_VULKAN_ENABLED
 #include "flint/vulkan/vulkan_tensor_data.h"
 #endif
@@ -120,6 +123,10 @@ std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype) 
 #ifdef LIBWAIFU_MLX_ENABLED
     case Device::kMetal:
       return op::metal::MetalTensorData::create(numel, dtype);
+#endif
+#ifdef LIBWAIFU_METAL_ENABLED
+    case Device::kMetal:
+      return op::metal_native::MetalTensorData::create(numel, dtype);
 #endif
 #ifdef LIBWAIFU_VULKAN_ENABLED
     case Device::kVulkan:

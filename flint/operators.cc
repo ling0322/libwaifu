@@ -39,6 +39,9 @@
 #ifdef LIBWAIFU_MLX_ENABLED
 #include "flint/metal/metal_operators.h"
 #endif
+#ifdef LIBWAIFU_METAL_ENABLED
+#include "flint/metal_native/metal_operators.h"
+#endif
 #ifdef LIBWAIFU_VULKAN_ENABLED
 #include "flint/vulkan/vulkan_operators.h"
 #endif
@@ -449,6 +452,13 @@ void initOperators() {
     if (op::metal::MetalOperators::isAvailable()) {
       CHECK(!gOperatorsForDevice[Device::kMetal]);
       gOperatorsForDevice[Device::kMetal] = op::metal::MetalOperators::create();
+    }
+#endif
+#ifdef LIBWAIFU_METAL_ENABLED
+    // Only where there is a device to run on, as with MLX.
+    if (op::metal_native::MetalOperators::isAvailable()) {
+      CHECK(!gOperatorsForDevice[Device::kMetal]);
+      gOperatorsForDevice[Device::kMetal] = op::metal_native::MetalOperators::create();
     }
 #endif
 #ifdef LIBWAIFU_VULKAN_ENABLED
