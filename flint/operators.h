@@ -114,8 +114,8 @@ class Operators {
   ///
   /// Every backend implements this. CUDA on CUTLASS, groups and all; the CPU as the 2-D
   /// convolution over an image one row tall that it is, sharing `conv.cc`'s im2col and GEMM with
-  /// `conv2d` and differing only in padding the length and not the height; Metal as MLX's own,
-  /// with the operands turned channels last and back.
+  /// `conv2d` and differing only in padding the length and not the height; Metal and Vulkan the
+  /// same way, through their `conv2d` kernels.
   virtual void conv1d(
       TensorView input,
       TensorView weight,
@@ -167,7 +167,7 @@ class Operators {
   ///
   /// No backend implements this. `waifu::audio::stft` composes it as a convolution against a bank
   /// of windowed sinusoids, which is a GEMM of O(nFft^2) per frame where a fast transform would
-  /// be O(nFft log nFft). A backend with an FFT -- cuFFT, vDSP, MLX -- is the reason this is named
+  /// be O(nFft log nFft). A backend with an FFT -- cuFFT, vDSP -- is the reason this is named
   /// here rather than left a composition forever.
   virtual void stft(
       TensorView input,

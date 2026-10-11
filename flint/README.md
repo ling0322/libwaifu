@@ -30,7 +30,9 @@ TensorView + Operators dispatch
 - `Operators` is one device's backend: it reads views and writes a caller-allocated `out`.
 - The CPU backend contains portable kernels plus AVX2, AVX-512, and ARM half-precision paths.
 - The CUDA backend contains custom inference kernels and optional FlashAttention/CUTLASS paths.
-- The Metal backend runs on MLX.
+- The Metal backend has Metal kernels of its own, built the way the Vulkan backend is, and runs
+  on every Apple GPU from the M1 on; on an M5 the products run on its neural accelerators. See
+  [docs/metal.md](../docs/metal.md).
 - The Vulkan backend has GLSL compute kernels of its own, and runs on any GPU with a Vulkan 1.2
   driver. See [Vulkan](#vulkan).
 - The C API owns no tensors: callers own `fl_tensor_data_t` storage and pass `fl_tensor_view_t`s.
@@ -42,7 +44,7 @@ TensorView + Operators dispatch
 flint/
 |-- cpu/             CPU tensors and kernels
 |-- cuda/            CUDA tensors and kernels
-|-- metal/           Metal tensors and operators, through MLX
+|-- metal_native/    Metal tensors and kernels; metal_native/kernels/ holds the Metal shaders
 |-- vulkan/          Vulkan tensors and kernels; vulkan/shaders/ holds the GLSL
 |-- lutil/           Utility code used by the native runtime
 |-- bin/             Native test and benchmark entry points
@@ -121,6 +123,9 @@ cmake --build build --parallel
 
 Vulkan is built by default on Linux and Windows, alone or beside CUDA; `-DWITH_VULKAN=OFF` leaves
 it out. See [Vulkan](#vulkan).
+
+Metal is built by default on macOS, and needs nothing but Xcode's Metal toolchain; `-DWITH_METAL=OFF`
+leaves it out. See [docs/metal.md](../docs/metal.md).
 
 FlashAttention is opt-in, since its kernels are slow to compile. Build them once with
 `./third_party/install_flash_attn.sh` and add `-DWITH_FLASH_ATTN=ON` to use them.

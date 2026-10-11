@@ -21,9 +21,8 @@
 //!
 //! The waifu crate's build script names flint's static libraries, and those reach this link on
 //! their own. Its link arguments do not: cargo keeps a `rustc-link-arg` to the package that said
-//! it. One of them is the `-sectcreate` that puts the Metal kernels into the image -- without it
-//! the first Metal operator aborts with "no __TEXT,__metallib section" -- so they are said again
-//! here, for this package's own links.
+//! it, so whatever flint's link flags carry as one is said again here, for this package's own
+//! links. (The Metal kernels need none: they are bytes inside flint itself.)
 
 use std::path::PathBuf;
 

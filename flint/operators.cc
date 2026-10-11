@@ -36,9 +36,6 @@
 #include "flint/cuda/cuda_operators.h"
 #endif
 #include "flint/functional.h"
-#ifdef LIBWAIFU_MLX_ENABLED
-#include "flint/metal/metal_operators.h"
-#endif
 #ifdef LIBWAIFU_METAL_ENABLED
 #include "flint/metal_native/metal_operators.h"
 #endif
@@ -446,16 +443,9 @@ void initOperators() {
     CHECK(!gOperatorsForDevice[Device::kCuda]);
     gOperatorsForDevice[Device::kCuda] = op::cuda::CudaOperators::create();
 #endif
-#ifdef LIBWAIFU_MLX_ENABLED
-    // Unlike CUDA, a build with MLX still has to cope with there being no GPU to talk to, so
-    // the operators are only registered when MLX can actually reach one.
-    if (op::metal::MetalOperators::isAvailable()) {
-      CHECK(!gOperatorsForDevice[Device::kMetal]);
-      gOperatorsForDevice[Device::kMetal] = op::metal::MetalOperators::create();
-    }
-#endif
 #ifdef LIBWAIFU_METAL_ENABLED
-    // Only where there is a device to run on, as with MLX.
+    // Unlike CUDA, a build with Metal still has to cope with there being no GPU it can run on,
+    // so the operators are only registered where there is one.
     if (op::metal_native::MetalOperators::isAvailable()) {
       CHECK(!gOperatorsForDevice[Device::kMetal]);
       gOperatorsForDevice[Device::kMetal] = op::metal_native::MetalOperators::create();

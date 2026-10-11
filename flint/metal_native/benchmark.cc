@@ -17,8 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// The same SDXL shapes the CUDA and CPU benchmarks run, on the Metal backend through MLX. Half
-// precision throughout, which is what the Metal operators use in practice.
+// The same SDXL shapes the CUDA and CPU benchmarks run, on the Metal backend. Half precision
+// throughout, which is what the Metal operators use in practice.
 
 #include <algorithm>
 #include <chrono>

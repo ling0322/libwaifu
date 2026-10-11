@@ -1,8 +1,8 @@
-# Metal on flint's own kernels
+# Metal
 
-`flint/metal_native` is the Metal device without MLX: flint's operators on flint's own kernels,
-built the way the Vulkan backend is. `-DWITH_METAL=ON` builds it; it and `-DWITH_MLX=ON` are the
-same device, so a build has one or the other.
+`flint/metal_native` is the Metal device: flint's operators on flint's own kernels, built the way
+the Vulkan backend is. It is on by default on macOS (`-DWITH_METAL=OFF` leaves it out), and it
+replaced a backend on MLX, removed on 2026-10-11 once the measurements below were taken.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_METAL=ON
@@ -33,8 +33,8 @@ cmake --build build-app -j$(sysctl -n hw.ncpu)
 
 ## Why
 
-MLX evaluates a graph it is handed; flint hands it one operator at a time and wants the answer
-written into a tensor it has already allocated. So every operator on the MLX backend was an
+MLX evaluates a graph it is handed; flint hands a backend one operator at a time and wants the
+answer written into a tensor it has already allocated. So every operator on the MLX backend was an
 `eval`, a wait for the GPU, and a copy of the result into place, and the GPU sat idle for half of
 an SDXL run while the host waited on it. Here an operator encodes its kernel and returns, and the
 work goes to the GPU in batches without anyone waiting.
@@ -72,8 +72,8 @@ work goes to the GPU in batches without anyone waiting.
 
 Apple M5 Pro (16 GPU cores, neural accelerators), macOS 26, 2026-10-10. SDXL base at 1024 x 1024,
 guidance 5, three images in a row; the second and third are the ones quoted. "MLX" is `main` as of
-`171687c`, built with `-DWITH_MLX=ON`: the MLX backend is to go, and these are its last numbers,
-kept here as what this backend replaced.
+`171687c`, built with `-DWITH_MLX=ON`: these are the MLX backend's last numbers before it was
+removed, kept here as what this backend replaced.
 
 ### Whole images
 
@@ -110,7 +110,7 @@ result after -- over a whole 4-step image, summed by operator. The waiting adds 
 | upsample_nearest2d | 221 ms | 43 ms |
 | **every node** | **16.6 s** | **11.7 s** |
 
-Where MLX is still ahead:
+Where MLX was still ahead:
 
 | | MLX | Metal |
 |---|---|---|
@@ -125,8 +125,37 @@ What was tried for the convolution and left out, on this machine: tiles of 128 x
 64 x 128), chunks of 64 rather than 32 along K (the same), and two threadgroup tiles in turn to
 save a barrier a chunk (slower: the threadgroup memory it costs).
 
-`docs/benchmarks/sdxl_metal_native_applem5pro.txt` is the `sdxl_metal` benchmark on this backend,
-beside `sdxl_metal_applem5pro.txt`, the same on MLX.
+`docs/benchmarks/sdxl_metal_applem5pro.txt` is the `sdxl_metal` benchmark on this backend, beside
+`sdxl_metal_mlx_applem5pro.txt`, the same on MLX.
+
+### Without the accelerators
+
+An M1 to M4 has no neural accelerators, and runs the simdgroup kernels; turned off on the M5 Pro,
+that is:
+
+| | MLX, with them | Metal, with them | **Metal, without** |
+|---|---|---|---|
+| SDXL, 4 steps | 16.4 s | 9.2 s | **29.7 s** |
+| SDXL, 20 steps | 52.2 to 56.1 s | 31.0 s | **80 to 89 s** |
+| matmul, the U-Net's linear layers | 6.6 to 15 TFLOP/s | 11 to 22 TFLOP/s | **4.5 to 5.7 TFLOP/s** |
+| conv 3 x 3, half | 17 to 21 TFLOP/s | 7.7 to 8.7 TFLOP/s | **3.5 to 4.0 TFLOP/s** |
+
+The 20-step runs without them were taken with a browser open, and spread from 89 to 98 s; the
+same kernels measured 80.5 s on a quiet machine earlier. The simdgroup GEMM is at 95 % of what the
+M5 Pro's simdgroup matrices do (5.9 TFLOP/s); the convolution is at 65 %, and the VAE's float32
+convolutions are most of what a run without them spends. MLX was not measured without its
+accelerators, so how the two compare on an M1 to M4 is not known.
+
+### Anima Turbo
+
+`anima:turbo` at its defaults: 1024 x 1024, 8 steps, no guidance. Two runs of three images each,
+on a quiet machine; every image within 0.1 s of the others in its run, but for MLX's first.
+
+| | an image |
+|---|---|
+| MLX, with the accelerators | 23.3 to 25.0 s |
+| **Metal, with the accelerators** | **13.1 to 13.2 s** |
+| Metal, without | 32.6 to 32.7 s |
 
 ### Accuracy
 

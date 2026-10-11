@@ -92,6 +92,9 @@ model_dir = 'D:\models'
 
 ## Recent updates
 
+- [2026-10-11] Metal runs on flint's own kernels rather than MLX, which is removed: on an M5 Pro an
+  SDXL image is 1.8 times as fast (9.2 s for 4 steps against 16.4 s), using the M5's neural
+  accelerators where it has them, and a build runs on macOS 14. See [docs/metal.md](docs/metal.md).
 - [2026-10-06] Seed-VC is removed, and libwaifu is MIT throughout again: there is no `gpl` feature
   or `-DENABLE_GPL`. Voice conversion is CosyVoice3's.
 - [2026-10-04] Fun-CosyVoice3 converts voices on the speech2speech page:
@@ -124,8 +127,8 @@ model_dir = 'D:\models'
 | macOS    | arm64     |            | ✅     |        |        |         | ✅      | ✅        |
 
 The GPU column a machine has is the one `waifu` picks on its own -- CUDA first, then Metal, then
-Vulkan, and the CPU kernels when there is none. Metal is compiled in by `-DWITH_MLX=ON` and macOS is
-the only host that configures with it. Vulkan is compiled in by default on Linux and Windows
+Vulkan, and the CPU kernels when there is none. Metal is compiled in by default on macOS, the only
+host that configures with it (`-DWITH_METAL=OFF` leaves it out). Vulkan is compiled in by default on Linux and Windows
 (`-DWITH_VULKAN=OFF` leaves it out); it has only been run on Linux so far.
 
 The two aarch64 kernels are one choice, not two: FEAT_FHM is optional in ARMv8.2, so the half
@@ -141,7 +144,7 @@ otherwise.
 | `cpu` | The CPU kernels. |
 | `cuda` | The card, weights moved once and kept there. |
 | `cuda_cpu_offload` | Weights stay in host memory and each is moved onto the card as it is used, so a model larger than the card still draws. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
-| `metal` | The GPU on Apple Silicon, through MLX. |
+| `metal` | The GPU on Apple Silicon, through flint's own kernels -- and an M5's neural accelerators. |
 | `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. |
 
 A build only has the devices it was configured with, so `cuda` on a `-DWITH_CUDA=OFF` build is a
@@ -264,18 +267,20 @@ only in the FlashAttention path.
 
 ### macOS
 
-Install OpenMP first, then configure with `-DWITH_MLX=ON` for Metal. CMake builds MLX itself, as
-an `ExternalProject`, and the Metal kernels end up inside the binary rather than beside it:
+Install OpenMP first. Metal is on by default: its kernels are compiled with Xcode's Metal toolchain
+and end up inside the binary rather than beside it.
 
 ```bash
 brew install libomp
 export OpenMP_ROOT="$(brew --prefix)/opt/libomp"
 
-cmake -S . -B build -DWITH_CUDA=OFF -DWITH_MLX=ON
+cmake -S . -B build -DWITH_CUDA=OFF
 cmake --build build --parallel
 ```
 
-Leave `-DWITH_MLX=ON` out for a CPU-only build.
+`-DWITH_METAL=OFF` makes a CPU-only build. A build runs on macOS 14 and later, but Homebrew's
+`libomp` is built for the macOS it was installed on: for a binary to hand to older systems, add
+`-DWITH_OPENMP=OFF`. See [docs/metal.md](docs/metal.md).
 
 ### Vulkan
 

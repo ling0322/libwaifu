@@ -350,8 +350,8 @@ pub(crate) fn set_log_level(level: i32) {
     unsafe { ffi::fl_set_log_level(level) };
 }
 
-/// Hands what the devices keep for reuse back to the system -- on Metal, the buffers MLX holds on
-/// to after a tensor is dropped. For after a model has been let go of.
+/// Hands what the devices keep for reuse back to the system -- on Metal, the memory the backend
+/// holds on to after a tensor is dropped. For after a model has been let go of, or an image drawn.
 pub fn release_memory() {
     unsafe { ffi::fl_release_memory() };
 }

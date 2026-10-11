@@ -3,7 +3,7 @@
 ## Build
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_MLX=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_METAL=ON
 cmake --build build -j$(sysctl -n hw.ncpu)
 ```
 

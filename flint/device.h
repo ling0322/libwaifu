@@ -51,8 +51,8 @@ class Device {
   /// @return availability of cuda device.
   static bool isCudaAvailable();
 
-  /// @brief Return true if the Metal device is available, which needs both a build with MLX and
-  ///        a machine with a Metal GPU.
+  /// @brief Return true if the Metal device is available, which needs both a build with Metal and
+  ///        a machine with an Apple GPU it can run on (an M1 or later).
   /// @return availability of the Metal device.
   static bool isMetalAvailable();
 

@@ -171,40 +171,6 @@ if (WITH_CUDA)
         "../third_party/cutlass/tools/util/include")
 endif()
 
-if(WITH_MLX)
-    set(flint_SOURCES
-        ${flint_SOURCES}
-        "metal/attention.cc"
-        "metal/common.cc"
-        "metal/conv1d.cc"
-        "metal/conv2d.cc"
-        "metal/elementwise.cc"
-        "metal/matmul.cc"
-        "metal/metal_operators.cc"
-        "metal/metal_tensor_data.cc"
-        "metal/metallib.cc"
-        "metal/norm.cc"
-        "metal/rand.cc"
-        "metal/reduce.cc"
-        "metal/shape.cc"
-        "metal/to_device.cc")
-    set(flint_test_SOURCES
-        ${flint_test_SOURCES}
-        "metal/attention_test.cc"
-        "metal/conv1d_test.cc"
-        "metal/conv2d_test.cc"
-        "metal/elementwise_test.cc"
-        "metal/matmul_test.cc"
-        "metal/metallib_test.cc"
-        "metal/norm_test.cc"
-        "metal/operators_test.cc"
-        "metal/rand_test.cc"
-        "metal/reduce_test.cc"
-        "metal/shape_test.cc"
-        "metal/to_device_test.cc")
-    set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal/benchmark.cc")
-endif()
-
 if(WITH_VULKAN)
     set(flint_SOURCES
         ${flint_SOURCES}
@@ -254,8 +220,7 @@ if(WITH_METAL)
         ${flint_test_SOURCES}
         "metal_native/block_allocator_test.cc"
         "metal_native/operators_test.cc")
-    # Only flint's operators, so it measures whichever Metal backend is built.
-    set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal/benchmark.cc")
+    set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal_native/benchmark.cc")
     include("metal_native/kernels/kernels.cmake")
 endif()
 
@@ -328,12 +293,4 @@ if(WITH_METAL)
         target_include_directories(${_target} SYSTEM PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/metal-cpp")
     endforeach()
-endif()
-
-# MLX headers use C++20 features (defaulted comparisons). Mark them as SYSTEM so the compiler
-# does not warn about code this project does not own.
-if(WITH_MLX)
-    target_include_directories(flint_static SYSTEM PRIVATE ${MLX_INCDIRS})
-    target_include_directories(flint_test SYSTEM PRIVATE ${MLX_INCDIRS})
-    target_include_directories(flint_benchmark SYSTEM PRIVATE ${MLX_INCDIRS})
 endif()

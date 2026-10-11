@@ -35,7 +35,7 @@ enum class Group {
   kSdxlCuda,
   /// The same, on the processor.
   kSdxlCpu,
-  /// The same, on the Metal GPU through MLX.
+  /// The same, on the Metal GPU.
   kSdxlMetal,
 };
 
