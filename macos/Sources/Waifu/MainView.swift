@@ -42,7 +42,7 @@ struct MainView: View {
     var body: some View {
         NavigationSplitView {
             Sidebar(session: session)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 300, max: 420)
         } detail: {
             if session.showingModels {
                 ModelManagerView(session: session)
@@ -88,7 +88,7 @@ struct MainView: View {
                 SettingsColumn(session: session, part: .settings)
                     .frame(maxHeight: .infinity)
                     .background(Theme.sidebar)
-                    .inspectorColumnWidth(min: 300, ideal: 340, max: 420)
+                    .inspectorColumnWidth(min: 300, ideal: 300, max: 420)
             }
     }
 

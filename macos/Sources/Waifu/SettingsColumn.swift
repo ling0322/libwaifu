@@ -64,6 +64,7 @@ struct SettingsColumn: View {
                 }
                 // Tighter rows than the prompts' cards: this column is a list of settings.
                 .environment(\.rowPadding, 5)
+                .labeledContentStyle(SettingRowStyle())
             }
         }
         .labeledContentStyle(RowStyle())
@@ -161,15 +162,7 @@ struct SettingsColumn: View {
                         label: "Strength", value: $session.form.strength, range: 0...1,
                         step: 0.05, decimals: 2)
                 }
-                SeedRow(seed: $session.form.seed, anyHelp: "A different picture every time") {
-                    Button {
-                        session.lastSeed()
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("The seed of the picture on show")
-                }
+                SeedRow(seed: $session.form.seed)
             } header: {
                 Header("Sampling")
             }
@@ -199,6 +192,7 @@ struct SettingsColumn: View {
                         TextField("Instruction", text: $session.form.style, prompt: Text("none"))
                             .labelsHidden()
                             .multilineTextAlignment(.trailing)
+                            .frame(maxWidth: .infinity)
                             .fieldBox()
                     }
                 } header: {
@@ -209,7 +203,7 @@ struct SettingsColumn: View {
             FormGroup {
                 SliderRow(label: "Speed", value: $session.form.speed, range: 0.25...4, step: 0.05, decimals: 2)
                 SliderRow(label: "Temperature", value: $session.form.temperature, range: 0...2, step: 0.05, decimals: 2)
-                SeedRow(seed: $session.form.seed, anyHelp: "A different reading every time") {}
+                SeedRow(seed: $session.form.seed)
             } header: {
                 Header("Reading")
             }
@@ -235,7 +229,7 @@ struct SettingsColumn: View {
                     }
                     .help("Off, only whose voice it is changes. On, the accent and pacing change as well.")
                 }
-                SeedRow(seed: $session.form.seed, anyHelp: "A different conversion every time") {}
+                SeedRow(seed: $session.form.seed)
             } header: {
                 Header("Conversion")
             }
@@ -333,10 +327,12 @@ private struct Rows: _VariadicView_UnaryViewRoot {
 
 extension View {
     /// A box around a small field, in the grey of a pop-up button, so that a number that can be
-    /// typed over looks like a control rather than like a label.
+    /// typed over looks like a control rather than like a label. As tall and as round as the
+    /// pop-up beside it, which is 20 points: the app is linked against the macOS 14 SDK, and
+    /// macOS 26 draws it the old way.
     func fieldBox() -> some View {
         padding(.horizontal, 6)
-            .padding(.vertical, 3)
+            .frame(height: 20)
             .background(Theme.control, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }
@@ -348,6 +344,41 @@ struct RowStyle: LabeledContentStyle {
             configuration.label
             Spacer(minLength: 8)
             configuration.content
+        }
+    }
+}
+
+/// How wide the labels of the settings column are, so that what they label starts in a line.
+private let labelWidth: CGFloat = 86
+
+/// A row of the settings column: the label in a column of its own width, and the control filling
+/// the rest, so that every control of the column starts and ends where the others do. A label too
+/// long for its column pushes its control over rather than being cut.
+struct SettingRowStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.label
+                .lineLimit(1)
+                .frame(minWidth: labelWidth, alignment: .leading)
+                .fixedSize()
+            configuration.content
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+}
+
+/// A control column cut in two equal halves with a narrow gap between: the width and the height
+/// either side of the "×".
+struct Halves<Left: View, Gap: View, Right: View>: View {
+    @ViewBuilder var left: Left
+    @ViewBuilder var gap: Gap
+    @ViewBuilder var right: Right
+
+    var body: some View {
+        HStack(spacing: 6) {
+            left.frame(maxWidth: .infinity)
+            gap.frame(width: 10)
+            right.frame(maxWidth: .infinity)
         }
     }
 }
@@ -379,7 +410,8 @@ struct Footnote: View {
 }
 
 /// A label, a slider and the number beside it, on one line: two ways of saying one value. The
-/// label has a column of its own width, so that the sliders of a group start in a line.
+/// number has a narrow box of one width at the end of the row, and the slider all the rest of the
+/// control column, so that the sliders of a group start and end in a line.
 struct SliderRow: View {
     var label: String
     @Binding var value: Double
@@ -391,24 +423,31 @@ struct SliderRow: View {
 
     var body: some View {
         let sliding = slider ?? range
-        HStack(spacing: 8) {
-            Text(label).lineLimit(1).frame(width: 86, alignment: .leading)
-            // Rounded here rather than given a `step`, which draws a tick for every one of them.
-            Slider(
-                value: Binding(
-                    get: { min(max(value, sliding.lowerBound), sliding.upperBound) },
-                    set: { value = ($0 / step).rounded() * step }),
-                in: sliding
-            )
-            TextField(
-                label,
-                value: Binding(get: { value }, set: { value = min(max($0, range.lowerBound), range.upperBound) }),
-                format: .number.precision(.fractionLength(decimals))
-            )
-            .labelsHidden()
-            .multilineTextAlignment(.trailing)
-            .frame(width: 44)
-            .fieldBox()
+        LabeledContent(label) {
+            HStack(spacing: 8) {
+                // Rounded here rather than given a `step`, which draws a tick for every one of them.
+                Slider(
+                    value: Binding(
+                        get: { min(max(value, sliding.lowerBound), sliding.upperBound) },
+                        set: { value = ($0 / step).rounded() * step }),
+                    in: sliding
+                ) {
+                    Text(label)
+                }
+                // The row says what it is: without this the slider keeps room for its own label,
+                // and its track starts short of the boxes above it.
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+                TextField(
+                    label,
+                    value: Binding(get: { value }, set: { value = min(max($0, range.lowerBound), range.upperBound) }),
+                    format: .number.precision(.fractionLength(decimals))
+                )
+                .labelsHidden()
+                .multilineTextAlignment(.trailing)
+                .frame(width: 36)
+                .fieldBox()
+            }
         }
     }
 }
@@ -429,15 +468,16 @@ struct SizeRows: View {
                 }
             }
             .labelsHidden()
-            .fixedSize()
         }
         LabeledContent("W × H") {
-            HStack(spacing: 6) {
+            Halves {
                 TextField("Width", value: side(\.width), format: .number.grouping(.never))
-                    .labelsHidden().multilineTextAlignment(.trailing).frame(width: 48).fieldBox()
+                    .labelsHidden().multilineTextAlignment(.trailing).frame(maxWidth: .infinity).fieldBox()
+            } gap: {
                 Text("×").foregroundStyle(.secondary)
+            } right: {
                 TextField("Height", value: side(\.height), format: .number.grouping(.never))
-                    .labelsHidden().multilineTextAlignment(.trailing).frame(width: 48).fieldBox()
+                    .labelsHidden().multilineTextAlignment(.trailing).frame(maxWidth: .infinity).fieldBox()
             }
         }
     }
@@ -461,29 +501,27 @@ struct SizeRows: View {
     }
 }
 
-/// The seed, and the die that asks for a fresh one each time.
-struct SeedRow<Extra: View>: View {
+/// The seed, and the die that rolls one: inside the seed's box, so that the box fills the control
+/// column as every other one does.
+struct SeedRow: View {
     @Binding var seed: String
-    var anyHelp: String
-    @ViewBuilder var extra: Extra
 
     var body: some View {
         LabeledContent("Seed") {
             HStack(spacing: 6) {
-                TextField("Seed", text: $seed)
-                    .labelsHidden()
-                    .multilineTextAlignment(.trailing)
-                    .frame(minWidth: 60, maxWidth: 160)
-                    .fieldBox()
                 Button {
-                    seed = "-1"
+                    seed = String(Int.random(in: 1...65535))
                 } label: {
                     Image(systemName: "dice")
                 }
                 .buttonStyle(.borderless)
-                .help(anyHelp)
-                extra
+                .help("A random seed")
+                TextField("Seed", text: $seed)
+                    .labelsHidden()
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: .infinity)
             }
+            .fieldBox()
         }
     }
 }
@@ -508,7 +546,6 @@ struct StylePicker: View {
                 ForEach(styles, id: \.self) { one in Text(one.label).tag(one.instruction) }
             }
             .labelsHidden()
-            .fixedSize()
         }
     }
 }
