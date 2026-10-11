@@ -42,6 +42,11 @@ struct Fp8MatmulParams {
 constexpr int64_t kTile = 64;
 constexpr uint32_t kGemmThreads = 128;
 
+// And of kernels/nax/fp8.metal, whose threadgroups are as many threads: activation rows by weight
+// rows.
+constexpr int64_t kNaxTileM = 64;
+constexpr int64_t kNaxTileN = 128;
+
 uint32_t ceilDiv(int64_t a, int64_t b) {
   return static_cast<uint32_t>((a + b - 1) / b);
 }
@@ -78,6 +83,20 @@ void fp8Matmul(
   params.perRow = perRow ? 1 : 0;
   params.vecA = fours(k) && fours(a.getInternalOffset());
   params.vecB = fours(k) && fours(data.getInternalOffset());
+
+  // On the neural accelerators where there are any, with the same parameters.
+  if (getContext(a)->hasNax()) {
+    getContext(a)->dispatchGroups(
+        "nax_fp8_matmul",
+        {getArg(out), getArg(a), getArg(data), getArg(scale)},
+        &params,
+        sizeof(params),
+        ceilDiv(rows, kNaxTileN),
+        ceilDiv(m, kNaxTileM),
+        1,
+        kGemmThreads);
+    return;
+  }
 
   getContext(a)->dispatchGroups(
       "fp8_matmul",

@@ -582,11 +582,8 @@ float decodeE4M3(uint8_t code) {
   return sign ? -magnitude : magnitude;
 }
 
-}  // namespace
-
-CATCH_TEST_CASE("test Metal fp8 matmul", "[op][metal]") {
-  SKIP_WITHOUT_METAL();
-
+// The fp8 products against the CPU's, on whichever kernel the Metal device has chosen.
+void checkFp8Matmul() {
   struct Case {
     std::vector<int> shapeA;  // (..., k)
     int rows;
@@ -654,6 +651,19 @@ CATCH_TEST_CASE("test Metal fp8 matmul", "[op][metal]") {
     }
     CATCH_CHECK(sqrt(err / ref) < 1e-3);
   }
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test Metal fp8 matmul", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  checkFp8Matmul();
+}
+
+CATCH_TEST_CASE("test Metal fp8 matmul without the neural accelerators", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  WithoutNax without;
+  checkFp8Matmul();
 }
 
 CATCH_TEST_CASE("test Metal shape operators", "[op][metal]") {
@@ -893,6 +903,58 @@ CATCH_TEST_CASE("benchmark Metal matmul and conv2d", "[.][metal-benchmark]") {
     double seconds = time([&]() { F::conv2d(mtl(), x, w, Tensor(), 1, 1, 1, 1); });
     double flops = 2.0 * c.N * c.H * c.H * c.K * c.C * 9;
     printf("%-28s %8.3f ms %7.1f TFLOPS\n", c.name, seconds * 1e3, flops / seconds / 1e12);
+  }
+}
+
+// Not a test: how fast the fp8 product is, with and without the neural accelerators, on the
+// shapes qwen-image 2.1 multiplies at 1024 x 1024. ./build/unittest "[metal-benchmark]".
+CATCH_TEST_CASE("benchmark Metal fp8 matmul", "[.][metal-benchmark]") {
+  SKIP_WITHOUT_METAL();
+
+  auto time = [](auto &&run) {
+    run();
+    mtl()->synchronize();
+    int repeat = 10;
+    double t0 = lut::now();
+    for (int i = 0; i < repeat; ++i) run();
+    mtl()->synchronize();
+    return (lut::now() - t0) / repeat;
+  };
+
+  struct Case {
+    const char *name;
+    int m, k, rows;
+  };
+  std::vector<Case> cases = {
+      {"dit qkv/out 4096x4096x4096", 4096, 4096, 4096},
+      {"dit mlp up 4096x12288x4096", 4096, 4096, 12288},
+      {"dit mlp down 4096x4096x12288", 4096, 12288, 4096},
+      {"text mlp up 300x12288x4096", 300, 4096, 12288},
+  };
+  std::mt19937 rng(7);
+  for (const Case &c : cases) {
+    Tensor codes = F::empty(Device::getCpu(), {c.rows, c.k}, DType::kFp8E4M3);
+    Fp8E4M3 *code = codes.getInternalData()->getData<Fp8E4M3>(0);
+    for (int64_t i = 0; i < static_cast<int64_t>(c.rows) * c.k; ++i) {
+      uint8_t x = static_cast<uint8_t>(rng() % 256);
+      code[i].v = (x & 0x7f) == 0x7f ? 0x3c : x;
+    }
+    Tensor weight = F::toDevice(mtl(), codes, Device::getMetal());
+    Tensor scales = F::empty(Device::getMetal(), {c.rows}, DType::kFloat);
+    mtl()->fill(scales, 0.01f);
+    Tensor a = toMetal(F::rand(Device::getCpu(), {c.m, c.k}, DType::kFloat), DType::kFloat16);
+    Tensor out = F::empty(Device::getMetal(), {c.m, c.rows}, DType::kFloat16);
+
+    auto run = [&]() { op::metal_native::fp8Matmul(a, weight, scales, true, out); };
+    double flops = 2.0 * c.m * c.k * c.rows;
+    double withNax = time(run);
+    double without;
+    {
+      WithoutNax off;
+      without = time(run);
+    }
+    printf("%-30s accelerators %7.2f ms %6.2f TFLOP/s   simdgroup %7.2f ms %6.2f TFLOP/s\n",
+           c.name, withNax * 1e3, flops / withNax / 1e12, without * 1e3, flops / without / 1e12);
   }
 }
 
