@@ -20,16 +20,9 @@ Two things decide which macOS a build runs on:
   time: `__builtin_available(macOS 26.2, *)` is then known to hold, and the binary is for 26.2
   and later only. The accelerators' kernels are a library of their own, built for 26.2 whatever
   the target.
-- **OpenMP.** `WITH_OPENMP` links Homebrew's `libomp.a` in statically, and Homebrew builds it
-  for the macOS it runs on -- 26.0 here, which the linker warns about. A binary for older systems,
-  such as the app's `libwaifu.dylib`, is built with `-DWITH_OPENMP=OFF`; the CPU operators are
-  then single threaded, which a program that computes on the GPU barely notices.
-
-```bash
-# libwaifu.dylib for an app that runs on macOS 14 and later
-cmake -S . -B build-app -DCMAKE_BUILD_TYPE=Release -DWITH_METAL=ON -DWITH_OPENMP=OFF
-cmake --build build-app -j$(sysctl -n hw.ncpu)
-```
+- **OpenMP.** `WITH_OPENMP` links LLVM's OpenMP runtime in statically, and builds it from
+  source for the same deployment target -- a prebuilt one, Homebrew's, is built for the macOS it
+  was installed on, and would take the binary with it. `-DLIBOMP_ROOT=...` uses one anyway.
 
 ## Why
 

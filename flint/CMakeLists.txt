@@ -278,6 +278,14 @@ target_include_directories(flint_test PRIVATE ${flint_INCDIR})
 add_library(flint_benchmark OBJECT ${flint_benchmark_SOURCES})
 target_include_directories(flint_benchmark PRIVATE ${flint_INCDIR})
 
+# The OpenMP runtime built from source is built by this build: its omp.h has to be there before
+# anything that includes it is compiled.
+if(TARGET libomp_external)
+    foreach(_target flint_static flint_test flint_benchmark)
+        add_dependencies(${_target} libomp_external)
+    endforeach()
+endif()
+
 # volk and VMA are third-party headers too, with warnings of their own. VK_NO_PROTOTYPES because
 # every Vulkan entry point comes through volk's function pointers rather than from a linked loader.
 if(WITH_VULKAN)

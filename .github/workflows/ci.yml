@@ -33,9 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install libomp
-        run: brew install libomp
-
+      # No libomp to install: the configure builds LLVM's from source, for macOS 14.
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_METAL=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0
 

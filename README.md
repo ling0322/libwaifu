@@ -267,20 +267,20 @@ only in the FlashAttention path.
 
 ### macOS
 
-Install OpenMP first. Metal is on by default: its kernels are compiled with Xcode's Metal toolchain
-and end up inside the binary rather than beside it.
+Nothing to install beyond Xcode. Metal is on by default: its kernels are compiled with Xcode's Metal
+toolchain and end up inside the binary rather than beside it. OpenMP's runtime, which Xcode does not
+ship, is LLVM's, fetched and built by the configure for the same macOS as the rest -- a dozen
+seconds, once.
 
 ```bash
-brew install libomp
-export OpenMP_ROOT="$(brew --prefix)/opt/libomp"
-
 cmake -S . -B build -DWITH_CUDA=OFF
 cmake --build build --parallel
 ```
 
-`-DWITH_METAL=OFF` makes a CPU-only build. A build runs on macOS 14 and later, but Homebrew's
-`libomp` is built for the macOS it was installed on: for a binary to hand to older systems, add
-`-DWITH_OPENMP=OFF`. See [docs/metal.md](docs/metal.md).
+`-DWITH_METAL=OFF` makes a CPU-only build. A build runs on macOS 14 and later. `-DLIBOMP_ROOT=...`
+uses a `libomp` already built instead, such as Homebrew's (`$(brew --prefix libomp)`), which is
+built for the macOS it was installed on and takes the binary with it. See
+[docs/metal.md](docs/metal.md).
 
 ### Vulkan
 
