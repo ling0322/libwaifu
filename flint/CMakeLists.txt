@@ -229,6 +229,36 @@ if(WITH_VULKAN)
     include("vulkan/shaders/shaders.cmake")
 endif()
 
+# Metal on flint's own kernels, written the way the Vulkan backend is. metal-cpp is how the C++
+# reaches Metal; the kernels are compiled into a library that ends up inside flint itself.
+if(WITH_METAL)
+    set(flint_SOURCES
+        ${flint_SOURCES}
+        "metal_native/attention.cc"
+        "metal_native/block_allocator.cc"
+        "metal_native/common.cc"
+        "metal_native/context.cc"
+        "metal_native/elementwise.cc"
+        "metal_native/matmul.cc"
+        "metal_native/metal_cpp.cc"
+        "metal_native/metal_operators.cc"
+        "metal_native/metal_tensor_data.cc"
+        "metal_native/norm.cc"
+        "metal_native/rand.cc"
+        "metal_native/reduce.cc"
+        "metal_native/shape.cc"
+        "metal_native/to_device.cc"
+        "${CMAKE_CURRENT_BINARY_DIR}/metal_kernels/metallib.cc"
+        "${CMAKE_CURRENT_BINARY_DIR}/metal_kernels/nax_metallib.cc")
+    set(flint_test_SOURCES
+        ${flint_test_SOURCES}
+        "metal_native/block_allocator_test.cc"
+        "metal_native/operators_test.cc")
+    # Only flint's operators, so it measures whichever Metal backend is built.
+    set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "metal/benchmark.cc")
+    include("metal_native/kernels/kernels.cmake")
+endif()
+
 # CPU specific code
 if(LIBWAIFU_KERNEL_X86_64)
     set(flint_SOURCES
@@ -290,6 +320,14 @@ if(WITH_VULKAN)
         target_compile_definitions(${_target} PRIVATE VK_NO_PROTOTYPES)
     endforeach()
     add_dependencies(flint_static flint_vulkan_shaders)
+endif()
+
+# metal-cpp is a third-party header with warnings of its own.
+if(WITH_METAL)
+    foreach(_target flint_static flint_test flint_benchmark)
+        target_include_directories(${_target} SYSTEM PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/metal-cpp")
+    endforeach()
 endif()
 
 # MLX headers use C++20 features (defaulted comparisons). Mark them as SYSTEM so the compiler

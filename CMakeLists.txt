@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Default to macOS 14.0 (Sonoma) so the binary runs on all Apple Silicon machines.
-# Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=... if needed.
+# The macOS a build runs on, unless -DCMAKE_OSX_DEPLOYMENT_TARGET=... says otherwise. The Metal
+# backend on flint's own kernels runs on macOS 14.0 (Sonoma), every Apple Silicon machine there is,
+# and decides at run time whether the neural accelerators' kernels, which want 26.2, can load --
+# a decision a later target would make at build time instead, since __builtin_available is then
+# known to hold. MLX builds its kernels for the accelerators only for a target of 26.2.
 if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING "macOS deployment target")
+    if(WITH_METAL)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "macOS deployment target")
+    else()
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING "macOS deployment target")
+    endif()
 endif()
 
 project(libwaifu LANGUAGES CXX C)
@@ -22,6 +29,9 @@ option(WITH_CUDNN "Build the benchmark's cuDNN Conv2d reference (needs FLINT_ENA
 # without it still has attention, through the block-wise fallback in operators.cc.
 option(WITH_FLASH_ATTN "Link the prebuilt FlashAttention forward kernels (slow to build)." OFF)
 option(WITH_MLX "Metal compute support, through MLX." OFF)
+# Metal on flint's own kernels (flint/metal_native), the Vulkan backend's structure in Metal's
+# terms. Either this or WITH_MLX: both are the Metal device.
+option(WITH_METAL "Metal compute support, on flint's own kernels." OFF)
 # On by default where there is a Vulkan to run on. The build needs no SDK and the binary loads the
 # loader itself, so turning it on costs a machine without Vulkan nothing but build time -- about
 # half a minute, most of it compiling glslang once. macOS has Metal instead, through MLX.
@@ -334,6 +344,16 @@ if(WITH_FLASH_ATTN)
         INTERFACE_INCLUDE_DIRECTORIES "${FLASH_ATTN_ROOT}/csrc/flash_attn/src")
 endif()
 
+if(WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "WITH_METAL requires macOS")
+    endif()
+    if(WITH_MLX)
+        message(FATAL_ERROR "WITH_METAL and WITH_MLX are both the Metal device: choose one")
+    endif()
+    add_definitions("-DLIBWAIFU_METAL_ENABLED")
+endif()
+
 if(WITH_MLX)
     if(NOT APPLE)
         message(FATAL_ERROR "WITH_MLX requires macOS: MLX's Metal backend has no other host")
@@ -505,6 +525,10 @@ if(WITH_MLX)
     set(libwaifu_LIBADD ${libwaifu_LIBADD} mlx)
 endif()
 
+if(WITH_METAL)
+    set(libwaifu_LIBADD ${libwaifu_LIBADD} "-framework Metal" "-framework Foundation")
+endif()
+
 if(WITH_OPENMP)
     set(libwaifu_LIBADD ${libwaifu_LIBADD} OpenMP::OpenMP_CXX)
 endif()
@@ -584,6 +608,13 @@ if(WITH_MLX)
         "cargo:rustc-link-lib=framework=Accelerate"
         "cargo:rustc-link-arg=${MLX_METALLIB_LINK_OPTION}")
     list(APPEND flint_CARGO_DEPENDS mlx_external)
+endif()
+
+if(WITH_METAL)
+    # The kernels are inside flint already; Metal and Foundation are all there is to link.
+    list(APPEND flint_CARGO_FLAGS
+        "cargo:rustc-link-lib=framework=Metal"
+        "cargo:rustc-link-lib=framework=Foundation")
 endif()
 
 if(WITH_OPENMP)

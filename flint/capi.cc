@@ -340,6 +340,16 @@ void fl_release_memory() {
     LOG(WARN) << "could not release the Metal buffer cache: " << e.what();
   }
 #endif  // LIBWAIFU_MLX_ENABLED
+#ifdef LIBWAIFU_METAL_ENABLED
+  // The same for flint's own Metal backend, whose buffer cache keeps what the tensors let go of.
+  try {
+    if (fl::Device::isMetalAvailable()) {
+      fl::getOperators(fl::Device::kMetal)->releaseUnusedMemory();
+    }
+  } catch (const std::exception &e) {
+    LOG(WARN) << "could not release the Metal buffer cache: " << e.what();
+  }
+#endif  // LIBWAIFU_METAL_ENABLED
 }
 
 // --- Storage ----------------------------------------------------------------------------------
