@@ -20,7 +20,9 @@
 #include "flint/cpu/unary.h"
 
 #include <math.h>
+#ifdef _OPENMP
 #include <omp.h>
+#endif
 
 #include "lutil/attributes.h"
 #include "flint/cpu/accessor.h"

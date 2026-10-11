@@ -13,6 +13,24 @@ It runs on every Apple GPU from the M1 on (family Apple7, for simdgroup matrices
 Where the GPU has neural accelerators and the system is macOS 26.2 or later -- an M5 -- the
 products and the convolutions run on those instead.
 
+Two things decide which macOS a build runs on:
+
+- **The deployment target.** A `WITH_METAL` build defaults to 14.0, and decides at run time
+  whether the accelerators' kernels can load. Built for 26.2 instead, it would decide at build
+  time: `__builtin_available(macOS 26.2, *)` is then known to hold, and the binary is for 26.2
+  and later only. The accelerators' kernels are a library of their own, built for 26.2 whatever
+  the target.
+- **OpenMP.** `WITH_OPENMP` links Homebrew's `libomp.a` in statically, and Homebrew builds it
+  for the macOS it runs on -- 26.0 here, which the linker warns about. A binary for older systems,
+  such as the app's `libwaifu.dylib`, is built with `-DWITH_OPENMP=OFF`; the CPU operators are
+  then single threaded, which a program that computes on the GPU barely notices.
+
+```bash
+# libwaifu.dylib for an app that runs on macOS 14 and later
+cmake -S . -B build-app -DCMAKE_BUILD_TYPE=Release -DWITH_METAL=ON -DWITH_OPENMP=OFF
+cmake --build build-app -j$(sysctl -n hw.ncpu)
+```
+
 ## Why
 
 MLX evaluates a graph it is handed; flint hands it one operator at a time and wants the answer

@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Default to macOS 14.0 (Sonoma) so the binary runs on all Apple Silicon machines.
-# Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=... if needed.
+# The macOS a build runs on, unless -DCMAKE_OSX_DEPLOYMENT_TARGET=... says otherwise. The Metal
+# backend on flint's own kernels runs on macOS 14.0 (Sonoma), every Apple Silicon machine there is,
+# and decides at run time whether the neural accelerators' kernels, which want 26.2, can load --
+# a decision a later target would make at build time instead, since __builtin_available is then
+# known to hold. MLX builds its kernels for the accelerators only for a target of 26.2.
 if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING "macOS deployment target")
+    if(WITH_METAL)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "macOS deployment target")
+    else()
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING "macOS deployment target")
+    endif()
 endif()
 
 project(libwaifu LANGUAGES CXX C)

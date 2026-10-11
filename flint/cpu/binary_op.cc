@@ -19,7 +19,9 @@
 
 #include "flint/cpu/binary_op.h"
 
+#ifdef _OPENMP
 #include <omp.h>
+#endif
 
 #include "lutil/attributes.h"
 #include "flint/cpu/accessor.h"
