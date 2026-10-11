@@ -1,16 +1,11 @@
 cmake_minimum_required(VERSION 3.22)
 
-# The macOS a build runs on, unless -DCMAKE_OSX_DEPLOYMENT_TARGET=... says otherwise. The Metal
-# backend on flint's own kernels runs on macOS 14.0 (Sonoma), every Apple Silicon machine there is,
-# and decides at run time whether the neural accelerators' kernels, which want 26.2, can load --
-# a decision a later target would make at build time instead, since __builtin_available is then
-# known to hold. MLX builds its kernels for the accelerators only for a target of 26.2.
+# The macOS a build runs on, unless -DCMAKE_OSX_DEPLOYMENT_TARGET=... says otherwise: 14.0
+# (Sonoma), every Apple Silicon machine there is. The Metal backend decides at run time whether the
+# neural accelerators' kernels, which want 26.2, can load -- a decision a later target would make at
+# build time instead, since __builtin_available is then known to hold.
 if(APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-    if(WITH_METAL)
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "macOS deployment target")
-    else()
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING "macOS deployment target")
-    endif()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "macOS deployment target")
 endif()
 
 project(libwaifu LANGUAGES CXX C)
@@ -28,13 +23,18 @@ option(WITH_CUDNN "Build the benchmark's cuDNN Conv2d reference (needs FLINT_ENA
 # FlashAttention costs minutes of nvcc per architecture, so it is opt-in: a CUDA build
 # without it still has attention, through the block-wise fallback in operators.cc.
 option(WITH_FLASH_ATTN "Link the prebuilt FlashAttention forward kernels (slow to build)." OFF)
-option(WITH_MLX "Metal compute support, through MLX." OFF)
-# Metal on flint's own kernels (flint/metal_native), the Vulkan backend's structure in Metal's
-# terms. Either this or WITH_MLX: both are the Metal device.
-option(WITH_METAL "Metal compute support, on flint's own kernels." OFF)
+# Metal (flint/metal_native), the Vulkan backend's structure in Metal's terms: on by default on
+# macOS. Its kernels are compiled with the toolchain Xcode has and carried inside flint, so it
+# needs nothing to download and checks for a GPU when the program starts.
+if(APPLE)
+    set(_libwaifu_metal_default ON)
+else()
+    set(_libwaifu_metal_default OFF)
+endif()
+option(WITH_METAL "Metal compute support." ${_libwaifu_metal_default})
 # On by default where there is a Vulkan to run on. The build needs no SDK and the binary loads the
 # loader itself, so turning it on costs a machine without Vulkan nothing but build time -- about
-# half a minute, most of it compiling glslang once. macOS has Metal instead, through MLX.
+# half a minute, most of it compiling glslang once. macOS has Metal instead.
 if(WIN32 OR (UNIX AND NOT APPLE))
     set(_libwaifu_vulkan_default ON)
 else()
@@ -348,91 +348,14 @@ if(WITH_METAL)
     if(NOT APPLE)
         message(FATAL_ERROR "WITH_METAL requires macOS")
     endif()
-    if(WITH_MLX)
-        message(FATAL_ERROR "WITH_METAL and WITH_MLX are both the Metal device: choose one")
-    endif()
     add_definitions("-DLIBWAIFU_METAL_ENABLED")
-endif()
-
-if(WITH_MLX)
-    if(NOT APPLE)
-        message(FATAL_ERROR "WITH_MLX requires macOS: MLX's Metal backend has no other host")
-    endif()
-
-    include(ExternalProject)
-
-    set(MLX_VERSION "v0.32.2")
-    set(MLX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx")
-    set(MLX_BUILD_ROOT "${CMAKE_BINARY_DIR}/mlx-build")
-    set(MLX_LIB "${MLX_BUILD_ROOT}/libmlx.a")
-    set(MLX_METALLIB "${MLX_BUILD_ROOT}/mlx/backend/metal/kernels/mlx.metallib")
-    set(MLX_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mlx_metallib_from_memory.patch")
-
-    ExternalProject_Add(mlx_external
-        GIT_REPOSITORY  https://github.com/ml-explore/mlx.git
-        GIT_TAG         "${MLX_VERSION}"
-        GIT_SHALLOW     ON
-        SOURCE_DIR      "${MLX_SOURCE_DIR}"
-        BINARY_DIR      "${MLX_BUILD_ROOT}"
-        PATCH_COMMAND   ${CMAKE_COMMAND}
-                            -DMLX_DIR=${MLX_SOURCE_DIR}
-                            -DPATCH_FILE=${MLX_PATCH}
-                            -P ${CMAKE_CURRENT_SOURCE_DIR}/third_party/apply_mlx_patch.cmake
-        CMAKE_ARGS
-            -DCMAKE_BUILD_TYPE=Release
-            -DBUILD_SHARED_LIBS=OFF
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-            -DMLX_BUILD_METAL=ON
-            -DMLX_BUILD_CPU=ON
-            -DMLX_BUILD_TESTS=OFF
-            -DMLX_BUILD_EXAMPLES=OFF
-            -DMLX_BUILD_BENCHMARKS=OFF
-            -DMLX_BUILD_PYTHON_BINDINGS=OFF
-            -DMLX_BUILD_PYTHON_STUBS=OFF
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}
-            -DCMAKE_MESSAGE_LOG_LEVEL=ERROR
-        BUILD_COMMAND   ${CMAKE_COMMAND} --build <BINARY_DIR> --target mlx --parallel
-        INSTALL_COMMAND ""
-        BUILD_BYPRODUCTS "${MLX_LIB}" "${MLX_BUILD_ROOT}/mlx/io/libgguflib.a"
-    )
-
-    add_definitions("-DLIBWAIFU_MLX_ENABLED")
-
-    add_library(mlx_gguflib STATIC IMPORTED)
-    set_target_properties(mlx_gguflib PROPERTIES
-        IMPORTED_LOCATION "${MLX_BUILD_ROOT}/mlx/io/libgguflib.a")
-
-    set(MLX_INCDIRS
-        "${MLX_SOURCE_DIR}"
-        "${MLX_BUILD_ROOT}/_deps/fmt-src/include"
-        "${MLX_BUILD_ROOT}/_deps/json-src/single_include"
-        "${MLX_BUILD_ROOT}/_deps/metal_cpp-src")
-
-    # ExternalProject runs at build time, but CMake validates include paths at
-    # configure time.  Create the directories so the check passes; they will be
-    # populated when mlx_external fetches its dependencies.
-    foreach(_dir ${MLX_INCDIRS})
-        file(MAKE_DIRECTORY "${_dir}")
-    endforeach()
-
-    add_library(mlx STATIC IMPORTED)
-    set_target_properties(mlx PROPERTIES
-        IMPORTED_LOCATION "${MLX_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${MLX_INCDIRS}"
-        INTERFACE_LINK_LIBRARIES
-            "mlx_gguflib;-framework Metal;-framework Foundation;-framework QuartzCore;-framework Accelerate")
-    add_dependencies(mlx mlx_external)
-
-    set(MLX_METALLIB_LINK_OPTION "-Wl,-sectcreate,__TEXT,__metallib,${MLX_METALLIB}")
-    set_property(TARGET mlx APPEND PROPERTY
-        INTERFACE_LINK_OPTIONS "${MLX_METALLIB_LINK_OPTION}")
 endif()
 
 if(WITH_VULKAN)
     # Nothing Vulkan is linked. volk opens the loader with dlopen when the operators are first
     # created, so a build with Vulkan still starts on a machine that has no loader, and simply
-    # reports the device as unavailable -- the same bargain an MLX build makes with a Mac that
-    # has no Metal GPU. That is also why nothing here asks for a Vulkan SDK: the headers, volk
+    # reports the device as unavailable -- the same bargain a Metal build makes with a Mac that
+    # has no Metal GPU it can run on. That is also why nothing here asks for a Vulkan SDK: the headers, volk
     # and the memory allocator are fetched source, and the one tool, the GLSL compiler, is built.
     include(FetchContent)
     include(ExternalProject)
@@ -521,10 +444,6 @@ if(WITH_FLASH_ATTN)
     set(libwaifu_LIBADD ${libwaifu_LIBADD} flash_attn)
 endif()
 
-if(WITH_MLX)
-    set(libwaifu_LIBADD ${libwaifu_LIBADD} mlx)
-endif()
-
 if(WITH_METAL)
     set(libwaifu_LIBADD ${libwaifu_LIBADD} "-framework Metal" "-framework Foundation")
 endif()
@@ -558,8 +477,8 @@ set(flint_CARGO_FLAGS
 # Some of those archives are built by an external project during this build, and rustc needs them
 # on disk by the time it links. Depending on `flint` does not arrange that: compiling flint only
 # reads their headers, so it finishes long before the archive beside those headers is written --
-# which is how a parallel build reached `cargo build` while libmlx.a was still several minutes of
-# Metal kernels away. Each block below names the project that produces what it asks rustc to link.
+# which is how a parallel build once reached `cargo build` while an archive it named was still
+# minutes from being written. Each block below names the project that produces what it asks rustc to link.
 set(flint_CARGO_DEPENDS "")
 
 if(UNIX AND NOT APPLE)
@@ -593,22 +512,6 @@ if(WITH_CUDA)
     endif()
 endif()
 
-if(WITH_MLX)
-    # The metallib section is a property of the final link, which for the `waifu` binary is
-    # rustc's, so it has to be passed through as a link arg rather than inherited from the
-    # `mlx` target the way the CMake executables inherit it.
-    list(APPEND flint_CARGO_FLAGS
-        "cargo:rustc-link-search=native=${MLX_BUILD_ROOT}"
-        "cargo:rustc-link-lib=static=mlx"
-        "cargo:rustc-link-search=native=${MLX_BUILD_ROOT}/mlx/io"
-        "cargo:rustc-link-lib=static=gguflib"
-        "cargo:rustc-link-lib=framework=Metal"
-        "cargo:rustc-link-lib=framework=Foundation"
-        "cargo:rustc-link-lib=framework=QuartzCore"
-        "cargo:rustc-link-lib=framework=Accelerate"
-        "cargo:rustc-link-arg=${MLX_METALLIB_LINK_OPTION}")
-    list(APPEND flint_CARGO_DEPENDS mlx_external)
-endif()
 
 if(WITH_METAL)
     # The kernels are inside flint already; Metal and Foundation are all there is to link.

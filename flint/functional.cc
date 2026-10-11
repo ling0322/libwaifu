@@ -33,9 +33,6 @@
 #include "flint/cuda/cuda_host_tensor_data.h"
 #include "flint/cuda/cuda_tensor_data.h"
 #endif
-#ifdef LIBWAIFU_MLX_ENABLED
-#include "flint/metal/metal_tensor_data.h"
-#endif
 #ifdef LIBWAIFU_METAL_ENABLED
 #include "flint/metal_native/metal_tensor_data.h"
 #endif
@@ -119,10 +116,6 @@ std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype) 
       return op::cuda::CudaTensorData::create(numel, dtype);
     case Device::kCudaHost:
       return op::cuda::CudaHostTensorData::create(numel, dtype);
-#endif
-#ifdef LIBWAIFU_MLX_ENABLED
-    case Device::kMetal:
-      return op::metal::MetalTensorData::create(numel, dtype);
 #endif
 #ifdef LIBWAIFU_METAL_ENABLED
     case Device::kMetal:

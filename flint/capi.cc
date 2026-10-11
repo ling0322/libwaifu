@@ -43,9 +43,6 @@
 #include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/cuda/to_device.h"
 #endif  // LIBWAIFU_CUDA_ENABLED
-#ifdef LIBWAIFU_MLX_ENABLED
-#include "mlx/memory.h"
-#endif  // LIBWAIFU_MLX_ENABLED
 
 namespace {
 
@@ -331,17 +328,9 @@ void fl_set_log_level(int32_t level) {
 }
 
 void fl_release_memory() {
-#ifdef LIBWAIFU_MLX_ENABLED
-  // MLX keeps a freed buffer for the next array of its size, up to the whole of memory: a model
-  // that has been dropped is still the process's until this hands it back.
-  try {
-    mlx::core::clear_cache();
-  } catch (const std::exception &e) {
-    LOG(WARN) << "could not release the Metal buffer cache: " << e.what();
-  }
-#endif  // LIBWAIFU_MLX_ENABLED
 #ifdef LIBWAIFU_METAL_ENABLED
-  // The same for flint's own Metal backend, whose buffer cache keeps what the tensors let go of.
+  // The Metal backend keeps the memory its tensors let go of for the next ones: a model that has
+  // been dropped is still the process's until this hands it back.
   try {
     if (fl::Device::isMetalAvailable()) {
       fl::getOperators(fl::Device::kMetal)->releaseUnusedMemory();

@@ -9,8 +9,10 @@ process, through `libwaifu.dylib` and its C API (`docs/ffi.md`), wrapped for Swi
 ## Build
 
 ```bash
-# the library, from the top of the repository: build/libwaifu.dylib and build/include/waifu.h
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_OPENMP=ON -DWITH_MLX=ON
+# the library, from the top of the repository: build/libwaifu.dylib and build/include/waifu.h --
+# without OpenMP, since Homebrew's libomp is built for the macOS it was installed on and the app
+# is for macOS 14 and later (docs/metal.md)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_METAL=ON -DWITH_OPENMP=OFF
 cmake --build build -j$(sysctl -n hw.ncpu)
 
 # the app, with build/libwaifu.dylib in its Frameworks, every published model's manifest in its
