@@ -91,7 +91,6 @@ struct ModelCard: View {
                     Text("cpu").tag("cpu")
                 }
                 .labelsHidden()
-                .fixedSize()
             }
             .disabled(session.canStop)
         } header: {

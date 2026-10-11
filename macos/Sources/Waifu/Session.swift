@@ -588,20 +588,9 @@ final class Session {
         }
     }
 
-    func lastSeed() {
-        if let seed = shown?.made?.seed { form.seed = String(seed) }
-    }
-
     func save(_ job: Job) {
         guard let bytes = outputs[job.id] else { return }
         Media.save(bytes, suggesting: Media.fileName(created: job.finished ?? job.created, kind: job.kind))
-    }
-
-    /// Takes a picture that was drawn back round to the box it can be drawn from.
-    func sendToImg2Img(_ job: Job) {
-        guard let bytes = outputs[job.id] else { return }
-        holdPicture(bytes)
-        tab = .img2img
     }
 
     // MARK: - what is held

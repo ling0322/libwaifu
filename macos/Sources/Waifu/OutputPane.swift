@@ -79,10 +79,6 @@ struct OutputPane: View {
             Button("Save…") { session.save(job) }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(session.outputs[job.id] == nil)
-            if pictures, session.model?.model?.drawsFromAPicture == true {
-                Button("Send to img2img") { session.sendToImg2Img(job) }
-                    .disabled(session.outputs[job.id] == nil)
-            }
             Button("Reuse these settings") { session.reuse(job) }
             Spacer()
             Button("Delete", role: .destructive) { deleting = job }
