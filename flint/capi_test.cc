@@ -110,6 +110,27 @@ void makeEmpty(
           &out->view) == FL_OK);
 }
 
+/// Storage of `storageNumel` elements on `device` with a contiguous view of `shape` over its
+/// start -- a view of fewer elements than the storage has, none at all included.
+void makeViewOver(
+    fl_device_type_t device,
+    int64_t storageNumel,
+    const std::vector<int32_t> &shape,
+    fl_dtype_t dtype,
+    Tensor *out) {
+  CATCH_REQUIRE(fl_tensor_data_create(device, dtype, storageNumel, &out->data) == FL_OK);
+  out->numel = numelOf(shape);
+  std::vector<int32_t> stride = stridesOf(shape);
+  CATCH_REQUIRE(
+      fl_tensor_view_create(
+          out->data,
+          shape.data(),
+          stride.data(),
+          static_cast<int32_t>(shape.size()),
+          0,
+          &out->view) == FL_OK);
+}
+
 /// The CPU operators, which every test here starts by asking for.
 void makeCpu(fl_operators_t *out) {
   fl_init();
@@ -464,6 +485,42 @@ CATCH_TEST_CASE("flint C API checks an fp8 weight before the kernel does", "[cor
   Tensor wrong;
   makeEmpty(FL_DEVICE_CUDA, {4, 16}, FL_DTYPE_FLOAT16, &wrong);
   CATCH_REQUIRE(fl_fp8_matmul(a, codes, scales, wrong) == FL_ERROR_INVALID_ARG);
+}
+
+CATCH_TEST_CASE("flint C API multiplies by an fp8 weight of no columns on Metal", "[core][flint][capi]") {
+  fl_init();
+
+  int32_t available = 0;
+  CATCH_REQUIRE(fl_is_device_available(FL_DEVICE_METAL, &available) == FL_OK);
+  if (!available) CATCH_SKIP("metal device not available");
+
+  ScopedOperators metal;
+  CATCH_REQUIRE(fl_operators_create(FL_DEVICE_METAL, &metal) == FL_OK);
+
+  // k = 0: an activation and a weight of no columns, as views over storage that has elements,
+  // which fl_tensor_view_create allows. The product is a sum of nothing, zero everywhere, written
+  // over what `out` held.
+  for (bool perRow : {true, false}) {
+    CATCH_INFO("per row = " << perRow);
+    Tensor a, codes, scales, out;
+    makeViewOver(FL_DEVICE_METAL, 16, {4, 0}, FL_DTYPE_FLOAT16, &a);
+    makeViewOver(FL_DEVICE_METAL, 16, {8, 0}, FL_DTYPE_FP8E4M3, &codes);
+    makeEmpty(FL_DEVICE_METAL, {perRow ? 8 : 1}, FL_DTYPE_FLOAT, &scales);
+    makeEmpty(FL_DEVICE_METAL, {4, 8}, FL_DTYPE_FLOAT16, &out);
+    CATCH_REQUIRE(fl_fill(metal, scales, 1.0f) == FL_OK);
+    CATCH_REQUIRE(fl_fill(metal, out, 7.0f) == FL_OK);
+
+    int32_t status = perRow ? fl_fp8_matmul(a, codes, scales, out)
+                            : fl_fp8_matmul_tensor_scale(a, codes, scales, out);
+    CATCH_REQUIRE(status == FL_OK);
+
+    Tensor wide, host;
+    makeEmpty(FL_DEVICE_METAL, {4, 8}, FL_DTYPE_FLOAT, &wide);
+    makeEmpty(FL_DEVICE_CPU, {4, 8}, FL_DTYPE_FLOAT, &host);
+    CATCH_REQUIRE(fl_cast(metal, out, wide) == FL_OK);
+    CATCH_REQUIRE(fl_transfer(metal, wide, host) == FL_OK);
+    for (float value : readFloats(host)) CATCH_REQUIRE(value == 0.0f);
+  }
 }
 
 CATCH_TEST_CASE("flint C API moves views between devices", "[core][flint][capi]") {

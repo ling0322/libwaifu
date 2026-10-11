@@ -65,14 +65,17 @@ void fp8Matmul(
   CHECK(data.getDType() == DType::kFp8E4M3 && scale.getDType() == DType::kFloat);
   CHECK(a.isContiguous() && out.isContiguous() && data.isContiguous() && scale.isContiguous());
 
+  // A product over nothing is zero everywhere, and the rows of `a` cannot be counted from its
+  // elements then: there are none, however many rows it has. So k == 0 is answered before the
+  // division by k, from `out`, which has every row.
   int64_t k = data.getShape(1);
   int64_t rows = data.getShape(0);
-  int64_t m = a.getNumEl() / k;
-  if (m == 0 || rows == 0) return;
   if (k == 0) {
-    fill(out, 0.0f);
+    if (out.getNumEl() > 0) fill(out, 0.0f);
     return;
   }
+  int64_t m = a.getNumEl() / k;
+  if (m == 0 || rows == 0) return;
 
   // Rows that start on a multiple of four elements are read four at a time.
   auto fours = [](int64_t x) { return x % 4 == 0; };
