@@ -235,23 +235,78 @@ jobs:
       - name: Test (C++)
         run: ./build/unittest
 
+      # The Developer ID certificate goes into a keychain of the job's own, made the default so
+      # that codesign finds the identity and notarytool the profile, and deleted when the job ends.
+      # The notary profile is an App Store Connect API key, under the name a developer's machine
+      # gives the scripts too (macos/README.md).
+      - name: Set up signing
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 16)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -f pkcs12 -k "$keychain" \
+              -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" \
+              >/dev/null
+          security list-keychains -d user -s "$keychain" \
+              $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$keychain"
+          echo "$ASC_KEY_P8" | base64 --decode > "$RUNNER_TEMP/key.p8"
+          xcrun notarytool store-credentials waifu-notary --key "$RUNNER_TEMP/key.p8" \
+              --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --keychain "$keychain"
+          rm "$RUNNER_TEMP/key.p8"
+
+      # The release's tag without its v, which the app says it is and the image is named for; a
+      # manual run has no tag, and is dev.
+      - name: Version
+        run: |
+          version=dev
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version=${GITHUB_REF_NAME#v}; fi
+          echo "WAIFU_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Build app
+        env:
+          WAIFU_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: macos/build-app.sh
 
+      # Signed, notarized and stapled. Apple's notary service takes minutes as a rule, and can take
+      # an hour or two over an account's first submissions.
       - name: Package
+        env:
+          WAIFU_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          WAIFU_NOTARY_PROFILE: waifu-notary
         run: |
           macos/package-dmg.sh
-          cp macos/build/Waifu.dmg waifu-macos.dmg
+          # Named for what it is, which version, and the one architecture it runs on: the runner
+          # is Apple silicon, and the app is built for nothing else.
+          dmg="libwaifu-gui-$WAIFU_VERSION-macos-arm64.dmg"
+          cp macos/build/libwaifu-gui.dmg "$dmg"
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: waifu-macos
-          path: waifu-macos.dmg
+          name: libwaifu-gui-macos-arm64
+          path: ${{ env.DMG }}
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/attach_release.sh waifu-macos.dmg
+        run: bash .github/attach_release.sh "$DMG"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true

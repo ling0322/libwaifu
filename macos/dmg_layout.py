@@ -1,5 +1,5 @@
-# Writes the .DS_Store that makes Finder open Waifu.dmg as one window of two large icons: the app on
-# the left, the Applications link on the right, to drag the one onto the other.
+# Writes the .DS_Store that makes Finder open libwaifu-gui.dmg as one window of two large icons: the
+# app on the left, the Applications link on the right, to drag the one onto the other.
 #
 #   python3 dmg_layout.py <folder the image is made from>
 #
@@ -40,5 +40,5 @@ with DSStore.open(sys.argv[1] + "/.DS_Store", "w+") as store:
     }
     store["."]["vSrn"] = ("long", 1)
     # An icon's position is its centre, in the window's own coordinates.
-    store["Waifu.app"]["Iloc"] = (WINDOW[0] // 4, 170)
+    store["libwaifu-gui.app"]["Iloc"] = (WINDOW[0] // 4, 170)
     store["Applications"]["Iloc"] = (WINDOW[0] * 3 // 4, 170)

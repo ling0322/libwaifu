@@ -4,7 +4,7 @@
 // C API in waifu-ffi (docs/ffi.md); CWaifu is that API's header, as a module Swift can import.
 //
 // libwaifu.dylib is CMake's to build, into build/ at the top of the repository: this links it
-// from there, and finds it there at run time while the app runs unbundled. Inside Waifu.app it is
+// from there, and finds it there at run time while the app runs unbundled. Inside libwaifu-gui.app it is
 // in Contents/Frameworks, which the second rpath is for.
 
 import Foundation
