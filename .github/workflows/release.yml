@@ -14,206 +14,8 @@ permissions:
   contents: write
 
 jobs:
-  windows-cuda-flash-attn:
-    name: Windows (CUDA + FlashAttention)
-    runs-on: windows-2022
-
-    # FlashAttention is twelve kernel sources compiled for every architecture the toolkit can
-    # reach, which is hours of nvcc rather than the minutes the rest of this job takes.
-    timeout-minutes: 360
-
-    env:
-      # flint compiles against the static MSVC runtime -- CMAKE_MSVC_RUNTIME_LIBRARY asks for
-      # /MT -- and rustc links the dynamic one unless told otherwise. Two runtimes in one binary
-      # is a link error, so cargo is pointed at the one CMake already chose.
-      RUSTFLAGS: -C target-feature=+crt-static
-
-      # Named once, so the toolkit installed below and the FlashAttention compiled against it
-      # cannot drift apart.
-      CUDA_VERSION: "12.9.1"
-
-      # install_flash_attn.sh sizes its own parallelism from /proc/meminfo or sysctl and finds
-      # neither under Git Bash, which would leave it compiling one kernel at a time. A runner has
-      # 4 cores and 16 GB, and one kernel costs about 3 GB in cicc, so three at once is what fits.
-      # Linux needs no such help: the script reads /proc/meminfo there and works it out.
-      FLASH_ATTN_PARALLEL: "3"
-
-      # The script runs a bare `cmake -S -B`, and bare on a runner that has Visual Studio means
-      # the Visual Studio generator: multi-config, so the archive would land in a Debug/ of its
-      # own rather than where the top-level CMakeLists looks -- and be built as Debug, since the
-      # script's --build names no --config. CMake reads this from the environment, so Ninja can
-      # be asked for without the script learning a new argument.
-      CMAKE_GENERATOR: Ninja
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # Ninja rather than the Visual Studio generator, which is multi-config and would put the
-      # binaries in build/Release/ instead of the build/ the steps below name.
-      - uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Install Ninja
-        run: choco install ninja -y
-
-      - name: Install CUDA
-        uses: Jimver/cuda-toolkit@v0.2.36
-        with:
-          # 12.8 is the floor, not a preference: it is the first toolkit that targets sm_100 and
-          # sm_120, and CMakeLists.txt builds no Blackwell cubins without it.
-          # 12.9 is what this is developed against.
-          cuda: ${{ env.CUDA_VERSION }}
-          method: network
-          # The _dev halves are the ones that carry the import libraries and headers, so cuBLAS
-          # needs both of its to be linkable. cuRAND is no longer asked for: flint/cuda/rand.cu
-          # carries the Philox that was taken from it, and the archive published below is the
-          # better for it -- cuRAND was the one library with no static form on this host, and its
-          # DLL would have had to travel in the zip for the binary to start at all.
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust", "visual_studio_integration"]'
-
-      # WITH_CUDA will not configure without the CUTLASS headers: it is the only Conv2d the
-      # library has, and the GEMM the model runs on.
-      - name: Install CUTLASS
-        working-directory: third_party
-        shell: bash
-        run: bash install_cutlass.sh
-
-      # Built here, from the source in this checkout, so what ships is what this commit says
-      # rather than whatever an archive published earlier happened to contain.
-      #
-      # This clones the CUTLASS revision FlashAttention is pinned against, which is a different
-      # one from the CUTLASS installed above -- two dependencies that happen to share a name.
-      - name: Build FlashAttention
-        working-directory: third_party
-        shell: bash
-        run: bash install_flash_attn.sh
-
-      # The top-level CMakeLists looks for exactly this, and would otherwise say so much later.
-      - name: Check FlashAttention built
-        shell: bash
-        run: test -f third_party/flash-attention/build/flash_attn.lib
-
-      # Every architecture the toolkit can reach, unlike CI's single one: this is the build
-      # somebody downloads, and it has to run on the card they own rather than the one here.
-      - name: Configure
-        run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DWITH_OPENMP=ON -DWITH_CUDA=ON -DWITH_FLASH_ATTN=ON
-
-      - name: Build
-        run: cmake --build build
-
-      # No NVIDIA card on the runner, so CudaOperators::create returns null and the CUDA cases
-      # take their CATCH_SKIP. This still proves the artifact starts and its CPU half works.
-      - name: Test (C++)
-        run: ./build/unittest.exe
-
-      - name: Package
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp build/waifu.exe dist/
-          cp LICENSE README.md dist/
-          cd dist && 7z a ../waifu-windows-cuda.zip .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: waifu-windows-cuda
-          path: waifu-windows-cuda.zip
-
-      # Only a tag has a release to attach to. `create` covers the tag that has no release yet,
-      # `upload` the one that already does -- a second runner, or a re-run, lands in the latter.
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/attach_release.sh waifu-windows-cuda.zip
-
-  linux-cuda-flash-attn:
-    name: Linux (CUDA + FlashAttention)
-    runs-on: ubuntu-latest
-
-    # Same reason as the Windows job: the FlashAttention kernels are the long pole here, not the
-    # library built after them.
-    timeout-minutes: 360
-
-    env:
-      # Named once, so the toolkit installed below and the FlashAttention compiled against it
-      # cannot drift apart.
-      CUDA_VERSION: "12.9.1"
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # The CUDA toolkit is several gigabytes and a hosted runner does not have many to spare.
-      # Clearing what this build will never touch is cheaper than finding out mid-download.
-      - name: Make room for CUDA
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
-          df -h /
-
-      - name: Install CUDA
-        uses: Jimver/cuda-toolkit@v0.2.36
-        with:
-          cuda: ${{ env.CUDA_VERSION }}
-          method: network
-          # Linux names cuBLAS differently from Windows: it is libcublas, and it takes no cuda-
-          # prefix, which is what the second input is for. Unlike the FlashAttention archive,
-          # this build links it, and links CUDA::cudart_static, so the -dev halves that carry the
-          # static libraries are here too.
-          sub-packages: '["nvcc", "cudart", "cudart-dev", "thrust"]'
-          non-cuda-sub-packages: '["libcublas", "libcublas-dev"]'
-
-      - name: Install CUTLASS
-        working-directory: third_party
-        shell: bash
-        run: bash install_cutlass.sh
-
-      - name: Build FlashAttention
-        working-directory: third_party
-        shell: bash
-        run: bash install_flash_attn.sh
-
-      # The top-level CMakeLists looks for exactly this, and would otherwise say so much later.
-      - name: Check FlashAttention built
-        shell: bash
-        run: test -f third_party/flash-attention/build/libflash_attn.a
-
-      - name: Configure
-        run: >
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          -DWITH_OPENMP=ON -DWITH_CUDA=ON -DWITH_FLASH_ATTN=ON
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      # No NVIDIA card here either, so CudaOperators::create returns null and the CUDA cases take
-      # their CATCH_SKIP. This still proves the artifact starts and its CPU half works.
-      - name: Test (C++)
-        run: ./build/unittest
-
-      - name: Package
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf dist && mkdir -p dist
-          cp build/waifu dist/
-          cp LICENSE README.md dist/
-          tar -czf waifu-linux-cuda.tar.gz -C dist .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: waifu-linux-cuda
-          path: waifu-linux-cuda.tar.gz
-
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/attach_release.sh waifu-linux-cuda.tar.gz
+  # Only the macOS app is released for now. The Windows and Linux CUDA jobs are out until they are
+  # wanted again; they are in this file as of 90e148b.
 
   macos-app:
     name: macOS app (Metal)
@@ -235,23 +37,78 @@ jobs:
       - name: Test (C++)
         run: ./build/unittest
 
+      # The Developer ID certificate goes into a keychain of the job's own, made the default so
+      # that codesign finds the identity and notarytool the profile, and deleted when the job ends.
+      # The notary profile is an App Store Connect API key, under the name a developer's machine
+      # gives the scripts too (macos/README.md).
+      - name: Set up signing
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 16)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -f pkcs12 -k "$keychain" \
+              -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" \
+              >/dev/null
+          security list-keychains -d user -s "$keychain" \
+              $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$keychain"
+          echo "$ASC_KEY_P8" | base64 --decode > "$RUNNER_TEMP/key.p8"
+          xcrun notarytool store-credentials waifu-notary --key "$RUNNER_TEMP/key.p8" \
+              --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --keychain "$keychain"
+          rm "$RUNNER_TEMP/key.p8"
+
+      # The release's tag without its v, which the app says it is and the image is named for; a
+      # manual run has no tag, and is dev.
+      - name: Version
+        run: |
+          version=dev
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version=${GITHUB_REF_NAME#v}; fi
+          echo "WAIFU_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Build app
+        env:
+          WAIFU_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: macos/build-app.sh
 
+      # Signed, notarized and stapled. Apple's notary service takes minutes as a rule, and can take
+      # an hour or two over an account's first submissions.
       - name: Package
+        env:
+          WAIFU_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          WAIFU_NOTARY_PROFILE: waifu-notary
         run: |
           macos/package-dmg.sh
-          cp macos/build/Waifu.dmg waifu-macos.dmg
+          # Named for what it is, which version, and the one architecture it runs on: the runner
+          # is Apple silicon, and the app is built for nothing else.
+          dmg="libwaifu-gui-$WAIFU_VERSION-macos-arm64.dmg"
+          cp macos/build/libwaifu-gui.dmg "$dmg"
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: waifu-macos
-          path: waifu-macos.dmg
+          name: libwaifu-gui-macos-arm64
+          path: ${{ env.DMG }}
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/attach_release.sh waifu-macos.dmg
+        run: bash .github/attach_release.sh "$DMG"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
