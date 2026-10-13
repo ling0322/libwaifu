@@ -21,6 +21,7 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 | `krea2:turbo-fp8` | Krea 2 Turbo, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 | `qwen-image:2.1` | Qwen-Image 2.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1)\] |
 | `qwen-image:2.1-fp8` | Qwen-Image 2.1, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1)\] |
+| `qwen-image:2.1-turbo-fp8` | Qwen-Image 2.1 Turbo (8 steps), quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1-turbo)\] |
 
 ## Supported voices
 
@@ -101,6 +102,8 @@ model_dir = 'D:\models'
   `waifu -task speech2speech -m cosyvoice`. See [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion).
 - [2026-10-02] Fun-CosyVoice3-0.5B-2512 is published, as `cosyvoice:v3` -- the second voice, Apache 2.0.
   See [docs/cosyvoice3.md](docs/cosyvoice3.md).
+- [2026-10-13] Qwen-Image 2.1 Turbo is published, as `qwen-image:2.1-turbo-fp8` -- the eight-step
+  checkpoint, fp8 only. Its eight sigmas are fixed in the package, so the step count is ignored.
 - [2026-09-23] Qwen-Image 2.1 is published, as `qwen-image:2.1` and `qwen-image:2.1-fp8` -- a
   fourth architecture, Built with Qwen. Its licence is non-commercial (research and evaluation)
   only; see [docs/qwen_image.md](docs/qwen_image.md#licensing).

@@ -280,6 +280,16 @@ const CATALOG: &[Published] = &[
         explicit: false,
         kind: Kind::Picture,
     },
+    // Qwen-Image 2.1's eight-step checkpoint, in a repository of its own: the manifest fixes the
+    // eight sigmas, so a step count asked for is ignored. fp8 only; there is no float16 package.
+    Published {
+        name: "qwen-image:2.1-turbo-fp8:v1.0",
+        full_name: "Qwen-Image 2.1 Turbo (fp8)",
+        repo: "ling0322/libwaifu-qwen-image-2.1-turbo",
+        manifest: "qwen-image-2.1-turbo-fp8.yaml",
+        explicit: false,
+        kind: Kind::Picture,
+    },
     // Voices are named `<family>:<version>` rather than `<family>:<model>:<version>`: there is no
     // second IndexTTS or CosyVoice3 variant to tell it apart from, so a `model` slot would name
     // nothing. CosyVoice3's version is the model's own, `v3` (Fun-CosyVoice 3.0).
@@ -431,6 +441,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("krea2:turbo-fp8", "krea2:turbo-fp8:v1.0"),
     ("qwen-image:2.1", "qwen-image:2.1:v1.0"),
     ("qwen-image:2.1-fp8", "qwen-image:2.1-fp8:v1.0"),
+    ("qwen-image:2.1-turbo-fp8", "qwen-image:2.1-turbo-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
     ("cosyvoice", "cosyvoice:v3"),
 ];

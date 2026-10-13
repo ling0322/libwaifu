@@ -267,8 +267,13 @@ impl QwenImage {
             .view(&[1, kept, width])?)
     }
 
-    /// The schedule for a picture `width` by `height`, which depends on its size.
+    /// The schedule for a picture `width` by `height`, which depends on its size -- unless the
+    /// package fixes its own levels (Turbo's eight), when `num_steps` and the size are ignored.
     pub fn sampler(&self, width: i32, height: i32, num_steps: i32) -> Result<FlowSampler> {
+        if let Some(sigmas) = &self.config.schedule.sigmas {
+            let config = SamplerConfig { shift: 1.0, multiplier: 1.0 };
+            return FlowSampler::from_sigmas(&config, sigmas);
+        }
         let scale = self.config.vae.scale;
         let tokens = (width / scale) * (height / scale);
         let config = SamplerConfig {

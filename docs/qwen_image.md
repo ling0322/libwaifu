@@ -150,6 +150,22 @@ on this machine's disk is about 200 MB/s and most of the time a step takes. A ma
 or more of RAM keeps it; `-fp8` halves the package -- 30 GB to 16 GB, the same ratio as its size on
 disk, since `Residency::LowVram` moves whichever package it was given the same way.
 
+## Turbo
+
+`Qwen/Qwen-Image-2.1-Turbo` is the same architecture, distilled to **eight steps**. The weights
+are laid out exactly as above; what differs is the schedule, which the checkpoint does not bend
+but writes out in `model_index.json` as `sample_sigmas` (`1, 0.978453, .., 0.414568`), with a plain
+scheduler (no dynamic shift, no `shift_terminal`). diffusers uses those levels as they stand and
+appends the zero. The exporter copies them into the manifest as `sampler_sigmas`; when it is
+present `QwenImage::sampler` builds `FlowSampler::from_sigmas` from it and **ignores the step
+count and the picture's size**. Only the fp8 package is published, as `qwen-image:2.1-turbo-fp8`
+in [ling0322/libwaifu-qwen-image-2.1-turbo](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1-turbo).
+Its VAE is a smaller file than the base release's (0.7 GB against 1.4 GB); it exports the same.
+
+Against the reference, 256 x 256, eight steps (`waifu/tests/qwen_image.rs`,
+`turbo_fp8_matches_the_reference`): velocity at step five 2.1e-2, decoder 8.0e-4, the whole walk
+1.8e-1 -- the fp8 encoder again, with fewer steps to average it out.
+
 ## ControlNet
 
 [`alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union`](https://huggingface.co/alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union)

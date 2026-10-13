@@ -242,11 +242,36 @@ def check_shapes(model: dict, text: dict, dit: dict, words: dict) -> None:
         raise SystemExit(f"{counted} encoder layers, {encoder['num_hidden_layers']} in the config")
 
 
-def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, fp8: bool) -> dict:
+def fixed_sigmas(index: dict):
+    """The noise levels a release fixes for itself, or None for one that bends its own.
+
+    Qwen-Image-2.1-Turbo writes its eight steps into `model_index.json` as `sample_sigmas`, and
+    its scheduler is a plain one: no dynamic shift, no `shift_terminal`. diffusers uses those
+    levels as they stand, with the zero appended, whatever `num_inference_steps` says.
+    """
+    sigmas = index.get("sample_sigmas")
+    if sigmas is None:
+        return None
+    sigmas = [float(sigma) for sigma in sigmas]
+    if not sigmas or sigmas[0] != 1.0 or any(a <= b for a, b in zip(sigmas, sigmas[1:])) \
+            or sigmas[-1] <= 0.0:
+        raise SystemExit(f"sample_sigmas is not a walk down from one: {sigmas}")
+    return sigmas
+
+
+def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, sigmas,
+                    fp8: bool) -> dict:
     encoder = text["text_config"]
     rope_theta = encoder.get("rope_theta") or encoder["rope_parameters"]["rope_theta"]
 
-    if scheduler.get("time_shift_type") != "exponential" or not scheduler["use_dynamic_shifting"]:
+    if sigmas is not None:
+        # The levels are used as they are, so the scheduler must not be going to bend them.
+        if scheduler.get("use_dynamic_shifting") or scheduler.get("shift") != 1.0 \
+                or scheduler.get("shift_terminal") is not None:
+            raise SystemExit("this release fixes its sigmas and also bends them; the runtime "
+                             "does one or the other")
+    elif scheduler.get("time_shift_type") != "exponential" \
+            or not scheduler["use_dynamic_shifting"]:
         raise SystemExit("this scheduler does not bend its schedule the way the runtime does")
 
     config = {"qwen_image": {
@@ -291,9 +316,15 @@ def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, fp8: bo
         "sampler_max_shift": f"{scheduler['max_shift']:g}",
         "sampler_base_seq_len": str(scheduler["base_image_seq_len"]),
         "sampler_max_seq_len": str(scheduler["max_image_seq_len"]),
-        "sampler_shift_terminal": f"{scheduler['shift_terminal']:g}",
+        "sampler_shift_terminal": f"{scheduler['shift_terminal'] or 0:g}",
         "system_prompt": SYSTEM_PROMPT,
     }}
+
+    if sigmas is not None:
+        # Where each step starts; the zero the last one ends at is the runtime's to append. When
+        # this is present the shift above is not used, and neither is the number of steps asked
+        # for.
+        config["qwen_image"]["sampler_sigmas"] = [float(f"{sigma:g}") for sigma in sigmas]
 
     if fp8:
         config["qwen_image"]["weight_format"] = "fp8"
@@ -354,7 +385,7 @@ def export_test_cases(directory: str, prompt: str) -> TensorBag:
     | `hidden_fp32` | the same, from the encoder at float32, which is what the runtime is held to |
     | `noise` | the latent the run starts from |
     | `sigmas` | the eleven noise levels the reference's scheduler walked |
-    | `latent`, `timestep` | the latent entering step `STEP_AT`, and the timestep the model saw |
+    | `latent`, `timestep` | the latent entering step `step_at`, and the timestep the model saw |
     | `velocity` | what the denoiser answers there |
     | `final_latent` | what the ten steps leave behind |
     | `decoded` | the picture, four channels, from the decoder at float32 and unclamped |
@@ -363,6 +394,12 @@ def export_test_cases(directory: str, prompt: str) -> TensorBag:
     prompt is recomputed at every step. diffusers says the two differ by rounding and nothing else.
     """
     from diffusers import AutoencoderKLQwenImage21, QwenImage21Pipeline
+
+    # A release that fixes its sigmas (Turbo) is walked along all of them; one that does not, for
+    # `TEST_STEPS` of its forty. Either way the denoiser is asked about the middle of the walk.
+    fixed = fixed_sigmas(read_json(directory, "model_index.json"))
+    test_steps = len(fixed) if fixed else TEST_STEPS
+    step_at = test_steps // 2
 
     ctx = Context("test_case")
     writer = TensorBag()
@@ -713,6 +750,7 @@ def main() -> int:
     text_config = read_json(args.model, "text_encoder", "config.json")
     vae_config = read_json(args.model, "vae", "config.json")
     scheduler = read_json(args.model, "scheduler", "scheduler_config.json")
+    sigmas = fixed_sigmas(read_json(args.model, "model_index.json"))
 
     if not args.test_only:
         dit = read_weights(*transformer_files(args.model))
@@ -737,14 +775,14 @@ def main() -> int:
         del words
         converter.export_vae(Context("qwen_image.vae"), vae)
 
-        config = generate_config(model, text_config, vae_config, scheduler, args.fp8)
+        config = generate_config(model, text_config, vae_config, scheduler, sigmas, args.fp8)
         config["model"] = {"type": "qwen_image"}
 
         # What the model card asks for: forty steps and no guidance -- `true_cfg_scale` defaults
         # to one and the pipeline calls the model "meant to be sampled without guidance". The
         # sizes are the card's own list at a quarter of the area, since the card's are two to
         # three megapixels and the runtime draws at one by default.
-        suggested = {"steps": 40, "guidance": 1.0,
+        suggested = {"steps": len(sigmas) if sigmas else 40, "guidance": 1.0,
                      "sizes": [[1024, 1024], [1184, 896], [896, 1184], [1248, 832],
                                [832, 1248], [1376, 768], [768, 1376]]}
 
