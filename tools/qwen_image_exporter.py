@@ -89,6 +89,18 @@ class Converter(Krea2Converter):
         self._quantized += 1
         self._count += 1
 
+    # ---- the vision tower ---------------------------------------------------------------
+
+    def export_vision(self, ctx: Context, weights: dict) -> None:
+        """Qwen3-VL's vision tower, for reading a reference picture when editing.
+
+        Nothing in the runtime reads these yet: text-to-image never hands the encoder a picture.
+        They are written under their published names (`visual.` stripped) and never quantized --
+        0.8 GB in float16, and a tower whose outputs are fed straight into the encoder's input.
+        """
+        for name, tensor in sorted(weights.items()):
+            self._write(ctx.with_subname(name), tensor)
+
     # ---- the denoiser -------------------------------------------------------------------
 
     def export_dit(self, ctx: Context, weights: dict, blocks: int) -> None:
@@ -207,6 +219,19 @@ def encoder_weights(directory: str) -> dict:
     return held
 
 
+def vision_weights(directory: str) -> dict:
+    """The vision tower under `model.visual.`, renamed without that prefix."""
+    held = {}
+    for file in sorted(glob.glob(path.join(directory, "text_encoder", "*.safetensors"))):
+        with safe_open(file, framework="pt") as handle:
+            for key in handle.keys():
+                if key.startswith("model.visual."):
+                    held[key[len("model.visual."):]] = handle.get_tensor(key)
+    if not held:
+        raise SystemExit("the text encoder has no vision tower to export")
+    return held
+
+
 def check_shapes(model: dict, text: dict, dit: dict, words: dict) -> None:
     """What the configurations claim, against what the tensors are."""
     hidden = model["num_attention_heads"] * model["attention_head_dim"]
@@ -300,6 +325,21 @@ def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, sigmas,
         "encoder_rope_theta": f"{rope_theta:g}",
         "encoder_rms_norm_eps": f"{encoder['rms_norm_eps']:g}",
         "encoder_select_layers": [int(encoder["num_hidden_layers"])],
+        # the encoder's vision tower, which only editing reads: its shape, where its deepstack
+        # features leave it, and the tokens that bracket a picture in the prompt.
+        "vision_depth": str(text["vision_config"]["depth"]),
+        "vision_hidden_size": str(text["vision_config"]["hidden_size"]),
+        "vision_num_heads": str(text["vision_config"]["num_heads"]),
+        "vision_mlp_size": str(text["vision_config"]["intermediate_size"]),
+        "vision_out_hidden_size": str(text["vision_config"]["out_hidden_size"]),
+        "vision_patch_size": str(text["vision_config"]["patch_size"]),
+        "vision_temporal_patch_size": str(text["vision_config"]["temporal_patch_size"]),
+        "vision_spatial_merge_size": str(text["vision_config"]["spatial_merge_size"]),
+        "vision_num_position_embeddings": str(text["vision_config"]["num_position_embeddings"]),
+        "vision_deepstack_layers": [int(i) for i in text["vision_config"]["deepstack_visual_indexes"]],
+        "vision_image_token_id": str(text["image_token_id"]),
+        "vision_start_token_id": str(text["vision_start_token_id"]),
+        "vision_end_token_id": str(text["vision_end_token_id"]),
         # the VAE
         "vae_scale": str(vae["scale_factor_spatial"]),
         "image_channels": str(vae["out_channels"]),
@@ -726,8 +766,8 @@ def main() -> int:
                              "them.")
     parser.add_argument("-fp8", action="store_true",
                         help="store the matrices as E4M3 with a scale per output channel.")
-    parser.add_argument("-part-size", type=parse_size, default="4GB",
-                        help='split the package into parts of about this size, as in "4GB".')
+    parser.add_argument("-part-size", type=parse_size, default="2GB",
+                        help='split the package into parts no larger than this, as in "2GB".')
     parser.add_argument("-test_output", type=str, default=None,
                         help="also write reference inputs and outputs here. Needs a diffusers "
                              "with QwenImage21Pipeline and a CUDA card.")
@@ -773,6 +813,7 @@ def main() -> int:
         converter.export_encoder(Context("qwen_image.text"), words,
                                  text_config["text_config"]["num_hidden_layers"])
         del words
+        converter.export_vision(Context("qwen_image.vision"), vision_weights(args.model))
         converter.export_vae(Context("qwen_image.vae"), vae)
 
         config = generate_config(model, text_config, vae_config, scheduler, sigmas, args.fp8)
