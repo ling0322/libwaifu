@@ -1,0 +1,119 @@
+<!-- The middle of the window on the text2speech page. -->
+<UserControl x:Class="Libwaifu.Gui.Views.SpeechTaskView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="clr-namespace:Libwaifu.Gui.Controls"
+             xmlns:views="clr-namespace:Libwaifu.Gui.Views">
+  <Grid>
+    <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                Visibility="{Binding ChosenModel, Converter={StaticResource EmptyToVisible}}">
+      <Path Data="{StaticResource IconBox}" Stretch="Uniform" Width="40" Height="40"
+            Stroke="{StaticResource TextSecondaryBrush}" StrokeThickness="1.1"
+            StrokeLineJoin="Round" HorizontalAlignment="Center" />
+      <TextBlock Text="{Binding Name, StringFormat='No model for {0}'}" Margin="0,14,0,0"
+                 FontSize="{StaticResource Title3Size}" HorizontalAlignment="Center" />
+      <Button Style="{StaticResource LinkButton}" Margin="0,8,0,0" HorizontalAlignment="Center"
+              Content="Choose one in the Model card on the right"
+              Command="{Binding DataContext.ToggleInspector, RelativeSource={RelativeSource AncestorType=Window}}" />
+    </StackPanel>
+
+    <Grid Visibility="{Binding ChosenModel, Converter={StaticResource EmptyToCollapsed}}">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="1" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+
+      <StackPanel Grid.Row="0" Margin="16">
+        <c:FormGroup Title="What to say" RowPadding="{StaticResource CenterRowPadding}"
+                     Footnote="{Binding NotAVoiceBecause}">
+          <TextBox Style="{StaticResource PromptBox}" MinLines="5" MaxLines="14"
+                   Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}"
+                   Tag="The text to read out. Punctuation is where it pauses" />
+        </c:FormGroup>
+
+        <Button Style="{StaticResource GoButton}" Margin="0,10,0,0"
+                Content="{Binding ActionWord}" Command="{Binding Go}"
+                IsEnabled="{Binding GoEnabled}" />
+      </StackPanel>
+
+      <Rectangle Grid.Row="1" Fill="{StaticResource PaneSplitBrush}" />
+
+      <Grid Grid.Row="2" Margin="12">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,10"
+                    Visibility="{Binding ShowProgress, Converter={StaticResource BoolToVisible}}">
+          <ProgressBar Style="{StaticResource ThinProgress}" Maximum="100"
+                       Value="{Binding ProgressValue, Mode=OneWay}"
+                       IsIndeterminate="{Binding Indeterminate}" />
+          <TextBlock Text="{Binding ProgressLine}" Style="{StaticResource CaptionText}"
+                     Margin="0,6,0,0" FontFamily="{StaticResource MonoFont}" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10"
+                    Visibility="{Binding ShowNotice, Converter={StaticResource BoolToVisible}}">
+          <Path Data="{StaticResource IconWarning}" Stretch="Uniform" Width="14" Height="14"
+                VerticalAlignment="Center" Margin="0,0,6,0"
+                Fill="{StaticResource DangerBrush}"
+                Visibility="{Binding NoticeIsError, Converter={StaticResource BoolToVisible}}" />
+          <Path Data="{StaticResource IconInfo}" Stretch="Uniform" Width="13" Height="13"
+                VerticalAlignment="Center" Margin="0,0,6,0" StrokeThickness="1.4"
+                Stroke="{StaticResource TextSecondaryBrush}"
+                Visibility="{Binding NoticeIsError, Converter={StaticResource BoolToCollapsed}}" />
+          <TextBlock Text="{Binding Notice}" VerticalAlignment="Center"
+                     Foreground="{StaticResource TextSecondaryBrush}" />
+        </StackPanel>
+
+        <!-- A clip has nothing to look at, so what is shown is the player and what was said. -->
+        <Grid Grid.Row="2">
+          <TextBlock Text="{Binding NothingYet}" Foreground="{StaticResource TextSecondaryBrush}"
+                     HorizontalAlignment="Center" VerticalAlignment="Center"
+                     Visibility="{Binding HasResult, Converter={StaticResource BoolToCollapsed}}" />
+          <StackPanel MaxWidth="560" VerticalAlignment="Center" HorizontalAlignment="Center"
+                      Visibility="{Binding HasResult, Converter={StaticResource BoolToVisible}}">
+            <views:PlayerView DataContext="{Binding ResultPlayer}" Width="400" />
+            <TextBlock Text="{Binding Selected.FirstLine}" FontSize="{StaticResource Title3Size}"
+                       TextWrapping="Wrap" Margin="0,14,0,0" HorizontalAlignment="Center"
+                       TextAlignment="Center" />
+            <TextBlock Text="{Binding Selected.Parameters}" Style="{StaticResource CaptionText}"
+                       Margin="0,8,0,0" TextAlignment="Center" />
+          </StackPanel>
+        </Grid>
+
+        <Grid Grid.Row="3" Margin="0,10,0,0"
+              Visibility="{Binding HasResult, Converter={StaticResource BoolToVisible}}">
+          <StackPanel Orientation="Horizontal">
+            <Button Style="{StaticResource SmallButton}" Content="Save..." Command="{Binding Save}" />
+            <Button Style="{StaticResource SmallButton}" Content="Reuse these settings"
+                    Margin="8,0,0,0" Command="{Binding Reuse}" />
+          </StackPanel>
+          <Button Style="{StaticResource SmallButtonDanger}" Content="Delete"
+                  HorizontalAlignment="Right" Command="{Binding Delete}" />
+        </Grid>
+
+        <ListBox Grid.Row="4" Style="{StaticResource Strip}" Height="56" Margin="0,10,0,0"
+                 ItemsSource="{Binding Shown}" SelectedItem="{Binding Selected}"
+                 Visibility="{Binding HasResult, Converter={StaticResource BoolToVisible}}">
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <Border Width="160" Height="52" CornerRadius="5" Padding="8,6"
+                      Background="{StaticResource CardBrush}" ToolTip="{Binding Hover}">
+                <StackPanel>
+                  <TextBlock Text="{Binding FirstLine}" TextTrimming="CharacterEllipsis" />
+                  <TextBlock Text="{Binding Length}" Style="{StaticResource CaptionText}" />
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Grid>
+    </Grid>
+  </Grid>
+</UserControl>
