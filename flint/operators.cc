@@ -429,6 +429,24 @@ std::shared_ptr<Operators> gOperatorsForDevice[Device::NumDeviceType] = {
 
 static std::atomic<bool> gInitialized{false};
 
+#ifdef _OPENMP
+// The thread that loads flint -- the main thread, for a program, a test binary or an app that
+// links it -- made a root of the OpenMP runtime for as long as it lives, by asking it something
+// that registers the asker (omp_get_max_threads does; not every omp_ call does).
+//
+// A libomp linked in statically, which is what the macOS build makes from LLVM's source, shuts
+// the runtime down when the last root thread exits (__kmp_internal_end_thread; the shared library
+// leaves that to its destructor instead), and starts it again for the next thread that asks.
+// Threads that come and go while others start -- each test of a binary on a thread of its own,
+// an engine thread replaced by another -- then catch a shutdown halfway through a start, and the
+// process aborts in ___kmp_free (kmp_alloc.cpp). A root that never exits means the last root
+// never does either. waifu/tests/openmp.rs is the case.
+//
+// Here, in the file initOperators is in, because the linker leaves out an object of a static
+// library that nothing refers to -- and its static initializers with it.
+static const int gOpenMPRootThread = omp_get_max_threads();
+#endif
+
 void initOperators() {
   op::cpu::kernel::init();
 
