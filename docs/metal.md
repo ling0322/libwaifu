@@ -61,6 +61,27 @@ work goes to the GPU in batches without anyone waiting.
   -- a prompt's 77 tokens, attended to from every pixel. Past that, the composition (matmul,
   softmax, matmul), whose products are the GEMMs above, is the faster.
 
+## Disk offload
+
+`-device metal_disk_offload` is `Residency::LowVram` on Metal: for a model larger than the Mac's
+memory. The package stays mapped and is not read when the model is -- `cuda_cpu_offload` reads it
+into the page cache up front, which on a GPU that shares the machine's memory would be the whole
+model in the memory the mode is there to spare. Each `load` copies its weight off the mapping into
+a buffer from the allocator, reading the disk for whatever pages are not in the cache, and the
+`free` after its last reader hands the buffer to the next weight. The copy is `Context::upload`:
+synchronous, so the host waits for the batch that last used the buffer and the GPU waits while the
+host reads the disk.
+
+Why the device does not read the mapping itself: a Metal buffer cannot fault a page in on demand.
+`newBufferWithBytesNoCopy` over a mapped file, with a kernel or a blit that reads 4 bytes of it, has
+the driver read and wire the whole buffer before the batch runs -- measured on 1 GB of a file not in
+the page cache: 150-200 ms to complete, 100% resident afterwards, and `commit` returning at once,
+so the reading happens in the driver and not on the host. Wrapping the package would hold all of
+it; llama.cpp, which does wrap its mapping, keeps it resident on purpose (a residency set and a
+keep-alive thread) and leaves the layers that do not fit to the CPU. Wrapping one weight at a time,
+released once its batch is done, is what a later version can do to take the host's copy and its
+waits out of the way.
+
 ## Measurements
 
 Apple M5 Pro (16 GPU cores, neural accelerators), macOS 26, 2026-10-10. SDXL base at 1024 x 1024,

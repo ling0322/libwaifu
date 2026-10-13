@@ -56,6 +56,11 @@ distilled release is for, seed 7:
 | `cuda` | 15.4 GB | `Aborted: out of memory` | - |
 | `cuda_cpu_offload` | 1.2 GB | a picture | 67 s |
 
+`-device metal_disk_offload` is the same for a Mac, whose GPU shares the machine's memory: the
+weights are left in the model's files and each is read off the disk as it is used, so a model
+larger than the Mac's memory still draws. Slower again -- the disk is read once per step for every
+weight the page cache has let go of -- and never picked for you either.
+
 ## Run
 
 `waifu` asks three things in the terminal -- the task (txt2img, img2img, text2speech or
@@ -140,11 +145,12 @@ otherwise.
 
 | `-device` | what it means |
 |---|---|
-| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `cuda_cpu_offload`: that one is for a card the model does not fit on, which is not a thing to decide on someone's behalf. |
+| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `metal_disk_offload`, nor `cuda_cpu_offload` except where the model is measured not to fit: those are for a model the device cannot hold, which is not a thing to decide silently on someone's behalf. |
 | `cpu` | The CPU kernels. |
 | `cuda` | The card, weights moved once and kept there. |
 | `cuda_cpu_offload` | Weights stay in host memory and each is moved onto the card as it is used, so a model larger than the card still draws. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
 | `metal` | The GPU on Apple Silicon, through flint's own kernels -- and an M5's neural accelerators. |
+| `metal_disk_offload` | Metal, with the weights left in the model's files and each read off the disk as it is used, so a model larger than the Mac's memory still draws. Slower. Also spelled `metal-disk-offload`. |
 | `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. |
 
 A build only has the devices it was configured with, so `cuda` on a `-DWITH_CUDA=OFF` build is a

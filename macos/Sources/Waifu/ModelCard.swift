@@ -88,9 +88,15 @@ struct ModelCard: View {
                 Picker("Device", selection: $session.device) {
                     Text("auto").tag("auto")
                     Text("metal").tag("metal")
+                    Text("metal_disk_offload").tag("metal_disk_offload")
                     Text("cpu").tag("cpu")
                 }
                 .labelsHidden()
+                // The one choice that has to say what it costs: picked without being told, it is
+                // a run that looks broken.
+                .help(session.device == "metal_disk_offload"
+                    ? "Leaves the weights in the model's files and reads each one off the disk as it is used: for a model larger than this Mac's memory, and slower."
+                    : "Where the model runs")
             }
             .disabled(session.canStop)
         } header: {

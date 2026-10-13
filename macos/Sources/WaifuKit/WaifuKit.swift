@@ -103,13 +103,14 @@ public struct AudioClip: Sendable, Equatable {
 }
 
 public enum Device: Sendable {
-    case auto, cpu, metal, cuda, cudaCPUOffload, vulkan
+    case auto, cpu, metal, metalDiskOffload, cuda, cudaCPUOffload, vulkan
 
     var c: WaifuDevice {
         switch self {
         case .auto: WAIFU_DEVICE_AUTO
         case .cpu: WAIFU_DEVICE_CPU
         case .metal: WAIFU_DEVICE_METAL
+        case .metalDiskOffload: WAIFU_DEVICE_METAL_DISK_OFFLOAD
         case .cuda: WAIFU_DEVICE_CUDA
         case .cudaCPUOffload: WAIFU_DEVICE_CUDA_CPU_OFFLOAD
         case .vulkan: WAIFU_DEVICE_VULKAN

@@ -461,9 +461,9 @@ select:focus {
   width: 110px;
 }
 
-/* For a name rather than a number: wide enough for `cuda_cpu_offload`. */
+/* For a name rather than a number: wide enough for `metal_disk_offload`, the longest device. */
 .field.short {
-  width: 168px;
+  width: 188px;
 }
 
 .label {
