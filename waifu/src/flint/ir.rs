@@ -75,10 +75,12 @@
 //! * [`Residency::LowVram`] kept every weight in ordinary host memory when the source was
 //!   built, and a load is the copy across the bus. The `free` after the weight's last reader is
 //!   the card taking those bytes back, so the card holds what the pass is using rather than the
-//!   model. See [`Weights`] for why the host copy is not page-locked.
+//!   model. See [`Weights`] for why the host copy is not page-locked. On Metal the "host memory"
+//!   is the package's file: nothing is read until a load asks for it.
 //!
-//! Both hold the model somewhere for as long as it is in use: on the card, or in host memory.
-//! That is the price of the IR not having to know which.
+//! Both hold the model somewhere for as long as it is in use: on the card, or in host memory --
+//! or, for a low-vram model on Metal, on the disk. That is the price of the IR not having to know
+//! which.
 //!
 //! # What is deliberately not here
 //!
@@ -325,6 +327,23 @@ impl<'a> RunContext<'a> {
 /// than half of RAM for the GPU, so a 32 GB machine could not hold a 17 GB model this way. And it
 /// cost a copy: locked memory is the process's own, where the mapping is shared with the page
 /// cache the file is already in.
+///
+/// # On Metal
+///
+/// The same, except that the package is not read when the model is. Metal's memory is the
+/// machine's, so a model read into the page cache up front is the whole model in the memory
+/// low-vram is there to spare, and on a machine smaller than the model the end of the package
+/// pushes out its beginning before the first step asks for it. So each weight stays its file's
+/// mapping, untouched, and a load reads it off the disk as it copies it into a buffer of the
+/// device's -- `metal_disk_offload`. Pages read that way are clean, and the kernel drops them
+/// rather than writing them anywhere when memory runs short.
+///
+/// The copy is the host's and synchronous (see `Context::upload` in `flint/metal_native`): it
+/// waits for the device to finish with the buffer it writes into, and the device waits while the
+/// host reads the disk. A weight's own pages are never handed to the device instead: a Metal
+/// buffer over a file mapping is read in whole and wired before any work that names it runs, so
+/// wrapping the package would hold all of it, and wrapping each weight is what a later version
+/// can do to take the host out of the way.
 pub struct Weights {
     /// Keyed the way the package keys them, which is what a graph's `load` asks for.
     tensors: HashMap<String, Tensor>,
@@ -345,7 +364,7 @@ impl Weights {
     /// copy of its own: a weight moved to the card leaves nothing behind, and one kept on the host
     /// is the page cache. See [`tensor_file`](crate::tensor_file).
     ///
-    /// A low-vram run on anything but CUDA is refused before a byte is read.
+    /// A low-vram run on anything but CUDA and Metal is refused before a byte is read.
     pub fn from_files(
         paths: &[impl AsRef<Path>],
         device: Device,
@@ -371,13 +390,13 @@ impl Weights {
     /// No weights yet, for a model running on `device` with its weights held the way `residency`
     /// says. [`tensor_file`](crate::tensor_file) fills it with [`Weights::insert`].
     ///
-    /// Refuses a low-vram run on anything but CUDA, which is how the reading is refused before a
-    /// byte of it is done.
+    /// Refuses a low-vram run on anything but CUDA and Metal, which is how the reading is refused
+    /// before a byte of it is done.
     pub(crate) fn empty(device: Device, residency: Residency) -> Result<Weights> {
         if !residency.works_on(device) {
             return Err(Error::model(format!(
-                "a low-vram run sends each weight across the bus through cuda's staged upload, \
-                 so it has nothing to offer {}",
+                "a low-vram run moves each weight onto the device as it is used, which only cuda \
+                 and metal do, so it has nothing to offer {}",
                 device.name()
             )));
         }
@@ -408,8 +427,10 @@ impl Weights {
 
         let tensor = retype(tensor, self.computes_in)?.to_device(self.kept_on)?;
         // Kept on the host, a weight is its file's mapping, and nothing below reads it until a
-        // run does -- so it is read here, in the order the package lies in.
-        if self.kept_on == Device::Cpu {
+        // run does -- so it is read here, in the order the package lies in. Except on Metal,
+        // where the host's memory is the device's too and the package stays on the disk until a
+        // load wants it; see the type documentation.
+        if self.kept_on == Device::Cpu && self.device != Device::Metal {
             read_through(&tensor)?;
         }
 
@@ -479,21 +500,24 @@ pub enum Residency {
     Device,
     /// On the host, and moved onto the device by each load and given back after its
     /// last reader. For a card the model does not fit on: what the card holds is what the pass is
-    /// using rather than the model. See [`Weights`].
+    /// using rather than the model. On Metal, whose memory is the machine's, "the host" is the
+    /// package's file, and it is for a model larger than the machine. See [`Weights`].
     LowVram,
 }
 
 impl Residency {
     /// Whether a run on `device` can be had this way.
     ///
-    /// [`Residency::LowVram`] is built on CUDA's staged upload, which no other backend has, so it
-    /// is the one answer that depends on where the run is going. Nothing above offers the pair that cannot be built --
-    /// the command line and both screens name the two together, as one device -- so this is the
-    /// check that says so for a caller reaching the library directly.
+    /// [`Residency::LowVram`] needs a device whose memory a weight can be moved into and given back
+    /// from one load at a time -- CUDA's, through its staged upload, and Metal's -- so it is the
+    /// one answer that depends on where the run is going. The processor already holds the
+    /// weights where it reads them, and Vulkan has no such path. Nothing above offers the pair
+    /// that cannot be built -- the command line and both screens name the two together, as one
+    /// device -- so this is the check that says so for a caller reaching the library directly.
     pub fn works_on(self, device: Device) -> bool {
         match self {
             Residency::Device => true,
-            Residency::LowVram => device == Device::Cuda,
+            Residency::LowVram => matches!(device, Device::Cuda | Device::Metal),
         }
     }
 }
@@ -1687,19 +1711,22 @@ mod tests {
     }
 
     #[test]
-    fn says_that_low_vram_is_cudas_alone() {
-        // Refused before anything is read, so an empty file is enough to ask with. Metal is asked
-        // too, on a machine that has none: the refusal comes before anything is asked of the
+    fn says_that_low_vram_is_for_cuda_and_metal_alone() {
+        // Refused before anything is read, so an empty file is enough to ask with. Vulkan is asked
+        // too, on a machine that may have none: the refusal comes before anything is asked of the
         // device, which is the point of it.
-        for device in [Device::Cpu, Device::Metal] {
+        for device in [Device::Cpu, Device::Vulkan] {
             let error = Weights::from_bytes(&empty_file(), device, Residency::LowVram)
                 .map(drop)
                 .unwrap_err()
                 .to_string();
 
-            assert!(error.contains("staged upload"), "{error}");
+            assert!(error.contains("only cuda and metal"), "{error}");
             assert!(error.contains(device.name()), "{error}");
         }
+
+        assert!(Residency::LowVram.works_on(Device::Cuda));
+        assert!(Residency::LowVram.works_on(Device::Metal));
     }
 
     #[test]

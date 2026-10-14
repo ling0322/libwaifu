@@ -27,8 +27,9 @@ use crate::{Device, Residency};
 /// One name rather than two answers. Where the weights wait is a question about a card the model
 /// does not fit on, so it has one device it can be asked of and one reason to ask it, and asking
 /// it beside the device made a second box whose rows were struck out three times out of four. As
-/// a device name -- `cuda_cpu_offload`, cuda with the weights kept on the host -- the pair that
-/// cannot be built cannot be said either, and there is one list on screen instead of two.
+/// a device name -- `cuda_cpu_offload`, cuda with the weights kept on the host, and
+/// `metal_disk_offload`, metal with them left on the disk -- the pair that cannot be built cannot
+/// be said either, and there is one list on screen instead of two.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Runtime {
     device: Device,
@@ -37,11 +38,12 @@ pub struct Runtime {
 
 impl Runtime {
     /// Every place a run can go, in the order the flag's own usage lists them.
-    pub const ALL: [Runtime; 5] = [
+    pub const ALL: [Runtime; 6] = [
         Runtime::on(Device::Cpu),
         Runtime::on(Device::Cuda),
         Runtime::CUDA_CPU_OFFLOAD,
         Runtime::on(Device::Metal),
+        Runtime::METAL_DISK_OFFLOAD,
         Runtime::on(Device::Vulkan),
     ];
 
@@ -52,7 +54,15 @@ impl Runtime {
         residency: Residency::LowVram,
     };
 
-    /// A device with the weights on it, which is what every name but the offload one means.
+    /// Metal, with the package left in its file and each weight read off the disk into the
+    /// device's memory at the instruction that reads it. Metal's memory is the machine's, so this
+    /// is for a model larger than the machine; see [`Weights`](crate::Weights).
+    pub const METAL_DISK_OFFLOAD: Runtime = Runtime {
+        device: Device::Metal,
+        residency: Residency::LowVram,
+    };
+
+    /// A device with the weights on it, which is what every name but the offload ones means.
     pub const fn on(device: Device) -> Runtime {
         Runtime {
             device,
@@ -70,19 +80,23 @@ impl Runtime {
 
     /// What it is called on the command line and on screen.
     pub fn name(self) -> &'static str {
-        match self.residency {
-            Residency::Device => self.device.name(),
-            Residency::LowVram => "cuda_cpu_offload",
+        match (self.device, self.residency) {
+            (device, Residency::Device) => device.name(),
+            (Device::Metal, Residency::LowVram) => "metal_disk_offload",
+            (_, Residency::LowVram) => "cuda_cpu_offload",
         }
     }
 
     /// What the terminal's device list says beside the name of one this machine can use.
     pub fn about(self) -> &'static str {
-        match self.residency {
-            Residency::Device => "ready",
-            // The one row that has to say more than that. It is the slow answer, and the slow
+        match (self.device, self.residency) {
+            (_, Residency::Device) => "ready",
+            // The rows that have to say more than that. They are the slow answers, and the slow
             // answer picked by someone who was not told is a run that looks broken.
-            Residency::LowVram => "ready, slower: for a model larger than the card",
+            (Device::Metal, Residency::LowVram) => {
+                "ready, slower: for a model larger than the memory"
+            }
+            (_, Residency::LowVram) => "ready, slower: for a model larger than the card",
         }
     }
 }
@@ -97,6 +111,7 @@ pub enum DeviceOption {
     Cuda,
     CudaCpuOffload,
     Metal,
+    MetalDiskOffload,
     Vulkan,
 }
 
@@ -108,8 +123,9 @@ impl DeviceOption {
             DeviceOption::Cuda => Runtime::on(Device::Cuda),
             DeviceOption::CudaCpuOffload => Runtime::CUDA_CPU_OFFLOAD,
             DeviceOption::Metal => Runtime::on(Device::Metal),
+            DeviceOption::MetalDiskOffload => Runtime::METAL_DISK_OFFLOAD,
             DeviceOption::Vulkan => Runtime::on(Device::Vulkan),
-            // Never the offload one: with no model in hand there is nothing to measure against
+            // Never an offload one: with no model in hand there is nothing to measure against
             // the card. [`DeviceOption::resolve_for`] is the answer once there is.
             DeviceOption::Auto => {
                 // At most one of CUDA and Metal is ever built, so the order between those two only
@@ -285,11 +301,16 @@ mod tests {
         assert_eq!(Runtime::best(Some(3 * GB), &here, eight), vulkan);
         assert_eq!(Runtime::best(Some(7 * GB), &here, eight), cpu);
 
-        // Metal has the machine's memory, so it has no card to be too big for.
-        let mac = [cpu, Runtime::on(Device::Metal)];
+        // Metal has the machine's memory, so it has no card to be too big for -- and its offload
+        // is never chosen for anyone, however large the model: it is asked for by name.
+        let mac = [cpu, Runtime::on(Device::Metal), Runtime::METAL_DISK_OFFLOAD];
         assert_eq!(
-            Runtime::best(Some(40 * GB), &mac, Room::default()),
+            Runtime::best(Some(400 * GB), &mac, Room::default()),
             Runtime::on(Device::Metal)
+        );
+        assert_eq!(
+            Runtime::METAL_DISK_OFFLOAD.short_of(Some(400 * GB), Room::default()),
+            None
         );
         assert_eq!(Runtime::best(Some(1), &[cpu], Room::default()), cpu);
     }
