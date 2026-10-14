@@ -4,7 +4,7 @@ Convolution along one axis, a short time Fourier transform, a mel filterbank, a 
 vocoder's activation -- everything a speech model asks for that a diffusion model never did.
 
 ```rust
-use waifu::audio::{conv1d, hann_window, stft, stft_basis, Padding};
+use waifu::audio::{hann_window, stft, stft_basis, Padding};
 
 let window = hann_window(1024);
 let (real, imaginary) = stft(
@@ -17,14 +17,14 @@ Runs on every backend, needs no feature flag, and adds no kernel to `flint`.
 
 ## None of it is a kernel
 
-The obvious reading of that list is six operators to write three times over, once for the
-processor, once for CUDA and once for Metal. That is not what is here. None of the six is
-irreducible, and each one is written as the operators `flint` already had:
+A 1-D convolution is the one operator in that list: `Graph::conv1d`, which the CPU, CUDA, Metal
+and Vulkan all implement, groups included. The obvious reading of the rest is more operators to
+write three times over, once for the processor, once for CUDA and once for Metal. That is not
+what is here. None of them is irreducible, and each one is written as the operators `flint`
+already had:
 
 | primitive | what it actually is |
 | --- | --- |
-| `conv1d` | `conv2d` over an image one pixel tall, plus the padding `conv2d` cannot express |
-| `depthwise_conv1d` | `R` shifted slices, each scaled per channel, added up |
 | `conv_transpose1d` | one `matmul`, then `ceil(kernel / stride)` shifted additions |
 | `stft` | `conv1d` against a bank of windowed sinusoids |
 | `istft` | `conv_transpose1d` against the matching bank, divided by the window's own overlap |
@@ -36,18 +36,10 @@ irreducible, and each one is written as the operators `flint` already had:
 The one thing that was added is `sin` and `cos`, which the CPU and CUDA kernels already
 implemented and the C interface simply did not export.
 
-What this buys is three things. It runs wherever `conv2d` and `matmul` run, which is every
+What this buys is three things. It runs wherever `conv1d` and `matmul` run, which is every
 backend, on the day it is written rather than three ports later. It is correct wherever they are
 correct, and they are tested. And a fused kernel can replace any one of these later without a
 caller noticing, because what a caller sees is the function and not the seven nodes behind it.
-
-### The padding is the whole trick of `conv1d`
-
-`conv2d` takes a square padding, so a 1-D convolution cannot simply be a 2-D one over an
-`(N, C, 1, L)` view: padding by `p` would make the height `2p + 1` and the output the wrong shape.
-So `conv1d` pads the time axis itself, explicitly, and asks `conv2d` for none. Stride and dilation
-need no such care -- a stride over one row leaves one row, and dilating a kernel one tall dilates
-nothing.
 
 ### Why a transposed convolution is a matrix multiply
 
@@ -88,16 +80,11 @@ Being a composition is how these are *computed*; it is not what they *are*. The 
 what the library says it can do, and a 1-D convolution should not be invisible there because it
 happens to be assembled in Rust today.
 
-So `conv1d`, `convTranspose1d`, `snake`, `stft` and `istft` are declared in `Operators`, dispatched
-through `F::`, exported by the C interface, and reachable from a graph as a single node:
-
-```rust
-let y = g.conv1d(x, w, Some(bias), 1, padding, dilation, groups);   // one node
-let y = waifu::audio::conv1d(&g, x, w, Some(bias), ..)?;            // the several that work
-```
-
-No backend implements any of them, so the first line fails when the graph runs and the second is
-what a model should call. What the declarations buy is that a backend which writes one of these
+So `convTranspose1d`, `snake`, `stft` and `istft` are declared in `Operators`, dispatched through
+`F::`, exported by the C interface, and reachable from a graph as a single node. No backend
+implements any of them, so such a node fails when the graph runs and the composition is what a
+model should call. `conv1d` began as the fifth; every backend has since implemented it, and the
+composition that stood in for it is gone. What the declarations buy is that a backend which writes one of these
 kernels overrides a method rather than restructuring its callers, and that the contract it has to
 meet -- shapes, layouts, what `centered` means, which of `alpha` and `beta` arrives already
 exponentiated -- is written down where the kernel will go.
@@ -106,7 +93,7 @@ exponentiated -- is written down where the kernel will go.
 
 The sixty-one unimplemented operators already in `Operators` use `NOT_IMPL()`, which is
 `LOG(FATAL)` followed by `abort()`. That is defensible for an operator some backend implements --
-reaching it means asking the wrong device -- but these five have no implementation anywhere, so
+reaching it means asking the wrong device -- but these four have no implementation anywhere, so
 every call would end the process.
 
 They use `THROW(NotImplemented, ...)` instead. `lut::NotImplementedError` already existed; the C
@@ -118,25 +105,22 @@ testable: an operator that kills the process cannot be asked whether it is wired
 
 - **`depthwiseConv1d`** -- depthwise is `conv1d` with `groups == in == out`, and one operation
   should not have two names at the interface. A backend wanting the specialized path tests
-  `groups` against the channel count. `audio::depthwise_conv1d` stays a Rust composition because
-  that is what it is: a way around the CUDA `conv2d` having no group support.
+  `groups` against the channel count, which is what CUDA's does.
 - **`mel_filterbank`, `resample`, `pad1d`** -- a constant built on the host and applied with
   `matmul`; two convolutions back to back; and `cat` against a zeros tensor. Nobody would write a
   kernel for any of the three.
 
 ## What is checked
 
-`waifu/tests/audio.rs` is fourteen tests on the processor, and none of them compares against a
+`waifu/tests/audio.rs` is sixteen tests on the processor, and none of them compares against a
 recorded output. A composition is exactly the kind of thing that goes wrong in a way that still
 runs and still produces a plausibly shaped tensor, so each test writes the definition out as a
 loop over indices, in the least clever way available, and asks whether the graph agrees:
 
-- `conv1d` against the sum it is defined to be, over six shapes: padded, strided, dilated to four,
-  grouped, and depthwise.
+- `Graph::conv1d` against the sum it is defined to be, over six shapes: padded, strided, dilated
+  to four, grouped, and depthwise.
 - `conv_transpose1d` against the scatter it is defined to be, including a kernel that is not a
   whole number of strides and the 16-over-8 a vocoder upsamples with.
-- `depthwise_conv1d` against `conv1d` with one group per channel, which is the thing it has to
-  be a substitute for, at the 31 taps a conformer uses.
 - `stft` against a direct discrete Fourier transform of each windowed frame.
 - `istft` of `stft` back to the signal, which is the test that catches what the two banks disagree
   about -- a factor of `n_fft`, a bin doubled that should not have been, an overlap-add off by a
@@ -154,46 +138,13 @@ cargo test --manifest-path waifu/Cargo.toml --test audio_cuda -- --ignored --tes
 
 Both files together are well under a second. Nothing here loads a model.
 
-## Grouped convolution, and why it stopped being a blocker
+## Grouped convolution
 
-A grouped convolution. `flint`'s CUDA `conv2d` is CUTLASS's, `conv2d_cutlass.cu` throws on any
-group count above one, and `cuda/conv2d.cc` calls it unconditionally:
-
-```
-InvalidArg: conv2d on CUTLASS: a grouped convolution is not implemented
-```
-
-This is not something the composition can paper over -- a grouped convolution is not a sum of
-ungrouped ones at any reasonable node count, and a depthwise one over 512 channels least of all.
-It is also not a build flag: `conv2d_cudnn.cc` beside it *does* set a group count, and cuDNN
-supports this perfectly well, but that file is compiled into the benchmark rather than the
-runtime, so reaching it means changing `conv2d.cc`.
-
-There were two ways out, both of them a decision about `flint`'s CUDA convolution rather than
-about audio: wire the cuDNN path into `cuda/conv2d.cc` and build with `WITH_CUDNN=ON`, or
-implement the grouped case in `conv2d_cutlass.cu`.
-
-Neither turned out to be necessary, because of what these models actually ask for. Every grouped
-convolution in IndexTTS-2.5 is **depthwise** -- `groups == in_channels == out_channels`, one
-channel per group and no channel multiplier -- and depthwise, unlike the general case, *is* a
-composition:
-
-```text
-out[n, c, t] = sum over k of  weight[c, k] * x[n, c, t + k * dilation - padding]
-```
-
-Read as a sum over taps rather than over channels, that is `R` shifted copies of the input, each
-scaled by one number per channel and added together. A shift is a slice, a per-channel scale is a
-broadcast multiply. `depthwise_conv1d` is those `3R` nodes, and it runs wherever they do.
-
-It is not free: `R` elementwise passes over the tensor rather than one fused kernel that reads it
-once, so roughly `R`-fold the memory traffic for the same arithmetic. At a conformer's 31 taps
-that is real, and it is still small beside the attention and the feed-forward in the same block.
-A fused depthwise kernel would be the thing to write if it ever shows up in a profile; nothing
-above `depthwise_conv1d` would have to change.
-
-What remains genuinely unavailable on a card is a group count strictly between one and the
-channel count. Nothing here uses one.
+`flint`'s CUDA `conv2d` is CUTLASS's and throws on any group count above one. A grouped 1-D
+convolution does not go through it: the `conv1d` node has a CUTLASS path of its own that takes
+groups. The depthwise case -- `groups == in_channels == out_channels`, which is every grouped
+convolution in IndexTTS-2.5 -- has a CUTLASS kernel of its own, and any other group count runs as
+one ungrouped convolution per group.
 
 ### The upsampling either side of a snake is not `resample`
 
@@ -237,7 +188,7 @@ its constructor and runs it on the reference audio for every synthesis, and the 
 conditioning encoder runs on every call too -- with no emotion prompt given it falls back to the
 speaker audio rather than being skipped. So neither can be avoided by asking for less.
 
-With `depthwise_conv1d` in place, all six rows above run on the card.
+With a grouped `conv1d`, all six rows above run on the card.
 
 (One caveat on the table: `s2mel/modules/wavenet.py` also defines a `DDSConv` that is depthwise.
 It is the VITS duration predictor's layer and does not appear to be on this model's path, but it
@@ -266,7 +217,7 @@ languages; and the pipeline that runs the six in order behind a
 [`Voice`](../waifu/src/speech.rs). Until that last one exists, the speech the program offers is still
 the stand-in described in [speech.md](speech.md).
 
-None of it is blocked on a kernel, and since `depthwise_conv1d` none of it is blocked on the CUDA
+None of it is blocked on a kernel, and since `conv1d` took groups none of it is blocked on the CUDA
 convolution either. Nor was any of the six: the vocoder, which was written first, needed two
 compositions, one padding mode and nothing in `flint`, and the loop on the GPT needed no operator
 that was not already here -- only the causal mask's alignment to the bottom right, which is what

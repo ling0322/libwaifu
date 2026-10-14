@@ -282,8 +282,7 @@ pub fn conv2d(
 
 /// A 1-D convolution of `input` `(N, C, L)` by `weight` `(K, C / groups, R)`.
 ///
-/// CUDA only, on CUTLASS; on any other device every call fails. [`crate::audio::conv1d`] is what
-/// computes a 1-D convolution everywhere today, out of [`conv2d`]. See `Operators::conv1d`.
+/// The CPU, CUDA, Metal and Vulkan all implement it. See `Operators::conv1d`.
 pub fn conv1d(
     input: &Tensor,
     weight: &Tensor,

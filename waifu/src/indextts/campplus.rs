@@ -46,7 +46,6 @@
 //! ones a strided convolution would have centred on, which is what makes the two equal rather
 //! than merely similar.
 
-use crate::audio::conv1d;
 use crate::flint::{DType, Device, Extent, Graph, Value};
 use crate::Result;
 
@@ -356,9 +355,7 @@ fn cam_layer(
     let local = {
         let sub = g.subgraph("linear_local");
         let weight = sub.load("weight", &[config.growth_rate, bn_channels, kernel]);
-        conv1d(
-            &sub, x, weight, None, 1, padding, dilation, 1, dtype, device,
-        )?
+        sub.conv1d(x, weight, None, 1, padding, dilation, 1)
     };
 
     // The context is the whole utterance plus the segment: a mean over all of time, broadcast
@@ -371,36 +368,14 @@ fn cam_layer(
         let sub = g.subgraph("linear1");
         let weight = sub.load("weight", &[reduced, bn_channels, 1]);
         let bias = sub.load("bias", &[reduced]);
-        g.relu(conv1d(
-            &sub,
-            context,
-            weight,
-            Some(bias),
-            1,
-            0,
-            1,
-            1,
-            dtype,
-            device,
-        )?)
+        g.relu(sub.conv1d(context, weight, Some(bias), 1, 0, 1, 1))
     };
 
     let mask = {
         let sub = g.subgraph("linear2");
         let weight = sub.load("weight", &[config.growth_rate, reduced, 1]);
         let bias = sub.load("bias", &[config.growth_rate]);
-        g.sigmoid(conv1d(
-            &sub,
-            context,
-            weight,
-            Some(bias),
-            1,
-            0,
-            1,
-            1,
-            dtype,
-            device,
-        )?)
+        g.sigmoid(sub.conv1d(context, weight, Some(bias), 1, 0, 1, 1))
     };
 
     Ok(g.mul(local, mask))
@@ -432,7 +407,7 @@ fn dense_layer(
     let y = {
         let sub = g.subgraph("linear1");
         let weight = sub.load("weight", &[bn_channels, in_channels, 1]);
-        conv1d(&sub, y, weight, None, 1, 0, 1, 1, dtype, device)?
+        sub.conv1d(y, weight, None, 1, 0, 1, 1)
     };
 
     let y = g.relu(batch_norm(
@@ -535,18 +510,9 @@ pub fn graph(
         let weight = sub
             .subgraph("linear")
             .load("weight", &[config.init_channels, channels, 5]);
-        let y = conv1d(
-            &sub.subgraph("linear"),
-            head,
-            weight,
-            None,
-            2,
-            2,
-            1,
-            1,
-            dtype,
-            device,
-        )?;
+        let y = sub
+            .subgraph("linear")
+            .conv1d(head, weight, None, 2, 2, 1, 1);
         g.relu(batch_norm(
             &sub.subgraph("nonlinear").subgraph("batchnorm"),
             y,
@@ -583,18 +549,9 @@ pub fn graph(
         let weight = sub
             .subgraph("linear")
             .load("weight", &[widened / 2, widened, 1]);
-        running = conv1d(
-            &sub.subgraph("linear"),
-            narrowed,
-            weight,
-            None,
-            1,
-            0,
-            1,
-            1,
-            dtype,
-            device,
-        )?;
+        running = sub
+            .subgraph("linear")
+            .conv1d(narrowed, weight, None, 1, 0, 1, 1);
         channels = widened / 2;
     }
 
@@ -614,18 +571,9 @@ pub fn graph(
     let weight = sub
         .subgraph("linear")
         .load("weight", &[config.embedding_size, channels * 2, 1]);
-    let projected = conv1d(
-        &sub.subgraph("linear"),
-        g.unsqueeze(pooled, 2),
-        weight,
-        None,
-        1,
-        0,
-        1,
-        1,
-        dtype,
-        device,
-    )?;
+    let projected = sub
+        .subgraph("linear")
+        .conv1d(g.unsqueeze(pooled, 2), weight, None, 1, 0, 1, 1);
 
     let normalized = batch_norm(
         &sub.subgraph("nonlinear").subgraph("batchnorm"),

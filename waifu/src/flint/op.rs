@@ -448,8 +448,7 @@ pub enum Op {
         dilation: i32,
         groups: i32,
     },
-    /// A 1-D convolution. CUDA only; `crate::audio::conv1d` is what runs today -- see
-    /// `Operators::conv1d`.
+    /// A 1-D convolution; see `Operators::conv1d`.
     Conv1d {
         input: Value,
         weight: Value,

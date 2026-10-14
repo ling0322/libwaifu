@@ -86,7 +86,6 @@
 //! `(512, 261632)` -- but it is worth knowing before anyone wonders why a four-block conformer
 //! weighs as much as the twenty-four-layer stack it feeds.
 
-use crate::audio::{conv1d, depthwise_conv1d};
 use crate::flint::{DType, Device, Extent, Graph, Tensor, Value};
 use crate::layers::{Conv2d, LayerNorm, Linear};
 use crate::Result;
@@ -377,13 +376,7 @@ fn attention(g: &Graph, x: Value, config: &Config, frames: i32, positions: Value
 /// that the module has no normalization of its own at the front -- the block applies `norm_conv`
 /// before calling this, which is where [`crate::indextts::w2v_bert`]'s equivalent differs.
 #[track_caller]
-fn conv_module(
-    g: &Graph,
-    x: Value,
-    config: &Config,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+fn conv_module(g: &Graph, x: Value, config: &Config) -> Value {
     let channels = config.encoder_dim;
 
     // (N, T, C) -> (N, C, T): the convolutions read time.
@@ -392,7 +385,7 @@ fn conv_module(
     let first = g.subgraph("pointwise_conv1");
     let weight = first.load("weight", &[2 * channels, channels, 1]);
     let bias = first.load("bias", &[2 * channels]);
-    let gated = conv1d(&first, x, weight, Some(bias), 1, 0, 1, 1, dtype, device)?;
+    let gated = first.conv1d(x, weight, Some(bias), 1, 0, 1, 1);
 
     // A gated linear unit over the channel axis, which is halved by it.
     let left = g.contiguous(g.slice(gated, 1, 0, channels));
@@ -403,18 +396,15 @@ fn conv_module(
     let depthwise = g.subgraph("depthwise_conv");
     let weight = depthwise.load("weight", &[channels, 1, config.cnn_kernel]);
     let bias = depthwise.load("bias", &[channels]);
-    let x = depthwise_conv1d(
-        &depthwise,
+    let x = g.conv1d(
         x,
         weight,
         Some(bias),
-        channels,
-        config.cnn_kernel,
+        1,
         (config.cnn_kernel - 1) / 2,
         1,
-        dtype,
-        device,
-    )?;
+        channels,
+    );
 
     let normed = LayerNorm::graph(
         &g.subgraph("norm"),
@@ -427,9 +417,9 @@ fn conv_module(
     let second = g.subgraph("pointwise_conv2");
     let weight = second.load("weight", &[channels, channels, 1]);
     let bias = second.load("bias", &[channels]);
-    let x = conv1d(&second, x, weight, Some(bias), 1, 0, 1, 1, dtype, device)?;
+    let x = second.conv1d(x, weight, Some(bias), 1, 0, 1, 1);
 
-    Ok(g.contiguous(g.transpose(x, 1, 2)))
+    g.contiguous(g.transpose(x, 1, 2))
 }
 
 /// One `ConformerEncoderLayer`: attention, convolution, feed forward, each around a residual, and
@@ -441,15 +431,7 @@ fn conv_module(
 /// pipeline differ on exactly that, and a scale copied from the wrong one changes every layer.
 #[track_caller]
 #[allow(clippy::too_many_arguments)]
-fn encoder_layer(
-    g: &Graph,
-    x: Value,
-    config: &Config,
-    frames: i32,
-    positions: Value,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+fn encoder_layer(g: &Graph, x: Value, config: &Config, frames: i32, positions: Value) -> Value {
     let dim = config.encoder_dim;
     let eps = config.layer_norm_eps;
 
@@ -460,15 +442,12 @@ fn encoder_layer(
     );
 
     let normed = LayerNorm::graph(&g.subgraph("norm_conv"), x, dim, eps);
-    let x = g.add(
-        conv_module(&g.subgraph("conv_module"), normed, config, dtype, device)?,
-        x,
-    );
+    let x = g.add(conv_module(&g.subgraph("conv_module"), normed, config), x);
 
     let normed = LayerNorm::graph(&g.subgraph("norm_ff"), x, dim, eps);
     let x = g.add(feed_forward(&g.subgraph("feed_forward"), normed, config), x);
 
-    Ok(LayerNorm::graph(&g.subgraph("norm_final"), x, dim, eps))
+    LayerNorm::graph(&g.subgraph("norm_final"), x, dim, eps)
 }
 
 /// `emo_conditioning_encoder`: `(N, frames, input_dim)` in, `(N, T', encoder_dim)` out.
@@ -478,15 +457,7 @@ fn encoder_layer(
 /// each sub-block needs, or its last residual leaves unnormalized.
 #[track_caller]
 #[allow(clippy::too_many_arguments)]
-pub fn encoder(
-    g: &Graph,
-    x: Value,
-    config: &Config,
-    frames: i32,
-    positions: Value,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+pub fn encoder(g: &Graph, x: Value, config: &Config, frames: i32, positions: Value) -> Value {
     let mut running = embed(&g.subgraph("embed"), x, config, frames);
 
     let blocks = g.subgraph("encoders");
@@ -497,17 +468,15 @@ pub fn encoder(
             config,
             Config::subsampled(frames),
             positions,
-            dtype,
-            device,
-        )?;
+        );
     }
 
-    Ok(LayerNorm::graph(
+    LayerNorm::graph(
         &g.subgraph("after_norm"),
         running,
         config.encoder_dim,
         config.layer_norm_eps,
-    ))
+    )
 }
 
 /// The perceiver's cross attention, whose queries are also part of what they read.
@@ -678,9 +647,7 @@ pub fn graph(
         config,
         frames,
         positions,
-        dtype,
-        device,
-    )?;
+    );
 
     let resampled = perceiver(
         &g.subgraph("emo_perceiver_encoder"),

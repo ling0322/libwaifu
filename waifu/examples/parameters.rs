@@ -72,8 +72,7 @@ fn semantic_codec_graph(g: &Graph) {
 fn semantic_codec_decode_graph(g: &Graph) {
     let config = semantic_codec::Config::indextts();
 
-    semantic_codec::decode(g, g.input("codes"), &config, FRAMES, F32, CPU)
-        .expect("the codec decodes");
+    semantic_codec::decode(g, g.input("codes"), &config, FRAMES);
 }
 
 fn s2mel_graph(g: &Graph) {

@@ -22,17 +22,16 @@
 //!
 //! # None of this is a new kernel
 //!
-//! The obvious way to read that list is as six operators to write three times over, once for the
-//! CPU, once for CUDA and once for Metal. It is not what happened here, because none of the six
-//! is irreducible:
+//! A 1-D convolution is the one operator in that list, [`Graph::conv1d`], which every backend
+//! implements and which takes a group count. The obvious way to read the rest is as five more
+//! operators to write three times over, once for the CPU, once for CUDA and once for Metal. It is
+//! not what happened here, because none of the five is irreducible:
 //!
-//! - a 1-D convolution is a 2-D one whose image is one pixel tall, and [`conv1d`] is that view
-//!   plus the padding `conv2d` cannot express, since its padding is square and this one's is not;
 //! - a transposed convolution is a matrix multiply per input position and then an overlap-add of
 //!   the columns that fall on each other, which [`conv_transpose1d`] writes as a fixed number of
 //!   shifted additions -- `ceil(kernel / stride)` of them, which is two for every vocoder here;
 //! - a short time Fourier transform is a convolution by a bank of windowed sinusoids, so
-//!   [`stft`] is [`conv1d`] against a constant this module computes on the host, and [`istft`] is
+//!   [`stft`] is [`Graph::conv1d`] against a constant this module computes on the host, and [`istft`] is
 //!   [`conv_transpose1d`] against the matching one, divided by the window's own overlap;
 //! - a mel filterbank is a matrix multiply;
 //! - resampling is a convolution by a windowed sinc, between a zero-stuffing and a decimation
@@ -40,7 +39,7 @@
 //! - and a snake is arithmetic.
 //!
 //! So this module is composition, not kernels, and it buys three things by being so. It runs
-//! wherever `conv2d` and `matmul` already run, which is every backend, on the day it is written
+//! wherever `conv1d` and `matmul` already run, which is every backend, on the day it is written
 //! rather than three ports later. It is correct wherever they are correct, and they are tested.
 //! And a fused kernel can replace any one of these later without a caller noticing, because what
 //! a caller sees is the function, not the seven nodes behind it.
@@ -185,168 +184,6 @@ pub fn reversal(n: i32) -> Result<Tensor> {
     }
 
     Ok(Tensor::from_f32(&[n as i32, n as i32], &values)?)
-}
-
-/// A convolution along the time axis of `x` `(N, C, L)` by `weight` `(K, C / groups, R)`, with an
-/// optional per-channel `bias` `(K)`.
-///
-/// What comes back is `(N, K, Lout)`, `Lout = (L + 2 * padding - dilation * (R - 1) - 1) / stride
-/// + 1`, which is what every reference implementation of this means.
-///
-/// # Why this is `conv2d`
-///
-/// A 1-D convolution is the 2-D one over an image one row tall, and the only thing that does not
-/// survive the reshape is the padding: `conv2d` pads both axes by the same amount, and padding
-/// the axis of length one would make it `2 * padding + 1` long and the output the wrong shape. So
-/// the padding is done here, explicitly, and `conv2d` is asked for none. Stride and dilation need
-/// no such care -- a stride over one row leaves one row, and a dilation of a kernel one tall
-/// dilates nothing.
-///
-/// # A general group count runs on the processor only
-///
-/// Not a limit of this function: `flint`'s CUDA `conv2d` is CUTLASS's, `conv2d_cutlass.cu` throws
-/// on any group count above one, and `cuda/conv2d.cc` calls it unconditionally. The cuDNN path
-/// beside it does set a group count, but it is built into the benchmark rather than into the
-/// runtime, so reaching it is a change to `conv2d.cc` and not a build flag.
-///
-/// In practice this has turned out not to block anything. Nothing in a speech model here wants a
-/// *general* grouped convolution -- what the conformers want is the depthwise case, where the
-/// group count is the channel count, and that one is a composition rather than a kernel:
-/// [`depthwise_conv1d`] computes it out of a slice and a multiply and runs on a card today.
-///
-/// So use [`depthwise_conv1d`] when the groups are the channels, which is every grouped
-/// convolution in IndexTTS-2.5. Reach for a group count here only for something in between --
-/// more than one channel per group -- and expect it on the processor only.
-#[track_caller]
-#[allow(clippy::too_many_arguments)]
-pub fn conv1d(
-    g: &Graph,
-    x: Value,
-    weight: Value,
-    bias: Option<Value>,
-    stride: i32,
-    padding: i32,
-    dilation: i32,
-    groups: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
-    let x = pad1d(g, x, padding, padding, Padding::Zero, dtype, device)?;
-
-    let x = g.unsqueeze(x, 2);
-    let weight = g.unsqueeze(weight, 2);
-    let y = g.conv2d(x, weight, bias, stride, 0, dilation, groups);
-
-    Ok(g.squeeze(y, 2))
-}
-
-/// A depthwise convolution along the time axis of `x` `(N, C, L)`: one kernel per channel and no
-/// mixing between them. `weight` is `(C, 1, R)`, the shape torch stores a
-/// `Conv1d(C, C, R, groups=C)` in, and `bias` is `(C)`.
-///
-/// What comes back is `(N, C, L + 2 * padding - dilation * (R - 1))`. Stride one only, which is
-/// what both callers that need this use; see below.
-///
-/// # Why this exists beside [`conv1d`]
-///
-/// [`conv1d`] passes a group count straight through to `conv2d`, and `flint`'s CUDA `conv2d`
-/// refuses any group count above one. That would leave a conformer -- and so IndexTTS-2.5's
-/// emotion conditioning encoder and the w2v-bert-2.0 in front of it -- unable to run on a card.
-///
-/// It does not, because those convolutions are not merely grouped, they are *depthwise*: the
-/// group count equals both the input and the output channel count, so every group is one channel
-/// wide and there is no channel multiplier. A general grouped convolution is not a composition of
-/// the operators here. A depthwise one is:
-///
-/// ```text
-/// out[n, c, t] = sum over k of  weight[c, k] * x[n, c, t + k * dilation - padding]
-/// ```
-///
-/// Read that as a sum over `k` rather than over channels and it is `R` shifted copies of `x`,
-/// each scaled by one number per channel and added up -- the same shape of trick
-/// [`conv_transpose1d`] uses. A shift is a slice, a per-channel scale is a broadcast multiply,
-/// and both of those run everywhere.
-///
-/// # What it costs
-///
-/// The arithmetic is exactly the convolution's, `R * C * L` multiply-adds either way. What is
-/// worse is the traffic: `R` elementwise passes over the whole tensor rather than one fused
-/// kernel that reads it once, so roughly `R`-fold the memory bandwidth, and `3 * R` nodes in the
-/// graph rather than one. For a conformer that is a kernel of 31 over a tensor the attention and
-/// the feed-forward beside it dominate anyway.
-///
-/// So this is the honest version of "it runs today", not a claim that it runs as fast as a real
-/// depthwise kernel would. If a conformer ever turns out to be bandwidth-bound here, this is the
-/// function to replace, and replacing it changes nothing above it.
-///
-/// # Stride
-///
-/// One. A stride would need every `s`-th position of a slice, and a strided view is not something
-/// the graph can express; the depthwise convolution in a conformer and the one in w2v-bert-2.0
-/// are both stride one, so nothing here needs it.
-#[track_caller]
-#[allow(clippy::too_many_arguments)]
-pub fn depthwise_conv1d(
-    g: &Graph,
-    x: Value,
-    weight: Value,
-    bias: Option<Value>,
-    channels: i32,
-    kernel: i32,
-    padding: i32,
-    dilation: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
-    assert!(kernel >= 1, "a kernel must be positive");
-    assert!(dilation >= 1, "a dilation must be positive");
-
-    let x = pad1d(g, x, padding, padding, Padding::Zero, dtype, device)?;
-
-    // Everything below works in `(N, L, C)`, because a binary operation broadcasts its right
-    // operand over the *leading* dimensions of its left: a per-channel scale is a `(C)` vector,
-    // so the channel has to be the last axis for it to line up.
-    let x = g.contiguous(g.transpose(x, 1, 2));
-
-    // `(C, 1, R)` -> `(R, C)`, so that tap `k` is one `subtensor` away.
-    let taps = g.contiguous(g.transpose(
-        g.view(weight, [Extent::At(channels), Extent::At(kernel)]),
-        0,
-        1,
-    ));
-
-    let mut total: Option<Value> = None;
-    for k in 0..kernel {
-        // Tap `k` reads from `k * dilation` and stops the same distance from the far end that the
-        // last tap does, which is what makes every slice the same length. Both bounds are
-        // constants -- a negative one counts from the back -- so the graph never needs to know
-        // how long the signal is.
-        let trim = dilation * (kernel - 1 - k);
-        let shifted = g.slice(
-            x,
-            1,
-            k * dilation,
-            match trim {
-                0 => Extent::from(crate::flint::Bound::End),
-                _ => Extent::At(-trim),
-            },
-        );
-
-        let scaled = g.mul(shifted, g.subtensor(taps, k));
-        total = Some(match total {
-            None => scaled,
-            Some(sofar) => g.add(sofar, scaled),
-        });
-    }
-
-    let out = total.expect("a kernel of at least one tap has at least one term");
-    let out = match bias {
-        // The channel is already last here, so a bias costs nothing but the add.
-        Some(bias) => g.add(out, bias),
-        None => out,
-    };
-
-    Ok(g.contiguous(g.transpose(out, 1, 2)))
 }
 
 /// A transposed convolution along the time axis of `x` `(N, C, L)` by `weight` `(C, K, R)`, with
@@ -767,7 +604,7 @@ pub fn stft(
 
     // One channel in, two per bin out, and a stride that is the hop: a frame is what the kernel
     // covers and the hop is how far it moves, which is the definition of the transform.
-    let spectrum = conv1d(g, x, basis, None, hop, 0, 1, 1, dtype, device)?;
+    let spectrum = g.conv1d(x, basis, None, hop, 0, 1, 1);
 
     let bins = n_fft / 2 + 1;
     let real = g.slice(spectrum, 1, 0, bins);
@@ -918,18 +755,7 @@ pub fn resample(
         }
     };
 
-    conv1d(
-        g,
-        stuffed,
-        kernel,
-        None,
-        down,
-        taps / 2,
-        1,
-        1,
-        dtype,
-        device,
-    )
+    Ok(g.conv1d(stuffed, kernel, None, down, taps / 2, 1, 1))
 }
 
 /// The windowed sinc the alias-free resampling in a BigVGAN's activation convolves by, as a
@@ -1123,7 +949,7 @@ pub fn downsample1d(
     let padded = pad1d(g, x, left, kernel / 2, Padding::Replicate, dtype, device)?;
 
     let folded = fold_channels(g, padded);
-    let down = conv1d(g, folded, filter, None, ratio, 0, 1, 1, dtype, device)?;
+    let down = g.conv1d(folded, filter, None, ratio, 0, 1, 1);
 
     Ok(unfold_channels(g, down, x, channels))
 }

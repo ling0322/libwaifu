@@ -2,9 +2,9 @@
 //!
 //! `tests/audio.rs` is what says these functions are correct; it checks each one against its own
 //! definition, on the CPU. What this file is for is the claim the module is built on -- that a
-//! 1-D convolution written as a 2-D one, and a Fourier transform written as a convolution, run
-//! wherever `conv2d` and `matmul` run, with no kernel of their own on any backend. That claim is
-//! either true on a second backend or it is not true at all.
+//! Fourier transform written as a convolution, and the rest of the compositions, run wherever
+//! `conv1d` and `matmul` run, with no kernel of their own on any backend. That claim is either
+//! true on a second backend or it is not true at all.
 //!
 //! So each test here writes one graph, runs it twice, and compares. The tolerances are loose
 //! because the CUDA operators work in half precision and the host ones do not: what is being
@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use waifu::audio::{
-    conv1d, conv_transpose1d, depthwise_conv1d, hann_window, istft, istft_basis, pad1d, snake, stft,
+    conv_transpose1d, hann_window, istft, istft_basis, pad1d, snake, stft,
     stft_basis, window_envelope, Padding,
 };
 use waifu::flint::{
@@ -90,10 +90,11 @@ fn conv1d_on_the_card_is_conv1d_on_the_host() {
         ),
         (2, 6, 16, 5, 2, 2, 1, 1),
         (4, 4, 20, 3, 1, 4, 4, 1),
-        // No grouped case here. `flint`'s CUDA conv2d is CUTLASS's and it throws on any group
-        // count above one, while the cuDNN path that would handle it is built into the benchmark
-        // rather than the runtime. `tests/audio.rs` covers grouped and depthwise on the
-        // processor; see the note on `conv1d` for what the card would need.
+        // Grouped, then depthwise -- the 31 tap kernel a conformer and w2v-bert-2.0 both use --
+        // which CUTLASS runs as a kernel of its own.
+        (4, 6, 16, 3, 1, 1, 1, 2),
+        (16, 16, 48, 31, 1, 15, 1, 16),
+        (6, 6, 32, 3, 1, 4, 4, 6),
     ];
 
     for (index, &(inc, outc, length, kernel, stride, padding, dilation, groups)) in
@@ -108,10 +109,9 @@ fn conv1d_on_the_card_is_conv1d_on_the_host() {
         let (w_host, w_cuda) = pair(&[outc as i32, (inc / groups) as i32, kernel as i32], &w);
         let (bias_host, bias_cuda) = pair(&[outc as i32], &bias);
 
-        let build = |dtype, device| {
+        let build = || {
             let g = Graph::new();
-            let out = conv1d(
-                &g,
+            let out = g.conv1d(
                 g.input("x"),
                 g.input("w"),
                 Some(g.input("bias")),
@@ -119,21 +119,18 @@ fn conv1d_on_the_card_is_conv1d_on_the_host() {
                 padding as i32,
                 dilation as i32,
                 groups as i32,
-                dtype,
-                device,
-            )
-            .unwrap();
+            );
             (g, out)
         };
 
-        let (g, out) = build(DType::Float, Device::Cpu);
+        let (g, out) = build();
         let (host_shape, host) = run(
             &g,
             out,
             &[("x", &x_host), ("w", &w_host), ("bias", &bias_host)],
         );
 
-        let (g, out) = build(cuda_float(), Device::Cuda);
+        let (g, out) = build();
         let (cuda_shape, cuda) = run(
             &g,
             out,
@@ -348,67 +345,3 @@ fn an_istft_of_an_stft_on_the_card_is_still_the_signal() {
     );
 }
 
-/// The one that matters: this is the shape `conv1d` refuses on a card, computed on the card.
-///
-/// A conformer's convolution module is depthwise, and so is w2v-bert-2.0's, so without this
-/// IndexTTS-2.5 has no GPU path at all. The host side is `conv1d` with one group per channel --
-/// the thing CUTLASS will not do -- which is exactly the comparison worth making.
-#[test]
-#[ignore = "needs a CUDA device"]
-fn a_depthwise_convolution_runs_on_the_card_where_a_grouped_one_cannot() {
-    // (channels, length, kernel, padding, dilation), including the 31 tap conformer kernel.
-    let cases = [
-        (8usize, 24usize, 3usize, 1usize, 1usize),
-        (16, 48, 31, 15, 1),
-        (6, 32, 3, 4, 4),
-    ];
-
-    for (index, &(channels, length, kernel, padding, dilation)) in cases.iter().enumerate() {
-        let batch = 2;
-        let x = ramp(batch * channels * length, index as f32);
-        let w = ramp(channels * kernel, index as f32 + 3.0);
-
-        let (x_host, x_cuda) = pair(&[batch as i32, channels as i32, length as i32], &x);
-        let (w_host, w_cuda) = pair(&[channels as i32, 1, kernel as i32], &w);
-
-        // On the host, by the grouped convolution this is meant to stand in for.
-        let g = Graph::new();
-        let out = conv1d(
-            &g,
-            g.input("x"),
-            g.input("w"),
-            None,
-            1,
-            padding as i32,
-            dilation as i32,
-            channels as i32,
-            DType::Float,
-            Device::Cpu,
-        )
-        .unwrap();
-        let (host_shape, host) = run(&g, out, &[("x", &x_host), ("w", &w_host)]);
-
-        // On the card, by the composition.
-        let g = Graph::new();
-        let out = depthwise_conv1d(
-            &g,
-            g.input("x"),
-            g.input("w"),
-            None,
-            channels as i32,
-            kernel as i32,
-            padding as i32,
-            dilation as i32,
-            cuda_float(),
-            Device::Cuda,
-        )
-        .unwrap();
-        let (cuda_shape, cuda) = run(&g, out, &[("x", &x_cuda), ("w", &w_cuda)]);
-
-        assert_eq!(
-            host_shape, cuda_shape,
-            "case {index} disagreed on the shape"
-        );
-        close(&cuda, &host, 2e-2, &format!("depthwise case {index}"));
-    }
-}
