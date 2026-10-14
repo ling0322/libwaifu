@@ -122,7 +122,7 @@ pub use sdxl::{
     VaeDecoder, VaeEncoder, VAE_SCALE,
 };
 pub use suggested::{Size, Suggestions};
-pub use tensor_file::{parse_safetensors, read_safetensors};
+pub use tensor_file::read_safetensors;
 pub use tokenizer::Tokenizer;
 pub use wav::Sound;
 

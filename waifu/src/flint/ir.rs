@@ -310,11 +310,6 @@ impl Weights {
         tensor_file::collect(paths, device, residency)
     }
 
-    /// The same, out of one file's bytes already in hand rather than off the disk.
-    pub fn from_bytes(bytes: &[u8], device: Device, residency: Residency) -> Result<Weights> {
-        tensor_file::collect_bytes(bytes, device, residency)
-    }
-
     /// `tensors` as they are, for a run on `device`: neither retyped nor moved here, so a load
     /// hands back a handle on one already on `device` and copies one that is not.
     ///
@@ -1141,16 +1136,6 @@ mod tests {
         Weights::from_tensors(tensors, Device::Cpu).unwrap()
     }
 
-    /// A safetensors file holding nothing, for the checks that happen before one is read.
-    ///
-    /// An empty header, which is the smallest file there is: eight bytes saying the header is two
-    /// long, and then `{}`.
-    fn empty_file() -> Vec<u8> {
-        let mut bytes = 2u64.to_le_bytes().to_vec();
-        bytes.extend_from_slice(b"{}");
-        bytes
-    }
-
     /// One transformer feed forward, which reads its input twice and so has a value that outlives
     /// the instruction after the one that made it.
     fn feed_forward() -> Graph {
@@ -1632,11 +1617,11 @@ mod tests {
 
     #[test]
     fn says_that_low_vram_is_for_cuda_and_metal_alone() {
-        // Refused before anything is read, so an empty file is enough to ask with. Vulkan is asked
+        // Refused before anything is read, so no file is needed to ask with. Vulkan is asked
         // too, on a machine that may have none: the refusal comes before anything is asked of the
         // device, which is the point of it.
         for device in [Device::Cpu, Device::Vulkan] {
-            let error = Weights::from_bytes(&empty_file(), device, Residency::LowVram)
+            let error = Weights::empty(device, Residency::LowVram)
                 .map(drop)
                 .unwrap_err()
                 .to_string();

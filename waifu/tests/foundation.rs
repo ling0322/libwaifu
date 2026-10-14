@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 use waifu::flint::{check_parameters, Graph, Ir, Residency, RunContext, Weights};
 use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
-use waifu::{parse_safetensors, read_safetensors, Embedding, Linear, WeightFormat};
+use waifu::{read_safetensors, Embedding, Linear, WeightFormat};
 
 /// A safetensors file holding `tensors`, each given as a name, a shape, and its elements.
 ///
@@ -63,14 +63,24 @@ fn write_params(tensors: &[(&str, &[i32], &[f32])]) -> Vec<u8> {
     out
 }
 
+/// What a file of `bytes` reads back as, exactly as stored.
+fn read_bytes(bytes: &[u8]) -> waifu::Result<HashMap<String, Tensor>> {
+    read_safetensors(&[&TempFile::new(bytes).0])
+}
+
+/// A model's weights out of a file of `bytes`, the way a model reads its package.
+fn weights_from(bytes: &[u8], device: Device, residency: Residency) -> waifu::Result<Weights> {
+    Weights::from_files(&[&TempFile::new(bytes).0], device, residency)
+}
+
 /// What a file holding `tensors` reads back as, exactly as stored.
 fn stored(tensors: &[(&str, &[i32], &[f32])]) -> HashMap<String, Tensor> {
-    parse_safetensors(&write_params(tensors)).unwrap()
+    read_bytes(&write_params(tensors)).unwrap()
 }
 
 /// A source read out of a file holding `tensors`, the way a model reads its package.
 fn source(tensors: &[(&str, &[i32], &[f32])], device: Device, residency: Residency) -> Rc<Weights> {
-    Rc::new(Weights::from_bytes(&write_params(tensors), device, residency).unwrap())
+    Rc::new(weights_from(&write_params(tensors), device, residency).unwrap())
 }
 
 /// The same, for a file whose tensors are not all one element type: each is given the name
@@ -112,7 +122,7 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
 
 /// What a file holding `tensors`, not all one element type, reads back as.
 fn stored_typed(tensors: &[(&str, &str, &[i32], Vec<u8>)]) -> HashMap<String, Tensor> {
-    parse_safetensors(&write_typed(tensors)).unwrap()
+    read_bytes(&write_typed(tensors)).unwrap()
 }
 
 /// Every tensor of several files at once, which is what a model written as several is read as.
@@ -178,15 +188,15 @@ fn refuses_a_parameter_file_it_does_not_understand() {
     // A file that stops in the middle of a tensor's data is refused rather than read short: the
     // header says how long each tensor is, and the bytes have to be there.
     let truncated = &params[..params.len() - 4];
-    assert!(parse_safetensors(truncated).is_err());
+    assert!(read_bytes(truncated).is_err());
 
     // A header that is not JSON at all, and one that claims a length the file does not have.
-    assert!(parse_safetensors(b"not a safetensors file").is_err());
-    assert!(parse_safetensors(&[]).is_err());
+    assert!(read_bytes(b"not a safetensors file").is_err());
+    assert!(read_bytes(&[]).is_err());
 
     let mut lying = params.clone();
     lying[0] = 0xff;
-    assert!(parse_safetensors(&lying).is_err());
+    assert!(read_bytes(&lying).is_err());
 }
 
 /// A pass written out of layers, read out of a package, and run.
@@ -307,7 +317,7 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
     let x = g.input("x");
     g.output("y", Linear::graph(&g.subgraph("proj"), x, 16, 8, false));
 
-    let weights = Weights::from_bytes(&bytes, Device::Cuda, Residency::Device).unwrap();
+    let weights = weights_from(&bytes, Device::Cuda, Residency::Device).unwrap();
     assert_eq!(
         weights.load("proj.weight", &[8, 16]).unwrap().dtype(),
         DType::Fp8E4M3,
@@ -349,7 +359,7 @@ fn the_scale_is_named_the_same_by_both_halves() {
 /// so the pairing is a name, and a name is only a convention until something checks it.
 #[test]
 fn refuses_quantized_elements_with_no_scales_beside_them() {
-    let error = parse_safetensors(&write_typed(&[(
+    let error = read_bytes(&write_typed(&[(
         "proj.weight",
         "F8_E4M3",
         &[2, 4],
@@ -360,7 +370,7 @@ fn refuses_quantized_elements_with_no_scales_beside_them() {
 
     // One float for the whole weight. A scale per row is what an older exporter wrote, and is
     // refused by name rather than read as something it is not.
-    let error = parse_safetensors(&write_typed(&[
+    let error = read_bytes(&write_typed(&[
         ("proj.weight", "F8_E4M3", &[2, 4], vec![0x38; 8]),
         ("proj.weight.scale", "F32", &[2], f32_bytes(&[1.0; 2])),
     ]))
@@ -368,7 +378,7 @@ fn refuses_quantized_elements_with_no_scales_beside_them() {
     assert!(error.to_string().contains("one for the whole weight"), "{error}");
     assert!(error.to_string().contains("exported again"), "{error}");
 
-    let error = parse_safetensors(&write_typed(&[
+    let error = read_bytes(&write_typed(&[
         ("proj.weight", "F8_E4M3", &[2, 4], vec![0x38; 8]),
         ("proj.weight.scale", "F16", &[1], vec![0; 2]),
     ]))
@@ -632,7 +642,7 @@ fn a_disk_offloaded_package_on_metal_runs_like_a_resident_one() {
         .unwrap()
         .to_device(Device::Metal)
         .unwrap();
-    let run = |source: &dyn ParamSource| {
+    let run = |source: &Weights| {
         let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
         to_host(&out[0].1)
     };
@@ -816,8 +826,8 @@ fn a_file_is_mapped_and_a_misaligned_tensor_copied() {
     assert_eq!(a.to_vec_f32().unwrap(), vec![1.5, -2.0]);
 }
 
-/// A package read off the disk -- mapped -- runs like the same bytes read out of a buffer, kept on
-/// the card or sent across the bus from the mapping.
+/// A package read off the disk -- mapped -- runs like the same weights put on the card by hand,
+/// kept on the card or sent across the bus from the mapping.
 #[test]
 #[ignore = "needs a CUDA device"]
 fn a_mapped_package_runs_like_one_read_into_memory() {
@@ -840,7 +850,12 @@ fn a_mapped_package_runs_like_one_read_into_memory() {
         to_host(&out[0].1)
     };
 
-    let expected = run(&Weights::from_bytes(&bytes, Device::Cuda, Residency::Device).unwrap());
+    let by_hand = Tensor::from_f32(&[256, 256], &values)
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap();
+    let by_hand = HashMap::from([("big.weight".to_string(), by_hand)]);
+    let expected = run(&Weights::from_tensors(by_hand, Device::Cuda).unwrap());
     for residency in [Residency::Device, Residency::LowVram] {
         let mapped = Weights::from_files(&[&file.0], Device::Cuda, residency).unwrap();
         assert_eq!(run(&mapped), expected, "{residency:?}");
