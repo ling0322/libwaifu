@@ -18,15 +18,13 @@ path = "src/bin/waifu.rs"
 required-features = ["cli"]
 
 [features]
-# The command line tool. Off by default: what it pulls in -- a terminal stack, a web server, an
-# HTTP client, an image encoder -- is the binary's to need, and nothing the library does asks for
-# any of it.
+# The command line tool. Off by default: what it pulls in -- a terminal stack, an HTTP client, an
+# image encoder -- is the binary's to need, and nothing the library does asks for any of it.
 cli = [
     "engine",
     "image/png",
     "image/jpeg",
     "dep:ratatui",
-    "dep:tiny_http",
 ]
 # Fetching published models, and where they are kept: the catalogue, the two hubs, config.toml.
 hub = ["dep:hf-hub", "dep:toml", "dep:ureq"]
@@ -38,8 +36,8 @@ engine = ["hub", "dep:image", "dep:serde_json"]
 [dependencies]
 # What the command line tool needs.
 #
-# The terminal the choosing happens in: which task, which model -- fetched there, under a bar --
-# and which device, before the page opens on the task that was picked. Trimmed to the crossterm
+# The terminal the whole of it happens in: which task, which model -- fetched there, under a bar
+# -- and which device, and then the screen a picture is drawn from. Trimmed to the crossterm
 # backend: the default set also builds the termwiz and termina ones, which is two more terminal
 # stacks than a program that runs in one terminal needs.
 ratatui = { version = "0.29", default-features = false, features = [
@@ -47,25 +45,11 @@ ratatui = { version = "0.29", default-features = false, features = [
     "underline-color",
 ], optional = true }
 
-# The server the page is served from. The page is a browser tab rather than the terminal, because
-# it is the one place a picture can actually be looked at, and this is the smallest thing that
-# will hand one to it: a socket, a thread per request and a `Request` with the method, the path
-# and the body already read off it. No executor, which matters -- nothing else in this crate is
-# async, and a run is a thread that owns a model and blocks for minutes at a time.
+# What the engine says about models and the machine, for the C API to hand on: a parser this
+# crate would own for no reason, since it is already in the tree, under hf-hub.
 #
-# Default features off: the set it ships with is TLS, in either an OpenSSL or a rustls flavour,
-# and a server bound to the loopback address for the length of one drawing session has nothing to
-# encrypt against. What is left is `ascii`, `chunked_transfer` and `httpdate`, which are between
-# them about a thousand lines.
-tiny_http = { version = "0.12", default-features = false, optional = true }
-
-# What the browser and the server say to each other. Every request that is not a file is a small
-# object of numbers and strings, and writing that by hand -- in both directions, with the escaping
-# -- is a parser this crate would own for no reason: it is already in the tree, under hf-hub.
-#
-# `Value` rather than derived types. What crosses is a handful of shapes, each read once and
-# checked as it is read, and a derive would buy the checking back at the cost of a second
-# description of every one of them.
+# `Value` rather than derived types. What crosses is a handful of shapes, each built once, and a
+# derive would buy nothing at the cost of a second description of every one of them.
 serde_json = { version = "1", optional = true }
 
 # The settings file, `config.toml`, which today says one thing: where fetched models go. It is a

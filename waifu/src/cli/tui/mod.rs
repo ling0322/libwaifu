@@ -17,20 +17,27 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The terminal half of the tool: what to do, with which model, and where.
+//! The whole of the tool, in the terminal: what to do, with which model, where -- and then the
+//! drawing.
 //!
-//! Three screens, one after the other -- a task, then a model for it, then a device -- and then
-//! the terminal is given back and the page is served for what was picked. The page picks none of
-//! the three. A model is gigabytes and a device is where they go, and both are settled here,
-//! where a fetch can be watched on a bar and stopped with a key, before anything is listening.
+//! Two screens to choose on, one after the other -- a task, then a model for it, fetched there if
+//! it is not on the disk -- and then the drawing screen, [`draw`], goes up for what was picked and
+//! reads the model onto a device behind it. Which device starts as what `-device` said, or what
+//! `auto` makes of the model and the machine; the drawing screen's device row opens a box that
+//! changes it, and the model is read onto the new one in the background.
 //!
-//! Escape goes back a screen, which on the first one is out; `q` and ctrl-c leave from anywhere.
+//! On the two, escape goes back a screen, which on the first one is out; `q` and ctrl-c leave
+//! from anywhere. On the drawing screen escape stops a run, or asks before leaving.
 
 mod ask;
 mod devices;
+mod draw;
+mod field;
 mod files;
 mod models;
 mod tasks;
+
+pub use draw::draw;
 
 use std::io::{self, IsTerminal};
 
@@ -42,7 +49,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::cli::args::{DeviceOption, Room, Runtime};
 use crate::cli::hub;
-use crate::cli::task::{Launch, Task};
+use crate::cli::task::Task;
 
 type Error = Box<dyn std::error::Error>;
 
@@ -73,45 +80,76 @@ pub fn can_take_the_screen() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
-/// Asks for a task, a model and a device, and fetches the model if it is not here.
+/// Has the terminal put back the way it was if the tensor library gives up, from now on.
 ///
-/// `task` is where the task list starts, which is what `-task` said, and `device` is where the
-/// device list starts: what `-device` named, or for `auto` the fastest device the picked model
-/// fits on. Both are only where the cursor starts: the screens are still shown, since the model
-/// between them is not yet chosen. `None` is somebody leaving, which is not a failure.
-pub fn choose(task: Option<Task>, device: DeviceOption) -> Result<Option<Launch>, Error> {
-    // Asked before the screen is taken, not when the device list comes up. The first question
-    // put to a device starts the tensor library, which says what hardware it found on stderr --
-    // straight over whatever is on the screen at that moment. The cards are measured whatever
-    // `-device` said: a device that was named is not second-guessed, but a run on it that is
-    // going to run out of memory is still worth a warning before it is started.
-    let available = Runtime::available();
-    let room = Room::measure(&available);
-    let machine = Machine {
-        device,
-        available,
-        room,
-    };
+/// Called before the first screen goes up and left for the rest of the run: every screen takes
+/// the terminal, and a check that fails inside the tensor library can come from any of them --
+/// the drawing screen has a model being read or run behind it the whole time it is up.
+pub fn give_the_screen_back_if_flint_aborts() {
+    crate::flint::on_fatal(give_the_screen_back);
+}
 
+/// Puts the terminal back the way it was, from inside the tensor library's last breath.
+///
+/// A check that fails there prints what went wrong and calls `abort()`, and the message is worth
+/// nothing written across a screen full of boxes -- which is where it lands, since by then the
+/// alternate screen is up, the cursor is hidden and the terminal is in raw mode. So the last thing
+/// that happens before the message is this.
+///
+/// It runs on whichever thread failed, which may not be the one drawing. Racing a half-finished
+/// frame is not a concern: nothing after this draws another, and a frame torn on the way out is
+/// better than a message nobody can read.
+extern "C" fn give_the_screen_back() {
+    ratatui::restore();
+
+    // And the cursor, which restore() does not do: hiding it is the Terminal's and showing it
+    // again is what its Drop does, and abort() runs no destructors. Without this the shell that
+    // gets the terminal back has no cursor in it.
+    let _ = ratatui::crossterm::execute!(io::stdout(), ratatui::crossterm::cursor::Show);
+}
+
+/// Asks for a task and a model for it, and fetches the model if it is not here.
+///
+/// `task` is where the task list starts, which is what `-task` said. Where the model runs is not
+/// asked here: the drawing screen opens on what [`Machine::start_for`] makes of it, and its device
+/// row changes it. `None` is somebody leaving, which is not a failure.
+pub fn choose(task: Option<Task>) -> Result<Option<(Task, String)>, Error> {
     let mut terminal = take_the_screen()?;
-    let chosen = walk(&mut terminal, task, &machine);
+    let chosen = walk(&mut terminal, task);
     ratatui::restore();
 
     chosen
 }
 
-/// What the device list is chosen from: what `-device` said, what this machine can run on, and how
-/// much room its cards had before anything was put on them.
-struct Machine {
+/// Where a model can run: what `-device` said, what this machine can run on, and how much room
+/// its cards had before anything was put on them.
+pub struct Machine {
     device: DeviceOption,
     available: Vec<Runtime>,
     room: Room,
 }
 
 impl Machine {
-    /// Where the device list starts for `model`, and -- where that was worked out from the size
-    /// of the model -- the line that says so.
-    fn start_for(&self, model: &str) -> (Runtime, Option<String>) {
+    /// Asks the machine, once, before any screen is up.
+    ///
+    /// Before, because the first question put to a device starts the tensor library, which says
+    /// what hardware it found on stderr -- straight over whatever is on the screen at that moment.
+    /// The cards are measured whatever `-device` said: a device that was named is not
+    /// second-guessed, but a run on it that is going to run out of memory is still worth a warning
+    /// before it is started.
+    pub fn measure(device: DeviceOption) -> Machine {
+        let available = Runtime::available();
+        let room = Room::measure(&available);
+        Machine {
+            device,
+            available,
+            room,
+        }
+    }
+
+    /// Where `model` runs to begin with, and -- where that was worked out from the size of the
+    /// model -- the line that says so.
+    pub fn start_for(&self, model: &str) -> (Runtime, Option<String>) {
         if self.device != DeviceOption::Auto {
             return (self.device.resolve(), None);
         }
@@ -138,12 +176,11 @@ impl Machine {
     }
 }
 
-/// The three screens, with the way back through them.
+/// The two screens, with the way back through them.
 fn walk(
     terminal: &mut DefaultTerminal,
     task: Option<Task>,
-    machine: &Machine,
-) -> Result<Option<Launch>, Error> {
+) -> Result<Option<(Task, String)>, Error> {
     let mut task_at = task
         .and_then(|task| Task::ALL.iter().position(|one| *one == task))
         .unwrap_or(0);
@@ -156,36 +193,10 @@ fn walk(
 
         // The model list is built again each time it is come back to, so that it says what is on
         // the disk now: a model fetched on the way through is one that is here on the way back.
-        loop {
-            let picked = match models::choose(terminal, task)? {
-                Step::Next(picked) => picked,
-                Step::Back => break,
-                Step::Quit => return Ok(None),
-            };
-
-            // Worked out again for each model: the one picked last time round may have fitted
-            // on the card where this one does not.
-            let (runtime, why) = machine.start_for(&picked.model);
-            match devices::choose(
-                terminal,
-                task,
-                &picked.label,
-                runtime,
-                why,
-                &machine.available,
-                hub::model_bytes(&picked.model),
-                machine.room,
-            )? {
-                Step::Next(runtime) => {
-                    return Ok(Some(Launch {
-                        task,
-                        model: picked.model,
-                        runtime,
-                    }))
-                }
-                Step::Back => continue,
-                Step::Quit => return Ok(None),
-            }
+        match models::choose(terminal, task)? {
+            Step::Next(picked) => return Ok(Some((task, picked.model))),
+            Step::Back => continue,
+            Step::Quit => return Ok(None),
         }
     }
 }

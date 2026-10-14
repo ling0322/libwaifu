@@ -40,11 +40,8 @@ impl fmt::Display for ArgError {
 
 impl std::error::Error for ArgError {}
 
-/// Where jobs are kept when `-output` does not say.
+/// Where pictures are written when `-output` does not say.
 pub const DEFAULT_OUTPUT: &str = "waifu-output";
-
-/// How much they may take up when `-output-limit` does not say: a gigabyte.
-pub const DEFAULT_OUTPUT_LIMIT: u64 = 1 << 30;
 
 /// The flags a command was given.
 #[derive(Debug, Default)]
@@ -52,9 +49,7 @@ pub struct Args {
     models: Vec<String>,
     device: Option<String>,
     image: Option<String>,
-    port: Option<String>,
     output: Option<String>,
-    output_limit: Option<String>,
     task: Option<String>,
     help: bool,
 }
@@ -86,11 +81,7 @@ impl Args {
                 "-m" | "--m" => args.models.push(value("-m")?),
                 "-device" | "--device" => args.device = Some(value("-device")?),
                 "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
-                "-port" | "--port" => args.port = Some(value("-port")?),
                 "-output" | "--output" => args.output = Some(value("-output")?),
-                "-output-limit" | "--output-limit" => {
-                    args.output_limit = Some(value("-output-limit")?)
-                }
                 "-task" | "--task" => args.task = Some(value("-task")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
                 other => return Err(ArgError(format!("flag provided but not defined: {other}"))),
@@ -107,8 +98,8 @@ impl Args {
     /// The one model file to work with, if one was named.
     ///
     /// None is not an error: without `-m` the terminal offers the published models and fetches the
-    /// one that is picked. For text2speech it is the voice. Several `-m` flags is usually a stray comma in one of them, and that
-    /// is an error, because guessing which of the two was meant is worse than saying so.
+    /// one that is picked. Several `-m` flags is usually a stray comma in one of them, and that is
+    /// an error, because guessing which of the two was meant is worse than saying so.
     pub fn model(&self) -> Result<Option<&str>, ArgError> {
         match self.models.len() {
             0 => Ok(None),
@@ -129,10 +120,10 @@ impl Args {
         self.image.as_deref()
     }
 
-    /// The task the page is served for, if one was named.
+    /// The task the drawing screen is opened for, if one was named.
     ///
-    /// None is not an error: beside `-m` the task is what the model is -- a voice reads, anything
-    /// else draws -- and without `-m` the terminal asks.
+    /// None is not an error: beside `-m` it is img2img where `-i` names a picture and txt2img
+    /// otherwise, and without `-m` the terminal asks.
     pub fn task(&self) -> Result<Option<Task>, ArgError> {
         let Some(task) = &self.task else {
             return Ok(None);
@@ -147,69 +138,10 @@ impl Args {
         Ok(Some(named))
     }
 
-    /// The port to serve the page on, if one was named.
-    ///
-    /// None is not an error: without it the tool takes the usual port, or the first free one near
-    /// it. Zero is refused rather than passed on -- the operating system reads it as "any port at
-    /// all", which is a fine thing for a test to ask for and not something anybody types.
-    pub fn port(&self) -> Result<Option<u16>, ArgError> {
-        let Some(port) = &self.port else {
-            return Ok(None);
-        };
-
-        match port.trim().parse::<u16>() {
-            Ok(0) | Err(_) => Err(ArgError(format!(
-                "invalid port \"{port}\": it must be a number between 1 and 65535"
-            ))),
-            Ok(port) => Ok(Some(port)),
-        }
-    }
-
-    /// The directory jobs and what they made are kept in. Left out, `waifu-output` in the
-    /// directory the program was started in.
+    /// The directory pictures are written into. Left out, `waifu-output` in the directory the
+    /// program was started in.
     pub fn output(&self) -> &str {
         self.output.as_deref().unwrap_or(DEFAULT_OUTPUT)
-    }
-
-    /// How many bytes the output directory may hold before the oldest of it is deleted, or None
-    /// for no limit, which is what `0` asks for. Left out, a gigabyte.
-    ///
-    /// Written the way somebody would say it: `1GB`, `512MB`, `1.5GB`, or a plain number of
-    /// bytes. A gigabyte is 2^30 bytes here, which is what a file manager means by one too.
-    pub fn output_limit(&self) -> Result<Option<u64>, ArgError> {
-        let Some(said) = &self.output_limit else {
-            return Ok(Some(DEFAULT_OUTPUT_LIMIT));
-        };
-        let refused = || {
-            ArgError(format!(
-                "invalid output limit \"{said}\": say it like 1GB, 512MB or 0 for no limit"
-            ))
-        };
-
-        let trimmed = said.trim().to_ascii_uppercase();
-        let trimmed = trimmed.trim_end_matches("IB").trim_end_matches('B');
-        let (number, unit) = match trimmed
-            .char_indices()
-            .find(|(_, c)| c.is_ascii_alphabetic())
-        {
-            Some((at, _)) => trimmed.split_at(at),
-            None => (trimmed, ""),
-        };
-        let scale: u64 = match unit {
-            "" => 1,
-            "K" => 1 << 10,
-            "M" => 1 << 20,
-            "G" => 1 << 30,
-            "T" => 1 << 40,
-            _ => return Err(refused()),
-        };
-        let number: f64 = number.trim().parse().map_err(|_| refused())?;
-        if !number.is_finite() || number < 0.0 {
-            return Err(refused());
-        }
-
-        let bytes = (number * scale as f64).round() as u64;
-        Ok((bytes > 0).then_some(bytes))
     }
 
     pub fn device(&self) -> Result<DeviceOption, ArgError> {
@@ -250,43 +182,35 @@ pub fn print_options() {
         "  -device string\n    \tinference device, one of cpu, cuda, cuda_cpu_offload, metal or \
          auto (default \"auto\"). auto picks the fastest one the model fits on: cuda where the \
          weights and room for a run fit in the card's free memory, cuda_cpu_offload where they do \
-         not. Without -m it is where the terminal's device list starts. \
+         not. It is where the model is read first; the drawing screen's device row moves it. \
          cuda_cpu_offload keeps the weights in host memory and moves each \
          one onto the card as it is used, so that a model larger than the card can still draw; it \
          is slower, since the whole model crosses the bus once per step."
     );
     eprintln!(
-        "  -m value\n    \tthe model to draw with, or the voice to read with: either a manifest \
-         file, which has the suffix \".yaml\" and names the packages the weights are in, or the \
-         name of a published model, which is fetched before the page opens. Left out, the \
-         terminal asks for the task, the model and the device, and fetches what is picked. The \
-         names are: {}.",
-        crate::cli::hub::names().join(", ")
+        "  -m value\n    \tthe model to draw with: either a manifest file, which has the suffix \
+         \".yaml\" and names the packages the weights are in, or the name of a published model, \
+         which is fetched before the drawing screen opens. Left out, the terminal asks for the \
+         task and the model, and fetches what is picked. The names are: {}.",
+        crate::cli::hub::names()
+            .into_iter()
+            .filter(|name| !crate::cli::hub::is_voice(name))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     eprintln!(
         "  -i string\n    \ta picture to draw from rather than from noise, as a PNG or a JPEG. \
-         It opens in the img2img tab, scaled to the size chosen there, and how far the run walks \
-         away from it is what the denoising strength box says."
+         It fills the draw from box, is scaled to the size chosen there, and how far the run walks \
+         away from it is what the strength box says."
     );
     eprintln!(
-        "  -task string\n    \twhat the page is for, one of {}. Beside -m it can be left out: a \
-         voice reads -- a published one, or a manifest of IndexTTS-2.5 or Fun-CosyVoice3 -- a \
-         converter converts, and a picture model draws, from the picture where -i names one.",
+        "  -task string\n    \twhat the drawing screen is for, one of {}. Beside -m it can be left \
+         out: img2img where -i names a picture, txt2img otherwise.",
         Task::names()
     );
     eprintln!(
-        "  -port int\n    \tthe port to serve the page on (default 7860). Left out, the first \
-         free port from 7860 upwards is used, so that a second copy of this in another window \
-         still starts. The page is served to this machine and no further."
-    );
-    eprintln!(
-        "  -output string\n    \twhere jobs and what they made are kept (default \"waifu-output\"). \
-         Everything posted to the server is kept there until it is deleted, and is still there \
-         after a restart."
-    );
-    eprintln!(
-        "  -output-limit size\n    \thow much the output directory may hold, like 1GB or 512MB, \
-         or 0 for no limit (default 1GB). Past it the oldest finished jobs are deleted first."
+        "  -output string\n    \twhere pictures are written (default \"waifu-output\"), as \
+         waifu-NNNN.png with the prompt and the settings that drew it inside."
     );
 }
 
@@ -438,51 +362,14 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_port_to_serve_on() {
-        // Left out is not an error: the tool has a port it takes when nobody says.
-        assert_eq!(args(&[]).unwrap().port().unwrap(), None);
-        assert_eq!(
-            args(&["-port", "8080"]).unwrap().port().unwrap(),
-            Some(8080)
-        );
-        assert_eq!(args(&["--port=1"]).unwrap().port().unwrap(), Some(1));
-
-        // Zero means "whichever one is free" to the operating system and nothing at all to the
-        // person typing it, and the rest are not numbers a port can be.
-        for typed in ["0", "70000", "-1", "http"] {
-            let error = args(&["-port", typed]).unwrap().port().unwrap_err();
-            assert!(error.to_string().contains("invalid port"), "{typed}");
-        }
-    }
-
-    #[test]
-    fn reads_where_to_keep_what_is_made() {
+    fn reads_where_to_write_what_is_drawn() {
         assert_eq!(args(&[]).unwrap().output(), "waifu-output");
         assert_eq!(args(&["-output", "out"]).unwrap().output(), "out");
         assert_eq!(args(&["--output=/tmp/w"]).unwrap().output(), "/tmp/w");
-    }
 
-    #[test]
-    fn reads_how_much_the_output_may_hold() {
-        let limit = |typed: &str| args(&["-output-limit", typed]).unwrap().output_limit();
-
-        assert_eq!(args(&[]).unwrap().output_limit().unwrap(), Some(1 << 30));
-        assert_eq!(limit("1GB").unwrap(), Some(1 << 30));
-        assert_eq!(limit("1gb").unwrap(), Some(1 << 30));
-        assert_eq!(limit("512MB").unwrap(), Some(512 << 20));
-        assert_eq!(limit("1.5G").unwrap(), Some(3 << 29));
-        assert_eq!(limit("2GiB").unwrap(), Some(2 << 30));
-        assert_eq!(limit("4096").unwrap(), Some(4096));
-        // Nothing at all is no limit, rather than a directory that can hold nothing.
-        assert_eq!(limit("0").unwrap(), None);
-
-        for typed in ["", "lots", "-1GB", "1PB", "1.2.3GB"] {
-            let error = limit(typed).unwrap_err();
-            assert!(
-                error.to_string().contains("invalid output limit"),
-                "{typed}"
-            );
-        }
+        // What the page had and the terminal does not: a port, and a limit on a store of jobs.
+        assert!(args(&["-port", "7860"]).is_err());
+        assert!(args(&["-output-limit", "1GB"]).is_err());
     }
 
     #[test]
@@ -493,8 +380,8 @@ mod tests {
             Some(Task::Img2Img)
         );
         assert_eq!(
-            args(&["--task=text2speech"]).unwrap().task().unwrap(),
-            Some(Task::Text2Speech)
+            args(&["--task=txt2img"]).unwrap().task().unwrap(),
+            Some(Task::Txt2Img)
         );
 
         // Every name it would have taken, for the reason the device's refusal lists them.
@@ -502,15 +389,11 @@ mod tests {
         for task in Task::ALL {
             assert!(error.to_string().contains(task.name()), "{error}");
         }
-
-        // Voice conversion is a task in every build: which converter it runs is the model's.
-        let asked = args(&["-task", "speech2speech"]).unwrap().task();
-        assert_eq!(asked.unwrap(), Some(Task::Speech2Speech));
     }
 
     #[test]
     fn the_offload_device_says_what_it_costs() {
-        // The one row in the terminal's device list anybody has to be told something about.
+        // The one row in the drawing screen's device list anybody has to be told something about.
         assert!(Runtime::CUDA_CPU_OFFLOAD.about().contains("slower"));
         assert!(!Runtime::ALL[0].about().contains("slower"));
     }

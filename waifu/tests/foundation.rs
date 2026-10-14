@@ -663,8 +663,8 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
 /// Asking a device to hand its spare memory back is a question every device answers, including
 /// the one that has nothing to answer it with.
 ///
-/// The webui calls this wherever it takes a model down, with whatever device the run was going to
-/// -- so a session on the CPU asks it too, and an error there would be a red line on the page
+/// A program calls this wherever it takes a model down, with whatever device the run was going to
+/// -- so a session on the CPU asks it too, and an error there would be a failure reported
 /// about a card that is not in the machine.
 #[test]
 fn a_device_that_holds_nothing_back_is_still_asked_to_hand_it_over() {

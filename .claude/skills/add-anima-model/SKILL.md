@@ -350,7 +350,7 @@ curl -sIL -o /dev/null -w "%{http_code}\n" "https://huggingface.co/<repo>/resolv
 curl -sIL -o /dev/null -w "%{http_code}\n" "https://modelscope.cn/models/<repo>/resolve/master/<manifest>"
 ```
 
-Then `README.md`: the model table, the `waifu webui -m` example list, and a `Recent updates` line.
+Then `README.md`: the model table, the `waifu -m` example list, and a `Recent updates` line.
 The table's prose talks about `sdxl:*` names and the licences of SDXL fine tunes; a first Anima
 entry makes that paragraph wrong as well as incomplete.
 

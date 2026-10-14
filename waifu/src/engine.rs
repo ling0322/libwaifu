@@ -1013,7 +1013,7 @@ impl Worker {
     }
 }
 
-/// `image` stretched to `width` by `height`, Lanczos, as webui scales a picture to start from.
+/// `image` stretched to `width` by `height`, Lanczos, as the draw command scales a picture to start from.
 fn scaled(image: &Image, width: u32, height: u32) -> Vec<u8> {
     if image.width == width && image.height == height {
         return image.rgb.clone();

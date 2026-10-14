@@ -19,8 +19,9 @@ transformers
 __pycache__
 *.model
 
-# What `waifu draw` writes: the pictures land in the directory it was started from, which for
-# anybody running it out of a checkout is this one.
+# What `waifu draw` writes: the pictures land in waifu-output under the directory it was started
+# from, which for anybody running it out of a checkout is this one.
+/waifu-output/
 waifu-*.png
 *.bin
 *.1

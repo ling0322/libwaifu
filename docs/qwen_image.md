@@ -200,7 +200,7 @@ convolution pads right and bottom only, like SDXL's.
 * Image editing and reference images. The model reads a condition picture both through the VAE
   and through Qwen3-VL's vision tower, which is not exported.
 * The prefix KV cache.
-* The ControlNet's inpainting (a mask and a kept picture), the webui, and the hub. The runtime
+* The ControlNet's inpainting (a mask and a kept picture), the CLI, and the hub. The runtime
   takes a preprocessed control picture; making one out of a photograph -- a pose detector, a
   depth estimator -- is the caller's.
 
