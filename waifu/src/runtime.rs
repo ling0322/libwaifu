@@ -87,7 +87,7 @@ impl Runtime {
         }
     }
 
-    /// What the terminal's device list says beside the name of one this machine can use.
+    /// What the drawing screen's device list says beside the name of one this machine can use.
     pub fn about(self) -> &'static str {
         match (self.device, self.residency) {
             (_, Residency::Device) => "ready",

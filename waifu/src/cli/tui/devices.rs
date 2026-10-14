@@ -17,27 +17,31 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The third screen: where the model runs.
+//! Where the model runs, as a box that opens over the drawing screen from its device row.
 //!
-//! Last, because it is the one question with an answer already -- whatever `-device` said, or what
-//! `auto` makes of this machine and the model just picked -- and most of the time enter is all it
-//! takes. Every device there
-//! is has a row. One this machine cannot use says so rather than being left off: that is how
-//! somebody finds out which kind of build they are running.
+//! Not a screen of its own any more. It is the one question with an answer already -- whatever
+//! `-device` said, or what `auto` makes of this machine and the model -- so the drawing screen
+//! opens on that answer, and this is how to change it afterwards. Every device there is has a
+//! row. One this machine cannot use says so rather than being left off: that is how somebody finds
+//! out which kind of build they are running.
+//!
+//! The same shape as the other boxes here: the host keeps one in an `Option`, hands it the keys,
+//! gives it an area, and takes the device out of [`Answer`].
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
-use ratatui::{DefaultTerminal, Frame};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::Frame;
 
 use crate::cli::args::{Room, Runtime};
-use crate::cli::task::Task;
 use crate::cli::tui::ask::{Answer, Confirm};
-use crate::cli::tui::{bordered, gigabytes, heading, quits, row_style, Step};
+use crate::cli::tui::{centred, gigabytes, row_style};
 
-type Error = Box<dyn std::error::Error>;
+/// How wide the box is drawn, before the room it is given decides: a name, and the longest thing
+/// said beside one, which is how short of memory a card is.
+const WIDTH: u16 = 84;
 
 /// A place a run could go, and whether this machine can go there.
 struct Choice {
@@ -50,77 +54,52 @@ struct Choice {
     short: Option<(u64, u64)>,
 }
 
-/// The screen: the rows, the cursor, and why the last enter did nothing.
-struct Devices {
-    /// What the heading says this is for.
-    task: Task,
+/// The box: the rows, the cursor, and why the last enter did nothing.
+pub struct DevicePicker {
+    /// What the warning says wants the memory.
     model: String,
     choices: Vec<Choice>,
     selected: usize,
-    /// Why the cursor started where it did, where `auto` chose by the size of the model.
-    why: Option<String>,
     refused: Option<String>,
     /// Open over the list after enter on a device the model is likely to run out of memory on.
     warning: Option<Confirm>,
 }
 
-/// Offers every device, starting on `runtime`, and waits for one of `available`. A device a model
-/// of `weights` bytes does not fit on, by `room`, asks before it is taken.
-#[allow(clippy::too_many_arguments)]
-pub fn choose(
-    terminal: &mut DefaultTerminal,
-    task: Task,
-    model: &str,
-    runtime: Runtime,
-    why: Option<String>,
-    available: &[Runtime],
-    weights: Option<u64>,
-    room: Room,
-) -> Result<Step<Runtime>, Error> {
-    let choices: Vec<Choice> = Runtime::ALL
-        .into_iter()
-        .map(|runtime| Choice {
-            available: available.contains(&runtime),
-            short: runtime.short_of(weights, room),
-            runtime,
-        })
-        .collect();
-    let mut screen = Devices {
-        task,
-        model: model.to_string(),
-        selected: choices
-            .iter()
-            .position(|choice| choice.runtime == runtime)
-            .unwrap_or(0),
-        choices,
-        why,
-        refused: None,
-        warning: None,
-    };
+impl DevicePicker {
+    /// Every device, with the cursor on `now`. One of `available` is what it hands back; one a
+    /// model of `weights` bytes does not fit on, by `room`, asks before it is taken.
+    pub fn open(
+        model: &str,
+        now: Runtime,
+        available: &[Runtime],
+        weights: Option<u64>,
+        room: Room,
+    ) -> DevicePicker {
+        let choices: Vec<Choice> = Runtime::ALL
+            .into_iter()
+            .map(|runtime| Choice {
+                available: available.contains(&runtime),
+                short: runtime.short_of(weights, room),
+                runtime,
+            })
+            .collect();
 
-    loop {
-        terminal.draw(|frame| screen.render(frame))?;
-
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        match screen.key(key) {
-            Answer::Open => {}
-            Answer::Cancelled if quits(&key) => return Ok(Step::Quit),
-            Answer::Cancelled => return Ok(Step::Back),
-            Answer::Given(runtime) => return Ok(Step::Next(runtime)),
+        DevicePicker {
+            model: model.to_string(),
+            selected: choices
+                .iter()
+                .position(|choice| choice.runtime == now)
+                .unwrap_or(0),
+            choices,
+            refused: None,
+            warning: None,
         }
     }
-}
 
-impl Devices {
-    fn key(&mut self, key: KeyEvent) -> Answer<Runtime> {
-        // The box has every key while it is open. Escape in it is no to the box, not back to the
-        // model list: what somebody escaping out of a warning wants is the list it came up over.
+    pub fn key(&mut self, key: KeyEvent) -> Answer<Runtime> {
+        // The question has every key while it is open. Escape in it is no to the question, not
+        // out of the list: what somebody escaping out of a warning wants is the list it came up
+        // over.
         if let Some(warning) = &mut self.warning {
             return match warning.key(key) {
                 Answer::Open => Answer::Open,
@@ -139,7 +118,9 @@ impl Devices {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(last),
-            KeyCode::Enter | KeyCode::Right => {
+            KeyCode::Home => self.selected = 0,
+            KeyCode::End => self.selected = last,
+            KeyCode::Enter => {
                 // Said here rather than by refusing to put the cursor on it. A device this build
                 // has no operators for is worth listing, and a cursor that skips a row without
                 // saying why is worse than a line of text that says it.
@@ -159,8 +140,7 @@ impl Devices {
                 }
                 return Answer::Given(chosen.runtime);
             }
-            KeyCode::Esc | KeyCode::Left => return Answer::Cancelled,
-            _ if quits(&key) => return Answer::Cancelled,
+            KeyCode::Esc => return Answer::Cancelled,
             _ => {}
         }
 
@@ -168,7 +148,7 @@ impl Devices {
         Answer::Open
     }
 
-    /// The box put up before a run on `runtime`, whose card has `free` bytes of the `wanted`.
+    /// The question put before a run on `runtime`, whose card has `free` bytes of the `wanted`.
     fn warn(&self, runtime: Runtime, wanted: u64, free: u64) -> Confirm {
         let name = runtime.name();
         // The way out, where this machine has one: the same card with the weights on the host.
@@ -197,26 +177,26 @@ impl Devices {
         ))
     }
 
-    fn render(&self, frame: &mut Frame) {
-        let [top, told, devices, _, foot] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(if self.why.is_some() { 2 } else { 1 }),
-            Constraint::Length(self.choices.len() as u16 + 2),
-            Constraint::Min(0),
-            Constraint::Length(3),
-        ])
-        .areas(frame.area());
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        // The rows, a line under them for the keys or what was refused, and the frame.
+        let box_area = centred(area, WIDTH, self.choices.len() as u16 + 3);
+        frame.render_widget(Clear, box_area);
 
-        frame.render_widget(
-            Paragraph::new(heading(&[self.task.name(), &self.model])),
-            top,
-        );
-        let mut lines =
-            vec![Line::from(" Where should it run? The page opens once this is chosen.").dim()];
-        if let Some(why) = &self.why {
-            lines.push(Line::from(format!(" {why}")).dim());
+        let outline = Block::bordered()
+            .border_type(BorderType::Thick)
+            .border_style(Style::new().fg(Color::Yellow))
+            .title(Span::styled(
+                " device: the model is read onto it again ",
+                Style::new().fg(Color::Yellow),
+            ));
+        let inner = outline.inner(box_area);
+        frame.render_widget(outline, box_area);
+        if inner.height < 2 {
+            return;
         }
-        frame.render_widget(Paragraph::new(lines), told);
+
+        let [list, foot] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
         let rows: Vec<Line> = self
             .choices
@@ -248,19 +228,21 @@ impl Devices {
                 ])
             })
             .collect();
-        frame.render_widget(Paragraph::new(rows).block(bordered(" device ")), devices);
+        frame.render_widget(Paragraph::new(rows), list);
 
         let line = match &self.refused {
             Some(refused) => Line::from(Span::styled(
-                format!(" {refused}"),
+                refused.clone(),
                 Style::default().fg(Color::Red),
             )),
-            None => Line::from(" up/down choose   enter open the page   esc back   q quit".dim()),
+            None => {
+                Line::from("up/down choose   enter read it there   esc close".fg(Color::DarkGray))
+            }
         };
-        frame.render_widget(Paragraph::new(line).block(bordered("")), foot);
+        frame.render_widget(Paragraph::new(line), foot);
 
         if let Some(warning) = &self.warning {
-            warning.render(frame, frame.area());
+            warning.render(frame, area);
         }
     }
 }
@@ -279,43 +261,50 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn devices() -> Devices {
-        Devices {
-            task: Task::Txt2Img,
-            model: "sdxl:base".to_string(),
-            choices: Runtime::ALL
-                .into_iter()
-                .map(|runtime| Choice {
-                    // Said rather than asked, so that what the screen draws is the same on a
-                    // machine with a card and on one without.
-                    available: runtime.device() != Device::Metal,
-                    short: None,
-                    runtime,
-                })
-                .collect(),
-            selected: 0,
-            why: None,
-            refused: None,
-            warning: None,
-        }
+    /// Every device but Metal, said rather than asked, so that what the box draws is the same on a
+    /// machine with a card and on one without.
+    fn here() -> Vec<Runtime> {
+        Runtime::ALL
+            .into_iter()
+            .filter(|runtime| runtime.device() != Device::Metal)
+            .collect()
+    }
+
+    fn devices() -> DevicePicker {
+        DevicePicker::open("sdxl:base", Runtime::ALL[0], &here(), None, Room::default())
+    }
+
+    fn at(device: Runtime) -> usize {
+        Runtime::ALL
+            .iter()
+            .position(|runtime| *runtime == device)
+            .unwrap()
     }
 
     /// The list for a model of 15 GB on a card with 8 free, which is short on cuda and vulkan.
-    fn too_big() -> Devices {
+    fn too_big() -> DevicePicker {
         const GB: u64 = 1_000_000_000;
         let room = Room {
             cuda: Some(8 * GB),
             vulkan: Some(8 * GB),
         };
-        let mut devices = devices();
-        for choice in &mut devices.choices {
-            choice.short = choice.runtime.short_of(Some(15 * GB), room);
-        }
-        devices.selected = Runtime::ALL
+        let cuda = *Runtime::ALL
             .iter()
-            .position(|runtime| runtime.device() == Device::Cuda)
+            .find(|runtime| runtime.device() == Device::Cuda)
             .unwrap();
-        devices
+        DevicePicker::open("sdxl:base", cuda, &here(), Some(15 * GB), room)
+    }
+
+    #[test]
+    fn it_opens_on_the_device_the_model_is_on() {
+        let picker = DevicePicker::open(
+            "sdxl:base",
+            Runtime::CUDA_CPU_OFFLOAD,
+            &here(),
+            None,
+            Room::default(),
+        );
+        assert_eq!(picker.selected, at(Runtime::CUDA_CPU_OFFLOAD));
     }
 
     #[test]
@@ -327,7 +316,7 @@ mod tests {
             "{drawn}"
         );
 
-        // Enter puts the question up instead of starting the run, and says what to do instead.
+        // Enter puts the question up instead of taking it, and says what to do instead.
         assert_eq!(devices.key(press(KeyCode::Enter)), Answer::Open);
         let drawn = screen(&devices);
         assert!(drawn.contains("may run out of memory ━"), "{drawn}");
@@ -342,7 +331,7 @@ mod tests {
         assert_eq!(devices.key(press(KeyCode::Esc)), Answer::Open);
         assert!(devices.warning.is_none());
 
-        // Yes runs it there all the same.
+        // Yes takes it all the same.
         devices.key(press(KeyCode::Enter));
         assert_eq!(
             devices.key(press(KeyCode::Char('y'))),
@@ -353,10 +342,7 @@ mod tests {
     #[test]
     fn a_device_the_model_fits_on_is_taken_without_asking() {
         let mut devices = too_big();
-        devices.selected = Runtime::ALL
-            .iter()
-            .position(|runtime| *runtime == Runtime::CUDA_CPU_OFFLOAD)
-            .unwrap();
+        devices.selected = at(Runtime::CUDA_CPU_OFFLOAD);
         assert_eq!(
             devices.key(press(KeyCode::Enter)),
             Answer::Given(Runtime::CUDA_CPU_OFFLOAD)
@@ -364,9 +350,11 @@ mod tests {
         assert!(devices.warning.is_none());
     }
 
-    fn screen(devices: &Devices) -> String {
+    fn screen(devices: &DevicePicker) -> String {
         let mut terminal = ratatui::Terminal::new(TestBackend::new(100, 15)).unwrap();
-        terminal.draw(|frame| devices.render(frame)).unwrap();
+        terminal
+            .draw(|frame| devices.render(frame, frame.area()))
+            .unwrap();
         screen_text(&terminal)
     }
 
@@ -379,20 +367,8 @@ mod tests {
         assert!(drawn.contains("not available on this machine"), "{drawn}");
         assert!(drawn.contains("slower"), "{drawn}");
 
-        // And the heading says what it is choosing for.
-        assert!(drawn.contains("txt2img  >  sdxl:base"), "{drawn}");
-    }
-
-    #[test]
-    fn says_why_the_cursor_started_where_it_did() {
-        let mut devices = devices();
-        assert!(!screen(&devices).contains("fastest"));
-
-        devices.why = Some("7.00 GB of weights: cuda is where it runs fastest".to_string());
-        let drawn = screen(&devices);
-        assert!(drawn.contains("cuda is where it runs fastest"), "{drawn}");
-        // And the list is still all there beneath it.
-        assert!(drawn.contains("vulkan"), "{drawn}");
+        // And it says what choosing one costs: the model is read again.
+        assert!(drawn.contains("read onto it again"), "{drawn}");
     }
 
     #[test]
@@ -413,23 +389,24 @@ mod tests {
     }
 
     #[test]
-    fn enter_hands_back_the_device_the_cursor_is_on() {
+    fn enter_hands_back_the_device_the_cursor_is_on_and_escape_closes() {
         let mut devices = devices();
-        devices.selected = Runtime::ALL
-            .iter()
-            .position(|runtime| *runtime == Runtime::CUDA_CPU_OFFLOAD)
-            .unwrap();
+        devices.selected = at(Runtime::CUDA_CPU_OFFLOAD);
         assert_eq!(
             devices.key(press(KeyCode::Enter)),
             Answer::Given(Runtime::CUDA_CPU_OFFLOAD)
         );
+        assert_eq!(devices.key(press(KeyCode::Esc)), Answer::Cancelled);
     }
 
     #[test]
-    fn escape_goes_back_and_the_keys_that_leave_leave() {
-        assert_eq!(devices().key(press(KeyCode::Esc)), Answer::Cancelled);
-        assert_eq!(devices().key(press(KeyCode::Char('q'))), Answer::Cancelled);
-        assert!(quits(&press(KeyCode::Char('q'))));
-        assert!(!quits(&press(KeyCode::Esc)));
+    fn a_box_with_no_room_for_it_still_draws() {
+        let devices = too_big();
+        for (width, height) in [(1u16, 1u16), (10, 3), (40, 6)] {
+            let mut terminal = ratatui::Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| devices.render(frame, frame.area()))
+                .unwrap();
+        }
     }
 }

@@ -20,8 +20,8 @@
 //! The first screen: what the session is for.
 //!
 //! Asked first because everything after it depends on the answer. The models offered next are the
-//! ones that can do it -- a voice cannot draw, and not every picture model can start from a
-//! picture -- and the page that opens at the end is that task's page.
+//! ones that can do it -- not every picture model can start from a picture -- and the drawing
+//! screen that opens at the end has that task's boxes.
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Layout};

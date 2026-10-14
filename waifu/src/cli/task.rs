@@ -17,40 +17,32 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! What a session is for, and what was settled before the page opened.
+//! What a session is for, and what was settled before the drawing screen opened.
 //!
-//! The terminal settles three things -- the task, the model, the device -- and the page is served
-//! for exactly those. The page does not change any of them: it has no model list, no download
-//! button and no device box, because all three are questions with a long wait behind a wrong
-//! answer, and the terminal is where the wait can be watched and stopped.
+//! The terminal settles two things -- the task and the model -- and the drawing screen is opened
+//! for exactly those, on the device `-device` or `auto` starts it on. It changes neither of the
+//! two: a different model is a fetch, and they are asked on the screens before it, where the wait
+//! can be watched and stopped. The device it does change, from its device row: that is a read of
+//! the model onto another card, which happens behind the screen.
 
 use crate::cli::args::Runtime;
-/// One kind of session: a tab on the page, and a row in the terminal's first list.
+
+/// One kind of session: a row in the terminal's first list, and the boxes the drawing screen has.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Task {
     Txt2Img,
     Img2Img,
-    Text2Speech,
-    /// Voice conversion: one recording said again in the voice of another.
-    Speech2Speech,
 }
 
 impl Task {
     /// Every task, in the order the terminal lists them and the usage names them.
-    pub const ALL: &'static [Task] = &[
-        Task::Txt2Img,
-        Task::Img2Img,
-        Task::Text2Speech,
-        Task::Speech2Speech,
-    ];
+    pub const ALL: &'static [Task] = &[Task::Txt2Img, Task::Img2Img];
 
-    /// What it is called: on the command line, in the list, and on the page's tab.
+    /// What it is called: on the command line, in the list, and in the drawing screen's heading.
     pub fn name(self) -> &'static str {
         match self {
             Task::Txt2Img => "txt2img",
             Task::Img2Img => "img2img",
-            Task::Text2Speech => "text2speech",
-            Task::Speech2Speech => "speech2speech",
         }
     }
 
@@ -59,8 +51,6 @@ impl Task {
         match self {
             Task::Txt2Img => "Draw a picture from a prompt",
             Task::Img2Img => "Draw a picture from a prompt and a picture to start from",
-            Task::Text2Speech => "Read some text out loud, in a voice",
-            Task::Speech2Speech => "Say a recording again in the voice of another one",
         }
     }
 
@@ -82,14 +72,14 @@ impl Task {
     }
 }
 
-/// What the terminal hands to the page: a task, the model or voice it runs, and where.
+/// What the terminal hands to the drawing screen: a task, the model it runs, and where.
 ///
 /// The model is on the disk by the time one of these exists. The terminal fetched it under its own
 /// bar, or the command line named a file that is already there.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Launch {
     pub task: Task,
-    /// A catalogue name or a manifest's path: what the worker hands to the hub to read.
+    /// A catalogue name or a manifest's path: what the painter hands to the hub to read.
     pub model: String,
     pub runtime: Runtime,
 }
@@ -108,8 +98,10 @@ mod tests {
     }
 
     #[test]
-    fn voice_conversion_is_a_task() {
-        assert_eq!(Task::named("speech2speech"), Some(Task::Speech2Speech));
-        assert!(Task::ALL.contains(&Task::Speech2Speech));
+    fn the_terminal_draws_and_does_not_speak() {
+        // Speech is the engine's, for the programs built over it: the terminal's tasks are the two
+        // the drawing screen has boxes for.
+        assert_eq!(Task::named("text2speech"), None);
+        assert_eq!(Task::named("speech2speech"), None);
     }
 }

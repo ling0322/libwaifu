@@ -26,8 +26,8 @@
 //! path back out of [`Outcome`].
 //!
 //! That is the whole of the interface, and it is why this is worth having as a module rather than
-//! as part of the model list: the next thing that wants a file off the disk needs three lines
-//! rather than another list.
+//! as part of the model list: the drawing screen wants a picture off the disk as well, and needs
+//! three lines for it rather than another list.
 
 use std::cell::Cell;
 use std::fs;
@@ -149,8 +149,8 @@ impl FilePicker {
         picker
     }
 
-    /// Where the picker is looking, which the tests walk it around by.
-    #[cfg(test)]
+    /// Where the picker is looking: what the drawing screen opens it on again next time, and what
+    /// the tests walk it around by.
     pub fn directory(&self) -> &Path {
         &self.directory
     }

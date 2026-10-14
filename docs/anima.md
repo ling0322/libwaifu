@@ -324,7 +324,7 @@ what exists.
 | the four of them together | draws a 512 by 512 picture in ten steps | -- |
 | tokenizers | done; both in the package | token for token, over 611 texts each |
 | `waifu/src/anima/pipeline.rs` | done | 0.0031, prompt to context |
-| package + CLI | done. `waifu webui` reads `[model] type` and takes the package to whichever model it names |
+| package + CLI | done. `waifu draw` reads `[model] type` and takes the package to whichever model it names |
 | `hub.rs` `CATALOG` | done, once it was asked for: turbo v1.1 is published to both hubs as `anima:turbo`, under CircleStone Labs' licence rather than libwaifu's. See Licensing |
 
 flint: nothing, as promised.

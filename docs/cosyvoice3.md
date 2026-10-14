@@ -102,11 +102,9 @@ The same package converts one recording into the voice of another, as upstream's
 does: the source's speech tokens are what is said, and the flow draws them continuing the
 reference -- its tokens, its mel, its speaker -- so the words and their timing are the source's and
 the voice is the reference's. The language model is not run. It is `impl Converter for
-CosyVoice3`, and the webui's speech2speech task:
-
-```bash
-waifu -task speech2speech -m cosyvoice
-```
+CosyVoice3`, which the engine runs for `waifu_engine_voice_conversion_async` in the C API
+([ffi.md](ffi.md)). The terminal's `waifu` draws only; the speech2speech page that ran this was
+removed with the rest of the web page.
 
 Upstream refuses a source over thirty seconds, which is as far as the speech tokenizer reads. A
 longer one is cut into pieces of at most that, each at the quietest 20 ms of its last eight

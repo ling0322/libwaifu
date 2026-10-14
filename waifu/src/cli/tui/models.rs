@@ -19,10 +19,10 @@
 
 //! The second screen: which model, and the fetch that follows if it is not on the disk.
 //!
-//! The list is the task's: picture models to draw with, only the ones that can start from a
-//! picture for img2img, and voices to read with. What is already on disk is marked, what is not
-//! is fetched when it is picked, and the next screen does not come up until it is all here -- so
-//! the page that opens at the end never has a download to do.
+//! The list is the task's: picture models to draw with, and only the ones that can start from a
+//! picture for img2img. What is already on disk is marked, what is not is fetched when it is
+//! picked, and the next screen does not come up until it is all here -- so the drawing screen
+//! that opens at the end never has a download to do.
 //!
 //! The fetch is minutes long, so it runs on a thread of its own and says how it is getting on down
 //! a channel. The screen stays live while it happens: a download that cannot be watched is
@@ -128,19 +128,11 @@ impl Entry {
 
 /// The published models a task can run, in the catalogue's order, and the file row under them.
 fn entries_for(task: Task) -> Vec<Entry> {
-    let listed = match task {
-        Task::Text2Speech => hub::listed_voices(),
-        Task::Speech2Speech => hub::listed_conversions(),
-        Task::Txt2Img | Task::Img2Img => hub::listed(),
-    };
-
-    let mut entries: Vec<Entry> = listed
+    let mut entries: Vec<Entry> = hub::listed()
         .into_iter()
-        // What the img2img page would only refuse. Asked of the kind and of the manifest where it
-        // is here, which is as much as can be known without reading the weights.
-        .filter(|model| {
-            task != Task::Img2Img || crate::cli::webui::draws_from_a_picture(model.name)
-        })
+        // What img2img would only refuse. Asked of the kind and of the manifest where it is here,
+        // which is as much as can be known without reading the weights.
+        .filter(|model| task != Task::Img2Img || crate::cli::draw::draws_from_a_picture(model.name))
         .map(|model| Entry::Published {
             name: model.name,
             full_name: model.full_name,
@@ -740,19 +732,13 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
     ])
     .areas(frame.area());
 
-    let what = match choices.task {
-        Task::Text2Speech => "voice",
-        Task::Speech2Speech => "converter",
-        Task::Txt2Img | Task::Img2Img => "model",
-    };
-
     frame.render_widget(Paragraph::new(heading(&[choices.task.name()])), top);
     frame.render_widget(
         Paragraph::new(
-            Line::from(format!(
-                " Pick a {what}. One that is not on the disk yet is fetched now, before the page \
-                 opens."
-            ))
+            Line::from(
+                " Pick a model. One that is not on the disk yet is fetched now, before anything \
+                 is drawn.",
+            )
             .dim(),
         ),
         told,
@@ -807,8 +793,7 @@ fn draw(frame: &mut Frame, choices: &Choices, doing: &Doing, failure: Option<&st
         })
         .collect();
 
-    let title = format!(" {what}s ");
-    frame.render_widget(Paragraph::new(rows).block(bordered(&title)), list);
+    frame.render_widget(Paragraph::new(rows).block(bordered(" models ")), list);
     draw_folders(frame, folders, choices);
 
     let enter = match choices.current() {
@@ -1084,24 +1069,12 @@ mod tests {
 
     #[test]
     fn the_list_is_the_tasks_own() {
-        // Voices for reading, and no picture model among them.
-        let voices = entries_for(Task::Text2Speech);
-        let names: Vec<&str> = voices.iter().map(Entry::name).collect();
-        assert!(names.contains(&"indextts"), "{names:?}");
-        assert!(!names.contains(&"sdxl:base"), "{names:?}");
-
-        // Pictures for drawing, and no voice among them.
+        // Pictures for drawing, and no voice among them: the terminal has nothing to say one with.
         let pictures = entries_for(Task::Txt2Img);
         let names: Vec<&str> = pictures.iter().map(Entry::name).collect();
         assert!(names.contains(&"sdxl:base"), "{names:?}");
         assert!(!names.contains(&"indextts"), "{names:?}");
-
-        // Converters for converting, and nothing that only speaks or draws.
-        let converters = entries_for(Task::Speech2Speech);
-        let names: Vec<&str> = converters.iter().map(Entry::name).collect();
-        assert!(names.contains(&"cosyvoice"), "{names:?}");
-        assert!(!names.contains(&"indextts"), "{names:?}");
-        assert!(!names.contains(&"sdxl:base"), "{names:?}");
+        assert!(!names.contains(&"cosyvoice"), "{names:?}");
 
         // And only what can start from a picture, for the task that starts from one. Anima
         // cannot, and says so out of its kind, before a package has been looked at.
@@ -1132,11 +1105,11 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_list_has_nothing_explicit_to_show() {
-        let mut choices = choices(Task::Text2Speech);
-        choices.entries = vec![row("indextts", false, false), Entry::OnDisk];
+    fn a_list_with_nothing_explicit_in_it_says_nothing_about_it() {
+        let mut choices = choices(Task::Txt2Img);
+        choices.entries = vec![row("sdxl:base", false, false), Entry::OnDisk];
         let drawn = screen(&choices);
-        assert!(drawn.contains("voices"), "{drawn}");
+        assert!(drawn.contains("sdxl:base"), "{drawn}");
         assert!(!drawn.contains("not-for-all-audiences"), "{drawn}");
     }
 
