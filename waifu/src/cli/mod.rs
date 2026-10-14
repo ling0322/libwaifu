@@ -19,19 +19,21 @@
 
 //! The libwaifu command line tool: draw a picture with a model.
 //!
-//! Behind the `cli` feature, because it is the only thing in this crate that needs a server and
-//! an image encoder. The `waifu` binary is a shim over [`run`]; everything else here is its
-//! implementation.
+//! Behind the `cli` feature, because it is the only thing in this crate that needs a terminal
+//! stack and an image encoder. The `waifu` binary is a shim over [`run`]; everything else here is
+//! its implementation.
 //!
 //! There is one thing the tool does, and the command line exists to say how to do it rather than
-//! which to do: `waifu` on its own is the same as `waifu webui`. Both ask in the terminal what the
-//! session is for -- a task, a model, a device -- fetch the model there if it is not on the disk,
-//! and then open a page in a browser for that one task.
+//! which to do: `waifu` on its own is the same as `waifu draw`. Both ask in the terminal what the
+//! session is for -- a task and a model -- fetch the model there if it is not on the disk, and
+//! then put up a screen of knobs to draw with while the model is read onto a device behind it,
+//! writing every picture into a directory an image viewer can open. Which device is a row on that
+//! screen.
 
 mod args;
+mod draw;
 mod task;
 mod tui;
-mod webui;
 
 // In the library since the C API needed them; named here as well, where they used to be.
 pub(crate) use crate::{config, hub};
@@ -59,9 +61,9 @@ struct Command {
 }
 
 static ALL: &[Command] = &[Command {
-    name: "webui",
-    about: "Pick a task, a model and a device, then draw or speak with your waifu in a browser",
-    main: webui::main,
+    name: "draw",
+    about: "Pick a task and a model, then draw with your waifu in the terminal",
+    main: draw::main,
 }];
 
 /// The command a word names, if it names one.

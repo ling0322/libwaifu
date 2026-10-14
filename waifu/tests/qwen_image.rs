@@ -180,3 +180,73 @@ fn every_part_matches_the_reference() {
     // Ten steps of the runtime's own schedule, timestep rounding and denoiser: 1.35e-2.
     assert!(rmse < 5e-2, "the walk drifted by {rmse}");
 }
+
+/// Qwen-Image-2.1-Turbo, fp8: eight fixed steps rather than a bent schedule. The tolerances are
+/// the fp8 package's (see "How close it is" in docs/qwen_image.md), not the float16 one's.
+#[test]
+#[ignore = "needs the qwen-image-2.1-turbo-fp8 package"]
+fn turbo_fp8_matches_the_reference() {
+    let manifest = Manifest::open(models_dir().join("qwen-image-2.1-turbo-fp8.yaml")).unwrap();
+    let model = QwenImage::from_manifest(device(), Residency::LowVram, &manifest).unwrap();
+    let cases =
+        read_safetensors(&[models_dir().join("qwen-image-2.1-turbo_test.safetensors")]).unwrap();
+
+    let prompt = "a red fox sitting in fresh snow, golden hour, photorealistic";
+    let ids = model.ids(prompt).unwrap();
+    assert_eq!(
+        ids.to_device(Device::Cpu).unwrap().to_vec_i64().unwrap(),
+        cases["test_case.input_ids"].to_vec_i64().unwrap(),
+        "the template tokenizes differently from the reference's"
+    );
+
+    let hidden = model.encode_ids(&ids).unwrap();
+    assert_eq!(hidden.shape(), cases["test_case.hidden"].shape());
+    let rmse = relative_rmse(&hidden, &cases["test_case.hidden_fp32"]);
+    println!("encoder rmse = {rmse} against float32");
+    assert!(rmse < 2e-1, "the encoder's states drifted by {rmse}");
+
+    // The schedule is the package's own eight levels and a zero, whatever steps are asked for.
+    let sampler = model.sampler(256, 256, 40).unwrap();
+    let sigmas = read(&cases["test_case.sigmas"]);
+    assert_eq!(sampler.sigmas().len(), 9);
+    assert_eq!(sampler.sigmas().len(), sigmas.len());
+    for (ours, theirs) in sampler.sigmas().iter().zip(&sigmas) {
+        assert!((ours - theirs).abs() < 1e-5, "{:?} against {sigmas:?}", sampler.sigmas());
+    }
+
+    let context = fixture(&cases, "test_case.hidden");
+    let latent = fixture(&cases, "test_case.latent");
+    let timestep = read(&cases["test_case.timestep"])[0];
+    let velocity = model.dit().forward(&latent, timestep, &context).unwrap();
+    let rmse = relative_rmse(&velocity, &cases["test_case.velocity"]);
+    println!("velocity rmse = {rmse} (at timestep {timestep})");
+    assert!(rmse < 6e-2, "the velocity drifted by {rmse}");
+
+    let final_latent = fixture(&cases, "test_case.final_latent");
+    let image = model.decode(&final_latent).unwrap();
+    let rmse = relative_rmse(&image, &cases["test_case.decoded"]);
+    println!("decoded rmse = {rmse}");
+    assert!(rmse < 3e-3, "the picture drifted by {rmse}");
+
+    let options = waifu::GenerationOptions {
+        width: 256,
+        height: 256,
+        num_steps: 8,
+        ..QwenImage::DEFAULTS.options()
+    };
+    let walked = model
+        .denoise_reporting(
+            &fixture(&cases, "test_case.noise"),
+            &sampler,
+            &model.encode_prompt(prompt).unwrap().cast(DType::Float16).unwrap(),
+            None,
+            None,
+            &options,
+            &mut |_| std::ops::ControlFlow::Continue(()),
+        )
+        .unwrap()
+        .unwrap();
+    let rmse = relative_rmse(&walked, &final_latent);
+    println!("final latent rmse = {rmse} (over 8 steps)");
+    assert!(rmse < 2e-1, "the walk drifted by {rmse}");
+}

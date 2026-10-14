@@ -531,8 +531,8 @@ fn utc_millis(at: SystemTime) -> String {
 }
 
 /// The calendar date `days` after 1970-01-01, by Howard Hinnant's `civil_from_days`. Written out
-/// rather than pulled in: a record and a log line are the only dates this library formats.
-pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
+/// rather than pulled in: a record is the only date this library formats.
+fn civil(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -1117,7 +1117,7 @@ impl Worker {
     }
 }
 
-/// `image` stretched to `width` by `height`, Lanczos, as webui scales a picture to start from.
+/// `image` stretched to `width` by `height`, Lanczos, as the draw command scales a picture to start from.
 fn scaled(image: &Image, width: u32, height: u32) -> Vec<u8> {
     if image.width == width && image.height == height {
         return image.rgb.clone();

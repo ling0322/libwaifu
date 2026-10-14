@@ -21,12 +21,13 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 | `krea2:turbo-fp8` | Krea 2 Turbo, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-krea2-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-krea2-turbo)\] |
 | `qwen-image:2.1` | Qwen-Image 2.1 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1)\] |
 | `qwen-image:2.1-fp8` | Qwen-Image 2.1, quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1)\] |
+| `qwen-image:2.1-turbo-fp8` | Qwen-Image 2.1 Turbo (8 steps), quantized to FP8 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1-turbo)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen-image-2.1-turbo)\] |
 
 ## Supported voices
 
-A voice is chosen in the terminal the way a model is, when the task is text2speech, and fetched
-off the same two hubs before the page opens. `-m` names one there too -- a name, or a manifest on
-the disk -- and a voice named that way opens the text2speech page on its own.
+The voices run in the library and through its C API -- which the macOS app speaks with -- rather
+than in the `waifu` terminal, which draws. From a checkout, `examples/speak.rs` says a sentence
+with either of them in the voice of a recording.
 
 | name | model | published as |
 |---|---|---|
@@ -35,10 +36,9 @@ the disk -- and a voice named that way opens the text2speech page on its own.
 
 ## Voice conversion
 
-The speech2speech page turns one recording into another voice: a recording to convert, a
-recording of the voice to convert it to, and a clip out. **Fun-CosyVoice3** does it:
-`waifu -task speech2speech -m cosyvoice`, the same package that reads text. It changes whose voice
-it is and keeps the words, timing and accent (see
+**Fun-CosyVoice3** turns one recording into another voice: a recording to convert, a recording of
+the voice to convert it to, and a clip out -- the same package that reads text, through the C
+API's voice conversion. It changes whose voice it is and keeps the words, timing and accent (see
 [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion)).
 
 ## Low memory mode
@@ -56,27 +56,34 @@ distilled release is for, seed 7:
 | `cuda` | 15.4 GB | `Aborted: out of memory` | - |
 | `cuda_cpu_offload` | 1.2 GB | a picture | 67 s |
 
+`-device metal_disk_offload` is the same for a Mac, whose GPU shares the machine's memory: the
+weights are left in the model's files and each is read off the disk as it is used, so a model
+larger than the Mac's memory still draws. Slower again -- the disk is read once per step for every
+weight the page cache has let go of -- and never picked for you either.
+
 ## Run
 
-`waifu` asks three things in the terminal -- the task (txt2img, img2img, text2speech or
-speech2speech), the model for it, and the device -- fetches the model under a
-progress bar if it is not on the disk yet, and then opens a page in a browser for that task:
+`waifu` asks two things in the terminal -- the task (txt2img or img2img) and the model for it --
+fetches the model under a progress bar if it is not on the disk yet, and then puts up the drawing
+screen while the model is read onto the fastest device it fits on: a prompt, what to steer away
+from, the steps, guidance, size and seed, for img2img a picture to start from (enter on it browses
+the disk) and how far to walk from it, and the device. Enter on the device row lists every device
+this machine has and warns where the model may run out of memory; picking another reads the model
+onto it in the background.
 
 ```bash
 $ waifu
-waifu is at http://127.0.0.1:7860 -- txt2img with sdxl:wai on cuda
 ```
 
-![](docs/libwaifu-webui.webp)
-
-The page is where things are drawn and said; it does not choose, download or move a model. To run
-another one, stop it and run `waifu` again. The terminal can be skipped by naming everything on
-the command line:
+Every picture is written to `waifu-output/waifu-NNNN.png` (`-output` says where else), with the
+prompt and the settings that drew it inside, in the `parameters` line other tools read. An empty
+seed box is a new seed each run, and the one used is written down with the picture. Escape stops a
+run between steps, and asks before leaving. The drawing screen does not choose or download a
+model: to run another one, leave and run `waifu` again. The choosing can be skipped by naming the
+model on the command line:
 
 ```bash
 $ waifu -m sdxl:wai -device cuda              # txt2img; img2img if -i names a picture
-$ waifu -m indextts                           # a voice: text2speech
-$ waifu -task speech2speech -m cosyvoice      # voice conversion
 $ waifu -task img2img -m sdxl:noob -i cat.png
 ```
 
@@ -92,6 +99,9 @@ model_dir = 'D:\models'
 
 ## Recent updates
 
+- [2026-10-13] Drawing is back in the terminal, on the screen it had before the web page, and the
+  web page is removed: `waifu` picks a task, a model and a device and then draws right there,
+  writing every picture into `waifu-output`. Speech is the C API's and the macOS app's.
 - [2026-10-11] Metal runs on flint's own kernels rather than MLX, which is removed: on an M5 Pro an
   SDXL image is 1.8 times as fast (9.2 s for 4 steps against 16.4 s), using the M5's neural
   accelerators where it has them, and a build runs on macOS 14. See [docs/metal.md](docs/metal.md).
@@ -101,6 +111,8 @@ model_dir = 'D:\models'
   `waifu -task speech2speech -m cosyvoice`. See [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion).
 - [2026-10-02] Fun-CosyVoice3-0.5B-2512 is published, as `cosyvoice:v3` -- the second voice, Apache 2.0.
   See [docs/cosyvoice3.md](docs/cosyvoice3.md).
+- [2026-10-13] Qwen-Image 2.1 Turbo is published, as `qwen-image:2.1-turbo-fp8` -- the eight-step
+  checkpoint, fp8 only. Its eight sigmas are fixed in the package, so the step count is ignored.
 - [2026-09-23] Qwen-Image 2.1 is published, as `qwen-image:2.1` and `qwen-image:2.1-fp8` -- a
   fourth architecture, Built with Qwen. Its licence is non-commercial (research and evaluation)
   only; see [docs/qwen_image.md](docs/qwen_image.md#licensing).
@@ -140,11 +152,12 @@ otherwise.
 
 | `-device` | what it means |
 |---|---|
-| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `cuda_cpu_offload`: that one is for a card the model does not fit on, which is not a thing to decide on someone's behalf. |
+| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `metal_disk_offload`, nor `cuda_cpu_offload` except where the model is measured not to fit: those are for a model the device cannot hold, which is not a thing to decide silently on someone's behalf. |
 | `cpu` | The CPU kernels. |
 | `cuda` | The card, weights moved once and kept there. |
 | `cuda_cpu_offload` | Weights stay in host memory and each is moved onto the card as it is used, so a model larger than the card still draws. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
 | `metal` | The GPU on Apple Silicon, through flint's own kernels -- and an M5's neural accelerators. |
+| `metal_disk_offload` | Metal, with the weights left in the model's files and each read off the disk as it is used, so a model larger than the Mac's memory still draws. Slower. Also spelled `metal-disk-offload`. |
 | `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. |
 
 A build only has the devices it was configured with, so `cuda` on a `-DWITH_CUDA=OFF` build is a
@@ -187,7 +200,7 @@ comes out burnt at the thirty and five SDXL likes, so take a model's own `sugges
 the defaults where it has one.
 
 `Sdxl::generate_reporting` is the same run with a reporter that hears how far along it is and can
-stop it between steps, which is what the `webui` command is built on.
+stop it between steps, which is what the `draw` command is built on.
 
 After completing the build steps below, run the complete example with:
 

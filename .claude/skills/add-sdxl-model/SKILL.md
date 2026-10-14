@@ -242,9 +242,9 @@ and it belongs against the numbers rather than in the model card, where nobody i
 moment they wonder. Everything else in the file is a record of what the model is and wants no
 annotation at all -- and the model card needs no table tracing each number to its source either.
 
-`-part-size 2GB` is the published convention. A 7.1 GB package becomes four parts
-(2.02 / 2.01 / 2.01 / 1.06 GB) named `<stem>-0000N-of-00004.safetensors`. Use the exporter's own
-`-part-size` rather than `tools/split_model.py` -- one step, same result.
+`-part-size 2GB` is the published convention, and a hard limit: no part may exceed 2,000,000,000
+bytes, so check the sizes before uploading. A 7.1 GB package becomes four or five parts
+named `<stem>-0000N-of-0000M.safetensors`. Use the exporter's own `-part-size` rather than `tools/split_model.py` -- one step, same result.
 
 Naming, matching what is already published:
 
@@ -376,7 +376,7 @@ curl -sIL -o /dev/null -w "%{http_code}\n" "https://huggingface.co/<repo>/resolv
 curl -sIL -o /dev/null -w "%{http_code}\n" "https://modelscope.cn/models/<repo>/resolve/master/<manifest>"
 ```
 
-Then `README.md`: the model table, the `waifu webui -m` example list, and a `Recent updates` line.
+Then `README.md`: the model table, the `waifu -m` example list, and a `Recent updates` line.
 
 ## 7. Test
 

@@ -1,0 +1,29 @@
+<!-- The last five hundred lines the library wrote. -->
+<Window x:Class="Libwaifu.Gui.Views.LogWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Log" Width="760" Height="480"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{StaticResource WindowBrush}"
+        TextElement.Foreground="{StaticResource TextBrush}"
+        TextElement.FontFamily="{StaticResource UiFont}"
+        TextElement.FontSize="{StaticResource BodySize}"
+        TextOptions.TextFormattingMode="Display">
+  <Grid Margin="12">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <Border Grid.Row="0" Background="{StaticResource FieldBrush}" CornerRadius="8" Padding="8"
+            BorderBrush="{StaticResource CardStrokeBrush}" BorderThickness="1">
+      <TextBox x:Name="Lines" IsReadOnly="True" BorderThickness="0" Background="Transparent"
+               Foreground="{StaticResource TextBrush}" FontFamily="{StaticResource MonoFont}"
+               FontSize="{StaticResource CaptionSize}" VerticalScrollBarVisibility="Auto"
+               HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap" />
+    </Border>
+
+    <Button Grid.Row="1" Style="{StaticResource SmallButton}" Content="Close" Width="80"
+            Margin="0,12,0,0" HorizontalAlignment="Right" IsCancel="True" Click="OnClose" />
+  </Grid>
+</Window>

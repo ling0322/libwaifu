@@ -255,6 +255,7 @@ typedef enum {
     WAIFU_DEVICE_CUDA,
     WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
     WAIFU_DEVICE_VULKAN,
+    WAIFU_DEVICE_METAL_DISK_OFFLOAD,
 } WaifuDevice;
 
 typedef struct WaifuEngine WaifuEngine;

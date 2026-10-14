@@ -51,7 +51,7 @@ struct WaifuApp: App {
     }
 
     /// `Waifu -m sdxl:base [-device metal]` chooses that model, and shows its task, as the window
-    /// opens -- the way `waifu webui -m` does. The first job loads it.
+    /// opens -- the way `waifu -m` does. The first job loads it.
     private func startFromTheCommandLine() {
         let arguments = Array(CommandLine.arguments.dropFirst())
         func value(_ names: String...) -> String? {

@@ -88,6 +88,30 @@ impl FlowSampler {
         })
     }
 
+    /// A schedule whose levels a package fixes itself: `starts` are where each step begins, and
+    /// the zero the last one finishes at is appended.
+    ///
+    /// Qwen-Image-2.1-Turbo's eight steps, which diffusers uses as they stand -- no shift and no
+    /// stretch, whatever number of steps a caller asks for.
+    pub fn from_sigmas(config: &SamplerConfig, starts: &[f32]) -> Result<FlowSampler> {
+        if starts.is_empty() {
+            return Err(Error::model("a schedule of no steps draws nothing"));
+        }
+        let descending = starts.windows(2).all(|pair| pair[0] > pair[1]);
+        if !descending || starts[0] > 1.0 || starts[starts.len() - 1] <= 0.0 {
+            return Err(Error::model(format!(
+                "{starts:?} is not a walk down from at most one to above zero"
+            )));
+        }
+
+        let mut sigmas = starts.to_vec();
+        sigmas.push(0.0);
+        Ok(FlowSampler {
+            config: *config,
+            sigmas,
+        })
+    }
+
     /// The same schedule stretched so that its last step starts at `terminal` rather than
     /// wherever the shift put it: `1 - (1 - sigma) / scale`, with the scale chosen to land the
     /// last one there. The first stays at one and the zero it finishes at stays zero.

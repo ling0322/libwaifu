@@ -1,0 +1,113 @@
+<!--
+  The Model Manager: where models are kept, and what is in there.
+
+  It is one page across the middle and the settings column, so there is nothing beside it and the
+  content is held to 760 in the middle of whatever width the window is.
+-->
+<UserControl x:Class="Libwaifu.Gui.Views.ModelManagerView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="clr-namespace:Libwaifu.Gui.Controls">
+  <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+    <StackPanel MaxWidth="760" HorizontalAlignment="Center">
+
+      <c:FormGroup Title="Model Manager" RowPadding="{StaticResource CenterRowPadding}"
+                   Footnote="Changing the folder does not move what is in the old one: a model is fetched into the new one when it is next used.">
+        <c:SettingRow Label="Kept in" LabelWidth="Auto" HorizontalContentAlignment="Right">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock Text="{Binding Directory}" VerticalAlignment="Center" Margin="8,0,8,0"
+                       TextTrimming="CharacterEllipsis" MaxWidth="380"
+                       ToolTip="{Binding Directory}" />
+            <Button Style="{StaticResource SmallButton}" Content="Show in Explorer"
+                    Command="{Binding Reveal}" />
+            <Button Style="{StaticResource SmallButton}" Content="Change..." Margin="8,0,0,0"
+                    Command="{Binding Change}" />
+          </StackPanel>
+        </c:SettingRow>
+      </c:FormGroup>
+
+      <!-- What a download or a delete came to, where it came to nothing good. -->
+      <StackPanel Orientation="Horizontal" Margin="2,10,0,0"
+                  Visibility="{Binding HasTrouble, Converter={StaticResource BoolToVisible}}">
+        <Path Data="{StaticResource IconWarning}" Stretch="Uniform" Width="14" Height="14"
+              VerticalAlignment="Center" Margin="0,0,6,0"
+              Fill="{StaticResource DangerBrush}" />
+        <TextBlock Text="{Binding Trouble}" Foreground="{StaticResource DangerBrush}"
+                   VerticalAlignment="Center" TextWrapping="Wrap" />
+      </StackPanel>
+
+      <ItemsControl ItemsSource="{Binding Groups}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate>
+            <c:FormGroup Title="{Binding Title}" Margin="0,16,0,0"
+                         ItemsSource="{Binding Rows}"
+                         RowPadding="{StaticResource CenterRowPadding}">
+              <c:FormGroup.ItemTemplate>
+                <DataTemplate>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*" />
+                      <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                        <!-- The one model that is on a device right now. -->
+                        <Border CornerRadius="7" Padding="6,1" Margin="8,0,0,0" Background="#2E7D32"
+                                VerticalAlignment="Center"
+                                Visibility="{Binding Loaded, Converter={StaticResource BoolToVisible}}">
+                          <TextBlock Text="loaded" FontSize="{StaticResource Caption2Size}"
+                                     Foreground="White" />
+                        </Border>
+                      </StackPanel>
+                      <TextBlock Text="{Binding FullName}" Style="{StaticResource CaptionText}" />
+                    </StackPanel>
+
+                    <!-- Being fetched. -->
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center"
+                                Visibility="{Binding Downloading, Converter={StaticResource BoolToVisible}}">
+                      <StackPanel Orientation="Horizontal">
+                        <ProgressBar Width="140" Maximum="100" VerticalAlignment="Center"
+                                     Style="{StaticResource ThinProgress}"
+                                     Value="{Binding Progress, Mode=OneWay}"
+                                     IsIndeterminate="{Binding Measured, Converter={StaticResource Not}}" />
+                        <Button Style="{StaticResource SmallButton}" Content="Cancel" Width="84"
+                                Margin="8,0,0,0" Command="{Binding Cancel}" />
+                      </StackPanel>
+                      <TextBlock Text="{Binding ProgressLine}" Style="{StaticResource CaptionText}"
+                                 MaxWidth="220" HorizontalAlignment="Right" TextAlignment="Right"
+                                 Margin="0,4,0,0" />
+                    </StackPanel>
+
+                    <!-- Here already. -->
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
+                                Visibility="{Binding Here, Converter={StaticResource BoolToVisible}}">
+                      <TextBlock Text="{Binding Size}" VerticalAlignment="Center"
+                                 Style="{StaticResource CaptionText}" Margin="0,0,8,0" />
+                      <Button Style="{StaticResource SmallButtonDanger}" Width="84"
+                              Command="{Binding Remove}" ToolTip="Delete it from the disk">
+                        <Path Data="{StaticResource IconTrash}" Stretch="Uniform" Width="13"
+                              Height="13" StrokeThickness="1.4"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+                      </Button>
+                    </StackPanel>
+
+                    <!-- Not here, or here only in part. -->
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center"
+                                Visibility="{Binding NotHere, Converter={StaticResource BoolToVisible}}">
+                      <TextBlock Text="{Binding Size}" VerticalAlignment="Center"
+                                 Style="{StaticResource CaptionText}" Margin="0,0,8,0" />
+                      <Button Style="{StaticResource SmallButton}" Content="Download" Width="84"
+                              Command="{Binding Download}" />
+                    </StackPanel>
+                  </Grid>
+                </DataTemplate>
+              </c:FormGroup.ItemTemplate>
+            </c:FormGroup>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

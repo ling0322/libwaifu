@@ -125,10 +125,12 @@ The encoder is held to float32 rather than to the bfloat16 reference because the
 less exact of the two: the last layer before the norm carries activations in the hundreds, and
 bfloat16 loses most of the first token the denoiser reads. float16 is the more exact of the two;
 fp8 is not -- at 1.21e-1 it is well past the reference's own 7.3e-2 rounding, unlike every other
-fp8 package here, where the float type is still most of the number. `-fp8` here still writes one
-scale per row rather than one for the whole tensor (see "One scale for the whole tensor" in
-`docs/fp8.md`) -- the same format Krea 2's fp8 package started with before moving off it -- and
-this encoder's weights are evidently less forgiving of it than Krea 2's are. Nothing crashes or
+fp8 package here, where the float type is still most of the number. These numbers are for the
+published `qwen-image:2.1-fp8`, which was exported with one scale per row. `-fp8` now writes one
+scale for the whole tensor (`fp8_tensor_scale`, see "One scale for the whole tensor" in
+`docs/fp8.md`) like Krea 2's, so a re-export will not reproduce them; the Turbo package is the
+first published in that format. This encoder's weights were evidently less forgiving of the
+per-row format than Krea 2's are. Nothing crashes or
 NaNs; the picture is a real, working one, just a more noticeably different one than this runtime's
 other fp8 packages draw.
 
@@ -149,6 +151,22 @@ steps: with room for it, each step reads memory; without, each step reads the di
 on this machine's disk is about 200 MB/s and most of the time a step takes. A machine with 48 GB
 or more of RAM keeps it; `-fp8` halves the package -- 30 GB to 16 GB, the same ratio as its size on
 disk, since `Residency::LowVram` moves whichever package it was given the same way.
+
+## Turbo
+
+`Qwen/Qwen-Image-2.1-Turbo` is the same architecture, distilled to **eight steps**. The weights
+are laid out exactly as above; what differs is the schedule, which the checkpoint does not bend
+but writes out in `model_index.json` as `sample_sigmas` (`1, 0.978453, .., 0.414568`), with a plain
+scheduler (no dynamic shift, no `shift_terminal`). diffusers uses those levels as they stand and
+appends the zero. The exporter copies them into the manifest as `sampler_sigmas`; when it is
+present `QwenImage::sampler` builds `FlowSampler::from_sigmas` from it and **ignores the step
+count and the picture's size**. Only the fp8 package is published, as `qwen-image:2.1-turbo-fp8`
+in [ling0322/libwaifu-qwen-image-2.1-turbo](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1-turbo).
+Its VAE is a smaller file than the base release's (0.7 GB against 1.4 GB); it exports the same.
+
+Against the reference, 256 x 256, eight steps (`waifu/tests/qwen_image.rs`,
+`turbo_fp8_matches_the_reference`): velocity at step five 2.1e-2, decoder 8.0e-4, the whole walk
+1.8e-1 -- the fp8 encoder again, with fewer steps to average it out.
 
 ## ControlNet
 
@@ -200,7 +218,7 @@ convolution pads right and bottom only, like SDXL's.
 * Image editing and reference images. The model reads a condition picture both through the VAE
   and through Qwen3-VL's vision tower, which is not exported.
 * The prefix KV cache.
-* The ControlNet's inpainting (a mask and a kept picture), the webui, and the hub. The runtime
+* The ControlNet's inpainting (a mask and a kept picture), the CLI, and the hub. The runtime
   takes a preprocessed control picture; making one out of a photograph -- a pose detector, a
   depth estimator -- is the caller's.
 

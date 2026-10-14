@@ -25,6 +25,7 @@
 //! the rest.
 
 use crate::error::{Error, Result};
+use crate::flow::{FlowSampler, SamplerConfig};
 use crate::flint::WeightFormat;
 use crate::krea2::EncoderConfig;
 use crate::mapping::Mapping;
@@ -144,13 +145,18 @@ pub struct VaeConfig {
 /// base_shift)` and `(max_seq_len, max_shift)` by how many image tokens are drawn -- a larger
 /// picture spends longer at high noise. And the schedule is stretched afterwards so that its last
 /// step before zero lands on `shift_terminal` rather than wherever the bend put it.
-#[derive(Clone, Copy, Debug)]
+///
+/// A release may instead fix its levels (`sigmas`), as Turbo's eight steps do; then none of the
+/// above applies and neither does the number of steps a caller asks for.
+#[derive(Clone, Debug)]
 pub struct ScheduleConfig {
     pub base_shift: f32,
     pub max_shift: f32,
     pub base_seq_len: i32,
     pub max_seq_len: i32,
     pub shift_terminal: f32,
+    /// Where each step starts, when the package fixes them. The final zero is not stored.
+    pub sigmas: Option<Vec<f32>>,
 }
 
 impl ScheduleConfig {
@@ -303,12 +309,21 @@ impl QwenImageConfig {
             base_seq_len: section.get("sampler_base_seq_len")?,
             max_seq_len: section.get("sampler_max_seq_len")?,
             shift_terminal: section.get("sampler_shift_terminal")?,
+            sigmas: if section.has("sampler_sigmas") {
+                Some(number_list(section, "sampler_sigmas")?)
+            } else {
+                None
+            },
         };
         if schedule.max_seq_len <= schedule.base_seq_len {
             return Err(Error::model(format!(
                 "a shift interpolated from {} tokens to {} is not a line",
                 schedule.base_seq_len, schedule.max_seq_len
             )));
+        }
+        if let Some(sigmas) = &schedule.sigmas {
+            // Checked here rather than at the first run, so a bad package fails to open.
+            FlowSampler::from_sigmas(&SamplerConfig { shift: 1.0, multiplier: 1.0 }, sigmas)?;
         }
         if !(0.0..1.0).contains(&schedule.shift_terminal) {
             return Err(Error::model(format!(
@@ -429,6 +444,26 @@ config:
 
         // 2048 by 2048 is past the line's end, and is extrapolated rather than clamped.
         assert!(schedule.shift_for(16384) > 0.9f32.exp());
+    }
+
+    /// Turbo's package carries its eight levels, and the runtime appends the zero.
+    #[test]
+    fn reads_a_fixed_schedule() {
+        assert!(release().schedule.sigmas.is_none());
+
+        let turbo = RELEASE.replace(
+            "    system_prompt:",
+            "    sampler_sigmas: [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568]\n    system_prompt:",
+        );
+        let sigmas = parse(&turbo).unwrap().schedule.sigmas.expect("fixed");
+        assert_eq!(sigmas.len(), 8);
+        let config = SamplerConfig { shift: 1.0, multiplier: 1.0 };
+        let sampler = FlowSampler::from_sigmas(&config, &sigmas).unwrap();
+        assert_eq!(sampler.steps(), 8);
+        assert_eq!(sampler.sigmas()[8], 0.0);
+
+        let rising = turbo.replace("[1.0, 0.978453", "[0.5, 0.978453");
+        assert!(parse(&rising).is_err());
     }
 
     #[test]

@@ -1,5 +1,12 @@
 # Speech: the page, and the model behind it
 
+> **The page is gone.** The web page this was written around was removed on 2026-10-13, when
+> drawing went back to the terminal. Speech now runs through [`waifu::engine`](../waifu/src/engine.rs)
+> and the C API over it ([ffi.md](ffi.md)), which the macOS app speaks with; `waifu` in the
+> terminal draws only, and `examples/speak.rs` says a sentence from a checkout. What follows about
+> the [`Voice`](../waifu/src/speech.rs) trait, the models and the WAV reader still holds; what it
+> says about the page, its tab and `-m` for a voice is history.
+
 `waifu` has a text2speech task. Drop a few seconds of somebody speaking on its page, type a
 sentence, press Speak, and get the sentence back in that voice as a WAV -- said by
 [IndexTTS-2.5](indextts.md).
@@ -90,7 +97,7 @@ again is the kind of thing that gets reported as a bug against the model.
 
 ### What a real model changed
 
-The three things this section used to predict, in [`worker.rs`](../waifu/src/cli/webui/worker.rs):
+The three things this section used to predict, now in [`describe.rs`](../waifu/src/describe.rs):
 
 - `look_at_voice(name)` describes a voice before any of it is read: `Tones` by asking it, and a
   package by what its kind says -- IndexTTS-2.5's rate and starting values, and that it is not in
@@ -142,7 +149,7 @@ someone drags onto the page has been through whatever wrote it: 8-, 16-, 24- and
 have to be walked past.
 
 Everything else is a codec, which is several thousand lines and a licence to read. So the browser
-decodes instead. `asWav` in [`app.js`](../waifu/src/cli/webui/assets/app.js) hands the dropped file
+decodes instead. `asWav` in the page's `app.js` (removed with it) handed the dropped file
 to `AudioContext.decodeAudioData`, mixes it to one channel, trims it to thirty seconds and encodes
 a WAV -- which means the page takes mp3, m4a, ogg, flac and webm without this program knowing what
 any of those are, and the far side only ever sees something it can read.

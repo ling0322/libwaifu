@@ -1,0 +1,8 @@
+# What MSBuild writes.
+bin/
+obj/
+
+# What Visual Studio writes beside the solution.
+.vs/
+*.user
+*.suo

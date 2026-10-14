@@ -1,0 +1,125 @@
+<!--
+  The settings column on a picture page: how big, how hard, and which noise to start from.
+
+  Every group here is off while a job is running or waiting, because what these say is what is
+  being drawn.
+-->
+<UserControl x:Class="Libwaifu.Gui.Views.ImageInspector"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="clr-namespace:Libwaifu.Gui.Controls"
+             IsEnabled="{Binding SettingsEnabled}">
+  <StackPanel>
+
+    <!-- — the picture to start from, on img2img only ================================== -->
+
+    <StackPanel Visibility="{Binding IsImg2Img, Converter={StaticResource BoolToVisible}}">
+      <TextBlock Text="Picture to draw from" Style="{StaticResource HeadlineText}" Margin="2,0,0,6" />
+
+      <!-- A model that cannot start from one says so, and there is nothing to drop on. -->
+      <TextBlock Text="{Binding WhyNotFromPicture}" Style="{StaticResource CaptionText}"
+                 Margin="2,0,0,0"
+                 Visibility="{Binding CanStartFromPicture, Converter={StaticResource BoolToCollapsed}}" />
+
+      <StackPanel Visibility="{Binding CanStartFromPicture, Converter={StaticResource BoolToVisible}}">
+        <Grid Visibility="{Binding HasSource, Converter={StaticResource BoolToVisible}}">
+          <Border CornerRadius="8" Height="180" ClipToBounds="True">
+            <Border.Background>
+              <ImageBrush ImageSource="{Binding Source}" Stretch="UniformToFill" />
+            </Border.Background>
+          </Border>
+        </Grid>
+
+        <c:DropBox Height="90" Caption="Drop or choose a picture"
+                   Icon="{StaticResource IconPicturePlus}"
+                   Filter="Pictures|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff;*.webp"
+                   Chosen="OnPictureChosen"
+                   Visibility="{Binding HasSource, Converter={StaticResource BoolToCollapsed}}" />
+
+        <Button Style="{StaticResource SmallButtonDanger}" Content="Remove the picture"
+                Margin="0,8,0,0" HorizontalAlignment="Right" Command="{Binding ClearSource}"
+                Visibility="{Binding HasSource, Converter={StaticResource BoolToVisible}}" />
+      </StackPanel>
+    </StackPanel>
+
+    <!-- — how big ===================================================================== -->
+
+    <c:FormGroup Title="Size" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}">
+      <c:SettingRow Label="Preset">
+        <ComboBox Style="{StaticResource PopupButton}" ItemsSource="{Binding Presets}"
+                  SelectedItem="{Binding Preset}" />
+      </c:SettingRow>
+      <c:SettingRow Label="W x H">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="10" />
+            <ColumnDefinition Width="*" />
+          </Grid.ColumnDefinitions>
+          <TextBox Grid.Column="0" Style="{StaticResource FieldBox}"
+                   Text="{Binding Width, UpdateSourceTrigger=LostFocus}" />
+          <TextBlock Grid.Column="1" Text="x" HorizontalAlignment="Center" VerticalAlignment="Center"
+                     Foreground="{StaticResource TextSecondaryBrush}" />
+          <TextBox Grid.Column="2" Style="{StaticResource FieldBox}"
+                   Text="{Binding Height, UpdateSourceTrigger=LostFocus}" />
+        </Grid>
+      </c:SettingRow>
+    </c:FormGroup>
+
+    <!-- — how hard ==================================================================== -->
+
+    <c:FormGroup Title="Sampling" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}">
+      <c:SettingRow Label="Steps">
+        <DockPanel>
+          <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                   Style="{StaticResource FieldBox}"
+                   Text="{Binding Steps, UpdateSourceTrigger=LostFocus}" />
+          <Slider Style="{StaticResource MacSlider}" Minimum="1" Maximum="80"
+                  IsSnapToTickEnabled="True" TickFrequency="1" Value="{Binding Steps}" />
+        </DockPanel>
+      </c:SettingRow>
+
+      <c:SettingRow Label="CFG scale"
+                    Visibility="{Binding TakesGuidance, Converter={StaticResource BoolToVisible}}">
+        <DockPanel>
+          <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                   Style="{StaticResource FieldBox}"
+                   Text="{Binding Cfg, StringFormat={}{0:0.0}, UpdateSourceTrigger=LostFocus}" />
+          <Slider Style="{StaticResource MacSlider}" Minimum="1" Maximum="30"
+                  IsSnapToTickEnabled="True" TickFrequency="0.1" Value="{Binding Cfg}" />
+        </DockPanel>
+      </c:SettingRow>
+
+      <c:SettingRow Label="Strength">
+        <c:SettingRow.Visibility>
+          <MultiBinding Converter="{StaticResource AllTrue}">
+            <Binding Path="IsImg2Img" />
+            <Binding Path="CanStartFromPicture" />
+          </MultiBinding>
+        </c:SettingRow.Visibility>
+        <DockPanel>
+          <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                   Style="{StaticResource FieldBox}"
+                   Text="{Binding Strength, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+          <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="1"
+                  IsSnapToTickEnabled="True" TickFrequency="0.05" Value="{Binding Strength}" />
+        </DockPanel>
+      </c:SettingRow>
+
+      <!--
+        The seed, which is text and not a number: "-1" and an empty box both mean a new one every
+        time, and that is a different thing from any number somebody could type.
+      -->
+      <c:SettingRow Label="Seed">
+        <Grid>
+          <TextBox Style="{StaticResource SeedBox}" Tag="-1"
+                   Text="{Binding Seed, UpdateSourceTrigger=PropertyChanged}" />
+          <Button Style="{StaticResource DieButton}" Command="{Binding Dice}">
+            <Path Data="{StaticResource IconDie}" Stretch="Uniform" Width="13" Height="13"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+        </Grid>
+      </c:SettingRow>
+    </c:FormGroup>
+  </StackPanel>
+</UserControl>

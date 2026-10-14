@@ -660,11 +660,85 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     drop(kept);
 }
 
+/// `metal_disk_offload`: a low-vram package on Metal is its file's mapping, and runs -- over and
+/// over, as a sampler does -- like the same package kept on the device.
+///
+/// Read off a file rather than out of a buffer, because the mapping is the case that is new here:
+/// each load copies a weight out of pages nothing has read yet.
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_disk_offloaded_package_on_metal_runs_like_a_resident_one() {
+    let values: Vec<f32> = (0..256 * 256).map(|i| ((i % 17) as f32 - 8.0) / 16.0).collect();
+    let bytes = write_laid_out(&[("big.weight", "F32", &[256, 256], f32_bytes(&values))]);
+    let file = TempFile::new(&bytes);
+
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let weight = graph.load("big.weight", &[256, 256]);
+    graph.output("y", graph.add(x, graph.matmul(x, weight)));
+    let ir = Ir::compile(&graph);
+
+    let x = Tensor::from_f32(&[256, 256], &values)
+        .unwrap()
+        .to_device(Device::Metal)
+        .unwrap();
+    let run = |source: &dyn ParamSource| {
+        let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
+        to_host(&out[0].1)
+    };
+
+    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let expected = run(&kept);
+    drop(kept);
+
+    let offloaded = Weights::from_files(&[&file.0], Device::Metal, Residency::LowVram).unwrap();
+    assert_eq!(run(&offloaded), expected);
+    assert_eq!(run(&offloaded), expected, "the second step reads the same weight");
+}
+
+/// And what it is for: the device never holds the model, only the weight a pass is reading.
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
+    let values = vec![0.5f32; 256 * 256];
+    let bytes = write_laid_out(&[("big.weight", "F32", &[256, 256], f32_bytes(&values))]);
+    let file = TempFile::new(&bytes);
+    let weight_bytes = (values.len() * std::mem::size_of::<f32>()) as i64;
+
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let weight = graph.load("big.weight", &[256, 256]);
+    graph.output("y", graph.matmul(x, weight));
+
+    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
+
+    // The input first, so that what is left after the run can be measured against it.
+    let x = Tensor::zeros(&[256, 256], DType::Float, Device::Metal).unwrap();
+
+    let before = allocated();
+    let offloaded = Weights::from_files(&[&file.0], Device::Metal, Residency::LowVram).unwrap();
+    assert_eq!(allocated(), before, "reading the package puts nothing on the device");
+    check_parameters(&graph, &offloaded).unwrap();
+    assert_eq!(allocated(), before, "checking a model must not move it");
+
+    // The weight lands on the device for the pass and is gone again by the time it ends.
+    let out = Ir::compile(&graph)
+        .run(&RunContext::new(&offloaded).input("x", &x))
+        .unwrap();
+    assert_eq!(allocated() - before, bytes_of(&out[0].1), "only the output is left");
+    drop(out);
+
+    // Against which: the same package read to keep its weights holds the model on the device.
+    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    assert!(allocated() - before >= weight_bytes);
+    drop(kept);
+}
+
 /// Asking a device to hand its spare memory back is a question every device answers, including
 /// the one that has nothing to answer it with.
 ///
-/// The webui calls this wherever it takes a model down, with whatever device the run was going to
-/// -- so a session on the CPU asks it too, and an error there would be a red line on the page
+/// A program calls this wherever it takes a model down, with whatever device the run was going to
+/// -- so a session on the CPU asks it too, and an error there would be a failure reported
 /// about a card that is not in the machine.
 #[test]
 fn a_device_that_holds_nothing_back_is_still_asked_to_hand_it_over() {
