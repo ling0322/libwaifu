@@ -33,7 +33,6 @@ struct Fp8MatmulParams {
   uint32_t M;
   uint32_t N;
   uint32_t K;
-  uint32_t perRow;
   uint32_t vecA;
   uint32_t vecB;
 };
@@ -57,7 +56,6 @@ void fp8Matmul(
     const TensorView &a,
     const TensorView &data,
     const TensorView &scale,
-    bool perRow,
     const TensorView &out) {
   // The C API has checked the operands: a <float16>(..., k) and out <float16>(..., rows), both
   // contiguous, the weight <fp8e4m3>(rows, k) and the scale <float>, contiguous too.
@@ -83,7 +81,6 @@ void fp8Matmul(
   params.M = static_cast<uint32_t>(m);
   params.N = static_cast<uint32_t>(rows);
   params.K = static_cast<uint32_t>(k);
-  params.perRow = perRow ? 1 : 0;
   params.vecA = fours(k) && fours(a.getInternalOffset());
   params.vecB = fours(k) && fours(data.getInternalOffset());
 

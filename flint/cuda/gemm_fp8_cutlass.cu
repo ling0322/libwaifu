@@ -25,15 +25,12 @@
 //
 // CUTLASS supplies both halves of that. The mainloop is its 2.x mixed input tensor op, reached by
 // tagging the operator `OpMultiplyAddMixedInputUpcast`; the epilogue is an EVT tree that reads
-// the scale -- a row vector of one per channel, or a single one for the whole weight -- and
-// multiplies the accumulator by it, so the scale costs no pass of its own.
+// the weight's one scale and multiplies the accumulator by it, so the scale costs no pass of its
+// own.
 
 #include <cuda_fp16.h>
-#include <cuda_fp8.h>
 
-#include <algorithm>
 #include <limits>
-#include <type_traits>
 
 // The order matters: `visitors.hpp` reaches for things -- NumericArrayConverter among them --
 // that it does not include itself, so `gemm_universal.h` has to come first. This is the order
@@ -45,7 +42,6 @@
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "lutil/error.h"
 #include "flint/cuda/common.h"
-#include "flint/cuda/fp8.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
 
 #define CUTLASS_CHECK(x)                                                                     \
@@ -61,125 +57,6 @@ namespace fl {
 namespace op {
 namespace cuda {
 namespace {
-
-/// Eight elements a thread: sixteen bytes in and eight bytes out, which is what makes both ends of
-/// the quantizer a single vector access.
-constexpr int kElementPerThread = 8;
-
-__forceinline__ __device__ float blockReduceMax(float v) {
-  __shared__ float warpMax[32];
-
-  int lane = threadIdx.x % 32;
-  int warp = threadIdx.x / 32;
-
-#pragma unroll
-  for (int offset = 16; offset > 0; offset /= 2) {
-    v = fmaxf(v, __shfl_down_sync(0xffffffff, v, offset));
-  }
-  if (lane == 0) warpMax[warp] = v;
-  __syncthreads();
-
-  int numWarp = (int(blockDim.x) + 31) / 32;
-  v = threadIdx.x < numWarp ? warpMax[threadIdx.x] : 0.0f;
-  if (warp == 0) {
-#pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-      v = fmaxf(v, __shfl_down_sync(0xffffffff, v, offset));
-    }
-  }
-
-  return v;
-}
-
-/// @brief One block owns one row, which is what makes the scale a block reduction rather than a
-///        second launch: a row's maximum is known before the same block quantizes it.
-///
-/// The row is read twice, once for the maximum and once for the elements. That is the cost of
-/// keeping it in one launch, and a weight is quantized once at load, so it is not a cost anything
-/// pays twice.
-__global__ void quantizeFp8Kernel(
-    const half *__restrict__ x,
-    int k,
-    uint8_t *__restrict__ q,
-    float *__restrict__ scale) {
-  int row = blockIdx.x;
-  const PackedOWORD<half2> *xRow =
-      reinterpret_cast<const PackedOWORD<half2> *>(x + static_cast<int64_t>(row) * k);
-  uint2 *qRow = reinterpret_cast<uint2 *>(q + static_cast<int64_t>(row) * k);
-  int numPack = k / kElementPerThread;
-
-  float amax = 0.0f;
-  for (int i = threadIdx.x; i < numPack; i += blockDim.x) {
-    PackedOWORD<half2> po = xRow[i];
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-      float2 f2 = __half22float2(po.v[j]);
-      amax = fmaxf(amax, fmaxf(fabsf(f2.x), fabsf(f2.y)));
-    }
-  }
-  amax = blockReduceMax(amax);
-
-  __shared__ float sRcpScale;
-  if (threadIdx.x == 0) {
-    // An all zero row has no scale to speak of. Zero is the one that makes the round trip exact
-    // and leaves nothing to divide by later.
-    //
-    // __fdiv_rn rather than `/`, which this file is compiled with --use_fast_math and would
-    // otherwise turn into a reciprocal approximation. One ulp on the scale moves the odd element
-    // that sits on a rounding boundary to the next code, and then a weight quantized here and one
-    // quantized on the processor are not the same bytes. Two of 16896 elements is what it was
-    // costing when the test that compares them was first run.
-    scale[row] = __fdiv_rn(amax, kFp8E4M3Max);
-    sRcpScale = amax > 0.0f ? __fdiv_rn(kFp8E4M3Max, amax) : 0.0f;
-  }
-  __syncthreads();
-  float rcpScale = sRcpScale;
-
-  for (int i = threadIdx.x; i < numPack; i += blockDim.x) {
-    PackedOWORD<half2> po = xRow[i];
-    union {
-      uint16_t pair[4];
-      uint2 v;
-    } out;
-
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-      float2 f2 = __half22float2(po.v[j]);
-      f2.x *= rcpScale;
-      f2.y *= rcpScale;
-      out.pair[j] = __nv_cvt_float2_to_fp8x2(f2, __NV_SATFINITE, __NV_E4M3);
-    }
-    qRow[i] = out.v;
-  }
-}
-
-__global__ void dequantizeFp8Kernel(
-    const uint8_t *__restrict__ q,
-    const float *__restrict__ scale,
-    half *__restrict__ x,
-    int rows,
-    int k) {
-  int numPack = k / kElementPerThread;
-  int total = rows * numPack;
-
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
-       idx += blockDim.x * gridDim.x) {
-    half2 rowScale = __float2half2_rn(scale[idx / numPack]);
-    union {
-      uint16_t pair[4];
-      uint2 v;
-    } in;
-    in.v = reinterpret_cast<const uint2 *>(q)[idx];
-
-    PackedOWORD<half2> out;
-#pragma unroll
-    for (int j = 0; j < 4; ++j) {
-      half2 v = half2(__nv_cvt_fp8x2_to_halfraw2(in.pair[j], __NV_E4M3));
-      out.v[j] = __hmul2(v, rowScale);
-    }
-    reinterpret_cast<PackedOWORD<half2> *>(x)[idx] = out;
-  }
-}
 
 using namespace cute;
 
@@ -201,9 +78,6 @@ constexpr int kAlignmentA = 8;
 constexpr int kAlignmentB = 16;
 constexpr int kAlignmentC = 8;
 
-/// How the weight is scaled: one scale per output channel, or one for the whole tensor.
-enum class Fp8Scale { kChannel, kTensor };
-
 /// One tile shape's worth of kernel: the mixed input mainloop, and an EVT epilogue that multiplies
 /// the accumulator by the weight's scale before writing half.
 ///
@@ -215,7 +89,7 @@ enum class Fp8Scale { kChannel, kTensor };
 /// Two stages is not reachable either: at two CUTLASS builds the mainloop out of `MmaPipelined`
 /// rather than `MmaMultistage`, and the mixed input warp operator has no overload it can call.
 /// Three works and measures within half a percent of four everywhere, so four it is.
-template<class ThreadblockShape, class WarpShape, int Stages, Fp8Scale kScale>
+template<class ThreadblockShape, class WarpShape, int Stages>
 struct Fp8Gemm {
   static constexpr int kEpilogueStages = 1;
 
@@ -228,18 +102,9 @@ struct Fp8Gemm {
 
   using Accumulator = cutlass::epilogue::threadblock::VisitorAccFetch;
 
-  // D = accumulator * channelScale[n]. The scale is constant down a column of the result, so it is
-  // a row vector broadcast over m -- a stride of zero on m, one on n.
-  using ChannelScale = cutlass::epilogue::threadblock::VisitorRowBroadcast<
-      OutputTileThreadMap,
-      ElementScale,
-      Stride<_0, _1, int32_t>>;
-
-  // D = accumulator * tensorScale. Read through a pointer by every thread as the epilogue starts,
-  // so a scale that lives on the device never has to come back to the host to be launched with.
-  using TensorScale = cutlass::epilogue::threadblock::VisitorScalarBroadcast<ElementScale>;
-
-  using Scale = std::conditional_t<kScale == Fp8Scale::kChannel, ChannelScale, TensorScale>;
+  // D = accumulator * scale. Read through a pointer by every thread as the epilogue starts, so a
+  // scale that lives on the device never has to come back to the host to be launched with.
+  using Scale = cutlass::epilogue::threadblock::VisitorScalarBroadcast<ElementScale>;
 
   using ApplyScale = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiplies,
@@ -309,36 +174,21 @@ struct Fp8Gemm {
 ///
 /// So the flat tile is ahead by up to three times until the rows fill a square one, and the
 /// square tile is never more than 5% ahead beyond that. `gemmFp8` splits them at 512 rows.
-///
-/// The scale only reaches the epilogue, which writes the same tile either way, so the per tensor
-/// kernels take the same tiles and the same split.
-template<Fp8Scale kScale>
-using FlatTile = Fp8Gemm<
-    cutlass::gemm::GemmShape<32, 64, 64>,
-    cutlass::gemm::GemmShape<32, 32, 64>,
-    4,
-    kScale>;
+using FlatTile =
+    Fp8Gemm<cutlass::gemm::GemmShape<32, 64, 64>, cutlass::gemm::GemmShape<32, 32, 64>, 4>;
 
-template<Fp8Scale kScale>
-using SquareTile = Fp8Gemm<
-    cutlass::gemm::GemmShape<128, 128, 64>,
-    cutlass::gemm::GemmShape<64, 32, 64>,
-    4,
-    kScale>;
+using SquareTile =
+    Fp8Gemm<cutlass::gemm::GemmShape<128, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>, 4>;
 
 constexpr int kFlatTileMaxRow = 512;
 
-/// @param scale the channel scale, <float>(n), or the tensor scale, <float>(1), as Config says.
-template<class Config, Fp8Scale kScale>
+/// @param scale the weight's one scale, <float>(1), on the device.
+template<class Config>
 void runFp8Gemm(int m, int n, int k, const half *A, const Fp8E4M3 *B, const float *scale, half *D) {
   using Gemm = typename Config::Gemm;
 
   typename Config::Scale::Arguments scaleArgs;
-  if constexpr (kScale == Fp8Scale::kChannel) {
-    scaleArgs = {scale, ElementScale(1), {_0{}, _1{}, int32_t(n)}};
-  } else {
-    scaleArgs.scalar_ptrs[0] = scale;
-  }
+  scaleArgs.scalar_ptrs[0] = scale;
 
   typename Config::EvtD::Arguments callbackArgs{
       {
@@ -388,65 +238,10 @@ bool isFp8GemmAvailable() {
   return available;
 }
 
-void quantizeFp8(TensorView x, TensorView data, TensorView channelScale) {
-  CHECK(x.getDevice().getType() == Device::kCuda);
-  CHECK(x.getDType() == DType::kFloat16);
-  CHECK(x.getDim() == 2);
-  CHECK(x.isContiguous());
-
-  int rows = x.getShape(0);
-  int k = x.getShape(1);
-
-  // Sixteen is what the mainloop reads the weight in; it also keeps every row of the packed data
-  // 16 byte aligned, which is what the quantizer's own vector accesses need.
-  CHECK(k % 16 == 0);
-  CHECK(x.getNumEl() < std::numeric_limits<int32_t>::max());
-
-  CHECK(data.getDevice().getType() == Device::kCuda && data.getDType() == DType::kFp8E4M3);
-  CHECK(data.isContiguous() && data.getShape() == std::vector<int>({rows, k}));
-  CHECK(channelScale.getDevice().getType() == Device::kCuda);
-  CHECK(channelScale.getDType() == DType::kFloat);
-  CHECK(channelScale.isContiguous() && channelScale.getShape() == std::vector<int>({rows}));
-
-  // One block a row, capped where a row is shorter than the block would be wide.
-  int blockSize = std::min(256, std::max(32, (k / kElementPerThread + 31) / 32 * 32));
-  quantizeFp8Kernel<<<rows, blockSize>>>(
-      getDataPtrCuda<half>(x),
-      k,
-      reinterpret_cast<uint8_t *>(getDataPtrCuda<Fp8E4M3>(data)),
-      getDataPtrCuda<float>(channelScale));
-
-  LL_CUDA_SYNCHRONIZE();
-  LL_CHECK_CUDA_STATUS(cudaGetLastError());
-}
-
-void dequantFp8ToHalf(TensorView data, TensorView channelScale, TensorView out) {
-  CHECK(data.getDim() == 2 && data.isContiguous() && channelScale.isContiguous());
-  int rows = data.getShape(0);
-  int k = data.getShape(1);
-  CHECK(out.getDevice().getType() == Device::kCuda && out.getDType() == DType::kFloat16);
-  CHECK(out.isContiguous() && out.getShape() == std::vector<int>({rows, k}));
-
-  constexpr int kBlockSize = 256;
-  int numPack = rows * (k / kElementPerThread);
-  dim3 grid = getGrid1D(numPack, kBlockSize);
-
-  dequantizeFp8Kernel<<<grid, kBlockSize>>>(
-      reinterpret_cast<const uint8_t *>(getDataPtrCuda<Fp8E4M3>(data)),
-      getDataPtrCuda<float>(channelScale),
-      getDataPtrCuda<half>(out),
-      rows,
-      k);
-
-  LL_CUDA_SYNCHRONIZE();
-  LL_CHECK_CUDA_STATUS(cudaGetLastError());
-}
-
 namespace {
 
-/// What the two public entry points share once each has checked its own scale: A (..., k) times
-/// the transpose of B (n, k), with `scale` read as Fp8Scale says.
-template<Fp8Scale kScale>
+/// A (..., k) times the transpose of B (n, k), times `scale`, once gemmFp8 has checked B and the
+/// scale.
 void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
   CHECK(A.getDevice().getType() == Device::kCuda);
   CHECK(A.getDType() == DType::kFloat16);
@@ -460,7 +255,7 @@ void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
   CHECK(D.isContiguous() && D.getShape() == shapeD);
 
   if (A.getDim() > 2) {
-    gemmFp8Impl<kScale>(A.view({-1, A.getShape(-1)}), B, scale, D.view({-1, B.getShape(0)}));
+    gemmFp8Impl(A.view({-1, A.getShape(-1)}), B, scale, D.view({-1, B.getShape(0)}));
     return;
   }
 
@@ -483,9 +278,9 @@ void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
   half *ptrD = getDataPtrCuda<half>(D);
 
   if (m <= kFlatTileMaxRow) {
-    runFp8Gemm<FlatTile<kScale>, kScale>(m, n, k, ptrA, ptrB, ptrScale, ptrD);
+    runFp8Gemm<FlatTile>(m, n, k, ptrA, ptrB, ptrScale, ptrD);
   } else {
-    runFp8Gemm<SquareTile<kScale>, kScale>(m, n, k, ptrA, ptrB, ptrScale, ptrD);
+    runFp8Gemm<SquareTile>(m, n, k, ptrA, ptrB, ptrScale, ptrD);
   }
 
   LL_CUDA_SYNCHRONIZE();
@@ -494,11 +289,7 @@ void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
 
 }  // namespace
 
-void gemmFp8(TensorView A, TensorView B, TensorView channelScale, TensorView D) {
-  gemmFp8Impl<Fp8Scale::kChannel>(A, B, channelScale, D);
-}
-
-void gemmFp8TensorScale(TensorView A, TensorView B, TensorView scale, TensorView D) {
+void gemmFp8(TensorView A, TensorView B, TensorView scale, TensorView D) {
   CHECK(B.getDevice().getType() == Device::kCuda);
   CHECK(B.getDType() == DType::kFp8E4M3);
   CHECK(B.getDim() == 2);
@@ -511,7 +302,7 @@ void gemmFp8TensorScale(TensorView A, TensorView B, TensorView scale, TensorView
   CHECK(scale.getDType() == DType::kFloat);
   CHECK(scale.getNumEl() == 1);
 
-  gemmFp8Impl<Fp8Scale::kTensor>(A, B, scale, D);
+  gemmFp8Impl(A, B, scale, D);
 }
 
 }  // namespace cuda

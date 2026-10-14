@@ -93,7 +93,7 @@ mod ir;
 mod op;
 mod operators;
 
-pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
+pub use fp8::{fp8_available, SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{check_parameters, Inst, Ir, ParamSource, Residency, RunContext, Weights};
 pub use operators::Operators;

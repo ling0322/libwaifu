@@ -165,13 +165,9 @@ pub enum WeightFormat {
     /// models, float32 where one needs the width.
     #[default]
     Float,
-    /// Quantized to E4M3 with one `<float>` scale per output channel, stored as two tensors --
-    /// `"…weight"` and `"…weight.scale"`. Half the bytes on the device, about 2.6e-2 of relative
-    /// error, and `docs/fp8.md` for the whole of it.
-    Fp8,
-    /// [`Fp8`](WeightFormat::Fp8) with one `<float>` scale for the whole weight rather than one
-    /// per row, stored the same way -- `"…weight"` and `"…weight.scale"`, the scale now a single
-    /// element rather than one per output channel.
+    /// Quantized to E4M3 with one `<float>` scale for the whole weight, stored as two tensors --
+    /// `"…weight"` and `"…weight.scale"`. Half the bytes on the device, and `docs/fp8.md` for
+    /// the whole of it.
     Fp8TensorScale,
 }
 
@@ -180,7 +176,6 @@ impl WeightFormat {
     pub fn from_name(name: &str) -> Option<WeightFormat> {
         match name {
             "float" => Some(WeightFormat::Float),
-            "fp8" => Some(WeightFormat::Fp8),
             "fp8_tensor_scale" => Some(WeightFormat::Fp8TensorScale),
             _ => None,
         }
@@ -190,7 +185,6 @@ impl WeightFormat {
     pub fn name(&self) -> &'static str {
         match self {
             WeightFormat::Float => "float",
-            WeightFormat::Fp8 => "fp8",
             WeightFormat::Fp8TensorScale => "fp8_tensor_scale",
         }
     }
@@ -705,21 +699,10 @@ impl Graph {
     }
 
     /// `lhs` times the transpose of an FP8 weight, which is the two values it is stored as: the
-    /// `<fp8e4m3>(rows, k)` elements and the `<float>(rows)` scale. See [`Op::Fp8Matmul`].
+    /// `<fp8e4m3>(rows, k)` elements and a single `<float>` scale. See [`Op::Fp8Matmul`].
     #[track_caller]
-    pub fn fp8_matmul(&self, lhs: Value, weight: Value, channel_scale: Value) -> Value {
-        self.push(Op::Fp8Matmul {
-            lhs,
-            weight,
-            channel_scale,
-        })
-    }
-
-    /// `lhs` times the transpose of an FP8 weight with one scale for the whole tensor: the
-    /// `<fp8e4m3>(rows, k)` elements and a single `<float>`. See [`Op::Fp8MatmulTensorScale`].
-    #[track_caller]
-    pub fn fp8_matmul_tensor_scale(&self, lhs: Value, weight: Value, scale: Value) -> Value {
-        self.push(Op::Fp8MatmulTensorScale { lhs, weight, scale })
+    pub fn fp8_matmul(&self, lhs: Value, weight: Value, scale: Value) -> Value {
+        self.push(Op::Fp8Matmul { lhs, weight, scale })
     }
 
     #[track_caller]
@@ -1191,13 +1174,13 @@ mod tests {
         let x = g.input("hidden");
         let weight = g.load("proj.weight", &[8, 16]);
         let scale = g.load("proj.weight_scale", &[1]);
-        let out = g.fp8_matmul_tensor_scale(x, weight, scale);
+        let out = g.fp8_matmul(x, weight, scale);
         g.output("hidden", out);
 
-        assert_eq!(g.op(out).name(), "fp8_matmul_tensor_scale");
+        assert_eq!(g.op(out).name(), "fp8_matmul");
         assert_eq!(g.op(out).operands(), vec![x, weight, scale]);
         assert_eq!(g.parameters(), vec!["proj.weight", "proj.weight_scale"]);
-        assert!(g.to_string().contains("fp8_matmul_tensor_scale("), "{g}");
+        assert!(g.to_string().contains("fp8_matmul("), "{g}");
     }
 
     #[test]

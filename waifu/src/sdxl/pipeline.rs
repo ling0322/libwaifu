@@ -870,11 +870,11 @@ config:
     /// And one key says it for every half that has matrices in it.
     #[test]
     fn a_package_may_say_it_stored_its_matrices_quantized() {
-        let config = parse(&format!("{CONFIG}    weight_format: fp8\n")).unwrap();
+        let config = parse(&format!("{CONFIG}    weight_format: fp8_tensor_scale\n")).unwrap();
 
-        assert_eq!(config.unet.weight_format, WeightFormat::Fp8);
-        assert_eq!(config.text.weight_format, WeightFormat::Fp8);
-        assert_eq!(config.text2.weight_format, WeightFormat::Fp8);
+        assert_eq!(config.unet.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(config.text.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(config.text2.weight_format, WeightFormat::Fp8TensorScale);
 
         // A name nothing reads is refused where it is read. The alternative is a package that
         // meant to be quantized, is not, and says nothing about it.

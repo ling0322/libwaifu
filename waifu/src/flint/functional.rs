@@ -556,35 +556,18 @@ fn fp8_result(a: &Tensor, weight: &Tensor) -> Result<Tensor> {
 /// `a` `(..., k)` times the transpose of an FP8 weight `(rows, k)`, as `(..., rows)`, in the
 /// float type the weight's device computes in.
 ///
-/// The weight arrives as the two tensors it is made of -- `<fp8e4m3>(rows, k)` and the
-/// `<float>(rows)` scale, row `r` meaning `weight[r] * channel_scale[r]` -- rather than as one
-/// value holding both. [`Fp8Tensor`](super::Fp8Tensor) is what quantizing produces and hands the
-/// pair out of; a weight a package stored quantized never becomes one, because it arrives as two
-/// ordinary tensors under two ordinary names and there is nothing to be gained by pairing them up
-/// again on the way to a call that takes them apart.
+/// The weight arrives as the two tensors a package stores it as -- `<fp8e4m3>(rows, k)` and a
+/// single `<float>` scale, the weight meaning `weight * scale` -- rather than as one value holding
+/// both: they arrive as two ordinary tensors under two ordinary names, and there is nothing to be
+/// gained by pairing them up again on the way to a call that takes them apart. `scale` holds one
+/// element, whatever its shape, on the weight's device; the kernel reads it there.
 ///
 /// The activation is not narrowed: the multiply happens at full width and only the weight is
-/// narrow. So this is `<float16>` in and out, with `rows` a
-/// multiple of 8 and `k` a multiple of 16. CUDA is the only device with the kernels for it.
-pub fn fp8_matmul(a: &Tensor, weight: &Tensor, channel_scale: &Tensor) -> Result<Tensor> {
+/// narrow. So this is `<float16>` in and out; on CUDA `rows` a multiple of 8 and `k` of 16. See
+/// [`fp8_available`](super::fp8_available) for the devices with the kernels.
+pub fn fp8_matmul(a: &Tensor, weight: &Tensor, scale: &Tensor) -> Result<Tensor> {
     let out = fp8_result(a, weight)?;
-    check(unsafe { ffi::fl_fp8_matmul(a.raw(), weight.raw(), channel_scale.raw(), out.raw()) })?;
-    Ok(out)
-}
-
-/// [`fp8_matmul`] for a weight with one scale for the whole tensor rather than one per row:
-/// `a` `(..., k)` times the transpose of `<fp8e4m3>(rows, k)`, times the one `<float>` in
-/// `scale`, as `(..., rows)`.
-///
-/// This is how a checkpoint quantized elsewhere usually arrives -- a `weight` of E4M3 codes and a
-/// single `weight_scale` -- and it is multiplied as stored. `scale` holds one element, whatever its
-/// shape, on the weight's device; the kernel reads it there. The same constraints as
-/// [`fp8_matmul`] otherwise: `<float16>` in and out, `rows` a multiple of 8, `k` of 16, CUDA only.
-pub fn fp8_matmul_tensor_scale(a: &Tensor, weight: &Tensor, scale: &Tensor) -> Result<Tensor> {
-    let out = fp8_result(a, weight)?;
-    check(unsafe {
-        ffi::fl_fp8_matmul_tensor_scale(a.raw(), weight.raw(), scale.raw(), out.raw())
-    })?;
+    check(unsafe { ffi::fl_fp8_matmul(a.raw(), weight.raw(), scale.raw(), out.raw()) })?;
     Ok(out)
 }
 

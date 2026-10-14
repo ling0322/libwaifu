@@ -1,24 +1,21 @@
 # FP8 weights
 
-A weight held in E4M3 with one scale per output channel, multiplied by an activation that stays at
+A weight held in E4M3 with one scale for the whole of it, multiplied by an activation that stays at
 full width.
 
 ```cpp
-op::cuda::quantizeFp8(weightFp16, codes, channelScale);   // once, at load
-op::cuda::gemmFp8(xFp16, codes, channelScale, y);         // per layer: half in, half out
+op::cuda::gemmFp8(xFp16, codes, scale, y);   // per layer: half in, half out
 ```
 
-Both write into views the caller allocated -- `codes` `<fp8e4m3>(rows, k)`, `channelScale`
-`<float>(rows)`, `y` `<half>(..., rows)` -- as every operator does.
+`codes` is `<fp8e4m3>(rows, k)`, `scale` a single `<float>` on the device, and `y`
+`<half>(..., rows)` a view the caller allocated, as every operator writes into.
 
-Needs `WITH_CUDA=ON` and an sm_80 or newer device, which is everything from Ampere on. `isFp8GemmAvailable()` reports it.
+Needs `WITH_CUDA=ON` and an sm_80 or newer device, which is everything from Ampere on, or Metal.
+`isFp8GemmAvailable()` reports the CUDA half of that.
 
-**The card is the only device that has it.** Nothing about the format is the card's -- the codes
-and the scales beside them are device agnostic, and a package that stores a weight quantized says
-nothing about where it will be multiplied -- but the kernels that read those bytes are CUDA's, so
-`fl_fp8_available` answers no everywhere else and the C interface refuses an operand that is not on
-a card. A processor path existed and was taken back out; see "What a processor would need" at the
-end for what it was and what it was worth.
+Nothing here quantizes. A weight arrives quantized, in a package an exporter wrote (see "In a
+package"), and the runtime only multiplies by it. There used to be a runtime quantizer and a
+format with one scale per row; both are gone -- see "Why one scale for the whole weight".
 
 What the narrow weight buys, and does not:
 
@@ -29,40 +26,37 @@ What the narrow weight buys, and does not:
 
 ## From Rust
 
-`functional::fp8_matmul` takes the weight as the two tensors it is made of. `flint::Fp8Tensor` is
-what quantizing hands both back in:
+`functional::fp8_matmul` takes the weight as the two tensors it is made of:
 
 ```rust
-let w = Fp8Tensor::quantize(&float16_weight)?;              // on CUDA
-let y = F::fp8_matmul(&x, w.data(), w.channel_scale())?;    // float16 in, float16 out
+let y = F::fp8_matmul(&x, &codes, &scale)?;   // float16 in, float16 out; scale is <float>[1]
 ```
 
 Two arguments rather than one pair, because a weight a package stored quantized never becomes a
 pair: it arrives as two ordinary tensors under two ordinary names. See "In a package" below. The
-C interface has always been this shape -- `fl_fp8_matmul` takes the two as two views.
+C interface is the same shape -- `fl_fp8_matmul` takes the two as two views.
 
-`Fp8Tensor::is_available(device)` answers whether that device can run it, which today is CUDA and
-nothing else. `k` has to be a multiple of 16 and the weight's row count a multiple of 8, which the
-C interface checks rather than leaving to the kernel.
+`flint::fp8_available(device)` answers whether that device can run it. On CUDA `k` has to be a
+multiple of 16 and the weight's row count a multiple of 8, which the C interface checks rather than
+leaving to the kernel.
 
-The C interface is `fl_fp8_available`, `fl_fp8_quantize`, `fl_fp8_dequantize`, `fl_fp8_matmul`
-and `fl_fp8_matmul_tensor_scale`. All of them dispatch on the device the tensors are already on -- one entry point per operation rather
-than one per backend, which is the shape to keep whether there is one backend or two.
+The C interface is `fl_fp8_available` and `fl_fp8_matmul`. Both dispatch on the device the tensors
+are already on -- one entry point per operation rather than one per backend.
 
 The kernels assert their preconditions with `CHECK`, which reports a broken invariant as
 `FL_ERROR_ABORTED`. The C interface checks device, type, contiguity and shape itself first even
-so -- of the weight and its scales as much as of the activation and the result: those are the
-caller's mistakes rather than the library's, so they come back as `FL_ERROR_INVALID_ARG` naming what was wrong, instead of
-as an internal failure with a stack trace behind it.
+so -- of the weight and its scale as much as of the activation and the result: those are the
+caller's mistakes rather than the library's, so they come back as `FL_ERROR_INVALID_ARG` naming
+what was wrong, instead of as an internal failure with a stack trace behind it.
 
 ## In a package
 
 A model whose weights were quantized before they were published stores each one as **two
-tensors**: `"…weight"` as `F8_E4M3` `(out, in)`, and `"…weight.scale"` as `F32` `(out,)`.
+tensors**: `"…weight"` as `F8_E4M3` `(out, in)`, and `"…weight.scale"` as `F32` `(1,)`.
 
 ```
 proj.weight         F8_E4M3  [2560, 2048]
-proj.weight.scale   F32      [2560]
+proj.weight.scale   F32      [1]
 ```
 
 Two tensors and not one, because that is what the format can say. A safetensors header holds a
@@ -83,7 +77,7 @@ The graph loads two weights and hands three operands to one node:
 
 ```
 %7  = load("proj.weight", [2560, 2048])
-%8  = load("proj.weight.scale", [2560])
+%8  = load("proj.weight.scale", [1])
 %9  = fp8_matmul(%3, %7, %8)
 ```
 
@@ -91,27 +85,31 @@ Two `load`s rather than one composite value, which is the whole point of storing
 scale is then an ordinary weight under an ordinary name, and everything that walks loads reaches it
 without being taught that FP8 exists -- `resident` reading the package onto the device, the
 liveness the `free` instructions come from, `Residency::LowVram` putting one weight at a time
-across the bus. The scale costs `4/k` of what the weight costs, which at `k=3072` is 0.13%.
+across the bus.
 
 Note also what is *not* there: the `transpose` a float `matmul` needs before it. `fp8_matmul` reads
 the weight in the `(out, in)` a package stores.
 
 ### The model says so, the reader does not guess
 
-Which of the two a package holds comes from its manifest:
+Whether a package holds its matrices quantized comes from its manifest:
 
 ```yaml
 config:
-  sdxl:
-    weight_format: fp8      # "float" when absent, which is every package so far
+  krea2:
+    weight_format: fp8_tensor_scale   # "float" when absent
 ```
 
-`Linear` builds the quantized multiply under `WeightFormat::Fp8` and the ordinary one otherwise.
-A graph could instead go looking for the scales and decide from what it found, and deliberately
-does not: then what a model *is* would depend on what a reader happened to see, two packages with
-the same configuration could compile to different passes, and a package that lost half its scales
-would quietly build a mixture instead of failing. Configuration is where a package says what is in
-it; the tensors are what it says it with.
+`Linear` builds the quantized multiply under `WeightFormat::Fp8TensorScale` and the ordinary one
+otherwise. A graph could instead go looking for the scales and decide from what it found, and
+deliberately does not: then what a model *is* would depend on what a reader happened to see, two
+packages with the same configuration could compile to different passes, and a package that lost
+half its scales would quietly build a mixture instead of failing. Configuration is where a package
+says what is in it; the tensors are what it says it with.
+
+`weight_format: fp8` was the format with one scale per row. It is no longer a name a manifest may
+use, and a package that still has a scale per row beside its weights is refused when it is read,
+with a message that says to export it again.
 
 The autoencoders do not read this. An autoencoder is convolutions, its few projections are small,
 and SDXL runs that half in float32 where the CUDA FP8 multiply takes float16 -- so the format a
@@ -119,48 +117,30 @@ package names is for the halves that have the matrices in them.
 
 ### Writing one
 
-`tools/model_writer.py` has `WeightsWriter.write_fp8_tensor`, which quantizes and writes the pair,
-and `Quantization.quantize_to_fp8`, which is the same arithmetic the runtime's own quantizer does.
-It has to be the same: a package written there is read by this, and this is one format rather than
-two only if every producer agrees on the bytes. Three details in it are load bearing -- the
-rounding of the division above is one -- and the docstring says which.
+`tools/model_writer.py` has `WeightsWriter.write_fp8_tensor_scale`, which quantizes and writes the
+pair, and `Quantization.quantize_to_fp8_tensor_scale`, which is the arithmetic:
 
-`tools/krea2_exporter.py` and `tools/qwen_image_exporter.py` (which shares its `Converter`) no
-longer write this one for `-fp8`; see "One scale for the whole tensor" below for the format they
-write instead. `write_fp8_tensor` and `quantize_to_fp8` remain only so that a package already published
-with one scale per row can still be read and re-created; new exports write one scale per tensor
-(see CLAUDE.md).
-
-## One scale for the whole tensor
-
-`WeightFormat::Fp8TensorScale` is everything above with one difference: `"…weight.scale"` is a
-single `<float>`, not one per row, and the graph reads it that way -- `Linear::graph` loads it at
-shape `[1]` rather than `[out_dim]` and builds `fp8_matmul_tensor_scale` in place of `fp8_matmul`.
-Same elements, same pairing, same suffix; only the scale's shape and which multiply reads it change.
-
-```rust
-let y = F::fp8_matmul_tensor_scale(&x, w.data(), &tensor_scale)?;   // tensor_scale is <float>[1]
+```
+scale      = amax(|x|) / 448      // 448 is E4M3's largest finite magnitude
+data[i][j] = e4m3(x[i][j] / scale)
 ```
 
-`flint::gemmFp8TensorScale` is the CUDA side of it (`flint/cuda/gemm_fp8_cutlass.h`,
-`fl_fp8_matmul_tensor_scale` in the C interface): the same CUTLASS 2.x mixed-input mainloop as
-`gemmFp8`, with `VisitorScalarBroadcast` in the epilogue where `gemmFp8` has
-`VisitorRowBroadcast` -- a value read once and broadcast over the whole tile rather than a row
-vector. `check_fp8_pairs` accepts `<float>[rows]` or `<float>[1]` beside an E4M3 tensor for this
-reason: which shape a package actually means is the manifest's `weight_format`, read once the graph
-is built, not something the file-level check is in a position to enforce ahead of that.
+so the largest element lands exactly on the top of the format's range. An all zero weight gets a
+zero scale and quantizes to zeros rather than to NaN. The docstring says which details of it are
+load bearing. `tools/krea2_exporter.py` and `tools/qwen_image_exporter.py` call it for `-fp8`.
 
-`Quantization.quantize_to_fp8_tensor_scale` in `tools/model_writer.py` is the same arithmetic as
-`quantize_to_fp8`, over the whole matrix instead of one row: `scale = amax(|x|) / 448` taken across
-every element, not per row. `WeightsWriter.write_fp8_tensor_scale` writes the pair; a manifest that
-wants this format says `weight_format: fp8_tensor_scale`.
+## Why one scale for the whole weight
 
-What one scale buys over one per row: a smaller pair -- `<float>[1]` against `<float>[out_dim]` --
-and nothing else; the E4M3 elements are the same size either way. What it costs is precision on a
-weight whose rows vary widely in magnitude, since the whole tensor's largest element sets the scale
-every row is divided by: a row far below that magnitude lands in E4M3's coarser codes near zero,
-where the per-row format would have scaled it onto the format's full range on its own. Which is
-worth it for a given weight is the exporter's call, the same way choosing FP8 at all is.
+One scale per row would be more accurate. A projection's output channels do not share a magnitude,
+and with one scale for all of them the largest sets the scale every row is divided by: a row far
+below it lands in E4M3's coarser codes near zero, where a scale of its own would have put it on the
+format's full range. Which is worth it for a given weight is the exporter's call, the same way
+choosing FP8 at all is.
+
+What one scale buys is one format. A checkpoint quantized elsewhere usually arrives this way -- E4M3
+codes and a single `weight_scale` -- and is multiplied as stored, and every package here is now
+written the same way. The per-row format, the runtime quantizer that produced it and the kernels
+that read it were removed rather than kept beside it.
 
 ## Why the activation is not narrowed
 
@@ -186,46 +166,13 @@ It is the same story on a processor with the ceiling lower, which is worth knowi
 one: x64 and aarch64 have no FP8 arithmetic at all, so the weight would be widened to float32
 between memory and the micro-kernel and the multiply would be the float32 one it was anyway.
 
-## The quantizer
-
-One CUDA block owns one row, which makes the scale a block reduction rather than a second launch:
-a row's maximum is known before the same block quantizes it. The row is read twice, once for the
-maximum and once for the elements, which is the cost of keeping it in one launch -- and a weight
-is quantized once at load, so it is not a cost anything pays twice.
-
-```
-channelScale[r] = rowAmax[r] / 448      // 448 is E4M3's largest finite magnitude
-data[r][j]      = e4m3(x[r][j] / channelScale[r])
-```
-
-so the largest element of each row lands exactly on the top of the format's range. A row that is
-all zero gets a zero scale and quantizes to zeros rather than to a NaN.
-
-### The division is round to nearest, on purpose
-
-`gemm_fp8_cutlass.cu` is compiled with `--use_fast_math`, which turns `448.0f / amax` into a
-reciprocal approximation. One ulp off is enough to move an element onto the next code -- it moved
-two in 16896 -- so those divisions are `__fdiv_rn`.
-
-It matters beyond this kernel. Anything else that produces these bytes has to produce the same
-ones, or a weight is not one format but two: an exporter that writes a package (see "In a package"
-above) is doing this arithmetic in float32 on a processor, and a quantizer written for a processor
-here would be doing it again. A reciprocal approximation in any of them would disagree with the
-others in a few elements per ten thousand, which is exactly the kind of difference nothing but an
-exact comparison finds.
-
-One scale per row rather than one per tensor, because a projection's output channels do not share
-a magnitude: with a single scale, one outlier channel pushes every other channel down into E4M3's
-subnormals. It is also the coarsest scaling the multiply can undo for free -- a scale constant
-down a column of the result is a multiply in the epilogue, where a finer one would have to be
-applied inside the mainloop.
-
 ## The epilogue, on the GPU
 
-`D = accumulator * channelScale[n]`, as a CUTLASS 2.x EVT tree: `VisitorAccFetch` and a
-`VisitorRowBroadcast` over the scale, multiplied by `VisitorCompute<cutlass::multiplies>` and
-written by `VisitorAuxStore`. The scale is a row vector -- stride zero on m, one on n -- so it
-costs no pass of its own and no second buffer.
+`D = accumulator * scale`, as a CUTLASS 2.x EVT tree: `VisitorAccFetch` and a
+`VisitorScalarBroadcast` over the scale, multiplied by `VisitorCompute<cutlass::multiplies>` and
+written by `VisitorAuxStore`. The scale is read through a pointer as the epilogue starts, so a scale
+that lives on the device never has to come back to the host to be launched with, and it costs no
+pass of its own.
 
 The one thing it costs: `GemmWithEpilogueVisitor::Params` asserts against a split K, so unlike the
 half GEMM beside it (`gemm_cutlass.cu`, where `splitKSlices` decides per call) this kernel cannot
@@ -307,28 +254,15 @@ the 32 MB L2, and the benchmark runs one shape twenty times over, so cuBLAS's 10
 because at 48 CTAs of two warps each the kernel is latency bound rather than bandwidth bound and
 never gets far enough ahead to live in L2. See the gaps below.
 
-The prologue costs what a full pass over the weight costs: 380 us for a 16384 by 3072 weight
-(100 MB read, 50 MB written), 22 us for 3072 by 3072. It is paid once, at load.
+These were measured with one scale per row. The mainloop and the tiles are the same now, and the
+epilogue reads one scale where it read a row of them, so it costs no more than it did.
 
 ### Accuracy
 
-Relative RMSE, `sqrt(sum((x - ref)^2) / sum(ref^2))`, of the FP8 path against the FP16 GEMM, which
-is the thing it replaces. `weight` is the quantized weight against the one it was made from, and
-`gemm` is the whole multiply.
-
-| shape (m,n,k) | weight | gemm |
-| --- | --- | --- |
-| 512x5120x3072 | 2.647e-02 | 2.649e-02 |
-| 512x3072x8192 | 2.647e-02 | 2.645e-02 |
-| 1x5120x3072 | 2.647e-02 | 2.647e-02 |
-| 1024x10240x1280 | 2.644e-02 | 2.644e-02 |
-
-The two columns agree to three figures, which is the result worth having: the GEMM adds nothing of
-its own to the format's error. Three mantissa bits is a step of one sixteenth at the top of a
-binade, and 2.6e-2 is what rounding normally distributed data to that costs.
-
-For scale: the FP16 GEMM's own error against an FP32 one is 3.6e-4, so this is about seventy times
-less accurate than FP16.
+What one scale costs depends on the weight: rounding to three mantissa bits is a step of one
+sixteenth at the top of a binade, and a row well below the weight's largest is further down the
+format than that. The multiply adds nothing of its own to the format's error. What it comes to for
+a whole model is in that model's document -- `docs/krea2.md` and `docs/qwen_image.md`.
 
 ## Known gaps
 
@@ -340,30 +274,20 @@ less accurate than FP16.
 - **No split K.** The SM80 EVT epilogue asserts against it, so a shape with too few n tiles to
   fill the machine has nothing to fall back on. `gemm_cutlass.cu`'s `splitKSlices` is what the
   half path does instead, and it is worth 25% to 55% on the shapes it fires for.
-- **No model is published quantized.** A package *can* store E4M3 now -- see "In a package" above,
-  which is read, checked and built into the pass -- and none of the models this library ships does.
-  Until one does, every weight here is still quantized at load if it is quantized at all, so the
-  file and the load time are what they always were and the saving starts once the weight is on the
-  device.
-- **The quantizer reads each row twice.** One pass would need either a second launch or a scale
-  chosen before the data is seen. At 380 us for a 50 MB weight it is a load-time cost only.
-- **Nothing is built out of it yet.** The diffusion model this crate runs is float16 throughout,
-  and at its row counts -- 1024 and 4096 -- this path is 5% behind cuBLAS rather than ahead. What
-  it is for is a weight read once per token, which is the language model shape.
-- **The card is the only device with the kernels**, so a package written with a quantized weight
-  loads nowhere else: `resident` will put the bytes on a processor perfectly well and the multiply
-  is what refuses them. See "What a processor would need" below.
+- **The processor has no kernels**, so a package written with a quantized weight runs on CUDA and
+  Metal only: `resident` will put the bytes on a processor perfectly well and the multiply is what
+  refuses them. See "What a processor would need" below.
 - **No CI runner exercises the multiply.** What CI can check is the half that needs no kernel --
-  that the file reader takes `F8_E4M3`, that it refuses elements with no scales beside them, and
+  that the file reader takes `F8_E4M3`, that it refuses elements with no scale beside them, and
   that a quantized projection is built out of two loads -- and it does. Everything past that is
   `#[ignore]`d for want of a card. This used to be covered on both halves and is the coverage the
   CPU path took with it.
 - `n` must be a multiple of 8, which is how wide the epilogue writes, and `k` a multiple of 16,
   which is how wide the mainloop reads the weight. The row count is free. Unlike the half GEMM,
   which picks its alignment per call from the operands it is handed, this one is instantiated at
-  one alignment and refuses anything narrower by name -- the weight comes from our own quantizer,
-  which already insists on a `k` that 16 divides. `can_implement` is asked before every launch
-  regardless, since CUTLASS's `initialize` returns success on strides the kernel cannot read.
+  one alignment and refuses anything narrower by name -- an exporter leaves a matrix whose `k` 16
+  does not divide in float. `can_implement` is asked before every launch regardless, since
+  CUTLASS's `initialize` returns success on strides the kernel cannot read.
 
 ## What a processor would need
 
@@ -375,10 +299,10 @@ The place for it already exists. `Gemm` in `cpu/kernel/gemm.h` takes the type B 
 separately from the type the micro-kernel computes in and converts in `Pack()` -- which is how
 `gemmHalfWeightFloat`, the float-activation-by-half-weight path a model on the CPU runs today,
 already works. An E4M3 weight is that arrangement with a narrower B, so the GEMM itself is `wgemm`
-instantiated at `TB = Fp8E4M3` and the micro-kernel never learns the format exists. The channel
-scale goes afterwards as a pass over C: on the GPU it is folded into the epilogue because the
-epilogue is free there, but `M*N` against the multiply's `M*N*K` does not justify touching the
-kernel here.
+instantiated at `TB = Fp8E4M3` and the micro-kernel never learns the format exists. The scale
+goes afterwards as a pass over C: on the GPU it is folded into the epilogue because the epilogue
+is free there, but `M*N` against the multiply's `M*N*K` does not justify touching the kernel
+here.
 
 Three kernels beyond that were each worth a measured factor, and are the reason it is not a
 weekend's work to redo:

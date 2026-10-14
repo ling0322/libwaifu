@@ -383,29 +383,9 @@ FLAPI int32_t fl_matmul(
 /// newer. Every other device is reported as zero rather than as an error.
 FLAPI int32_t fl_fp8_available(fl_device_type_t device, int32_t *out);
 
-/// Quantize `x` <float16>(rows, k) to E4M3 with one scale per row, writing the codes into `data`
-/// <fp8e4m3>(rows, k) and the scales into `channel_scale` <float>(rows). k a multiple of 16.
-FLAPI int32_t fl_fp8_quantize(
-    fl_tensor_view_t x,
-    fl_tensor_view_t data,
-    fl_tensor_view_t channel_scale);
-
-/// The inverse of fl_fp8_quantize(), into `out` <float16>(rows, k).
-FLAPI int32_t fl_fp8_dequantize(
-    fl_tensor_view_t data,
-    fl_tensor_view_t channel_scale,
-    fl_tensor_view_t out);
-
-/// `a` <float16>(..., k) times the transpose of the FP8 weight `data` (rows, k) with one scale per
-/// row, into `out` <float16>(..., rows). rows a multiple of 8, k of 16.
+/// `a` <float16>(..., k) times the transpose of the FP8 weight `data` <fp8e4m3>(rows, k) and its
+/// one <float> `scale`, into `out` <float16>(..., rows). On CUDA rows a multiple of 8, k of 16.
 FLAPI int32_t fl_fp8_matmul(
-    fl_tensor_view_t a,
-    fl_tensor_view_t data,
-    fl_tensor_view_t channel_scale,
-    fl_tensor_view_t out);
-
-/// fl_fp8_matmul() for a weight with one <float> scale for the whole tensor.
-FLAPI int32_t fl_fp8_matmul_tensor_scale(
     fl_tensor_view_t a,
     fl_tensor_view_t data,
     fl_tensor_view_t scale,

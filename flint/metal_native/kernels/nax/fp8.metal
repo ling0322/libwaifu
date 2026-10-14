@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 // The half activation times an E4M3 weight on the neural accelerators, as kernels/fp8.metal has it:
-// C (M, N) = A (M, K) W^T, W (N, K) with a scale a row or one for all of it. The activation is
+// C (M, N) = A (M, K) W^T, W (N, K) with one scale for all of it. The activation is
 // read where it is. The weight is read kTileK columns at a time, widened to half -- exactly -- into
 // threadgroup memory, a row of W to a row of the tile, and the next chunk read into registers
 // while matmul2d works on this one. The sum is in float, and the scale is applied on the way out.
@@ -37,7 +37,6 @@ struct Fp8MatmulParams {
   uint M;
   uint N;
   uint K;
-  uint perRow;
   uint vecA;
   uint vecB;  // the weight's rows start on a multiple of four bytes
 };
@@ -152,6 +151,6 @@ kernel void nax_fp8_matmul(
     uint n = n0 + uint(at[0]);
     uint m = m0 + uint(at[1]);
     if (m >= p.M || n >= p.N) continue;
-    c[m * p.N + n] = half(sum[i] * scale[p.perRow ? n : 0]);
+    c[m * p.N + n] = half(sum[i] * scale[0]);
   }
 }

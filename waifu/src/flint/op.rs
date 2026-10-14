@@ -417,8 +417,8 @@ pub enum Op {
         rhs: Value,
     },
     /// `lhs` times the transpose of a weight held in FP8, which is two values rather than one:
-    /// `weight` is `<fp8e4m3>(rows, k)` and `channel_scale` is `<float>(rows)`, row `r` of the
-    /// weight meaning `weight[r] * channel_scale[r]`.
+    /// `weight` is `<fp8e4m3>(rows, k)` and `scale` a single `<float>`, the weight meaning
+    /// `weight * scale`.
     ///
     /// Two operands and not one composite, because two is what the package holds and two is what
     /// the operator takes. The gain is that a scale is then an ordinary weight under an ordinary
@@ -430,15 +430,6 @@ pub enum Op {
     /// No transpose comes before this the way one comes before a [`Matmul`](Op::Matmul): this
     /// reads the weight in the `(out, in)` a package stores it in.
     Fp8Matmul {
-        lhs: Value,
-        weight: Value,
-        channel_scale: Value,
-    },
-    /// [`Fp8Matmul`](Op::Fp8Matmul) with one scale for the whole weight: `weight` is
-    /// `<fp8e4m3>(rows, k)` and `scale` a single `<float>`, the weight meaning `weight * scale`.
-    /// A separate operand for the same reason the channel scale is one: it is an ordinary weight
-    /// reached by an ordinary [`Op::Load`].
-    Fp8MatmulTensorScale {
         lhs: Value,
         weight: Value,
         scale: Value,
@@ -593,7 +584,6 @@ impl Op {
             Op::GroupNorm { .. } => "group_norm",
             Op::Matmul { .. } => "matmul",
             Op::Fp8Matmul { .. } => "fp8_matmul",
-            Op::Fp8MatmulTensorScale { .. } => "fp8_matmul_tensor_scale",
             Op::Lookup { .. } => "lookup",
             Op::Conv2d { .. } => "conv2d",
             Op::Conv1d { .. } => "conv1d",
@@ -680,12 +670,7 @@ impl Op {
                 vec![*lhs, *rhs]
             }
             Op::Lookup { table, indices } => vec![*table, *indices],
-            Op::Fp8Matmul {
-                lhs,
-                weight,
-                channel_scale,
-            } => vec![*lhs, *weight, *channel_scale],
-            Op::Fp8MatmulTensorScale { lhs, weight, scale } => vec![*lhs, *weight, *scale],
+            Op::Fp8Matmul { lhs, weight, scale } => vec![*lhs, *weight, *scale],
             Op::RmsNorm { input, weight, .. } => vec![*input, *weight],
 
             Op::LayerNorm {
@@ -896,7 +881,6 @@ impl fmt::Display for Op {
             | Op::Binary { .. }
             | Op::Matmul { .. }
             | Op::Fp8Matmul { .. }
-            | Op::Fp8MatmulTensorScale { .. }
             | Op::Lookup { .. }
             | Op::Contiguous { .. } => (),
         }

@@ -587,23 +587,21 @@ void checkFp8Matmul() {
   struct Case {
     std::vector<int> shapeA;  // (..., k)
     int rows;
-    bool perRow;
   };
   std::vector<Case> cases = {
-      {{37, 48}, 72, true},       // nothing a whole tile, nothing four wide
-      {{37, 50}, 72, true},       // k not a multiple of four: one element at a time
-      {{128, 256}, 128, true},    // whole tiles, read four at a time
-      {{2, 5, 64}, 96, false},    // a batch, and one scale for all of the weight
-      {{1, 3072}, 3072, true},    // one row of a long product, as a single token has it
+      {{37, 48}, 72},       // nothing a whole tile, nothing four wide
+      {{37, 50}, 72},       // k not a multiple of four: one element at a time
+      {{128, 256}, 128},    // whole tiles, read four at a time
+      {{2, 5, 64}, 96},     // a batch
+      {{1, 3072}, 3072},    // one row of a long product, as a single token has it
   };
 
   std::mt19937 rng(7);
   for (const Case &c : cases) {
     int k = c.shapeA.back();
-    CATCH_INFO("a has " << c.shapeA.size() << " dimensions, k = " << k << ", rows = " << c.rows
-                        << ", per row = " << c.perRow);
+    CATCH_INFO("a has " << c.shapeA.size() << " dimensions, k = " << k << ", rows = " << c.rows);
 
-    // Codes from all of E4M3 but its NaNs, and scales a weight's would be.
+    // Codes from all of E4M3 but its NaNs, and a scale a weight's would be.
     Tensor codes = F::empty(Device::getCpu(), {c.rows, k}, DType::kFp8E4M3);
     Fp8E4M3 *code = codes.getInternalData()->getData<Fp8E4M3>(0);
     std::vector<float> weight(static_cast<size_t>(c.rows) * k);
@@ -613,10 +611,8 @@ void checkFp8Matmul() {
       code[i].v = x;
       weight[i] = decodeE4M3(x);
     }
-    int numScales = c.perRow ? c.rows : 1;
-    Tensor scales = F::empty(Device::getCpu(), {numScales}, DType::kFloat);
-    float *scale = scales.getInternalData()->getData<float>(0);
-    for (int i = 0; i < numScales; ++i) scale[i] = 0.001f * (1 + static_cast<int>(rng() % 100));
+    float scale = 0.001f * (1 + static_cast<int>(rng() % 100));
+    Tensor scales = Tensor::create<float>({1}, {scale});
 
     // The activation in half, from [-2, 2), and the product the long way, in float.
     Tensor uniform = F::rand(Device::getCpu(), c.shapeA, DType::kFloat);
@@ -628,7 +624,7 @@ void checkFp8Matmul() {
       for (int j = 0; j < c.rows; ++j) {
         double sum = 0;
         for (int l = 0; l < k; ++l) sum += double(activation[i * k + l]) * weight[j * k + l];
-        reference[i * c.rows + j] = static_cast<float>(sum * scale[c.perRow ? j : 0]);
+        reference[i * c.rows + j] = static_cast<float>(sum * scale);
       }
     }
 
@@ -639,7 +635,6 @@ void checkFp8Matmul() {
         a,
         F::toDevice(mtl(), codes, Device::getMetal()),
         F::toDevice(mtl(), scales, Device::getMetal()),
-        c.perRow,
         out);
     std::vector<float> got = values(out);
 
@@ -940,12 +935,12 @@ CATCH_TEST_CASE("benchmark Metal fp8 matmul", "[.][metal-benchmark]") {
       code[i].v = (x & 0x7f) == 0x7f ? 0x3c : x;
     }
     Tensor weight = F::toDevice(mtl(), codes, Device::getMetal());
-    Tensor scales = F::empty(Device::getMetal(), {c.rows}, DType::kFloat);
+    Tensor scales = F::empty(Device::getMetal(), {1}, DType::kFloat);
     mtl()->fill(scales, 0.01f);
     Tensor a = toMetal(F::rand(Device::getCpu(), {c.m, c.k}, DType::kFloat), DType::kFloat16);
     Tensor out = F::empty(Device::getMetal(), {c.m, c.rows}, DType::kFloat16);
 
-    auto run = [&]() { op::metal_native::fp8Matmul(a, weight, scales, true, out); };
+    auto run = [&]() { op::metal_native::fp8Matmul(a, weight, scales, out); };
     double flops = 2.0 * c.m * c.k * c.rows;
     double withNax = time(run);
     double without;

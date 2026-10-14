@@ -20,15 +20,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include <algorithm>
 #include <cmath>
+#include <random>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/error.h"
 #include "lutil/span.h"
 #include "flint/test_functional.h"
-#include "flint/cuda/fp8.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -57,7 +56,7 @@ Tensor toCpuFloat(const Tensor &a) {
 }
 
 /// allClose compares magnitudes, and a NaN is not larger than anything, so it slips through the
-/// maximum. An all zero row is exactly the case that would produce one.
+/// maximum. A scale of zero is exactly the case that would produce one.
 bool allFinite(const Tensor &x) {
   Tensor a = toCpuFloat(x);
   const float *data = a.getInternalData()->getData<float>(a.getInternalOffset());
@@ -68,7 +67,7 @@ bool allFinite(const Tensor &x) {
 }
 
 /// allClose measures the largest difference against the mean magnitude, which says nothing useful
-/// when one row of the result is thousands of times larger than the rest. This weighs every
+/// when one element of the result is thousands of times larger than the rest. This weighs every
 /// element by its own size instead.
 double relativeRmse(const Tensor &x, const Tensor &reference) {
   Tensor a = toCpuFloat(x);
@@ -87,43 +86,48 @@ double relativeRmse(const Tensor &x, const Tensor &reference) {
   return std::sqrt(squaredError / squaredReference);
 }
 
-/// Thirty-two magnitudes E4M3 holds exactly, the largest of them 448. A row of these has a scale
-/// of exactly one, so quantizing it is a round trip rather than an approximation, and anything
-/// the quantizer gets wrong -- the scale arithmetic, the element order, the byte packing -- turns
-/// it into a wrong answer rather than into slightly more error.
-std::vector<float> exactE4m3Row(float rowScale) {
-  const float codes[32] = {0.0f,    448.0f,  -448.0f, 1.0f,   -1.0f,  1.5f,   2.0f,   3.0f,
-                           4.0f,    6.0f,    8.0f,    12.0f,  16.0f,  24.0f,  32.0f,  48.0f,
-                           64.0f,   96.0f,   128.0f,  192.0f, 256.0f, 384.0f, 416.0f, 320.0f,
-                           -256.0f, -0.5f,   0.5f,    0.25f,  0.125f, -96.0f, 224.0f, -3.0f};
-
-  std::vector<float> row;
-  for (float code : codes) {
-    row.push_back(code * rowScale);
-  }
-  return row;
+/// The value an E4M3 code stands for, worked out here rather than by anything the kernel shares.
+float decodeE4M3(uint8_t code) {
+  int sign = code >> 7;
+  int exponent = (code >> 3) & 0xf;
+  int mantissa = code & 0x7;
+  float magnitude = exponent == 0 ? ldexpf(static_cast<float>(mantissa), -9)
+                                  : ldexpf(1.0f + mantissa / 8.0f, exponent - 7);
+  return sign ? -magnitude : magnitude;
 }
 
-/// What quantizing a weight gives: the E4M3 codes and one scale per row.
+/// A weight's E4M3 codes on the card, and what they stand for on the host.
 struct Fp8Weight {
-  Tensor data;
-  Tensor channelScale;
+  Tensor codes;
+  Tensor values;  // <float>(n, k) on the CPU, unscaled
 };
 
-Fp8Weight quantize(const Tensor &x) {
-  int rows = x.getShape(0);
-  int k = x.getShape(1);
-  Fp8Weight weight{
-      F::empty(Device::getCuda(), {rows, k}, DType::kFp8E4M3),
-      F::empty(Device::getCuda(), {rows}, DType::kFloat)};
-  op::cuda::quantizeFp8(x, weight.data, weight.channelScale);
-  return weight;
+Fp8Weight makeWeight(int n, int k, const std::vector<uint8_t> &bytes) {
+  Tensor codes = F::empty(Device::getCpu(), {n, k}, DType::kFp8E4M3);
+  Tensor values = F::empty(Device::getCpu(), {n, k}, DType::kFloat);
+  Fp8E4M3 *code = codes.getInternalData()->getData<Fp8E4M3>(0);
+  float *value = values.getInternalData()->getData<float>(0);
+  for (size_t i = 0; i < bytes.size(); ++i) {
+    code[i].v = bytes[i];
+    value[i] = decodeE4M3(bytes[i]);
+  }
+  return {F::toDevice(cudaOps(), codes, Device::getCuda()), values};
 }
 
-Tensor dequantize(const Fp8Weight &weight) {
-  Tensor out = F::empty(Device::getCuda(), weight.data.getShape(), DType::kFloat16);
-  op::cuda::dequantFp8ToHalf(weight.data, weight.channelScale, out);
-  return out;
+/// Codes from all of E4M3 but its two NaNs, which a package never holds.
+Fp8Weight randomWeight(int n, int k) {
+  static std::mt19937 rng(7);
+  std::vector<uint8_t> bytes(static_cast<size_t>(n) * k);
+  for (uint8_t &x : bytes) {
+    x = static_cast<uint8_t>(rng() % 256);
+    if ((x & 0x7f) == 0x7f) x = 0x3c;
+  }
+  return makeWeight(n, k, bytes);
+}
+
+/// <float>(1) on the device.
+Tensor cudaScale(float value) {
+  return F::toDevice(cudaOps(), Tensor::create<float>({1}, {value}), Device::getCuda());
 }
 
 /// What `A` (..., k) times a weight of `rows` rows is written into.
@@ -133,16 +137,15 @@ Tensor gemmResult(const Tensor &A, int rows) {
   return F::empty(Device::getCuda(), shape, DType::kFloat16);
 }
 
-Tensor gemm(const Tensor &A, const Fp8Weight &weight) {
-  Tensor D = gemmResult(A, weight.data.getShape(0));
-  op::cuda::gemmFp8(A, weight.data, weight.channelScale, D);
+Tensor gemm(const Tensor &A, const Fp8Weight &weight, const Tensor &scale) {
+  Tensor D = gemmResult(A, weight.codes.getShape(0));
+  op::cuda::gemmFp8(A, weight.codes, scale, D);
   return D;
 }
 
-Tensor gemmTensorScale(const Tensor &A, const Tensor &codes, const Tensor &scale) {
-  Tensor D = gemmResult(A, codes.getShape(0));
-  op::cuda::gemmFp8TensorScale(A, codes, scale, D);
-  return D;
+/// The weight as a half GEMM sees it: the codes' values times the scale, transposed.
+Tensor dequantized(const Fp8Weight &weight, float scale) {
+  return toCudaHalf(F::mul(cpuOps(), weight.values, scale)).transpose(0, 1);
 }
 
 bool skipUnavailable() {
@@ -150,146 +153,32 @@ bool skipUnavailable() {
   return !op::cuda::isFp8GemmAvailable();
 }
 
-/// The reference dequantizes the weight and multiplies in half, so the quantization error sits on
-/// the weight in both and what is compared is the mainloop and the epilogue.
-bool gemmMatchesReference(const Tensor &a, const Tensor &w) {
-  Tensor ha = toCudaHalf(a);
-  Fp8Weight qw = quantize(toCudaHalf(w));
+// Not a power of two, so a scale that went missing or was applied twice cannot come out right.
+constexpr float kScale = 0.0137f;
 
-  Tensor expected = F::matmul(cudaOps(), ha, dequantize(qw).transpose(0, 1));
-  Tensor actual = gemm(ha, qw);
+/// The reference multiplies in half by the weight the codes stand for, so what is compared is the
+/// mainloop and the epilogue.
+bool gemmMatchesReference(int m, int n, int k) {
+  Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {m, k}));
+  Fp8Weight w = randomWeight(n, k);
 
-  if (actual.getShape() != std::vector<int>{a.getShape(0), w.getShape(0)}) return false;
+  Tensor expected = F::matmul(cudaOps(), a, dequantized(w, kScale));
+  Tensor actual = gemm(a, w, cudaScale(kScale));
+
+  if (actual.getShape() != std::vector<int>{m, n}) return false;
   if (!allFinite(actual)) return false;
 
   return relativeRmse(actual, expected) < 5e-3;
 }
 
-/// <float>(n) on the device, every element `value`: a channel scale that says the same thing a
-/// tensor scale of `value` does.
-Tensor cudaFilled(int n, float value) {
-  std::vector<float> data(n, value);
-  return F::toDevice(cudaOps(), Tensor::create<float>({n}, lut::makeConstSpan(data)), Device::getCuda());
-}
-
-/// The E4M3 codes of a random (n, k) weight, which is all gemmFp8TensorScale reads of it. Their
-/// own per channel scales are thrown away: the scale the tests multiply by is theirs to choose.
-Tensor randomFp8Codes(int n, int k) {
-  return quantize(toCudaHalf(F::randNormal(Device::getCpu(), {n, k}))).data;
-}
-
 }  // namespace
-
-CATCH_TEST_CASE("test fp8 quantizer round trip", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  // Four rows, each a different power of two away from the next, so the per channel scale is the
-  // only thing that can tell them apart.
-  std::vector<float> data;
-  for (float rowScale : {1.0f, 8.0f, 0.03125f, 64.0f}) {
-    std::vector<float> row = exactE4m3Row(rowScale);
-    data.insert(data.end(), row.begin(), row.end());
-  }
-  Tensor w = Tensor::create<float>({4, 32}, lut::makeConstSpan(data));
-
-  Fp8Weight q = quantize(toCudaHalf(w));
-  CATCH_REQUIRE(q.data.getShape() == std::vector<int>{4, 32});
-  CATCH_REQUIRE(q.data.getDType() == DType::kFp8E4M3);
-  CATCH_REQUIRE(q.channelScale.getShape() == std::vector<int>{4});
-
-  // rowAmax / 448, and every row's amax is 448 times the row's own scale.
-  Tensor scale = Tensor::create<float>({4}, {1.0f, 8.0f, 0.03125f, 64.0f});
-  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(q.channelScale), scale, 1e-6f, 1e-6f));
-
-  Tensor x = dequantize(q);
-  CATCH_REQUIRE(x.getShape() == std::vector<int>{4, 32});
-  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
-}
-
-CATCH_TEST_CASE("test fp8 quantizer shapes", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  struct Case {
-    int rows;
-    int k;
-  };
-  // k of 16 is the shortest row the quantizer takes, and 3072 is longer than one block of threads
-  // reaches in a single step.
-  std::vector<Case> cases = {{1, 16}, {7, 32}, {128, 64}, {130, 96}, {3, 3072}};
-
-  for (const Case &c : cases) {
-    CATCH_INFO("rows = " << c.rows << ", k = " << c.k);
-    Tensor w = F::randNormal(Device::getCpu(), {c.rows, c.k});
-    Fp8Weight q = quantize(toCudaHalf(w));
-
-    CATCH_REQUIRE(q.data.getShape() == std::vector<int>{c.rows, c.k});
-    CATCH_REQUIRE(q.channelScale.getShape() == std::vector<int>{c.rows});
-
-    Tensor x = dequantize(q);
-    CATCH_REQUIRE(x.getShape() == std::vector<int>{c.rows, c.k});
-    CATCH_REQUIRE(allFinite(x));
-
-    // Three mantissa bits is a step of 1/16 at the top of a binade, so half of that is the worst
-    // a rounded element can be off by relative to the row's largest.
-    CATCH_REQUIRE(relativeRmse(x, toCudaHalf(w)) < 4e-2);
-  }
-}
-
-CATCH_TEST_CASE("test fp8 quantizer zero row", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  // A row with nothing in it drives its own scale to zero, and the scale is a divisor on the way
-  // in. This is the case that turns into NaN if the guard is missing.
-  std::vector<float> data(2 * 32, 0.0f);
-  for (int i = 32; i < 64; ++i) data[i] = 1.0f;
-
-  Tensor w = Tensor::create<float>({2, 32}, lut::makeConstSpan(data));
-  Fp8Weight q = quantize(toCudaHalf(w));
-
-  Tensor x = dequantize(q);
-  CATCH_REQUIRE(allFinite(x));
-  CATCH_REQUIRE(cpuOps()->allClose(toCpuFloat(x), w, 1e-6f, 1e-6f));
-
-  // And a GEMM against it comes back as zeros rather than as NaN.
-  Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {8, 32}));
-  Fp8Weight qZero = quantize(toCudaHalf(F::zeros(Device::getCpu(), {8, 32}, DType::kFloat)));
-  Tensor out = gemm(a, qZero);
-  CATCH_REQUIRE(allFinite(out));
-  CATCH_REQUIRE(
-      cpuOps()->allClose(toCpuFloat(out), F::zeros(Device::getCpu(), {8, 8}, DType::kFloat), 1e-6f, 1e-6f));
-}
-
-CATCH_TEST_CASE("test fp8 quantizer dynamic range", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  // One channel thousands of times larger than the rest is the case a per tensor scale cannot
-  // hold: with one scale for everything the small channels would quantize to zero. Each row gets
-  // its own, so each row keeps its own signal.
-  std::vector<float> data(4 * 64);
-  for (int r = 0; r < 4; ++r) {
-    float rowScale = r == 0 ? 4096.0f : 1.0e-3f;
-    for (int i = 0; i < 64; ++i) {
-      data[r * 64 + i] = rowScale * ((i % 5) - 2) / 2.0f;
-    }
-  }
-
-  Tensor w = Tensor::create<float>({4, 64}, lut::makeConstSpan(data));
-  Fp8Weight q = quantize(toCudaHalf(w));
-  Tensor x = dequantize(q);
-
-  CATCH_REQUIRE(allFinite(x));
-  for (int r = 0; r < 4; ++r) {
-    CATCH_INFO("row = " << r);
-    CATCH_REQUIRE(relativeRmse(x.slice(0, {r, r + 1}), toCudaHalf(w).slice(0, {r, r + 1})) < 4e-2);
-  }
-}
 
 CATCH_TEST_CASE("test gemmFp8 (shapes)", "[fl][op][cuda][cutlass][fp8]") {
   if (skipUnavailable()) CATCH_SKIP("no cuda device available");
 
   auto runCase = [](int m, int n, int k) {
     CATCH_INFO("m = " << m << ", n = " << n << ", k = " << k);
-    return gemmMatchesReference(F::randNormal(Device::getCpu(), {m, k}), F::randNormal(Device::getCpu(), {n, k}));
+    return gemmMatchesReference(m, n, k);
   };
 
   // One whole tile, and the tile shape is 128x128x64.
@@ -319,140 +208,63 @@ CATCH_TEST_CASE("test gemmFp8 (shapes)", "[fl][op][cuda][cutlass][fp8]") {
 CATCH_TEST_CASE("test gemmFp8 (batch axes)", "[fl][op][cuda][cutlass][fp8]") {
   if (skipUnavailable()) CATCH_SKIP("no cuda device available");
 
-  Fp8Weight qw = quantize(toCudaHalf(F::randNormal(Device::getCpu(), {64, 128})));
+  Fp8Weight w = randomWeight(64, 128);
+  Tensor scale = cudaScale(0.5f);
 
   Tensor a3 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 128}));
-  Tensor out3 = gemm(a3, qw);
+  Tensor out3 = gemm(a3, w, scale);
   CATCH_REQUIRE(out3.getShape() == std::vector<int>{2, 3, 64});
   CATCH_REQUIRE(cpuOps()->allClose(
       toCpuFloat(out3.view({-1, 64})),
-      toCpuFloat(gemm(a3.view({-1, 128}), qw)),
+      toCpuFloat(gemm(a3.view({-1, 128}), w, scale)),
       1e-6f,
       1e-6f));
 
   Tensor a4 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 5, 128}));
-  CATCH_REQUIRE(gemm(a4, qw).getShape() == std::vector<int>{2, 3, 5, 64});
+  CATCH_REQUIRE(gemm(a4, w, scale).getShape() == std::vector<int>{2, 3, 5, 64});
 }
 
 CATCH_TEST_CASE("test gemmFp8 (reused weight)", "[fl][op][cuda][cutlass][fp8]") {
   if (skipUnavailable()) CATCH_SKIP("no cuda device available");
 
-  // A weight is quantized once at load and multiplied for the rest of the process, so the operand
-  // has to survive being used again, and by a different row count than the first time.
-  Fp8Weight qw = quantize(toCudaHalf(F::randNormal(Device::getCpu(), {128, 256})));
-  Tensor reference = dequantize(qw).transpose(0, 1);
+  // A weight is read once at load and multiplied for the rest of the process, so the operand has
+  // to survive being used again, and by a different row count than the first time.
+  Fp8Weight w = randomWeight(128, 256);
+  Tensor scale = cudaScale(kScale);
+  Tensor reference = dequantized(w, kScale);
 
   for (int m : {1, 7, 64}) {
     CATCH_INFO("m = " << m);
     Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {m, 256}));
-    CATCH_REQUIRE(relativeRmse(gemm(a, qw), F::matmul(cudaOps(), a, reference)) < 5e-3);
+    CATCH_REQUIRE(relativeRmse(gemm(a, w, scale), F::matmul(cudaOps(), a, reference)) < 5e-3);
   }
 }
 
-CATCH_TEST_CASE("test gemmFp8 (channel scale per column)", "[fl][op][cuda][cutlass][fp8]") {
+CATCH_TEST_CASE("test gemmFp8 (scale applied)", "[fl][op][cuda][cutlass][fp8]") {
   if (skipUnavailable()) CATCH_SKIP("no cuda device available");
 
-  // A weight whose channels differ by four orders of magnitude, against an activation of ones:
-  // each column of the result is then that channel's own row sum, so a scale applied to the wrong
-  // axis -- or to the tile rather than to the channel -- cannot look right by accident.
-  std::vector<float> data(16 * 16);
-  for (int r = 0; r < 16; ++r) {
-    for (int i = 0; i < 16; ++i) {
-      data[r * 16 + i] = std::pow(10.0f, float(r % 5) - 2.0f);
-    }
-  }
-
-  Tensor w = Tensor::create<float>({16, 16}, lut::makeConstSpan(data));
-  Fp8Weight qw = quantize(toCudaHalf(w));
-
-  std::vector<float> ones(4 * 16, 1.0f);
-  Tensor a = toCudaHalf(Tensor::create<float>({4, 16}, lut::makeConstSpan(ones)));
-  Tensor out = gemm(a, qw);
-
-  std::vector<float> expected(4 * 16);
-  for (int m = 0; m < 4; ++m) {
-    for (int r = 0; r < 16; ++r) {
-      expected[m * 16 + r] = 16.0f * std::pow(10.0f, float(r % 5) - 2.0f);
-    }
-  }
-
-  // Element by element rather than through relativeRmse, which weighs by magnitude and so would
-  // not notice the channels four orders of magnitude below the largest being wrong. Each row here
-  // is a constant, so quantizing it is exact -- every element is the row's own maximum -- and the
-  // only error left is the half the result is written in.
-  CATCH_REQUIRE(allFinite(out));
-  Tensor actual = toCpuFloat(out);
-  const float *got = actual.getInternalData()->getData<float>(actual.getInternalOffset());
-  for (int i = 0; i < 4 * 16; ++i) {
-    CATCH_INFO("element " << i << ": " << got[i] << " against " << expected[i]);
-    CATCH_REQUIRE(std::fabs(got[i] - expected[i]) <= std::fabs(expected[i]) * 1e-3f);
-  }
-}
-
-CATCH_TEST_CASE("test gemmFp8TensorScale (shapes)", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  // Not a power of two, so a scale that went missing or was applied twice cannot come out right.
-  constexpr float kScale = 0.0137f;
-  Tensor scale = cudaFilled(1, kScale);
-
-  auto runCase = [&](int m, int n, int k) {
-    CATCH_INFO("m = " << m << ", n = " << n << ", k = " << k);
-    Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {m, k}));
-    Tensor codes = randomFp8Codes(n, k);
-    Fp8Weight uniform{codes, cudaFilled(n, kScale)};
-
-    Tensor actual = gemmTensorScale(a, codes, scale);
-    if (actual.getShape() != std::vector<int>{m, n}) return false;
-    if (!allFinite(actual)) return false;
-
-    // Against a half GEMM on the dequantized weight, as gemmFp8 is checked.
-    Tensor reference = F::matmul(cudaOps(), a, dequantize(uniform).transpose(0, 1));
-    if (relativeRmse(actual, reference) >= 5e-3) return false;
-
-    // And against gemmFp8 with the same scale on every channel, which is the same mainloop and the
-    // same multiply in the epilogue, so it has to be the same bytes.
-    // Element by element, since allClose's comparison is strict and a tolerance of zero fails
-    // even two identical tensors.
-    Tensor x = toCpuFloat(actual);
-    Tensor y = toCpuFloat(gemm(a, uniform));
-    const float *px = x.getInternalData()->getData<float>(x.getInternalOffset());
-    const float *py = y.getInternalData()->getData<float>(y.getInternalOffset());
-    return std::equal(px, px + x.getNumEl(), py);
-  };
-
-  CATCH_REQUIRE(runCase(128, 128, 64));
-  CATCH_REQUIRE(runCase(1, 8, 16));
-  CATCH_REQUIRE(runCase(1, 5120, 3072));
-  CATCH_REQUIRE(runCase(129, 264, 96));
-  CATCH_REQUIRE(runCase(300, 200, 256));
-  // Either side of the row count that picks the other tile.
-  CATCH_REQUIRE(runCase(512, 64, 64));
-  CATCH_REQUIRE(runCase(513, 64, 64));
-}
-
-CATCH_TEST_CASE("test gemmFp8TensorScale (scale applied)", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  // Codes E4M3 holds exactly against an activation of ones, so each column of the result is that
-  // row's code sum times the scale, and the only error left is the half it is written in. Two
-  // scales four orders of magnitude apart over the same codes: an epilogue that ignored the scale
-  // would get at most one of them right.
-  std::vector<float> row = exactE4m3Row(1.0f);
-  std::vector<float> data;
-  for (int r = 0; r < 8; ++r) data.insert(data.end(), row.begin(), row.end());
-  Tensor w = Tensor::create<float>({8, 32}, lut::makeConstSpan(data));
-  Tensor codes = quantize(toCudaHalf(w)).data;
+  // The same thirty-two codes in every row against an activation of ones, so each column of the
+  // result is the row's code sum times the scale, and the only error left is the half it is
+  // written in. Two scales four orders of magnitude apart over the same codes: an epilogue that
+  // ignored the scale would get at most one of them right, and a scale of zero has to give zeros
+  // rather than NaN.
+  const uint8_t row[32] = {0x00, 0x7e, 0xfe, 0x38, 0xb8, 0x3c, 0x40, 0x44, 0x48, 0x4c, 0x50,
+                           0x54, 0x58, 0x5c, 0x60, 0x64, 0x68, 0x6c, 0x70, 0x74, 0x78, 0x7c,
+                           0x7d, 0x7a, 0xf8, 0xb0, 0x30, 0x28, 0x20, 0xec, 0x76, 0xc4};
+  std::vector<uint8_t> bytes;
+  for (int r = 0; r < 8; ++r) bytes.insert(bytes.end(), row, row + 32);
+  Fp8Weight w = makeWeight(8, 32, bytes);
 
   float rowSum = 0.0f;
-  for (float v : row) rowSum += v;
+  for (uint8_t code : row) rowSum += decodeE4M3(code);
+  CATCH_REQUIRE(rowSum != 0.0f);
 
   std::vector<float> ones(4 * 32, 1.0f);
   Tensor a = toCudaHalf(Tensor::create<float>({4, 32}, lut::makeConstSpan(ones)));
 
-  for (float scale : {0.001953125f, 3.0f}) {
+  for (float scale : {0.001953125f, 3.0f, 0.0f}) {
     CATCH_INFO("scale = " << scale);
-    Tensor out = gemmTensorScale(a, codes, cudaFilled(1, scale));
+    Tensor out = gemm(a, w, cudaScale(scale));
     CATCH_REQUIRE(allFinite(out));
 
     Tensor actual = toCpuFloat(out);
@@ -463,22 +275,6 @@ CATCH_TEST_CASE("test gemmFp8TensorScale (scale applied)", "[fl][op][cuda][cutla
       CATCH_REQUIRE(std::fabs(got[i] - expected) <= std::fabs(expected) * 1e-3f);
     }
   }
-}
-
-CATCH_TEST_CASE("test gemmFp8TensorScale (batch axes)", "[fl][op][cuda][cutlass][fp8]") {
-  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
-
-  Tensor codes = randomFp8Codes(64, 128);
-  Tensor scale = cudaFilled(1, 0.5f);
-
-  Tensor a3 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 128}));
-  Tensor out3 = gemmTensorScale(a3, codes, scale);
-  CATCH_REQUIRE(out3.getShape() == std::vector<int>{2, 3, 64});
-  CATCH_REQUIRE(cpuOps()->allClose(
-      toCpuFloat(out3.view({-1, 64})),
-      toCpuFloat(gemmTensorScale(a3.view({-1, 128}), codes, scale)),
-      1e-6f,
-      1e-6f));
 }
 
 }  // namespace fl

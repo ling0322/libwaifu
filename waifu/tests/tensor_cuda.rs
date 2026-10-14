@@ -5,7 +5,7 @@
 //! run with `cargo test --test cuda -- --ignored`. On a machine without one, the library ends the
 //! process rather than reporting an error, which is why they do not simply detect and skip.
 
-use waifu::flint::{functional as F, DType, Device, Fp8Tensor, Tensor};
+use waifu::flint::{fp8_available, functional as F, DType, Device, Tensor};
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
 fn cuda_float() -> DType {
@@ -341,67 +341,29 @@ fn makes_zeros_of_the_type_it_was_asked_for() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn multiplies_by_an_fp8_weight() {
-    if !Fp8Tensor::is_available(Device::Cuda) {
+    if !fp8_available(Device::Cuda) {
         eprintln!("skipped: this build has no FP8 GEMM (needs WITH_CUDA=ON and sm_80 or newer)");
         return;
     }
 
-    // Magnitudes E4M3 holds exactly, and each of the eight channels a different power of two away
-    // from the next -- so the round trip is exact, and the channels come back right only if each
-    // carried its own scale. Eight channels because that is how wide the epilogue writes.
-    const CODES: [f32; 16] = [
+    // Values E4M3 holds exactly, the same in every row, and their codes. What is left to multiply
+    // them by is the scale, which is not a power of two, so one that went missing or was applied
+    // twice cannot come out right.
+    const VALUES: [f32; 16] = [
         448.0, -224.0, 112.0, 56.0, 28.0, 14.0, 7.0, 3.5, 1.75, 0.875, 0.0, -1.0, 2.0, -4.0, 8.0,
         -16.0,
     ];
-    const SCALES: [f32; 8] = [1.0, 2.0, 4.0, 8.0, 16.0, 0.5, 0.25, 0.125];
-
-    let data: Vec<f32> = SCALES
-        .iter()
-        .flat_map(|scale| CODES.iter().map(move |code| code * scale))
-        .collect();
-    let weight = cuda_f32(&[8, 16], &data);
-
-    let quantized = Fp8Tensor::quantize(&weight).unwrap();
-    assert_eq!(quantized.shape().unwrap(), (8, 16));
-
-    // The scale is the row's own largest magnitude over 448, and the codes reach 448 exactly.
-    assert_eq!(to_host_f32(&quantized.dequantize().unwrap()), data);
-
-    // One row of ones against it is each channel's own row sum, so a scale applied to the wrong
-    // axis cannot pass.
-    let a = cuda_f32(&[1, 16], &[1.0; 16]);
-    let out = F::fp8_matmul(&a, quantized.data(), quantized.channel_scale()).unwrap();
-    assert_eq!(out.shape(), vec![1, 8]);
-
-    let expected = to_host_f32(&F::matmul(&a, &weight.transpose(0, 1).unwrap()).unwrap());
-    for (got, want) in to_host_f32(&out).iter().zip(expected.iter()) {
-        assert!(
-            (got - want).abs() <= want.abs() * 1e-2,
-            "fp8 gave {got}, half gave {want}"
-        );
-    }
-}
-
-#[test]
-#[ignore = "needs a CUDA device"]
-fn multiplies_by_an_fp8_weight_with_one_scale() {
-    if !Fp8Tensor::is_available(Device::Cuda) {
-        eprintln!("skipped: this build has no FP8 GEMM (needs WITH_CUDA=ON and sm_80 or newer)");
-        return;
-    }
-
-    // Codes E4M3 holds exactly, the same in every row, so the per channel quantizer hands back a
-    // scale of one on every row and codes that are the values themselves. What is left to multiply
-    // them by is the tensor scale, which is not a power of two, so one that went missing or was
-    // applied twice cannot come out right.
-    const CODES: [f32; 16] = [
-        448.0, -224.0, 112.0, 56.0, 28.0, 14.0, 7.0, 3.5, 1.75, 0.875, 0.0, -1.0, 2.0, -4.0, 8.0,
-        -16.0,
+    const CODES: [u8; 16] = [
+        0x7e, 0xf6, 0x6e, 0x66, 0x5e, 0x56, 0x4e, 0x46, 0x3e, 0x36, 0x00, 0xb8, 0x40, 0xc8, 0x50,
+        0xd8,
     ];
     const SCALE: f32 = 0.0137;
 
-    let data: Vec<f32> = (0..8).flat_map(|_| CODES).collect();
-    let codes = Fp8Tensor::quantize(&cuda_f32(&[8, 16], &data)).unwrap();
+    let bytes: Vec<u8> = (0..8).flat_map(|_| CODES).collect();
+    let codes = Tensor::from_bytes(&[8, 16], DType::Fp8E4M3, &bytes)
+        .unwrap()
+        .to_device(Device::Cuda)
+        .unwrap();
     let scale = Tensor::from_f32(&[1], &[SCALE])
         .unwrap()
         .to_device(Device::Cuda)
@@ -412,22 +374,13 @@ fn multiplies_by_an_fp8_weight_with_one_scale() {
     let rows: Vec<f32> = [1.0; 16].into_iter().chain(ramp.iter().copied()).collect();
     let a = cuda_f32(&[2, 16], &rows);
 
-    let out = F::fp8_matmul_tensor_scale(&a, codes.data(), &scale).unwrap();
+    let out = F::fp8_matmul(&a, &codes, &scale).unwrap();
     assert_eq!(out.shape(), vec![2, 8]);
     let got = to_host_f32(&out);
 
-    // The same codes and the same scale on every channel through fp8_matmul are the same mainloop
-    // and the same multiply in the epilogue, so they are the same bytes.
-    let uniform = Tensor::from_f32(&[8], &[SCALE; 8])
-        .unwrap()
-        .to_device(Device::Cuda)
-        .unwrap();
-    let same = to_host_f32(&F::fp8_matmul(&a, codes.data(), &uniform).unwrap());
-    assert_eq!(got, same);
-
-    // And against the arithmetic done here, which knows nothing of either kernel.
+    // Against the arithmetic done here, which knows nothing of the kernel.
     for (m, row) in [vec![1.0; 16], ramp].iter().enumerate() {
-        let want: f32 = row.iter().zip(CODES).map(|(x, c)| x * c).sum::<f32>() * SCALE;
+        let want: f32 = row.iter().zip(VALUES).map(|(x, v)| x * v).sum::<f32>() * SCALE;
         for n in 0..8 {
             let got = got[m * 8 + n];
             assert!(
@@ -437,11 +390,11 @@ fn multiplies_by_an_fp8_weight_with_one_scale() {
         }
     }
 
-    // A scale of two elements is a caller's mistake, and comes back as one rather than ending the
-    // process in the kernel's own check.
-    let two = Tensor::from_f32(&[2], &[SCALE; 2])
+    // A scale per row is a caller's mistake, and comes back as one rather than ending the process
+    // in the kernel's own check.
+    let per_row = Tensor::from_f32(&[8], &[SCALE; 8])
         .unwrap()
         .to_device(Device::Cuda)
         .unwrap();
-    assert!(F::fp8_matmul_tensor_scale(&a, codes.data(), &two).is_err());
+    assert!(F::fp8_matmul(&a, &codes, &per_row).is_err());
 }
