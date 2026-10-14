@@ -572,12 +572,17 @@ class TensorBag:
         print(f"wrote {path.basename(where)}: {len(self.tensors)} reference tensors")
 
 
+# What a part's safetensors header may take on top of its tensors, counted against `part_size`: a
+# header is a JSON line per tensor, about a hundred kilobytes for the thousand tensors of a model.
+HEADER_ALLOWANCE = 1 << 20
+
+
 class WeightsWriter:
     """Collects a model's tensors and writes them as safetensors.
 
     Seven gigabytes is an awkward size to publish and an awkward one to fetch: it cannot be
     downloaded in parallel, and a failed transfer starts over. Given `part_size` this rolls over
-    to a new file whenever the one being filled reaches it, so what comes out is
+    to a new file whenever the next tensor would take the one being filled past it, so what comes out is
     `<stem>-00001-of-00002.safetensors` and its neighbours.
 
     A safetensors file is written in one go rather than streamed, so one part's worth of tensors
@@ -662,8 +667,12 @@ class WeightsWriter:
         self._hold(ctx.name + FP8_SCALE_SUFFIX, scale)
 
     def _hold(self, name: str, tensor: torch.Tensor) -> None:
-        """Keep one tensor for the part being filled, rolling over to the next when it is full."""
-        if self._part_size is not None and self._written >= self._part_size:
+        """Keep one tensor for the part being filled, rolling over to the next when it would not
+        fit, so that no part is larger than `part_size` -- a tensor bigger than that is the one
+        thing that gets a part, and a file, to itself."""
+        size = tensor.numel() * tensor.element_size()
+        if (self._part_size is not None and self._holding
+                and self._written + size > self._part_size - HEADER_ALLOWANCE):
             self._flush()
 
         if name in self._holding:
@@ -671,7 +680,7 @@ class WeightsWriter:
 
         print(f"write tensor {name}, shape={tuple(tensor.shape)}, dtype={tensor.dtype}")
         self._holding[name] = tensor.detach().cpu().contiguous().clone()
-        self._written += tensor.numel() * tensor.element_size()
+        self._written += size
 
     def finish(self, config, suggested=None, tokenizers=None) -> list:
         """Write what is left, name the parts, and write the manifest that describes them.

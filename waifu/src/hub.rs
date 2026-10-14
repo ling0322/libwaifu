@@ -268,8 +268,8 @@ const CATALOG: &[Published] = &[
         kind: Kind::Picture,
     },
     // The same weights with the matrices quantized, one scale per row rather than per tensor
-    // (`-fp8` here has not moved to the tensor-scale format the way Krea 2's has; see
-    // docs/qwen_image.md and docs/fp8.md). Half the package and half the card, for well past ten
+    // (exported before `-fp8` here moved to the tensor-scale format; see docs/qwen_image.md and
+    // docs/fp8.md). Half the package and half the card, for well past ten
     // times the error in the text encoder -- more than this runtime's other fp8 packages cost,
     // and worth knowing before reaching for it over the float16 one.
     Published {
@@ -277,6 +277,16 @@ const CATALOG: &[Published] = &[
         full_name: "Qwen-Image 2.1 (fp8)",
         repo: "ling0322/libwaifu-qwen-image-2.1",
         manifest: "qwen-image-2.1-fp8.yaml",
+        explicit: false,
+        kind: Kind::Picture,
+    },
+    // Qwen-Image 2.1's eight-step checkpoint, in a repository of its own: the manifest fixes the
+    // eight sigmas, so a step count asked for is ignored. fp8 only; there is no float16 package.
+    Published {
+        name: "qwen-image:2.1-turbo-fp8:v1.0",
+        full_name: "Qwen-Image 2.1 Turbo (fp8)",
+        repo: "ling0322/libwaifu-qwen-image-2.1-turbo",
+        manifest: "qwen-image-2.1-turbo-fp8.yaml",
         explicit: false,
         kind: Kind::Picture,
     },
@@ -431,6 +441,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("krea2:turbo-fp8", "krea2:turbo-fp8:v1.0"),
     ("qwen-image:2.1", "qwen-image:2.1:v1.0"),
     ("qwen-image:2.1-fp8", "qwen-image:2.1-fp8:v1.0"),
+    ("qwen-image:2.1-turbo-fp8", "qwen-image:2.1-turbo-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
     ("cosyvoice", "cosyvoice:v3"),
 ];

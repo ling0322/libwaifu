@@ -72,6 +72,21 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
   trajectory, not `torch.randn`. Two implementations agreeing on activations neither was trained
   to see says nothing about the pictures they draw.
 
+## Publishing models
+
+- **No weights shard may exceed 2 GB** (2,000,000,000 bytes, header included -- the number the Hub
+  shows as "2.00 GB"). Export with `-part-size 2GB`; the writer rolls over *before* a tensor that
+  would not fit, and only a single tensor larger than that gets a file to itself.
+- Before uploading, check it: `ls -l models/<stem>-0*.safetensors` and confirm every size is under
+  2000000000. A shard over the limit means re-exporting, not uploading -- a repository cannot be
+  fixed afterwards without deleting and re-uploading all of it.
+- This holds for every package, whatever the exporter's own default is.
+- **fp8 packages use one scale per tensor** (`weight_format: fp8_tensor_scale`, written with
+  `WeightsWriter.write_fp8_tensor_scale`). Per-channel scales (`weight_format: fp8`,
+  `write_fp8_tensor`) are retired: do not export a new package with them, and re-export an old one
+  that has them before it is published again. A ControlNet package must use the same format as
+  the model it steers.
+
 ## Git
 
 - Never modify, commit to, or push directly to `main`. Use a non-`main` branch and a pull request.

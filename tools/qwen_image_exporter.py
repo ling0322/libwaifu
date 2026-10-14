@@ -32,7 +32,8 @@ This reads the published diffusers layout as it stands, which is what `hf downlo
         -model  ~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/<rev> \\
         -output models/qwen-image-2.1.safetensors
 
-`-fp8` writes the matrices as E4M3 with a scale per output channel: thirty gigabytes to sixteen.
+`-fp8` writes the matrices as E4M3 with one scale for the whole tensor (`fp8_tensor_scale`): thirty
+gigabytes to sixteen.
 
 `-controlnet` exports VideoX-Fun's ControlNet-Union for this model instead, as a package of its
 own that the runtime reads beside the model's; the two have to agree on `-fp8`:
@@ -80,14 +81,27 @@ class Converter(Krea2Converter):
     taught the denoiser and the autoencoder that are this model's own."""
 
     def _matrix(self, ctx: Context, tensor: torch.Tensor) -> None:
-        """Krea 2's own `_matrix` now writes the tensor-scale FP8 format; this export has not
-        moved to it yet, so `-fp8` here still writes one scale per row. See docs/fp8.md."""
+        """Write a weight the runtime multiplies by, as E4M3 with one scale for the whole tensor
+        where the package is quantized. Per-channel scales are no longer written; see
+        docs/fp8.md."""
         if not self._fp8:
             return self._write(ctx, tensor)
 
-        self._writer.write_fp8_tensor(ctx, tensor.to(torch.float32))
+        self._writer.write_fp8_tensor_scale(ctx, tensor.to(torch.float32))
         self._quantized += 1
         self._count += 1
+
+    # ---- the vision tower ---------------------------------------------------------------
+
+    def export_vision(self, ctx: Context, weights: dict) -> None:
+        """Qwen3-VL's vision tower, for reading a reference picture when editing.
+
+        Nothing in the runtime reads these yet: text-to-image never hands the encoder a picture.
+        They are written under their published names (`visual.` stripped) and never quantized --
+        0.8 GB in float16, and a tower whose outputs are fed straight into the encoder's input.
+        """
+        for name, tensor in sorted(weights.items()):
+            self._write(ctx.with_subname(name), tensor)
 
     # ---- the denoiser -------------------------------------------------------------------
 
@@ -207,6 +221,19 @@ def encoder_weights(directory: str) -> dict:
     return held
 
 
+def vision_weights(directory: str) -> dict:
+    """The vision tower under `model.visual.`, renamed without that prefix."""
+    held = {}
+    for file in sorted(glob.glob(path.join(directory, "text_encoder", "*.safetensors"))):
+        with safe_open(file, framework="pt") as handle:
+            for key in handle.keys():
+                if key.startswith("model.visual."):
+                    held[key[len("model.visual."):]] = handle.get_tensor(key)
+    if not held:
+        raise SystemExit("the text encoder has no vision tower to export")
+    return held
+
+
 def check_shapes(model: dict, text: dict, dit: dict, words: dict) -> None:
     """What the configurations claim, against what the tensors are."""
     hidden = model["num_attention_heads"] * model["attention_head_dim"]
@@ -242,11 +269,36 @@ def check_shapes(model: dict, text: dict, dit: dict, words: dict) -> None:
         raise SystemExit(f"{counted} encoder layers, {encoder['num_hidden_layers']} in the config")
 
 
-def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, fp8: bool) -> dict:
+def fixed_sigmas(index: dict):
+    """The noise levels a release fixes for itself, or None for one that bends its own.
+
+    Qwen-Image-2.1-Turbo writes its eight steps into `model_index.json` as `sample_sigmas`, and
+    its scheduler is a plain one: no dynamic shift, no `shift_terminal`. diffusers uses those
+    levels as they stand, with the zero appended, whatever `num_inference_steps` says.
+    """
+    sigmas = index.get("sample_sigmas")
+    if sigmas is None:
+        return None
+    sigmas = [float(sigma) for sigma in sigmas]
+    if not sigmas or sigmas[0] != 1.0 or any(a <= b for a, b in zip(sigmas, sigmas[1:])) \
+            or sigmas[-1] <= 0.0:
+        raise SystemExit(f"sample_sigmas is not a walk down from one: {sigmas}")
+    return sigmas
+
+
+def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, sigmas,
+                    fp8: bool) -> dict:
     encoder = text["text_config"]
     rope_theta = encoder.get("rope_theta") or encoder["rope_parameters"]["rope_theta"]
 
-    if scheduler.get("time_shift_type") != "exponential" or not scheduler["use_dynamic_shifting"]:
+    if sigmas is not None:
+        # The levels are used as they are, so the scheduler must not be going to bend them.
+        if scheduler.get("use_dynamic_shifting") or scheduler.get("shift") != 1.0 \
+                or scheduler.get("shift_terminal") is not None:
+            raise SystemExit("this release fixes its sigmas and also bends them; the runtime "
+                             "does one or the other")
+    elif scheduler.get("time_shift_type") != "exponential" \
+            or not scheduler["use_dynamic_shifting"]:
         raise SystemExit("this scheduler does not bend its schedule the way the runtime does")
 
     config = {"qwen_image": {
@@ -275,6 +327,21 @@ def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, fp8: bo
         "encoder_rope_theta": f"{rope_theta:g}",
         "encoder_rms_norm_eps": f"{encoder['rms_norm_eps']:g}",
         "encoder_select_layers": [int(encoder["num_hidden_layers"])],
+        # the encoder's vision tower, which only editing reads: its shape, where its deepstack
+        # features leave it, and the tokens that bracket a picture in the prompt.
+        "vision_depth": str(text["vision_config"]["depth"]),
+        "vision_hidden_size": str(text["vision_config"]["hidden_size"]),
+        "vision_num_heads": str(text["vision_config"]["num_heads"]),
+        "vision_mlp_size": str(text["vision_config"]["intermediate_size"]),
+        "vision_out_hidden_size": str(text["vision_config"]["out_hidden_size"]),
+        "vision_patch_size": str(text["vision_config"]["patch_size"]),
+        "vision_temporal_patch_size": str(text["vision_config"]["temporal_patch_size"]),
+        "vision_spatial_merge_size": str(text["vision_config"]["spatial_merge_size"]),
+        "vision_num_position_embeddings": str(text["vision_config"]["num_position_embeddings"]),
+        "vision_deepstack_layers": [int(i) for i in text["vision_config"]["deepstack_visual_indexes"]],
+        "vision_image_token_id": str(text["image_token_id"]),
+        "vision_start_token_id": str(text["vision_start_token_id"]),
+        "vision_end_token_id": str(text["vision_end_token_id"]),
         # the VAE
         "vae_scale": str(vae["scale_factor_spatial"]),
         "image_channels": str(vae["out_channels"]),
@@ -291,12 +358,18 @@ def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, fp8: bo
         "sampler_max_shift": f"{scheduler['max_shift']:g}",
         "sampler_base_seq_len": str(scheduler["base_image_seq_len"]),
         "sampler_max_seq_len": str(scheduler["max_image_seq_len"]),
-        "sampler_shift_terminal": f"{scheduler['shift_terminal']:g}",
+        "sampler_shift_terminal": f"{scheduler['shift_terminal'] or 0:g}",
         "system_prompt": SYSTEM_PROMPT,
     }}
 
+    if sigmas is not None:
+        # Where each step starts; the zero the last one ends at is the runtime's to append. When
+        # this is present the shift above is not used, and neither is the number of steps asked
+        # for.
+        config["qwen_image"]["sampler_sigmas"] = [float(f"{sigma:g}") for sigma in sigmas]
+
     if fp8:
-        config["qwen_image"]["weight_format"] = "fp8"
+        config["qwen_image"]["weight_format"] = "fp8_tensor_scale"
 
     return config
 
@@ -328,7 +401,7 @@ def generate_control_config(model: dict, weights: dict, fp8: bool) -> tuple:
         "control_in_channels": str(in_channels),
     }
     if fp8:
-        section["weight_format"] = "fp8"
+        section["weight_format"] = "fp8_tensor_scale"
     return {"model": {"type": "qwen_image_control"}, "qwen_image_control": section}, blocks
 
 
@@ -354,7 +427,7 @@ def export_test_cases(directory: str, prompt: str) -> TensorBag:
     | `hidden_fp32` | the same, from the encoder at float32, which is what the runtime is held to |
     | `noise` | the latent the run starts from |
     | `sigmas` | the eleven noise levels the reference's scheduler walked |
-    | `latent`, `timestep` | the latent entering step `STEP_AT`, and the timestep the model saw |
+    | `latent`, `timestep` | the latent entering step `step_at`, and the timestep the model saw |
     | `velocity` | what the denoiser answers there |
     | `final_latent` | what the ten steps leave behind |
     | `decoded` | the picture, four channels, from the decoder at float32 and unclamped |
@@ -363,6 +436,12 @@ def export_test_cases(directory: str, prompt: str) -> TensorBag:
     prompt is recomputed at every step. diffusers says the two differ by rounding and nothing else.
     """
     from diffusers import AutoencoderKLQwenImage21, QwenImage21Pipeline
+
+    # A release that fixes its sigmas (Turbo) is walked along all of them; one that does not, for
+    # `TEST_STEPS` of its forty. Either way the denoiser is asked about the middle of the walk.
+    fixed = fixed_sigmas(read_json(directory, "model_index.json"))
+    test_steps = len(fixed) if fixed else TEST_STEPS
+    step_at = test_steps // 2
 
     ctx = Context("test_case")
     writer = TensorBag()
@@ -688,9 +767,9 @@ def main() -> int:
                         help="what to call the model. Names the weights and the manifest beside "
                              "them.")
     parser.add_argument("-fp8", action="store_true",
-                        help="store the matrices as E4M3 with a scale per output channel.")
-    parser.add_argument("-part-size", type=parse_size, default="4GB",
-                        help='split the package into parts of about this size, as in "4GB".')
+                        help="store the matrices as E4M3 with one scale for the whole tensor.")
+    parser.add_argument("-part-size", type=parse_size, default="2GB",
+                        help='split the package into parts no larger than this, as in "2GB".')
     parser.add_argument("-test_output", type=str, default=None,
                         help="also write reference inputs and outputs here. Needs a diffusers "
                              "with QwenImage21Pipeline and a CUDA card.")
@@ -713,6 +792,7 @@ def main() -> int:
     text_config = read_json(args.model, "text_encoder", "config.json")
     vae_config = read_json(args.model, "vae", "config.json")
     scheduler = read_json(args.model, "scheduler", "scheduler_config.json")
+    sigmas = fixed_sigmas(read_json(args.model, "model_index.json"))
 
     if not args.test_only:
         dit = read_weights(*transformer_files(args.model))
@@ -735,16 +815,17 @@ def main() -> int:
         converter.export_encoder(Context("qwen_image.text"), words,
                                  text_config["text_config"]["num_hidden_layers"])
         del words
+        converter.export_vision(Context("qwen_image.vision"), vision_weights(args.model))
         converter.export_vae(Context("qwen_image.vae"), vae)
 
-        config = generate_config(model, text_config, vae_config, scheduler, args.fp8)
+        config = generate_config(model, text_config, vae_config, scheduler, sigmas, args.fp8)
         config["model"] = {"type": "qwen_image"}
 
         # What the model card asks for: forty steps and no guidance -- `true_cfg_scale` defaults
         # to one and the pipeline calls the model "meant to be sampled without guidance". The
         # sizes are the card's own list at a quarter of the area, since the card's are two to
         # three megapixels and the runtime draws at one by default.
-        suggested = {"steps": 40, "guidance": 1.0,
+        suggested = {"steps": len(sigmas) if sigmas else 40, "guidance": 1.0,
                      "sizes": [[1024, 1024], [1184, 896], [896, 1184], [1248, 832],
                                [832, 1248], [1376, 768], [768, 1376]]}
 

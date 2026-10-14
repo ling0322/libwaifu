@@ -127,8 +127,9 @@ rounding of the division above is one -- and the docstring says which.
 
 `tools/krea2_exporter.py` and `tools/qwen_image_exporter.py` (which shares its `Converter`) no
 longer write this one for `-fp8`; see "One scale for the whole tensor" below for the format they
-write instead. `write_fp8_tensor` and `quantize_to_fp8` stay for a package that wants one scale per
-row on purpose -- an exporter is free to call either.
+write instead. `write_fp8_tensor` and `quantize_to_fp8` remain only so that a package already published
+with one scale per row can still be read and re-created; new exports write one scale per tensor
+(see CLAUDE.md).
 
 ## One scale for the whole tensor
 
