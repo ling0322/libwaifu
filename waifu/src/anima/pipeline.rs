@@ -175,8 +175,8 @@ impl Anima {
     /// what lets a Qwen3 encoder stand in for it. Feeding the same ids to both, or skipping the
     /// adapter and handing the denoiser the hidden states directly, type checks and draws noise.
     ///
-    /// The end marker goes on the T5 ids and not the Qwen3 ones, which is the reference's
-    /// asymmetry rather than an oversight here.
+    /// The end marker goes on the T5 ids and not the Qwen3 ones, as in diffusers' Anima pipeline,
+    /// whose T5 tokenizer appends `</s>` and whose Qwen tokenizer appends nothing.
     pub fn encode_prompt(&self, prompt: &str) -> Result<Tensor> {
         let hidden = self
             .text_encoder

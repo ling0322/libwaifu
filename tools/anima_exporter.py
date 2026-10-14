@@ -26,10 +26,10 @@ halves of that, so an image can go in as well as come out -- published as three 
 safetensors files, and the whole of what it is is written down in `docs/anima.md`
 -- read that first, because several of the decisions here only make sense against it.
 
-Unlike the SDXL exporter this one does not walk a diffusers pipeline: there is no diffusers
-implementation of Anima to walk. It reads the three state dictionaries directly and rewrites them,
-which means the tensor names below are the contract with the runtime and nothing checks them for
-us.
+Unlike the SDXL exporter this one does not walk a diffusers pipeline: Anima is published as
+three bare state dictionaries, not as a pipeline to walk. It reads them directly and rewrites
+them, which means the tensor names below are the contract with the runtime and nothing checks them
+for us.
 
     .venv/bin/python tools/anima_exporter.py \
         -dit    models/anima/split_files/diffusion_models/anima-turbo-v1.1.safetensors \
@@ -48,7 +48,7 @@ from os import path
 import torch
 from safetensors import safe_open
 
-import anima_comfy as reference
+import anima_reference as reference
 from tokenizer_exporter import encoder, read_tokenizer, tokenizer_corpus, tokenizer_json
 from model_exporter import Context, TensorBag, open_weights, parse_size, stem_of
 
@@ -375,10 +375,10 @@ def generate_config(dit: dict, text: dict, blocks: int, layers: int) -> dict:
     hidden = dit["x_embedder.proj.1.weight"].shape[0]
     latent = dit["final_layer.linear.weight"].shape[0] // 4
 
-    # ComfyUI's model_detection.py reads the rotary extrapolation ratios off the latent width:
-    # sixteen channels is the text-to-image branch, which asks for four times the spatial extent
-    # and leaves time alone. Anything else has a different row in that table, and guessing it is
-    # a silent error rather than a loud one.
+    # The rotary extrapolation ratios are those of the 16 channel Cosmos-Predict2 2B text-to-image
+    # model, which asks for four times the spatial extent and leaves time alone. A different
+    # latent width is a different base model with ratios of its own, and guessing them is a
+    # silent error rather than a loud one.
     if latent != 16:
         raise SystemExit(
             f"{latent} latent channels: this exporter only knows the rotary extrapolation "
@@ -428,9 +428,10 @@ def generate_config(dit: dict, text: dict, blocks: int, layers: int) -> dict:
         # rectified flow, not the epsilon prediction every SDXL checkpoint carries
         "prediction": "flow",
         # How the schedule is bent and what the denoiser is handed. Neither is in any tensor:
-        # they are Anima's entry in ComfyUI's model table. The multiplier of one is the unusual
-        # half -- a flow model is normally passed a thousandfold timestep, and this one is passed
-        # the sigma itself.
+        # they are the `shift` of the scheduler config Anima's diffusers release carries, and the
+        # division by `num_train_timesteps` its pipeline does before calling the transformer. The
+        # multiplier of one is the unusual half -- a flow model is normally passed a thousandfold
+        # timestep, and this one is passed the sigma itself.
         "sampler_shift": "3.0",
         "sampler_multiplier": "1.0",
     }}
@@ -489,11 +490,11 @@ def reference_encoders(qwen, t5):
 def export_test_cases(dit: dict, text: dict, vae: dict, qwen_ids, t5_ids) -> TensorBag:
     """Write what the reference makes of one prompt, so the runtime can be checked against it.
 
-    The same idea as `sdxl_exporter.export_test_cases`, against `anima_comfy` -- which is ComfyUI -- rather than
-    against diffusers, and covering the path in the order a picture travels it: the encoder's
-    hidden states, the adapter's context, one denoising step, one decode, and -- for image to
-    image, which starts where text to image ends -- that decode encoded again and decoded once
-    more.
+    The same idea as `sdxl_exporter.export_test_cases`, against `anima_reference` -- which is
+    diffusers' Anima models -- and covering the path in the order a picture travels it: the
+    encoder's hidden states, the adapter's context, one denoising step, one decode, and -- for
+    image to image, which starts where text to image ends -- that decode encoded again and decoded
+    once more.
 
     All of it on a 16 by 16 latent -- a 128 by 128 image, 64 patches -- which is large enough to
     exercise every block and small enough to carry in the repository.
@@ -588,22 +589,13 @@ def main() -> int:
     parser.add_argument(
         "-test_output", type=str, default=None,
         help="also write reference inputs and outputs here, for the runtime to be checked "
-             "against. Runs the whole model on the CPU, which takes a few minutes, and needs "
-             "-comfyui.")
-    parser.add_argument(
-        "-comfyui", type=str, default=None,
-        help="a ComfyUI checkout, which is the reference the test outputs are computed with -- "
-             "the same arrangement sdxl_exporter.py has with diffusers. Only -test_output needs "
-             "it. See tools/anima_comfy.py for what to install and where.")
+             "against. Runs the whole model on the CPU through diffusers, which takes a few "
+             "minutes, and needs the venv tools/requirements-anima.txt describes.")
     args = parser.parse_args()
 
-    # Before anything is read, so a missing checkout costs nothing but the message. The path goes
-    # on sys.path here and the modules are imported stage by stage as they are needed.
+    # Before anything is read, so a missing diffusers costs nothing but the message.
     if args.test_output:
-        if not args.comfyui:
-            raise SystemExit("-test_output needs -comfyui: the reference outputs are what ComfyUI "
-                             "computes, and there is no second implementation here to ask")
-        reference.use(args.comfyui)
+        reference.check()
 
     dit = strip_prefix(read(args.dit))
     text = read(args.text)

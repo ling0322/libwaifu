@@ -65,8 +65,8 @@ What to read out of it:
   the first, the community 2.9B expansion the second; the exporter strips both and refuses to
   find anything under a third.
 - **`x_embedder.proj.1.weight` is `[hidden, 68]`.** `68 // 4 - 1` is 16 latent channels, which is
-  the text-to-image row of ComfyUI's `model_detection.py` and **the only row the exporter has
-  rotary extrapolation ratios for**. Anything else it refuses by name rather than guessing, which
+  the Cosmos-Predict2 2B text-to-image model and **the only width the exporter has rotary
+  extrapolation ratios for**. Anything else it refuses by name rather than guessing, which
   is right: guessing those ratios is exactly how they were wrong for months (`docs/anima.md`,
   "Positions").
 - **`final_layer.linear.weight` is `[64, hidden]`** -- 2x2 patches over those 16 channels.
@@ -147,9 +147,15 @@ python3 -m venv .venv
 .venv/bin/pip install -r tools/requirements.txt
 ```
 
-**A ComfyUI checkout is needed only for `-test_output`.** It is the reference the test tensors are
-computed with -- the arrangement `sdxl_exporter.py` has with diffusers -- and
-`tools/anima_comfy.py` says what to install and where. A plain export needs none of it.
+**`-test_output` needs a second venv**, from `tools/requirements-anima.txt`. The test tensors
+are computed with diffusers' Anima models (`tools/anima_reference.py`) -- the arrangement
+`sdxl_exporter.py` has with diffusers -- and those need diffusers 0.41 and a transformers with
+Qwen3, which cannot share `.venv` with the SDXL pair. A plain export needs none of it.
+
+```bash
+python3 -m venv .venv-anima
+.venv-anima/bin/pip install -r tools/requirements-anima.txt
+```
 
 ## 3. Export
 
@@ -381,9 +387,10 @@ produces `Aborted: out of memory`, which reads as a code failure and is not one.
 
 | symptom | cause | fix |
 |---|---|---|
-| `this exporter only knows the rotary extrapolation ratios for the 16 channel text-to-image branch` | the denoiser's latent width is not 16, so ComfyUI's `model_detection.py` would take a different row | not a bug to route around: find the ratios for that row and add it deliberately |
+| `this exporter only knows the rotary extrapolation ratios for the 16 channel text-to-image branch` | the denoiser's latent width is not 16, so it is a different base model with ratios of its own | not a bug to route around: find that model's ratios and add them deliberately |
 | the model will not load: a manifest key is missing | it was exported before the rotary ratios were written into manifests, and the reader does not default them | re-export. Defaulting them is how they were silently wrong for months |
-| `-test_output` exits with "needs -comfyui" | the reference outputs are what ComfyUI computes; there is no second implementation here to ask | pass a ComfyUI checkout, per `tools/anima_comfy.py` |
+| `-test_output` exits with "needs diffusers with Anima and transformers with Qwen3" | the exporter ran in `.venv`, whose diffusers 0.31 predates Anima | run it from `.venv-anima`, per `tools/requirements-anima.txt` |
+| `decodes_a_latent_the_way_the_reference_does` is off by about 0.05 | diffusers clamps a decode to [-1, 1] and the runtime does not; the test clamps the runtime's picture first | if that clamp was removed from the test, put it back |
 | the export dies fetching a tokenizer | neither vocabulary is published beside Anima's weights -- they come from `Qwen/Qwen3-0.6B-Base` and `google/t5-v1_1-xxl` | pass `-qwen_tokenizer` / `-t5_tokenizer` local paths |
 | `OverflowError: ... which fp16 cannot hold` | a weight outside fp16's range, which bf16 has and fp16 has not | the check is right; the format would otherwise write an infinity |
 | a picture that is soft and unfinished, or burnt and over-contrasted | turbo's numbers on an aesthetic release, or the reverse | `suggested.steps`/`guidance` belong to the release, not to Anima |
@@ -405,11 +412,10 @@ published stem (`anima-turbo-v1.1`) is deliberately a different one. Do not rena
 match the published spelling.
 
 ```bash
-.venv/bin/python tools/anima_exporter.py \
+.venv-anima/bin/python tools/anima_exporter.py \
   -dit models/... -text models/... -vae models/... \
   -output models/anima-turbo-v11.safetensors \
-  -test_output models/anima-turbo-v11_test.safetensors \
-  -comfyui /path/to/ComfyUI
+  -test_output models/anima-turbo-v11_test.safetensors
 ```
 
 **Regenerate it whenever `export_test_cases` changes**, and whenever anything it depends on does:
@@ -418,7 +424,7 @@ hidden states, the adapter's context before and after padding, one step's veloci
 The corpora are 611 texts each and are what catch a package built against the wrong tokenizer
 revision, which no reference tensor can.
 
-The test export runs the whole model on CPU through ComfyUI and takes a few minutes.
+The test export runs the whole model on CPU through diffusers and takes under a minute.
 
 ## Disk
 
