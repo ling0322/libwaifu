@@ -504,11 +504,11 @@ config:
     fn a_package_says_whether_it_stored_its_matrices_quantized() {
         let quantized = parse(&RELEASE.replace(
             "    prediction: flow",
-            "    prediction: flow\n    weight_format: fp8",
+            "    prediction: flow\n    weight_format: fp8_tensor_scale",
         ))
         .unwrap();
-        assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8);
-        assert_eq!(quantized.encoder.weight_format, WeightFormat::Fp8);
+        assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(quantized.encoder.weight_format, WeightFormat::Fp8TensorScale);
     }
 
     /// What `tools/qwen_image_exporter.py -controlnet` writes for VideoX-Fun's checkpoint.
@@ -551,7 +551,7 @@ config:
         // A float control package beside an FP8 model: one graph reads both.
         let quantized = control(&CONTROL.replace(
             "control_in_channels: 129",
-            "control_in_channels: 129\n    weight_format: fp8",
+            "control_in_channels: 129\n    weight_format: fp8_tensor_scale",
         ))
         .expect_err("fp8 beside float");
         assert!(quantized.to_string().contains("stores"), "{quantized}");

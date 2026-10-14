@@ -174,10 +174,7 @@ extern "C" {
     pub fn fl_matmul(operators: Ops, a: V, b: V, out: V) -> i32;
 
     pub fn fl_fp8_available(device: FlDeviceType, out: *mut i32) -> i32;
-    pub fn fl_fp8_quantize(x: V, data: V, channel_scale: V) -> i32;
-    pub fn fl_fp8_dequantize(data: V, channel_scale: V, out: V) -> i32;
-    pub fn fl_fp8_matmul(a: V, data: V, channel_scale: V, out: V) -> i32;
-    pub fn fl_fp8_matmul_tensor_scale(a: V, data: V, scale: V, out: V) -> i32;
+    pub fn fl_fp8_matmul(a: V, data: V, scale: V, out: V) -> i32;
 
     pub fn fl_add(operators: Ops, a: V, b: V, out: V) -> i32;
     pub fn fl_sub(operators: Ops, a: V, b: V, out: V) -> i32;

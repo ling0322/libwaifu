@@ -67,7 +67,7 @@ use memmap2::Mmap;
 use safetensors::tensor::{Dtype, SafeTensors};
 
 use crate::error::{Error, Result};
-use crate::flint::{DType, Device, Residency, Tensor, Weights, CHANNEL_SCALE_SUFFIX};
+use crate::flint::{DType, Device, Residency, Tensor, Weights, SCALE_SUFFIX};
 
 /// The largest rank and dimension a stored tensor may have, which keep a corrupt file from asking
 /// for an unreasonable allocation.
@@ -103,7 +103,7 @@ pub fn parse_safetensors(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
 ///
 /// Each tensor borrows its file's mapping rather than a copy of it, and [`Weights::insert`] puts
 /// it where it waits as it arrives, so what the host holds is what the weights keep: nothing, for
-/// a weight moved to the card. Every quantized weight has to have its scales beside it; see
+/// a weight moved to the card. Every quantized weight has to have its scale beside it; see
 /// [`check_fp8_pairs`].
 pub(crate) fn collect(
     paths: &[impl AsRef<Path>],
@@ -264,7 +264,7 @@ fn dimensions(shape: &[usize]) -> Result<Vec<i32>> {
 /// reinterpreted as the wrong type and drawing noise.
 ///
 /// `F8_E4M3` is the format `docs/fp8.md` describes, and is the one element type here that means
-/// nothing on its own: the tensor beside it holding its scales is what makes it a weight. See
+/// nothing on its own: the tensor beside it holding its scale is what makes it a weight. See
 /// [`check_fp8_pairs`].
 fn dtype(dtype: Dtype) -> Result<DType> {
     match dtype {
@@ -283,7 +283,7 @@ fn dtype(dtype: Dtype) -> Result<DType> {
     }
 }
 
-/// That every `<fp8e4m3>` tensor has the scales it means itself against beside it.
+/// That every `<fp8e4m3>` tensor has the scale it means itself against beside it.
 ///
 /// A quantized weight is two tensors -- `"…weight"` and `"…weight.scale"` -- and the file format
 /// has nowhere to say they belong together, so the name is the whole of the pairing and this is
@@ -296,12 +296,9 @@ fn dtype(dtype: Dtype) -> Result<DType> {
 /// scale may have been written to different ones. Where each tensor went does not change the
 /// answer: placing one moves it, and keeps its type and its shape.
 ///
-/// A scale of `<float>[rows]` (one per output channel, [`WeightFormat::Fp8`](crate::flint::WeightFormat::Fp8))
-/// or `<float>[1]` (one for the whole weight, [`WeightFormat::Fp8TensorScale`](crate::flint::WeightFormat::Fp8TensorScale))
-/// both pass here: which one a model actually wants is a configuration's call, not this reader's --
-/// see [`WeightFormat`](crate::flint::WeightFormat) -- and by the time a graph is built for it,
-/// [`Linear::graph`](crate::Linear::graph) asks for the scale at the exact shape its format means,
-/// so a package that names the wrong shape for what its manifest declares fails there instead.
+/// The scale is `<float>[1]`, one for the whole weight, which is the only FP8 format this runtime
+/// reads; see [`WeightFormat::Fp8TensorScale`](crate::flint::WeightFormat::Fp8TensorScale). A
+/// package written with one scale per row is refused here, by name, rather than by a kernel.
 ///
 /// The other direction is deliberately not checked. A `"…scale"` with no FP8 tensor beside it is
 /// an ordinary tensor with an unlucky name, and refusing one would make a suffix this library
@@ -312,7 +309,7 @@ fn check_fp8_pairs(tensors: &HashMap<String, Tensor>) -> Result<()> {
             continue;
         }
 
-        let scale_name = format!("{name}{CHANNEL_SCALE_SUFFIX}");
+        let scale_name = format!("{name}{SCALE_SUFFIX}");
         let Some(scale) = tensors.get(&scale_name) else {
             return Err(Error::format(format!(
                 "tensor {name:?} is float8_e4m3 and there is no {scale_name:?} beside it; a \
@@ -321,12 +318,11 @@ fn check_fp8_pairs(tensors: &HashMap<String, Tensor>) -> Result<()> {
             )));
         };
 
-        let rows = tensor.shape().first().copied().unwrap_or(0);
-        let shape = scale.shape();
-        if scale.dtype() != DType::Float || (shape != [rows] && shape != [1]) {
+        if scale.dtype() != DType::Float || scale.shape() != [1] {
             return Err(Error::format(format!(
-                "tensor {scale_name:?} is {:?}{:?}, and the scales of {name:?} have to be \
-                 <float>[{rows}] -- one per row -- or <float>[1] -- one for the whole weight",
+                "tensor {scale_name:?} is {:?}{:?}, and the scale of {name:?} has to be \
+                 <float>[1], one for the whole weight; a package with a scale per row was \
+                 written for an older runtime and has to be exported again",
                 scale.dtype(),
                 scale.shape(),
             )));

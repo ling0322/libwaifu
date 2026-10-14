@@ -141,58 +141,23 @@ class Quantization:
         return qweights, scales.type(torch.float16), zeros.type(torch.float16)
 
     @classmethod
-    def quantize_to_fp8(cls, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """A 2D weight to E4M3 elements and one float32 scale per row.
-
-        The same arithmetic the runtime's own quantizer does, and it has to be: a package written
-        here is read by that, and `docs/fp8.md` is one format rather than two only if every
-        producer agrees on the bytes.
-
-            scale[r]   = amax(|x[r]|) / 448          # 448 is E4M3's largest finite magnitude
-            data[r][j] = e4m3(x[r][j] / scale[r])
-
-        so each row's largest element lands exactly on the top of the format's range. A row that is
-        all zero gets a zero scale and quantizes to zeros rather than to a NaN.
-
-        Three details are not free to change:
-
-        - The division is float32 and round to nearest. One ulp moves elements onto the next code:
-          on the CUDA side `--use_fast_math` turning this into a reciprocal approximation moved 2
-          elements in 16896, which is why that kernel divides with `__fdiv_rn`.
-        - The clamp is the saturation `__NV_SATFINITE` does. Without it torch sends what rounds
-          past 448 to NaN, and the row maximum can land a hair above it.
-        - `float8_e4m3fn` is the format: 448 max, no infinities, NaN at 0x7f. That is what
-          `__NV_E4M3` is too.
-        """
-        if tensor.dim() != 2:
-            raise ValueError(f"fp8 takes a matrix, not {tuple(tensor.shape)}")
-
-        weights = tensor.detach().cpu().to(torch.float32)
-        scales = weights.abs().amax(dim=1) / FP8_E4M3_MAX
-
-        # An all zero row has no scale to speak of; dividing by one is what would make a NaN.
-        divisor = torch.where(scales > 0, scales, torch.ones_like(scales))
-        data = weights / divisor.unsqueeze(1)
-        data = data.clamp(-FP8_E4M3_MAX, FP8_E4M3_MAX).to(torch.float8_e4m3fn)
-
-        return data, scales
-
-    @classmethod
     def quantize_to_fp8_tensor_scale(cls, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """A 2D weight to E4M3 elements and one float32 scale for the whole matrix.
-
-        The same rounding and the same saturation as `quantize_to_fp8`, over the whole tensor
-        rather than one row at a time:
 
             scale      = amax(|x|) / 448          # 448 is E4M3's largest finite magnitude
             data[i][j] = e4m3(x[i][j] / scale)
 
-        One `<float>` beside the elements instead of the `(out,)` `quantize_to_fp8` writes -- which
-        is what `flint::gemmFp8TensorScale` reads, a single value its epilogue broadcasts rather
-        than a row vector. The saving is smaller still to write and load; what it gives up is the
-        row-by-row scaling `quantize_to_fp8` does: a single outlier row's magnitude sets the scale
-        for every other row too, so a weight whose rows vary widely in magnitude loses more to this
-        format than to the per-row one.
+        so the largest element lands exactly on the top of the format's range. One `<float>` beside
+        the elements, which is what `flint::gemmFp8` reads: a single value its epilogue broadcasts.
+        What one scale gives up is precision on a weight whose rows vary widely in magnitude, since
+        the largest row sets the scale every other row is divided by. See `docs/fp8.md`.
+
+        Two details are not free to change:
+
+        - The clamp is the saturation `__NV_SATFINITE` does. Without it torch sends what rounds
+          past 448 to NaN, and the maximum can land a hair above it.
+        - `float8_e4m3fn` is the format: 448 max, no infinities, NaN at 0x7f. That is what
+          `__NV_E4M3` is too.
 
         An all zero tensor has no scale to speak of; dividing by one is what would make a NaN.
         """
@@ -209,11 +174,11 @@ class Quantization:
         return data, scale.reshape(1)
 
 
-#: E4M3's largest finite magnitude, which is what a row's maximum is scaled onto.
+#: E4M3's largest finite magnitude, which is what a weight's maximum is scaled onto.
 FP8_E4M3_MAX = 448.0
 
-#: What a package calls the scales beside a weight it stored quantized. The runtime looks for this
-#: name exactly -- `flint::CHANNEL_SCALE_SUFFIX` -- and refuses an E4M3 tensor without one.
+#: What a package calls the scale beside a weight it stored quantized. The runtime looks for this
+#: name exactly -- `flint::SCALE_SUFFIX` -- and refuses an E4M3 tensor without one.
 FP8_SCALE_SUFFIX = ".scale"
 
 
@@ -633,33 +598,19 @@ class WeightsWriter:
 
         self._hold(ctx.name, tensor)
 
-    def write_fp8_tensor(self, ctx, tensor: torch.Tensor) -> None:
-        """A matrix, quantized to E4M3 and written as the two tensors it is then made of.
-
-        `<name>` holds the elements and `<name>.scale` the float32 scale of each row, which is the
-        layout `docs/fp8.md` describes and the only one the runtime reads: safetensors cannot tie
-        two tensors together, so the pair is a naming convention, and the reader refuses elements
-        with no scales beside them.
-
-        Half the file and half the bytes on the device, for about 2.6e-2 of relative error. Whether
-        a model is worth that is the exporter's call, and the package has to say which it made:
-        `weight_format: fp8` in the manifest is what makes the runtime build the quantized
-        multiply, and a package that writes these tensors without it will not load.
-        """
-        data, scales = Quantization.quantize_to_fp8(tensor)
-
-        self._hold(ctx.name, data)
-        self._hold(ctx.name + FP8_SCALE_SUFFIX, scales)
-
     def write_fp8_tensor_scale(self, ctx, tensor: torch.Tensor) -> None:
-        """A matrix, quantized to E4M3 with one scale for the whole tensor rather than one per row.
+        """A matrix, quantized to E4M3 with one scale for the whole of it, and written as the two
+        tensors it is then made of.
 
-        The same two tensors `write_fp8_tensor` writes, under the same names -- `<name>` and
-        `<name>.scale` -- so the pairing `docs/fp8.md` describes and `check_fp8_pairs` enforces is
-        unchanged. `<name>.scale` is a single `<float>` here rather than one per row, which is what
-        tells the runtime to build `fp8_matmul_tensor_scale` rather than `fp8_matmul`:
-        `weight_format: fp8_tensor_scale` in the manifest is where that is said, the same way
-        `weight_format: fp8` says the row-scaled format.
+        `<name>` holds the elements and `<name>.scale` the single float32 scale, which is the layout
+        `docs/fp8.md` describes and the only one the runtime reads: safetensors cannot tie two
+        tensors together, so the pair is a naming convention, and the reader refuses elements with
+        no scale beside them.
+
+        Half the file and half the bytes on the device. Whether a model is worth the error is the
+        exporter's call, and the package has to say which it made: `weight_format:
+        fp8_tensor_scale` in the manifest is what makes the runtime build the quantized multiply,
+        and a package that writes these tensors without it will not load.
         """
         data, scale = Quantization.quantize_to_fp8_tensor_scale(tensor)
 

@@ -132,7 +132,8 @@ impl Mapping {
         let value = self.get_str(key)?;
         WeightFormat::from_name(value).ok_or_else(|| {
             Error::format(format!(
-                "{}: key {key:?} holds {value:?}, which is neither \"float\" nor \"fp8\"",
+                "{}: key {key:?} holds {value:?}, which is neither \"float\" nor \
+                 \"fp8_tensor_scale\"",
                 self.name
             ))
         })

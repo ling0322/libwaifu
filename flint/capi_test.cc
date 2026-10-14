@@ -452,39 +452,35 @@ CATCH_TEST_CASE("flint C API checks an fp8 weight before the kernel does", "[cor
   ScopedOperators cuda;
   CATCH_REQUIRE(fl_operators_create(FL_DEVICE_CUDA, &cuda) == FL_OK);
 
-  // A weight of 8 rows by 32, its scales, an activation of 4 rows and where the product goes.
-  Tensor x, codes, scales, a, out;
-  makeEmpty(FL_DEVICE_CUDA, {8, 32}, FL_DTYPE_FLOAT16, &x);
+  // A weight of 8 rows by 32, its scale, an activation of 4 rows and where the product goes. What
+  // the codes hold does not matter to what is checked here.
+  Tensor codes, scale, a, out;
   makeEmpty(FL_DEVICE_CUDA, {8, 32}, FL_DTYPE_FP8E4M3, &codes);
-  makeEmpty(FL_DEVICE_CUDA, {8}, FL_DTYPE_FLOAT, &scales);
+  makeEmpty(FL_DEVICE_CUDA, {1}, FL_DTYPE_FLOAT, &scale);
   makeEmpty(FL_DEVICE_CUDA, {4, 32}, FL_DTYPE_FLOAT16, &a);
   makeEmpty(FL_DEVICE_CUDA, {4, 8}, FL_DTYPE_FLOAT16, &out);
-  CATCH_REQUIRE(fl_fill(cuda, x, 0.5f) == FL_OK);
+  CATCH_REQUIRE(fl_fill(cuda, scale, 0.5f) == FL_OK);
   CATCH_REQUIRE(fl_fill(cuda, a, 1.0f) == FL_OK);
 
-  CATCH_REQUIRE(fl_fp8_quantize(x, codes, scales) == FL_OK);
-  CATCH_REQUIRE(fl_fp8_matmul(a, codes, scales, out) == FL_OK);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, scale, out) == FL_OK);
 
-  // The scales where the codes belong.
-  CATCH_REQUIRE(fl_fp8_matmul(a, scales, scales, out) == FL_ERROR_INVALID_ARG);
+  // The scale where the codes belong.
+  CATCH_REQUIRE(fl_fp8_matmul(a, scale, scale, out) == FL_ERROR_INVALID_ARG);
 
-  // One scale for a weight that has eight rows.
-  const int32_t first[] = {1};
-  const int32_t unit[] = {1};
-  fl_tensor_view_t oneScale = nullptr;
-  CATCH_REQUIRE(fl_tensor_view_create(scales.data, first, unit, 1, 0, &oneScale) == FL_OK);
-  CATCH_REQUIRE(fl_fp8_matmul(a, codes, oneScale, out) == FL_ERROR_INVALID_ARG);
-  fl_tensor_view_destroy(oneScale);
+  // A scale for each of the weight's eight rows rather than one for all of it.
+  Tensor rowScales;
+  makeEmpty(FL_DEVICE_CUDA, {8}, FL_DTYPE_FLOAT, &rowScales);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, rowScales, out) == FL_ERROR_INVALID_ARG);
 
-  // Scales on the host, which would reach the kernel as an address it may not touch.
-  Tensor hostScales;
-  makeEmpty(FL_DEVICE_CPU, {8}, FL_DTYPE_FLOAT, &hostScales);
-  CATCH_REQUIRE(fl_fp8_matmul(a, codes, hostScales, out) == FL_ERROR_INVALID_ARG);
+  // A scale on the host, which would reach the kernel as an address it may not touch.
+  Tensor hostScale;
+  makeEmpty(FL_DEVICE_CPU, {1}, FL_DTYPE_FLOAT, &hostScale);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, hostScale, out) == FL_ERROR_INVALID_ARG);
 
   // A product written somewhere of another shape.
   Tensor wrong;
   makeEmpty(FL_DEVICE_CUDA, {4, 16}, FL_DTYPE_FLOAT16, &wrong);
-  CATCH_REQUIRE(fl_fp8_matmul(a, codes, scales, wrong) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, scale, wrong) == FL_ERROR_INVALID_ARG);
 }
 
 CATCH_TEST_CASE("flint C API multiplies by an fp8 weight of no columns on Metal", "[core][flint][capi]") {
@@ -500,27 +496,22 @@ CATCH_TEST_CASE("flint C API multiplies by an fp8 weight of no columns on Metal"
   // k = 0: an activation and a weight of no columns, as views over storage that has elements,
   // which fl_tensor_view_create allows. The product is a sum of nothing, zero everywhere, written
   // over what `out` held.
-  for (bool perRow : {true, false}) {
-    CATCH_INFO("per row = " << perRow);
-    Tensor a, codes, scales, out;
-    makeViewOver(FL_DEVICE_METAL, 16, {4, 0}, FL_DTYPE_FLOAT16, &a);
-    makeViewOver(FL_DEVICE_METAL, 16, {8, 0}, FL_DTYPE_FP8E4M3, &codes);
-    makeEmpty(FL_DEVICE_METAL, {perRow ? 8 : 1}, FL_DTYPE_FLOAT, &scales);
-    makeEmpty(FL_DEVICE_METAL, {4, 8}, FL_DTYPE_FLOAT16, &out);
-    CATCH_REQUIRE(fl_fill(metal, scales, 1.0f) == FL_OK);
-    CATCH_REQUIRE(fl_fill(metal, out, 7.0f) == FL_OK);
+  Tensor a, codes, scale, out;
+  makeViewOver(FL_DEVICE_METAL, 16, {4, 0}, FL_DTYPE_FLOAT16, &a);
+  makeViewOver(FL_DEVICE_METAL, 16, {8, 0}, FL_DTYPE_FP8E4M3, &codes);
+  makeEmpty(FL_DEVICE_METAL, {1}, FL_DTYPE_FLOAT, &scale);
+  makeEmpty(FL_DEVICE_METAL, {4, 8}, FL_DTYPE_FLOAT16, &out);
+  CATCH_REQUIRE(fl_fill(metal, scale, 1.0f) == FL_OK);
+  CATCH_REQUIRE(fl_fill(metal, out, 7.0f) == FL_OK);
 
-    int32_t status = perRow ? fl_fp8_matmul(a, codes, scales, out)
-                            : fl_fp8_matmul_tensor_scale(a, codes, scales, out);
-    CATCH_REQUIRE(status == FL_OK);
+  CATCH_REQUIRE(fl_fp8_matmul(a, codes, scale, out) == FL_OK);
 
-    Tensor wide, host;
-    makeEmpty(FL_DEVICE_METAL, {4, 8}, FL_DTYPE_FLOAT, &wide);
-    makeEmpty(FL_DEVICE_CPU, {4, 8}, FL_DTYPE_FLOAT, &host);
-    CATCH_REQUIRE(fl_cast(metal, out, wide) == FL_OK);
-    CATCH_REQUIRE(fl_transfer(metal, wide, host) == FL_OK);
-    for (float value : readFloats(host)) CATCH_REQUIRE(value == 0.0f);
-  }
+  Tensor wide, host;
+  makeEmpty(FL_DEVICE_METAL, {4, 8}, FL_DTYPE_FLOAT, &wide);
+  makeEmpty(FL_DEVICE_CPU, {4, 8}, FL_DTYPE_FLOAT, &host);
+  CATCH_REQUIRE(fl_cast(metal, out, wide) == FL_OK);
+  CATCH_REQUIRE(fl_transfer(metal, wide, host) == FL_OK);
+  for (float value : readFloats(host)) CATCH_REQUIRE(value == 0.0f);
 }
 
 CATCH_TEST_CASE("flint C API moves views between devices", "[core][flint][capi]") {

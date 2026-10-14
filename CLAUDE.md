@@ -82,10 +82,9 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
   fixed afterwards without deleting and re-uploading all of it.
 - This holds for every package, whatever the exporter's own default is.
 - **fp8 packages use one scale per tensor** (`weight_format: fp8_tensor_scale`, written with
-  `WeightsWriter.write_fp8_tensor_scale`). Per-channel scales (`weight_format: fp8`,
-  `write_fp8_tensor`) are retired: do not export a new package with them, and re-export an old one
-  that has them before it is published again. A ControlNet package must use the same format as
-  the model it steers.
+  `WeightsWriter.write_fp8_tensor_scale`). Per-channel scales (`weight_format: fp8`) have been
+  removed from the runtime and the writer: a package that has them no longer loads and has to be
+  exported again. A ControlNet package must use the same format as the model it steers.
 
 ## Git
 

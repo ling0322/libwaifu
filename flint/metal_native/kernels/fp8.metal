@@ -18,10 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 // The product of a half activation and an FP8 weight on gemm.h: C (M, N) = A (M, K) W^T (K, N),
-// the weight W (N, K) in E4M3 with a scale for each of its rows -- each of C's columns -- or one
-// for the whole of it. The weight is read a byte an element and widened to half as it is staged,
-// which is exact: every E4M3 value is a half. The scale is applied to the sum on the way out,
-// where it is one multiply an element rather than one a term.
+// the weight W (N, K) in E4M3 with one scale for the whole of it. The weight is read a byte an
+// element and widened to half as it is staged, which is exact: every E4M3 value is a half. The
+// scale is applied to the sum on the way out, where it is one multiply an element rather than one
+// a term.
 
 #include "gemm.h"
 
@@ -30,7 +30,6 @@ struct Fp8MatmulParams {
   uint M;
   uint N;
   uint K;
-  uint perRow;  // a scale for each row of the weight, or one for the whole of it
   uint vecA;    // the activation's rows start on a multiple of four elements
   uint vecB;    // and the weight's
 };
@@ -100,12 +99,12 @@ struct Fp8MatmulProblem {
     }
   }
 
-  // Every element is scaled by its column's scale on the way out, so none goes as a block.
+  // Every element is scaled on the way out, so none goes as a block.
   bool storeBlock(simdgroup_matrix<float, 8, 8>, uint, uint) const {
     return false;
   }
   void storeC(uint m, uint n, float value) const {
-    c[m * p->N + n] = half(value * scale[p->perRow ? n : 0]);
+    c[m * p->N + n] = half(value * scale[0]);
   }
 };
 

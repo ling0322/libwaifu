@@ -39,7 +39,6 @@
 #include "lutil/error.h"
 #include "lutil/internal/log.h"
 #ifdef LIBWAIFU_CUDA_ENABLED
-#include "flint/cuda/fp8.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/cuda/to_device.h"
 #endif  // LIBWAIFU_CUDA_ENABLED
@@ -891,8 +890,8 @@ bool fp8Available(fl::Device::Type device) {
   if (device == fl::Device::kCuda) return fl::op::cuda::isFp8GemmAvailable();
 #endif
 #ifdef LIBWAIFU_METAL_ENABLED
-  // The product only: the weight is widened to half as the kernel reads it, which any Apple GPU
-  // the backend runs on can do. Quantizing is still CUDA's.
+  // The weight is widened to half as the kernel reads it, which any Apple GPU the backend runs on
+  // can do.
   if (device == fl::Device::kMetal) return true;
 #endif
 
@@ -901,17 +900,12 @@ bool fp8Available(fl::Device::Type device) {
 
 /// The kernels assert their preconditions with CHECK, which reports a broken invariant of ours.
 /// What a caller could get wrong is checked here first, where it can be named as a bad argument.
-void checkFp8Weight(const fl::TensorView &data, const fl::TensorView &scale, bool perRow) {
+void checkFp8Weight(const fl::TensorView &data, const fl::TensorView &scale) {
   if (data.getDType() != fl::DType::kFp8E4M3 || data.getDim() != 2) {
     throw lut::InvalidArgError("fp8 operand: data is not <fp8e4m3>(rows, k)");
   }
-  if (perRow) {
-    if (scale.getDType() != fl::DType::kFloat || scale.getDim() != 1 ||
-        scale.getShape(0) != data.getShape(0)) {
-      throw lut::InvalidArgError("fp8 operand: channel scale is not <float>(rows)");
-    }
-  } else if (scale.getDType() != fl::DType::kFloat || scale.getNumEl() != 1) {
-    throw lut::InvalidArgError("fp8 operand: the tensor scale is not a single <float>");
+  if (scale.getDType() != fl::DType::kFloat || scale.getNumEl() != 1) {
+    throw lut::InvalidArgError("fp8 operand: the scale is not a single <float>");
   }
   // A weight and its scales on different devices would reach a kernel as one pointer it may touch
   // and one it may not, and nothing would say so.
@@ -964,18 +958,26 @@ void checkFp8Tiles(int rows, int k) {
   if (k % 16 != 0) throw lut::InvalidArgError("the fp8 operand's k is not a multiple of 16");
 }
 
-/// The product of `a` and the FP8 weight `data` with `scale`, per row or for the whole tensor.
-int32_t fp8Matmul(
+}  // namespace
+
+int32_t fl_fp8_available(fl_device_type_t device, int32_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    *out = fp8Available(toDevice(device).getType()) ? 1 : 0;
+    return clearError();
+  });
+}
+
+int32_t fl_fp8_matmul(
     fl_tensor_view_t a,
     fl_tensor_view_t data,
     fl_tensor_view_t scale,
-    fl_tensor_view_t out,
-    bool perRow) {
+    fl_tensor_view_t out) {
   // The return type is written down because a build without CUDA has nothing but the throw left
   // in here, and a lambda that only throws deduces void.
   return guard([&]() -> int32_t {
     const fl::TensorView &weight = deref(data);
-    checkFp8Weight(weight, deref(scale), perRow);
+    checkFp8Weight(weight, deref(scale));
     fl::Device::Type device = weight.getDevice().getType();
     int rows = weight.getShape(0);
     int k = weight.getShape(1);
@@ -987,105 +989,18 @@ int32_t fp8Matmul(
 #ifdef LIBWAIFU_CUDA_ENABLED
     if (device == fl::Device::kCuda) {
       checkFp8Tiles(rows, k);
-      if (perRow) {
-        fl::op::cuda::gemmFp8(deref(a), weight, deref(scale), deref(out));
-      } else {
-        fl::op::cuda::gemmFp8TensorScale(deref(a), weight, deref(scale), deref(out));
-      }
+      fl::op::cuda::gemmFp8(deref(a), weight, deref(scale), deref(out));
       return clearError();
     }
 #endif
 #ifdef LIBWAIFU_METAL_ENABLED
     if (device == fl::Device::kMetal) {
-      fl::op::metal_native::fp8Matmul(deref(a), weight, deref(scale), perRow, deref(out));
+      fl::op::metal_native::fp8Matmul(deref(a), weight, deref(scale), deref(out));
       return clearError();
     }
 #endif
     throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
   });
-}
-
-}  // namespace
-
-int32_t fl_fp8_available(fl_device_type_t device, int32_t *out) {
-  return guard([&]() {
-    if (!out) throw lut::InvalidArgError("out is null");
-    *out = fp8Available(toDevice(device).getType()) ? 1 : 0;
-    return clearError();
-  });
-}
-
-int32_t fl_fp8_quantize(fl_tensor_view_t x, fl_tensor_view_t data, fl_tensor_view_t channel_scale) {
-  return guard([&]() -> int32_t {
-    const fl::TensorView &tensor = deref(x);
-    if (!tensor.isContiguous()) throw lut::InvalidArgError("the tensor to quantize is not contiguous");
-    if (tensor.getDim() != 2) {
-      throw lut::InvalidArgError("the tensor to quantize is not two dimensional");
-    }
-    if (tensor.getDevice().getType() != fl::Device::kCuda) {
-      throw lut::InvalidArgError("the tensor to quantize is on a device with no FP8 kernels");
-    }
-
-#ifdef LIBWAIFU_CUDA_ENABLED
-    if (tensor.getDType() != fl::DType::kFloat16) {
-      throw lut::InvalidArgError("the tensor to quantize is not <float16>");
-    }
-    if (tensor.getShape(-1) % 16 != 0) {
-      throw lut::InvalidArgError("the tensor to quantize: k is not a multiple of 16");
-    }
-
-    const fl::TensorView &codes = deref(data);
-    const fl::TensorView &scales = deref(channel_scale);
-    checkFp8Weight(codes, scales, true);
-    if (codes.getDevice().getType() != fl::Device::kCuda) {
-      throw lut::InvalidArgError("the codes are not on the tensor's device");
-    }
-    checkShape(codes, tensor.getShape(), "the codes");
-
-    fl::op::cuda::quantizeFp8(tensor, codes, scales);
-    return clearError();
-#else
-    throw lut::InvalidArgError("this build has no CUDA support (needs WITH_CUDA=ON)");
-#endif
-  });
-}
-
-int32_t fl_fp8_dequantize(fl_tensor_view_t data, fl_tensor_view_t channel_scale, fl_tensor_view_t out) {
-  return guard([&]() -> int32_t {
-    const fl::TensorView &codes = deref(data);
-    checkFp8Weight(codes, deref(channel_scale), true);
-
-#ifdef LIBWAIFU_CUDA_ENABLED
-    if (codes.getDevice().getType() == fl::Device::kCuda) {
-      const fl::TensorView &y = deref(out);
-      if (y.getDevice().getType() != fl::Device::kCuda || y.getDType() != fl::DType::kFloat16 ||
-          !y.isContiguous()) {
-        throw lut::InvalidArgError("out is not contiguous <float16> on the device");
-      }
-      checkShape(y, codes.getShape(), "out");
-
-      fl::op::cuda::dequantFp8ToHalf(codes, deref(channel_scale), y);
-      return clearError();
-    }
-#endif
-    throw lut::InvalidArgError("the fp8 operand is on a device with no FP8 kernels");
-  });
-}
-
-int32_t fl_fp8_matmul(
-    fl_tensor_view_t a,
-    fl_tensor_view_t data,
-    fl_tensor_view_t channel_scale,
-    fl_tensor_view_t out) {
-  return fp8Matmul(a, data, channel_scale, out, true);
-}
-
-int32_t fl_fp8_matmul_tensor_scale(
-    fl_tensor_view_t a,
-    fl_tensor_view_t data,
-    fl_tensor_view_t scale,
-    fl_tensor_view_t out) {
-  return fp8Matmul(a, data, scale, out, false);
 }
 
 // --- Elementwise ------------------------------------------------------------------------------

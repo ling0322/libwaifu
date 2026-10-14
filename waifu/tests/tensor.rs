@@ -1,7 +1,7 @@
 //! Tests for the safe tensor wrapper. These link against the shared library that CMake builds, so
 //! run `cmake --build build --target flint` first, or point LIBWAIFU_LIB_DIR somewhere else.
 
-use waifu::flint::{functional as F, Bound, DType, Device, Fp8Tensor, Operators, Tensor};
+use waifu::flint::{fp8_available, functional as F, Bound, DType, Device, Operators, Tensor};
 
 #[test]
 fn reports_metadata() {
@@ -142,10 +142,15 @@ fn debug_shows_the_shape() {
 /// The processor has no FP8 kernels for now, and says so rather than failing further in.
 #[test]
 fn has_no_fp8_on_the_processor() {
-    assert!(!Fp8Tensor::is_available(Device::Cpu));
+    assert!(!fp8_available(Device::Cpu));
 
-    let weight = Tensor::from_f32(&[4, 8], &[1.0; 32]).unwrap();
-    let error = Fp8Tensor::quantize(&weight).unwrap_err();
+    let a = Tensor::from_f32(&[1, 16], &[1.0; 16])
+        .unwrap()
+        .cast(DType::Float16)
+        .unwrap();
+    let codes = Tensor::from_bytes(&[8, 16], DType::Fp8E4M3, &[0x38; 8 * 16]).unwrap();
+    let scale = Tensor::from_f32(&[1], &[1.0]).unwrap();
+    let error = F::fp8_matmul(&a, &codes, &scale).unwrap_err();
     assert!(error.message().contains("no FP8 kernels"), "{error}");
 }
 
