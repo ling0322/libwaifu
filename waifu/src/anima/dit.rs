@@ -340,8 +340,8 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
     let d = config.hidden_size;
     // The residual stream runs in float32 whatever the sublayers run in. This model's residuals
     // are large enough that in half they reach infinity part way through the first block and every
-    // step after it is NaN -- which is what ComfyUI means by keeping the stream wide and running
-    // the attention and the feed forward narrow.
+    // step after it is NaN -- so the stream is kept wide while the attention and the feed forward
+    // run narrow.
     let mut x = g.cast(
         Linear::graph(
             &g.subgraph("x_embedder"),

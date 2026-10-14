@@ -2,9 +2,10 @@
 
 Notes towards running Anima in libwaifu. The shapes were read off the published tensor headers
 over range requests, the conv folding was proved with a script that still runs, and the behaviour
-that shapes alone do not show -- the text path, the position layout, the latent scaling -- came
-from the reference implementations in ComfyUI (`comfy/ldm/anima/model.py`,
-`comfy/ldm/cosmos/predict2.py`, `comfy/text_encoders/anima.py`) and diffusers.
+that shapes alone do not show -- the text path, the position layout, the latent scaling -- is
+diffusers' (Apache-2.0): `AnimaTextConditioner`, `CosmosTransformer3DModel`,
+`AutoencoderKLQwenImage` and `AnimaModularPipeline`, which is also what the test tensors are
+computed with -- see `tools/anima_reference.py`.
 
 Anima is **not an SDXL fine tune**, so none of `waifu/src/sdxl/` applies to it and the
 `add-sdxl-model` skill does not describe this job. It is a diffusion transformer derived from
@@ -86,31 +87,22 @@ the way out, which is why the output is 64 and the input 68.
 
 ## How a block actually runs
 
-Shapes do not give any of this and most of it is a silent error. Read off
-`comfy/ldm/cosmos/predict2.py`.
+Shapes do not give any of this and most of it is a silent error. diffusers'
+`transformer_cosmos.py` is where to check it.
 
-The timestep path is the one that reads backwards. `Timesteps` builds a sinusoid --
-`exponent = -log(10000) * arange(half) / half`, then `cat([cos, sin])`, cosine first -- and hands
-it to `TimestepEmbedding`, whose two linears produce **only the AdaLN-LoRA term**:
+The timestep path is the one that reads backwards. The timestep becomes a sinusoid --
+`exponent = -log(10000) * arange(half) / half`, then `cat([cos, sin])`, cosine first -- and the
+two linears of `t_embedder` turn that into **only the AdaLN-LoRA term**, 6144 wide. They never
+feed the modulation directly. What every block modulates on is `t_embedding_norm(sinusoid)` --
+the RMSNorm applied to the *input* of those linears -- and the LoRA term rides alongside. Reading
+the linears' output as the timestep embedding is the obvious mistake and it is wrong.
 
-```python
-emb = self.linear_2(self.activation(self.linear_1(sample)))
-if self.use_adaln_lora:
-    adaln_lora_B_T_3D = emb       # 6144 wide
-    emb_B_T_D = sample            # the raw sinusoid, not the projection
+Each block then, three times over, for the self attention, the cross attention and the MLP:
+
 ```
-
-So `t_embedder`'s linears never feed the modulation directly. What every block modulates on is
-`t_embedding_norm(sinusoid)` -- the RMSNorm applied to the *input* of those linears -- and the
-6144-wide LoRA rides alongside. Reading `emb` as the projection is the obvious mistake and it is
-wrong.
-
-Each block then, three times over:
-
-```python
-shift, scale, gate = (adaln_modulation_<part>(emb) + adaln_lora_B_T_3D).chunk(3, dim=-1)
-normalized     = layer_norm(x) * (1 + scale) + shift
-x              = x + gate * sublayer(normalized)          # torch.addcmul
+shift, scale, gate = split3(adaln_modulation_<part>(emb) + adaln_lora)
+normalized         = layer_norm(x) * (1 + scale) + shift
+x                  = x + gate * sublayer(normalized)
 ```
 
 The same `adaln_lora` is added to all three. `adaln_modulation_*` is
@@ -125,17 +117,14 @@ everywhere else in this model.
 In the attentions, `q_norm` and `k_norm` are `RMSNorm(head_dim, eps=1e-6)` applied per head; `v`
 is not normalized. Nothing carries a bias. And **rotary position embedding is applied to self
 attention only** -- the cross attention is explicitly excluded, which makes sense once the context
-is 512 padded text tokens with no geometry, but it is one line in the reference and invisible
-here. The MLP is a plain `Linear -> GELU -> Linear`.
+is 512 padded text tokens with no geometry, but nothing in the weights says so. The MLP is a plain `Linear -> GELU -> Linear`.
 
 ### The residual stream has to be fp32
 
-Straight from the reference, and the reason is not obvious:
-
-> The residual stream for this model has large values. To make fp16 compute_dtype work, we keep
-> the residual stream in fp32, but run attention and MLP modules in fp16. An alternate method that
-> clamps fp16 values "works" in the sense that it makes coherent images, but there is noticeable
-> quality degradation and visual artifacts.
+The residuals of this model are large enough that in fp16 they reach infinity part way through
+the stack, and every step after that is NaN. So the stream between blocks is kept in fp32 while
+the attentions and the MLP run in fp16. Clamping fp16 instead would keep the numbers finite but
+would no longer be the model.
 
 `waifu::sdxl` runs fp16 throughout and has no reason not to. This one does. The weights are fine
 narrow -- the exporter checks every one against fp16's range and none of turbo v1.1 comes close --
@@ -144,11 +133,8 @@ but the accumulating `x` between blocks is not.
 And a wide stream is not enough on its own: **the places that step on and off it have to widen
 before they multiply, not after.** There are two.
 
-```python
-x = torch.addcmul(x, gate.to(residual_dtype), result.to(residual_dtype))
-```
-
-Both operands are cast to float32 *before* the multiply. Gating in half and widening the product
+The gated residual add, `x + gate * sublayer(...)`, casts both the gate and the sublayer's output
+to float32 *before* the multiply. Gating in half and widening the product
 is a different computation, and the difference is an infinity. The same goes for the modulation:
 `norm(x) * (1 + scale) + shift` is done on the wide `x`, and only its result is narrowed for the
 projections that follow.
@@ -314,23 +300,26 @@ what exists.
 | | state | agrees with the reference to |
 |---|---|---|
 | `tools/anima_exporter.py` | done | -- |
-| `tools/anima_comfy.py` | done; the reference is ComfyUI itself | -- |
+| `tools/anima_reference.py` | done; the reference is diffusers' Anima models | -- |
 | `waifu/src/anima/config.rs` | done | -- |
-| `waifu/src/anima/text_encoder.rs` | done | 0.0029 |
-| `waifu/src/anima/adapter.rs` | done | 0.0024 |
-| `waifu/src/anima/dit.rs` | done | 0.0028 |
-| `waifu/src/anima/vae.rs` | decoder done. The package carries the encoder's weights and the reference outputs to check one against, but the encoder itself is unwritten, so no img2img yet | 0.00072 |
+| `waifu/src/anima/text_encoder.rs` | done | 0.0039 |
+| `waifu/src/anima/adapter.rs` | done | 0.0025 |
+| `waifu/src/anima/dit.rs` | done | 0.012 |
+| `waifu/src/anima/vae.rs` | decoder done. The package carries the encoder's weights and the reference outputs to check one against, but the encoder itself is unwritten, so no img2img yet | 0.00070 |
 | `waifu/src/anima/sampler.rs` | done | -- |
 | the four of them together | draws a 512 by 512 picture in ten steps | -- |
 | tokenizers | done; both in the package | token for token, over 611 texts each |
-| `waifu/src/anima/pipeline.rs` | done | 0.0031, prompt to context |
+| `waifu/src/anima/pipeline.rs` | done | 0.0025, prompt to context |
 | package + CLI | done. `waifu draw` reads `[model] type` and takes the package to whichever model it names |
 | `hub.rs` `CATALOG` | done, once it was asked for: turbo v1.1 is published to both hubs as `anima:turbo`, under CircleStone Labs' licence rather than libwaifu's. See Licensing |
 
 flint: nothing, as promised.
 
-The RMSE numbers are relative, against `tools/anima_comfy.py`, which runs ComfyUI in float32 where the
-runtime runs in half. The pipeline's is the encoder and the adapter composed, from a prompt as a
+The RMSE numbers are relative, against `tools/anima_reference.py`, which runs diffusers in
+float32 where the runtime runs in half, measured on turbo v1.1. The decoder's is after clamping
+the runtime's picture to [-1, 1], which diffusers' `decode` does and this runtime leaves to the
+conversion to pixels; unclamped, a decode of a unit-normal latent differs by 0.048, all of it in
+the tenth of the picture outside that range. The pipeline's is the encoder and the adapter composed, from a prompt as a
 string through to the padded context the denoiser reads, so it lands a little above either of them
 alone. The decoder is the closest of them, which is worth a second look: it is the
 stage that appeared to need a kernel that does not exist, and folding a causal convolution over one
@@ -367,7 +356,7 @@ range, what it would otherwise write is an infinity, and what that draws is nois
 ### And the reference outputs
 
 `-test_output` writes a second, small package the way `sdxl_exporter.py` does, holding what
-`tools/anima_comfy.py` makes ComfyUI compute for one fixed prompt: the encoder's hidden states, the adapter's
+`tools/anima_reference.py` makes diffusers compute for one fixed prompt: the encoder's hidden states, the adapter's
 context before and after padding, the velocity of one denoising step, one decode, and then that
 decode's picture encoded again and decoded once more. A 16 by 16
 latent, so 64 patches and a 128 by 128 image -- every block exercised, 2.4 MB to carry.
@@ -413,9 +402,11 @@ gets its own base, `10000.0 * ntk_factor`, where the factor is
 Rotation is NeoX `rotate_half`, which is the convention flint's `rotaryEmbedding` already
 implements.
 
-**The ratios are not all 1.0, and this file said for months that they were.** `model_detection.py`
-branches on `in_channels`, and Anima's is 16 -- `x_embedder.proj.1.weight` is `[2048, 68]`, so
-`68 // 4 - 1` -- which takes the branch asking for four times the spatial extent:
+**The ratios are not all 1.0, and this file said for months that they were.** Anima's denoiser
+is the 16 channel Cosmos-Predict2 2B text-to-image model -- `x_embedder.proj.1.weight` is
+`[2048, 68]`, so `68 // 4 - 1` -- and that model asks for four times the spatial extent, which is
+`rope_scale = [1.0, 4.0, 4.0]` (time, height, width) in the transformer config of
+`circlestone-labs/Anima-Base-v1.0-Diffusers`:
 
 ```
 rope_h_extrapolation_ratio = 4.0
@@ -429,37 +420,25 @@ choice, and it is the kind of error that draws a perfectly reasonable picture: m
 16x16 latent, a flat 10000 against the real bases is `max|d| = 5.5e-01` on the velocity, 13%
 relative, at a cosine similarity of 0.9959. Close enough to look right, nowhere near right.
 
-It was found by standing the hand transcription that used to live in `tools/anima_reference.py`
-next to ComfyUI's own `comfy.ldm.anima.model.Anima`, on the same weights in float32. That
-transcription is gone now, and this is why: it had been checked only by the fact that it drew a
-coherent picture, the test tensors were generated from it, the runtime was built to match those,
-and the suite was green throughout -- every one of those measured agreement with the
-transcription rather than with Anima. **A reference that is not the upstream implementation is a
-ruler nobody checks.** `tools/anima_comfy.py` replaces it by running ComfyUI itself, the same
-arrangement `sdxl_exporter.py` has with diffusers, and `-test_output` now requires `-comfyui`.
+It was found by putting the hand transcription that used to be the reference beside an
+independent implementation, on the same weights in float32. That transcription is gone now, and
+this is why: it had been checked only by the fact that it drew a coherent picture, the test
+tensors were generated from it, the runtime was built to match those, and the suite was green
+throughout -- every one of those measured agreement with the transcription rather than with
+Anima. **A reference that is not an implementation somebody else maintains is a ruler nobody
+checks.** `tools/anima_reference.py` runs diffusers' Anima models, the same arrangement
+`sdxl_exporter.py` has with diffusers.
 
 Three things carried the assumption and moved together to be rid of it. `anima_exporter.py`
 writes the ratios into the manifest as `rope_h_extrapolation_ratio` and its two neighbours --
 written rather than assumed, because assuming them is how they were wrong -- and refuses a
-checkpoint whose latent width it has no row for. `DitConfig::rope_bases` turns them into one base
-per axis, which `waifu/src/anima/dit.rs` now gives to `frequencies` separately rather than
-sharing `rope_theta` between all three. And the test tensors were regenerated, this time by
-ComfyUI.
+checkpoint whose latent width it has no ratios for. `DitConfig::rope_bases` turns them into one
+base per axis, which `waifu/src/anima/dit.rs` now gives to `frequencies` separately rather than
+sharing `rope_theta` between all three. And the test tensors were regenerated.
 
-While the four stages were being put side by side, the other three were measured too, which had
-never been done. They were right all along -- but nothing had established that, and the way the
-rotary base was wrong is exactly how any of them could have been:
-
-| stage | ComfyUI against the old transcription |
-|---|---|
-| Qwen3 text encoder | `6.1e-05` |
-| LLM adapter | `0.0` exactly |
-| denoiser | `8.9e-06` |
-| VAE decoder | `2.1e-06` |
-
-The last of those is worth its own line: libwaifu decodes through convolutions folded from three
-dimensions to two, ComfyUI through the real `Conv3d`, and they agree to `2.1e-06` on the
-published weights. The folding had only ever been proved on synthetic ones.
+The decoder's agreement is worth its own line: libwaifu decodes through convolutions folded from
+three dimensions to two, diffusers through the real `Conv3d`, and they agree to `7.0e-04` on the
+published weights in half precision. The folding had only ever been proved on synthetic ones.
 
 A model written before this has no ratios in its manifest and will not load: the reader asks
 for the three keys and does not default them. That is deliberate. Defaulting to 1.0 would go back

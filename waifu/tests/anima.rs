@@ -17,13 +17,12 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! Anima's parts against what ComfyUI produces for the same inputs, by way of the test
-//! tensors `tools/anima_comfy.py` writes into the package.
+//! Anima's parts against what diffusers produces for the same inputs, by way of the test
+//! tensors `tools/anima_reference.py` writes into the package.
 //!
-//! The reference is ComfyUI run directly on the same weights, so agreeing with it here is
-//! agreeing with the model rather than with a second opinion of our own. None of what passes
-//! between these stages can be judged by
-//! looking -- a hidden state, a context, a velocity -- and an error in any of them shows up only
+//! The reference is diffusers' Anima models run directly on the same weights, so agreeing with
+//! it here is agreeing with the model rather than with a second opinion of our own. None of what
+//! passes between these stages can be judged by looking -- a hidden state, a context, a velocity -- and an error in any of them shows up only
 //! as a picture that is subtly not the prompt, so they are compared as numbers.
 //!
 //! Each stage is measured against the reference's own inputs where it can be, so that what a
@@ -254,7 +253,8 @@ fn one_step_matches_the_reference() {
     println!("dit velocity rmse = {rmse}");
 
     // Twenty-eight blocks of fp16 against a float32 reference, and this model's residual stream
-    // is large enough that ComfyUI keeps its own in float32 for exactly this reason.
+    // is large enough that it overflows half precision, which is why the runtime keeps it in
+    // float32.
     assert!(rmse < 5e-2, "the velocity drifted by {rmse}");
 }
 
@@ -306,6 +306,21 @@ fn decodes_a_latent_the_way_the_reference_does() {
 
     // An eighth of the side, three channels out of sixteen: a 16 by 16 latent is 128 by 128.
     assert_eq!(image.shape(), vec![1, 3, 128, 128]);
+
+    // The reference decode clamps its picture to [-1, 1] and this runtime leaves that to the
+    // conversion to pixels, so the runtime's is clamped here before the two are compared. On a
+    // latent off a unit normal a tenth of the picture lies outside that range.
+    let pixels: Vec<f32> = image
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap()
+        .into_iter()
+        .map(|value| value.clamp(-1.0, 1.0))
+        .collect();
+    let image = Tensor::from_f32(&[1, 3, 128, 128], &pixels).unwrap();
 
     let reference = cases["test_case.decoded"].clone();
     let rmse = relative_rmse(&image, &reference);

@@ -79,7 +79,7 @@ pub struct DitConfig {
     /// They are read from the package rather than assumed here because assuming them is how they
     /// came to be wrong. Anima asks for four times the spatial extent and leaves time alone, and
     /// a flat base on all three axes is 13% off on the velocity while still drawing a picture
-    /// that looks perfectly reasonable. It was caught by running ComfyUI beside it.
+    /// that looks perfectly reasonable. It was caught by running a reference beside it.
     pub rope_h_ratio: f32,
     pub rope_w_ratio: f32,
     pub rope_t_ratio: f32,

@@ -1,0 +1,24 @@
+# What `anima_exporter.py -test_output` needs, in a venv of its own:
+#
+#     python3 -m venv .venv-anima
+#     .venv-anima/bin/pip install -r tools/requirements-anima.txt
+#
+# The reference outputs are what diffusers' Anima models compute -- see tools/anima_reference.py
+# -- and those arrived in diffusers 0.41, with a Qwen3 text encoder that needs a transformers far
+# newer than the 4.46.3 tools/requirements.txt pins for the SDXL reference. The two pairs cannot
+# share a venv, so this one is for Anima and nothing else. A plain export, without -test_output,
+# runs in either.
+#
+# The pins are the set the Anima reference tensors are generated with; a different diffusers is a
+# different reference. torch is unpinned for the same reason it is in tools/requirements.txt, and
+# torchvision is here because diffusers' Cosmos transformer resizes the padding mask with it.
+torch
+torchvision
+diffusers==0.41.0
+transformers==5.19.0
+huggingface-hub==1.33.0
+tokenizers==0.23.3
+accelerate
+safetensors
+sentencepiece
+protobuf
