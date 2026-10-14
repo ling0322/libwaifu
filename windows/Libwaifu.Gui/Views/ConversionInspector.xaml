@@ -1,0 +1,55 @@
+<!-- The settings column on the speech2speech page: whose voice to use, and how hard to work. -->
+<UserControl x:Class="Libwaifu.Gui.Views.ConversionInspector"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="clr-namespace:Libwaifu.Gui.Controls"
+             xmlns:views="clr-namespace:Libwaifu.Gui.Views"
+             IsEnabled="{Binding SettingsEnabled}">
+  <StackPanel>
+    <TextBlock Text="Voice to convert it to" Style="{StaticResource HeadlineText}" Margin="2,0,0,6" />
+
+    <Grid Margin="0,0,0,8" Visibility="{Binding HasTo, Converter={StaticResource BoolToVisible}}">
+      <views:PlayerView DataContext="{Binding ToPlayer}" Margin="0,0,26,0" />
+      <Button Style="{StaticResource IconButton}" Width="22" Height="20" HorizontalAlignment="Right"
+              ToolTip="Remove the recording" Command="{Binding ClearTo}">
+        <Path Data="{StaticResource IconClose}" Stretch="Uniform" Width="11" Height="11"
+              StrokeThickness="1.6"
+              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+      </Button>
+    </Grid>
+
+    <c:DropBox Height="56" Caption="{Binding ToCaption}" Icon="{StaticResource IconWaveformPlus}"
+               Filter="Recordings|*.wav;*.mp3;*.m4a;*.aac;*.flac;*.wma;*.ogg"
+               Chosen="OnVoiceChosen" />
+
+    <c:FormGroup Title="Conversion" Margin="0,12,0,0"
+                 RowPadding="{StaticResource InspectorRowPadding}">
+      <c:SettingRow Label="Steps">
+        <DockPanel>
+          <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                   Style="{StaticResource FieldBox}"
+                   Text="{Binding Steps, UpdateSourceTrigger=LostFocus}" />
+          <Slider Style="{StaticResource MacSlider}" Minimum="1" Maximum="100"
+                  IsSnapToTickEnabled="True" TickFrequency="1" Value="{Binding Steps}" />
+        </DockPanel>
+      </c:SettingRow>
+
+      <c:SettingRow Label="Convert the style too"
+                    ToolTip="Off, only whose voice it is changes. On, the accent and pacing change as well."
+                    Visibility="{Binding ConvertsStyle, Converter={StaticResource BoolToVisible}}">
+        <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding ConvertStyle}" />
+      </c:SettingRow>
+
+      <c:SettingRow Label="Seed">
+        <Grid>
+          <TextBox Style="{StaticResource SeedBox}" Tag="-1"
+                   Text="{Binding Seed, UpdateSourceTrigger=PropertyChanged}" />
+          <Button Style="{StaticResource DieButton}" Command="{Binding Dice}">
+            <Path Data="{StaticResource IconDie}" Stretch="Uniform" Width="13" Height="13"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+        </Grid>
+      </c:SettingRow>
+    </c:FormGroup>
+  </StackPanel>
+</UserControl>

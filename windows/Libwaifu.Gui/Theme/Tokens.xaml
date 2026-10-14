@@ -1,0 +1,117 @@
+<!--
+  Every colour and size the screen is made of, in one file.
+
+  The values are the macOS app's, from section 4 of the design spec, and they are literals rather
+  than system brushes on purpose: the appearance is a fixed dark grey that does not follow the
+  system theme and does not take a tint from the wallpaper. That rules out Mica and Acrylic here
+  for the same reason it rules out NSVisualEffectView there — a picture is the only thing on this
+  screen worth looking at, and a background that changes colour decides what the colours in it
+  look like.
+
+  Sizes are DIPs, which at 100% scaling are the points the mac side measures in.
+-->
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+  <!-- — surfaces ========================================================================= -->
+
+  <SolidColorBrush x:Key="WindowBrush" Color="#282828" />
+  <SolidColorBrush x:Key="SidebarBrush" Color="#202020" />
+  <SolidColorBrush x:Key="CardBrush" Color="#383838" />
+  <SolidColorBrush x:Key="FieldBrush" Color="#1C1C1C" />
+  <SolidColorBrush x:Key="ControlBrush" Color="#6A6A6A" />
+  <SolidColorBrush x:Key="ControlHoverBrush" Color="#7A7A7A" />
+  <SolidColorBrush x:Key="ControlPressedBrush" Color="#565656" />
+  <SolidColorBrush x:Key="MenuBrush" Color="#2E2E2E" />
+
+  <!-- What a chosen row down the sidebar is filled with: a grey, not the accent colour. -->
+  <SolidColorBrush x:Key="SelectedBrush" Color="#3A3A3C" />
+
+  <!-- The outline of a card and the hairline between its rows. White at a few percent rather
+       than a grey of its own, so one card reads the same on the window and on the sidebar. -->
+  <SolidColorBrush x:Key="CardStrokeBrush" Color="#12FFFFFF" />
+  <SolidColorBrush x:Key="SeparatorBrush" Color="#1AFFFFFF" />
+  <SolidColorBrush x:Key="PaneSplitBrush" Color="#1AFFFFFF" />
+
+  <!-- — ink ============================================================================== -->
+
+  <SolidColorBrush x:Key="TextBrush" Color="#D9FFFFFF" />
+  <SolidColorBrush x:Key="TextSecondaryBrush" Color="#8CFFFFFF" />
+  <SolidColorBrush x:Key="TextTertiaryBrush" Color="#59FFFFFF" />
+  <SolidColorBrush x:Key="TextOnAccentBrush" Color="#FFFFFFFF" />
+
+  <!-- — the two colours with an opinion =================================================== -->
+
+  <!-- The system accent colour, read out of the registry at startup; this is the fallback and
+       also what the mac defaults to. Used by the big button, the progress bar, the selected
+       thumbnail's edge and the highlight a drag draws. -->
+  <!--
+    The colour itself is the resource and the brushes point at it, because a brush in a
+    dictionary is frozen the moment it is loaded and a frozen brush cannot be told a new colour.
+    A dynamic reference keeps them thawed, so replacing the colour at startup reaches every one
+    of them.
+  -->
+  <Color x:Key="AccentColour">#0A84FF</Color>
+  <Color x:Key="AccentDimColour">#330A84FF</Color>
+  <SolidColorBrush x:Key="AccentBrush" Color="{DynamicResource AccentColour}" />
+  <SolidColorBrush x:Key="AccentDimBrush" Color="{DynamicResource AccentDimColour}" />
+  <SolidColorBrush x:Key="DangerBrush" Color="#FF453A" />
+
+  <!-- The sidebar's 20x20 task squares. One colour per task, as on the mac. -->
+  <SolidColorBrush x:Key="TaskImageBrush" Color="#0A84FF" />
+  <SolidColorBrush x:Key="TaskImage2Brush" Color="#BF5AF2" />
+  <SolidColorBrush x:Key="TaskSpeechBrush" Color="#FF375F" />
+  <SolidColorBrush x:Key="TaskConversionBrush" Color="#FF9F0A" />
+  <SolidColorBrush x:Key="TaskModelsBrush" Color="#8E8E93" />
+
+  <!-- — type ============================================================================== -->
+
+  <FontFamily x:Key="UiFont">Segoe UI Variable Text, Segoe UI</FontFamily>
+  <!-- Progress text counts up while it is read, so its digits are all one width. -->
+  <FontFamily x:Key="MonoFont">Cascadia Mono, Consolas</FontFamily>
+
+  <sys:Double x:Key="BodySize">13</sys:Double>
+  <sys:Double x:Key="HeadlineSize">13</sys:Double>
+  <sys:Double x:Key="Title3Size">15</sys:Double>
+  <sys:Double x:Key="CaptionSize">11</sys:Double>
+  <sys:Double x:Key="Caption2Size">10</sys:Double>
+
+  <!-- — sizes ============================================================================== -->
+
+  <sys:Double x:Key="FieldBoxHeight">20</sys:Double>
+  <sys:Double x:Key="BigButtonHeight">32</sys:Double>
+  <sys:Double x:Key="LabelColumn">86</sys:Double>
+  <CornerRadius x:Key="CardRadius">8</CornerRadius>
+  <CornerRadius x:Key="SmallRadius">5</CornerRadius>
+
+  <Thickness x:Key="CenterRowPadding">12,8</Thickness>
+  <Thickness x:Key="InspectorRowPadding">12,5</Thickness>
+
+  <!-- — the three kinds of text, as styles ================================================= -->
+
+  <Style x:Key="BodyText" TargetType="TextBlock">
+    <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+    <Setter Property="FontSize" Value="{StaticResource BodySize}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+  </Style>
+
+  <Style x:Key="HeadlineText" TargetType="TextBlock" BasedOn="{StaticResource BodyText}">
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="{StaticResource HeadlineSize}" />
+  </Style>
+
+  <Style x:Key="CaptionText" TargetType="TextBlock" BasedOn="{StaticResource BodyText}">
+    <Setter Property="FontSize" Value="{StaticResource CaptionSize}" />
+    <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+    <Setter Property="TextTrimming" Value="None" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+
+  <!-- The small all-caps heading over each line of machine information. -->
+  <Style x:Key="Caption2Text" TargetType="TextBlock" BasedOn="{StaticResource BodyText}">
+    <Setter Property="FontSize" Value="{StaticResource Caption2Size}" />
+    <Setter Property="Foreground" Value="{StaticResource TextTertiaryBrush}" />
+  </Style>
+</ResourceDictionary>

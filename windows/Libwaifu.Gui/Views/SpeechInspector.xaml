@@ -1,0 +1,90 @@
+<!-- The settings column on the text2speech page: whose voice, in what style, read how. -->
+<UserControl x:Class="Libwaifu.Gui.Views.SpeechInspector"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="clr-namespace:Libwaifu.Gui.Controls"
+             xmlns:views="clr-namespace:Libwaifu.Gui.Views"
+             IsEnabled="{Binding SettingsEnabled}">
+  <StackPanel>
+
+    <!-- — the voice to copy ============================================================ -->
+
+    <StackPanel>
+      <TextBlock Text="Recording to sound like" Style="{StaticResource HeadlineText}"
+                 Margin="2,0,0,6" />
+      <TextBlock Text="{Binding WhyNotARecording}" Style="{StaticResource CaptionText}"
+                 Margin="2,0,0,0"
+                 Visibility="{Binding TakesARecording, Converter={StaticResource BoolToCollapsed}}" />
+
+      <StackPanel Visibility="{Binding TakesARecording, Converter={StaticResource BoolToVisible}}">
+        <Grid Margin="0,0,0,8"
+              Visibility="{Binding HasReference, Converter={StaticResource BoolToVisible}}">
+          <views:PlayerView DataContext="{Binding Player}" Margin="0,0,26,0" />
+          <Button Style="{StaticResource IconButton}" Width="22" Height="20"
+                  HorizontalAlignment="Right" ToolTip="Remove the recording"
+                  Command="{Binding ClearReference}">
+            <Path Data="{StaticResource IconClose}" Stretch="Uniform" Width="11" Height="11"
+                  StrokeThickness="1.6"
+                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+        </Grid>
+
+        <c:DropBox Height="56" Caption="{Binding DropCaption}"
+                   Icon="{StaticResource IconWaveformPlus}"
+                   Filter="Recordings|*.wav;*.mp3;*.m4a;*.aac;*.flac;*.wma;*.ogg"
+                   Chosen="OnRecordingChosen" />
+      </StackPanel>
+    </StackPanel>
+
+    <!-- — how to say it ================================================================= -->
+
+    <c:FormGroup Title="Style" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}"
+                 Visibility="{Binding HasStyles, Converter={StaticResource BoolToVisible}}">
+      <c:SettingRow Label="Say it">
+        <ComboBox Style="{StaticResource PopupButton}" ItemsSource="{Binding Styles}"
+                  SelectedItem="{Binding Style}">
+          <ComboBox.ItemTemplate>
+            <DataTemplate>
+              <TextBlock Text="{Binding Label}" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+      </c:SettingRow>
+      <c:SettingRow Label="Instruction">
+        <TextBox Style="{StaticResource FieldBox}" Tag="none"
+                 Text="{Binding Instruction, UpdateSourceTrigger=PropertyChanged}" />
+      </c:SettingRow>
+    </c:FormGroup>
+
+    <c:FormGroup Title="Reading" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}">
+      <c:SettingRow Label="Speed">
+        <DockPanel>
+          <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                   Style="{StaticResource FieldBox}"
+                   Text="{Binding Speed, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+          <Slider Style="{StaticResource MacSlider}" Minimum="0.25" Maximum="4"
+                  IsSnapToTickEnabled="True" TickFrequency="0.05" Value="{Binding Speed}" />
+        </DockPanel>
+      </c:SettingRow>
+      <c:SettingRow Label="Temperature">
+        <DockPanel>
+          <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                   Style="{StaticResource FieldBox}"
+                   Text="{Binding Temperature, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+          <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="2"
+                  IsSnapToTickEnabled="True" TickFrequency="0.05" Value="{Binding Temperature}" />
+        </DockPanel>
+      </c:SettingRow>
+      <c:SettingRow Label="Seed">
+        <Grid>
+          <TextBox Style="{StaticResource SeedBox}" Tag="-1"
+                   Text="{Binding Seed, UpdateSourceTrigger=PropertyChanged}" />
+          <Button Style="{StaticResource DieButton}" Command="{Binding Dice}">
+            <Path Data="{StaticResource IconDie}" Stretch="Uniform" Width="13" Height="13"
+                  Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" />
+          </Button>
+        </Grid>
+      </c:SettingRow>
+    </c:FormGroup>
+  </StackPanel>
+</UserControl>
