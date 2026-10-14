@@ -18,7 +18,7 @@ use waifu::audio::{
     istft_basis, magnitude, mel_filterbank, pad1d, resample, resample_kernel, snake, stft,
     stft_basis, window_envelope, MelScale, Padding,
 };
-use waifu::flint::{DType, Device, Graph, Ir, RunContext, Tensor, Value};
+use waifu::flint::{DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights};
 
 const CPU: Device = Device::Cpu;
 const F32: DType = DType::Float;
@@ -27,7 +27,7 @@ const F32: DType = DType::Float;
 fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> Vec<f32> {
     g.output("out", out);
 
-    let weights: HashMap<String, Tensor> = HashMap::new();
+    let weights = Weights::from_tensors(HashMap::new(), Device::Cpu).unwrap();
     let mut context = RunContext::new(&weights);
     for (name, tensor) in inputs {
         context = context.input(name, tensor);
@@ -42,7 +42,7 @@ fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> Vec<f32> {
 fn run_shaped(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, Vec<f32>) {
     g.output("out", out);
 
-    let weights: HashMap<String, Tensor> = HashMap::new();
+    let weights = Weights::from_tensors(HashMap::new(), Device::Cpu).unwrap();
     let mut context = RunContext::new(&weights);
     for (name, tensor) in inputs {
         context = context.input(name, tensor);
@@ -1089,7 +1089,7 @@ fn the_remaining_audio_operators_are_nodes_no_backend_implements_yet() {
             "a {name} graph did not print as one:\n{printed}"
         );
 
-        let weights: HashMap<String, Tensor> = HashMap::new();
+        let weights = Weights::from_tensors(HashMap::new(), Device::Cpu).unwrap();
         let mut context = RunContext::new(&weights);
         for (input, tensor) in &inputs {
             context = context.input(input, tensor);

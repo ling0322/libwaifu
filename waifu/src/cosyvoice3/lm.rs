@@ -55,7 +55,7 @@ use std::rc::Rc;
 
 use crate::error::Error;
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::Linear;
 use crate::Result;
@@ -315,7 +315,7 @@ pub struct Lm {
     step: Ir,
     past_names: Vec<(String, String)>,
     kept_names: Vec<(String, String)>,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     device: Device,
     dtype: DType,
     /// Every position's rotary angles, on the device. See [`Rotary`].
@@ -417,7 +417,7 @@ impl Lm {
     pub fn build(
         config: Config,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         dtype: DType,
         device: Device,
     ) -> Result<Lm> {

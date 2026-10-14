@@ -75,7 +75,7 @@ use crate::audio::{
     apply_filterbank, conv1d, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis,
     MelScale, Padding,
 };
-use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value};
+use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights};
 use crate::{Error, Result};
 
 /// How a waveform is cut into frames and turned into log mel energies.
@@ -734,7 +734,7 @@ impl Spectrograms {
 
     /// Run a graph that reads no weights, only the wave it is handed.
     fn run(&self, g: &Graph, wave: &[f32]) -> Result<Tensor> {
-        let nothing: HashMap<String, Tensor> = HashMap::new();
+        let nothing = Weights::from_tensors(HashMap::new(), self.device)?;
         let wave = self.upload(wave)?;
         let context = RunContext::new(&nothing).input("wave", &wave);
         Ir::compile(g)

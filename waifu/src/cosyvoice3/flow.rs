@@ -50,8 +50,8 @@ use std::rc::Rc;
 
 use crate::audio::{pad1d, Padding};
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, RunContext,
-    Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value,
+    Weights,
 };
 use crate::indextts::gpt::gelu_new;
 use crate::layers::Linear;
@@ -501,7 +501,7 @@ pub struct Flow {
     config: Config,
     condition: Ir,
     estimator: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     device: Device,
     /// The rotary cosines and sines of every frame the flow can draw, `(noise_frames, head_dim / 2,
     /// 1)` each, on the device: 3.8 MB, worked out once and sliced to a sentence's length.
@@ -521,7 +521,7 @@ impl Flow {
     pub fn build(
         config: Config,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         dtype: DType,
         device: Device,
     ) -> Result<Flow> {

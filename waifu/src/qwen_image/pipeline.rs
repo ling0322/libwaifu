@@ -33,7 +33,7 @@ use std::rc::Rc;
 
 use super::{ControlConfig, Dit, QwenImageConfig, VaeDecoder, VaeEncoder};
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, ParamSource, Residency, Tensor, Weights};
+use crate::flint::{functional as F, DType, Device, Residency, Tensor, Weights};
 use crate::flow::{FlowSampler, SamplerConfig};
 use crate::generation::{unwatched, GenerationDefaults, GenerationOptions, GenerationProgress};
 use crate::krea2::TextEncoder;
@@ -158,7 +158,7 @@ impl QwenImage {
         };
 
         let dtype = F::default_float_type(device)?;
-        let weights: Rc<dyn ParamSource> =
+        let weights: Rc<Weights> =
             Rc::new(Weights::from_files(&paths, device, residency)?);
 
         let named = |half: &str| format!("{model_type}.{half}");

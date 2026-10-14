@@ -55,7 +55,7 @@
 //! encoding in the perceiver's attention. Upstream's `emo_cond_mask_pad` prepends the latent's
 //! own `True` at position zero, so the order would matter the moment a batch were padded.
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor, Value};
+use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Value, Weights};
 use waifu::indextts::emotion::{self, Config};
 use waifu::Result;
 
@@ -197,29 +197,13 @@ fn scatter(name: &str, count: usize, scale: f64) -> Vec<f32> {
         .collect()
 }
 
-struct Scattered;
+fn scattered(name: &str, shape: &[i32]) -> Result<Tensor> {
+    let count: usize = shape.iter().map(|size| *size as usize).product();
 
-impl ParamSource for Scattered {
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let count: usize = shape.iter().map(|size| *size as usize).product();
-
-        Ok(Tensor::from_f32(
-            shape,
-            &scatter(name, count, WEIGHT_SCALE),
-        )?)
-    }
-
-    fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
-        None
-    }
-
-    fn has(&self, _: &str) -> bool {
-        true
-    }
-
-    fn check(&self, _: &str, _: &[i32]) -> Result<()> {
-        Ok(())
-    }
+    Ok(Tensor::from_f32(
+        shape,
+        &scatter(name, count, WEIGHT_SCALE),
+    )?)
 }
 
 fn probe_indices(length: usize, limit: usize) -> Vec<usize> {
@@ -284,7 +268,7 @@ fn run(stage: impl Fn(&Graph, Value, &Config, Value) -> Value) -> (Vec<i32>, Vec
     let out = stage(&g, g.input("x"), &config, g.input("positions"));
     g.output("out", out);
 
-    let weights = Scattered;
+    let weights = Weights::for_graph(&g, CPU, scattered).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(

@@ -83,8 +83,8 @@ use std::rc::Rc;
 
 use crate::error::Error;
 use crate::flint::{
-    check_parameters, functional as F, Bound, DType, Device, Extent, Graph, Ir, ParamSource,
-    RunContext, Tensor, Value,
+    check_parameters, functional as F, Bound, DType, Device, Extent, Graph, Ir, RunContext, Tensor,
+    Value, Weights,
 };
 use crate::Result;
 
@@ -621,7 +621,7 @@ pub struct Gpt {
     /// them. Indexed by layer, keys then values.
     past_names: Vec<(String, String)>,
     kept_names: Vec<(String, String)>,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     float_type: DType,
     device: Device,
 }
@@ -642,7 +642,7 @@ impl Gpt {
     pub fn build(
         config: Config,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
         device: Device,
     ) -> Result<Gpt> {

@@ -58,18 +58,18 @@
 //! does not decide: which nodes are worth running, and where each value is finished with.
 //!
 //! ```
-//! # use waifu::flint::{Graph, Ir, RunContext, Tensor};
+//! # use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Weights};
 //! # use std::collections::HashMap;
 //! # let g = Graph::new();
 //! # let x = g.input("hidden");
 //! # let gated = g.silu(x);
 //! # g.output("hidden", gated);
-//! // The same graph again, and this time run. The weights come from the source the run is
+//! // The same graph again, and this time run. The weights come from the ones the run is
 //! // given, which is also what decides where they wait.
 //! let ir = Ir::compile(&g);
 //!
 //! let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
-//! let weights = HashMap::new();
+//! let weights = Weights::from_tensors(HashMap::new(), Device::Cpu)?;
 //!
 //! let context = RunContext::new(&weights).input("hidden", &hidden);
 //! let outputs = ir.run(&context)?;
@@ -95,7 +95,7 @@ mod operators;
 
 pub use fp8::{Fp8Tensor, CHANNEL_SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
-pub use ir::{check_parameters, Inst, Ir, ParamSource, Residency, RunContext, Weights};
+pub use ir::{check_parameters, Inst, Ir, Residency, RunContext, Weights};
 pub use operators::Operators;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
 

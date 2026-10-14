@@ -33,7 +33,7 @@ use waifu::cosyvoice3::flow::{self, Flow};
 use waifu::cosyvoice3::hift::Hift;
 use waifu::cosyvoice3::lm::{self, Lm};
 use waifu::cosyvoice3::{features, speech_tokenizer};
-use waifu::flint::{Graph, Ir, ParamSource, RunContext, Tensor};
+use waifu::flint::{Graph, Ir, RunContext, Tensor};
 use waifu::indextts;
 use waifu::indextts::features::resample;
 
@@ -60,7 +60,7 @@ fn manifest() -> Manifest {
     Manifest::open(models_dir().join("cosyvoice3.yaml")).unwrap()
 }
 
-fn weights(manifest: &Manifest) -> Rc<dyn ParamSource> {
+fn weights(manifest: &Manifest) -> Rc<Weights> {
     Rc::new(
         Weights::from_files(&manifest.weight_paths().unwrap(), DEVICE, Residency::Device).unwrap(),
     )
@@ -113,7 +113,7 @@ fn max_error(got: &[f32], want: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-fn run(weights: &Rc<dyn ParamSource>, g: &Graph, inputs: &[(&str, &Tensor)]) -> Vec<Tensor> {
+fn run(weights: &Rc<Weights>, g: &Graph, inputs: &[(&str, &Tensor)]) -> Vec<Tensor> {
     let ir = Ir::compile(g);
     let mut context = RunContext::new(weights.as_ref());
     for (name, tensor) in inputs {

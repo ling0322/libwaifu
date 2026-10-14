@@ -110,7 +110,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use crate::flint::{
-    functional as F, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor,
+    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor,
     Weights,
 };
 use crate::{
@@ -226,7 +226,7 @@ pub struct Reference {
 /// IndexTTS-2.5, with every model it runs read and waiting.
 pub struct IndexTts {
     settings: Settings,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     gpt: Gpt,
     vocoder: BigVgan,
     tokenizer: Tokenizer,
@@ -281,7 +281,7 @@ impl IndexTts {
 
         // Every model here runs in full precision; see the module note.
         let dtype = DType::Float;
-        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+        let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
             residency,

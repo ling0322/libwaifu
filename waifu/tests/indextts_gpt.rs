@@ -29,7 +29,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Value, Weights};
+use waifu::flint::{Device, Graph, Ir, Residency, RunContext, Tensor, Value, Weights};
 use waifu::indextts::gpt::{self, Config, Gpt, Sampling};
 use waifu::Result;
 
@@ -125,26 +125,10 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
         .collect()
 }
 
-struct Filled;
+fn filled(name: &str, shape: &[i32]) -> Result<Tensor> {
+    let count: usize = shape.iter().map(|size| *size as usize).product();
 
-impl ParamSource for Filled {
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let count: usize = shape.iter().map(|size| *size as usize).product();
-
-        Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
-    }
-
-    fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
-        None
-    }
-
-    fn has(&self, _: &str) -> bool {
-        true
-    }
-
-    fn check(&self, _: &str, _: &[i32]) -> Result<()> {
-        Ok(())
-    }
+    Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
 }
 
 fn embeddings() -> Tensor {
@@ -180,8 +164,8 @@ fn run(
     let out = build(&g);
     g.output("out", out);
 
-    let filled = Filled;
-    let mut context = RunContext::new(&filled);
+    let weights = Weights::for_graph(&g, CPU, filled).unwrap();
+    let mut context = RunContext::new(&weights);
     for (name, tensor) in inputs {
         context = context.input(name, tensor);
     }
@@ -297,8 +281,6 @@ const MODEL: &str = "gpt2";
 /// So these tests get their own weights, drawn by xorshift rather than swept. Nothing here is
 /// compared against Python -- both sides of every comparison below are this crate's -- so the
 /// only thing the numbers have to be is different from each other.
-struct Scattered;
-
 fn scatter(name: &str, count: usize, scale: f64) -> Vec<f32> {
     let mut state = hash32(name) | 1;
 
@@ -313,27 +295,13 @@ fn scatter(name: &str, count: usize, scale: f64) -> Vec<f32> {
         .collect()
 }
 
-impl ParamSource for Scattered {
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let count: usize = shape.iter().map(|size| *size as usize).product();
+fn scattered(name: &str, shape: &[i32]) -> Result<Tensor> {
+    let count: usize = shape.iter().map(|size| *size as usize).product();
 
-        Ok(Tensor::from_f32(
-            shape,
-            &scatter(name, count, WEIGHT_SCALE),
-        )?)
-    }
-
-    fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
-        None
-    }
-
-    fn has(&self, _: &str) -> bool {
-        true
-    }
-
-    fn check(&self, _: &str, _: &[i32]) -> Result<()> {
-        Ok(())
-    }
+    Ok(Tensor::from_f32(
+        shape,
+        &scatter(name, count, WEIGHT_SCALE),
+    )?)
 }
 
 /// What language every reading here is in. Not zero, so that a language embedding dropped on the
@@ -362,9 +330,47 @@ fn sentence() -> Vec<i32> {
 }
 
 fn model() -> Gpt {
-    let weights: Rc<dyn ParamSource> = Rc::new(Scattered);
+    // The weights a whole pass reads are the ones the cached passes read between them.
+    let weights = Rc::new(Weights::for_graph(&whole_pass(), CPU, scattered).unwrap());
 
     Gpt::build(config(), MODEL, &weights, F32, CPU).unwrap()
+}
+
+/// Every position at once, built the way `Gpt` builds its prefix out of the same public
+/// functions: conditioning, text, and the mel sequence, scored by one graph.
+fn whole_pass() -> Graph {
+    let config = config();
+
+    let g = Graph::new();
+    let sub = g.subgraph(MODEL);
+
+    let conditioned = gpt::conditioning(
+        &sub,
+        sub.input("speaker"),
+        sub.input("emotion"),
+        &config,
+        SPEAKER_DIM,
+        F32,
+        CPU,
+    )
+    .unwrap();
+    let embedded = gpt::text_embeddings(
+        &sub,
+        sub.input("text"),
+        sub.input("text_positions"),
+        sub.input("language"),
+        &config,
+    );
+    let voiced =
+        gpt::mel_embeddings(&sub, sub.input("mel"), sub.input("mel_positions"), &config);
+
+    let whole = sub.cat(sub.cat(conditioned, embedded, 1), voiced, 1);
+    g.output(
+        "logits",
+        gpt::graph(&sub, whole, &config, F32, CPU).unwrap(),
+    );
+
+    g
 }
 
 /// Every position of `[ conditioning ][ text ][ start ][ said... ]`, scored in one pass.
@@ -403,40 +409,12 @@ fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
     )
     .unwrap();
 
-    let g = Graph::new();
-    let sub = g.subgraph(MODEL);
-
-    let conditioned = gpt::conditioning(
-        &sub,
-        sub.input("speaker"),
-        sub.input("emotion"),
-        &config,
-        SPEAKER_DIM,
-        F32,
-        CPU,
-    )
-    .unwrap();
-    let embedded = gpt::text_embeddings(
-        &sub,
-        sub.input("text"),
-        sub.input("text_positions"),
-        sub.input("language"),
-        &config,
-    );
-    let voiced =
-        gpt::mel_embeddings(&sub, sub.input("mel"), sub.input("mel_positions"), &config);
-
-    let whole = sub.cat(sub.cat(conditioned, embedded, 1), voiced, 1);
-    g.output(
-        "logits",
-        gpt::graph(&sub, whole, &config, F32, CPU).unwrap(),
-    );
-
-    let filled = Scattered;
+    let g = whole_pass();
+    let weights = Weights::for_graph(&g, CPU, scattered).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("speaker", &speaker)
                 .input("emotion", &emotion)
                 .input("text", &text)
@@ -518,11 +496,11 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
     let hidden = gpt::backbone(&g, g.input("x"), &config, F32, CPU).unwrap();
     g.output("hidden", hidden);
 
-    let filled = Scattered;
+    let weights = Weights::for_graph(&g, CPU, scattered).unwrap();
     let whole_ir = Ir::compile(&g);
     let at_once = whole_ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("x", &whole),
         )
         .unwrap()[0]
@@ -545,7 +523,7 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
     let prefill_ir = Ir::compile(&g);
     let prefill = prefill_ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("x", &before),
         )
         .unwrap();
@@ -580,7 +558,7 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
         })
         .collect();
 
-    let mut context = RunContext::new(&filled).input("x", &last);
+    let mut context = RunContext::new(&weights).input("x", &last);
     for (keys, values, k, v) in &names {
         context = context.input(keys, k).input(values, v);
     }
@@ -908,7 +886,7 @@ fn the_released_gpt_is_the_released_gpt() {
     // for; a package too large for that is what `Residency::LowVram` is for, and nothing in this
     // test would change but the argument.
     let name = "indextts25-gpt.safetensors";
-    let weights: Rc<dyn ParamSource> = Rc::new(
+    let weights: Rc<Weights> = Rc::new(
         Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device).unwrap_or_else(
             |error| {
                 panic!(

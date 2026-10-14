@@ -39,7 +39,7 @@ use std::rc::Rc;
 
 use crate::anima::{Adapter, AnimaConfig, Dit, FlowSampler, TextEncoder, VaeDecoder};
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, ParamSource, Residency, Tensor, Weights};
+use crate::flint::{functional as F, DType, Device, Residency, Tensor, Weights};
 use crate::generation::{unwatched, GenerationDefaults, GenerationOptions, GenerationProgress};
 use crate::manifest::Manifest;
 use crate::tokenizer::Tokenizer;
@@ -128,7 +128,7 @@ impl Anima {
         let config = AnimaConfig::from_section(manifest.section(&model_type)?)?;
 
         let dtype = F::default_float_type(device)?;
-        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+        let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
             residency,

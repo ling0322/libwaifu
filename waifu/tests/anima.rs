@@ -38,7 +38,7 @@ use waifu::anima::{
     Adapter, AdapterConfig, Dit, DitConfig, FlowSampler, SamplerConfig, TextConfig, TextEncoder,
     VaeConfig, VaeDecoder
 };
-use waifu::flint::{ParamSource, Tensor, Weights};
+use waifu::flint::{Tensor, Weights};
 use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
 
 fn models_dir() -> PathBuf {
@@ -50,9 +50,9 @@ fn device() -> Device {
 }
 
 /// The whole package on the device, read once for this test binary rather than per test.
-fn weights() -> Rc<dyn ParamSource> {
+fn weights() -> Rc<Weights> {
     thread_local! {
-        static WEIGHTS: OnceCell<Rc<dyn ParamSource>> = const { OnceCell::new() };
+        static WEIGHTS: OnceCell<Rc<Weights>> = const { OnceCell::new() };
     }
 
     WEIGHTS.with(|cell| {

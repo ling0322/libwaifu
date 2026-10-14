@@ -40,7 +40,7 @@ use std::rc::Rc;
 
 use waifu::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
 use waifu::indextts::bigvgan::{BigVgan, BigVganConfig};
-use waifu::flint::{DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Weights};
+use waifu::flint::{DType, Device, Graph, Inst, Ir, Op, Residency, RunContext, Tensor, Weights};
 use waifu::read_safetensors;
 
 const CPU: Device = Device::Cpu;
@@ -90,13 +90,12 @@ fn tensor(shape: &[i32], values: &[f32]) -> Tensor {
 
 /// Every weight the reference model has, filled from its name. The list is the reference's own --
 /// see `PARAMETERS` -- so a graph that asks for something else does not find it.
-fn weights(scale: f64) -> Rc<dyn ParamSource> {
+fn weights(scale: f64) -> Rc<Weights> {
     weights_on(CPU, F32, scale)
 }
 
-/// The same, where the model is going to run. A weight has to be on the device already: nothing
-/// between a [`ParamSource`] and a graph moves one.
-fn weights_on(device: Device, dtype: DType, scale: f64) -> Rc<dyn ParamSource> {
+/// The same, where the model is going to run.
+fn weights_on(device: Device, dtype: DType, scale: f64) -> Rc<Weights> {
     let held: HashMap<String, Tensor> = PARAMETERS
         .iter()
         .map(|(name, shape)| {
@@ -110,7 +109,7 @@ fn weights_on(device: Device, dtype: DType, scale: f64) -> Rc<dyn ParamSource> {
         })
         .collect();
 
-    Rc::new(held)
+    Rc::new(Weights::from_tensors(held, device).unwrap())
 }
 
 /// The model `tools/bigvgan_reference.py` builds, which is the released one with every count cut
@@ -166,7 +165,7 @@ fn run(
     let out = build(&g, g.input("x"));
     g.output("out", out);
 
-    let empty: HashMap<String, Tensor> = HashMap::new();
+    let empty = Weights::from_tensors(HashMap::new(), CPU).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(&RunContext::new(&empty).input("x", x))
@@ -307,16 +306,24 @@ fn every_weight_it_reads_is_one_the_checkpoint_holds() {
     // reference's parameters and nothing else -- so building at all is the assertion. What is
     // left is the other direction: a weight in the checkpoint that the graph never reads is a
     // layer that was not written.
-    let read = Reading::default();
-    let source: Rc<dyn ParamSource> = Rc::new(read.clone());
-
-    let vocoder = BigVgan::build(config(false), "", &source, CPU, F32).unwrap();
-    vocoder.forward(&mel()).unwrap();
+    let vocoder = BigVgan::build(config(false), "", &weights(WEIGHT_SCALE), CPU, F32).unwrap();
+    let read: Vec<&str> = vocoder
+        .ir()
+        .insts()
+        .iter()
+        .filter_map(|inst| match inst {
+            Inst::Run {
+                op: Op::Load { name, .. },
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
 
     let mut unread: Vec<&str> = PARAMETERS
         .iter()
         .map(|(name, _)| *name)
-        .filter(|name| !read.names().iter().any(|asked| asked == name))
+        .filter(|name| !read.contains(name))
         .collect();
     unread.sort_unstable();
 
@@ -408,7 +415,7 @@ fn exported(name: &str) -> HashMap<String, Tensor> {
 #[ignore = "needs the exported BigVGAN checkpoint in models/"]
 fn the_released_vocoder_is_the_released_vocoder() {
     let name = "bigvgan-22khz-80band.safetensors";
-    let weights: Rc<dyn ParamSource> = Rc::new(
+    let weights: Rc<Weights> = Rc::new(
         Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device)
             .unwrap_or_else(|error| panic!("{name}: {error}\nExport it first; see `exported`.")),
     );
@@ -442,57 +449,6 @@ fn the_released_vocoder_is_the_released_vocoder() {
         &expected.to_vec_f32().unwrap(),
         1e-4,
     );
-}
-
-/// A [`ParamSource`] that writes down what it was asked for.
-///
-/// It holds the reference's parameters, the way [`weights`] does, and remembers every name that
-/// was looked up -- which is how `every_weight_it_reads_is_one_the_checkpoint_holds` can ask the
-/// question the other way round.
-#[derive(Clone, Default)]
-struct Reading {
-    asked: Rc<std::cell::RefCell<Vec<String>>>,
-}
-
-impl Reading {
-    fn names(&self) -> Vec<String> {
-        self.asked.borrow().clone()
-    }
-
-    fn held(&self, name: &str) -> Option<Tensor> {
-        PARAMETERS
-            .iter()
-            .find(|(held, _)| *held == name)
-            .map(|(held, shape)| {
-                let count = shape.iter().product::<i32>() as usize;
-
-                tensor(shape, &fill(held, count, WEIGHT_SCALE))
-            })
-    }
-}
-
-impl ParamSource for Reading {
-    fn load(&self, name: &str, shape: &[i32]) -> waifu::Result<Tensor> {
-        self.asked.borrow_mut().push(name.to_string());
-        self.check(name, shape)?;
-
-        Ok(self.held(name).expect("checked just above"))
-    }
-
-    fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
-        PARAMETERS
-            .iter()
-            .find(|(held, _)| *held == name)
-            .map(|(_, shape)| shape.to_vec())
-    }
-
-    fn check(&self, name: &str, shape: &[i32]) -> waifu::Result<()> {
-        match self.shape_of(name) {
-            Some(held) if held == shape => Ok(()),
-            Some(held) => panic!("{name} is {held:?} here, not {shape:?}"),
-            None => panic!("no {name} in the reference checkpoint"),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------------------------

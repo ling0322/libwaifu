@@ -40,7 +40,7 @@ use std::rc::Rc;
 use super::config::TextConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::{Embedding, Linear};
 
@@ -243,7 +243,7 @@ fn write(config: &TextConfig, float_type: DType, g: &Graph) {
 pub struct TextEncoder {
     config: TextConfig,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
 }
 
 impl fmt::Debug for TextEncoder {
@@ -257,7 +257,7 @@ impl TextEncoder {
     pub fn build(
         config: TextConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<TextEncoder> {
         if config.num_heads % config.num_kv_heads != 0 {

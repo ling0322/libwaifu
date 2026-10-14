@@ -46,7 +46,7 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::{Conv2d, Linear};
 
@@ -260,7 +260,7 @@ fn write(
 /// The upsample list is flat and its widths step down as it goes, so rather than a table that
 /// would have to agree with the package, each entry is read: a `resample.1` makes it a resample,
 /// a `residual.2` a residual block, and their own weights say how wide.
-fn stages(weights: &dyn ParamSource, name: &str) -> Result<Vec<Stage>> {
+fn stages(weights: &Weights, name: &str) -> Result<Vec<Stage>> {
     let mut found = Vec::new();
 
     // The shapes rather than the weights: this is reading the architecture, and a weight moved
@@ -307,7 +307,7 @@ fn stages(weights: &dyn ParamSource, name: &str) -> Result<Vec<Stage>> {
 pub struct VaeDecoder {
     config: VaeConfig,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     mean: Tensor,
     std: Tensor,
 }
@@ -322,7 +322,7 @@ impl VaeDecoder {
     pub fn build(
         config: VaeConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         device: Device,
         float_type: DType,
     ) -> Result<VaeDecoder> {

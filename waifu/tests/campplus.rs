@@ -25,7 +25,7 @@
 //! inside `CAMLayer` three segments with a short one at the end.
 
 use waifu::indextts::campplus::{self, Config};
-use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor};
+use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Weights};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;
@@ -126,40 +126,23 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
 /// the model here that could fall out of step with the first. A weight the graph does not ask
 /// for is never made, and one it asks for under the wrong name is filled with the wrong numbers
 /// and fails loudly rather than being quietly missing.
-struct Filled;
+fn filled(name: &str, shape: &[i32]) -> Result<Tensor> {
+    let count: usize = shape.iter().map(|size| *size as usize).product();
 
-impl ParamSource for Filled {
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let count: usize = shape.iter().map(|size| *size as usize).product();
+    // The two halves of a folded normalization are filled the way the reference sets them:
+    // a scale that cannot be zero, and a smaller shift. See `tools/campplus_reference.py`.
+    let values = if let Some(stem) = name.strip_suffix(".scale") {
+        fill(&format!("{stem}.scale"), count, 0.5)
+            .into_iter()
+            .map(|value| value.abs() + 0.5)
+            .collect()
+    } else if name.ends_with(".shift") {
+        fill(name, count, 0.3)
+    } else {
+        fill(name, count, WEIGHT_SCALE)
+    };
 
-        // The two halves of a folded normalization are filled the way the reference sets them:
-        // a scale that cannot be zero, and a smaller shift. See `tools/campplus_reference.py`.
-        let values = if let Some(stem) = name.strip_suffix(".scale") {
-            fill(&format!("{stem}.scale"), count, 0.5)
-                .into_iter()
-                .map(|value| value.abs() + 0.5)
-                .collect()
-        } else if name.ends_with(".shift") {
-            fill(name, count, 0.3)
-        } else {
-            fill(name, count, WEIGHT_SCALE)
-        };
-
-        Ok(Tensor::from_f32(shape, &values)?)
-    }
-
-    fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
-        None
-    }
-
-    fn has(&self, _: &str) -> bool {
-        true
-    }
-
-    /// Everything the graph asks for exists, because it is made when it is asked for.
-    fn check(&self, _: &str, _: &[i32]) -> Result<()> {
-        Ok(())
-    }
+    Ok(Tensor::from_f32(shape, &values)?)
 }
 
 /// The filterbank energies the reference was handed: filled from a name, then centred over time
@@ -200,12 +183,12 @@ fn run(build: impl FnOnce(&Graph) -> waifu::flint::Value) -> (Vec<i32>, Vec<f32>
     let out = build(&g);
     g.output("out", out);
 
-    let filled = Filled;
+    let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let x = input();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("x", &x),
         )
         .unwrap();

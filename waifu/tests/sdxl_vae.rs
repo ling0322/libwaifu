@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{ParamSource, Tensor, Weights};
+use waifu::flint::{Tensor, Weights};
 use waifu::{
     read_safetensors, DType, Device, Manifest, Residency, VaeConfig, VaeDecoder, VaeEncoder,
 };
@@ -44,9 +44,9 @@ fn models_dir() -> PathBuf {
 ///
 /// The package is read whole rather than a model's part of it, so reading it per test would read
 /// seven gigabytes as many times as there are tests here.
-fn weights() -> Rc<dyn ParamSource> {
+fn weights() -> Rc<Weights> {
     thread_local! {
-        static WEIGHTS: OnceCell<Rc<dyn ParamSource>> = const { OnceCell::new() };
+        static WEIGHTS: OnceCell<Rc<Weights>> = const { OnceCell::new() };
     }
 
     WEIGHTS.with(|cell| {

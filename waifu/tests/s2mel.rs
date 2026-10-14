@@ -22,7 +22,7 @@
 //! the end of a list; at a depth of two there is nothing to get wrong and at thirteen there is an
 //! off-by-one in three places.
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor, Value};
+use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Value, Weights};
 use waifu::indextts::s2mel::{self, Config};
 use waifu::Result;
 
@@ -119,26 +119,10 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
 }
 
 /// Every weight, made up from its own name at the moment the graph asks for it.
-struct Filled;
+fn filled(name: &str, shape: &[i32]) -> Result<Tensor> {
+    let count: usize = shape.iter().map(|size| *size as usize).product();
 
-impl ParamSource for Filled {
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let count: usize = shape.iter().map(|size| *size as usize).product();
-
-        Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
-    }
-
-    fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
-        None
-    }
-
-    fn has(&self, _: &str) -> bool {
-        true
-    }
-
-    fn check(&self, _: &str, _: &[i32]) -> Result<()> {
-        Ok(())
-    }
+    Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
 }
 
 fn tensor(name: &str, shape: &[i32]) -> Tensor {
@@ -197,11 +181,11 @@ fn the_denoiser_is_the_reference_denoiser() {
     .unwrap();
     g.output("out", out);
 
-    let filled = Filled;
+    let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -256,11 +240,11 @@ fn the_transformer_trunk_is_the_reference_trunk() {
     .unwrap();
     g.output("out", out);
 
-    let filled = Filled;
+    let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("x", &x)
                 .input("prompt_x", &prompt_x)
                 .input("cond", &cond)
@@ -301,10 +285,10 @@ fn the_length_regulator_is_the_reference_regulator() {
     let out = s2mel::length_regulator(&g, g.input("tokens"), &config, FRAMES, F32, CPU).unwrap();
     g.output("out", out);
 
-    let filled = Filled;
+    let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
-        .run(&RunContext::new(&filled).input("tokens", &tokens))
+        .run(&RunContext::new(&weights).input("tokens", &tokens))
         .unwrap();
 
     let result = outputs[0].1.to_device(CPU).unwrap();
@@ -330,11 +314,11 @@ fn mish_is_the_activation_it_replaces() {
     let out = s2mel::mish(&g, g.input("x"), F32, CPU).unwrap();
     g.output("out", out);
 
-    let filled = Filled;
+    let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("x", &x),
         )
         .unwrap();

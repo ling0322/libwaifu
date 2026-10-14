@@ -56,7 +56,7 @@ use std::rc::Rc;
 use super::config::{ControlConfig, DitConfig};
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::krea2::dit::{gelu_tanh, rotate, timestep_sinusoid};
 use crate::layers::Linear;
@@ -447,7 +447,7 @@ pub struct Dit {
     ir: Ir,
     /// The same denoiser with the control chain beside it, when a control package was read.
     controlled: Option<(ControlConfig, Ir)>,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     float_type: DType,
     placed: RefCell<Option<Placed>>,
 }
@@ -466,7 +466,7 @@ fn compile(
     config: &DitConfig,
     control: Option<&ControlConfig>,
     name: &str,
-    weights: &dyn ParamSource,
+    weights: &Weights,
     float_type: DType,
 ) -> Result<Ir> {
     let graph = Graph::with_weights(config.weight_format);
@@ -479,7 +479,7 @@ impl Dit {
     pub fn build(
         config: DitConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<Dit> {
         Self::build_with_control(config, None, name, weights, float_type)
@@ -491,7 +491,7 @@ impl Dit {
         config: DitConfig,
         control: Option<ControlConfig>,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<Dit> {
         let ir = compile(&config, None, name, weights.as_ref(), float_type)?;

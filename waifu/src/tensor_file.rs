@@ -53,7 +53,7 @@
 //! mapped -- one truncated or rewritten in place faults the next time a weight in it is read.
 //!
 //! There is no object in between that holds a model's files. A model is read once, into the
-//! [`ParamSource`](crate::flint::ParamSource) it runs from; the mappings go with the last tensor
+//! [`Weights`](crate::flint::Weights) it runs from; the mappings go with the last tensor
 //! on them.
 
 use std::collections::HashMap;

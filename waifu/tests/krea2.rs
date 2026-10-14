@@ -53,7 +53,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{ParamSource, Tensor, Weights};
+use waifu::flint::{Tensor, Weights};
 use waifu::krea2::{
     Dit, DitConfig, EncoderConfig, FlowSampler, SamplerConfig, TextEncoder, VaeConfig, VaeDecoder,
 };
@@ -77,9 +77,9 @@ fn device() -> Device {
 }
 
 /// The whole package on the device, read once for this test binary rather than per test.
-fn weights() -> Rc<dyn ParamSource> {
+fn weights() -> Rc<Weights> {
     thread_local! {
-        static WEIGHTS: OnceCell<Rc<dyn ParamSource>> = const { OnceCell::new() };
+        static WEIGHTS: OnceCell<Rc<Weights>> = const { OnceCell::new() };
     }
 
     WEIGHTS.with(|cell| {

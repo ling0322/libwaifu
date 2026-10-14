@@ -29,9 +29,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use crate::error::{Error, Result};
-use crate::flint::{
-    functional as F, DType, Device, ParamSource, Residency, Tensor, WeightFormat, Weights,
-};
+use crate::flint::{functional as F, DType, Device, Residency, Tensor, WeightFormat, Weights};
 use crate::generation::{unwatched, GenerationOptions, GenerationProgress};
 use crate::manifest::Manifest;
 use crate::mapping::Mapping;
@@ -176,7 +174,7 @@ impl SdxlConfig {
 /// One tensor is enough to tell the two apart: a package either has the whole half or none of it,
 /// and a package with some of it is a broken file rather than an old one, which the modules below
 /// will say better than a check here could.
-fn has_encoder(weights: &dyn ParamSource, name: &str) -> bool {
+fn has_encoder(weights: &Weights, name: &str) -> bool {
     weights.has(&format!("{name}.conv_in.weight"))
 }
 
@@ -267,7 +265,7 @@ impl Sdxl {
         // The whole package, read once, and put where the residency says it waits. The four halves
         // are written against it and share it: a weight is found by the name the package holds it
         // under, and the four namespaces below are what keeps them apart.
-        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+        let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
             residency,
