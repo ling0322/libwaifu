@@ -32,7 +32,8 @@ This reads the published diffusers layout as it stands, which is what `hf downlo
         -model  ~/.cache/huggingface/hub/models--Qwen--Qwen-Image-2.1/snapshots/<rev> \\
         -output models/qwen-image-2.1.safetensors
 
-`-fp8` writes the matrices as E4M3 with a scale per output channel: thirty gigabytes to sixteen.
+`-fp8` writes the matrices as E4M3 with one scale for the whole tensor (`fp8_tensor_scale`): thirty
+gigabytes to sixteen.
 
 `-controlnet` exports VideoX-Fun's ControlNet-Union for this model instead, as a package of its
 own that the runtime reads beside the model's; the two have to agree on `-fp8`:
@@ -80,12 +81,13 @@ class Converter(Krea2Converter):
     taught the denoiser and the autoencoder that are this model's own."""
 
     def _matrix(self, ctx: Context, tensor: torch.Tensor) -> None:
-        """Krea 2's own `_matrix` now writes the tensor-scale FP8 format; this export has not
-        moved to it yet, so `-fp8` here still writes one scale per row. See docs/fp8.md."""
+        """Write a weight the runtime multiplies by, as E4M3 with one scale for the whole tensor
+        where the package is quantized. Per-channel scales are no longer written; see
+        docs/fp8.md."""
         if not self._fp8:
             return self._write(ctx, tensor)
 
-        self._writer.write_fp8_tensor(ctx, tensor.to(torch.float32))
+        self._writer.write_fp8_tensor_scale(ctx, tensor.to(torch.float32))
         self._quantized += 1
         self._count += 1
 
@@ -367,7 +369,7 @@ def generate_config(model: dict, text: dict, vae: dict, scheduler: dict, sigmas,
         config["qwen_image"]["sampler_sigmas"] = [float(f"{sigma:g}") for sigma in sigmas]
 
     if fp8:
-        config["qwen_image"]["weight_format"] = "fp8"
+        config["qwen_image"]["weight_format"] = "fp8_tensor_scale"
 
     return config
 
@@ -399,7 +401,7 @@ def generate_control_config(model: dict, weights: dict, fp8: bool) -> tuple:
         "control_in_channels": str(in_channels),
     }
     if fp8:
-        section["weight_format"] = "fp8"
+        section["weight_format"] = "fp8_tensor_scale"
     return {"model": {"type": "qwen_image_control"}, "qwen_image_control": section}, blocks
 
 
@@ -765,7 +767,7 @@ def main() -> int:
                         help="what to call the model. Names the weights and the manifest beside "
                              "them.")
     parser.add_argument("-fp8", action="store_true",
-                        help="store the matrices as E4M3 with a scale per output channel.")
+                        help="store the matrices as E4M3 with one scale for the whole tensor.")
     parser.add_argument("-part-size", type=parse_size, default="2GB",
                         help='split the package into parts no larger than this, as in "2GB".')
     parser.add_argument("-test_output", type=str, default=None,

@@ -268,8 +268,8 @@ const CATALOG: &[Published] = &[
         kind: Kind::Picture,
     },
     // The same weights with the matrices quantized, one scale per row rather than per tensor
-    // (`-fp8` here has not moved to the tensor-scale format the way Krea 2's has; see
-    // docs/qwen_image.md and docs/fp8.md). Half the package and half the card, for well past ten
+    // (exported before `-fp8` here moved to the tensor-scale format; see docs/qwen_image.md and
+    // docs/fp8.md). Half the package and half the card, for well past ten
     // times the error in the text encoder -- more than this runtime's other fp8 packages cost,
     // and worth knowing before reaching for it over the float16 one.
     Published {

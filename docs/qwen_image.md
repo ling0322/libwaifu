@@ -125,10 +125,12 @@ The encoder is held to float32 rather than to the bfloat16 reference because the
 less exact of the two: the last layer before the norm carries activations in the hundreds, and
 bfloat16 loses most of the first token the denoiser reads. float16 is the more exact of the two;
 fp8 is not -- at 1.21e-1 it is well past the reference's own 7.3e-2 rounding, unlike every other
-fp8 package here, where the float type is still most of the number. `-fp8` here still writes one
-scale per row rather than one for the whole tensor (see "One scale for the whole tensor" in
-`docs/fp8.md`) -- the same format Krea 2's fp8 package started with before moving off it -- and
-this encoder's weights are evidently less forgiving of it than Krea 2's are. Nothing crashes or
+fp8 package here, where the float type is still most of the number. These numbers are for the
+published `qwen-image:2.1-fp8`, which was exported with one scale per row. `-fp8` now writes one
+scale for the whole tensor (`fp8_tensor_scale`, see "One scale for the whole tensor" in
+`docs/fp8.md`) like Krea 2's, so a re-export will not reproduce them; the Turbo package is the
+first published in that format. This encoder's weights were evidently less forgiving of the
+per-row format than Krea 2's are. Nothing crashes or
 NaNs; the picture is a real, working one, just a more noticeably different one than this runtime's
 other fp8 packages draw.
 
