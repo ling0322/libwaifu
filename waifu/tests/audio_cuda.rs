@@ -21,7 +21,7 @@ use waifu::audio::{
     stft_basis, window_envelope, Padding,
 };
 use waifu::flint::{
-    functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Value,
+    functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
@@ -32,7 +32,7 @@ fn cuda_float() -> DType {
 fn run(g: &Graph, out: Value, inputs: &[(&str, &Tensor)]) -> (Vec<i32>, Vec<f32>) {
     g.output("out", out);
 
-    let weights: HashMap<String, Tensor> = HashMap::new();
+    let weights = Weights::from_tensors(HashMap::new(), Device::Cuda).unwrap();
     let mut context = RunContext::new(&weights);
     for (name, tensor) in inputs {
         context = context.input(name, tensor);

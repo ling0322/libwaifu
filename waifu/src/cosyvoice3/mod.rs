@@ -90,7 +90,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use crate::flint::{
-    functional as F, DType, Device, Graph, Ir, ParamSource, Residency, RunContext, Tensor, Weights,
+    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor, Weights,
 };
 use crate::indextts::{campplus, features::resample};
 use crate::{
@@ -186,7 +186,7 @@ pub struct Reference {
 /// Fun-CosyVoice3-0.5B, with every model it runs read and waiting.
 pub struct CosyVoice3 {
     settings: Settings,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     lm: Lm,
     flow: Flow,
     hift: Hift,
@@ -275,7 +275,7 @@ impl CosyVoice3 {
 
         // Upstream runs every model in float32 unless asked for fp16, and so does this.
         let dtype = DType::Float;
-        let weights: Rc<dyn ParamSource> = Rc::new(Weights::from_files(
+        let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
             residency,

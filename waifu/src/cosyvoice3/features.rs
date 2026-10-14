@@ -38,7 +38,7 @@ use crate::audio::{
     apply_filterbank, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis, MelScale,
     Padding,
 };
-use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value};
+use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights};
 use crate::indextts::features::Spectrograms;
 use crate::{Error, Result};
 
@@ -111,7 +111,7 @@ impl Features {
 
     /// Run a graph that reads no weights, only the wave it is handed.
     fn run(&self, g: &Graph, wave: &Tensor) -> Result<Tensor> {
-        let nothing: HashMap<String, Tensor> = HashMap::new();
+        let nothing = Weights::from_tensors(HashMap::new(), self.device)?;
         let context = RunContext::new(&nothing).input("wave", wave);
         Ir::compile(g)
             .run(&context)?

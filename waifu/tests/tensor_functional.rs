@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 
-use waifu::flint::{functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor};
+use waifu::flint::{
+    functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Weights,
+};
 
 fn cpu_f32(shape: &[i32], data: &[f32]) -> Tensor {
     Tensor::from_f32(shape, data).unwrap()
@@ -451,7 +453,7 @@ fn resizes_the_last_dimension_the_way_torch_interpolate_does() {
     let frames: Vec<f32> = (0..90).map(|i| i as f32).collect();
     let x = cpu_f32(&[1, 90], &frames);
     let like = Tensor::zeros(&[154], DType::Float, Device::Cpu).unwrap();
-    let weights: HashMap<String, Tensor> = HashMap::new();
+    let weights = Weights::from_tensors(HashMap::new(), Device::Cpu).unwrap();
     let out = Ir::compile(&g)
         .run(
             &RunContext::new(&weights)

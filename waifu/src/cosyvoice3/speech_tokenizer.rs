@@ -250,7 +250,9 @@ mod tests {
         let ids = quantize(&g, g.input("p"), DType::Float, Device::Cpu).unwrap();
         g.output("ids", ids);
         let p = Tensor::from_f32(&[1, 2, 8], &projections).unwrap();
-        let params: std::collections::HashMap<String, Tensor> = std::collections::HashMap::new();
+        let params =
+            crate::flint::Weights::from_tensors(std::collections::HashMap::new(), Device::Cpu)
+                .unwrap();
         let out = crate::flint::Ir::compile(&g)
             .run(&crate::flint::RunContext::new(&params).input("p", &p))
             .unwrap();

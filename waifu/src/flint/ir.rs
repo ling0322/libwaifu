@@ -58,7 +58,7 @@
 //! optimization, they are what makes running a graph cost what running the pass costs.
 //!
 //! What they buy on top of that is the weights. A model's parameters are `load` instructions
-//! like any other, answered by the [`ParamSource`] the run was given and freed at the instruction
+//! like any other, answered by the [`Weights`] the run was given and freed at the instruction
 //! that read one last. So a run holds no more of a model's weights *on the device* at once than
 //! the pass is actually using, whatever the source holds elsewhere.
 //!
@@ -150,69 +150,6 @@ impl fmt::Display for Inst {
     }
 }
 
-/// What a [`load`](Op::Load) is answered out of.
-///
-/// Where the weights are -- on the card, or on the host -- was decided when the source
-/// was built, so the one thing a run asks of it is a weight, on the device the run is going to.
-/// [`Weights`] is what a model is read into.
-///
-/// A weight is asked for by the name the package holds it under, because that is all a graph
-/// knows: there is no build step that could have handed out anything shorter.
-pub trait ParamSource {
-    /// The weight called `name`, which the caller expects to have `shape`, on the device the run
-    /// is going to.
-    ///
-    /// A lookup where the weights were kept on the card, and the copy across the bus where they
-    /// were kept on the host. Either way what comes back is a tensor the operators can read, and
-    /// a handle the run lets go of after the weight's last reader.
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor>;
-
-    /// What shape the weight called `name` is, if there is one here.
-    ///
-    /// For a model that reads its own architecture out of the package rather than out of a
-    /// configuration -- Anima's autoencoder counts its stages by looking for them -- which has to
-    /// ask before it knows what it is asking for. Answered without handing the weight over, for
-    /// the same reason `check` is: a weight asked for is a weight moved, and finding out how big
-    /// one is should not be.
-    fn shape_of(&self, name: &str) -> Option<Vec<i32>>;
-
-    /// Whether there is a weight called `name` here at all, whatever shape it turns out to be.
-    ///
-    /// For the half of a model a package may or may not hold -- SDXL's VAE encoder is one -- where
-    /// the question has to be answered before there is anything to ask it about a shape.
-    fn has(&self, name: &str) -> bool {
-        self.shape_of(name).is_some()
-    }
-
-    /// Whether `name` is here with `shape`, answered without handing the weight over.
-    ///
-    /// Apart from `load` because for a source where loading costs something the two are not the
-    /// same question at all: checking a model's eight hundred weights by moving each one across
-    /// the bus and dropping it would be a whole pass's worth of copying to learn nothing but that
-    /// the package is the right one. See [`check_parameters`], which is the only caller.
-    fn check(&self, name: &str, shape: &[i32]) -> Result<()>;
-}
-
-impl ParamSource for HashMap<String, Tensor> {
-    /// A state dict whose tensors are already where the run wants them, which hands over another
-    /// handle on one rather than moving anything. A handle costs no bytes.
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        Ok(held(self, name, shape)?.clone())
-    }
-
-    fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
-        self.get(name).map(|tensor| tensor.shape())
-    }
-
-    fn has(&self, name: &str) -> bool {
-        self.contains_key(name)
-    }
-
-    fn check(&self, name: &str, shape: &[i32]) -> Result<()> {
-        held(self, name, shape).map(drop)
-    }
-}
-
 /// The tensor a state dict holds under `name`, or what is wrong with asking for it.
 ///
 /// Borrowed rather than cloned, so that taking a handle stays the caller's decision: `check` wants
@@ -244,13 +181,13 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// two things it is -- what the run is given, and then the run:
 ///
 /// ```
-/// # use waifu::flint::{Graph, Ir, Residency, RunContext, Tensor};
+/// # use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Weights};
 /// # use std::collections::HashMap;
 /// # let g = Graph::new();
 /// # let x = g.input("hidden");
 /// # g.output("hidden", g.silu(x));
 /// # let ir = Ir::compile(&g);
-/// # let weights = HashMap::new();
+/// # let weights = Weights::from_tensors(HashMap::new(), Device::Cpu)?;
 /// # let hidden = Tensor::from_f32(&[1, 2], &[1.0, -1.0])?;
 /// let context = RunContext::new(&weights).input("hidden", &hidden);
 /// let outputs = ir.run(&context)?;
@@ -260,14 +197,14 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// It holds the names and borrows the tensors, so the one thing it costs is the list itself --
 /// five pairs for the U-Net, against the pass they are handed to.
 pub struct RunContext<'a> {
-    params: &'a dyn ParamSource,
+    params: &'a Weights,
     inputs: Vec<(&'a str, &'a Tensor)>,
 }
 
 impl<'a> RunContext<'a> {
     /// A run that loads every [`Op::Load`]'s weight from `params`, with nothing kept and no
     /// inputs yet.
-    pub fn new(params: &'a dyn ParamSource) -> Self {
+    pub fn new(params: &'a Weights) -> Self {
         RunContext {
             params,
             inputs: Vec::new(),
@@ -284,7 +221,7 @@ impl<'a> RunContext<'a> {
     }
 
     /// Where every [`Op::Load`] reads its weight from.
-    pub fn params(&self) -> &'a dyn ParamSource {
+    pub fn params(&self) -> &'a Weights {
         self.params
     }
 
@@ -305,7 +242,7 @@ impl<'a> RunContext<'a> {
 /// A model's weights, read out of its package and kept where [`Residency`] says.
 ///
 /// One map of tensors, whichever residency: on the card for [`Residency::Device`], in ordinary host
-/// memory for [`Residency::LowVram`]. What differs is only whether a [`load`](ParamSource::load)
+/// memory for [`Residency::LowVram`]. What differs is only whether a [`load`](Weights::load)
 /// has to move the weight -- a kept one is already where the run wants it and is handed over as a
 /// handle, and a waiting one is copied across the bus, to be given back at the `free` after its
 /// last reader.
@@ -357,6 +294,42 @@ impl Weights {
     /// The same, out of one file's bytes already in hand rather than off the disk.
     pub fn from_bytes(bytes: &[u8], device: Device, residency: Residency) -> Result<Weights> {
         tensor_file::collect_bytes(bytes, device, residency)
+    }
+
+    /// `tensors` as they are, for a run on `device`: neither retyped nor moved here, so a load
+    /// hands back a handle on one already on `device` and copies one that is not.
+    ///
+    /// For weights that were not read out of a package -- made up by a test, or none at all for
+    /// a graph that loads nothing.
+    pub fn from_tensors(tensors: HashMap<String, Tensor>, device: Device) -> Result<Weights> {
+        Ok(Weights {
+            tensors,
+            ..Weights::empty(device, Residency::Device)?
+        })
+    }
+
+    /// A weight for every [`Op::Load`] in `graph`, each made by `make` out of its name and shape,
+    /// for a run on `device`.
+    ///
+    /// For weights made up rather than read: asking the graph what it loads means there is no
+    /// second list of a model's weights to fall out of step with the first. A name loaded more
+    /// than once is made once.
+    pub fn for_graph(
+        graph: &Graph,
+        device: Device,
+        mut make: impl FnMut(&str, &[i32]) -> Result<Tensor>,
+    ) -> Result<Weights> {
+        let mut tensors = HashMap::new();
+        for (_, op) in graph.nodes() {
+            if let Op::Load { name, shape } = op {
+                if !tensors.contains_key(&name) {
+                    let tensor = make(&name, &shape)?;
+                    tensors.insert(name, tensor);
+                }
+            }
+        }
+
+        Weights::from_tensors(tensors, device)
     }
 
     /// How many weights there are.
@@ -417,42 +390,47 @@ impl Weights {
         Ok(())
     }
 
-    /// Every weight, by name, for the checks made over the whole package once it is read.
-    pub(crate) fn tensors(&self) -> &HashMap<String, Tensor> {
-        &self.tensors
-    }
-}
-
-impl ParamSource for Weights {
-    /// The weight, where the run wants it: a handle on it if it is already there, and the copy
-    /// across the bus if it is waiting on the host.
-    ///
-    /// Asked of the device rather than assumed, because `to_device` copies whether or not the
-    /// tensor has anywhere to go -- a kept weight moved "to" the card it is on would be a second
-    /// copy of the model, one weight at a time, every step.
+    /// The weight called `name`, which the caller expects to have `shape`, on the device the run
+    /// is going to: a handle on it if it is already there, and the copy across the bus if it is
+    /// waiting on the host. Either way the run lets go of it after the weight's last reader.
     ///
     /// Synchronous, because the instruction after this one reads what it returns and there is
     /// nothing else for the host to be doing in between.
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let held = held(&self.tensors, name, shape)?;
-        match held.device() == self.device {
-            true => Ok(held.clone()),
-            false => Ok(held.to_device(self.device)?),
-        }
+    pub fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
+        Ok(held(&self.tensors, name, shape)?.to_device(self.device)?)
     }
 
-    fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
+    /// What shape the weight called `name` is, if there is one here.
+    ///
+    /// For a model that reads its own architecture out of the package rather than out of a
+    /// configuration -- Anima's autoencoder counts its stages by looking for them -- which has to
+    /// ask before it knows what it is asking for. Answered without handing the weight over, for
+    /// the same reason `check` is.
+    pub fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
         self.tensors.get(name).map(|tensor| tensor.shape())
     }
 
-    fn has(&self, name: &str) -> bool {
+    /// Whether there is a weight called `name` here at all, whatever shape it turns out to be.
+    ///
+    /// For the half of a model a package may or may not hold -- SDXL's VAE encoder is one -- where
+    /// the question has to be answered before there is anything to ask it about a shape.
+    pub fn has(&self, name: &str) -> bool {
         self.tensors.contains_key(name)
     }
 
-    /// Asked of the map, which is the reason `check` is not `load` with its result dropped:
-    /// checking a low-vram model this way moves none of it.
-    fn check(&self, name: &str, shape: &[i32]) -> Result<()> {
+    /// Whether `name` is here with `shape`, answered without handing the weight over.
+    ///
+    /// Asked of the map rather than being `load` with its result dropped: checking a low-vram
+    /// model's eight hundred weights by moving each one across the bus would be a whole pass's
+    /// worth of copying to learn that the package is the right one. See [`check_parameters`],
+    /// which is the only caller.
+    pub fn check(&self, name: &str, shape: &[i32]) -> Result<()> {
         held(&self.tensors, name, shape).map(drop)
+    }
+
+    /// Every weight, by name, for the checks made over the whole package once it is read.
+    pub(crate) fn tensors(&self) -> &HashMap<String, Tensor> {
+        &self.tensors
     }
 }
 
@@ -500,15 +478,15 @@ impl Residency {
 
 /// Say now whether `weights` can answer everything `graph` will ask for.
 ///
-/// A graph names its weights and reads none of them, and a [`ParamSource`] is filled without
+/// A graph names its weights and reads none of them, and [`Weights`] are read without
 /// consulting any graph, so the two are only brought together by a `load` instruction running.
 /// That would make a package that does not hold what a model asks for -- or holds it in another
 /// shape -- something found out on the way to a picture rather than when the model was asked for.
 ///
 /// This asks the same questions the first run would and throws the answers away. It is
-/// [`ParamSource::check`] rather than a read per weight precisely so that it stays free to ask:
+/// [`Weights::check`] rather than a read per weight precisely so that it stays free to ask:
 /// a read is a read of the disk, and a package is checked before any of it is wanted.
-pub fn check_parameters(graph: &Graph, weights: &dyn ParamSource) -> Result<()> {
+pub fn check_parameters(graph: &Graph, weights: &Weights) -> Result<()> {
     for (_, op) in graph.nodes() {
         if let Op::Load { name, shape } = op {
             weights.check(&name, &shape)?;
@@ -591,7 +569,7 @@ impl Ir {
     /// node reading it, which is everything this needs of it.
     ///
     /// Nothing here depends on where the weights are. A `load` is an instruction like any other,
-    /// answered by the [`ParamSource`] a run is given, and freed after its last reader like any
+    /// answered by the [`Weights`] a run is given, and freed after its last reader like any
     /// other value -- which is a handle let go of where the weights are kept on the card, and the
     /// card's copy given back where they wait on the host.
     pub fn compile(graph: &Graph) -> Ir {
@@ -644,7 +622,7 @@ impl Ir {
 
     /// Run the instructions, and hand back what the graph named as its outputs.
     ///
-    /// `context` holds a tensor for each of [`Ir::inputs`] and the [`ParamSource`] every load
+    /// `context` holds a tensor for each of [`Ir::inputs`] and the [`Weights`] every load
     /// reads its weight from -- by lookup where the weights are kept, and through the
     /// [`Inst::Read`] in front of the reader where they are streamed. The outputs come back in
     /// the order [`Graph::output`] named them.
@@ -1133,55 +1111,17 @@ fn remaining_reads(
 mod tests {
     use super::*;
 
-    use std::cell::Cell;
-
     use crate::flint::Device;
 
-    /// A state dict holding `tensors`, which is what a `load` reads out of.
-    fn state_dict(tensors: &[(&str, &[i32], &[f32])]) -> HashMap<String, Tensor> {
-        tensors
+    /// Weights on the host holding `tensors`, which is what a `load` reads out of.
+    fn weights(tensors: &[(&str, &[i32], &[f32])]) -> Weights {
+        let tensors = tensors
             .iter()
             .map(|(name, shape, values)| {
                 (name.to_string(), Tensor::from_f32(shape, values).unwrap())
             })
-            .collect()
-    }
-
-    /// A state dict that counts what it was asked, for telling the two questions apart.
-    struct Counting {
-        weights: HashMap<String, Tensor>,
-        loads: Cell<usize>,
-        checks: Cell<usize>,
-    }
-
-    impl Counting {
-        fn over(weights: HashMap<String, Tensor>) -> Counting {
-            Counting {
-                weights,
-                loads: Cell::new(0),
-                checks: Cell::new(0),
-            }
-        }
-    }
-
-    impl ParamSource for Counting {
-        fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-            self.loads.set(self.loads.get() + 1);
-            self.weights.load(name, shape)
-        }
-
-        fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
-            self.weights.shape_of(name)
-        }
-
-        fn has(&self, name: &str) -> bool {
-            self.weights.has(name)
-        }
-
-        fn check(&self, name: &str, shape: &[i32]) -> Result<()> {
-            self.checks.set(self.checks.get() + 1);
-            self.weights.check(name, shape)
-        }
+            .collect();
+        Weights::from_tensors(tensors, Device::Cpu).unwrap()
     }
 
     /// A safetensors file holding nothing, for the checks that happen before one is read.
@@ -1376,7 +1316,7 @@ mod tests {
 
         let table = Tensor::from_f32(&[4, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).unwrap();
         let two = Tensor::from_i64(&[2], &[0, 0]).unwrap();
-        let params = state_dict(&[]);
+        let params = weights(&[]);
         let context = RunContext::new(&params)
             .input("x", &two)
             .input("table", &table);
@@ -1407,7 +1347,7 @@ mod tests {
         );
 
         let ir = Ir::compile(&g);
-        let params = state_dict(&[]);
+        let params = weights(&[]);
         for length in [2, 6] {
             let x = Tensor::from_f32(&[length], &vec![1.0; length as usize]).unwrap();
             let context = RunContext::new(&params).input("x", &x);
@@ -1420,8 +1360,8 @@ mod tests {
     #[test]
     fn computes_what_the_eager_pass_computes() {
         let hidden = Tensor::from_f32(&[2, 2], &[1.0, -2.0, 0.5, 3.0]).unwrap();
-        let params = state_dict(&[("fc.weight", &[2, 2], &[0.25, -1.5, 2.0, 0.75])]);
-        let weight = params["fc.weight"].clone();
+        let params = weights(&[("fc.weight", &[2, 2], &[0.25, -1.5, 2.0, 0.75])]);
+        let weight = params.tensors()["fc.weight"].clone();
 
         let context = RunContext::new(&params).input("hidden", &hidden);
         let outputs = compile_and_run(&feed_forward(), context).unwrap();
@@ -1449,7 +1389,7 @@ mod tests {
         g.output("pooled", pooled);
 
         let hidden = Tensor::from_f32(&[2, 2], &[1.0, 2.0, 3.0, 4.0]).unwrap();
-        let params = state_dict(&[]);
+        let params = weights(&[]);
         let context = RunContext::new(&params).input("hidden", &hidden);
 
         let outputs = compile_and_run(&g, context).unwrap();
@@ -1467,7 +1407,7 @@ mod tests {
         g.output("columns", g.cumsum(x, 0));
 
         let x = Tensor::from_f32(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let params = state_dict(&[]);
+        let params = weights(&[]);
         let outputs = compile_and_run(&g, RunContext::new(&params).input("x", &x)).unwrap();
 
         assert_eq!(outputs[0].1.shape(), vec![2, 3]);
@@ -1488,7 +1428,7 @@ mod tests {
         g.output("logged", g.log(x));
 
         let x = Tensor::from_f32(&[2], &[1.0, std::f32::consts::E]).unwrap();
-        let params = state_dict(&[]);
+        let params = weights(&[]);
         let outputs = compile_and_run(&g, RunContext::new(&params).input("x", &x)).unwrap();
 
         let logged = outputs[0].1.to_vec_f32().unwrap();
@@ -1506,7 +1446,7 @@ mod tests {
 
         let x = Tensor::from_f32(&[2], &[2.4, 0.5]).unwrap();
         let table = Tensor::from_f32(&[3, 2], &[0.0, 0.0, 1.0, 1.0, 2.0, 2.0]).unwrap();
-        let params = state_dict(&[]);
+        let params = weights(&[]);
         let context = RunContext::new(&params)
             .input("x", &x)
             .input("table", &table);
@@ -1523,7 +1463,7 @@ mod tests {
         g.output("hidden", x);
 
         let ir = Ir::compile(&g);
-        let params = state_dict(&[]);
+        let params = weights(&[]);
         let tensor = Tensor::from_f32(&[1], &[1.0]).unwrap();
 
         let missing = ir.run(&RunContext::new(&params)).unwrap_err().to_string();
@@ -1555,7 +1495,7 @@ mod tests {
         // from a load of its own, and says the same thing: a kept load is an instruction in the
         // pass, so what blames it is what blames any other.
         let error = Ir::compile(&g)
-            .run(&RunContext::new(&state_dict(&[])))
+            .run(&RunContext::new(&weights(&[])))
             .unwrap_err()
             .to_string();
 
@@ -1586,7 +1526,7 @@ mod tests {
         assert_eq!(g.parameters(), vec!["down1.attn.to_q.weight", "out.bias"]);
 
         let hidden = Tensor::from_f32(&[2, 2], &[1.0, 0.0, 0.0, 1.0]).unwrap();
-        let params = state_dict(&[
+        let params = weights(&[
             ("down1.attn.to_q.weight", &[2, 2], &[1.0, 2.0, 3.0, 4.0]),
             ("out.bias", &[2, 2], &[10.0, 10.0, 10.0, 10.0]),
         ]);
@@ -1602,7 +1542,7 @@ mod tests {
         let weight = g.load("fc.weight", &[2, 2]);
         g.output("weight", weight);
 
-        let params = state_dict(&[("fc.weight", &[4], &[1.0, 2.0, 3.0, 4.0])]);
+        let params = weights(&[("fc.weight", &[4], &[1.0, 2.0, 3.0, 4.0])]);
         let error = Ir::compile(&g)
             .run(&RunContext::new(&params))
             .unwrap_err()
@@ -1655,21 +1595,8 @@ mod tests {
     }
 
     #[test]
-    fn checks_a_graph_without_loading_a_single_weight() {
-        let source = Counting::over(state_dict(&[("fc.weight", &[2, 2], &[1.0, 0.0, 0.0, 1.0])]));
-
-        check_parameters(&feed_forward(), &source).unwrap();
-
-        assert_eq!(source.checks.get(), 1);
-        // The whole reason `check` is not `load` with its answer thrown away: from a low-vram
-        // source a load is a weight crossing the bus, and checking a model would otherwise move
-        // the whole of it to learn that the package is the right one.
-        assert_eq!(source.loads.get(), 0, "checking a model must not move it");
-    }
-
-    #[test]
     fn a_check_is_still_the_two_questions_a_load_asks() {
-        let source = Counting::over(state_dict(&[("fc.weight", &[2, 1], &[1.0, 0.0])]));
+        let source = weights(&[("fc.weight", &[2, 1], &[1.0, 0.0])]);
 
         // The right name in the wrong shape, which is the mistake this is here to catch early.
         let error = check_parameters(&feed_forward(), &source)
@@ -1680,7 +1607,7 @@ mod tests {
             "{error}"
         );
 
-        let missing = check_parameters(&feed_forward(), &Counting::over(state_dict(&[])))
+        let missing = check_parameters(&feed_forward(), &weights(&[]))
             .unwrap_err()
             .to_string();
         assert!(missing.contains("not found in model"), "{missing}");

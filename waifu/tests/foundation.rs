@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use waifu::flint::{check_parameters, Graph, Ir, ParamSource, Residency, RunContext, Weights};
+use waifu::flint::{check_parameters, Graph, Ir, Residency, RunContext, Weights};
 use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
 use waifu::{parse_safetensors, read_safetensors, Embedding, Linear, WeightFormat};
 
@@ -69,11 +69,7 @@ fn stored(tensors: &[(&str, &[i32], &[f32])]) -> HashMap<String, Tensor> {
 }
 
 /// A source read out of a file holding `tensors`, the way a model reads its package.
-fn source(
-    tensors: &[(&str, &[i32], &[f32])],
-    device: Device,
-    residency: Residency,
-) -> Rc<dyn ParamSource> {
+fn source(tensors: &[(&str, &[i32], &[f32])], device: Device, residency: Residency) -> Rc<Weights> {
     Rc::new(Weights::from_bytes(&write_params(tensors), device, residency).unwrap())
 }
 
@@ -159,6 +155,7 @@ fn reads_parameters_by_their_whole_names() {
     assert!(file.contains_key("sdxl.embd.weight"));
     assert!(!file.contains_key("sdxl.embd.bias"));
 
+    let file = Weights::from_tensors(file, Device::Cpu).unwrap();
     let weight = file.load("sdxl.embd.weight", &[3, 2]).unwrap();
     assert_eq!(weight.shape(), vec![3, 2]);
     assert_eq!(
@@ -224,6 +221,7 @@ fn writes_reads_and_runs_a_pass_of_layers() {
     // And exactly those come out of the package, once each however many nodes read them.
     assert_eq!(file.len(), 3);
 
+    let file = Weights::from_tensors(file, Device::Cpu).unwrap();
     let ids = Tensor::from_i64(&[2], &[2, 0]).unwrap();
     let context = RunContext::new(&file).input("tokens", &ids);
     let ir = Ir::compile(&g);
@@ -507,6 +505,8 @@ fn reads_a_model_written_as_several_files() {
 
     let file = param_files(&[first, second]).unwrap();
     assert_eq!(names(&file), vec!["a", "b"]);
+
+    let file = Weights::from_tensors(file, Device::Cpu).unwrap();
     assert_eq!(
         file.load("a", &[2]).unwrap().to_vec_f32().unwrap(),
         vec![1.0, 2.0]
@@ -811,7 +811,7 @@ fn a_mapped_package_runs_like_one_read_into_memory() {
         .unwrap()
         .to_device(Device::Cuda)
         .unwrap();
-    let run = |source: &dyn ParamSource| {
+    let run = |source: &Weights| {
         let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
         to_host(&out[0].1)
     };

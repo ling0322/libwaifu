@@ -36,7 +36,7 @@ use std::rc::Rc;
 use super::config::AdapterConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::{Embedding, Linear};
 
@@ -263,7 +263,7 @@ fn write(config: &AdapterConfig, float_type: DType, g: &Graph) {
 pub struct Adapter {
     config: AdapterConfig,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
 }
 
 impl fmt::Debug for Adapter {
@@ -276,7 +276,7 @@ impl Adapter {
     pub fn build(
         config: AdapterConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<Adapter> {
         let graph = Graph::with_weights(config.weight_format);

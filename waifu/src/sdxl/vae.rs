@@ -53,8 +53,8 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, RunContext,
-    Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value,
+    Weights,
 };
 use crate::layers::{Conv2d, GroupNorm, Linear};
 
@@ -449,7 +449,7 @@ pub struct VaeDecoder {
     ir: Ir,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
 }
 
 impl fmt::Debug for VaeDecoder {
@@ -467,7 +467,7 @@ impl VaeDecoder {
     pub fn build(
         config: VaeConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         device: Device,
         float_type: DType,
     ) -> Result<VaeDecoder> {
@@ -558,7 +558,7 @@ pub struct VaeEncoder {
     ir: Ir,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
 }
 
 impl fmt::Debug for VaeEncoder {
@@ -573,7 +573,7 @@ impl VaeEncoder {
     pub fn build(
         config: VaeConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         device: Device,
         float_type: DType,
     ) -> Result<VaeEncoder> {

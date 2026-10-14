@@ -55,8 +55,8 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
-    WeightFormat,
+    check_parameters, functional as F, Extent, Graph, Ir, RunContext, Tensor, Value, WeightFormat,
+    Weights,
 };
 use crate::layers::{Conv2d, GroupNorm, LayerNorm, Linear};
 
@@ -751,7 +751,7 @@ pub struct Unet {
     ir: Ir,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
 }
 
 impl fmt::Debug for Unet {
@@ -765,7 +765,7 @@ impl fmt::Debug for Unet {
 impl Unet {
     /// `name` is the namespace the package holds this U-Net under, which is what its weights are
     /// named from; `weights` is the whole package, read once and shared.
-    pub fn build(config: UnetConfig, name: &str, weights: &Rc<dyn ParamSource>) -> Result<Unet> {
+    pub fn build(config: UnetConfig, name: &str, weights: &Rc<Weights>) -> Result<Unet> {
         check(&config)?;
 
         let graph = Graph::with_weights(config.weight_format);

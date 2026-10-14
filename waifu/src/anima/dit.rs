@@ -51,8 +51,8 @@ use std::rc::Rc;
 use super::config::DitConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, ParamSource, RunContext,
-    Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value,
+    Weights,
 };
 use crate::layers::Linear;
 
@@ -397,7 +397,7 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
 pub struct Dit {
     config: DitConfig,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     float_type: DType,
 }
 
@@ -411,7 +411,7 @@ impl Dit {
     pub fn build(
         config: DitConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<Dit> {
         let graph = Graph::with_weights(config.weight_format);

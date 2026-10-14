@@ -22,7 +22,7 @@
 //! model, so what matters is not only that the stack is right but that stopping partway lands
 //! where the reference says it does.
 
-use waifu::flint::{Device, Graph, Ir, ParamSource, RunContext, Tensor};
+use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Weights};
 use waifu::indextts::w2v_bert::{self, Config};
 use waifu::Result;
 
@@ -111,26 +111,10 @@ fn fill(name: &str, count: usize, scale: f64) -> Vec<f32> {
         .collect()
 }
 
-struct Filled;
+fn filled(name: &str, shape: &[i32]) -> Result<Tensor> {
+    let count: usize = shape.iter().map(|size| *size as usize).product();
 
-impl ParamSource for Filled {
-    fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        let count: usize = shape.iter().map(|size| *size as usize).product();
-
-        Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
-    }
-
-    fn shape_of(&self, _: &str) -> Option<Vec<i32>> {
-        None
-    }
-
-    fn has(&self, _: &str) -> bool {
-        true
-    }
-
-    fn check(&self, _: &str, _: &[i32]) -> Result<()> {
-        Ok(())
-    }
+    Ok(Tensor::from_f32(shape, &fill(name, count, WEIGHT_SCALE))?)
 }
 
 fn probe_indices(length: usize, limit: usize) -> Vec<usize> {
@@ -164,11 +148,11 @@ fn run(layers: i32) -> (Vec<i32>, Vec<f32>) {
     .unwrap();
     g.output("out", out);
 
-    let filled = Filled;
+    let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
         .run(
-            &RunContext::new(&filled)
+            &RunContext::new(&weights)
                 .input("x", &features)
                 .input("distances", &distances),
         )

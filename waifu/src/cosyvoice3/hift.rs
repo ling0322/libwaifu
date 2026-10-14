@@ -68,7 +68,7 @@ use crate::audio::{
     conv_transpose1d, hann_window, istft, istft_basis, pad1d, snake, stft, stft_basis, Padding,
 };
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::Linear;
 use crate::{Error, Result};
@@ -519,7 +519,7 @@ pub struct Hift {
     pitch: Ir,
     source: Ir,
     decode: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     device: Device,
 }
 
@@ -532,12 +532,7 @@ impl fmt::Debug for Hift {
 }
 
 impl Hift {
-    pub fn build(
-        name: &str,
-        weights: &Rc<dyn ParamSource>,
-        dtype: DType,
-        device: Device,
-    ) -> Result<Hift> {
+    pub fn build(name: &str, weights: &Rc<Weights>, dtype: DType, device: Device) -> Result<Hift> {
         let compile = |write: fn(&Graph, DType, Device) -> Result<()>| -> Result<Ir> {
             let g = Graph::new();
             write(&g.subgraph(name), dtype, device)?;

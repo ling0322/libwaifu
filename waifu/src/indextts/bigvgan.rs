@@ -64,7 +64,7 @@ use std::rc::Rc;
 use crate::audio::{downsample1d, kaiser_sinc_filter, snake, upsample1d};
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::{Conv1d, ConvTranspose1d};
 
@@ -497,7 +497,7 @@ pub struct BigVgan {
     /// Where its weights are, which is where a mel has to be brought to meet them.
     device: Device,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
 }
 
 impl fmt::Debug for BigVgan {
@@ -514,7 +514,7 @@ impl BigVgan {
     pub fn build(
         config: BigVganConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         device: Device,
         float_type: DType,
     ) -> Result<BigVgan> {

@@ -40,7 +40,7 @@ use std::rc::Rc;
 use super::config::VaeConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::Conv2d;
 use crate::sdxl::vae::pad_right_bottom;
@@ -383,7 +383,7 @@ fn write(
 }
 
 /// The decoder's stages, read off the weights, with the temporal flags the package states.
-fn stages(weights: &dyn ParamSource, name: &str, temporal: &[bool]) -> Result<Vec<Stage>> {
+fn stages(weights: &Weights, name: &str, temporal: &[bool]) -> Result<Vec<Stage>> {
     let mut found = Vec::new();
 
     for index in 0.. {
@@ -430,7 +430,7 @@ fn stages(weights: &dyn ParamSource, name: &str, temporal: &[bool]) -> Result<Ve
 
 /// The encoder's stages, read off the weights. `temporal` is the decoder's flags, as the package
 /// states them: the encoder's are the same stages walked the other way.
-fn encoder_stages(weights: &dyn ParamSource, name: &str, temporal: &[bool]) -> Result<Vec<Stage>> {
+fn encoder_stages(weights: &Weights, name: &str, temporal: &[bool]) -> Result<Vec<Stage>> {
     let mut found = Vec::new();
 
     for index in 0.. {
@@ -494,7 +494,7 @@ fn encoder_stages(weights: &dyn ParamSource, name: &str, temporal: &[bool]) -> R
 pub struct VaeDecoder {
     config: VaeConfig,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     mean: Tensor,
     std: Tensor,
 }
@@ -509,7 +509,7 @@ impl VaeDecoder {
     pub fn build(
         config: VaeConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         device: Device,
         float_type: DType,
     ) -> Result<VaeDecoder> {
@@ -579,7 +579,7 @@ impl VaeDecoder {
 pub struct VaeEncoder {
     config: VaeConfig,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     mean: Tensor,
     std: Tensor,
 }
@@ -594,7 +594,7 @@ impl VaeEncoder {
     pub fn build(
         config: VaeConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         device: Device,
         float_type: DType,
     ) -> Result<VaeEncoder> {

@@ -62,7 +62,7 @@ use std::rc::Rc;
 use super::config::DitConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::Linear;
 
@@ -572,7 +572,7 @@ fn write(config: &DitConfig, float_type: DType, g: &Graph) {
 pub struct Dit {
     config: DitConfig,
     ir: Ir,
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
     float_type: DType,
     /// The rotary table for whatever was drawn last. A step is one call and a run is many at the
     /// same size, so building it once is twenty-five million sines the second step does not have
@@ -591,7 +591,7 @@ impl Dit {
     pub fn build(
         config: DitConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<Dit> {
         let graph = Graph::with_weights(config.weight_format);

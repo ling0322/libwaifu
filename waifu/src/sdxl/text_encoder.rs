@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, ParamSource, RunContext, Tensor, Value, WeightFormat,
+    check_parameters, DType, Extent, Graph, Ir, Weights, RunContext, Tensor, Value, WeightFormat,
 };
 use crate::layers::{Embedding, LayerNorm, Linear};
 
@@ -210,7 +210,7 @@ pub struct ClipTextEncoder {
     ir: Ir,
     /// Every weight the package holds, which the four halves of a model share. See
     /// [`resident`](crate::flint::resident).
-    weights: Rc<dyn ParamSource>,
+    weights: Rc<Weights>,
 }
 
 impl fmt::Debug for ClipTextEncoder {
@@ -228,7 +228,7 @@ impl ClipTextEncoder {
     pub fn build(
         config: ClipTextConfig,
         name: &str,
-        weights: &Rc<dyn ParamSource>,
+        weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<ClipTextEncoder> {
         if config.num_layers < 2 {
