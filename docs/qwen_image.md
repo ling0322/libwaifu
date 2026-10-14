@@ -126,8 +126,8 @@ less exact of the two: the last layer before the norm carries activations in the
 bfloat16 loses most of the first token the denoiser reads. float16 is the more exact of the two;
 fp8 is not -- at 1.21e-1 it is well past the reference's own 7.3e-2 rounding, unlike every other
 fp8 package here, where the float type is still most of the number. These numbers are for the
-published `qwen-image:2.1-fp8`, which was exported with one scale per row. `-fp8` now writes one
-scale for the whole tensor (`fp8_tensor_scale`, see "One scale for the whole tensor" in
+once-published `qwen-image:2.1-fp8` (since withdrawn for the Turbo package), which was exported
+with one scale per row. `-fp8` now writes one scale for the whole tensor (`fp8_tensor_scale`, see "One scale for the whole tensor" in
 `docs/fp8.md`) like Krea 2's, so a re-export will not reproduce them; the Turbo package is the
 first published in that format. This encoder's weights were evidently less forgiving of the
 per-row format than Krea 2's are. Nothing crashes or
@@ -262,6 +262,7 @@ threshold that opens it up. Section 3 asks for, and this gets:
 | §4.b "Built with Qwen" in the product documentation | said in `NOTICE` and on the card |
 | §4.c not "Qwen" as the primary name | the repository id keeps this project's `libwaifu-` prefix |
 
-The converted packages are published at
-[ling0322/libwaifu-qwen-image-2.1](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1) and
-on ModelScope under the same name.
+The converted package is published at
+[ling0322/libwaifu-qwen-image-2.1-turbo](https://huggingface.co/ling0322/libwaifu-qwen-image-2.1-turbo)
+and on ModelScope under the same name. The base release's packages,
+`qwen-image:2.1` and `qwen-image:2.1-fp8`, are no longer in the catalog.
