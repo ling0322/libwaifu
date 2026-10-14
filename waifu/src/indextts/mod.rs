@@ -472,9 +472,7 @@ impl IndexTts {
             g.input("codes"),
             &semantic_codec::Config::indextts(),
             tokens,
-            self.dtype,
-            self.device,
-        )?;
+        );
         g.output("features", features);
 
         Ok(self.run(&g, &[("codes", &ids)])?.remove(0))

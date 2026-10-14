@@ -72,8 +72,8 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 
 use crate::audio::{
-    apply_filterbank, conv1d, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis,
-    MelScale, Padding,
+    apply_filterbank, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis, MelScale,
+    Padding,
 };
 use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value};
 use crate::{Error, Result};
@@ -749,14 +749,13 @@ impl Spectrograms {
     /// frame-major, `(1, frames, 80)`. The scale is applied to the samples, as Kaldi applies it.
     fn kaldi_log_mel(&self, g: &Graph, analysis: &Analysis) -> Result<Value> {
         let bins = (analysis.fft_length / 2) as i32;
-        let (dtype, device) = (DType::Float, self.device);
+        let device = self.device;
 
         let wave = match analysis.scale == 1.0 {
             true => g.input("wave"),
             false => g.mul_scalar(g.input("wave"), analysis.scale as f32),
         };
-        let spectrum = conv1d(
-            g,
+        let spectrum = g.conv1d(
             wave,
             g.constant(self.kaldi_basis.clone()),
             None,
@@ -764,9 +763,7 @@ impl Spectrograms {
             0,
             1,
             1,
-            dtype,
-            device,
-        )?;
+        );
         let real = g.slice(spectrum, 1, 0, bins);
         let imaginary = g.slice(spectrum, 1, bins, 2 * bins);
         let power = g.add(g.square(real), g.square(imaginary));

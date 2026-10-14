@@ -55,7 +55,6 @@
 //! would have chosen between them commented out just above. So the embedding is never reached and
 //! the projection always is. This follows the code rather than the configuration.
 
-use crate::audio::conv1d;
 use crate::flint::{functional as F, DType, Device, Extent, Graph, Tensor, Value};
 use crate::layers::Linear;
 use crate::Result;
@@ -368,15 +367,7 @@ fn block(
 /// tanh and the sigmoid that gate it. Every layer's skip output is summed, which is what comes
 /// back; the residual is what carries on.
 #[track_caller]
-fn wavenet(
-    g: &Graph,
-    x: Value,
-    conditioning: Value,
-    config: &Config,
-    frames: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+fn wavenet(g: &Graph, x: Value, conditioning: Value, config: &Config, frames: i32) -> Value {
     let channels = config.wavenet_dim;
     let gated = 2 * channels;
     let padding = (config.wavenet_kernel - 1) / 2;
@@ -387,18 +378,7 @@ fn wavenet(
         let sub = g.subgraph("cond_layer").subgraph("conv").subgraph("conv");
         let weight = sub.load("weight", &[gated * config.wavenet_layers, channels, 1]);
         let bias = sub.load("bias", &[gated * config.wavenet_layers]);
-        conv1d(
-            &sub,
-            conditioning,
-            weight,
-            Some(bias),
-            1,
-            0,
-            1,
-            1,
-            dtype,
-            device,
-        )?
+        sub.conv1d(conditioning, weight, Some(bias), 1, 0, 1, 1)
     };
 
     let mut running = x;
@@ -415,18 +395,7 @@ fn wavenet(
                 .subgraph("conv");
             let weight = sub.load("weight", &[gated, channels, config.wavenet_kernel]);
             let bias = sub.load("bias", &[gated]);
-            conv1d(
-                &sub,
-                running,
-                weight,
-                Some(bias),
-                1,
-                padding,
-                1,
-                1,
-                dtype,
-                device,
-            )?
+            sub.conv1d(running, weight, Some(bias), 1, padding, 1, 1)
         };
 
         // This layer's slice of the timestep projection, one frame wide and broadcast over time.
@@ -447,7 +416,7 @@ fn wavenet(
                 .subgraph("conv");
             let weight = sub.load("weight", &[out_channels, channels, 1]);
             let bias = sub.load("bias", &[out_channels]);
-            conv1d(&sub, gate, weight, Some(bias), 1, 0, 1, 1, dtype, device)?
+            sub.conv1d(gate, weight, Some(bias), 1, 0, 1, 1)
         };
 
         let skip = match last {
@@ -468,7 +437,7 @@ fn wavenet(
 
     let _ = frames;
 
-    Ok(total.expect("a wavenet of at least one layer sums at least one skip"))
+    total.expect("a wavenet of at least one layer sums at least one skip")
 }
 
 /// One step of the trajectory: `(N, 80, T)` out, the direction to move the mel in.
@@ -679,9 +648,7 @@ pub fn graph(
         g.unsqueeze(t2, 2),
         config,
         frames,
-        dtype,
-        device,
-    )?;
+    );
 
     let residual = Linear::graph(
         &g.subgraph("res_projection"),
@@ -726,8 +693,7 @@ pub fn graph(
     let weight = sub.load("weight", &[config.in_channels, config.wavenet_dim, 1]);
     let bias = sub.load("bias", &[config.in_channels]);
 
-    conv1d(
-        &sub,
+    Ok(sub.conv1d(
         g.contiguous(g.transpose(out, 1, 2)),
         weight,
         Some(bias),
@@ -735,9 +701,7 @@ pub fn graph(
         0,
         1,
         1,
-        dtype,
-        device,
-    )
+    ))
 }
 
 // -------------------------------------------------------------------------------------------
@@ -809,7 +773,7 @@ pub fn length_regulator(
         let sub = model.subgraph(&(stage * 3).to_string());
         let weight = sub.load("weight", &[channels, channels, 3]);
         let bias = sub.load("bias", &[channels]);
-        running = conv1d(&sub, running, weight, Some(bias), 1, 1, 1, 1, dtype, device)?;
+        running = sub.conv1d(running, weight, Some(bias), 1, 1, 1, 1);
 
         // `group_norm` wants four axes. With one group it normalizes over the channels and
         // everything after them together, so `(N, C, 1, T)` covers the same numbers as the
@@ -833,7 +797,7 @@ pub fn length_regulator(
     let sub = model.subgraph(&(config.stages * 3).to_string());
     let weight = sub.load("weight", &[config.out_channels, channels, 1]);
     let bias = sub.load("bias", &[config.out_channels]);
-    let out = conv1d(&sub, running, weight, Some(bias), 1, 0, 1, 1, dtype, device)?;
+    let out = sub.conv1d(running, weight, Some(bias), 1, 0, 1, 1);
 
     let _ = frames;
 

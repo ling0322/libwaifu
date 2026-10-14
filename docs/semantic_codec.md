@@ -56,9 +56,7 @@ a GELU after `down`; `decode` puts none after `out_project`. And the doubling is
 along a new last axis and flattens it, which puts every frame beside its own copy.
 
 A ConvNeXt block is a depthwise convolution seven frames wide that mixes no channels, then two
-linears that mix channels and no frames. That separation is why this needs `depthwise_conv1d`
-rather than a grouped `conv1d` — see `docs/audio.md` for why those are not the same thing on a
-card.
+linears that mix channels and no frames. The depthwise one is `conv1d` with a group per channel.
 
 ## The nearest entry is found on the host
 

@@ -25,7 +25,7 @@ not a detail: at full weight the residual stream doubles through every layer.
 
 Every other depthwise convolution in this repository pads symmetrically. This one pads
 `kernel - 1` on the left and nothing on the right, so a frame never sees the future.
-`depthwise_conv1d` takes one padding for both sides, so the padding happens in front of it and
+`conv1d` takes one padding for both sides, so the padding happens in front of it and
 the convolution is asked for none.
 
 ### The positions are relative keys, not rotary

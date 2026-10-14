@@ -765,11 +765,10 @@ impl Graph {
         })
     }
 
-    /// A 1-D convolution as a single node.
+    /// A 1-D convolution as a single node: `input` `(N, C, L)` by `weight` `(K, C / groups, R)`.
     ///
-    /// Only CUDA implements this; on any other device a graph holding one fails when it runs.
-    /// What computes a 1-D convolution today is [`crate::audio::conv1d`], which writes several
-    /// nodes instead and runs everywhere.
+    /// The CPU, CUDA, Metal and Vulkan all implement it, groups included; a depthwise one is
+    /// `groups` equal to the channel count.
     #[track_caller]
     #[allow(clippy::too_many_arguments)]
     pub fn conv1d(

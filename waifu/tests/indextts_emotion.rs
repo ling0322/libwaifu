@@ -336,10 +336,7 @@ fn reads_the_recording_the_way_the_conformer_does() {
             config,
             FRAMES,
             positions,
-            F32,
-            CPU,
         )
-        .unwrap()
     });
 
     assert_eq!(shape, vec![1, 10, ENCODER_DIM]);
@@ -359,10 +356,7 @@ fn boils_the_recording_down_the_way_the_perceiver_does() {
             config,
             FRAMES,
             positions,
-            F32,
-            CPU,
-        )
-        .unwrap();
+        );
 
         emotion::perceiver(
             &perceiver_namespace(g),

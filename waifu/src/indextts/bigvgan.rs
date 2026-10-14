@@ -250,9 +250,7 @@ fn amp_block(
             same_padding(kernel, dilation),
             dilation,
             true,
-            dtype,
-            device,
-        )?;
+        );
 
         let xt = activation(&second, config, xt, channels, up, down, dtype, device)?;
         let xt = Conv1d::graph(
@@ -265,9 +263,7 @@ fn amp_block(
             same_padding(kernel, 1),
             1,
             true,
-            dtype,
-            device,
-        )?;
+        );
 
         x = g.add(xt, x);
     }
@@ -320,9 +316,7 @@ fn write(config: &BigVganConfig, dtype: DType, device: Device, g: &Graph) -> Res
         3,
         1,
         true,
-        dtype,
-        device,
-    )?;
+    );
 
     let kinds = config.resblock_kernel_sizes.len();
     for stage in 0..config.upsample_rates.len() {
@@ -395,9 +389,7 @@ fn write(config: &BigVganConfig, dtype: DType, device: Device, g: &Graph) -> Res
         3,
         1,
         config.use_bias_at_final,
-        dtype,
-        device,
-    )?;
+    );
 
     let bounded = match config.use_tanh_at_final {
         true => g.tanh(x),

@@ -57,7 +57,6 @@
 //! `T * 8192` floats, once per utterance; the walk over them is memory-bound and short beside the
 //! twelve ConvNeXt blocks in front of it.
 
-use crate::audio::{conv1d, depthwise_conv1d};
 use crate::flint::{DType, Device, Extent, Graph, Value};
 use crate::layers::Linear;
 use crate::Result;
@@ -94,34 +93,14 @@ impl Config {
 /// One ConvNeXt block: a depthwise convolution over time, then a pointwise pair over channels.
 ///
 /// The depthwise convolution is seven frames wide and mixes no channels; the two linears mix
-/// channels and no frames. That separation is the whole idea, and it is why this needs
-/// [`depthwise_conv1d`] rather than a grouped [`conv1d`] -- see that function for why the two are
-/// not the same thing on a card.
+/// channels and no frames. That separation is the whole idea.
 #[track_caller]
-fn convnext_block(
-    g: &Graph,
-    x: Value,
-    dim: i32,
-    intermediate: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+fn convnext_block(g: &Graph, x: Value, dim: i32, intermediate: i32) -> Value {
     let residual = x;
 
     let weight = g.subgraph("dwconv").load("weight", &[dim, 1, 7]);
     let bias = g.subgraph("dwconv").load("bias", &[dim]);
-    let y = depthwise_conv1d(
-        &g.subgraph("dwconv"),
-        x,
-        weight,
-        Some(bias),
-        dim,
-        7,
-        3,
-        1,
-        dtype,
-        device,
-    )?;
+    let y = g.conv1d(x, weight, Some(bias), 1, 3, 1, dim);
 
     // (N, C, T) -> (N, T, C): the two linears read channels, and so does the normalization.
     let y = g.contiguous(g.transpose(y, 1, 2));
@@ -140,26 +119,19 @@ fn convnext_block(
     // One learned scale per channel, which is what keeps a deep stack of these stable.
     let y = g.mul(y, g.load("gamma", &[dim]));
 
-    Ok(g.add(residual, g.contiguous(g.transpose(y, 1, 2))))
+    g.add(residual, g.contiguous(g.transpose(y, 1, 2)))
 }
 
 /// The ConvNeXt trunk: `(N, in_channels, T)` in, `(N, T, dim)` out.
 #[track_caller]
 #[allow(clippy::too_many_arguments)]
-pub fn vocos_backbone(
-    g: &Graph,
-    x: Value,
-    in_channels: i32,
-    config: &Config,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+pub fn vocos_backbone(g: &Graph, x: Value, in_channels: i32, config: &Config) -> Value {
     let dim = config.vocos_dim;
 
     let embed = g.subgraph("embed");
     let weight = embed.load("weight", &[dim, in_channels, 7]);
     let bias = embed.load("bias", &[dim]);
-    let x = conv1d(&embed, x, weight, Some(bias), 1, 3, 1, 1, dtype, device)?;
+    let x = embed.conv1d(x, weight, Some(bias), 1, 3, 1, 1);
 
     // The first normalization is over channels, so it happens with time last and is put back.
     let norm = g.subgraph("norm");
@@ -177,19 +149,17 @@ pub fn vocos_backbone(
             running,
             dim,
             config.vocos_intermediate_dim,
-            dtype,
-            device,
-        )?;
+        );
     }
 
     let last = g.subgraph("final_layer_norm");
 
-    Ok(g.layer_norm(
+    g.layer_norm(
         g.contiguous(g.transpose(running, 1, 2)),
         Some(last.load("weight", &[dim])),
         Some(last.load("bias", &[dim])),
         1e-6,
-    ))
+    )
 }
 
 /// `x / ||x||` over the last axis, which is what makes a Euclidean nearest neighbour a cosine one.
@@ -236,8 +206,7 @@ pub fn similarity(
     let down = g.subgraph("down");
     let weight = down.load("weight", &[config.hidden_size, config.hidden_size, 3]);
     let bias = down.load("bias", &[config.hidden_size]);
-    let halved = conv1d(
-        &down,
+    let halved = down.conv1d(
         g.contiguous(g.transpose(x, 1, 2)),
         weight,
         Some(bias),
@@ -245,9 +214,7 @@ pub fn similarity(
         1,
         1,
         1,
-        dtype,
-        device,
-    )?;
+    );
 
     let encoder = g.subgraph("encoder");
     let trunk = vocos_backbone(
@@ -255,9 +222,7 @@ pub fn similarity(
         g.gelu(halved),
         config.hidden_size,
         config,
-        dtype,
-        device,
-    )?;
+    );
 
     // The trunk works in `vocos_dim` and the quantizer in `hidden_size`, so one projection back.
     let features = Linear::graph(
@@ -273,8 +238,7 @@ pub fn similarity(
     let project = quantizer.subgraph("in_project");
     let weight = project.load("weight", &[config.codebook_dim, config.hidden_size, 1]);
     let bias = project.load("bias", &[config.codebook_dim]);
-    let latents = conv1d(
-        &project,
+    let latents = project.conv1d(
         g.contiguous(g.transpose(features, 1, 2)),
         weight,
         Some(bias),
@@ -282,9 +246,7 @@ pub fn similarity(
         0,
         1,
         1,
-        dtype,
-        device,
-    )?;
+    );
 
     // Both sides normalized, so the dot product ranks the same way the distance does.
     let latents = normalize(
@@ -362,14 +324,7 @@ pub fn nearest(similarity: &[f32], codebook_size: usize) -> Vec<i32> {
 /// There is no activation in front of this backbone. `quantize` puts a GELU after `down` and
 /// `decode` puts none after `out_project`, which is asymmetric and is what the release does.
 #[track_caller]
-pub fn decode(
-    g: &Graph,
-    codes: Value,
-    config: &Config,
-    tokens: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+pub fn decode(g: &Graph, codes: Value, config: &Config, tokens: i32) -> Value {
     let quantizer = g.subgraph("quantizer").subgraph("quantizers").subgraph("0");
 
     // The entry each token stands for: (N * T) indices -> (N, T, codebook_dim).
@@ -389,8 +344,7 @@ pub fn decode(
     let project = quantizer.subgraph("out_project");
     let weight = project.load("weight", &[config.hidden_size, config.codebook_dim, 1]);
     let bias = project.load("bias", &[config.hidden_size]);
-    let widened = conv1d(
-        &project,
+    let widened = project.conv1d(
         g.contiguous(g.transpose(entries, 1, 2)),
         weight,
         Some(bias),
@@ -398,19 +352,10 @@ pub fn decode(
         0,
         1,
         1,
-        dtype,
-        device,
-    )?;
+    );
 
     let decoder = g.subgraph("decoder");
-    let trunk = vocos_backbone(
-        &decoder.subgraph("0"),
-        widened,
-        config.hidden_size,
-        config,
-        dtype,
-        device,
-    )?;
+    let trunk = vocos_backbone(&decoder.subgraph("0"), widened, config.hidden_size, config);
     let features = Linear::graph(
         &decoder.subgraph("1"),
         trunk,
@@ -435,7 +380,7 @@ pub fn decode(
     let up = g.subgraph("up");
     let weight = up.load("weight", &[config.hidden_size, config.hidden_size, 3]);
     let bias = up.load("bias", &[config.hidden_size]);
-    let smoothed = conv1d(&up, doubled, weight, Some(bias), 1, 1, 1, 1, dtype, device)?;
+    let smoothed = up.conv1d(doubled, weight, Some(bias), 1, 1, 1, 1);
 
-    Ok(g.contiguous(g.transpose(smoothed, 1, 2)))
+    g.contiguous(g.transpose(smoothed, 1, 2))
 }

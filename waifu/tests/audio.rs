@@ -1,8 +1,7 @@
 //! The audio primitives, each against a direct statement of what it is defined to be.
 //!
-//! Every function in `waifu::audio` is a composition -- a 1-D convolution is a 2-D one, a Fourier
-//! transform is a convolution, a transposed convolution is a matrix multiply and some additions
-//! -- and a composition is exactly the kind of thing that is wrong in a way that still runs and
+//! Every function in `waifu::audio` is a composition -- a Fourier transform is a convolution, a
+//! transposed convolution is a matrix multiply and some additions -- and a composition is exactly the kind of thing that is wrong in a way that still runs and
 //! still produces a plausibly shaped tensor. So none of these compares against a recorded output.
 //! Each one writes the definition out as a loop over indices, in the least clever way available,
 //! and asks whether the graph agrees with it.
@@ -14,7 +13,7 @@
 use std::collections::HashMap;
 
 use waifu::audio::{
-    apply_filterbank, conv1d, conv_transpose1d, depthwise_conv1d, hann_window, istft,
+    apply_filterbank, conv_transpose1d, hann_window, istft,
     istft_basis, magnitude, mel_filterbank, pad1d, resample, resample_kernel, snake, stft,
     stft_basis, window_envelope, MelScale, Padding,
 };
@@ -214,80 +213,10 @@ fn conv1d_cases() -> Vec<Conv1dCase> {
     ]
 }
 
-#[test]
-fn conv1d_is_the_sum_it_is_defined_to_be() {
-    let cases = conv1d_cases();
-
-    for (index, case) in cases.iter().enumerate() {
-        let x = ramp(case.batch * case.in_channels * case.length, index as f32);
-        let w = ramp(
-            case.out_channels * (case.in_channels / case.groups) * case.kernel,
-            index as f32 + 3.0,
-        );
-        let bias = ramp(case.out_channels, index as f32 + 7.0);
-
-        let x_tensor = Tensor::from_f32(
-            &[
-                case.batch as i32,
-                case.in_channels as i32,
-                case.length as i32,
-            ],
-            &x,
-        )
-        .unwrap();
-        let w_tensor = Tensor::from_f32(
-            &[
-                case.out_channels as i32,
-                (case.in_channels / case.groups) as i32,
-                case.kernel as i32,
-            ],
-            &w,
-        )
-        .unwrap();
-        let bias_tensor = Tensor::from_f32(&[case.out_channels as i32], &bias).unwrap();
-
-        let g = Graph::new();
-        let out = conv1d(
-            &g,
-            g.input("x"),
-            g.input("w"),
-            Some(g.input("bias")),
-            case.stride as i32,
-            case.padding as i32,
-            case.dilation as i32,
-            case.groups as i32,
-            F32,
-            CPU,
-        )
-        .unwrap();
-
-        let (shape, got) = run_shaped(
-            &g,
-            out,
-            &[("x", &x_tensor), ("w", &w_tensor), ("bias", &bias_tensor)],
-        );
-
-        let (out_length, expected) = naive_conv1d(case, &x, &w, &bias);
-        assert_eq!(
-            shape,
-            vec![
-                case.batch as i32,
-                case.out_channels as i32,
-                out_length as i32
-            ],
-            "case {index} came back the wrong shape"
-        );
-        close(&got, &expected, 1e-5);
-    }
-}
-
-/// The same shapes through `Graph::conv1d` -- the operator rather than the composition -- which
-/// the CPU has a kernel for and which is what `waifu::audio::conv1d` is to be replaced by.
+/// `Graph::conv1d` against `naive_conv1d`, which the CPU has a kernel for.
 ///
-/// Against `naive_conv1d` and not against the composition above, for the reason that test gives:
-/// two implementations agreeing tells you nothing if they agree on the same misreading. What this
-/// adds over `flint/cpu/conv1d_test.cc` is the chain -- `Graph` to `Op` to `ir` to the C
-/// interface to `Operators` -- which C++ alone cannot reach.
+/// What this adds over `flint/cpu/conv1d_test.cc` is the chain -- `Graph` to `Op` to `ir` to the
+/// C interface to `Operators` -- which C++ alone cannot reach.
 #[test]
 fn the_conv1d_operator_is_the_sum_it_is_defined_to_be() {
     for (index, case) in conv1d_cases().iter().enumerate() {
@@ -939,83 +868,6 @@ fn resampling_a_sine_keeps_its_frequency_and_its_amplitude() {
             (sample - expected).abs() < 0.05,
             "sample {n}: {sample} is not {expected}"
         );
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// depthwise
-// ---------------------------------------------------------------------------------------------
-
-/// The whole claim of `depthwise_conv1d`: it is what `conv1d` with one group per channel already
-/// computes, written so that it runs where that one cannot.
-///
-/// So the reference here is `conv1d` itself rather than another loop. The loop is what says
-/// `conv1d` is right, over in `conv1d_is_the_sum_it_is_defined_to_be`, and depthwise is a case of
-/// it; what this has to establish is that the two agree, because that is what makes one a
-/// substitute for the other.
-#[test]
-fn depthwise_conv1d_is_conv1d_with_one_group_per_channel() {
-    // (channels, length, kernel, padding, dilation). The fourth is the 31-tap kernel a conformer
-    // and w2v-bert-2.0 both use, with the padding that keeps the length.
-    let cases = [
-        (4usize, 12usize, 3usize, 1usize, 1usize),
-        (8, 20, 5, 2, 1),
-        (6, 32, 3, 4, 4),
-        (16, 64, 31, 15, 1),
-        (3, 10, 1, 0, 1),
-        (5, 24, 4, 0, 2),
-    ];
-
-    for (index, &(channels, length, kernel, padding, dilation)) in cases.iter().enumerate() {
-        let batch = 2;
-        let x = ramp(batch * channels * length, index as f32);
-        let w = ramp(channels * kernel, index as f32 + 3.0);
-        let bias = ramp(channels, index as f32 + 9.0);
-
-        let x_tensor =
-            Tensor::from_f32(&[batch as i32, channels as i32, length as i32], &x).unwrap();
-        let w_tensor = Tensor::from_f32(&[channels as i32, 1, kernel as i32], &w).unwrap();
-        let bias_tensor = Tensor::from_f32(&[channels as i32], &bias).unwrap();
-        let inputs: &[(&str, &Tensor)] =
-            &[("x", &x_tensor), ("w", &w_tensor), ("bias", &bias_tensor)];
-
-        let g = Graph::new();
-        let out = depthwise_conv1d(
-            &g,
-            g.input("x"),
-            g.input("w"),
-            Some(g.input("bias")),
-            channels as i32,
-            kernel as i32,
-            padding as i32,
-            dilation as i32,
-            F32,
-            CPU,
-        )
-        .unwrap();
-        let (depthwise_shape, depthwise) = run_shaped(&g, out, inputs);
-
-        let g = Graph::new();
-        let out = conv1d(
-            &g,
-            g.input("x"),
-            g.input("w"),
-            Some(g.input("bias")),
-            1,
-            padding as i32,
-            dilation as i32,
-            channels as i32,
-            F32,
-            CPU,
-        )
-        .unwrap();
-        let (grouped_shape, grouped) = run_shaped(&g, out, inputs);
-
-        assert_eq!(
-            depthwise_shape, grouped_shape,
-            "case {index} came back a different shape from the grouped convolution"
-        );
-        close(&depthwise, &grouped, 1e-5);
     }
 }
 

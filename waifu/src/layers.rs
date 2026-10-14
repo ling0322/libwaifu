@@ -113,9 +113,8 @@ impl Conv2d {
 
 /// A convolution along one axis, as a speech model has rather than a diffusion model.
 ///
-/// What runs is [`crate::audio::conv1d`], which is several nodes and not a kernel; this is the
-/// weight and the bias in front of it, so that a model says which convolution it wants and not
-/// how one is assembled.
+/// The weight and the bias in front of [`Graph::conv1d`], so that a model says which convolution
+/// it wants and not where its parameters are.
 pub struct Conv1d;
 
 impl Conv1d {
@@ -123,11 +122,6 @@ impl Conv1d {
     pub const BIAS: &'static str = "bias";
 
     /// `input` is `(N, C, L)` and what comes back is `(N, K, Lout)`.
-    ///
-    /// `dtype` and `device` are what the tensor will be in when the graph runs. A 1-D convolution
-    /// pads the time axis itself rather than asking `conv2d` for it -- see
-    /// [`crate::audio::conv1d`] -- and building that padding means knowing both, which a graph
-    /// does not.
     #[track_caller]
     #[allow(clippy::too_many_arguments)]
     pub fn graph(
@@ -140,15 +134,11 @@ impl Conv1d {
         padding: i32,
         dilation: i32,
         has_bias: bool,
-        dtype: DType,
-        device: Device,
-    ) -> Result<Value> {
+    ) -> Value {
         let weight = g.load(Self::WEIGHT, &[out_channels, in_channels, kernel]);
         let bias = has_bias.then(|| g.load(Self::BIAS, &[out_channels]));
 
-        crate::audio::conv1d(
-            g, input, weight, bias, stride, padding, dilation, 1, dtype, device,
-        )
+        g.conv1d(input, weight, bias, stride, padding, dilation, 1)
     }
 }
 

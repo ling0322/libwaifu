@@ -39,7 +39,7 @@
 //!
 //! **The depthwise convolution is causal.** Every other depthwise convolution in this repository
 //! pads symmetrically; this one pads `kernel - 1` on the left and nothing on the right, so a
-//! frame never sees the future. [`depthwise_conv1d`] takes one padding for both sides, so the
+//! frame never sees the future. [`Graph::conv1d`] takes one padding for both sides, so the
 //! padding is done in front of it and the convolution is asked for none.
 //!
 //! **The positions are relative keys, not rotary.** The score between two frames gets a term that
@@ -48,7 +48,7 @@
 //! turns it into the `(T, T, head_dim)` the scores need -- so the gather is an operator that
 //! exists rather than one that does not.
 
-use crate::audio::{conv1d, depthwise_conv1d, pad1d, Padding};
+use crate::audio::{pad1d, Padding};
 use crate::flint::{DType, Device, Extent, Graph, Tensor, Value};
 use crate::layers::{LayerNorm, Linear};
 use crate::Result;
@@ -235,7 +235,7 @@ fn conv_module(
 
     let first = g.subgraph("pointwise_conv1");
     let weight = first.load("weight", &[2 * hidden, hidden, 1]);
-    let gated = conv1d(&first, x, weight, None, 1, 0, 1, 1, dtype, device)?;
+    let gated = first.conv1d(x, weight, None, 1, 0, 1, 1);
 
     // A gated linear unit over the channel axis, which is halved by it.
     let left = g.contiguous(g.slice(gated, 1, 0, hidden));
@@ -255,18 +255,7 @@ fn conv_module(
 
     let depthwise = g.subgraph("depthwise_conv");
     let weight = depthwise.load("weight", &[hidden, 1, config.conv_kernel]);
-    let x = depthwise_conv1d(
-        &depthwise,
-        padded,
-        weight,
-        None,
-        hidden,
-        config.conv_kernel,
-        0,
-        1,
-        dtype,
-        device,
-    )?;
+    let x = g.conv1d(padded, weight, None, 1, 0, 1, hidden);
 
     // The normalization between the two is over channels, so time goes last and comes back.
     let x = LayerNorm::graph(
@@ -279,7 +268,7 @@ fn conv_module(
 
     let second = g.subgraph("pointwise_conv2");
     let weight = second.load("weight", &[hidden, hidden, 1]);
-    let x = conv1d(&second, x, weight, None, 1, 0, 1, 1, dtype, device)?;
+    let x = second.conv1d(x, weight, None, 1, 0, 1, 1);
 
     Ok(g.contiguous(g.transpose(x, 1, 2)))
 }
