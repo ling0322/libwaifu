@@ -143,6 +143,7 @@ final class Launcher {
     private static func device(_ name: String) -> Device {
         switch name {
         case "metal": .metal
+        case "metal_disk_offload": .metalDiskOffload
         case "cpu": .cpu
         case "cuda": .cuda
         case "vulkan": .vulkan

@@ -66,6 +66,10 @@ typedef enum {
   WAIFU_DEVICE_CUDA = 3,
   WAIFU_DEVICE_CUDA_CPU_OFFLOAD = 4,
   WAIFU_DEVICE_VULKAN = 5,
+  // Metal with the weights left in the model's files, each read off the disk as it is used:
+  // for a model larger than the Mac's memory, and slower. Last, so the numbers above keep
+  // their meaning.
+  WAIFU_DEVICE_METAL_DISK_OFFLOAD = 6,
 } WaifuDevice;
 
 // One thread that holds a model and runs jobs on it, one at a time, in the order asked.
