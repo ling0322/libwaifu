@@ -67,18 +67,25 @@ fn stamp_revision() {
         }
     }
 
-    let revision = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&manifest)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+    let rev_parse = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(&manifest)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
 
+    // The short one for a screen; the whole one for the record written beside a picture, which no
+    // number of later commits can make ambiguous.
+    let revision = rev_parse(&["rev-parse", "--short", "HEAD"]);
+    let commit = rev_parse(&["rev-parse", "HEAD"]);
     println!("cargo:rustc-env=WAIFU_REVISION={revision}");
+    println!("cargo:rustc-env=WAIFU_COMMIT={commit}");
 }
 
 /// The ref file HEAD names, relative to the git directory, when it names one at all. A detached

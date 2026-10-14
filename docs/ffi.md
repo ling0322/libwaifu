@@ -327,6 +327,9 @@ typedef struct {
 typedef struct {
     WaifuStatus status;
     const WaifuImage *image;  // NULL unless status.code is WAIFU_OK
+    // How it was made, as JSON (docs/image-metadata.md); NULL unless status.code is WAIFU_OK.
+    // Its paths are null, for the caller to fill in: request.parameters.inputs, result.output.
+    const char *record;
 } WaifuImageCompletionEvent;
 
 typedef void (*WaifuImageCompleteCallback)(void *user_data, const WaifuImageCompletionEvent *event);

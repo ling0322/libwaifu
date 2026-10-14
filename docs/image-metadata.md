@@ -68,8 +68,8 @@ one the engine drew with, never a default or `auto`.
 
 | Field        | Type   | Means                                                                  |
 | ------------ | ------ | ---------------------------------------------------------------------- |
-| `model`      | string | The catalog name with its version, alias resolved: `anima:turbo:v1.1`. |
-| `device`     | string | `"cpu"`, `"metal"`, `"cuda"`, `"cuda-cpu-offload"` or `"vulkan"`.      |
+| `model`      | string | The catalog name with its version, alias resolved: `anima:turbo:v1.1`; for a manifest, its path as it was loaded. |
+| `device`     | string | `"cpu"`, `"metal"`, `"cuda"`, `"cuda_cpu_offload"` or `"vulkan"`.      |
 | `prompt`     | string | The text the engine was given.                                         |
 | `negative`   | string | `""` for a model that takes no guidance.                               |
 | `width`      | int    | Pixels.                                                                |
@@ -114,8 +114,10 @@ What the record does not pin, and drawing again does not notice:
 - Seeds are strings: they span u64, past what a JSON number keeps in JavaScript.
 - A record larger than 1 MiB, not UTF-8, or not JSON is not read. A record without a PNG of its name
   beside it belongs to no picture.
-- The record is written by the library, the only part that knows what the engine drew with; webui
-  and the apps write what it hands them.
+- The library makes the record, the only part that knows what the engine drew with, and hands it
+  over with the picture (`record` in `WaifuImageCompletionEvent`). It is handed pixels and hands
+  pixels back, so it leaves the paths null; the caller fills in `inputs` and `output` and writes
+  the file.
 
 ## Privacy
 

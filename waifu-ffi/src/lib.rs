@@ -773,6 +773,11 @@ pub struct WaifuImageCompletionEvent {
     pub status: WaifuStatus,
     /// NULL unless status.code is WAIFU_OK.
     pub image: *const WaifuImage,
+    /// How it was made, as JSON: docs/image-metadata.md. NULL unless status.code is WAIFU_OK. Its
+    /// paths are null -- the library is handed pixels and hands pixels back -- and are the
+    /// caller's to fill in: request.parameters.inputs for each image it gave, result.output for
+    /// where it writes this one.
+    pub record: *const c_char,
 }
 
 pub type WaifuImageCompleteCallback =
@@ -849,24 +854,29 @@ pub unsafe extern "C" fn waifu_engine_draw_async(
         let user_data = UserData(user_data);
         let on_complete = {
             let gate = gate.clone();
-            Box::new(move |ended: Ended<engine::Image>| {
+            Box::new(move |ended: Ended<engine::Drawn>| {
                 let Some(callback) = on_complete else {
                     return;
                 };
                 gate.wait();
                 let (code, message) = status_of(&ended);
-                let image = match &ended {
-                    Ended::Done(image) => Some(WaifuImage {
-                        width: image.width,
-                        height: image.height,
-                        rgb: image.rgb.as_ptr(),
-                        len: image.rgb.len(),
-                    }),
-                    _ => None,
+                let (image, record) = match &ended {
+                    Ended::Done(drawn) => (
+                        Some(WaifuImage {
+                            width: drawn.image.width,
+                            height: drawn.image.height,
+                            rgb: drawn.image.rgb.as_ptr(),
+                            len: drawn.image.rgb.len(),
+                        }),
+                        // JSON escapes a NUL, so there is none in it to refuse.
+                        CString::new(drawn.record.as_str()).ok(),
+                    ),
+                    _ => (None, None),
                 };
                 let event = WaifuImageCompletionEvent {
                     status: status(code, &message),
                     image: image.as_ref().map_or(ptr::null(), |image| image as *const WaifuImage),
+                    record: record.as_ref().map_or(ptr::null(), |record| record.as_ptr()),
                 };
                 let user_data = user_data;
                 unsafe { callback(user_data.0, &event) };

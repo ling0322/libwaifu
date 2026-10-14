@@ -36,7 +36,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Map, Value};
 
 use crate::cosyvoice3::CosyVoice3;
 use crate::describe::{self, converter_kind, voice_kind, Chosen, ConverterKind, VoiceKind, TONES};
@@ -66,6 +68,16 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+}
+
+/// A picture the engine drew, and the record of how it was made: docs/image-metadata.md.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drawn {
+    pub image: Image,
+    /// The record, as JSON. Its paths -- each input's and the output's -- are null: the engine is
+    /// handed pixels and hands pixels back, so where they came from and go to are the caller's to
+    /// fill in.
+    pub record: String,
 }
 
 /// What a draw is asked for. See `WaifuDrawRequest` in docs/ffi.md, which is this.
@@ -205,7 +217,7 @@ enum Work {
     Draw {
         request: DrawRequest,
         on_progress: OnProgress,
-        on_complete: OnComplete<Image>,
+        on_complete: OnComplete<Drawn>,
     },
     Speak {
         request: SpeakRequest,
@@ -297,7 +309,7 @@ impl Engine {
         &self,
         request: DrawRequest,
         on_progress: OnProgress,
-        on_complete: OnComplete<Image>,
+        on_complete: OnComplete<Drawn>,
     ) -> Result<JobId, String> {
         check_draw(&request)?;
         Ok(self.submit(Work::Draw {
@@ -450,6 +462,88 @@ fn placeholders(prompt: &str) -> Result<Vec<String>, String> {
         rest = &after[end + 2..];
     }
     Ok(found)
+}
+
+// -- the record ------------------------------------------------------------------------------------
+
+/// The record of a draw, docs/image-metadata.md: what the engine drew with, which the request
+/// asked for only in part -- a model without guidance draws with its own and no negative, and
+/// strength is clamped. The paths are null; see [`Drawn::record`].
+fn record(model: &str, device: &str, request: &DrawRequest, options: &GenerationOptions, seconds: f64, finished: SystemTime) -> Value {
+    let start_from = request.images.iter().any(|(key, _)| key == START_FROM);
+    let mut parameters = json!({
+        "model": model,
+        "device": device,
+        "prompt": request.prompt,
+        "negative": options.negative_prompt,
+        "width": request.width,
+        "height": request.height,
+        "steps": request.steps,
+        "guidance": shortest(options.guidance_scale),
+        // A u64 spans past what a JSON number keeps in JavaScript.
+        "seed": request.seed.to_string(),
+    });
+    if start_from {
+        parameters["strength"] = shortest(options.strength).into();
+    }
+    let inputs: Map<String, Value> = request.images.iter().map(|(key, _)| (key.clone(), Value::Null)).collect();
+    parameters["inputs"] = inputs.into();
+
+    let commit = env!("WAIFU_COMMIT");
+    json!({
+        "environment": {
+            "libwaifu": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "revision": (commit != "unknown").then_some(commit),
+            },
+        },
+        "request": {
+            "task": if start_from { "img2img" } else { "txt2img" },
+            "parameters": parameters,
+        },
+        "result": {
+            "output": Value::Null,
+            "created": utc_millis(finished),
+            "generation_seconds": (seconds * 1000.0).round() / 1000.0,
+        },
+    })
+}
+
+/// An f32 as the shortest decimal that reads back to it: 0.6, not the 0.6000000238418579 that
+/// widening it to an f64 would write, so that drawing again asks for the same number.
+fn shortest(value: f32) -> f64 {
+    value.to_string().parse().unwrap_or(f64::from(value))
+}
+
+/// A moment as `2026-10-11T07:22:19.199Z`.
+fn utc_millis(at: SystemTime) -> String {
+    let millis = at.duration_since(UNIX_EPOCH).map(|since| since.as_millis()).unwrap_or(0) as u64;
+    let (seconds, millis) = (millis / 1000, millis % 1000);
+    let (days, rest) = (seconds / 86_400, seconds % 86_400);
+    let (year, month, day) = civil(days as i64);
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{millis:03}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+/// The calendar date `days` after 1970-01-01, by Howard Hinnant's `civil_from_days`. Written out
+/// rather than pulled in: a record and a log line are the only dates this library formats.
+pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    (year, month, day)
 }
 
 // -- the thread ------------------------------------------------------------------------------------
@@ -823,7 +917,7 @@ impl Worker {
         crate::flint::release_memory();
     }
 
-    fn draw(&mut self, request: &DrawRequest, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<Image> {
+    fn draw(&mut self, request: &DrawRequest, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<Drawn> {
         let Loaded::Image { model, chosen } = &self.loaded else {
             return Ended::failed(Failure::NotLoaded, "no model that draws is loaded");
         };
@@ -895,14 +989,24 @@ impl Worker {
         };
 
         let shape = tensor.shape();
-        match to_rgb8(&tensor) {
-            Ok(rgb) => Ended::Done(Image {
-                width: shape[3] as u32,
-                height: shape[2] as u32,
-                rgb,
-            }),
-            Err(error) => Ended::failed(Failure::Model, error.to_string()),
-        }
+        let rgb = match to_rgb8(&tensor) {
+            Ok(rgb) => rgb,
+            Err(error) => return Ended::failed(Failure::Model, error.to_string()),
+        };
+        let image = Image {
+            width: shape[3] as u32,
+            height: shape[2] as u32,
+            rgb,
+        };
+
+        // The catalogue's versioned name, which an alias is not; a manifest as it was asked for.
+        let model = hub::published_name(&self.name).unwrap_or(&self.name);
+        let seconds = started.elapsed().as_secs_f64();
+        let record = record(model, self.runtime.name(), request, &options, seconds, SystemTime::now());
+        Ended::Done(Drawn {
+            image,
+            record: record.to_string(),
+        })
     }
 
     fn voice(&self) -> Option<&dyn Voice> {
@@ -1206,6 +1310,43 @@ mod tests {
     }
 
     #[test]
+    fn a_record_says_what_the_engine_drew_with() {
+        let mut request = a_request("a cat", vec![(START_FROM, a_pixel())]);
+        request.seed = u64::MAX;
+        request.negative = "asked for, and dropped".to_string();
+        // What the engine made of the request: no guidance, so the model's own and no negative.
+        let options = GenerationOptions {
+            guidance_scale: 1.0,
+            negative_prompt: String::new(),
+            strength: 0.6,
+            ..GenerationOptions::default()
+        };
+        let finished = UNIX_EPOCH + Duration::from_millis(1_790_378_474_199);
+        let img2img = record("anima:turbo:v1.1", "metal", &request, &options, 15.5312, finished);
+
+        let parameters = &img2img["request"]["parameters"];
+        assert_eq!(img2img["request"]["task"], "img2img");
+        assert_eq!(parameters["model"], "anima:turbo:v1.1");
+        assert_eq!(parameters["device"], "metal");
+        assert_eq!(parameters["negative"], "");
+        assert_eq!(parameters["guidance"], 1.0);
+        // The shortest decimal of the f32, not its widening.
+        assert_eq!(parameters["strength"].to_string(), "0.6");
+        assert_eq!(parameters["seed"], "18446744073709551615");
+        assert_eq!(parameters["inputs"], json!({ "start_from": null }));
+        assert_eq!(img2img["result"]["output"], Value::Null);
+        assert_eq!(img2img["result"]["created"], "2026-09-25T23:21:14.199Z");
+        assert_eq!(img2img["result"]["generation_seconds"], 15.531);
+        assert_eq!(img2img["environment"]["libwaifu"]["version"], env!("CARGO_PKG_VERSION"));
+
+        // From noise: no strength, and nothing drawn from.
+        let txt2img = record("anima:turbo:v1.1", "cpu", &a_request("a cat", vec![]), &options, 1.0, finished);
+        assert_eq!(txt2img["request"]["task"], "txt2img");
+        assert!(txt2img["request"]["parameters"].get("strength").is_none());
+        assert_eq!(txt2img["request"]["parameters"]["inputs"], json!({}));
+    }
+
+    #[test]
     fn a_draw_is_refused_at_the_call_for_what_no_model_could_run() {
         assert!(check_draw(&a_request("a cat", vec![])).is_ok());
         assert!(check_draw(&a_request("the girl in <|girl|>", vec![("girl", a_pixel())])).is_ok());
@@ -1288,7 +1429,7 @@ mod tests {
         assert!(matches!(spoken.recv_timeout(Duration::from_millis(50)), Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected)));
 
         // A picture asked of a voice is the wrong kind.
-        let (progress, complete, drawn) = listen::<Image>();
+        let (progress, complete, drawn) = listen::<Drawn>();
         engine.draw(a_request("a cat", vec![]), progress, complete).unwrap();
         assert!(matches!(drawn.recv_timeout(WAIT).unwrap(), Ended::Failed(Failure::NotLoaded, _)));
     }

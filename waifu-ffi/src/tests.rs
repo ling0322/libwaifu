@@ -33,7 +33,7 @@ enum Heard {
     Progress(WaifuStage, String),
     Complete(WaifuStatusCode, Option<String>),
     Audio(WaifuStatusCode, usize, u32),
-    Image(WaifuStatusCode, Option<(u32, u32, usize)>),
+    Image(WaifuStatusCode, Option<(u32, u32, usize)>, Option<String>),
 }
 
 unsafe fn text(pointer: *const c_char) -> Option<String> {
@@ -63,7 +63,7 @@ unsafe extern "C" fn on_audio(user_data: *mut c_void, event: *const WaifuAudioCo
 unsafe extern "C" fn on_image(user_data: *mut c_void, event: *const WaifuImageCompletionEvent) {
     let event = &*event;
     let image = event.image.as_ref().map(|image| (image.width, image.height, image.len));
-    let _ = sender(user_data).send(Heard::Image(event.status.code, image));
+    let _ = sender(user_data).send(Heard::Image(event.status.code, image, text(event.record)));
 }
 
 /// A channel whose sending end lives as long as the test, behind the pointer the callbacks get.
@@ -228,7 +228,7 @@ fn a_voice_is_loaded_and_speaks_through_the_c_api() {
             control_scale: 1.0,
         };
         assert_ne!(waifu_engine_draw_async(engine, &request, user_data(&send), None, Some(on_image)), 0);
-        assert_eq!(the_end(&heard), Heard::Image(WaifuStatusCode::WAIFU_ERR_NOT_LOADED, None));
+        assert_eq!(the_end(&heard), Heard::Image(WaifuStatusCode::WAIFU_ERR_NOT_LOADED, None, None));
 
         waifu_engine_free(engine);
     }

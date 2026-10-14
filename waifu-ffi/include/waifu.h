@@ -174,6 +174,11 @@ typedef struct {
   WaifuStatus status;
   // NULL unless status.code is WAIFU_OK.
   const WaifuImage *image;
+  // How it was made, as JSON: docs/image-metadata.md. NULL unless status.code is WAIFU_OK. Its
+  // paths are null -- the library is handed pixels and hands pixels back -- and are the
+  // caller's to fill in: request.parameters.inputs for each image it gave, result.output for
+  // where it writes this one.
+  const char *record;
 } WaifuImageCompletionEvent;
 
 typedef void (*WaifuImageCompleteCallback)(void *user_data, const WaifuImageCompletionEvent *event);

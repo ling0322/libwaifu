@@ -28,6 +28,8 @@ use std::fmt::Display;
 use std::io::{self, IsTerminal};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::engine::civil;
+
 /// The routes the page asks several times a second. A line for each would bury everything else,
 /// so they are logged only when they fail.
 const POLLED: [&str; 3] = ["/api/state", "/api/progress", "/api/machine"];
@@ -85,22 +87,6 @@ fn stamp(at: SystemTime) -> String {
         rest % 3600 / 60,
         rest % 60
     )
-}
-
-/// The calendar date `days` after 1970-01-01, by Howard Hinnant's `civil_from_days`. Written out
-/// rather than pulled in: it is the one date this program ever formats.
-fn civil(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = yoe + era * 400 + i64::from(month <= 2);
-
-    (year, month, day)
 }
 
 #[cfg(test)]
