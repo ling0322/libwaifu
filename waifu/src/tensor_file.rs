@@ -90,14 +90,6 @@ pub fn read_safetensors(paths: &[impl AsRef<Path>]) -> Result<HashMap<String, Te
     Ok(tensors)
 }
 
-/// The same, out of one file's bytes already in hand rather than off the disk.
-pub fn parse_safetensors(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
-    let mut tensors = HashMap::new();
-    each_copied(bytes, &mut |name, tensor| keep(&mut tensors, name, tensor))?;
-    check_fp8_pairs(&tensors)?;
-    Ok(tensors)
-}
-
 /// A model's weights out of the files at `paths`, for a model running on `device` with its
 /// weights held the way `residency` says -- what [`Weights::from_files`] is.
 ///
@@ -112,14 +104,6 @@ pub(crate) fn collect(
 ) -> Result<Weights> {
     let mut weights = Weights::empty(device, residency)?;
     each_mapped(paths, &mut |name, tensor| weights.insert(name, tensor))?;
-    check_fp8_pairs(weights.tensors())?;
-    Ok(weights)
-}
-
-/// [`collect`], for one file whose bytes are already in hand.
-pub(crate) fn collect_bytes(bytes: &[u8], device: Device, residency: Residency) -> Result<Weights> {
-    let mut weights = Weights::empty(device, residency)?;
-    each_copied(bytes, &mut |name, tensor| weights.insert(name, tensor))?;
     check_fp8_pairs(weights.tensors())?;
     Ok(weights)
 }
@@ -143,15 +127,6 @@ fn each_mapped(
         .map_err(blame)?;
     }
     Ok(())
-}
-
-/// Hand every tensor of one file's `bytes` to `each`, in the order it lies in, each one a copy.
-fn each_copied(bytes: &[u8], each: &mut dyn FnMut(String, Tensor) -> Result<()>) -> Result<()> {
-    each_in(bytes, &mut |name, stored| {
-        let tensor = Tensor::from_bytes(&stored.shape, stored.dtype, &bytes[stored.range])
-            .map_err(|error| Error::format(format!("tensor {name:?}: {error}")))?;
-        each(name, tensor)
-    })
 }
 
 /// `path`, mapped read-only.
