@@ -18,7 +18,7 @@ every filter is made of, are `waifu::audio`.
 
 ## The operators
 
-| node | CPU and CUDA | every other device |
+| node | CPU, CUDA and Vulkan | Metal |
 | --- | --- | --- |
 | `Graph::conv1d` | a kernel (CUTLASS on CUDA, groups included) | a kernel |
 | `Graph::conv_transpose1d` | one GEMM, then a col2im kernel | one `matmul` and `ceil(R / stride)` shifted additions per group |
@@ -28,8 +28,8 @@ every filter is made of, are `waifu::audio`.
 | `Graph::stft` | a reflection `pad1d` and a `conv1d` against a bank of windowed sinusoids | the same |
 | `Graph::istft` | a `conv_transpose1d` against the inverse bank, divided by the window's overlap | the same |
 
-"Every other device" is Metal and Vulkan today: the compositions live in the base class,
-`flint/functional.cc`, so a backend without a kernel for one of these runs it out of the operators
+Metal is the one device without these kernels today, and it loses nothing: the compositions live
+in the base class, `flint/functional.cc`, so a backend without a kernel for one of these runs it out of the operators
 it does have -- `matmul`, `copy`, `fill`, the elementwise family -- and overriding the method is
 all it takes to give it a kernel later. Nothing above `Operators` can tell which it got.
 
@@ -46,7 +46,7 @@ contributions at once is `(N * L, C) @ (C, K * R)` -- `F::transposedConvolutionC
 through the device's own `matmul` and so its tuned GEMM. What is left is adding up the ones that
 landed on the same place.
 
-The CPU and CUDA do that in one pass, col2im: a thread per output position gathers the taps
+The CPU, CUDA and Vulkan do that in one pass, col2im: a thread per output position gathers the taps
 congruent to it modulo the stride, `ceil(R / stride)` of them -- two for every vocoder here -- and
 adds the bias. The composition gets there without a kernel: `l * stride + r` and `l' * stride + r'`
 collide only when `r` and `r'` are a whole stride apart, so cutting the kernel into stride-long
@@ -107,7 +107,8 @@ tensor.
 - `flint/cuda/signal_test.cc`: the CUDA kernels against the CPU in float and half, and the
   compositions run on the GPU -- which is where reading the window back and moving the banks over
   is exercised before Metal relies on it.
-- `flint/vulkan/operators_test.cc`: the compositions on a real Vulkan device, against the CPU.
+- `flint/vulkan/operators_test.cc`: the Vulkan kernels in float and half against the CPU, and
+  the compositions run on the same device -- what Metal relies on, tested from Linux.
 - `waifu/tests/audio.rs`: every node from a graph, through `Op`, `ir` and the C interface, against
   its definition: `conv1d` over six shapes, `conv_transpose1d`, the paddings, the snake, the clamp,
   `stft` against a DFT, `istft` of `stft` back to the signal, a mel spectrogram against the

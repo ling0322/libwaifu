@@ -139,8 +139,8 @@ class Operators {
   /// Lout being (L - 1) * stride - 2 * padding + R + outputPadding: input position `l`
   /// contributes the whole kernel starting at `l * stride`. What a vocoder upsamples with.
   ///
-  /// The CPU and CUDA have a kernel, one thread per output element gathering the input positions
-  /// that land on it. Any other device gets `F::composedConvTranspose1d`, a `matmul` per group and
+  /// The CPU, CUDA and Vulkan have a kernel, one thread per output element gathering the input
+  /// positions that land on it. Metal gets `F::composedConvTranspose1d`, a `matmul` per group and
   /// ceil(R / stride) shifted additions.
   virtual void convTranspose1d(
       TensorView input,
@@ -157,7 +157,7 @@ class Operators {
   /// -- a checkpoint trained with `alpha_logscale` stores their logarithm, and raising it belongs
   /// to whoever reads the weight. An empty `beta` means beta is alpha, the plain snake.
   ///
-  /// The CPU and CUDA fuse it into one pass. Any other device gets `F::composedSnake`, about six
+  /// The CPU, CUDA and Vulkan fuse it into one pass. Metal gets `F::composedSnake`, about six
   /// passes of the elementwise operators.
   virtual void snake(
       TensorView input,
@@ -171,14 +171,14 @@ class Operators {
   /// about its first and last samples (`F.pad(mode="reflect")`, which needs `left` and `right`
   /// below L), or the first and last samples repeated (`mode="replicate"`, any width).
   ///
-  /// The CPU and CUDA have a kernel. Any other device gets `F::composedPad1d`, which copies the
+  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedPad1d`, which copies the
   /// middle and builds each edge out of `copy`, `fill` and, for a mirror, a `matmul`.
   virtual void pad1d(TensorView input, int left, int right, PadMode mode, TensorView out);
 
   /// `min(max(x, lo), hi)`, elementwise, into `out` of `input`'s shape. Either bound may be
   /// infinite, which leaves that side alone. `torch.clamp`.
   ///
-  /// The CPU and CUDA have a kernel. Any other device gets `F::composedClamp`, out of `relu`.
+  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedClamp`, out of `relu`.
   virtual void clamp(TensorView input, float lo, float hi, TensorView out);
 
   /// Short time Fourier transform of `input` <float16|float>(N, 1, L) against `window` (nFft), as

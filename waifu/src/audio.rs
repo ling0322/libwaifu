@@ -26,8 +26,8 @@
 //! A convolution along one axis and its transpose, a padding by zeros, a mirror or a repeated
 //! edge, a short time Fourier transform and its inverse, a snake activation and a clamp are each a
 //! single [`Graph`] node -- [`Graph::conv1d`], [`Graph::conv_transpose1d`], [`Graph::pad1d`],
-//! [`Graph::stft`], [`Graph::istft`], [`Graph::snake`], [`Graph::clamp`] -- which the CPU and CUDA
-//! run as kernels of their own and every other device as a composition of the operators it has.
+//! [`Graph::stft`], [`Graph::istft`], [`Graph::snake`], [`Graph::clamp`] -- which the CPU, CUDA
+//! and Vulkan run as kernels of their own and Metal as a composition of the operators it has.
 //! What is left here is what a model *designs* rather than computes: the numbers a filter is made
 //! of, worked out on the host once, and the few lines that put two operators together the way one
 //! reference implementation did.

@@ -20,7 +20,7 @@
 // The CUDA kernels of flint/cuda/signal.h against the CPU's, which flint/cpu/signal_test.cc checks
 // against the definitions, in float and in half. And the compositions every device without a
 // kernel runs, run here on the GPU: they move constants to the device and read the window back,
-// which the CPU never has to, and a GPU is where that is tested before Metal or Vulkan relies on it.
+// which the CPU never has to, and a GPU is where that is tested before Metal relies on it.
 
 #include <math.h>
 

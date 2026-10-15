@@ -186,6 +186,7 @@ if(WITH_VULKAN)
         "vulkan/rand.cc"
         "vulkan/reduce.cc"
         "vulkan/shape.cc"
+        "vulkan/signal.cc"
         "vulkan/to_device.cc"
         "vulkan/vma.cc"
         "${VULKAN_THIRD_PARTY}/volk/volk.c"

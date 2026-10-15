@@ -51,7 +51,8 @@ const F32: DType = DType::Float;
 /// orders; nothing else about them differs.
 const TOLERANCE: f32 = 2e-4;
 
-/// On a card, where the float type is half rather than float32, the waveform is compared with the
+/// On a card -- CUDA or Vulkan -- where the float type is half rather than float32, the waveform is
+/// compared with the
 /// processor's float32 one -- which `a_mel_becomes_the_waveform_bigvgan_makes_of_it` holds to
 /// BigVGAN's -- over a mel long enough to say something about half rather than about one draw.
 ///
@@ -61,14 +62,14 @@ const TOLERANCE: f32 = 2e-4;
 /// compositions they replaced, moved the old fixture from 3.6e-3 to 5.0e-3, while the compositions
 /// themselves exceeded a 4e-3 bound on thirteen of the twenty. So the mean is what is checked, and
 /// the maximum only for a gross failure.
-const CUDA_FRAMES: i32 = 200;
+const CARD_FRAMES: i32 = 200;
 
-/// Over `CUDA_FRAMES`, the mean was 1.5e-3 to 1.6e-3 across four mels, and 1.6e-3 to 1.8e-3 before
-/// the snake and the transposed convolution were kernels.
-const CUDA_MEAN_TOLERANCE: f64 = 2.5e-3;
+/// Over `CARD_FRAMES`, the mean was 1.5e-3 to 1.6e-3 across four mels on CUDA, and 1.6e-3 to 1.8e-3
+/// before the snake and the transposed convolution were kernels; 1.5e-3 on Vulkan.
+const CARD_MEAN_TOLERANCE: f64 = 2.5e-3;
 
 /// And the worst sample 5.3e-3 to 6.4e-3, against a waveform whose RMS is 0.43.
-const CUDA_MAX_TOLERANCE: f64 = 1.5e-2;
+const CARD_MAX_TOLERANCE: f64 = 1.5e-2;
 
 /// The scales `tools/bigvgan_reference.py` generated each waveform at.
 const WEIGHT_SCALE: f64 = 0.25;
@@ -386,24 +387,22 @@ fn a_configuration_that_cannot_be_built_says_so() {
     assert!(refused(|c| c.upsample_initial_channel = 2).contains("do not survive"));
 }
 
-#[test]
-#[ignore = "needs a CUDA device"]
-fn it_runs_on_a_card() {
-    // The same small model as `a_mel_becomes_the_waveform_bigvgan_makes_of_it`, on the GPU and in
-    // whatever float type that backend works in, against the processor in float32. See
-    // `CUDA_FRAMES` for why the mel is long and the mean is what is held.
-    let mel = tensor(&[1, 8, CUDA_FRAMES], &fill("mel", 8 * CUDA_FRAMES as usize, 1.0));
+/// The same small model as `a_mel_becomes_the_waveform_bigvgan_makes_of_it`, on `device` and in
+/// whatever float type it works in, against the processor in float32. See `CARD_FRAMES` for why
+/// the mel is long and the mean is what is held.
+fn matches_the_processor_on(device: Device) {
+    let mel = tensor(&[1, 8, CARD_FRAMES], &fill("mel", 8 * CARD_FRAMES as usize, 1.0));
     let run = |device, dtype| {
         let weights = weights_on(device, dtype, WEIGHT_SCALE);
         let vocoder = BigVgan::build(config(false), "", &weights, device, dtype).unwrap();
         let waveform = vocoder.forward(&mel).unwrap();
-        assert_eq!(waveform.shape(), vec![1, 1, 4 * CUDA_FRAMES]);
+        assert_eq!(waveform.shape(), vec![1, 1, 4 * CARD_FRAMES]);
 
         waveform.to_device(CPU).unwrap().cast(F32).unwrap().to_vec_f32().unwrap()
     };
 
-    let half = waifu::flint::functional::default_float_type(Device::Cuda).unwrap();
-    let card = run(Device::Cuda, half);
+    let half = waifu::flint::functional::default_float_type(device).unwrap();
+    let card = run(device, half);
     let host = run(CPU, F32);
 
     let (mut mean, mut worst) = (0f64, 0f64);
@@ -414,13 +413,25 @@ fn it_runs_on_a_card() {
     }
 
     assert!(
-        mean <= CUDA_MEAN_TOLERANCE,
+        mean <= CARD_MEAN_TOLERANCE,
         "the card is {mean:.3e} from the processor on average"
     );
     assert!(
-        worst <= CUDA_MAX_TOLERANCE,
+        worst <= CARD_MAX_TOLERANCE,
         "the card is {worst:.3e} from the processor at its worst"
     );
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn it_runs_on_a_card() {
+    matches_the_processor_on(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn it_runs_on_vulkan() {
+    matches_the_processor_on(Device::Vulkan);
 }
 
 // ---------------------------------------------------------------------------------------------

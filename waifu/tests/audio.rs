@@ -844,7 +844,7 @@ fn resampling_a_sine_keeps_its_frequency_and_its_amplitude() {
 
 /// `conv_transpose1d`, `pad1d`, `snake`, `clamp`, `stft` and `istft` are each one node of a graph
 /// and one operator of flint's -- named in `Operators`, dispatched through `F::`, run by a kernel
-/// on the CPU and CUDA and by a composition of other operators everywhere else.
+/// on the CPU, CUDA and Vulkan and by a composition of other operators on Metal.
 ///
 /// The whole chain is declarations, which is easy to get wrong in a way nothing notices: a node
 /// no pass recognises and a node wired to the wrong operator can both still produce a tensor. So
