@@ -181,14 +181,26 @@ fn fits(task: Task, model: &str, chosen: &Chosen) -> Result<(), String> {
 
 /// Whether a picture model can start from a picture, as far as is known without fetching it:
 /// what the terminal's img2img list is filtered on. Asked of its manifest where one is here --
-/// fetched, or bundled -- and taken as yes where none is, which a run says otherwise of later.
+/// fetched, or bundled -- and of its kind where none is: a published name starts with its family,
+/// and SDXL is the one family whose layer that reads a picture is written. An SDXL packaged before
+/// that layer existed is still taken as yes until it is here, which a run says otherwise of later.
 pub fn draws_from_a_picture(model: &str) -> bool {
     match manager::manifest_path(model) {
         Ok(manifest) => {
             engine::look_at(&manifest).is_ok_and(|chosen| chosen.no_picture_because.is_none())
         }
-        Err(_) => true,
+        Err(_) => family_draws_from_a_picture(model),
     }
+}
+
+/// Whether a published name's family can start from a picture, before any of it is on the disk.
+/// Anything that is not a published name -- a file that is not there -- is taken as yes, and the
+/// run that cannot find it says why.
+fn family_draws_from_a_picture(model: &str) -> bool {
+    if !manager::catalog().iter().any(|listed| listed.name == model) {
+        return true;
+    }
+    model.split(':').next() == Some("sdxl")
 }
 
 /// The manifest of `model`, fetching the model first where it is a published name that is not on
@@ -297,6 +309,17 @@ mod tests {
         assert_eq!(manifest_of(path.to_str().unwrap()).unwrap(), path);
         assert!(draws_from_a_picture(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_model_not_yet_fetched_is_judged_by_its_family() {
+        // Said of the kind, before a package has been looked at: Anima's, Krea 2's and
+        // Qwen-Image's layer that reads a picture is not written, and SDXL's is.
+        assert!(!family_draws_from_a_picture("anima:turbo"));
+        assert!(!family_draws_from_a_picture("krea2:turbo"));
+        assert!(!family_draws_from_a_picture("qwen-image:2.1-turbo-fp8"));
+        assert!(family_draws_from_a_picture("sdxl:base"));
+        assert!(family_draws_from_a_picture("/not/here.yaml"));
     }
 
     #[test]

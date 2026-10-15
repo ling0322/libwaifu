@@ -53,10 +53,7 @@ fn w2v_bert_graph(g: &Graph) {
         FRAMES,
         w2v_bert::Config::USED_LAYERS,
         g.input("distances"),
-        F32,
-        CPU,
-    )
-    .expect("w2v-bert builds");
+    );
 }
 
 /// The encoder, which IndexTTS-2.5 does not run -- see the module note. Here so that the half

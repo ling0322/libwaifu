@@ -178,11 +178,11 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(&file, "# a comment\nsomething_else = 3\n").unwrap();
 
-        set_model_dir_in(&file, Some(Path::new("/data/models"))).unwrap();
-        assert_eq!(
-            model_dir_in(&file).unwrap(),
-            Some(PathBuf::from("/data/models"))
-        );
+        // Absolute everywhere: on Windows `/data/models` has no drive, and joining it to the
+        // file's directory takes that directory's.
+        let models = directory.join("models");
+        set_model_dir_in(&file, Some(&models)).unwrap();
+        assert_eq!(model_dir_in(&file).unwrap(), Some(models));
         assert!(fs::read_to_string(&file)
             .unwrap()
             .contains("something_else = 3"));
