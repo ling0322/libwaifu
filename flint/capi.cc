@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <exception>
 #include <initializer_list>
 #include <limits>
@@ -800,6 +801,40 @@ int32_t fl_snake(
     checkOnDevice(deref(alpha), operators, "alpha");
     checkOptionalOnDevice(beta, operators, "beta");
     op->snake(x, deref(alpha), optional(beta), eps, y);
+  });
+}
+
+int32_t fl_pad1d(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    int32_t left,
+    int32_t right,
+    fl_pad_mode_t mode,
+    fl_tensor_view_t out) {
+  return guard([&]() {
+    const fl::TensorView &x = deref(input);
+    checkNotEmpty(x, "the input");
+    checkOnDevice(x, operators, "the input");
+    checkOnDevice(deref(out), operators, "out");
+    if (mode != FL_PAD_ZERO && mode != FL_PAD_REFLECT && mode != FL_PAD_REPLICATE) {
+      throw lut::InvalidArgError("fl_pad1d: no such padding mode");
+    }
+    deref(operators)->pad1d(x, left, right, static_cast<fl::PadMode>(mode), deref(out));
+    return clearError();
+  });
+}
+
+int32_t fl_clamp(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    float lo,
+    float hi,
+    fl_tensor_view_t out) {
+  return elementwise(operators, input, out, [&](fl::Operators *op, auto x, auto y) {
+    if (std::isnan(lo) || std::isnan(hi) || lo > hi) {
+      throw lut::InvalidArgError("fl_clamp: the bounds are not an interval");
+    }
+    op->clamp(x, lo, hi, y);
   });
 }
 

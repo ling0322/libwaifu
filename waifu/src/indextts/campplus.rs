@@ -46,7 +46,7 @@
 //! ones a strided convolution would have centred on, which is what makes the two equal rather
 //! than merely similar.
 
-use crate::flint::{DType, Device, Extent, Graph, Value};
+use crate::flint::{DType, Device, Extent, Graph, PadMode, Value};
 use crate::Result;
 
 /// The widths of one CAMPPlus. The counts -- three blocks, twelve then twenty-four then sixteen
@@ -289,15 +289,7 @@ fn segment_pooling(
     let padded = segments * SEGMENT;
 
     // Sum over each whole window, with the tail zero-padded so the windows divide evenly.
-    let wide = crate::audio::pad1d(
-        g,
-        x,
-        0,
-        padded - frames,
-        crate::audio::Padding::Zero,
-        dtype,
-        device,
-    )?;
+    let wide = g.pad1d(x, 0, padded - frames, PadMode::Zero);
     let split = g.view(
         wide,
         [

@@ -955,6 +955,13 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
             beta,
             eps,
         } => F::snake(get(input), get(alpha), beta.as_ref().map(get), *eps)?,
+        Op::Pad1d {
+            input,
+            left,
+            right,
+            mode,
+        } => F::pad1d(get(input), *left, *right, *mode)?,
+        Op::Clamp { input, lo, hi } => F::clamp(get(input), *lo, *hi)?,
         Op::Stft {
             input,
             window,

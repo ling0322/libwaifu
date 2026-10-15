@@ -188,7 +188,7 @@ pub enum Unary {
     /// `x * sigmoid(1.702 * x)`, which OpenAI's CLIP uses in place of GELU.
     QuickGelu,
     Silu,
-    /// In radians. Here because a snake activation needs one; see `crate::audio`.
+    /// In radians.
     Sin,
     /// In radians.
     Cos,
@@ -198,6 +198,38 @@ pub enum Unary {
     Swiglu,
     /// The same gating with a GELU.
     Geglu,
+}
+
+/// What [`Op::Pad1d`] puts in the positions it adds.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PadMode {
+    /// Zeros, which is what a convolution means by padding.
+    Zero,
+    /// The signal mirrored about its own first and last samples, which are therefore not
+    /// repeated: `F.pad(mode="reflect")`, and what `torch.stft` means by `center=True`. Pads by
+    /// less than the signal is long.
+    Reflect,
+    /// The first and last samples repeated, `F.pad(mode="replicate")`. Pads by any amount.
+    Replicate,
+}
+
+impl PadMode {
+    /// What the C API calls it, `FL_PAD_*`.
+    pub fn code(self) -> i32 {
+        match self {
+            PadMode::Zero => 0,
+            PadMode::Reflect => 1,
+            PadMode::Replicate => 2,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PadMode::Zero => "zero",
+            PadMode::Reflect => "reflect",
+            PadMode::Replicate => "replicate",
+        }
+    }
 }
 
 impl Unary {
@@ -458,7 +490,7 @@ pub enum Op {
         dilation: i32,
         groups: i32,
     },
-    /// A transposed 1-D convolution. No backend implements this either.
+    /// A transposed 1-D convolution.
     ConvTranspose1d {
         input: Value,
         weight: Value,
@@ -468,14 +500,27 @@ pub enum Op {
         output_padding: i32,
         groups: i32,
     },
-    /// `x + sin(alpha * x)^2 / (beta + eps)`, per channel. No backend implements this.
+    /// `x + sin(alpha * x)^2 / (beta + eps)`, per channel.
     Snake {
         input: Value,
         alpha: Value,
         beta: Option<Value>,
         eps: f32,
     },
-    /// A short time Fourier transform against `window`. No backend implements this.
+    /// `left` and `right` more positions on the last dimension, filled as `mode` says.
+    Pad1d {
+        input: Value,
+        left: i32,
+        right: i32,
+        mode: PadMode,
+    },
+    /// `min(max(x, lo), hi)`, either bound possibly infinite.
+    Clamp {
+        input: Value,
+        lo: f32,
+        hi: f32,
+    },
+    /// A short time Fourier transform against `window`.
     Stft {
         input: Value,
         window: Value,
@@ -483,7 +528,7 @@ pub enum Op {
         hop: i32,
         centered: bool,
     },
-    /// The inverse of [`Op::Stft`]. No backend implements this.
+    /// The inverse of [`Op::Stft`].
     Istft {
         spectrum: Value,
         window: Value,
@@ -588,6 +633,8 @@ impl Op {
             Op::Conv1d { .. } => "conv1d",
             Op::ConvTranspose1d { .. } => "conv_transpose1d",
             Op::Snake { .. } => "snake",
+            Op::Pad1d { .. } => "pad1d",
+            Op::Clamp { .. } => "clamp",
             Op::Stft { .. } => "stft",
             Op::Istft { .. } => "istft",
             Op::UpsampleNearest2d { .. } => "upsample_nearest2d",
@@ -653,6 +700,8 @@ impl Op {
             | Op::ModScalar { input, .. }
             | Op::Reduce { input, .. }
             | Op::Cumsum { input, .. }
+            | Op::Pad1d { input, .. }
+            | Op::Clamp { input, .. }
             | Op::UpsampleNearest2d { input, .. }
             | Op::UpsampleNearest1d { input, .. }
             | Op::View { input, .. }
@@ -841,6 +890,16 @@ impl fmt::Display for Op {
                 call.arg(format_args!("groups={groups}"))?;
             }
             Op::Snake { eps, .. } => call.arg(format_args!("eps={eps}"))?,
+            Op::Pad1d {
+                left, right, mode, ..
+            } => {
+                call.arg(format_args!("{left}, {right}"))?;
+                call.arg(mode.name())?;
+            }
+            Op::Clamp { lo, hi, .. } => {
+                call.arg(format_args!("lo={lo}"))?;
+                call.arg(format_args!("hi={hi}"))?;
+            }
             Op::Stft {
                 n_fft,
                 hop,

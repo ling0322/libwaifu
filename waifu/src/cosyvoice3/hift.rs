@@ -44,7 +44,7 @@
 //!   times a row of nine constants, which is a matrix product;
 //! - upstream downsamples that to one value a frame and `cumsum`s it, then scales by `2 pi * 480`,
 //!   and so does this;
-//! - `f0 > 10` is a step, written `1 - relu(1 - relu(f0 - 10) * 1e6)`: exact except within a
+//! - `f0 > 10` is a step, written `clamp((f0 - 10) * 1e6, 0, 1)`: exact except within a
 //!   millionth of a hertz above ten;
 //! - `% 1` is left out. Adding whole turns to a frame's advance adds whole multiples of
 //!   `2 pi * 480` to every later phase, which a sine does not see, and for speech the advance is
@@ -64,11 +64,9 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::audio::{
-    conv_transpose1d, hann_window, istft, istft_basis, pad1d, snake, stft, stft_basis, Padding,
-};
+use crate::audio::hann_window;
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
+    check_parameters, DType, Device, Extent, Graph, Ir, PadMode, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::Linear;
 use crate::{Error, Result};
@@ -114,17 +112,6 @@ fn elu(g: &Graph, x: Value, one: Value) -> Value {
     g.add(g.relu(x), g.sub(g.exp(negative), one))
 }
 
-/// `min(x, limit)`, as `limit - relu(limit - x)`. `limit` is a one-element constant, and a binary
-/// operation broadcasts only its right operand, so the subtraction is written as a negation added.
-fn at_most(g: &Graph, x: Value, limit: Value) -> Value {
-    g.add(g.neg(g.relu(g.add(g.neg(x), limit))), limit)
-}
-
-/// `max(x, floor)`, as `floor + relu(x - floor)`.
-fn at_least(g: &Graph, x: Value, floor: Value) -> Value {
-    g.add(g.relu(g.sub(x, floor)), floor)
-}
-
 /// A convolution padded `left` and `right` with zeros first, which is how every causal one here is
 /// written: `CausalConv1d` pads one side by its `causal_padding` and convolves with none.
 #[allow(clippy::too_many_arguments)]
@@ -137,11 +124,9 @@ fn conv(
     stride: i32,
     dilation: i32,
     (left, right): (i32, i32),
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
-    let padded = pad1d(g, x, left, right, Padding::Zero, dtype, device)?;
-    Ok(g.conv1d(
+) -> Value {
+    let padded = g.pad1d(x, left, right, PadMode::Zero);
+    g.conv1d(
         padded,
         g.load("weight", &[out_channels, in_channels, kernel]),
         Some(g.load("bias", &[out_channels])),
@@ -149,24 +134,17 @@ fn conv(
         0,
         dilation,
         1,
-    ))
+    )
 }
 
 /// A causal residual block: for each dilation, snake, convolve, snake, convolve, add.
-fn resblock(
-    g: &Graph,
-    x: Value,
-    channels: i32,
-    kernel: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+fn resblock(g: &Graph, x: Value, channels: i32, kernel: i32) -> Value {
     let mut x = x;
     for (index, dilation) in DILATIONS.iter().enumerate() {
         let name = index.to_string();
         let alpha = |group: &str| g.subgraph(group).subgraph(&name).load("alpha", &[channels]);
 
-        let xt = snake(g, x, alpha("activations1"), None, 1e-9, dtype, device)?;
+        let xt = g.snake(x, alpha("activations1"), None, 1e-9);
         let xt = conv(
             &g.subgraph("convs1").subgraph(&name),
             xt,
@@ -176,10 +154,8 @@ fn resblock(
             1,
             *dilation,
             ((kernel - 1) * dilation, 0),
-            dtype,
-            device,
-        )?;
-        let xt = snake(g, xt, alpha("activations2"), None, 1e-9, dtype, device)?;
+        );
+        let xt = g.snake(xt, alpha("activations2"), None, 1e-9);
         let xt = conv(
             &g.subgraph("convs2").subgraph(&name),
             xt,
@@ -189,12 +165,10 @@ fn resblock(
             1,
             1,
             (kernel - 1, 0),
-            dtype,
-            device,
-        )?;
+        );
         x = g.add(xt, x);
     }
-    Ok(x)
+    x
 }
 
 /// The pitch predictor: `(1, 80, T)` mel in, `(1, T)` hertz out.
@@ -204,18 +178,7 @@ fn write_pitch(g: &Graph, dtype: DType, device: Device) -> Result<()> {
     let mel = g.cast(g.input("mel"), dtype);
 
     // The first reads three frames ahead; the other four only behind.
-    let mut x = conv(
-        &condnet.subgraph("0"),
-        mel,
-        80,
-        BASE,
-        4,
-        1,
-        1,
-        (0, 3),
-        dtype,
-        device,
-    )?;
+    let mut x = conv(&condnet.subgraph("0"), mel, 80, BASE, 4, 1, 1, (0, 3));
     x = elu(g, x, one);
     for layer in [2, 4, 6, 8] {
         x = conv(
@@ -227,9 +190,7 @@ fn write_pitch(g: &Graph, dtype: DType, device: Device) -> Result<()> {
             1,
             1,
             (2, 0),
-            dtype,
-            device,
-        )?;
+        );
         x = elu(g, x, one);
     }
 
@@ -267,7 +228,6 @@ fn per_sample(g: &Graph, x: Value, width: i32, dtype: DType, device: Device) -> 
 /// The source: `f0` `(1, T)` and uniform `noise` `(1, T * 480, 9)` in, the excitation
 /// `(1, 1, T * 480)` out. See the module note for how each of upstream's steps is written.
 fn write_source(g: &Graph, dtype: DType, device: Device) -> Result<()> {
-    let one = constant(g, 1.0, dtype, device)?;
     let width = HARMONICS as i32;
 
     let f0 = g.cast(g.input("f0"), dtype);
@@ -289,8 +249,8 @@ fn write_source(g: &Graph, dtype: DType, device: Device) -> Result<()> {
     let sines = g.mul_scalar(g.sin(phase), SINE_AMP);
 
     // Voiced where the pitch is above ten hertz, as a step, then one per harmonic.
-    let above = g.relu(g.sub(f0, constant(g, VOICED_THRESHOLD, dtype, device)?));
-    let voiced = at_most(g, g.mul_scalar(above, 1e6), one);
+    let above = g.sub(f0, constant(g, VOICED_THRESHOLD, dtype, device)?);
+    let voiced = g.clamp(g.mul_scalar(above, 1e6), 0.0, 1.0);
     let ones = g.constant(tensor_on(&[1, width], &[1.0; HARMONICS], dtype, device)?);
     let voiced = g.matmul(voiced, ones);
 
@@ -334,34 +294,12 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
     let mel = g.cast(g.input("mel"), dtype);
     let excitation = g.cast(g.input("excitation"), dtype);
     let spectrum = (2 * BINS) as i32;
-    let window = hann_window(FFT);
+    let window = g.constant(tensor_on(&[FFT as i32], &hann_window(FFT), dtype, device)?);
 
     // `torch.stft(s, 16, 4, 16, hann)`: centred, reflected, nine bins real then nine imaginary.
-    let basis = g.constant(stft_basis(FFT, &window)?.to_device(device)?.cast(dtype)?);
-    let (real, imaginary) = stft(
-        g,
-        excitation,
-        basis,
-        FFT as i32,
-        FFT_HOP,
-        Some(Padding::Reflect),
-        dtype,
-        device,
-    )?;
-    let source = g.cat(real, imaginary, 1);
+    let source = g.stft(excitation, window, FFT as i32, FFT_HOP, true);
 
-    let mut x = conv(
-        &g.subgraph("conv_pre"),
-        mel,
-        80,
-        BASE,
-        5,
-        1,
-        1,
-        (0, 4),
-        dtype,
-        device,
-    )?;
+    let mut x = conv(&g.subgraph("conv_pre"), mel, 80, BASE, 5, 1, 1, (0, 4));
 
     // How far each stage's source is taken down to meet it: 15, 3, then 1.
     let downs = [15, 3, 1];
@@ -396,9 +334,7 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
             1,
             1,
             (kernel - 1, 0),
-            dtype,
-            device,
-        )?;
+        );
 
         if index == UPSAMPLES.len() - 1 {
             // `ReflectionPad1d((1, 0))`: the second sample, copied in front of the first.
@@ -416,9 +352,7 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
                 1,
                 1,
                 (0, 0),
-                dtype,
-                device,
-            )?,
+            ),
             _ => conv(
                 &g.subgraph("source_downs").subgraph(&name),
                 source,
@@ -428,18 +362,14 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
                 down,
                 1,
                 (down - 1, 0),
-                dtype,
-                device,
-            )?,
+            ),
         };
         let si = resblock(
             &g.subgraph("source_resblocks").subgraph(&name),
             si,
             out_channels,
             SOURCE_KERNELS[index],
-            dtype,
-            device,
-        )?;
+        );
         x = g.add(x, si);
 
         let mut total: Option<Value> = None;
@@ -450,9 +380,7 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
                 x,
                 out_channels,
                 *kernel,
-                dtype,
-                device,
-            )?;
+            );
             total = Some(match total {
                 None => block,
                 Some(sum) => g.add(sum, block),
@@ -472,41 +400,22 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
         1,
         1,
         (6, 0),
-        dtype,
-        device,
-    )?;
+    );
 
     // `_istft`: `exp` of the first nine channels, clipped at a hundred, is the magnitude, and `sin`
     // of the other nine is the phase.
-    let magnitude = at_most(
-        g,
+    let magnitude = g.clamp(
         g.exp(g.slice(x, 1, 0, BINS as i32)),
-        constant(g, MAGNITUDE_LIMIT, dtype, device)?,
+        f32::NEG_INFINITY,
+        MAGNITUDE_LIMIT,
     );
     let phase = g.sin(g.slice(x, 1, BINS as i32, spectrum));
     let real = g.mul(magnitude, g.cos(phase));
     let imaginary = g.mul(magnitude, g.sin(phase));
-
-    // The overlap of the squared window, for however many frames there are: a row of ones as long
-    // as the frames, transposed-convolved by the window's square at the hop.
-    let one = constant(g, 1.0, dtype, device)?;
-    let ones = g.add(g.mul_scalar(g.slice(real, 1, 0, 1), 0.0), one);
-    let squared: Vec<f32> = window.iter().map(|w| w * w).collect();
-    let squared = g.constant(tensor_on(&[1, 1, FFT as i32], &squared, dtype, device)?);
-    let envelope = conv_transpose1d(
-        g, ones, squared, None, 1, 1, FFT as i32, FFT_HOP, 0, dtype, device,
-    )?;
-    let envelope = at_least(g, envelope, constant(g, 1e-11, dtype, device)?);
-
-    let inverse = g.constant(istft_basis(FFT, &window)?.to_device(device)?.cast(dtype)?);
-    let wave = istft(
-        g, real, imaginary, inverse, envelope, FFT as i32, FFT_HOP, true, dtype, device,
-    )?;
+    let wave = g.istft(g.cat(real, imaginary, 1), window, FFT as i32, FFT_HOP, true);
 
     // `torch.clamp(x, -0.99, 0.99)`.
-    let limit = constant(g, AUDIO_LIMIT, dtype, device)?;
-    let wave = at_most(g, wave, limit);
-    let wave = at_least(g, wave, constant(g, -AUDIO_LIMIT, dtype, device)?);
+    let wave = g.clamp(wave, -AUDIO_LIMIT, AUDIO_LIMIT);
     g.output(
         "wave",
         g.cast(g.view(wave, [Extent::prod(wave, 0, 3)]), DType::Float),

@@ -205,6 +205,9 @@ extern "C" {
     pub fn fl_swiglu(operators: Ops, input: V, out: V) -> i32;
     pub fn fl_geglu(operators: Ops, input: V, out: V) -> i32;
 
+    pub fn fl_pad1d(operators: Ops, input: V, left: i32, right: i32, mode: i32, out: V) -> i32;
+    pub fn fl_clamp(operators: Ops, input: V, lo: f32, hi: f32, out: V) -> i32;
+
     pub fn fl_sum(operators: Ops, input: V, dim: i32, out: V) -> i32;
     pub fn fl_cumsum(operators: Ops, input: V, dim: i32, out: V) -> i32;
     pub fn fl_max(operators: Ops, input: V, out: V) -> i32;

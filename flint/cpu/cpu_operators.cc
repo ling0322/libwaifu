@@ -40,6 +40,7 @@
 #include "flint/cpu/matmul.h"
 #include "flint/cpu/normalizations.h"
 #include "flint/cpu/conv1d.h"
+#include "flint/cpu/signal.h"
 #include "flint/cpu/conv2d.h"
 #include "flint/cpu/upsample.h"
 #include "flint/cpu/print.h"
@@ -524,6 +525,48 @@ void CPUOperators::conv1d(
     int groups,
     TensorView out) {
   cpu::conv1d(input, weight, bias, stride, padding, dilation, groups, out);
+}
+
+void CPUOperators::convTranspose1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups,
+    TensorView out) {
+  F::checkConvTranspose1d(input, weight, bias, stride, padding, outputPadding, groups, out);
+  int groupOut = weight.getShape(1);
+
+  for (int g = 0; g < groups; ++g) {
+    Tensor columns = F::transposedConvolutionColumns(this, input, weight, groups, g);
+    cpu::overlapAdd1d(
+        columns,
+        bias.empty() ? bias : bias.slice(0, {g * groupOut, (g + 1) * groupOut}),
+        input.getShape(2),
+        stride,
+        padding,
+        weight.getShape(2),
+        out.slice(1, {g * groupOut, (g + 1) * groupOut}));
+  }
+}
+
+void CPUOperators::snake(
+    TensorView input,
+    TensorView alpha,
+    TensorView beta,
+    float eps,
+    TensorView out) {
+  cpu::snake(input, alpha, beta, eps, out);
+}
+
+void CPUOperators::pad1d(TensorView input, int left, int right, PadMode mode, TensorView out) {
+  cpu::pad1d(input, left, right, mode, out);
+}
+
+void CPUOperators::clamp(TensorView input, float lo, float hi, TensorView out) {
+  cpu::clamp(input, lo, hi, out);
 }
 
 void CPUOperators::causalMask(TensorView out) {

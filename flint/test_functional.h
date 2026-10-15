@@ -94,6 +94,8 @@ Tensor quickGelu(Operators *op, TensorView input);
 Tensor swiglu(Operators *op, TensorView input);
 Tensor geglu(Operators *op, TensorView input);
 Tensor snake(Operators *op, TensorView input, TensorView alpha, TensorView beta, float eps);
+Tensor pad1d(Operators *op, TensorView input, int left, int right, PadMode mode);
+Tensor clamp(Operators *op, TensorView input, float lo, float hi);
 
 // --- Reductions -----------------------------------------------------------------------------
 

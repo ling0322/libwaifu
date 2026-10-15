@@ -314,6 +314,20 @@ Tensor snake(Operators *op, TensorView input, TensorView alpha, TensorView beta,
   return out;
 }
 
+Tensor pad1d(Operators *op, TensorView input, int left, int right, PadMode mode) {
+  std::vector<int> shape = input.getShape();
+  shape.back() += left + right;
+  Tensor out = empty(input.getDevice(), shape, input.getDType());
+  op->pad1d(input, left, right, mode, out);
+  return out;
+}
+
+Tensor clamp(Operators *op, TensorView input, float lo, float hi) {
+  Tensor out = likeInput(input);
+  op->clamp(input, lo, hi, out);
+  return out;
+}
+
 // --- Reductions -----------------------------------------------------------------------------
 
 Tensor sum(Operators *op, TensorView input, int dim) {

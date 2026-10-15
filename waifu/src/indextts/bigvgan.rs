@@ -61,7 +61,7 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::audio::{downsample1d, kaiser_sinc_filter, snake, upsample1d};
+use crate::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights,
@@ -163,7 +163,6 @@ fn same_padding(kernel: i32, dilation: i32) -> i32 {
 /// parameter, and the reference raises it every time it runs. Doing the same keeps the package a
 /// straight copy of the checkpoint rather than something an exporter has quietly transformed, and
 /// it costs one node over a vector as long as the channel count.
-#[allow(clippy::too_many_arguments)]
 fn activation(
     g: &Graph,
     config: &BigVganConfig,
@@ -171,9 +170,7 @@ fn activation(
     channels: i32,
     up: Value,
     down: Value,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+) -> Value {
     let act = g.subgraph("act");
 
     let exponentiate = |value: Value| match config.snake_logscale {
@@ -187,28 +184,10 @@ fn activation(
         false => None,
     };
 
-    let raised = upsample1d(
-        g,
-        x,
-        up,
-        channels,
-        ACTIVATION_RATIO,
-        ACTIVATION_TAPS,
-        dtype,
-        device,
-    )?;
-    let curled = snake(g, raised, alpha, beta, SNAKE_EPS, dtype, device)?;
+    let raised = upsample1d(g, x, up, channels, ACTIVATION_RATIO, ACTIVATION_TAPS);
+    let curled = g.snake(raised, alpha, beta, SNAKE_EPS);
 
-    downsample1d(
-        g,
-        curled,
-        down,
-        channels,
-        ACTIVATION_RATIO,
-        ACTIVATION_TAPS,
-        dtype,
-        device,
-    )
+    downsample1d(g, curled, down, channels, ACTIVATION_RATIO, ACTIVATION_TAPS)
 }
 
 /// An AMP block: for each dilation, two convolutions with an activation in front of each, added
@@ -226,9 +205,7 @@ fn amp_block(
     dilations: &[i32],
     up: Value,
     down: Value,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+) -> Value {
     let mut x = input;
 
     for (layer, &dilation) in dilations.iter().enumerate() {
@@ -239,7 +216,7 @@ fn amp_block(
         let first = g.subgraph(&format!("activations.{}", 2 * layer));
         let second = g.subgraph(&format!("activations.{}", 2 * layer + 1));
 
-        let xt = activation(&first, config, x, channels, up, down, dtype, device)?;
+        let xt = activation(&first, config, x, channels, up, down);
         let xt = Conv1d::graph(
             &g.subgraph(&format!("convs1.{layer}")),
             xt,
@@ -252,7 +229,7 @@ fn amp_block(
             true,
         );
 
-        let xt = activation(&second, config, xt, channels, up, down, dtype, device)?;
+        let xt = activation(&second, config, xt, channels, up, down);
         let xt = Conv1d::graph(
             &g.subgraph(&format!("convs2.{layer}")),
             xt,
@@ -268,22 +245,7 @@ fn amp_block(
         x = g.add(xt, x);
     }
 
-    Ok(x)
-}
-
-/// `clamp(x, -1, 1)`, which is not an operator here and does not need to be.
-///
-/// `(|x + 1| - |x - 1|) / 2` is the same function: above one both absolute values grow together
-/// and the difference stops changing, below minus one the same in reverse, and in between the
-/// second term is `1 - x` and the whole thing is `x`. Four nodes, all of them everywhere.
-fn clamp_unit(g: &Graph, x: Value, dtype: DType, device: Device) -> Result<Value> {
-    let one = g.constant(
-        Tensor::from_f32(&[1], &[1.0])?
-            .to_device(device)?
-            .cast(dtype)?,
-    );
-
-    Ok(g.mul_scalar(g.sub(g.abs(g.add(x, one)), g.abs(g.sub(x, one))), 0.5))
+    x
 }
 
 /// The whole pass, from the mel the graph is given to the waveform it names.
@@ -336,9 +298,7 @@ fn write(config: &BigVganConfig, dtype: DType, device: Device, g: &Graph) -> Res
             kernel,
             rate,
             (kernel - rate) / 2,
-            dtype,
-            device,
-        )?;
+        );
 
         // Every AMP block at this stage reads the same input, and what goes on is their mean --
         // a multi-receptive-field fusion, which is the one thing this inherits from HiFi-GAN
@@ -354,9 +314,7 @@ fn write(config: &BigVganConfig, dtype: DType, device: Device, g: &Graph) -> Res
                 &config.resblock_dilation_sizes[kind],
                 up,
                 down,
-                dtype,
-                device,
-            )?;
+            );
 
             total = Some(match total {
                 None => block,
@@ -375,9 +333,7 @@ fn write(config: &BigVganConfig, dtype: DType, device: Device, g: &Graph) -> Res
         narrowest,
         up,
         down,
-        dtype,
-        device,
-    )?;
+    );
 
     let x = Conv1d::graph(
         &g.subgraph("conv_post"),
@@ -393,7 +349,7 @@ fn write(config: &BigVganConfig, dtype: DType, device: Device, g: &Graph) -> Res
 
     let bounded = match config.use_tanh_at_final {
         true => g.tanh(x),
-        false => clamp_unit(g, x, dtype, device)?,
+        false => g.clamp(x, -1.0, 1.0),
     };
 
     g.output("waveform", bounded);

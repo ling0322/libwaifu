@@ -20,12 +20,15 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/time.h"
 #include "flint/test_functional.h"
 #include "flint/device.h"
+#include "flint/functional.h"
 #include "flint/operators.h"
 
 // Every operator the Vulkan device has, checked against the CPU's answer to the same question.
@@ -227,6 +230,207 @@ CATCH_TEST_CASE("test Vulkan round and cast to int64", "[op][vulkan]") {
     CATCH_REQUIRE(asLongs(ids) == nearest);
     CATCH_REQUIRE(asLongs(F::cast(vk(), onDevice, DType::kLong)) == truncated);
   }
+}
+
+// The signal kernels, each against the CPU, in both float types: a grouped transposed
+// convolution with an output padding and a kernel that is not a whole number of strides, a snake
+// with and without beta, every padding mode -- a replication wider than the signal among them --
+// and a clamp bounded on one side and on both.
+CATCH_TEST_CASE("test Vulkan signal operators", "[op][vulkan][signal]") {
+  SKIP_WITHOUT_VULKAN();
+  float inf = std::numeric_limits<float>::infinity();
+
+  Tensor x = randn({2, 6, 29});
+  Tensor w = randn({6, 2, 7});
+  Tensor b = randn({4});
+  Tensor upsample = randn({1, 16, 40});
+  Tensor upsampleWeight = randn({16, 8, 16});
+  Tensor alpha = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor beta = plus(F::abs(cpu(), randn({6})), 0.2f);
+
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    CATCH_INFO("dtype = " << dtype.toString());
+    float tol = dtype == DType::kFloat ? 1e-4f : 2e-2f;
+
+    CATCH_REQUIRE(close(
+        F::convTranspose1d(
+            vk(), toVulkan(x, dtype), toVulkan(w, dtype), toVulkan(b, dtype), 3, 2, 1, 2),
+        F::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2),
+        tol,
+        tol));
+    // A vocoder's: the kernel twice the stride, no bias.
+    CATCH_REQUIRE(close(
+        F::convTranspose1d(
+            vk(), toVulkan(upsample, dtype), toVulkan(upsampleWeight, dtype), Tensor(), 8, 4, 0, 1),
+        F::convTranspose1d(cpu(), upsample, upsampleWeight, Tensor(), 8, 4, 0, 1),
+        tol,
+        tol));
+
+    for (bool withBeta : {false, true}) {
+      CATCH_REQUIRE(close(
+          F::snake(
+              vk(),
+              toVulkan(x, dtype),
+              toVulkan(alpha, dtype),
+              withBeta ? toVulkan(beta, dtype) : Tensor(),
+              1e-9f),
+          F::snake(cpu(), x, alpha, withBeta ? beta : Tensor(), 1e-9f),
+          tol,
+          tol));
+    }
+
+    // Arguments to twenty radians: GLSL bounds sin only inside [-pi, pi], and the kernel reduces
+    // the angle into it first rather than trusting the driver beyond.
+    Tensor far = F::mul(cpu(), x, 5.0f);
+    Tensor wide = plus(F::abs(cpu(), randn({6})), 1.0f);
+    CATCH_REQUIRE(close(
+        F::snake(vk(), toVulkan(far, dtype), toVulkan(wide, dtype), Tensor(), 1e-9f),
+        F::snake(cpu(), toCpu(toVulkan(far, dtype)), toCpu(toVulkan(wide, dtype)), Tensor(), 1e-9f),
+        tol,
+        tol));
+
+    // A padding moves elements and computes nothing, so it is exact once the CPU's answer has
+    // been through the same type.
+    Tensor rounded = toCpu(toVulkan(x, dtype));
+    for (PadMode mode : {PadMode::kZero, PadMode::kReflect, PadMode::kReplicate}) {
+      CATCH_REQUIRE(close(
+          F::pad1d(vk(), toVulkan(x, dtype), 5, 9, mode),
+          F::pad1d(cpu(), rounded, 5, 9, mode),
+          0.0f,
+          1e-6f));
+    }
+    CATCH_REQUIRE(close(
+        F::pad1d(vk(), toVulkan(x, dtype), 40, 33, PadMode::kReplicate),
+        F::pad1d(cpu(), rounded, 40, 33, PadMode::kReplicate),
+        0.0f,
+        1e-6f));
+
+    CATCH_REQUIRE(close(
+        F::clamp(vk(), toVulkan(x, dtype), -0.5f, inf),
+        F::clamp(cpu(), rounded, -0.5f, inf),
+        0.0f,
+        1e-6f));
+    CATCH_REQUIRE(close(
+        F::clamp(vk(), toVulkan(x, dtype), -1.0f, 0.5f),
+        F::clamp(cpu(), rounded, -1.0f, 0.5f),
+        0.0f,
+        1e-6f));
+
+    // A NaN stays one, which GLSL's min and max do not promise; an infinity goes to its bound.
+    Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+    float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
+    raw[0] = std::numeric_limits<float>::quiet_NaN();
+    raw[1] = inf;
+    raw[2] = -inf;
+    raw[3] = 0.125f;
+    std::vector<float> clamped = values(F::clamp(vk(), toVulkan(special, dtype), -0.5f, 0.25f));
+    CATCH_REQUIRE(std::isnan(clamped[0]));
+    CATCH_REQUIRE(clamped[1] == 0.25f);
+    CATCH_REQUIRE(clamped[2] == -0.5f);
+    CATCH_REQUIRE(clamped[3] == 0.125f);
+  }
+
+  // A transform and its inverse, which every device composes: the window is read back to the
+  // host to build the banks, the one part of these a device-resident operator never otherwise
+  // does.
+  int nFft = 16, hop = 4;
+  Tensor wave = randn({2, 1, 64});
+  Tensor window = F::zeros(Device::getCpu(), {nFft}, DType::kFloat);
+  float *taps = window.getInternalData()->getData<float>(window.getInternalOffset());
+  for (int i = 0; i < nFft; ++i) taps[i] = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / nFft);
+  Tensor spectrum = F::stft(vk(), toVulkan(wave), toVulkan(window), nFft, hop, true);
+  CATCH_REQUIRE(close(spectrum, F::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
+  CATCH_REQUIRE(
+      close(F::istft(vk(), spectrum, toVulkan(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
+
+  // In half and not centred, the ends are kept, where the window's overlap is below what half can
+  // hold: dividing by it there made NaNs.
+  Tensor halfSpectrum = F::stft(
+      vk(), toVulkan(wave, DType::kFloat16), toVulkan(window, DType::kFloat16), nFft, hop, false);
+  std::vector<float> back =
+      values(F::istft(vk(), halfSpectrum, toVulkan(window, DType::kFloat16), nFft, hop, false));
+  std::vector<float> want = values(wave);
+  for (size_t i = 0; i < back.size(); ++i) {
+    CATCH_INFO("sample " << i);
+    CATCH_REQUIRE(std::isfinite(back[i]));
+    // Away from the ends of each of the two signals.
+    size_t at = i % 64;
+    if (at >= size_t(nFft) && at < 64 - size_t(nFft)) {
+      CATCH_REQUIRE(fabsf(back[i] - want[i]) < 2e-2f);
+    }
+  }
+}
+
+// The compositions in flint/functional.cc that a device without these kernels runs -- Metal
+// today -- run here on a GPU that has the kernels, by calling them directly, so that what Metal
+// relies on is tested on a device that can be tested from Linux.
+CATCH_TEST_CASE("test Vulkan signal operators by composition", "[op][vulkan][signal]") {
+  SKIP_WITHOUT_VULKAN();
+  float inf = std::numeric_limits<float>::infinity();
+
+  Tensor x = randn({2, 6, 29});
+  Tensor w = randn({6, 2, 7});
+  Tensor b = randn({4});
+  Tensor alpha = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor beta = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor vx = toVulkan(x);
+
+  Tensor transposed = F::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2);
+  Tensor out = F::zeros(Device::getVulkan(), transposed.getShape(), DType::kFloat);
+  F::composedConvTranspose1d(vk(), vx, toVulkan(w), toVulkan(b), 3, 2, 1, 2, out);
+  CATCH_REQUIRE(close(out, transposed, 1e-4f, 1e-4f));
+
+  out = F::zeros(Device::getVulkan(), x.getShape(), DType::kFloat);
+  F::composedSnake(vk(), vx, toVulkan(alpha), toVulkan(beta), 1e-9f, out);
+  CATCH_REQUIRE(close(out, F::snake(cpu(), x, alpha, beta, 1e-9f), 1e-4f, 1e-4f));
+
+  for (PadMode mode : {PadMode::kZero, PadMode::kReflect, PadMode::kReplicate}) {
+    out = F::zeros(Device::getVulkan(), {2, 6, 43}, DType::kFloat);
+    F::composedPad1d(vk(), vx, 5, 9, mode, out);
+    CATCH_REQUIRE(close(out, F::pad1d(cpu(), x, 5, 9, mode), 0.0f, 1e-6f));
+  }
+
+  for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, inf}, {-1.0f, 0.5f}}) {
+    out = F::zeros(Device::getVulkan(), x.getShape(), DType::kFloat);
+    F::composedClamp(vk(), vx, lo, hi, out);
+    std::vector<float> got = values(out), want = values(F::clamp(cpu(), x, lo, hi));
+    for (size_t i = 0; i < got.size(); ++i) CATCH_REQUIRE(got[i] == want[i]);
+  }
+
+  // In half, exactly what the kernel gives: a value inside the interval is itself however small,
+  // and one beyond it is exactly the bound.
+  Tensor small = F::zeros(Device::getCpu(), {8}, DType::kFloat);
+  float *s = small.getInternalData()->getData<float>(small.getInternalOffset());
+  float smallValues[] = {1e-4f, -1e-4f, 3e-5f, 0.2499f, -0.4999f, -1e4f, 1e4f, 99.9f};
+  std::copy(smallValues, smallValues + 8, s);
+  for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, 0.25f}, {-inf, 100.0f}}) {
+    CATCH_INFO("lo " << lo << " hi " << hi);
+    Tensor composed = F::zeros(Device::getVulkan(), {8}, DType::kFloat16);
+    F::composedClamp(vk(), toVulkan(small, DType::kFloat16), lo, hi, composed);
+    std::vector<float> got = values(composed);
+    std::vector<float> want = values(F::clamp(vk(), toVulkan(small, DType::kFloat16), lo, hi));
+    for (int i = 0; i < 8; ++i) {
+      CATCH_INFO("element " << i << ": " << got[i] << " against " << want[i]);
+      CATCH_REQUIRE(got[i] == want[i]);
+    }
+    // And inside the interval, the input as half holds it.
+    std::vector<float> rounded = values(toVulkan(small, DType::kFloat16));
+    for (int i = 0; i < 5; ++i) CATCH_REQUIRE(got[i] == rounded[i]);
+  }
+
+  Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+  float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
+  raw[0] = std::numeric_limits<float>::quiet_NaN();
+  raw[1] = inf;
+  raw[2] = -inf;
+  raw[3] = 0.125f;
+  out = F::zeros(Device::getVulkan(), {4}, DType::kFloat);
+  F::composedClamp(vk(), toVulkan(special), -0.5f, 0.25f, out);
+  std::vector<float> clamped = values(out);
+  CATCH_REQUIRE(std::isnan(clamped[0]));
+  CATCH_REQUIRE(clamped[1] == 0.25f);
+  CATCH_REQUIRE(clamped[2] == -0.5f);
+  CATCH_REQUIRE(clamped[3] == 0.125f);
 }
 
 CATCH_TEST_CASE("test Vulkan softmax and reductions", "[op][vulkan]") {

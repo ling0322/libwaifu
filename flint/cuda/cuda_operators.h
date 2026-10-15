@@ -80,6 +80,19 @@ class CudaOperators : public Operators {
   void upsampleNearest2d(TensorView input, int scale, TensorView out) override;
   void upsampleNearest1d(TensorView input, TensorView out) override;
   void geglu(TensorView input, TensorView out) override;
+  void convTranspose1d(
+      TensorView input,
+      TensorView weight,
+      TensorView bias,
+      int stride,
+      int padding,
+      int outputPadding,
+      int groups,
+      TensorView out) override;
+  void snake(TensorView input, TensorView alpha, TensorView beta, float eps, TensorView out)
+      override;
+  void pad1d(TensorView input, int left, int right, PadMode mode, TensorView out) override;
+  void clamp(TensorView input, float lo, float hi, TensorView out) override;
   void conv2d(
       TensorView input,
       TensorView weight,

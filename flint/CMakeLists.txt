@@ -30,6 +30,7 @@ set(flint_SOURCES
     "cpu/reduce.cc"
     "cpu/scan.cc"
     "cpu/repetition_penalty.cc"
+    "cpu/signal.cc"
     "cpu/softmax.cc"
     "cpu/tensor.cc"
     "cpu/transform.cc"
@@ -58,6 +59,7 @@ set(flint_test_SOURCES
     "cpu/normalizations_test.cc"
     "cpu/reduce_test.cc"
     "cpu/scan_test.cc"
+    "cpu/signal_test.cc"
     "cpu/sampling_test.cc"
     "cpu/softmax_test.cc"
     "cpu/unary_test.cc"
@@ -114,6 +116,7 @@ if (WITH_CUDA)
         "cuda/staged_upload.cc"
         "cuda/store_kv_cache.cu"
         "cuda/to_device.cc"
+        "cuda/signal.cu"
         "cuda/upsample.cu"
         "cuda/unary.cu")
 
@@ -150,6 +153,7 @@ if (WITH_CUDA)
         "cuda/softmax_test.cc"
         "cuda/store_kv_cache_test.cc"
         "cuda/to_device_test.cc"
+        "cuda/signal_test.cc"
         "cuda/upsample_test.cc"
         "cuda/unary_test.cc")
     set(flint_benchmark_SOURCES ${flint_benchmark_SOURCES} "cuda/benchmark.cc")
@@ -182,6 +186,7 @@ if(WITH_VULKAN)
         "vulkan/rand.cc"
         "vulkan/reduce.cc"
         "vulkan/shape.cc"
+        "vulkan/signal.cc"
         "vulkan/to_device.cc"
         "vulkan/vma.cc"
         "${VULKAN_THIRD_PARTY}/volk/volk.c"

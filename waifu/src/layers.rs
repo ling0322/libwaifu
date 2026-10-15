@@ -43,8 +43,7 @@
 //! model asks for a weight in two places, the graph that reads it and the exporter that wrote it,
 //! and those two must not be free to disagree.
 
-use crate::flint::{DType, Device, Graph, Value, WeightFormat};
-use crate::Result;
+use crate::flint::{DType, Graph, Value, WeightFormat};
 
 /// Normalization over the last dimension: subtract the mean, divide by the standard deviation,
 /// scale and shift.
@@ -142,8 +141,7 @@ impl Conv1d {
     }
 }
 
-/// The transposed one, which is what a vocoder upsamples with. See [`Conv1d`], and
-/// [`crate::audio::conv_transpose1d`] for what actually runs.
+/// The transposed one, which is what a vocoder upsamples with. See [`Conv1d`].
 pub struct ConvTranspose1d;
 
 impl ConvTranspose1d {
@@ -155,7 +153,6 @@ impl ConvTranspose1d {
     /// The weight is `(C, K, R)` -- input channels first, which is the way round a transposed
     /// convolution stores one and the opposite of [`Conv1d`].
     #[track_caller]
-    #[allow(clippy::too_many_arguments)]
     pub fn graph(
         g: &Graph,
         input: Value,
@@ -164,25 +161,11 @@ impl ConvTranspose1d {
         kernel: i32,
         stride: i32,
         padding: i32,
-        dtype: DType,
-        device: Device,
-    ) -> Result<Value> {
+    ) -> Value {
         let weight = g.load(Self::WEIGHT, &[in_channels, out_channels, kernel]);
         let bias = g.load(Self::BIAS, &[out_channels]);
 
-        crate::audio::conv_transpose1d(
-            g,
-            input,
-            weight,
-            Some(bias),
-            in_channels,
-            out_channels,
-            kernel,
-            stride,
-            padding,
-            dtype,
-            device,
-        )
+        g.conv_transpose1d(input, weight, Some(bias), stride, padding, 0, 1)
     }
 }
 

@@ -96,7 +96,7 @@ mod operators;
 pub use fp8::{fp8_available, SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{check_parameters, Inst, Ir, Residency, RunContext, Weights};
-pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
+pub use op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
 pub use operators::Operators;
 
 use operators::{operators_of, transfer_operators};

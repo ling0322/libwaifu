@@ -1,10 +1,9 @@
 //! The audio primitives on the card, against the same primitives on the host.
 //!
-//! `tests/audio.rs` is what says these functions are correct; it checks each one against its own
-//! definition, on the CPU. What this file is for is the claim the module is built on -- that a
-//! Fourier transform written as a convolution, and the rest of the compositions, run wherever
-//! `conv1d` and `matmul` run, with no kernel of their own on any backend. That claim is either
-//! true on a second backend or it is not true at all.
+//! `tests/audio.rs` is what says these operators are correct; it checks each one against its own
+//! definition, on the CPU. What this file is for is the card's kernels -- and, for the transform,
+//! flint's composition of them -- giving the same answer through the whole chain from a graph,
+//! in the float the card works in.
 //!
 //! So each test here writes one graph, runs it twice, and compares. The tolerances are loose
 //! because the CUDA operators work in half precision and the host ones do not: what is being
@@ -16,11 +15,10 @@
 
 use std::collections::HashMap;
 
-use waifu::audio::{
-    conv_transpose1d, hann_window, istft, istft_basis, pad1d, snake, stft, stft_basis,
-    window_envelope, Padding,
+use waifu::audio::hann_window;
+use waifu::flint::{
+    functional as F, DType, Device, Graph, Ir, PadMode, RunContext, Tensor, Value, Weights,
 };
-use waifu::flint::{functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights};
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
 fn cuda_float() -> DType {
@@ -161,29 +159,24 @@ fn conv_transpose1d_on_the_card_is_conv_transpose1d_on_the_host() {
         let (x_host, x_cuda) = pair(&[batch as i32, inc as i32, length as i32], &x);
         let (w_host, w_cuda) = pair(&[inc as i32, outc as i32, kernel as i32], &w);
 
-        let build = |dtype, device| {
+        let build = || {
             let g = Graph::new();
-            let out = conv_transpose1d(
-                &g,
+            let out = g.conv_transpose1d(
                 g.input("x"),
                 g.input("w"),
                 None,
-                inc as i32,
-                outc as i32,
-                kernel as i32,
                 stride as i32,
                 padding as i32,
-                dtype,
-                device,
-            )
-            .unwrap();
+                0,
+                1,
+            );
             (g, out)
         };
 
-        let (g, out) = build(DType::Float, Device::Cpu);
+        let (g, out) = build();
         let (host_shape, host) = run(&g, out, &[("x", &x_host), ("w", &w_host)]);
 
-        let (g, out) = build(cuda_float(), Device::Cuda);
+        let (g, out) = build();
         let (cuda_shape, cuda) = run(&g, out, &[("x", &x_cuda), ("w", &w_cuda)]);
 
         assert_eq!(
@@ -207,16 +200,7 @@ fn reflect_padding_on_the_card_mirrors_the_way_it_does_on_the_host() {
     let (_, cuda) = pair(&[1, 1, 6], &values);
 
     let g = Graph::new();
-    let out = pad1d(
-        &g,
-        g.input("x"),
-        2,
-        3,
-        Padding::Reflect,
-        cuda_float(),
-        Device::Cuda,
-    )
-    .unwrap();
+    let out = g.pad1d(g.input("x"), 2, 3, PadMode::Reflect);
     let (shape, got) = run(&g, out, &[("x", &cuda)]);
 
     assert_eq!(shape, vec![1, 1, 11]);
@@ -238,29 +222,20 @@ fn snake_on_the_card_is_snake_on_the_host() {
     let (a_host, a_cuda) = pair(&[channels as i32], &alpha);
     let (b_host, b_cuda) = pair(&[channels as i32], &beta);
 
-    let build = |dtype, device| {
+    let build = || {
         let g = Graph::new();
-        let out = snake(
-            &g,
-            g.input("x"),
-            g.input("alpha"),
-            Some(g.input("beta")),
-            1e-6,
-            dtype,
-            device,
-        )
-        .unwrap();
+        let out = g.snake(g.input("x"), g.input("alpha"), Some(g.input("beta")), 1e-6);
         (g, out)
     };
 
-    let (g, out) = build(DType::Float, Device::Cpu);
+    let (g, out) = build();
     let (_, host) = run(
         &g,
         out,
         &[("x", &x_host), ("alpha", &a_host), ("beta", &b_host)],
     );
 
-    let (g, out) = build(cuda_float(), Device::Cuda);
+    let (g, out) = build();
     let (_, cuda) = run(
         &g,
         out,
@@ -285,53 +260,13 @@ fn an_istft_of_an_stft_on_the_card_is_still_the_signal() {
     let frames = (length - n_fft) / hop + 1;
 
     let (_, x) = pair(&[1, 1, length as i32], &signal);
-
-    let basis = stft_basis(n_fft, &window)
-        .unwrap()
-        .cast(cuda_float())
-        .unwrap()
-        .to_device(Device::Cuda)
-        .unwrap();
-    let inverse = istft_basis(n_fft, &window)
-        .unwrap()
-        .cast(cuda_float())
-        .unwrap()
-        .to_device(Device::Cuda)
-        .unwrap();
-    let envelope = window_envelope(&window, hop, frames, 1e-6)
-        .unwrap()
-        .cast(cuda_float())
-        .unwrap()
-        .to_device(Device::Cuda)
-        .unwrap();
+    let (_, w) = pair(&[n_fft as i32], &window);
 
     let g = Graph::new();
-    let (real, imaginary) = stft(
-        &g,
-        g.input("x"),
-        g.constant(basis),
-        n_fft as i32,
-        hop as i32,
-        None,
-        cuda_float(),
-        Device::Cuda,
-    )
-    .unwrap();
-    let back = istft(
-        &g,
-        real,
-        imaginary,
-        g.constant(inverse),
-        g.constant(envelope),
-        n_fft as i32,
-        hop as i32,
-        false,
-        cuda_float(),
-        Device::Cuda,
-    )
-    .unwrap();
+    let spectrum = g.stft(g.input("x"), g.input("w"), n_fft as i32, hop as i32, false);
+    let back = g.istft(spectrum, g.input("w"), n_fft as i32, hop as i32, false);
 
-    let (shape, got) = run(&g, back, &[("x", &x)]);
+    let (shape, got) = run(&g, back, &[("x", &x), ("w", &w)]);
     assert_eq!(shape, vec![1, 1, ((frames - 1) * hop + n_fft) as i32]);
 
     let covered = n_fft..(frames - 1) * hop;
