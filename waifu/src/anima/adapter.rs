@@ -1,34 +1,36 @@
-// The MIT License (MIT)
+// Copyright 2026 The HuggingFace Team. All rights reserved.
+// Copyright 2026 Xiaoyang Chen
 //
-// Copyright (c) 2026 Xiaoyang Chen
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy of this software
-// and associated documentation files (the "Software"), to deal in the Software without
-// restriction, including without limitation the rights to use, copy, modify, merge, publish,
-// distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
-// Software is furnished to do so, subject to the following conditions:
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// The above copyright notice and this permission notice shall be included in all copies or
-// substantial portions of the Software.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 //
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
-// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
-// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// Ported from diffusers 0.41.0,
+// src/diffusers/models/condition_embedders/condition_embedder_anima.py
+// (https://github.com/huggingface/diffusers). Changes from the original: written in Rust as a
+// flint graph; the self attention's q, k and v and the cross attention's k and v are each one
+// fused projection, as the package stores them; the rotary tables hold half a head rather than
+// the duplicated whole; masks, the zero padding to the context length and gradient
+// checkpointing are left out (the pipeline pads, and a single prompt needs no mask).
 
-//! The bridge from Qwen3 onto the cross-attention the denoiser was pretrained for.
+//! `AnimaTextConditioner`: the bridge from Qwen3 onto the cross attention the denoiser was
+//! pretrained for.
 //!
-//! Cosmos-Predict2 was trained against T5, and Anima conditions on Qwen3. This is what stands
-//! between them: six blocks whose *queries* are a T5 vocabulary embedded here -- which is why its
-//! table is 32128 wide and not the encoder's 151936 -- and whose context is what Qwen3 made of the
-//! same prompt. The denoiser never sees the encoder's states directly. It sees only what comes out
-//! of this.
+//! Cosmos-Predict2 was trained against T5, and Anima conditions on Qwen3. This stands between
+//! them: six blocks whose queries are T5 token ids embedded here -- which is why its table is
+//! 32128 wide and not the encoder's 151936 -- and whose context is what Qwen3 made of the same
+//! prompt. The denoiser never sees the encoder's states directly.
 //!
-//! It is not the denoiser's kind of block. The norms are RMSNorm rather than LayerNorm, there is
-//! no modulation at all, the feed forward carries biases, and the attention is bidirectional --
-//! a prompt is not a sequence being continued. It rotates the cross-attention's keys too, against
-//! the context's own positions, where the denoiser rotates nothing on its cross attention.
+//! Unlike the denoiser's blocks there is no modulation, the norms are RMSNorm, the feed forward
+//! carries biases, and the cross attention rotates its keys by the context's own positions.
 
 use std::fmt;
 use std::rc::Rc;
@@ -36,228 +38,203 @@ use std::rc::Rc;
 use super::config::AdapterConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::{Embedding, Linear};
 
-/// The base every rotation in the adapter is built on. Not the encoder's million, and not
-/// reachable from the package: the reference fixes it at ten thousand.
+/// `AnimaRotaryEmbedding`'s base, which the conditioner does not configure.
 const ROPE_THETA: f64 = 10000.0;
 
-/// Cosines and sines for one run's two sequences: the query stream and the context.
-struct Rotary {
-    cos: Tensor,
-    sin: Tensor,
-    context_cos: Tensor,
-    context_sin: Tensor,
-}
-
-/// One table, `(length, heads, head_dim / 2)`, laid out so that its trailing dimensions match the
-/// `(1, length, heads, head_dim / 2)` it multiplies.
-fn table(
+/// `AnimaRotaryEmbedding` for positions `0..length`, as `(length, heads, head_dim / 2)` tables.
+///
+/// diffusers concatenates the frequencies with themselves to cover the whole head; half is enough
+/// here because [`apply_rotary`] multiplies each half by the same angles.
+fn rotary_embedding(
     length: i32,
     heads: i32,
     head_dim: i32,
-    device: crate::flint::Device,
+    device: Device,
 ) -> Result<(Tensor, Tensor)> {
-    let half = (head_dim / 2) as usize;
-    let count = length as usize * heads as usize * half;
+    let half = head_dim / 2;
+    let inv_freq: Vec<f64> = (0..half)
+        .map(|index| 1.0 / ROPE_THETA.powf(2.0 * index as f64 / head_dim as f64))
+        .collect();
+
+    let count = (length * heads * half) as usize;
     let mut cos = Vec::with_capacity(count);
     let mut sin = Vec::with_capacity(count);
-
-    for position in 0..length as usize {
+    for position in 0..length {
         for _ in 0..heads {
-            for index in 0..half {
-                let exponent = 2.0 * index as f64 / head_dim as f64;
-                let angle = position as f64 / ROPE_THETA.powf(exponent);
+            for freq in &inv_freq {
+                let angle = position as f64 * freq;
                 cos.push(angle.cos() as f32);
                 sin.push(angle.sin() as f32);
             }
         }
     }
 
-    let shape = [length, heads, head_dim / 2];
+    let shape = [length, heads, half];
     Ok((
         Tensor::from_f32(&shape, &cos)?.to_device(device)?,
         Tensor::from_f32(&shape, &sin)?.to_device(device)?,
     ))
 }
 
-/// Rotate the last dimension of `x`, pairing its first half against its second.
-fn rotate(g: &Graph, x: Value, cos: Value, sin: Value, half: i32) -> Value {
-    let first = g.slice(x, 3, 0, half);
-    let second = g.slice(x, 3, half, 2 * half);
+/// `_apply_rotary_pos_emb`: `x * cos + rotate_half(x) * sin` on `(1, L, heads, head_dim)`.
+fn apply_rotary(g: &Graph, x: Value, cos: Value, sin: Value, half: i32) -> Value {
+    let x1 = g.slice(x, 3, 0, half);
+    let x2 = g.slice(x, 3, half, 2 * half);
 
-    let left = g.sub(g.mul(first, cos), g.mul(second, sin));
-    let right = g.add(g.mul(first, sin), g.mul(second, cos));
-    g.cat(left, right, 3)
+    // rotate_half(x) is (-x2, x1).
+    let first = g.sub(g.mul(x1, cos), g.mul(x2, sin));
+    let second = g.add(g.mul(x2, cos), g.mul(x1, sin));
+    g.cat(first, second, 3)
 }
 
-/// Split a `(1, L, heads * head_dim)` projection into heads and normalize each one.
-fn heads(g: &Graph, x: Value, norm: &str, config: &AdapterConfig, eps: f32) -> Value {
-    let length = Extent::of(x, 1);
-    let viewed = g.view(
+/// A `(1, L, heads * head_dim)` projection viewed as heads and put through `norm` (`q_norm` or
+/// `k_norm`), which normalizes each head on its own.
+fn normed_heads(g: &Graph, x: Value, norm: &str, config: &AdapterConfig) -> Value {
+    let x = g.view(
         x,
         [
             Extent::At(1),
-            length,
+            Extent::of(x, 1),
             config.num_heads.into(),
             config.head_dim.into(),
         ],
     );
     let weight = g.subgraph(norm).load(Linear::WEIGHT, &[config.head_dim]);
-    g.rms_norm(viewed, weight, eps)
+    g.rms_norm(x, weight, super::NORM_EPS)
 }
 
-/// Attention laid out the way flint wants it, and put back the way the stream wants it.
-fn attend(g: &Graph, q: Value, k: Value, v: Value, width: i32) -> Value {
-    let length = Extent::of(q, 1);
-    let q = g.transpose(q, 1, 2);
-    let k = g.transpose(k, 1, 2);
-    let v = g.transpose(v, 1, 2);
+/// `AnimaTextConditionerAttnProcessor` from the projections on: normalize and rotate the query
+/// and key, attend without a causal mask, and project back out through `o_proj`.
+///
+/// `query` reads the positions `rope` holds and `key` the ones `key_rope` holds, which are the
+/// same table in the self attention and the context's in the cross attention.
+#[allow(clippy::too_many_arguments)]
+fn attention(
+    config: &AdapterConfig,
+    g: &Graph,
+    query: Value,
+    key: Value,
+    value: Value,
+    rope: (Value, Value),
+    key_rope: (Value, Value),
+) -> Value {
+    let half = config.head_dim / 2;
+    let length = Extent::of(query, 1);
 
-    // Bidirectional: this is a prompt being read, not continued.
-    let out = g.attention(q, k, v, false);
+    let query = normed_heads(g, query, "q_norm", config);
+    let query = apply_rotary(g, query, rope.0, rope.1, half);
+    let key = normed_heads(g, key, "k_norm", config);
+    let key = apply_rotary(g, key, key_rope.0, key_rope.1, half);
+    let value = g.view(
+        value,
+        [
+            Extent::At(1),
+            Extent::of(value, 1),
+            config.num_heads.into(),
+            config.head_dim.into(),
+        ],
+    );
+
+    let out = g.attention(
+        g.transpose(query, 1, 2),
+        g.transpose(key, 1, 2),
+        g.transpose(value, 1, 2),
+        false,
+    );
     let out = g.contiguous(g.transpose(out, 1, 2));
-    g.view(out, [Extent::At(1), length, width.into()])
+    let out = g.view(out, [Extent::At(1), length, config.hidden_size.into()]);
+
+    let d = config.hidden_size;
+    Linear::graph(&g.subgraph("out_proj"), out, d, d, false)
 }
 
-/// One block, written into `g`.
+/// The `RMSNorm` in front of each sublayer.
+fn norm(g: &Graph, name: &str, x: Value, width: i32) -> Value {
+    let weight = g.subgraph(name).load(Linear::WEIGHT, &[width]);
+    g.rms_norm(x, weight, super::NORM_EPS)
+}
+
+/// `AnimaTextConditionerBlock`: self attention, cross attention into `context`, then the MLP,
+/// each on an RMSNorm of the stream and added back onto it.
 fn block(
     config: &AdapterConfig,
     g: &Graph,
-    input: Value,
+    hidden: Value,
     context: Value,
-    rope: [Value; 4],
+    rope: (Value, Value),
+    context_rope: (Value, Value),
 ) -> Value {
     let d = config.hidden_size;
-    let half = config.head_dim / 2;
-    let eps = super::NORM_EPS;
-    let [cos, sin, context_cos, context_sin] = rope;
 
-    // -- self attention, over the query stream alone -------------------------------------
-    let normed = {
-        let weight = g.subgraph("norm_self_attn").load(Linear::WEIGHT, &[d]);
-        g.rms_norm(input, weight, eps)
-    };
+    let normed = norm(g, "norm_self_attn", hidden, d);
     let qkv = Linear::graph(&g.subgraph("self_attn.qkv_proj"), normed, d, 3 * d, false);
-    let q = g.contiguous(g.slice(qkv, 2, 0, d));
-    let k = g.contiguous(g.slice(qkv, 2, d, 2 * d));
-    let v = g.contiguous(g.slice(qkv, 2, 2 * d, 3 * d));
-
-    let sub = g.subgraph("self_attn");
-    let q = rotate(g, heads(&sub, q, "q_norm", config, eps), cos, sin, half);
-    let k = rotate(g, heads(&sub, k, "k_norm", config, eps), cos, sin, half);
-    let v = g.view(
-        v,
-        [
-            Extent::At(1),
-            Extent::of(input, 1),
-            config.num_heads.into(),
-            config.head_dim.into(),
-        ],
+    let attn = attention(
+        config,
+        &g.subgraph("self_attn"),
+        g.contiguous(g.slice(qkv, 2, 0, d)),
+        g.contiguous(g.slice(qkv, 2, d, 2 * d)),
+        g.contiguous(g.slice(qkv, 2, 2 * d, 3 * d)),
+        rope,
+        rope,
     );
+    let hidden = g.add(hidden, attn);
 
-    let out = attend(g, q, k, v, d);
-    let x = g.add(
-        input,
-        Linear::graph(&g.subgraph("self_attn.out_proj"), out, d, d, false),
-    );
-
-    // -- cross attention, into what the encoder made of the prompt ------------------------
-    let normed = {
-        let weight = g.subgraph("norm_cross_attn").load(Linear::WEIGHT, &[d]);
-        g.rms_norm(x, weight, eps)
-    };
-    let sub = g.subgraph("cross_attn");
-    let q = Linear::graph(&g.subgraph("cross_attn.q_proj"), normed, d, d, false);
-    let q = rotate(g, heads(&sub, q, "q_norm", config, eps), cos, sin, half);
-
-    // The key and value are the only things here that read the context, which is why they are one
-    // projection and the query is not.
+    let normed = norm(g, "norm_cross_attn", hidden, d);
+    let query = Linear::graph(&g.subgraph("cross_attn.q_proj"), normed, d, d, false);
     let kv = Linear::graph(&g.subgraph("cross_attn.kv_proj"), context, d, 2 * d, false);
-    let k = g.contiguous(g.slice(kv, 2, 0, d));
-    let v = g.contiguous(g.slice(kv, 2, d, 2 * d));
-    let k = rotate(
-        g,
-        heads(&sub, k, "k_norm", config, eps),
-        context_cos,
-        context_sin,
-        half,
+    let attn = attention(
+        config,
+        &g.subgraph("cross_attn"),
+        query,
+        g.contiguous(g.slice(kv, 2, 0, d)),
+        g.contiguous(g.slice(kv, 2, d, 2 * d)),
+        rope,
+        context_rope,
     );
-    let v = g.view(
-        v,
-        [
-            Extent::At(1),
-            Extent::of(context, 1),
-            config.num_heads.into(),
-            config.head_dim.into(),
-        ],
-    );
+    let hidden = g.add(hidden, attn);
 
-    let out = attend(g, q, k, v, d);
-    let x = g.add(
-        x,
-        Linear::graph(&g.subgraph("cross_attn.out_proj"), out, d, d, false),
-    );
-
-    // -- feed forward, which unlike the denoiser's carries biases -------------------------
-    let residual = x;
-    let normed = {
-        let weight = g.subgraph("norm_mlp").load(Linear::WEIGHT, &[d]);
-        g.rms_norm(residual, weight, eps)
-    };
-    let hidden = Linear::graph(&g.subgraph("mlp.fc1"), normed, d, config.mlp_size, true);
-    let hidden = g.gelu(hidden);
-    let down = Linear::graph(&g.subgraph("mlp.fc2"), hidden, config.mlp_size, d, true);
-
-    g.add(residual, down)
+    let normed = norm(g, "norm_mlp", hidden, d);
+    let up = Linear::graph(&g.subgraph("mlp.fc1"), normed, d, config.mlp_size, true);
+    let down = Linear::graph(&g.subgraph("mlp.fc2"), g.gelu(up), config.mlp_size, d, true);
+    g.add(hidden, down)
 }
 
-/// The whole adapter, written into `g`.
+/// `AnimaTextConditioner.forward`, written into `g`.
 fn write(config: &AdapterConfig, float_type: DType, g: &Graph) {
+    let d = config.hidden_size;
     let ids = g.input("input_ids");
     let context = g.input("context");
-    let rope = [
+    let rope = (
         g.cast(g.input("rope_cos"), float_type),
         g.cast(g.input("rope_sin"), float_type),
+    );
+    let context_rope = (
         g.cast(g.input("context_rope_cos"), float_type),
         g.cast(g.input("context_rope_sin"), float_type),
-    ];
-
-    // No projection after the embedding: the reference has one only when the widths differ, and
-    // here they do not, which is why the package holds no `in_proj`.
-    let embedded = Embedding::graph(
-        &g.subgraph("embed"),
-        ids,
-        config.hidden_size,
-        config.vocab_size,
-        float_type,
     );
-    let mut x = g.unsqueeze(embedded, 0);
+
+    // `in_proj` is the identity when `model_dim` equals `target_dim`, as it does in every Anima
+    // release, so the package holds none.
+    let embedded = Embedding::graph(&g.subgraph("embed"), ids, d, config.vocab_size, float_type);
+    let mut hidden = g.unsqueeze(embedded, 0);
 
     for index in 0..config.num_blocks {
-        x = block(
+        hidden = block(
             config,
             &g.subgraph(&format!("block{index}")),
-            x,
+            hidden,
             context,
             rope,
+            context_rope,
         );
     }
 
-    // The projection comes before the norm, not after it.
-    let projected = Linear::graph(
-        &g.subgraph("out_proj"),
-        x,
-        config.hidden_size,
-        config.hidden_size,
-        true,
-    );
-    let weight = g
-        .subgraph("norm")
-        .load(Linear::WEIGHT, &[config.hidden_size]);
-    g.output("context", g.rms_norm(projected, weight, super::NORM_EPS));
+    let projected = Linear::graph(&g.subgraph("out_proj"), hidden, d, d, true);
+    g.output("context", norm(g, "norm", projected, d));
 }
 
 pub struct Adapter {
@@ -283,11 +260,9 @@ impl Adapter {
         write(&config, float_type, &graph.subgraph(name));
         check_parameters(&graph, weights.as_ref())?;
 
-        let ir = Ir::compile(&graph);
-
         Ok(Adapter {
+            ir: Ir::compile(&graph),
             weights: Rc::clone(weights),
-            ir,
             config,
         })
     }
@@ -301,11 +276,10 @@ impl Adapter {
     }
 
     /// `input_ids` is the prompt under the T5 tokenizer, `<long>(L)`; `hidden` is what the text
-    /// encoder made of the same prompt under its own, `(1, C, D)`. The two lengths are unrelated
-    /// and neither has to match the other.
+    /// encoder made of the same prompt under its own, `(1, C, D)`. The two lengths are unrelated.
     ///
-    /// What comes back is `(1, L, D)`, still the length of the T5 ids. Padding it out to the
-    /// denoiser's context length is the pipeline's business, not this one's.
+    /// What comes back is `(1, L, D)`. Padding it to the denoiser's context length is the
+    /// pipeline's business.
     pub fn forward(&self, input_ids: &Tensor, hidden: &Tensor) -> Result<Tensor> {
         let dim = input_ids.dim()?;
         if dim != 1 {
@@ -314,38 +288,25 @@ impl Adapter {
             )));
         }
 
-        let length = input_ids.shape_at(0)?;
-        let context_length = hidden.shape_at(1)?;
         let device = input_ids.device();
-
-        let (cos, sin) = table(length, self.config.num_heads, self.config.head_dim, device)?;
-        let (context_cos, context_sin) = table(
-            context_length,
-            self.config.num_heads,
-            self.config.head_dim,
-            device,
-        )?;
-        let rotary = Rotary {
-            cos,
-            sin,
-            context_cos,
-            context_sin,
-        };
+        let (heads, head_dim) = (self.config.num_heads, self.config.head_dim);
+        let (cos, sin) = rotary_embedding(input_ids.shape_at(0)?, heads, head_dim, device)?;
+        let (context_cos, context_sin) =
+            rotary_embedding(hidden.shape_at(1)?, heads, head_dim, device)?;
 
         let run = RunContext::new(&*self.weights)
             .input("input_ids", input_ids)
             .input("context", hidden)
-            .input("rope_cos", &rotary.cos)
-            .input("rope_sin", &rotary.sin)
-            .input("context_rope_cos", &rotary.context_cos)
-            .input("context_rope_sin", &rotary.context_sin);
+            .input("rope_cos", &cos)
+            .input("rope_sin", &sin)
+            .input("context_rope_cos", &context_cos)
+            .input("context_rope_sin", &context_sin);
 
-        let outputs = self.ir.run(&run)?;
-
-        outputs
-            .iter()
+        self.ir
+            .run(&run)?
+            .into_iter()
             .find(|(name, _)| name == "context")
-            .map(|(_, tensor)| tensor.clone())
+            .map(|(_, tensor)| tensor)
             .ok_or_else(|| Error::model("the adapter produced no context"))
     }
 }
