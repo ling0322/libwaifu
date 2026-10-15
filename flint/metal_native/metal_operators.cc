@@ -124,6 +124,54 @@ void MetalOperators::conv1d(
   metal_native::conv1d(input, weight, bias, stride, padding, dilation, groups, out);
 }
 
+void MetalOperators::convTranspose1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups,
+    TensorView out) {
+  F::checkConvTranspose1d(input, weight, bias, stride, padding, outputPadding, groups, out);
+  int groupOut = weight.getShape(1);
+
+  // A matmul per group into columns, then the kernel gathering them into the output.
+  for (int g = 0; g < groups; ++g) {
+    Tensor columns = F::transposedConvolutionColumns(this, input, weight, groups, g);
+    metal_native::overlapAdd1d(
+        columns,
+        bias.empty() ? bias : bias.slice(0, {g * groupOut, (g + 1) * groupOut}),
+        input.getShape(2),
+        stride,
+        padding,
+        weight.getShape(2),
+        out.slice(1, {g * groupOut, (g + 1) * groupOut}));
+  }
+}
+
+void MetalOperators::snake(
+    TensorView input,
+    TensorView alpha,
+    TensorView beta,
+    float eps,
+    TensorView out) {
+  metal_native::snake(input, alpha, beta, eps, out);
+}
+
+void MetalOperators::pad1d(TensorView input, int left, int right, PadMode mode, TensorView out) {
+  // The kernel is built for the two float types; anything else is padded by composition.
+  DType dtype = input.getDType();
+  if (dtype != DType::kFloat && dtype != DType::kFloat16) {
+    return Operators::pad1d(input, left, right, mode, out);
+  }
+  metal_native::pad1d(input, left, right, mode, out);
+}
+
+void MetalOperators::clamp(TensorView input, float lo, float hi, TensorView out) {
+  metal_native::clamp(input, lo, hi, out);
+}
+
 void MetalOperators::attention(
     TensorView q,
     TensorView k,

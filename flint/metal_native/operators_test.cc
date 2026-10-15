@@ -20,6 +20,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <cmath>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -507,6 +509,132 @@ CATCH_TEST_CASE("test Metal convolutions without the neural accelerators", "[op]
   SKIP_WITHOUT_METAL();
   WithoutNax without;
   checkConvolutions();
+}
+
+// The signal kernels, each against the CPU, in both float types: a grouped transposed
+// convolution with an output padding and a kernel that is not a whole number of strides, a snake
+// with and without beta, every padding mode -- a replication wider than the signal among them --
+// and a clamp bounded on one side and on both. Then a transform and its inverse, which compose
+// them.
+CATCH_TEST_CASE("test Metal signal operators", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  float inf = std::numeric_limits<float>::infinity();
+
+  Tensor x = randn({2, 6, 29});
+  Tensor w = randn({6, 2, 7});
+  Tensor b = randn({4});
+  Tensor upsample = randn({1, 16, 40});
+  Tensor upsampleWeight = randn({16, 8, 16});
+  Tensor alpha = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor beta = plus(F::abs(cpu(), randn({6})), 0.2f);
+
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    CATCH_INFO("dtype = " << dtype.toString());
+    float tol = dtype == DType::kFloat ? 1e-4f : 2e-2f;
+
+    CATCH_REQUIRE(close(
+        F::convTranspose1d(
+            mtl(), toMetal(x, dtype), toMetal(w, dtype), toMetal(b, dtype), 3, 2, 1, 2),
+        F::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2),
+        tol,
+        tol));
+    // A vocoder's: the kernel twice the stride, no bias.
+    CATCH_REQUIRE(close(
+        F::convTranspose1d(
+            mtl(), toMetal(upsample, dtype), toMetal(upsampleWeight, dtype), Tensor(), 8, 4, 0, 1),
+        F::convTranspose1d(cpu(), upsample, upsampleWeight, Tensor(), 8, 4, 0, 1),
+        tol,
+        tol));
+
+    for (bool withBeta : {false, true}) {
+      CATCH_REQUIRE(close(
+          F::snake(
+              mtl(),
+              toMetal(x, dtype),
+              toMetal(alpha, dtype),
+              withBeta ? toMetal(beta, dtype) : Tensor(),
+              1e-9f),
+          F::snake(cpu(), x, alpha, withBeta ? beta : Tensor(), 1e-9f),
+          tol,
+          tol));
+    }
+
+    // Arguments to twenty radians, where an approximate sin would drift.
+    Tensor far = F::mul(cpu(), x, 5.0f);
+    Tensor wide = plus(F::abs(cpu(), randn({6})), 1.0f);
+    CATCH_REQUIRE(close(
+        F::snake(mtl(), toMetal(far, dtype), toMetal(wide, dtype), Tensor(), 1e-9f),
+        F::snake(cpu(), toCpu(toMetal(far, dtype)), toCpu(toMetal(wide, dtype)), Tensor(), 1e-9f),
+        tol,
+        tol));
+
+    // A padding moves elements and computes nothing, so it is exact once the CPU's answer has
+    // been through the same type.
+    Tensor rounded = toCpu(toMetal(x, dtype));
+    for (PadMode mode : {PadMode::kZero, PadMode::kReflect, PadMode::kReplicate}) {
+      CATCH_REQUIRE(close(
+          F::pad1d(mtl(), toMetal(x, dtype), 5, 9, mode),
+          F::pad1d(cpu(), rounded, 5, 9, mode),
+          0.0f,
+          1e-6f));
+    }
+    CATCH_REQUIRE(close(
+        F::pad1d(mtl(), toMetal(x, dtype), 40, 33, PadMode::kReplicate),
+        F::pad1d(cpu(), rounded, 40, 33, PadMode::kReplicate),
+        0.0f,
+        1e-6f));
+
+    CATCH_REQUIRE(close(
+        F::clamp(mtl(), toMetal(x, dtype), -0.5f, inf),
+        F::clamp(cpu(), rounded, -0.5f, inf),
+        0.0f,
+        1e-6f));
+    CATCH_REQUIRE(close(
+        F::clamp(mtl(), toMetal(x, dtype), -1.0f, 0.5f),
+        F::clamp(cpu(), rounded, -1.0f, 0.5f),
+        0.0f,
+        1e-6f));
+
+    // A NaN stays one, which Metal's min and max do not keep; an infinity goes to its bound.
+    Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+    float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
+    raw[0] = std::numeric_limits<float>::quiet_NaN();
+    raw[1] = inf;
+    raw[2] = -inf;
+    raw[3] = 0.125f;
+    std::vector<float> clamped = values(F::clamp(mtl(), toMetal(special, dtype), -0.5f, 0.25f));
+    CATCH_REQUIRE(std::isnan(clamped[0]));
+    CATCH_REQUIRE(clamped[1] == 0.25f);
+    CATCH_REQUIRE(clamped[2] == -0.5f);
+    CATCH_REQUIRE(clamped[3] == 0.125f);
+  }
+
+  // A transform and its inverse, which every device composes out of the operators above.
+  int nFft = 16, hop = 4;
+  Tensor wave = randn({2, 1, 64});
+  Tensor window = F::zeros(Device::getCpu(), {nFft}, DType::kFloat);
+  float *taps = window.getInternalData()->getData<float>(window.getInternalOffset());
+  for (int i = 0; i < nFft; ++i) taps[i] = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / nFft);
+  Tensor spectrum = F::stft(mtl(), toMetal(wave), toMetal(window), nFft, hop, true);
+  CATCH_REQUIRE(close(spectrum, F::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
+  CATCH_REQUIRE(
+      close(F::istft(mtl(), spectrum, toMetal(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
+
+  // In half and not centred, the ends are kept, where the window's overlap is below what half can
+  // hold: dividing by it there made NaNs.
+  Tensor halfSpectrum = F::stft(
+      mtl(), toMetal(wave, DType::kFloat16), toMetal(window, DType::kFloat16), nFft, hop, false);
+  std::vector<float> back =
+      values(F::istft(mtl(), halfSpectrum, toMetal(window, DType::kFloat16), nFft, hop, false));
+  std::vector<float> want = values(wave);
+  for (size_t i = 0; i < back.size(); ++i) {
+    CATCH_INFO("sample " << i);
+    CATCH_REQUIRE(std::isfinite(back[i]));
+    size_t at = i % 64;
+    if (at >= size_t(nFft) && at < 64 - size_t(nFft)) {
+      CATCH_REQUIRE(fabsf(back[i] - want[i]) < 2e-2f);
+    }
+  }
 }
 
 CATCH_TEST_CASE("test Metal attention", "[op][metal]") {

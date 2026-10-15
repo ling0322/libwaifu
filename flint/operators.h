@@ -139,8 +139,8 @@ class Operators {
   /// Lout being (L - 1) * stride - 2 * padding + R + outputPadding: input position `l`
   /// contributes the whole kernel starting at `l * stride`. What a vocoder upsamples with.
   ///
-  /// The CPU, CUDA and Vulkan have a kernel, one thread per output element gathering the input
-  /// positions that land on it. Metal gets `F::composedConvTranspose1d`, a `matmul` per group and
+  /// Every device has a kernel, one thread per output element gathering the input positions that
+  /// land on it. A device without one gets `F::composedConvTranspose1d`, a `matmul` per group and
   /// ceil(R / stride) shifted additions.
   virtual void convTranspose1d(
       TensorView input,
@@ -157,8 +157,8 @@ class Operators {
   /// -- a checkpoint trained with `alpha_logscale` stores their logarithm, and raising it belongs
   /// to whoever reads the weight. An empty `beta` means beta is alpha, the plain snake.
   ///
-  /// The CPU, CUDA and Vulkan fuse it into one pass. Metal gets `F::composedSnake`, about six
-  /// passes of the elementwise operators.
+  /// Every device fuses it into one pass. A device without a kernel gets `F::composedSnake`,
+  /// about six passes of the elementwise operators.
   virtual void snake(
       TensorView input,
       TensorView alpha,
@@ -171,14 +171,14 @@ class Operators {
   /// about its first and last samples (`F.pad(mode="reflect")`, which needs `left` and `right`
   /// below L), or the first and last samples repeated (`mode="replicate"`, any width).
   ///
-  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedPad1d`, which copies the
+  /// Every device has a kernel. A device without one gets `F::composedPad1d`, which copies the
   /// middle and builds each edge out of `copy`, `fill` and, for a mirror, a `matmul`.
   virtual void pad1d(TensorView input, int left, int right, PadMode mode, TensorView out);
 
   /// `min(max(x, lo), hi)`, elementwise, into `out` of `input`'s shape. Either bound may be
   /// infinite, which leaves that side alone. A NaN stays a NaN, on every device. `torch.clamp`.
   ///
-  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedClamp`, which picks each
+  /// Every device has a kernel. A device without one gets `F::composedClamp`, which picks each
   /// element or its bound with the `max` and `min` reductions -- exactly, never by arithmetic that
   /// rounds -- and puts back a NaN a reduction may have dropped.
   virtual void clamp(TensorView input, float lo, float hi, TensorView out);
