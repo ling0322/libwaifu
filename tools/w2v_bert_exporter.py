@@ -34,7 +34,7 @@ stored, read onto a card or run.
 
 `waifu::w2v_bert::Config::USED_LAYERS` is that sixteen, and this file's `LAYERS` has to agree with
 it. They are two constants in two languages saying the same thing, so the count is printed at the
-end for a human to compare against `cargo run --example parameters -- w2v_bert`.
+end for a human to compare against `cargo run -p waifu-tools --bin parameters -- w2v_bert`.
 
 # Nothing is done to the weights
 

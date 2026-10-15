@@ -262,11 +262,11 @@ resolves them without listing them in `names()`.
 
 ## 4. Verify before uploading, not after
 
-Two examples, in this order:
+Two tools, in this order:
 
 ```bash
-cargo run --release --example load     -- models/<stem>.yaml cuda
-cargo run --release --example generate -- models/<stem>.yaml "<prompt>" cuda
+cargo run --release -p waifu-tools --bin load     -- models/<stem>.yaml cuda
+cargo run --release -p waifu-tools --bin generate -- models/<stem>.yaml "<prompt>" cuda
 ```
 
 `load` assembles the whole model from the manifest and encodes a prompt with it, which is the
@@ -356,8 +356,9 @@ the fine tunes differ: base is `openrail++`, WAI is `cdla-permissive-2.0`, NoobA
 
 ## 6. Wire it into the CLI
 
-Only two edits in `waifu/src/cli/hub.rs` -- the picker and the `-m` usage text both build
-themselves from `hub::names()`, so nothing else needs telling:
+Only two edits in `waifu-modelmanager/src/hub.rs` -- the picker and the `-m` usage text both build
+themselves from the catalogue, which libwaifu_modelmanager hands out, so nothing else needs
+telling:
 
 - add a `Published` entry to `CATALOG` (`name`, `repo`, `manifest`)
 - add the unversioned alias to `ALIASES`
@@ -382,10 +383,12 @@ Then `README.md`: the model table, the `waifu -m` example list, and a `Recent up
 
 ```bash
 ./build/unittest
-cargo test --manifest-path waifu/Cargo.toml --features cli -- --test-threads=1
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test --manifest-path waifu/Cargo.toml -- --test-threads=1
+cargo test -p waifu-modelmanager
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test -p waifu-cli
 ```
 
-Both flags matter -- see traps. To run the SDXL numerical tests you also need `models/`
+`--test-threads=1` matters -- see traps. The `hub.rs` tests are `waifu-modelmanager`'s. To run the SDXL numerical tests you also need `models/`
 populated; see "Test data" below.
 
 ## Traps
@@ -395,7 +398,7 @@ populated; see "Test data" below.
 | configure stops on `invalid CUTLASS_ROOT` | `third_party/cutlass` is not vendored, and a CUDA build requires it | `third_party/install_cutlass.sh` |
 | a CUDA build takes tens of minutes longer than expected | `install_flash_attn.sh` was run out of habit: it compiles every kernel for `sm_80`, `sm_86`, `sm_89`, `sm_90` and `sm_120` | skip it. Since `dd804f1` a build without it breaks nothing -- `stores_and_reads_a_paged_kv_cache` asks `F::paged_attention_available()` and skips itself, and `cuda/flash_attn_test.cc` is only compiled when the option is on. Wanted anyway? Pin `FLASH_ATTN_CUDA_ARCH` to this card's arch |
 | every `sdxl.rs` test fails with `Aborted: out of memory` | `cargo test` runs one thread per core, each loading a 7 GB model onto one GPU | `-- --test-threads=1` |
-| `hub.rs` tests never run | `cli` is a Cargo feature; plain `cargo test` compiles none of `src/cli/` | `--features cli` |
+| `hub.rs` tests never run | they are `waifu-modelmanager`'s, and `--manifest-path waifu/Cargo.toml` tests only `waifu` | `cargo test -p waifu-modelmanager` |
 | CPU verify takes 20+ minutes | no CUDA in the build | build with CUDA |
 | the export dies on a 106-byte "checkpoint" | a Civitai download without a valid token writes the JSON error body to the output file and `curl` still exits `0` | check it is not JSON (`file <name>.safetensors`) before exporting; verify the sha256 |
 | a link error in `cargo test` that makes no sense | the disk filled: a debug `cargo test` builds a second dependency tree beside the release one cmake already built | `--release` on the Rust suite, and delete each checkpoint the moment its export finishes |
@@ -441,4 +444,5 @@ whole second dependency tree beside the release one CMake already built. On a bo
 that fills the disk, and a full disk here does not announce itself: the tool cannot even create
 the file it writes command output to, so *every* command fails before it runs, and the failure
 before that one is a linker error that looks like a code problem. Run the Rust suite as
-`cargo test --release --manifest-path waifu/Cargo.toml --features cli`.
+`cargo test --release --manifest-path waifu/Cargo.toml`, and the catalogue's as
+`cargo test --release -p waifu-modelmanager`.

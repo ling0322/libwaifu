@@ -1,0 +1,15 @@
+[package]
+name = "waifu-tools"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Tools for working on libwaifu: checking an export, timing a model, fetching manifests"
+
+# Programs for the people working on this repository, not for anybody using the libraries: unlike
+# the command line, they call the two crates' Rust APIs directly -- a model's graph, its
+# parameters, the allocator's high-water mark -- which no C API says. Each is one file under
+# src/bin, run with `cargo run --release -p waifu-tools --bin <name> -- ...`.
+
+[dependencies]
+waifu = { path = "../waifu" }
+waifu-modelmanager = { path = "../waifu-modelmanager" }

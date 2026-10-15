@@ -333,7 +333,7 @@ def report_position_buffer(state):
             f"{POSITION_BUFFER} is no longer the sinusoid rounded to bfloat16 -- {wrong} of "
             f"{off_rounded.numel()} elements are more than one bfloat16 step ({coarsest_bfloat16_step:.3g}) "
             f"from the closed form, worst {off.max().item():.3g}. The release has changed its "
-            f"position encoding, and docs/indextts_emotion.md is now telling a story about the old one"
+            f"position encoding, and docs/indextts.md is now telling a story about the old one"
         )
 
     return positions, dim, off.mean().item(), off.max().item()

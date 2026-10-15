@@ -24,8 +24,9 @@ hardware allows. No API key, no cloud, no queue, and no one else seeing what you
 ## Supported voices
 
 The voices run in the library and through its C API -- which the macOS app speaks with -- rather
-than in the `waifu` terminal, which draws. From a checkout, `examples/speak.rs` says a sentence
-with either of them in the voice of a recording.
+than in the `waifu` terminal, which draws. From a checkout,
+`cargo run --release -p waifu-tools --bin speak` says a sentence with either of them in the voice
+of a recording.
 
 | name | model | published as |
 |---|---|---|
@@ -202,17 +203,17 @@ the defaults where it has one.
 `Sdxl::generate_reporting` is the same run with a reporter that hears how far along it is and can
 stop it between steps, which is what the `draw` command is built on.
 
-After completing the build steps below, run the complete example with:
+After completing the build steps below, run the complete program with:
 
 ```bash
-cargo run --release -p waifu --example generate -- \
+cargo run --release -p waifu-tools --bin generate -- \
 	sdxl.yaml \
 	"a photo of an astronaut riding a horse on mars"
 ```
 
 It takes an optional third argument -- `cpu`, `cuda` or `metal` -- and takes the first accelerator
 this build can reach when that is left out. See
-[waifu/examples/generate.rs](waifu/examples/generate.rs) for the complete source.
+[waifu-tools/src/bin/generate.rs](waifu-tools/src/bin/generate.rs) for the complete source.
 
 ## Build
 
@@ -314,11 +315,13 @@ cmake --build build --target unittest --parallel
 
 Run the Rust tests. These read the link flags CMake already wrote out, so they work without
 re-running `cmake --build` -- just be sure `build/` reflects the latest C++ if you edited a kernel.
-`--features cli` is what compiles `waifu/src/cli`, and without it none of the command line is
-tested:
+The command line, `waifu-cli`, has both libraries linked into it statically and calls them through
+their C APIs only:
 
 ```bash
-cargo test -p waifu --features cli
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test -p waifu
+cargo test -p waifu-modelmanager
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test -p waifu-cli
 ```
 
 The ignored Rust CUDA integration tests can be run on a CUDA machine with:
@@ -354,9 +357,7 @@ cargo test --release -p waifu --no-fail-fast \
 
 Neither flag is optional. `--test-threads=1` keeps one model on the card at a time, where cargo
 would otherwise start one per core, and `--no-fail-fast` keeps a failure in one test binary from
-stopping the ones after it. Leave `--features cli` off these: nothing under `waifu/src/cli` is
-reached from `tests/`, and asking for it drags hyper and rustls through a release compile first.
-One GPU means one job -- a second checkout running these at the same time reports `Aborted: out of
+stopping the ones after it. One GPU means one job -- a second checkout running these at the same time reports `Aborted: out of
 memory`, which reads as a code failure and is not one.
 
 ## License

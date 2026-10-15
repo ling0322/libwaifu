@@ -94,8 +94,6 @@ pub mod emotion;
 pub mod features;
 /// The GPT: text and a voice in, the semantic tokens [`crate::indextts::s2mel`] reads out.
 pub mod gpt;
-/// The text frontend: writing out what a number is read as, so the model never sees a digit.
-pub mod normalize;
 /// S2Mel's denoiser: semantic tokens and a voice in, the mel spectrogram a vocoder reads out.
 pub mod s2mel;
 /// The semantic codec: w2v-bert's features in, the discrete tokens the GPT reads out.
@@ -119,7 +117,7 @@ use crate::{
 
 use self::bigvgan::{BigVgan, BigVganConfig};
 use self::gpt::{Gpt, Sampling};
-use self::normalize::Language;
+use crate::text_normalizer::{self as normalize, Language};
 
 /// Where each of the six models sits in the package. See `tools/indextts_package.py`.
 const GPT: &str = "indextts2.gpt";

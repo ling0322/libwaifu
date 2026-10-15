@@ -66,7 +66,7 @@ Everything else keeps the checkpoint's own name, shape and value.
 That the 121 names the graph loads are all present and all the right shape, and that folding
 produced the shape the graph declares.
 
-    cargo run --release --example parameters -- semantic_codec_decode
+    cargo run --release -p waifu-tools --bin parameters -- semantic_codec_decode
 
 prints that list, and it is the authority; this file is written against it.
 

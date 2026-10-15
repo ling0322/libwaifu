@@ -71,13 +71,6 @@ impl Node {
         }
     }
 
-    /// The items of this value, if it is a list.
-    pub fn as_seq(&self) -> Option<&[Node]> {
-        match self {
-            Node::Seq(items) => Some(items),
-            _ => None,
-        }
-    }
 }
 
 /// One line that is neither blank nor a comment: how far it is indented, what is on it, and which
