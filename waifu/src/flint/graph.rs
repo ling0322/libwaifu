@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use super::{DType, Device, Tensor};
 
-use super::op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
+use super::op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
 
 /// A forward pass written down rather than run.
 ///
@@ -799,7 +799,10 @@ impl Graph {
         })
     }
 
-    /// A snake activation as a single node. Unimplemented; see [`Graph::conv1d`].
+    /// The activation a BigVGAN is built from, per channel of `input` `(N, C, L)`:
+    /// `x + sin(alpha * x)^2 / (beta + eps)`. `alpha` and `beta` are `(C)` and already
+    /// exponentiated; no `beta` means beta is alpha, the plain snake. The epsilon is added to the
+    /// divisor, which is what the reference does, for a channel whose parameter decayed to zero.
     #[track_caller]
     pub fn snake(&self, input: Value, alpha: Value, beta: Option<Value>, eps: f32) -> Value {
         self.push(Op::Snake {
@@ -810,7 +813,33 @@ impl Graph {
         })
     }
 
-    /// A short time Fourier transform as a single node. Unimplemented; see [`Graph::conv1d`].
+    /// `left` and `right` more positions on the last dimension of `input`, filled as `mode` says.
+    #[track_caller]
+    pub fn pad1d(&self, input: Value, left: i32, right: i32, mode: PadMode) -> Value {
+        assert!(left >= 0 && right >= 0, "a padding cannot be negative");
+        if left == 0 && right == 0 {
+            return input;
+        }
+        self.push(Op::Pad1d {
+            input,
+            left,
+            right,
+            mode,
+        })
+    }
+
+    /// `min(max(input, lo), hi)`, `torch.clamp`. Either bound may be infinite, which leaves that
+    /// side alone.
+    #[track_caller]
+    pub fn clamp(&self, input: Value, lo: f32, hi: f32) -> Value {
+        assert!(lo <= hi, "clamp to an empty interval");
+        self.push(Op::Clamp { input, lo, hi })
+    }
+
+    /// The short time Fourier transform of `input` `(N, 1, L)` against `window` `(n_fft)`:
+    /// `(N, 2 * (n_fft / 2 + 1), frames)`, every bin's real part and then every bin's imaginary
+    /// part. `centered` pads half a window at each end by reflection first, which is what
+    /// `torch.stft` does by default.
     #[track_caller]
     pub fn stft(&self, input: Value, window: Value, n_fft: i32, hop: i32, centered: bool) -> Value {
         self.push(Op::Stft {
@@ -822,7 +851,9 @@ impl Graph {
         })
     }
 
-    /// The inverse transform as a single node. Unimplemented; see [`Graph::conv1d`].
+    /// The inverse of [`Graph::stft`]: `spectrum` as `stft` lays it out, overlap-added and
+    /// divided by the window's own overlap, as `(N, 1, L)`. `centered` trims the half window
+    /// `stft` added at each end.
     #[track_caller]
     pub fn istft(
         &self,

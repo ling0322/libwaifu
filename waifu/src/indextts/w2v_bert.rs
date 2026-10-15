@@ -48,8 +48,7 @@
 //! turns it into the `(T, T, head_dim)` the scores need -- so the gather is an operator that
 //! exists rather than one that does not.
 
-use crate::audio::{pad1d, Padding};
-use crate::flint::{DType, Device, Extent, Graph, Tensor, Value};
+use crate::flint::{Device, Extent, Graph, PadMode, Tensor, Value};
 use crate::layers::{LayerNorm, Linear};
 use crate::Result;
 
@@ -219,13 +218,7 @@ fn attention(g: &Graph, x: Value, config: &Config, frames: i32, distances: Value
 
 /// The convolution module: a gated pointwise pair around a causal depthwise convolution.
 #[track_caller]
-fn conv_module(
-    g: &Graph,
-    x: Value,
-    config: &Config,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+fn conv_module(g: &Graph, x: Value, config: &Config) -> Value {
     let hidden = config.hidden_size;
 
     let x = LayerNorm::graph(&g.subgraph("layer_norm"), x, hidden, config.layer_norm_eps);
@@ -243,15 +236,7 @@ fn conv_module(
     let x = g.mul(left, g.sigmoid(right));
 
     // Causal: the whole padding goes on the left, so a frame never reads the future.
-    let padded = pad1d(
-        g,
-        x,
-        config.conv_kernel - 1,
-        0,
-        Padding::Zero,
-        dtype,
-        device,
-    )?;
+    let padded = g.pad1d(x, config.conv_kernel - 1, 0, PadMode::Zero);
 
     let depthwise = g.subgraph("depthwise_conv");
     let weight = depthwise.load("weight", &[hidden, 1, config.conv_kernel]);
@@ -270,21 +255,12 @@ fn conv_module(
     let weight = second.load("weight", &[hidden, hidden, 1]);
     let x = second.conv1d(x, weight, None, 1, 0, 1, 1);
 
-    Ok(g.contiguous(g.transpose(x, 1, 2)))
+    g.contiguous(g.transpose(x, 1, 2))
 }
 
 /// One conformer layer: feed forward, attention, convolution, feed forward, normalize.
 #[track_caller]
-#[allow(clippy::too_many_arguments)]
-fn encoder_layer(
-    g: &Graph,
-    x: Value,
-    config: &Config,
-    frames: i32,
-    distances: Value,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+fn encoder_layer(g: &Graph, x: Value, config: &Config, frames: i32, distances: Value) -> Value {
     let hidden = config.hidden_size;
     let eps = config.layer_norm_eps;
 
@@ -303,7 +279,7 @@ fn encoder_layer(
     );
 
     let x = g.add(
-        conv_module(&g.subgraph("conv_module"), x, config, dtype, device)?,
+        conv_module(&g.subgraph("conv_module"), x, config),
         x,
     );
 
@@ -313,12 +289,7 @@ fn encoder_layer(
         x,
     );
 
-    Ok(LayerNorm::graph(
-        &g.subgraph("final_layer_norm"),
-        x,
-        hidden,
-        eps,
-    ))
+    LayerNorm::graph(&g.subgraph("final_layer_norm"), x, hidden, eps)
 }
 
 /// The encoder as IndexTTS-2.5 reads it: `(N, T, feature_dim)` in, `(N, T, hidden_size)` out.
@@ -326,7 +297,6 @@ fn encoder_layer(
 /// `layers` is how many of the twenty-four to run. IndexTTS wants [`Config::USED_LAYERS`], which
 /// is sixteen; running all of them would be a third more work for a tensor nothing reads.
 #[track_caller]
-#[allow(clippy::too_many_arguments)]
 pub fn graph(
     g: &Graph,
     x: Value,
@@ -334,9 +304,7 @@ pub fn graph(
     frames: i32,
     layers: i32,
     distances: Value,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+) -> Value {
     let projection = g.subgraph("feature_projection");
     let normed = LayerNorm::graph(
         &projection.subgraph("layer_norm"),
@@ -360,10 +328,8 @@ pub fn graph(
             config,
             frames,
             distances,
-            dtype,
-            device,
-        )?;
+        );
     }
 
-    Ok(running)
+    running
 }

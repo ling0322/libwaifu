@@ -17,39 +17,20 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! What a speech model asks for that a diffusion model never did: convolution along one axis, a
-//! short time Fourier transform, a mel filterbank, and the activation a vocoder is built from.
+//! What a speech model asks for that a diffusion model never did, beyond the operators: a window,
+//! a mel filterbank, the filters a resampling convolves by, and the alias-free resampling around a
+//! BigVGAN's activation.
 //!
-//! # None of this is a new kernel
+//! # The operators are flint's
 //!
-//! A 1-D convolution is the one operator in that list, [`Graph::conv1d`], which every backend
-//! implements and which takes a group count. The obvious way to read the rest is as five more
-//! operators to write three times over, once for the CPU, once for CUDA and once for Metal. It is
-//! not what happened here, because none of the five is irreducible:
-//!
-//! - a transposed convolution is a matrix multiply per input position and then an overlap-add of
-//!   the columns that fall on each other, which [`conv_transpose1d`] writes as a fixed number of
-//!   shifted additions -- `ceil(kernel / stride)` of them, which is two for every vocoder here;
-//! - a short time Fourier transform is a convolution by a bank of windowed sinusoids, so
-//!   [`stft`] is [`Graph::conv1d`] against a constant this module computes on the host, and [`istft`] is
-//!   [`conv_transpose1d`] against the matching one, divided by the window's own overlap;
-//! - a mel filterbank is a matrix multiply;
-//! - resampling is a convolution by a windowed sinc, between a zero-stuffing and a decimation
-//!   that are themselves a transposed convolution and a stride;
-//! - and a snake is arithmetic.
-//!
-//! So this module is composition, not kernels, and it buys three things by being so. It runs
-//! wherever `conv1d` and `matmul` already run, which is every backend, on the day it is written
-//! rather than three ports later. It is correct wherever they are correct, and they are tested.
-//! And a fused kernel can replace any one of these later without a caller noticing, because what
-//! a caller sees is the function, not the seven nodes behind it.
-//!
-//! What it costs is real and worth saying plainly: the sinusoid bank makes an STFT an O(N^2)
-//! matrix multiply per frame where a radix-2 transform would be O(N log N). At the 1024-point
-//! window these models use that is about a hundredfold more arithmetic -- but it is arithmetic
-//! shaped like a GEMM, which is the one shape this library is fastest at, and a ten second
-//! utterance is a couple of GFLOP. It is the vocoder that costs, not the transform in front of
-//! it. If that ever stops being true, [`stft`] is the function to replace.
+//! A convolution along one axis and its transpose, a padding by zeros, a mirror or a repeated
+//! edge, a short time Fourier transform and its inverse, a snake activation and a clamp are each a
+//! single [`Graph`] node -- [`Graph::conv1d`], [`Graph::conv_transpose1d`], [`Graph::pad1d`],
+//! [`Graph::stft`], [`Graph::istft`], [`Graph::snake`], [`Graph::clamp`] -- which the CPU and CUDA
+//! run as kernels of their own and every other device as a composition of the operators it has.
+//! What is left here is what a model *designs* rather than computes: the numbers a filter is made
+//! of, worked out on the host once, and the few lines that put two operators together the way one
+//! reference implementation did.
 //!
 //! # Shapes
 //!
@@ -58,326 +39,8 @@
 //! the reference implementations use, and keeping it means a weight can be read from a package in
 //! the layout its authors stored it in.
 
-use crate::flint::{Bound, DType, Device, Extent, Graph, Tensor, Value};
+use crate::flint::{Bound, DType, Device, Extent, Graph, PadMode, Tensor, Value};
 use crate::Result;
-
-/// How [`pad1d`] fills what it adds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Padding {
-    /// Zeros, which is what a convolution means by padding.
-    Zero,
-    /// The signal mirrored about its own first and last samples, which is what `torch.stft`
-    /// means by `center=True` and therefore what every mel spectrogram in a speech model was
-    /// computed with. Mirroring rather than zeroing keeps the edge frames from seeing a step
-    /// that is not in the audio.
-    ///
-    /// A reversal is a matrix multiply by the anti-diagonal here -- see [`reversal`] -- because
-    /// there is no operator that reads a dimension backwards and this needs no new one.
-    Reflect,
-    /// The first and last samples repeated, which is what the alias-free resampling around a
-    /// BigVGAN's activation pads with -- see [`upsample1d`]. Unlike [`Padding::Reflect`] it can
-    /// pad a signal by more than the signal is long, which that resampling does at the short
-    /// lengths a test uses.
-    ///
-    /// Repeating one sample `n` times is a matrix multiply by a row of ones, for the same reason
-    /// the mirror is one by the anti-diagonal: it is the operator that is already here.
-    Replicate,
-}
-
-/// `left` and `right` more positions on the time axis of `x` `(N, C, L)`.
-///
-/// `dtype` and `device` are the ones `x` will have when the graph runs; a graph holds no tensors,
-/// so it cannot work them out for itself, and the model that writes this call is the thing that
-/// knows both.
-#[track_caller]
-pub fn pad1d(
-    g: &Graph,
-    x: Value,
-    left: i32,
-    right: i32,
-    mode: Padding,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
-    if left == 0 && right == 0 {
-        return Ok(x);
-    }
-
-    assert!(left >= 0 && right >= 0, "a padding cannot be negative");
-
-    Ok(match mode {
-        Padding::Zero => {
-            let mut out = x;
-            if left > 0 {
-                let zeros = g.zeros(
-                    [Extent::of(x, 0), Extent::of(x, 1), Extent::At(left)],
-                    dtype,
-                    device,
-                );
-                out = g.cat(zeros, out, 2);
-            }
-            if right > 0 {
-                let zeros = g.zeros(
-                    [Extent::of(x, 0), Extent::of(x, 1), Extent::At(right)],
-                    dtype,
-                    device,
-                );
-                out = g.cat(out, zeros, 2);
-            }
-            out
-        }
-
-        // `x[1 ..= left]` reversed on the front and `x[L - 1 - right .. L - 1]` reversed on the
-        // back: the mirror is about the first and last samples, which are therefore not repeated.
-        // Both slices are written with constant bounds -- negative ones count from the back --
-        // so neither needs the graph to know how long `x` is.
-        Padding::Reflect => {
-            let mut out = x;
-            if left > 0 {
-                let edge = g.slice(x, 2, 1, left + 1);
-                let flip = g.constant(reversal(left)?.to_device(device)?.cast(dtype)?);
-                out = g.cat(g.matmul(edge, flip), out, 2);
-            }
-            if right > 0 {
-                let edge = g.slice(x, 2, -(right + 1), -1);
-                let flip = g.constant(reversal(right)?.to_device(device)?.cast(dtype)?);
-                out = g.cat(out, g.matmul(edge, flip), 2);
-            }
-            out
-        }
-
-        // The edge sample `left` or `right` times over: `(N, C, 1) @ (1, n)` is that sample
-        // broadcast across `n` positions, and the multiply broadcasts the row over the batch and
-        // the channels the way the mirror above does.
-        Padding::Replicate => {
-            let mut out = x;
-            if left > 0 {
-                let edge = g.slice(x, 2, 0, 1);
-                let spread = g.constant(ones(left)?.to_device(device)?.cast(dtype)?);
-                out = g.cat(g.matmul(edge, spread), out, 2);
-            }
-            if right > 0 {
-                let edge = g.slice(x, 2, -1, Bound::End);
-                let spread = g.constant(ones(right)?.to_device(device)?.cast(dtype)?);
-                out = g.cat(out, g.matmul(edge, spread), 2);
-            }
-            out
-        }
-    })
-}
-
-/// A `(1, n)` row of ones, which copies whatever is multiplied by it across `n` positions.
-fn ones(n: i32) -> Result<Tensor> {
-    Ok(Tensor::from_f32(&[1, n], &vec![1.0f32; n as usize])?)
-}
-
-/// The `n` by `n` anti-diagonal, which reverses the last axis of whatever is multiplied by it.
-///
-/// `x @ reversal(n)` is `x` backwards. It exists because reading a dimension in reverse is not
-/// an operator here and does not need to be: a reversal is a permutation, a permutation is a
-/// matrix, and a matrix multiply is the operator this library is built on.
-pub fn reversal(n: i32) -> Result<Tensor> {
-    let n = n as usize;
-    let mut values = vec![0.0f32; n * n];
-    for row in 0..n {
-        values[row * n + (n - 1 - row)] = 1.0;
-    }
-
-    Ok(Tensor::from_f32(&[n as i32, n as i32], &values)?)
-}
-
-/// A transposed convolution along the time axis of `x` `(N, C, L)` by `weight` `(C, K, R)`, with
-/// an optional per-channel `bias` `(K)`. This is what a vocoder upsamples with.
-///
-/// What comes back is `(N, K, (L - 1) * stride - 2 * padding + R)`, which is what
-/// `torch.nn.ConvTranspose1d` produces for the same arguments with no output padding.
-///
-/// # Why this is a matrix multiply and some additions
-///
-/// Read the operation the way it is defined rather than as a convolution: input position `l`
-/// contributes `weight[:, :, k]` to output position `l * stride + k`, for every `k`. The
-/// contribution is a matrix multiply -- `(N, L, C) @ (C, K * R)` gives every one of them at once
-/// -- and what is left is adding up the ones that landed on the same output position.
-///
-/// Which ones those are is fixed: positions `l * stride + k` and `l' * stride + k'` collide only
-/// when `k` and `k'` are `stride` apart, so cutting the kernel into `ceil(R / stride)` pieces of
-/// `stride` each makes every piece collision-free within itself and the whole thing a sum of
-/// `ceil(R / stride)` shifted copies. For the vocoders here the kernel is twice the stride, so
-/// that is two additions.
-///
-/// # Groups
-///
-/// One group only, which is why there is no argument for it. The upsampling in a vocoder and the
-/// inverse transform in [`istft`] are the two callers this was written for and neither groups, so
-/// rather than write a general case with nothing to test it against there is no general case. A
-/// grouped transposed convolution is the same derivation with a block-diagonal weight.
-#[track_caller]
-#[allow(clippy::too_many_arguments)]
-pub fn conv_transpose1d(
-    g: &Graph,
-    x: Value,
-    weight: Value,
-    bias: Option<Value>,
-    in_channels: i32,
-    out_channels: i32,
-    kernel: i32,
-    stride: i32,
-    padding: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
-    assert!(stride >= 1, "a stride must be positive");
-    assert!(kernel >= 1, "a kernel must be positive");
-
-    // The kernel is rounded up to a whole number of strides so that it cuts evenly into pieces.
-    // The zeros this pads it with contribute nothing, and what they add to the far end of the
-    // output is trimmed off below.
-    let pieces = (kernel + stride - 1) / stride;
-    let padded = pieces * stride;
-
-    let weight = pad1d(g, weight, 0, padded - kernel, Padding::Zero, dtype, device)?;
-
-    // (N, L, C) @ (C, K * R) -> (N, L, K * R): every contribution of every input position, before
-    // anything has been said about where they land.
-    let flat = g.view(
-        weight,
-        [Extent::At(in_channels), Extent::At(out_channels * padded)],
-    );
-    let columns = g.matmul(g.contiguous(g.transpose(x, 1, 2)), flat);
-
-    // Cut the kernel axis into `pieces` of `stride`. Within a piece no two contributions collide,
-    // so a piece flattens straight onto the time axis; between pieces the collision is a shift of
-    // a whole stride, which is the padding below.
-    let split = g.view(
-        columns,
-        [
-            Extent::of(x, 0),
-            Extent::of(x, 2),
-            Extent::At(out_channels),
-            Extent::At(pieces),
-            Extent::At(stride),
-        ],
-    );
-
-    let mut total: Option<Value> = None;
-    for piece in 0..pieces {
-        // (N, L, K, 1, stride) -> (N, K, L, 1, stride) -> (N, K, L * stride).
-        let part = g.contiguous(g.transpose(g.slice(split, 3, piece, piece + 1), 1, 2));
-        let part = g.view(
-            part,
-            [
-                Extent::of(x, 0),
-                Extent::At(out_channels),
-                Extent::prod(part, 2, 5),
-            ],
-        );
-
-        let part = pad1d(
-            g,
-            part,
-            piece * stride,
-            (pieces - 1 - piece) * stride,
-            Padding::Zero,
-            dtype,
-            device,
-        )?;
-
-        total = Some(match total {
-            None => part,
-            Some(sofar) => g.add(sofar, part),
-        });
-    }
-
-    let full = total.expect("a kernel of at least one stride cuts into at least one piece");
-
-    // Every piece is `(L + pieces - 1) * stride` long, which is what a transposed convolution by
-    // the *padded* kernel produces. The real one is shorter by what the padding added, and
-    // `padding` itself takes that many more off each end.
-    let trim = padded - kernel + padding;
-    let full = match (padding, trim) {
-        (0, 0) => full,
-        _ => g.slice(
-            full,
-            2,
-            padding,
-            match trim {
-                0 => Extent::from(crate::flint::Bound::End),
-                _ => Extent::At(-trim),
-            },
-        ),
-    };
-
-    // Contiguous either way: `full` is a slice, which is a view, and a view cannot be moved off
-    // the device or reshaped by whatever reads this next.
-    Ok(g.contiguous(match bias {
-        None => full,
-        // A bias is per output channel, and a binary operation broadcasts its right operand over
-        // the *leading* dimensions of its left. So the channel has to be last for the add, which
-        // is two transposes and no copy.
-        Some(bias) => g.transpose(g.add(g.transpose(full, 1, 2), bias), 1, 2),
-    }))
-}
-
-/// The activation a BigVGAN is built from: `x + sin(alpha * x)^2 / alpha`.
-///
-/// `alpha` and `beta` are `(C)`, one per channel of `x` `(N, C, L)`. With `beta` given this is
-/// the "snakebeta" variant, `x + sin(alpha * x)^2 / beta`, which is what the vocoders in these
-/// models use; the two are the same function when `beta == alpha`.
-///
-/// Both are taken already exponentiated. A BigVGAN trained with `alpha_logscale` stores the
-/// logarithm and raises it where it is read, and that belongs to whoever reads the weight, not
-/// here -- this is the arithmetic, not the storage.
-///
-/// The channel is moved to the last axis and back because a binary operation broadcasts its right
-/// operand over the leading dimensions of its left, so a per-channel vector has to sit against
-/// the axis it names. Neither transpose moves any data.
-///
-/// # What it costs
-///
-/// Of everything in this module this is the one most likely to want a kernel of its own. It is
-/// elementwise, so it is bound by memory rather than arithmetic, and written this way it is about
-/// six passes over the whole tensor plus a copy to make the result contiguous, where a fused
-/// kernel would read it once and write it once.
-///
-/// That matters because of where it runs. A BigVGAN applies it after every convolution in every
-/// AMP block -- eighteen times per upsampling stage, on the tensors that have already been
-/// upsampled -- so it is the vocoder's bandwidth, not its arithmetic, that this spends. The
-/// convolutions beside it go through `conv2d` and a tuned GEMM; this does not.
-#[track_caller]
-pub fn snake(
-    g: &Graph,
-    x: Value,
-    alpha: Value,
-    beta: Option<Value>,
-    eps: f32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
-    let t = g.transpose(x, 1, 2);
-
-    let scaled = g.mul(t, alpha);
-    let squared = g.square(g.sin(scaled));
-
-    // The epsilon is added to the divisor rather than guarding the division, which is what the
-    // reference does and is there for the channel whose parameter has decayed to zero.
-    let divisor = g.add(beta.unwrap_or(alpha), scalar(g, eps, dtype, device)?);
-    let out = g.add(t, g.div(squared, divisor));
-
-    // Contiguous, not just transposed back: what comes out of here is a tensor a caller may do
-    // anything with, including move it off the device, and a view cannot be moved.
-    Ok(g.contiguous(g.transpose(out, 1, 2)))
-}
-
-/// `eps` as something the graph can add to a tensor: a constant of one element, which a binary
-/// operation broadcasts over every dimension of its left operand.
-#[track_caller]
-fn scalar(g: &Graph, value: f32, dtype: DType, device: Device) -> Result<Value> {
-    Ok(g.constant(
-        Tensor::from_f32(&[1], &[value])?
-            .to_device(device)?
-            .cast(dtype)?,
-    ))
-}
 
 /// A periodic Hann window of `n` points, which is what every speech model here analyses with.
 ///
@@ -391,99 +54,6 @@ pub fn hann_window(n: usize) -> Vec<f32> {
             (0.5 - 0.5 * phase.cos()) as f32
         })
         .collect()
-}
-
-/// The bank of windowed sinusoids that [`stft`] convolves by: `(2 * (n_fft / 2 + 1), 1, n_fft)`.
-///
-/// The first `n_fft / 2 + 1` channels are the real part of the transform and the rest are the
-/// imaginary part, in that order, because a tensor here holds real numbers and a spectrum is the
-/// two halves of one laid end to end. Only half the spectrum is kept: the input is real, so the
-/// other half is its conjugate and says nothing new.
-pub fn stft_basis(n_fft: usize, window: &[f32]) -> Result<Tensor> {
-    assert_eq!(window.len(), n_fft, "a window is as long as the transform");
-
-    let bins = n_fft / 2 + 1;
-    let mut values = vec![0.0f32; 2 * bins * n_fft];
-
-    for bin in 0..bins {
-        for n in 0..n_fft {
-            let phase = 2.0 * std::f64::consts::PI * bin as f64 * n as f64 / n_fft as f64;
-            let w = window[n] as f64;
-            values[bin * n_fft + n] = (w * phase.cos()) as f32;
-            values[(bins + bin) * n_fft + n] = (-w * phase.sin()) as f32;
-        }
-    }
-
-    Ok(Tensor::from_f32(
-        &[2 * bins as i32, 1, n_fft as i32],
-        &values,
-    )?)
-}
-
-/// The bank [`istft`] transposes by, the inverse of [`stft_basis`]: `(2 * (n_fft / 2 + 1), 1,
-/// n_fft)`.
-///
-/// Two things distinguish it from the forward bank beyond the sign. It carries the `1 / n_fft` an
-/// inverse transform divides by, and it doubles every bin except the two -- the constant one and
-/// the Nyquist one -- that have no conjugate partner, which is what recovers the half of the
-/// spectrum the forward transform did not keep. It is windowed again, which is what an overlap-add
-/// resynthesis does; [`window_envelope`] is what divides that second window back out.
-pub fn istft_basis(n_fft: usize, window: &[f32]) -> Result<Tensor> {
-    assert_eq!(window.len(), n_fft, "a window is as long as the transform");
-
-    let bins = n_fft / 2 + 1;
-    let mut values = vec![0.0f32; 2 * bins * n_fft];
-
-    for bin in 0..bins {
-        // The bins that are their own conjugate appear once in a full spectrum; every other bin
-        // appears twice, and this bank sees only one of the two.
-        let fold = if bin == 0 || (n_fft.is_multiple_of(2) && bin == n_fft / 2) {
-            1.0
-        } else {
-            2.0
-        };
-        let scale = fold / n_fft as f64;
-
-        for n in 0..n_fft {
-            let phase = 2.0 * std::f64::consts::PI * bin as f64 * n as f64 / n_fft as f64;
-            let w = window[n] as f64;
-            values[bin * n_fft + n] = (scale * phase.cos() * w) as f32;
-            values[(bins + bin) * n_fft + n] = (-scale * phase.sin() * w) as f32;
-        }
-    }
-
-    Ok(Tensor::from_f32(
-        &[2 * bins as i32, 1, n_fft as i32],
-        &values,
-    )?)
-}
-
-/// What the analysis and synthesis windows together multiply each sample by, once every frame
-/// that covers it has been added up: `sum_t window[n - t * hop]^2`, `(1, 1, length)`.
-///
-/// Dividing by this is what makes an [`istft`] of an [`stft`] the signal it started as. It is a
-/// constant of the window and the hop rather than of the audio, but its length is the audio's, so
-/// it is built for a known number of frames.
-pub fn window_envelope(window: &[f32], hop: usize, frames: usize, eps: f32) -> Result<Tensor> {
-    let n_fft = window.len();
-    let length = (frames - 1) * hop + n_fft;
-    let mut values = vec![0.0f32; length];
-
-    for frame in 0..frames {
-        for n in 0..n_fft {
-            values[frame * hop + n] += window[n] * window[n];
-        }
-    }
-
-    // A position no frame covered would divide by zero. With a Hann window and a hop of a quarter
-    // of it that is only the very ends, which is exactly where `center` padding is trimmed off.
-    for value in &mut values {
-        if *value < eps {
-            *value = eps;
-        }
-    }
-
-    Ok(Tensor::from_f32(&[1, 1, length as i32], &values)?)
 }
 
 /// Which mel scale a filterbank is laid out on.
@@ -577,40 +147,23 @@ pub fn mel_filterbank(
     Ok(Tensor::from_f32(&[n_mels as i32, bins as i32], &values)?)
 }
 
-/// The short time Fourier transform of `x` `(N, 1, L)`, as a real and an imaginary part, each
-/// `(N, n_fft / 2 + 1, frames)`.
-///
-/// `basis` is [`stft_basis`] as a constant, which is where the window went. `centered` pads the
-/// signal by half a window at both ends so that frame `t` is centred on sample `t * hop` rather
-/// than starting there, which is what `torch.stft` does by default and what every mel
-/// spectrogram in these models was computed with; [`Padding::Reflect`] is likewise its default
-/// and the reason this takes a mode at all.
+/// `value` as something the graph can add to a tensor: a constant of one element, which a binary
+/// operation broadcasts over every dimension of its left operand.
 #[track_caller]
-#[allow(clippy::too_many_arguments)]
-pub fn stft(
-    g: &Graph,
-    x: Value,
-    basis: Value,
-    n_fft: i32,
-    hop: i32,
-    centered: Option<Padding>,
-    dtype: DType,
-    device: Device,
-) -> Result<(Value, Value)> {
-    let x = match centered {
-        None => x,
-        Some(mode) => pad1d(g, x, n_fft / 2, n_fft / 2, mode, dtype, device)?,
-    };
+fn scalar(g: &Graph, value: f32, dtype: DType, device: Device) -> Result<Value> {
+    Ok(g.constant(
+        Tensor::from_f32(&[1], &[value])?
+            .to_device(device)?
+            .cast(dtype)?,
+    ))
+}
 
-    // One channel in, two per bin out, and a stride that is the hop: a frame is what the kernel
-    // covers and the hop is how far it moves, which is the definition of the transform.
-    let spectrum = g.conv1d(x, basis, None, hop, 0, 1, 1);
-
+/// The real and the imaginary part of what [`Graph::stft`] gives at `n_fft`, each `(N, n_fft / 2
+/// + 1, frames)`: the first half of its channels and the second.
+#[track_caller]
+pub fn halves(g: &Graph, spectrum: Value, n_fft: i32) -> (Value, Value) {
     let bins = n_fft / 2 + 1;
-    let real = g.slice(spectrum, 1, 0, bins);
-    let imaginary = g.slice(spectrum, 1, bins, 2 * bins);
-
-    Ok((real, imaginary))
+    (g.slice(spectrum, 1, 0, bins), g.slice(spectrum, 1, bins, 2 * bins))
 }
 
 /// `sqrt(real^2 + imaginary^2)`, the magnitude spectrum a mel filterbank is applied to.
@@ -643,50 +196,6 @@ pub fn apply_filterbank(g: &Graph, magnitude: Value, filterbank: Value) -> Value
     let mel = g.matmul(framewise, g.transpose(filterbank, 0, 1));
 
     g.contiguous(g.transpose(mel, 1, 2))
-}
-
-/// The inverse of [`stft`]: `(N, 1, (frames - 1) * hop + n_fft)`, or that trimmed by half a
-/// window at each end when the transform was `centered`.
-///
-/// `basis` is [`istft_basis`] and `envelope` is [`window_envelope`], both as constants. The
-/// transposed convolution is the overlap-add; the division by the envelope is what undoes the
-/// two windows the signal has been multiplied by on the way through.
-#[track_caller]
-#[allow(clippy::too_many_arguments)]
-pub fn istft(
-    g: &Graph,
-    real: Value,
-    imaginary: Value,
-    basis: Value,
-    envelope: Value,
-    n_fft: i32,
-    hop: i32,
-    centered: bool,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
-    let bins = n_fft / 2 + 1;
-    let spectrum = g.cat(real, imaginary, 1);
-
-    let wave = conv_transpose1d(
-        g,
-        spectrum,
-        basis,
-        None,
-        2 * bins,
-        1,
-        n_fft,
-        hop,
-        0,
-        dtype,
-        device,
-    )?;
-    let wave = g.div(wave, envelope);
-
-    Ok(match centered {
-        false => wave,
-        true => g.slice(wave, 2, n_fft / 2, -(n_fft / 2)),
-    })
 }
 
 /// The windowed sinc a resampling convolves by, as a `(1, 1, taps)` kernel and the stride to read
@@ -751,7 +260,7 @@ pub fn resample(
                     .to_device(device)?
                     .cast(dtype)?,
             );
-            conv_transpose1d(g, x, one, None, 1, 1, 1, up, 0, dtype, device)?
+            g.conv_transpose1d(x, one, None, up, 0, 0, 1)
         }
     };
 
@@ -867,9 +376,8 @@ fn bessel_i0(x: f64) -> f64 {
 /// The reference convolves with `groups = C` and the same taps in every group, which is a
 /// depthwise convolution whose kernel does not vary by channel. That is not a grouped convolution
 /// at all: reading `(N, C, L)` as `(N * C, 1, L)` makes each channel its own item in a batch, and
-/// one ungrouped single-channel convolution does all of them at once. So neither this nor
-/// [`downsample1d`] needs the grouped transposed convolution that [`conv_transpose1d`] does not
-/// have.
+/// one ungrouped single-channel convolution does all of them at once -- with one filter as its
+/// whole weight, rather than `C` copies of it.
 ///
 /// # Why it pads before it upsamples
 ///
@@ -879,7 +387,6 @@ fn bessel_i0(x: f64) -> f64 {
 /// that taper into the padding, where it is thrown away. This is what
 /// `alias_free_activation/torch/resample.py` does, down to which side the odd sample goes on.
 #[track_caller]
-#[allow(clippy::too_many_arguments)]
 pub fn upsample1d(
     g: &Graph,
     x: Value,
@@ -887,9 +394,7 @@ pub fn upsample1d(
     channels: i32,
     ratio: i32,
     kernel: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+) -> Value {
     assert!(ratio >= 1, "a ratio must be positive");
     assert!(
         kernel >= ratio,
@@ -900,15 +405,13 @@ pub fn upsample1d(
     let left = pad * ratio + (kernel - ratio) / 2;
     let right = pad * ratio + (kernel - ratio + 1) / 2;
 
-    let padded = pad1d(g, x, pad, pad, Padding::Replicate, dtype, device)?;
+    let padded = g.pad1d(x, pad, pad, PadMode::Replicate);
     let folded = fold_channels(g, padded);
 
     // The `ratio` is the amplitude the zeros a transposed convolution interleaves took out, the
     // same factor `resample_kernel` folds into its taps. Here the filter is shared with
     // `downsample1d`, which must not have it, so it is applied to the signal instead.
-    let up = conv_transpose1d(
-        g, folded, filter, None, 1, 1, kernel, ratio, 0, dtype, device,
-    )?;
+    let up = g.conv_transpose1d(folded, filter, None, ratio, 0, 0, 1);
     let up = g.mul_scalar(up, ratio as f32);
 
     let trimmed = g.slice(
@@ -921,7 +424,7 @@ pub fn upsample1d(
         },
     );
 
-    Ok(unfold_channels(g, trimmed, x, channels))
+    unfold_channels(g, trimmed, x, channels)
 }
 
 /// `x` `(N, C, L)` resampled down by `ratio`, which is the other half of what an alias-free
@@ -930,7 +433,6 @@ pub fn upsample1d(
 /// What comes back is `(N, C, ceil(L / ratio))`, and for the even `L` an upsampling produced that
 /// is `L / ratio`.
 #[track_caller]
-#[allow(clippy::too_many_arguments)]
 pub fn downsample1d(
     g: &Graph,
     x: Value,
@@ -938,20 +440,18 @@ pub fn downsample1d(
     channels: i32,
     ratio: i32,
     kernel: i32,
-    dtype: DType,
-    device: Device,
-) -> Result<Value> {
+) -> Value {
     assert!(ratio >= 1, "a ratio must be positive");
 
     // An even kernel is centred between two samples, so it takes one less on the left than on
     // the right; an odd one is centred on a sample and takes the same either side.
     let left = kernel / 2 - i32::from(kernel % 2 == 0);
-    let padded = pad1d(g, x, left, kernel / 2, Padding::Replicate, dtype, device)?;
+    let padded = g.pad1d(x, left, kernel / 2, PadMode::Replicate);
 
     let folded = fold_channels(g, padded);
     let down = g.conv1d(folded, filter, None, ratio, 0, 1, 1);
 
-    Ok(unfold_channels(g, down, x, channels))
+    unfold_channels(g, down, x, channels)
 }
 
 /// `(N, C, L)` read as `(N * C, 1, L)`, so that a convolution by one channel's worth of taps

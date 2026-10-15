@@ -382,9 +382,7 @@ impl IndexTts {
             frames,
             w2v_bert::Config::USED_LAYERS,
             g.input("distances"),
-            self.dtype,
-            self.device,
-        )?;
+        );
         let stats = sub.subgraph("semantic");
         let mean = stats.load("mean", &[config.hidden_size]);
         let std = stats.load("std", &[config.hidden_size]);

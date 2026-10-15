@@ -27,7 +27,6 @@ use waifu::indextts::w2v_bert::{self, Config};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;
-const F32: waifu::DType = waifu::DType::Float;
 
 const FEATURE_DIM: i32 = 20;
 const HIDDEN: i32 = 32;
@@ -142,10 +141,7 @@ fn run(layers: i32) -> (Vec<i32>, Vec<f32>) {
         FRAMES,
         layers,
         g.input("distances"),
-        F32,
-        CPU,
-    )
-    .unwrap();
+    );
     g.output("out", out);
 
     let weights = Weights::for_graph(&g, CPU, filled).unwrap();

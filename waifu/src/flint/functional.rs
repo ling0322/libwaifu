@@ -32,7 +32,7 @@
 //! ```
 
 use super::operators::{copy_operators, operators_of, raw_operators};
-use super::{check, ffi, DType, Device, Error, Result, Tensor};
+use super::{check, ffi, DType, Device, Error, PadMode, Result, Tensor};
 
 /// Reduce over the last dimension, the default of [`sum`] and [`max`].
 pub const LAST_DIM: i32 = -1;
@@ -318,8 +318,6 @@ pub fn conv1d(
 }
 
 /// A transposed 1-D convolution of `input` `(N, C, L)` by `weight` `(C, K / groups, R)`.
-///
-/// No device implements this yet; [`crate::audio::conv_transpose1d`] is what computes one today.
 pub fn conv_transpose1d(
     input: &Tensor,
     weight: &Tensor,
@@ -360,20 +358,57 @@ pub fn conv_transpose1d(
 }
 
 /// `x + sin(alpha * x)^2 / (beta + eps)`, per channel of `input` `(N, C, L)`.
-///
-/// No device implements this yet; [`crate::audio::snake`] is what computes one today.
 pub fn snake(input: &Tensor, alpha: &Tensor, beta: Option<&Tensor>, eps: f32) -> Result<Tensor> {
-    let operators = operators_of(input)?;
-    let out = like(input)?;
+    let (input, alpha) = (input.contiguous()?, alpha.contiguous()?);
+    let beta = beta.map(Tensor::contiguous).transpose()?;
+    let operators = operators_of(&input)?;
+    let out = like(&input)?;
     check(unsafe {
-        ffi::fl_snake(operators, input.raw(), alpha.raw(), optional(beta), eps, out.raw())
+        ffi::fl_snake(operators, input.raw(), alpha.raw(), optional(beta.as_ref()), eps, out.raw())
     })?;
     Ok(out)
 }
 
+/// `input` `(..., L)` with `left` and `right` more positions on its last dimension, filled as
+/// `mode` says: `(..., left + L + right)`.
+pub fn pad1d(input: &Tensor, left: i32, right: i32, mode: PadMode) -> Result<Tensor> {
+    if left < 0 || right < 0 {
+        return Err(Error::invalid("pad1d: a padding cannot be negative"));
+    }
+    let input = input.contiguous()?;
+    let mut shape = input.shape();
+    let Some(last) = shape.last_mut() else {
+        return Err(Error::invalid("pad1d: the input has no dimension to pad"));
+    };
+    if mode == PadMode::Reflect && (left >= *last || right >= *last) {
+        return Err(Error::invalid(format!(
+            "pad1d: a reflection of {left} and {right} is not less than the {} it mirrors",
+            *last
+        )));
+    }
+    *last += left + right;
+
+    let operators = operators_of(&input)?;
+    let out = beside(&input, &shape, input.dtype())?;
+    check(unsafe {
+        ffi::fl_pad1d(operators, input.raw(), left, right, mode.code(), out.raw())
+    })?;
+    Ok(out)
+}
+
+/// `min(max(input, lo), hi)`. Either bound may be infinite.
+pub fn clamp(input: &Tensor, lo: f32, hi: f32) -> Result<Tensor> {
+    if lo.is_nan() || hi.is_nan() || lo > hi {
+        return Err(Error::invalid(format!("clamp: [{lo}, {hi}] is not an interval")));
+    }
+    let input = input.contiguous()?;
+    let operators = operators_of(&input)?;
+    let out = like(&input)?;
+    check(unsafe { ffi::fl_clamp(operators, input.raw(), lo, hi, out.raw()) })?;
+    Ok(out)
+}
+
 /// The short time Fourier transform of `input` `(N, 1, L)` against `window` `(n_fft)`.
-///
-/// No device implements this yet; [`crate::audio::stft`] is what computes one today.
 pub fn stft(
     input: &Tensor,
     window: &Tensor,
@@ -411,8 +446,6 @@ pub fn stft(
 }
 
 /// The inverse of [`stft`].
-///
-/// No device implements this yet; [`crate::audio::istft`] is what computes one today.
 pub fn istft(
     spectrum: &Tensor,
     window: &Tensor,

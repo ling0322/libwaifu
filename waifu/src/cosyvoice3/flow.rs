@@ -48,9 +48,9 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::audio::{pad1d, Padding};
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, PadMode, RunContext, Tensor,
+    Value,
     Weights,
 };
 use crate::indextts::gpt::gelu_new;
@@ -133,7 +133,7 @@ fn write_condition(g: &Graph, config: &Config, dtype: DType, device: Device) -> 
 
     let lookahead = g.subgraph("pre_lookahead_layer");
     let across = g.contiguous(g.transpose(embedded, 1, 2));
-    let x = pad1d(g, across, 0, config.lookahead, Padding::Zero, dtype, device)?;
+    let x = g.pad1d(across, 0, config.lookahead, PadMode::Zero);
     let conv1 = lookahead.subgraph("conv1");
     let x = g.conv1d(
         x,
@@ -148,7 +148,7 @@ fn write_condition(g: &Graph, config: &Config, dtype: DType, device: Device) -> 
         1,
     );
     let x = leaky_relu(g, x);
-    let x = pad1d(g, x, 2, 0, Padding::Zero, dtype, device)?;
+    let x = g.pad1d(x, 2, 0, PadMode::Zero);
     let conv2 = lookahead.subgraph("conv2");
     let x = g.conv1d(
         x,
@@ -346,15 +346,7 @@ fn write_estimator(g: &Graph, config: &Config, dtype: DType, device: Device) -> 
         for name in ["conv1", "conv2"] {
             let conv = sub.subgraph(name).subgraph("0");
             let across = g.contiguous(g.transpose(running, 1, 2));
-            let padded = pad1d(
-                g,
-                across,
-                config.position_kernel - 1,
-                0,
-                Padding::Zero,
-                dtype,
-                device,
-            )?;
+            let padded = g.pad1d(across, config.position_kernel - 1, 0, PadMode::Zero);
             let convolved = g.conv1d(
                 padded,
                 conv.load(

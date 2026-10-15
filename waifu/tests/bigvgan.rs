@@ -51,10 +51,24 @@ const F32: DType = DType::Float;
 /// orders; nothing else about them differs.
 const TOLERANCE: f32 = 2e-4;
 
-/// And on a card, where the float type is half rather than float32. An order of magnitude looser,
-/// which is what sixteen bits of mantissa through a hundred-odd layers costs: the worst of the 24
-/// samples is 3.4e-3 away from BigVGAN's, against a waveform that peaks at 0.75.
-const CUDA_TOLERANCE: f32 = 4e-3;
+/// On a card, where the float type is half rather than float32, the waveform is compared with the
+/// processor's float32 one -- which `a_mel_becomes_the_waveform_bigvgan_makes_of_it` holds to
+/// BigVGAN's -- over a mel long enough to say something about half rather than about one draw.
+///
+/// The worst of 24 samples is not that. Over twenty six-frame mels it ranged from 2.5e-3 to
+/// 7.6e-3 for the same code, and which way a given mel fell changed with nothing but the order the
+/// roundings happened in: the fused snake and transposed convolution, each nearer float32 than the
+/// compositions they replaced, moved the old fixture from 3.6e-3 to 5.0e-3, while the compositions
+/// themselves exceeded a 4e-3 bound on thirteen of the twenty. So the mean is what is checked, and
+/// the maximum only for a gross failure.
+const CUDA_FRAMES: i32 = 200;
+
+/// Over `CUDA_FRAMES`, the mean was 1.5e-3 to 1.6e-3 across four mels, and 1.6e-3 to 1.8e-3 before
+/// the snake and the transposed convolution were kernels.
+const CUDA_MEAN_TOLERANCE: f64 = 2.5e-3;
+
+/// And the worst sample 5.3e-3 to 6.4e-3, against a waveform whose RMS is 0.43.
+const CUDA_MAX_TOLERANCE: f64 = 1.5e-2;
 
 /// The scales `tools/bigvgan_reference.py` generated each waveform at.
 const WEIGHT_SCALE: f64 = 0.25;
@@ -208,7 +222,7 @@ fn upsampling_is_the_reference_upsampling() {
         |g, x| {
             let taps = g.constant(filter.clone());
 
-            upsample1d(g, x, taps, 3, 2, 12, F32, CPU).unwrap()
+            upsample1d(g, x, taps, 3, 2, 12)
         },
         &signal,
     );
@@ -228,7 +242,7 @@ fn downsampling_is_the_reference_downsampling() {
         |g, x| {
             let taps = g.constant(filter.clone());
 
-            downsample1d(g, x, taps, 3, 2, 12, F32, CPU).unwrap()
+            downsample1d(g, x, taps, 3, 2, 12)
         },
         &signal,
     );
@@ -250,10 +264,10 @@ fn an_anti_aliased_snake_is_the_two_of_them_around_a_snake() {
             let alpha = g.exp(g.constant(tensor(&[3], &fill("act.alpha", 3, WEIGHT_SCALE))));
             let beta = g.exp(g.constant(tensor(&[3], &fill("act.beta", 3, WEIGHT_SCALE))));
 
-            let raised = upsample1d(g, x, taps, 3, 2, 12, F32, CPU).unwrap();
-            let curled = waifu::audio::snake(g, raised, alpha, Some(beta), 1e-9, F32, CPU).unwrap();
+            let raised = upsample1d(g, x, taps, 3, 2, 12);
+            let curled = g.snake(raised, alpha, Some(beta), 1e-9);
 
-            downsample1d(g, curled, taps, 3, 2, 12, F32, CPU).unwrap()
+            downsample1d(g, curled, taps, 3, 2, 12)
         },
         &signal,
     );
@@ -375,21 +389,38 @@ fn a_configuration_that_cannot_be_built_says_so() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn it_runs_on_a_card() {
-    // The whole point of a model composed out of `conv2d` and `matmul` is that it runs wherever
-    // those do, so this is the same small model as `a_mel_becomes_the_waveform_bigvgan_makes_of_it`
-    // against the same expectation, on the GPU and in whatever float type that backend works in.
-    let dtype = waifu::flint::functional::default_float_type(Device::Cuda).unwrap();
-    let weights = weights_on(Device::Cuda, dtype, WEIGHT_SCALE);
+    // The same small model as `a_mel_becomes_the_waveform_bigvgan_makes_of_it`, on the GPU and in
+    // whatever float type that backend works in, against the processor in float32. See
+    // `CUDA_FRAMES` for why the mel is long and the mean is what is held.
+    let mel = tensor(&[1, 8, CUDA_FRAMES], &fill("mel", 8 * CUDA_FRAMES as usize, 1.0));
+    let run = |device, dtype| {
+        let weights = weights_on(device, dtype, WEIGHT_SCALE);
+        let vocoder = BigVgan::build(config(false), "", &weights, device, dtype).unwrap();
+        let waveform = vocoder.forward(&mel).unwrap();
+        assert_eq!(waveform.shape(), vec![1, 1, 4 * CUDA_FRAMES]);
 
-    let vocoder = BigVgan::build(config(false), "", &weights, Device::Cuda, dtype).unwrap();
-    let waveform = vocoder.forward(&mel()).unwrap();
+        waveform.to_device(CPU).unwrap().cast(F32).unwrap().to_vec_f32().unwrap()
+    };
 
-    assert_eq!(waveform.shape(), vec![1, 1, 24]);
+    let half = waifu::flint::functional::default_float_type(Device::Cuda).unwrap();
+    let card = run(Device::Cuda, half);
+    let host = run(CPU, F32);
 
-    // Against the same numbers the processor is checked on: this is BigVGAN's float32 answer, and
-    // the distance to it is what half costs rather than anything about the card.
-    let host = waveform.to_device(CPU).unwrap().cast(F32).unwrap();
-    close(&host.to_vec_f32().unwrap(), &WAVEFORM, CUDA_TOLERANCE);
+    let (mut mean, mut worst) = (0f64, 0f64);
+    for (x, y) in card.iter().zip(&host) {
+        let error = (f64::from(*x) - f64::from(*y)).abs();
+        mean += error / card.len() as f64;
+        worst = worst.max(error);
+    }
+
+    assert!(
+        mean <= CUDA_MEAN_TOLERANCE,
+        "the card is {mean:.3e} from the processor on average"
+    );
+    assert!(
+        worst <= CUDA_MAX_TOLERANCE,
+        "the card is {worst:.3e} from the processor at its worst"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

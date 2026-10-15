@@ -28,17 +28,14 @@
 //!   hands the same CAMPPlus, so it is IndexTTS's [`Spectrograms::campplus`], whose module note
 //!   says how Kaldi's frame processing becomes one convolution.
 //!
-//! Each is a strided convolution by a bank of windowed sinusoids -- [`crate::audio::stft`] -- and
-//! then a filterbank and a logarithm, as a graph. The banks and filterbanks depend on nothing but
-//! the transform, so they are built once, when the model is read, and kept on the device.
+//! Each is a short time Fourier transform -- [`Graph::stft`] -- and then a filterbank and a
+//! logarithm, as a graph. The windows and filterbanks depend on nothing but the transform, so they
+//! are built once, when the model is read, and kept on the device.
 
 use std::collections::HashMap;
 
-use crate::audio::{
-    apply_filterbank, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis, MelScale,
-    Padding,
-};
-use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights};
+use crate::audio::{apply_filterbank, halves, hann_window, magnitude, mel_filterbank, MelScale};
+use crate::flint::{DType, Device, Extent, Graph, Ir, PadMode, RunContext, Tensor, Value, Weights};
 use crate::indextts::features::Spectrograms;
 use crate::{Error, Result};
 
@@ -52,17 +49,18 @@ const WHISPER_FFT: usize = 400;
 const WHISPER_HOP: i32 = 160;
 const WHISPER_BANDS: usize = 128;
 
-/// The three transforms' banks and filterbanks, on the device.
+/// The three transforms' windows and filterbanks, on the device.
 pub struct Features {
     device: Device,
-    speech_basis: Tensor,
+    speech_window: Tensor,
     speech_filterbank: Tensor,
-    whisper_basis: Tensor,
+    whisper_window: Tensor,
     whisper_filterbank: Tensor,
     kaldi: Spectrograms,
 }
 
-/// `max(x, floor)`, as `floor + relu(x - floor)`; `floor` is a one-element constant.
+/// `max(x, floor)`, as `floor + relu(x - floor)`, for a `floor` that is a value of the graph's
+/// rather than a number -- a constant one is [`Graph::clamp`].
 fn at_least(g: &Graph, x: Value, floor: Value) -> Value {
     g.add(g.relu(g.sub(x, floor)), floor)
 }
@@ -76,12 +74,11 @@ impl Features {
     pub fn new(device: Device) -> Result<Features> {
         let on = |tensor: Tensor| -> Result<Tensor> { Ok(tensor.to_device(device)?) };
 
-        let speech_window = hann_window(SPEECH_FFT);
-        let whisper_window = hann_window(WHISPER_FFT);
+        let window = |n: usize| Tensor::from_f32(&[n as i32], &hann_window(n));
 
         Ok(Features {
             device,
-            speech_basis: on(stft_basis(SPEECH_FFT, &speech_window)?)?,
+            speech_window: on(window(SPEECH_FFT)?)?,
             speech_filterbank: on(mel_filterbank(
                 24000,
                 SPEECH_FFT,
@@ -91,7 +88,7 @@ impl Features {
                 MelScale::Slaney,
                 true,
             )?)?,
-            whisper_basis: on(stft_basis(WHISPER_FFT, &whisper_window)?)?,
+            whisper_window: on(window(WHISPER_FFT)?)?,
             whisper_filterbank: on(mel_filterbank(
                 16000,
                 WHISPER_FFT,
@@ -135,28 +132,18 @@ impl Features {
         let (dtype, device) = (DType::Float, self.device);
 
         let g = Graph::new();
-        let x = pad1d(
-            &g,
-            g.input("wave"),
-            pad,
-            pad,
-            Padding::Reflect,
-            dtype,
-            device,
-        )?;
-        let (real, imaginary) = stft(
-            &g,
+        let x = g.pad1d(g.input("wave"), pad, pad, PadMode::Reflect);
+        let spectrum = g.stft(
             x,
-            g.constant(self.speech_basis.clone()),
+            g.constant(self.speech_window.clone()),
             SPEECH_FFT as i32,
             SPEECH_HOP,
-            None,
-            dtype,
-            device,
-        )?;
+            false,
+        );
+        let (real, imaginary) = halves(&g, spectrum, SPEECH_FFT as i32);
         let magnitude = magnitude(&g, real, imaginary, 1e-9, dtype, device)?;
         let mel = apply_filterbank(&g, magnitude, g.constant(self.speech_filterbank.clone()));
-        g.output("mel", g.log(at_least(&g, mel, scalar(&g, 1e-5, device)?)));
+        g.output("mel", g.log(g.clamp(mel, 1e-5, f32::INFINITY)));
 
         self.run(&g, &self.upload(wave)?)
     }
@@ -173,24 +160,22 @@ impl Features {
                 "the recording is too short to hear a voice in",
             ));
         }
-        let (dtype, device) = (DType::Float, self.device);
+        let device = self.device;
 
         let g = Graph::new();
-        let (real, imaginary) = stft(
-            &g,
+        let spectrum = g.stft(
             g.input("wave"),
-            g.constant(self.whisper_basis.clone()),
+            g.constant(self.whisper_window.clone()),
             WHISPER_FFT as i32,
             WHISPER_HOP,
-            Some(Padding::Reflect),
-            dtype,
-            device,
-        )?;
+            true,
+        );
+        let (real, imaginary) = halves(&g, spectrum, WHISPER_FFT as i32);
         let power = g.add(g.square(real), g.square(imaginary));
         let power = g.slice(power, 2, 0, -1);
         let mel = apply_filterbank(&g, power, g.constant(self.whisper_filterbank.clone()));
         let logged = g.mul_scalar(
-            g.log(at_least(&g, mel, scalar(&g, 1e-10, device)?)),
+            g.log(g.clamp(mel, 1e-10, f32::INFINITY)),
             1.0 / std::f32::consts::LN_10,
         );
 

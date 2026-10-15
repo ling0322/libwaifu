@@ -31,6 +31,14 @@
 
 namespace fl {
 
+/// What `Operators::pad1d` puts in the positions it adds. The values are the C API's
+/// `FL_PAD_*`.
+enum class PadMode {
+  kZero = 0,
+  kReflect = 1,
+  kReplicate = 2,
+};
+
 /// @brief What a device computes with: one kernel per method, reading the views it is given and
 /// writing the one it is told to write.
 ///
@@ -131,8 +139,9 @@ class Operators {
   /// Lout being (L - 1) * stride - 2 * padding + R + outputPadding: input position `l`
   /// contributes the whole kernel starting at `l * stride`. What a vocoder upsamples with.
   ///
-  /// No backend implements this. `waifu::audio::conv_transpose1d` composes it as one `matmul`
-  /// and ceil(R / stride) shifted additions, for one group only.
+  /// The CPU and CUDA have a kernel, one thread per output element gathering the input positions
+  /// that land on it. Any other device gets `F::composedConvTranspose1d`, a `matmul` per group and
+  /// ceil(R / stride) shifted additions.
   virtual void convTranspose1d(
       TensorView input,
       TensorView weight,
@@ -148,10 +157,8 @@ class Operators {
   /// -- a checkpoint trained with `alpha_logscale` stores their logarithm, and raising it belongs
   /// to whoever reads the weight. An empty `beta` means beta is alpha, the plain snake.
   ///
-  /// No backend implements this. `waifu::audio::snake` composes it out of the elementwise
-  /// operators, which costs about six passes over the tensor where a fused kernel would cost one.
-  /// Of everything named here this is the one whose kernel would most likely pay for itself: it
-  /// is memory bound and a vocoder applies it eighteen times per upsampling stage.
+  /// The CPU and CUDA fuse it into one pass. Any other device gets `F::composedSnake`, about six
+  /// passes of the elementwise operators.
   virtual void snake(
       TensorView input,
       TensorView alpha,
@@ -159,16 +166,31 @@ class Operators {
       float eps,
       TensorView out);
 
-  /// Short time Fourier transform of `input` <float>(N, 1, L) against `window` (nFft), as
-  /// <float>(N, 2 * (nFft / 2 + 1), frames) -- every bin's real part, then every bin's imaginary
-  /// part, because a tensor here holds real numbers. Only half the spectrum: the input is real,
-  /// so the other half is its conjugate. `centered` pads by half a window at both ends, by
-  /// reflection, which is what `torch.stft` does by default.
+  /// `input` <float16|float>(..., L) with `left` and `right` more positions on its last dimension,
+  /// into `out` (..., left + L + right). `mode` says what goes in them: zeros, the signal mirrored
+  /// about its first and last samples (`F.pad(mode="reflect")`, which needs `left` and `right`
+  /// below L), or the first and last samples repeated (`mode="replicate"`, any width).
   ///
-  /// No backend implements this. `waifu::audio::stft` composes it as a convolution against a bank
-  /// of windowed sinusoids, which is a GEMM of O(nFft^2) per frame where a fast transform would
-  /// be O(nFft log nFft). A backend with an FFT -- cuFFT, vDSP -- is the reason this is named
-  /// here rather than left a composition forever.
+  /// The CPU and CUDA have a kernel. Any other device gets `F::composedPad1d`, which copies the
+  /// middle and builds each edge out of `copy`, `fill` and, for a mirror, a `matmul`.
+  virtual void pad1d(TensorView input, int left, int right, PadMode mode, TensorView out);
+
+  /// `min(max(x, lo), hi)`, elementwise, into `out` of `input`'s shape. Either bound may be
+  /// infinite, which leaves that side alone. `torch.clamp`.
+  ///
+  /// The CPU and CUDA have a kernel. Any other device gets `F::composedClamp`, out of `relu`.
+  virtual void clamp(TensorView input, float lo, float hi, TensorView out);
+
+  /// Short time Fourier transform of `input` <float16|float>(N, 1, L) against `window` (nFft), as
+  /// (N, 2 * (nFft / 2 + 1), frames) -- every bin's real part, then every bin's imaginary part,
+  /// because a tensor here holds real numbers. Only half the spectrum: the input is real, so the
+  /// other half is its conjugate. `centered` pads by half a window at both ends, by reflection,
+  /// which is what `torch.stft` does by default.
+  ///
+  /// No device has a kernel; every one runs `F::composedStft`, a `conv1d` against a bank of
+  /// windowed sinusoids. That is a GEMM of O(nFft^2) per frame where a fast transform would be
+  /// O(nFft log nFft) -- arithmetic shaped like the one thing every backend is fastest at. A
+  /// backend with an FFT -- cuFFT, vDSP -- is the reason this is an operator and not a helper.
   virtual void stft(
       TensorView input,
       TensorView window,
@@ -177,11 +199,13 @@ class Operators {
       bool centered,
       TensorView out);
 
-  /// The inverse of `stft`: `spectrum` <float>(N, 2 * (nFft / 2 + 1), frames) against `window`
-  /// (nFft), as <float>(N, 1, L). Overlap-add, divided by the window's own overlap so that the
-  /// inverse of a transform is the signal it was taken of.
+  /// The inverse of `stft`: `spectrum` <float16|float>(N, 2 * (nFft / 2 + 1), frames) against
+  /// `window` (nFft), as (N, 1, L). Overlap-add, divided by the window's own overlap so that the
+  /// inverse of a transform is the signal it was taken of. `centered` trims the half window
+  /// `stft` added at each end.
   ///
-  /// No backend implements this. `waifu::audio::istft` composes it out of `conv_transpose1d`.
+  /// No device has a kernel; every one runs `F::composedIstft`, a `convTranspose1d` against the
+  /// inverse bank.
   virtual void istft(
       TensorView spectrum,
       TensorView window,

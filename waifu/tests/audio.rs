@@ -1,8 +1,9 @@
 //! The audio primitives, each against a direct statement of what it is defined to be.
 //!
-//! Every function in `waifu::audio` is a composition -- a Fourier transform is a convolution, a
-//! transposed convolution is a matrix multiply and some additions -- and a composition is exactly the kind of thing that is wrong in a way that still runs and
-//! still produces a plausibly shaped tensor. So none of these compares against a recorded output.
+//! The operators -- a transposed convolution, a padding, a snake, a Fourier transform and its
+//! inverse, a clamp -- are flint's, and the rest of `waifu::audio` composes them. Both are exactly
+//! the kind of thing that is wrong in a way that still runs and still produces a plausibly shaped
+//! tensor. So none of these compares against a recorded output.
 //! Each one writes the definition out as a loop over indices, in the least clever way available,
 //! and asks whether the graph agrees with it.
 //!
@@ -13,11 +14,10 @@
 use std::collections::HashMap;
 
 use waifu::audio::{
-    apply_filterbank, conv_transpose1d, hann_window, istft,
-    istft_basis, magnitude, mel_filterbank, pad1d, resample, resample_kernel, snake, stft,
-    stft_basis, window_envelope, MelScale, Padding,
+    apply_filterbank, halves, hann_window, magnitude, mel_filterbank, resample, resample_kernel,
+    MelScale,
 };
-use waifu::flint::{DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights};
+use waifu::flint::{DType, Device, Graph, Ir, PadMode, RunContext, Tensor, Value, Weights};
 
 const CPU: Device = Device::Cpu;
 const F32: DType = DType::Float;
@@ -361,20 +361,15 @@ fn conv_transpose1d_scatters_the_kernel_the_way_it_is_defined_to() {
         let bias_tensor = Tensor::from_f32(&[out_channels as i32], &bias).unwrap();
 
         let g = Graph::new();
-        let out = conv_transpose1d(
-            &g,
+        let out = g.conv_transpose1d(
             g.input("x"),
             g.input("w"),
             Some(g.input("bias")),
-            in_channels as i32,
-            out_channels as i32,
-            kernel as i32,
             stride as i32,
             padding as i32,
-            F32,
-            CPU,
-        )
-        .unwrap();
+            0,
+            1,
+        );
 
         let (shape, got) = run_shaped(
             &g,
@@ -414,7 +409,7 @@ fn reflect_padding_mirrors_about_the_end_samples_without_repeating_them() {
     let tensor = Tensor::from_f32(&[1, 1, 5], &x).unwrap();
 
     let g = Graph::new();
-    let out = pad1d(&g, g.input("x"), 2, 3, Padding::Reflect, F32, CPU).unwrap();
+    let out = g.pad1d(g.input("x"), 2, 3, PadMode::Reflect);
     let got = run(&g, out, &[("x", &tensor)]);
 
     // 3 2 | 1 2 3 4 5 | 4 3 2 -- the first and last samples appear once, which is what makes this
@@ -427,7 +422,7 @@ fn zero_padding_adds_zeros_on_the_sides_it_is_asked_for() {
     let tensor = Tensor::from_f32(&[1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
     let g = Graph::new();
-    let out = pad1d(&g, g.input("x"), 1, 2, Padding::Zero, F32, CPU).unwrap();
+    let out = g.pad1d(g.input("x"), 1, 2, PadMode::Zero);
     let (shape, got) = run_shaped(&g, out, &[("x", &tensor)]);
 
     assert_eq!(shape, vec![1, 2, 6]);
@@ -442,7 +437,7 @@ fn replicate_padding_repeats_the_samples_on_the_ends() {
     let tensor = Tensor::from_f32(&[1, 2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
     let g = Graph::new();
-    let out = pad1d(&g, g.input("x"), 2, 1, Padding::Replicate, F32, CPU).unwrap();
+    let out = g.pad1d(g.input("x"), 2, 1, PadMode::Replicate);
     let (shape, got) = run_shaped(&g, out, &[("x", &tensor)]);
 
     assert_eq!(shape, vec![1, 2, 6]);
@@ -460,7 +455,7 @@ fn replicate_padding_can_pad_by_more_than_the_signal_is_long() {
     let tensor = Tensor::from_f32(&[1, 1, 3], &[7.0, 8.0, 9.0]).unwrap();
 
     let g = Graph::new();
-    let out = pad1d(&g, g.input("x"), 5, 5, Padding::Replicate, F32, CPU).unwrap();
+    let out = g.pad1d(g.input("x"), 5, 5, PadMode::Replicate);
     let (shape, got) = run_shaped(&g, out, &[("x", &tensor)]);
 
     assert_eq!(shape, vec![1, 1, 13]);
@@ -486,16 +481,7 @@ fn snake_is_the_function_it_is_named_for() {
 
     // With a beta: x + sin(alpha x)^2 / beta, per channel.
     let g = Graph::new();
-    let out = snake(
-        &g,
-        g.input("x"),
-        g.input("alpha"),
-        Some(g.input("beta")),
-        0.0,
-        F32,
-        CPU,
-    )
-    .unwrap();
+    let out = g.snake(g.input("x"), g.input("alpha"), Some(g.input("beta")), 0.0);
     let got = run(
         &g,
         out,
@@ -517,7 +503,7 @@ fn snake_is_the_function_it_is_named_for() {
 
     // Without one, beta is alpha and this is the plain snake.
     let g = Graph::new();
-    let out = snake(&g, g.input("x"), g.input("alpha"), None, 0.0, F32, CPU).unwrap();
+    let out = g.snake(g.input("x"), g.input("alpha"), None, 0.0);
     let got = run(&g, out, &[("x", &x_tensor), ("alpha", &alpha_tensor)]);
 
     for c in 0..channels {
@@ -530,8 +516,32 @@ fn snake_is_the_function_it_is_named_for() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// clamp
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn clamp_bounds_each_side_it_is_given_and_leaves_an_infinite_one_alone() {
+    let x = [-3.0f32, -1.0, -0.5, 0.0, 0.25, 1.0, 7.0];
+    let tensor = Tensor::from_f32(&[1, 7], &x).unwrap();
+
+    for (lo, hi) in [(-0.99f32, 0.99f32), (1e-5, f32::INFINITY), (f32::NEG_INFINITY, 0.5)] {
+        let g = Graph::new();
+        let out = g.clamp(g.input("x"), lo, hi);
+        let got = run(&g, out, &[("x", &tensor)]);
+
+        let expected: Vec<f32> = x.iter().map(|v| v.max(lo).min(hi)).collect();
+        assert_eq!(got, expected, "clamp to [{lo}, {hi}]");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // the transform
 // ---------------------------------------------------------------------------------------------
+
+/// `window` as a constant of the graph, which is how a model hands one to [`Graph::stft`].
+fn window_of(g: &Graph, window: &[f32]) -> Value {
+    g.constant(Tensor::from_f32(&[window.len() as i32], window).unwrap())
+}
 
 #[test]
 fn an_stft_is_the_fourier_transform_of_each_windowed_frame() {
@@ -540,21 +550,9 @@ fn an_stft_is_the_fourier_transform_of_each_windowed_frame() {
     let signal = ramp(length, 2.0);
 
     let x = Tensor::from_f32(&[1, 1, length as i32], &signal).unwrap();
-    let basis = stft_basis(n_fft, &window).unwrap();
 
     let g = Graph::new();
-    let (real, imaginary) = stft(
-        &g,
-        g.input("x"),
-        g.constant(basis),
-        n_fft as i32,
-        hop as i32,
-        None,
-        F32,
-        CPU,
-    )
-    .unwrap();
-    let out = g.cat(real, imaginary, 1);
+    let out = g.stft(g.input("x"), window_of(&g, &window), n_fft as i32, hop as i32, false);
     let (shape, got) = run_shaped(&g, out, &[("x", &x)]);
 
     let bins = n_fft / 2 + 1;
@@ -600,31 +598,9 @@ fn an_istft_gives_back_the_signal_an_stft_was_taken_of() {
     let frames = (length - n_fft) / hop + 1;
 
     let g = Graph::new();
-    let (real, imaginary) = stft(
-        &g,
-        g.input("x"),
-        g.constant(stft_basis(n_fft, &window).unwrap()),
-        n_fft as i32,
-        hop as i32,
-        None,
-        F32,
-        CPU,
-    )
-    .unwrap();
-
-    let back = istft(
-        &g,
-        real,
-        imaginary,
-        g.constant(istft_basis(n_fft, &window).unwrap()),
-        g.constant(window_envelope(&window, hop, frames, 1e-11).unwrap()),
-        n_fft as i32,
-        hop as i32,
-        false,
-        F32,
-        CPU,
-    )
-    .unwrap();
+    let w = window_of(&g, &window);
+    let spectrum = g.stft(g.input("x"), w, n_fft as i32, hop as i32, false);
+    let back = g.istft(spectrum, w, n_fft as i32, hop as i32, false);
 
     let (shape, got) = run_shaped(&g, back, &[("x", &x)]);
     assert_eq!(shape, vec![1, 1, ((frames - 1) * hop + n_fft) as i32]);
@@ -634,6 +610,15 @@ fn an_istft_gives_back_the_signal_an_stft_was_taken_of() {
     // them come out right.
     let covered = n_fft..(frames - 1) * hop;
     close(&got[covered.clone()], &signal[covered], 1e-4);
+
+    // Which it does: centred, the whole signal comes back, ends and all.
+    let g = Graph::new();
+    let w = window_of(&g, &window);
+    let spectrum = g.stft(g.input("x"), w, n_fft as i32, hop as i32, true);
+    let back = g.istft(spectrum, w, n_fft as i32, hop as i32, true);
+    let (shape, got) = run_shaped(&g, back, &[("x", &x)]);
+    assert_eq!(shape, vec![1, 1, length as i32]);
+    close(&got, &signal, 1e-4);
 }
 
 #[test]
@@ -644,17 +629,8 @@ fn a_centered_transform_puts_a_frame_on_every_hop_of_the_signal() {
     let x = Tensor::from_f32(&[1, 1, length as i32], &signal).unwrap();
 
     let g = Graph::new();
-    let (real, _) = stft(
-        &g,
-        g.input("x"),
-        g.constant(stft_basis(n_fft, &window).unwrap()),
-        n_fft as i32,
-        hop as i32,
-        Some(Padding::Reflect),
-        F32,
-        CPU,
-    )
-    .unwrap();
+    let spectrum = g.stft(g.input("x"), window_of(&g, &window), n_fft as i32, hop as i32, true);
+    let (real, _) = halves(&g, spectrum, n_fft as i32);
 
     let (shape, _) = run_shaped(&g, real, &[("x", &x)]);
 
@@ -747,17 +723,8 @@ fn a_mel_spectrogram_is_the_filterbank_times_the_magnitude() {
     let bank_values = bank.to_vec_f32().unwrap();
 
     let g = Graph::new();
-    let (real, imaginary) = stft(
-        &g,
-        g.input("x"),
-        g.constant(stft_basis(n_fft, &window).unwrap()),
-        n_fft as i32,
-        hop as i32,
-        None,
-        F32,
-        CPU,
-    )
-    .unwrap();
+    let spectrum = g.stft(g.input("x"), window_of(&g, &window), n_fft as i32, hop as i32, false);
+    let (real, imaginary) = halves(&g, spectrum, n_fft as i32);
     let power = magnitude(&g, real, imaginary, 1e-9, F32, CPU).unwrap();
     let mel = apply_filterbank(&g, power, g.constant(bank));
 
@@ -872,69 +839,76 @@ fn resampling_a_sine_keeps_its_frequency_and_its_amplitude() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// the operators, as opposed to the compositions
+// the operators, as single nodes
 // ---------------------------------------------------------------------------------------------
 
-/// `conv_transpose1d`, `snake`, `stft` and `istft` are also operators -- named in `Operators`,
-/// dispatched through `F::`, reachable as a single node from a graph -- and no backend implements
-/// any of them.
+/// `conv_transpose1d`, `pad1d`, `snake`, `clamp`, `stft` and `istft` are each one node of a graph
+/// and one operator of flint's -- named in `Operators`, dispatched through `F::`, run by a kernel
+/// on the CPU and CUDA and by a composition of other operators everywhere else.
 ///
-/// `conv1d` was the fifth until #43 gave it a CUDA kernel, and its line is gone from here for the
-/// reason the last paragraph gives. What covers that kernel now is `flint/cuda/conv1d_test.cc`.
-///
-/// That combination is easy to get wrong in a way nothing notices, because the whole chain is
-/// declarations: a node no pass recognises and a node whose kernel is missing both do nothing,
-/// and only one of the two is intended. So this asks for the intended failure by name. Each graph
-/// has to compile, print as the call it stands for, and then fail *at the operator layer* when it
-/// runs -- which is five links, from `Graph` through `Op` and `ir` and the C interface down to
-/// `Operators`, every one of which has to be connected for the message to come back.
-///
-/// The bases throw rather than abort, which is what makes this a test at all: an operator that
-/// kills the process cannot be asked whether it is there.
-///
-/// When a backend grows one of these kernels its line here stops failing, and that is the signal
-/// to delete the line rather than a reason to doubt it.
+/// The whole chain is declarations, which is easy to get wrong in a way nothing notices: a node
+/// no pass recognises and a node wired to the wrong operator can both still produce a tensor. So
+/// each graph here has to print as the call it stands for -- which says `Op::name` and the
+/// `Display` arm were both filled in -- and then run, from `Graph` through `Op` and `ir` and the C
+/// interface down to `Operators`, into the shape the operator promises. What the values are is the
+/// business of the tests above.
 #[test]
-fn the_remaining_audio_operators_are_nodes_no_backend_implements_yet() {
+fn the_audio_operators_are_single_nodes_the_cpu_runs() {
     let signal = Tensor::from_f32(&[1, 2, 8], &ramp(16, 0.0)).unwrap();
+    let mono = Tensor::from_f32(&[1, 1, 8], &ramp(8, 2.0)).unwrap();
+    let spectrum = Tensor::from_f32(&[1, 6, 3], &ramp(18, 3.0)).unwrap();
     let weight = Tensor::from_f32(&[2, 1, 3], &ramp(6, 1.0)).unwrap();
     let per_channel = Tensor::from_f32(&[2], &[0.7, 1.3]).unwrap();
     let window = Tensor::from_f32(&[4], &hann_window(4)).unwrap();
 
-    // Each case is what the node should be called, how to build it, and the inputs that graph
-    // declares -- a run is refused anything it did not ask for.
+    // Each case is what the node should be called, how to build it, the inputs that graph
+    // declares -- a run is refused anything it did not ask for -- and the shape it comes out.
     type Build = Box<dyn Fn(&Graph) -> Value>;
-    type Case<'a> = (&'a str, Build, Vec<(&'a str, &'a Tensor)>);
+    type Case<'a> = (&'a str, Build, Vec<(&'a str, &'a Tensor)>, Vec<i32>);
     let cases: Vec<Case> = vec![
         (
             "conv_transpose1d",
             Box::new(|g: &Graph| g.conv_transpose1d(g.input("x"), g.input("w"), None, 2, 0, 0, 1)),
             vec![("x", &signal), ("w", &weight)],
+            vec![1, 1, 17],
+        ),
+        (
+            "pad1d",
+            Box::new(|g: &Graph| g.pad1d(g.input("x"), 3, 1, PadMode::Reflect)),
+            vec![("x", &signal)],
+            vec![1, 2, 12],
         ),
         (
             "snake",
             Box::new(|g: &Graph| g.snake(g.input("x"), g.input("a"), None, 1e-6)),
             vec![("x", &signal), ("a", &per_channel)],
+            vec![1, 2, 8],
+        ),
+        (
+            "clamp",
+            Box::new(|g: &Graph| g.clamp(g.input("x"), -0.5, 0.5)),
+            vec![("x", &signal)],
+            vec![1, 2, 8],
         ),
         (
             "stft",
             Box::new(|g: &Graph| g.stft(g.input("x"), g.input("win"), 4, 2, false)),
-            vec![("x", &signal), ("win", &window)],
+            vec![("x", &mono), ("win", &window)],
+            vec![1, 6, 3],
         ),
         (
             "istft",
             Box::new(|g: &Graph| g.istft(g.input("x"), g.input("win"), 4, 2, false)),
-            vec![("x", &signal), ("win", &window)],
+            vec![("x", &spectrum), ("win", &window)],
+            vec![1, 1, 8],
         ),
     ];
 
-    for (name, build, inputs) in cases {
+    for (name, build, inputs, expected) in cases {
         let g = Graph::new();
         let out = build(&g);
         g.output("out", out);
 
-        // It reads as the call it stands for, which is what says `Op::name` and the `Display`
-        // arm were both filled in.
         let printed = format!("{g}");
         assert!(
             printed.contains(&format!("{name}(")),
@@ -947,22 +921,9 @@ fn the_remaining_audio_operators_are_nodes_no_backend_implements_yet() {
             context = context.input(input, tensor);
         }
 
-        let ir = Ir::compile(&g);
-        let error = ir
+        let outputs = Ir::compile(&g)
             .run(&context)
-            .expect_err("no backend implements this, so running it has to fail");
-
-        // The failure has to be the operator saying it has no kernel. Anything else -- an unknown
-        // node, a shape complaint, a missing input -- would mean the chain is miswired rather
-        // than merely unimplemented.
-        let message = error.to_string();
-        assert!(
-            message.contains("no device has this kernel"),
-            "{name} failed for the wrong reason: {message}"
-        );
-        assert!(
-            message.contains(name) || message.contains("convTranspose1d"),
-            "{name} failed without naming itself: {message}"
-        );
+            .unwrap_or_else(|error| panic!("{name} did not run: {error}"));
+        assert_eq!(outputs[0].1.shape(), expected, "{name} came back the wrong shape");
     }
 }

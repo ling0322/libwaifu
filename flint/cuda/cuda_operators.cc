@@ -31,6 +31,7 @@
 #include "flint/cuda/conv2d.h"
 #include "flint/cuda/cuda_host_tensor_data.h"
 #include "flint/cuda/norm.h"
+#include "flint/cuda/signal.h"
 #include "flint/cuda/upsample.h"
 #include "flint/cuda/copy.h"
 #include "flint/cuda/fill.h"
@@ -315,6 +316,48 @@ void CudaOperators::upsampleNearest2d(TensorView input, int scale, TensorView ou
 
 void CudaOperators::upsampleNearest1d(TensorView input, TensorView out) {
   cuda::upsampleNearest1d(input, out);
+}
+
+void CudaOperators::convTranspose1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups,
+    TensorView out) {
+  F::checkConvTranspose1d(input, weight, bias, stride, padding, outputPadding, groups, out);
+  int groupOut = weight.getShape(1);
+
+  for (int g = 0; g < groups; ++g) {
+    Tensor columns = F::transposedConvolutionColumns(this, input, weight, groups, g);
+    cuda::overlapAdd1d(
+        columns,
+        bias.empty() ? bias : bias.slice(0, {g * groupOut, (g + 1) * groupOut}),
+        input.getShape(2),
+        stride,
+        padding,
+        weight.getShape(2),
+        out.slice(1, {g * groupOut, (g + 1) * groupOut}));
+  }
+}
+
+void CudaOperators::snake(
+    TensorView input,
+    TensorView alpha,
+    TensorView beta,
+    float eps,
+    TensorView out) {
+  cuda::snake(input, alpha, beta, eps, out);
+}
+
+void CudaOperators::pad1d(TensorView input, int left, int right, PadMode mode, TensorView out) {
+  cuda::pad1d(input, left, right, mode, out);
+}
+
+void CudaOperators::clamp(TensorView input, float lo, float hi, TensorView out) {
+  cuda::clamp(input, lo, hi, out);
 }
 
 void CudaOperators::geglu(TensorView input, TensorView out) {

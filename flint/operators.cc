@@ -141,9 +141,7 @@ void Operators::convTranspose1d(
     int outputPadding,
     int groups,
     TensorView out) {
-  THROW(
-      NotImplemented,
-      "convTranspose1d: no device has this kernel; waifu::audio::conv_transpose1d composes one");
+  F::composedConvTranspose1d(this, input, weight, bias, stride, padding, outputPadding, groups, out);
 }
 
 void Operators::snake(
@@ -152,7 +150,15 @@ void Operators::snake(
     TensorView beta,
     float eps,
     TensorView out) {
-  THROW(NotImplemented, "snake: no device has this kernel; waifu::audio::snake composes one");
+  F::composedSnake(this, input, alpha, beta, eps, out);
+}
+
+void Operators::pad1d(TensorView input, int left, int right, PadMode mode, TensorView out) {
+  F::composedPad1d(this, input, left, right, mode, out);
+}
+
+void Operators::clamp(TensorView input, float lo, float hi, TensorView out) {
+  F::composedClamp(this, input, lo, hi, out);
 }
 
 void Operators::stft(
@@ -162,7 +168,7 @@ void Operators::stft(
     int hop,
     bool centered,
     TensorView out) {
-  THROW(NotImplemented, "stft: no device has this kernel; waifu::audio::stft composes one");
+  F::composedStft(this, input, window, nFft, hop, centered, out);
 }
 
 void Operators::istft(
@@ -172,7 +178,7 @@ void Operators::istft(
     int hop,
     bool centered,
     TensorView out) {
-  THROW(NotImplemented, "istft: no device has this kernel; waifu::audio::istft composes one");
+  F::composedIstft(this, spectrum, window, nFft, hop, centered, out);
 }
 
 void Operators::mul(TensorView input, float other, TensorView out) {

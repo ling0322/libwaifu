@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <limits>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
@@ -227,6 +228,53 @@ CATCH_TEST_CASE("test Vulkan round and cast to int64", "[op][vulkan]") {
     CATCH_REQUIRE(asLongs(ids) == nearest);
     CATCH_REQUIRE(asLongs(F::cast(vk(), onDevice, DType::kLong)) == truncated);
   }
+}
+
+// The device has no kernel for these, so this is the composition in flint/functional.h that
+// Operators runs in its place -- the same code a Metal device runs, on a device that can be tested
+// here.
+CATCH_TEST_CASE("test Vulkan signal operators by composition", "[op][vulkan][signal]") {
+  SKIP_WITHOUT_VULKAN();
+  float inf = std::numeric_limits<float>::infinity();
+
+  Tensor x = randn({2, 6, 29});
+  Tensor w = randn({6, 2, 7});
+  Tensor b = randn({4});
+  Tensor transposed = F::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2);
+  CATCH_REQUIRE(close(
+      F::convTranspose1d(vk(), toVulkan(x), toVulkan(w), toVulkan(b), 3, 2, 1, 2),
+      transposed,
+      1e-4f,
+      1e-4f));
+
+  Tensor alpha = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor beta = plus(F::abs(cpu(), randn({6})), 0.2f);
+  CATCH_REQUIRE(close(
+      F::snake(vk(), toVulkan(x), toVulkan(alpha), toVulkan(beta), 1e-9f),
+      F::snake(cpu(), x, alpha, beta, 1e-9f),
+      1e-4f,
+      1e-4f));
+
+  for (PadMode mode : {PadMode::kZero, PadMode::kReflect, PadMode::kReplicate}) {
+    CATCH_REQUIRE(close(
+        F::pad1d(vk(), toVulkan(x), 5, 9, mode), F::pad1d(cpu(), x, 5, 9, mode), 0.0f, 1e-6f));
+  }
+
+  CATCH_REQUIRE(close(
+      F::clamp(vk(), toVulkan(x), -0.5f, inf), F::clamp(cpu(), x, -0.5f, inf), 0.0f, 1e-6f));
+  CATCH_REQUIRE(close(
+      F::clamp(vk(), toVulkan(x), -1.0f, 0.5f), F::clamp(cpu(), x, -1.0f, 0.5f), 0.0f, 1e-6f));
+
+  // A transform and its inverse: the window is read back to the host to build the banks, which
+  // is the one part of these a device-resident operator never otherwise does.
+  int nFft = 16, hop = 4;
+  Tensor wave = randn({2, 1, 64});
+  Tensor window = F::zeros(Device::getCpu(), {nFft}, DType::kFloat);
+  float *taps = window.getInternalData()->getData<float>(window.getInternalOffset());
+  for (int i = 0; i < nFft; ++i) taps[i] = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / nFft);
+  Tensor spectrum = F::stft(vk(), toVulkan(wave), toVulkan(window), nFft, hop, true);
+  CATCH_REQUIRE(close(spectrum, F::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
+  CATCH_REQUIRE(close(F::istft(vk(), spectrum, toVulkan(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
 }
 
 CATCH_TEST_CASE("test Vulkan softmax and reductions", "[op][vulkan]") {

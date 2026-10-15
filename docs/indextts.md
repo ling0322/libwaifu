@@ -234,9 +234,10 @@ guidance as two passes, and no guidance as one.
 samples per frame. NVIDIA's, MIT licensed; it sits under `indextts` because nothing else here runs
 it, and moves beside [`waifu::audio`](audio.md) the day something does.
 
-It adds no operator: six transposed convolutions, each followed by three averaged residual blocks,
-and 109 anti-aliased snakes, all of them `audio` functions built from `conv2d`, `matmul` and
-arithmetic -- so it runs on every backend.
+Six transposed convolutions, each followed by three averaged residual blocks, and 109 anti-aliased
+snakes. The transposed convolution and the snake are flint operators with CPU and CUDA kernels of
+their own, and every other backend composes them, so it runs on all of them; the alias-free
+resampling around each snake is `audio`'s, a padding and two convolutions.
 
 - **The snake is `x + sin(alpha x)^2 / beta`**, applied at twice the rate and filtered back down
   so the harmonics it makes do not fold into the audible band.

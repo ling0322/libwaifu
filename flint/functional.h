@@ -26,12 +26,11 @@
 #include "lutil/span.h"
 #include "flint/device.h"
 #include "flint/dtype.h"
+#include "flint/operators.h"
 #include "flint/tensor.h"
 #include "flint/tensor_view.h"
 
 namespace fl {
-
-class Operators;
 
 /// @brief What the operators themselves need of allocation, and the one operation they share that
 /// is made of others.
@@ -70,6 +69,94 @@ void composedAttention(
     TensorView k,
     TensorView v,
     bool causal,
+    TensorView out);
+
+// --- Signal ---------------------------------------------------------------------------------
+//
+// What the operators of the same names do on a device with no kernel of their own, out of
+// operators every device has. Each writes `out`, which is contiguous, and reads its input as
+// Operators::convTranspose1d and the rest describe it.
+
+/// A transposed 1-D convolution as, per group, one `matmul` giving every input position's
+/// contribution and ceil(R / stride) shifted additions landing them: positions `l * stride + r`
+/// and `l' * stride + r'` only collide when `r` and `r'` are a whole stride apart, so cutting the
+/// kernel into stride-long pieces makes each piece collision-free within itself.
+void composedConvTranspose1d(
+    Operators *op,
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups,
+    TensorView out);
+
+/// What one group of a transposed 1-D convolution of `input` (N, C, L) by `weight` (C, K / groups,
+/// R) contributes, before anything has been said about where it lands: (N * L, K / groups * R),
+/// row `n * L + l` and column `k * R + r` being what input position `l` of item `n` adds to output
+/// channel `k` of the group at position `l * stride + r - padding`. One `copy` and one `matmul`.
+///
+/// A device with a kernel of its own for `convTranspose1d` runs this and then gathers every
+/// output position from the columns that land on it, in one pass: col2im.
+Tensor transposedConvolutionColumns(Operators *op, TensorView input, TensorView weight, int groups, int group);
+
+/// What `convTranspose1d` checks of its arguments on every device, and the output length.
+int checkConvTranspose1d(
+    TensorView input,
+    TensorView weight,
+    TensorView bias,
+    int stride,
+    int padding,
+    int outputPadding,
+    int groups,
+    TensorView out);
+
+/// A snake as `mul`, `sin`, `square`, `divTensor` and `add`, with the channel parameters
+/// broadcast across the length by an expanded view.
+void composedSnake(
+    Operators *op,
+    TensorView input,
+    TensorView alpha,
+    TensorView beta,
+    float eps,
+    TensorView out);
+
+/// A padding as a `copy` of the middle and one of each edge: zeros by `fill`, a repeated sample
+/// by an expanded view of it, and a mirror by a `matmul` against the anti-diagonal -- reading a
+/// dimension backwards is a permutation, and a permutation is a matrix.
+void composedPad1d(
+    Operators *op,
+    TensorView input,
+    int left,
+    int right,
+    PadMode mode,
+    TensorView out);
+
+/// A clamp as `lo + relu(x - lo)` and `hi - relu(hi - x)`, either skipped when its bound is
+/// infinite.
+void composedClamp(Operators *op, TensorView input, float lo, float hi, TensorView out);
+
+/// A short time Fourier transform as a reflection padding and a `conv1d` against the bank of
+/// windowed sinusoids, which is built on the host from `window`.
+void composedStft(
+    Operators *op,
+    TensorView input,
+    TensorView window,
+    int nFft,
+    int hop,
+    bool centered,
+    TensorView out);
+
+/// Its inverse as a `convTranspose1d` against the inverse bank -- the overlap-add -- divided by the
+/// window's squared overlap, both built on the host from `window`.
+void composedIstft(
+    Operators *op,
+    TensorView spectrum,
+    TensorView window,
+    int nFft,
+    int hop,
+    bool centered,
     TensorView out);
 
 }  // namespace F

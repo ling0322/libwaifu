@@ -1,142 +1,126 @@
 # Audio primitives
 
-Convolution along one axis, a short time Fourier transform, a mel filterbank, a resampling and a
-vocoder's activation -- everything a speech model asks for that a diffusion model never did.
+Convolution along one axis and its transpose, a padding, a short time Fourier transform and its
+inverse, a vocoder's activation, a clamp, a mel filterbank and a resampling -- everything a speech
+model asks for that a diffusion model never did.
 
 ```rust
-use waifu::audio::{hann_window, stft, stft_basis, Padding};
+use waifu::audio::{halves, hann_window};
+use waifu::flint::PadMode;
 
-let window = hann_window(1024);
-let (real, imaginary) = stft(
-    &g, wave, g.constant(stft_basis(1024, &window)?),
-    1024, 256, Some(Padding::Reflect), DType::Float16, Device::Cuda,
-)?;
+let window = g.constant(Tensor::from_f32(&[1024], &hann_window(1024))?.to_device(device)?);
+let spectrum = g.stft(wave, window, 1024, 256, true);
+let (real, imaginary) = halves(&g, spectrum, 1024);
 ```
 
-Runs on every backend, needs no feature flag, and adds no kernel to `flint`.
+The first seven are `flint` operators, each one node of a graph. The last two, and the numbers
+every filter is made of, are `waifu::audio`.
 
-## None of it is a kernel
+## The operators
 
-A 1-D convolution is the one operator in that list: `Graph::conv1d`, which the CPU, CUDA, Metal
-and Vulkan all implement, groups included. The obvious reading of the rest is more operators to
-write three times over, once for the processor, once for CUDA and once for Metal. That is not
-what is here. None of them is irreducible, and each one is written as the operators `flint`
-already had:
+| node | CPU and CUDA | every other device |
+| --- | --- | --- |
+| `Graph::conv1d` | a kernel (CUTLASS on CUDA, groups included) | a kernel |
+| `Graph::conv_transpose1d` | one GEMM, then a col2im kernel | one `matmul` and `ceil(R / stride)` shifted additions per group |
+| `Graph::pad1d` (zero, reflect, replicate) | a kernel | `copy`, `fill`, and a `matmul` against the anti-diagonal for a mirror |
+| `Graph::snake` | a kernel, one pass | `mul`, `sin`, `square`, `divTensor`, `add` |
+| `Graph::clamp` | a kernel | `relu` either side, a side skipped when its bound is infinite |
+| `Graph::stft` | a reflection `pad1d` and a `conv1d` against a bank of windowed sinusoids | the same |
+| `Graph::istft` | a `conv_transpose1d` against the inverse bank, divided by the window's overlap | the same |
 
-| primitive | what it actually is |
-| --- | --- |
-| `conv_transpose1d` | one `matmul`, then `ceil(kernel / stride)` shifted additions |
-| `stft` | `conv1d` against a bank of windowed sinusoids |
-| `istft` | `conv_transpose1d` against the matching bank, divided by the window's own overlap |
-| `mel_filterbank` | a `matmul` |
-| `resample` | a `conv_transpose1d` that stuffs zeros, a `conv1d` that low-passes, a stride |
-| `upsample1d`, `downsample1d` | the same pair at a fixed ratio, against a Kaiser-windowed sinc |
-| `snake` | arithmetic |
+"Every other device" is Metal and Vulkan today: the compositions live in the base class,
+`flint/functional.cc`, so a backend without a kernel for one of these runs it out of the operators
+it does have -- `matmul`, `copy`, `fill`, the elementwise family -- and overriding the method is
+all it takes to give it a kernel later. Nothing above `Operators` can tell which it got.
 
-The one thing that was added is `sin` and `cos`, which the CPU and CUDA kernels already
-implemented and the C interface simply did not export.
+These were compositions in `waifu::audio` until they were operators. Each was about six to
+twenty-five graph nodes, and a vocoder runs them a lot: BigVGAN applies a snake inside every one of
+109 anti-aliased activations and a transposed convolution in each of them, and the composed snake
+was six passes over the tensor where the kernel is one.
 
-What this buys is three things. It runs wherever `conv1d` and `matmul` run, which is every
-backend, on the day it is written rather than three ports later. It is correct wherever they are
-correct, and they are tested. And a fused kernel can replace any one of these later without a
-caller noticing, because what a caller sees is the function and not the seven nodes behind it.
-
-### Why a transposed convolution is a matrix multiply
+### Why a transposed convolution is a GEMM
 
 Read the operation as it is defined rather than as a convolution. Input position `l` contributes
-`weight[:, :, k]` to output position `l * stride + k`, for every `k`. Every one of those
-contributions at once is `(N, L, C) @ (C, K * R)`, and what is left is adding up the ones that
+`weight[:, :, r]` to output position `l * stride + r - padding`, for every `r`. Every one of those
+contributions at once is `(N * L, C) @ (C, K * R)` -- `F::transposedConvolutionColumns`, which goes
+through the device's own `matmul` and so its tuned GEMM. What is left is adding up the ones that
 landed on the same place.
 
-Which ones those are is fixed: `l * stride + k` and `l' * stride + k'` collide only when `k` and
-`k'` are a whole stride apart. So cutting the kernel into `ceil(R / stride)` pieces of `stride`
-each makes every piece collision-free within itself, and the whole operation a sum of that many
-shifted copies. A BigVGAN's kernel is twice its stride, so it is two additions.
+The CPU and CUDA do that in one pass, col2im: a thread per output position gathers the taps
+congruent to it modulo the stride, `ceil(R / stride)` of them -- two for every vocoder here -- and
+adds the bias. The composition gets there without a kernel: `l * stride + r` and `l' * stride + r'`
+collide only when `r` and `r'` are a whole stride apart, so cutting the kernel into stride-long
+pieces makes each piece collision-free within itself, and the whole a sum of that many shifted
+copies.
 
 ### What the transform costs
 
 A bank of sinusoids makes an STFT an O(N²) matrix multiply per frame where a radix-2 transform is
 O(N log N). At the 1024-point window these models use that is about a hundredfold more arithmetic.
 
-It is worth saying plainly rather than hiding, and it is still the right trade here: the
-arithmetic is shaped like a GEMM, which is the one shape this library is fastest at, and ten
-seconds of audio is a couple of GFLOP. The vocoder is what costs in a speech pipeline, not the
-transform in front of it. If that ever stops being true, `stft` is the function to replace, and
-replacing it changes nothing above it.
+It is still the right trade here: the arithmetic is shaped like a GEMM, which is the one shape this
+library is fastest at, and ten seconds of audio is a couple of GFLOP. The vocoder is what costs in
+a speech pipeline, not the transform in front of it. The banks are built on the host from the
+window the node is handed, which means reading the window back from the device once per call. A
+backend with an FFT -- cuFFT, vDSP -- overrides `stft` and `istft`, and nothing above them changes.
 
-## Reflect padding, without an operator that reads backwards
+### `pad1d` and `clamp` are nodes of their own
 
-`torch.stft(center=True)` pads by mirroring, and every mel spectrogram in a speech model was
-computed that way. Mirroring needs a dimension read in reverse, and nothing here does that.
+A clamp is not a `Unary`, because it carries two bounds, and a padding is not a view, because it
+writes. So each is an `Op` of its own, `Op::Pad1d` and `Op::Clamp`, run through `F::pad1d` and
+`F::clamp` and the C interface's `fl_pad1d` and `fl_clamp` -- the path `fl_conv_transpose1d`,
+`fl_snake`, `fl_stft` and `fl_istft` take too, and every other operator.
 
-It does not need to. A reversal is a permutation, a permutation is a matrix, and a matrix multiply
-is the operator this library is built on: `reversal(n)` is the `n` by `n` anti-diagonal, and
-`x @ reversal(n)` is `x` backwards. The two edge slices are written with constant bounds --
-negative ones count from the back -- so neither needs the graph to know how long the signal is.
+## What is left in `waifu::audio`
 
-## The operators exist even though no backend does
+What a model *designs* rather than computes:
 
-Being a composition is how these are *computed*; it is not what they *are*. The operator set is
-what the library says it can do, and a 1-D convolution should not be invisible there because it
-happens to be assembled in Rust today.
-
-So `convTranspose1d`, `snake`, `stft` and `istft` are declared in `Operators`, dispatched through
-`F::`, exported by the C interface, and reachable from a graph as a single node. No backend
-implements any of them, so such a node fails when the graph runs and the composition is what a
-model should call. `conv1d` began as the fifth; every backend has since implemented it, and the
-composition that stood in for it is gone. What the declarations buy is that a backend which writes one of these
-kernels overrides a method rather than restructuring its callers, and that the contract it has to
-meet -- shapes, layouts, what `centered` means, which of `alpha` and `beta` arrives already
-exponentiated -- is written down where the kernel will go.
-
-### They throw rather than abort
-
-The sixty-one unimplemented operators already in `Operators` use `NOT_IMPL()`, which is
-`LOG(FATAL)` followed by `abort()`. That is defensible for an operator some backend implements --
-reaching it means asking the wrong device -- but these four have no implementation anywhere, so
-every call would end the process.
-
-They use `THROW(NotImplemented, ...)` instead. `lut::NotImplementedError` already existed; the C
-interface's `guard` catches it like any other, and what comes back to Rust is an ordinary error
-naming the operator and pointing at the composition that does work. That is also what makes them
-testable: an operator that kills the process cannot be asked whether it is wired up.
+- `hann_window`, `mel_filterbank` (HTK or Slaney, area-normalized or not), `resample_kernel` and
+  `kaiser_sinc_filter` -- the numbers a filter is made of, worked out on the host once;
+- `magnitude`, `apply_filterbank` and `halves`, which put two operators together the way every mel
+  spectrogram here does;
+- `resample`, a `conv_transpose1d` that stuffs zeros and a `conv1d` that low-passes and strides;
+- `upsample1d` and `downsample1d`, the pair a BigVGAN's anti-aliased activation is built on.
 
 ### What is not an operator
 
 - **`depthwiseConv1d`** -- depthwise is `conv1d` with `groups == in == out`, and one operation
   should not have two names at the interface. A backend wanting the specialized path tests
   `groups` against the channel count, which is what CUDA's does.
-- **`mel_filterbank`, `resample`, `pad1d`** -- a constant built on the host and applied with
-  `matmul`; two convolutions back to back; and `cat` against a zeros tensor. Nobody would write a
-  kernel for any of the three.
+- **`mel_filterbank`, `resample`** -- a constant built on the host and applied with `matmul`, and
+  two convolutions back to back. Nobody would write a kernel for either.
+- **A maximum of two tensors.** Whisper's log mel raises everything to eight below its loudest
+  value, a bound that is a value of the graph rather than a number, and `clamp` takes numbers. It
+  is written `floor + relu(x - floor)` where it is used.
 
 ## What is checked
 
-`waifu/tests/audio.rs` is sixteen tests on the processor, and none of them compares against a
-recorded output. A composition is exactly the kind of thing that goes wrong in a way that still
-runs and still produces a plausibly shaped tensor, so each test writes the definition out as a
-loop over indices, in the least clever way available, and asks whether the graph agrees:
+Each operator is checked against its own definition, written out as a loop over indices in the
+least clever way available, and never against a recorded output -- an operator is exactly the
+kind of thing that goes wrong in a way that still runs and still produces a plausibly shaped
+tensor.
 
-- `Graph::conv1d` against the sum it is defined to be, over six shapes: padded, strided, dilated
-  to four, grouped, and depthwise.
-- `conv_transpose1d` against the scatter it is defined to be, including a kernel that is not a
-  whole number of strides and the 16-over-8 a vocoder upsamples with.
-- `stft` against a direct discrete Fourier transform of each windowed frame.
-- `istft` of `stft` back to the signal, which is the test that catches what the two banks disagree
-  about -- a factor of `n_fft`, a bin doubled that should not have been, an overlap-add off by a
-  hop.
-- a mel spectrogram against the filterbank times the modulus, computed from the signal.
-- a resampled sine, still that sine at the new rate and the same amplitude.
-
-`waifu/tests/audio_cuda.rs` runs the same graphs on a card and compares them against the host,
-because "it works on every backend" is either true on a second backend or it is not true at all.
-Those are `#[ignore]`d the way every CUDA test here is:
+- `flint/cpu/signal_test.cc`: the CPU kernels *and* the compositions, each against the definition
+  -- a transposed convolution with groups, output padding and a kernel shorter than the stride; a
+  snake with and without beta; every padding mode, including a replication wider than the signal;
+  a clamp on either side; an STFT against a direct DFT of each frame, and an ISTFT round trip.
+- `flint/cuda/signal_test.cc`: the CUDA kernels against the CPU in float and half, and the
+  compositions run on the GPU -- which is where reading the window back and moving the banks over
+  is exercised before Metal relies on it.
+- `flint/vulkan/operators_test.cc`: the compositions on a real Vulkan device, against the CPU.
+- `waifu/tests/audio.rs`: every node from a graph, through `Op`, `ir` and the C interface, against
+  its definition: `conv1d` over six shapes, `conv_transpose1d`, the paddings, the snake, the clamp,
+  `stft` against a DFT, `istft` of `stft` back to the signal, a mel spectrogram against the
+  filterbank times the modulus, and a resampled sine.
+- `waifu/tests/audio_cuda.rs`: the same graphs on a card against the host. `#[ignore]`d the way
+  every CUDA test here is:
 
 ```bash
+./build/unittest "[signal]"
 cargo test --manifest-path waifu/Cargo.toml --test audio_cuda -- --ignored --test-threads=1
 ```
 
-Both files together are well under a second. Nothing here loads a model.
+All of it together is well under a second. Nothing here loads a model.
 
 ## Grouped convolution
 
@@ -155,8 +139,8 @@ the trimming is asymmetric -- which is what makes the output exactly `ratio` tim
 three of those are `alias_free_activation/torch/resample.py`, and swapping in the other filter
 changes the audio. Hence two resamplings here rather than one with a window argument.
 
-`Padding::Replicate` arrived with them, and can pad by more than the signal is long, which
-`Padding::Reflect` cannot.
+`PadMode::Replicate` arrived with them, and can pad by more than the signal is long, which
+`PadMode::Reflect` cannot.
 
 ### What IndexTTS-2.5 does not use
 

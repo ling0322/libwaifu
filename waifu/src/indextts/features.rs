@@ -71,11 +71,8 @@
 use std::collections::HashMap;
 use std::f64::consts::PI;
 
-use crate::audio::{
-    apply_filterbank, hann_window, magnitude, mel_filterbank, pad1d, stft, stft_basis, MelScale,
-    Padding,
-};
-use crate::flint::{DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights};
+use crate::audio::{apply_filterbank, halves, hann_window, magnitude, mel_filterbank, MelScale};
+use crate::flint::{DType, Device, Extent, Graph, Ir, PadMode, RunContext, Tensor, Value, Weights};
 use crate::{Error, Result};
 
 /// How a waveform is cut into frames and turned into log mel energies.
@@ -668,11 +665,6 @@ const REFERENCE_FFT: usize = 1024;
 const REFERENCE_HOP: i32 = 256;
 const REFERENCE_BANDS: usize = 80;
 
-/// `max(x, floor)`, as `floor + relu(x - floor)`; `floor` is a one-element constant.
-fn at_least(g: &Graph, x: Value, floor: Value) -> Value {
-    g.add(g.relu(g.sub(x, floor)), floor)
-}
-
 fn scalar(g: &Graph, value: f32, device: Device) -> Result<Value> {
     Ok(g.constant(Tensor::from_f32(&[1], &[value])?.to_device(device)?))
 }
@@ -686,7 +678,7 @@ pub struct Spectrograms {
     device: Device,
     kaldi_basis: Tensor,
     kaldi_filterbank: Tensor,
-    mel_basis: Tensor,
+    mel_window: Tensor,
     mel_filterbank: Tensor,
 }
 
@@ -706,7 +698,7 @@ impl Spectrograms {
             .collect();
 
         // Periodic: `torch.hann_window`'s default, and the opposite of Povey's.
-        let window = hann_window(REFERENCE_FFT);
+        let window = Tensor::from_f32(&[REFERENCE_FFT as i32], &hann_window(REFERENCE_FFT))?;
 
         Ok(Spectrograms {
             device,
@@ -715,7 +707,7 @@ impl Spectrograms {
                 &[kaldi.bins as i32, bins as i32],
                 &transposed,
             )?)?,
-            mel_basis: on(stft_basis(REFERENCE_FFT, &window)?)?,
+            mel_window: on(window)?,
             mel_filterbank: on(mel_filterbank(
                 REFERENCE_RATE,
                 REFERENCE_FFT,
@@ -749,7 +741,6 @@ impl Spectrograms {
     /// frame-major, `(1, frames, 80)`. The scale is applied to the samples, as Kaldi applies it.
     fn kaldi_log_mel(&self, g: &Graph, analysis: &Analysis) -> Result<Value> {
         let bins = (analysis.fft_length / 2) as i32;
-        let device = self.device;
 
         let wave = match analysis.scale == 1.0 {
             true => g.input("wave"),
@@ -768,11 +759,7 @@ impl Spectrograms {
         let imaginary = g.slice(spectrum, 1, bins, 2 * bins);
         let power = g.add(g.square(real), g.square(imaginary));
         let mel = apply_filterbank(g, power, g.constant(self.kaldi_filterbank.clone()));
-        let logged = g.log(at_least(
-            g,
-            mel,
-            scalar(g, analysis.mel_floor as f32, device)?,
-        ));
+        let logged = g.log(g.clamp(mel, analysis.mel_floor as f32, f32::INFINITY));
 
         Ok(g.contiguous(g.transpose(logged, 1, 2)))
     }
@@ -855,28 +842,18 @@ impl Spectrograms {
         let (dtype, device) = (DType::Float, self.device);
 
         let g = Graph::new();
-        let x = pad1d(
-            &g,
-            g.input("wave"),
-            pad,
-            pad,
-            Padding::Reflect,
-            dtype,
-            device,
-        )?;
-        let (real, imaginary) = stft(
-            &g,
+        let x = g.pad1d(g.input("wave"), pad, pad, PadMode::Reflect);
+        let spectrum = g.stft(
             x,
-            g.constant(self.mel_basis.clone()),
+            g.constant(self.mel_window.clone()),
             REFERENCE_FFT as i32,
             REFERENCE_HOP,
-            None,
-            dtype,
-            device,
-        )?;
+            false,
+        );
+        let (real, imaginary) = halves(&g, spectrum, REFERENCE_FFT as i32);
         let magnitude = magnitude(&g, real, imaginary, 1e-9, dtype, device)?;
         let mel = apply_filterbank(&g, magnitude, g.constant(self.mel_filterbank.clone()));
-        g.output("mel", g.log(at_least(&g, mel, scalar(&g, 1e-5, device)?)));
+        g.output("mel", g.log(g.clamp(mel, 1e-5, f32::INFINITY)));
 
         self.run(&g, wave)
     }

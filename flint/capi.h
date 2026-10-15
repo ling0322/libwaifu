@@ -101,6 +101,16 @@ typedef enum fl_device_type_t {
   FL_DEVICE_UNKNOWN = 5,
 } fl_device_type_t;
 
+/// What fl_pad1d() puts in the positions it adds.
+typedef enum fl_pad_mode_t {
+  /// Zeros.
+  FL_PAD_ZERO = 0,
+  /// The signal mirrored about its first and last samples, `F.pad(mode="reflect")`.
+  FL_PAD_REFLECT = 1,
+  /// The first and last samples repeated, `F.pad(mode="replicate")`.
+  FL_PAD_REPLICATE = 2,
+} fl_pad_mode_t;
+
 /// Select the operator backends for the machine. Call once before anything else here; later calls
 /// do nothing. Failures are reported through fl_get_last_error_code().
 FLAPI void fl_init(void);
@@ -335,6 +345,25 @@ FLAPI int32_t fl_snake(
     fl_tensor_view_t alpha,
     fl_tensor_view_t beta,
     float eps,
+    fl_tensor_view_t out);
+
+/// `input` (..., L) with `left` and `right` more positions on its last dimension, filled as `mode`
+/// says, into `out` (..., left + L + right). A reflection pads by less than L on either side.
+FLAPI int32_t fl_pad1d(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    int32_t left,
+    int32_t right,
+    fl_pad_mode_t mode,
+    fl_tensor_view_t out);
+
+/// `min(max(input, lo), hi)`, elementwise, into `out` of `input`'s shape. Either bound may be
+/// infinite.
+FLAPI int32_t fl_clamp(
+    fl_operators_t operators,
+    fl_tensor_view_t input,
+    float lo,
+    float hi,
     fl_tensor_view_t out);
 
 /// Short time Fourier transform of `input` (N, 1, L) against `window` (n_fft), into `out`
