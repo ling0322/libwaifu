@@ -23,6 +23,7 @@
 
 #include "lutil/span.h"
 #include "flint/dtype.h"
+#include "flint/operators.h"
 #include "flint/tensor.h"
 #include "flint/tensor_view.h"
 
@@ -155,6 +156,26 @@ void conv1d(
     int dilation,
     int groups,
     const TensorView &out);
+
+// signal.cc
+/// col2im for convTranspose1d: `out` (N, K, Lout), whose last dimension is contiguous, gathered
+/// from `columns` (N * L, K * R), F::transposedConvolutionColumns of one group, plus `bias` (K).
+void overlapAdd1d(
+    const TensorView &columns,
+    const TensorView &bias,
+    int length,
+    int stride,
+    int padding,
+    int kernel,
+    const TensorView &out);
+void snake(
+    const TensorView &input,
+    const TensorView &alpha,
+    const TensorView &beta,
+    float eps,
+    const TensorView &out);
+void pad1d(const TensorView &input, int left, int right, PadMode mode, const TensorView &out);
+void clamp(const TensorView &input, float lo, float hi, const TensorView &out);
 
 // rand.cc
 /// Philox4x32-10, drawing the same numbers for a seed as the CUDA and Vulkan operators do.

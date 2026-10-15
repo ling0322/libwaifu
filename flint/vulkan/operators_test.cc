@@ -361,9 +361,9 @@ CATCH_TEST_CASE("test Vulkan signal operators", "[op][vulkan][signal]") {
   }
 }
 
-// The compositions in flint/functional.cc that a device without these kernels runs -- Metal
-// today -- run here on a GPU that has the kernels, by calling them directly, so that what Metal
-// relies on is tested on a device that can be tested from Linux.
+// The compositions in flint/functional.cc that a device without these kernels runs, run here on a
+// GPU that has the kernels, by calling them directly, so that what a new backend relies on is
+// tested on a device that can be tested from Linux.
 CATCH_TEST_CASE("test Vulkan signal operators by composition", "[op][vulkan][signal]") {
   SKIP_WITHOUT_VULKAN();
   float inf = std::numeric_limits<float>::infinity();

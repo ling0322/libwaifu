@@ -18,20 +18,22 @@ every filter is made of, are `waifu::audio`.
 
 ## The operators
 
-| node | CPU, CUDA and Vulkan | Metal |
-| --- | --- | --- |
-| `Graph::conv1d` | a kernel (CUTLASS on CUDA, groups included) | a kernel |
-| `Graph::conv_transpose1d` | one GEMM, then a col2im kernel | one `matmul` and `ceil(R / stride)` shifted additions per group |
-| `Graph::pad1d` (zero, reflect, replicate) | a kernel | `copy`, `fill`, and a `matmul` against the anti-diagonal for a mirror |
-| `Graph::snake` | a kernel, one pass | `mul`, `sin`, `square`, `divTensor`, `add` |
-| `Graph::clamp` | a kernel; a NaN stays a NaN | the `max` and `min` reductions of each element beside its bound, which pick rather than compute, and `exp(-\|x\|) * 0` added to keep a NaN |
-| `Graph::stft` | a reflection `pad1d` and a `conv1d` against a bank of windowed sinusoids | the same |
-| `Graph::istft` | a `conv_transpose1d` against the inverse bank, divided by the window's overlap in float32 whatever the type | the same |
+| node | CPU, CUDA, Vulkan and Metal |
+| --- | --- |
+| `Graph::conv1d` | a kernel (CUTLASS on CUDA, groups included) |
+| `Graph::conv_transpose1d` | one GEMM per group, then a col2im kernel |
+| `Graph::pad1d` (zero, reflect, replicate) | a kernel |
+| `Graph::snake` | a kernel, one pass |
+| `Graph::clamp` | a kernel; a NaN stays a NaN |
+| `Graph::stft` | a reflection `pad1d` and a `conv1d` against a bank of windowed sinusoids |
+| `Graph::istft` | a `conv_transpose1d` against the inverse bank, divided by the window's overlap in float32 whatever the type |
 
-Metal is the one device without these kernels today, and it loses nothing: the compositions live
-in the base class, `flint/functional.cc`, so a backend without a kernel for one of these runs it out of the operators
-it does have -- `matmul`, `copy`, `fill`, the elementwise family -- and overriding the method is
-all it takes to give it a kernel later. Nothing above `Operators` can tell which it got.
+Every device has these kernels, but the base class, `flint/functional.cc`, keeps a composition of
+each -- the transposed convolution as a `matmul` and `ceil(R / stride)` shifted additions per
+group, the padding out of `copy`, `fill` and a `matmul` against the anti-diagonal, the snake out of
+the elementwise family, the clamp out of the `max` and `min` reductions -- so a new backend runs
+them out of the operators it does have, and overriding the method is all it takes to give it a
+kernel later. Nothing above `Operators` can tell which it got.
 
 These were compositions in `waifu::audio` until they were operators. Each was about six to
 twenty-five graph nodes, and a vocoder runs them a lot: BigVGAN applies a snake inside every one of
@@ -106,9 +108,11 @@ tensor.
   a clamp on either side; an STFT against a direct DFT of each frame, and an ISTFT round trip.
 - `flint/cuda/signal_test.cc`: the CUDA kernels against the CPU in float and half, and the
   compositions run on the GPU -- which is where reading the window back and moving the banks over
-  is exercised before Metal relies on it.
+  is exercised on a GPU.
 - `flint/vulkan/operators_test.cc`: the Vulkan kernels in float and half against the CPU, and
-  the compositions run on the same device -- what Metal relies on, tested from Linux.
+  the compositions run on the same device -- what a new backend relies on, tested from Linux.
+- `flint/metal_native/operators_test.cc`: the Metal kernels in float and half against the CPU,
+  and the STFT and its inverse composed of them.
 - `waifu/tests/audio.rs`: every node from a graph, through `Op`, `ir` and the C interface, against
   its definition: `conv1d` over six shapes, `conv_transpose1d`, the paddings, the snake, the clamp,
   `stft` against a DFT, `istft` of `stft` back to the signal, a mel spectrogram against the

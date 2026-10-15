@@ -29,9 +29,9 @@ TensorView + Operators dispatch
 - `TensorData` owns storage; a `TensorView` is shape, stride and offset over it.
 - `Operators` is one device's backend: it reads views and writes a caller-allocated `out`.
   Where a device has no kernel for an operator, the base class may compose one out of the
-  operators it does have -- attention, the STFT and its inverse, and on Metal the transposed
-  conv1d, snake, pad1d and clamp, are written that way in `functional.cc` -- so a new backend
-  runs them on the day it has matmul, copy and the elementwise family.
+  operators it does have -- attention, the STFT and its inverse, the transposed conv1d, snake,
+  pad1d and clamp are written that way in `functional.cc` -- so a new backend runs them on the
+  day it has matmul, copy and the elementwise family.
 - The CPU backend contains portable kernels plus AVX2, AVX-512, and ARM half-precision paths.
 - The CUDA backend contains custom inference kernels and optional FlashAttention/CUTLASS paths.
 - The Metal backend has Metal kernels of its own, built the way the Vulkan backend is, and runs

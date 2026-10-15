@@ -219,6 +219,7 @@ if(WITH_METAL)
         "metal_native/rand.cc"
         "metal_native/reduce.cc"
         "metal_native/shape.cc"
+        "metal_native/signal.cc"
         "metal_native/to_device.cc"
         "${CMAKE_CURRENT_BINARY_DIR}/metal_kernels/metallib.cc"
         "${CMAKE_CURRENT_BINARY_DIR}/metal_kernels/nax_metallib.cc")

@@ -235,8 +235,8 @@ samples per frame. NVIDIA's, MIT licensed; it sits under `indextts` because noth
 it, and moves beside [`waifu::audio`](audio.md) the day something does.
 
 Six transposed convolutions, each followed by three averaged residual blocks, and 109 anti-aliased
-snakes. The transposed convolution and the snake are flint operators with CPU, CUDA and Vulkan
-kernels of their own, and Metal composes them, so it runs on every backend; the alias-free
+snakes. The transposed convolution and the snake are flint operators with CPU, CUDA, Vulkan and
+Metal kernels of their own, so it runs on every backend; the alias-free
 resampling around each snake is `audio`'s, a padding and two convolutions.
 
 - **The snake is `x + sin(alpha x)^2 / beta`**, applied at twice the rate and filtered back down
