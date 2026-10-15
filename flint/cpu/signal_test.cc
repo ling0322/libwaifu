@@ -217,20 +217,23 @@ CATCH_TEST_CASE("clamp bounds either side or both, kernel and composition", "[op
   float nan = std::numeric_limits<float>::quiet_NaN();
   // Two dimensions, so that a bound broadcast as if the input were a vector would show. A NaN
   // stays one, as torch.clamp has it, and an infinity goes to whichever bound it is beyond.
-  std::vector<float> x = {-3.0f, -0.99f, -0.5f, 0.0f, 0.25f, 0.99f, 7.0f, 0.5f, nan, inf, -inf, 1.0f};
-  Tensor input = tensorOf({3, 4}, x);
+  // Everything is exact: 1e-8 is inside every interval here and would be lost to `x - lo + lo`,
+  // and -1e30 is the bound and not what `x + (lo - x)` rounds to.
+  std::vector<float> x = {-3.0f, -0.99f, -0.5f, 0.0f, 0.25f, 0.99f, 7.0f, 0.5f, nan, inf, -inf, 1.0f,
+                          1e-8f, -1e-8f, -1e30f, 1e30f};
+  Tensor input = tensorOf({4, 4}, x);
 
   for (auto [lo, hi] : std::vector<std::pair<float, float>>{
-           {-0.99f, 0.99f}, {1e-5f, inf}, {-inf, 0.3f}, {-inf, inf}}) {
+           {-0.99f, 0.99f}, {1e-9f, inf}, {-inf, 0.3f}, {-inf, inf}, {-0.5f, 0.25f}}) {
     CATCH_INFO("lo " << lo << " hi " << hi);
     std::vector<float> expected;
     for (float v : x) expected.push_back(std::isnan(v) ? v : std::min(std::max(v, lo), hi));
 
     requireClose(valuesOf(F::clamp(cpuOps(), input, lo, hi)), expected, 0);
 
-    Tensor composed = F::zeros(Device::kCpu, {3, 4}, DType::kFloat);
+    Tensor composed = F::zeros(Device::kCpu, {4, 4}, DType::kFloat);
     F::composedClamp(cpuOps(), input, lo, hi, composed);
-    requireClose(valuesOf(composed), expected, 1e-6f);
+    requireClose(valuesOf(composed), expected, 0);
   }
 }
 

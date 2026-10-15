@@ -24,7 +24,7 @@ every filter is made of, are `waifu::audio`.
 | `Graph::conv_transpose1d` | one GEMM, then a col2im kernel | one `matmul` and `ceil(R / stride)` shifted additions per group |
 | `Graph::pad1d` (zero, reflect, replicate) | a kernel | `copy`, `fill`, and a `matmul` against the anti-diagonal for a mirror |
 | `Graph::snake` | a kernel, one pass | `mul`, `sin`, `square`, `divTensor`, `add` |
-| `Graph::clamp` | a kernel; a NaN stays a NaN | `relu` either side, a side skipped when its bound is infinite, and `exp(-\|x\|) * 0` added to put back the NaN a relu drops |
+| `Graph::clamp` | a kernel; a NaN stays a NaN | the `max` and `min` reductions of each element beside its bound, which pick rather than compute, and `exp(-\|x\|) * 0` added to keep a NaN |
 | `Graph::stft` | a reflection `pad1d` and a `conv1d` against a bank of windowed sinusoids | the same |
 | `Graph::istft` | a `conv_transpose1d` against the inverse bank, divided by the window's overlap in float32 whatever the type | the same |
 

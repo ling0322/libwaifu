@@ -178,8 +178,9 @@ class Operators {
   /// `min(max(x, lo), hi)`, elementwise, into `out` of `input`'s shape. Either bound may be
   /// infinite, which leaves that side alone. A NaN stays a NaN, on every device. `torch.clamp`.
   ///
-  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedClamp`, out of `relu`, with
-  /// the NaN a relu drops put back.
+  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedClamp`, which picks each
+  /// element or its bound with the `max` and `min` reductions -- exactly, never by arithmetic that
+  /// rounds -- and puts back a NaN a reduction may have dropped.
   virtual void clamp(TensorView input, float lo, float hi, TensorView out);
 
   /// Short time Fourier transform of `input` <float16|float>(N, 1, L) against `window` (nFft), as

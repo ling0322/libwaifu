@@ -133,8 +133,9 @@ void composedPad1d(
     PadMode mode,
     TensorView out);
 
-/// A clamp as `lo + relu(x - lo)` and `hi - relu(hi - x)`, either skipped when its bound is
-/// infinite.
+/// A clamp as the `max` and then the `min` reduction of each element beside its bound, so that a
+/// value inside the interval comes out exactly itself; either is skipped when its bound is
+/// infinite, and a NaN the reductions dropped is put back.
 void composedClamp(Operators *op, TensorView input, float lo, float hi, TensorView out);
 
 /// A short time Fourier transform as a reflection padding and a `conv1d` against the bank of

@@ -205,6 +205,33 @@ CATCH_TEST_CASE("CUDA clamp agrees with the CPU", "[op][cuda][signal]") {
     CATCH_REQUIRE(closeTo(composed, expected, DType::kFloat));
   }
 
+  // In half, kernel and composition both exactly the input rounded to half and then clamped: a value
+  // inside the interval is itself, however small -- `x - lo + lo` would make 0 of 1e-4 against a
+  // bound of -0.5 -- and one beyond it is exactly the bound.
+  Tensor small = onCpu({1, 8}, {1e-4f, -1e-4f, 3e-5f, 0.2499f, -0.4999f, -1e4f, 1e4f, 99.9f});
+  for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, 0.25f}, {-inf, 100.0f}}) {
+    CATCH_INFO("lo " << lo << " hi " << hi);
+    Tensor rounded = backToCpu(onCuda(small, DType::kFloat16));
+    Tensor expected = F::clamp(cpuOps(), rounded, lo, hi);
+    // The bounds too are only what half can hold of them.
+    Tensor halfBounds = backToCpu(onCuda(onCpu({2}, {std::isinf(lo) ? 0.0f : lo, hi}), DType::kFloat16));
+    const float *b = halfBounds.getInternalData()->getData<float>(halfBounds.getInternalOffset());
+    if (!std::isinf(lo)) expected = F::clamp(cpuOps(), rounded, b[0], b[1]);
+    else expected = F::clamp(cpuOps(), rounded, lo, b[1]);
+
+    Tensor kernel = backToCpu(F::clamp(cudaOps(), onCuda(small, DType::kFloat16), lo, hi));
+    Tensor composed = F::zeros(Device::getCuda(), {1, 8}, DType::kFloat16);
+    F::composedClamp(cudaOps(), onCuda(small, DType::kFloat16), lo, hi, composed);
+    for (const Tensor &got : {kernel, backToCpu(composed)}) {
+      const float *v = got.getInternalData()->getData<float>(got.getInternalOffset());
+      const float *e = expected.getInternalData()->getData<float>(expected.getInternalOffset());
+      for (int i = 0; i < 8; ++i) {
+        CATCH_INFO("element " << i << ": " << v[i] << " against " << e[i]);
+        CATCH_REQUIRE(v[i] == e[i]);
+      }
+    }
+  }
+
   // A NaN stays one, as on the CPU, and an infinity goes to the bound it is beyond: fmaxf and
   // fminf on their own would make a bound of the NaN.
   float nan = std::numeric_limits<float>::quiet_NaN();

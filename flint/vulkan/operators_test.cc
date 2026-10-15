@@ -393,7 +393,29 @@ CATCH_TEST_CASE("test Vulkan signal operators by composition", "[op][vulkan][sig
   for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, inf}, {-1.0f, 0.5f}}) {
     out = F::zeros(Device::getVulkan(), x.getShape(), DType::kFloat);
     F::composedClamp(vk(), vx, lo, hi, out);
-    CATCH_REQUIRE(close(out, F::clamp(cpu(), x, lo, hi), 0.0f, 1e-6f));
+    std::vector<float> got = values(out), want = values(F::clamp(cpu(), x, lo, hi));
+    for (size_t i = 0; i < got.size(); ++i) CATCH_REQUIRE(got[i] == want[i]);
+  }
+
+  // In half, exactly what the kernel gives: a value inside the interval is itself however small,
+  // and one beyond it is exactly the bound.
+  Tensor small = F::zeros(Device::getCpu(), {8}, DType::kFloat);
+  float *s = small.getInternalData()->getData<float>(small.getInternalOffset());
+  float smallValues[] = {1e-4f, -1e-4f, 3e-5f, 0.2499f, -0.4999f, -1e4f, 1e4f, 99.9f};
+  std::copy(smallValues, smallValues + 8, s);
+  for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, 0.25f}, {-inf, 100.0f}}) {
+    CATCH_INFO("lo " << lo << " hi " << hi);
+    Tensor composed = F::zeros(Device::getVulkan(), {8}, DType::kFloat16);
+    F::composedClamp(vk(), toVulkan(small, DType::kFloat16), lo, hi, composed);
+    std::vector<float> got = values(composed);
+    std::vector<float> want = values(F::clamp(vk(), toVulkan(small, DType::kFloat16), lo, hi));
+    for (int i = 0; i < 8; ++i) {
+      CATCH_INFO("element " << i << ": " << got[i] << " against " << want[i]);
+      CATCH_REQUIRE(got[i] == want[i]);
+    }
+    // And inside the interval, the input as half holds it.
+    std::vector<float> rounded = values(toVulkan(small, DType::kFloat16));
+    for (int i = 0; i < 5; ++i) CATCH_REQUIRE(got[i] == rounded[i]);
   }
 
   Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);

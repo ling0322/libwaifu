@@ -597,34 +597,44 @@ void composedClamp(Operators *op, TensorView input, float lo, float hi, TensorVi
     return;
   }
 
+  // Every element beside its bound, (n, 2), and the bound picked out by the `max` or `min` that
+  // reduces the last dimension. A reduction hands back one of the two as it is, so a value inside
+  // the interval comes out exactly itself and one beyond it exactly the bound. Arithmetic would
+  // not: `lo + relu(x - lo)` rounds `x - lo` to the input's type first, and 1e-4 in half comes
+  // back from a lower bound of -0.5 as 0.
+  int n = static_cast<int>(input.getNumEl());
+  Tensor dense;
+  TensorView x = input;
+  if (!x.isContiguous()) {
+    dense = emptyLike(input);
+    op->copy(input, dense);
+    x = dense;
+  }
+
+  Tensor pair = empty(device, {n, 2}, dtype);
+  Tensor picked = empty(device, {n}, dtype);
+  auto bound = [&](TensorView from, float value, bool upper) {
+    op->copy(from.view({n, 1}), pair.slice(1, {0, 1}));
+    op->copy(scalar(op, device, dtype, value, {n, 1}), pair.slice(1, {1, 2}));
+    if (upper) {
+      op->min(pair, picked);
+    } else {
+      op->max(pair, picked);
+    }
+  };
+  if (hasLo) {
+    bound(x, lo, false);
+    x = picked;
+  }
+  if (hasHi) bound(x, hi, true);
+  op->copy(picked.view(shape), out);
+
+  // Whether a reduction keeps a NaN is the device's business, and torch.clamp keeps it, as the
+  // kernels do. `exp(-|x|) * 0` is 0 for every number and either infinity -- exp(-inf) is 0 --
+  // and NaN for a NaN alone: added on, it puts the NaN back and leaves the rest exactly as it
+  // was. Not `x * 0`, which is a NaN of an infinity too.
   Tensor a = emptyLike(input);
   Tensor b = emptyLike(input);
-  TensorView x = input;
-
-  // max(x, lo) = lo + relu(x - lo).
-  if (hasLo) {
-    Tensor bound = scalar(op, device, dtype, lo, shape);
-    op->sub(x, bound, a);
-    op->relu(a, b);
-    op->add(b, bound, hasHi ? a : out);
-    x = a;
-  }
-
-  // min(x, hi) = hi - relu(hi - x), written as hi + -relu(x - hi negated) so that the bound is
-  // always the right operand.
-  if (hasHi) {
-    Tensor bound = scalar(op, device, dtype, hi, shape);
-    op->sub(x, bound, b);
-    op->neg(b, a);
-    op->relu(a, b);
-    op->neg(b, a);
-    op->add(a, bound, out);
-  }
-
-  // A relu makes 0 of a NaN, so by now a NaN input has come out as a bound. torch.clamp keeps it,
-  // and so do the kernels. `exp(-|x|) * 0` is 0 for every number and either infinity -- exp(-inf)
-  // is 0 -- and NaN for a NaN alone: added on, it puts the NaN back and leaves the rest. Not
-  // `x * 0`, which is a NaN of an infinity too.
   op->abs(input, a);
   op->neg(a, b);
   op->exp(b, a);
