@@ -69,9 +69,9 @@ fn temp_dir(what: &str) -> std::path::PathBuf {
     dir
 }
 
-/// A whole manifest whose one suggestion is `line`, written as it stands.
-fn suggesting(line: &str) -> String {
-    format!("weights:\n  - m.safetensors\nconfig:\n  model:\n    type: sdxl\nsuggested:\n  {line}\n")
+/// A whole manifest whose model block holds `line`, written as it stands, besides its type.
+fn configuring(line: &str) -> String {
+    format!("weights:\n  - m.safetensors\nconfig:\n  model:\n    type: sdxl\n    {line}\n")
 }
 
 #[test]
@@ -127,16 +127,8 @@ fn reads_the_three_blocks_a_manifest_merged() {
     assert_eq!(sdxl.get_or("force_upcast", 1).unwrap(), 1);
     assert_eq!(sdxl.get::<i32>("clip_skip").unwrap(), 2);
 
-    // What used to be metadata.json, which has grown from one field to several.
-    let suggested = manifest.suggested();
-    assert_eq!(
-        suggested.prompt.as_deref(),
-        Some("masterpiece, best quality")
-    );
-    assert_eq!(suggested.sizes, vec![(1024, 1024), (832, 1216), (1216, 832)]);
-    assert_eq!(suggested.size(), Some((1024, 1024)));
-    assert_eq!(suggested.steps, Some(8));
-    assert_eq!(suggested.guidance, Some(1.0));
+    // What used to be metadata.json is the model manager's, and stepped over here: reading the
+    // manifest above at all is the check that it is.
 
     assert!(manifest.has_section("sdxl"));
     assert!(!manifest.has_section("anima"));
@@ -182,18 +174,6 @@ fn a_model_that_tokenizes_nothing_names_no_tokenizers() {
 }
 
 #[test]
-fn a_model_with_no_advice_to_give_has_no_suggested_block() {
-    let manifest =
-        Manifest::parse("weights:\n  - m.safetensors\nconfig:\n  model:\n    type: sdxl\n").unwrap();
-
-    let suggested = manifest.suggested();
-    assert_eq!(suggested.prompt, None);
-    assert_eq!(suggested.steps, None);
-    assert_eq!(suggested.guidance, None);
-    assert!(suggested.sizes.is_empty());
-}
-
-#[test]
 fn a_block_this_build_has_not_heard_of_is_stepped_over() {
     // A manifest from a newer writer still names the weights and still says what the model is.
     let manifest = Manifest::parse(
@@ -209,60 +189,48 @@ fn a_block_this_build_has_not_heard_of_is_stepped_over() {
         manifest.section("model").unwrap().get_str("type").unwrap(),
         "sdxl"
     );
-    assert_eq!(manifest.suggested().prompt.as_deref(), Some("1girl"));
 }
 
 #[test]
 fn scalars_mean_what_they_mean_everywhere_else() {
-    let prompt = |line: &str| {
-        Manifest::parse(&suggesting(line))
+    let value = |line: &str| {
+        Manifest::parse(&configuring(line))
             .unwrap()
-            .suggested()
-            .prompt
-            .clone()
+            .section("model")
+            .unwrap()
+            .get_str("note")
+            .unwrap()
+            .to_string()
     };
 
     // A space and then a `#` begins a comment, the way it does everywhere else; a `#` with no
-    // space before it is part of the value. A prompt that really wants the first has to be
+    // space before it is part of the value. A value that really wants the first has to be
     // quoted, and the exporter quotes it.
-    assert_eq!(
-        prompt("prompt: a plain value  # and a comment").as_deref(),
-        Some("a plain value")
-    );
-    assert_eq!(
-        prompt("prompt: tag#1 keeps its hash").as_deref(),
-        Some("tag#1 keeps its hash")
-    );
-    assert_eq!(
-        prompt(r#"prompt: "tag #1, quoted""#).as_deref(),
-        Some("tag #1, quoted")
-    );
+    assert_eq!(value("note: a plain value  # and a comment"), "a plain value");
+    assert_eq!(value("note: tag#1 keeps its hash"), "tag#1 keeps its hash");
+    assert_eq!(value(r#"note: "tag #1, quoted""#), "tag #1, quoted");
 
     // Quoted, with the escapes each kind of quote has and no others.
-    assert_eq!(
-        prompt(r#"prompt: "a: colon, and a \"quote\"""#).as_deref(),
-        Some(r#"a: colon, and a "quote""#)
-    );
-    assert_eq!(prompt("prompt: 'it''s here'").as_deref(), Some("it's here"));
+    assert_eq!(value(r#"note: "a: colon, and a \"quote\"""#), r#"a: colon, and a "quote""#);
+    assert_eq!(value("note: 'it''s here'"), "it's here");
 
     // Anything wider than ASCII arrives as itself: the exporter writes utf-8 rather than escapes.
-    assert_eq!(prompt("prompt: 猫, 🐱").as_deref(), Some("猫, 🐱"));
+    assert_eq!(value("note: 猫, 🐱"), "猫, 🐱");
 }
 
 #[test]
 fn a_list_may_be_written_on_one_line_or_on_several() {
-    let block = Manifest::parse(&suggesting("sizes:\n    - [1024, 1024]\n    - [832, 1216]"))
+    let header = "config:\n  model:\n    type: sdxl\n";
+    let block = Manifest::parse(&format!("weights:\n  - a.safetensors\n  - b.safetensors\n{header}"))
         .unwrap()
-        .suggested()
-        .sizes
-        .clone();
-    let inline = Manifest::parse(&suggesting("sizes: [[1024, 1024], [832, 1216]]"))
+        .weights()
+        .to_vec();
+    let inline = Manifest::parse(&format!("weights: [a.safetensors, b.safetensors]\n{header}"))
         .unwrap()
-        .suggested()
-        .sizes
-        .clone();
+        .weights()
+        .to_vec();
 
-    assert_eq!(block, vec![(1024, 1024), (832, 1216)]);
+    assert_eq!(block, ["a.safetensors", "b.safetensors"]);
     assert_eq!(block, inline);
 }
 

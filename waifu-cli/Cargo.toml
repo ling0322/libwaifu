@@ -1,0 +1,38 @@
+[package]
+name = "waifu-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The waifu command line tool, over the C APIs of libwaifu and libwaifu_modelmanager"
+
+# Both libraries are linked into the binary statically, and it calls nothing of theirs but their
+# C APIs: `waifu::c_api` and `waifu_modelmanager::c_api`, the functions waifu.h and
+# waifu_modelmanager.h declare. One file to copy, and nothing to find at run time.
+[[bin]]
+name = "waifu"
+path = "src/main.rs"
+
+[dependencies]
+# The engine and the model manager, for their C APIs only.
+waifu = { path = "../waifu" }
+waifu-modelmanager = { path = "../waifu-modelmanager" }
+
+# The terminal the whole of it happens in: which task, which model -- fetched there, under a bar
+# -- and which device, and then the screen a picture is drawn from. Trimmed to the crossterm
+# backend: the default set also builds the termwiz and termina ones, which is two more terminal
+# stacks than a program that runs in one terminal needs.
+ratatui = { version = "0.29", default-features = false, features = [
+    "crossterm",
+    "underline-color",
+] }
+
+# What the libraries say about models, devices and where models are kept, which they say as JSON.
+serde_json = "1"
+
+# Reading the picture a run starts from, and writing the one it ends with: the two formats anyone
+# actually hands a diffusion model, which are also the two written in pure Rust. The engine takes
+# and hands back rows of RGB; the files are this tool's.
+#
+# Cargo.lock holds 0.25.9 rather than the newest 0.25: 0.25.10 asks for a rustc a minor version
+# ahead of the one this is built with.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

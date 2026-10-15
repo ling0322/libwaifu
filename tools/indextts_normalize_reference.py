@@ -97,7 +97,7 @@ def ours(cases):
     extension of it to normalize a string would be a great deal of machinery for a pure function.
     """
     program = """
-use waifu::indextts_normalize::{normalize, Language};
+use waifu::text_normalizer::{normalize, Language};
 
 fn main() {
     let mut input = String::new();

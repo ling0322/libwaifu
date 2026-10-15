@@ -27,6 +27,19 @@ jobs:
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
 
+      - name: Test (model manager)
+        run: cargo test -p waifu-modelmanager
+
+      - name: Test (command line)
+        run: cargo test -p waifu-cli
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+      - name: Build (tools)
+        run: cargo build -p waifu-tools
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
   macos-metal:
     name: macOS (CPU + Metal)
     runs-on: macos-latest
@@ -45,6 +58,19 @@ jobs:
 
       - name: Test (Rust)
         run: cargo test --manifest-path waifu/Cargo.toml
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+      - name: Test (model manager)
+        run: cargo test -p waifu-modelmanager
+
+      - name: Test (command line)
+        run: cargo test -p waifu-cli
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+      - name: Build (tools)
+        run: cargo build -p waifu-tools
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
 
@@ -114,5 +140,18 @@ jobs:
 
       - name: Test (Rust)
         run: cargo test --manifest-path waifu/Cargo.toml
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+      - name: Test (model manager)
+        run: cargo test -p waifu-modelmanager
+
+      - name: Test (command line)
+        run: cargo test -p waifu-cli
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+      - name: Build (tools)
+        run: cargo build -p waifu-tools
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build

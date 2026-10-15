@@ -251,8 +251,8 @@ local test fixture is the exception and is deliberately not this -- see "Test da
 ## 4. Verify before uploading, not after
 
 ```bash
-cargo run --release --example load     -- models/<stem>.yaml cuda
-cargo run --release --example generate -- models/<stem>.yaml "<prompt>" cuda
+cargo run --release -p waifu-tools --bin load     -- models/<stem>.yaml cuda
+cargo run --release -p waifu-tools --bin generate -- models/<stem>.yaml "<prompt>" cuda
 ```
 
 `load` builds the whole model from the manifest and encodes a prompt with it -- weights,
@@ -327,7 +327,7 @@ model and not on the pictures. Add `not-for-all-audiences` if the samples warran
 
 ## 6. Wire it into the CLI
 
-`waifu/src/cli/hub.rs`, once the model is actually on both hubs and not before -- an entry naming
+`waifu-modelmanager/src/hub.rs`, once the model is actually on both hubs and not before -- an entry naming
 a manifest that is not published is a name that 404s for everyone who types it.
 
 - a `Published` entry in `CATALOG`: `name`, `full_name` (what the picker shows), `repo`,
@@ -358,11 +358,13 @@ entry makes that paragraph wrong as well as incomplete.
 
 ```bash
 ./build/unittest
-cargo test --release --manifest-path waifu/Cargo.toml --features cli -- --test-threads=1
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test --release --manifest-path waifu/Cargo.toml -- --test-threads=1
+cargo test --release -p waifu-modelmanager
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test --release -p waifu-cli
 ```
 
-`--features cli` is what compiles `src/cli/`, so without it the `hub.rs` tests you just changed do
-not run at all.
+The `hub.rs` tests you just changed are `waifu-modelmanager`'s, and the picker and the `-m` usage
+text read the catalogue through its C API, which is what `waifu-cli`'s tests check.
 
 The model tests are `#[ignore]`d and need a real package. **Do not run them unless the user asks**
 (`CLAUDE.md`); say which were skipped and what runs them. When asked, and for a change that

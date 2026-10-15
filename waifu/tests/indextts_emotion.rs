@@ -23,8 +23,8 @@
 //! Every other reference here sweeps a sine per parameter. This draws by xorshift instead,
 //! because most of what this module does is attention: a swept parameter makes every key in a
 //! projection point nearly the same way, the softmax over them comes out flat, and a flat softmax
-//! is an average -- which does not care what order its keys arrived in. `docs/indextts_gpt.md`
-//! has the longer version, and the bug it cost.
+//! is an average -- which does not care what order its keys arrived in. `docs/indextts.md`
+//! says why, under the GPT.
 //!
 //! # Four probes and a table
 //!

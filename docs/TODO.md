@@ -584,15 +584,11 @@ The Rust test has the gate this entry asked for: `fl_paged_attention_available()
 the kernels. It matters more than it did, since `WITH_FLASH_ATTN` is now off by default.
 
 
-## The Rust suite skips the CLI, and cannot run the SDXL tests in parallel
+## The Rust suite cannot run the SDXL tests in parallel
 
-Two things about `cargo test --manifest-path waifu/Cargo.toml`, which is the command CLAUDE.md and
-`.github/workflows/ci.yml` both give:
-
-**It compiles none of `src/cli/`.** `waifu/Cargo.toml:23` puts the `cli` module behind a feature,
-so every test in `cli/hub.rs`, `cli/args.rs` and `cli/picker.rs` is silently absent -- 153 of them
-against 30 without. A broken model catalog entry passes CI. `--features cli` is the fix, and CI
-does not pass it.
+About `cargo test --manifest-path waifu/Cargo.toml`, which is the command CLAUDE.md and
+`.github/workflows/ci.yml` both give. (The command line and the catalogue are crates of their own
+now, `waifu-cli` and `waifu-modelmanager`, and both have a step of their own in CI.)
 
 **Its default parallelism cannot work on one GPU.** `cargo test` runs one thread per core, and
 every test in `waifu/tests/sdxl.rs` calls `model()`, which loads a 7 GB package onto the device.
@@ -610,10 +606,10 @@ like `refuses_a_size_it_cannot_work_in`, which touch no reference data, fail wit
 from a line that only loads the model, and it looks like a broken package rather than a harness
 that asked for too much at once.
 
-Nothing documents either flag. Together the command that actually runs everything is
+Nothing documents the flag. The command that actually runs everything is
 
 ```bash
-cargo test --manifest-path waifu/Cargo.toml --features cli -- --include-ignored --test-threads=1
+cargo test --manifest-path waifu/Cargo.toml -- --include-ignored --test-threads=1
 ```
 
 

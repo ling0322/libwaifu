@@ -628,60 +628,94 @@ file(GENERATE
 
 # CMake drives the Rust build too, so a plain `cmake --build build` is the whole build: no
 # separate `cargo build` step. LIBWAIFU_LIB_DIR is set explicitly so this works regardless of where
-# the build directory was configured, matching what waifu/build.rs falls back to on its own.
+# the build directory was configured, matching what the build scripts fall back to on their own.
 #
 # CARGO_TARGET_DIR points inside the build directory as well, so that a build writes nothing
 # outside it and two build directories configured differently do not fight over one cache. Cargo
-# still puts the binary under a profile directory of its own, so the last step copies it up beside
-# the C++ executables, where someone who built in `build` expects to find it.
+# still puts what it builds under a profile directory of its own, so each target copies it up
+# beside the C++ executables, where someone who built in `build` expects to find it.
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 set(waifu_CARGO_DIR "${CMAKE_BINARY_DIR}/cargo")
-set(waifu_CLI "${waifu_CARGO_DIR}/release/waifu${CMAKE_EXECUTABLE_SUFFIX}")
-# `--features cli` is what builds the `waifu` binary: it is off by default so that using the crate
-# as a library does not drag in a terminal library.
-set(waifu_CARGO_FEATURES "cli")
+set(waifu_CARGO_OUT "${waifu_CARGO_DIR}/release")
+
+# The two libraries, and the command line built on their C APIs. See docs/ffi.md.
+#
+#   libwaifu               the engine: libwaifu.dylib, libwaifu.so or waifu.dll
+#   libwaifu_modelmanager  the catalogue and fetching, with no engine and no flint behind it
+#
+# Each is copied beside the executables with its header under include/. The two share nothing,
+# headers included. On Windows the import library goes too, which is what a program linking the
+# DLL is linked against.
+if (APPLE)
+    set(waifu_LIB_PREFIX "lib")
+    set(waifu_LIB_SUFFIX ".dylib")
+elseif (WIN32)
+    set(waifu_LIB_PREFIX "")
+    set(waifu_LIB_SUFFIX ".dll")
+else()
+    set(waifu_LIB_PREFIX "lib")
+    set(waifu_LIB_SUFFIX ".so")
+endif()
+
+# waifu_copy_commands(<out> <library> <header dir> <header>): the commands that copy a library
+# cargo built, and its header, up beside the executables.
+function(waifu_copy_commands out library header_dir header)
+    set(commands
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${waifu_CARGO_OUT}/${waifu_LIB_PREFIX}${library}${waifu_LIB_SUFFIX}"
+                "${CMAKE_BINARY_DIR}/${waifu_LIB_PREFIX}${library}${waifu_LIB_SUFFIX}")
+    if (WIN32)
+        list(APPEND commands
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${waifu_CARGO_OUT}/${library}.dll.lib" "${CMAKE_BINARY_DIR}/${library}.dll.lib")
+    endif()
+    list(APPEND commands
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/include"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/${header_dir}/${header}" "${CMAKE_BINARY_DIR}/include/${header}")
+    set(${out} ${commands} PARENT_SCOPE)
+endfunction()
+
+# The engine. Its own build script reads flint_link_flags.txt, puts the Metal kernels into it and
+# writes the header.
+waifu_copy_commands(waifu_ENGINE_COPY waifu waifu/include waifu.h)
+add_custom_target(waifu-engine ALL
+    COMMAND ${CMAKE_COMMAND} -E env "LIBWAIFU_LIB_DIR=${CMAKE_BINARY_DIR}"
+            "CARGO_TARGET_DIR=${waifu_CARGO_DIR}"
+            ${CARGO_EXECUTABLE} build -p waifu --lib --release
+    ${waifu_ENGINE_COPY}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS flint "${CMAKE_BINARY_DIR}/flint_link_flags.txt" ${flint_CARGO_DEPENDS}
+    COMMENT "cargo build -p waifu --lib --release"
+    VERBATIM)
+
+# The model manager. It links nothing native, so it needs nothing CMake built.
+waifu_copy_commands(waifu_MODELMANAGER_COPY waifu_modelmanager waifu-modelmanager/include waifu_modelmanager.h)
+add_custom_target(waifu-modelmanager ALL
+    COMMAND ${CMAKE_COMMAND} -E env "CARGO_TARGET_DIR=${waifu_CARGO_DIR}"
+            ${CARGO_EXECUTABLE} build -p waifu-modelmanager --lib --release
+    ${waifu_MODELMANAGER_COPY}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "cargo build -p waifu-modelmanager --lib --release"
+    VERBATIM)
+
+# The command line, `waifu`, which calls the two libraries above through nothing but their C APIs,
+# with both linked into it statically: one file, which needs neither library beside it.
+set(waifu_CLI "${waifu_CARGO_OUT}/waifu${CMAKE_EXECUTABLE_SUFFIX}")
 add_custom_target(waifu-cli ALL
     COMMAND ${CMAKE_COMMAND} -E env "LIBWAIFU_LIB_DIR=${CMAKE_BINARY_DIR}"
             "CARGO_TARGET_DIR=${waifu_CARGO_DIR}"
-            ${CARGO_EXECUTABLE} build -p waifu --features ${waifu_CARGO_FEATURES} --release
+            ${CARGO_EXECUTABLE} build -p waifu-cli --release
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${waifu_CLI}" "${CMAKE_BINARY_DIR}/waifu${CMAKE_EXECUTABLE_SUFFIX}"
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    DEPENDS flint "${CMAKE_BINARY_DIR}/flint_link_flags.txt" ${flint_CARGO_DEPENDS}
-    COMMENT "cargo build -p waifu --features ${waifu_CARGO_FEATURES} --release"
+    COMMENT "cargo build -p waifu-cli --release"
     VERBATIM)
 
-# The C API, as a shared library an app links: libwaifu.dylib, libwaifu.so or waifu.dll, beside the
-# executables, and waifu.h under include/. See docs/ffi.md.
-#
-# Cargo names the library after its crate, waifu_ffi, so the copy gives it the name its install
-# name says it has. Its own build script puts the Metal kernels into it and writes the header.
-if (APPLE)
-    set(waifu_FFI_BUILT "${waifu_CARGO_DIR}/release/libwaifu_ffi.dylib")
-    set(waifu_FFI "${CMAKE_BINARY_DIR}/libwaifu.dylib")
-elseif (WIN32)
-    set(waifu_FFI_BUILT "${waifu_CARGO_DIR}/release/waifu_ffi.dll")
-    set(waifu_FFI "${CMAKE_BINARY_DIR}/waifu.dll")
-else()
-    set(waifu_FFI_BUILT "${waifu_CARGO_DIR}/release/libwaifu_ffi.so")
-    set(waifu_FFI "${CMAKE_BINARY_DIR}/libwaifu.so")
-endif()
-add_custom_target(waifu-ffi ALL
-    COMMAND ${CMAKE_COMMAND} -E env "LIBWAIFU_LIB_DIR=${CMAKE_BINARY_DIR}"
-            "CARGO_TARGET_DIR=${waifu_CARGO_DIR}"
-            ${CARGO_EXECUTABLE} build -p waifu-ffi --release
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${waifu_FFI_BUILT}" "${waifu_FFI}"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/include"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/waifu-ffi/include/waifu.h"
-            "${CMAKE_BINARY_DIR}/include/waifu.h"
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    DEPENDS flint "${CMAKE_BINARY_DIR}/flint_link_flags.txt" ${flint_CARGO_DEPENDS}
-    COMMENT "cargo build -p waifu-ffi --release"
-    VERBATIM)
 # One cargo at a time in one target directory: two would wait on each other's lock anyway, and
-# this way the second reuses what the first built.
-add_dependencies(waifu-ffi waifu-cli)
+# this way each reuses what the one before built.
+add_dependencies(waifu-modelmanager waifu-engine)
+add_dependencies(waifu-cli waifu-engine waifu-modelmanager)
 
 set(unittest_LIBADD
     flint_test

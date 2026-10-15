@@ -1,0 +1,59 @@
+[package]
+name = "waifu-modelmanager"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "libwaifu_modelmanager: which models there are, fetching them, and where they are kept"
+
+# A dynamic library, libwaifu_modelmanager.dylib (.so, waifu_modelmanager.dll), whose C API is all
+# anything outside this crate uses: see docs/ffi.md. The rlib is for this crate's own tests, for
+# the command line, which links it statically and calls its C API, and for waifu-tools. libwaifu does not link it, nor it libwaifu.
+[lib]
+name = "waifu_modelmanager"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+
+# The catalogue as JSON, for the C API to hand on: a parser this crate would own for no reason,
+# since it is already in the tree, under hf-hub.
+#
+# `Value` rather than derived types. What crosses is a handful of shapes, each built once, and a
+# derive would buy nothing at the cost of a second description of every one of them.
+serde_json = { version = "1" }
+
+# The settings file, `config.toml`, which today says one thing: where fetched models go. It is a
+# file for people to open in an editor, so it is in the format that lets them write a comment and
+# a Windows path without escaping every backslash -- and reading that properly is a parser, which
+# is not something to write again here.
+toml = { version = "1" }
+
+# Fetching from ModelScope, which hf-hub does not speak, and probing whether the machine can
+# reach the outside at all. Rust has no HTTP in its standard library, so this is the one thing the
+# tool cannot do on its own. Held to the rustls backend: the native-tls default would link the
+# system OpenSSL, and a dynamic library on the far side of the build is exactly what this crate
+# does not want.
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
+] }
+
+# Fetching from Hugging Face, which is where the models are published and where all but one of
+# the fetches go. Its own client rather than ureq against a URL built here: it is what tracks how
+# that hub actually answers -- redirects to a CDN, xet-backed files that are not a plain GET, the
+# headers that say a file moved -- and none of that is worth rediscovering here one bug report at
+# a time.
+#
+# It is the largest thing in this file by a distance, reqwest and tokio and hf-xet behind it, and
+# that is the price of the above. Held to rustls for the same reason ureq is, and to the blocking
+# feature because nothing else in this crate is async: an executor exists to run one download at
+# a time and no further.
+#
+# The other fetch is ModelScope, which this does not speak. That one stays on ureq, above.
+hf-hub = { version = "1", default-features = false, features = [
+    "blocking",
+    "rustls-tls",
+] }
+
+[build-dependencies]
+cbindgen = { version = "0.29", default-features = false }

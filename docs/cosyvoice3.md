@@ -6,8 +6,8 @@ under Apache 2.0.
 
 ```bash
 waifu -m cosyvoice                                  # the text2speech page
-cargo run --release --example speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav
-cargo run --release --example speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav 7 "录音里说的话。"
+cargo run --release -p waifu-tools --bin speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav
+cargo run --release -p waifu-tools --bin speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav 7 "录音里说的话。"
 ```
 
 ```rust
@@ -57,9 +57,9 @@ The exporter checks the written `tokenizer.json` against the tokenizer upstream 
 
 Tokens and mel are then cut to the same length, two frames a token.
 
-**Saying, once per sentence.** The text is normalized and split into pieces of 60 to 80
-characters (Chinese) or tokens (anything else), as upstream's `text_normalize` does -- see
-[`frontend.rs`](../waifu/src/cosyvoice3/frontend.rs) -- and each piece goes through:
+**Saying, once per sentence.** The text is [normalized](text_normalize.md) and split into pieces
+of 60 to 80 characters (Chinese) or tokens (anything else), as upstream's `text_normalize` does --
+see [`frontend.rs`](../waifu/src/cosyvoice3/frontend.rs) -- and each piece goes through:
 
 1. [The language model](../waifu/src/cosyvoice3/lm.rs): `[sos] text [task] prompt-tokens` in,
    speech tokens out, by repetition-aware nucleus sampling (top-p 0.8, top-k 25, a token said in

@@ -24,7 +24,7 @@
 //! that thread. The calls return at once; what comes of a job arrives through its callbacks --
 //! progress any number of times, then exactly one completion -- on the engine's thread.
 //!
-//! This is what the C API in waifu-ffi is a thin skin over; see docs/ffi.md for the contract it
+//! This is what the C API in [`crate::c_api`] is a thin skin over; see docs/ffi.md for the contract it
 //! keeps. One model at a time: two on one card double the memory, and on Metal nothing can say
 //! beforehand whether they would fit.
 
@@ -40,11 +40,10 @@ use std::time::Instant;
 
 use crate::cosyvoice3::CosyVoice3;
 use crate::describe::{self, converter_kind, voice_kind, Chosen, ConverterKind, VoiceKind, TONES};
-use crate::hub;
 use crate::image_model::ImageModel;
 use crate::indextts::IndexTts;
-use crate::progress::{Convert, Doing, Fetch, Run, Say, VOCODER_RATIO};
-use crate::runtime::{DeviceOption, Runtime};
+use crate::progress::{Convert, Doing, Run, Say, VOCODER_RATIO};
+use crate::runtime::{DeviceOption, Room, Runtime};
 use crate::wav::Sound;
 use crate::{
     from_rgb8, to_rgb8, ConversionOptions, ConversionProgress, Converter, Device,
@@ -108,7 +107,6 @@ pub struct VoiceConversionRequest {
 /// Which part of a job a progress report is about.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
-    Fetching,
     Reading,
     Encoding,
     Drawing,
@@ -124,13 +122,9 @@ pub struct Progress {
     pub stage: Stage,
     /// Of the whole job, 0 to 1, or None where nothing can say -- reading weights.
     pub fraction: Option<f64>,
-    /// What the stage counts: bytes, steps or tokens. 0 and 0 where it counts nothing.
+    /// What the stage counts: steps or tokens. 0 and 0 where it counts nothing.
     pub done: u64,
     pub total: u64,
-    /// Fetching only: which file of how many.
-    pub part: u32,
-    pub parts: u32,
-    pub file: Option<String>,
     /// "step 3 of 8", for a status line.
     pub words: String,
     /// Since the job started.
@@ -140,8 +134,8 @@ pub struct Progress {
 /// Why a job failed, in the C API's terms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failure {
+    /// Neither the stand-in nor a manifest that exists.
     UnknownModel,
-    Fetch,
     Model,
     NotLoaded,
     Internal,
@@ -278,7 +272,9 @@ impl Engine {
         job
     }
 
-    /// Fetches `model` if it has to, and reads it onto the device, dropping the one before.
+    /// Reads the model whose manifest is at `model` onto the device, dropping the one before.
+    /// `model` is a path -- fetching a published model and saying where it went is the model
+    /// manager's -- or the stand-in voice, "tones".
     pub fn load(&self, model: &str, on_progress: OnProgress, on_complete: OnComplete<()>) -> JobId {
         self.submit(Work::Load {
             model: model.to_string(),
@@ -528,41 +524,33 @@ struct Reporter<'a> {
 
 impl Reporter<'_> {
     fn tell(&mut self, doing: &Doing) {
-        let (stage, done, total, part, parts, file) = match doing {
+        let (stage, done, total) = match doing {
             Doing::Nothing => return,
-            Doing::Fetching(fetch) => (
-                Stage::Fetching,
-                fetch.done,
-                fetch.total.unwrap_or(0),
-                fetch.part as u32,
-                fetch.parts as u32,
-                (!fetch.file.is_empty()).then(|| fetch.file.clone()),
-            ),
-            Doing::Reading { .. } => (Stage::Reading, 0, 0, 0, 0, None),
+            Doing::Reading { .. } => (Stage::Reading, 0, 0),
             Doing::Drawing(run) => match run.progress {
-                GenerationProgress::Encoding => (Stage::Encoding, 0, 0, 0, 0, None),
+                GenerationProgress::Encoding => (Stage::Encoding, 0, 0),
                 GenerationProgress::Step { done, total } => {
-                    (Stage::Drawing, done as u64, total as u64, 0, 0, None)
+                    (Stage::Drawing, done as u64, total as u64)
                 }
-                GenerationProgress::Decoding => (Stage::Decoding, 0, 0, 0, 0, None),
+                GenerationProgress::Decoding => (Stage::Decoding, 0, 0),
             },
             Doing::Speaking(say) => match say.progress {
-                SpeechProgress::Reading => (Stage::Encoding, 0, 0, 0, 0, None),
+                SpeechProgress::Reading => (Stage::Encoding, 0, 0),
                 SpeechProgress::Saying { done, expected } => {
-                    (Stage::Saying, done.max(0) as u64, expected.max(0) as u64, 0, 0, None)
+                    (Stage::Saying, done.max(0) as u64, expected.max(0) as u64)
                 }
-                SpeechProgress::Sounding => (Stage::Sounding, 0, 0, 0, 0, None),
+                SpeechProgress::Sounding => (Stage::Sounding, 0, 0),
             },
             Doing::Converting(convert) => match convert.progress {
-                ConversionProgress::Listening => (Stage::Listening, 0, 0, 0, 0, None),
+                ConversionProgress::Listening => (Stage::Listening, 0, 0),
                 ConversionProgress::Saying { done, expected } => {
-                    (Stage::Saying, done.max(0) as u64, expected.max(0) as u64, 0, 0, None)
+                    (Stage::Saying, done.max(0) as u64, expected.max(0) as u64)
                 }
                 ConversionProgress::Drawing { done, total } => {
-                    (Stage::Drawing, done.max(0) as u64, total.max(0) as u64, 0, 0, None)
+                    (Stage::Drawing, done.max(0) as u64, total.max(0) as u64)
                 }
                 ConversionProgress::Sounding { done, total } => {
-                    (Stage::Sounding, done.max(0) as u64, total.max(0) as u64, 0, 0, None)
+                    (Stage::Sounding, done.max(0) as u64, total.max(0) as u64)
                 }
             },
         };
@@ -572,139 +560,9 @@ impl Reporter<'_> {
             fraction: doing.fraction(),
             done,
             total,
-            part,
-            parts,
-            file,
             words: doing.words(),
             seconds: self.started.elapsed().as_secs_f64(),
         });
-    }
-}
-
-/// The name a screen shows for `asked`: the file name of a path, since the whole of one does not
-/// fit, and the name itself otherwise.
-fn shown_name(asked: &str) -> String {
-    match asked.rsplit_once('/') {
-        Some((_, file)) if !file.is_empty() => file.to_string(),
-        _ => asked.to_string(),
-    }
-}
-
-/// Fetches the published model `asked` names, if it is not here already, and hands back its
-/// manifest; a manifest's own path is handed back as it is. On the caller's thread: what
-/// `waifu_modelmanager_fetch_async` runs on a thread of its own, and what a load starts with.
-pub fn fetch(asked: &str, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<std::path::PathBuf> {
-    let mut reporter = Reporter {
-        on_progress,
-        started: Instant::now(),
-    };
-    fetch_reporting(asked, &mut reporter, stop)
-}
-
-/// Fetches the manifest of every published model not yet here, and none of their packages: see
-/// [`hub::fetch_manifests`]. Each is reported as a part of the whole, under the model name
-/// "model metadata".
-pub fn fetch_manifests(on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<()> {
-    let mut reporter = Reporter {
-        on_progress,
-        started: Instant::now(),
-    };
-    let mut fetch = Fetch {
-        model: "model metadata".to_string(),
-        hub: None,
-        file: String::new(),
-        done: 0,
-        total: None,
-        part: 0,
-        parts: 0,
-    };
-    let fetched = hub::fetch_manifests(
-        &mut |progress| {
-            match progress {
-                hub::Progress::From { hub } => fetch.hub = Some(hub),
-                hub::Progress::Fetching {
-                    file,
-                    done,
-                    total,
-                    part,
-                    parts,
-                } => {
-                    fetch.file = file.to_string();
-                    (fetch.done, fetch.total, fetch.part, fetch.parts) = (done, total, part, parts);
-                }
-                hub::Progress::Fetched {
-                    file,
-                    bytes,
-                    part,
-                    parts,
-                } => {
-                    fetch.file = file.to_string();
-                    (fetch.done, fetch.total, fetch.part, fetch.parts) = (bytes, Some(bytes), part, parts);
-                }
-            }
-            reporter.tell(&Doing::Fetching(fetch.clone()));
-        },
-        stop,
-    );
-    match fetched {
-        Ok(()) => Ended::Done(()),
-        Err(error) if hub::stopped(&error) => Ended::Cancelled,
-        Err(error) => Ended::failed(Failure::Fetch, error.to_string()),
-    }
-}
-
-fn fetch_reporting(asked: &str, reporter: &mut Reporter, stop: &dyn Fn() -> bool) -> Ended<std::path::PathBuf> {
-    if hub::full_name(asked).is_none() && !Path::new(asked).is_file() {
-        return Ended::failed(
-            Failure::UnknownModel,
-            format!("there is no model called \"{asked}\": neither a published name nor a manifest that exists"),
-        );
-    }
-
-    let mut fetch = Fetch {
-        model: shown_name(asked),
-        hub: None,
-        file: String::new(),
-        done: 0,
-        total: None,
-        part: 0,
-        parts: 0,
-    };
-    reporter.tell(&Doing::Fetching(fetch.clone()));
-
-    let fetched = hub::resolve_reporting(
-        asked,
-        &mut |progress| {
-            match progress {
-                hub::Progress::From { hub } => fetch.hub = Some(hub),
-                hub::Progress::Fetching {
-                    file,
-                    done,
-                    total,
-                    part,
-                    parts,
-                } => {
-                    fetch.file = file.to_string();
-                    (fetch.done, fetch.total, fetch.part, fetch.parts) = (done, total, part, parts);
-                }
-                hub::Progress::Fetched {
-                    file,
-                    bytes,
-                    part,
-                    parts,
-                } => {
-                    fetch.file = file.to_string();
-                    (fetch.done, fetch.total, fetch.part, fetch.parts) = (bytes, Some(bytes), part, parts);
-                }
-            }
-            reporter.tell(&Doing::Fetching(fetch.clone()));
-        },
-        stop,
-    );
-    match fetched {
-        Ok(path) => Ended::Done(path),
-        Err(error) if hub::stopped(&error) => Ended::Cancelled,
-        Err(error) => Ended::failed(Failure::Fetch, error.to_string()),
     }
 }
 
@@ -717,7 +575,7 @@ impl Worker {
                 mut on_progress,
                 on_complete,
             } => {
-                let ended = guarded(|| self.load(&model, &mut on_progress, &stop));
+                let ended = guarded(|| self.load(&model, &mut on_progress));
                 on_complete(ended);
             }
             Work::Unload { on_complete } => {
@@ -755,7 +613,7 @@ impl Worker {
         }
     }
 
-    fn load(&mut self, asked: &str, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<()> {
+    fn load(&mut self, asked: &str, on_progress: &mut OnProgress) -> Ended<()> {
         let mut reporter = Reporter {
             on_progress,
             started: Instant::now(),
@@ -769,12 +627,11 @@ impl Worker {
             self.name = asked.to_string();
             return Ended::Done(());
         }
-        let path = match fetch_reporting(asked, &mut reporter, stop) {
-            Ended::Done(path) => path,
-            Ended::Cancelled => return Ended::Cancelled,
-            Ended::Failed(failure, message) => return Ended::Failed(failure, message),
-        };
-        let shown = shown_name(asked);
+        let path = std::path::PathBuf::from(asked);
+        if !path.is_file() {
+            return Ended::failed(Failure::UnknownModel, describe::no_manifest_at(asked));
+        }
+        let shown = describe::shown_name(asked);
 
         reporter.tell(&Doing::Reading { model: shown });
         let (device, residency) = (self.runtime.device(), self.runtime.residency());
@@ -845,17 +702,14 @@ impl Worker {
             }
         }
 
-        // Both or neither, and neither for a model with no second pass to steer.
-        let (guidance, negative) = match chosen.takes_guidance {
-            true => (request.guidance, request.negative.clone()),
-            false => (chosen.defaults.guidance_scale, String::new()),
-        };
+        // As asked: what to start a model's boxes at, guidance included, is the caller's to have
+        // decided, and the request is what it decided.
         let options = GenerationOptions {
             width: request.width as i32,
             height: request.height as i32,
             num_steps: request.steps as i32,
-            guidance_scale: guidance,
-            negative_prompt: negative,
+            guidance_scale: request.guidance,
+            negative_prompt: request.negative.clone(),
             seed: Some(request.seed),
             strength: request.strength.clamp(0.0, 1.0),
         };
@@ -1026,41 +880,20 @@ fn scaled(image: &Image, width: u32, height: u32) -> Vec<u8> {
 
 // -- what is there, as JSON ------------------------------------------------------------------
 
-/// A float as a box can show it: four places, which is finer than any setting steps.
-fn showable(value: f32) -> f64 {
-    (f64::from(value) * 10_000.0).round() / 10_000.0
-}
-
-/// The published models, aliases only: `waifu_modelmanager_catalog_json`.
-pub fn catalog_json() -> serde_json::Value {
-    let entry = |listed: hub::Listed, kind: &str| {
-        serde_json::json!({
-            "name": listed.name,
-            "full_name": listed.full_name,
-            "kind": kind,
-            "cached": listed.cached,
-            // Whether its manifest is here, with or without its packages: what it suggests can
-            // be read from it. See waifu_modelmanager_fetch_manifests_async.
-            "manifest_here": hub::local_manifest(listed.name).is_some(),
-            "bytes_on_disk": listed.bytes,
-            "explicit": listed.explicit,
-        })
-    };
-    let models: Vec<serde_json::Value> = hub::listed()
-        .into_iter()
-        .map(|listed| entry(listed, "image"))
-        .chain(hub::listed_voices().into_iter().map(|listed| entry(listed, "speech")))
-        .chain(hub::listed_conversions().into_iter().map(|listed| entry(listed, "conversion")))
-        .collect();
-    serde_json::json!({ "models": models })
-}
-
-/// What a model is, without reading it: `waifu_modelmanager_describe_json`. None for a name that
-/// is neither published nor a manifest on the disk.
+/// What a model is, without reading it: `waifu_describe_json` -- what a request for it may hold,
+/// and not what to start a screen's boxes at, which is the model manager's. None for anything but
+/// the stand-in and the path of a manifest. `bytes` is how much its files are, where they are all
+/// here: null where the manifest came without them.
 pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
-    if asked != TONES && hub::full_name(asked).is_none() && !Path::new(asked).is_file() {
+    if asked != TONES && !Path::new(asked).is_file() {
         return None;
     }
+    let mut described = described(asked);
+    described["bytes"] = describe::bytes_on_disk(asked).into();
+    Some(described)
+}
+
+fn described(asked: &str) -> serde_json::Value {
 
     let mut kinds = Vec::new();
     if describe::is_a_voice(asked) {
@@ -1077,7 +910,6 @@ pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
             "name": converter.name,
             "full_name": converter.full_name,
             "on_disk": converter.on_disk,
-            "steps": converter.defaults.steps,
             "rate": converter.rate,
             "converts_style": converter.no_style_because.is_none(),
             "no_style_because": converter.no_style_because,
@@ -1092,8 +924,6 @@ pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
             "name": voice.name,
             "full_name": voice.full_name,
             "on_disk": voice.on_disk,
-            "speed": showable(voice.defaults.speed),
-            "temperature": showable(voice.defaults.temperature),
             "rate": voice.rate,
             "takes_a_recording": voice.no_likeness_because.is_none(),
             "no_likeness_because": voice.no_likeness_because,
@@ -1107,21 +937,20 @@ pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
         if kinds.contains(&"conversion") {
             described["conversion"] = conversion();
         }
-        return Some(described);
+        return described;
     }
     if kinds.first() == Some(&"conversion") {
         let converter = describe::look_at_converter(asked);
-        return Some(serde_json::json!({
+        return serde_json::json!({
             "kind": "conversion",
             "kinds": kinds,
             "name": converter.name,
             "full_name": converter.full_name,
             "on_disk": converter.on_disk,
-            "steps": converter.defaults.steps,
             "rate": converter.rate,
             "converts_style": converter.no_style_because.is_none(),
             "no_style_because": converter.no_style_because,
-        }));
+        });
     }
 
     let chosen = describe::look_at(asked);
@@ -1141,31 +970,47 @@ pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
         "prompt_images".to_string(),
         format!("{} reads words only", chosen.full_name).into(),
     );
-    Some(serde_json::json!({
+    serde_json::json!({
         "kind": "image",
         "kinds": ["image"],
         "name": chosen.name,
         "full_name": chosen.full_name,
         "on_disk": chosen.on_disk,
-        "width": chosen.defaults.width,
-        "height": chosen.defaults.height,
-        "steps": chosen.defaults.num_steps,
-        "guidance": showable(chosen.defaults.guidance_scale),
-        "takes_guidance": chosen.takes_guidance,
         "sampler": chosen.sampler,
-        "sizes": chosen.sizes.iter().map(|(w, h)| serde_json::json!([w, h])).collect::<Vec<_>>(),
         "alignment": chosen.alignment,
-        "prompt": chosen.suggested_prompt,
-        "avoid": chosen.suggested_avoid,
         "prompt_images": 0,
         "image_keys": image_keys,
         "why_not": why_not,
-    }))
+    })
 }
 
 /// The machine: `waifu_machine_json`. Measured for the device `auto` would choose.
 pub fn machine_json() -> serde_json::Value {
     crate::machine::describe(DeviceOption::Auto.resolve())
+}
+
+/// Where a run can go: `waifu_devices_json`. Every device the C API names, whether this build
+/// and this machine can take a run there, and -- for CUDA and Vulkan where they can -- how much of
+/// the card is free now, in bytes. Which of them suits a model is the caller's to decide.
+pub fn devices_json() -> serde_json::Value {
+    let available = Runtime::available();
+    let room = Room::measure(&available);
+    let devices: Vec<serde_json::Value> = Runtime::ALL
+        .iter()
+        .map(|runtime| {
+            let free = match runtime.device() {
+                Device::Cuda => room.cuda,
+                Device::Vulkan => room.vulkan,
+                _ => None,
+            };
+            serde_json::json!({
+                "name": runtime.name(),
+                "available": available.contains(runtime),
+                "free": free,
+            })
+        })
+        .collect();
+    serde_json::json!({ "devices": devices })
 }
 
 /// Which device a name means, as the C API numbers them.
@@ -1180,7 +1025,7 @@ pub fn device_option(device: Device) -> DeviceOption {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use std::sync::mpsc::RecvTimeoutError;
@@ -1294,10 +1139,11 @@ mod tests {
     }
 
     #[test]
-    fn a_model_nobody_published_is_unknown() {
+    fn a_name_that_is_no_manifest_is_unknown() {
+        // A published name included: it is the model manager's to turn into a path.
         let engine = an_engine();
         let (progress, complete, heard) = listen::<()>();
-        engine.load("no-such-model:v9", progress, complete);
+        engine.load("sdxl:base", progress, complete);
         assert!(matches!(heard.recv_timeout(WAIT).unwrap(), Ended::Failed(Failure::UnknownModel, _)));
     }
 
@@ -1375,20 +1221,29 @@ mod tests {
         assert!(reports.iter().all(|report| !report.words.is_empty()));
     }
 
-    #[test]
-    fn what_is_published_and_what_a_model_is_come_back_as_json() {
-        let catalog = catalog_json();
-        let models = catalog["models"].as_array().unwrap();
-        assert!(models.iter().any(|model| model["name"] == "sdxl:base" && model["kind"] == "image"));
-        assert!(models.iter().any(|model| model["kind"] == "speech"));
+    /// A manifest of `kind` in a directory of its own, naming one weights file that is not there:
+    /// what a manifest fetched on its own, or bundled with an app, looks like.
+    pub(crate) fn a_manifest(stem: &str, kind: &str) -> String {
+        let directory = std::env::temp_dir().join(format!("waifu-manifest-{}-{stem}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{stem}.yaml"));
+        let text = format!("weights:\n  - {stem}.safetensors\nconfig:\n  model:\n    type: {kind}\n");
+        std::fs::write(&path, text).unwrap();
+        path.to_str().unwrap().to_string()
+    }
 
-        let sdxl = describe_json("sdxl:base").unwrap();
+    #[test]
+    fn what_a_model_is_comes_back_as_json() {
+        let sdxl = describe_json(&a_manifest("sdxl-base", "sdxl")).unwrap();
         assert_eq!(sdxl["kind"], "image");
-        assert_eq!(sdxl["takes_guidance"], true);
         assert_eq!(sdxl["prompt_images"], 0);
+        // What to start the boxes at is the model manager's, not what a request may hold.
+        for default in ["steps", "guidance", "takes_guidance", "sizes", "prompt"] {
+            assert!(sdxl.get(default).is_none(), "{default} in {sdxl}");
+        }
         assert_eq!(sdxl["image_keys"], serde_json::json!(["start_from"]));
 
-        let anima = describe_json("anima:turbo").unwrap();
+        let anima = describe_json(&a_manifest("anima-turbo", crate::Anima::MODEL_TYPE)).unwrap();
         assert_eq!(anima["image_keys"], serde_json::json!([]));
         assert!(anima["why_not"]["start_from"].as_str().unwrap().contains("Anima"));
         assert_eq!(sdxl["alignment"], 32);
@@ -1397,10 +1252,16 @@ mod tests {
         let tones = describe_json(TONES).unwrap();
         assert_eq!(tones["kind"], "speech");
 
-        let cosyvoice = describe_json("cosyvoice").unwrap();
+        let cosyvoice = describe_json(&a_manifest("cosyvoice3", CosyVoice3::MODEL_TYPE)).unwrap();
         assert_eq!(cosyvoice["kinds"], serde_json::json!(["speech", "conversion"]));
-        assert!(cosyvoice["conversion"]["steps"].as_i64().unwrap() > 0, "{cosyvoice}");
+        assert!(cosyvoice["conversion"]["rate"].as_u64().unwrap() > 0, "{cosyvoice}");
 
+        // Its weights are not beside it, which is a manifest that says what it is all the same.
+        assert_eq!(sdxl["on_disk"], false);
+        assert_eq!(sdxl["bytes"], serde_json::Value::Null);
+
+        // A published name is the model manager's to turn into a path.
+        assert!(describe_json("sdxl:base").is_none());
         assert!(describe_json("no-such-model:v9").is_none());
     }
 }

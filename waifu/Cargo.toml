@@ -8,93 +8,30 @@ description = "Your local AI waifu: diffusion image generation on top of the fli
 # to a single owner in the dependency graph.
 links = "flint"
 
+# A dynamic library, libwaifu.dylib (.so, waifu.dll), whose C API is all anything outside this
+# crate uses: see docs/ffi.md. The Metal kernels are a section of the image flint is in, and a
+# dylib carries them wherever it goes. The rlib is for this crate's own tests, for the command
+# line, which links it statically and calls its C API, and for waifu-tools.
 [lib]
 name = "waifu"
 path = "src/lib.rs"
-
-[[bin]]
-name = "waifu"
-path = "src/bin/waifu.rs"
-required-features = ["cli"]
-
-[features]
-# The command line tool. Off by default: what it pulls in -- a terminal stack, an HTTP client, an
-# image encoder -- is the binary's to need, and nothing the library does asks for any of it.
-cli = [
-    "engine",
-    "image/png",
-    "image/jpeg",
-    "dep:ratatui",
-]
-# Fetching published models, and where they are kept: the catalogue, the two hubs, config.toml.
-hub = ["dep:hf-hub", "dep:toml", "dep:ureq"]
-# What a program that is not the command line needs to run models for somebody: the engine, what
-# it says about models and the machine as JSON, and the resizing a picture to start from takes.
-# What the C API in waifu-ffi is built over.
-engine = ["hub", "dep:image", "dep:serde_json"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# What the command line tool needs.
-#
-# The terminal the whole of it happens in: which task, which model -- fetched there, under a bar
-# -- and which device, and then the screen a picture is drawn from. Trimmed to the crossterm
-# backend: the default set also builds the termwiz and termina ones, which is two more terminal
-# stacks than a program that runs in one terminal needs.
-ratatui = { version = "0.29", default-features = false, features = [
-    "crossterm",
-    "underline-color",
-], optional = true }
-
 # What the engine says about models and the machine, for the C API to hand on: a parser this
-# crate would own for no reason, since it is already in the tree, under hf-hub.
+# crate would own for no reason, since it is already in the tree, under tokenizers.
 #
 # `Value` rather than derived types. What crosses is a handful of shapes, each built once, and a
 # derive would buy nothing at the cost of a second description of every one of them.
-serde_json = { version = "1", optional = true }
+serde_json = "1"
 
-# The settings file, `config.toml`, which today says one thing: where fetched models go. It is a
-# file for people to open in an editor, so it is in the format that lets them write a comment and
-# a Windows path without escaping every backslash -- and reading that properly is a parser, which
-# is not something to write again here.
-toml = { version = "1", optional = true }
-
-# Fetching from ModelScope, which hf-hub does not speak, and probing whether the machine can
-# reach the outside at all. Rust has no HTTP in its standard library, so this is the one thing the
-# tool cannot do on its own. Held to the rustls backend: the native-tls default would link the
-# system OpenSSL, and a dynamic library on the far side of the build is exactly what this crate
-# does not want.
-ureq = { version = "3", default-features = false, features = [
-    "rustls",
-    "gzip",
-], optional = true }
-
-# Fetching from Hugging Face, which is where the models are published and where all but one of
-# the fetches go. Its own client rather than ureq against a URL built here: it is what tracks how
-# that hub actually answers -- redirects to a CDN, xet-backed files that are not a plain GET, the
-# headers that say a file moved -- and none of that is worth rediscovering here one bug report at
-# a time.
-#
-# It is the largest thing in this file by a distance, reqwest and tokio and hf-xet behind it, and
-# that is the price of the above. Held to rustls for the same reason ureq is, and to the blocking
-# feature because nothing else in this crate is async: an executor exists to run one download at
-# a time and no further.
-#
-# The other fetch is ModelScope, which this does not speak. That one stays on ureq, below.
-hf-hub = { version = "1", default-features = false, features = [
-    "blocking",
-    "rustls-tls",
-], optional = true }
-
-# Reading the picture an image to image run starts from, and writing the one it ends with. The
-# default feature set is a dozen decoders -- avif, exr, tiff, webp and the rest -- behind a good
-# deal of C. Held to the two formats anyone actually hands a diffusion model, which are also the
-# two written in pure Rust.
+# Resizing the picture an image to image run starts from to the size it is drawn at. No codecs:
+# a picture crosses the C API as rows of RGB, and decoding or writing a file is the caller's.
 #
 # Cargo.lock holds 0.25.9 rather than the newest 0.25: 0.25.10 asks for a rustc a minor version
 # ahead of the one this is built with. Nothing here needs what it added, so the lock is the place
 # that says so rather than a bound in the range.
-# No codecs by default: the engine only resizes, and the command line turns on the two it reads.
-image = { version = "0.25", default-features = false, optional = true }
+image = { version = "0.25", default-features = false }
 
 # Reading the weights, which are safetensors: the format every other runtime already writes, so a
 # weight can be looked at with torch, with numpy, or with the viewer on the hub. It replaced two
@@ -122,7 +59,5 @@ tokenizers = { version = "0.23", default-features = false, features = [
     "fancy-regex",
 ] }
 
-# Fetches every published model's manifest into a directory, for an app to be built with.
-[[example]]
-name = "fetch_manifests"
-required-features = ["hub"]
+[build-dependencies]
+cbindgen = { version = "0.29", default-features = false }
