@@ -95,7 +95,10 @@ impl Fetch {
         if self.file.is_empty() {
             return format!("fetching {}", self.model);
         }
-        let from = self.hub.map(|hub| format!(" from {hub}")).unwrap_or_default();
+        let from = self
+            .hub
+            .map(|hub| format!(" from {hub}"))
+            .unwrap_or_default();
         match self.parts {
             0 => format!("fetching {}{from} -- {}", self.model, self.file),
             parts => format!(
@@ -201,8 +204,16 @@ pub fn catalog_json() -> serde_json::Value {
     let models: Vec<serde_json::Value> = hub::listed()
         .into_iter()
         .map(|listed| entry(listed, "image"))
-        .chain(hub::listed_voices().into_iter().map(|listed| entry(listed, "speech")))
-        .chain(hub::listed_conversions().into_iter().map(|listed| entry(listed, "conversion")))
+        .chain(
+            hub::listed_voices()
+                .into_iter()
+                .map(|listed| entry(listed, "speech")),
+        )
+        .chain(
+            hub::listed_conversions()
+                .into_iter()
+                .map(|listed| entry(listed, "conversion")),
+        )
         .collect();
     serde_json::json!({ "models": models })
 }
@@ -236,7 +247,10 @@ mod tests {
     fn a_name_that_is_neither_published_nor_a_file_is_refused_before_anything_is_fetched() {
         let mut heard = 0;
         let fetched = fetch("no-such:model", &mut |_| heard += 1, &|| false);
-        assert!(matches!(fetched, Err(Failed::UnknownModel(_))), "{fetched:?}");
+        assert!(
+            matches!(fetched, Err(Failed::UnknownModel(_))),
+            "{fetched:?}"
+        );
         assert_eq!(heard, 0);
     }
 
@@ -244,7 +258,9 @@ mod tests {
     fn what_is_published_comes_back_as_json() {
         let catalog = catalog_json();
         let models = catalog["models"].as_array().unwrap();
-        assert!(models.iter().any(|model| model["name"] == "sdxl:base" && model["kind"] == "image"));
+        assert!(models
+            .iter()
+            .any(|model| model["name"] == "sdxl:base" && model["kind"] == "image"));
         assert!(models.iter().any(|model| model["kind"] == "speech"));
     }
 

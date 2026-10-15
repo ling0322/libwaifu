@@ -30,7 +30,9 @@ fn main() {
     // Found next to whatever loads it -- an app's Frameworks directory, a test's own -- rather than
     // at the path cargo happened to write it to.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libwaifu_modelmanager.dylib");
+        println!(
+            "cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libwaifu_modelmanager.dylib"
+        );
     }
 
     write_header(&manifest);

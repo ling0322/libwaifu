@@ -298,10 +298,7 @@ fn write_control(
         g.cast(Linear::graph(&before, projected, d, d, true), DType::Float),
         image,
     );
-    let mut text = g.add(
-        text,
-        g.cast(before.load(Linear::BIAS, &[d]), DType::Float),
-    );
+    let mut text = g.add(text, g.cast(before.load(Linear::BIAS, &[d]), DType::Float));
 
     let mut skips = Vec::with_capacity(control.layers.len());
     for index in 0..control.layers.len() {
@@ -309,7 +306,13 @@ fn write_control(
         (text, image) = block(config, &sub, text, image, now, zero, cos, sin, narrow);
 
         let joined = g.cat(g.cast(text, narrow), g.cast(image, narrow), 1);
-        skips.push(Linear::graph(&sub.subgraph("after_proj"), joined, d, d, true));
+        skips.push(Linear::graph(
+            &sub.subgraph("after_proj"),
+            joined,
+            d,
+            d,
+            true,
+        ));
     }
     skips
 }

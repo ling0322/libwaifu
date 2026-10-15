@@ -35,7 +35,7 @@ use std::rc::Rc;
 
 use waifu::anima::{
     Adapter, AdapterConfig, Dit, DitConfig, FlowSampler, SamplerConfig, TextConfig, TextEncoder,
-    VaeConfig, VaeDecoder
+    VaeConfig, VaeDecoder,
 };
 use waifu::flint::{Tensor, Weights};
 use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
@@ -108,7 +108,7 @@ fn config() -> TextConfig {
         mlp_size: 3072,
         rope_theta: 1e6,
         norm_eps: 1e-6,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -156,7 +156,7 @@ fn adapter_config() -> AdapterConfig {
         head_dim: 64,
         vocab_size: 32128,
         mlp_size: 4096,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -224,7 +224,7 @@ fn dit_config() -> DitConfig {
         rope_w_ratio: 4.0,
         rope_t_ratio: 1.0,
         context_dim: 1024,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -235,11 +235,13 @@ fn one_step_matches_the_reference() {
 
     // Against the reference's own context rather than this runtime's, so that what is measured
     // is the denoiser alone and not the two stages in front of it a second time.
-    let context = cases["test_case.context_padded"].to_device(device())
+    let context = cases["test_case.context_padded"]
+        .to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
-    let latent = cases["test_case.latent"].to_device(device())
+    let latent = cases["test_case.latent"]
+        .to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
@@ -283,7 +285,7 @@ fn vae_config() -> VaeConfig {
         latents_std: vec![
             2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652,
             1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
-        ]
+        ],
     }
 }
 
@@ -291,8 +293,7 @@ fn vae_config() -> VaeConfig {
 #[ignore = "needs the anima package"]
 fn decodes_a_latent_the_way_the_reference_does() {
     let cases = cases();
-    let latent = cases["test_case.latent"].to_device(device())
-        .unwrap();
+    let latent = cases["test_case.latent"].to_device(device()).unwrap();
 
     let decoder = VaeDecoder::build(
         vae_config(),
@@ -387,7 +388,8 @@ fn draws_a_picture_end_to_end() {
 
     // From the reference's context, so that this is the sampler, the denoiser and the decoder
     // being tested together rather than the tokenizers, which are still to come.
-    let context = cases["test_case.context_padded"].to_device(device())
+    let context = cases["test_case.context_padded"]
+        .to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
@@ -406,7 +408,7 @@ fn draws_a_picture_end_to_end() {
     let sampler = FlowSampler::new(
         &SamplerConfig {
             shift: 3.0,
-            multiplier: 1.0
+            multiplier: 1.0,
         },
         8,
     )

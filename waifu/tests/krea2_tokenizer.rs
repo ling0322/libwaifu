@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! Krea 2's tokenizer against the real vocabulary, diffed token for token with what the published
 //! tokenizer produced for the same texts.
 //!
@@ -99,7 +98,9 @@ fn the_tokenizer_matches_the_reference_token_for_token() {
 #[ignore = "needs the krea2 package"]
 fn the_template_gives_the_ids_the_reference_ran_on() {
     let cases = test_cases();
-    let expected: Vec<i32> = cases["test_case.input_ids"].to_vec_i64().unwrap()
+    let expected: Vec<i32> = cases["test_case.input_ids"]
+        .to_vec_i64()
+        .unwrap()
         .iter()
         .map(|&id| id as i32)
         .collect();

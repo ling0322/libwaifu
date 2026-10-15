@@ -375,7 +375,10 @@ fn refuses_quantized_elements_with_no_scales_beside_them() {
         ("proj.weight.scale", "F32", &[2], f32_bytes(&[1.0; 2])),
     ]))
     .unwrap_err();
-    assert!(error.to_string().contains("one for the whole weight"), "{error}");
+    assert!(
+        error.to_string().contains("one for the whole weight"),
+        "{error}"
+    );
     assert!(error.to_string().contains("exported again"), "{error}");
 
     let error = read_bytes(&write_typed(&[
@@ -383,7 +386,10 @@ fn refuses_quantized_elements_with_no_scales_beside_them() {
         ("proj.weight.scale", "F16", &[1], vec![0; 2]),
     ]))
     .unwrap_err();
-    assert!(error.to_string().contains("one for the whole weight"), "{error}");
+    assert!(
+        error.to_string().contains("one for the whole weight"),
+        "{error}"
+    );
 
     // A single float is what this accepts.
     let file = stored_typed(&[
@@ -628,7 +634,9 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
 #[test]
 #[ignore = "needs a Metal device"]
 fn a_disk_offloaded_package_on_metal_runs_like_a_resident_one() {
-    let values: Vec<f32> = (0..256 * 256).map(|i| ((i % 17) as f32 - 8.0) / 16.0).collect();
+    let values: Vec<f32> = (0..256 * 256)
+        .map(|i| ((i % 17) as f32 - 8.0) / 16.0)
+        .collect();
     let bytes = write_laid_out(&[("big.weight", "F32", &[256, 256], f32_bytes(&values))]);
     let file = TempFile::new(&bytes);
 
@@ -653,7 +661,11 @@ fn a_disk_offloaded_package_on_metal_runs_like_a_resident_one() {
 
     let offloaded = Weights::from_files(&[&file.0], Device::Metal, Residency::LowVram).unwrap();
     assert_eq!(run(&offloaded), expected);
-    assert_eq!(run(&offloaded), expected, "the second step reads the same weight");
+    assert_eq!(
+        run(&offloaded),
+        expected,
+        "the second step reads the same weight"
+    );
 }
 
 /// And what it is for: the device never holds the model, only the weight a pass is reading.
@@ -677,7 +689,11 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
 
     let before = allocated();
     let offloaded = Weights::from_files(&[&file.0], Device::Metal, Residency::LowVram).unwrap();
-    assert_eq!(allocated(), before, "reading the package puts nothing on the device");
+    assert_eq!(
+        allocated(),
+        before,
+        "reading the package puts nothing on the device"
+    );
     check_parameters(&graph, &offloaded).unwrap();
     assert_eq!(allocated(), before, "checking a model must not move it");
 
@@ -685,7 +701,11 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
     let out = Ir::compile(&graph)
         .run(&RunContext::new(&offloaded).input("x", &x))
         .unwrap();
-    assert_eq!(allocated() - before, bytes_of(&out[0].1), "only the output is left");
+    assert_eq!(
+        allocated() - before,
+        bytes_of(&out[0].1),
+        "only the output is left"
+    );
     drop(out);
 
     // Against which: the same package read to keep its weights holds the model on the device.
@@ -814,8 +834,14 @@ fn a_file_is_mapped_and_a_misaligned_tensor_copied() {
 
     // The aligned two are the mapping -- read-only, so there is no writable view of them -- and
     // the misaligned one is a copy of its own.
-    assert!(a.host_bytes_mut().is_err(), "an aligned tensor is the mapping");
-    assert!(b.host_bytes_mut().is_err(), "bytes are aligned wherever they are");
+    assert!(
+        a.host_bytes_mut().is_err(),
+        "an aligned tensor is the mapping"
+    );
+    assert!(
+        b.host_bytes_mut().is_err(),
+        "bytes are aligned wherever they are"
+    );
     assert!(c.host_bytes_mut().is_ok(), "a misaligned tensor is copied");
     // Read-only is still readable, where it lies.
     assert_eq!(a.host_bytes().unwrap(), &f32_bytes(&[1.5, -2.0])[..]);
@@ -831,7 +857,9 @@ fn a_file_is_mapped_and_a_misaligned_tensor_copied() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn a_mapped_package_runs_like_one_read_into_memory() {
-    let values: Vec<f32> = (0..256 * 256).map(|i| ((i % 17) as f32 - 8.0) / 16.0).collect();
+    let values: Vec<f32> = (0..256 * 256)
+        .map(|i| ((i % 17) as f32 - 8.0) / 16.0)
+        .collect();
     let bytes = write_laid_out(&[("big.weight", "F32", &[256, 256], f32_bytes(&values))]);
     let file = TempFile::new(&bytes);
 

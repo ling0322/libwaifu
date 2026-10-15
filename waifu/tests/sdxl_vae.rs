@@ -75,7 +75,7 @@ fn config() -> VaeConfig {
         layers_per_block: 2,
         norm_num_groups: 32,
         norm_eps: 1e-6,
-        scaling_factor: 0.13025
+        scaling_factor: 0.13025,
     }
 }
 
@@ -100,7 +100,8 @@ fn relative_rmse(actual: &Tensor, reference: &Tensor) -> f32 {
 }
 
 fn latent(cases: &HashMap<String, Tensor>) -> Tensor {
-    cases["test_case.latent"].to_device(Device::Cuda)
+    cases["test_case.latent"]
+        .to_device(Device::Cuda)
         .unwrap()
         .cast(DType::Float16)
         .unwrap()
@@ -108,7 +109,8 @@ fn latent(cases: &HashMap<String, Tensor>) -> Tensor {
 
 /// The image the reference decoder made of that latent, which is what the encoder is given back.
 fn image(cases: &HashMap<String, Tensor>) -> Tensor {
-    cases["test_case.decoded"].to_device(Device::Cuda)
+    cases["test_case.decoded"]
+        .to_device(Device::Cuda)
         .unwrap()
         .cast(DType::Float16)
         .unwrap()

@@ -70,7 +70,6 @@ impl Node {
             _ => None,
         }
     }
-
 }
 
 /// One line that is neither blank nor a comment: how far it is indented, what is on it, and which

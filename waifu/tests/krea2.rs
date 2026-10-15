@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! Krea 2's parts against what diffusers produces for the same inputs, by way of the test tensors
 //! `tools/krea2_exporter.py` writes beside the package.
 //!
@@ -132,7 +131,8 @@ fn read(tensor: &Tensor) -> Vec<f32> {
 
 /// One of the reference's tensors, on the device and in the type this runtime computes in.
 fn fixture(cases: &HashMap<String, Tensor>, name: &str) -> Tensor {
-    cases[name].clone()
+    cases[name]
+        .clone()
         .to_device(device())
         .unwrap()
         .cast(DType::Float16)
@@ -200,8 +200,8 @@ fn vae_config() -> VaeConfig {
             0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
         ],
         latents_std: vec![
-            2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526,
-            2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.916,
+            2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652,
+            1.5579, 1.6382, 1.1253, 2.8251, 1.916,
         ],
     }
 }

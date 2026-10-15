@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! Krea 2, the third family here and the largest: twelve billion parameters of single-stream
 //! MMDiT over the same sixteen-channel latents [`anima`](crate::anima) draws through.
 //!

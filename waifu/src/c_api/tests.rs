@@ -27,7 +27,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
 
-
 const WAIT: Duration = Duration::from_secs(20);
 
 /// What a test hears of one job, sent from the callbacks.
@@ -49,7 +48,10 @@ unsafe fn sender<'a>(user_data: *mut c_void) -> &'a Sender<Heard> {
 
 unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuProgressEvent) {
     let event = &*event;
-    let _ = sender(user_data).send(Heard::Progress(event.stage, text(event.words).unwrap_or_default()));
+    let _ = sender(user_data).send(Heard::Progress(
+        event.stage,
+        text(event.words).unwrap_or_default(),
+    ));
 }
 
 unsafe extern "C" fn on_complete(user_data: *mut c_void, event: *const WaifuCompletionEvent) {
@@ -59,13 +61,19 @@ unsafe extern "C" fn on_complete(user_data: *mut c_void, event: *const WaifuComp
 
 unsafe extern "C" fn on_audio(user_data: *mut c_void, event: *const WaifuAudioCompletionEvent) {
     let event = &*event;
-    let (count, rate) = event.audio.as_ref().map_or((0, 0), |audio| (audio.count, audio.rate));
+    let (count, rate) = event
+        .audio
+        .as_ref()
+        .map_or((0, 0), |audio| (audio.count, audio.rate));
     let _ = sender(user_data).send(Heard::Audio(event.status.code, count, rate));
 }
 
 unsafe extern "C" fn on_image(user_data: *mut c_void, event: *const WaifuImageCompletionEvent) {
     let event = &*event;
-    let image = event.image.as_ref().map(|image| (image.width, image.height, image.len));
+    let image = event
+        .image
+        .as_ref()
+        .map(|image| (image.width, image.height, image.len));
     let _ = sender(user_data).send(Heard::Image(event.status.code, image));
 }
 
@@ -113,13 +121,18 @@ fn the_abi_is_the_header_s() {
 #[test]
 fn what_a_model_is_and_the_machine_are_json_and_freed_by_the_caller() {
     unsafe {
-        let manifest = std::ffi::CString::new(crate::engine::tests::a_manifest("c-api-sdxl", "sdxl")).unwrap();
+        let manifest =
+            std::ffi::CString::new(crate::engine::tests::a_manifest("c-api-sdxl", "sdxl")).unwrap();
         let described = waifu_describe_json(manifest.as_ptr());
         assert!(text(described).unwrap().contains("\"image_keys\""));
         waifu_string_free(described);
 
         assert!(waifu_describe_json(c"no-such-model:v9".as_ptr()).is_null());
-        assert!(last_error().contains("no-such-model:v9"), "{}", last_error());
+        assert!(
+            last_error().contains("no-such-model:v9"),
+            "{}",
+            last_error()
+        );
 
         let machine = waifu_machine_json();
         assert!(text(machine).unwrap().contains("\"accelerators\""));
@@ -149,7 +162,13 @@ fn a_call_refused_at_the_door_returns_0_and_calls_nothing() {
             strength: 0.8,
             control_scale: 1.0,
         };
-        let job = waifu_engine_draw_async(engine, &request, user_data(&send), Some(on_progress), Some(on_image));
+        let job = waifu_engine_draw_async(
+            engine,
+            &request,
+            user_data(&send),
+            Some(on_progress),
+            Some(on_image),
+        );
         assert_eq!(job, 0);
         assert!(last_error().contains("<|girl|>"), "{}", last_error());
 
@@ -159,11 +178,23 @@ fn a_call_refused_at_the_door_returns_0_and_calls_nothing() {
             prompt: c"a cat".as_ptr(),
             ..request
         };
-        assert_eq!(waifu_engine_draw_async(engine, &short, user_data(&send), None, Some(on_image)), 0);
+        assert_eq!(
+            waifu_engine_draw_async(engine, &short, user_data(&send), None, Some(on_image)),
+            0
+        );
         assert!(last_error().contains("struct_size"), "{}", last_error());
 
         // A NULL where a string has to be.
-        assert_eq!(waifu_engine_load_async(engine, ptr::null(), user_data(&send), None, Some(on_complete)), 0);
+        assert_eq!(
+            waifu_engine_load_async(
+                engine,
+                ptr::null(),
+                user_data(&send),
+                None,
+                Some(on_complete)
+            ),
+            0
+        );
 
         waifu_engine_free(engine);
         // Nothing was ever called for any of them.
@@ -178,18 +209,36 @@ fn a_voice_is_loaded_and_speaks_through_the_c_api() {
         assert!(!engine.is_null(), "{}", last_error());
 
         let (send, heard) = a_channel();
-        let job = waifu_engine_load_async(engine, c"tones".as_ptr(), user_data(&send), Some(on_progress), Some(on_complete));
+        let job = waifu_engine_load_async(
+            engine,
+            c"tones".as_ptr(),
+            user_data(&send),
+            Some(on_progress),
+            Some(on_complete),
+        );
         assert_ne!(job, 0);
-        assert_eq!(the_end(&heard), Heard::Complete(WaifuStatusCode::WAIFU_OK, None));
+        assert_eq!(
+            the_end(&heard),
+            Heard::Complete(WaifuStatusCode::WAIFU_OK, None)
+        );
 
         let (send, heard) = a_channel();
         let request = a_speak_request(c"hello there");
-        let job = waifu_engine_speak_async(engine, &request, user_data(&send), Some(on_progress), Some(on_audio));
+        let job = waifu_engine_speak_async(
+            engine,
+            &request,
+            user_data(&send),
+            Some(on_progress),
+            Some(on_audio),
+        );
         assert_ne!(job, 0);
 
         // Progress before the end, with words for a status line, and the end with the samples.
         let first = heard.recv_timeout(WAIT).unwrap();
-        assert!(matches!(first, Heard::Progress(WaifuStage::WAIFU_STAGE_ENCODING, ref words) if !words.is_empty()), "{first:?}");
+        assert!(
+            matches!(first, Heard::Progress(WaifuStage::WAIFU_STAGE_ENCODING, ref words) if !words.is_empty()),
+            "{first:?}"
+        );
         match the_end(&heard) {
             Heard::Audio(WaifuStatusCode::WAIFU_OK, count, rate) => {
                 assert!(count > 0);
@@ -214,8 +263,14 @@ fn a_voice_is_loaded_and_speaks_through_the_c_api() {
             strength: 0.8,
             control_scale: 1.0,
         };
-        assert_ne!(waifu_engine_draw_async(engine, &request, user_data(&send), None, Some(on_image)), 0);
-        assert_eq!(the_end(&heard), Heard::Image(WaifuStatusCode::WAIFU_ERR_NOT_LOADED, None));
+        assert_ne!(
+            waifu_engine_draw_async(engine, &request, user_data(&send), None, Some(on_image)),
+            0
+        );
+        assert_eq!(
+            the_end(&heard),
+            Heard::Image(WaifuStatusCode::WAIFU_ERR_NOT_LOADED, None)
+        );
 
         waifu_engine_free(engine);
     }
@@ -226,7 +281,13 @@ fn freeing_the_engine_ends_every_job_it_had() {
     unsafe {
         let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
         let (send, heard) = a_channel();
-        waifu_engine_load_async(engine, c"tones".as_ptr(), user_data(&send), None, Some(on_complete));
+        waifu_engine_load_async(
+            engine,
+            c"tones".as_ptr(),
+            user_data(&send),
+            None,
+            Some(on_complete),
+        );
         let request = a_speak_request(c"hello there");
         for _ in 0..3 {
             waifu_engine_speak_async(engine, &request, user_data(&send), None, Some(on_audio));
@@ -234,7 +295,10 @@ fn freeing_the_engine_ends_every_job_it_had() {
         waifu_engine_free(engine);
 
         // Four jobs, four ends, whatever each came to.
-        let ends = heard.try_iter().filter(|heard| !matches!(heard, Heard::Progress(..))).count();
+        let ends = heard
+            .try_iter()
+            .filter(|heard| !matches!(heard, Heard::Progress(..)))
+            .count();
         assert_eq!(ends, 4);
     }
 }
@@ -244,7 +308,16 @@ fn a_name_that_is_no_manifest_is_unknown_at_the_end() {
     unsafe {
         let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
         let (send, heard) = a_channel();
-        assert_ne!(waifu_engine_load_async(engine, c"no-such-model:v9".as_ptr(), user_data(&send), None, Some(on_complete)), 0);
+        assert_ne!(
+            waifu_engine_load_async(
+                engine,
+                c"no-such-model:v9".as_ptr(),
+                user_data(&send),
+                None,
+                Some(on_complete)
+            ),
+            0
+        );
         match the_end(&heard) {
             Heard::Complete(WaifuStatusCode::WAIFU_ERR_UNKNOWN_MODEL, Some(message)) => {
                 assert!(message.contains("no-such-model:v9"))
@@ -275,7 +348,8 @@ fn a_log_callback_hears_the_library_s_lines() {
     assert!(
         lines
             .iter()
-            .any(|(level, line)| *level == WaifuLogLevel::WAIFU_LOG_WARNING && line == "a line for the app"),
+            .any(|(level, line)| *level == WaifuLogLevel::WAIFU_LOG_WARNING
+                && line == "a line for the app"),
         "{lines:?}"
     );
 }

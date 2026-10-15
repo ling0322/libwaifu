@@ -154,9 +154,18 @@ fn map(path: &Path) -> Result<Mmap> {
 fn borrowed(map: &Arc<Mmap>, stored: Stored) -> Result<Tensor> {
     let alignment = stored.dtype.total_size(1).max(1) as usize;
     if stored.range.start % alignment == 0 {
-        Ok(Tensor::borrowing(&stored.shape, stored.dtype, map, stored.range)?)
+        Ok(Tensor::borrowing(
+            &stored.shape,
+            stored.dtype,
+            map,
+            stored.range,
+        )?)
     } else {
-        Ok(Tensor::from_bytes(&stored.shape, stored.dtype, &map[stored.range])?)
+        Ok(Tensor::from_bytes(
+            &stored.shape,
+            stored.dtype,
+            &map[stored.range],
+        )?)
     }
 }
 
@@ -196,7 +205,14 @@ fn each_in(bytes: &[u8], each: &mut dyn FnMut(String, Stored) -> Result<()>) -> 
             )));
         }
 
-        each(name, Stored { shape, dtype, range })?;
+        each(
+            name,
+            Stored {
+                shape,
+                dtype,
+                range,
+            },
+        )?;
     }
 
     Ok(())
@@ -217,7 +233,10 @@ fn keep(tensors: &mut HashMap<String, Tensor>, name: String, tensor: Tensor) -> 
 /// The shape a header claims, as the dimensions a tensor is built from.
 fn dimensions(shape: &[usize]) -> Result<Vec<i32>> {
     if shape.len() > MAX_RANK {
-        return Err(Error::format(format!("rank {} is out of range", shape.len())));
+        return Err(Error::format(format!(
+            "rank {} is out of range",
+            shape.len()
+        )));
     }
 
     let mut dimensions = Vec::with_capacity(shape.len());

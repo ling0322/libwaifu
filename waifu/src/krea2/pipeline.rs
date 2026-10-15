@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! The four parts joined up, with a prompt at one end and a picture at the other.
 //!
 //! 1. the prompt is wrapped in the chat template the model was sampled with -- a system line

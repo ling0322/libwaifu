@@ -28,7 +28,9 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::RwLock;
 
-use crate::c::{self, WaifuLogEvent, WaifuLogLevel, WaifuModelManagerLogEvent, WaifuModelManagerLogLevel};
+use crate::c::{
+    self, WaifuLogEvent, WaifuLogLevel, WaifuModelManagerLogEvent, WaifuModelManagerLogLevel,
+};
 
 /// How much a line matters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -96,7 +98,10 @@ unsafe extern "C" fn from_waifu(_: *mut c_void, event: *const WaifuLogEvent) {
     hand_over(level, &source, &c::text(event.message).unwrap_or_default());
 }
 
-unsafe extern "C" fn from_the_model_manager(_: *mut c_void, event: *const WaifuModelManagerLogEvent) {
+unsafe extern "C" fn from_the_model_manager(
+    _: *mut c_void,
+    event: *const WaifuModelManagerLogEvent,
+) {
     let event = &*event;
     let level = match event.level {
         WaifuModelManagerLogLevel::WAIFU_MODELMANAGER_LOG_DEBUG => Level::Debug,

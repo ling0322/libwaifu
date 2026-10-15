@@ -254,7 +254,9 @@ impl Runtime {
 
     /// The one called `name`, as `waifu_devices_json` and the -device flag name them.
     pub fn named(name: &str) -> Option<Runtime> {
-        Runtime::ALL.into_iter().find(|runtime| runtime.name() == name)
+        Runtime::ALL
+            .into_iter()
+            .find(|runtime| runtime.name() == name)
     }
 }
 

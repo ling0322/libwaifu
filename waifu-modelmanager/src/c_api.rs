@@ -36,14 +36,14 @@ use std::time::Instant;
 
 mod support;
 
+use support::{
+    c_string, caught, required, set_last_error, status, string_in, string_out, Gate, UserData,
+};
 pub use support::{
     WaifuModelManagerCompleteCallback, WaifuModelManagerCompletionEvent,
     WaifuModelManagerLogCallback, WaifuModelManagerLogEvent, WaifuModelManagerLogLevel,
     WaifuModelManagerProgressCallback, WaifuModelManagerProgressEvent, WaifuModelManagerStatus,
     WaifuModelManagerStatusCode,
-};
-use support::{
-    c_string, caught, required, set_last_error, status, string_in, string_out, Gate, UserData,
 };
 
 use crate::fetch::{self, Failed, Fetch};
@@ -78,7 +78,10 @@ pub unsafe extern "C" fn waifu_modelmanager_string_free(s: *mut c_char) {
 /// Every line this library would print goes to the callback instead, from whichever thread wrote
 /// it. NULL puts them back on the console. libwaifu's lines are waifu_set_log_callback's.
 #[no_mangle]
-pub extern "C" fn waifu_modelmanager_set_log_callback(user_data: *mut c_void, callback: WaifuModelManagerLogCallback) {
+pub extern "C" fn waifu_modelmanager_set_log_callback(
+    user_data: *mut c_void,
+    callback: WaifuModelManagerLogCallback,
+) {
     caught((), || log::set_sink(support::log_sink(user_data, callback)))
 }
 
@@ -94,7 +97,9 @@ pub extern "C" fn waifu_modelmanager_set_log_level(level: WaifuModelManagerLogLe
 /// failure.
 #[no_mangle]
 pub extern "C" fn waifu_modelmanager_catalog_json() -> *mut c_char {
-    caught(ptr::null_mut(), || string_out(&fetch::catalog_json().to_string()))
+    caught(ptr::null_mut(), || {
+        string_out(&fetch::catalog_json().to_string())
+    })
 }
 
 /// Where downloads go. Free with waifu_modelmanager_string_free. NULL on failure.
@@ -114,7 +119,8 @@ pub extern "C" fn waifu_modelmanager_directory() -> *mut c_char {
 /// two null where they cannot be told. Free with waifu_modelmanager_string_free. NULL on failure.
 #[no_mangle]
 pub extern "C" fn waifu_modelmanager_directory_json() -> *mut c_char {
-    caught(ptr::null_mut(), || match hub::model_directory() {
+    caught(ptr::null_mut(), || {
+        match hub::model_directory() {
         Ok((directory, said)) => string_out(
             &serde_json::json!({
                 "directory": directory.to_string_lossy(),
@@ -132,6 +138,7 @@ pub extern "C" fn waifu_modelmanager_directory_json() -> *mut c_char {
             set_last_error(&error.to_string());
             ptr::null_mut()
         }
+    }
     })
 }
 
@@ -161,7 +168,9 @@ pub unsafe extern "C" fn waifu_modelmanager_manifest_path(name: *const c_char) -
         match hub::local_manifest(&name) {
             Some(path) => string_out(&path.to_string_lossy()),
             None => {
-                set_last_error(&format!("the manifest of \"{name}\" is not here: fetch it first"));
+                set_last_error(&format!(
+                    "the manifest of \"{name}\" is not here: fetch it first"
+                ));
                 ptr::null_mut()
             }
         }
@@ -197,7 +206,9 @@ pub unsafe extern "C" fn waifu_modelmanager_defaults_json(model: *const c_char) 
 
 /// Downloads go to `path` from now on, saved to config.toml; NULL or "" for the default.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_modelmanager_set_directory(path: *const c_char) -> WaifuModelManagerStatusCode {
+pub unsafe extern "C" fn waifu_modelmanager_set_directory(
+    path: *const c_char,
+) -> WaifuModelManagerStatusCode {
     caught(WAIFU_MODELMANAGER_ERR_INTERNAL, || {
         let path = match string_in(path, "path") {
             Ok(path) => path.filter(|path| !path.is_empty()),
@@ -222,7 +233,9 @@ pub unsafe extern "C" fn waifu_modelmanager_set_directory(path: *const c_char) -
 /// back the bundled one where nothing has been fetched. Laid out as the download directory is,
 /// and only read. NULL or "" for none. Not saved.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_modelmanager_set_bundled_manifests(directory: *const c_char) -> WaifuModelManagerStatusCode {
+pub unsafe extern "C" fn waifu_modelmanager_set_bundled_manifests(
+    directory: *const c_char,
+) -> WaifuModelManagerStatusCode {
     caught(WAIFU_MODELMANAGER_ERR_INTERNAL, || {
         let directory = match string_in(directory, "directory") {
             Ok(directory) => directory.filter(|directory| !directory.is_empty()),
@@ -238,7 +251,9 @@ pub unsafe extern "C" fn waifu_modelmanager_set_bundled_manifests(directory: *co
 
 /// Deletes a downloaded package.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_modelmanager_remove(name: *const c_char) -> WaifuModelManagerStatusCode {
+pub unsafe extern "C" fn waifu_modelmanager_remove(
+    name: *const c_char,
+) -> WaifuModelManagerStatusCode {
     caught(WAIFU_MODELMANAGER_ERR_INTERNAL, || {
         let name = match required(name, "name") {
             Ok(name) => name,
@@ -285,9 +300,12 @@ pub unsafe extern "C" fn waifu_modelmanager_fetch_async(
                 return ptr::null_mut();
             }
         };
-        spawn_fetch(user_data, on_progress, on_complete, move |on_progress, stop| {
-            fetch::fetch(&model, on_progress, stop).map(|_| ())
-        })
+        spawn_fetch(
+            user_data,
+            on_progress,
+            on_complete,
+            move |on_progress, stop| fetch::fetch(&model, on_progress, stop).map(|_| ()),
+        )
     })
 }
 
@@ -320,51 +338,61 @@ fn spawn_fetch(
     let user_data = UserData(user_data);
     let stop = Arc::new(AtomicBool::new(false));
 
-    let thread = thread::Builder::new().name("waifu-fetch".to_string()).spawn({
-        let stop = Arc::clone(&stop);
-        let gate = gate.clone();
-        move || {
-            let started = Instant::now();
-            let mut tell = |fetch: &Fetch| {
-                if on_progress.is_none() {
+    let thread = thread::Builder::new()
+        .name("waifu-fetch".to_string())
+        .spawn({
+            let stop = Arc::clone(&stop);
+            let gate = gate.clone();
+            move || {
+                let started = Instant::now();
+                let mut tell = |fetch: &Fetch| {
+                    if on_progress.is_none() {
+                        return;
+                    }
+                    gate.wait();
+                    let words = fetch.words();
+                    support::tell_progress(
+                        on_progress,
+                        user_data,
+                        &support::Progress {
+                            fraction: fetch.fraction(),
+                            done: fetch.done,
+                            total: fetch.total.unwrap_or(0),
+                            part: fetch.part as u32,
+                            parts: fetch.parts as u32,
+                            file: Some(fetch.file.as_str()).filter(|file| !file.is_empty()),
+                            words: &words,
+                            seconds: started.elapsed().as_secs_f64(),
+                            hub: fetch.hub,
+                        },
+                    );
+                };
+                let ended = panic::catch_unwind(AssertUnwindSafe(|| {
+                    work(&mut tell, &|| stop.load(Ordering::Relaxed))
+                }))
+                .unwrap_or_else(|_| {
+                    Err(Failed::Fetch(
+                        "a bug in the library: the fetch panicked".to_string(),
+                    ))
+                });
+
+                if on_complete.is_none() {
                     return;
                 }
                 gate.wait();
-                let words = fetch.words();
-                support::tell_progress(
-                    on_progress,
-                    user_data,
-                    &support::Progress {
-                        fraction: fetch.fraction(),
-                        done: fetch.done,
-                        total: fetch.total.unwrap_or(0),
-                        part: fetch.part as u32,
-                        parts: fetch.parts as u32,
-                        file: Some(fetch.file.as_str()).filter(|file| !file.is_empty()),
-                        words: &words,
-                        seconds: started.elapsed().as_secs_f64(),
-                        hub: fetch.hub,
-                    },
-                );
-            };
-            let ended = panic::catch_unwind(AssertUnwindSafe(|| {
-                work(&mut tell, &|| stop.load(Ordering::Relaxed))
-            }))
-            .unwrap_or_else(|_| Err(Failed::Fetch("a bug in the library: the fetch panicked".to_string())));
-
-            if on_complete.is_none() {
-                return;
+                let (code, message) = match &ended {
+                    Ok(()) => (WAIFU_MODELMANAGER_OK, None),
+                    Err(Failed::Stopped) => (WAIFU_MODELMANAGER_CANCELLED, None),
+                    Err(Failed::UnknownModel(message)) => {
+                        (WAIFU_MODELMANAGER_ERR_UNKNOWN_MODEL, Some(message.as_str()))
+                    }
+                    Err(Failed::Fetch(message)) => {
+                        (WAIFU_MODELMANAGER_ERR_FETCH, Some(message.as_str()))
+                    }
+                };
+                tell_completion(on_complete, user_data, code, message);
             }
-            gate.wait();
-            let (code, message) = match &ended {
-                Ok(()) => (WAIFU_MODELMANAGER_OK, None),
-                Err(Failed::Stopped) => (WAIFU_MODELMANAGER_CANCELLED, None),
-                Err(Failed::UnknownModel(message)) => (WAIFU_MODELMANAGER_ERR_UNKNOWN_MODEL, Some(message.as_str())),
-                Err(Failed::Fetch(message)) => (WAIFU_MODELMANAGER_ERR_FETCH, Some(message.as_str())),
-            };
-            tell_completion(on_complete, user_data, code, message);
-        }
-    });
+        });
     match thread {
         Ok(thread) => {
             let fetch = Box::into_raw(Box::new(WaifuModelFetch {
@@ -382,7 +410,12 @@ fn spawn_fetch(
 }
 
 /// Calls `callback`, if there is one, with how a job that makes nothing ended.
-pub fn tell_completion(callback: WaifuModelManagerCompleteCallback, user_data: UserData, code: WaifuModelManagerStatusCode, message: Option<&str>) {
+pub fn tell_completion(
+    callback: WaifuModelManagerCompleteCallback,
+    user_data: UserData,
+    code: WaifuModelManagerStatusCode,
+    message: Option<&str>,
+) {
     let Some(callback) = callback else {
         return;
     };

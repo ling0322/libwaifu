@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! The Qwen3-VL text tower, read for twelve of its hidden states rather than for another token.
 //!
 //! Thirty-six decoder layers, grouped query attention with thirty-two query heads against eight
@@ -248,7 +247,13 @@ fn write(config: &EncoderConfig, float_type: DType, g: &Graph) {
     let mut states = vec![g.unsqueeze(embedded, 0)];
     for index in 0..config.num_layers {
         let last = *states.last().expect("the embedding is always there");
-        states.push(layer(config, &g.subgraph(&format!("block{index}")), last, cos, sin));
+        states.push(layer(
+            config,
+            &g.subgraph(&format!("block{index}")),
+            last,
+            cos,
+            sin,
+        ));
     }
 
     // The stack the denoiser reads, in the order the package names the layers. Each state is

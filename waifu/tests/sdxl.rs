@@ -118,7 +118,7 @@ fn options() -> GenerationOptions {
         guidance_scale: GUIDANCE,
         negative_prompt: String::new(),
         seed: None,
-        strength: STRENGTH
+        strength: STRENGTH,
     }
 }
 
@@ -194,12 +194,7 @@ fn encodes_a_prompt_the_way_the_reference_does() {
 
     assert!(relative_rmse(&first, &hidden) < 2e-2);
     assert!(relative_rmse(&second, &hidden2) < 2e-2);
-    assert!(
-        relative_rmse(
-            &embedding.pooled,
-            &cases["test_case.pooled2"]
-        ) < 2e-2
-    );
+    assert!(relative_rmse(&embedding.pooled, &cases["test_case.pooled2"]) < 2e-2);
 }
 
 #[test]
@@ -228,7 +223,7 @@ fn a_batch_of_two_is_two_batches_of_one() {
                 &UnetCondition {
                     context: &embedding.context,
                     pooled: &embedding.pooled,
-                    time_ids
+                    time_ids,
                 },
             )
             .unwrap()
@@ -246,7 +241,7 @@ fn a_batch_of_two_is_two_batches_of_one() {
             &UnetCondition {
                 context: &context,
                 pooled: &pooled,
-                time_ids
+                time_ids,
             },
         )
         .unwrap();
@@ -286,10 +281,7 @@ fn denoising_matches_the_reference_pipeline() {
         .unwrap();
     assert_eq!(denoised.shape(), latent.shape());
 
-    let rmse = relative_rmse(
-        &denoised,
-        &cases["test_case.denoised"],
-    );
+    let rmse = relative_rmse(&denoised, &cases["test_case.denoised"]);
     println!("denoise rmse = {rmse} (torch's own half precision is {TORCH_HALF_GAP} from float32)");
     assert!(
         rmse < TORCH_HALF_GAP * HALF_ALLOWANCE,
@@ -322,10 +314,7 @@ fn denoising_on_the_cpu_matches_the_reference_pipeline() {
         .unwrap();
     assert_eq!(denoised.shape(), latent.shape());
 
-    let rmse = relative_rmse(
-        &denoised,
-        &cases["test_case.denoised"],
-    );
+    let rmse = relative_rmse(&denoised, &cases["test_case.denoised"]);
     println!("cpu denoise rmse = {rmse}");
     assert!(rmse < FLOAT32_TOLERANCE, "four steps drifted by {rmse}");
 }
@@ -549,10 +538,7 @@ fn no_strength_is_the_picture_through_the_autoencoder_and_nothing_else() {
     let given = picture(&cases);
     let image = model.generate_from_image(&given, PROMPT, &options).unwrap();
 
-    let rmse = relative_rmse(
-        &image,
-        &cases["test_case.round_trip"],
-    );
+    let rmse = relative_rmse(&image, &cases["test_case.round_trip"]);
     println!("round trip rmse against the reference = {rmse}");
     assert!(rmse < 2e-2, "a run of no steps drifted by {rmse}");
 }
@@ -576,10 +562,7 @@ fn more_strength_leaves_less_of_the_picture() {
         options.seed = Some(11);
 
         let image = model.generate_from_image(&given, PROMPT, &options).unwrap();
-        drift.push(relative_rmse(
-            &image,
-            &cases["test_case.decoded"],
-        ));
+        drift.push(relative_rmse(&image, &cases["test_case.decoded"]));
     }
 
     println!("drift from the picture at 0.25, 0.5 and 1.0 strength = {drift:?}");

@@ -25,8 +25,8 @@
 //! the rest.
 
 use crate::error::{Error, Result};
-use crate::flow::{FlowSampler, SamplerConfig};
 use crate::flint::WeightFormat;
+use crate::flow::{FlowSampler, SamplerConfig};
 use crate::krea2::EncoderConfig;
 use crate::mapping::Mapping;
 
@@ -323,7 +323,13 @@ impl QwenImageConfig {
         }
         if let Some(sigmas) = &schedule.sigmas {
             // Checked here rather than at the first run, so a bad package fails to open.
-            FlowSampler::from_sigmas(&SamplerConfig { shift: 1.0, multiplier: 1.0 }, sigmas)?;
+            FlowSampler::from_sigmas(
+                &SamplerConfig {
+                    shift: 1.0,
+                    multiplier: 1.0,
+                },
+                sigmas,
+            )?;
         }
         if !(0.0..1.0).contains(&schedule.shift_terminal) {
             return Err(Error::model(format!(
@@ -457,7 +463,10 @@ config:
         );
         let sigmas = parse(&turbo).unwrap().schedule.sigmas.expect("fixed");
         assert_eq!(sigmas.len(), 8);
-        let config = SamplerConfig { shift: 1.0, multiplier: 1.0 };
+        let config = SamplerConfig {
+            shift: 1.0,
+            multiplier: 1.0,
+        };
         let sampler = FlowSampler::from_sigmas(&config, &sigmas).unwrap();
         assert_eq!(sampler.steps(), 8);
         assert_eq!(sampler.sigmas()[8], 0.0);
@@ -508,7 +517,10 @@ config:
         ))
         .unwrap();
         assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8TensorScale);
-        assert_eq!(quantized.encoder.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(
+            quantized.encoder.weight_format,
+            WeightFormat::Fp8TensorScale
+        );
     }
 
     /// What `tools/qwen_image_exporter.py -controlnet` writes for VideoX-Fun's checkpoint.

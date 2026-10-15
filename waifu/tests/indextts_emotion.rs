@@ -261,8 +261,7 @@ fn perceiver_namespace(g: &Graph) -> Graph {
 fn run(stage: impl Fn(&Graph, Value, &Config, Value) -> Value) -> (Vec<i32>, Vec<f32>) {
     let config = config();
     let positions =
-        emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU)
-            .unwrap();
+        emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU).unwrap();
 
     let g = Graph::new();
     let out = stage(&g, g.input("x"), &config, g.input("positions"));
@@ -285,8 +284,7 @@ fn run(stage: impl Fn(&Graph, Value, &Config, Value) -> Value) -> (Vec<i32>, Vec
 /// probe after it would fail for a reason that is not its own.
 #[test]
 fn builds_the_sinusoid_table_upstream_carries() {
-    let table = emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU)
-        .unwrap();
+    let table = emotion::positional_encoding(Config::subsampled(FRAMES), ENCODER_DIM, CPU).unwrap();
 
     let (shape, got) = probe(&table);
 
@@ -314,13 +312,7 @@ fn embeds_the_recording_the_way_the_subsampling_does() {
 #[test]
 fn reads_the_recording_the_way_the_conformer_does() {
     let (shape, got) = run(|g, x, config, positions| {
-        emotion::encoder(
-            &encoder_namespace(g),
-            x,
-            config,
-            FRAMES,
-            positions,
-        )
+        emotion::encoder(&encoder_namespace(g), x, config, FRAMES, positions)
     });
 
     assert_eq!(shape, vec![1, 10, ENCODER_DIM]);
@@ -334,13 +326,7 @@ fn reads_the_recording_the_way_the_conformer_does() {
 #[test]
 fn boils_the_recording_down_the_way_the_perceiver_does() {
     let (shape, got) = run(|g, x, config, positions| {
-        let encoded = emotion::encoder(
-            &encoder_namespace(g),
-            x,
-            config,
-            FRAMES,
-            positions,
-        );
+        let encoded = emotion::encoder(&encoder_namespace(g), x, config, FRAMES, positions);
 
         emotion::perceiver(
             &perceiver_namespace(g),

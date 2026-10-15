@@ -77,7 +77,7 @@ fn config() -> UnetConfig {
         cross_attention_dim: 2048,
         addition_time_embed_dim: 256,
         projection_class_embeddings_input_dim: 2816,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -121,7 +121,7 @@ struct Inputs {
     context: Tensor,
     pooled: Tensor,
     time_ids: [f32; 6],
-    timestep: f32
+    timestep: f32,
 }
 
 fn inputs(cases: &HashMap<String, Tensor>) -> Inputs {
@@ -138,7 +138,7 @@ fn inputs(cases: &HashMap<String, Tensor>) -> Inputs {
         context: to_cuda(&F::cat(&hidden, &hidden2, -1).unwrap()),
         pooled: to_cuda(&cases["test_case.pooled2"]),
         time_ids: time_ids.try_into().unwrap(),
-        timestep
+        timestep,
     }
 }
 
@@ -146,7 +146,7 @@ fn condition(inputs: &Inputs) -> UnetCondition<'_> {
     UnetCondition {
         context: &inputs.context,
         pooled: &inputs.pooled,
-        time_ids: inputs.time_ids
+        time_ids: inputs.time_ids,
     }
 }
 
@@ -216,7 +216,7 @@ fn the_prompt_changes_the_answer() {
             &UnetCondition {
                 context: &empty,
                 pooled: &inputs.pooled,
-                time_ids: inputs.time_ids
+                time_ids: inputs.time_ids,
             },
         )
         .unwrap();
