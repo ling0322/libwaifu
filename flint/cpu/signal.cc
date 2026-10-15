@@ -25,6 +25,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include "lutil/error.h"
@@ -157,7 +158,10 @@ void clampKernel(const TensorView &input, float lo, float hi, const TensorView &
 
 #pragma omp parallel for num_threads(omp_get_max_threads())
   for (int64_t i = 0; i < numel; ++i) {
-    y[i] = static_cast<T>(std::min(std::max(static_cast<float>(x[i]), lo), hi));
+    // A NaN stays one, as torch.clamp has it, rather than resting on which argument of std::max
+    // it happens to be.
+    float v = static_cast<float>(x[i]);
+    y[i] = static_cast<T>(std::isnan(v) ? v : std::min(std::max(v, lo), hi));
   }
 }
 

@@ -620,6 +620,16 @@ void composedClamp(Operators *op, TensorView input, float lo, float hi, TensorVi
     op->neg(b, a);
     op->add(a, bound, out);
   }
+
+  // A relu makes 0 of a NaN, so by now a NaN input has come out as a bound. torch.clamp keeps it,
+  // and so do the kernels. `exp(-|x|) * 0` is 0 for every number and either infinity -- exp(-inf)
+  // is 0 -- and NaN for a NaN alone: added on, it puts the NaN back and leaves the rest. Not
+  // `x * 0`, which is a NaN of an infinity too.
+  op->abs(input, a);
+  op->neg(a, b);
+  op->exp(b, a);
+  op->mul(a, 0.0f, b);
+  op->add(out, b, out);
 }
 
 void composedStft(
@@ -683,19 +693,36 @@ void composedIstft(
   Tensor bank = hostConstant(op, device, dtype, {2 * bins, 1, nFft}, sinusoidBank(taps, true));
 
   // What the two windows together multiply each sample by, once every frame covering it is added
-  // up. A position no frame covers -- only the very ends, which `centered` trims -- is kept off
-  // zero rather than divided by.
+  // up. A position no frame covers -- the first sample of a Hann window, which `centered` trims --
+  // is kept off zero rather than divided by.
   std::vector<float> envelope(fullLength, 0.0f);
   for (int frame = 0; frame < frames; ++frame) {
     for (int n = 0; n < nFft; ++n) envelope[frame * hop + n] += taps[n] * taps[n];
   }
   for (float &value : envelope) value = std::max(value, 1e-11f);
-  Tensor overlap = hostConstant(op, device, dtype, {1, 1, fullLength}, envelope);
 
   Tensor wave = empty(device, {batch, 1, fullLength}, dtype);
   op->convTranspose1d(spectrum, bank, TensorView(), hop, 0, 0, 1, wave);
-  op->divTensor(wave, overlap.expand({batch, 1, fullLength}), wave);
-  op->copy(wave.slice(2, {trim, fullLength - trim}), out);
+
+  // Divided in float32 whatever the spectrum's type. Toward the ends the envelope falls far below
+  // what half can hold -- the floor above, and w[1]^2 of a 1024-point Hann at 9e-11 -- and a
+  // divisor that rounded to zero makes a NaN of the sample, or an infinity.
+  Tensor overlap = hostConstant(op, device, DType::kFloat, {1, 1, fullLength}, envelope);
+  Tensor normalized = wave;
+  if (dtype != DType::kFloat) {
+    normalized = empty(device, {batch, 1, fullLength}, DType::kFloat);
+    op->cast(wave, normalized);
+  }
+  op->divTensor(normalized, overlap.expand({batch, 1, fullLength}), normalized);
+
+  TensorView kept = normalized.slice(2, {trim, fullLength - trim});
+  if (dtype == DType::kFloat) {
+    op->copy(kept, out);
+  } else {
+    Tensor packed = empty(device, out.getShape(), DType::kFloat);
+    op->copy(kept, packed);
+    op->cast(packed, out);
+  }
 }
 
 }  // namespace F

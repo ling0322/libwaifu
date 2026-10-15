@@ -24,6 +24,7 @@
 
 #include <math.h>
 
+#include <cmath>
 #include <limits>
 #include <vector>
 
@@ -203,6 +204,23 @@ CATCH_TEST_CASE("CUDA clamp agrees with the CPU", "[op][cuda][signal]") {
     F::composedClamp(cudaOps(), onCuda(x, DType::kFloat), lo, hi, composed);
     CATCH_REQUIRE(closeTo(composed, expected, DType::kFloat));
   }
+
+  // A NaN stays one, as on the CPU, and an infinity goes to the bound it is beyond: fmaxf and
+  // fminf on their own would make a bound of the NaN.
+  float nan = std::numeric_limits<float>::quiet_NaN();
+  Tensor special = onCpu({1, 4}, {nan, inf, -inf, 0.1f});
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    Tensor kernel = backToCpu(F::clamp(cudaOps(), onCuda(special, dtype), -0.5f, 0.25f));
+    Tensor composed = F::zeros(Device::getCuda(), {1, 4}, dtype);
+    F::composedClamp(cudaOps(), onCuda(special, dtype), -0.5f, 0.25f, composed);
+    for (const Tensor &got : {kernel, backToCpu(composed)}) {
+      const float *v = got.getInternalData()->getData<float>(got.getInternalOffset());
+      CATCH_REQUIRE(std::isnan(v[0]));
+      CATCH_REQUIRE(v[1] == 0.25f);
+      CATCH_REQUIRE(v[2] == -0.5f);
+      CATCH_REQUIRE(fabsf(v[3] - 0.1f) < 1e-3f);
+    }
+  }
 }
 
 CATCH_TEST_CASE("CUDA stft and istft agree with the CPU", "[op][cuda][signal]") {
@@ -220,6 +238,36 @@ CATCH_TEST_CASE("CUDA stft and istft agree with the CPU", "[op][cuda][signal]") 
 
     Tensor back = F::istft(cudaOps(), spectrum, onCuda(window, DType::kFloat), nFft, hop, true);
     CATCH_REQUIRE(cpuOps()->allClose(backToCpu(back), x, 1e-3f, 1e-3f));
+  }
+}
+
+CATCH_TEST_CASE("CUDA istft in half has no NaN at the ends", "[op][cuda][signal]") {
+  // Not centred, so the ends are kept: there the squared window's overlap is far below what half
+  // can hold -- zero at the first sample of a Hann window, 9e-11 at the next -- and dividing by it
+  // in half made NaNs. Away from the ends the round trip is the signal, to what half allows.
+  int nFft = 1024, hop = 256, length = 8 * nFft;
+  Tensor x = onCpu({1, 1, length}, spread(length, 10));
+  Tensor window = onCpu({nFft}, hann(nFft));
+
+  for (bool centered : {false, true}) {
+    CATCH_INFO("centered " << centered);
+    DType h = DType::kFloat16;
+    Tensor spectrum = F::stft(cudaOps(), onCuda(x, h), onCuda(window, h), nFft, hop, centered);
+    Tensor back = backToCpu(F::istft(cudaOps(), spectrum, onCuda(window, h), nFft, hop, centered));
+    CATCH_REQUIRE(back.getNumEl() == length);
+
+    const float *got = back.getInternalData()->getData<float>(back.getInternalOffset());
+    const float *want = x.getInternalData()->getData<float>(x.getInternalOffset());
+    double worst = 0;
+    for (int i = 0; i < length; ++i) {
+      CATCH_INFO("sample " << i);
+      CATCH_REQUIRE(std::isfinite(got[i]));
+      // Covered by a whole window's worth of frames either side.
+      if (centered || (i >= nFft && i < length - nFft)) {
+        worst = std::max(worst, double(fabsf(got[i] - want[i])));
+      }
+    }
+    CATCH_REQUIRE(worst < 2e-2);
   }
 }
 

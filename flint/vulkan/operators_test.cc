@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <cmath>
 #include <limits>
 #include <vector>
 
@@ -314,6 +315,19 @@ CATCH_TEST_CASE("test Vulkan signal operators", "[op][vulkan][signal]") {
         F::clamp(cpu(), rounded, -1.0f, 0.5f),
         0.0f,
         1e-6f));
+
+    // A NaN stays one, which GLSL's min and max do not promise; an infinity goes to its bound.
+    Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+    float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
+    raw[0] = std::numeric_limits<float>::quiet_NaN();
+    raw[1] = inf;
+    raw[2] = -inf;
+    raw[3] = 0.125f;
+    std::vector<float> clamped = values(F::clamp(vk(), toVulkan(special, dtype), -0.5f, 0.25f));
+    CATCH_REQUIRE(std::isnan(clamped[0]));
+    CATCH_REQUIRE(clamped[1] == 0.25f);
+    CATCH_REQUIRE(clamped[2] == -0.5f);
+    CATCH_REQUIRE(clamped[3] == 0.125f);
   }
 
   // A transform and its inverse, which every device composes: the window is read back to the
@@ -328,6 +342,23 @@ CATCH_TEST_CASE("test Vulkan signal operators", "[op][vulkan][signal]") {
   CATCH_REQUIRE(close(spectrum, F::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
   CATCH_REQUIRE(
       close(F::istft(vk(), spectrum, toVulkan(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
+
+  // In half and not centred, the ends are kept, where the window's overlap is below what half can
+  // hold: dividing by it there made NaNs.
+  Tensor halfSpectrum = F::stft(
+      vk(), toVulkan(wave, DType::kFloat16), toVulkan(window, DType::kFloat16), nFft, hop, false);
+  std::vector<float> back =
+      values(F::istft(vk(), halfSpectrum, toVulkan(window, DType::kFloat16), nFft, hop, false));
+  std::vector<float> want = values(wave);
+  for (size_t i = 0; i < back.size(); ++i) {
+    CATCH_INFO("sample " << i);
+    CATCH_REQUIRE(std::isfinite(back[i]));
+    // Away from the ends of each of the two signals.
+    size_t at = i % 64;
+    if (at >= size_t(nFft) && at < 64 - size_t(nFft)) {
+      CATCH_REQUIRE(fabsf(back[i] - want[i]) < 2e-2f);
+    }
+  }
 }
 
 // The compositions in flint/functional.cc that a device without these kernels runs -- Metal
@@ -364,6 +395,20 @@ CATCH_TEST_CASE("test Vulkan signal operators by composition", "[op][vulkan][sig
     F::composedClamp(vk(), vx, lo, hi, out);
     CATCH_REQUIRE(close(out, F::clamp(cpu(), x, lo, hi), 0.0f, 1e-6f));
   }
+
+  Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+  float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
+  raw[0] = std::numeric_limits<float>::quiet_NaN();
+  raw[1] = inf;
+  raw[2] = -inf;
+  raw[3] = 0.125f;
+  out = F::zeros(Device::getVulkan(), {4}, DType::kFloat);
+  F::composedClamp(vk(), toVulkan(special), -0.5f, 0.25f, out);
+  std::vector<float> clamped = values(out);
+  CATCH_REQUIRE(std::isnan(clamped[0]));
+  CATCH_REQUIRE(clamped[1] == 0.25f);
+  CATCH_REQUIRE(clamped[2] == -0.5f);
+  CATCH_REQUIRE(clamped[3] == 0.125f);
 }
 
 CATCH_TEST_CASE("test Vulkan softmax and reductions", "[op][vulkan]") {

@@ -161,7 +161,9 @@ __global__ void clampKernel(
     uint32_t numel) {
   for (uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < numel;
        idx += blockDim.x * gridDim.x) {
-    out[idx] = store<T>(fminf(fmaxf(load(input, idx), lo), hi));
+    // A NaN stays one, as torch.clamp and the CPU have it: fmaxf and fminf would return the bound.
+    float x = load(input, idx);
+    out[idx] = store<T>(isnan(x) ? x : fminf(fmaxf(x, lo), hi));
   }
 }
 

@@ -358,7 +358,7 @@ FLAPI int32_t fl_pad1d(
     fl_tensor_view_t out);
 
 /// `min(max(input, lo), hi)`, elementwise, into `out` of `input`'s shape. Either bound may be
-/// infinite.
+/// infinite. A NaN stays a NaN.
 FLAPI int32_t fl_clamp(
     fl_operators_t operators,
     fl_tensor_view_t input,

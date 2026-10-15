@@ -176,9 +176,10 @@ class Operators {
   virtual void pad1d(TensorView input, int left, int right, PadMode mode, TensorView out);
 
   /// `min(max(x, lo), hi)`, elementwise, into `out` of `input`'s shape. Either bound may be
-  /// infinite, which leaves that side alone. `torch.clamp`.
+  /// infinite, which leaves that side alone. A NaN stays a NaN, on every device. `torch.clamp`.
   ///
-  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedClamp`, out of `relu`.
+  /// The CPU, CUDA and Vulkan have a kernel. Metal gets `F::composedClamp`, out of `relu`, with
+  /// the NaN a relu drops put back.
   virtual void clamp(TensorView input, float lo, float hi, TensorView out);
 
   /// Short time Fourier transform of `input` <float16|float>(N, 1, L) against `window` (nFft), as

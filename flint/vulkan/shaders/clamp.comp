@@ -35,5 +35,7 @@ void main() {
   uint i = globalIndex();
   if (i >= pc.numel) return;
 
-  STORE_C(pc.c, i, min(max(LOAD_A(pc.a, i), pc.lo), pc.hi));
+  // A NaN stays one, as torch.clamp has it; GLSL leaves what min and max make of one undefined.
+  float x = LOAD_A(pc.a, i);
+  STORE_C(pc.c, i, isnan(x) ? x : min(max(x, pc.lo), pc.hi));
 }
