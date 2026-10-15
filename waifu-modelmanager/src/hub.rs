@@ -558,12 +558,20 @@ fn manifest_in(published: &Published, cache: &Path) -> PathBuf {
 /// anybody has fetched a gigabyte: see [`fetch_manifests`].
 pub fn local_manifest(name: &str) -> Option<PathBuf> {
     let published = published(name)?;
-    manifest_among(published, cache_directory().ok().as_deref(), bundled_manifests().as_deref())
+    manifest_among(
+        published,
+        cache_directory().ok().as_deref(),
+        bundled_manifests().as_deref(),
+    )
 }
 
 /// The manifest of `published` in `cache`, or else in `bundled`: one fetched with the model is
 /// the newer, and wins over the one an app was built with.
-fn manifest_among(published: &Published, cache: Option<&Path>, bundled: Option<&Path>) -> Option<PathBuf> {
+fn manifest_among(
+    published: &Published,
+    cache: Option<&Path>,
+    bundled: Option<&Path>,
+) -> Option<PathBuf> {
     cache
         .and_then(|cache| local_manifest_in(published, cache))
         .or_else(|| bundled.and_then(|bundled| local_manifest_in(published, bundled)))
@@ -582,7 +590,10 @@ pub fn set_bundled_manifests(directory: Option<PathBuf>) {
 }
 
 fn bundled_manifests() -> Option<PathBuf> {
-    BUNDLED.read().unwrap_or_else(|held| held.into_inner()).clone()
+    BUNDLED
+        .read()
+        .unwrap_or_else(|held| held.into_inner())
+        .clone()
 }
 
 fn local_manifest_in(published: &Published, cache: &Path) -> Option<PathBuf> {
@@ -613,7 +624,10 @@ fn missing_manifests_in(cache: &Path) -> Vec<&'static Published> {
 ///
 /// A program embedding the library decides when it may touch the network, which is why this is
 /// asked for rather than done on the way to anything else.
-pub fn fetch_manifests(report: &mut dyn FnMut(Progress), stop: &dyn Fn() -> bool) -> Result<(), Error> {
+pub fn fetch_manifests(
+    report: &mut dyn FnMut(Progress),
+    stop: &dyn Fn() -> bool,
+) -> Result<(), Error> {
     let cache = cache_directory()?;
     let missing = missing_manifests_in(&cache);
     if missing.is_empty() {
@@ -633,7 +647,13 @@ pub fn fetch_manifests(report: &mut dyn FnMut(Progress), stop: &dyn Fn() -> bool
             at: index + 1,
             of: missing.len(),
         };
-        download(published.repo, published.manifest, &manifest, part, &mut watching)?;
+        download(
+            published.repo,
+            published.manifest,
+            &manifest,
+            part,
+            &mut watching,
+        )?;
     }
     Ok(())
 }
@@ -946,7 +966,10 @@ fn fetch(published: &Published, watching: &mut Watching) -> Result<PathBuf, Erro
 
 /// Every file a model is made of, as its manifest names them: the weights and the vocabularies.
 fn files_named_by(manifest: &Path) -> Result<Vec<String>, Error> {
-    Ok(named_files(manifest)?.into_iter().map(|(name, _)| name).collect())
+    Ok(named_files(manifest)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// Every file the manifest at `manifest` names, and where it is: the `weights` list, then each
@@ -1969,8 +1992,7 @@ mod tests {
         let staging = directory.join(format!("{INCOMING}.4171.0"));
         fs::create_dir_all(&staging).expect("somewhere to put it");
         fs::write(directory.join(model.manifest), b"a manifest").expect("the manifest");
-        fs::write(directory.join("second.safetensors.part"), b"half of one")
-            .expect("a part file");
+        fs::write(directory.join("second.safetensors.part"), b"half of one").expect("a part file");
         fs::write(staging.join("third"), b"staged").expect("something staged");
 
         remove_in(model, &cache).expect("it goes");
@@ -2027,7 +2049,11 @@ mod tests {
         let place = |under: &Path| {
             let directory = under.join(model.repo.replace('/', "--"));
             fs::create_dir_all(&directory).expect("a directory to put it in");
-            fs::write(directory.join(model.manifest), b"weights:\n  - a.safetensors\n").expect("the manifest");
+            fs::write(
+                directory.join(model.manifest),
+                b"weights:\n  - a.safetensors\n",
+            )
+            .expect("the manifest");
             directory.join(model.manifest)
         };
 
@@ -2036,12 +2062,21 @@ mod tests {
 
         // The app was built with it: read from there.
         let built_with = place(&bundled);
-        assert_eq!(manifest_among(model, Some(&cache), Some(&bundled)), Some(built_with.clone()));
-        assert_eq!(manifest_among(model, None, Some(&bundled)), Some(built_with));
+        assert_eq!(
+            manifest_among(model, Some(&cache), Some(&bundled)),
+            Some(built_with.clone())
+        );
+        assert_eq!(
+            manifest_among(model, None, Some(&bundled)),
+            Some(built_with)
+        );
 
         // And fetched since: the cache's is the newer, and wins.
         let fetched = place(&cache);
-        assert_eq!(manifest_among(model, Some(&cache), Some(&bundled)), Some(fetched));
+        assert_eq!(
+            manifest_among(model, Some(&cache), Some(&bundled)),
+            Some(fetched)
+        );
         // A manifest the app was built with is not a downloaded model.
         assert!(!is_cached_in(model, &bundled));
 
@@ -2057,16 +2092,25 @@ mod tests {
         let everything = missing_manifests_in(&cache);
         assert!(!everything.is_empty());
         let mut seen = std::collections::HashSet::new();
-        assert!(everything.iter().all(|published| seen.insert((published.repo, published.manifest))));
+        assert!(everything
+            .iter()
+            .all(|published| seen.insert((published.repo, published.manifest))));
 
         // Its manifest and nothing else, which is what fetching the manifests leaves: what it
         // suggests can be read, and it is still not a model that is ready to draw with.
         let model = published("anima:turbo").expect("Anima Turbo");
         let directory = cache.join(model.repo.replace('/', "--"));
         fs::create_dir_all(&directory).expect("a directory to put it in");
-        fs::write(directory.join(model.manifest), b"weights:\n  - a.safetensors\n").expect("the manifest");
+        fs::write(
+            directory.join(model.manifest),
+            b"weights:\n  - a.safetensors\n",
+        )
+        .expect("the manifest");
 
-        assert_eq!(local_manifest_in(model, &cache), Some(directory.join(model.manifest)));
+        assert_eq!(
+            local_manifest_in(model, &cache),
+            Some(directory.join(model.manifest))
+        );
         assert!(!is_cached_in(model, &cache));
         // And it is not asked for again.
         assert!(missing_manifests_in(&cache)

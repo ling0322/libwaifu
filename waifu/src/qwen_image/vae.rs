@@ -43,8 +43,8 @@ use crate::flint::{
     check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::Conv2d;
-use crate::sdxl::vae::pad_right_bottom;
 use crate::qwen_vae::{attention, channel_norm};
+use crate::sdxl::vae::pad_right_bottom;
 
 /// One stage of the decoder or the encoder, as its weights and the package describe it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,7 +166,13 @@ fn avg_down_indices(input: i32, output: i32, temporal: bool) -> (Vec<i64>, i32) 
 
 /// The shortcut around a downsampling stage: `(1, C_in, 2H, 2W)` to `(1, C_out, H, W)`. `halved`
 /// is any `(.., .., H, W)` value, which is where the halved size is read from.
-fn avg_down(g: &Graph, input: Value, halved: Value, stage: &Stage, device: Device) -> Result<Value> {
+fn avg_down(
+    g: &Graph,
+    input: Value,
+    halved: Value,
+    stage: &Stage,
+    device: Device,
+) -> Result<Value> {
     let (indices, group) = avg_down_indices(stage.input, stage.output, stage.temporal);
     let indices = Tensor::from_i64(&[indices.len() as i32], &indices)?.to_device(device)?;
 
@@ -202,10 +208,7 @@ fn avg_down(g: &Graph, input: Value, halved: Value, stage: &Stage, device: Devic
         ],
     );
     let mean = g.div_scalar(g.sum(grouped, 1), group as f32);
-    Ok(g.view(
-        mean,
-        [Extent::At(1), stage.output.into(), height, width],
-    ))
+    Ok(g.view(mean, [Extent::At(1), stage.output.into(), height, width]))
 }
 
 /// The encoder, written into `g`: a picture in `-1..=1` to the normalized latent the denoiser
@@ -671,7 +674,10 @@ mod tests {
         // the odd ones are the real frame's four sub-pixels.
         let (doubled, group) = avg_down_indices(96, 192, true);
         assert_eq!(group, 4);
-        assert_eq!(&doubled[..12], &[384, 384, 384, 384, 0, 1, 2, 3, 384, 384, 384, 384]);
+        assert_eq!(
+            &doubled[..12],
+            &[384, 384, 384, 384, 0, 1, 2, 3, 384, 384, 384, 384]
+        );
         assert_eq!(&doubled[12..16], &[4, 5, 6, 7]);
     }
 

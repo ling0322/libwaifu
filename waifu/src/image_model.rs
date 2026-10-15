@@ -64,27 +64,19 @@ impl ImageModel {
 
         match Self::kind(&manifest)?.as_str() {
             Anima::MODEL_TYPE => Ok(ImageModel::Anima(Anima::from_manifest(
-                device,
-                residency,
-                &manifest,
+                device, residency, &manifest,
             )?)),
             Krea2::MODEL_TYPE => Ok(ImageModel::Krea2(Krea2::from_manifest(
-                device,
-                residency,
-                &manifest,
+                device, residency, &manifest,
             )?)),
             QwenImage::MODEL_TYPE => Ok(ImageModel::QwenImage(QwenImage::from_manifest(
-                device,
-                residency,
-                &manifest,
+                device, residency, &manifest,
             )?)),
             // Everything else goes to SDXL, which says what it makes of it. A model of a kind
             // nobody here has heard of is its complaint to make rather than this one's, since it
             // is the one that knows what it can read.
             _ => Ok(ImageModel::Sdxl(Sdxl::from_manifest(
-                device,
-                residency,
-                &manifest,
+                device, residency, &manifest,
             )?)),
         }
     }
@@ -105,7 +97,9 @@ impl ImageModel {
     pub fn sampler(&self) -> &'static str {
         match self {
             ImageModel::Sdxl(_) => "Euler",
-            ImageModel::Anima(_) | ImageModel::Krea2(_) | ImageModel::QwenImage(_) => "Flow match Euler",
+            ImageModel::Anima(_) | ImageModel::Krea2(_) | ImageModel::QwenImage(_) => {
+                "Flow match Euler"
+            }
         }
     }
 
@@ -157,10 +151,12 @@ impl ImageModel {
             }
             // The same sentence the door turns a run away with, for the caller that is not the
             // door: one wording for one refusal.
-            ImageModel::Anima(_) | ImageModel::Krea2(_) | ImageModel::QwenImage(_) => Err(crate::Error::model(
-                self.no_picture_because()
-                    .unwrap_or("this model cannot start from a picture"),
-            )),
+            ImageModel::Anima(_) | ImageModel::Krea2(_) | ImageModel::QwenImage(_) => {
+                Err(crate::Error::model(
+                    self.no_picture_because()
+                        .unwrap_or("this model cannot start from a picture"),
+                ))
+            }
         }
     }
 }

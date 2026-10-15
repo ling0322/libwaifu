@@ -184,7 +184,9 @@ fn fits(task: Task, model: &str, chosen: &Chosen) -> Result<(), String> {
 /// fetched, or bundled -- and taken as yes where none is, which a run says otherwise of later.
 pub fn draws_from_a_picture(model: &str) -> bool {
     match manager::manifest_path(model) {
-        Ok(manifest) => engine::look_at(&manifest).is_ok_and(|chosen| chosen.no_picture_because.is_none()),
+        Ok(manifest) => {
+            engine::look_at(&manifest).is_ok_and(|chosen| chosen.no_picture_because.is_none())
+        }
         Err(_) => true,
     }
 }
@@ -254,7 +256,8 @@ mod tests {
     use super::*;
 
     fn a_manifest(stem: &str, kind: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("waifu-draw-cmd-{}-{stem}.yaml", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("waifu-draw-cmd-{}-{stem}.yaml", std::process::id()));
         std::fs::write(
             &path,
             format!("weights:\n  - w.safetensors\nconfig:\n  model:\n    type: {kind}\n"),

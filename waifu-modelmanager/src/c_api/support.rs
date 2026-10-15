@@ -148,7 +148,8 @@ pub struct WaifuModelManagerLogEvent {
 
 /// Called on whichever thread wrote the line, which can be the caller's own. It must be safe to
 /// call from any thread, and must not call into the library.
-pub type WaifuModelManagerLogCallback = Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuModelManagerLogEvent)>;
+pub type WaifuModelManagerLogCallback =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuModelManagerLogEvent)>;
 
 /// A caller's pointer, handed back as it was given, on whichever thread a callback runs.
 #[derive(Clone, Copy)]
@@ -211,7 +212,9 @@ pub struct WaifuModelManagerProgressEvent {
     pub hub: *const c_char,
 }
 
-pub type WaifuModelManagerProgressCallback = Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuModelManagerProgressEvent)>;
+pub type WaifuModelManagerProgressCallback = Option<
+    unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuModelManagerProgressEvent),
+>;
 
 /// How a fetch ended.
 #[repr(C)]
@@ -219,7 +222,9 @@ pub struct WaifuModelManagerCompletionEvent {
     pub status: WaifuModelManagerStatus,
 }
 
-pub type WaifuModelManagerCompleteCallback = Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuModelManagerCompletionEvent)>;
+pub type WaifuModelManagerCompleteCallback = Option<
+    unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuModelManagerCompletionEvent),
+>;
 
 /// A progress report, before it is made into C.
 pub struct Progress<'a> {
@@ -235,7 +240,11 @@ pub struct Progress<'a> {
 }
 
 /// Calls `callback`, if there is one, with `progress`.
-pub fn tell_progress(callback: WaifuModelManagerProgressCallback, user_data: UserData, progress: &Progress) {
+pub fn tell_progress(
+    callback: WaifuModelManagerProgressCallback,
+    user_data: UserData,
+    progress: &Progress,
+) {
     let Some(callback) = callback else {
         return;
     };
@@ -257,10 +266,15 @@ pub fn tell_progress(callback: WaifuModelManagerProgressCallback, user_data: Use
 }
 
 /// A status whose message lives as long as `message` does.
-pub fn status(code: WaifuModelManagerStatusCode, message: &Option<CString>) -> WaifuModelManagerStatus {
+pub fn status(
+    code: WaifuModelManagerStatusCode,
+    message: &Option<CString>,
+) -> WaifuModelManagerStatus {
     WaifuModelManagerStatus {
         code,
-        message: message.as_ref().map_or(ptr::null(), |message| message.as_ptr()),
+        message: message
+            .as_ref()
+            .map_or(ptr::null(), |message| message.as_ptr()),
     }
 }
 
@@ -283,7 +297,9 @@ impl Gate {
         let (open, opened) = &*self.0;
         let mut is_open = open.lock().unwrap_or_else(|held| held.into_inner());
         while !*is_open {
-            is_open = opened.wait(is_open).unwrap_or_else(|held| held.into_inner());
+            is_open = opened
+                .wait(is_open)
+                .unwrap_or_else(|held| held.into_inner());
         }
     }
 }

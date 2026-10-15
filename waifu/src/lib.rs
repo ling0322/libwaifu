@@ -50,19 +50,16 @@ pub mod anima;
 pub mod audio;
 /// The C API, which is all anything outside this crate calls: see docs/ffi.md.
 pub mod c_api;
-pub mod describe;
-pub mod engine;
-pub mod image_model;
-pub mod machine;
-pub mod progress;
-pub mod runtime;
 /// Fun-CosyVoice3-0.5B: a recording and a sentence in, the sentence in that voice out, at 24 kHz.
 /// A module for the reason [`indextts`] is one -- five models, two of them somebody else's.
 pub mod cosyvoice3;
+pub mod describe;
+pub mod engine;
 mod error;
 pub mod flint;
 mod flow;
 mod generation;
+pub mod image_model;
 /// IndexTTS-2.5, whole: a recording and a sentence in, the sentence in that voice out. A module
 /// rather than files at the crate root the way `sdxl` is, because half of what it runs is
 /// somebody else's model -- w2v-bert, CAMPPlus, BigVGAN -- and a name like `w2v_bert` beside
@@ -72,22 +69,25 @@ pub mod indextts;
 /// single-stream MMDiT over the same sixteen-channel latents, conditioned on twelve tapped layers
 /// of a Qwen3-VL encoder. `docs/krea2.md` is where the whole of it is written down.
 pub mod krea2;
-pub mod qwen_image;
 mod layers;
 pub mod log;
+pub mod machine;
 mod manifest;
 mod mapping;
+pub mod progress;
+pub mod qwen_image;
 mod qwen_vae;
 mod reader;
+pub mod runtime;
 mod sdxl;
 /// Turning text into a waveform. [`Voice`] is the shape of the question and [`Tones`] is the one
 /// answer to it there is so far -- a stand-in that makes a noise where the syllables are, so that
 /// the screen and everything under it can be written before there is a model to put behind it.
 pub mod speech;
+mod tensor_file;
 /// Writing out what a number is read as, so a speech model never sees a digit: the text
 /// normalizer IndexTTS-2.5 and CosyVoice3 both read their text through.
 pub mod text_normalizer;
-mod tensor_file;
 mod tokenizer;
 /// Reading and writing WAV, which is the one audio format this crate handles itself: a header, a
 /// format chunk and the samples, and no codec to depend on.
@@ -102,21 +102,21 @@ pub use flint::{DType, Device, Residency, WeightFormat, Weights};
 
 pub use anima::Anima;
 pub use error::{Error, Result};
-pub use krea2::Krea2;
-pub use qwen_image::QwenImage;
 pub use generation::{GenerationDefaults, GenerationOptions, GenerationProgress};
+pub use krea2::Krea2;
 pub use layers::{Conv1d, Conv2d, ConvTranspose1d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use manifest::Manifest;
 pub use mapping::Mapping;
+pub use qwen_image::QwenImage;
 pub use reader::BinaryRead;
-pub use speech::{
-    ConversionDefaults, ConversionOptions, ConversionProgress, Converter, SpeechDefaults,
-    SpeechOptions, SpeechProgress, Style, Tones, Voice,
-};
 pub use sdxl::{
     from_rgb8, to_rgb8, ClipTextConfig, ClipTextEncoder, ClipTextOutput, EulerSampler,
     PromptEmbedding, SamplerConfig, Sdxl, SdxlConfig, Unet, UnetCondition, UnetConfig, VaeConfig,
     VaeDecoder, VaeEncoder, VAE_SCALE,
+};
+pub use speech::{
+    ConversionDefaults, ConversionOptions, ConversionProgress, Converter, SpeechDefaults,
+    SpeechOptions, SpeechProgress, Style, Tones, Voice,
 };
 pub use tensor_file::read_safetensors;
 pub use tokenizer::Tokenizer;

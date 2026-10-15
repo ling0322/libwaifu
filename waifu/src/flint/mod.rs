@@ -96,8 +96,8 @@ mod operators;
 pub use fp8::{fp8_available, SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{check_parameters, Inst, Ir, Residency, RunContext, Weights};
-pub use operators::Operators;
 pub use op::{Binary, Extent, Op, Reduce, Scalar, Unary, Value};
+pub use operators::Operators;
 
 use operators::{operators_of, transfer_operators};
 
@@ -542,7 +542,12 @@ pub struct Tensor {
 
 impl Tensor {
     /// A tensor over `storage` with the given layout, checked by the library against the storage.
-    fn over(storage: Rc<Storage>, shape: Vec<i32>, stride: Vec<i32>, offset: i64) -> Result<Tensor> {
+    fn over(
+        storage: Rc<Storage>,
+        shape: Vec<i32>,
+        stride: Vec<i32>,
+        offset: i64,
+    ) -> Result<Tensor> {
         let mut raw: ffi::FlTensorView = std::ptr::null_mut();
         check(unsafe {
             ffi::fl_tensor_view_create(
@@ -590,7 +595,9 @@ impl Tensor {
     /// this is only worth using when every element is written first.
     pub fn empty(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
         if let Some(&n) = shape.iter().find(|&&n| n < 0) {
-            return Err(Error::invalid(format!("a tensor cannot have a dimension of {n}")));
+            return Err(Error::invalid(format!(
+                "a tensor cannot have a dimension of {n}"
+            )));
         }
         let numel: i64 = shape.iter().map(|&n| n as i64).product();
         let storage = Storage::allocate(numel, dtype, device)?;
@@ -665,7 +672,12 @@ impl Tensor {
 
         let mut raw: ffi::FlTensorData = std::ptr::null_mut();
         check(unsafe {
-            ffi::fl_tensor_data_borrow(bytes.as_ptr() as *const c_void, dtype as i32, numel, &mut raw)
+            ffi::fl_tensor_data_borrow(
+                bytes.as_ptr() as *const c_void,
+                dtype as i32,
+                numel,
+                &mut raw,
+            )
         })?;
         let storage = Rc::new(Storage {
             raw,
@@ -703,7 +715,9 @@ impl Tensor {
             )));
         }
         if !self.is_contiguous() {
-            return Err(Error::invalid("a non-contiguous tensor's bytes are not one run"));
+            return Err(Error::invalid(
+                "a non-contiguous tensor's bytes are not one run",
+            ));
         }
         let nbytes = self.nbytes()? as usize;
         if nbytes == 0 {
@@ -756,7 +770,9 @@ impl Tensor {
         let rank = self.layout.shape.len() as i32;
         let real = if dim < 0 { dim + rank } else { dim };
         if real < 0 || real >= rank {
-            return Err(Error::invalid(format!("no dimension {dim} in a {rank}-D tensor")));
+            return Err(Error::invalid(format!(
+                "no dimension {dim} in a {rank}-D tensor"
+            )));
         }
         Ok(real as usize)
     }
@@ -843,7 +859,9 @@ impl Tensor {
         for d in (0..self.layout.shape.len()).rev() {
             let (size, stride) = (self.layout.shape[d], self.layout.stride[d]);
             if stride == 0 {
-                return Err(Error::invalid("unable to change the view of an expanded tensor"));
+                return Err(Error::invalid(
+                    "unable to change the view of an expanded tensor",
+                ));
             }
             let joins = d + 1 < self.layout.shape.len()
                 && self.layout.stride[d + 1] as i64 * self.layout.shape[d + 1] as i64
@@ -963,7 +981,11 @@ impl Tensor {
     /// Add a dimension of size one at `dim`.
     pub fn unsqueeze(&self, dim: i32) -> Result<Tensor> {
         let rank = self.layout.shape.len();
-        let d = if dim == rank as i32 { rank } else { self.real_dim(dim)? };
+        let d = if dim == rank as i32 {
+            rank
+        } else {
+            self.real_dim(dim)?
+        };
         let stride = if rank == 0 {
             1
         } else if d == 0 {

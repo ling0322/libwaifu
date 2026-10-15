@@ -107,10 +107,7 @@ fn encode() -> (Vec<i32>, Vec<f32>) {
     let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let ir = Ir::compile(&g);
     let outputs = ir
-        .run(
-            &RunContext::new(&weights)
-                .input("x", &features),
-        )
+        .run(&RunContext::new(&weights).input("x", &features))
         .unwrap();
 
     let tensor = outputs[0].1.to_device(CPU).unwrap();

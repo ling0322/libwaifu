@@ -93,7 +93,10 @@ pub fn catalog() -> Vec<Listed> {
 
 /// The published models that draw.
 pub fn pictures() -> Vec<Listed> {
-    catalog().into_iter().filter(|model| model.kind == "image").collect()
+    catalog()
+        .into_iter()
+        .filter(|model| model.kind == "image")
+        .collect()
 }
 
 /// Whether `name` is a published model that speaks or converts rather than draws.
@@ -139,8 +142,8 @@ pub struct Directory {
 /// Where models are fetched into, or why that cannot be told -- a settings file that does not
 /// read, most likely.
 pub fn directory() -> Result<Directory, String> {
-    let said = c::manager_json(c::waifu_modelmanager_directory_json())
-        .ok_or_else(c::manager_error)?;
+    let said =
+        c::manager_json(c::waifu_modelmanager_directory_json()).ok_or_else(c::manager_error)?;
     Ok(Directory {
         now: PathBuf::from(said["directory"].as_str().unwrap_or_default()),
         said: match said["said"].as_str() {
@@ -206,7 +209,8 @@ pub enum Word {
 }
 
 /// What a stop leaves behind, as the screens say it.
-const STOPPED: &str = "stopped -- what has come down is kept, and fetching it again carries on from there";
+const STOPPED: &str =
+    "stopped -- what has come down is kept, and fetching it again carries on from there";
 
 /// A fetch running in libwaifu_modelmanager, and the channel its news comes down.
 pub struct Fetch {
@@ -238,7 +242,11 @@ impl Fetch {
             drop(unsafe { Box::from_raw(sender) });
             return Err(c::manager_error());
         }
-        Ok(Fetch { handle, sender, news })
+        Ok(Fetch {
+            handle,
+            sender,
+            news,
+        })
     }
 
     /// Asks it to stop. What has come down is kept.
@@ -272,7 +280,9 @@ unsafe extern "C" fn on_complete(user_data: *mut c_void, event: *const WaifuComp
     let _ = sender.send(match status.code {
         WaifuStatusCode::WAIFU_MODELMANAGER_OK => Word::Done,
         WaifuStatusCode::WAIFU_MODELMANAGER_CANCELLED => Word::Stopped(STOPPED.to_string()),
-        _ => Word::Failed(c::text(status.message).unwrap_or_else(|| "the fetch failed".to_string())),
+        _ => {
+            Word::Failed(c::text(status.message).unwrap_or_else(|| "the fetch failed".to_string()))
+        }
     });
 }
 
@@ -283,7 +293,9 @@ mod tests {
     #[test]
     fn the_catalogue_lists_pictures_and_voices() {
         let catalog = catalog();
-        assert!(catalog.iter().any(|model| model.name == "sdxl:base" && model.kind == "image"));
+        assert!(catalog
+            .iter()
+            .any(|model| model.name == "sdxl:base" && model.kind == "image"));
         assert!(is_a_voice("indextts"));
         assert!(!is_a_voice("sdxl:base"));
         assert!(pictures().iter().all(|model| model.kind == "image"));
@@ -300,11 +312,18 @@ mod tests {
     fn a_fetch_of_a_model_nobody_published_fails_at_the_end() {
         let fetch = Fetch::start("no-such-model:v9").unwrap();
         let end = loop {
-            match fetch.news.recv_timeout(std::time::Duration::from_secs(20)).unwrap() {
+            match fetch
+                .news
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .unwrap()
+            {
                 Word::Fetching { .. } => continue,
                 end => break end,
             }
         };
-        assert!(matches!(&end, Word::Failed(message) if message.contains("no-such-model:v9")), "{end:?}");
+        assert!(
+            matches!(&end, Word::Failed(message) if message.contains("no-such-model:v9")),
+            "{end:?}"
+        );
     }
 }

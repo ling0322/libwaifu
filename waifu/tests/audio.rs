@@ -13,9 +13,8 @@
 use std::collections::HashMap;
 
 use waifu::audio::{
-    apply_filterbank, conv_transpose1d, hann_window, istft,
-    istft_basis, magnitude, mel_filterbank, pad1d, resample, resample_kernel, snake, stft,
-    stft_basis, window_envelope, MelScale, Padding,
+    apply_filterbank, conv_transpose1d, hann_window, istft, istft_basis, magnitude, mel_filterbank,
+    pad1d, resample, resample_kernel, snake, stft, stft_basis, window_envelope, MelScale, Padding,
 };
 use waifu::flint::{DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights};
 

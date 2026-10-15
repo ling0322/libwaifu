@@ -118,12 +118,14 @@ pub const ANIMA_DRAWS_FROM_NO_PICTURE: &str = "Anima cannot start from a picture
 
 /// And why Krea 2 cannot either, which is the same reason: it draws through the same Qwen-Image
 /// autoencoder, and the half of it that reads a picture has no layer to run it.
-pub const KREA2_DRAWS_FROM_NO_PICTURE: &str = "Krea 2 cannot start from a picture yet: its package \
+pub const KREA2_DRAWS_FROM_NO_PICTURE: &str =
+    "Krea 2 cannot start from a picture yet: its package \
      carries an image encoder, but the layer that reads one is not written";
 
 /// And why Qwen-Image 2.1 cannot, for a different reason: its model edits pictures by reading
 /// them as well as starting from them, and neither half of that is written here.
-pub const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 cannot start from a picture yet: \
+pub const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str =
+    "Qwen-Image 2.1 cannot start from a picture yet: \
      it edits by reading the picture through its text encoder too, and that is not written";
 
 /// What the built-in stand-in voice is called where a name is asked for.
@@ -219,7 +221,10 @@ pub fn look_at_converter(asked: &str) -> ChosenConverter {
 /// Whether `asked` turns one recording into another: a manifest on the disk whose `model.type` is
 /// one. CosyVoice3 is both this and a voice.
 pub fn is_a_converter(asked: &str) -> bool {
-    manifest_of(asked).as_deref().and_then(converter_kind).is_some()
+    manifest_of(asked)
+        .as_deref()
+        .and_then(converter_kind)
+        .is_some()
 }
 
 /// The models a package can convert voices with.

@@ -17,12 +17,10 @@
 use std::collections::HashMap;
 
 use waifu::audio::{
-    conv_transpose1d, hann_window, istft, istft_basis, pad1d, snake, stft,
-    stft_basis, window_envelope, Padding,
+    conv_transpose1d, hann_window, istft, istft_basis, pad1d, snake, stft, stft_basis,
+    window_envelope, Padding,
 };
-use waifu::flint::{
-    functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights,
-};
+use waifu::flint::{functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Value, Weights};
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
 fn cuda_float() -> DType {
@@ -344,4 +342,3 @@ fn an_istft_of_an_stft_on_the_card_is_still_the_signal() {
         "istft of stft",
     );
 }
-

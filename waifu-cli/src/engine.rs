@@ -143,7 +143,8 @@ impl Default for Chosen {
 /// start at, as one.
 pub fn look_at(manifest: &Path) -> Result<Chosen, String> {
     let asked = c::c_string(&manifest.to_string_lossy());
-    let mut said = c::waifu_json(unsafe { c::waifu_describe_json(asked.as_ptr()) }).ok_or_else(c::waifu_error)?;
+    let mut said = c::waifu_json(unsafe { c::waifu_describe_json(asked.as_ptr()) })
+        .ok_or_else(c::waifu_error)?;
     let defaults = c::manager_json(unsafe { c::waifu_modelmanager_defaults_json(asked.as_ptr()) })
         .ok_or_else(c::manager_error)?;
     // The two halves of one description. A `conversion` is in both, and its defaults go inside.
@@ -175,9 +176,15 @@ pub fn chosen_from(said: &serde_json::Value) -> Chosen {
     Chosen {
         draws: said["kind"] == "image",
         defaults: GenerationDefaults {
-            width: said["width"].as_i64().map_or(defaults.width, |width| width as i32),
-            height: said["height"].as_i64().map_or(defaults.height, |height| height as i32),
-            num_steps: said["steps"].as_i64().map_or(defaults.num_steps, |steps| steps as i32),
+            width: said["width"]
+                .as_i64()
+                .map_or(defaults.width, |width| width as i32),
+            height: said["height"]
+                .as_i64()
+                .map_or(defaults.height, |height| height as i32),
+            num_steps: said["steps"]
+                .as_i64()
+                .map_or(defaults.num_steps, |steps| steps as i32),
             guidance_scale: said["guidance"]
                 .as_f64()
                 .map_or(defaults.guidance_scale, |guidance| guidance as f32),
@@ -281,7 +288,9 @@ impl Engine {
             struct_size: std::mem::size_of::<WaifuDrawRequest>() as u32,
             prompt: prompt.as_ptr(),
             negative: negative.as_ptr(),
-            images: input.as_ref().map_or(ptr::null(), |input| input as *const WaifuImageInput),
+            images: input
+                .as_ref()
+                .map_or(ptr::null(), |input| input as *const WaifuImageInput),
             image_count: input.is_some() as usize,
             width: options.width.max(0) as u32,
             height: options.height.max(0) as u32,
@@ -330,7 +339,10 @@ fn status_of(code: WaifuStatusCode, message: Option<String>) -> Ended<()> {
 
 unsafe extern "C" fn on_loaded(user_data: *mut c_void, event: *const WaifuCompletionEvent) {
     let (sender, status) = (&*(user_data as *const Sender<Heard>), &(*event).status);
-    let _ = sender.send(Heard::Loaded(status_of(status.code, c::text(status.message))));
+    let _ = sender.send(Heard::Loaded(status_of(
+        status.code,
+        c::text(status.message),
+    )));
 }
 
 unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuProgressEvent) {
@@ -349,7 +361,10 @@ unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuProg
 
 unsafe extern "C" fn on_drawn(user_data: *mut c_void, event: *const WaifuImageCompletionEvent) {
     let (sender, event) = (&*(user_data as *const Sender<Heard>), &*event);
-    let ended = match (status_of(event.status.code, c::text(event.status.message)), event.image.as_ref()) {
+    let ended = match (
+        status_of(event.status.code, c::text(event.status.message)),
+        event.image.as_ref(),
+    ) {
         (Ended::Done(()), Some(image)) => {
             let rgb = std::slice::from_raw_parts(image.rgb, image.len).to_vec();
             Ended::Done((image.width, image.height, rgb))

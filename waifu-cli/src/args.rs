@@ -21,9 +21,9 @@
 
 use std::fmt;
 
-use crate::task::Task;
 #[allow(unused_imports)]
 use crate::runtime::{Device, Residency};
+use crate::task::Task;
 
 pub use crate::runtime::{DeviceOption, Room, Runtime};
 
@@ -229,9 +229,18 @@ mod tests {
     #[test]
     fn a_named_device_is_not_second_guessed_by_what_the_machine_has() {
         let cpu_only = [Runtime::on(Device::Cpu)];
-        assert_eq!(DeviceOption::Cuda.resolve(&cpu_only), Runtime::on(Device::Cuda));
-        assert_eq!(DeviceOption::Auto.resolve(&cpu_only), Runtime::on(Device::Cpu));
-        assert_eq!(DeviceOption::Auto.resolve(&Runtime::ALL), Runtime::on(Device::Cuda));
+        assert_eq!(
+            DeviceOption::Cuda.resolve(&cpu_only),
+            Runtime::on(Device::Cuda)
+        );
+        assert_eq!(
+            DeviceOption::Auto.resolve(&cpu_only),
+            Runtime::on(Device::Cpu)
+        );
+        assert_eq!(
+            DeviceOption::Auto.resolve(&Runtime::ALL),
+            Runtime::on(Device::Cuda)
+        );
     }
 
     #[test]
@@ -255,15 +264,24 @@ mod tests {
         }
 
         let asked = args(&["-device", "metal_disk_offload"]).unwrap();
-        assert_eq!(asked.device().unwrap().resolve(&Runtime::ALL), Runtime::METAL_DISK_OFFLOAD);
+        assert_eq!(
+            asked.device().unwrap().resolve(&Runtime::ALL),
+            Runtime::METAL_DISK_OFFLOAD
+        );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).residency(),
             Residency::LowVram
         );
-        assert_eq!(asked.device().unwrap().resolve(&Runtime::ALL).device(), Device::Metal);
+        assert_eq!(
+            asked.device().unwrap().resolve(&Runtime::ALL).device(),
+            Device::Metal
+        );
 
         let asked = args(&["-device", "cuda_cpu_offload"]).unwrap();
-        assert_eq!(asked.device().unwrap().resolve(&Runtime::ALL), Runtime::CUDA_CPU_OFFLOAD);
+        assert_eq!(
+            asked.device().unwrap().resolve(&Runtime::ALL),
+            Runtime::CUDA_CPU_OFFLOAD
+        );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).residency(),
             Residency::LowVram
@@ -286,7 +304,11 @@ mod tests {
                 "{typed}"
             );
         }
-        for typed in ["metal_disk_offload", "metal-disk-offload", "Metal_Disk_Offload"] {
+        for typed in [
+            "metal_disk_offload",
+            "metal-disk-offload",
+            "Metal_Disk_Offload",
+        ] {
             assert_eq!(
                 args(&["-device", typed]).unwrap().device().unwrap(),
                 DeviceOption::MetalDiskOffload,
@@ -371,14 +393,22 @@ mod tests {
 
     #[test]
     fn a_named_device_is_the_one_that_is_used() {
-        assert_eq!(DeviceOption::Cpu.resolve(&Runtime::ALL).device(), Device::Cpu);
-        assert_eq!(DeviceOption::Cuda.resolve(&Runtime::ALL).device(), Device::Cuda);
+        assert_eq!(
+            DeviceOption::Cpu.resolve(&Runtime::ALL).device(),
+            Device::Cpu
+        );
+        assert_eq!(
+            DeviceOption::Cuda.resolve(&Runtime::ALL).device(),
+            Device::Cuda
+        );
         assert_eq!(
             DeviceOption::CudaCpuOffload.resolve(&Runtime::ALL).device(),
             Device::Cuda
         );
         assert_eq!(
-            DeviceOption::MetalDiskOffload.resolve(&Runtime::ALL).device(),
+            DeviceOption::MetalDiskOffload
+                .resolve(&Runtime::ALL)
+                .device(),
             Device::Metal
         );
     }

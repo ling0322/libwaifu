@@ -33,13 +33,15 @@ use std::ptr;
 
 mod support;
 
+use support::{caught, required, set_last_error, status, string_in, string_out, Gate, UserData};
 pub use support::{
     WaifuCompleteCallback, WaifuCompletionEvent, WaifuLogCallback, WaifuLogEvent, WaifuLogLevel,
     WaifuProgressCallback, WaifuProgressEvent, WaifuStage, WaifuStatus, WaifuStatusCode,
 };
-use support::{caught, required, set_last_error, status, string_in, string_out, Gate, UserData};
 
-use crate::engine::{self, DrawRequest, Ended, Engine, Failure, SpeakRequest, Stage, VoiceConversionRequest};
+use crate::engine::{
+    self, DrawRequest, Ended, Engine, Failure, SpeakRequest, Stage, VoiceConversionRequest,
+};
 use crate::runtime::DeviceOption;
 use crate::wav::Sound;
 
@@ -76,7 +78,9 @@ pub unsafe extern "C" fn waifu_string_free(s: *mut c_char) {
 /// anything else: flint writes what hardware it found the first time a device is asked about.
 #[no_mangle]
 pub extern "C" fn waifu_set_log_callback(user_data: *mut c_void, callback: WaifuLogCallback) {
-    caught((), || crate::log::set_sink(support::log_sink(user_data, callback)))
+    caught((), || {
+        crate::log::set_sink(support::log_sink(user_data, callback))
+    })
 }
 
 /// Lines below the level are not made at all. INFO unless set.
@@ -91,7 +95,9 @@ pub extern "C" fn waifu_set_log_level(level: WaifuLogLevel) {
 /// with waifu_string_free. NULL on failure.
 #[no_mangle]
 pub extern "C" fn waifu_machine_json() -> *mut c_char {
-    caught(ptr::null_mut(), || string_out(&engine::machine_json().to_string()))
+    caught(ptr::null_mut(), || {
+        string_out(&engine::machine_json().to_string())
+    })
 }
 
 /// Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
@@ -101,7 +107,9 @@ pub extern "C" fn waifu_machine_json() -> *mut c_char {
 /// NULL on failure.
 #[no_mangle]
 pub extern "C" fn waifu_devices_json() -> *mut c_char {
-    caught(ptr::null_mut(), || string_out(&engine::devices_json().to_string()))
+    caught(ptr::null_mut(), || {
+        string_out(&engine::devices_json().to_string())
+    })
 }
 
 // -- progress --------------------------------------------------------------------------------
@@ -119,7 +127,11 @@ fn stage_out(stage: Stage) -> WaifuStage {
 }
 
 /// The engine's progress callback, calling the caller's.
-fn progress_to(gate: &Gate, user_data: UserData, callback: WaifuProgressCallback) -> engine::OnProgress {
+fn progress_to(
+    gate: &Gate,
+    user_data: UserData,
+    callback: WaifuProgressCallback,
+) -> engine::OnProgress {
     let gate = gate.clone();
     Box::new(move |progress| {
         if callback.is_none() {
@@ -162,7 +174,11 @@ fn status_of<T>(ended: &Ended<T>) -> (WaifuStatusCode, Option<CString>) {
     }
 }
 
-fn completion_to<T>(gate: &Gate, user_data: UserData, callback: WaifuCompleteCallback) -> engine::OnComplete<T> {
+fn completion_to<T>(
+    gate: &Gate,
+    user_data: UserData,
+    callback: WaifuCompleteCallback,
+) -> engine::OnComplete<T> {
     let gate = gate.clone();
     Box::new(move |ended: Ended<T>| {
         let Some(callback) = callback else {
@@ -434,7 +450,9 @@ pub unsafe extern "C" fn waifu_engine_unload_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let engine = engine.as_ref().ok_or("the engine is NULL")?;
-        Ok(engine.engine.unload(completion_to(&gate, UserData(user_data), on_complete)))
+        Ok(engine
+            .engine
+            .unload(completion_to(&gate, UserData(user_data), on_complete)))
     })
 }
 
@@ -442,7 +460,9 @@ pub unsafe extern "C" fn waifu_engine_unload_async(
 
 /// A request struct, read only if it is at least as large as the one this library knows.
 unsafe fn request_in<'a, T>(request: *const T, size: u32, what: &str) -> Result<&'a T, String> {
-    let request = request.as_ref().ok_or_else(|| format!("the {what} is NULL"))?;
+    let request = request
+        .as_ref()
+        .ok_or_else(|| format!("the {what} is NULL"))?;
     if (size as usize) < std::mem::size_of::<T>() {
         return Err(format!(
             "the {what} says it is {size} bytes, and this library reads {}: set struct_size to sizeof",
@@ -528,13 +548,19 @@ pub unsafe extern "C" fn waifu_engine_draw_async(
                 };
                 let event = WaifuImageCompletionEvent {
                     status: status(code, &message),
-                    image: image.as_ref().map_or(ptr::null(), |image| image as *const WaifuImage),
+                    image: image
+                        .as_ref()
+                        .map_or(ptr::null(), |image| image as *const WaifuImage),
                 };
                 let user_data = user_data;
                 unsafe { callback(user_data.0, &event) };
             })
         };
-        engine.engine.draw(request, progress_to(&gate, user_data, on_progress), on_complete)
+        engine.engine.draw(
+            request,
+            progress_to(&gate, user_data, on_progress),
+            on_complete,
+        )
     })
 }
 
@@ -555,7 +581,11 @@ unsafe fn audio_in(audio: *const WaifuAudio, what: &str) -> Result<Sound, String
     Ok(Sound::new(samples, audio.rate))
 }
 
-fn audio_completion_to(gate: &Gate, user_data: UserData, callback: WaifuAudioCompleteCallback) -> engine::OnComplete<Sound> {
+fn audio_completion_to(
+    gate: &Gate,
+    user_data: UserData,
+    callback: WaifuAudioCompleteCallback,
+) -> engine::OnComplete<Sound> {
     let gate = gate.clone();
     Box::new(move |ended: Ended<Sound>| {
         let Some(callback) = callback else {
@@ -573,7 +603,9 @@ fn audio_completion_to(gate: &Gate, user_data: UserData, callback: WaifuAudioCom
         };
         let event = WaifuAudioCompletionEvent {
             status: status(code, &message),
-            audio: audio.as_ref().map_or(ptr::null(), |audio| audio as *const WaifuAudio),
+            audio: audio
+                .as_ref()
+                .map_or(ptr::null(), |audio| audio as *const WaifuAudio),
         };
         let user_data = user_data;
         unsafe { callback(user_data.0, &event) };

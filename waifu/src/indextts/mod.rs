@@ -108,8 +108,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use crate::flint::{
-    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor,
-    Weights,
+    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor, Weights,
 };
 use crate::{
     Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Tokenizer, Voice,

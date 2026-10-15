@@ -196,7 +196,10 @@ mod tests {
             guidance: Some(1.0),
             ..Suggestions::default()
         };
-        assert!(!guided_by(&turbo, true), "Anima Turbo's card says CFG 1 and nothing else");
+        assert!(
+            !guided_by(&turbo, true),
+            "Anima Turbo's card says CFG 1 and nothing else"
+        );
 
         // What the package says outranks what it suggests: an undistilled model that likes one.
         let says_so = Suggestions {
@@ -218,15 +221,23 @@ mod tests {
 
     /// A manifest of `kind` with `suggested` under it, in a file of its own.
     fn a_manifest(stem: &str, kind: &str, suggested: &str) -> String {
-        let path = std::env::temp_dir().join(format!("waifu-defaults-{}-{stem}.yaml", std::process::id()));
-        let text = format!("weights:\n  - w.safetensors\nconfig:\n  model:\n    type: {kind}\n{suggested}");
+        let path =
+            std::env::temp_dir().join(format!("waifu-defaults-{}-{stem}.yaml", std::process::id()));
+        let text = format!(
+            "weights:\n  - w.safetensors\nconfig:\n  model:\n    type: {kind}\n{suggested}"
+        );
         std::fs::write(&path, text).unwrap();
         path.to_str().unwrap().to_string()
     }
 
     #[test]
     fn a_turbo_release_starts_at_its_own_numbers_and_offers_no_guidance() {
-        let turbo = defaults_json(&a_manifest("turbo", "anima", "suggested:\n  steps: 8\n  guidance: 1\n")).unwrap();
+        let turbo = defaults_json(&a_manifest(
+            "turbo",
+            "anima",
+            "suggested:\n  steps: 8\n  guidance: 1\n",
+        ))
+        .unwrap();
         assert_eq!(turbo["steps"], 8);
         assert_eq!(turbo["guidance"], 1.0);
         assert_eq!(turbo["takes_guidance"], false);

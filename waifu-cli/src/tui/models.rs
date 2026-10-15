@@ -865,13 +865,7 @@ fn draw_folders(frame: &mut Frame, area: Rect, choices: &Choices) {
 /// `enter` is what enter does on the row the cursor is on, which is not the same on all of them,
 /// and `failure` is shown as it was given -- whoever set it says what it was, since by the time it
 /// reaches here a fetch that failed and a file that cannot be opened look alike.
-fn draw_foot(
-    frame: &mut Frame,
-    area: Rect,
-    doing: &Doing,
-    enter: &str,
-    failure: Option<&str>,
-) {
+fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, enter: &str, failure: Option<&str>) {
     match doing {
         Doing::Fetching {
             stop,

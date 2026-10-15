@@ -63,7 +63,8 @@ fn write_header(manifest: &Path) {
     println!("cargo:rerun-if-changed=src/c_api/support.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
-    let config = cbindgen::Config::from_file(manifest.join("cbindgen.toml")).expect("waifu/cbindgen.toml");
+    let config =
+        cbindgen::Config::from_file(manifest.join("cbindgen.toml")).expect("waifu/cbindgen.toml");
     match cbindgen::Builder::new()
         .with_config(config)
         .with_src(manifest.join("src/c_api.rs"))

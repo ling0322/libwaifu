@@ -254,8 +254,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::KeyModifiers;
 
-    use crate::tui::screen_text;
     use crate::runtime::Device;
+    use crate::tui::screen_text;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

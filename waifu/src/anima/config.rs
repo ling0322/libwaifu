@@ -472,7 +472,10 @@ config:
         let quantized =
             parse(&format!("{TURBO_V11}    weight_format: fp8_tensor_scale\n")).unwrap();
         assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8TensorScale);
-        assert_eq!(quantized.adapter.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(
+            quantized.adapter.weight_format,
+            WeightFormat::Fp8TensorScale
+        );
         assert_eq!(quantized.text.weight_format, WeightFormat::Fp8TensorScale);
     }
 

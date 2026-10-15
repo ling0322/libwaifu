@@ -92,16 +92,14 @@ fn check_corpus(tokenizer: &Tokenizer, beside: &str) {
 #[test]
 #[ignore = "needs the anima package"]
 fn the_text_encoder_tokenizer_matches_the_reference_token_for_token() {
-    let tokenizer =
-        Tokenizer::open_section(&manifest(), Anima::QWEN_TOKENIZER_SECTION).unwrap();
+    let tokenizer = Tokenizer::open_section(&manifest(), Anima::QWEN_TOKENIZER_SECTION).unwrap();
     check_corpus(&tokenizer, "anima-turbo-v11_test_qwen3_corpus.tsv");
 }
 
 #[test]
 #[ignore = "needs the anima package"]
 fn the_adapter_tokenizer_matches_the_reference_token_for_token() {
-    let tokenizer =
-        Tokenizer::open_section(&manifest(), Anima::T5_TOKENIZER_SECTION).unwrap();
+    let tokenizer = Tokenizer::open_section(&manifest(), Anima::T5_TOKENIZER_SECTION).unwrap();
     check_corpus(&tokenizer, "anima-turbo-v11_test_t5_corpus.tsv");
 }
 
@@ -115,7 +113,8 @@ fn both_tokenizers_give_the_ids_the_reference_ran_on() {
     let cases = test_cases();
 
     let reference = |name: &str| -> Vec<i32> {
-        cases[name].clone()
+        cases[name]
+            .clone()
             .to_vec_i64()
             .unwrap()
             .iter()
@@ -124,7 +123,10 @@ fn both_tokenizers_give_the_ids_the_reference_ran_on() {
     };
 
     let qwen = Tokenizer::open_section(&manifest(), Anima::QWEN_TOKENIZER_SECTION).unwrap();
-    assert_eq!(qwen.encode(PROMPT).unwrap(), reference("test_case.qwen_ids"));
+    assert_eq!(
+        qwen.encode(PROMPT).unwrap(),
+        reference("test_case.qwen_ids")
+    );
 
     let t5 = Tokenizer::open_section(&manifest(), Anima::T5_TOKENIZER_SECTION).unwrap();
     let mut ids = t5.encode(PROMPT).unwrap();

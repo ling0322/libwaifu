@@ -211,7 +211,11 @@ fn turbo_fp8_matches_the_reference() {
     assert_eq!(sampler.sigmas().len(), 9);
     assert_eq!(sampler.sigmas().len(), sigmas.len());
     for (ours, theirs) in sampler.sigmas().iter().zip(&sigmas) {
-        assert!((ours - theirs).abs() < 1e-5, "{:?} against {sigmas:?}", sampler.sigmas());
+        assert!(
+            (ours - theirs).abs() < 1e-5,
+            "{:?} against {sigmas:?}",
+            sampler.sigmas()
+        );
     }
 
     let context = fixture(&cases, "test_case.hidden");
@@ -238,7 +242,11 @@ fn turbo_fp8_matches_the_reference() {
         .denoise_reporting(
             &fixture(&cases, "test_case.noise"),
             &sampler,
-            &model.encode_prompt(prompt).unwrap().cast(DType::Float16).unwrap(),
+            &model
+                .encode_prompt(prompt)
+                .unwrap()
+                .cast(DType::Float16)
+                .unwrap(),
             None,
             None,
             &options,

@@ -126,7 +126,10 @@ impl Suggestions {
         Suggestions {
             prompt: text(Suggestions::PROMPT).map(str::to_string),
             avoid: text(Suggestions::AVOID).map(str::to_string),
-            sizes: fields.get(Suggestions::SIZES).map(sizes).unwrap_or_default(),
+            sizes: fields
+                .get(Suggestions::SIZES)
+                .map(sizes)
+                .unwrap_or_default(),
             steps: text(Suggestions::STEPS).and_then(|value| value.parse().ok()),
             guidance: text(Suggestions::GUIDANCE).and_then(|value| value.parse().ok()),
             // Absent, or written as a word this cannot read, is a model that has not answered --
@@ -299,8 +302,9 @@ mod tests {
     #[test]
     fn the_sizes_may_be_written_on_one_line() {
         // A flow sequence and a block one are the same list, which is the point of accepting both.
-        let inline =
-            Suggestions::from_fields(&fields("suggested:\n  sizes: [[1024, 1024], [832, 1216]]\n"));
+        let inline = Suggestions::from_fields(&fields(
+            "suggested:\n  sizes: [[1024, 1024], [832, 1216]]\n",
+        ));
         assert_eq!(inline.sizes, vec![(1024, 1024), (832, 1216)]);
     }
 
@@ -315,7 +319,8 @@ mod tests {
         assert_eq!(nothing.size(), None);
 
         // Written but empty, which a hand edited manifest is one backspace away from.
-        let empty = Suggestions::from_fields(&fields("suggested:\n  prompt: \"\"\n  steps: \"\"\n"));
+        let empty =
+            Suggestions::from_fields(&fields("suggested:\n  prompt: \"\"\n  steps: \"\"\n"));
         assert_eq!(empty, Suggestions::default());
     }
 
@@ -349,18 +354,35 @@ mod tests {
 
     #[test]
     fn a_prompt_and_a_list_are_read_the_way_yaml_reads_them() {
-        let prompt = |line: &str| Suggestions::from_fields(&fields(&format!("suggested:\n  {line}\n"))).prompt;
+        let prompt = |line: &str| {
+            Suggestions::from_fields(&fields(&format!("suggested:\n  {line}\n"))).prompt
+        };
 
         // A space and then a `#` begins a comment; a `#` with no space before it is part of the
         // value, and a prompt that really wants the first is quoted, which the exporter does.
-        assert_eq!(prompt("prompt: a plain value  # and a comment").as_deref(), Some("a plain value"));
-        assert_eq!(prompt("prompt: tag#1 keeps its hash").as_deref(), Some("tag#1 keeps its hash"));
-        assert_eq!(prompt(r#"prompt: "tag #1, quoted""#).as_deref(), Some("tag #1, quoted"));
+        assert_eq!(
+            prompt("prompt: a plain value  # and a comment").as_deref(),
+            Some("a plain value")
+        );
+        assert_eq!(
+            prompt("prompt: tag#1 keeps its hash").as_deref(),
+            Some("tag#1 keeps its hash")
+        );
+        assert_eq!(
+            prompt(r#"prompt: "tag #1, quoted""#).as_deref(),
+            Some("tag #1, quoted")
+        );
         assert_eq!(prompt("prompt: 'it''s here'").as_deref(), Some("it's here"));
         assert_eq!(prompt("prompt: 猫, 🐱").as_deref(), Some("猫, 🐱"));
 
-        let block = Suggestions::from_fields(&fields("suggested:\n  sizes:\n    - [1024, 1024]\n    - [832, 1216]\n")).sizes;
-        let inline = Suggestions::from_fields(&fields("suggested:\n  sizes: [[1024, 1024], [832, 1216]]\n")).sizes;
+        let block = Suggestions::from_fields(&fields(
+            "suggested:\n  sizes:\n    - [1024, 1024]\n    - [832, 1216]\n",
+        ))
+        .sizes;
+        let inline = Suggestions::from_fields(&fields(
+            "suggested:\n  sizes: [[1024, 1024], [832, 1216]]\n",
+        ))
+        .sizes;
         assert_eq!(block, vec![(1024, 1024), (832, 1216)]);
         assert_eq!(block, inline);
     }

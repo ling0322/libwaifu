@@ -234,7 +234,10 @@ impl Engine {
     pub fn new(device: DeviceOption) -> Result<Engine, String> {
         let runtime = device.resolve();
         if !runtime.device().is_available() {
-            return Err(format!("{} is not available on this machine", runtime.name()));
+            return Err(format!(
+                "{} is not available on this machine",
+                runtime.name()
+            ));
         }
 
         let (commands, queue) = mpsc::channel();
@@ -265,7 +268,9 @@ impl Engine {
         lock(&self.shared.open).insert(job);
         // The thread is there until this is dropped, so the send only fails if it died -- and a
         // job it never sees still has to be ended.
-        if let Err(mpsc::SendError(Command::Job(_, work))) = self.commands.send(Command::Job(job, work)) {
+        if let Err(mpsc::SendError(Command::Job(_, work))) =
+            self.commands.send(Command::Job(job, work))
+        {
             lock(&self.shared.open).remove(&job);
             work.cancel();
         }
@@ -383,7 +388,9 @@ pub fn check_draw(request: &DrawRequest) -> Result<(), String> {
     // which.
     for (side, name) in [(request.width, "width"), (request.height, "height")] {
         if !(64..=2048).contains(&side) {
-            return Err(format!("the {name} is {side}: it has to be from 64 to 2048"));
+            return Err(format!(
+                "the {name} is {side}: it has to be from 64 to 2048"
+            ));
         }
     }
     if request.steps == 0 {
@@ -396,12 +403,17 @@ pub fn check_draw(request: &DrawRequest) -> Result<(), String> {
     let mut keys = HashSet::new();
     for (key, image) in &request.images {
         if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(format!("\"{key}\" is not a key: letters, digits and _ only"));
+            return Err(format!(
+                "\"{key}\" is not a key: letters, digits and _ only"
+            ));
         }
         if !keys.insert(key.as_str()) {
             return Err(format!("two images are given under \"{key}\""));
         }
-        if image.width == 0 || image.height == 0 || image.rgb.len() != (image.width * image.height * 3) as usize {
+        if image.width == 0
+            || image.height == 0
+            || image.rgb.len() != (image.width * image.height * 3) as usize
+        {
             return Err(format!(
                 "the image under \"{key}\" is {}x{} and {} bytes, which is not that many rows of RGB",
                 image.width,
@@ -453,7 +465,10 @@ fn placeholders(prompt: &str) -> Result<Vec<String>, String> {
 /// What the thread has read.
 enum Loaded {
     Nothing,
-    Image { model: ImageModel, chosen: Chosen },
+    Image {
+        model: ImageModel,
+        chosen: Chosen,
+    },
     Voice(Box<dyn Voice>),
     /// Both a voice and a converter: one model, used as either.
     CosyVoice(CosyVoice3),
@@ -642,14 +657,16 @@ impl Worker {
                     VoiceKind::CosyVoice3 => {
                         Loaded::CosyVoice(CosyVoice3::from_manifest(device, residency, &manifest)?)
                     }
-                    VoiceKind::IndexTts => {
-                        Loaded::Voice(Box::new(IndexTts::from_manifest(device, residency, &manifest)?))
-                    }
+                    VoiceKind::IndexTts => Loaded::Voice(Box::new(IndexTts::from_manifest(
+                        device, residency, &manifest,
+                    )?)),
                 });
             }
             if let Some(ConverterKind::CosyVoice3) = converter_kind(&path) {
                 let manifest = Manifest::open(&path)?;
-                return Ok(Loaded::CosyVoice(CosyVoice3::from_manifest(device, residency, &manifest)?));
+                return Ok(Loaded::CosyVoice(CosyVoice3::from_manifest(
+                    device, residency, &manifest,
+                )?));
             }
             let model = ImageModel::from_manifest(&path, device, residency)?;
             let mut chosen = describe::look_at(asked);
@@ -680,22 +697,44 @@ impl Worker {
         crate::flint::release_memory();
     }
 
-    fn draw(&mut self, request: &DrawRequest, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<Image> {
+    fn draw(
+        &mut self,
+        request: &DrawRequest,
+        on_progress: &mut OnProgress,
+        stop: &dyn Fn() -> bool,
+    ) -> Ended<Image> {
         let Loaded::Image { model, chosen } = &self.loaded else {
             return Ended::failed(Failure::NotLoaded, "no model that draws is loaded");
         };
 
         // What the model cannot be given, said before anything runs.
-        if let Some((key, _)) = request.images.iter().find(|(key, _)| !KEPT_KEYS.contains(&key.as_str())) {
+        if let Some((key, _)) = request
+            .images
+            .iter()
+            .find(|(key, _)| !KEPT_KEYS.contains(&key.as_str()))
+        {
             return Ended::failed(
                 Failure::Model,
-                format!("{} reads words only: it cannot be shown <|{key}|>", chosen.full_name),
+                format!(
+                    "{} reads words only: it cannot be shown <|{key}|>",
+                    chosen.full_name
+                ),
             );
         }
         if request.images.iter().any(|(key, _)| key == CONTROL) {
-            return Ended::failed(Failure::Model, format!("{} has no ControlNet to hold to a control image", chosen.full_name));
+            return Ended::failed(
+                Failure::Model,
+                format!(
+                    "{} has no ControlNet to hold to a control image",
+                    chosen.full_name
+                ),
+            );
         }
-        let start_from = request.images.iter().find(|(key, _)| key == START_FROM).map(|(_, image)| image);
+        let start_from = request
+            .images
+            .iter()
+            .find(|(key, _)| key == START_FROM)
+            .map(|(_, image)| image);
         if start_from.is_some() {
             if let Some(why) = model.no_picture_because() {
                 return Ended::failed(Failure::Model, why);
@@ -715,7 +754,10 @@ impl Worker {
         };
 
         let started = Instant::now();
-        let mut reporter = Reporter { on_progress, started };
+        let mut reporter = Reporter {
+            on_progress,
+            started,
+        };
         let mut run = Run {
             progress: GenerationProgress::Encoding,
             steps: options.num_steps,
@@ -767,7 +809,12 @@ impl Worker {
         }
     }
 
-    fn speak(&mut self, request: &SpeakRequest, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<Sound> {
+    fn speak(
+        &mut self,
+        request: &SpeakRequest,
+        on_progress: &mut OnProgress,
+        stop: &dyn Fn() -> bool,
+    ) -> Ended<Sound> {
         let ratio = self.vocoder_ratio;
         let Some(voice) = self.voice() else {
             return Ended::failed(Failure::NotLoaded, "no voice is loaded");
@@ -777,7 +824,11 @@ impl Worker {
                 return Ended::failed(Failure::Model, why);
             }
         }
-        let style = request.style.as_ref().map(|style| style.trim().to_string()).filter(|style| !style.is_empty());
+        let style = request
+            .style
+            .as_ref()
+            .map(|style| style.trim().to_string())
+            .filter(|style| !style.is_empty());
         if style.is_some() && voice.styles().is_empty() {
             return Ended::failed(Failure::Model, format!("{} takes no style", voice.name()));
         }
@@ -790,7 +841,10 @@ impl Worker {
         };
 
         let started = Instant::now();
-        let mut reporter = Reporter { on_progress, started };
+        let mut reporter = Reporter {
+            on_progress,
+            started,
+        };
         let mut say = Say {
             progress: SpeechProgress::Reading,
             expected: 0,
@@ -803,7 +857,9 @@ impl Worker {
             say.progress = progress;
             match progress {
                 SpeechProgress::Saying { expected, .. } => say.expected = expected,
-                SpeechProgress::Sounding if say.sounding.is_none() => say.sounding = Some(Instant::now()),
+                SpeechProgress::Sounding if say.sounding.is_none() => {
+                    say.sounding = Some(Instant::now())
+                }
                 _ => {}
             }
             reporter.tell(&Doing::Speaking(say.clone()));
@@ -827,10 +883,20 @@ impl Worker {
         }
     }
 
-    fn convert(&mut self, request: &VoiceConversionRequest, on_progress: &mut OnProgress, stop: &dyn Fn() -> bool) -> Ended<Sound> {
+    fn convert(
+        &mut self,
+        request: &VoiceConversionRequest,
+        on_progress: &mut OnProgress,
+        stop: &dyn Fn() -> bool,
+    ) -> Ended<Sound> {
         let converter: &dyn Converter = match &self.loaded {
             Loaded::CosyVoice(model) => model,
-            _ => return Ended::failed(Failure::NotLoaded, "no model that converts voices is loaded"),
+            _ => {
+                return Ended::failed(
+                    Failure::NotLoaded,
+                    "no model that converts voices is loaded",
+                )
+            }
         };
         if request.convert_style {
             if let Some(why) = converter.no_style_conversion_because() {
@@ -872,10 +938,17 @@ fn scaled(image: &Image, width: u32, height: u32) -> Vec<u8> {
     if image.width == width && image.height == height {
         return image.rgb.clone();
     }
-    let Some(source) = image::RgbImage::from_raw(image.width, image.height, image.rgb.clone()) else {
+    let Some(source) = image::RgbImage::from_raw(image.width, image.height, image.rgb.clone())
+    else {
         return vec![0; (width * height * 3) as usize];
     };
-    image::imageops::resize(&source, width, height, image::imageops::FilterType::Lanczos3).into_raw()
+    image::imageops::resize(
+        &source,
+        width,
+        height,
+        image::imageops::FilterType::Lanczos3,
+    )
+    .into_raw()
 }
 
 // -- what is there, as JSON ------------------------------------------------------------------
@@ -894,7 +967,6 @@ pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
 }
 
 fn described(asked: &str) -> serde_json::Value {
-
     let mut kinds = Vec::new();
     if describe::is_a_voice(asked) {
         kinds.push("speech");
@@ -1035,7 +1107,10 @@ pub(crate) mod tests {
         DrawRequest {
             prompt: prompt.to_string(),
             negative: String::new(),
-            images: images.into_iter().map(|(key, image)| (key.to_string(), image)).collect(),
+            images: images
+                .into_iter()
+                .map(|(key, image)| (key.to_string(), image))
+                .collect(),
             width: 64,
             height: 64,
             steps: 1,
@@ -1047,26 +1122,56 @@ pub(crate) mod tests {
     }
 
     fn a_pixel() -> Image {
-        Image { width: 1, height: 1, rgb: vec![0, 0, 0] }
+        Image {
+            width: 1,
+            height: 1,
+            rgb: vec![0, 0, 0],
+        }
     }
 
     #[test]
     fn a_draw_is_refused_at_the_call_for_what_no_model_could_run() {
         assert!(check_draw(&a_request("a cat", vec![])).is_ok());
-        assert!(check_draw(&a_request("the girl in <|girl|>", vec![("girl", a_pixel())])).is_ok());
+        assert!(check_draw(&a_request(
+            "the girl in <|girl|>",
+            vec![("girl", a_pixel())]
+        ))
+        .is_ok());
         assert!(check_draw(&a_request("a cat", vec![(START_FROM, a_pixel())])).is_ok());
 
         for (request, says) in [
             (a_request("   ", vec![]), "empty"),
             (a_request("<|girl|>", vec![]), "names no image"),
-            (a_request("a cat", vec![("girl", a_pixel())]), "not named in the prompt"),
-            (a_request("<|start_from|>", vec![(START_FROM, a_pixel())]), "not for the prompt"),
+            (
+                a_request("a cat", vec![("girl", a_pixel())]),
+                "not named in the prompt",
+            ),
+            (
+                a_request("<|start_from|>", vec![(START_FROM, a_pixel())]),
+                "not for the prompt",
+            ),
             (a_request("a <|endofprompt|> cat", vec![]), "names no image"),
             (a_request("a <|end of|> cat", vec![]), "own markers"),
             (a_request("a <| cat", vec![]), "does not close"),
-            (a_request("<|a|> <|a|>", vec![("a", a_pixel()), ("a", a_pixel())]), "two images"),
+            (
+                a_request("<|a|> <|a|>", vec![("a", a_pixel()), ("a", a_pixel())]),
+                "two images",
+            ),
             (a_request("<|a-b|>", vec![("a-b", a_pixel())]), "not a key"),
-            (a_request("<|a|>", vec![("a", Image { width: 2, height: 2, rgb: vec![0; 3] })]), "rows of RGB"),
+            (
+                a_request(
+                    "<|a|>",
+                    vec![(
+                        "a",
+                        Image {
+                            width: 2,
+                            height: 2,
+                            rgb: vec![0; 3],
+                        },
+                    )],
+                ),
+                "rows of RGB",
+            ),
         ] {
             let refused = check_draw(&request).expect_err(&request.prompt);
             assert!(refused.contains(says), "{}: {refused}", request.prompt);
@@ -1086,7 +1191,11 @@ pub(crate) mod tests {
     /// wait for them on its own thread.
     fn listen<T: Send + 'static>() -> (OnProgress, OnComplete<T>, Receiver<Ended<T>>) {
         let (ended, heard) = mpsc::channel();
-        (Box::new(|_| {}), Box::new(move |end| ended.send(end).unwrap()), heard)
+        (
+            Box::new(|_| {}),
+            Box::new(move |end| ended.send(end).unwrap()),
+            heard,
+        )
     }
 
     fn an_engine() -> Engine {
@@ -1129,13 +1238,24 @@ pub(crate) mod tests {
             other => panic!("{other:?}"),
         }
         // And nothing more: one end each.
-        assert!(matches!(loaded.recv_timeout(Duration::from_millis(50)), Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected)));
-        assert!(matches!(spoken.recv_timeout(Duration::from_millis(50)), Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected)));
+        assert!(matches!(
+            loaded.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected)
+        ));
+        assert!(matches!(
+            spoken.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected)
+        ));
 
         // A picture asked of a voice is the wrong kind.
         let (progress, complete, drawn) = listen::<Image>();
-        engine.draw(a_request("a cat", vec![]), progress, complete).unwrap();
-        assert!(matches!(drawn.recv_timeout(WAIT).unwrap(), Ended::Failed(Failure::NotLoaded, _)));
+        engine
+            .draw(a_request("a cat", vec![]), progress, complete)
+            .unwrap();
+        assert!(matches!(
+            drawn.recv_timeout(WAIT).unwrap(),
+            Ended::Failed(Failure::NotLoaded, _)
+        ));
     }
 
     #[test]
@@ -1144,7 +1264,10 @@ pub(crate) mod tests {
         let engine = an_engine();
         let (progress, complete, heard) = listen::<()>();
         engine.load("sdxl:base", progress, complete);
-        assert!(matches!(heard.recv_timeout(WAIT).unwrap(), Ended::Failed(Failure::UnknownModel, _)));
+        assert!(matches!(
+            heard.recv_timeout(WAIT).unwrap(),
+            Ended::Failed(Failure::UnknownModel, _)
+        ));
     }
 
     #[test]
@@ -1211,7 +1334,11 @@ pub(crate) mod tests {
         let (told, heard_progress) = mpsc::channel();
         let (_, complete, spoken) = listen::<Sound>();
         engine
-            .speak(a_speaking(), Box::new(move |progress| told.send(progress.clone()).unwrap()), complete)
+            .speak(
+                a_speaking(),
+                Box::new(move |progress| told.send(progress.clone()).unwrap()),
+                complete,
+            )
             .unwrap();
         assert!(matches!(spoken.recv_timeout(WAIT).unwrap(), Ended::Done(_)));
 
@@ -1224,10 +1351,12 @@ pub(crate) mod tests {
     /// A manifest of `kind` in a directory of its own, naming one weights file that is not there:
     /// what a manifest fetched on its own, or bundled with an app, looks like.
     pub(crate) fn a_manifest(stem: &str, kind: &str) -> String {
-        let directory = std::env::temp_dir().join(format!("waifu-manifest-{}-{stem}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("waifu-manifest-{}-{stem}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("{stem}.yaml"));
-        let text = format!("weights:\n  - {stem}.safetensors\nconfig:\n  model:\n    type: {kind}\n");
+        let text =
+            format!("weights:\n  - {stem}.safetensors\nconfig:\n  model:\n    type: {kind}\n");
         std::fs::write(&path, text).unwrap();
         path.to_str().unwrap().to_string()
     }
@@ -1245,7 +1374,10 @@ pub(crate) mod tests {
 
         let anima = describe_json(&a_manifest("anima-turbo", crate::Anima::MODEL_TYPE)).unwrap();
         assert_eq!(anima["image_keys"], serde_json::json!([]));
-        assert!(anima["why_not"]["start_from"].as_str().unwrap().contains("Anima"));
+        assert!(anima["why_not"]["start_from"]
+            .as_str()
+            .unwrap()
+            .contains("Anima"));
         assert_eq!(sdxl["alignment"], 32);
         assert_eq!(anima["alignment"], 16);
 
@@ -1253,8 +1385,14 @@ pub(crate) mod tests {
         assert_eq!(tones["kind"], "speech");
 
         let cosyvoice = describe_json(&a_manifest("cosyvoice3", CosyVoice3::MODEL_TYPE)).unwrap();
-        assert_eq!(cosyvoice["kinds"], serde_json::json!(["speech", "conversion"]));
-        assert!(cosyvoice["conversion"]["rate"].as_u64().unwrap() > 0, "{cosyvoice}");
+        assert_eq!(
+            cosyvoice["kinds"],
+            serde_json::json!(["speech", "conversion"])
+        );
+        assert!(
+            cosyvoice["conversion"]["rate"].as_u64().unwrap() > 0,
+            "{cosyvoice}"
+        );
 
         // Its weights are not beside it, which is a manifest that says what it is all the same.
         assert_eq!(sdxl["on_disk"], false);

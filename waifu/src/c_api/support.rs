@@ -152,7 +152,8 @@ pub struct WaifuLogEvent {
 
 /// Called on whichever thread wrote the line, which can be the caller's own. It must be safe to
 /// call from any thread, and must not call into the library.
-pub type WaifuLogCallback = Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuLogEvent)>;
+pub type WaifuLogCallback =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuLogEvent)>;
 
 /// A caller's pointer, handed back as it was given, on whichever thread a callback runs.
 #[derive(Clone, Copy)]
@@ -233,7 +234,8 @@ pub struct WaifuProgressEvent {
     pub seconds: f64,
 }
 
-pub type WaifuProgressCallback = Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuProgressEvent)>;
+pub type WaifuProgressCallback =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuProgressEvent)>;
 
 /// How a job that makes nothing ended: a fetch, a load, an unload.
 #[repr(C)]
@@ -241,7 +243,8 @@ pub struct WaifuCompletionEvent {
     pub status: WaifuStatus,
 }
 
-pub type WaifuCompleteCallback = Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuCompletionEvent)>;
+pub type WaifuCompleteCallback =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuCompletionEvent)>;
 
 /// A progress report, before it is made into C.
 pub struct Progress<'a> {
@@ -281,7 +284,9 @@ pub fn tell_progress(callback: WaifuProgressCallback, user_data: UserData, progr
 pub fn status(code: WaifuStatusCode, message: &Option<CString>) -> WaifuStatus {
     WaifuStatus {
         code,
-        message: message.as_ref().map_or(ptr::null(), |message| message.as_ptr()),
+        message: message
+            .as_ref()
+            .map_or(ptr::null(), |message| message.as_ptr()),
     }
 }
 
@@ -304,7 +309,9 @@ impl Gate {
         let (open, opened) = &*self.0;
         let mut is_open = open.lock().unwrap_or_else(|held| held.into_inner());
         while !*is_open {
-            is_open = opened.wait(is_open).unwrap_or_else(|held| held.into_inner());
+            is_open = opened
+                .wait(is_open)
+                .unwrap_or_else(|held| held.into_inner());
         }
     }
 }

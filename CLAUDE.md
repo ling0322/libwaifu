@@ -21,6 +21,15 @@ LIBWAIFU_LIB_DIR="$PWD/build" cargo build -p waifu-tools
 
 `LIBWAIFU_LIB_DIR` must be absolute because the build scripts run from their crates' directories.
 
+## Formatting
+
+Before committing any Rust change, run `cargo fmt` over every crate in the workspace and commit
+the result with it:
+
+```bash
+cargo fmt --all
+```
+
 ## Licence
 
 libwaifu is MIT throughout. Do not add code ported from, or depending on, GPL or other copyleft

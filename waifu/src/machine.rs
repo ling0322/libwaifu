@@ -39,8 +39,8 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 
-use crate::runtime::Runtime;
 use crate::flint::{Device, MemorySnapshot};
+use crate::runtime::Runtime;
 
 /// What the machine is, as opposed to what is left of it.
 ///
