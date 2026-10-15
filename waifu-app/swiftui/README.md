@@ -62,7 +62,9 @@ unloading the one before, with the download and the read on the bar. The setting
 job runs.
 
 What is made is kept in the app's own folder, `~/Library/Application Support/libwaifu/output`, which
-**File > Show Output Folder** (⇧⌘O) opens in Finder.
+**File > Show Output Folder** (⇧⌘O) opens in Finder. Clicking the picture in the middle opens it in
+a window of its own, fitted to the window (Esc closes it). **Delete All…** deletes every picture in
+the strip, after asking; what is still being made is left alone.
 
 The Model Manager lists every published model, with how much of it is on this Mac: a download with
 its progress, and a delete.

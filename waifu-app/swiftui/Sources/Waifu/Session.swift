@@ -564,6 +564,11 @@ final class Session {
         images[job.id] = nil
     }
 
+    /// Deletes every picture or clip in the strip: the current tab's kind, and nothing still going.
+    func forgetAll() {
+        for job in done { forget(job) }
+    }
+
     /// Puts what a job was made with back in the boxes, which is how one is made again.
     func reuse(_ job: Job) {
         guard let made = job.made else { return }

@@ -26,6 +26,7 @@ import SwiftUI
 struct OutputPane: View {
     @Bindable var session: Session
     @State private var deleting: Job?
+    @State private var deletingAll = false
 
     private var pictures: Bool { session.tab.kind == "image" }
 
@@ -82,6 +83,16 @@ struct OutputPane: View {
             Button("Reuse these settings") { session.reuse(job) }
             Spacer()
             Button("Delete", role: .destructive) { deleting = job }
+            Button("Delete All…", role: .destructive) { deletingAll = true }
+                .confirmationDialog(
+                    "Delete all \(session.done.count) \(pictures ? "pictures" : "clips")?",
+                    isPresented: $deletingAll
+                ) {
+                    Button("Delete All", role: .destructive) { session.forgetAll() }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Nothing else keeps a copy.")
+                }
         }
     }
 
@@ -145,6 +156,8 @@ struct PictureFrame: View {
     var session: Session
     var job: Job
 
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
         Group {
             if let image = session.images[job.id] {
@@ -152,6 +165,8 @@ struct PictureFrame: View {
                     .resizable()
                     .scaledToFit()
                     .draggable(Image(nsImage: image))
+                    .overlay(PointingHand())
+                    .onTapGesture { openWindow(id: "preview", value: job.id) }
                     .contextMenu {
                         Button("Copy") {
                             NSPasteboard.general.clearContents()
@@ -162,12 +177,101 @@ struct PictureFrame: View {
                             NSPasteboard.general.setString(job.made?.parameters ?? "", forType: .string)
                         }
                     }
-                    .help(job.made?.parameters ?? "")
+                    .help(["Click to open it in a window of its own", job.made?.parameters]
+                        .compactMap { $0 }.joined(separator: "\n\n"))
             } else {
                 ProgressView()
             }
         }
         .task(id: job.id) { await session.load(job) }
+    }
+}
+
+/// The window a picture opens in when it is clicked: the picture alone, filling a window of its
+/// shape. Esc closes it; one deleted while it is open leaves the window saying so.
+struct PreviewWindow: View {
+    var session: Session
+    var id: String
+
+    @Environment(\.dismiss) private var dismiss
+
+    private var job: Job? { session.jobs.first { $0.id == id } }
+
+    var body: some View {
+        ZStack {
+            if let image = session.images[id] {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .background(FitWindow(image: image))
+                    .draggable(Image(nsImage: image))
+                    .contextMenu {
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.writeObjects([image])
+                        }
+                    }
+            } else if job == nil {
+                Text("This picture has been deleted.").foregroundStyle(.secondary).padding(40)
+            } else {
+                ProgressView().padding(40)
+            }
+            Button("Close") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+                .hidden()
+        }
+        .navigationTitle(job.map { Media.fileName(created: $0.finished ?? $0.created, kind: $0.kind) } ?? "Preview")
+        .task(id: id) { if let job { await session.load(job) } }
+    }
+}
+
+/// The pointing hand over what it is laid on, which says that a click does something. A cursor
+/// rect, not a push on hover: nothing is left to pop when the view goes while the mouse is on it.
+struct PointingHand: NSViewRepresentable {
+    final class Area: NSView {
+        override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func makeNSView(context: Context) -> Area { Area() }
+    func updateNSView(_ view: Area, context: Context) { view.window?.invalidateCursorRects(for: view) }
+}
+
+/// Shapes the window it is in like `image`, once a picture: as large as the picture's pixels where
+/// the screen has room, smaller where it has not, and held to that shape as it is resized -- so the
+/// picture fills it with nothing round its edges.
+struct FitWindow: NSViewRepresentable {
+    var image: NSImage
+
+    final class Probe: NSView {
+        var fitted: NSSize?
+        var size = NSSize.zero
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            fit()
+        }
+
+        func fit() {
+            guard let window, size.width > 0, size.height > 0, fitted != size else { return }
+            fitted = size
+            let room = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? size
+            let scale = min(1, room.width * 0.9 / size.width, (room.height * 0.9 - 28) / size.height)
+            let content = NSSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+            window.contentAspectRatio = size
+            window.setContentSize(content)
+            window.center()
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe { Probe() }
+
+    func updateNSView(_ probe: Probe, context: Context) {
+        // In pixels, which is the picture's own shape and size whatever the file says its DPI is.
+        let pixels = image.representations.first.map { NSSize(width: $0.pixelsWide, height: $0.pixelsHigh) }
+        probe.size = pixels.flatMap { $0.width > 0 ? $0 : nil } ?? image.size
+        DispatchQueue.main.async { probe.fit() }
     }
 }
 
