@@ -17,11 +17,16 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! Diffusion image generation on top of the flint tensor library.
+//! Diffusion image generation on top of the flint tensor library: libwaifu.
 //!
 //! It reads a model package, builds the model it describes, and runs it; the tensor operations
 //! themselves are the ones [`flint`] binds, and that module is the safe wrapper over the native
 //! `libflint.a` this crate links.
+//!
+//! What anything outside this crate calls is the C API in [`c_api`], from the dynamic library --
+//! the command line too. The Rust items are public for this crate's own tests, examples and
+//! benchmarks. A model is handed over as the path of its manifest: which models are published,
+//! and fetching them, is libwaifu_modelmanager's.
 //!
 //! ```no_run
 //! use waifu::Manifest;
@@ -43,23 +48,13 @@ pub mod anima;
 /// activation, all composed from the operators [`flint`] already has rather than written as
 /// kernels of their own.
 pub mod audio;
-#[cfg(feature = "cli")]
-pub mod cli;
-#[cfg(feature = "hub")]
-pub mod config;
-#[cfg(feature = "engine")]
+/// The C API, which is all anything outside this crate calls: see docs/ffi.md.
+pub mod c_api;
 pub mod describe;
-#[cfg(feature = "engine")]
 pub mod engine;
-#[cfg(feature = "hub")]
-pub mod hub;
-#[cfg(feature = "engine")]
 pub mod image_model;
-#[cfg(feature = "engine")]
 pub mod machine;
-#[cfg(feature = "engine")]
 pub mod progress;
-#[cfg(feature = "engine")]
 pub mod runtime;
 /// Fun-CosyVoice3-0.5B: a recording and a sentence in, the sentence in that voice out, at 24 kHz.
 /// A module for the reason [`indextts`] is one -- five models, two of them somebody else's.
@@ -89,7 +84,9 @@ mod sdxl;
 /// answer to it there is so far -- a stand-in that makes a noise where the syllables are, so that
 /// the screen and everything under it can be written before there is a model to put behind it.
 pub mod speech;
-mod suggested;
+/// Writing out what a number is read as, so a speech model never sees a digit: the text
+/// normalizer IndexTTS-2.5 and CosyVoice3 both read their text through.
+pub mod text_normalizer;
 mod tensor_file;
 mod tokenizer;
 /// Reading and writing WAV, which is the one audio format this crate handles itself: a header, a
@@ -121,7 +118,6 @@ pub use sdxl::{
     PromptEmbedding, SamplerConfig, Sdxl, SdxlConfig, Unet, UnetCondition, UnetConfig, VaeConfig,
     VaeDecoder, VaeEncoder, VAE_SCALE,
 };
-pub use suggested::{Size, Suggestions};
 pub use tensor_file::read_safetensors;
 pub use tokenizer::Tokenizer;
 pub use wav::Sound;

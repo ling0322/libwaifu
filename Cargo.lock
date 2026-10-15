@@ -1377,18 +1377,18 @@ dependencies = [
 
 [[package]]
 name = "indoc"
-version = "2.0.7"
+version = "2.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
+checksum = "a37b2691796cffeb8a8cd305ac66e65841559f147f4e63231d0eafa4db5384d1"
 dependencies = [
  "rustversion",
 ]
 
 [[package]]
 name = "instability"
-version = "0.3.13"
+version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bf84e73fa6f27f299dec58e13223cf70db80da872eb921d4f6138342a0eabc8"
+checksum = "4c3b5acc1e2fd9375041a388da33d1eb8aed5f7a8c0dd3543e3ea2805adfbe20"
 dependencies = [
  "darling 0.24.1",
  "indoc",
@@ -3419,23 +3419,42 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "waifu"
 version = "0.1.0"
 dependencies = [
- "hf-hub",
+ "cbindgen",
  "image",
  "memmap2",
- "ratatui",
  "safetensors",
  "serde_json",
  "tokenizers",
+]
+
+[[package]]
+name = "waifu-cli"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "ratatui",
+ "serde_json",
+ "waifu",
+ "waifu-modelmanager",
+]
+
+[[package]]
+name = "waifu-modelmanager"
+version = "0.1.0"
+dependencies = [
+ "cbindgen",
+ "hf-hub",
+ "serde_json",
  "toml 1.1.6+spec-1.1.0",
  "ureq",
 ]
 
 [[package]]
-name = "waifu-ffi"
+name = "waifu-tools"
 version = "0.1.0"
 dependencies = [
- "cbindgen",
  "waifu",
+ "waifu-modelmanager",
 ]
 
 [[package]]

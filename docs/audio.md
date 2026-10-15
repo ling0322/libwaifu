@@ -198,16 +198,16 @@ is in the file.)
 
 These are the primitives. What sits on top of them is now written, and what joins them up is not.
 
-All six of IndexTTS-2.5's models -- about 5.5 GB between them -- are here, each with a document of
-its own and a test against the implementation it came from:
+All six of IndexTTS-2.5's models -- about 5.5 GB between them -- are here, each with a test against
+the implementation it came from, and described in [indextts.md](indextts.md):
 
 | piece | |
 | --- | --- |
-| GPT backbone, 1280d × 24L | `waifu::indextts::gpt`, and [indextts_gpt.md](indextts_gpt.md) -- with the generation loop on top of it |
-| semantic codec, 8192 entries | `waifu::indextts::semantic_codec`, and [semantic_codec.md](semantic_codec.md) |
-| S2Mel, flow-matching DiT 13L × 512d | `waifu::indextts::s2mel`, and [s2mel.md](s2mel.md) |
-| BigVGAN vocoder | `waifu::indextts::bigvgan`, and [bigvgan.md](bigvgan.md) |
-| w2v-bert-2.0 | `waifu::indextts::w2v_bert`, and [w2v_bert.md](w2v_bert.md) |
+| GPT backbone, 1280d × 24L | `waifu::indextts::gpt` -- with the generation loop on top of it |
+| semantic codec, 8192 entries | `waifu::indextts::semantic_codec` |
+| S2Mel, flow-matching DiT 13L × 512d | `waifu::indextts::s2mel` |
+| BigVGAN vocoder | `waifu::indextts::bigvgan` |
+| w2v-bert-2.0 | `waifu::indextts::w2v_bert` |
 | CAMPPlus | `waifu::indextts::campplus`, and [campplus.md](campplus.md) |
 
 What remains is not a model. It is the emotion conformer and perceiver that produce `emo_vec`

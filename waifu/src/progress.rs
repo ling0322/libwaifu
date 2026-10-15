@@ -17,7 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! How far along a fetch, a read or a run is: what a bar is drawn from, and the words on it.
+//! How far along a read or a run is: what a bar is drawn from, and the words on it.
 
 use std::time::Instant;
 
@@ -50,22 +50,6 @@ const HELD: f64 = 0.99;
 /// run; of the rest, the vocoder takes a little more than the steps it follows do.
 const SAYING: f64 = 0.4;
 const DRAWING: f64 = 0.45;
-
-/// Which package of a model is being fetched, and how far into it.
-#[derive(Clone)]
-pub struct Fetch {
-    pub model: String,
-    /// Which hub it is coming from, once the fetch has settled that. Unknown for the moment
-    /// before: it is decided by a probe, and a screen that guessed would be naming a hub while
-    /// the probe is still out.
-    pub hub: Option<&'static str>,
-    pub file: String,
-    pub done: u64,
-    pub total: Option<u64>,
-    pub part: usize,
-    /// How many packages there are in all, or zero while that is still unknown.
-    pub parts: usize,
-}
 
 /// A run in flight.
 #[derive(Clone)]
@@ -150,7 +134,6 @@ impl Convert {
 pub enum Doing {
     /// Nothing: either no model has been asked for yet, or the last thing asked for has finished.
     Nothing,
-    Fetching(Fetch),
     /// Reading a model off the disk and onto the device, which is minutes for a large one.
     Reading {
         model: String,
@@ -168,16 +151,11 @@ impl Doing {
 
     /// How far along, between nothing and all of it, or `None` for work with no end in sight.
     ///
-    /// A fetch knows how many bytes it is; reading a model does not know anything -- it is one
-    /// call into the tensor library that returns when it returns -- and a bar drawn for it would
-    /// be a bar making something up.
+    /// Reading a model does not know anything -- it is one call into the tensor library that
+    /// returns when it returns -- and a bar drawn for it would be a bar making something up.
     pub fn fraction(&self) -> Option<f64> {
         match self {
             Doing::Nothing | Doing::Reading { .. } => None,
-            Doing::Fetching(fetch) => fetch
-                .total
-                .filter(|total| *total > 0)
-                .map(|total| fetch.done as f64 / total as f64),
             Doing::Drawing(run) => Some(drawn(run.progress, run.steps)),
             Doing::Speaking(say) => Some(spoken(say, Instant::now())),
             Doing::Converting(convert) => Some(converted(convert)),
@@ -188,14 +166,6 @@ impl Doing {
     pub fn words(&self) -> String {
         match self {
             Doing::Nothing => String::new(),
-            Doing::Fetching(fetch) if fetch.file.is_empty() => format!("fetching {}", fetch.model),
-            Doing::Fetching(fetch) => match fetch.parts {
-                0 => format!("fetching {} -- {}", fetch.model, fetch.file),
-                parts => format!(
-                    "fetching {} -- {} ({} of {parts})",
-                    fetch.model, fetch.file, fetch.part
-                ),
-            },
             Doing::Reading { model } => format!("reading {model}"),
             Doing::Drawing(run) => match run.progress {
                 GenerationProgress::Encoding => "reading the prompt".to_string(),
@@ -392,31 +362,6 @@ mod tests {
         assert_eq!(reading.fraction(), None);
         assert!(reading.is_busy());
         assert!(reading.words().contains("sdxl:base"));
-    }
-
-    #[test]
-    fn a_fetch_of_an_unknown_length_has_no_fraction_either() {
-        // Which is what a server that did not say how long the file is leaves, and it is also
-        // what the moment before the first byte looks like.
-        let mut fetch = Fetch {
-            model: "sdxl:base".to_string(),
-            hub: None,
-            file: "sdxl-base.waifupkg".to_string(),
-            done: 512,
-            total: None,
-            part: 1,
-            parts: 3,
-        };
-        assert_eq!(Doing::Fetching(fetch.clone()).fraction(), None);
-
-        fetch.total = Some(1024);
-        assert_eq!(Doing::Fetching(fetch.clone()).fraction(), Some(0.5));
-
-        // And the words say which model, not only which file: the file names in a package are not
-        // something anybody recognises.
-        let words = Doing::Fetching(fetch).words();
-        assert!(words.contains("sdxl:base"), "{words}");
-        assert!(words.contains("1 of 3"), "{words}");
     }
 
     #[test]

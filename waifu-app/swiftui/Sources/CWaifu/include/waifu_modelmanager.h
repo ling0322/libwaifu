@@ -1,0 +1,1 @@
+../../../../../waifu-modelmanager/include/waifu_modelmanager.h

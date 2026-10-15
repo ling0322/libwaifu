@@ -3,7 +3,7 @@
 > **The page is gone.** The web page this was written around was removed on 2026-10-13, when
 > drawing went back to the terminal. Speech now runs through [`waifu::engine`](../waifu/src/engine.rs)
 > and the C API over it ([ffi.md](ffi.md)), which the macOS app speaks with; `waifu` in the
-> terminal draws only, and `examples/speak.rs` says a sentence from a checkout. What follows about
+> terminal draws only, and waifu-tools' `speak` says a sentence from a checkout. What follows about
 > the [`Voice`](../waifu/src/speech.rs) trait, the models and the WAV reader still holds; what it
 > says about the page, its tab and `-m` for a voice is history.
 
@@ -176,8 +176,5 @@ shape and neither has the other.
 Nothing here needs a model, a card or a network, so all of it runs in the fast suite:
 
 ```bash
-LIBWAIFU_LIB_DIR="$PWD/build" cargo test --manifest-path waifu/Cargo.toml --features cli --lib
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test --manifest-path waifu/Cargo.toml --lib
 ```
-
-`--features cli` matters: without it, none of `waifu/src/cli` is compiled, so none of the routes,
-the state or the worker is tested. The library half -- `speech` and `wav` -- is tested either way.

@@ -40,7 +40,7 @@ jobs:
       # The Developer ID certificate goes into a keychain of the job's own, made the default so
       # that codesign finds the identity and notarytool the profile, and deleted when the job ends.
       # The notary profile is an App Store Connect API key, under the name a developer's machine
-      # gives the scripts too (macos/README.md).
+      # gives the scripts too (waifu-app/swiftui/README.md).
       - name: Set up signing
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
@@ -80,7 +80,7 @@ jobs:
       - name: Build app
         env:
           WAIFU_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-        run: macos/build-app.sh
+        run: waifu-app/swiftui/build-app.sh
 
       # Signed, notarized and stapled. Apple's notary service takes minutes as a rule, and can take
       # an hour or two over an account's first submissions.
@@ -89,11 +89,11 @@ jobs:
           WAIFU_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
           WAIFU_NOTARY_PROFILE: waifu-notary
         run: |
-          macos/package-dmg.sh
+          waifu-app/swiftui/package-dmg.sh
           # Named for what it is, which version, and the one architecture it runs on: the runner
           # is Apple silicon, and the app is built for nothing else.
           dmg="libwaifu-gui-$WAIFU_VERSION-macos-arm64.dmg"
-          cp macos/build/libwaifu-gui.dmg "$dmg"
+          cp waifu-app/swiftui/build/libwaifu-gui.dmg "$dmg"
           echo "DMG=$dmg" >> "$GITHUB_ENV"
 
       - name: Upload artifact

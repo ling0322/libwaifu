@@ -9,7 +9,7 @@
 //! where this and WeTextProcessing differ, so every divergence is one somebody chose. The cases
 //! marked "agrees with the reference" are the ones that came out of running it.
 
-use waifu::indextts::normalize::{normalize, Language};
+use waifu::text_normalizer::{normalize, Language};
 
 const ZH: Language = Language::Chinese;
 const EN: Language = Language::English;

@@ -9,14 +9,17 @@ cmake --build build -j$(sysctl -n hw.ncpu)
 
 ## Test
 
-Before committing, both fast suites must pass:
+Before committing, the fast suites must pass:
 
 ```bash
 ./build/unittest
 LIBWAIFU_LIB_DIR="$PWD/build" cargo test --manifest-path waifu/Cargo.toml
+cargo test -p waifu-modelmanager
+LIBWAIFU_LIB_DIR="$PWD/build" cargo test -p waifu-cli
+LIBWAIFU_LIB_DIR="$PWD/build" cargo build -p waifu-tools
 ```
 
-`LIBWAIFU_LIB_DIR` must be absolute because the Rust build script runs from `waifu/`.
+`LIBWAIFU_LIB_DIR` must be absolute because the build scripts run from their crates' directories.
 
 ## Licence
 
@@ -55,14 +58,14 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test cosyvoice3 -- --ignored --test-threads=1
 
-# waifu/src/indextts/, tools/indextts_* (campplus.rs and features.rs: run cosyvoice3's too)
+# waifu/src/indextts/, waifu/src/text_normalizer/, tools/indextts_*
+# (campplus.rs, features.rs and text_normalizer/: run cosyvoice3's too)
 # needs models/indextts25.yaml and the two recordings tools/indextts_reference_voices.py writes
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test indextts --test indextts_gpt -- --ignored --test-threads=1
 ```
 
 - Keep `--no-fail-fast` and `--test-threads=1`; each test loads a full model onto the GPU.
-- Do not add `--features cli`.
 - Run only one GPU job at a time. Check `nvidia-smi` before diagnosing OOM or timing failures.
 - No individual test may exceed three minutes. Reuse model fixtures across tests instead of
   loading a model per test. The harness gives every test its own thread, so a thread-local
@@ -85,6 +88,10 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
   `WeightsWriter.write_fp8_tensor_scale`). Per-channel scales (`weight_format: fp8`) have been
   removed from the runtime and the writer: a package that has them no longer loads and has to be
   exported again. A ControlNet package must use the same format as the model it steers.
+
+## Apps
+
+Do not change the behavior of `waifu-app/swiftui` or `waifu-app/wpf` unless the user asks.
 
 ## Git
 

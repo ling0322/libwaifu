@@ -21,7 +21,7 @@
 //! `frontend_utils.py` it calls, in the order it calls them.
 //!
 //! Upstream normalizes numbers with WeTextProcessing when it is installed, and so does this --
-//! through [`crate::indextts::normalize`], which is the same grammar's behaviour written as rules,
+//! through [`crate::text_normalizer`], which is the same grammar's behaviour written as rules,
 //! with the differences that module lists. Everything else is ported as written: a Chinese text
 //! loses its blanks between Chinese characters, its superscripts, its full-width brackets and its
 //! trailing commas, and has its `.` made `。`; either language is then cut at sentence punctuation
@@ -30,7 +30,7 @@
 //! A text holding `<|` and `|>` -- one that carries its own markers -- is not touched, as upstream
 //! does not touch it.
 
-use crate::indextts::normalize::{normalize, Language};
+use crate::text_normalizer::{normalize, Language};
 use crate::Result;
 
 const TOKEN_MAX: usize = 80;

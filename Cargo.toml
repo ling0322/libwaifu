@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "waifu",
-    "waifu-ffi",
+    "waifu-cli",
+    "waifu-modelmanager",
+    "waifu-tools",
 ]
 resolver = "2"

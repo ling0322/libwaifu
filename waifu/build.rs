@@ -1,6 +1,6 @@
-// Points the linker at the static library that the CMake build produces. CMake is what drives
-// this crate's build -- the top-level CMakeLists.txt's `waifu-cli` target runs `cargo build` after
-// the `flint` archive is fresh, so a plain `cmake --build build` builds both. This script never
+// Points the linker at the static library that the CMake build produces, and writes waifu.h. CMake
+// is what drives this crate's build -- the top-level CMakeLists.txt's `waifu-engine` target runs
+// `cargo build` after the `flint` archive is fresh, so a plain `cmake --build build` builds both. This script never
 // invokes CMake itself; it only reads the link flags CMake already wrote out. That keeps a lone
 // `cargo build` working too (useful when iterating on Rust code only), as long as the native
 // archive is already up to date. Override the location with LIBWAIFU_LIB_DIR when building
@@ -45,46 +45,36 @@ fn main() {
         println!("{line}");
     }
 
-    stamp_revision();
-}
-
-/// Put the commit this was built from into the binary, for the screen to show.
-///
-/// A screenshot of a run is worth little without it: two builds of the same version can differ by
-/// anything, and the first thing to ask about a picture that came out wrong is which code made it.
-/// Missing on purpose is a failure: a copy of the source with no git around it still builds, and
-/// says "unknown" where the hash would be rather than refusing.
-fn stamp_revision() {
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let git = manifest.join("../.git");
-
-    // Rebuilt when the checkout moves. HEAD covers a checkout, and the file HEAD points at covers
-    // a commit made on the branch already checked out.
-    if git.is_dir() {
-        println!("cargo:rerun-if-changed={}", git.join("HEAD").display());
-        if let Some(reference) = head_reference(&git) {
-            println!("cargo:rerun-if-changed={}", git.join(reference).display());
-        }
+    // Found next to whatever loads it -- an app's Frameworks directory, the command line's own --
+    // rather than at the path cargo happened to write it to.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libwaifu.dylib");
     }
 
-    let revision = std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&manifest)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    println!("cargo:rustc-env=WAIFU_REVISION={revision}");
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    write_header(&manifest);
 }
 
-/// The ref file HEAD names, relative to the git directory, when it names one at all. A detached
-/// HEAD holds a commit instead, and then there is no second file to watch.
-fn head_reference(git: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
-    let reference = head.trim().strip_prefix("ref: ")?;
-    Some(reference.to_string())
+/// waifu.h, from the `extern "C"` functions and `#[repr(C)]` types in src/c_api.rs and
+/// src/c_api/support.rs, with their doc comments. Written beside the source, where a change to the
+/// ABI shows up in a diff.
+fn write_header(manifest: &Path) {
+    println!("cargo:rerun-if-changed=src/c_api.rs");
+    println!("cargo:rerun-if-changed=src/c_api/support.rs");
+    println!("cargo:rerun-if-changed=cbindgen.toml");
+
+    let config = cbindgen::Config::from_file(manifest.join("cbindgen.toml")).expect("waifu/cbindgen.toml");
+    match cbindgen::Builder::new()
+        .with_config(config)
+        .with_src(manifest.join("src/c_api.rs"))
+        .with_src(manifest.join("src/c_api/support.rs"))
+        .generate()
+    {
+        Ok(bindings) => {
+            bindings.write_to_file(manifest.join("include/waifu.h"));
+        }
+        // Said rather than failed on: a header that cannot be regenerated leaves the last one,
+        // and the library under it still builds.
+        Err(error) => println!("cargo:warning=waifu.h was not regenerated: {error}"),
+    }
 }

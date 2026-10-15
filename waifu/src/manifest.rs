@@ -52,8 +52,10 @@
 //! `weights` names the safetensors files, in the order they are to be read. `tokenizers` names a
 //! `tokenizer.json` for each way this model turns text into ids -- one for most, two for Anima,
 //! which reads its prompt through a Qwen3 vocabulary and a T5 one. `config` is what `model.ini`
-//! said, block for block and key for key, with nothing renamed on the way across. [`Suggestions`]
-//! is what `metadata.json` said, grown from one field to several.
+//! said, block for block and key for key, with nothing renamed on the way across. `suggested` is
+//! what `metadata.json` said, grown from one field to several: what a screen should start the
+//! model's boxes at. Running the model needs none of it, so it is the model manager's to read and
+//! this steps over it.
 //!
 //! A tokenizer is one line because a tokenizer is one file: everything about how a model's text
 //! becomes ids -- the vocabulary, the merge ranks, the normalizer, the pre-tokenizer -- is inside
@@ -76,7 +78,6 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::mapping::Mapping;
-use crate::suggested::Suggestions;
 use crate::yaml::{self, Node};
 
 /// What a model's manifest says.
@@ -86,7 +87,6 @@ pub struct Manifest {
     weights: Vec<String>,
     tokenizers: BTreeMap<String, String>,
     config: BTreeMap<String, Mapping>,
-    suggested: Suggestions,
     explicit: bool,
 }
 
@@ -98,7 +98,6 @@ impl Manifest {
     pub const WEIGHTS: &'static str = "weights";
     pub const TOKENIZERS: &'static str = "tokenizers";
     pub const CONFIG: &'static str = "config";
-    pub const SUGGESTED: &'static str = "suggested";
     /// Spelled after the tag the model cards carry, which is where the answer comes from -- and
     /// which is also the spelling the hubs will keep: ModelScope's moderation reverts a commit
     /// that says the same thing in plainer words, silently, reporting the upload as committed and
@@ -170,14 +169,6 @@ impl Manifest {
             config.insert(name, block);
         }
 
-        // The one block that may be missing altogether. A model with no advice to give has none,
-        // and that is not an absence worth complaining about: it is what every model had before
-        // there was anywhere to say it.
-        let suggested = match top.remove(Self::SUGGESTED) {
-            Some(node) => Suggestions::from_fields(&node.into_map(Self::SUGGESTED)?),
-            None => Suggestions::default(),
-        };
-
         // What the model draws, which the catalogue also knows for a published one -- this is the
         // answer for a manifest handed over by path, which is in no catalogue at all. Missing
         // reads as false: every manifest written before there was anywhere to say this says
@@ -187,15 +178,14 @@ impl Manifest {
             .and_then(|node| node.as_str().map(|said| said.trim() == "true"))
             .unwrap_or(false);
 
-        // A block this build has not heard of is stepped over rather than refused, the way an
-        // unknown suggestion always was: a manifest from a newer writer still names the weights
-        // and still says what the model is.
+        // A block this build has not heard of is stepped over rather than refused -- `suggested`
+        // among them, which is the model manager's: a manifest from a newer writer still names
+        // the weights and still says what the model is.
         Ok(Manifest {
             path: PathBuf::new(),
             weights,
             tokenizers,
             config,
-            suggested,
             explicit,
         })
     }
@@ -255,11 +245,6 @@ impl Manifest {
     /// Whether the manifest says anything under `name`.
     pub fn has_section(&self, name: &str) -> bool {
         self.config.contains_key(name)
-    }
-
-    /// What the model suggests being asked for, which for an older model is nothing.
-    pub fn suggested(&self) -> &Suggestions {
-        &self.suggested
     }
 
     /// Whether what it was trained on means it draws explicit pictures readily, asked for them or

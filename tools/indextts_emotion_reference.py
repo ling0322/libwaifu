@@ -44,7 +44,7 @@ it, so what is left exercises the same arithmetic.
 
 The weights are drawn by xorshift from each parameter's own name, in both languages, and *not* by
 sweeping a sine the way the other reference scripts here do. The reason is written up in
-`docs/indextts_gpt.md`: a swept parameter makes every key in a projection point nearly the same
+`docs/indextts.md`, under the GPT: a swept parameter makes every key in a projection point nearly the same
 way, the softmax over them comes out flat, and a flat softmax is an average -- which does not care
 what order its keys arrived in. Attention is most of what this module is, so it is drawn scattered
 or it is not being tested.
