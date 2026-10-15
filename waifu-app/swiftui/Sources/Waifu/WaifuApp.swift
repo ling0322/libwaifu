@@ -40,6 +40,12 @@ struct WaifuApp: App {
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             }
         }
+
+        // A picture on its own, in a window of its shape: one window a picture, opened by clicking
+        // it in the big frame.
+        WindowGroup("Preview", id: "preview", for: String.self) { $id in
+            if let id { PreviewWindow(session: session, id: id) }
+        }
     }
 
     /// Where what is made is kept: the app's own folder, not one to choose. `-output <folder>` on
