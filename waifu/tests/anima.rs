@@ -17,13 +17,12 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! Anima's parts against what ComfyUI produces for the same inputs, by way of the test
-//! tensors `tools/anima_comfy.py` writes into the package.
+//! Anima's parts against what diffusers produces for the same inputs, by way of the test
+//! tensors `tools/anima_reference.py` writes into the package.
 //!
-//! The reference is ComfyUI run directly on the same weights, so agreeing with it here is
-//! agreeing with the model rather than with a second opinion of our own. None of what passes
-//! between these stages can be judged by
-//! looking -- a hidden state, a context, a velocity -- and an error in any of them shows up only
+//! The reference is diffusers' Anima models run directly on the same weights, so agreeing with
+//! it here is agreeing with the model rather than with a second opinion of our own. None of what
+//! passes between these stages can be judged by looking -- a hidden state, a context, a velocity -- and an error in any of them shows up only
 //! as a picture that is subtly not the prompt, so they are compared as numbers.
 //!
 //! Each stage is measured against the reference's own inputs where it can be, so that what a
@@ -36,7 +35,7 @@ use std::rc::Rc;
 
 use waifu::anima::{
     Adapter, AdapterConfig, Dit, DitConfig, FlowSampler, SamplerConfig, TextConfig, TextEncoder,
-    VaeConfig, VaeDecoder
+    VaeConfig, VaeDecoder,
 };
 use waifu::flint::{Tensor, Weights};
 use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
@@ -109,7 +108,7 @@ fn config() -> TextConfig {
         mlp_size: 3072,
         rope_theta: 1e6,
         norm_eps: 1e-6,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -157,7 +156,7 @@ fn adapter_config() -> AdapterConfig {
         head_dim: 64,
         vocab_size: 32128,
         mlp_size: 4096,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -225,7 +224,7 @@ fn dit_config() -> DitConfig {
         rope_w_ratio: 4.0,
         rope_t_ratio: 1.0,
         context_dim: 1024,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -236,11 +235,13 @@ fn one_step_matches_the_reference() {
 
     // Against the reference's own context rather than this runtime's, so that what is measured
     // is the denoiser alone and not the two stages in front of it a second time.
-    let context = cases["test_case.context_padded"].to_device(device())
+    let context = cases["test_case.context_padded"]
+        .to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
-    let latent = cases["test_case.latent"].to_device(device())
+    let latent = cases["test_case.latent"]
+        .to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
@@ -254,7 +255,8 @@ fn one_step_matches_the_reference() {
     println!("dit velocity rmse = {rmse}");
 
     // Twenty-eight blocks of fp16 against a float32 reference, and this model's residual stream
-    // is large enough that ComfyUI keeps its own in float32 for exactly this reason.
+    // is large enough that it overflows half precision, which is why the runtime keeps it in
+    // float32.
     assert!(rmse < 5e-2, "the velocity drifted by {rmse}");
 }
 
@@ -283,7 +285,7 @@ fn vae_config() -> VaeConfig {
         latents_std: vec![
             2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652,
             1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
-        ]
+        ],
     }
 }
 
@@ -291,8 +293,7 @@ fn vae_config() -> VaeConfig {
 #[ignore = "needs the anima package"]
 fn decodes_a_latent_the_way_the_reference_does() {
     let cases = cases();
-    let latent = cases["test_case.latent"].to_device(device())
-        .unwrap();
+    let latent = cases["test_case.latent"].to_device(device()).unwrap();
 
     let decoder = VaeDecoder::build(
         vae_config(),
@@ -306,6 +307,21 @@ fn decodes_a_latent_the_way_the_reference_does() {
 
     // An eighth of the side, three channels out of sixteen: a 16 by 16 latent is 128 by 128.
     assert_eq!(image.shape(), vec![1, 3, 128, 128]);
+
+    // The reference decode clamps its picture to [-1, 1] and this runtime leaves that to the
+    // conversion to pixels, so the runtime's is clamped here before the two are compared. On a
+    // latent off a unit normal a tenth of the picture lies outside that range.
+    let pixels: Vec<f32> = image
+        .to_device(Device::Cpu)
+        .unwrap()
+        .cast(DType::Float)
+        .unwrap()
+        .to_vec_f32()
+        .unwrap()
+        .into_iter()
+        .map(|value| value.clamp(-1.0, 1.0))
+        .collect();
+    let image = Tensor::from_f32(&[1, 3, 128, 128], &pixels).unwrap();
 
     let reference = cases["test_case.decoded"].clone();
     let rmse = relative_rmse(&image, &reference);
@@ -372,7 +388,8 @@ fn draws_a_picture_end_to_end() {
 
     // From the reference's context, so that this is the sampler, the denoiser and the decoder
     // being tested together rather than the tokenizers, which are still to come.
-    let context = cases["test_case.context_padded"].to_device(device())
+    let context = cases["test_case.context_padded"]
+        .to_device(device())
         .unwrap()
         .cast(DType::Float16)
         .unwrap();
@@ -391,7 +408,7 @@ fn draws_a_picture_end_to_end() {
     let sampler = FlowSampler::new(
         &SamplerConfig {
             shift: 3.0,
-            multiplier: 1.0
+            multiplier: 1.0,
         },
         8,
     )

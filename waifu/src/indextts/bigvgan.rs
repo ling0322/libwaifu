@@ -525,8 +525,7 @@ impl BigVgan {
             )));
         }
 
-        let context = RunContext::new(&*self.weights)
-            .input("mel", mel);
+        let context = RunContext::new(&*self.weights).input("mel", mel);
 
         output(&self.ir.run(&context)?, "waveform")
     }

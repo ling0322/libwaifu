@@ -316,12 +316,7 @@ fn mish_is_the_activation_it_replaces() {
 
     let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let ir = Ir::compile(&g);
-    let outputs = ir
-        .run(
-            &RunContext::new(&weights)
-                .input("x", &x),
-        )
-        .unwrap();
+    let outputs = ir.run(&RunContext::new(&weights).input("x", &x)).unwrap();
     let got = outputs[0].1.to_device(CPU).unwrap().to_vec_f32().unwrap();
 
     let want: Vec<f32> = values

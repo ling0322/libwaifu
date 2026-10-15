@@ -50,7 +50,7 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, Weights, RunContext, Tensor, Value, WeightFormat,
+    check_parameters, DType, Extent, Graph, Ir, RunContext, Tensor, Value, WeightFormat, Weights,
 };
 use crate::layers::{Embedding, LayerNorm, Linear};
 

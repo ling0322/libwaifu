@@ -111,7 +111,7 @@ fn config_l() -> ClipTextConfig {
         quick_gelu: true,
         norm_eps: 1e-5,
         eot_token_id: 49407,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
@@ -126,12 +126,13 @@ fn config_big_g() -> ClipTextConfig {
         quick_gelu: false,
         norm_eps: 1e-5,
         eot_token_id: 49407,
-        weight_format: WeightFormat::Float
+        weight_format: WeightFormat::Float,
     }
 }
 
 fn input_ids(cases: &HashMap<String, Tensor>, name: &str) -> Tensor {
-    cases[name].clone()
+    cases[name]
+        .clone()
         .view(&[77])
         .unwrap()
         .to_device(device())
@@ -175,19 +176,13 @@ fn the_second_encoder_matches_the_reference() {
     assert_eq!(out.hidden.shape(), vec![1, 77, 1280]);
     assert_eq!(out.pooled.shape(), vec![1, 1280]);
 
-    let hidden = relative_rmse(
-        &out.hidden,
-        &cases["test_case.hidden2"],
-    );
+    let hidden = relative_rmse(&out.hidden, &cases["test_case.hidden2"]);
     println!("encoder-2 hidden rmse = {hidden}");
     assert!(hidden < 1e-2, "the hidden state drifted by {hidden}");
 
     // The pooled vector is what SDXL adds to its timestep embedding, and it comes out of one
     // position of one layer, so an error anywhere upstream lands here concentrated.
-    let pooled = relative_rmse(
-        &out.pooled,
-        &cases["test_case.pooled2"],
-    );
+    let pooled = relative_rmse(&out.pooled, &cases["test_case.pooled2"]);
     println!("encoder-2 pooled rmse = {pooled}");
     assert!(pooled < 5e-3, "the pooled vector drifted by {pooled}");
 }

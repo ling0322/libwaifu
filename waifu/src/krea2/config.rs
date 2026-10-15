@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! What a Krea 2 package says about itself.
 //!
 //! `tools/krea2_exporter.py` reads most of these off the weights rather than writing them down,
@@ -471,7 +470,9 @@ config:
     #[test]
     fn refuses_a_tapped_layer_count_the_denoiser_does_not_read() {
         let wrong = TURBO.replace("num_text_layers: 12", "num_text_layers: 11");
-        let message = parse(&wrong).expect_err("twelve taps, eleven read").to_string();
+        let message = parse(&wrong)
+            .expect_err("twelve taps, eleven read")
+            .to_string();
         assert!(message.contains("taps"), "{message}");
     }
 
@@ -522,7 +523,10 @@ config:
 
         let tensor_scale = parse(&format!("{TURBO}    weight_format: fp8_tensor_scale\n")).unwrap();
         assert_eq!(tensor_scale.dit.weight_format, WeightFormat::Fp8TensorScale);
-        assert_eq!(tensor_scale.encoder.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(
+            tensor_scale.encoder.weight_format,
+            WeightFormat::Fp8TensorScale
+        );
 
         // `fp8` was a scale per row, which this runtime no longer reads.
         assert!(parse(&format!("{TURBO}    weight_format: fp8\n")).is_err());

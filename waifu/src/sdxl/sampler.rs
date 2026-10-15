@@ -125,9 +125,9 @@ impl EulerSampler {
     /// Which is the other way round from the way diffusers takes the same two numbers: there,
     /// `num_inference_steps` is the whole schedule and `strength` cuts it down, so asking for
     /// thirty steps at 0.8 runs twenty-four. The arithmetic is the same and the knob is the same;
-    /// what differs is which of the two numbers is the one you can count on. ComfyUI counts on
-    /// this one, and so does this, because a step count that quietly means something else as soon
-    /// as another box is touched is a step count nobody can read.
+    /// what differs is which of the two numbers is the one you can count on. This counts on the
+    /// step count, because a step count that quietly means something else as soon as another box
+    /// is touched is a step count nobody can read.
     ///
     /// The latent to start from is the encoded picture plus unit noise times `sigmas()[start()]`.
     pub fn from_image(
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn the_strength_is_how_far_down_the_schedule_the_tail_begins() {
         // Twenty of forty at a half, twenty of twenty-five at 0.8: the last num_steps of a
-        // schedule num_steps/strength long, which is the arithmetic ComfyUI does.
+        // schedule num_steps/strength long.
         let half = from_image(20, 0.5);
         assert_eq!(half.len(), 40);
         assert_eq!(half.start(), 20);
@@ -368,8 +368,8 @@ mod tests {
         assert_eq!(most.len(), 25);
         assert_eq!(most.start(), 5);
 
-        // Where the arithmetic is not exact the tail is what is left of the floor, which is what
-        // ComfyUI's int(steps / denoise) gives: 20 / 0.75 is 26 and not 27.
+        // Where the arithmetic is not exact the tail is what is left of the floor: 20 / 0.75 is
+        // 26 and not 27.
         let rough = from_image(20, 0.75);
         assert_eq!(rough.len(), 26);
         assert_eq!(rough.start(), 6);
@@ -382,14 +382,10 @@ mod tests {
     }
 
     #[test]
-    fn the_schedule_is_the_one_comfyui_would_have_built() {
-        // Its KSampler::set_steps, which is where this shape comes from:
-        //
-        //     new_steps = int(steps / denoise)
-        //     sigmas = calculate_sigmas(new_steps)[-(steps + 1):]
-        //
-        // The pairs below are that arithmetic run in python, so a change here that quietly moved
-        // the tail would have to disagree with the tool people are coming from.
+    fn the_schedule_is_the_floor_of_the_steps_over_the_strength() {
+        // The whole schedule is floor(num_steps / strength) long and the run is its last
+        // num_steps. The pairs below are that arithmetic worked by hand, so a change here that
+        // quietly moved the tail has to disagree with something written down.
         for (steps, strength, whole) in [
             (20, 1.0, 20),
             (20, 0.9, 22),

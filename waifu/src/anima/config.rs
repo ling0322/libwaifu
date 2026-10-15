@@ -79,7 +79,7 @@ pub struct DitConfig {
     /// They are read from the package rather than assumed here because assuming them is how they
     /// came to be wrong. Anima asks for four times the spatial extent and leaves time alone, and
     /// a flat base on all three axes is 13% off on the velocity while still drawing a picture
-    /// that looks perfectly reasonable. It was caught by running ComfyUI beside it.
+    /// that looks perfectly reasonable. It was caught by comparing against the upstream implementation.
     pub rope_h_ratio: f32,
     pub rope_w_ratio: f32,
     pub rope_t_ratio: f32,
@@ -134,7 +134,7 @@ pub struct AdapterConfig {
     pub head_dim: i32,
     /// A T5 vocabulary, which is why it is not the encoder's. Its ids are the query stream.
     pub vocab_size: i32,
-    /// Four times the hidden size. The reference fixes the ratio rather than storing it, and no
+    /// Four times the hidden size. `AnimaTextConditioner` fixes the ratio rather than storing it, and no
     /// tensor in the package contradicts it, so it is worked out rather than read.
     pub mlp_size: i32,
     /// How the package stored the matrices this multiplies by, which decides what its projections
@@ -472,7 +472,10 @@ config:
         let quantized =
             parse(&format!("{TURBO_V11}    weight_format: fp8_tensor_scale\n")).unwrap();
         assert_eq!(quantized.dit.weight_format, WeightFormat::Fp8TensorScale);
-        assert_eq!(quantized.adapter.weight_format, WeightFormat::Fp8TensorScale);
+        assert_eq!(
+            quantized.adapter.weight_format,
+            WeightFormat::Fp8TensorScale
+        );
         assert_eq!(quantized.text.weight_format, WeightFormat::Fp8TensorScale);
     }
 

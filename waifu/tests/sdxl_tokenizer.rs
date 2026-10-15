@@ -99,7 +99,9 @@ fn wraps_a_prompt_the_way_the_text_encoder_is_fed() {
     // model layer has to add, and this says what that has to look like.
     let cases = test_cases();
 
-    let reference: Vec<i32> = cases["test_case.input_ids"].to_vec_i64().unwrap()
+    let reference: Vec<i32> = cases["test_case.input_ids"]
+        .to_vec_i64()
+        .unwrap()
         .iter()
         .map(|id| *id as i32)
         .collect();

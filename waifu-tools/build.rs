@@ -41,7 +41,10 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LIBWAIFU_LIB_DIR");
     println!("cargo:rerun-if-changed={}", flags_path.display());
 
-    for line in flags.lines().filter(|line| line.starts_with("cargo:rustc-link-arg=")) {
+    for line in flags
+        .lines()
+        .filter(|line| line.starts_with("cargo:rustc-link-arg="))
+    {
         println!("{line}");
     }
 }

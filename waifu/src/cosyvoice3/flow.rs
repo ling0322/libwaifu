@@ -49,9 +49,8 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, PadMode, RunContext, Tensor,
-    Value,
-    Weights,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, PadMode, RunContext,
+    Tensor, Value, Weights,
 };
 use crate::indextts::gpt::gelu_new;
 use crate::layers::Linear;

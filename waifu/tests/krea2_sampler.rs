@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! The schedule Krea 2 is sampled on, against the one diffusers' scheduler actually walked.
 //!
 //! Nine numbers and no weights, so this is the one test of this model that costs nothing to run.
@@ -60,7 +59,8 @@ fn config() -> SamplerConfig {
 #[ignore = "needs the krea2 package"]
 fn walks_the_schedule_the_reference_walked() {
     let cases = read_safetensors(&[models_dir().join("krea2-turbo_test.safetensors")]).unwrap();
-    let reference = cases["test_case.sigmas"].to_device(Device::Cpu)
+    let reference = cases["test_case.sigmas"]
+        .to_device(Device::Cpu)
         .unwrap()
         .cast(DType::Float)
         .unwrap()
@@ -91,6 +91,9 @@ fn walks_the_schedule_the_reference_walked() {
     // timestep a flow model usually carries: the embedding inside the model multiplies by the
     // thousand. Passing it 750 instead of 0.75 loads fine and produces noise.
     for index in 0..STEPS as usize {
-        assert_eq!(sampler.timestep(index).unwrap(), sampler.sigma(index).unwrap());
+        assert_eq!(
+            sampler.timestep(index).unwrap(),
+            sampler.sigma(index).unwrap()
+        );
     }
 }

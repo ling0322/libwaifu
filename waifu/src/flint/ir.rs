@@ -769,8 +769,8 @@ fn blame(value: Value, op: &Op, site: &Site, error: Error) -> Error {
 fn step(inst: &Inst, slots: &mut [Option<Tensor>], context: &RunContext<'_>) -> Result<()> {
     match inst {
         Inst::Run { value, op, site } => {
-            let tensor = execute(op, slots, context)
-                .map_err(|error| blame(*value, op, site, error))?;
+            let tensor =
+                execute(op, slots, context).map_err(|error| blame(*value, op, site, error))?;
 
             slots[value.slot()] = Some(tensor);
         }

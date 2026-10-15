@@ -119,7 +119,9 @@ fn hand_over(level: Level, source: &str, message: &str) {
 extern "C" fn from_flint(level: i32, source: *const c_char, message: *const c_char) {
     let text = |pointer: *const c_char| match pointer.is_null() {
         true => String::new(),
-        false => unsafe { CStr::from_ptr(pointer) }.to_string_lossy().into_owned(),
+        false => unsafe { CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned(),
     };
     hand_over(Level::from_flint(level), &text(source), &text(message));
 }
@@ -146,14 +148,22 @@ mod tests {
         write(Level::Warning, "hub", "taking ModelScope instead");
         write(Level::Debug, "hub", "not this");
         // A line as the tensor library hands one over, through its C API.
-        from_flint(1, c"interface.cc:84".as_ptr(), c"Use asimdfhm backend.".as_ptr());
+        from_flint(
+            1,
+            c"interface.cc:84".as_ptr(),
+            c"Use asimdfhm backend.".as_ptr(),
+        );
 
         set_sink(None);
         let heard = heard.lock().unwrap();
         assert_eq!(heard.len(), 2, "{heard:?}");
         assert_eq!(
             heard[0],
-            (Level::Warning, "hub".to_string(), "taking ModelScope instead".to_string())
+            (
+                Level::Warning,
+                "hub".to_string(),
+                "taking ModelScope instead".to_string()
+            )
         );
         assert_eq!(heard[1].0, Level::Info);
         assert_eq!(heard[1].1, "interface.cc:84");

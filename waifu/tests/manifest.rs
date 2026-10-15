@@ -146,7 +146,10 @@ fn a_model_may_tokenize_more_than_one_way() {
     )
     .unwrap();
 
-    assert_eq!(manifest.tokenizer("qwen3").unwrap(), "m.qwen3.tokenizer.json");
+    assert_eq!(
+        manifest.tokenizer("qwen3").unwrap(),
+        "m.qwen3.tokenizer.json"
+    );
     assert_eq!(manifest.tokenizer("t5").unwrap(), "m.t5.tokenizer.json");
 
     // Asking for the one it does not have says which it does have, since that is the thing worth
@@ -157,7 +160,11 @@ fn a_model_may_tokenize_more_than_one_way() {
 
     assert_eq!(
         manifest.files(),
-        ["m.safetensors", "m.qwen3.tokenizer.json", "m.t5.tokenizer.json"]
+        [
+            "m.safetensors",
+            "m.qwen3.tokenizer.json",
+            "m.t5.tokenizer.json"
+        ]
     );
 }
 
@@ -206,12 +213,18 @@ fn scalars_mean_what_they_mean_everywhere_else() {
     // A space and then a `#` begins a comment, the way it does everywhere else; a `#` with no
     // space before it is part of the value. A value that really wants the first has to be
     // quoted, and the exporter quotes it.
-    assert_eq!(value("note: a plain value  # and a comment"), "a plain value");
+    assert_eq!(
+        value("note: a plain value  # and a comment"),
+        "a plain value"
+    );
     assert_eq!(value("note: tag#1 keeps its hash"), "tag#1 keeps its hash");
     assert_eq!(value(r#"note: "tag #1, quoted""#), "tag #1, quoted");
 
     // Quoted, with the escapes each kind of quote has and no others.
-    assert_eq!(value(r#"note: "a: colon, and a \"quote\"""#), r#"a: colon, and a "quote""#);
+    assert_eq!(
+        value(r#"note: "a: colon, and a \"quote\"""#),
+        r#"a: colon, and a "quote""#
+    );
     assert_eq!(value("note: 'it''s here'"), "it's here");
 
     // Anything wider than ASCII arrives as itself: the exporter writes utf-8 rather than escapes.
@@ -221,14 +234,18 @@ fn scalars_mean_what_they_mean_everywhere_else() {
 #[test]
 fn a_list_may_be_written_on_one_line_or_on_several() {
     let header = "config:\n  model:\n    type: sdxl\n";
-    let block = Manifest::parse(&format!("weights:\n  - a.safetensors\n  - b.safetensors\n{header}"))
-        .unwrap()
-        .weights()
-        .to_vec();
-    let inline = Manifest::parse(&format!("weights: [a.safetensors, b.safetensors]\n{header}"))
-        .unwrap()
-        .weights()
-        .to_vec();
+    let block = Manifest::parse(&format!(
+        "weights:\n  - a.safetensors\n  - b.safetensors\n{header}"
+    ))
+    .unwrap()
+    .weights()
+    .to_vec();
+    let inline = Manifest::parse(&format!(
+        "weights: [a.safetensors, b.safetensors]\n{header}"
+    ))
+    .unwrap()
+    .weights()
+    .to_vec();
 
     assert_eq!(block, ["a.safetensors", "b.safetensors"]);
     assert_eq!(block, inline);
@@ -239,12 +256,16 @@ fn a_manifest_says_whether_the_model_draws_explicit_pictures() {
     let body = "weights:\n  - m.safetensors\nconfig:\n  model:\n    type: sdxl\n";
 
     // Said, either way.
-    assert!(Manifest::parse(&format!("{body}not_for_all_audiences: true\n"))
-        .unwrap()
-        .explicit());
-    assert!(!Manifest::parse(&format!("{body}not_for_all_audiences: false\n"))
-        .unwrap()
-        .explicit());
+    assert!(
+        Manifest::parse(&format!("{body}not_for_all_audiences: true\n"))
+            .unwrap()
+            .explicit()
+    );
+    assert!(
+        !Manifest::parse(&format!("{body}not_for_all_audiences: false\n"))
+            .unwrap()
+            .explicit()
+    );
 
     // And not said at all, which is every manifest written before there was anywhere to say it.
     // It reads as no rather than as an error: an old package still names its weights.
@@ -382,8 +403,7 @@ fn tensor(name: &str, first: f32) -> Vec<u8> {
     data.extend_from_slice(&first.to_le_bytes());
     data.extend_from_slice(&(first + 1.0).to_le_bytes());
 
-    let header =
-        format!("{{{name:?}:{{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}}}");
+    let header = format!("{{{name:?}:{{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}}}");
     let mut out = (header.len() as u64).to_le_bytes().to_vec();
     out.extend_from_slice(header.as_bytes());
     out.extend_from_slice(&data);
@@ -395,6 +415,9 @@ fn a_manifest_that_is_not_there_says_which_file_it_looked_for() {
     let missing = std::env::temp_dir().join("waifu-no-such-manifest.yaml");
     let _ = std::fs::remove_file(&missing);
 
-    let error = Manifest::open(&missing).map(|_| ()).unwrap_err().to_string();
+    let error = Manifest::open(&missing)
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("waifu-no-such-manifest.yaml"), "{error}");
 }

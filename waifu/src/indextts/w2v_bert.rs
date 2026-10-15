@@ -278,10 +278,7 @@ fn encoder_layer(g: &Graph, x: Value, config: &Config, frames: i32, distances: V
         x,
     );
 
-    let x = g.add(
-        conv_module(&g.subgraph("conv_module"), x, config),
-        x,
-    );
+    let x = g.add(conv_module(&g.subgraph("conv_module"), x, config), x);
 
     let normed = LayerNorm::graph(&g.subgraph("ffn2_layer_norm"), x, hidden, eps);
     let x = g.add(

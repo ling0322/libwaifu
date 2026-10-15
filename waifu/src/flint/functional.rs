@@ -57,7 +57,9 @@ fn beside(input: &Tensor, shape: &[i32], dtype: DType) -> Result<Tensor> {
 fn real_dim(input: &Tensor, dim: i32, name: &str) -> Result<i32> {
     let rank = input.dim()?;
     if dim < -rank || dim >= rank {
-        return Err(Error::invalid(format!("{name}: no dimension {dim} in a {rank}-D tensor")));
+        return Err(Error::invalid(format!(
+            "{name}: no dimension {dim} in a {rank}-D tensor"
+        )));
     }
     Ok(if dim < 0 { dim + rank } else { dim })
 }
@@ -116,20 +118,32 @@ fn convolved_length(
 ) -> Result<i32> {
     let out = (length + 2 * padding - dilation * (kernel - 1) - 1) / stride + 1;
     if out < 1 {
-        return Err(Error::invalid(format!("{name}: the output would be {out} long")));
+        return Err(Error::invalid(format!(
+            "{name}: the output would be {out} long"
+        )));
     }
     Ok(out)
 }
 
-fn check_convolution(stride: i32, padding: i32, dilation: i32, groups: i32, name: &str) -> Result<()> {
+fn check_convolution(
+    stride: i32,
+    padding: i32,
+    dilation: i32,
+    groups: i32,
+    name: &str,
+) -> Result<()> {
     if groups < 1 {
         return Err(Error::invalid(format!("{name}: groups must be at least 1")));
     }
     if stride < 1 || dilation < 1 {
-        return Err(Error::invalid(format!("{name}: stride and dilation must be at least 1")));
+        return Err(Error::invalid(format!(
+            "{name}: stride and dilation must be at least 1"
+        )));
     }
     if padding < 0 {
-        return Err(Error::invalid(format!("{name}: padding cannot be negative")));
+        return Err(Error::invalid(format!(
+            "{name}: padding cannot be negative"
+        )));
     }
     Ok(())
 }
@@ -233,7 +247,14 @@ pub fn layer_norm(
     let operators = operators_of(input)?;
     let out = like(input)?;
     check(unsafe {
-        ffi::fl_layer_norm(operators, input.raw(), optional(weight), optional(bias), eps, out.raw())
+        ffi::fl_layer_norm(
+            operators,
+            input.raw(),
+            optional(weight),
+            optional(bias),
+            eps,
+            out.raw(),
+        )
     })?;
     Ok(out)
 }
@@ -255,7 +276,9 @@ pub fn conv2d(
     groups: i32,
 ) -> Result<Tensor> {
     if input.dim()? != 4 || weight.dim()? != 4 {
-        return Err(Error::invalid("conv2d: the input and the weight must be 4-D"));
+        return Err(Error::invalid(
+            "conv2d: the input and the weight must be 4-D",
+        ));
     }
     check_convolution(stride, padding, dilation, groups, "conv2d")?;
     let (x, w) = (input.shape(), weight.shape());
@@ -293,7 +316,9 @@ pub fn conv1d(
     groups: i32,
 ) -> Result<Tensor> {
     if input.dim()? != 3 || weight.dim()? != 3 {
-        return Err(Error::invalid("conv1d: the input and the weight must be 3-D"));
+        return Err(Error::invalid(
+            "conv1d: the input and the weight must be 3-D",
+        ));
     }
     check_convolution(stride, padding, dilation, groups, "conv1d")?;
     let (x, w) = (input.shape(), weight.shape());
@@ -328,7 +353,9 @@ pub fn conv_transpose1d(
     groups: i32,
 ) -> Result<Tensor> {
     if input.dim()? != 3 || weight.dim()? != 3 {
-        return Err(Error::invalid("convTranspose1d: the input and the weight must be 3-D"));
+        return Err(Error::invalid(
+            "convTranspose1d: the input and the weight must be 3-D",
+        ));
     }
     check_convolution(stride, padding, 1, groups, "convTranspose1d")?;
     let (x, w) = (input.shape(), weight.shape());
@@ -364,7 +391,14 @@ pub fn snake(input: &Tensor, alpha: &Tensor, beta: Option<&Tensor>, eps: f32) ->
     let operators = operators_of(&input)?;
     let out = like(&input)?;
     check(unsafe {
-        ffi::fl_snake(operators, input.raw(), alpha.raw(), optional(beta.as_ref()), eps, out.raw())
+        ffi::fl_snake(
+            operators,
+            input.raw(),
+            alpha.raw(),
+            optional(beta.as_ref()),
+            eps,
+            out.raw(),
+        )
     })?;
     Ok(out)
 }
@@ -390,16 +424,16 @@ pub fn pad1d(input: &Tensor, left: i32, right: i32, mode: PadMode) -> Result<Ten
 
     let operators = operators_of(&input)?;
     let out = beside(&input, &shape, input.dtype())?;
-    check(unsafe {
-        ffi::fl_pad1d(operators, input.raw(), left, right, mode.code(), out.raw())
-    })?;
+    check(unsafe { ffi::fl_pad1d(operators, input.raw(), left, right, mode.code(), out.raw()) })?;
     Ok(out)
 }
 
 /// `min(max(input, lo), hi)`. Either bound may be infinite.
 pub fn clamp(input: &Tensor, lo: f32, hi: f32) -> Result<Tensor> {
     if lo.is_nan() || hi.is_nan() || lo > hi {
-        return Err(Error::invalid(format!("clamp: [{lo}, {hi}] is not an interval")));
+        return Err(Error::invalid(format!(
+            "clamp: [{lo}, {hi}] is not an interval"
+        )));
     }
     let input = input.contiguous()?;
     let operators = operators_of(&input)?;
@@ -454,7 +488,9 @@ pub fn istft(
     centered: bool,
 ) -> Result<Tensor> {
     if spectrum.dim()? != 3 {
-        return Err(Error::invalid("istft: the spectrum must be (N, bins, frames)"));
+        return Err(Error::invalid(
+            "istft: the spectrum must be (N, bins, frames)",
+        ));
     }
     if n_fft < 1 || hop < 1 {
         return Err(Error::invalid("istft: nFft and hop must be at least 1"));
@@ -466,7 +502,11 @@ pub fn istft(
     }
 
     let operators = operators_of(spectrum)?;
-    let out = beside(spectrum, &[spectrum.shape_at(0)?, 1, length], spectrum.dtype())?;
+    let out = beside(
+        spectrum,
+        &[spectrum.shape_at(0)?, 1, length],
+        spectrum.dtype(),
+    )?;
     check(unsafe {
         ffi::fl_istft(
             operators,
@@ -512,12 +552,18 @@ pub fn upsample_nearest2d(input: &Tensor, scale: i32) -> Result<Tensor> {
         return Err(Error::invalid("upsampleNearest2d: the input is not 4-D"));
     }
     if scale < 1 {
-        return Err(Error::invalid("upsampleNearest2d: the scale must be at least 1"));
+        return Err(Error::invalid(
+            "upsampleNearest2d: the scale must be at least 1",
+        ));
     }
     let x = input.shape();
 
     let operators = operators_of(input)?;
-    let out = beside(input, &[x[0], x[1], x[2] * scale, x[3] * scale], input.dtype())?;
+    let out = beside(
+        input,
+        &[x[0], x[1], x[2] * scale, x[3] * scale],
+        input.dtype(),
+    )?;
     check(unsafe { ffi::fl_upsample_nearest2d(operators, input.raw(), scale, out.raw()) })?;
     Ok(out)
 }
@@ -527,10 +573,14 @@ pub fn upsample_nearest2d(input: &Tensor, scale: i32) -> Result<Tensor> {
 /// ratio `length / size` and the product taken in float32 -- torch's index, frame for frame.
 pub fn upsample_nearest1d(input: &Tensor, size: i32) -> Result<Tensor> {
     if input.dim()? < 1 {
-        return Err(Error::invalid("upsampleNearest1d: the input has no dimensions"));
+        return Err(Error::invalid(
+            "upsampleNearest1d: the input has no dimensions",
+        ));
     }
     if size < 1 {
-        return Err(Error::invalid("upsampleNearest1d: the size must be at least 1"));
+        return Err(Error::invalid(
+            "upsampleNearest1d: the size must be at least 1",
+        ));
     }
     let mut shape = input.shape();
     *shape.last_mut().expect("at least one dimension") = size;
@@ -603,13 +653,19 @@ pub fn fp8_matmul(a: &Tensor, weight: &Tensor, scale: &Tensor) -> Result<Tensor>
     Ok(out)
 }
 
-type BinaryFn =
-    unsafe extern "C" fn(ffi::FlOperators, ffi::FlTensorView, ffi::FlTensorView, ffi::FlTensorView) -> i32;
+type BinaryFn = unsafe extern "C" fn(
+    ffi::FlOperators,
+    ffi::FlTensorView,
+    ffi::FlTensorView,
+    ffi::FlTensorView,
+) -> i32;
 
 /// An elementwise operation of `a` and `b`, `b` broadcast to `a`'s shape, into a tensor like `a`.
 fn binary(a: &Tensor, b: &Tensor, name: &str, call: BinaryFn) -> Result<Tensor> {
     if a.dtype() != b.dtype() {
-        return Err(Error::invalid(format!("{name}: the two operands differ in type")));
+        return Err(Error::invalid(format!(
+            "{name}: the two operands differ in type"
+        )));
     }
     let b = broadcast_to(b, a, name)?;
     let operators = operators_of(a)?;
@@ -882,7 +938,9 @@ pub fn cat(a: &Tensor, b: &Tensor, dim: i32) -> Result<Tensor> {
 /// may, in the device's default float type.
 pub fn causal_mask(max_len: i32, device: Device) -> Result<Tensor> {
     if max_len < 1 {
-        return Err(Error::invalid(format!("causalMask: a mask of {max_len} positions")));
+        return Err(Error::invalid(format!(
+            "causalMask: a mask of {max_len} positions"
+        )));
     }
     let operators = raw_operators(device)?;
     let out = Tensor::empty(&[max_len, max_len], default_float_type(device)?, device)?;
@@ -909,7 +967,14 @@ pub fn attention(q: &Tensor, k: &Tensor, v: &Tensor, causal: bool) -> Result<Ten
     let operators = operators_of(q)?;
     let out = beside(q, &[sq[0], sq[1], sq[2], sv[3]], q.dtype())?;
     check(unsafe {
-        ffi::fl_attention(operators, q.raw(), k.raw(), v.raw(), causal as i32, out.raw())
+        ffi::fl_attention(
+            operators,
+            q.raw(),
+            k.raw(),
+            v.raw(),
+            causal as i32,
+            out.raw(),
+        )
     })?;
     Ok(out)
 }
@@ -956,7 +1021,9 @@ pub fn paged_attention_available() -> bool {
 /// its query length, which is where `causal` starts masking.
 pub fn paged_attention(q: &Tensor, cache: &PagedKvCache<'_>, causal: bool) -> Result<Tensor> {
     if q.dim()? != 3 {
-        return Err(Error::invalid("pagedAttention: q must be (tokens, heads, headDim)"));
+        return Err(Error::invalid(
+            "pagedAttention: q must be (tokens, heads, headDim)",
+        ));
     }
     let operators = operators_of(q)?;
     let out = like(q)?;
@@ -1014,7 +1081,9 @@ pub fn sample_with_params(
     top_ps: &Tensor,
 ) -> Result<Tensor> {
     if logits.dim()? != 2 {
-        return Err(Error::invalid("sample: the logits must be (rows, vocabulary)"));
+        return Err(Error::invalid(
+            "sample: the logits must be (rows, vocabulary)",
+        ));
     }
     let operators = operators_of(logits)?;
     let out = beside(logits, &[logits.shape_at(0)?], DType::Long)?;

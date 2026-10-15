@@ -24,8 +24,8 @@
 //! the channels of all the ones before it, and 420 frames is what gives the segment pooling
 //! inside `CAMLayer` three segments with a short one at the end.
 
-use waifu::indextts::campplus::{self, Config};
 use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Weights};
+use waifu::indextts::campplus::{self, Config};
 use waifu::Result;
 
 const CPU: Device = Device::Cpu;
@@ -186,12 +186,7 @@ fn run(build: impl FnOnce(&Graph) -> waifu::flint::Value) -> (Vec<i32>, Vec<f32>
     let weights = Weights::for_graph(&g, CPU, filled).unwrap();
     let x = input();
     let ir = Ir::compile(&g);
-    let outputs = ir
-        .run(
-            &RunContext::new(&weights)
-                .input("x", &x),
-        )
-        .unwrap();
+    let outputs = ir.run(&RunContext::new(&weights).input("x", &x)).unwrap();
 
     let tensor = outputs[0].1.to_device(CPU).unwrap();
 

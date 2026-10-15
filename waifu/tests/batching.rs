@@ -42,7 +42,7 @@ use waifu::{DType, Device};
 fn tolerance(device: Device) -> f32 {
     match device {
         Device::Cuda => 1e-2,
-        _ => 1e-5
+        _ => 1e-5,
     }
 }
 

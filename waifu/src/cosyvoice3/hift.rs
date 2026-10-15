@@ -66,8 +66,7 @@ use std::rc::Rc;
 
 use crate::audio::hann_window;
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, PadMode, RunContext, Tensor, Value,
-    Weights,
+    check_parameters, DType, Device, Extent, Graph, Ir, PadMode, RunContext, Tensor, Value, Weights,
 };
 use crate::layers::Linear;
 use crate::{Error, Result};
@@ -179,16 +178,7 @@ fn write_pitch(g: &Graph, dtype: DType, device: Device) -> Result<()> {
     let mel = g.cast(g.input("mel"), dtype);
 
     // The first reads three frames ahead; the other four only behind.
-    let mut x = conv(
-        &condnet.subgraph("0"),
-        mel,
-        80,
-        BASE,
-        4,
-        1,
-        1,
-        (0, 3),
-    );
+    let mut x = conv(&condnet.subgraph("0"), mel, 80, BASE, 4, 1, 1, (0, 3));
     x = elu(g, x, one);
     for layer in [2, 4, 6, 8] {
         x = conv(
@@ -309,16 +299,7 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
     // `torch.stft(s, 16, 4, 16, hann)`: centred, reflected, nine bins real then nine imaginary.
     let source = g.stft(excitation, window, FFT as i32, FFT_HOP, true);
 
-    let mut x = conv(
-        &g.subgraph("conv_pre"),
-        mel,
-        80,
-        BASE,
-        5,
-        1,
-        1,
-        (0, 4),
-    );
+    let mut x = conv(&g.subgraph("conv_pre"), mel, 80, BASE, 5, 1, 1, (0, 4));
 
     // How far each stage's source is taken down to meet it: 15, 3, then 1.
     let downs = [15, 3, 1];
@@ -431,13 +412,7 @@ fn write_decode(g: &Graph, dtype: DType, device: Device) -> Result<()> {
     let phase = g.sin(g.slice(x, 1, BINS as i32, spectrum));
     let real = g.mul(magnitude, g.cos(phase));
     let imaginary = g.mul(magnitude, g.sin(phase));
-    let wave = g.istft(
-        g.cat(real, imaginary, 1),
-        window,
-        FFT as i32,
-        FFT_HOP,
-        true,
-    );
+    let wave = g.istft(g.cat(real, imaginary, 1), window, FFT as i32, FFT_HOP, true);
 
     // `torch.clamp(x, -0.99, 0.99)`.
     let wave = g.clamp(wave, -AUDIO_LIMIT, AUDIO_LIMIT);

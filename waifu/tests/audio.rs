@@ -524,7 +524,11 @@ fn clamp_bounds_each_side_it_is_given_and_leaves_an_infinite_one_alone() {
     let x = [-3.0f32, -1.0, -0.5, 0.0, 0.25, 1.0, 7.0];
     let tensor = Tensor::from_f32(&[1, 7], &x).unwrap();
 
-    for (lo, hi) in [(-0.99f32, 0.99f32), (1e-5, f32::INFINITY), (f32::NEG_INFINITY, 0.5)] {
+    for (lo, hi) in [
+        (-0.99f32, 0.99f32),
+        (1e-5, f32::INFINITY),
+        (f32::NEG_INFINITY, 0.5),
+    ] {
         let g = Graph::new();
         let out = g.clamp(g.input("x"), lo, hi);
         let got = run(&g, out, &[("x", &tensor)]);
@@ -552,7 +556,13 @@ fn an_stft_is_the_fourier_transform_of_each_windowed_frame() {
     let x = Tensor::from_f32(&[1, 1, length as i32], &signal).unwrap();
 
     let g = Graph::new();
-    let out = g.stft(g.input("x"), window_of(&g, &window), n_fft as i32, hop as i32, false);
+    let out = g.stft(
+        g.input("x"),
+        window_of(&g, &window),
+        n_fft as i32,
+        hop as i32,
+        false,
+    );
     let (shape, got) = run_shaped(&g, out, &[("x", &x)]);
 
     let bins = n_fft / 2 + 1;
@@ -629,7 +639,13 @@ fn a_centered_transform_puts_a_frame_on_every_hop_of_the_signal() {
     let x = Tensor::from_f32(&[1, 1, length as i32], &signal).unwrap();
 
     let g = Graph::new();
-    let spectrum = g.stft(g.input("x"), window_of(&g, &window), n_fft as i32, hop as i32, true);
+    let spectrum = g.stft(
+        g.input("x"),
+        window_of(&g, &window),
+        n_fft as i32,
+        hop as i32,
+        true,
+    );
     let (real, _) = halves(&g, spectrum, n_fft as i32);
 
     let (shape, _) = run_shaped(&g, real, &[("x", &x)]);
@@ -723,7 +739,13 @@ fn a_mel_spectrogram_is_the_filterbank_times_the_magnitude() {
     let bank_values = bank.to_vec_f32().unwrap();
 
     let g = Graph::new();
-    let spectrum = g.stft(g.input("x"), window_of(&g, &window), n_fft as i32, hop as i32, false);
+    let spectrum = g.stft(
+        g.input("x"),
+        window_of(&g, &window),
+        n_fft as i32,
+        hop as i32,
+        false,
+    );
     let (real, imaginary) = halves(&g, spectrum, n_fft as i32);
     let power = magnitude(&g, real, imaginary, 1e-9, F32, CPU).unwrap();
     let mel = apply_filterbank(&g, power, g.constant(bank));
@@ -924,6 +946,10 @@ fn the_audio_operators_are_single_nodes_the_cpu_runs() {
         let outputs = Ir::compile(&g)
             .run(&context)
             .unwrap_or_else(|error| panic!("{name} did not run: {error}"));
-        assert_eq!(outputs[0].1.shape(), expected, "{name} came back the wrong shape");
+        assert_eq!(
+            outputs[0].1.shape(),
+            expected,
+            "{name} came back the wrong shape"
+        );
     }
 }

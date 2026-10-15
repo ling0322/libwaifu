@@ -158,8 +158,7 @@ impl QwenImage {
         };
 
         let dtype = F::default_float_type(device)?;
-        let weights: Rc<Weights> =
-            Rc::new(Weights::from_files(&paths, device, residency)?);
+        let weights: Rc<Weights> = Rc::new(Weights::from_files(&paths, device, residency)?);
 
         let named = |half: &str| format!("{model_type}.{half}");
         let tokenizer = Tokenizer::open(manifest)?;
@@ -271,7 +270,10 @@ impl QwenImage {
     /// package fixes its own levels (Turbo's eight), when `num_steps` and the size are ignored.
     pub fn sampler(&self, width: i32, height: i32, num_steps: i32) -> Result<FlowSampler> {
         if let Some(sigmas) = &self.config.schedule.sigmas {
-            let config = SamplerConfig { shift: 1.0, multiplier: 1.0 };
+            let config = SamplerConfig {
+                shift: 1.0,
+                multiplier: 1.0,
+            };
             return FlowSampler::from_sigmas(&config, sigmas);
         }
         let scale = self.config.vae.scale;
@@ -374,8 +376,13 @@ impl QwenImage {
         conditioning: &Tensor,
         scale: f32,
     ) -> Result<Tensor> {
-        let image =
-            self.generate_controlled_reporting(prompt, options, conditioning, scale, &mut unwatched)?;
+        let image = self.generate_controlled_reporting(
+            prompt,
+            options,
+            conditioning,
+            scale,
+            &mut unwatched,
+        )?;
         Ok(image.expect("a run nothing asked to stop runs to the end"))
     }
 

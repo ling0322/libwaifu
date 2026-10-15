@@ -41,7 +41,10 @@ fn main() {
 
     let fetched = waifu_modelmanager::hub::fetch_manifests(
         &mut |progress| {
-            if let waifu_modelmanager::hub::Progress::Fetched { file, part, parts, .. } = progress {
+            if let waifu_modelmanager::hub::Progress::Fetched {
+                file, part, parts, ..
+            } = progress
+            {
                 eprintln!("{part}/{parts} {file}");
             }
         },

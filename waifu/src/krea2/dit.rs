@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! The denoiser: one stream of tokens, the prompt in front of the picture, twenty-eight blocks
 //! deep and six thousand wide.
 //!
@@ -105,11 +104,7 @@ fn rope_table(
             .map(|index| 1.0 / theta.powf(2.0 * index as f64 / dim as f64))
             .collect()
     };
-    let (freq_t, freq_h, freq_w) = (
-        frequencies(dim_t),
-        frequencies(dim_h),
-        frequencies(dim_w),
-    );
+    let (freq_t, freq_h, freq_w) = (frequencies(dim_t), frequencies(dim_h), frequencies(dim_w));
 
     let pairs = config.rope_pairs() as usize;
     let tokens = (text_length + rows * columns) as usize;
@@ -209,7 +204,10 @@ fn modulate(
     shift: Value,
     narrow: DType,
 ) -> Value {
-    let weight = g.cast(g.subgraph(norm).load(Linear::WEIGHT, &[width]), DType::Float);
+    let weight = g.cast(
+        g.subgraph(norm).load(Linear::WEIGHT, &[width]),
+        DType::Float,
+    );
     let normed = g.rms_norm(x, weight, eps);
 
     let scaled = g.add(g.mul(normed, g.cast(scale, DType::Float)), normed);
@@ -307,12 +305,7 @@ fn attend(
     let q = g.contiguous(g.slice(fused, 2, 0, queries));
     let k = g.contiguous(g.slice(fused, 2, queries, queries + keys));
     let v = g.contiguous(g.slice(fused, 2, queries + keys, queries + 2 * keys));
-    let gate = g.contiguous(g.slice(
-        fused,
-        2,
-        queries + 2 * keys,
-        queries + 2 * keys + width,
-    ));
+    let gate = g.contiguous(g.slice(fused, 2, queries + 2 * keys, queries + 2 * keys + width));
 
     let q = heads(g, q, "attn.q_norm", num_heads, head_dim, eps);
     let k = heads(g, k, "attn.k_norm", num_kv_heads, head_dim, eps);
@@ -353,7 +346,13 @@ fn attend(
 /// first, because that is the half `swiglu` puts the swish on.
 fn feed_forward(g: &Graph, x: Value, width: i32, hidden: i32) -> Value {
     let gated = Linear::graph(&g.subgraph("ff.gate_up_proj"), x, width, 2 * hidden, false);
-    Linear::graph(&g.subgraph("ff.down"), g.swiglu(gated), hidden, width, false)
+    Linear::graph(
+        &g.subgraph("ff.down"),
+        g.swiglu(gated),
+        hidden,
+        width,
+        false,
+    )
 }
 
 /// One text fusion block: an attention and a feed forward, both pre-normed, neither modulated.
@@ -383,15 +382,11 @@ fn fusion_block(config: &DitConfig, g: &Graph, x: Value, narrow: DType) -> Value
 }
 
 /// An RMSNorm off the wide stream and onto the narrow one, where there is no modulation to apply.
-fn modulate_free(
-    g: &Graph,
-    x: Value,
-    norm: &str,
-    width: i32,
-    eps: f32,
-    narrow: DType,
-) -> Value {
-    let weight = g.cast(g.subgraph(norm).load(Linear::WEIGHT, &[width]), DType::Float);
+fn modulate_free(g: &Graph, x: Value, norm: &str, width: i32, eps: f32, narrow: DType) -> Value {
+    let weight = g.cast(
+        g.subgraph(norm).load(Linear::WEIGHT, &[width]),
+        DType::Float,
+    );
     g.cast(g.rms_norm(x, weight, eps), narrow)
 }
 
@@ -442,7 +437,16 @@ fn block(
     let d = config.hidden_size;
     let parts = modulation(g, shared, d, 6);
 
-    let normed = modulate(g, x, "norm1", d, config.norm_eps, parts[0], parts[1], narrow);
+    let normed = modulate(
+        g,
+        x,
+        "norm1",
+        d,
+        config.norm_eps,
+        parts[0],
+        parts[1],
+        narrow,
+    );
     let out = attend(
         g,
         normed,
@@ -455,7 +459,16 @@ fn block(
     );
     let x = accumulate(g, x, out, parts[2]);
 
-    let normed = modulate(g, x, "norm2", d, config.norm_eps, parts[3], parts[4], narrow);
+    let normed = modulate(
+        g,
+        x,
+        "norm2",
+        d,
+        config.norm_eps,
+        parts[3],
+        parts[4],
+        narrow,
+    );
     let out = feed_forward(g, normed, d, config.mlp_size);
     accumulate(g, x, out, parts[5])
 }
@@ -702,7 +715,13 @@ impl Dit {
 
         let mut placed = self.placed.borrow_mut();
         if placed.as_ref().map(|table| table.key) != Some((text_length, rows, columns)) {
-            *placed = Some(rope_table(&self.config, text_length, rows, columns, device)?);
+            *placed = Some(rope_table(
+                &self.config,
+                text_length,
+                rows,
+                columns,
+                device,
+            )?);
         }
         let table = placed.as_ref().expect("it was just built");
 

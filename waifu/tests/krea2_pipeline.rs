@@ -17,7 +17,6 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 //! The whole of Krea 2, from a string to pixels.
 //!
 //! `krea2.rs` checks each part against the reference with the ids and tensors handed to it. This
@@ -160,7 +159,10 @@ fn draws_a_picture_the_reference_would_recognize() {
 
     let rough = roughness(&image);
     println!("roughness = {rough}");
-    assert!(rough < 1.0, "this is noise, not a picture: roughness {rough}");
+    assert!(
+        rough < 1.0,
+        "this is noise, not a picture: roughness {rough}"
+    );
 
     // The same seed twice. A run that differs from itself has something in it that is not the
     // model -- an uninitialized buffer, a table built from whatever was on the stack.

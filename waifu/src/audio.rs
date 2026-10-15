@@ -163,7 +163,10 @@ fn scalar(g: &Graph, value: f32, dtype: DType, device: Device) -> Result<Value> 
 #[track_caller]
 pub fn halves(g: &Graph, spectrum: Value, n_fft: i32) -> (Value, Value) {
     let bins = n_fft / 2 + 1;
-    (g.slice(spectrum, 1, 0, bins), g.slice(spectrum, 1, bins, 2 * bins))
+    (
+        g.slice(spectrum, 1, 0, bins),
+        g.slice(spectrum, 1, bins, 2 * bins),
+    )
 }
 
 /// `sqrt(real^2 + imaginary^2)`, the magnitude spectrum a mel filterbank is applied to.

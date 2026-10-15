@@ -361,8 +361,7 @@ fn whole_pass() -> Graph {
         sub.input("language"),
         &config,
     );
-    let voiced =
-        gpt::mel_embeddings(&sub, sub.input("mel"), sub.input("mel_positions"), &config);
+    let voiced = gpt::mel_embeddings(&sub, sub.input("mel"), sub.input("mel_positions"), &config);
 
     let whole = sub.cat(sub.cat(conditioned, embedded, 1), voiced, 1);
     g.output(
@@ -437,10 +436,7 @@ fn scored_in_one_pass(said: &[i32]) -> (i32, Vec<Vec<f32>>) {
         .collect();
 
     // Where the prefix ends: three rows of conditioning, the wrapped text, and the start token.
-    (
-        gpt::Config::CONDITIONING_ROWS + text_length + 1,
-        by_row,
-    )
+    (gpt::Config::CONDITIONING_ROWS + text_length + 1, by_row)
 }
 
 /// The same number, and not merely a close one.
@@ -499,10 +495,7 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
     let weights = Weights::for_graph(&g, CPU, scattered).unwrap();
     let whole_ir = Ir::compile(&g);
     let at_once = whole_ir
-        .run(
-            &RunContext::new(&weights)
-                .input("x", &whole),
-        )
+        .run(&RunContext::new(&weights).input("x", &whole))
         .unwrap()[0]
         .1
         .to_device(CPU)
@@ -512,8 +505,7 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
 
     // And a piece at a time: everything but the last row, keeping what each layer computed.
     let g = Graph::new();
-    let (hidden, kept) =
-        gpt::backbone_keeping(&g, g.input("x"), None, &config, F32, CPU).unwrap();
+    let (hidden, kept) = gpt::backbone_keeping(&g, g.input("x"), None, &config, F32, CPU).unwrap();
     g.output("hidden", hidden);
     for (index, one) in kept.iter().enumerate() {
         g.output(&format!("k{index}"), one.keys);
@@ -522,10 +514,7 @@ fn a_step_against_the_cache_is_the_same_arithmetic() {
 
     let prefill_ir = Ir::compile(&g);
     let prefill = prefill_ir
-        .run(
-            &RunContext::new(&weights)
-                .input("x", &before),
-        )
+        .run(&RunContext::new(&weights).input("x", &before))
         .unwrap();
     let find = |wanted: &str| -> Tensor {
         prefill

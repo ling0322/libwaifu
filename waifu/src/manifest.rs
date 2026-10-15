@@ -213,19 +213,22 @@ impl Manifest {
     /// A model with one calls it `"tokenizer"`; one that tokenizes its prompt more than once names
     /// each of them, and there is nothing to make one of those the default.
     pub fn tokenizer(&self, name: &str) -> Result<&str> {
-        self.tokenizers.get(name).map(String::as_str).ok_or_else(|| {
-            Error::format(match self.tokenizers.is_empty() {
-                true => format!("this model names no tokenizers, and {name:?} would be one"),
-                false => format!(
-                    "this model has no tokenizer called {name:?}; it has {}",
-                    self.tokenizers
-                        .keys()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
+        self.tokenizers
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                Error::format(match self.tokenizers.is_empty() {
+                    true => format!("this model names no tokenizers, and {name:?} would be one"),
+                    false => format!(
+                        "this model has no tokenizer called {name:?}; it has {}",
+                        self.tokenizers
+                            .keys()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                })
             })
-        })
     }
 
     /// The block of settings called `name`, which is where a model reads its own.

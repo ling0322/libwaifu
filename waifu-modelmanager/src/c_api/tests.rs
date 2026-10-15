@@ -28,7 +28,6 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
 
-
 const WAIT: Duration = Duration::from_secs(20);
 
 /// What a test hears of one fetch, sent from the callbacks.
@@ -46,12 +45,18 @@ unsafe fn sender<'a>(user_data: *mut c_void) -> &'a Sender<Heard> {
     &*(user_data as *const Sender<Heard>)
 }
 
-unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuModelManagerProgressEvent) {
+unsafe extern "C" fn on_progress(
+    user_data: *mut c_void,
+    event: *const WaifuModelManagerProgressEvent,
+) {
     let event = &*event;
     let _ = sender(user_data).send(Heard::Progress(text(event.words).unwrap_or_default()));
 }
 
-unsafe extern "C" fn on_complete(user_data: *mut c_void, event: *const WaifuModelManagerCompletionEvent) {
+unsafe extern "C" fn on_complete(
+    user_data: *mut c_void,
+    event: *const WaifuModelManagerCompletionEvent,
+) {
     let status = &(*event).status;
     let _ = sender(user_data).send(Heard::Complete(status.code, text(status.message)));
 }
@@ -62,7 +67,10 @@ fn last_error() -> String {
 
 #[test]
 fn the_abi_is_the_header_s() {
-    assert_eq!(waifu_modelmanager_abi_version(), WAIFU_MODELMANAGER_ABI_VERSION);
+    assert_eq!(
+        waifu_modelmanager_abi_version(),
+        WAIFU_MODELMANAGER_ABI_VERSION
+    );
 }
 
 #[test]
@@ -82,7 +90,12 @@ fn where_models_go_is_json_and_says_who_said_so() {
         assert!(!said.is_null(), "{}", last_error());
         let text = text(said).unwrap();
         waifu_modelmanager_string_free(said);
-        for key in ["\"directory\"", "\"said\"", "\"default\"", "\"config_file\""] {
+        for key in [
+            "\"directory\"",
+            "\"said\"",
+            "\"default\"",
+            "\"config_file\"",
+        ] {
             assert!(text.contains(key), "{text}");
         }
     }
@@ -101,7 +114,11 @@ fn a_manifest_path_is_a_path_or_none() {
         std::fs::remove_file(&file).unwrap();
 
         assert!(waifu_modelmanager_manifest_path(c"no-such-model:v9".as_ptr()).is_null());
-        assert!(last_error().contains("no-such-model:v9"), "{}", last_error());
+        assert!(
+            last_error().contains("no-such-model:v9"),
+            "{}",
+            last_error()
+        );
         assert!(waifu_modelmanager_manifest_path(ptr::null()).is_null());
     }
 }
@@ -112,18 +129,37 @@ fn bundled_manifests_are_a_directory_or_none() {
         // Where they are is the caller's; what is read from them is hub's to test.
         let directory = std::env::temp_dir();
         let directory = std::ffi::CString::new(directory.to_str().expect("a UTF-8 path")).unwrap();
-        assert_eq!(waifu_modelmanager_set_bundled_manifests(directory.as_ptr()), WAIFU_MODELMANAGER_OK);
-        assert_eq!(waifu_modelmanager_set_bundled_manifests(c"".as_ptr()), WAIFU_MODELMANAGER_OK);
-        assert_eq!(waifu_modelmanager_set_bundled_manifests(ptr::null()), WAIFU_MODELMANAGER_OK);
+        assert_eq!(
+            waifu_modelmanager_set_bundled_manifests(directory.as_ptr()),
+            WAIFU_MODELMANAGER_OK
+        );
+        assert_eq!(
+            waifu_modelmanager_set_bundled_manifests(c"".as_ptr()),
+            WAIFU_MODELMANAGER_OK
+        );
+        assert_eq!(
+            waifu_modelmanager_set_bundled_manifests(ptr::null()),
+            WAIFU_MODELMANAGER_OK
+        );
     }
 }
 
 #[test]
 fn removing_a_model_nobody_published_is_refused_by_name() {
     unsafe {
-        assert_eq!(waifu_modelmanager_remove(c"no-such-model:v9".as_ptr()), WAIFU_MODELMANAGER_ERR_UNKNOWN_MODEL);
-        assert!(last_error().contains("no-such-model:v9"), "{}", last_error());
-        assert_eq!(waifu_modelmanager_remove(ptr::null()), WAIFU_MODELMANAGER_ERR_INVALID_ARGUMENT);
+        assert_eq!(
+            waifu_modelmanager_remove(c"no-such-model:v9".as_ptr()),
+            WAIFU_MODELMANAGER_ERR_UNKNOWN_MODEL
+        );
+        assert!(
+            last_error().contains("no-such-model:v9"),
+            "{}",
+            last_error()
+        );
+        assert_eq!(
+            waifu_modelmanager_remove(ptr::null()),
+            WAIFU_MODELMANAGER_ERR_INVALID_ARGUMENT
+        );
     }
 }
 
@@ -132,7 +168,12 @@ fn a_fetch_refused_at_the_door_is_null_and_calls_nothing() {
     unsafe {
         let (send, heard) = mpsc::channel();
         let user_data = &send as *const Sender<Heard> as *mut c_void;
-        let fetch = waifu_modelmanager_fetch_async(ptr::null(), user_data, Some(on_progress), Some(on_complete));
+        let fetch = waifu_modelmanager_fetch_async(
+            ptr::null(),
+            user_data,
+            Some(on_progress),
+            Some(on_complete),
+        );
         assert!(fetch.is_null());
         assert!(last_error().contains("model"), "{}", last_error());
         assert!(heard.recv_timeout(Duration::from_millis(100)).is_err());
@@ -179,9 +220,9 @@ fn a_log_callback_hears_the_library_s_lines() {
 
     let lines = lines.lock().unwrap();
     assert!(
-        lines
-            .iter()
-            .any(|(level, line)| *level == WaifuModelManagerLogLevel::WAIFU_MODELMANAGER_LOG_WARNING && line == "a line for the app"),
+        lines.iter().any(|(level, line)| *level
+            == WaifuModelManagerLogLevel::WAIFU_MODELMANAGER_LOG_WARNING
+            && line == "a line for the app"),
         "{lines:?}"
     );
 }

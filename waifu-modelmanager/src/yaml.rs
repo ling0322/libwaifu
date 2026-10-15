@@ -254,7 +254,9 @@ fn split_key(text: &str, number: usize) -> Result<(String, &str)> {
                 }
                 let key = plain_or_quoted(text[..index].trim_end(), number)?;
                 if key.is_empty() {
-                    return Err(FormatError::new(format!("line {number}: a key with no name")));
+                    return Err(FormatError::new(format!(
+                        "line {number}: a key with no name"
+                    )));
                 }
                 return Ok((key, after.trim_start()));
             }
