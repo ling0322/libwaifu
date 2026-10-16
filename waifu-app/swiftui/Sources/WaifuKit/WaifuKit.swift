@@ -438,8 +438,15 @@ func call<T>(
 public final class Engine: @unchecked Sendable {
     private let handle: OpaquePointer
 
-    public init(device: Device) throws {
-        guard let handle = waifu_engine_new(device.c) else {
+    /// An engine on `device`. On `.metalDiskOffload` and `.cudaCPUOffload`, up to
+    /// `deviceWeightBytes` of each model's weights -- the smallest first -- stay on the device and
+    /// only the rest are read as they are used; any other device refuses more than 0.
+    public init(device: Device, deviceWeightBytes: UInt64 = 0) throws {
+        var options = WaifuEngineOptions(
+            struct_size: UInt32(MemoryLayout<WaifuEngineOptions>.size),
+            device: device.c,
+            device_weight_bytes: deviceWeightBytes)
+        guard let handle = waifu_engine_new_with_options(&options) else {
             throw WaifuError.refused(lastError())
         }
         self.handle = handle

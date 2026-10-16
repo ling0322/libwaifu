@@ -97,6 +97,8 @@ struct ModelInfo {
     var kinds: [String]
     /// What it runs on, as the launch screen chose it.
     var device: String
+    /// How much its files are, where they are all on this Mac; nil before it is downloaded.
+    var bytes: UInt64?
     var model: Chosen?
     var voice: Voice?
     var converter: Converter?
@@ -107,13 +109,15 @@ struct ModelInfo {
         struct Kinds: Decodable {
             var kind: String
             var kinds: [String]?
+            var bytes: UInt64?
         }
         struct Both: Decodable {
             var conversion: Converter?
         }
         let kinds = try decoder.decode(Kinds.self, from: data)
         var info = ModelInfo(
-            name: name, kind: kinds.kind, kinds: kinds.kinds ?? [kinds.kind], device: device)
+            name: name, kind: kinds.kind, kinds: kinds.kinds ?? [kinds.kind], device: device,
+            bytes: kinds.bytes)
         switch kinds.kind {
         case "image":
             info.model = try decoder.decode(Chosen.self, from: data)

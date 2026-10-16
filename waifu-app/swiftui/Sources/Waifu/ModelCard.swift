@@ -17,8 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// The Model card at the top of the right column: which model the task on show runs on, and on
-// which device. Nothing is loaded from here -- the first Generate, Speak or Convert fetches the
+// The Model card at the top of the right column: which model the task on show runs on; the Device
+// card under it says where. Nothing is loaded from here -- the first Generate, Speak or Convert fetches the
 // model and reads it, and the bar says how that is going.
 
 import SwiftUI
@@ -84,21 +84,6 @@ struct ModelCard: View {
             // Held while a job runs, like the settings under the card: the job is of this model,
             // on this device, kept in this folder.
             .disabled(session.canStop)
-            LabeledContent("Device") {
-                Picker("Device", selection: $session.device) {
-                    Text("auto").tag("auto")
-                    Text("metal").tag("metal")
-                    Text("metal_disk_offload").tag("metal_disk_offload")
-                    Text("cpu").tag("cpu")
-                }
-                .labelsHidden()
-                // The one choice that has to say what it costs: picked without being told, it is
-                // a run that looks broken.
-                .help(session.device == "metal_disk_offload"
-                    ? "Leaves the weights in the model's files and reads each one off the disk as it is used: for a model larger than this Mac's memory, and slower."
-                    : "Where the model runs")
-            }
-            .disabled(session.canStop)
         } header: {
             HStack {
                 Header("Model")
@@ -122,13 +107,25 @@ struct ModelCard: View {
         }
     }
 
+    /// ", with 2.5 GB on the GPU" where `placement` keeps any weights there, and nothing otherwise.
+    private func onGPU(_ placement: Placement) -> String {
+        placement.deviceWeightBytes == 0
+            ? "" : String(format: ", with %.1f GB on the GPU", Double(placement.deviceWeightBytes) / 1e9)
+    }
+
     /// Where the chosen model is: not fetched yet, fetched, or loaded -- or why it is not a model.
     @ViewBuilder private var footnote: some View {
         if let why = session.notDescribed[kind] {
             Text(why).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
         } else if let model = session.model {
-            if launcher.has(model.name, on: session.device) {
-                Footnote("Loaded on \(session.device).")
+            if launcher.has(model.name, on: session.placement) {
+                Footnote("Loaded on \(session.device)\(onGPU(session.placement)).")
+            } else if let loaded = launcher.loaded, loaded.model == model.name,
+                loaded.placement.device == session.device
+            {
+                // Only the slider moved: what stays on the GPU is decided as the model is read.
+                Footnote(
+                    "Loaded on \(session.device)\(onGPU(loaded.placement)). The next job reads it again\(onGPU(session.placement)).")
             } else if model.onDisk {
                 Footnote("Downloaded. Read onto the device by the first job.")
             } else {

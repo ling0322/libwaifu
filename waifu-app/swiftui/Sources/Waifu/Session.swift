@@ -107,6 +107,17 @@ final class Session {
     var device: String {
         didSet { UserDefaults.standard.set(device, forKey: "device") }
     }
+    /// For metal_disk_offload: how many gigabytes of a model's smallest weights stay on the GPU,
+    /// the rest read off the disk as they are used. Takes effect when a model is next read.
+    var deviceWeightGB: Double {
+        didSet { UserDefaults.standard.set(deviceWeightGB, forKey: "deviceWeightGB") }
+    }
+    /// Where a job's model is read to, as the Model card says now.
+    var placement: Placement {
+        Placement(
+            device: device,
+            deviceWeightBytes: device == "metal_disk_offload" ? UInt64(deviceWeightGB * 1e9) : 0)
+    }
     /// The model the tab on show is for.
     var model: ModelInfo? { described[tab.kind] }
     /// Where what this window makes is kept, and what it made before is read back from.
@@ -161,6 +172,7 @@ final class Session {
             try? ModelManager.setBundledManifests(manifests.path)
         }
         device = UserDefaults.standard.string(forKey: "device") ?? "auto"
+        deviceWeightGB = max(0, UserDefaults.standard.double(forKey: "deviceWeightGB"))
         for kind in Session.kinds {
             if let name = UserDefaults.standard.string(forKey: "model.\(kind)"), !name.isBlank {
                 chosen[kind] = name
@@ -405,7 +417,7 @@ final class Session {
         let id = UUID().uuidString.lowercased()
         jobs.insert(Job(id: id, kind: kind, status: .queued, created: Date().timeIntervalSince1970 * 1000), at: 0)
 
-        let device = device
+        let placement = placement
         let previous = last
         let task = Task { [weak self] in
             await previous?.value
@@ -421,8 +433,8 @@ final class Session {
                 Task { @MainActor in self.heard(said, of: id) }
             }
             do {
-                let wasLoaded = launcher.has(model, on: device)
-                let engine = try await launcher.ensure(model, on: device)
+                let wasLoaded = launcher.has(model, on: placement)
+                let engine = try await launcher.ensure(model, on: placement)
                 if !wasLoaded { refresh(model) }
                 if let (bytes, made) = try await run(engine, report) {
                     keep(id, bytes: bytes, made: made)

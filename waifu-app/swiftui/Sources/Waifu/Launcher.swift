@@ -21,7 +21,8 @@
 // is not the one loaded.
 //
 // One engine for as long as the app runs, on the device the Model card chose -- a new one only when
-// the device changes. Its progress -- the download, then the read -- is the job's bar until the
+// the device changes, or how much of the model metal_disk_offload keeps on the GPU, which is decided
+// when a model is read. Its progress -- the download, then the read -- is the job's bar until the
 // job has steps of its own. What the library writes to its log is kept here too, for when that
 // line is not enough.
 
@@ -29,14 +30,22 @@ import Foundation
 import Observation
 import WaifuKit
 
+/// Where a model is read to: a device, as the Model card names it, and how many bytes of its
+/// smallest weights stay on the GPU there -- 0 but for metal_disk_offload, which reads the rest off
+/// the disk as they are used.
+struct Placement: Equatable {
+    var device: String
+    var deviceWeightBytes: UInt64 = 0
+}
+
 @MainActor @Observable
 final class Launcher {
     enum State {
         case idle
         /// Fetching or reading `model`. `line` is how far along; `fraction` where it can say.
         case loading(model: String, line: String, fraction: Double?)
-        /// `model` is on `device`.
-        case ready(model: String, device: String)
+        /// `model` is on `placement`.
+        case ready(model: String, placement: Placement)
         case failed(String)
     }
 
@@ -46,7 +55,7 @@ final class Launcher {
     private(set) var log: [String] = []
 
     private var engine: Engine?
-    private var engineDevice: String?
+    private var enginePlacement: Placement?
 
     init() {
         // Before anything else asks the library anything: the first device query writes what
@@ -76,18 +85,23 @@ final class Launcher {
         if case .loading = state { true } else { false }
     }
 
-    /// Whether `model` on `device` is what is loaded now.
-    func has(_ model: String, on device: String) -> Bool {
-        if case .ready(model, device) = state { true } else { false }
+    /// Whether `model` on `placement` is what is loaded now.
+    func has(_ model: String, on placement: Placement) -> Bool {
+        if case .ready(model, placement) = state { true } else { false }
     }
 
-    /// The engine with `model` on `device`: the one there is where it is already loaded, and
+    /// What is loaded now, and where.
+    var loaded: (model: String, placement: Placement)? {
+        if case .ready(let model, let placement) = state { (model, placement) } else { nil }
+    }
+
+    /// The engine with `model` on `placement`: the one there is where it is already loaded, and
     /// otherwise the one it has just been fetched and read into.
-    func ensure(_ model: String, on device: String) async throws -> Engine {
-        if has(model, on: device), let engine { return engine }
+    func ensure(_ model: String, on placement: Placement) async throws -> Engine {
+        if has(model, on: placement), let engine { return engine }
         // The one there goes before the next is read, and says so: two models are never on one
         // card, and memory the old one still holds is memory the new one is read into.
-        if case .ready(let old, device) = state, let engine {
+        if case .ready(let old, placement) = state, let engine {
             state = .loading(model: model, line: "unloading \(old)", fraction: nil)
             do {
                 try await engine.unload()
@@ -97,15 +111,15 @@ final class Launcher {
             }
             state = .idle
         }
-        return try await load(model, on: device)
+        return try await load(model, on: placement)
     }
 
-    /// Loads `model` onto `device`, and hands back the engine it is on. Cancelling the task that
-    /// awaits this stops the download between files; the read cannot be stopped.
-    func load(_ model: String, on device: String) async throws -> Engine {
+    /// Loads `model` onto `placement`, and hands back the engine it is on. Cancelling the task
+    /// that awaits this stops the download between files; the read cannot be stopped.
+    func load(_ model: String, on placement: Placement) async throws -> Engine {
         let engine: Engine
         do {
-            engine = try self.engine(on: device)
+            engine = try self.engine(on: placement)
         } catch {
             state = .failed(error.localizedDescription)
             throw error
@@ -119,7 +133,7 @@ final class Launcher {
                     self.state = .loading(model: model, line: progress.words, fraction: progress.fraction)
                 }
             }
-            state = .ready(model: model, device: device)
+            state = .ready(model: model, placement: placement)
             return engine
         } catch is CancellationError {
             state = .idle
@@ -130,13 +144,16 @@ final class Launcher {
         }
     }
 
-    private func engine(on device: String) throws -> Engine {
-        if let engine, engineDevice == device { return engine }
+    /// An engine for `placement`: the one there is where it was made for it, and a new one
+    /// otherwise -- which reads the model again, since what stays on the GPU is decided as it is.
+    private func engine(on placement: Placement) throws -> Engine {
+        if let engine, enginePlacement == placement { return engine }
         // Freed first: two engines would be two models on one card.
         engine = nil
-        let made = try Engine(device: Launcher.device(device))
+        let made = try Engine(
+            device: Launcher.device(placement.device), deviceWeightBytes: placement.deviceWeightBytes)
         engine = made
-        engineDevice = device
+        enginePlacement = placement
         return made
     }
 
