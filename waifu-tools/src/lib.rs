@@ -22,12 +22,14 @@
 use waifu::{GenerationOptions, Residency};
 
 /// Where the weights wait, taken out of `arguments` wherever it was put, since it is a flag and
-/// not a position: `lowvram`, or `hybrid=GB` for low-vram with that many gigabytes of the smallest
-/// weights kept on the device. On the device when there is neither.
+/// not a position: `hybrid=GB` for [`Residency::Hybrid`] with that many gigabytes of the smallest
+/// weights kept on the device, or `lowvram` for `hybrid=0`. On the device when there is neither.
 pub fn residency(arguments: &mut Vec<String>) -> Result<Residency, waifu::Error> {
     if let Some(at) = arguments.iter().position(|a| a == "lowvram") {
         arguments.remove(at);
-        return Ok(Residency::LowVram);
+        return Ok(Residency::Hybrid {
+            device_weight_bytes: 0,
+        });
     }
     if let Some(at) = arguments.iter().position(|a| a.starts_with("hybrid=")) {
         let flag = arguments.remove(at);

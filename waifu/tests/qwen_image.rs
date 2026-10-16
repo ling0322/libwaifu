@@ -81,7 +81,14 @@ fn fixture(cases: &HashMap<String, Tensor>, name: &str) -> Tensor {
 #[ignore = "needs the qwen-image-2.1 package"]
 fn every_part_matches_the_reference() {
     let manifest = Manifest::open(models_dir().join("qwen-image-2.1.yaml")).unwrap();
-    let model = QwenImage::from_manifest(device(), Residency::LowVram, &manifest).unwrap();
+    let model = QwenImage::from_manifest(
+        device(),
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+        &manifest,
+    )
+    .unwrap();
     let cases = read_safetensors(&[models_dir().join("qwen-image-2.1_test.safetensors")]).unwrap();
 
     // -- the template and the encoder --------------------------------------------------------
@@ -187,7 +194,14 @@ fn every_part_matches_the_reference() {
 #[ignore = "needs the qwen-image-2.1-turbo-fp8 package"]
 fn turbo_fp8_matches_the_reference() {
     let manifest = Manifest::open(models_dir().join("qwen-image-2.1-turbo-fp8.yaml")).unwrap();
-    let model = QwenImage::from_manifest(device(), Residency::LowVram, &manifest).unwrap();
+    let model = QwenImage::from_manifest(
+        device(),
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+        &manifest,
+    )
+    .unwrap();
     let cases =
         read_safetensors(&[models_dir().join("qwen-image-2.1-turbo_test.safetensors")]).unwrap();
 

@@ -72,15 +72,13 @@
 //!   load is a lookup and the handle it hands back costs no bytes. What the card holds is the
 //!   model, which is what a model that fits wants and what twenty sampler steps would otherwise
 //!   pay for twenty times over.
-//! * [`Residency::LowVram`] kept every weight in ordinary host memory when the source was
-//!   built, and a load is the copy across the bus. The `free` after the weight's last reader is
-//!   the card taking those bytes back, so the card holds what the pass is using rather than the
-//!   model. See [`Weights`] for why the host copy is not page-locked. On Metal the "host memory"
-//!   is the package's file: nothing is read until a load asks for it.
-//! * [`Residency::Hybrid`] is low-vram with the smallest weights put on the card and kept, as
-//!   many as fit in the bytes it was given. A load of one of those is a lookup again, so a pass
-//!   makes as many fewer copies -- and as many fewer waits for one -- as there were small weights
-//!   to keep, for the price of the biggest ones it could not.
+//! * [`Residency::Hybrid`] put the smallest weights on the card, as many as fit in the bytes it
+//!   was given, and kept the rest in ordinary host memory, where a load is the copy across the
+//!   bus. The `free` after such a weight's last reader is the card taking those bytes back, so
+//!   the card holds the small weights and what the pass is using rather than the model. See
+//!   [`Weights`] for why the host copy is not page-locked. On Metal the "host memory" is the
+//!   package's file: nothing is read until a load asks for it. Given no bytes, it keeps every
+//!   weight on the host.
 //!
 //! Both hold the model somewhere for as long as it is in use: on the card, or in host memory --
 //! or, for a low-vram model on Metal, on the disk. That is the price of the IR not having to know
@@ -248,10 +246,10 @@ impl<'a> RunContext<'a> {
 /// A model's weights, read out of its package and kept where [`Residency`] says.
 ///
 /// One map of tensors, whichever residency: on the card for [`Residency::Device`], in ordinary host
-/// memory for [`Residency::LowVram`], and some of each for [`Residency::Hybrid`]. What differs is
-/// only whether a [`load`](Weights::load) has to move the weight -- a kept one is already where
-/// the run wants it and is handed over as a handle, and a waiting one is copied across the bus, to
-/// be given back at the `free` after its last reader.
+/// memory for [`Residency::Hybrid`], or some of each where it was given room on the card. What
+/// differs is only whether a [`load`](Weights::load) has to move the weight -- a kept one is
+/// already where the run wants it and is handed over as a handle, and a waiting one is copied
+/// across the bus, to be given back at the `free` after its last reader.
 ///
 /// # What low-vram costs
 ///
@@ -381,13 +379,13 @@ impl Weights {
             device,
             kept_on: match residency {
                 Residency::Device => device,
-                Residency::LowVram | Residency::Hybrid { .. } => Device::Cpu,
+                Residency::Hybrid { .. } => Device::Cpu,
             },
             device_weight_bytes: match residency {
                 Residency::Hybrid {
                     device_weight_bytes,
                 } => device_weight_bytes,
-                Residency::Device | Residency::LowVram => 0,
+                Residency::Device => 0,
             },
             computes_in: F::default_float_type(device)?,
         })
@@ -524,27 +522,26 @@ pub enum Residency {
     /// On the device, moved once and kept. Fastest, and what a card the model fits on wants.
     #[default]
     Device,
-    /// On the host, and moved onto the device by each load and given back after its
-    /// last reader. For a card the model does not fit on: what the card holds is what the pass is
-    /// using rather than the model. On Metal, whose memory is the machine's, "the host" is the
-    /// package's file, and it is for a model larger than the machine. See [`Weights`].
-    LowVram,
-    /// As [`Residency::LowVram`], except that the smallest weights are put on the device and kept
-    /// there, as many as fit in `device_weight_bytes`.
+    /// The smallest weights on the device, as many as fit in `device_weight_bytes`, and the rest
+    /// on the host, each moved onto the device by the load that reads it and given back after its
+    /// last reader. For a card the model does not fit on: what the card holds is the small
+    /// weights and what the pass is using rather than the model. On Metal, whose memory is the
+    /// machine's, "the host" is the package's file, and it is for a model larger than the machine.
+    /// See [`Weights`]. With `device_weight_bytes` 0 every weight waits on the host.
     ///
-    /// Smallest first because what a low-vram load costs is mostly not its bytes: each one is a
-    /// copy the run waits for, and a model's norms, biases and scales are hundreds of loads that
-    /// are each a wait and almost nothing to keep. So the first few hundred megabytes take most of
-    /// the waits away, and what is left to cross over per pass is the large projections, whose
-    /// copies are the ones that run at the bus's rate. Nothing at all is [`Residency::LowVram`],
-    /// and more than the model is [`Residency::Device`].
+    /// Smallest first because what a load from the host costs is mostly not its bytes: each one
+    /// is a copy the run waits for, and a model's norms, biases and scales are hundreds of loads
+    /// that are each a wait and almost nothing to keep. So the first few hundred megabytes take
+    /// most of the waits away, and what is left to cross over per pass is the large projections,
+    /// whose copies are the ones that run at the bus's rate. More than the model is
+    /// [`Residency::Device`].
     Hybrid { device_weight_bytes: u64 },
 }
 
 impl Residency {
     /// Whether a run on `device` can be had this way.
     ///
-    /// [`Residency::LowVram`] needs a device whose memory a weight can be moved into and given back
+    /// [`Residency::Hybrid`] needs a device whose memory a weight can be moved into and given back
     /// from one load at a time -- CUDA's, through its staged upload, and Metal's -- so it is the
     /// one answer that depends on where the run is going. The processor already holds the
     /// weights where it reads them, and Vulkan has no such path. Nothing above offers the pair
@@ -553,9 +550,7 @@ impl Residency {
     pub fn works_on(self, device: Device) -> bool {
         match self {
             Residency::Device => true,
-            Residency::LowVram | Residency::Hybrid { .. } => {
-                matches!(device, Device::Cuda | Device::Metal)
-            }
+            Residency::Hybrid { .. } => matches!(device, Device::Cuda | Device::Metal),
         }
     }
 }
@@ -1706,25 +1701,29 @@ mod tests {
         // too, on a machine that may have none: the refusal comes before anything is asked of the
         // device, which is the point of it.
         for device in [Device::Cpu, Device::Vulkan] {
-            let error = Weights::empty(device, Residency::LowVram)
-                .map(drop)
-                .unwrap_err()
-                .to_string();
+            let error = Weights::empty(
+                device,
+                Residency::Hybrid {
+                    device_weight_bytes: 0,
+                },
+            )
+            .map(drop)
+            .unwrap_err()
+            .to_string();
 
             assert!(error.contains("only cuda and metal"), "{error}");
             assert!(error.contains(device.name()), "{error}");
         }
 
-        assert!(Residency::LowVram.works_on(Device::Cuda));
-        assert!(Residency::LowVram.works_on(Device::Metal));
-
-        let hybrid = Residency::Hybrid {
-            device_weight_bytes: 1 << 30,
-        };
-        assert!(hybrid.works_on(Device::Cuda));
-        assert!(hybrid.works_on(Device::Metal));
-        assert!(!hybrid.works_on(Device::Cpu));
-        assert!(!hybrid.works_on(Device::Vulkan));
+        for device_weight_bytes in [0, 1 << 30] {
+            let hybrid = Residency::Hybrid {
+                device_weight_bytes,
+            };
+            assert!(hybrid.works_on(Device::Cuda));
+            assert!(hybrid.works_on(Device::Metal));
+            assert!(!hybrid.works_on(Device::Cpu));
+            assert!(!hybrid.works_on(Device::Vulkan));
+        }
     }
 
     #[test]

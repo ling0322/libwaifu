@@ -234,7 +234,7 @@ impl Engine {
             struct_size: std::mem::size_of::<c::WaifuEngineOptions>() as u32,
             device: runtime.waifu_device(),
             device_weight_bytes: match runtime.residency() {
-                Residency::LowVram => device_weight_bytes,
+                Residency::Hybrid => device_weight_bytes,
                 Residency::Device => 0,
             },
         };

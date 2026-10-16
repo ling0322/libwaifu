@@ -10,9 +10,10 @@
 //! bytes, so what it reports is the model rather than the process.
 //!
 //! Measured in two stages, because they answer different questions: what building the model puts
-//! on the card, and what one pass adds on top of it. Under `Residency::LowVram` the first should
-//! be nearly nothing -- that is the whole claim of the mode -- and under `Residency::Device` it is
-//! the model.
+//! on the card, and what one pass adds on top of it. Under `Residency::Hybrid` with nothing kept
+//! on the card (`lowvram`) the first should be nearly nothing -- that is the whole claim of the
+//! mode -- with `hybrid=GB` it should be at most that, and under `Residency::Device` it is the
+//! model.
 
 use std::time::Instant;
 

@@ -319,7 +319,7 @@ mod tests {
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::LowVram
+            Residency::Hybrid
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).device(),
@@ -333,7 +333,7 @@ mod tests {
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::LowVram
+            Residency::Hybrid
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).device(),

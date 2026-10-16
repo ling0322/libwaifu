@@ -51,7 +51,9 @@ impl Runtime {
     /// instruction that reads it. For a card the model does not fit on.
     pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
         device: Device::Cuda,
-        residency: Residency::LowVram,
+        residency: Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
     };
 
     /// Metal, with the package left in its file and each weight read off the disk into the
@@ -59,7 +61,9 @@ impl Runtime {
     /// is for a model larger than the machine; see [`Weights`](crate::Weights).
     pub const METAL_DISK_OFFLOAD: Runtime = Runtime {
         device: Device::Metal,
-        residency: Residency::LowVram,
+        residency: Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
     };
 
     /// A device with the weights on it, which is what every name but the offload ones means.
@@ -86,7 +90,7 @@ impl Runtime {
     pub fn with_device_weight_bytes(self, bytes: u64) -> Result<Runtime, String> {
         match (self.residency, bytes) {
             (_, 0) => Ok(self),
-            (Residency::LowVram | Residency::Hybrid { .. }, _) => Ok(Runtime {
+            (Residency::Hybrid { .. }, _) => Ok(Runtime {
                 residency: Residency::Hybrid {
                     device_weight_bytes: bytes,
                 },
@@ -105,8 +109,8 @@ impl Runtime {
     pub fn name(self) -> &'static str {
         match (self.device, self.residency) {
             (device, Residency::Device) => device.name(),
-            (Device::Metal, Residency::LowVram | Residency::Hybrid { .. }) => "metal_disk_offload",
-            (_, Residency::LowVram | Residency::Hybrid { .. }) => "cuda_cpu_offload",
+            (Device::Metal, Residency::Hybrid { .. }) => "metal_disk_offload",
+            (_, Residency::Hybrid { .. }) => "cuda_cpu_offload",
         }
     }
 
@@ -116,12 +120,10 @@ impl Runtime {
             (_, Residency::Device) => "ready",
             // The rows that have to say more than that. They are the slow answers, and the slow
             // answer picked by someone who was not told is a run that looks broken.
-            (Device::Metal, Residency::LowVram | Residency::Hybrid { .. }) => {
+            (Device::Metal, Residency::Hybrid { .. }) => {
                 "ready, slower: for a model larger than the memory"
             }
-            (_, Residency::LowVram | Residency::Hybrid { .. }) => {
-                "ready, slower: for a model larger than the card"
-            }
+            (_, Residency::Hybrid { .. }) => "ready, slower: for a model larger than the card",
         }
     }
 }

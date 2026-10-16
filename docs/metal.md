@@ -63,7 +63,7 @@ work goes to the GPU in batches without anyone waiting.
 
 ## Disk offload
 
-`-device metal_disk_offload` is `Residency::LowVram` on Metal: for a model larger than the Mac's
+`-device metal_disk_offload` is `Residency::Hybrid` on Metal: for a model larger than the Mac's
 memory. The package stays mapped and is not read when the model is -- `cuda_cpu_offload` reads it
 into the page cache up front, which on a GPU that shares the machine's memory would be the whole
 model in the memory the mode is there to spare. Each `load` copies its weight off the mapping into
