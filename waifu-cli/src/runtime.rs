@@ -43,11 +43,12 @@ impl Device {
 }
 
 /// Where the weights wait between the steps that read them: on the device, or -- for a model
-/// larger than it -- on the host or the disk, each moved over at the step that reads it.
+/// larger than it -- on the host or the disk, each moved over at the step that reads it, apart from
+/// the smallest, as many as `-device-weights` leaves room for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Residency {
     Device,
-    LowVram,
+    Hybrid,
 }
 
 use crate::c::{self, WaifuDevice};
@@ -81,7 +82,7 @@ impl Runtime {
     /// instruction that reads it. For a card the model does not fit on.
     pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
         device: Device::Cuda,
-        residency: Residency::LowVram,
+        residency: Residency::Hybrid,
     };
 
     /// Metal, with the package left in its file and each weight read off the disk into the
@@ -89,7 +90,7 @@ impl Runtime {
     /// is for a model larger than the machine.
     pub const METAL_DISK_OFFLOAD: Runtime = Runtime {
         device: Device::Metal,
-        residency: Residency::LowVram,
+        residency: Residency::Hybrid,
     };
 
     /// A device with the weights on it, which is what every name but the offload ones means.
@@ -104,7 +105,6 @@ impl Runtime {
         self.device
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn residency(self) -> Residency {
         self.residency
     }
@@ -113,8 +113,8 @@ impl Runtime {
     pub fn name(self) -> &'static str {
         match (self.device, self.residency) {
             (device, Residency::Device) => device.name(),
-            (Device::Metal, Residency::LowVram) => "metal_disk_offload",
-            (_, Residency::LowVram) => "cuda_cpu_offload",
+            (Device::Metal, Residency::Hybrid) => "metal_disk_offload",
+            (_, Residency::Hybrid) => "cuda_cpu_offload",
         }
     }
 
@@ -124,10 +124,10 @@ impl Runtime {
             (_, Residency::Device) => "ready",
             // The rows that have to say more than that. They are the slow answers, and the slow
             // answer picked by someone who was not told is a run that looks broken.
-            (Device::Metal, Residency::LowVram) => {
+            (Device::Metal, Residency::Hybrid) => {
                 "ready, slower: for a model larger than the memory"
             }
-            (_, Residency::LowVram) => "ready, slower: for a model larger than the card",
+            (_, Residency::Hybrid) => "ready, slower: for a model larger than the card",
         }
     }
 }
@@ -245,9 +245,9 @@ impl Runtime {
         match (self.device, self.residency) {
             (Device::Cpu, _) => WaifuDevice::WAIFU_DEVICE_CPU,
             (Device::Cuda, Residency::Device) => WaifuDevice::WAIFU_DEVICE_CUDA,
-            (Device::Cuda, Residency::LowVram) => WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
+            (Device::Cuda, Residency::Hybrid) => WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
             (Device::Metal, Residency::Device) => WaifuDevice::WAIFU_DEVICE_METAL,
-            (Device::Metal, Residency::LowVram) => WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD,
+            (Device::Metal, Residency::Hybrid) => WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD,
             (Device::Vulkan, _) => WaifuDevice::WAIFU_DEVICE_VULKAN,
         }
     }

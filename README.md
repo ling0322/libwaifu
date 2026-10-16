@@ -60,6 +60,12 @@ weights are left in the model's files and each is read off the disk as it is use
 larger than the Mac's memory still draws. Slower again -- the disk is read once per step for every
 weight the page cache has let go of -- and never picked for you either.
 
+`-device-weights GB` beside either keeps that many gigabytes of the model's weights on the device,
+the smallest first, and moves only the rest: `-device cuda_cpu_offload -device-weights 6`. The
+small weights -- norms, biases, scales -- are most of the moves and little of the bytes, so the
+first gigabyte or so takes away most of the waiting, and what is left to move is the large
+projections. The default is 0, which is the offload device as above.
+
 ## Run
 
 `waifu` asks two things in the terminal -- the task (txt2img or img2img) and the model for it --

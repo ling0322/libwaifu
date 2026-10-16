@@ -456,7 +456,7 @@ pub enum Op {
     /// the operator takes. The gain is that a scale is then an ordinary weight under an ordinary
     /// name, reached by an ordinary [`Op::Load`]: everything that walks loads -- what
     /// [`resident`](super::resident) reads, the liveness a `free` comes from,
-    /// [`Residency::LowVram`](super::Residency::LowVram) putting one weight at a time across the
+    /// [`Residency::Hybrid`](super::Residency::Hybrid) putting one weight at a time across the
     /// bus -- reaches the scale without being taught that it exists.
     ///
     /// No transpose comes before this the way one comes before a [`Matmul`](Op::Matmul): this

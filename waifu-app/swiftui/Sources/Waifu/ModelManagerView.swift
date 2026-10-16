@@ -175,7 +175,7 @@ struct ModelManagerView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(entry.name).fontWeight(.medium)
-                    if session.launcher.has(entry.name, on: session.device) {
+                    if session.launcher.has(entry.name, on: session.placement) {
                         Text("loaded").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Color.green.opacity(0.25), in: Capsule())
                     }

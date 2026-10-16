@@ -48,6 +48,7 @@ pub const DEFAULT_OUTPUT: &str = "waifu-output";
 pub struct Args {
     models: Vec<String>,
     device: Option<String>,
+    device_weights: Option<String>,
     image: Option<String>,
     output: Option<String>,
     task: Option<String>,
@@ -80,6 +81,9 @@ impl Args {
             match name {
                 "-m" | "--m" => args.models.push(value("-m")?),
                 "-device" | "--device" => args.device = Some(value("-device")?),
+                "-device-weights" | "--device-weights" => {
+                    args.device_weights = Some(value("-device-weights")?)
+                }
                 "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
                 "-output" | "--output" => args.output = Some(value("-output")?),
                 "-task" | "--task" => args.task = Some(value("-task")?),
@@ -144,6 +148,45 @@ impl Args {
         self.output.as_deref().unwrap_or(DEFAULT_OUTPUT)
     }
 
+    /// How many bytes of the smallest weights an offload device keeps on the card, as
+    /// `-device-weights` gives them in gigabytes: `6`, `6.5` or `6GB`. Nothing when it is left out.
+    ///
+    /// Refused beside a device that is not an offload one, which keeps every weight on the card
+    /// already. Beside `auto` it is taken, and used if `auto` -- or the device row -- picks an
+    /// offload device.
+    pub fn device_weight_bytes(&self) -> Result<u64, ArgError> {
+        let Some(typed) = &self.device_weights else {
+            return Ok(0);
+        };
+
+        let number = typed.trim();
+        let number = ["GB", "gb", "Gb", "G", "g"]
+            .iter()
+            .find_map(|unit| number.strip_suffix(unit))
+            .unwrap_or(number)
+            .trim();
+        let gigabytes: f64 = number
+            .parse()
+            .ok()
+            .filter(|gigabytes: &f64| gigabytes.is_finite() && *gigabytes >= 0.0)
+            .ok_or_else(|| {
+                ArgError(format!(
+                    "invalid -device-weights \"{typed}\": expected gigabytes, as 6 or 6.5GB"
+                ))
+            })?;
+
+        match self.device()? {
+            DeviceOption::Auto | DeviceOption::CudaCpuOffload | DeviceOption::MetalDiskOffload => {
+                Ok((gigabytes * 1e9) as u64)
+            }
+            _ => Err(ArgError(
+                "-device-weights is for cuda_cpu_offload and metal_disk_offload: every other \
+                 device keeps all of the weights on it already"
+                    .to_string(),
+            )),
+        }
+    }
+
     pub fn device(&self) -> Result<DeviceOption, ArgError> {
         match self
             .device
@@ -190,6 +233,12 @@ pub fn print_options() {
          leaves the weights in the model's files and reads each one off the disk as it is used, \
          so that a model larger than the Mac's memory can still draw; it is slower again, and \
          auto never picks it."
+    );
+    eprintln!(
+        "  -device-weights gigabytes\n    \tfor cuda_cpu_offload and metal_disk_offload: keep this \
+         many gigabytes of the model's weights on the device, the smallest first, and move only \
+         the rest over as they are used (default 0, none). The small weights are most of the \
+         moves and little of the bytes, so a few gigabytes take away most of the waiting."
     );
     eprintln!(
         "  -m value\n    \tthe model to draw with: either a manifest file, which has the suffix \
@@ -270,7 +319,7 @@ mod tests {
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::LowVram
+            Residency::Hybrid
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).device(),
@@ -284,7 +333,7 @@ mod tests {
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::LowVram
+            Residency::Hybrid
         );
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).device(),
@@ -457,5 +506,44 @@ mod tests {
         assert!(args(&["-h"]).unwrap().wants_help());
         assert!(args(&["--help"]).unwrap().wants_help());
         assert!(!args(&["-m", "x"]).unwrap().wants_help());
+    }
+
+    #[test]
+    fn reads_the_gigabytes_of_weights_an_offload_device_keeps() {
+        let kept = |arguments: &[&str]| args(arguments).unwrap().device_weight_bytes();
+
+        assert_eq!(kept(&[]).unwrap(), 0);
+        for typed in ["6", "6GB", "6gb", "6G", " 6 GB"] {
+            assert_eq!(
+                kept(&["-device", "cuda_cpu_offload", "-device-weights", typed]).unwrap(),
+                6_000_000_000,
+                "{typed}"
+            );
+        }
+        assert_eq!(
+            kept(&["-device=metal_disk_offload", "-device-weights=0.5"]).unwrap(),
+            500_000_000
+        );
+        // Beside auto it is taken, for whichever offload device auto or the device row picks.
+        assert_eq!(kept(&["-device-weights", "2"]).unwrap(), 2_000_000_000);
+
+        for typed in ["", "six", "-1", "6TB", "inf"] {
+            let error = kept(&["-device", "cuda_cpu_offload", "-device-weights", typed])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("expected gigabytes"), "{typed}: {error}");
+        }
+    }
+
+    #[test]
+    fn refuses_weights_kept_on_a_device_that_keeps_them_all() {
+        for device in ["cuda", "metal", "vulkan", "cpu"] {
+            let error = args(&["-device", device, "-device-weights", "6"])
+                .unwrap()
+                .device_weight_bytes()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("cuda_cpu_offload"), "{device}: {error}");
+        }
     }
 }

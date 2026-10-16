@@ -38,24 +38,17 @@
 
 use std::io::Write;
 
-use waifu::{to_rgb8, Anima, Device, Krea2, Manifest, Residency, Sdxl};
+use waifu::{to_rgb8, Anima, Device, Krea2, Manifest, Sdxl};
 use waifu_tools::settings;
 
 fn main() -> Result<(), waifu::Error> {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
 
-    // Taken out wherever it was put, since it is a flag and not one of the three positions.
-    let residency = match arguments.iter().position(|a| a == "lowvram") {
-        Some(at) => {
-            arguments.remove(at);
-            Residency::LowVram
-        }
-        None => Residency::Device,
-    };
+    let residency = waifu_tools::residency(&mut arguments)?;
 
     let mut arguments = arguments.into_iter();
     let (Some(model_path), Some(prompt)) = (arguments.next(), arguments.next()) else {
-        eprintln!("usage: generate MODEL.yaml PROMPT [cpu|cuda|metal] [lowvram]");
+        eprintln!("usage: generate MODEL.yaml PROMPT [cpu|cuda|metal] [lowvram|hybrid=GB]");
         std::process::exit(1);
     };
 

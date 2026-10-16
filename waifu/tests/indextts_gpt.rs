@@ -872,7 +872,7 @@ fn probed(scores: &Tensor, limit: usize) -> Vec<f32> {
 #[ignore = "needs the exported IndexTTS-2.5 GPT in models/"]
 fn the_released_gpt_is_the_released_gpt() {
     // Read onto the device once. 574 M parameters is 2.2 GB, which is what this machine has room
-    // for; a package too large for that is what `Residency::LowVram` is for, and nothing in this
+    // for; a package too large for that is what `Residency::Hybrid` is for, and nothing in this
     // test would change but the argument.
     let name = "indextts25-gpt.safetensors";
     let weights: Rc<Weights> = Rc::new(

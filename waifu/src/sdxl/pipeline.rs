@@ -244,7 +244,7 @@ impl Sdxl {
     /// tensor was written to is not something the model has to know: they are read in the order
     /// they are named, into one namespace.
     ///
-    /// [`Residency::LowVram`] is the one to reach for when the card has less memory on it than the
+    /// [`Residency::Hybrid`] is the one to reach for when the card has less memory on it than the
     /// weights have bytes. It draws the same picture, a good deal more slowly, and nothing below
     /// this line knows which of the two it is running under.
     pub fn from_manifest(

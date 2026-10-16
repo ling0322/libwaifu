@@ -47,6 +47,7 @@ struct SettingsColumn: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         ModelCard(session: session)
+                        DeviceCard(session: session)
                         if session.model != nil {
                             Group {
                                 switch session.tab {
@@ -420,10 +421,14 @@ struct SliderRow: View {
     var slider: ClosedRange<Double>?
     var step: Double
     var decimals: Int
+    /// What the value means, where the label cannot say it: behind a ? beside the label.
+    var explanation: String? = nil
+
+    @State private var explaining = false
 
     var body: some View {
         let sliding = slider ?? range
-        LabeledContent(label) {
+        LabeledContent {
             HStack(spacing: 8) {
                 // Rounded here rather than given a `step`, which draws a tick for every one of them.
                 Slider(
@@ -447,6 +452,29 @@ struct SliderRow: View {
                 .multilineTextAlignment(.trailing)
                 .frame(width: 36)
                 .fieldBox()
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(label)
+                if let explanation {
+                    Button {
+                        explaining.toggle()
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("What \(label) means")
+                    .popover(isPresented: $explaining, arrowEdge: .bottom) {
+                        // As a paragraph: the label it hangs from is one line, and would make
+                        // this one too.
+                        Text(explanation)
+                            .lineLimit(nil)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(width: 280, alignment: .leading)
+                            .padding(14)
+                    }
+                }
             }
         }
     }

@@ -105,6 +105,7 @@ pub(crate) fn collect(
     let mut weights = Weights::empty(device, residency)?;
     each_mapped(paths, &mut |name, tensor| weights.insert(name, tensor))?;
     check_fp8_pairs(weights.tensors())?;
+    weights.keep_the_smallest_on_device()?;
     Ok(weights)
 }
 

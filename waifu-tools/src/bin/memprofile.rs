@@ -10,14 +10,15 @@
 //! bytes, so what it reports is the model rather than the process.
 //!
 //! Measured in two stages, because they answer different questions: what building the model puts
-//! on the card, and what one pass adds on top of it. Under `Residency::LowVram` the first should
-//! be nearly nothing -- that is the whole claim of the mode -- and under `Residency::Device` it is
-//! the model.
+//! on the card, and what one pass adds on top of it. Under `Residency::Hybrid` with nothing kept
+//! on the card (`lowvram`) the first should be nearly nothing -- that is the whole claim of the
+//! mode -- with `hybrid=GB` it should be at most that, and under `Residency::Device` it is the
+//! model.
 
 use std::time::Instant;
 
 use waifu::flint::MemorySnapshot;
-use waifu::{Device, Krea2, Manifest, Residency};
+use waifu::{Device, Krea2, Manifest};
 use waifu_tools::settings;
 
 const PROMPT: &str = "a calico cat asleep on a stack of books, warm afternoon light";
@@ -29,16 +30,10 @@ fn mib(bytes: i64) -> f64 {
 fn main() -> Result<(), waifu::Error> {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
 
-    let residency = match arguments.iter().position(|a| a == "lowvram") {
-        Some(at) => {
-            arguments.remove(at);
-            Residency::LowVram
-        }
-        None => Residency::Device,
-    };
+    let residency = waifu_tools::residency(&mut arguments)?;
 
     let Some(model_path) = arguments.first() else {
-        eprintln!("usage: memprofile MODEL.yaml [lowvram]");
+        eprintln!("usage: memprofile MODEL.yaml [lowvram|hybrid=GB]");
         std::process::exit(1);
     };
 

@@ -40,7 +40,8 @@ pub use support::{
 };
 
 use crate::engine::{
-    self, DrawRequest, Ended, Engine, Failure, SpeakRequest, Stage, VoiceConversionRequest,
+    self, DrawRequest, Ended, Engine, EngineOptions, Failure, SpeakRequest, Stage,
+    VoiceConversionRequest,
 };
 use crate::runtime::DeviceOption;
 use crate::wav::Sound;
@@ -352,11 +353,46 @@ pub struct WaifuAudioCompletionEvent {
 pub type WaifuAudioCompleteCallback =
     Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuAudioCompletionEvent)>;
 
+/// How an engine is started. Zeroed, apart from struct_size, it is waifu_engine_new on
+/// WAIFU_DEVICE_AUTO.
+#[repr(C)]
+pub struct WaifuEngineOptions {
+    /// sizeof(WaifuEngineOptions), as the caller was compiled with.
+    pub struct_size: u32,
+    pub device: WaifuDevice,
+    /// For WAIFU_DEVICE_CUDA_CPU_OFFLOAD and WAIFU_DEVICE_METAL_DISK_OFFLOAD: up to this many bytes
+    /// of each model's weights are kept on the device, the smallest first, and only the rest are
+    /// moved over as they are used. 0 keeps none; more than 0 is refused for any other device.
+    pub device_weight_bytes: u64,
+}
+
 /// Starts the engine's thread. NULL, with waifu_last_error, if the device is not available.
 #[no_mangle]
 pub extern "C" fn waifu_engine_new(device: WaifuDevice) -> *mut WaifuEngine {
+    let options = WaifuEngineOptions {
+        struct_size: std::mem::size_of::<WaifuEngineOptions>() as u32,
+        device,
+        device_weight_bytes: 0,
+    };
+    unsafe { waifu_engine_new_with_options(&options) }
+}
+
+/// As waifu_engine_new, the way `options` says. NULL, with waifu_last_error, if the device is not
+/// available or the options are refused.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_engine_new_with_options(
+    options: *const WaifuEngineOptions,
+) -> *mut WaifuEngine {
     caught(ptr::null_mut(), || {
-        let option = match device {
+        let size = options.as_ref().map_or(0, |options| options.struct_size);
+        let options = match request_in(options, size, "WaifuEngineOptions") {
+            Ok(options) => options,
+            Err(error) => {
+                set_last_error(&error);
+                return ptr::null_mut();
+            }
+        };
+        let device = match options.device {
             WaifuDevice::WAIFU_DEVICE_AUTO => DeviceOption::Auto,
             WaifuDevice::WAIFU_DEVICE_CPU => DeviceOption::Cpu,
             WaifuDevice::WAIFU_DEVICE_METAL => DeviceOption::Metal,
@@ -365,7 +401,11 @@ pub extern "C" fn waifu_engine_new(device: WaifuDevice) -> *mut WaifuEngine {
             WaifuDevice::WAIFU_DEVICE_VULKAN => DeviceOption::Vulkan,
             WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD => DeviceOption::MetalDiskOffload,
         };
-        match Engine::new(option) {
+        let options = EngineOptions {
+            device,
+            device_weight_bytes: options.device_weight_bytes,
+        };
+        match Engine::new(options) {
             Ok(engine) => Box::into_raw(Box::new(WaifuEngine { engine })),
             Err(error) => {
                 set_last_error(&error);

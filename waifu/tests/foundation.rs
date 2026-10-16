@@ -548,7 +548,13 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
         .run(&RunContext::new(on_the_card.as_ref()).input("x", &x))
         .unwrap();
 
-    let over_the_bus = source(tensors, Device::Cuda, Residency::LowVram);
+    let over_the_bus = source(
+        tensors,
+        Device::Cuda,
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+    );
     assert!(over_the_bus.has("proj.weight"));
 
     let streamed = ir
@@ -593,7 +599,13 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     // Read the way a model reads it, through `Residency`. The whole package is on the host now,
     // and none of it is on the card.
     let before = allocated();
-    let on_the_host = source(tensors, Device::Cuda, Residency::LowVram);
+    let on_the_host = source(
+        tensors,
+        Device::Cuda,
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+    );
     assert_eq!(
         allocated(),
         before,
@@ -659,7 +671,14 @@ fn a_disk_offloaded_package_on_metal_runs_like_a_resident_one() {
     let expected = run(&kept);
     drop(kept);
 
-    let offloaded = Weights::from_files(&[&file.0], Device::Metal, Residency::LowVram).unwrap();
+    let offloaded = Weights::from_files(
+        &[&file.0],
+        Device::Metal,
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+    )
+    .unwrap();
     assert_eq!(run(&offloaded), expected);
     assert_eq!(
         run(&offloaded),
@@ -688,7 +707,14 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
     let x = Tensor::zeros(&[256, 256], DType::Float, Device::Metal).unwrap();
 
     let before = allocated();
-    let offloaded = Weights::from_files(&[&file.0], Device::Metal, Residency::LowVram).unwrap();
+    let offloaded = Weights::from_files(
+        &[&file.0],
+        Device::Metal,
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+    )
+    .unwrap();
     assert_eq!(
         allocated(),
         before,
@@ -712,6 +738,73 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
     let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
     assert!(allocated() - before >= weight_bytes);
     drop(kept);
+}
+
+/// A hybrid package keeps its smallest weights on the device and leaves the rest where a low-vram
+/// one would, and draws the same either way.
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_hybrid_package_keeps_the_smallest_weights_on_metal() {
+    let big: Vec<f32> = (0..256 * 256)
+        .map(|i| ((i % 17) as f32 - 8.0) / 16.0)
+        .collect();
+    let small: Vec<f32> = (0..256).map(|i| (i % 5) as f32 / 4.0).collect();
+    let bytes = write_laid_out(&[
+        ("big.weight", "F32", &[256, 256], f32_bytes(&big)),
+        ("small.bias", "F32", &[256], f32_bytes(&small)),
+        ("small.scale", "F32", &[256], f32_bytes(&small)),
+    ]);
+    let file = TempFile::new(&bytes);
+    let small_bytes = 2 * 256 * std::mem::size_of::<f32>() as i64;
+
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let weight = graph.load("big.weight", &[256, 256]);
+    let bias = graph.load("small.bias", &[256]);
+    let scale = graph.load("small.scale", &[256]);
+    graph.output(
+        "y",
+        graph.mul(graph.add(graph.matmul(x, weight), bias), scale),
+    );
+    let ir = Ir::compile(&graph);
+
+    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
+    let x = Tensor::from_f32(&[256, 256], &big)
+        .unwrap()
+        .to_device(Device::Metal)
+        .unwrap();
+    let run = |source: &Weights| {
+        let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
+        to_host(&out[0].1)
+    };
+
+    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let expected = run(&kept);
+    drop(kept);
+
+    // Room for the two small ones and not the big one: they stay, and it does not.
+    let before = allocated();
+    let hybrid = Weights::from_files(
+        &[&file.0],
+        Device::Metal,
+        Residency::Hybrid {
+            device_weight_bytes: small_bytes as u64 + 1024,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        allocated() - before,
+        small_bytes,
+        "the small weights and only they"
+    );
+
+    assert_eq!(run(&hybrid), expected);
+    assert_eq!(
+        allocated() - before,
+        small_bytes,
+        "the big weight is given back after the pass"
+    );
+    assert_eq!(run(&hybrid), expected, "the second step reads the same");
 }
 
 /// Asking a device to hand its spare memory back is a question every device answers, including
@@ -884,7 +977,12 @@ fn a_mapped_package_runs_like_one_read_into_memory() {
         .unwrap();
     let by_hand = HashMap::from([("big.weight".to_string(), by_hand)]);
     let expected = run(&Weights::from_tensors(by_hand, Device::Cuda).unwrap());
-    for residency in [Residency::Device, Residency::LowVram] {
+    for residency in [
+        Residency::Device,
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+    ] {
         let mapped = Weights::from_files(&[&file.0], Device::Cuda, residency).unwrap();
         assert_eq!(run(&mapped), expected, "{residency:?}");
     }

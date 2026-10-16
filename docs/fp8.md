@@ -84,7 +84,7 @@ The graph loads two weights and hands three operands to one node:
 Two `load`s rather than one composite value, which is the whole point of storing it this way: a
 scale is then an ordinary weight under an ordinary name, and everything that walks loads reaches it
 without being taught that FP8 exists -- `resident` reading the package onto the device, the
-liveness the `free` instructions come from, `Residency::LowVram` putting one weight at a time
+liveness the `free` instructions come from, `Residency::Hybrid` putting one weight at a time
 across the bus.
 
 Note also what is *not* there: the `transpose` a float `matmul` needs before it. `fp8_matmul` reads
