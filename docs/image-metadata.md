@@ -1,6 +1,9 @@
 # How a picture was made
 
-Status: design, not implemented.
+Status: the macOS app (`waifu-app/swiftui`) writes the record, beside each picture in its output
+folder, from what `waifu_version_json`, `waifu_engine_device` and the catalogue's `versioned_name`
+say. The `tEXt` chunks, the library writing the record itself, and the CLI, webui and Windows app
+are not implemented.
 
 Every picture libwaifu writes gets a JSON record beside it, saying which build drew it and what it
 was asked to draw. The request in it is what libwaifu needs to draw a picture close to it again.

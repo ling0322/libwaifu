@@ -113,6 +113,23 @@ pub extern "C" fn waifu_devices_json() -> *mut c_char {
     })
 }
 
+/// This build, as JSON: `{"version", "revision"}`, the crate's version and the full commit it was
+/// built from, or null for a build made without git. Free with waifu_string_free. NULL on
+/// failure.
+#[no_mangle]
+pub extern "C" fn waifu_version_json() -> *mut c_char {
+    caught(ptr::null_mut(), || {
+        let revision = Some(env!("WAIFU_REVISION")).filter(|revision| !revision.is_empty());
+        string_out(
+            &serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "revision": revision,
+            })
+            .to_string(),
+        )
+    })
+}
+
 // -- progress --------------------------------------------------------------------------------
 
 fn stage_out(stage: Stage) -> WaifuStage {
@@ -436,6 +453,18 @@ pub unsafe extern "C" fn waifu_engine_cancel(engine: *mut WaifuEngine, job: Waif
 pub unsafe extern "C" fn waifu_engine_cancel_all(engine: *mut WaifuEngine) {
     if let Some(engine) = engine.as_ref() {
         caught((), || engine.engine.cancel_all());
+    }
+}
+
+/// What the engine runs on, named as waifu_devices_json names it -- never "auto", which is settled
+/// when it starts. Free with waifu_string_free. NULL for a NULL engine.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_engine_device(engine: *const WaifuEngine) -> *mut c_char {
+    match engine.as_ref() {
+        Some(engine) => caught(ptr::null_mut(), || {
+            string_out(engine.engine.runtime().name())
+        }),
+        None => ptr::null_mut(),
     }
 }
 

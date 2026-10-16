@@ -53,6 +53,36 @@ fn main() {
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     write_header(&manifest);
+    stamp_revision(&manifest);
+}
+
+/// The commit this was built from, in full, for `waifu_version_json`: a picture's record names the
+/// build that drew it. Empty where there is no git -- a copy of the source still builds.
+fn stamp_revision(manifest: &Path) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(manifest)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+
+    // Rebuilt when the checkout moves: HEAD for a checkout, and the ref it names for a commit on
+    // the branch already checked out. Asked of git, since a worktree keeps both elsewhere.
+    let mut watched = vec!["HEAD".to_string()];
+    watched.extend(git(&["symbolic-ref", "-q", "HEAD"]));
+    for name in watched {
+        if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", &name]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+
+    let revision = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+    println!("cargo:rustc-env=WAIFU_REVISION={revision}");
 }
 
 /// waifu.h, from the `extern "C"` functions and `#[repr(C)]` types in src/c_api.rs and

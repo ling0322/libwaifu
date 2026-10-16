@@ -92,6 +92,25 @@ public enum ABI {
     public static var modelManagerHeader: UInt32 { UInt32(WAIFU_MODELMANAGER_ABI_VERSION) }
 }
 
+/// The build of libwaifu that is loaded: what a picture's record says drew it.
+public struct LibraryVersion: Decodable, Sendable, Equatable {
+    /// The crate's version: "0.1.0".
+    public var version: String
+    /// The full commit it was built from; nil for a build made without git.
+    public var revision: String?
+
+    public init(version: String, revision: String?) {
+        self.version = version
+        self.revision = revision
+    }
+
+    public static let current: LibraryVersion? = {
+        guard let said = waifu_version_json() else { return nil }
+        defer { waifu_string_free(said) }
+        return try? JSONDecoder().decode(LibraryVersion.self, from: Data(String(cString: said).utf8))
+    }()
+}
+
 // MARK: - what goes in and comes out
 
 /// A picture as rows of RGB, three bytes a pixel, top to bottom.
@@ -456,6 +475,14 @@ public final class Engine: @unchecked Sendable {
         waifu_engine_free(handle)
     }
 
+    /// What it runs on, as waifu_devices_json names it: "metal", "cpu", "metal_disk_offload". Never
+    /// "auto", which the library settles when the engine starts.
+    public var device: String {
+        guard let said = waifu_engine_device(handle) else { return "" }
+        defer { waifu_string_free(said) }
+        return String(cString: said)
+    }
+
     private var cancel: (WaifuJob) -> Void {
         { [handle] job in waifu_engine_cancel(handle, job) }
     }
@@ -635,6 +662,7 @@ public enum ModelManager {
     /// A published model, as the catalogue lists it.
     struct Listed: Decodable {
         var name: String
+        var versioned_name: String?
         var full_name: String
         var cached: Bool
     }
@@ -649,6 +677,12 @@ public enum ModelManager {
             throw WaifuError.unknownModel("there is no model called \"\(model)\"")
         }
         return listed
+    }
+
+    /// The catalogue's name for `model` with its version, the alias followed: "anima:turbo" is
+    /// "anima:turbo:v1.1". Nil for what the catalogue does not list, a manifest's path included.
+    public static func versionedName(_ model: String) -> String? {
+        try? listed(model).versioned_name
     }
 
     /// Whether every package of a published model is here, as the catalogue says.

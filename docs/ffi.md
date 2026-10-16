@@ -312,6 +312,10 @@ char *waifu_describe_json(const char *model);
 // caller's to decide. Asking CUDA builds a context on the card.
 char *waifu_devices_json(void);
 
+// This build: {"version", "revision"}, the crate's version and the full commit it was built from,
+// null without git. What a picture's record (docs/image-metadata.md) names as `libwaifu`.
+char *waifu_version_json(void);
+
 // -- the engine ------------------------------------------------------------------------------
 
 typedef enum {
@@ -355,6 +359,10 @@ void waifu_engine_free(WaifuEngine *engine);
 // Jobs run one at a time in the order they were asked for, loads included.
 void waifu_engine_cancel(WaifuEngine *engine, WaifuJob job);  // running: after this step
 void waifu_engine_cancel_all(WaifuEngine *engine);
+
+// What it runs on, named as waifu_devices_json names it: never "auto", which is settled when it
+// starts. Free with waifu_string_free.
+char *waifu_engine_device(const WaifuEngine *engine);
 
 // Reads the model whose manifest is at `model` onto the device, dropping the model before; "tones"
 // is the stand-in voice. A published model is fetched, and its path found, with the model
@@ -496,7 +504,7 @@ change. Everything a job is made of is a struct.
 
 ```json
 { "models": [
-  { "name": "sdxl:noob", "full_name": "NoobAI XL 1.1", "kind": "image",
+  { "name": "sdxl:noob", "versioned_name": "sdxl:noob:v1.1", "full_name": "NoobAI XL 1.1", "kind": "image",
     "cached": true, "manifest_here": true, "bytes_on_disk": 6938000000, "explicit": false,
     "directory": "/Users/me/.cache/libwaifu/models/ling0322--libwaifu-sdxl-noob" } ] }
 ```
@@ -507,6 +515,9 @@ every manifest (`cargo run -p waifu-tools --bin fetch_manifests`) and hand them 
 `waifu_modelmanager_set_bundled_manifests`, or fetch them with
 `waifu_modelmanager_fetch_manifests_async`; `waifu_modelmanager_manifest_path` then hands back
 one to describe. `directory` is where its packages are, once any of them is: null before.
+
+`versioned_name` is `name` with its version, the alias followed: what a picture's record calls the
+model.
 
 `kind` is `image`, `speech` or `conversion`; a model that does two is listed twice.
 

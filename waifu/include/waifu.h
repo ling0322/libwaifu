@@ -265,6 +265,11 @@ char *waifu_machine_json(void);
 // NULL on failure.
 char *waifu_devices_json(void);
 
+// This build, as JSON: `{"version", "revision"}`, the crate's version and the full commit it was
+// built from, or null for a build made without git. Free with waifu_string_free. NULL on
+// failure.
+char *waifu_version_json(void);
+
 // What a model is, without reading it, as JSON: the path of its manifest, whose weights need not
 // be beside it, or "tones". Free with waifu_string_free. NULL, with waifu_last_error, for
 // anything else.
@@ -285,6 +290,10 @@ void waifu_engine_free(WaifuEngine *engine);
 void waifu_engine_cancel(WaifuEngine *engine, WaifuJob job);
 
 void waifu_engine_cancel_all(WaifuEngine *engine);
+
+// What the engine runs on, named as waifu_devices_json names it -- never "auto", which is settled
+// when it starts. Free with waifu_string_free. NULL for a NULL engine.
+char *waifu_engine_device(const WaifuEngine *engine);
 
 // Reads the model whose manifest is at `model` onto the device, dropping the one before; "tones"
 // is the stand-in voice. A published model is fetched, and its manifest found, with

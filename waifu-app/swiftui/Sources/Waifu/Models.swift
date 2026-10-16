@@ -223,6 +223,10 @@ struct Made: Codable {
     var steps: Int?
     var guidance: Double?
     var strength: Double?
+    /// What it was drawn on, as a picture's record spells it: "metal", never "auto".
+    var device: String?
+    /// The picture it started from, as an absolute path.
+    var startFrom: String?
     // A reading.
     var text: String?
     var speed: Double?
@@ -234,6 +238,22 @@ struct Made: Codable {
     // A sound.
     var length: Double?
     var rate: Int?
+
+    /// A picture's settings, with the lines that are copied and shown under it.
+    static func picture(
+        seed: UInt64, model: String, prompt: String, negative: String, width: Int, height: Int,
+        steps: Int, guidance: Double, strength: Double?
+    ) -> Made {
+        var lines = [prompt]
+        if !negative.isBlank { lines.append("Negative prompt: \(negative)") }
+        var settings = "Steps: \(steps), CFG scale: \(guidance), Seed: \(seed), Size: \(width)x\(height), Model: \(model)"
+        if let strength { settings += ", Denoising strength: \(strength)" }
+        lines.append(settings)
+        return Made(
+            seed: seed, seconds: 0, model: model, parameters: lines.joined(separator: "\n"),
+            prompt: prompt, negative: negative, width: width, height: height, steps: steps,
+            guidance: guidance, strength: strength)
+    }
 }
 
 /// A job this window asked for, or one read back out of the output folder.
@@ -254,8 +274,127 @@ struct Job: Identifiable {
     var isDone: Bool { status == .done && made != nil }
 }
 
-/// What is kept on the disk for a finished job: its id, kind and when, and what made it, beside a
-/// file of the same id holding what it made.
+/// How a picture was made, as docs/image-metadata.md lays it out: kept beside the PNG of the same
+/// name, saying which build drew it and what it was asked to draw.
+struct ImageRecord: Codable {
+    struct Environment: Codable {
+        var libwaifu: Library
+    }
+
+    struct Library: Codable {
+        var version: String
+        /// Written as null, not left out, for a build made without git.
+        var revision: String?
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(version, forKey: .version)
+            try container.encode(revision, forKey: .revision)
+        }
+    }
+
+    struct Request: Codable {
+        /// "txt2img" or "img2img".
+        var task: String
+        var parameters: Parameters
+    }
+
+    struct Parameters: Codable {
+        var model: String
+        var device: String
+        var prompt: String
+        var negative: String
+        var width: Int
+        var height: Int
+        var steps: Int
+        var guidance: Double
+        /// A u64 in decimal: past what a JSON number keeps in JavaScript.
+        var seed: String
+        /// img2img only.
+        var strength: Double?
+        var inputs: [String: String]
+
+        init(made: Made) {
+            model = made.model
+            device = made.device ?? ""
+            prompt = made.prompt ?? ""
+            negative = made.negative ?? ""
+            width = made.width ?? 0
+            height = made.height ?? 0
+            steps = made.steps ?? 0
+            guidance = made.guidance ?? 0
+            seed = String(made.seed)
+            strength = made.strength
+            inputs = made.startFrom.map { ["start_from": $0] } ?? [:]
+        }
+    }
+
+    struct Result: Codable {
+        /// The absolute path the PNG was written to.
+        var output: String
+        /// When drawing finished: UTC, ISO 8601 with milliseconds.
+        var created: String
+        var generationSeconds: Double
+
+        enum CodingKeys: String, CodingKey {
+            case output, created
+            case generationSeconds = "generation_seconds"
+        }
+    }
+
+    var environment: Environment
+    var request: Request
+    var result: Result
+
+    private static func stamp() -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        return formatter
+    }
+
+    /// The record of a picture written to `output`, finished at `finished` milliseconds since 1970.
+    init(made: Made, output: URL, finished: Double, library: LibraryVersion?) {
+        environment = Environment(
+            libwaifu: Library(version: library?.version ?? "unknown", revision: library?.revision))
+        request = Request(task: made.startFrom == nil ? "txt2img" : "img2img", parameters: Parameters(made: made))
+        result = Result(
+            output: output.path,
+            created: Self.stamp().string(from: Date(timeIntervalSince1970: finished / 1000)),
+            generationSeconds: (made.seconds * 100).rounded() / 100)
+    }
+
+    /// When drawing finished, in milliseconds since 1970.
+    var finished: Double? {
+        Self.stamp().date(from: result.created).map { $0.timeIntervalSince1970 * 1000 }
+    }
+
+    /// What the app keeps of it, to list, show and reuse.
+    var made: Made? {
+        let parameters = request.parameters
+        guard let seed = UInt64(parameters.seed) else { return nil }
+        var made = Made.picture(
+            seed: seed, model: parameters.model, prompt: parameters.prompt, negative: parameters.negative,
+            width: parameters.width, height: parameters.height, steps: parameters.steps,
+            guidance: parameters.guidance, strength: parameters.strength)
+        made.seconds = result.generationSeconds
+        made.device = parameters.device
+        made.startFrom = parameters.inputs["start_from"]
+        return made
+    }
+
+    /// The JSON written beside the picture: keys sorted, which puts environment, request and
+    /// result in the order the format lists them, and paths unescaped.
+    func json() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(self)
+    }
+}
+
+/// What is kept on the disk for a finished reading or conversion -- a picture has an
+/// `ImageRecord` -- and for a picture made before that: its id, kind and when, and what made it,
+/// beside a file of the same id holding what it made.
 struct Record: Codable {
     var id: String
     var kind: String
