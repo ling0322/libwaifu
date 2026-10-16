@@ -78,12 +78,35 @@ impl Runtime {
         self.residency
     }
 
-    /// What it is called on the command line and on screen.
+    /// This offload runtime with the smallest weights kept on the device, as many as fit in
+    /// `bytes`: [`Residency::Hybrid`]. Nothing is the runtime as it is.
+    ///
+    /// Refused for a runtime that is not an offload one, since it keeps the whole model on the
+    /// device already and there is nothing a number of bytes would change.
+    pub fn with_device_weight_bytes(self, bytes: u64) -> Result<Runtime, String> {
+        match (self.residency, bytes) {
+            (_, 0) => Ok(self),
+            (Residency::LowVram | Residency::Hybrid { .. }, _) => Ok(Runtime {
+                residency: Residency::Hybrid {
+                    device_weight_bytes: bytes,
+                },
+                ..self
+            }),
+            (Residency::Device, _) => Err(format!(
+                "{} keeps every weight on the device already: the bytes of weights to keep there \
+                 are for cuda_cpu_offload and metal_disk_offload",
+                self.name()
+            )),
+        }
+    }
+
+    /// What it is called on the command line and on screen. A hybrid runtime goes by its offload
+    /// device's name: it is that device with a number beside it.
     pub fn name(self) -> &'static str {
         match (self.device, self.residency) {
             (device, Residency::Device) => device.name(),
-            (Device::Metal, Residency::LowVram) => "metal_disk_offload",
-            (_, Residency::LowVram) => "cuda_cpu_offload",
+            (Device::Metal, Residency::LowVram | Residency::Hybrid { .. }) => "metal_disk_offload",
+            (_, Residency::LowVram | Residency::Hybrid { .. }) => "cuda_cpu_offload",
         }
     }
 
@@ -93,19 +116,22 @@ impl Runtime {
             (_, Residency::Device) => "ready",
             // The rows that have to say more than that. They are the slow answers, and the slow
             // answer picked by someone who was not told is a run that looks broken.
-            (Device::Metal, Residency::LowVram) => {
+            (Device::Metal, Residency::LowVram | Residency::Hybrid { .. }) => {
                 "ready, slower: for a model larger than the memory"
             }
-            (_, Residency::LowVram) => "ready, slower: for a model larger than the card",
+            (_, Residency::LowVram | Residency::Hybrid { .. }) => {
+                "ready, slower: for a model larger than the card"
+            }
         }
     }
 }
 
 /// Where the model should run, as `-device` spells it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DeviceOption {
     /// The first accelerator there is a device for -- CUDA, then Metal, then Vulkan -- and the CPU
     /// otherwise.
+    #[default]
     Auto,
     Cpu,
     Cuda,

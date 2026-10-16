@@ -17,7 +17,7 @@
 use std::time::Instant;
 
 use waifu::flint::MemorySnapshot;
-use waifu::{Device, Krea2, Manifest, Residency};
+use waifu::{Device, Krea2, Manifest};
 use waifu_tools::settings;
 
 const PROMPT: &str = "a calico cat asleep on a stack of books, warm afternoon light";
@@ -29,16 +29,10 @@ fn mib(bytes: i64) -> f64 {
 fn main() -> Result<(), waifu::Error> {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
 
-    let residency = match arguments.iter().position(|a| a == "lowvram") {
-        Some(at) => {
-            arguments.remove(at);
-            Residency::LowVram
-        }
-        None => Residency::Device,
-    };
+    let residency = waifu_tools::residency(&mut arguments)?;
 
     let Some(model_path) = arguments.first() else {
-        eprintln!("usage: memprofile MODEL.yaml [lowvram]");
+        eprintln!("usage: memprofile MODEL.yaml [lowvram|hybrid=GB]");
         std::process::exit(1);
     };
 

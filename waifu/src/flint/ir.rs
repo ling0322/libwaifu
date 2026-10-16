@@ -77,6 +77,10 @@
 //!   the card taking those bytes back, so the card holds what the pass is using rather than the
 //!   model. See [`Weights`] for why the host copy is not page-locked. On Metal the "host memory"
 //!   is the package's file: nothing is read until a load asks for it.
+//! * [`Residency::Hybrid`] is low-vram with the smallest weights put on the card and kept, as
+//!   many as fit in the bytes it was given. A load of one of those is a lookup again, so a pass
+//!   makes as many fewer copies -- and as many fewer waits for one -- as there were small weights
+//!   to keep, for the price of the biggest ones it could not.
 //!
 //! Both hold the model somewhere for as long as it is in use: on the card, or in host memory --
 //! or, for a low-vram model on Metal, on the disk. That is the price of the IR not having to know
@@ -244,10 +248,10 @@ impl<'a> RunContext<'a> {
 /// A model's weights, read out of its package and kept where [`Residency`] says.
 ///
 /// One map of tensors, whichever residency: on the card for [`Residency::Device`], in ordinary host
-/// memory for [`Residency::LowVram`]. What differs is only whether a [`load`](Weights::load)
-/// has to move the weight -- a kept one is already where the run wants it and is handed over as a
-/// handle, and a waiting one is copied across the bus, to be given back at the `free` after its
-/// last reader.
+/// memory for [`Residency::LowVram`], and some of each for [`Residency::Hybrid`]. What differs is
+/// only whether a [`load`](Weights::load) has to move the weight -- a kept one is already where
+/// the run wants it and is handed over as a handle, and a waiting one is copied across the bus, to
+/// be given back at the `free` after its last reader.
 ///
 /// # What low-vram costs
 ///
@@ -288,6 +292,9 @@ pub struct Weights {
     device: Device,
     /// Where a weight waits between runs: `device` itself, or the host for a low-vram model.
     kept_on: Device,
+    /// How many bytes of weights a hybrid model keeps on `device` once it is read; nothing for
+    /// the others, whose weights all wait in one place.
+    device_weight_bytes: u64,
     /// What `device` computes in, which a half vector is widened to; see [`retype`].
     computes_in: DType,
 }
@@ -374,7 +381,13 @@ impl Weights {
             device,
             kept_on: match residency {
                 Residency::Device => device,
-                Residency::LowVram => Device::Cpu,
+                Residency::LowVram | Residency::Hybrid { .. } => Device::Cpu,
+            },
+            device_weight_bytes: match residency {
+                Residency::Hybrid {
+                    device_weight_bytes,
+                } => device_weight_bytes,
+                Residency::Device | Residency::LowVram => 0,
             },
             computes_in: F::default_float_type(device)?,
         })
@@ -403,6 +416,46 @@ impl Weights {
         }
 
         self.tensors.insert(name, tensor);
+        Ok(())
+    }
+
+    /// For a hybrid model, once every weight is in: the smallest put on the device and kept there,
+    /// as many as fit in the bytes it was given. See [`smallest_within`].
+    ///
+    /// After the whole package rather than as each weight comes, because which are the smallest
+    /// is a question about all of them. Each one moved leaves its host copy behind for the page
+    /// cache to drop, as a resident model's weights do.
+    pub(crate) fn keep_the_smallest_on_device(&mut self) -> Result<()> {
+        if self.device_weight_bytes == 0 {
+            return Ok(());
+        }
+
+        let mut sizes = Vec::with_capacity(self.tensors.len());
+        for (name, tensor) in &self.tensors {
+            sizes.push((name.clone(), tensor.nbytes()? as u64));
+        }
+        let (kept, bytes) = smallest_within(sizes, self.device_weight_bytes);
+
+        for name in &kept {
+            let tensor = self
+                .tensors
+                .get_mut(name)
+                .expect("a name the map was asked for");
+            *tensor = tensor.to_device(self.device)?;
+        }
+
+        crate::log::write(
+            crate::log::Level::Info,
+            "weights",
+            &format!(
+                "{} of {} weights kept on {}: {} MB of the {} MB allowed",
+                kept.len(),
+                self.tensors.len(),
+                self.device.name(),
+                bytes / 1_000_000,
+                self.device_weight_bytes / 1_000_000
+            ),
+        );
         Ok(())
     }
 
@@ -476,6 +529,16 @@ pub enum Residency {
     /// using rather than the model. On Metal, whose memory is the machine's, "the host" is the
     /// package's file, and it is for a model larger than the machine. See [`Weights`].
     LowVram,
+    /// As [`Residency::LowVram`], except that the smallest weights are put on the device and kept
+    /// there, as many as fit in `device_weight_bytes`.
+    ///
+    /// Smallest first because what a low-vram load costs is mostly not its bytes: each one is a
+    /// copy the run waits for, and a model's norms, biases and scales are hundreds of loads that
+    /// are each a wait and almost nothing to keep. So the first few hundred megabytes take most of
+    /// the waits away, and what is left to cross over per pass is the large projections, whose
+    /// copies are the ones that run at the bus's rate. Nothing at all is [`Residency::LowVram`],
+    /// and more than the model is [`Residency::Device`].
+    Hybrid { device_weight_bytes: u64 },
 }
 
 impl Residency {
@@ -490,9 +553,31 @@ impl Residency {
     pub fn works_on(self, device: Device) -> bool {
         match self {
             Residency::Device => true,
-            Residency::LowVram => matches!(device, Device::Cuda | Device::Metal),
+            Residency::LowVram | Residency::Hybrid { .. } => {
+                matches!(device, Device::Cuda | Device::Metal)
+            }
         }
     }
+}
+
+/// Which of the weights `sizes` names, by name and bytes, to keep on the device within `budget`
+/// bytes, and how many bytes that comes to: the smallest first, for as long as the next fits.
+///
+/// Once one does not fit, none after it can, since they are larger. Weights of the same size go
+/// by name, so that the same package and the same budget keep the same weights every time.
+fn smallest_within(mut sizes: Vec<(String, u64)>, budget: u64) -> (Vec<String>, u64) {
+    sizes.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+    let mut kept = Vec::new();
+    let mut total = 0u64;
+    for (name, bytes) in sizes {
+        if total.saturating_add(bytes) > budget {
+            break;
+        }
+        total += bytes;
+        kept.push(name);
+    }
+    (kept, total)
 }
 
 /// Say now whether `weights` can answer everything `graph` will ask for.
@@ -1632,6 +1717,46 @@ mod tests {
 
         assert!(Residency::LowVram.works_on(Device::Cuda));
         assert!(Residency::LowVram.works_on(Device::Metal));
+
+        let hybrid = Residency::Hybrid {
+            device_weight_bytes: 1 << 30,
+        };
+        assert!(hybrid.works_on(Device::Cuda));
+        assert!(hybrid.works_on(Device::Metal));
+        assert!(!hybrid.works_on(Device::Cpu));
+        assert!(!hybrid.works_on(Device::Vulkan));
+    }
+
+    #[test]
+    fn a_hybrid_model_keeps_its_smallest_weights_on_the_device() {
+        let sizes = |list: &[(&str, u64)]| {
+            list.iter()
+                .map(|(name, bytes)| (name.to_string(), *bytes))
+                .collect::<Vec<_>>()
+        };
+        let model = sizes(&[
+            ("proj", 400),
+            ("norm", 8),
+            ("bias", 16),
+            ("scale", 8),
+            ("mlp", 200),
+        ]);
+
+        // The smallest first, ties by name, until the next one would not fit.
+        assert_eq!(
+            smallest_within(model.clone(), 240),
+            (
+                vec!["norm".into(), "scale".into(), "bias".into(), "mlp".into()],
+                232
+            )
+        );
+        // Stopping at the first that does not fit, not skipping it for a later one that would.
+        assert_eq!(
+            smallest_within(model.clone(), 100),
+            (vec!["norm".into(), "scale".into(), "bias".into()], 32)
+        );
+        assert_eq!(smallest_within(model.clone(), 0), (vec![], 0));
+        assert_eq!(smallest_within(model, u64::MAX).0.len(), 5);
     }
 
     #[test]

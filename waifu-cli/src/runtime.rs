@@ -104,7 +104,6 @@ impl Runtime {
         self.device
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn residency(self) -> Residency {
         self.residency
     }

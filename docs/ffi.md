@@ -332,6 +332,22 @@ typedef uint64_t WaifuJob;
 // Starts the engine's thread. NULL, with waifu_last_error, if the device is not available.
 WaifuEngine *waifu_engine_new(WaifuDevice device);
 
+// How an engine is started. Zeroed, apart from struct_size, it is waifu_engine_new on
+// WAIFU_DEVICE_AUTO.
+typedef struct {
+  // sizeof(WaifuEngineOptions), as the caller was compiled with.
+  uint32_t struct_size;
+  WaifuDevice device;
+  // For WAIFU_DEVICE_CUDA_CPU_OFFLOAD and WAIFU_DEVICE_METAL_DISK_OFFLOAD: up to this many bytes of
+  // each model's weights are kept on the device, the smallest first, and only the rest are moved
+  // over as they are used. 0 keeps none; more than 0 is refused for any other device.
+  uint64_t device_weight_bytes;
+} WaifuEngineOptions;
+
+// As waifu_engine_new, the way `options` says. NULL, with waifu_last_error, if the device is not
+// available or the options are refused.
+WaifuEngine *waifu_engine_new_with_options(const WaifuEngineOptions *options);
+
 // Stops what is running, cancels what waits (each gets on_complete with WAIFU_CANCELLED), drops the
 // model and joins the thread -- which can take until the end of the step that is running.
 void waifu_engine_free(WaifuEngine *engine);

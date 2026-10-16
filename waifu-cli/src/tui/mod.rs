@@ -115,6 +115,8 @@ pub fn choose(task: Option<Task>) -> Result<Option<(Task, String)>, Error> {
 /// its cards had before anything was put on them.
 pub struct Machine {
     device: DeviceOption,
+    /// What `-device-weights` said, in bytes: weights an offload device keeps on the card.
+    pub device_weight_bytes: u64,
     available: Vec<Runtime>,
     room: Room,
 }
@@ -127,10 +129,11 @@ impl Machine {
     /// The cards are measured whatever `-device` said: a device that was named is not
     /// second-guessed, but a run on it that is going to run out of memory is still worth a warning
     /// before it is started.
-    pub fn measure(device: DeviceOption) -> Machine {
+    pub fn measure(device: DeviceOption, device_weight_bytes: u64) -> Machine {
         let (available, room) = crate::runtime::measure();
         Machine {
             device,
+            device_weight_bytes,
             available,
             room,
         }

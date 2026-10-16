@@ -33,7 +33,7 @@ use crate::c::{
     WaifuImageCompletionEvent, WaifuImageInput, WaifuJob, WaifuProgressEvent, WaifuStage,
     WaifuStatusCode,
 };
-use crate::runtime::Runtime;
+use crate::runtime::{Residency, Runtime};
 
 /// The sizes offered for a model whose manifest does not name its own: the ones SDXL was trained
 /// at, which is also what libwaifu offers for one.
@@ -226,9 +226,19 @@ pub struct Engine {
 unsafe impl Send for Engine {}
 
 impl Engine {
-    /// Starts an engine on `runtime`, or says why it cannot.
-    pub fn new(runtime: Runtime) -> Result<Engine, String> {
-        let handle = c::waifu_engine_new(runtime.waifu_device());
+    /// Starts an engine on `runtime`, or says why it cannot. An offload runtime keeps
+    /// `device_weight_bytes` of the smallest weights on the device; any other keeps all of them
+    /// there, and the number is not for it.
+    pub fn new(runtime: Runtime, device_weight_bytes: u64) -> Result<Engine, String> {
+        let options = c::WaifuEngineOptions {
+            struct_size: std::mem::size_of::<c::WaifuEngineOptions>() as u32,
+            device: runtime.waifu_device(),
+            device_weight_bytes: match runtime.residency() {
+                Residency::LowVram => device_weight_bytes,
+                Residency::Device => 0,
+            },
+        };
+        let handle = unsafe { c::waifu_engine_new_with_options(&options) };
         match handle.is_null() {
             true => Err(c::waifu_error()),
             false => Ok(Engine { handle }),

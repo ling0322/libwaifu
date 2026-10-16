@@ -19,7 +19,31 @@
 
 //! What the tools in src/bin share.
 
-use waifu::GenerationOptions;
+use waifu::{GenerationOptions, Residency};
+
+/// Where the weights wait, taken out of `arguments` wherever it was put, since it is a flag and
+/// not a position: `lowvram`, or `hybrid=GB` for low-vram with that many gigabytes of the smallest
+/// weights kept on the device. On the device when there is neither.
+pub fn residency(arguments: &mut Vec<String>) -> Result<Residency, waifu::Error> {
+    if let Some(at) = arguments.iter().position(|a| a == "lowvram") {
+        arguments.remove(at);
+        return Ok(Residency::LowVram);
+    }
+    if let Some(at) = arguments.iter().position(|a| a.starts_with("hybrid=")) {
+        let flag = arguments.remove(at);
+        let gigabytes: f64 = flag["hybrid=".len()..]
+            .parse()
+            .ok()
+            .filter(|gigabytes: &f64| gigabytes.is_finite() && *gigabytes >= 0.0)
+            .ok_or_else(|| {
+                waifu::Error::Model(format!("{flag}: expected hybrid=GB, as hybrid=6"))
+            })?;
+        return Ok(Residency::Hybrid {
+            device_weight_bytes: (gigabytes * 1e9) as u64,
+        });
+    }
+    Ok(Residency::Device)
+}
 
 /// The request a tool draws with for the model whose manifest is at `path`: what a screen would
 /// start its boxes at -- the kind of model's defaults with the manifest's `suggested:` block over
