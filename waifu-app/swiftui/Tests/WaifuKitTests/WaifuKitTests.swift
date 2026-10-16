@@ -29,6 +29,28 @@ final class WaifuKitTests: XCTestCase {
         XCTAssertEqual(ABI.modelManagerLibrary, ABI.modelManagerHeader)
     }
 
+    func testTheLibrarySaysWhichBuildItIs() throws {
+        let build = try XCTUnwrap(LibraryVersion.current)
+        XCTAssertFalse(build.version.isEmpty)
+        // The full commit, or nothing for a build made without git.
+        if let revision = build.revision {
+            XCTAssertEqual(revision.count, 40, revision)
+            XCTAssertTrue(revision.allSatisfy(\.isHexDigit), revision)
+        }
+    }
+
+    func testAnEngineSaysWhatItRunsOnWithAutoSettled() throws {
+        XCTAssertEqual(try Engine(device: .cpu).device, "cpu")
+        let auto = try Engine(device: .auto).device
+        XCTAssertFalse(auto.isEmpty)
+        XCTAssertNotEqual(auto, "auto")
+    }
+
+    func testAPublishedNameHasItsVersion() {
+        XCTAssertEqual(ModelManager.versionedName("anima:turbo"), "anima:turbo:v1.1")
+        XCTAssertNil(ModelManager.versionedName("/no/such/manifest.yaml"))
+    }
+
     func testAVoiceIsLoadedAndSpeaks() async throws {
         let engine = try Engine(device: .cpu)
         try await engine.load("tones")

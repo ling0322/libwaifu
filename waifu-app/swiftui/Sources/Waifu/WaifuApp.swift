@@ -41,11 +41,12 @@ struct WaifuApp: App {
             }
         }
 
-        // A picture on its own, in a window of its shape: one window a picture, opened by clicking
-        // it in the big frame.
+        // A picture on its own, in a window of its own: one window a picture, opened by clicking it
+        // in the big frame, at one size, and resized as anybody likes.
         WindowGroup("Preview", id: "preview", for: String.self) { $id in
             if let id { PreviewWindow(session: session, id: id) }
         }
+        .defaultSize(PreviewWindow.size)
     }
 
     /// Where what is made is kept: the app's own folder, not one to choose. `-output <folder>` on

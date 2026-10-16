@@ -188,6 +188,8 @@ pub fn catalog_json() -> serde_json::Value {
     let entry = |listed: hub::Listed, kind: &str| {
         serde_json::json!({
             "name": listed.name,
+            // The name with its version, the alias followed: what a picture's record calls it.
+            "versioned_name": hub::published_name(listed.name),
             "full_name": listed.full_name,
             "kind": kind,
             "cached": listed.cached,

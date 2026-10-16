@@ -157,6 +157,8 @@ struct PictureFrame: View {
     var job: Job
 
     @Environment(\.openWindow) private var openWindow
+    /// Whether the mouse is over the picture, which then says that a click opens it.
+    @State private var hovering = false
 
     var body: some View {
         Group {
@@ -165,7 +167,11 @@ struct PictureFrame: View {
                     .resizable()
                     .scaledToFit()
                     .draggable(Image(nsImage: image))
+                    .overlay { OpensOnClick(shown: hovering) }
                     .overlay(PointingHand())
+                    .onHover { over in
+                        withAnimation(.easeOut(duration: 0.15)) { hovering = over }
+                    }
                     .onTapGesture { openWindow(id: "preview", value: job.id) }
                     .contextMenu {
                         Button("Copy") {
@@ -187,42 +193,129 @@ struct PictureFrame: View {
     }
 }
 
-/// The window a picture opens in when it is clicked: the picture alone, filling a window of its
-/// shape. Esc closes it; one deleted while it is open leaves the window saying so.
+/// Laid over a picture the mouse is on: the picture dimmed a little, and in its corner the sign
+/// for opening it larger. It takes no clicks; the picture under it does.
+struct OpensOnClick: View {
+    var shown: Bool
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.opacity(shown ? 0.12 : 0)
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(8)
+                .background(.black.opacity(0.5), in: Circle())
+                .padding(10)
+                .opacity(shown ? 1 : 0)
+                .scaleEffect(shown ? 1 : 0.85)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// The window a picture opens in when it is clicked, opening at one size whatever the picture: the
+/// picture fitted into it, and the record kept beside it, where there is one, in a column on its
+/// right that the toolbar shows and hides. Esc closes it; one deleted while it is open leaves the
+/// window saying so.
 struct PreviewWindow: View {
     var session: Session
     var id: String
 
     @Environment(\.dismiss) private var dismiss
+    @State private var record: String?
+    @AppStorage("preview.showsRecord") private var showsRecord = true
+
+    /// What it opens at: small enough for a 13-inch screen, title bar and all.
+    static let size = CGSize(width: 1000, height: 700)
+
+    init(session: Session, id: String) {
+        self.session = session
+        self.id = id
+        // Read before the first frame, or the column comes in after it and the picture jumps.
+        _record = State(initialValue: session.recordText(id))
+    }
 
     private var job: Job? { session.jobs.first { $0.id == id } }
 
     var body: some View {
-        ZStack {
-            if let image = session.images[id] {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
-                    .background(FitWindow(image: image))
-                    .draggable(Image(nsImage: image))
-                    .contextMenu {
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.writeObjects([image])
+        HStack(spacing: 0) {
+            ZStack {
+                if let image = session.images[id] {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .draggable(Image(nsImage: image))
+                        .contextMenu {
+                            Button("Copy") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.writeObjects([image])
+                            }
                         }
-                    }
-            } else if job == nil {
-                Text("This picture has been deleted.").foregroundStyle(.secondary).padding(40)
-            } else {
-                ProgressView().padding(40)
+                } else if job == nil {
+                    Text("This picture has been deleted.").foregroundStyle(.secondary).padding(40)
+                } else {
+                    ProgressView().padding(40)
+                }
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .hidden()
             }
-            Button("Close") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-                .hidden()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let record, showsRecord {
+                Divider()
+                RecordColumn(text: record).frame(width: 300)
+            }
+        }
+        .frame(minWidth: 400, minHeight: 300)
+        .toolbar {
+            if record != nil {
+                Button {
+                    showsRecord.toggle()
+                } label: {
+                    Label(showsRecord ? "Hide Record" : "Show Record", systemImage: "sidebar.right")
+                }
+                .help(showsRecord ? "Hide how it was made" : "Show how it was made")
+            }
         }
         .navigationTitle(job.map { Media.fileName(created: $0.finished ?? $0.created, kind: $0.kind) } ?? "Preview")
+        // For a window the big frame did not open -- one restored with the app -- whose picture
+        // has not been read.
         .task(id: id) { if let job { await session.load(job) } }
+    }
+}
+
+/// A picture's record as it is on the disk, to read and copy from.
+struct RecordColumn: View {
+    var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Record").font(.headline)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy the record")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            ScrollView {
+                Text(text)
+                    .font(.system(size: 13, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(12)
+            }
+        }
+        .background(.background)
     }
 }
 
@@ -236,43 +329,6 @@ struct PointingHand: NSViewRepresentable {
 
     func makeNSView(context: Context) -> Area { Area() }
     func updateNSView(_ view: Area, context: Context) { view.window?.invalidateCursorRects(for: view) }
-}
-
-/// Shapes the window it is in like `image`, once a picture: as large as the picture's pixels where
-/// the screen has room, smaller where it has not, and held to that shape as it is resized -- so the
-/// picture fills it with nothing round its edges.
-struct FitWindow: NSViewRepresentable {
-    var image: NSImage
-
-    final class Probe: NSView {
-        var fitted: NSSize?
-        var size = NSSize.zero
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            fit()
-        }
-
-        func fit() {
-            guard let window, size.width > 0, size.height > 0, fitted != size else { return }
-            fitted = size
-            let room = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? size
-            let scale = min(1, room.width * 0.9 / size.width, (room.height * 0.9 - 28) / size.height)
-            let content = NSSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
-            window.contentAspectRatio = size
-            window.setContentSize(content)
-            window.center()
-        }
-    }
-
-    func makeNSView(context: Context) -> Probe { Probe() }
-
-    func updateNSView(_ probe: Probe, context: Context) {
-        // In pixels, which is the picture's own shape and size whatever the file says its DPI is.
-        let pixels = image.representations.first.map { NSSize(width: $0.pixelsWide, height: $0.pixelsHigh) }
-        probe.size = pixels.flatMap { $0.width > 0 ? $0 : nil } ?? image.size
-        DispatchQueue.main.async { probe.fit() }
-    }
 }
 
 struct Thumbnail: View {

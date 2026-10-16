@@ -30,10 +30,7 @@ struct DeviceCard: View {
         FormGroup {
             LabeledContent("Device") {
                 Picker("Device", selection: $session.device) {
-                    Text("auto").tag("auto")
-                    Text("metal").tag("metal")
-                    Text("metal_disk_offload").tag("metal_disk_offload")
-                    Text("cpu").tag("cpu")
+                    ForEach(Session.devices, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
                 // The one choice that has to say what it costs: picked without being told, it is

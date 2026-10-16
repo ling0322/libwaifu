@@ -77,6 +77,9 @@ struct JobForm {
 /// the screen shows or plays it.
 struct Held {
     var bytes: Data
+    /// The file it was read from, for a picture's record: nil for one pasted or dropped as bytes
+    /// until a job is drawn from it, which keeps a copy in the output folder.
+    var url: URL?
     var image: NSImage?
     var rgb: RGBImage?
     var clip: AudioClip?
@@ -161,6 +164,9 @@ final class Session {
     private var last: Task<Void, Never>?
 
     static let kinds = ["image", "speech", "conversion"]
+
+    /// What the Model card offers to run on, as the library names them.
+    static let devices = ["auto", "metal", "metal_disk_offload", "cpu"]
 
     init(folder: URL) {
         self.folder = folder
@@ -268,14 +274,27 @@ final class Session {
         folder.appendingPathComponent("\(id).json")
     }
 
+    /// Where pictures pasted or dropped as bytes are kept once a job is drawn from them, so that
+    /// its record has a path to name.
+    private var inputs: URL { folder.appendingPathComponent("inputs") }
+
     /// The jobs kept in the folder, newest first. What each made is read when it is first shown.
+    /// A picture's record is an `ImageRecord`; a sound's, and a picture's from before those, a
+    /// `Record`.
     private func readHistory() {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         let decoder = JSONDecoder()
         jobs = names.filter { $0.hasSuffix(".json") }.compactMap { name -> Job? in
-            guard let data = try? Data(contentsOf: folder.appendingPathComponent(name)),
-                let record = try? decoder.decode(Record.self, from: data)
-            else { return nil }
+            let url = folder.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            if let record = try? decoder.decode(ImageRecord.self, from: data),
+                let made = record.made, let finished = record.finished
+            {
+                return Job(
+                    id: url.deletingPathExtension().lastPathComponent, kind: "image", status: .done,
+                    created: finished, finished: finished, made: made)
+            }
+            guard let record = try? decoder.decode(Record.self, from: data) else { return nil }
             return Job(
                 id: record.id, kind: record.kind, status: .done, created: record.created,
                 finished: record.finished, made: record.made)
@@ -292,6 +311,14 @@ final class Session {
         if job.kind == "image" { images[job.id] = NSImage(data: bytes) }
     }
 
+    /// The record kept beside what job `id` made, as it is written on the disk: nil where there is
+    /// none, and -- as docs/image-metadata.md has it -- for one over 1 MiB or not UTF-8. Read at
+    /// once, so that a preview has it for its first frame: a few kilobytes.
+    func recordText(_ id: String) -> String? {
+        guard let data = try? Data(contentsOf: recordFile(id)), data.count <= 1 << 20 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     /// Writes what a job made, and what made it, and shows it.
     private func keep(_ id: String, bytes: Data, made: Made) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
@@ -305,13 +332,21 @@ final class Session {
         showing = nil
         playing = nil
 
-        let record = Record(id: id, kind: jobs[index].kind, created: jobs[index].created, finished: finished, made: made)
+        let kind = jobs[index].kind
+        let output = file(id, kind: kind)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try bytes.write(to: file(id, kind: record.kind))
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(record).write(to: recordFile(id))
+            try bytes.write(to: output)
+            let json: Data
+            if kind == "image" {
+                json = try ImageRecord(made: made, output: output, finished: finished, library: LibraryVersion.current).json()
+            } else {
+                let record = Record(id: id, kind: kind, created: jobs[index].created, finished: finished, made: made)
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                json = try encoder.encode(record)
+            }
+            try json.write(to: recordFile(id))
         } catch {
             complaint = "could not keep it in \(folder.path): \(error.localizedDescription)"
         }
@@ -480,31 +515,56 @@ final class Session {
         // Both or neither, and neither for a model with no second pass to steer.
         if chosen.guided { request.negative = form.negative }
         let fromAPicture = tab == .img2img
+        // As the engine draws with it.
+        let strength = min(max(form.strength, 0), 1)
         if fromAPicture, let rgb = picture?.rgb {
             request.images = [(key: "start_from", image: rgb)]
-            request.strength = form.strength
+            request.strength = strength
         }
 
-        var parameters = [form.prompt]
-        if chosen.guided, !form.negative.isBlank { parameters.append("Negative prompt: \(form.negative)") }
-        var settings = "Steps: \(form.steps), CFG scale: \(chosen.guided ? form.guidance : chosen.guidance), Seed: \(seed), Size: \(form.width)x\(form.height), Model: \(modelName)"
-        if fromAPicture { settings += ", Denoising strength: \(form.strength)" }
-        parameters.append(settings)
-        let made = Made(
-            seed: seed, seconds: 0, model: modelName, parameters: parameters.joined(separator: "\n"),
-            prompt: form.prompt, negative: chosen.guided ? form.negative : "", width: form.width,
-            height: form.height, steps: form.steps, guidance: chosen.guided ? form.guidance : chosen.guidance,
-            strength: fromAPicture ? form.strength : nil)
+        // What the record calls the model: its published name with the version, or the path of
+        // the manifest it was asked for by.
+        var asked = Made.picture(
+            seed: seed, model: ModelManager.versionedName(modelName) ?? modelName, prompt: form.prompt,
+            negative: chosen.guided ? form.negative : "", width: form.width, height: form.height,
+            steps: form.steps, guidance: chosen.guided ? form.guidance : chosen.guidance,
+            strength: fromAPicture ? strength : nil)
+        if fromAPicture { asked.startFrom = startFrom()?.path }
+        let made = asked
 
         start(kind: "image", model: modelName) { engine, report in
             let started = Date()
-            guard let image = try await engine.draw(request, progress: report),
-                let png = Media.png(image)
-            else { return nil }
-            var made = made
-            made.seconds = Date().timeIntervalSince(started)
-            return (png, made)
+            guard let image = try await engine.draw(request, progress: report) else { return nil }
+            let seconds = Date().timeIntervalSince(started)
+            guard let png = Media.png(image) else { return nil }
+            // What it was drawn at and on, which the boxes need not have said: "auto" is settled
+            // by the engine.
+            var drawn = Made.picture(
+                seed: made.seed, model: made.model, prompt: made.prompt ?? "", negative: made.negative ?? "",
+                width: image.width, height: image.height, steps: made.steps ?? 0,
+                guidance: made.guidance ?? 0, strength: made.strength)
+            drawn.seconds = seconds
+            drawn.device = engine.device.replacingOccurrences(of: "_", with: "-")
+            drawn.startFrom = made.startFrom
+            return (png, drawn)
         }
+    }
+
+    /// The file the held picture is in, for a record to name: the one it was read from, or for one
+    /// pasted or dropped as bytes, a copy kept in the output folder the first time it is drawn from.
+    private func startFrom() -> URL? {
+        guard let held = picture else { return nil }
+        if let url = held.url { return url }
+        let jpeg = held.bytes.starts(with: [0xFF, 0xD8, 0xFF])
+        let copy = inputs.appendingPathComponent("\(UUID().uuidString.lowercased()).\(jpeg ? "jpg" : "png")")
+        do {
+            try FileManager.default.createDirectory(at: inputs, withIntermediateDirectories: true)
+            try held.bytes.write(to: copy)
+        } catch {
+            return nil
+        }
+        picture?.url = copy
+        return copy
     }
 
     private func speak() {
@@ -574,6 +634,12 @@ final class Session {
         jobs.removeAll { $0.id == job.id }
         outputs[job.id] = nil
         images[job.id] = nil
+        // The copy of a pasted picture it started from, once nothing else names it.
+        if let input = job.made?.startFrom, input.hasPrefix(inputs.path + "/"),
+            picture?.url?.path != input, !jobs.contains(where: { $0.made?.startFrom == input })
+        {
+            try? FileManager.default.removeItem(atPath: input)
+        }
     }
 
     /// Deletes every picture or clip in the strip: the current tab's kind, and nothing still going.
@@ -585,6 +651,13 @@ final class Session {
     func reuse(_ job: Job) {
         guard let made = job.made else { return }
         form.seed = String(made.seed)
+        // What it was drawn on, where the record says and the card offers it -- a record spells
+        // it with hyphens -- and not while a job is going, when the card cannot change it either.
+        if let device = made.device?.replacingOccurrences(of: "-", with: "_"),
+            Session.devices.contains(device), !canStop
+        {
+            self.device = device
+        }
         switch job.kind {
         case "image":
             form.prompt = made.prompt ?? form.prompt
@@ -616,19 +689,19 @@ final class Session {
 
     func holdPicture(at url: URL) {
         do {
-            holdPicture(try Media.picture(at: url))
+            holdPicture(try Media.picture(at: url), from: url)
         } catch {
             complaint = error.localizedDescription
         }
     }
 
-    func holdPicture(_ bytes: Data) {
+    func holdPicture(_ bytes: Data, from url: URL? = nil) {
         guard let image = NSImage(data: bytes), let rgb = Media.rgb(image) else {
             complaint = "that is not a picture this Mac can read"
             return
         }
         complaint = nil
-        picture = Held(bytes: bytes, image: image, rgb: rgb)
+        picture = Held(bytes: bytes, url: url?.standardizedFileURL, image: image, rgb: rgb)
         tab = .img2img
     }
 

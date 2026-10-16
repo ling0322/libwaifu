@@ -174,6 +174,8 @@ pub type OnComplete<T> = Box<dyn FnOnce(Ended<T>) + Send>;
 /// every one of them still gets its completion, as cancelled -- drops the model and joins the
 /// thread.
 pub struct Engine {
+    /// What it runs on, `auto` resolved.
+    runtime: Runtime,
     commands: Sender<Command>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
@@ -270,10 +272,16 @@ impl Engine {
             .map_err(|error| format!("could not start the engine's thread: {error}"))?;
 
         Ok(Engine {
+            runtime,
             commands,
             shared,
             thread: Some(thread),
         })
+    }
+
+    /// What it runs on: never `auto`, which is settled when it starts.
+    pub fn runtime(&self) -> Runtime {
+        self.runtime
     }
 
     fn submit(&self, work: Work) -> JobId {

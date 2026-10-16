@@ -53,5 +53,13 @@ let package = Package(
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", build])
             ]
         ),
+        .testTarget(
+            name: "WaifuTests",
+            dependencies: ["Waifu"],
+            path: "Tests/WaifuTests",
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", build])
+            ]
+        ),
     ]
 )
