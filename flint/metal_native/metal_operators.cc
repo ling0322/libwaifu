@@ -381,6 +381,10 @@ void MetalOperators::releaseUnusedMemory() {
   _context->releaseUnusedMemory();
 }
 
+void MetalOperators::setMemoryLimit(int64_t bytes) {
+  _context->setMemoryLimit(bytes);
+}
+
 DType MetalOperators::getDefaultFloatType() {
   return DType::kFloat16;
 }

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
+#include "lutil/error.h"
 #include "lutil/time.h"
 #include "flint/test_functional.h"
 #include "flint/device.h"
@@ -973,22 +974,59 @@ CATCH_TEST_CASE("test Metal memory statistics", "[op][metal]") {
 }
 
 
-CATCH_TEST_CASE("test Metal allocation the device cannot give is nullopt", "[op][metal]") {
+CATCH_TEST_CASE("test Metal allocation the device cannot give is out of memory", "[op][metal]") {
   SKIP_WITHOUT_METAL();
+  using op::metal_native::Buffer;
 
   // A terabyte: more than any Mac's buffer can be, so the device refuses it however much is free.
   std::shared_ptr<op::metal_native::Context> context = op::metal_native::Context::get();
-  int64_t before = context->captureMemorySnapshot().getAllocatedMemory();
-  std::optional<op::metal_native::Buffer> refused = context->allocate(int64_t(1) << 40);
-  CATCH_REQUIRE_FALSE(refused.has_value());
-  CATCH_REQUIRE(context->captureMemorySnapshot().getAllocatedMemory() == before);
+  int64_t before = context->getAllocatedBytes();
+  CATCH_REQUIRE_THROWS_AS(context->allocate(int64_t(1) << 40), lut::OutOfMemoryError);
+  CATCH_REQUIRE(context->getAllocatedBytes() == before);
+
+  // Its own kind of error, so that a caller can tell it from every other failure.
+  try {
+    context->allocate(int64_t(1) << 40);
+  } catch (const lut::Error &e) {
+    CATCH_REQUIRE(e.getCode() == lut::ErrorCode::OutOfMemory);
+  }
 
   // And nothing is left broken by it: the next allocation that fits is had as before.
-  std::optional<op::metal_native::Buffer> taken = context->allocate(1 << 20);
-  CATCH_REQUIRE(taken.has_value());
-  CATCH_REQUIRE((*taken)->size >= 1 << 20);
-  context->free(*taken);
-  CATCH_REQUIRE(context->captureMemorySnapshot().getAllocatedMemory() == before);
+  Buffer taken = context->allocate(1 << 20);
+  CATCH_REQUIRE(taken->size >= 1 << 20);
+  context->free(taken);
+  CATCH_REQUIRE(context->getAllocatedBytes() == before);
+}
+
+CATCH_TEST_CASE("test Metal allocation past the memory limit is out of memory", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  using op::metal_native::Buffer;
+
+  std::shared_ptr<op::metal_native::Context> context = op::metal_native::Context::get();
+  context->releaseUnusedMemory();
+
+  // Room for one 600 MB tensor and not two. Larger than a chunk, so no chunk already held -- every
+  // one of them in use, now that the empty ones have gone -- has room for it.
+  constexpr int64_t kBig = 600 << 20;
+  context->setMemoryLimit(context->getHeldBytes() + (1 << 30));
+
+  Buffer first = context->allocate(kBig);
+  CATCH_REQUIRE(context->getHeldBytes() <= context->getMemoryLimit());
+  CATCH_REQUIRE_THROWS_AS(context->allocate(kBig), lut::OutOfMemoryError);
+  CATCH_REQUIRE(context->getHeldBytes() <= context->getMemoryLimit());
+
+  // Given back, the bytes are there for the next tensor, inside the limit.
+  context->free(first);
+  Buffer again = context->allocate(kBig);
+  context->free(again);
+
+  // And no limit is the device's limit again.
+  context->setMemoryLimit(0);
+  Buffer a = context->allocate(kBig);
+  Buffer b = context->allocate(kBig);
+  context->free(a);
+  context->free(b);
+  context->releaseUnusedMemory();
 }
 
 // Not a test: how fast the products are, on shapes an SDXL U-Net at 1024 x 1024 multiplies.

@@ -207,7 +207,7 @@ MTL::ComputePipelineState *Context::getKernel(const char *name) {
   return _kernels.emplace(name, pipeline).first->second;
 }
 
-std::optional<Buffer> Context::allocate(int64_t bytes) {
+Buffer Context::allocate(int64_t bytes) {
   CHECK(bytes > 0);
   int64_t size = BlockAllocator::roundUp(bytes);
 
@@ -215,9 +215,30 @@ std::optional<Buffer> Context::allocate(int64_t bytes) {
   Block *block = _blocks.take(size);
   if (!block) {
     // Nothing free is large enough: a new chunk, kChunkSize unless the tensor is larger.
-    int64_t chunkSize = std::max(
-        kChunkSize,
-        (size + kChunkGranule - 1) / kChunkGranule * kChunkGranule);
+    int64_t needed = (size + kChunkGranule - 1) / kChunkGranule * kChunkGranule;
+    int64_t chunkSize = std::max(kChunkSize, needed);
+
+    // Within the limit, if there is one: the empty chunks go back first where a new one would pass
+    // it, and the new one is no larger than the room that leaves -- a limit is not to be spent on
+    // the part of a chunk no tensor asked for. Where even the tensor does not fit, nothing is
+    // asked of the device.
+    if (_memoryLimit > 0) {
+      if (_blocks.getHeldBytes() + chunkSize > _memoryLimit) {
+        synchronize();
+        releaseEmptyChunks();
+      }
+      int64_t room = (_memoryLimit - _blocks.getHeldBytes()) / kChunkGranule * kChunkGranule;
+      if (needed > room) {
+        throw lut::OutOfMemoryError(lut::sprintf(
+            "%d bytes more would take the Metal device past its limit of %d bytes (%d held, %d "
+            "by tensors)",
+            needed,
+            _memoryLimit,
+            _blocks.getHeldBytes(),
+            _allocatedBytes));
+      }
+      chunkSize = std::min(chunkSize, room);
+    }
 
     // A tensor larger than a chunk has one of its own, and the empty chunks there are -- every one
     // too small for it, or take() would have found it -- go back before it is made, once the
@@ -241,7 +262,12 @@ std::optional<Buffer> Context::allocate(int64_t bytes) {
       releaseEmptyChunks();
       created = _device->newBuffer(static_cast<NS::UInteger>(chunkSize), kBufferOptions);
     }
-    if (!created) return std::nullopt;
+    if (!created) {
+      throw lut::OutOfMemoryError(lut::sprintf(
+          "the Metal device could not allocate %d bytes (%d held by tensors)",
+          chunkSize,
+          _allocatedBytes));
+    }
 
     _blocks.addChunk(created, chunkSize);
     block = _blocks.take(size);
@@ -277,6 +303,27 @@ void Context::releaseEmptyChunks(int64_t largerThan) {
     _blocks.removeChunk(chunk);
     buffer->release();
   }
+}
+
+void Context::setMemoryLimit(int64_t bytes) {
+  CHECK(bytes >= 0);
+  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  _memoryLimit = bytes;
+}
+
+int64_t Context::getMemoryLimit() {
+  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  return _memoryLimit;
+}
+
+int64_t Context::getHeldBytes() {
+  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  return _blocks.getHeldBytes();
+}
+
+int64_t Context::getAllocatedBytes() {
+  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  return _allocatedBytes;
 }
 
 void Context::releaseUnusedMemory() {

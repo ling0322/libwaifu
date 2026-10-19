@@ -27,7 +27,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -119,10 +118,26 @@ class Context {
     return _info;
   }
 
-  /// A buffer of at least `bytes` bytes, cut from a chunk the context holds, or from a new one;
-  /// std::nullopt when the device is out of memory even after the empty chunks have gone back,
-  /// which is the caller's to report or to make room for.
-  std::optional<Buffer> allocate(int64_t bytes);
+  /// A buffer of at least `bytes` bytes, cut from a chunk the context holds, or from a new one.
+  /// @throw lut::OutOfMemoryError when the device is out of memory, or a new chunk would take the
+  ///     context past its memory limit, even after the empty chunks have gone back. Nothing is
+  ///     taken then, so a caller that frees something may ask again.
+  Buffer allocate(int64_t bytes);
+
+  /// The most the chunks the context holds may come to, in bytes; 0, the default, for no limit
+  /// but the device's. A tensor that fits in a chunk already held is cut from it whatever the
+  /// limit; one that needs a new chunk past it is refused by allocate(). Lowering it below
+  /// what is held lets nothing go: the chunks in use stay, and the limit holds from the next
+  /// chunk on.
+  void setMemoryLimit(int64_t bytes);
+  int64_t getMemoryLimit();
+
+  /// The bytes of the chunks the context holds -- in use or not -- which is what the limit counts.
+  int64_t getHeldBytes();
+
+  /// The bytes the tensors hold: each one's size rounded up to the allocator's alignment, and none
+  /// of the free blocks or empty chunks beside them. What a snapshot calls allocated.
+  int64_t getAllocatedBytes();
 
   /// Hand `buffer`'s bytes back, for the next tensor that fits in them. The chunk stays the
   /// context's even once nothing is cut from it: chunks go back to the device only in
@@ -211,6 +226,7 @@ class Context {
   BlockAllocator _blocks;
   int64_t _allocatedBytes = 0;
   int64_t _peakAllocatedBytes = 0;
+  int64_t _memoryLimit = 0;  // 0 for none
 
   Context() = default;
 

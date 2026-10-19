@@ -568,6 +568,11 @@ FLAPI int32_t fl_memory_reset_peak_stats(fl_device_type_t device);
 /// otherwise have reused.
 FLAPI int32_t fl_memory_release_unused(fl_device_type_t device);
 
+/// Limit the memory the allocator of `device` holds -- its tensors and what it keeps for reuse --
+/// to `bytes`; 0 for no limit but the device's. An allocation that would pass it fails as one the
+/// device cannot give does. Only Metal has one: any other device is refused.
+FLAPI int32_t fl_memory_set_limit(fl_device_type_t device, int64_t bytes);
+
 /// What fl_set_fatal_handler() registers.
 typedef void (*fl_fatal_handler_t)(void);
 

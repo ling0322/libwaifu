@@ -1314,3 +1314,11 @@ int32_t fl_memory_release_unused(fl_device_type_t device) {
     return clearError();
   });
 }
+
+int32_t fl_memory_set_limit(fl_device_type_t device, int64_t bytes) {
+  return guard([&]() {
+    if (bytes < 0) throw lut::InvalidArgError("a memory limit is at least 0");
+    fl::MemorySnapshot::setLimit(toDevice(device), bytes);
+    return clearError();
+  });
+}

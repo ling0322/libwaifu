@@ -412,6 +412,18 @@ impl MemorySnapshot {
         init();
         check(unsafe { ffi::fl_memory_release_unused(device as i32) })
     }
+
+    /// Limit what the allocator of `device` holds -- its tensors and the memory it keeps for reuse
+    /// -- to `bytes`, 0 for no limit but the device's. An allocation that would pass it fails the
+    /// call that asked for it, as one the device cannot give does, and takes nothing: whatever
+    /// was let go of on the way out is there for the next call.
+    ///
+    /// The process's, not a model's: there is one allocator per device. Only Metal has one, and
+    /// any other device is refused.
+    pub fn set_limit(device: Device, bytes: i64) -> Result<()> {
+        init();
+        check(unsafe { ffi::fl_memory_set_limit(device as i32, bytes) })
+    }
 }
 
 /// Storage: a run of elements of one dtype on one device, owned here and shared by every tensor

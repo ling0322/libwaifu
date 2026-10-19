@@ -46,6 +46,12 @@ class MemorySnapshot {
   /// @param device The device to hand memory back on.
   static void releaseUnused(Device device);
 
+  /// @brief Limit the memory a device's allocator holds to `bytes`, 0 for no limit but the
+  /// device's: an allocation that would pass it throws lut::OutOfMemoryError. Only Metal has one.
+  /// @param device The device to limit.
+  /// @param bytes The limit, at least 0.
+  static void setLimit(Device device, int64_t bytes);
+
   MemorySnapshot(
       int64_t totalMemory,
       int64_t freeMemory,

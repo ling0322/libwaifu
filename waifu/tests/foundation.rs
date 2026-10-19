@@ -807,6 +807,108 @@ fn a_hybrid_package_keeps_the_smallest_weights_on_metal() {
     assert_eq!(run(&hybrid), expected, "the second step reads the same");
 }
 
+/// A run that runs out of the memory it is allowed partway through says so and leaves nothing
+/// behind: the same weights run again once there is room, and give what they gave before.
+///
+/// What letting a weight go when memory runs out is to be built on. Running out is to be a common
+/// path, answered by freeing something and running the instruction again, so what is checked is
+/// that failing is clean and not only that it fails.
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again() {
+    const MB: i64 = 1 << 20;
+    let a: Vec<f32> = (0..1024 * 1024)
+        .map(|i| ((i % 13) as f32 - 6.0) / 64.0)
+        .collect();
+    let b: Vec<f32> = (0..1024 * 4096)
+        .map(|i| ((i % 7) as f32 - 3.0) / 64.0)
+        .collect();
+    let file = TempFile::new(&write_laid_out(&[
+        ("a.weight", "F32", &[1024, 1024], f32_bytes(&a)),
+        ("b.weight", "F32", &[1024, 4096], f32_bytes(&b)),
+    ]));
+
+    // y = silu(x a) b: `a` is 4 MB and `b` 16 MB, and both wait in the file until their load. So
+    // a run under 8 MB gets through the first product and fails at the second weight.
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let h = graph.silu(graph.matmul(x, graph.load("a.weight", &[1024, 1024])));
+    graph.output("y", graph.matmul(h, graph.load("b.weight", &[1024, 4096])));
+    let ir = Ir::compile(&graph);
+
+    let weights = Weights::from_files(
+        &[&file.0],
+        Device::Metal,
+        Residency::Hybrid {
+            device_weight_bytes: 0,
+        },
+    )
+    .unwrap();
+    let input: Vec<f32> = (0..64 * 1024)
+        .map(|i| ((i % 11) as f32 - 5.0) / 8.0)
+        .collect();
+    let run = |weights: &Weights| {
+        let x = Tensor::from_f32(&[64, 1024], &input)
+            .unwrap()
+            .to_device(Device::Metal)
+            .unwrap();
+        ir.run(&RunContext::new(weights).input("x", &x))
+            .map(|out| to_host(&out[0].1))
+    };
+    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
+
+    let expected = run(&weights).unwrap();
+    MemorySnapshot::release_unused(Device::Metal).unwrap();
+    assert_eq!(
+        allocated(),
+        0,
+        "nothing on the device before the limit is set"
+    );
+
+    // Lifted however the test ends, so that no other test runs under it.
+    struct Unlimited;
+    impl Drop for Unlimited {
+        fn drop(&mut self) {
+            let _ = MemorySnapshot::set_limit(Device::Metal, 0);
+        }
+    }
+    let _unlimited = Unlimited;
+
+    MemorySnapshot::set_limit(Device::Metal, 8 * MB).unwrap();
+    let error = run(&weights).unwrap_err().to_string();
+    assert!(error.contains("OutOfMemory"), "{error}");
+    assert!(
+        error.contains("b.weight"),
+        "failed at the second weight: {error}"
+    );
+    assert_eq!(
+        allocated(),
+        0,
+        "the input, the first weight and the product before it are all let go of"
+    );
+
+    // Room enough under a limit, and no limit at all: the same weights, the same answer.
+    MemorySnapshot::set_limit(Device::Metal, 64 * MB).unwrap();
+    assert_eq!(run(&weights).unwrap(), expected);
+    MemorySnapshot::set_limit(Device::Metal, 0).unwrap();
+    assert_eq!(run(&weights).unwrap(), expected);
+}
+
+/// Only Metal's allocator takes a limit. Any other device says so rather than taking a number it
+/// would do nothing with, and a limit below nothing is refused before any device is asked.
+#[test]
+fn only_metal_takes_a_memory_limit() {
+    let error = MemorySnapshot::set_limit(Device::Cpu, 1 << 30)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no kernel on this device"), "{error}");
+
+    let error = MemorySnapshot::set_limit(Device::Cpu, -1)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("at least 0"), "{error}");
+}
+
 /// Asking a device to hand its spare memory back is a question every device answers, including
 /// the one that has nothing to answer it with.
 ///

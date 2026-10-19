@@ -31,6 +31,8 @@ std::string getErrorCodeName(ErrorCode code) {
       return "InvalidArg";
     case ErrorCode::NotImplemented:
       return "NotImplemented";
+    case ErrorCode::OutOfMemory:
+      return "OutOfMemory";
     default:
       return "Unknown";
   }
@@ -71,6 +73,10 @@ InvalidArgError::InvalidArgError(const std::string &what)
 
 NotImplementedError::NotImplementedError(const std::string &what)
     : Error(ErrorCode::InvalidArg, buildErrorMsg(ErrorCode::NotImplemented, what)) {
+}
+
+OutOfMemoryError::OutOfMemoryError(const std::string &what)
+    : Error(ErrorCode::OutOfMemory, buildErrorMsg(ErrorCode::OutOfMemory, what)) {
 }
 
 }  // namespace lut
