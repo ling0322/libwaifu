@@ -31,14 +31,14 @@ std::unique_ptr<TensorData> MetalTensorData::create(int64_t numel, DType dtype) 
 
   std::unique_ptr<MetalTensorData> data(new MetalTensorData());
   data->_context = Context::get();
-  data->_buffer = data->_context->allocate(dtype.getTotalSize(numel));
+  data->_buffer = data->_context->getAllocator().allocate(dtype.getTotalSize(numel));
   data->_numel = numel;
   data->_dtype = dtype;
   return data;
 }
 
 MetalTensorData::~MetalTensorData() {
-  if (_buffer) _context->free(_buffer);
+  if (_buffer) _context->getAllocator().free(_buffer);
 }
 
 Device MetalTensorData::getDevice() const {

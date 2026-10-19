@@ -979,54 +979,54 @@ CATCH_TEST_CASE("test Metal allocation the device cannot give is out of memory",
   using op::metal_native::Buffer;
 
   // A terabyte: more than any Mac's buffer can be, so the device refuses it however much is free.
-  std::shared_ptr<op::metal_native::Context> context = op::metal_native::Context::get();
-  int64_t before = context->getAllocatedBytes();
-  CATCH_REQUIRE_THROWS_AS(context->allocate(int64_t(1) << 40), lut::OutOfMemoryError);
-  CATCH_REQUIRE(context->getAllocatedBytes() == before);
+  op::metal_native::VRamAllocator &allocator = op::metal_native::Context::get()->getAllocator();
+  int64_t before = allocator.getAllocatedBytes();
+  CATCH_REQUIRE_THROWS_AS(allocator.allocate(int64_t(1) << 40), lut::OutOfMemoryError);
+  CATCH_REQUIRE(allocator.getAllocatedBytes() == before);
 
   // Its own kind of error, so that a caller can tell it from every other failure.
   try {
-    context->allocate(int64_t(1) << 40);
+    allocator.allocate(int64_t(1) << 40);
   } catch (const lut::Error &e) {
     CATCH_REQUIRE(e.getCode() == lut::ErrorCode::OutOfMemory);
   }
 
   // And nothing is left broken by it: the next allocation that fits is had as before.
-  Buffer taken = context->allocate(1 << 20);
+  Buffer taken = allocator.allocate(1 << 20);
   CATCH_REQUIRE(taken->size >= 1 << 20);
-  context->free(taken);
-  CATCH_REQUIRE(context->getAllocatedBytes() == before);
+  allocator.free(taken);
+  CATCH_REQUIRE(allocator.getAllocatedBytes() == before);
 }
 
 CATCH_TEST_CASE("test Metal allocation past the memory limit is out of memory", "[op][metal]") {
   SKIP_WITHOUT_METAL();
   using op::metal_native::Buffer;
 
-  std::shared_ptr<op::metal_native::Context> context = op::metal_native::Context::get();
-  context->releaseUnusedMemory();
+  op::metal_native::VRamAllocator &allocator = op::metal_native::Context::get()->getAllocator();
+  allocator.releaseUnusedMemory();
 
   // Room for one 600 MB tensor and not two. Larger than a chunk, so no chunk already held -- every
   // one of them in use, now that the empty ones have gone -- has room for it.
   constexpr int64_t kBig = 600 << 20;
-  context->setMemoryLimit(context->getHeldBytes() + (1 << 30));
+  allocator.setMemoryLimit(allocator.getHeldBytes() + (1 << 30));
 
-  Buffer first = context->allocate(kBig);
-  CATCH_REQUIRE(context->getHeldBytes() <= context->getMemoryLimit());
-  CATCH_REQUIRE_THROWS_AS(context->allocate(kBig), lut::OutOfMemoryError);
-  CATCH_REQUIRE(context->getHeldBytes() <= context->getMemoryLimit());
+  Buffer first = allocator.allocate(kBig);
+  CATCH_REQUIRE(allocator.getHeldBytes() <= allocator.getMemoryLimit());
+  CATCH_REQUIRE_THROWS_AS(allocator.allocate(kBig), lut::OutOfMemoryError);
+  CATCH_REQUIRE(allocator.getHeldBytes() <= allocator.getMemoryLimit());
 
   // Given back, the bytes are there for the next tensor, inside the limit.
-  context->free(first);
-  Buffer again = context->allocate(kBig);
-  context->free(again);
+  allocator.free(first);
+  Buffer again = allocator.allocate(kBig);
+  allocator.free(again);
 
   // And no limit is the device's limit again.
-  context->setMemoryLimit(0);
-  Buffer a = context->allocate(kBig);
-  Buffer b = context->allocate(kBig);
-  context->free(a);
-  context->free(b);
-  context->releaseUnusedMemory();
+  allocator.setMemoryLimit(0);
+  Buffer a = allocator.allocate(kBig);
+  Buffer b = allocator.allocate(kBig);
+  allocator.free(a);
+  allocator.free(b);
+  allocator.releaseUnusedMemory();
 }
 
 // Not a test: how fast the products are, on shapes an SDXL U-Net at 1024 x 1024 multiplies.

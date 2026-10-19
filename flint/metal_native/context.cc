@@ -46,20 +46,6 @@ constexpr uint64_t kMaxBatchesInFlight = 3;
 // long run of work while the rest is still being encoded.
 constexpr int kCommandsPerBatch = 64;
 
-// The size of a chunk, which tensors are cut from; a tensor larger than that has a chunk of its
-// own, rounded up to the granule.
-constexpr int64_t kChunkSize = 512 << 20;
-constexpr int64_t kChunkGranule = 2 << 20;
-
-// Making a chunk larger than this first hands back the empty chunks larger than it. See
-// Context::allocate.
-constexpr int64_t kLargeChunk = 512 << 20;
-
-// Every buffer is shared memory, which the host addresses directly, and untracked: the order
-// work is encoded in is what keeps it from racing, see the class comment.
-constexpr MTL::ResourceOptions kBufferOptions =
-    MTL::ResourceStorageModeShared | MTL::ResourceHazardTrackingModeUntracked;
-
 // What metal-cpp hands back autoreleased has to be made inside a pool, or it is never released.
 class Pool {
  public:
@@ -184,6 +170,9 @@ void Context::open() {
   LOG(INFO) << "Metal device: " << _info.name << ", "
             << _info.workingSetBytes / (1 << 20) << " MB working set"
             << (_naxLibrary ? ", neural accelerators" : "");
+
+  _allocator = std::make_unique<VRamAllocator>(
+      _device, _info.workingSetBytes, [this]() { synchronize(); });
 }
 
 MTL::ComputePipelineState *Context::getKernel(const char *name) {
@@ -207,146 +196,6 @@ MTL::ComputePipelineState *Context::getKernel(const char *name) {
   return _kernels.emplace(name, pipeline).first->second;
 }
 
-Buffer Context::allocate(int64_t bytes) {
-  CHECK(bytes > 0);
-  int64_t size = BlockAllocator::roundUp(bytes);
-
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  Block *block = _blocks.take(size);
-  if (!block) {
-    // Nothing free is large enough: a new chunk, kChunkSize unless the tensor is larger.
-    int64_t needed = (size + kChunkGranule - 1) / kChunkGranule * kChunkGranule;
-    int64_t chunkSize = std::max(kChunkSize, needed);
-
-    // Within the limit, if there is one: the empty chunks go back first where a new one would pass
-    // it, and the new one is no larger than the room that leaves -- a limit is not to be spent on
-    // the part of a chunk no tensor asked for. Where even the tensor does not fit, nothing is
-    // asked of the device.
-    if (_memoryLimit > 0) {
-      if (_blocks.getHeldBytes() + chunkSize > _memoryLimit) {
-        synchronize();
-        releaseEmptyChunks();
-      }
-      int64_t room = (_memoryLimit - _blocks.getHeldBytes()) / kChunkGranule * kChunkGranule;
-      if (needed > room) {
-        throw lut::OutOfMemoryError(lut::sprintf(
-            "%d bytes more would take the Metal device past its limit of %d bytes (%d held, %d "
-            "by tensors)",
-            needed,
-            _memoryLimit,
-            _blocks.getHeldBytes(),
-            _allocatedBytes));
-      }
-      chunkSize = std::min(chunkSize, room);
-    }
-
-    // A tensor larger than a chunk has one of its own, and the empty chunks there are -- every one
-    // too small for it, or take() would have found it -- go back before it is made, once the
-    // device is done with them, rather than sit beside it until the work is over. That is where
-    // a model's stages change: the denoiser's chunks, say, when the decoder's first gigabyte
-    // comes. A tensor that size that fits in an empty chunk takes it instead, and nothing waits.
-    if (chunkSize > kLargeChunk) {
-      synchronize();
-      releaseEmptyChunks();
-    }
-
-    // Past the budget, every empty chunk goes back before more is asked for.
-    if (static_cast<int64_t>(_device->currentAllocatedSize()) + chunkSize > _info.workingSetBytes) {
-      synchronize();
-      releaseEmptyChunks();
-    }
-
-    MTL::Buffer *created = _device->newBuffer(static_cast<NS::UInteger>(chunkSize), kBufferOptions);
-    if (!created) {
-      synchronize();
-      releaseEmptyChunks();
-      created = _device->newBuffer(static_cast<NS::UInteger>(chunkSize), kBufferOptions);
-    }
-    if (!created) {
-      throw lut::OutOfMemoryError(lut::sprintf(
-          "the Metal device could not allocate %d bytes (%d held by tensors)",
-          chunkSize,
-          _allocatedBytes));
-    }
-
-    _blocks.addChunk(created, chunkSize);
-    block = _blocks.take(size);
-    CHECK(block);
-  }
-
-  Buffer buffer = std::make_shared<BufferState>();
-  buffer->buffer = static_cast<MTL::Buffer *>(block->chunk->handle);
-  buffer->offset = block->offset;
-  buffer->size = block->size;
-  // Bytes another tensor had, which work still queued may use: the host waits for it.
-  buffer->lastUse = block->lastUse;
-  buffer->block = block;
-
-  _allocatedBytes += buffer->size;
-  _peakAllocatedBytes = std::max(_peakAllocatedBytes, _allocatedBytes);
-  return buffer;
-}
-
-void Context::free(const Buffer &buffer) {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  _allocatedBytes -= buffer->size;
-  _blocks.give(buffer->block, buffer->lastUse);
-  buffer->block = nullptr;
-}
-
-void Context::releaseEmptyChunks(int64_t largerThan) {
-  // The command buffers do not retain what they use, which is why this comes only after
-  // synchronize(): the device has to be done with a chunk before it goes.
-  for (Chunk *chunk : _blocks.emptyChunks()) {
-    if (chunk->size <= largerThan) continue;
-    MTL::Buffer *buffer = static_cast<MTL::Buffer *>(chunk->handle);
-    _blocks.removeChunk(chunk);
-    buffer->release();
-  }
-}
-
-void Context::setMemoryLimit(int64_t bytes) {
-  CHECK(bytes >= 0);
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  _memoryLimit = bytes;
-}
-
-int64_t Context::getMemoryLimit() {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  return _memoryLimit;
-}
-
-int64_t Context::getHeldBytes() {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  return _blocks.getHeldBytes();
-}
-
-int64_t Context::getAllocatedBytes() {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  return _allocatedBytes;
-}
-
-void Context::releaseUnusedMemory() {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  synchronize();
-  releaseEmptyChunks();
-}
-
-MemorySnapshot Context::captureMemorySnapshot() {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-
-  // One pool of memory for the host and the device, so what is free is what the budget leaves
-  // after everything this process has on the GPU, the cache included.
-  int64_t total = _info.workingSetBytes;
-  int64_t free = total - static_cast<int64_t>(_device->currentAllocatedSize());
-  return MemorySnapshot(total, std::max<int64_t>(0, free), _allocatedBytes, _peakAllocatedBytes);
-}
-
-void Context::resetPeakMemoryStats() {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
-  _peakAllocatedBytes = _allocatedBytes;
-}
-
 MTL::ComputeCommandEncoder *Context::beginCommand(
     MTL::ComputePipelineState *kernel,
     std::initializer_list<Arg> args,
@@ -363,8 +212,8 @@ MTL::ComputeCommandEncoder *Context::beginCommand(
 
   // Every command waits for every one before it in this encoder, and writes nothing until what
   // they wrote is there to be read. Coarser than saying which buffers each one touches, and it is
-  // what makes the order work was asked for in the order it runs in, which the buffer cache
-  // depends on.
+  // what makes the order work was asked for in the order it runs in, which the allocator depends
+  // on.
   _encoder->memoryBarrier(MTL::BarrierScopeBuffers);
   _encoder->setComputePipelineState(kernel);
 
@@ -394,7 +243,7 @@ void Context::dispatch(
     int groupSize) {
   if (threads <= 0) return;
 
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  std::lock_guard<std::mutex> lock(_mutex);
   MTL::ComputePipelineState *pipeline = getKernel(kernel);
   NS::UInteger width = std::min<NS::UInteger>(
       static_cast<NS::UInteger>(groupSize),
@@ -418,7 +267,7 @@ void Context::dispatchGroups(
     uint32_t threadsPerGroup) {
   if (groupsX == 0 || groupsY == 0 || groupsZ == 0) return;
 
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  std::lock_guard<std::mutex> lock(_mutex);
   MTL::ComputePipelineState *pipeline = getKernel(kernel);
   CHECK(threadsPerGroup <= pipeline->maxTotalThreadsPerThreadgroup());
 
@@ -491,7 +340,7 @@ void Context::retireFinished() {
 }
 
 void Context::synchronize() {
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  std::lock_guard<std::mutex> lock(_mutex);
   submit();
   waitFor(_submittedSerial);
   retireFinished();
@@ -501,7 +350,7 @@ void Context::upload(const void *src, const Buffer &dest, int64_t offset, int64_
   if (bytes == 0) return;
   CHECK(offset >= 0 && offset + bytes <= dest->size);
 
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  std::lock_guard<std::mutex> lock(_mutex);
   waitFor(dest->lastUse);
   memcpy(static_cast<std::byte *>(dest->buffer->contents()) + dest->offset + offset, src, bytes);
 }
@@ -510,7 +359,7 @@ void Context::download(const Buffer &src, int64_t offset, void *dest, int64_t by
   if (bytes == 0) return;
   CHECK(offset >= 0 && offset + bytes <= src->size);
 
-  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  std::lock_guard<std::mutex> lock(_mutex);
   waitFor(src->lastUse);
   memcpy(
       dest, static_cast<const std::byte *>(src->buffer->contents()) + src->offset + offset, bytes);

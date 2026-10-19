@@ -221,6 +221,7 @@ if(WITH_METAL)
         "metal_native/shape.cc"
         "metal_native/signal.cc"
         "metal_native/to_device.cc"
+        "metal_native/vram_allocator.cc"
         "${CMAKE_CURRENT_BINARY_DIR}/metal_kernels/metallib.cc"
         "${CMAKE_CURRENT_BINARY_DIR}/metal_kernels/nax_metallib.cc")
     set(flint_test_SOURCES

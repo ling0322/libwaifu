@@ -24,19 +24,16 @@
 #include <condition_variable>
 #include <deque>
 #include <initializer_list>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <string>
 #include <unordered_map>
 
-#include "flint/memory.h"
-#include "flint/metal_native/block_allocator.h"
+#include "flint/metal_native/vram_allocator.h"
 
 // metal-cpp's types, named and not included: only context.cc talks to Metal.
 namespace MTL {
-class Buffer;
 class CommandBuffer;
 class CommandQueue;
 class ComputeCommandEncoder;
@@ -49,20 +46,6 @@ class Library;
 namespace fl {
 namespace op {
 namespace metal_native {
-
-/// One tensor's storage: a run of shared memory, which the GPU and the host both address, cut
-/// from a larger buffer the context holds.
-///
-/// It remembers the last batch of work that was handed it, which is what the host waits for
-/// before it touches the bytes -- and only that batch, not everything queued.
-struct BufferState {
-  MTL::Buffer *buffer = nullptr;  // the chunk's
-  int64_t offset = 0;             // where the run starts in it
-  int64_t size = 0;               // what was allocated, which is the size asked for rounded up
-  uint64_t lastUse = 0;
-  Block *block = nullptr;
-};
-using Buffer = std::shared_ptr<BufferState>;
 
 /// What a kernel is handed for one of its tensors: a buffer, and where in it the tensor starts.
 struct Arg {
@@ -80,7 +63,7 @@ struct DeviceInfo {
 };
 
 /// The Metal device, and everything that is shared by the tensors on it: the queue its work goes
-/// to, the kernels it has built and the buffers it keeps for reuse. The Vulkan backend's Context,
+/// to, the kernels it has built and the allocator its tensors' memory comes from. The Vulkan backend's Context,
 /// in Metal's terms.
 ///
 /// Work is encoded into a command buffer rather than run as it is asked for, and committed a
@@ -118,39 +101,10 @@ class Context {
     return _info;
   }
 
-  /// A buffer of at least `bytes` bytes, cut from a chunk the context holds, or from a new one.
-  /// @throw lut::OutOfMemoryError when the device is out of memory, or a new chunk would take the
-  ///     context past its memory limit, even after the empty chunks have gone back. Nothing is
-  ///     taken then, so a caller that frees something may ask again.
-  Buffer allocate(int64_t bytes);
-
-  /// The most the chunks the context holds may come to, in bytes; 0, the default, for no limit
-  /// but the device's. A tensor that fits in a chunk already held is cut from it whatever the
-  /// limit; one that needs a new chunk past it is refused by allocate(). Lowering it below
-  /// what is held lets nothing go: the chunks in use stay, and the limit holds from the next
-  /// chunk on.
-  void setMemoryLimit(int64_t bytes);
-  int64_t getMemoryLimit();
-
-  /// The bytes of the chunks the context holds -- in use or not -- which is what the limit counts.
-  int64_t getHeldBytes();
-
-  /// The bytes the tensors hold: each one's size rounded up to the allocator's alignment, and none
-  /// of the free blocks or empty chunks beside them. What a snapshot calls allocated.
-  int64_t getAllocatedBytes();
-
-  /// Hand `buffer`'s bytes back, for the next tensor that fits in them. The chunk stays the
-  /// context's even once nothing is cut from it: chunks go back to the device only in
-  /// releaseUnusedMemory(), or when the budget would be passed.
-  void free(const Buffer &buffer);
-
-  /// Wait for the device and hand every empty chunk back. What a caller does when it is done with
-  /// a piece of work -- a whole image, say -- so that what the work needed at its peak is not kept
-  /// until the next.
-  void releaseUnusedMemory();
-
-  MemorySnapshot captureMemorySnapshot();
-  void resetPeakMemoryStats();
+  /// Where the tensors on the device get their storage.
+  VRamAllocator &getAllocator() {
+    return *_allocator;
+  }
 
   /// Encode a dispatch of the kernel called `kernel` over `threads` threads in threadgroups of
   /// `groupSize`, the last one cut short where `threads` is not a multiple of it. `args` are bound
@@ -191,9 +145,9 @@ class Context {
     uint64_t serial = 0;
   };
 
-  // Guarded by _mutex. Recursive because allocate() empties the cache through synchronize() when
-  // the device runs out.
-  std::recursive_mutex _mutex;
+  // Guarded by _mutex. Nothing is asked of the allocator while it is held: the allocator calls
+  // synchronize() with its own lock held.
+  std::mutex _mutex;
 
   MTL::Device *_device = nullptr;
   MTL::CommandQueue *_queue = nullptr;
@@ -222,11 +176,7 @@ class Context {
   std::set<uint64_t> _finished;  // finished, but after one that has not
   std::string _error;
 
-  // The chunks the tensors are cut from, and what the tensors hold.
-  BlockAllocator _blocks;
-  int64_t _allocatedBytes = 0;
-  int64_t _peakAllocatedBytes = 0;
-  int64_t _memoryLimit = 0;  // 0 for none
+  std::unique_ptr<VRamAllocator> _allocator;
 
   Context() = default;
 
@@ -250,10 +200,6 @@ class Context {
   void waitFor(uint64_t serial);
   // Forgets committed batches that have finished.
   void retireFinished();
-
-  // Hands every empty chunk larger than `largerThan` bytes back to the device, which has to be
-  // done with them: called only after synchronize().
-  void releaseEmptyChunks(int64_t largerThan = 0);
 };
 
 }  // namespace metal_native

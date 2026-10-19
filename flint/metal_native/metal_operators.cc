@@ -370,19 +370,19 @@ void MetalOperators::manualSeed(uint64_t seed) {
 }
 
 MemorySnapshot MetalOperators::captureMemorySnapshot() {
-  return _context->captureMemorySnapshot();
+  return _context->getAllocator().captureMemorySnapshot();
 }
 
 void MetalOperators::resetPeakMemoryStats() {
-  _context->resetPeakMemoryStats();
+  _context->getAllocator().resetPeakMemoryStats();
 }
 
 void MetalOperators::releaseUnusedMemory() {
-  _context->releaseUnusedMemory();
+  _context->getAllocator().releaseUnusedMemory();
 }
 
 void MetalOperators::setMemoryLimit(int64_t bytes) {
-  _context->setMemoryLimit(bytes);
+  _context->getAllocator().setMemoryLimit(bytes);
 }
 
 DType MetalOperators::getDefaultFloatType() {
