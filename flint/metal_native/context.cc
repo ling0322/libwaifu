@@ -207,7 +207,7 @@ MTL::ComputePipelineState *Context::getKernel(const char *name) {
   return _kernels.emplace(name, pipeline).first->second;
 }
 
-Buffer Context::allocate(int64_t bytes) {
+std::optional<Buffer> Context::allocate(int64_t bytes) {
   CHECK(bytes > 0);
   int64_t size = BlockAllocator::roundUp(bytes);
 
@@ -241,13 +241,7 @@ Buffer Context::allocate(int64_t bytes) {
       releaseEmptyChunks();
       created = _device->newBuffer(static_cast<NS::UInteger>(chunkSize), kBufferOptions);
     }
-    if (!created) {
-      throw lut::AbortedError(lut::sprintf(
-          "out of memory: the Metal device could not allocate %d bytes (%d held by tensors)",
-          chunkSize,
-          _allocatedBytes));
-    }
-
+    if (!created) return std::nullopt;
 
     _blocks.addChunk(created, chunkSize);
     block = _blocks.take(size);

@@ -27,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -118,10 +119,10 @@ class Context {
     return _info;
   }
 
-  /// A buffer of at least `bytes` bytes, cut from a chunk the context holds, or from a new one.
-  /// @throw lut::AbortedError when the device is out of memory even after the empty chunks have
-  ///     gone back.
-  Buffer allocate(int64_t bytes);
+  /// A buffer of at least `bytes` bytes, cut from a chunk the context holds, or from a new one;
+  /// std::nullopt when the device is out of memory even after the empty chunks have gone back,
+  /// which is the caller's to report or to make room for.
+  std::optional<Buffer> allocate(int64_t bytes);
 
   /// Hand `buffer`'s bytes back, for the next tensor that fits in them. The chunk stays the
   /// context's even once nothing is cut from it: chunks go back to the device only in

@@ -973,6 +973,24 @@ CATCH_TEST_CASE("test Metal memory statistics", "[op][metal]") {
 }
 
 
+CATCH_TEST_CASE("test Metal allocation the device cannot give is nullopt", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // A terabyte: more than any Mac's buffer can be, so the device refuses it however much is free.
+  std::shared_ptr<op::metal_native::Context> context = op::metal_native::Context::get();
+  int64_t before = context->captureMemorySnapshot().getAllocatedMemory();
+  std::optional<op::metal_native::Buffer> refused = context->allocate(int64_t(1) << 40);
+  CATCH_REQUIRE_FALSE(refused.has_value());
+  CATCH_REQUIRE(context->captureMemorySnapshot().getAllocatedMemory() == before);
+
+  // And nothing is left broken by it: the next allocation that fits is had as before.
+  std::optional<op::metal_native::Buffer> taken = context->allocate(1 << 20);
+  CATCH_REQUIRE(taken.has_value());
+  CATCH_REQUIRE((*taken)->size >= 1 << 20);
+  context->free(*taken);
+  CATCH_REQUIRE(context->captureMemorySnapshot().getAllocatedMemory() == before);
+}
+
 // Not a test: how fast the products are, on shapes an SDXL U-Net at 1024 x 1024 multiplies.
 // Hidden, so it runs only when asked for: ./build/unittest "[metal-benchmark]".
 CATCH_TEST_CASE("benchmark Metal matmul and conv2d", "[.][metal-benchmark]") {

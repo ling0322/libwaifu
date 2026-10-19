@@ -21,6 +21,7 @@
 
 #include "lutil/error.h"
 #include "lutil/log.h"
+#include "lutil/strings.h"
 
 namespace fl {
 namespace op {
@@ -31,7 +32,15 @@ std::unique_ptr<TensorData> MetalTensorData::create(int64_t numel, DType dtype) 
 
   std::unique_ptr<MetalTensorData> data(new MetalTensorData());
   data->_context = Context::get();
-  data->_buffer = data->_context->allocate(dtype.getTotalSize(numel));
+  int64_t bytes = dtype.getTotalSize(numel);
+  std::optional<Buffer> buffer = data->_context->allocate(bytes);
+  if (!buffer) {
+    throw lut::AbortedError(lut::sprintf(
+        "out of memory: the Metal device could not allocate %d bytes (%d held by tensors)",
+        bytes,
+        data->_context->captureMemorySnapshot().getAllocatedMemory()));
+  }
+  data->_buffer = *buffer;
   data->_numel = numel;
   data->_dtype = dtype;
   return data;
