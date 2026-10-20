@@ -27,7 +27,7 @@ use std::path::Path;
 
 use super::graph::Graph;
 use super::op::Op;
-use super::{functional as F, DType, Device, Tensor};
+use super::{functional as F, AllocHint, DType, Device, Tensor};
 use crate::error::{Error, Result};
 use crate::tensor_file;
 
@@ -211,7 +211,8 @@ impl Weights {
             )));
         }
 
-        let tensor = retype(tensor, self.computes_in)?.to_device(self.kept_on)?;
+        let tensor =
+            retype(tensor, self.computes_in)?.to_device_as(self.kept_on, AllocHint::Weight)?;
         // Kept on the host, a weight is its file's mapping, and nothing below reads it until a
         // run does -- so it is read here, in the order the package lies in. Except on Metal,
         // where the host's memory is the device's too and the package stays on the disk until a
@@ -246,7 +247,7 @@ impl Weights {
                 .tensors
                 .get_mut(name)
                 .expect("a name the map was asked for");
-            *tensor = tensor.to_device(self.device)?;
+            *tensor = tensor.to_device_as(self.device, AllocHint::Weight)?;
         }
 
         crate::log::write(
@@ -271,7 +272,7 @@ impl Weights {
     /// Synchronous, because the instruction after this one reads what it returns and there is
     /// nothing else for the host to be doing in between.
     pub fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        Ok(held(&self.tensors, name, shape)?.to_device(self.device)?)
+        Ok(held(&self.tensors, name, shape)?.to_device_as(self.device, AllocHint::Weight)?)
     }
 
     /// What shape the weight called `name` is, if there is one here.

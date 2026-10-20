@@ -31,34 +31,13 @@
 #include "lutil/log.h"
 #include "lutil/strings.h"
 #include "flint/metal_native/kernels.h"
+#include "flint/metal_native/metal_cpp.h"
 
 namespace fl {
 namespace op {
 namespace metal_native {
 
 namespace {
-
-// Committed batches are waited for once there are more than this many, which is what keeps the
-// host from encoding arbitrarily far ahead of the device.
-constexpr uint64_t kMaxBatchesInFlight = 3;
-
-// A batch is committed once it holds this many commands, so the device starts on the first of a
-// long run of work while the rest is still being encoded.
-constexpr int kCommandsPerBatch = 64;
-
-// What metal-cpp hands back autoreleased has to be made inside a pool, or it is never released.
-class Pool {
- public:
-  Pool()
-      : _pool(NS::AutoreleasePool::alloc()->init()) {
-  }
-  ~Pool() {
-    _pool->release();
-  }
-
- private:
-  NS::AutoreleasePool *_pool;
-};
 
 // Whether `device` has neural accelerators that kernels/nax/ can run on: Metal 4's tensor
 // operations, which are macOS 26.2's, and a GPU of the generation that added the accelerators --
@@ -78,11 +57,6 @@ bool hasNeuralAccelerators(MTL::Device *device) {
   int generation = atoi(name.c_str() + g + 1);
   char variant = name.back();
   return generation >= (variant == 'p' ? 18 : 17);
-}
-
-std::string describe(NS::Error *error) {
-  if (!error) return "no reason given";
-  return error->localizedDescription()->utf8String();
 }
 
 // The context, once opened, and never destroyed: the operators live in a static array whose
@@ -117,7 +91,7 @@ std::shared_ptr<Context> Context::get() {
 }
 
 void Context::open() {
-  Pool pool;
+  AutoreleasePool pool;
 
   _device = MTL::CreateSystemDefaultDevice();
   if (!_device) throw lut::AbortedError("there is no Metal device");
@@ -129,9 +103,6 @@ void Context::open() {
         "%s is not an Apple GPU of family 7 or later, which this backend needs",
         _device->name()->utf8String()));
   }
-
-  _queue = _device->newCommandQueue();
-  if (!_queue) throw lut::AbortedError("could not create a Metal command queue");
 
   // The kernels were compiled into one library when flint was built, and are carried in it.
   dispatch_data_t data = dispatch_data_create(
@@ -163,23 +134,22 @@ void Context::open() {
     }
   }
 
-  _fence = _device->newFence();
-
   _info.name = _device->name()->utf8String();
   _info.workingSetBytes = static_cast<int64_t>(_device->recommendedMaxWorkingSetSize());
   LOG(INFO) << "Metal device: " << _info.name << ", "
             << _info.workingSetBytes / (1 << 20) << " MB working set"
             << (_naxLibrary ? ", neural accelerators" : "");
 
-  _allocator = std::make_unique<VRamAllocator>(
-      _device, _info.workingSetBytes, [this]() { synchronize(); });
+  _stream = std::make_shared<CommandStream>(_device);
+  _allocator = std::make_unique<VramAllocator>(_device, _info.workingSetBytes, _stream);
 }
 
 MTL::ComputePipelineState *Context::getKernel(const char *name) {
+  std::lock_guard<std::mutex> lock(_kernelMutex);
   auto it = _kernels.find(name);
   if (it != _kernels.end()) return it->second;
 
-  Pool pool;
+  AutoreleasePool pool;
   MTL::Library *library = strncmp(name, "nax_", 4) == 0 ? _naxLibrary : _library;
   if (!library) throw lut::AbortedError(lut::sprintf("no Metal kernel called %s here", name));
   MTL::Function *function = library->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
@@ -196,69 +166,20 @@ MTL::ComputePipelineState *Context::getKernel(const char *name) {
   return _kernels.emplace(name, pipeline).first->second;
 }
 
-MTL::ComputeCommandEncoder *Context::beginCommand(
-    MTL::ComputePipelineState *kernel,
-    std::initializer_list<Arg> args,
-    const void *params,
-    size_t paramsSize) {
-  if (!_recording) {
-    Pool pool;
-    _recording = _queue->commandBufferWithUnretainedReferences()->retain();
-    _encoder = _recording->computeCommandEncoder(MTL::DispatchTypeConcurrent)->retain();
-
-    // After everything committed before: the batch before this one updated the fence last.
-    if (_fenceUpdated) _encoder->waitForFence(_fence);
-  }
-
-  // Every command waits for every one before it in this encoder, and writes nothing until what
-  // they wrote is there to be read. Coarser than saying which buffers each one touches, and it is
-  // what makes the order work was asked for in the order it runs in, which the allocator depends
-  // on.
-  _encoder->memoryBarrier(MTL::BarrierScopeBuffers);
-  _encoder->setComputePipelineState(kernel);
-
-  uint64_t serial = _submittedSerial + 1;
-  NS::UInteger index = 0;
-  for (const Arg &arg : args) {
-    const Buffer &buffer = *arg.buffer;
-    _encoder->setBuffer(
-        buffer->buffer, static_cast<NS::UInteger>(buffer->offset + arg.offset), index++);
-    buffer->lastUse = serial;
-  }
-  if (paramsSize) _encoder->setBytes(params, static_cast<NS::UInteger>(paramsSize), index);
-
-  return _encoder;
-}
-
-void Context::endCommand() {
-  if (++_numRecorded >= kCommandsPerBatch) submit();
-}
-
 void Context::dispatch(
     const char *kernel,
-    std::initializer_list<Arg> args,
+    std::initializer_list<CommandStream::Arg> args,
     const void *params,
     size_t paramsSize,
     int64_t threads,
     int groupSize) {
   if (threads <= 0) return;
-
-  std::lock_guard<std::mutex> lock(_mutex);
-  MTL::ComputePipelineState *pipeline = getKernel(kernel);
-  NS::UInteger width = std::min<NS::UInteger>(
-      static_cast<NS::UInteger>(groupSize),
-      pipeline->maxTotalThreadsPerThreadgroup());
-
-  MTL::ComputeCommandEncoder *encoder = beginCommand(pipeline, args, params, paramsSize);
-  encoder->dispatchThreads(
-      MTL::Size(static_cast<NS::UInteger>(threads), 1, 1),
-      MTL::Size(width, 1, 1));
-  endCommand();
+  _stream->dispatch(getKernel(kernel), args, params, paramsSize, threads, groupSize);
 }
 
 void Context::dispatchGroups(
     const char *kernel,
-    std::initializer_list<Arg> args,
+    std::initializer_list<CommandStream::Arg> args,
     const void *params,
     size_t paramsSize,
     uint32_t groupsX,
@@ -266,103 +187,8 @@ void Context::dispatchGroups(
     uint32_t groupsZ,
     uint32_t threadsPerGroup) {
   if (groupsX == 0 || groupsY == 0 || groupsZ == 0) return;
-
-  std::lock_guard<std::mutex> lock(_mutex);
-  MTL::ComputePipelineState *pipeline = getKernel(kernel);
-  CHECK(threadsPerGroup <= pipeline->maxTotalThreadsPerThreadgroup());
-
-  MTL::ComputeCommandEncoder *encoder = beginCommand(pipeline, args, params, paramsSize);
-  encoder->dispatchThreadgroups(
-      MTL::Size(groupsX, groupsY, groupsZ),
-      MTL::Size(threadsPerGroup, 1, 1));
-  endCommand();
-}
-
-void Context::submit() {
-  if (!_recording) return;
-
-  // The next batch waits on this: see beginCommand().
-  _encoder->updateFence(_fence);
-  _encoder->endEncoding();
-  _encoder->release();
-  _encoder = nullptr;
-  _fenceUpdated = true;
-
-  uint64_t serial = ++_submittedSerial;
-  _recording->addCompletedHandler([this, serial](MTL::CommandBuffer *commandBuffer) {
-    std::lock_guard<std::mutex> lock(_completionMutex);
-    if (commandBuffer->status() == MTL::CommandBufferStatusError && _error.empty()) {
-      _error = describe(commandBuffer->error());
-    }
-
-    // Batches finish in the order they were committed on one queue; the handlers are not promised
-    // to be called in it. What has finished is everything up to the first that has not.
-    _finished.insert(serial);
-    while (_finished.count(_completedSerial + 1)) {
-      _finished.erase(_completedSerial + 1);
-      ++_completedSerial;
-    }
-
-    _completed.notify_all();
-  });
-  _recording->commit();
-
-  _submitted.push_back(Submitted{_recording, serial});
-  _recording = nullptr;
-  _numRecorded = 0;
-
-  retireFinished();
-  if (_submittedSerial > kMaxBatchesInFlight) waitFor(_submittedSerial - kMaxBatchesInFlight);
-}
-
-void Context::waitFor(uint64_t serial) {
-  if (serial == 0) return;
-  if (serial > _submittedSerial) submit();  // it is the batch still being encoded
-
-  std::unique_lock<std::mutex> lock(_completionMutex);
-  _completed.wait(lock, [&]() { return _completedSerial >= serial || !_error.empty(); });
-  if (!_error.empty()) {
-    // Nothing encoded after a failed batch can be trusted, and there is no recovering it.
-    throw lut::AbortedError("the Metal device failed: " + _error);
-  }
-}
-
-void Context::retireFinished() {
-  uint64_t completed;
-  {
-    std::lock_guard<std::mutex> lock(_completionMutex);
-    completed = _completedSerial;
-  }
-  while (!_submitted.empty() && _submitted.front().serial <= completed) {
-    _submitted.front().commandBuffer->release();
-    _submitted.pop_front();
-  }
-}
-
-void Context::synchronize() {
-  std::lock_guard<std::mutex> lock(_mutex);
-  submit();
-  waitFor(_submittedSerial);
-  retireFinished();
-}
-
-void Context::upload(const void *src, const Buffer &dest, int64_t offset, int64_t bytes) {
-  if (bytes == 0) return;
-  CHECK(offset >= 0 && offset + bytes <= dest->size);
-
-  std::lock_guard<std::mutex> lock(_mutex);
-  waitFor(dest->lastUse);
-  memcpy(static_cast<std::byte *>(dest->buffer->contents()) + dest->offset + offset, src, bytes);
-}
-
-void Context::download(const Buffer &src, int64_t offset, void *dest, int64_t bytes) {
-  if (bytes == 0) return;
-  CHECK(offset >= 0 && offset + bytes <= src->size);
-
-  std::lock_guard<std::mutex> lock(_mutex);
-  waitFor(src->lastUse);
-  memcpy(
-      dest, static_cast<const std::byte *>(src->buffer->contents()) + src->offset + offset, bytes);
+  _stream->dispatchGroups(
+      getKernel(kernel), args, params, paramsSize, groupsX, groupsY, groupsZ, threadsPerGroup);
 }
 
 }  // namespace metal_native

@@ -103,7 +103,7 @@ constexpr int64_t kAttentionScoreLimit = 128 * 1024 * 1024;
 
 // --- Allocation -----------------------------------------------------------------------------
 
-std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype) {
+std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype, AllocHint hint) {
   if (numel > TensorData::MaxNumEl) {
     THROW(InvalidArg, lut::sprintf("a tensor of %d elements is too large", numel));
   }
@@ -120,7 +120,7 @@ std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype) 
 #endif
 #ifdef LIBWAIFU_METAL_ENABLED
     case Device::kMetal:
-      return op::metal_native::MetalTensorData::create(numel, dtype);
+      return op::metal_native::MetalTensorData::create(numel, dtype, hint);
 #endif
 #ifdef LIBWAIFU_VULKAN_ENABLED
     case Device::kVulkan:

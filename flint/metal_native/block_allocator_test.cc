@@ -138,6 +138,54 @@ CATCH_TEST_CASE("BlockAllocator lists empty chunks oldest first and forgets them
   CATCH_CHECK(blocks.take(256) == nullptr);
 }
 
+CATCH_TEST_CASE("BlockAllocator keeps a dedicated chunk for one block", "[metal-alloc]") {
+  BlockAllocator blocks;
+  Chunk *big = blocks.addChunk(handle(1), 10240, true);
+
+  // Its bytes are not the free ones: take() does not see them, before or after it is used.
+  CATCH_CHECK(blocks.take(256) == nullptr);
+  Block *a = blocks.takeDedicated(9000, 10240);  // rounded up to 9216
+  CATCH_REQUIRE(a);
+  CATCH_CHECK(a->chunk == big);
+  CATCH_CHECK(a->offset == 0);
+  CATCH_CHECK(a->size == 9216);
+  CATCH_CHECK(blocks.getUsedBytes() == 9216);
+  CATCH_CHECK(blocks.take(256) == nullptr);
+  CATCH_CHECK(blocks.takeDedicated(256, 10240) == nullptr);
+
+  // Given back, it is empty and whole again -- and still nobody's but takeDedicated's.
+  blocks.give(a, 0);
+  CATCH_CHECK(big->empty());
+  CATCH_CHECK(blocks.take(256) == nullptr);
+
+  // Only to a block that asks for a chunk no larger than this one.
+  CATCH_CHECK(blocks.takeDedicated(4096, 4096 * 5 / 4) == nullptr);
+  Block *b = blocks.takeDedicated(8192, 8192 * 5 / 4);
+  CATCH_REQUIRE(b);
+  CATCH_CHECK(b->chunk == big);
+  blocks.give(b, 0);
+
+  // The smallest of those that fit, and the ordinary chunks are untouched by it.
+  Chunk *bigger = blocks.addChunk(handle(2), 12288, true);
+  Chunk *ordinary = blocks.addChunk(handle(3), 4096);
+  Block *c = blocks.takeDedicated(9216, 12288);
+  CATCH_REQUIRE(c);
+  CATCH_CHECK(c->chunk == big);
+  Block *d = blocks.takeDedicated(9216, 12288);
+  CATCH_REQUIRE(d);
+  CATCH_CHECK(d->chunk == bigger);
+  Block *e = blocks.take(4096);
+  CATCH_REQUIRE(e);
+  CATCH_CHECK(e->chunk == ordinary);
+
+  blocks.give(c, 0);
+  blocks.give(d, 0);
+  blocks.give(e, 0);
+  CATCH_CHECK(blocks.emptyChunks().size() == 3);
+  for (Chunk *chunk : blocks.emptyChunks()) blocks.removeChunk(chunk);
+  CATCH_CHECK(blocks.getHeldBytes() == 0);
+}
+
 }  // namespace metal_native
 }  // namespace op
 }  // namespace fl

@@ -26,12 +26,12 @@ namespace fl {
 namespace op {
 namespace metal_native {
 
-std::unique_ptr<TensorData> MetalTensorData::create(int64_t numel, DType dtype) {
+std::unique_ptr<TensorData> MetalTensorData::create(int64_t numel, DType dtype, AllocHint hint) {
   CHECK(numel > 0 && numel <= MaxNumEl);
 
   std::unique_ptr<MetalTensorData> data(new MetalTensorData());
   data->_context = Context::get();
-  data->_buffer = data->_context->getAllocator().allocate(dtype.getTotalSize(numel));
+  data->_buffer = data->_context->getAllocator().allocate(dtype.getTotalSize(numel), hint);
   data->_numel = numel;
   data->_dtype = dtype;
   return data;

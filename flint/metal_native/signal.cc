@@ -92,7 +92,7 @@ Contiguous parameter(
 
 /// What a kernel is handed for an operand that may be empty: the operand, or `x` in its place,
 /// which the kernel is told not to read.
-Arg argOr(const TensorView &operand, const TensorView &x) {
+CommandStream::Arg argOr(const TensorView &operand, const TensorView &x) {
   return operand.empty() ? getArg(x) : getArg(operand);
 }
 

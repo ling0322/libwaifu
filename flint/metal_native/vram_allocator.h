@@ -21,7 +21,6 @@
 
 #include <stdint.h>
 
-#include <functional>
 #include <memory>
 #include <mutex>
 
@@ -38,45 +37,59 @@ namespace fl {
 namespace op {
 namespace metal_native {
 
-/// One tensor's storage: a run of shared memory, which the GPU and the host both address, cut
-/// from a larger buffer the allocator holds.
+class CommandStream;
+
+/// How a buffer was had, which is how it goes back.
+enum class BufferType {
+  /// A run of a chunk the allocator keeps for reuse: an activation, or anything but a weight.
+  kCached,
+  /// A buffer of its own, which goes back to the device whole: a weight's.
+  kWeight,
+};
+
+/// One tensor's storage: a run of shared memory, which the GPU and the host both address -- cut
+/// from a larger buffer the allocator holds, or, for a weight, a buffer of its own.
 ///
 /// It remembers the last batch of work that was handed it, which is what the host waits for
 /// before it touches the bytes -- and only that batch, not everything queued.
 struct BufferState {
-  MTL::Buffer *buffer = nullptr;  // the chunk's
+  MTL::Buffer *buffer = nullptr;  // the chunk's, or its own
   int64_t offset = 0;             // where the run starts in it
   int64_t size = 0;               // what was allocated, which is the size asked for rounded up
   uint64_t lastUse = 0;
-  Block *block = nullptr;
+  Block *block = nullptr;  // the run of the chunk it is, for a cached buffer
+  BufferType type = BufferType::kCached;
 };
 using Buffer = std::shared_ptr<BufferState>;
 
-/// The memory of the tensors on a Metal device: chunks of shared memory asked of the device, the
-/// tensors cut from them by a BlockAllocator, a limit on what may be held, and the numbers a
-/// snapshot reports.
+/// The memory of the tensors on a Metal device: chunks of shared memory asked of the device and
+/// the activations cut from them by a BlockAllocator, the weights' buffers of their own, a limit
+/// on what may be held, and the numbers a snapshot reports.
 ///
-/// A chunk may go back to the device only once the device is done with it, and the work that uses
-/// it is the context's: `synchronize`, which the allocator is given, waits for all of it. The
-/// allocator calls it with its own lock held, so whoever owns the work must never call into the
-/// allocator while holding a lock of its own.
-class VRamAllocator {
+/// Memory may go back to the device only once the device is done with it, and the work that uses
+/// it is the stream's: the allocator waits for it there, with its own lock held. The stream never
+/// asks anything of the allocator.
+class VramAllocator {
  public:
-  /// Chunks of `device`'s, kept within `budgetBytes` -- what the system suggests one process keep
-  /// on the GPU -- where it can be.
-  VRamAllocator(MTL::Device *device, int64_t budgetBytes, std::function<void()> synchronize);
-  VRamAllocator(const VRamAllocator &) = delete;
-  VRamAllocator &operator=(const VRamAllocator &) = delete;
+  /// Memory of `device`'s, kept within `budgetBytes` -- what the system suggests one process keep
+  /// on the GPU -- where it can be, for the work `stream` runs.
+  VramAllocator(MTL::Device *device, int64_t budgetBytes, std::shared_ptr<CommandStream> stream);
+  VramAllocator(const VramAllocator &) = delete;
+  VramAllocator &operator=(const VramAllocator &) = delete;
 
-  /// A buffer of at least `bytes` bytes, cut from a chunk the allocator holds, or from a new one.
-  /// @throw lut::OutOfMemoryError when the device is out of memory, or a new chunk would take the
-  ///     allocator past its memory limit, even after the empty chunks have gone back. Nothing is
-  ///     taken then, so a caller that frees something may ask again.
-  Buffer allocate(int64_t bytes);
+  /// A buffer of at least `bytes` bytes for what `hint` says it is for. An activation, or anything
+  /// that is not a weight, is cut from a chunk the allocator holds, or from a new one. A weight is
+  /// given a buffer of its own, so that letting it go gives its memory back to the device whole
+  /// rather than leaving a hole in a chunk.
+  /// @throw lut::OutOfMemoryError when the device is out of memory, or the allocator would pass its
+  ///     memory limit, even after the empty chunks have gone back.
+  ///     Nothing is taken then, so a caller that frees something may ask again.
+  Buffer allocate(int64_t bytes, AllocHint hint = AllocHint::kActivation);
 
   /// Hand `buffer`'s bytes back, for the next tensor that fits in them. The chunk stays the
   /// allocator's even once nothing is cut from it: chunks go back to the device only in
-  /// releaseUnusedMemory(), or when the budget or the limit would be passed.
+  /// releaseUnusedMemory(), or when the budget or the limit would be passed. A weight's buffer goes
+  /// back to the device at once -- after the work that last used it, which this waits for.
   void free(const Buffer &buffer);
 
   /// Wait for the device and hand every empty chunk back. What a caller does when it is done with
@@ -84,16 +97,16 @@ class VRamAllocator {
   /// until the next.
   void releaseUnusedMemory();
 
-  /// The most the chunks the allocator holds may come to, in bytes; 0, the default, for no limit
-  /// but the device's. A tensor that fits in a chunk already held is cut from it whatever the
-  /// limit; one that needs a new chunk past it is refused by allocate(). Lowering it below
-  /// what is held lets nothing go: the chunks in use stay, and the limit holds from the next
-  /// chunk on.
+  /// The most the allocator may hold, in bytes -- its chunks and the weights' buffers; 0, the
+  /// default, for no limit but the device's. A tensor that fits in a chunk already held is cut
+  /// from it whatever the limit; one that needs a new chunk or a buffer of its own past it is
+  /// refused by allocate(). Lowering it below what is held lets nothing go: what is in use stays,
+  /// and the limit holds from the next allocation on.
   void setMemoryLimit(int64_t bytes);
   int64_t getMemoryLimit();
 
-  /// The bytes of the chunks the allocator holds -- in use or not -- which is what the limit
-  /// counts.
+  /// The bytes the allocator holds from the device -- its chunks, in use or not, and the weights'
+  /// buffers -- which is what the limit counts.
   int64_t getHeldBytes();
 
   /// The bytes the tensors hold: each one's size rounded up to the allocator's alignment, and none
@@ -108,7 +121,7 @@ class VRamAllocator {
 
   MTL::Device *_device;
   int64_t _budgetBytes;
-  std::function<void()> _synchronize;
+  std::shared_ptr<CommandStream> _stream;
 
   // The chunks the tensors are cut from, and what the tensors hold.
   BlockAllocator _blocks;
@@ -116,8 +129,17 @@ class VRamAllocator {
   int64_t _peakAllocatedBytes = 0;
   int64_t _memoryLimit = 0;  // 0 for none
 
+  // The bytes of the weights' buffers, which are not cut from chunks.
+  int64_t _weightBytes = 0;
+
+  // A weight's buffer of its own, of at least `bytes` bytes.
+  Buffer allocateWeight(int64_t bytes);
+
   // Waits for the device, then hands every empty chunk back to it.
   void synchronizeAndReleaseEmptyChunks();
+
+  // What the limit counts: the chunks and the weights' buffers.
+  int64_t held() const;
 };
 
 }  // namespace metal_native

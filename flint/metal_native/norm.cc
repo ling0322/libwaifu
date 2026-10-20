@@ -85,7 +85,7 @@ Contiguous getOperand(
 
 /// The operand to bind for one a kernel may be given or not: `x` stands in for one that is not
 /// there, and the kernel is told by its flag not to read it.
-Arg argOr(const TensorView &operand, const TensorView &x) {
+CommandStream::Arg argOr(const TensorView &operand, const TensorView &x) {
   return operand.empty() ? getArg(x) : getArg(operand);
 }
 

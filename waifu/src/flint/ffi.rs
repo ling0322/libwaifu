@@ -63,6 +63,7 @@ extern "C" {
         device: FlDeviceType,
         dtype: FlDType,
         numel: i64,
+        hint: i32,
         out: *mut FlTensorData,
     ) -> i32;
     pub fn fl_tensor_data_borrow(

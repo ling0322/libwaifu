@@ -979,7 +979,7 @@ CATCH_TEST_CASE("test Metal allocation the device cannot give is out of memory",
   using op::metal_native::Buffer;
 
   // A terabyte: more than any Mac's buffer can be, so the device refuses it however much is free.
-  op::metal_native::VRamAllocator &allocator = op::metal_native::Context::get()->getAllocator();
+  op::metal_native::VramAllocator &allocator = op::metal_native::Context::get()->getAllocator();
   int64_t before = allocator.getAllocatedBytes();
   CATCH_REQUIRE_THROWS_AS(allocator.allocate(int64_t(1) << 40), lut::OutOfMemoryError);
   CATCH_REQUIRE(allocator.getAllocatedBytes() == before);
@@ -1002,7 +1002,7 @@ CATCH_TEST_CASE("test Metal allocation past the memory limit is out of memory", 
   SKIP_WITHOUT_METAL();
   using op::metal_native::Buffer;
 
-  op::metal_native::VRamAllocator &allocator = op::metal_native::Context::get()->getAllocator();
+  op::metal_native::VramAllocator &allocator = op::metal_native::Context::get()->getAllocator();
   allocator.releaseUnusedMemory();
 
   // Room for one 600 MB tensor and not two. Larger than a chunk, so no chunk already held -- every
@@ -1027,6 +1027,98 @@ CATCH_TEST_CASE("test Metal allocation past the memory limit is out of memory", 
   allocator.free(a);
   allocator.free(b);
   allocator.releaseUnusedMemory();
+}
+
+namespace {
+
+// A float tensor of `shape` on Metal, allocated as `hint` says.
+Tensor metalTensor(std::vector<int> shape, AllocHint hint) {
+  int64_t numel = 1;
+  for (int n : shape) numel *= n;
+  return Tensor::create(
+      std::make_shared<TensorShape>(lut::makeConstSpan(shape)),
+      F::allocate(Device::getMetal(), numel, DType::kFloat, hint));
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test Metal a large tensor's chunk is kept for one that fills it", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  using op::metal_native::Buffer;
+  op::metal_native::VramAllocator &allocator = op::metal_native::Context::get()->getAllocator();
+  allocator.releaseUnusedMemory();
+
+  // 900 MB: a chunk of its own, which stays when the tensor goes.
+  Buffer large = allocator.allocate(900 << 20);
+  op::metal_native::Chunk *chunk = large->block->chunk;
+  CATCH_REQUIRE(chunk->dedicated);
+  allocator.free(large);
+
+  // A small tensor is not cut from it.
+  Buffer small = allocator.allocate(1 << 20);
+  CATCH_CHECK(small->block->chunk != chunk);
+
+  // One that fills four fifths of it and more has it, the same chunk.
+  Buffer filling = allocator.allocate(800 << 20);
+  CATCH_CHECK(filling->block->chunk == chunk);
+  allocator.free(filling);
+
+  // One that would leave more than a fifth of it empty has a chunk of its own instead -- made once
+  // the empty 900 MB one has gone back, so that what is held is it, the small one's and no more.
+  // (The chunk is told by its size: the one that went may leave its address to the new one.)
+  int64_t smallChunk = small->block->chunk->size;
+  Buffer smaller = allocator.allocate(600 << 20);
+  CATCH_CHECK(smaller->block->chunk->size == 600 << 20);
+  CATCH_CHECK(allocator.getHeldBytes() == smallChunk + (600 << 20));
+
+  allocator.free(smaller);
+  allocator.free(small);
+  allocator.releaseUnusedMemory();
+}
+
+CATCH_TEST_CASE("test Metal weights have buffers of their own", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  std::shared_ptr<op::metal_native::Context> context = op::metal_native::Context::get();
+  op::metal_native::VramAllocator &allocator = context->getAllocator();
+  allocator.releaseUnusedMemory();
+  int64_t held = allocator.getHeldBytes();
+  int64_t allocated = allocator.getAllocatedBytes();
+
+  {
+    // 20 KB: a buffer of its own, of whole pages, and no chunk.
+    Tensor weight = metalTensor({1024, 5}, AllocHint::kWeight);
+    int64_t taken = allocator.getHeldBytes() - held;
+    CATCH_REQUIRE(taken >= 1024 * 5 * 4);
+    CATCH_REQUIRE(taken < (1 << 20));
+    CATCH_REQUIRE(allocator.getAllocatedBytes() - allocated == 1024 * 5 * 4);
+
+    // Read and written like any other tensor's.
+    mtl()->fill(weight, 1.5f);
+    for (float value : values(weight)) CATCH_REQUIRE(value == 1.5f);
+
+    // Written again and let go of at once, with the fill still being encoded: the free waits for
+    // that work, since the command buffers do not keep what they use, and then gives the buffer
+    // back.
+    mtl()->fill(weight, 2.5f);
+  }
+  CATCH_REQUIRE(allocator.getAllocatedBytes() == allocated);
+  CATCH_REQUIRE(allocator.getHeldBytes() == held);
+}
+
+CATCH_TEST_CASE("test Metal weights count against the memory limit", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  op::metal_native::VramAllocator &allocator = op::metal_native::Context::get()->getAllocator();
+  allocator.releaseUnusedMemory();
+
+  // Room for one 600 KB weight and not two.
+  allocator.setMemoryLimit(allocator.getHeldBytes() + (1 << 20));
+  {
+    Tensor first = metalTensor({600, 256}, AllocHint::kWeight);
+    CATCH_REQUIRE_THROWS_AS(metalTensor({600, 256}, AllocHint::kWeight), lut::OutOfMemoryError);
+  }
+  // Let go of, and never used by the device, it is back at once: there is room for the next.
+  Tensor again = metalTensor({600, 256}, AllocHint::kWeight);
+  allocator.setMemoryLimit(0);
 }
 
 // Not a test: how fast the products are, on shapes an SDXL U-Net at 1024 x 1024 multiplies.

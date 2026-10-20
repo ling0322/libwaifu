@@ -173,6 +173,24 @@ pub enum Device {
     Vulkan = 4,
 }
 
+/// What a tensor's storage is for, which an allocator may treat each in its own way.
+///
+/// Metal cuts an activation from the memory it keeps for reuse, and gives a weight a buffer of its
+/// own, which goes back to the device whole when the weight is let go of -- so that dropping a
+/// weight to make room for another frees memory a new one can have, rather than a hole in a chunk.
+/// Every other device ignores it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(i32)]
+pub enum AllocHint {
+    /// What a pass makes and drops again: the outputs of operators.
+    #[default]
+    Activation = 0,
+    /// A model's parameter, kept until it is let go of.
+    Weight = 1,
+    /// Anything else, treated as an activation.
+    Other = 2,
+}
+
 impl Device {
     /// What this device is called on the command line and on screen.
     pub fn name(self) -> &'static str {
@@ -440,12 +458,18 @@ struct Storage {
 }
 
 impl Storage {
-    /// Uninitialized storage for `numel` elements, at least one.
-    fn allocate(numel: i64, dtype: DType, device: Device) -> Result<Rc<Storage>> {
+    /// Uninitialized storage for `numel` elements, at least one, for what `hint` says it is for.
+    fn allocate(numel: i64, dtype: DType, device: Device, hint: AllocHint) -> Result<Rc<Storage>> {
         init();
         let mut raw: ffi::FlTensorData = std::ptr::null_mut();
         check(unsafe {
-            ffi::fl_tensor_data_create(device as i32, dtype as i32, numel.max(1), &mut raw)
+            ffi::fl_tensor_data_create(
+                device as i32,
+                dtype as i32,
+                numel.max(1),
+                hint as i32,
+                &mut raw,
+            )
         })?;
         Ok(Rc::new(Storage {
             raw,
@@ -608,13 +632,23 @@ impl Tensor {
     /// for it. Reading an element before writing it gives whatever the allocator handed back, so
     /// this is only worth using when every element is written first.
     pub fn empty(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
+        Tensor::empty_as(shape, dtype, device, AllocHint::Activation)
+    }
+
+    /// [`Tensor::empty`], for what `hint` says the storage is for.
+    pub fn empty_as(
+        shape: &[i32],
+        dtype: DType,
+        device: Device,
+        hint: AllocHint,
+    ) -> Result<Tensor> {
         if let Some(&n) = shape.iter().find(|&&n| n < 0) {
             return Err(Error::invalid(format!(
                 "a tensor cannot have a dimension of {n}"
             )));
         }
         let numel: i64 = shape.iter().map(|&n| n as i64).product();
-        let storage = Storage::allocate(numel, dtype, device)?;
+        let storage = Storage::allocate(numel, dtype, device, hint)?;
         Tensor::over(storage, shape.to_vec(), contiguous_strides(shape), 0)
     }
 
@@ -1043,6 +1077,12 @@ impl Tensor {
 
     /// Copy the tensor to another device.
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
+        self.to_device_as(device, AllocHint::Activation)
+    }
+
+    /// [`Tensor::to_device`], with the copy's storage allocated for what `hint` says it is for: a
+    /// weight moved onto the device is [`AllocHint::Weight`].
+    pub fn to_device_as(&self, device: Device, hint: AllocHint) -> Result<Tensor> {
         // Already there, so nothing is copied and no operator is asked anything.
         if self.device() == device {
             return Ok(self.clone());
@@ -1051,7 +1091,7 @@ impl Tensor {
         // A transfer is a plain copy of one run of bytes, so a strided tensor is packed first, on
         // the side it is on -- the host's operators for either kind of host memory.
         let source = self.contiguous()?;
-        let dest = Tensor::empty(&source.layout.shape, source.dtype(), device)?;
+        let dest = Tensor::empty_as(&source.layout.shape, source.dtype(), device, hint)?;
         let operators = transfer_operators(source.device(), device)?;
         check(unsafe { ffi::fl_transfer(operators, source.raw(), dest.raw()) })?;
         Ok(dest)

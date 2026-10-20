@@ -25,3 +25,26 @@
 
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
+
+#include "flint/metal_native/metal_cpp.h"
+
+namespace fl {
+namespace op {
+namespace metal_native {
+
+AutoreleasePool::AutoreleasePool()
+    : _pool(NS::AutoreleasePool::alloc()->init()) {
+}
+
+AutoreleasePool::~AutoreleasePool() {
+  _pool->release();
+}
+
+std::string describe(NS::Error *error) {
+  if (!error) return "no reason given";
+  return error->localizedDescription()->utf8String();
+}
+
+}  // namespace metal_native
+}  // namespace op
+}  // namespace fl

@@ -84,8 +84,8 @@ int64_t getByteOffset(const TensorView &tensor) {
   return tensor.getDType().getTotalSize(tensor.getInternalOffset());
 }
 
-Arg getArg(const TensorView &tensor) {
-  return Arg{&getBuffer(tensor), getByteOffset(tensor)};
+CommandStream::Arg getArg(const TensorView &tensor) {
+  return CommandStream::Arg{&getBuffer(tensor), getByteOffset(tensor)};
 }
 
 std::string getTypeSuffix(DType dtype) {

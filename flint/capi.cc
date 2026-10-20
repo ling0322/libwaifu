@@ -66,6 +66,18 @@ int32_t clearError() {
   return FL_OK;
 }
 
+fl::AllocHint toHint(fl_alloc_hint_t hint) {
+  switch (hint) {
+    case FL_ALLOC_ACTIVATION:
+      return fl::AllocHint::kActivation;
+    case FL_ALLOC_WEIGHT:
+      return fl::AllocHint::kWeight;
+    case FL_ALLOC_OTHER:
+      return fl::AllocHint::kOther;
+  }
+  throw lut::InvalidArgError("unknown allocation hint " + std::to_string(static_cast<int>(hint)));
+}
+
 fl::DType toDType(fl_dtype_t dtype) {
   switch (dtype) {
     case FL_DTYPE_FLOAT:
@@ -350,13 +362,14 @@ int32_t fl_tensor_data_create(
     fl_device_type_t device,
     fl_dtype_t dtype,
     int64_t numel,
+    fl_alloc_hint_t hint,
     fl_tensor_data_t *out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
     if (numel < 1) throw lut::InvalidArgError("storage holds at least one element");
 
     *out = reinterpret_cast<fl_tensor_data_t>(
-        fl::F::allocate(toDevice(device), numel, toDType(dtype)).release());
+        fl::F::allocate(toDevice(device), numel, toDType(dtype), toHint(hint)).release());
     return clearError();
   });
 }

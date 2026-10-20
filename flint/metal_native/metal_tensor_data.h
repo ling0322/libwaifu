@@ -36,7 +36,10 @@ namespace metal_native {
 /// is what waits for the work queued on it first.
 class MetalTensorData : public TensorData {
  public:
-  static std::unique_ptr<TensorData> create(int64_t numel, DType dtype);
+  static std::unique_ptr<TensorData> create(
+      int64_t numel,
+      DType dtype,
+      AllocHint hint = AllocHint::kActivation);
 
   ~MetalTensorData();
 

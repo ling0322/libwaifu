@@ -53,7 +53,7 @@ Context *getContext(const TensorView &tensor);
 
 /// Where `tensor`'s first element is -- its buffer and the byte offset in it -- which is what a
 /// kernel is handed for it.
-Arg getArg(const TensorView &tensor);
+CommandStream::Arg getArg(const TensorView &tensor);
 
 /// The buffer holding `tensor`, and the byte offset of its first element in it.
 const Buffer &getBuffer(const TensorView &tensor);

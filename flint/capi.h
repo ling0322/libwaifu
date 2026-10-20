@@ -111,6 +111,18 @@ typedef enum fl_pad_mode_t {
   FL_PAD_REPLICATE = 2,
 } fl_pad_mode_t;
 
+/// What a tensor's storage is for, which an allocator may treat each in its own way: Metal cuts an
+/// activation from the memory it keeps for reuse, and gives a weight a buffer of its own that goes
+/// back to the device whole when it is freed. Every other device ignores it.
+typedef enum fl_alloc_hint_t {
+  /// What a pass makes and drops again: the outputs of operators.
+  FL_ALLOC_ACTIVATION = 0,
+  /// A model's parameter, kept until it is let go of.
+  FL_ALLOC_WEIGHT = 1,
+  /// Anything else, treated as an activation.
+  FL_ALLOC_OTHER = 2,
+} fl_alloc_hint_t;
+
 /// Select the operator backends for the machine. Call once before anything else here; later calls
 /// do nothing. Failures are reported through fl_get_last_error_code().
 FLAPI void fl_init(void);
@@ -144,13 +156,14 @@ FLAPI int32_t fl_get_default_float_type(fl_operators_t operators, fl_dtype_t *ou
 
 // --- Storage ----------------------------------------------------------------------------------
 
-/// Allocate uninitialized storage for `numel` elements of `dtype` on `device`. FL_DEVICE_CUDA_HOST
-/// is page-locked host memory, which only a CUDA build can allocate.
+/// Allocate uninitialized storage for `numel` elements of `dtype` on `device`, for what `hint` says
+/// it is for. FL_DEVICE_CUDA_HOST is page-locked host memory, which only a CUDA build can allocate.
 /// @param numel at least one.
 FLAPI int32_t fl_tensor_data_create(
     fl_device_type_t device,
     fl_dtype_t dtype,
     int64_t numel,
+    fl_alloc_hint_t hint,
     fl_tensor_data_t *out);
 
 /// Storage on the CPU that *is* `numel` elements of `dtype` at `data`, rather than a copy of them:

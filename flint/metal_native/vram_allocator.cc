@@ -26,6 +26,7 @@
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
+#include "flint/metal_native/command_stream.h"
 
 namespace fl {
 namespace op {
@@ -38,8 +39,12 @@ namespace {
 constexpr int64_t kChunkSize = 512 << 20;
 constexpr int64_t kChunkGranule = 2 << 20;
 
+// What the device rounds a buffer of its own up to: a weight's is counted as this many bytes at
+// least, before it is made and its real size can be asked.
+constexpr int64_t kPage = 16 << 10;
+
 // Making a chunk larger than this first hands back the empty chunks larger than it. See
-// VRamAllocator::allocate.
+// VramAllocator::allocate.
 constexpr int64_t kLargeChunk = 512 << 20;
 
 // Every buffer is shared memory, which the host addresses directly, and untracked: the order
@@ -49,50 +54,61 @@ constexpr MTL::ResourceOptions kBufferOptions =
 
 }  // namespace
 
-VRamAllocator::VRamAllocator(
+VramAllocator::VramAllocator(
     MTL::Device *device,
     int64_t budgetBytes,
-    std::function<void()> synchronize)
+    std::shared_ptr<CommandStream> stream)
     : _device(device),
       _budgetBytes(budgetBytes),
-      _synchronize(std::move(synchronize)) {
+      _stream(std::move(stream)) {
 }
 
-Buffer VRamAllocator::allocate(int64_t bytes) {
+Buffer VramAllocator::allocate(int64_t bytes, AllocHint hint) {
   CHECK(bytes > 0);
+  if (hint == AllocHint::kWeight) return allocateWeight(bytes);
   int64_t size = BlockAllocator::roundUp(bytes);
 
   std::lock_guard<std::mutex> lock(_mutex);
+  // From what a chunk has free, or else from the chunk of its own a tensor larger than a chunk
+  // once had -- if this one fills four fifths of it at least. Such a chunk is kept for one tensor
+  // at a time, as large as the one it was made for or nearly: cut up by small ones, it could go
+  // back to the device only once all of them had, and the next large tensor -- the same one in
+  // the next step, as often as not -- would need another.
   Block *block = _blocks.take(size);
+  if (!block) block = _blocks.takeDedicated(size, size * 5 / 4);
   if (!block) {
-    // Nothing free is large enough: a new chunk, kChunkSize unless the tensor is larger.
+    // Nothing free is large enough: a new chunk, kChunkSize unless the tensor is larger, and then
+    // the tensor's own.
     int64_t needed = (size + kChunkGranule - 1) / kChunkGranule * kChunkGranule;
     int64_t chunkSize = std::max(kChunkSize, needed);
+    bool dedicated = needed > kChunkSize;
 
-    // Within the limit, if there is one: the empty chunks go back first where a new one would pass
-    // it, and the new one is no larger than the room that leaves -- a limit is not to be spent on
-    // the part of a chunk no tensor asked for. Where even the tensor does not fit, nothing is
-    // asked of the device.
+    // Within the limit, if there is one: the empty chunks go back first where a new chunk would
+    // pass it. A whole chunk where there is room for one, and
+    // otherwise what this tensor needs and no more: what is left of the limit is for what comes
+    // next, the weights among it, which are not cut from chunks. Where even the tensor does not
+    // fit, nothing is asked of the device.
     if (_memoryLimit > 0) {
-      if (_blocks.getHeldBytes() + chunkSize > _memoryLimit) synchronizeAndReleaseEmptyChunks();
-      int64_t room = (_memoryLimit - _blocks.getHeldBytes()) / kChunkGranule * kChunkGranule;
+      if (held() + chunkSize > _memoryLimit) synchronizeAndReleaseEmptyChunks();
+      int64_t room = (_memoryLimit - held()) / kChunkGranule * kChunkGranule;
       if (needed > room) {
         throw lut::OutOfMemoryError(lut::sprintf(
             "%d bytes more would take the Metal device past its limit of %d bytes (%d held, %d "
             "by tensors)",
             needed,
             _memoryLimit,
-            _blocks.getHeldBytes(),
+            held(),
             _allocatedBytes));
       }
-      chunkSize = std::min(chunkSize, room);
+      if (chunkSize > room) chunkSize = needed;
     }
 
     // A tensor larger than a chunk has one of its own, and the empty chunks there are -- every one
-    // too small for it, or take() would have found it -- go back before it is made, once the
-    // device is done with them, rather than sit beside it until the work is over. That is where
-    // a model's stages change: the denoiser's chunks, say, when the decoder's first gigabyte
-    // comes. A tensor that size that fits in an empty chunk takes it instead, and nothing waits.
+    // too small for it or too large for it to fill, or it would have been taken -- go back before
+    // it is made, once the device is done with them, rather than sit beside it until the work is
+    // over. That is where a model's stages change: the denoiser's chunks, say, when the decoder's
+    // first gigabyte comes. A tensor that size that fills an empty chunk of its own takes it
+    // instead, and nothing waits.
     if (chunkSize > kLargeChunk) synchronizeAndReleaseEmptyChunks();
 
     // Past the budget, every empty chunk goes back before more is asked for.
@@ -112,8 +128,8 @@ Buffer VRamAllocator::allocate(int64_t bytes) {
           _allocatedBytes));
     }
 
-    _blocks.addChunk(created, chunkSize);
-    block = _blocks.take(size);
+    _blocks.addChunk(created, chunkSize, dedicated);
+    block = dedicated ? _blocks.takeDedicated(size, chunkSize) : _blocks.take(size);
     CHECK(block);
   }
 
@@ -130,17 +146,86 @@ Buffer VRamAllocator::allocate(int64_t bytes) {
   return buffer;
 }
 
-void VRamAllocator::free(const Buffer &buffer) {
+Buffer VramAllocator::allocateWeight(int64_t bytes) {
+  int64_t size = BlockAllocator::roundUp(bytes);
+  int64_t pages = (size + kPage - 1) / kPage * kPage;
+
   std::lock_guard<std::mutex> lock(_mutex);
-  _allocatedBytes -= buffer->size;
-  _blocks.give(buffer->block, buffer->lastUse);
-  buffer->block = nullptr;
+
+  // Within the limit: the empty chunks go back first, and past it, nothing is asked of the device.
+  if (_memoryLimit > 0 && held() + pages > _memoryLimit) {
+    synchronizeAndReleaseEmptyChunks();
+    if (held() + pages > _memoryLimit) {
+      throw lut::OutOfMemoryError(lut::sprintf(
+          "a weight of %d bytes would take the Metal device past its limit of %d bytes (%d held, "
+          "%d by tensors)",
+          size,
+          _memoryLimit,
+          held(),
+          _allocatedBytes));
+    }
+  }
+
+  // Past the budget, every empty chunk goes back before more is asked for, as for a chunk.
+  if (static_cast<int64_t>(_device->currentAllocatedSize()) + pages > _budgetBytes) {
+    synchronizeAndReleaseEmptyChunks();
+  }
+
+  MTL::Buffer *created = _device->newBuffer(static_cast<NS::UInteger>(size), kBufferOptions);
+  if (!created) {
+    synchronizeAndReleaseEmptyChunks();
+    created = _device->newBuffer(static_cast<NS::UInteger>(size), kBufferOptions);
+  }
+  if (!created) {
+    throw lut::OutOfMemoryError(lut::sprintf(
+        "the Metal device could not allocate a weight of %d bytes (%d held by tensors)",
+        size,
+        _allocatedBytes));
+  }
+
+  Buffer buffer = std::make_shared<BufferState>();
+  buffer->buffer = created;
+  buffer->size = size;
+  buffer->type = BufferType::kWeight;
+  _weightBytes += static_cast<int64_t>(created->allocatedSize());
+
+  _allocatedBytes += buffer->size;
+  _peakAllocatedBytes = std::max(_peakAllocatedBytes, _allocatedBytes);
+  return buffer;
 }
 
-void VRamAllocator::synchronizeAndReleaseEmptyChunks() {
+void VramAllocator::free(const Buffer &buffer) {
+  std::lock_guard<std::mutex> lock(_mutex);
+  _allocatedBytes -= buffer->size;
+
+  switch (buffer->type) {
+    case BufferType::kCached:
+      _blocks.give(buffer->block, buffer->lastUse);
+      buffer->block = nullptr;
+      break;
+    case BufferType::kWeight:
+      // Back to the device whole -- but not before the work that last read it, which may still be
+      // queued: the command buffers do not keep what they use. Waited for here, from a destructor,
+      // so a device that has failed is said in the log rather than thrown: the buffer is kept
+      // then, since nothing can say the device is done with it.
+      try {
+        _stream->wait(buffer->lastUse);
+      } catch (const lut::Error &e) {
+        LOG(ERROR) << "a weight's buffer is kept, the device having failed: " << e.what();
+        buffer->buffer = nullptr;
+        break;
+      }
+      _weightBytes -= static_cast<int64_t>(buffer->buffer->allocatedSize());
+      buffer->buffer->release();
+      buffer->buffer = nullptr;
+      break;
+  }
+}
+
+void VramAllocator::synchronizeAndReleaseEmptyChunks() {
   // The command buffers do not retain what they use, which is why the device has to be done with
   // a chunk before it goes.
-  _synchronize();
+  _stream->synchronize();
   for (Chunk *chunk : _blocks.emptyChunks()) {
     MTL::Buffer *buffer = static_cast<MTL::Buffer *>(chunk->handle);
     _blocks.removeChunk(chunk);
@@ -148,33 +233,37 @@ void VRamAllocator::synchronizeAndReleaseEmptyChunks() {
   }
 }
 
-void VRamAllocator::releaseUnusedMemory() {
+int64_t VramAllocator::held() const {
+  return _blocks.getHeldBytes() + _weightBytes;
+}
+
+void VramAllocator::releaseUnusedMemory() {
   std::lock_guard<std::mutex> lock(_mutex);
   synchronizeAndReleaseEmptyChunks();
 }
 
-void VRamAllocator::setMemoryLimit(int64_t bytes) {
+void VramAllocator::setMemoryLimit(int64_t bytes) {
   CHECK(bytes >= 0);
   std::lock_guard<std::mutex> lock(_mutex);
   _memoryLimit = bytes;
 }
 
-int64_t VRamAllocator::getMemoryLimit() {
+int64_t VramAllocator::getMemoryLimit() {
   std::lock_guard<std::mutex> lock(_mutex);
   return _memoryLimit;
 }
 
-int64_t VRamAllocator::getHeldBytes() {
+int64_t VramAllocator::getHeldBytes() {
   std::lock_guard<std::mutex> lock(_mutex);
-  return _blocks.getHeldBytes();
+  return held();
 }
 
-int64_t VRamAllocator::getAllocatedBytes() {
+int64_t VramAllocator::getAllocatedBytes() {
   std::lock_guard<std::mutex> lock(_mutex);
   return _allocatedBytes;
 }
 
-MemorySnapshot VRamAllocator::captureMemorySnapshot() {
+MemorySnapshot VramAllocator::captureMemorySnapshot() {
   std::lock_guard<std::mutex> lock(_mutex);
 
   // One pool of memory for the host and the device, so what is free is what the budget leaves
@@ -184,7 +273,7 @@ MemorySnapshot VRamAllocator::captureMemorySnapshot() {
   return MemorySnapshot(total, std::max<int64_t>(0, free), _allocatedBytes, _peakAllocatedBytes);
 }
 
-void VRamAllocator::resetPeakMemoryStats() {
+void VramAllocator::resetPeakMemoryStats() {
   std::lock_guard<std::mutex> lock(_mutex);
   _peakAllocatedBytes = _allocatedBytes;
 }

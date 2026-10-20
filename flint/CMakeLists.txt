@@ -207,6 +207,7 @@ if(WITH_METAL)
         ${flint_SOURCES}
         "metal_native/attention.cc"
         "metal_native/block_allocator.cc"
+        "metal_native/command_stream.cc"
         "metal_native/common.cc"
         "metal_native/context.cc"
         "metal_native/elementwise.cc"

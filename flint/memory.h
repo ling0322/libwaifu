@@ -25,6 +25,18 @@
 
 namespace fl {
 
+/// What a tensor's storage is for, which an allocator may treat each in its own way. Metal cuts an
+/// activation from the chunks it keeps for reuse, and gives a weight a buffer of its own, which
+/// goes back to the device whole when the weight is let go of; every other device ignores it.
+enum class AllocHint : int32_t {
+  /// What a pass makes and drops again: the outputs of operators, and their workspace.
+  kActivation = 0,
+  /// A model's parameter, kept until it is let go of -- to make room for another, say.
+  kWeight = 1,
+  /// Anything else, treated as an activation.
+  kOther = 2,
+};
+
 /// @brief A snapshot of the memory usage of one device. Devices that do not report their memory
 /// usage (the CPU backend) report zero for every value.
 class MemorySnapshot {

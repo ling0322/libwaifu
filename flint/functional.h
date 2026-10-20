@@ -26,6 +26,7 @@
 #include "lutil/span.h"
 #include "flint/device.h"
 #include "flint/dtype.h"
+#include "flint/memory.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
 #include "flint/tensor_view.h"
@@ -49,8 +50,13 @@ namespace F {
 
 /// @brief Uninitialized storage for `numel` elements of `dtype` on `device` -- Device::kCudaHost
 /// being page-locked host memory the CUDA device reads directly. At least one element is
-/// allocated, so that a tensor with a dimension of zero still has storage to point at.
-std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype);
+/// allocated, so that a tensor with a dimension of zero still has storage to point at. `hint` says
+/// what it is for, which only Metal tells apart.
+std::unique_ptr<TensorData> allocate(
+    Device device,
+    int64_t numel,
+    DType dtype,
+    AllocHint hint = AllocHint::kActivation);
 
 /// @brief An uninitialized contiguous tensor of `shape` and `dtype` on `device`. Device::kCudaHost
 /// is page-locked host memory the CUDA device reads directly.
