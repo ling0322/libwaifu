@@ -45,6 +45,12 @@ impl Error {
     pub(crate) fn model(message: impl Into<String>) -> Error {
         Error::Model(message.into())
     }
+
+    /// Whether a tensor operation found the device out of memory, or its limit in the way: see
+    /// [`flint::Error::is_out_of_memory`](crate::flint::Error::is_out_of_memory).
+    pub fn is_out_of_memory(&self) -> bool {
+        matches!(self, Error::Tensor(error) if error.is_out_of_memory())
+    }
 }
 
 impl fmt::Display for Error {

@@ -64,25 +64,31 @@
 //!
 //! # Where a weight comes from
 //!
-//! The source, and nowhere else: an IR is one list of instructions whichever [`Residency`](super::Residency) the
+//! The source, and nowhere else: an IR is one list of instructions whichever [`Residency`] the
 //! model was read with, and a `load` is one of them either way. What differs is only what the
 //! source does when a load asks it for a weight, and that was decided when the source was built.
 //!
-//! * [`Residency::Device`](super::Residency::Device) put every weight on the card when the source was built, so a
+//! * [`Residency::Device`] put every weight on the card when the source was built, so a
 //!   load is a lookup and the handle it hands back costs no bytes. What the card holds is the
 //!   model, which is what a model that fits wants and what twenty sampler steps would otherwise
 //!   pay for twenty times over.
-//! * [`Residency::Hybrid`](super::Residency::Hybrid) put the smallest weights on the card, as many as fit in the bytes it
+//! * [`Residency::Hybrid`] put the smallest weights on the card, as many as fit in the bytes it
 //!   was given, and kept the rest in ordinary host memory, where a load is the copy across the
 //!   bus. The `free` after such a weight's last reader is the card taking those bytes back, so
 //!   the card holds the small weights and what the pass is using rather than the model. See
 //!   [`Weights`] for why the host copy is not page-locked. On Metal the "host memory" is the
 //!   package's file: nothing is read until a load asks for it. Given no bytes, it keeps every
-//!   weight on the host.
+//!   weight on the host. And where the card runs out in the middle of a run, the instruction that
+//!   ran out moves the largest of the weights it kept back to the host and runs again, until it
+//!   fits or none is left to move.
 //!
 //! Both hold the model somewhere for as long as it is in use: on the card, or in host memory --
 //! or, for a low-vram model on Metal, on the disk. That is the price of the IR not having to know
 //! which.
+//!
+//! [`Residency`]: super::Residency
+//! [`Residency::Device`]: super::Residency::Device
+//! [`Residency::Hybrid`]: super::Residency::Hybrid
 //!
 //! # What is deliberately not here
 //!
@@ -432,8 +438,28 @@ fn blame(value: Value, op: &Op, site: &Site, error: Error) -> Error {
 fn step(inst: &Inst, slots: &mut [Option<Tensor>], context: &RunContext<'_>) -> Result<()> {
     match inst {
         Inst::Run { value, op, site } => {
-            let tensor =
-                execute(op, slots, context).map_err(|error| blame(*value, op, site, error))?;
+            // Running out of the device's memory is answered by moving a weight kept there back
+            // to the host and running the instruction again, for as long as there is one to move.
+            // Again is the same: an instruction writes what it makes and nothing it reads, and a
+            // draw has its output before it moves the generator on.
+            let tensor = loop {
+                match execute(op, slots, context) {
+                    Ok(tensor) => break tensor,
+                    Err(error) if error.is_out_of_memory() => {
+                        match context.params().evict_one()? {
+                            Some(name) => crate::log::write(
+                                crate::log::Level::Info,
+                                "ir",
+                                &format!(
+                                    "out of memory at {value} = {op}: {name} moved off the device"
+                                ),
+                            ),
+                            None => return Err(blame(*value, op, site, error)),
+                        }
+                    }
+                    Err(error) => return Err(blame(*value, op, site, error)),
+                }
+            };
 
             slots[value.slot()] = Some(tensor);
         }

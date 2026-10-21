@@ -936,8 +936,102 @@ fn a_hybrid_package_fills_the_device_to_its_limit() {
     // Without a limit, the budget has room for the whole package.
     MemorySnapshot::set_limit(Device::Metal, 0).unwrap();
     let before = allocated();
-    let filled = Weights::from_files(&[&file.0], Device::Metal, as_many_as_fit).unwrap();
+    let _filled = Weights::from_files(&[&file.0], Device::Metal, as_many_as_fit).unwrap();
     assert_eq!(allocated() - before, 4 * 16384 + 256 * 256 * 4);
+}
+
+/// A run that finds the device full -- every byte its limit leaves taken by weights -- moves
+/// weights back to the host until what it makes fits, and gives what it gives with room to spare.
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_run_short_of_memory_moves_weights_off_the_device_and_goes_on() {
+    const MB: i64 = 1 << 20;
+    let names: Vec<String> = (0..16).map(|i| format!("w{i:02}")).collect();
+    let tensors: Vec<Vec<f32>> = (0..16)
+        .map(|i| {
+            (0..256 * 256)
+                .map(|j| (((i + j) % 13) as f32 - 6.0) / 256.0)
+                .collect()
+        })
+        .collect();
+    let laid_out: Vec<(&str, &str, &[i32], Vec<u8>)> = names
+        .iter()
+        .zip(&tensors)
+        .map(|(name, values)| (name.as_str(), "F32", &[256, 256][..], f32_bytes(values)))
+        .collect();
+    let file = TempFile::new(&write_laid_out(&laid_out));
+
+    // y = x + sum of x w: the input, the sum and each product are a megabyte apiece.
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let mut y = x;
+    for name in &names {
+        y = graph.add(y, graph.matmul(x, graph.load(name, &[256, 256])));
+    }
+    graph.output("y", y);
+    let ir = Ir::compile(&graph);
+
+    let input: Vec<f32> = (0..1024 * 256)
+        .map(|i| ((i % 11) as f32 - 5.0) / 8.0)
+        .collect();
+    let run = |weights: &Weights| {
+        let x = Tensor::from_f32(&[1024, 256], &input)
+            .unwrap()
+            .to_device(Device::Metal)
+            .unwrap();
+        ir.run(&RunContext::new(weights).input("x", &x))
+            .map(|out| to_host(&out[0].1))
+    };
+    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
+
+    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let expected = run(&kept).unwrap();
+    drop(kept);
+    MemorySnapshot::release_unused(Device::Metal).unwrap();
+    assert_eq!(
+        allocated(),
+        0,
+        "nothing on the device before the limit is set"
+    );
+
+    // Lifted however the test ends, so that no other test runs under it.
+    struct Unlimited;
+    impl Drop for Unlimited {
+        fn drop(&mut self) {
+            let _ = MemorySnapshot::set_limit(Device::Metal, 0);
+        }
+    }
+    let _unlimited = Unlimited;
+
+    // Six megabytes: the input's chunk, two, and the weights the other four -- all of them.
+    MemorySnapshot::set_limit(Device::Metal, 6 * MB).unwrap();
+    let x = Tensor::from_f32(&[1024, 256], &input)
+        .unwrap()
+        .to_device(Device::Metal)
+        .unwrap();
+    let filled = Weights::from_files(
+        &[&file.0],
+        Device::Metal,
+        Residency::Hybrid {
+            device_weight_bytes: u64::MAX,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        MemorySnapshot::capture(Device::Metal).unwrap().free,
+        0,
+        "the weights fill what the limit leaves"
+    );
+    drop(x);
+
+    assert_eq!(run(&filled).unwrap(), expected);
+
+    // Some of them had to go to make room, and those that are left are still there to go.
+    let mut left = 0;
+    while filled.evict_one().unwrap().is_some() {
+        left += 1;
+    }
+    assert!(left < 16, "no weight was moved off the device");
 }
 
 /// A run that runs out of the memory it is allowed partway through says so and leaves nothing

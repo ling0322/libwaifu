@@ -96,9 +96,9 @@ pub struct Weights {
     /// cell, because a weight on the device may be moved back to the host in the middle of a run,
     /// through the `Weights` the run shares: see [`Weights::evict_one`].
     tensors: RefCell<HashMap<String, Tensor>>,
-    /// The names of the weights [`keep_the_smallest_on_device`](Weights::keep_the_smallest_on_device)
-    /// put on the device, in the order it put them there, smallest first: a stack, whose top --
-    /// the largest -- is the first to go back to the host when the device runs out.
+    /// The names of the weights `keep_the_smallest_on_device` put on the device, in the order it
+    /// put them there, smallest first: a stack, whose top -- the largest -- is the first to go
+    /// back to the host when the device runs out. See [`Weights::evict_one`].
     gpu_tensors: RefCell<Vec<String>>,
     /// Where a run wants a weight, which is the device the model was built for.
     device: Device,
@@ -376,8 +376,9 @@ pub enum Residency {
     #[default]
     Device,
     /// The smallest weights on the device, as many as fit in `device_weight_bytes` and in what the
-    /// device has free -- `u64::MAX` for as many as it has room for -- and the rest on the host, each moved onto the device by the load that reads it and given back after its
-    /// last reader. For a card the model does not fit on: what the card holds is the small
+    /// device has free -- `u64::MAX` for as many as it has room for -- and the rest on the host,
+    /// each moved onto the device by the load that reads it and given back after its last
+    /// reader. For a card the model does not fit on: what the card holds is the small
     /// weights and what the pass is using rather than the model. On Metal, whose memory is the
     /// machine's, "the host" is the package's file, and it is for a model larger than the machine.
     /// See [`Weights`]. With `device_weight_bytes` 0 every weight waits on the host.
