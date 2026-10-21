@@ -7,7 +7,7 @@ cargo run --release -p waifu-tools --bin speak -- models/indextts25.yaml voice.w
 ```
 
 ```rust
-let tts = IndexTts::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
+let tts = IndexTts::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
 let voice = tts.listen(&recording)?;               // once per voice
 let sound = tts.say("今天天气很好。", &voice, &options, &mut report)?;
 ```

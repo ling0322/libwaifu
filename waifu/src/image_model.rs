@@ -28,7 +28,7 @@ use crate::describe::{
 use crate::flint::Tensor;
 use crate::{
     Anima, Device, GenerationDefaults, GenerationOptions, GenerationProgress, Krea2, Manifest,
-    QwenImage, Residency, Sdxl,
+    QwenImage, Sdxl,
 };
 
 /// One of the models that draw, read and on its device.
@@ -58,25 +58,33 @@ impl ImageModel {
     pub fn from_manifest(
         model_path: &Path,
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
     ) -> crate::Result<ImageModel> {
         let manifest = Manifest::open(model_path)?;
 
         match Self::kind(&manifest)?.as_str() {
             Anima::MODEL_TYPE => Ok(ImageModel::Anima(Anima::from_manifest(
-                device, residency, &manifest,
+                device,
+                device_weight_bytes,
+                &manifest,
             )?)),
             Krea2::MODEL_TYPE => Ok(ImageModel::Krea2(Krea2::from_manifest(
-                device, residency, &manifest,
+                device,
+                device_weight_bytes,
+                &manifest,
             )?)),
             QwenImage::MODEL_TYPE => Ok(ImageModel::QwenImage(QwenImage::from_manifest(
-                device, residency, &manifest,
+                device,
+                device_weight_bytes,
+                &manifest,
             )?)),
             // Everything else goes to SDXL, which says what it makes of it. A model of a kind
             // nobody here has heard of is its complaint to make rather than this one's, since it
             // is the one that knows what it can read.
             _ => Ok(ImageModel::Sdxl(Sdxl::from_manifest(
-                device, residency, &manifest,
+                device,
+                device_weight_bytes,
+                &manifest,
             )?)),
         }
     }

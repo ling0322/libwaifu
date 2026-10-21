@@ -664,26 +664,33 @@ impl Worker {
         let shown = describe::shown_name(asked);
 
         reporter.tell(&Doing::Reading { model: shown });
-        let (device, residency) = (self.runtime.device(), self.runtime.residency());
+        let (device, device_weight_bytes) =
+            (self.runtime.device(), self.runtime.device_weight_bytes());
         let read = || -> crate::Result<Loaded> {
             if let Some(kind) = voice_kind(&path) {
                 let manifest = Manifest::open(&path)?;
                 return Ok(match kind {
-                    VoiceKind::CosyVoice3 => {
-                        Loaded::CosyVoice(CosyVoice3::from_manifest(device, residency, &manifest)?)
-                    }
+                    VoiceKind::CosyVoice3 => Loaded::CosyVoice(CosyVoice3::from_manifest(
+                        device,
+                        device_weight_bytes,
+                        &manifest,
+                    )?),
                     VoiceKind::IndexTts => Loaded::Voice(Box::new(IndexTts::from_manifest(
-                        device, residency, &manifest,
+                        device,
+                        device_weight_bytes,
+                        &manifest,
                     )?)),
                 });
             }
             if let Some(ConverterKind::CosyVoice3) = converter_kind(&path) {
                 let manifest = Manifest::open(&path)?;
                 return Ok(Loaded::CosyVoice(CosyVoice3::from_manifest(
-                    device, residency, &manifest,
+                    device,
+                    device_weight_bytes,
+                    &manifest,
                 )?));
             }
-            let model = ImageModel::from_manifest(&path, device, residency)?;
+            let model = ImageModel::from_manifest(&path, device, device_weight_bytes)?;
             let mut chosen = describe::look_at(asked);
             chosen.no_picture_because = model.no_picture_because().map(str::to_string);
             chosen.on_disk = true;

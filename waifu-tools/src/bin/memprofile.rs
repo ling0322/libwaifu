@@ -10,10 +10,9 @@
 //! bytes, so what it reports is the model rather than the process.
 //!
 //! Measured in two stages, because they answer different questions: what building the model puts
-//! on the card, and what one pass adds on top of it. Under `Residency::Hybrid` with nothing kept
-//! on the card (`lowvram`) the first should be nearly nothing -- that is the whole claim of the
-//! mode -- with `hybrid=GB` it should be at most that, and under `Residency::Device` it is the
-//! model.
+//! on the card, and what one pass adds on top of it. With nothing kept on the card (`lowvram`)
+//! the first should be nearly nothing -- that is the whole claim of the mode -- with `hybrid=GB`
+//! it should be at most that, and given neither, on a card, it is the model.
 
 use std::time::Instant;
 
@@ -30,7 +29,7 @@ fn mib(bytes: i64) -> f64 {
 fn main() -> Result<(), waifu::Error> {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
 
-    let residency = waifu_tools::residency(&mut arguments)?;
+    let device_weight_bytes = waifu_tools::device_weight_bytes(&mut arguments)?;
 
     let Some(model_path) = arguments.first() else {
         eprintln!("usage: memprofile MODEL.yaml [lowvram|hybrid=GB]");
@@ -39,7 +38,10 @@ fn main() -> Result<(), waifu::Error> {
 
     let device = Device::Cuda;
     let manifest = Manifest::open(model_path)?;
-    eprintln!("weights {residency:?}");
+    eprintln!(
+        "weights kept on the device: {}",
+        waifu_tools::bytes_kept(device_weight_bytes)
+    );
 
     let start = MemorySnapshot::capture(device)?;
     println!(
@@ -52,7 +54,7 @@ fn main() -> Result<(), waifu::Error> {
     // putting them on the card, so this is the number that says the model was never put there.
     MemorySnapshot::reset_peak_stats(device)?;
     let built = Instant::now();
-    let model = Krea2::from_manifest(device, residency, &manifest)?;
+    let model = Krea2::from_manifest(device, device_weight_bytes, &manifest)?;
     let build_time = built.elapsed();
     let after_build = MemorySnapshot::capture(device)?;
     println!(

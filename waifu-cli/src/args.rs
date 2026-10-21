@@ -22,7 +22,7 @@
 use std::fmt;
 
 #[allow(unused_imports)]
-use crate::runtime::{Device, Residency};
+use crate::runtime::Device;
 use crate::task::Task;
 
 pub use crate::runtime::{DeviceOption, Room, Runtime};
@@ -159,7 +159,6 @@ impl Args {
             // is typed both ways and being told off over the punctuation helps nobody.
             "cuda_cpu_offload" | "cuda-cpu-offload" => Ok(DeviceOption::CudaCpuOffload),
             "metal" => Ok(DeviceOption::Metal),
-            "metal_disk_offload" | "metal-disk-offload" => Ok(DeviceOption::MetalDiskOffload),
             "vulkan" => Ok(DeviceOption::Vulkan),
             // Every name it would have taken, built from the list rather than written out
             // again: a name refused here is most often a name that was nearly right, and a list
@@ -181,15 +180,14 @@ impl Args {
 pub fn print_options() {
     eprintln!(
         "  -device string\n    \tinference device, one of cpu, cuda, cuda_cpu_offload, metal, \
-         metal_disk_offload, vulkan or auto (default \"auto\"). auto picks the fastest one the \
-         model fits on: cuda where the weights and room for a run fit in the card's free memory, \
-         cuda_cpu_offload where they do not. It is where the model is read first; the drawing \
-         screen's device row moves it. cuda_cpu_offload keeps the weights in host memory and \
-         moves each one onto the card as it is used, so that a model larger than the card can still draw; it \
-         is slower, since the whole model crosses the bus once per step. metal_disk_offload \
-         leaves the weights in the model's files and reads each one off the disk as it is used, \
-         so that a model larger than the Mac's memory can still draw; it is slower again, and \
-         auto never picks it."
+         vulkan or auto (default \"auto\"). auto picks the fastest one the model fits on: cuda \
+         where the weights and room for a run fit in the card's free memory, cuda_cpu_offload \
+         where they do not. It is where the model is read first; the drawing screen's device row \
+         moves it. cuda_cpu_offload keeps the weights in host memory and moves each one onto the \
+         card as it is used, so that a model larger than the card can still draw; it is slower, \
+         since the whole model crosses the bus once per step. metal keeps as many of the weights \
+         on the GPU as fit, the smallest first, and reads the rest off the disk as they are used, \
+         so that a model larger than the Mac's memory can still draw."
     );
     eprintln!(
         "  -m value\n    \tthe model to draw with: either a manifest file, which has the suffix \
@@ -260,32 +258,15 @@ mod tests {
             DeviceOption::Cuda,
             DeviceOption::Metal,
         ] {
-            assert_eq!(device.resolve(&Runtime::ALL).residency(), Residency::Device);
+            assert!(!device.resolve(&Runtime::ALL).offload());
         }
-
-        let asked = args(&["-device", "metal_disk_offload"]).unwrap();
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL),
-            Runtime::METAL_DISK_OFFLOAD
-        );
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::Hybrid
-        );
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL).device(),
-            Device::Metal
-        );
 
         let asked = args(&["-device", "cuda_cpu_offload"]).unwrap();
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL),
             Runtime::CUDA_CPU_OFFLOAD
         );
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::Hybrid
-        );
+        assert!(asked.device().unwrap().resolve(&Runtime::ALL).offload());
         assert_eq!(
             asked.device().unwrap().resolve(&Runtime::ALL).device(),
             Device::Cuda,
@@ -301,17 +282,6 @@ mod tests {
             assert_eq!(
                 args(&["-device", typed]).unwrap().device().unwrap(),
                 DeviceOption::CudaCpuOffload,
-                "{typed}"
-            );
-        }
-        for typed in [
-            "metal_disk_offload",
-            "metal-disk-offload",
-            "Metal_Disk_Offload",
-        ] {
-            assert_eq!(
-                args(&["-device", typed]).unwrap().device().unwrap(),
-                DeviceOption::MetalDiskOffload,
                 "{typed}"
             );
         }
@@ -405,12 +375,6 @@ mod tests {
             DeviceOption::CudaCpuOffload.resolve(&Runtime::ALL).device(),
             Device::Cuda
         );
-        assert_eq!(
-            DeviceOption::MetalDiskOffload
-                .resolve(&Runtime::ALL)
-                .device(),
-            Device::Metal
-        );
     }
 
     #[test]
@@ -447,8 +411,7 @@ mod tests {
     fn the_offload_device_says_what_it_costs() {
         // The rows in the drawing screen's device list anybody has to be told something about.
         assert!(Runtime::CUDA_CPU_OFFLOAD.about().contains("slower"));
-        assert!(Runtime::METAL_DISK_OFFLOAD.about().contains("slower"));
-        assert!(Runtime::METAL_DISK_OFFLOAD.about().contains("memory"));
+        assert!(!Runtime::on(Device::Metal).about().contains("slower"));
         assert!(!Runtime::ALL[0].about().contains("slower"));
     }
 

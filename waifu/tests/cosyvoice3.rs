@@ -39,8 +39,7 @@ use waifu::indextts::features::resample;
 
 use waifu::cosyvoice3::CosyVoice3;
 use waifu::{
-    read_safetensors, wav, DType, Device, Manifest, Residency, Sound, SpeechOptions,
-    SpeechProgress, Weights,
+    read_safetensors, wav, DType, Device, Manifest, Sound, SpeechOptions, SpeechProgress, Weights,
 };
 
 /// What `tools/cosyvoice3_reference.py` read, and the transcript of its recording.
@@ -61,9 +60,7 @@ fn manifest() -> Manifest {
 }
 
 fn weights(manifest: &Manifest) -> Rc<Weights> {
-    Rc::new(
-        Weights::from_files(&manifest.weight_paths().unwrap(), DEVICE, Residency::Device).unwrap(),
-    )
+    Rc::new(Weights::from_files(&manifest.weight_paths().unwrap(), DEVICE, u64::MAX).unwrap())
 }
 
 fn fixture() -> HashMap<String, Tensor> {
@@ -451,7 +448,7 @@ fn the_vocoder_sounds_the_mel_as_upstream_does() {
 #[ignore]
 fn says_the_sentence_in_the_voice_of_the_recording() {
     let cases = fixture();
-    let tts = CosyVoice3::from_manifest(DEVICE, Residency::Device, &manifest()).unwrap();
+    let tts = CosyVoice3::from_manifest(DEVICE, u64::MAX, &manifest()).unwrap();
     let recording = Sound::new(floats(&cases, "prompt_24k"), 24000);
 
     let heard = tts.listen(&recording).unwrap();

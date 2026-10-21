@@ -11,7 +11,7 @@ cargo run --release -p waifu-tools --bin speak -- models/cosyvoice3.yaml voice.w
 ```
 
 ```rust
-let tts = CosyVoice3::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
+let tts = CosyVoice3::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
 let voice = tts.listen(&recording)?;                               // once per voice
 let sound = tts.say("今天天气很好。", &voice, &options, &mut report)?;  // no transcript
 let sound = tts.say_after("今天天气很好。", "录音里说的话。", &voice, &options, &mut report)?;

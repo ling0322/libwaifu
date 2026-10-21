@@ -37,7 +37,6 @@ use std::path::PathBuf;
 use waifu::flint::Tensor;
 use waifu::{
     read_safetensors, DType, Device, GenerationOptions, GenerationProgress, Krea2, Manifest,
-    Residency,
 };
 
 /// The prompt the reference outputs were computed for.
@@ -54,7 +53,7 @@ fn device() -> Device {
 /// The model: twenty-four gigabytes of denoiser and eight of encoder, read once.
 fn model() -> Krea2 {
     let manifest = Manifest::open(models_dir().join("krea2-turbo.yaml")).unwrap();
-    Krea2::from_manifest(device(), Residency::Device, &manifest).unwrap()
+    Krea2::from_manifest(device(), u64::MAX, &manifest).unwrap()
 }
 
 fn cases() -> HashMap<String, Tensor> {

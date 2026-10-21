@@ -33,7 +33,7 @@ use std::rc::Rc;
 
 use super::{ControlConfig, Dit, QwenImageConfig, VaeDecoder, VaeEncoder};
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, Residency, Tensor, Weights};
+use crate::flint::{functional as F, DType, Device, Tensor, Weights};
 use crate::flow::{FlowSampler, SamplerConfig};
 use crate::generation::{unwatched, GenerationDefaults, GenerationOptions, GenerationProgress};
 use crate::krea2::TextEncoder;
@@ -109,17 +109,17 @@ impl QwenImage {
 
     pub fn from_manifest(
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
         manifest: &Manifest,
     ) -> Result<QwenImage> {
-        Self::from_manifests(device, residency, manifest, None)
+        Self::from_manifests(device, device_weight_bytes, manifest, None)
     }
 
     /// The model, and with `control` the ControlNet package that steers it: one set of weights
     /// read out of both, since the control chain is part of the denoiser's graph.
     pub fn from_manifests(
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
         manifest: &Manifest,
         control: Option<&Manifest>,
     ) -> Result<QwenImage> {
@@ -158,7 +158,8 @@ impl QwenImage {
         };
 
         let dtype = F::default_float_type(device)?;
-        let weights: Rc<Weights> = Rc::new(Weights::from_files(&paths, device, residency)?);
+        let weights: Rc<Weights> =
+            Rc::new(Weights::from_files(&paths, device, device_weight_bytes)?);
 
         let named = |half: &str| format!("{model_type}.{half}");
         let tokenizer = Tokenizer::open(manifest)?;

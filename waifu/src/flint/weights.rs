@@ -17,8 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! A model's weights, read out of its package and kept where [`Residency`] says, and what a
-//! graph's `load` instructions are answered from. See the IR's documentation for how a run reads
+//! A model's weights, read out of its package and kept on the device as far as they fit, and
+//! what a graph's `load` instructions are answered from. See the IR's documentation for how a run reads
 //! them: [`Ir`](super::Ir).
 
 use std::cell::{Ref, RefCell};
@@ -51,13 +51,13 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
     Ok(tensor)
 }
 
-/// A model's weights, read out of its package and kept where [`Residency`] says.
+/// A model's weights, read out of its package and kept on the device as far as they were asked to
+/// be and it allows: see [`Weights::from_files`].
 ///
-/// One map of tensors, whichever residency: on the card for [`Residency::Device`], in ordinary host
-/// memory for [`Residency::Hybrid`], or some of each where it was given room on the card. What
-/// differs is only whether a [`load`](Weights::load) has to move the weight -- a kept one is
-/// already where the run wants it and is handed over as a handle, and a waiting one is copied
-/// across the bus, to be given back at the `free` after its last reader.
+/// One map of tensors, some on the card and the rest in ordinary host memory -- or all of them on
+/// the card. What differs is only whether a [`load`](Weights::load) has to move the weight -- a
+/// kept one is already where the run wants it and is handed over as a handle, and a waiting one is
+/// copied across the bus, to be given back at the `free` after its last reader.
 ///
 /// # What low-vram costs
 ///
@@ -82,7 +82,7 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// low-vram is there to spare, and on a machine smaller than the model the end of the package
 /// pushes out its beginning before the first step asks for it. So each weight stays its file's
 /// mapping, untouched, and a load reads it off the disk as it copies it into a buffer of the
-/// device's -- `metal_disk_offload`. Pages read that way are clean, and the kernel drops them
+/// device's. Pages read that way are clean, and the kernel drops them
 /// rather than writing them anywhere when memory runs short.
 ///
 /// The copy is the host's and synchronous (see `Context::upload` in `flint/metal_native`): it
@@ -100,31 +100,50 @@ pub struct Weights {
     /// put them there, smallest first: a stack, whose top -- the largest -- is the first to go
     /// back to the host when the device runs out. See [`Weights::evict_one`].
     gpu_tensors: RefCell<Vec<String>>,
-    /// Where a run wants a weight, which is the device the model was built for.
+    /// Where a run wants a weight, which is the device the model was built for. Where any one
+    /// weight waits between runs is its own tensor's to say.
     device: Device,
-    /// Where the weights wait between runs: on `device`, or on the host but for the smallest.
-    /// Where any one weight is is its own tensor's to say.
-    residency: Residency,
     /// What `device` computes in, which a half vector is widened to; see [`retype`].
     computes_in: DType,
 }
 
 impl Weights {
-    /// Every weight of the safetensors files at `paths`, for a model running on `device` with its
-    /// weights held the way `residency` says.
+    /// Every weight of the safetensors files at `paths`, for a model running on `device`, with up
+    /// to `device_weight_bytes` of them kept on it -- `u64::MAX`, the usual answer, for as many as
+    /// fit -- and the rest on the host.
     ///
     /// The one way a model's weights are read. Each file is mapped rather than read, and each of
     /// its weights is put where it is going straight out of the mapping, so the host holds no
     /// copy of its own: a weight moved to the card leaves nothing behind, and one kept on the host
     /// is the page cache. See [`tensor_file`](crate::tensor_file).
     ///
-    /// A low-vram run on anything but CUDA and Metal is refused before a byte is read.
+    /// The weights kept are the smallest, no more of them than the device has free -- the room its
+    /// memory limit leaves, or, without one, its budget -- and a run that runs short moves the
+    /// largest of them back off it: see [`Weights::evict_one`]. Those not kept are each moved onto
+    /// the device by the load that reads it and given back after its last reader; on Metal, whose
+    /// memory is the machine's, "the host" is the package's file, so a model larger than the
+    /// machine still runs. 0 keeps none.
+    ///
+    /// Smallest first because what a load from the host costs is mostly not its bytes: each one
+    /// is a copy the run waits for, and a model's norms, biases and scales are hundreds of loads
+    /// that are each a wait and almost nothing to keep. So the first few hundred megabytes take
+    /// most of the waits away, and what is left to cross over per pass is the large projections,
+    /// whose copies are the ones that run at the bus's rate.
+    ///
+    /// What each device can do of that is [`kept_on_device`]'s to say: on the processor and
+    /// Vulkan, and on CUDA asked to fill it, every weight is on the device.
     pub fn from_files(
         paths: &[impl AsRef<Path>],
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
     ) -> Result<Weights> {
-        tensor_file::collect(paths, device, residency)
+        tensor_file::collect(paths, device, device_weight_bytes)
+    }
+
+    /// What `device` makes of being asked to keep `device_weight_bytes` of the weights: `None`
+    /// for every weight on the device as it is read, or the bytes of them to keep there.
+    pub(crate) fn kept_on(device: Device, device_weight_bytes: u64) -> Option<u64> {
+        kept_on_device(device, device_weight_bytes)
     }
 
     /// `tensors` as they are, for a run on `device`: neither retyped nor moved here, so a load
@@ -135,7 +154,7 @@ impl Weights {
     pub fn from_tensors(tensors: HashMap<String, Tensor>, device: Device) -> Result<Weights> {
         Ok(Weights {
             tensors: RefCell::new(tensors),
-            ..Weights::empty(device, Residency::Device)?
+            ..Weights::empty(device)?
         })
     }
 
@@ -172,36 +191,25 @@ impl Weights {
         self.tensors.borrow().is_empty()
     }
 
-    /// No weights yet, for a model running on `device` with its weights held the way `residency`
-    /// says. [`tensor_file`](crate::tensor_file) fills it with [`Weights::insert`].
-    ///
-    /// Refuses a low-vram run on anything but CUDA and Metal, which is how the reading is refused
-    /// before a byte of it is done.
-    pub(crate) fn empty(device: Device, residency: Residency) -> Result<Weights> {
-        if !residency.works_on(device) {
-            return Err(Error::model(format!(
-                "a low-vram run moves each weight onto the device as it is used, which only cuda \
-                 and metal do, so it has nothing to offer {}",
-                device.name()
-            )));
-        }
-
+    /// No weights yet, for a model running on `device`. [`tensor_file`](crate::tensor_file) fills
+    /// it with [`Weights::insert`].
+    pub(crate) fn empty(device: Device) -> Result<Weights> {
         Ok(Weights {
             tensors: RefCell::new(HashMap::new()),
             gpu_tensors: RefCell::new(Vec::new()),
             device,
-            residency,
             computes_in: F::default_float_type(device)?,
         })
     }
 
-    /// Keep `tensor` under `name`, `retype`d and put where it waits.
+    /// Keep `tensor` under `name`, `retype`d and put on the device -- or, `on_host`, left where it
+    /// is until a load wants it.
     ///
     /// `retype` runs before the move rather than after it, because a conversion is cheaper on a
     /// tensor that has not been sent anywhere. A name already held is refused rather than
     /// replaced -- a model whose weights depend on the order its files were listed in is worse
     /// than one that will not load -- and refused before anything is moved.
-    pub(crate) fn insert(&mut self, name: String, tensor: Tensor) -> Result<()> {
+    pub(crate) fn insert(&mut self, name: String, tensor: Tensor, on_host: bool) -> Result<()> {
         let tensors = self.tensors.get_mut();
         if tensors.contains_key(&name) {
             return Err(Error::format(format!(
@@ -210,13 +218,13 @@ impl Weights {
         }
 
         let tensor = retype(tensor, self.computes_in)?;
-        let tensor = match self.residency {
-            Residency::Device => tensor.to_device_as(self.device, AllocHint::Weight)?,
+        let tensor = match on_host {
+            false => tensor.to_device_as(self.device, AllocHint::Weight)?,
             // On the host, a weight is its file's mapping, and nothing below reads it until a run
             // does -- so it is read here, in the order the package lies in. Except on Metal, where
             // the host's memory is the device's too and the package stays on the disk until a
             // load wants it; see the type documentation.
-            Residency::Hybrid { .. } => {
+            true => {
                 if self.device != Device::Metal {
                     read_through(&tensor)?;
                 }
@@ -228,23 +236,22 @@ impl Weights {
         Ok(())
     }
 
-    /// For a hybrid model, once every weight is in: the smallest put on the device and kept there,
-    /// as many as fit in the bytes it was given and in what the device has free -- the room its
-    /// memory limit leaves, or, without one, its budget. Given `u64::MAX` bytes, that is as many as
-    /// the device has room for. See [`smallest_within`].
+    /// Once every weight is in on the host: the smallest put on the device and kept there, as many
+    /// as fit in `device_weight_bytes` and in what the device has free -- the room its memory
+    /// limit leaves, or, without one, its budget. Given `u64::MAX` bytes, that is as many as the
+    /// device has room for. See [`smallest_within`].
     ///
     /// After the whole package rather than as each weight comes, because which are the smallest
-    /// is a question about all of them. Each one moved leaves its host copy behind for the page
-    /// cache to drop, as a resident model's weights do. A device that turns out to be full before
-    /// the last of them -- each weight takes whole pages, which the sizes do not count -- keeps
-    /// those it has.
-    pub(crate) fn keep_the_smallest_on_device(&mut self) -> Result<()> {
-        let Residency::Hybrid {
-            device_weight_bytes,
-        } = self.residency
-        else {
-            return Ok(());
-        };
+    /// is a question about all of them. They are moved in `order`, the order the package lies in,
+    /// so that the disk is read front to back rather than smallest first. Each one moved leaves its
+    /// host copy behind for the page cache to drop, as a resident model's weights do. A device that
+    /// turns out to be full before the last of them -- each weight takes whole pages, which the
+    /// sizes do not count -- keeps those it has.
+    pub(crate) fn keep_the_smallest_on_device(
+        &mut self,
+        device_weight_bytes: u64,
+        order: &[String],
+    ) -> Result<()> {
         if device_weight_bytes == 0 {
             return Ok(());
         }
@@ -259,21 +266,25 @@ impl Weights {
         }
         let (chosen, _) = smallest_within(sizes, allowed);
 
-        // Smallest first, as smallest_within hands them back, so that the largest is on top.
-        let gpu_tensors = self.gpu_tensors.get_mut();
+        // Moved in the order they lie in, and stacked smallest first, as smallest_within hands
+        // them back, so that the largest is on top.
+        let wanted: std::collections::HashSet<&String> = chosen.iter().collect();
         let mut bytes = 0u64;
-        for name in &chosen {
+        let mut moved = std::collections::HashSet::new();
+        for name in order.iter().filter(|name| wanted.contains(name)) {
             let tensor = tensors.get_mut(name).expect("a name the map was asked for");
             match tensor.to_device_as(self.device, AllocHint::Weight) {
-                Ok(moved) => {
-                    bytes += moved.nbytes()? as u64;
-                    *tensor = moved;
-                    gpu_tensors.push(name.clone());
+                Ok(on_device) => {
+                    bytes += on_device.nbytes()? as u64;
+                    *tensor = on_device;
+                    moved.insert(name.clone());
                 }
                 Err(error) if error.is_out_of_memory() => break,
                 Err(error) => return Err(error.into()),
             }
         }
+        let gpu_tensors = self.gpu_tensors.get_mut();
+        gpu_tensors.extend(chosen.into_iter().filter(|name| moved.contains(name)));
 
         crate::log::write(
             crate::log::Level::Info,
@@ -365,47 +376,22 @@ impl fmt::Debug for Weights {
     }
 }
 
-/// Where a model's weights wait between the passes that read them.
+/// What `device` makes of being asked to keep `device_weight_bytes` of a model's weights: `None`
+/// for every weight on the device as it is read, and otherwise every weight on the host and as
+/// many bytes of the smallest of them as that on the device, moved there once the package is in.
 ///
-/// The one question a caller has to answer that the package cannot: both modes run the same IR
-/// over the same weights and draw the same picture, and they differ only in what the card is
-/// holding while they do it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Residency {
-    /// On the device, moved once and kept. Fastest, and what a card the model fits on wants.
-    #[default]
-    Device,
-    /// The smallest weights on the device, as many as fit in `device_weight_bytes` and in what the
-    /// device has free -- `u64::MAX` for as many as it has room for -- and the rest on the host,
-    /// each moved onto the device by the load that reads it and given back after its last
-    /// reader. For a card the model does not fit on: what the card holds is the small
-    /// weights and what the pass is using rather than the model. On Metal, whose memory is the
-    /// machine's, "the host" is the package's file, and it is for a model larger than the machine.
-    /// See [`Weights`]. With `device_weight_bytes` 0 every weight waits on the host.
-    ///
-    /// Smallest first because what a load from the host costs is mostly not its bytes: each one
-    /// is a copy the run waits for, and a model's norms, biases and scales are hundreds of loads
-    /// that are each a wait and almost nothing to keep. So the first few hundred megabytes take
-    /// most of the waits away, and what is left to cross over per pass is the large projections,
-    /// whose copies are the ones that run at the bus's rate. More than the model is
-    /// [`Residency::Device`].
-    Hybrid { device_weight_bytes: u64 },
-}
-
-impl Residency {
-    /// Whether a run on `device` can be had this way.
-    ///
-    /// [`Residency::Hybrid`] needs a device whose memory a weight can be moved into and given back
-    /// from one load at a time -- CUDA's, through its staged upload, and Metal's -- so it is the
-    /// one answer that depends on where the run is going. The processor already holds the
-    /// weights where it reads them, and Vulkan has no such path. Nothing above offers the pair
-    /// that cannot be built -- the command line and both screens name the two together, as one
-    /// device -- so this is the check that says so for a caller reaching the library directly.
-    pub fn works_on(self, device: Device) -> bool {
-        match self {
-            Residency::Device => true,
-            Residency::Hybrid { .. } => matches!(device, Device::Cuda | Device::Metal),
-        }
+/// Keeping some off the device needs a device whose memory a weight can be moved into and given
+/// back from one load at a time -- CUDA's, through its staged upload, and Metal's. The processor
+/// already holds the weights where it reads them, and Vulkan has no such path, so on those every
+/// weight is on the device. And filling the device -- `u64::MAX` -- needs one that can make room
+/// again, which only Metal can as things are: a card has no limit here, and running out there is
+/// not told apart from any other failure. So on CUDA filling is every weight on the card; a number
+/// of bytes, none among them, is kept as asked.
+fn kept_on_device(device: Device, device_weight_bytes: u64) -> Option<u64> {
+    match device {
+        Device::Metal => Some(device_weight_bytes),
+        Device::Cuda if device_weight_bytes != u64::MAX => Some(device_weight_bytes),
+        _ => None,
     }
 }
 
@@ -536,33 +522,23 @@ mod tests {
     }
 
     #[test]
-    fn says_that_low_vram_is_for_cuda_and_metal_alone() {
-        // Refused before anything is read, so no file is needed to ask with. Vulkan is asked
-        // too, on a machine that may have none: the refusal comes before anything is asked of the
-        // device, which is the point of it.
-        for device in [Device::Cpu, Device::Vulkan] {
-            let error = Weights::empty(
-                device,
-                Residency::Hybrid {
-                    device_weight_bytes: 0,
-                },
-            )
-            .map(drop)
-            .unwrap_err()
-            .to_string();
+    fn each_device_does_what_it_can_of_what_is_asked() {
+        let (fill, some, none) = (u64::MAX, 1 << 30, 0);
 
-            assert!(error.contains("only cuda and metal"), "{error}");
-            assert!(error.contains(device.name()), "{error}");
+        // Metal does all of it.
+        for asked in [fill, some, none] {
+            assert_eq!(kept_on_device(Device::Metal, asked), Some(asked));
         }
-
-        for device_weight_bytes in [0, 1 << 30] {
-            let hybrid = Residency::Hybrid {
-                device_weight_bytes,
-            };
-            assert!(hybrid.works_on(Device::Cuda));
-            assert!(hybrid.works_on(Device::Metal));
-            assert!(!hybrid.works_on(Device::Cpu));
-            assert!(!hybrid.works_on(Device::Vulkan));
+        // CUDA keeps a number of bytes, none among them, but cannot make room again, so filling it
+        // is all of the weights on the card.
+        assert_eq!(kept_on_device(Device::Cuda, fill), None);
+        assert_eq!(kept_on_device(Device::Cuda, some), Some(some));
+        assert_eq!(kept_on_device(Device::Cuda, none), Some(none));
+        // The processor and Vulkan have every weight on the device, however they are asked.
+        for device in [Device::Cpu, Device::Vulkan] {
+            for asked in [fill, some, none] {
+                assert_eq!(kept_on_device(device, asked), None);
+            }
         }
     }
 
@@ -596,10 +572,5 @@ mod tests {
         );
         assert_eq!(smallest_within(model.clone(), 0), (vec![], 0));
         assert_eq!(smallest_within(model, u64::MAX).0.len(), 5);
-    }
-
-    #[test]
-    fn keeps_the_weights_on_the_device_unless_asked_otherwise() {
-        assert_eq!(Residency::default(), Residency::Device);
     }
 }

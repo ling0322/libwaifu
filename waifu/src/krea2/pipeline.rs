@@ -50,7 +50,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, Residency, Tensor, Weights};
+use crate::flint::{functional as F, DType, Device, Tensor, Weights};
 use crate::flow::FlowSampler;
 use crate::generation::{unwatched, GenerationDefaults, GenerationOptions, GenerationProgress};
 use crate::krea2::{Dit, Krea2Config, TextEncoder};
@@ -124,11 +124,11 @@ impl Krea2 {
         guidance_scale: 1.0,
     };
 
-    /// Read the whole model `manifest` describes, onto `device`, with its weights waiting where
-    /// `residency` says.
+    /// Read the whole model `manifest` describes, onto `device`, with up to `device_weight_bytes` of
+    /// its weights kept there -- `u64::MAX` for as many as fit; see [`Weights::from_files`].
     pub fn from_manifest(
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
         manifest: &Manifest,
     ) -> Result<Krea2> {
         let model_section = manifest.section(Self::MODEL_SECTION)?;
@@ -146,7 +146,7 @@ impl Krea2 {
         let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
-            residency,
+            device_weight_bytes,
         )?);
 
         let named = |half: &str| format!("{model_type}.{half}");

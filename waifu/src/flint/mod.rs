@@ -99,7 +99,7 @@ pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{Inst, Ir, RunContext};
 pub use op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
 pub use operators::Operators;
-pub use weights::{check_parameters, Residency, Weights};
+pub use weights::{check_parameters, Weights};
 
 use operators::{operators_of, transfer_operators};
 

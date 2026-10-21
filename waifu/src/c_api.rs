@@ -102,7 +102,7 @@ pub extern "C" fn waifu_machine_json() -> *mut c_char {
 }
 
 /// Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-/// names them -- cpu, cuda, cuda_cpu_offload, metal, metal_disk_offload, vulkan -- with `free` the
+/// names them -- cpu, cuda, cuda_cpu_offload, metal, vulkan -- with `free` the
 /// bytes free on the card for CUDA and Vulkan where they can be used, and null otherwise. Asking
 /// CUDA builds a context on the card, a few hundred megabytes of it. Free with waifu_string_free.
 /// NULL on failure.
@@ -258,9 +258,9 @@ pub enum WaifuDevice {
     WAIFU_DEVICE_CUDA = 3,
     WAIFU_DEVICE_CUDA_CPU_OFFLOAD = 4,
     WAIFU_DEVICE_VULKAN = 5,
-    /// Metal with the weights left in the model's files, each read off the disk as it is used:
-    /// for a model larger than the Mac's memory, and slower. Last, so the numbers above keep
-    /// their meaning.
+    /// The same as WAIFU_DEVICE_METAL, which now keeps in the model's files whatever does not fit
+    /// on the device. Kept for callers built against an older header, and last, so the numbers
+    /// above keep their meaning.
     WAIFU_DEVICE_METAL_DISK_OFFLOAD = 6,
 }
 
@@ -420,9 +420,9 @@ pub unsafe extern "C" fn waifu_engine_new_with_options(
 /// Limits the memory of `device` -- the tensors of whatever runs on it, the weights an offload
 /// device keeps there, and what it keeps for reuse -- to `bytes`; 0 for no limit but the
 /// device's. For the whole process rather than an engine: set it before an engine reads a model.
-/// On WAIFU_DEVICE_METAL_DISK_OFFLOAD the model's smallest weights fill what it leaves, and a run
-/// that then runs short moves weights back off the device rather than failing. Only Metal has a
-/// limit: false, with waifu_last_error, for any other device.
+/// On Metal the model's smallest weights fill what it leaves, and a run that then runs short moves
+/// weights back off the device rather than failing. Only Metal has a limit: false, with
+/// waifu_last_error, for any other device.
 #[no_mangle]
 pub extern "C" fn waifu_set_memory_limit(device: WaifuDevice, bytes: u64) -> bool {
     caught(false, || {
@@ -445,7 +445,7 @@ fn device_option(device: WaifuDevice) -> DeviceOption {
         WaifuDevice::WAIFU_DEVICE_CUDA => DeviceOption::Cuda,
         WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD => DeviceOption::CudaCpuOffload,
         WaifuDevice::WAIFU_DEVICE_VULKAN => DeviceOption::Vulkan,
-        WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD => DeviceOption::MetalDiskOffload,
+        WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD => DeviceOption::Metal,
     }
 }
 

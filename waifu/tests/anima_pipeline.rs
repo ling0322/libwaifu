@@ -31,7 +31,6 @@ use std::path::PathBuf;
 use waifu::flint::Tensor;
 use waifu::{
     read_safetensors, Anima, DType, Device, GenerationOptions, GenerationProgress, Manifest,
-    Residency,
 };
 
 /// The prompt the reference outputs were computed for.
@@ -48,7 +47,7 @@ fn device() -> Device {
 
 fn model() -> Anima {
     let manifest = Manifest::open(models_dir().join("anima-turbo-v11.yaml")).unwrap();
-    Anima::from_manifest(device(), Residency::Device, &manifest).unwrap()
+    Anima::from_manifest(device(), u64::MAX, &manifest).unwrap()
 }
 
 fn cases() -> HashMap<String, Tensor> {

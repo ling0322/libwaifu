@@ -56,7 +56,7 @@ use waifu::flint::{Tensor, Weights};
 use waifu::krea2::{
     Dit, DitConfig, EncoderConfig, FlowSampler, SamplerConfig, TextEncoder, VaeConfig, VaeDecoder,
 };
-use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
+use waifu::{read_safetensors, DType, Device, Manifest, WeightFormat};
 
 /// How many tokens of the encoder's answer the denoiser reads, which is all of them but the
 /// thirty-four the template puts in front.
@@ -85,12 +85,7 @@ fn weights() -> Rc<Weights> {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("krea2-turbo.yaml")).unwrap();
             Rc::new(
-                Weights::from_files(
-                    &manifest.weight_paths().unwrap(),
-                    device(),
-                    Residency::Device,
-                )
-                .unwrap(),
+                Weights::from_files(&manifest.weight_paths().unwrap(), device(), u64::MAX).unwrap(),
             )
         }))
     })

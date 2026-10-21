@@ -325,7 +325,7 @@ typedef enum {
     WAIFU_DEVICE_CUDA,
     WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
     WAIFU_DEVICE_VULKAN,
-    WAIFU_DEVICE_METAL_DISK_OFFLOAD,
+    WAIFU_DEVICE_METAL_DISK_OFFLOAD,  // the same as WAIFU_DEVICE_METAL, for older callers
 } WaifuDevice;
 
 typedef struct WaifuEngine WaifuEngine;
@@ -351,9 +351,9 @@ WaifuEngine *waifu_engine_new_with_options(const WaifuEngineOptions *options);
 // Limits the memory of `device` -- the tensors of whatever runs on it, the weights an offload
 // device keeps there, and what it keeps for reuse -- to `bytes`; 0 for no limit but the
 // device's. For the whole process rather than an engine: set it before an engine reads a model.
-// On WAIFU_DEVICE_METAL_DISK_OFFLOAD the model's smallest weights fill what it leaves, and a run
-// that then runs short moves weights back off the device rather than failing. Only Metal has a
-// limit: false, with waifu_last_error, for any other device.
+// On Metal the model's smallest weights fill what it leaves, and a run that then runs short moves
+// weights back off the device rather than failing. Only Metal has a limit: false, with
+// waifu_last_error, for any other device.
 bool waifu_set_memory_limit(WaifuDevice device, uint64_t bytes);
 
 // Stops what is running, cancels what waits (each gets on_complete with WAIFU_CANCELLED), drops the

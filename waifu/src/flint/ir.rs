@@ -64,31 +64,26 @@
 //!
 //! # Where a weight comes from
 //!
-//! The source, and nowhere else: an IR is one list of instructions whichever [`Residency`] the
-//! model was read with, and a `load` is one of them either way. What differs is only what the
-//! source does when a load asks it for a weight, and that was decided when the source was built.
+//! The source, and nowhere else: an IR is one list of instructions however many of the model's
+//! weights the source keeps on the card, and a `load` is one of them either way. What differs is
+//! only what the source does when a load asks it for a weight, and that was decided when the
+//! source was built -- see [`Weights::from_files`].
 //!
-//! * [`Residency::Device`] put every weight on the card when the source was built, so a
-//!   load is a lookup and the handle it hands back costs no bytes. What the card holds is the
-//!   model, which is what a model that fits wants and what twenty sampler steps would otherwise
-//!   pay for twenty times over.
-//! * [`Residency::Hybrid`] put the smallest weights on the card, as many as fit in the bytes it
-//!   was given, and kept the rest in ordinary host memory, where a load is the copy across the
-//!   bus. The `free` after such a weight's last reader is the card taking those bytes back, so
-//!   the card holds the small weights and what the pass is using rather than the model. See
-//!   [`Weights`] for why the host copy is not page-locked. On Metal the "host memory" is the
-//!   package's file: nothing is read until a load asks for it. Given no bytes, it keeps every
-//!   weight on the host. And where the card runs out in the middle of a run, the instruction that
-//!   ran out moves the largest of the weights it kept back to the host and runs again, until it
-//!   fits or none is left to move.
+//! * A weight kept on the card when the source was built is a lookup, and the handle a load hands
+//!   back costs no bytes. A card that holds them all holds the model, which is what a model that
+//!   fits wants and what twenty sampler steps would otherwise pay for twenty times over.
+//! * A weight kept in ordinary host memory is a copy across the bus at each load, and the `free`
+//!   after its last reader is the card taking those bytes back, so the card holds what it kept
+//!   and what the pass is using rather than the model. See [`Weights`] for why the host copy is
+//!   not page-locked. On Metal the "host memory" is the package's file: nothing is read until a
+//!   load asks for it.
 //!
-//! Both hold the model somewhere for as long as it is in use: on the card, or in host memory --
-//! or, for a low-vram model on Metal, on the disk. That is the price of the IR not having to know
-//! which.
+//! The ones kept are the smallest, as many as fit. And where the card runs out in the middle of a
+//! run, the instruction that ran out moves the largest of them back to the host and runs again,
+//! until it fits or none is left to move.
 //!
-//! [`Residency`]: super::Residency
-//! [`Residency::Device`]: super::Residency::Device
-//! [`Residency::Hybrid`]: super::Residency::Hybrid
+//! Either way the model is held somewhere for as long as it is in use: on the card, or in host
+//! memory -- or, on Metal, on the disk. That is the price of the IR not having to know which.
 //!
 //! # What is deliberately not here
 //!

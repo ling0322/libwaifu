@@ -29,7 +29,7 @@ use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use crate::error::{Error, Result};
-use crate::flint::{functional as F, DType, Device, Residency, Tensor, WeightFormat, Weights};
+use crate::flint::{functional as F, DType, Device, Tensor, WeightFormat, Weights};
 use crate::generation::{unwatched, GenerationOptions, GenerationProgress};
 use crate::manifest::Manifest;
 use crate::mapping::Mapping;
@@ -237,19 +237,19 @@ impl Sdxl {
     /// the type and reading the section named `sdxl` were the same thing.
     pub const MODEL_TYPE: &'static str = "sdxl";
 
-    /// Read the whole model `manifest` describes, onto `device`, with its weights waiting where
-    /// `residency` says.
+    /// Read the whole model `manifest` describes, onto `device`, with up to `device_weight_bytes` of
+    /// its weights kept there -- `u64::MAX` for as many as fit; see [`Weights::from_files`].
     ///
     /// The manifest says what the model is and which packages the weights are in. Which package a
     /// tensor was written to is not something the model has to know: they are read in the order
     /// they are named, into one namespace.
     ///
-    /// [`Residency::Hybrid`] is the one to reach for when the card has less memory on it than the
-    /// weights have bytes. It draws the same picture, a good deal more slowly, and nothing below
-    /// this line knows which of the two it is running under.
+    /// Fewer bytes than the weights have is what a card with less memory on it than that wants. It
+    /// draws the same picture, a good deal more slowly, and nothing below this line knows how many
+    /// of the weights it is running with on the card.
     pub fn from_manifest(
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
         manifest: &Manifest,
     ) -> Result<Sdxl> {
         let model_section = manifest.section(Self::MODEL_SECTION)?;
@@ -262,13 +262,13 @@ impl Sdxl {
         // The weights, read in the order the manifest names them: each file is read through once,
         // in full, and they read into one namespace.
         let dtype = F::default_float_type(device)?;
-        // The whole package, read once, and put where the residency says it waits. The four halves
+        // The whole package, read once, and as much of it kept on the device as was asked for. The four halves
         // are written against it and share it: a weight is found by the name the package holds it
         // under, and the four namespaces below are what keeps them apart.
         let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
-            residency,
+            device_weight_bytes,
         )?);
 
         let named = |half: &str| format!("{model_type}.{half}");

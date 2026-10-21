@@ -28,7 +28,7 @@
 //! whole path a draw takes, short of the drawing -- so it is the cheapest thing that says a
 //! converted model actually loads.
 
-use waifu::{Anima, Device, Manifest, Residency, Sdxl};
+use waifu::{Anima, Device, Manifest, Sdxl};
 
 fn main() -> Result<(), waifu::Error> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -51,12 +51,12 @@ fn main() -> Result<(), waifu::Error> {
 
     let ids = match kind.as_str() {
         Anima::MODEL_TYPE => {
-            let model = Anima::from_manifest(device, Residency::Device, &manifest)?;
+            let model = Anima::from_manifest(device, u64::MAX, &manifest)?;
             println!("built in {:?}", started.elapsed());
             model.encode_prompt(prompt)?.shape()
         }
         _ => {
-            let model = Sdxl::from_manifest(device, Residency::Device, &manifest)?;
+            let model = Sdxl::from_manifest(device, u64::MAX, &manifest)?;
             println!("built in {:?}", started.elapsed());
             model.encode_prompt(prompt)?.context.shape()
         }

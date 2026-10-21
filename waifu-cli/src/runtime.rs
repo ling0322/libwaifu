@@ -42,14 +42,6 @@ impl Device {
     }
 }
 
-/// Where the weights wait between the steps that read them: on the device, or -- for a model
-/// larger than it -- on the host or the disk, each moved over at the step that reads it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Residency {
-    Device,
-    Hybrid,
-}
-
 use crate::c::{self, WaifuDevice};
 
 /// Where a run goes: a device, and where the weights wait between the steps that read them.
@@ -57,23 +49,23 @@ use crate::c::{self, WaifuDevice};
 /// One name rather than two answers. Where the weights wait is a question about a card the model
 /// does not fit on, so it has one device it can be asked of and one reason to ask it, and asking
 /// it beside the device made a second box whose rows were struck out three times out of four. As
-/// a device name -- `cuda_cpu_offload`, cuda with the weights kept on the host, and
-/// `metal_disk_offload`, metal with them left on the disk -- the pair that cannot be built cannot
-/// be said either, and there is one list on screen instead of two.
+/// a device name -- `cuda_cpu_offload`, cuda with the weights kept on the host -- the pair that
+/// cannot be built cannot be said either, and there is one list on screen instead of two. Metal
+/// needs no second name: libwaifu keeps on it what fits and the rest in the model's files.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Runtime {
     device: Device,
-    residency: Residency,
+    /// The weights on the host, each moved onto the card as it is used: cuda_cpu_offload.
+    offload: bool,
 }
 
 impl Runtime {
     /// Every place a run can go, in the order the flag's own usage lists them.
-    pub const ALL: [Runtime; 6] = [
+    pub const ALL: [Runtime; 5] = [
         Runtime::on(Device::Cpu),
         Runtime::on(Device::Cuda),
         Runtime::CUDA_CPU_OFFLOAD,
         Runtime::on(Device::Metal),
-        Runtime::METAL_DISK_OFFLOAD,
         Runtime::on(Device::Vulkan),
     ];
 
@@ -81,22 +73,15 @@ impl Runtime {
     /// instruction that reads it. For a card the model does not fit on.
     pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
         device: Device::Cuda,
-        residency: Residency::Hybrid,
+        offload: true,
     };
 
-    /// Metal, with the package left in its file and each weight read off the disk into the
-    /// device's memory at the instruction that reads it. Metal's memory is the machine's, so this
-    /// is for a model larger than the machine.
-    pub const METAL_DISK_OFFLOAD: Runtime = Runtime {
-        device: Device::Metal,
-        residency: Residency::Hybrid,
-    };
-
-    /// A device with the weights on it, which is what every name but the offload ones means.
+    /// A device with as many of the weights on it as fit, which is what every name but the
+    /// offload one means.
     pub const fn on(device: Device) -> Runtime {
         Runtime {
             device,
-            residency: Residency::Device,
+            offload: false,
         }
     }
 
@@ -105,29 +90,25 @@ impl Runtime {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn residency(self) -> Residency {
-        self.residency
+    pub fn offload(self) -> bool {
+        self.offload
     }
 
     /// What it is called on the command line and on screen.
     pub fn name(self) -> &'static str {
-        match (self.device, self.residency) {
-            (device, Residency::Device) => device.name(),
-            (Device::Metal, Residency::Hybrid) => "metal_disk_offload",
-            (_, Residency::Hybrid) => "cuda_cpu_offload",
+        match self.offload {
+            false => self.device.name(),
+            true => "cuda_cpu_offload",
         }
     }
 
     /// What the drawing screen's device list says beside the name of one this machine can use.
     pub fn about(self) -> &'static str {
-        match (self.device, self.residency) {
-            (_, Residency::Device) => "ready",
-            // The rows that have to say more than that. They are the slow answers, and the slow
-            // answer picked by someone who was not told is a run that looks broken.
-            (Device::Metal, Residency::Hybrid) => {
-                "ready, slower: for a model larger than the memory"
-            }
-            (_, Residency::Hybrid) => "ready, slower: for a model larger than the card",
+        match self.offload {
+            false => "ready",
+            // The row that has to say more than that. It is the slow answer, and the slow answer
+            // picked by someone who was not told is a run that looks broken.
+            true => "ready, slower: for a model larger than the card",
         }
     }
 }
@@ -142,7 +123,6 @@ pub enum DeviceOption {
     Cuda,
     CudaCpuOffload,
     Metal,
-    MetalDiskOffload,
     Vulkan,
 }
 
@@ -155,7 +135,6 @@ impl DeviceOption {
             DeviceOption::Cuda => Runtime::on(Device::Cuda),
             DeviceOption::CudaCpuOffload => Runtime::CUDA_CPU_OFFLOAD,
             DeviceOption::Metal => Runtime::on(Device::Metal),
-            DeviceOption::MetalDiskOffload => Runtime::METAL_DISK_OFFLOAD,
             DeviceOption::Vulkan => Runtime::on(Device::Vulkan),
             // Never an offload one: with no model in hand there is nothing to measure against
             // the card. [`Runtime::best`] is the answer once there is.
@@ -200,9 +179,9 @@ impl Runtime {
     /// one keeps them on the host, Metal's memory is the machine's, and a size or a card that is
     /// not known is taken as one that fits.
     pub fn short_of(self, weights: Option<u64>, room: Room) -> Option<(u64, u64)> {
-        let free = match (self.device, self.residency) {
-            (Device::Cuda, Residency::Device) => room.cuda,
-            (Device::Vulkan, Residency::Device) => room.vulkan,
+        let free = match (self.device, self.offload) {
+            (Device::Cuda, false) => room.cuda,
+            (Device::Vulkan, false) => room.vulkan,
             _ => None,
         }?;
         let wanted = wanted_on_the_card(weights?);
@@ -242,12 +221,11 @@ impl Runtime {
 impl Runtime {
     /// The device libwaifu's engine is started on for this.
     pub fn waifu_device(self) -> WaifuDevice {
-        match (self.device, self.residency) {
+        match (self.device, self.offload) {
             (Device::Cpu, _) => WaifuDevice::WAIFU_DEVICE_CPU,
-            (Device::Cuda, Residency::Device) => WaifuDevice::WAIFU_DEVICE_CUDA,
-            (Device::Cuda, Residency::Hybrid) => WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
-            (Device::Metal, Residency::Device) => WaifuDevice::WAIFU_DEVICE_METAL,
-            (Device::Metal, Residency::Hybrid) => WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD,
+            (Device::Cuda, false) => WaifuDevice::WAIFU_DEVICE_CUDA,
+            (Device::Cuda, true) => WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
+            (Device::Metal, _) => WaifuDevice::WAIFU_DEVICE_METAL,
             (Device::Vulkan, _) => WaifuDevice::WAIFU_DEVICE_VULKAN,
         }
     }
@@ -335,15 +313,15 @@ mod tests {
         assert_eq!(Runtime::best(Some(3 * GB), &here, eight), vulkan);
         assert_eq!(Runtime::best(Some(7 * GB), &here, eight), cpu);
 
-        // Metal has the machine's memory, so it has no card to be too big for -- and its offload
-        // is never chosen for anyone, however large the model: it is asked for by name.
-        let mac = [cpu, Runtime::on(Device::Metal), Runtime::METAL_DISK_OFFLOAD];
+        // Metal has the machine's memory, so it has no card to be too big for: what does not fit
+        // stays in the model's files.
+        let mac = [cpu, Runtime::on(Device::Metal)];
         assert_eq!(
             Runtime::best(Some(400 * GB), &mac, Room::default()),
             Runtime::on(Device::Metal)
         );
         assert_eq!(
-            Runtime::METAL_DISK_OFFLOAD.short_of(Some(400 * GB), Room::default()),
+            Runtime::on(Device::Metal).short_of(Some(400 * GB), Room::default()),
             None
         );
         assert_eq!(Runtime::best(Some(1), &[cpu], Room::default()), cpu);

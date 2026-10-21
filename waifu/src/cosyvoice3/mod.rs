@@ -20,7 +20,7 @@
 //! Fun-CosyVoice3-0.5B-2512, whole: a recording and a sentence in, the sentence in that voice out.
 //!
 //! ```text
-//! let tts = CosyVoice3::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
+//! let tts = CosyVoice3::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
 //! let voice = tts.listen(&recording)?;                    // once per voice
 //! let sound = tts.say("今天天气很好。", &voice, &options, &mut report)?;
 //! ```
@@ -89,9 +89,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use crate::flint::{
-    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor, Weights,
-};
+use crate::flint::{functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Weights};
 use crate::indextts::{campplus, features::resample};
 use crate::{
     ConversionDefaults, ConversionOptions, ConversionProgress, Converter, Error, Manifest, Result,
@@ -262,7 +260,7 @@ impl CosyVoice3 {
     /// Read the whole model `manifest` describes, onto `device`.
     pub fn from_manifest(
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
         manifest: &Manifest,
     ) -> Result<CosyVoice3> {
         let model_type = manifest.section("model")?.get_str("type")?.to_string();
@@ -278,7 +276,7 @@ impl CosyVoice3 {
         let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
-            residency,
+            device_weight_bytes,
         )?);
 
         Ok(CosyVoice3 {

@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use waifu::flint::{check_parameters, Graph, Ir, Residency, RunContext, Weights};
+use waifu::flint::{check_parameters, Graph, Ir, RunContext, Weights};
 use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
 use waifu::{read_safetensors, Embedding, Linear, WeightFormat};
 
@@ -69,8 +69,8 @@ fn read_bytes(bytes: &[u8]) -> waifu::Result<HashMap<String, Tensor>> {
 }
 
 /// A model's weights out of a file of `bytes`, the way a model reads its package.
-fn weights_from(bytes: &[u8], device: Device, residency: Residency) -> waifu::Result<Weights> {
-    Weights::from_files(&[&TempFile::new(bytes).0], device, residency)
+fn weights_from(bytes: &[u8], device: Device, device_weight_bytes: u64) -> waifu::Result<Weights> {
+    Weights::from_files(&[&TempFile::new(bytes).0], device, device_weight_bytes)
 }
 
 /// What a file holding `tensors` reads back as, exactly as stored.
@@ -79,8 +79,12 @@ fn stored(tensors: &[(&str, &[i32], &[f32])]) -> HashMap<String, Tensor> {
 }
 
 /// A source read out of a file holding `tensors`, the way a model reads its package.
-fn source(tensors: &[(&str, &[i32], &[f32])], device: Device, residency: Residency) -> Rc<Weights> {
-    Rc::new(weights_from(&write_params(tensors), device, residency).unwrap())
+fn source(
+    tensors: &[(&str, &[i32], &[f32])],
+    device: Device,
+    device_weight_bytes: u64,
+) -> Rc<Weights> {
+    Rc::new(weights_from(&write_params(tensors), device, device_weight_bytes).unwrap())
 }
 
 /// The same, for a file whose tensors are not all one element type: each is given the name
@@ -317,7 +321,7 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
     let x = g.input("x");
     g.output("y", Linear::graph(&g.subgraph("proj"), x, 16, 8, false));
 
-    let weights = weights_from(&bytes, Device::Cuda, Residency::Device).unwrap();
+    let weights = weights_from(&bytes, Device::Cuda, u64::MAX).unwrap();
     assert_eq!(
         weights.load("proj.weight", &[8, 16]).unwrap().dtype(),
         DType::Fp8E4M3,
@@ -499,7 +503,7 @@ fn a_source_answers_for_a_shape_without_handing_the_weight_over() {
     // A model that works out its own architecture by looking for weights -- Anima's autoencoder
     // counts its stages this way -- asks this hundreds of times, and from a low-vram source
     // handing the weight over would be a copy across the bus each time.
-    let weights = source(&[("a", &[2, 3], &[0.0; 6])], Device::Cpu, Residency::Device);
+    let weights = source(&[("a", &[2, 3], &[0.0; 6])], Device::Cpu, u64::MAX);
 
     assert_eq!(weights.shape_of("a"), Some(vec![2, 3]));
     assert_eq!(weights.shape_of("missing"), None);
@@ -543,18 +547,12 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     // and nothing the IR says.
     let ir = Ir::compile(&graph);
 
-    let on_the_card = source(tensors, Device::Cuda, Residency::Device);
+    let on_the_card = source(tensors, Device::Cuda, u64::MAX);
     let kept = ir
         .run(&RunContext::new(on_the_card.as_ref()).input("x", &x))
         .unwrap();
 
-    let over_the_bus = source(
-        tensors,
-        Device::Cuda,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    );
+    let over_the_bus = source(tensors, Device::Cuda, 0);
     assert!(over_the_bus.has("proj.weight"));
 
     let streamed = ir
@@ -596,16 +594,10 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     drop(F::matmul(&warm, &warm).unwrap());
     drop(warm);
 
-    // Read the way a model reads it, through `Residency`. The whole package is on the host now,
+    // Read the way a model reads it, through `Weights::from_files`. The whole package is on the host now,
     // and none of it is on the card.
     let before = allocated();
-    let on_the_host = source(
-        tensors,
-        Device::Cuda,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    );
+    let on_the_host = source(tensors, Device::Cuda, 0);
     assert_eq!(
         allocated(),
         before,
@@ -632,7 +624,7 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
 
     // Against which: the same package read to keep its weights does put the model on the card as
     // it is read, and holds it there.
-    let kept = source(tensors, Device::Cuda, Residency::Device);
+    let kept = source(tensors, Device::Cuda, u64::MAX);
 
     assert!(allocated() - before >= bytes);
     drop(kept);
@@ -667,18 +659,11 @@ fn a_disk_offloaded_package_on_metal_runs_like_a_resident_one() {
         to_host(&out[0].1)
     };
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     let expected = run(&kept);
     drop(kept);
 
-    let offloaded = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    )
-    .unwrap();
+    let offloaded = Weights::from_files(&[&file.0], Device::Metal, 0).unwrap();
     assert_eq!(run(&offloaded), expected);
     assert_eq!(
         run(&offloaded),
@@ -707,14 +692,7 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
     let x = Tensor::zeros(&[256, 256], DType::Float, Device::Metal).unwrap();
 
     let before = allocated();
-    let offloaded = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    )
-    .unwrap();
+    let offloaded = Weights::from_files(&[&file.0], Device::Metal, 0).unwrap();
     assert_eq!(
         allocated(),
         before,
@@ -735,7 +713,7 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
     drop(out);
 
     // Against which: the same package read to keep its weights holds the model on the device.
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     assert!(allocated() - before >= weight_bytes);
     drop(kept);
 }
@@ -778,20 +756,13 @@ fn a_hybrid_package_keeps_the_smallest_weights_on_metal() {
         to_host(&out[0].1)
     };
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     let expected = run(&kept);
     drop(kept);
 
     // Room for the two small ones and not the big one: they stay, and it does not.
     let before = allocated();
-    let hybrid = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: small_bytes as u64 + 1024,
-        },
-    )
-    .unwrap();
+    let hybrid = Weights::from_files(&[&file.0], Device::Metal, small_bytes as u64 + 1024).unwrap();
     assert_eq!(
         allocated() - before,
         small_bytes,
@@ -847,20 +818,13 @@ fn a_hybrid_package_gives_its_kept_weights_back_largest_first() {
         to_host(&out[0].1)
     };
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     let expected = run(&kept);
     drop(kept);
 
     // Room for the three small ones -- 1, 1 and 4 KB -- and not the big one.
     let before = allocated();
-    let hybrid = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: 7 << 10,
-        },
-    )
-    .unwrap();
+    let hybrid = Weights::from_files(&[&file.0], Device::Metal, 7 << 10).unwrap();
     assert_eq!(allocated() - before, 6 << 10);
     assert_eq!(run(&hybrid), expected);
 
@@ -898,9 +862,7 @@ fn a_hybrid_package_fills_the_device_to_its_limit() {
         ("d.weight", "F32", &[4096], f32_bytes(&page)),
         ("big.weight", "F32", &[256, 256], f32_bytes(&big)),
     ]));
-    let as_many_as_fit = Residency::Hybrid {
-        device_weight_bytes: u64::MAX,
-    };
+    let as_many_as_fit = u64::MAX;
     let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
 
     // Lifted however the test ends, so that no other test runs under it.
@@ -984,7 +946,7 @@ fn a_run_short_of_memory_moves_weights_off_the_device_and_goes_on() {
     };
     let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     let expected = run(&kept).unwrap();
     drop(kept);
     MemorySnapshot::release_unused(Device::Metal).unwrap();
@@ -1009,14 +971,7 @@ fn a_run_short_of_memory_moves_weights_off_the_device_and_goes_on() {
         .unwrap()
         .to_device(Device::Metal)
         .unwrap();
-    let filled = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: u64::MAX,
-        },
-    )
-    .unwrap();
+    let filled = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     assert_eq!(
         MemorySnapshot::capture(Device::Metal).unwrap().free,
         0,
@@ -1063,14 +1018,7 @@ fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again() {
     graph.output("y", graph.matmul(h, graph.load("b.weight", &[1024, 4096])));
     let ir = Ir::compile(&graph);
 
-    let weights = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    )
-    .unwrap();
+    let weights = Weights::from_files(&[&file.0], Device::Metal, 0).unwrap();
     let input: Vec<f32> = (0..64 * 1024)
         .map(|i| ((i % 11) as f32 - 5.0) / 8.0)
         .collect();
@@ -1306,13 +1254,8 @@ fn a_mapped_package_runs_like_one_read_into_memory() {
         .unwrap();
     let by_hand = HashMap::from([("big.weight".to_string(), by_hand)]);
     let expected = run(&Weights::from_tensors(by_hand, Device::Cuda).unwrap());
-    for residency in [
-        Residency::Device,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    ] {
-        let mapped = Weights::from_files(&[&file.0], Device::Cuda, residency).unwrap();
-        assert_eq!(run(&mapped), expected, "{residency:?}");
+    for device_weight_bytes in [u64::MAX, 0] {
+        let mapped = Weights::from_files(&[&file.0], Device::Cuda, device_weight_bytes).unwrap();
+        assert_eq!(run(&mapped), expected, "{device_weight_bytes:?}");
     }
 }

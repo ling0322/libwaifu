@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use waifu::audio::{downsample1d, kaiser_sinc_filter, upsample1d};
-use waifu::flint::{DType, Device, Graph, Inst, Ir, Op, Residency, RunContext, Tensor, Weights};
+use waifu::flint::{DType, Device, Graph, Inst, Ir, Op, RunContext, Tensor, Weights};
 use waifu::indextts::bigvgan::{BigVgan, BigVganConfig};
 use waifu::read_safetensors;
 
@@ -465,7 +465,7 @@ fn exported(name: &str) -> HashMap<String, Tensor> {
 fn the_released_vocoder_is_the_released_vocoder() {
     let name = "bigvgan-22khz-80band.safetensors";
     let weights: Rc<Weights> = Rc::new(
-        Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device)
+        Weights::from_files(&[models_dir().join(name)], CPU, u64::MAX)
             .unwrap_or_else(|error| panic!("{name}: {error}\nExport it first; see `exported`.")),
     );
     let vocoder = BigVgan::build(

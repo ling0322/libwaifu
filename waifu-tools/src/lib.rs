@@ -19,17 +19,15 @@
 
 //! What the tools in src/bin share.
 
-use waifu::{GenerationOptions, Residency};
+use waifu::GenerationOptions;
 
-/// Where the weights wait, taken out of `arguments` wherever it was put, since it is a flag and
-/// not a position: `hybrid=GB` for [`Residency::Hybrid`] with that many gigabytes of the smallest
-/// weights kept on the device, or `lowvram` for `hybrid=0`. On the device when there is neither.
-pub fn residency(arguments: &mut Vec<String>) -> Result<Residency, waifu::Error> {
+/// How many bytes of the weights to keep on the device, taken out of `arguments` wherever it was
+/// put, since it is a flag and not a position: `hybrid=GB` for that many gigabytes of the smallest
+/// weights, or `lowvram` for none. As many as fit -- `u64::MAX` -- when there is neither.
+pub fn device_weight_bytes(arguments: &mut Vec<String>) -> Result<u64, waifu::Error> {
     if let Some(at) = arguments.iter().position(|a| a == "lowvram") {
         arguments.remove(at);
-        return Ok(Residency::Hybrid {
-            device_weight_bytes: 0,
-        });
+        return Ok(0);
     }
     if let Some(at) = arguments.iter().position(|a| a.starts_with("hybrid=")) {
         let flag = arguments.remove(at);
@@ -40,11 +38,17 @@ pub fn residency(arguments: &mut Vec<String>) -> Result<Residency, waifu::Error>
             .ok_or_else(|| {
                 waifu::Error::Model(format!("{flag}: expected hybrid=GB, as hybrid=6"))
             })?;
-        return Ok(Residency::Hybrid {
-            device_weight_bytes: (gigabytes * 1e9) as u64,
-        });
+        return Ok((gigabytes * 1e9) as u64);
     }
-    Ok(Residency::Device)
+    Ok(u64::MAX)
+}
+
+/// `device_weight_bytes` as a person reads it: as many as fit, or so many gigabytes.
+pub fn bytes_kept(device_weight_bytes: u64) -> String {
+    match device_weight_bytes {
+        u64::MAX => "as many as fit".to_string(),
+        bytes => format!("{:.1} GB", bytes as f64 / 1e9),
+    }
 }
 
 /// The request a tool draws with for the model whose manifest is at `path`: what a screen would

@@ -140,14 +140,13 @@ public struct AudioClip: Sendable, Equatable {
 }
 
 public enum Device: Sendable {
-    case auto, cpu, metal, metalDiskOffload, cuda, cudaCPUOffload, vulkan
+    case auto, cpu, metal, cuda, cudaCPUOffload, vulkan
 
     var c: WaifuDevice {
         switch self {
         case .auto: WAIFU_DEVICE_AUTO
         case .cpu: WAIFU_DEVICE_CPU
         case .metal: WAIFU_DEVICE_METAL
-        case .metalDiskOffload: WAIFU_DEVICE_METAL_DISK_OFFLOAD
         case .cuda: WAIFU_DEVICE_CUDA
         case .cudaCPUOffload: WAIFU_DEVICE_CUDA_CPU_OFFLOAD
         case .vulkan: WAIFU_DEVICE_VULKAN
@@ -466,9 +465,8 @@ public final class Engine: @unchecked Sendable {
         }
     }
 
-    /// An engine on `device`. On `.metalDiskOffload` the model's smallest weights fill what the
-    /// memory limit leaves -- see setMemoryLimit -- and the rest are read off the disk as they are
-    /// used.
+    /// An engine on `device`. On `.metal` the model's smallest weights fill what the memory limit
+    /// leaves -- see setMemoryLimit -- and the rest are read off the disk as they are used.
     public init(device: Device) throws {
         var options = WaifuEngineOptions(
             struct_size: UInt32(MemoryLayout<WaifuEngineOptions>.size),
@@ -483,7 +481,7 @@ public final class Engine: @unchecked Sendable {
         waifu_engine_free(handle)
     }
 
-    /// What it runs on, as waifu_devices_json names it: "metal", "cpu", "metal_disk_offload". Never
+    /// What it runs on, as waifu_devices_json names it: "metal", "cpu", "cuda_cpu_offload". Never
     /// "auto", which the library settles when the engine starts.
     public var device: String {
         guard let said = waifu_engine_device(handle) else { return "" }

@@ -35,7 +35,7 @@ use std::time::Instant;
 
 use waifu::cosyvoice3::CosyVoice3;
 use waifu::indextts::IndexTts;
-use waifu::{wav, Device, Manifest, Residency, Sound, SpeechOptions, SpeechProgress};
+use waifu::{wav, Device, Manifest, Sound, SpeechOptions, SpeechProgress};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().collect();
@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sound: Option<Sound> = match kind.as_str() {
         CosyVoice3::MODEL_TYPE => {
-            let tts = CosyVoice3::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
+            let tts = CosyVoice3::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
             eprintln!("read the model in {:.1} s", clock.elapsed().as_secs_f64());
 
             let listening = Instant::now();
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ => {
-            let tts = IndexTts::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
+            let tts = IndexTts::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
             eprintln!("read the model in {:.1} s", clock.elapsed().as_secs_f64());
 
             let listening = Instant::now();

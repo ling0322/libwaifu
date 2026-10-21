@@ -67,7 +67,7 @@ use memmap2::Mmap;
 use safetensors::tensor::{Dtype, SafeTensors};
 
 use crate::error::{Error, Result};
-use crate::flint::{DType, Device, Residency, Tensor, Weights, SCALE_SUFFIX};
+use crate::flint::{DType, Device, Tensor, Weights, SCALE_SUFFIX};
 
 /// The largest rank and dimension a stored tensor may have, which keep a corrupt file from asking
 /// for an unreasonable allocation.
@@ -91,7 +91,7 @@ pub fn read_safetensors(paths: &[impl AsRef<Path>]) -> Result<HashMap<String, Te
 }
 
 /// A model's weights out of the files at `paths`, for a model running on `device` with its
-/// weights held the way `residency` says -- what [`Weights::from_files`] is.
+/// weights kept on it as `device_weight_bytes` asks -- what [`Weights::from_files`] is.
 ///
 /// Each tensor borrows its file's mapping rather than a copy of it, and [`Weights::insert`] puts
 /// it where it waits as it arrives, so what the host holds is what the weights keep: nothing, for
@@ -100,12 +100,20 @@ pub fn read_safetensors(paths: &[impl AsRef<Path>]) -> Result<HashMap<String, Te
 pub(crate) fn collect(
     paths: &[impl AsRef<Path>],
     device: Device,
-    residency: Residency,
+    device_weight_bytes: u64,
 ) -> Result<Weights> {
-    let mut weights = Weights::empty(device, residency)?;
-    each_mapped(paths, &mut |name, tensor| weights.insert(name, tensor))?;
+    let kept = Weights::kept_on(device, device_weight_bytes);
+    let mut weights = Weights::empty(device)?;
+    // The order the package lies in, which the weights kept on the device are moved in.
+    let mut order = Vec::new();
+    each_mapped(paths, &mut |name, tensor| {
+        order.push(name.clone());
+        weights.insert(name, tensor, kept.is_some())
+    })?;
     check_fp8_pairs(&weights.tensors())?;
-    weights.keep_the_smallest_on_device()?;
+    if let Some(bytes) = kept {
+        weights.keep_the_smallest_on_device(bytes, &order)?;
+    }
     Ok(weights)
 }
 

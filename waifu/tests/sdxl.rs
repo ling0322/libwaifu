@@ -30,8 +30,7 @@ use std::rc::Rc;
 
 use waifu::flint::{functional as F, Tensor};
 use waifu::{
-    read_safetensors, to_rgb8, DType, Device, GenerationOptions, Manifest, Residency, Sdxl,
-    UnetCondition,
+    read_safetensors, to_rgb8, DType, Device, GenerationOptions, Manifest, Sdxl, UnetCondition,
 };
 
 /// What the reference denoising run in the exporter was written for.
@@ -101,7 +100,7 @@ fn model() -> Rc<Sdxl> {
     MODEL.with(|cell| {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
-            Rc::new(Sdxl::from_manifest(Device::Cuda, Residency::Device, &manifest).unwrap())
+            Rc::new(Sdxl::from_manifest(Device::Cuda, u64::MAX, &manifest).unwrap())
         }))
     })
 }
@@ -303,7 +302,7 @@ fn denoising_on_the_cpu_matches_the_reference_pipeline() {
     // which device they are on, so only a CUDA kernel's own mistake can hide from this.
     let cases = cases();
     let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
-    let model = Sdxl::from_manifest(Device::Cpu, Residency::Device, &manifest).unwrap();
+    let model = Sdxl::from_manifest(Device::Cpu, u64::MAX, &manifest).unwrap();
 
     let latent = cases["test_case.latent"].clone();
     let prompt = model.encode_prompt(PROMPT).unwrap();

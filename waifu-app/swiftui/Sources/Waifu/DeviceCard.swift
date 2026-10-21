@@ -17,8 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// The Device card, under the Model card: where the model runs, and -- for metal_disk_offload --
-// how much of it stays on the GPU. Nothing is read from here: the next job reads the model where
+// The Device card, under the Model card: where the model runs, and -- on Metal -- the most of the
+// GPU's memory it may hold. Nothing is read from here: the next job reads the model where
 // this says, again if it has changed.
 
 import SwiftUI
@@ -33,16 +33,12 @@ struct DeviceCard: View {
                     ForEach(Session.devices, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
-                // The one choice that has to say what it costs: picked without being told, it is
-                // a run that looks broken.
-                .help(session.device == "metal_disk_offload"
-                    ? "Leaves the weights in the model's files and reads each one off the disk as it is used: for a model larger than this Mac's memory, and slower."
-                    : "Where the model runs")
+                .help("Where the model runs")
             }
             .disabled(session.canStop)
-            // Only for the one device that reads weights off the disk: every other keeps all of
-            // them on the GPU already.
-            if session.device == "metal_disk_offload" {
+            // Only where the model runs on Metal, which auto is on a Mac: the processor has no GPU
+            // memory to limit.
+            if session.limitsVram {
                 SliderRow(
                     label: "vram (GB)", value: vramLimit, range: 1...macMemory, step: 0.5,
                     decimals: 1,

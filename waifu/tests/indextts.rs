@@ -52,7 +52,7 @@ use std::path::PathBuf;
 
 use waifu::flint::Tensor;
 use waifu::indextts::{IndexTts, RATE};
-use waifu::{wav, DType, Device, Manifest, Residency, SpeechOptions, SpeechProgress, Voice};
+use waifu::{wav, DType, Device, Manifest, SpeechOptions, SpeechProgress, Voice};
 
 const SENTENCE: &str = "Hello, this is a test of the new voice.";
 
@@ -106,7 +106,7 @@ fn carry_on(_: SpeechProgress) -> ControlFlow<()> {
 #[ignore]
 fn says_a_sentence_in_the_voice_it_was_given() {
     let manifest = Manifest::open(models_dir().join("indextts25.yaml")).unwrap();
-    let tts = IndexTts::from_manifest(Device::Cuda, Residency::Device, &manifest).unwrap();
+    let tts = IndexTts::from_manifest(Device::Cuda, u64::MAX, &manifest).unwrap();
 
     let (a, b) = (
         recording("indextts25-reference.wav"),

@@ -21,8 +21,8 @@
 // is not the one loaded.
 //
 // One engine for as long as the app runs, on the device the Model card chose -- a new one only when
-// the device changes, or how much of the model metal_disk_offload keeps on the GPU, which is decided
-// when a model is read. Its progress -- the download, then the read -- is the job's bar until the
+// the device changes, or the most of the GPU's memory the model may hold, which is filled as a model
+// is read. Its progress -- the download, then the read -- is the job's bar until the
 // job has steps of its own. What the library writes to its log is kept here too, for when that
 // line is not enough.
 
@@ -31,9 +31,9 @@ import Observation
 import WaifuKit
 
 /// Where a model is read to: a device, as the Model card names it, and the most of the GPU's
-/// memory it may hold there -- 0 for no limit but the Mac's. Only metal_disk_offload has one: it
-/// fills what the limit leaves with the model's weights, the smallest first, and reads the rest
-/// off the disk as they are used, moving weights back off the GPU when a job needs the room.
+/// memory it may hold there -- 0 for no limit but the Mac's. Only Metal has one: it fills what the
+/// limit leaves with the model's weights, the smallest first, and reads the rest off the disk as
+/// they are used, moving weights back off the GPU when a job needs the room.
 struct Placement: Equatable {
     var device: String
     var memoryLimitBytes: UInt64 = 0
@@ -155,12 +155,8 @@ final class Launcher {
         // The limit before the engine, which fills what it leaves with weights as it reads the
         // model. The process's rather than the engine's, so lifted again for any other device --
         // where there is Metal to lift it on.
-        let offload = placement.device == "metal_disk_offload"
-        if offload {
-            try Engine.setMemoryLimit(placement.memoryLimitBytes, on: .metal)
-        } else {
-            try? Engine.setMemoryLimit(0, on: .metal)
-        }
+        // Not thrown on, since auto may be a Mac without Metal.
+        try? Engine.setMemoryLimit(placement.memoryLimitBytes, on: .metal)
 
         let made = try Engine(device: Launcher.device(placement.device))
         engine = made
@@ -171,7 +167,6 @@ final class Launcher {
     private static func device(_ name: String) -> Device {
         switch name {
         case "metal": .metal
-        case "metal_disk_offload": .metalDiskOffload
         case "cpu": .cpu
         case "cuda": .cuda
         case "vulkan": .vulkan

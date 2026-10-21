@@ -75,12 +75,15 @@ final class WaifuKitTests: XCTestCase {
         XCTAssertFalse(heard.progress[0].words.isEmpty)
     }
 
-    func testTheDiskOffloadDeviceReachesTheEngine() async throws {
-        // A machine without Metal -- a CI VM -- has nothing to offload to.
+    func testMetalReadsAModelUnderAMemoryLimit() async throws {
+        // A machine without Metal -- a CI VM -- has nothing to limit.
         guard (try? Engine(device: .metal)) != nil else {
             throw XCTSkip("no Metal device")
         }
-        let engine = try Engine(device: .metalDiskOffload)
+        try Engine.setMemoryLimit(1 << 30, on: .metal)
+        // Lifted again however the test ends, so that no other test runs under it.
+        defer { try? Engine.setMemoryLimit(0, on: .metal) }
+        let engine = try Engine(device: .metal)
         try await engine.load("tones")
         let clip = try await engine.speak(SpeakRequest(text: "hello", speed: 1, temperature: 0.8, seed: 7)) { _ in }
         XCTAssertFalse(try XCTUnwrap(clip).samples.isEmpty)
@@ -91,7 +94,7 @@ final class WaifuKitTests: XCTestCase {
         guard (try? Engine(device: .metal)) != nil else {
             throw XCTSkip("no Metal device")
         }
-        try Engine.setMemoryLimit(1 << 40, on: .metalDiskOffload)
+        try Engine.setMemoryLimit(1 << 40, on: .metal)
         // Lifted again, so that no other test runs under it.
         try Engine.setMemoryLimit(0, on: .metal)
     }

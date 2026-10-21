@@ -384,7 +384,7 @@ fn a_memory_limit_is_for_a_device_that_has_one() {
     // under it.
     if crate::flint::Device::Metal.is_available() {
         assert!(waifu_set_memory_limit(
-            WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD,
+            WaifuDevice::WAIFU_DEVICE_METAL,
             1 << 40
         ));
         assert!(waifu_set_memory_limit(WaifuDevice::WAIFU_DEVICE_METAL, 0));

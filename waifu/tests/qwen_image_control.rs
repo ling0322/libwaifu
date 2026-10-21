@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 use waifu::flint::Tensor;
 use waifu::qwen_image::QwenImage;
-use waifu::{read_safetensors, DType, Device, Manifest, Residency};
+use waifu::{read_safetensors, DType, Device, Manifest};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
@@ -82,15 +82,7 @@ fn fixture(cases: &HashMap<String, Tensor>, name: &str) -> Tensor {
 fn the_control_chain_matches_videox_fun() {
     let manifest = Manifest::open(models_dir().join("qwen-image-2.1.yaml")).unwrap();
     let control = Manifest::open(models_dir().join("qwen-image-2.1-controlnet.yaml")).unwrap();
-    let model = QwenImage::from_manifests(
-        device(),
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-        &manifest,
-        Some(&control),
-    )
-    .unwrap();
+    let model = QwenImage::from_manifests(device(), 0, &manifest, Some(&control)).unwrap();
     assert!(model.has_control());
     let cases =
         read_safetensors(&[models_dir().join("qwen-image-2.1-controlnet_test.safetensors")])

@@ -136,8 +136,8 @@ other fp8 packages draw.
 
 ## Memory
 
-Measured on a 16 GB RTX 5060 Ti with 62 GB of RAM, fp16 package, `Residency::Hybrid` with nothing
-kept on the card, 1024 x 1024:
+Measured on a 16 GB RTX 5060 Ti with 62 GB of RAM, fp16 package, `device_weight_bytes` 0 --
+nothing kept on the card -- 1024 x 1024:
 
 | | |
 |---|---|
@@ -150,7 +150,7 @@ little else. What decides the speed is whether the 30 GB package stays in the pa
 steps: with room for it, each step reads memory; without, each step reads the disk again, which
 on this machine's disk is about 200 MB/s and most of the time a step takes. A machine with 48 GB
 or more of RAM keeps it; `-fp8` halves the package -- 30 GB to 16 GB, the same ratio as its size on
-disk, since `Residency::Hybrid` moves whichever package it was given the same way.
+disk, since `Weights` moves whichever package it was given the same way.
 
 ## Turbo
 
