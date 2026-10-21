@@ -807,6 +807,139 @@ fn a_hybrid_package_keeps_the_smallest_weights_on_metal() {
     assert_eq!(run(&hybrid), expected, "the second step reads the same");
 }
 
+/// The weights a hybrid package keeps on the device go back to the host largest first, one at a
+/// time, as they would when the device runs out -- and the model gives the same answer without
+/// them, reading each across again as it is used.
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first() {
+    let big: Vec<f32> = (0..256 * 256)
+        .map(|i| ((i % 17) as f32 - 8.0) / 16.0)
+        .collect();
+    let small: Vec<f32> = (0..256).map(|i| (i % 5) as f32 / 4.0).collect();
+    let medium = vec![0.5f32; 1024];
+    let bytes = write_laid_out(&[
+        ("big.weight", "F32", &[256, 256], f32_bytes(&big)),
+        ("small.bias", "F32", &[256], f32_bytes(&small)),
+        ("small.scale", "F32", &[256], f32_bytes(&small)),
+        ("medium.unused", "F32", &[1024], f32_bytes(&medium)),
+    ]);
+    let file = TempFile::new(&bytes);
+
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let weight = graph.load("big.weight", &[256, 256]);
+    let bias = graph.load("small.bias", &[256]);
+    let scale = graph.load("small.scale", &[256]);
+    graph.output(
+        "y",
+        graph.mul(graph.add(graph.matmul(x, weight), bias), scale),
+    );
+    let ir = Ir::compile(&graph);
+
+    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
+    let x = Tensor::from_f32(&[256, 256], &big)
+        .unwrap()
+        .to_device(Device::Metal)
+        .unwrap();
+    let run = |source: &Weights| {
+        let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
+        to_host(&out[0].1)
+    };
+
+    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let expected = run(&kept);
+    drop(kept);
+
+    // Room for the three small ones -- 1, 1 and 4 KB -- and not the big one.
+    let before = allocated();
+    let hybrid = Weights::from_files(
+        &[&file.0],
+        Device::Metal,
+        Residency::Hybrid {
+            device_weight_bytes: 7 << 10,
+        },
+    )
+    .unwrap();
+    assert_eq!(allocated() - before, 6 << 10);
+    assert_eq!(run(&hybrid), expected);
+
+    // Largest first, and of two the same size the one that went on last.
+    assert_eq!(
+        hybrid.evict_one().unwrap().as_deref(),
+        Some("medium.unused")
+    );
+    assert_eq!(allocated() - before, 2 << 10);
+    assert_eq!(hybrid.evict_one().unwrap().as_deref(), Some("small.scale"));
+    assert_eq!(hybrid.evict_one().unwrap().as_deref(), Some("small.bias"));
+    assert_eq!(hybrid.evict_one().unwrap(), None);
+    assert_eq!(
+        allocated() - before,
+        0,
+        "nothing of the package is left on the device"
+    );
+
+    // Read across again as each is used, to the same answer.
+    assert_eq!(run(&hybrid), expected);
+}
+
+/// Given as many bytes as there are, a hybrid package fills the device with its smallest weights:
+/// up to its memory limit where it has one, and, without one, to its budget.
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_hybrid_package_fills_the_device_to_its_limit() {
+    // Four weights of a page each, which take no more than they say, and one larger.
+    let page = vec![0.25f32; 4096];
+    let big = vec![0.5f32; 256 * 256];
+    let file = TempFile::new(&write_laid_out(&[
+        ("a.weight", "F32", &[4096], f32_bytes(&page)),
+        ("b.weight", "F32", &[4096], f32_bytes(&page)),
+        ("c.weight", "F32", &[4096], f32_bytes(&page)),
+        ("d.weight", "F32", &[4096], f32_bytes(&page)),
+        ("big.weight", "F32", &[256, 256], f32_bytes(&big)),
+    ]));
+    let as_many_as_fit = Residency::Hybrid {
+        device_weight_bytes: u64::MAX,
+    };
+    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
+
+    // Lifted however the test ends, so that no other test runs under it.
+    struct Unlimited;
+    impl Drop for Unlimited {
+        fn drop(&mut self) {
+            let _ = MemorySnapshot::set_limit(Device::Metal, 0);
+        }
+    }
+    let _unlimited = Unlimited;
+
+    // Under a limit a snapshot's total is the limit and what is free is what it leaves, so that
+    // what is held is the difference: three pages more than that is room for three of the four.
+    MemorySnapshot::release_unused(Device::Metal).unwrap();
+    MemorySnapshot::set_limit(Device::Metal, 1 << 40).unwrap();
+    let snapshot = MemorySnapshot::capture(Device::Metal).unwrap();
+    let held = snapshot.total - snapshot.free;
+    MemorySnapshot::set_limit(Device::Metal, held + 3 * 16384).unwrap();
+
+    let before = allocated();
+    let filled = Weights::from_files(&[&file.0], Device::Metal, as_many_as_fit).unwrap();
+    assert_eq!(
+        allocated() - before,
+        3 * 16384,
+        "three of the pages, and not the big one"
+    );
+    assert_eq!(filled.evict_one().unwrap().as_deref(), Some("c.weight"));
+    assert_eq!(filled.evict_one().unwrap().as_deref(), Some("b.weight"));
+    assert_eq!(filled.evict_one().unwrap().as_deref(), Some("a.weight"));
+    assert_eq!(filled.evict_one().unwrap(), None);
+    drop(filled);
+
+    // Without a limit, the budget has room for the whole package.
+    MemorySnapshot::set_limit(Device::Metal, 0).unwrap();
+    let before = allocated();
+    let filled = Weights::from_files(&[&file.0], Device::Metal, as_many_as_fit).unwrap();
+    assert_eq!(allocated() - before, 4 * 16384 + 256 * 256 * 4);
+}
+
 /// A run that runs out of the memory it is allowed partway through says so and leaves nothing
 /// behind: the same weights run again once there is room, and give what they gave before.
 ///

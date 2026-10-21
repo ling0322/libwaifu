@@ -265,10 +265,17 @@ impl Error {
         self.code == ffi::FL_ERROR_INVALID_ARG
     }
 
-    /// Whether the call was accepted but could not be carried out, such as running out of memory
-    /// or asking for a device the build does not support.
+    /// Whether the call was accepted but could not be carried out, such as asking for a device the
+    /// build does not support. Running out of memory is not this but [`Error::is_out_of_memory`].
     pub fn is_aborted(&self) -> bool {
         self.code == ffi::FL_ERROR_ABORTED
+    }
+
+    /// Whether the device could not give the memory the call needed, or its limit would have been
+    /// passed: see [`MemorySnapshot::set_limit`]. Nothing was taken, so the call may be made again
+    /// once something has been let go of.
+    pub fn is_out_of_memory(&self) -> bool {
+        self.code == ffi::FL_ERROR_OUT_OF_MEMORY
     }
 
     fn unsupported(message: String) -> Error {

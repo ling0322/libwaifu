@@ -48,6 +48,10 @@ extern "C" {
 #define FL_OK 0
 #define FL_ERROR_INVALID_ARG 0x0100
 #define FL_ERROR_ABORTED 0x0102
+/// A device could not give the memory a call needed, or its memory limit would have been passed
+/// -- see fl_memory_set_limit(). Nothing was taken, so the call may be made again once something
+/// has been freed.
+#define FL_ERROR_OUT_OF_MEMORY 0x0103
 
 
 /// Storage: a run of elements of one dtype on one device, and nothing about their shape.

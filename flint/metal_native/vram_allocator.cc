@@ -266,10 +266,12 @@ int64_t VramAllocator::getAllocatedBytes() {
 MemorySnapshot VramAllocator::captureMemorySnapshot() {
   std::lock_guard<std::mutex> lock(_mutex);
 
-  // One pool of memory for the host and the device, so what is free is what the budget leaves
-  // after everything this process has on the GPU, the cache included.
-  int64_t total = _budgetBytes;
-  int64_t free = total - static_cast<int64_t>(_device->currentAllocatedSize());
+  // Under a limit, what there is is the limit, and what is free is what it leaves after what the
+  // allocator holds -- the cache included. Without one, the device's budget and everything this
+  // process has on the GPU: one pool of memory for the host and the device.
+  int64_t total = _memoryLimit > 0 ? _memoryLimit : _budgetBytes;
+  int64_t used = _memoryLimit > 0 ? held() : static_cast<int64_t>(_device->currentAllocatedSize());
+  int64_t free = total - used;
   return MemorySnapshot(total, std::max<int64_t>(0, free), _allocatedBytes, _peakAllocatedBytes);
 }
 

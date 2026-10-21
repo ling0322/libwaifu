@@ -113,6 +113,9 @@ class VramAllocator {
   /// of the free blocks or empty chunks beside them. What a snapshot calls allocated.
   int64_t getAllocatedBytes();
 
+  /// Under a memory limit, the limit is the total and what it leaves after what is held is free;
+  /// without one, the device's budget, and what it leaves after everything this process has on
+  /// the GPU.
   MemorySnapshot captureMemorySnapshot();
   void resetPeakMemoryStats();
 

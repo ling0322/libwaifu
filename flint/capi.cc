@@ -191,6 +191,8 @@ int32_t guard(Body &&body) {
     return body();
   } catch (const lut::InvalidArgError &error) {
     return setError(FL_ERROR_INVALID_ARG, error.what());
+  } catch (const lut::OutOfMemoryError &error) {
+    return setError(FL_ERROR_OUT_OF_MEMORY, error.what());
   } catch (const std::bad_alloc &) {
     return setError(FL_ERROR_ABORTED, "out of memory");
   } catch (const std::exception &error) {

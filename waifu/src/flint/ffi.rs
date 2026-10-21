@@ -9,6 +9,7 @@ use std::os::raw::{c_char, c_int, c_void};
 pub const FL_OK: i32 = 0;
 pub const FL_ERROR_INVALID_ARG: i32 = 0x0100;
 pub const FL_ERROR_ABORTED: i32 = 0x0102;
+pub const FL_ERROR_OUT_OF_MEMORY: i32 = 0x0103;
 
 /// Opaque storage handle, owned by whoever made it. Only ever held behind a pointer.
 #[repr(C)]
