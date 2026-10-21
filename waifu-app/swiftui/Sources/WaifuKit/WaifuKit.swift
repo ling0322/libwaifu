@@ -466,15 +466,13 @@ public final class Engine: @unchecked Sendable {
         }
     }
 
-    /// An engine on `device`. On `.metalDiskOffload` and `.cudaCPUOffload`, up to
-    /// `deviceWeightBytes` of each model's weights -- the smallest first -- stay on the device and
-    /// only the rest are read as they are used, no more than the device has free: `.max` fills
-    /// what the memory limit leaves. Any other device refuses more than 0.
-    public init(device: Device, deviceWeightBytes: UInt64 = 0) throws {
+    /// An engine on `device`. On `.metalDiskOffload` the model's smallest weights fill what the
+    /// memory limit leaves -- see setMemoryLimit -- and the rest are read off the disk as they are
+    /// used.
+    public init(device: Device) throws {
         var options = WaifuEngineOptions(
             struct_size: UInt32(MemoryLayout<WaifuEngineOptions>.size),
-            device: device.c,
-            device_weight_bytes: deviceWeightBytes)
+            device: device.c)
         guard let handle = waifu_engine_new_with_options(&options) else {
             throw WaifuError.refused(lastError())
         }

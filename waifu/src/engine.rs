@@ -59,14 +59,11 @@ pub const START_FROM: &str = "start_from";
 pub const CONTROL: &str = "control";
 const KEPT_KEYS: &[&str] = &[START_FROM, CONTROL];
 
-/// How an engine is started: where it runs, and how much of an offload model it keeps there.
+/// How an engine is started: where it runs. How much of the device it may use is the process's,
+/// not an engine's: see [`crate::runtime::set_memory_limit`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EngineOptions {
     pub device: DeviceOption,
-    /// Bytes of each model's smallest weights an offload device keeps on the device, moving only
-    /// the rest as they are used; see [`Runtime::with_device_weight_bytes`]. 0 keeps none, and
-    /// anything else is refused for a device that is not an offload one.
-    pub device_weight_bytes: u64,
 }
 
 /// A picture as rows of RGB, three bytes a pixel, top to bottom.
@@ -242,12 +239,9 @@ impl Work {
 
 impl Engine {
     /// Starts an engine the way `options` says. Refused where the device is not one this build
-    /// can use on this machine, and for weights kept on a device that is not an offload one.
+    /// can use on this machine.
     pub fn new(options: EngineOptions) -> Result<Engine, String> {
-        let runtime = options
-            .device
-            .resolve()
-            .with_device_weight_bytes(options.device_weight_bytes)?;
+        let runtime = options.device.resolve();
         if !runtime.device().is_available() {
             return Err(format!(
                 "{} is not available on this machine",
@@ -1222,7 +1216,6 @@ pub(crate) mod tests {
     fn an_engine() -> Engine {
         Engine::new(EngineOptions {
             device: DeviceOption::Cpu,
-            ..EngineOptions::default()
         })
         .expect("an engine on the CPU")
     }

@@ -355,30 +355,6 @@ fn a_log_callback_hears_the_library_s_lines() {
 }
 
 #[test]
-fn weights_kept_on_the_device_are_for_the_offload_devices_alone() {
-    let options = |device_weight_bytes| WaifuEngineOptions {
-        struct_size: std::mem::size_of::<WaifuEngineOptions>() as u32,
-        device: WaifuDevice::WAIFU_DEVICE_CPU,
-        device_weight_bytes,
-    };
-    unsafe {
-        // Nothing kept is the engine waifu_engine_new starts, on any device.
-        let engine = waifu_engine_new_with_options(&options(0));
-        assert!(!engine.is_null(), "{}", last_error());
-        waifu_engine_free(engine);
-
-        // A device that keeps the whole model already has nothing for the number to change.
-        let engine = waifu_engine_new_with_options(&options(1 << 30));
-        assert!(engine.is_null());
-        assert!(
-            last_error().contains("cuda_cpu_offload"),
-            "{}",
-            last_error()
-        );
-    }
-}
-
-#[test]
 fn engine_options_compiled_against_another_header_are_refused() {
     unsafe {
         let engine = waifu_engine_new_with_options(ptr::null());
@@ -386,9 +362,8 @@ fn engine_options_compiled_against_another_header_are_refused() {
         assert!(last_error().contains("NULL"), "{}", last_error());
 
         let short = WaifuEngineOptions {
-            struct_size: 8,
+            struct_size: 4,
             device: WaifuDevice::WAIFU_DEVICE_CPU,
-            device_weight_bytes: 0,
         };
         let engine = waifu_engine_new_with_options(&short);
         assert!(engine.is_null());

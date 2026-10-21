@@ -69,7 +69,6 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     let model = with_usage(args.model())?.map(str::to_string);
     let asked_task = with_usage(args.task())?;
     let device = with_usage(args.device())?;
-    let device_weight_bytes = with_usage(args.device_weight_bytes())?;
     let output = PathBuf::from(args.output());
     let image = args.image();
 
@@ -108,7 +107,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
 
     // What this machine can run on and how much room its cards have, asked once and before any
     // screen is up: the first question put to a device has the tensor library say what it found.
-    let machine = tui::Machine::measure(device, device_weight_bytes);
+    let machine = tui::Machine::measure(device);
 
     let (task, model) = match model {
         // Named on the command line: nothing to ask. Fetched here, in the terminal, on a line

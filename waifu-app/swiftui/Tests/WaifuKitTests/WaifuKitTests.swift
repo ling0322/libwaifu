@@ -86,17 +86,6 @@ final class WaifuKitTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(clip).samples.isEmpty)
     }
 
-    func testWeightsKeptOnTheDeviceAreForTheOffloadDevicesAlone() async throws {
-        XCTAssertThrowsError(try Engine(device: .cpu, deviceWeightBytes: 1 << 30))
-        guard (try? Engine(device: .metal)) != nil else {
-            throw XCTSkip("no Metal device")
-        }
-        let engine = try Engine(device: .metalDiskOffload, deviceWeightBytes: 1 << 30)
-        try await engine.load("tones")
-        let clip = try await engine.speak(SpeakRequest(text: "hello", speed: 1, temperature: 0.8, seed: 7)) { _ in }
-        XCTAssertFalse(try XCTUnwrap(clip).samples.isEmpty)
-    }
-
     func testAMemoryLimitIsForMetal() throws {
         XCTAssertThrowsError(try Engine.setMemoryLimit(1 << 30, on: .cpu))
         guard (try? Engine(device: .metal)) != nil else {

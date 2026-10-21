@@ -105,18 +105,7 @@ pub fn draw(
         let cancel = Arc::clone(&cancel);
         let output = output.to_path_buf();
         let label = label.clone();
-        let device_weight_bytes = machine.device_weight_bytes;
-        move || {
-            paint(
-                &manifest,
-                &label,
-                &output,
-                device_weight_bytes,
-                &waiting,
-                &updates,
-                &cancel,
-            )
-        }
+        move || paint(&manifest, &label, &output, &waiting, &updates, &cancel)
     });
 
     let mut app = App::for_chosen(launch.task, label, launch.runtime, chosen, output);
@@ -316,7 +305,6 @@ fn paint(
     manifest: &Path,
     label: &str,
     output: &Path,
-    device_weight_bytes: u64,
     requests: &Receiver<Request>,
     updates: &Sender<Update>,
     cancel: &AtomicBool,
@@ -329,7 +317,7 @@ fn paint(
                 // Let go of first. Two copies on one card is twice the memory, and a move that
                 // ran out of it would lose the model that was working as well as the new one.
                 drop(engine.take());
-                let update = match Engine::new(runtime, device_weight_bytes) {
+                let update = match Engine::new(runtime) {
                     Ok(started) => match started.load(manifest) {
                         Ended::Done(()) => {
                             engine = Some(started);

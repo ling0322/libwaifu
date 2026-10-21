@@ -162,8 +162,7 @@ final class Launcher {
             try? Engine.setMemoryLimit(0, on: .metal)
         }
 
-        let made = try Engine(
-            device: Launcher.device(placement.device), deviceWeightBytes: offload ? .max : 0)
+        let made = try Engine(device: Launcher.device(placement.device))
         engine = made
         enginePlacement = placement
         return made

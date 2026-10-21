@@ -377,12 +377,6 @@ pub struct WaifuEngineOptions {
     /// sizeof(WaifuEngineOptions), as the caller was compiled with.
     pub struct_size: u32,
     pub device: WaifuDevice,
-    /// For WAIFU_DEVICE_CUDA_CPU_OFFLOAD and WAIFU_DEVICE_METAL_DISK_OFFLOAD: up to this many bytes
-    /// of each model's weights are kept on the device, the smallest first, and only the rest are
-    /// moved over as they are used -- no more than the device has free, so UINT64_MAX is as many
-    /// as fit in what waifu_set_memory_limit leaves. 0 keeps none; more than 0 is refused for any
-    /// other device.
-    pub device_weight_bytes: u64,
 }
 
 /// Starts the engine's thread. NULL, with waifu_last_error, if the device is not available.
@@ -391,7 +385,6 @@ pub extern "C" fn waifu_engine_new(device: WaifuDevice) -> *mut WaifuEngine {
     let options = WaifuEngineOptions {
         struct_size: std::mem::size_of::<WaifuEngineOptions>() as u32,
         device,
-        device_weight_bytes: 0,
     };
     unsafe { waifu_engine_new_with_options(&options) }
 }
@@ -413,7 +406,6 @@ pub unsafe extern "C" fn waifu_engine_new_with_options(
         };
         let options = EngineOptions {
             device: device_option(options.device),
-            device_weight_bytes: options.device_weight_bytes,
         };
         match Engine::new(options) {
             Ok(engine) => Box::into_raw(Box::new(WaifuEngine { engine })),
@@ -427,10 +419,10 @@ pub unsafe extern "C" fn waifu_engine_new_with_options(
 
 /// Limits the memory of `device` -- the tensors of whatever runs on it, the weights an offload
 /// device keeps there, and what it keeps for reuse -- to `bytes`; 0 for no limit but the
-/// device's. For the whole process rather than an engine: set it before an engine reads a model,
-/// which fills what it leaves with weights where its options' device_weight_bytes is UINT64_MAX.
-/// A run that then runs short moves weights back off the device rather than failing. Only Metal
-/// has a limit: false, with waifu_last_error, for any other device.
+/// device's. For the whole process rather than an engine: set it before an engine reads a model.
+/// On WAIFU_DEVICE_METAL_DISK_OFFLOAD the model's smallest weights fill what it leaves, and a run
+/// that then runs short moves weights back off the device rather than failing. Only Metal has a
+/// limit: false, with waifu_last_error, for any other device.
 #[no_mangle]
 pub extern "C" fn waifu_set_memory_limit(device: WaifuDevice, bytes: u64) -> bool {
     caught(false, || {

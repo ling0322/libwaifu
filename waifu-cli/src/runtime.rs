@@ -43,8 +43,7 @@ impl Device {
 }
 
 /// Where the weights wait between the steps that read them: on the device, or -- for a model
-/// larger than it -- on the host or the disk, each moved over at the step that reads it, apart from
-/// the smallest, as many as `-device-weights` leaves room for.
+/// larger than it -- on the host or the disk, each moved over at the step that reads it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Residency {
     Device,
@@ -105,6 +104,7 @@ impl Runtime {
         self.device
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn residency(self) -> Residency {
         self.residency
     }

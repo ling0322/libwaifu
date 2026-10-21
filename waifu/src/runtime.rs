@@ -56,13 +56,19 @@ impl Runtime {
         },
     };
 
-    /// Metal, with the package left in its file and each weight read off the disk into the
-    /// device's memory at the instruction that reads it. Metal's memory is the machine's, so this
-    /// is for a model larger than the machine; see [`Weights`](crate::Weights).
+    /// Metal, with the package left in its file but for the smallest weights, which fill what
+    /// the memory limit leaves -- the device's budget where there is none -- as the model is read;
+    /// every other weight is read off the disk into the device's memory at the instruction that
+    /// reads it, and a run that runs short moves weights back off the device. Metal's memory is
+    /// the machine's, so this is for a model larger than the machine; see
+    /// [`Weights`](crate::Weights) and [`set_memory_limit`].
+    ///
+    /// Not Cuda's, which keeps nothing on the card: a card has no limit here, and running out
+    /// there is not told apart from any other failure, so nothing would make room for a run.
     pub const METAL_DISK_OFFLOAD: Runtime = Runtime {
         device: Device::Metal,
         residency: Residency::Hybrid {
-            device_weight_bytes: 0,
+            device_weight_bytes: u64::MAX,
         },
     };
 
@@ -80,28 +86,6 @@ impl Runtime {
 
     pub fn residency(self) -> Residency {
         self.residency
-    }
-
-    /// This offload runtime with the smallest weights kept on the device, as many as fit in
-    /// `bytes`: [`Residency::Hybrid`]. Nothing is the runtime as it is.
-    ///
-    /// Refused for a runtime that is not an offload one, since it keeps the whole model on the
-    /// device already and there is nothing a number of bytes would change.
-    pub fn with_device_weight_bytes(self, bytes: u64) -> Result<Runtime, String> {
-        match (self.residency, bytes) {
-            (_, 0) => Ok(self),
-            (Residency::Hybrid { .. }, _) => Ok(Runtime {
-                residency: Residency::Hybrid {
-                    device_weight_bytes: bytes,
-                },
-                ..self
-            }),
-            (Residency::Device, _) => Err(format!(
-                "{} keeps every weight on the device already: the bytes of weights to keep there \
-                 are for cuda_cpu_offload and metal_disk_offload",
-                self.name()
-            )),
-        }
     }
 
     /// What it is called on the command line and on screen. A hybrid runtime goes by its offload
@@ -209,9 +193,9 @@ impl Room {
 /// weights an offload runtime keeps on it, and what it keeps for reuse -- to `bytes`; 0 for no
 /// limit but the device's.
 ///
-/// The process's, not an engine's: there is one allocator per device. An offload runtime asked
-/// to keep `u64::MAX` bytes of weights fills what the limit leaves when it reads a model, and a
-/// run that then runs short moves weights back off the device. Only Metal has a limit.
+/// The process's, not an engine's: there is one allocator per device. metal_disk_offload fills
+/// what the limit leaves with weights when it reads a model, and a run that then runs short moves
+/// weights back off the device. Only Metal has a limit.
 pub fn set_memory_limit(device: DeviceOption, bytes: u64) -> Result<(), String> {
     let device = device.resolve().device();
     MemorySnapshot::set_limit(device, bytes.min(i64::MAX as u64) as i64)
