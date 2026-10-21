@@ -395,3 +395,23 @@ fn engine_options_compiled_against_another_header_are_refused() {
         assert!(last_error().contains("struct_size"), "{}", last_error());
     }
 }
+
+#[test]
+fn a_memory_limit_is_for_a_device_that_has_one() {
+    // The processor's allocator holds nothing back, so there is nothing for a limit to limit.
+    assert!(!waifu_set_memory_limit(
+        WaifuDevice::WAIFU_DEVICE_CPU,
+        1 << 30
+    ));
+    assert!(last_error().contains("cpu"), "{}", last_error());
+
+    // Metal has one, where there is Metal: set, and lifted again so that no other test runs
+    // under it.
+    if crate::flint::Device::Metal.is_available() {
+        assert!(waifu_set_memory_limit(
+            WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD,
+            1 << 40
+        ));
+        assert!(waifu_set_memory_limit(WaifuDevice::WAIFU_DEVICE_METAL, 0));
+    }
+}

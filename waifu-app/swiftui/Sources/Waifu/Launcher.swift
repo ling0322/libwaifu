@@ -30,12 +30,13 @@ import Foundation
 import Observation
 import WaifuKit
 
-/// Where a model is read to: a device, as the Model card names it, and how many bytes of its
-/// smallest weights stay on the GPU there -- 0 but for metal_disk_offload, which reads the rest off
-/// the disk as they are used.
+/// Where a model is read to: a device, as the Model card names it, and the most of the GPU's
+/// memory it may hold there -- 0 for no limit but the Mac's. Only metal_disk_offload has one: it
+/// fills what the limit leaves with the model's weights, the smallest first, and reads the rest
+/// off the disk as they are used, moving weights back off the GPU when a job needs the room.
 struct Placement: Equatable {
     var device: String
-    var deviceWeightBytes: UInt64 = 0
+    var memoryLimitBytes: UInt64 = 0
 }
 
 @MainActor @Observable
@@ -150,8 +151,19 @@ final class Launcher {
         if let engine, enginePlacement == placement { return engine }
         // Freed first: two engines would be two models on one card.
         engine = nil
+
+        // The limit before the engine, which fills what it leaves with weights as it reads the
+        // model. The process's rather than the engine's, so lifted again for any other device --
+        // where there is Metal to lift it on.
+        let offload = placement.device == "metal_disk_offload"
+        if offload {
+            try Engine.setMemoryLimit(placement.memoryLimitBytes, on: .metal)
+        } else {
+            try? Engine.setMemoryLimit(0, on: .metal)
+        }
+
         let made = try Engine(
-            device: Launcher.device(placement.device), deviceWeightBytes: placement.deviceWeightBytes)
+            device: Launcher.device(placement.device), deviceWeightBytes: offload ? .max : 0)
         engine = made
         enginePlacement = placement
         return made

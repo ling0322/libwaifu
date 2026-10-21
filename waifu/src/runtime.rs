@@ -205,6 +205,19 @@ impl Room {
     }
 }
 
+/// Limit the memory of the device `device` runs on -- the tensors of whatever runs there, the
+/// weights an offload runtime keeps on it, and what it keeps for reuse -- to `bytes`; 0 for no
+/// limit but the device's.
+///
+/// The process's, not an engine's: there is one allocator per device. An offload runtime asked
+/// to keep `u64::MAX` bytes of weights fills what the limit leaves when it reads a model, and a
+/// run that then runs short moves weights back off the device. Only Metal has a limit.
+pub fn set_memory_limit(device: DeviceOption, bytes: u64) -> Result<(), String> {
+    let device = device.resolve().device();
+    MemorySnapshot::set_limit(device, bytes.min(i64::MAX as u64) as i64)
+        .map_err(|error| format!("{} takes no memory limit: {error}", device.name()))
+}
+
 impl Runtime {
     /// Every place a run can go that this build and this machine can take it.
     ///

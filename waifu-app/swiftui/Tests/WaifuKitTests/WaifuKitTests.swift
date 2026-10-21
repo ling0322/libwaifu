@@ -97,6 +97,16 @@ final class WaifuKitTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(clip).samples.isEmpty)
     }
 
+    func testAMemoryLimitIsForMetal() throws {
+        XCTAssertThrowsError(try Engine.setMemoryLimit(1 << 30, on: .cpu))
+        guard (try? Engine(device: .metal)) != nil else {
+            throw XCTSkip("no Metal device")
+        }
+        try Engine.setMemoryLimit(1 << 40, on: .metalDiskOffload)
+        // Lifted again, so that no other test runs under it.
+        try Engine.setMemoryLimit(0, on: .metal)
+    }
+
     func testARequestNoModelCouldRunIsRefusedAtTheCall() async throws {
         let engine = try Engine(device: .cpu)
         var request = DrawRequest(prompt: "the girl in <|girl|>", width: 64, height: 64, steps: 1, guidance: 5, seed: 7)

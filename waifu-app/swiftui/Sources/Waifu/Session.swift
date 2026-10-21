@@ -110,16 +110,16 @@ final class Session {
     var device: String {
         didSet { UserDefaults.standard.set(device, forKey: "device") }
     }
-    /// For metal_disk_offload: how many gigabytes of a model's smallest weights stay on the GPU,
-    /// the rest read off the disk as they are used. Takes effect when a model is next read.
-    var deviceWeightGB: Double {
-        didSet { UserDefaults.standard.set(deviceWeightGB, forKey: "deviceWeightGB") }
+    /// For metal_disk_offload: the most of the GPU's memory, in gigabytes, the model and its jobs
+    /// may hold; 0 for no limit but the Mac's. Takes effect when a model is next read.
+    var vramLimitGB: Double {
+        didSet { UserDefaults.standard.set(vramLimitGB, forKey: "vramLimitGB") }
     }
     /// Where a job's model is read to, as the Model card says now.
     var placement: Placement {
         Placement(
             device: device,
-            deviceWeightBytes: device == "metal_disk_offload" ? UInt64(deviceWeightGB * 1e9) : 0)
+            memoryLimitBytes: device == "metal_disk_offload" ? UInt64(vramLimitGB * 1e9) : 0)
     }
     /// The model the tab on show is for.
     var model: ModelInfo? { described[tab.kind] }
@@ -178,7 +178,7 @@ final class Session {
             try? ModelManager.setBundledManifests(manifests.path)
         }
         device = UserDefaults.standard.string(forKey: "device") ?? "auto"
-        deviceWeightGB = max(0, UserDefaults.standard.double(forKey: "deviceWeightGB"))
+        vramLimitGB = max(0, UserDefaults.standard.double(forKey: "vramLimitGB"))
         for kind in Session.kinds {
             if let name = UserDefaults.standard.string(forKey: "model.\(kind)"), !name.isBlank {
                 chosen[kind] = name

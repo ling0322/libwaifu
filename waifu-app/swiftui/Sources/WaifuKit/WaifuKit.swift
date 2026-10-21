@@ -457,9 +457,19 @@ func call<T>(
 public final class Engine: @unchecked Sendable {
     private let handle: OpaquePointer
 
+    /// Limits the memory of `device` -- the tensors of whatever runs on it, the weights kept there,
+    /// and what it keeps for reuse -- to `bytes`; 0 for no limit but the device's. For the whole
+    /// process rather than an engine, so set before an engine reads a model. Only Metal has one.
+    public static func setMemoryLimit(_ bytes: UInt64, on device: Device) throws {
+        guard waifu_set_memory_limit(device.c, bytes) else {
+            throw WaifuError.refused(lastError())
+        }
+    }
+
     /// An engine on `device`. On `.metalDiskOffload` and `.cudaCPUOffload`, up to
     /// `deviceWeightBytes` of each model's weights -- the smallest first -- stay on the device and
-    /// only the rest are read as they are used; any other device refuses more than 0.
+    /// only the rest are read as they are used, no more than the device has free: `.max` fills
+    /// what the memory limit leaves. Any other device refuses more than 0.
     public init(device: Device, deviceWeightBytes: UInt64 = 0) throws {
         var options = WaifuEngineOptions(
             struct_size: UInt32(MemoryLayout<WaifuEngineOptions>.size),
