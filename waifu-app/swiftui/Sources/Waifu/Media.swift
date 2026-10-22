@@ -198,4 +198,12 @@ enum Media {
         panel.allowsMultipleSelection = false
         return panel.runModal() == .OK ? panel.url : nil
     }
+
+    /// `choose`, taking as many files as are picked.
+    static func chooseAll(_ types: [UTType]) -> [URL] {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = types
+        panel.allowsMultipleSelection = true
+        return panel.runModal() == .OK ? panel.urls : []
+    }
 }

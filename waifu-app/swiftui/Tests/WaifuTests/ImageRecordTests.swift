@@ -87,6 +87,49 @@ final class ImageRecordTests: XCTestCase {
             (parameters["inputs"] as? [String: String])?["start_from"], "/Users/alice/Pictures/ref-0412.jpg")
     }
 
+    func testPicturesThePromptNamesAreItsInputsByName() throws {
+        var made = picture()
+        made.prompt = "put a small red wizard hat on <|cat|>"
+        made.promptPictures = ["cat": "/Users/alice/Pictures/cat.png"]
+        let record = try written(made, library: nil)
+        let request = try XCTUnwrap(record["request"] as? [String: Any])
+        // It starts from noise: the picture is read, not started from.
+        XCTAssertEqual(request["task"] as? String, "txt2img")
+        let parameters = try XCTUnwrap(request["parameters"] as? [String: Any])
+        XCTAssertEqual(parameters["inputs"] as? [String: String], ["cat": "/Users/alice/Pictures/cat.png"])
+        XCTAssertNil(parameters["strength"])
+
+        let json = try ImageRecord(made: made, output: output, finished: finished, library: nil).json()
+        let back = try XCTUnwrap(try JSONDecoder().decode(ImageRecord.self, from: json).made)
+        XCTAssertEqual(back.promptPictures, ["cat": "/Users/alice/Pictures/cat.png"])
+        XCTAssertNil(back.startFrom)
+    }
+
+    @MainActor
+    func testTheNamesAPromptWritesAreReadTheWayTheEngineReadsThem() {
+        XCTAssertEqual(
+            Session.placeholders(in: "<|b|> beside <|a|>, and <|b|> again"), ["b", "a"])
+        XCTAssertEqual(Session.placeholders(in: "no pictures at all"), [])
+        XCTAssertEqual(Session.placeholders(in: "an open <|end"), [])
+    }
+
+    @MainActor
+    func testPicturesAreNamedImage0OnTheFirstNumberFree() {
+        XCTAssertEqual(Session.nextName(after: []), "image_0")
+        XCTAssertEqual(Session.nextName(after: ["image_0", "image_1"]), "image_2")
+        // image_0 taken away: the next picture is image_0 again.
+        XCTAssertEqual(Session.nextName(after: ["image_1", "image_2"]), "image_0")
+    }
+
+    @MainActor
+    func testAPictureIsReadAtAMegapixelOfItsOwnShape() {
+        // `QwenImage::picture_size`'s own cases.
+        XCTAssertEqual(Session.readSize(width: 512, height: 512).0, 1024)
+        XCTAssertTrue(Session.readSize(width: 4000, height: 3000) == (1184, 896))
+        XCTAssertTrue(Session.readSize(width: 1024, height: 704) == (1248, 864))
+        XCTAssertTrue(Session.readSize(width: 1920, height: 1080) == (1376, 768))
+    }
+
     func testARevisionNobodyKnowsIsNullNotMissing() throws {
         let made = picture()
         let json = try ImageRecord(

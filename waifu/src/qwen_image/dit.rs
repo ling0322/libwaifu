@@ -61,22 +61,75 @@ use crate::flint::{
 use crate::krea2::dit::{gelu_tanh, rotate, timestep_sinusoid};
 use crate::layers::Linear;
 
+/// One run of the prompt the denoiser reads: words, or a picture the prompt names.
+///
+/// A prompt with no picture in it is one run of words. One with pictures alternates: the words up
+/// to a picture, the picture's latent, the words after it. A picture here is its latent's tokens,
+/// four for each slot the encoder read it through -- the encoder's states at those slots are not
+/// read at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Segment {
+    Words(i32),
+    Picture { rows: i32, columns: i32 },
+}
+
+impl Segment {
+    /// How many tokens of the sequence it is.
+    pub fn len(&self) -> i32 {
+        match *self {
+            Segment::Words(count) => count,
+            Segment::Picture { rows, columns } => rows * columns,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// The rotary table for one sequence, built on the host because it depends on the prompt's
-/// length and the picture's size.
+/// layout and the picture's size.
 struct Placed {
     cos: Tensor,
     sin: Tensor,
-    key: (i32, i32, i32),
+    key: (Vec<Segment>, i32, i32),
 }
 
-/// Where each token sits, as `QwenImage21Rope` places it.
+/// Where each token sits, as `QwenImage21Rope` places it: `(frame, row, column)` for the prompt
+/// laid out as `layout` and then the `rows` x `columns` picture being drawn.
 ///
-/// The prompt's `n`th token is at `(n, n, n)`. The picture is one block at frame `L` -- the
-/// position the prompt reached -- with its rows at `-(H - H / 2) .. H / 2` and its columns the
-/// same, so that where a picture's tokens are does not depend on how long the prompt was.
+/// The words advance along all three axes together: the `n`th is at `(n, n, n)`. A picture is a
+/// block at the frame the words reached, its rows at `-(H - H / 2) .. H / 2` and its columns the
+/// same, so that where a picture's tokens are does not depend on where it sits; the frame after
+/// it is `max(H, W)` further on.
+fn positions(layout: &[Segment], rows: i32, columns: i32) -> Vec<[i32; 3]> {
+    let mut placed = Vec::new();
+    let mut frame = 0;
+    let picture = |placed: &mut Vec<[i32; 3]>, frame: &mut i32, rows: i32, columns: i32| {
+        for row in -(rows - rows / 2)..rows / 2 {
+            for column in -(columns - columns / 2)..columns / 2 {
+                placed.push([*frame, row, column]);
+            }
+        }
+        *frame += rows.max(columns);
+    };
+    for segment in layout {
+        match *segment {
+            Segment::Words(count) => {
+                placed.extend((frame..frame + count).map(|at| [at, at, at]));
+                frame += count;
+            }
+            Segment::Picture { rows, columns } => picture(&mut placed, &mut frame, rows, columns),
+        }
+    }
+    picture(&mut placed, &mut frame, rows, columns);
+    placed
+}
+
+/// The rotary table of [`positions`], `(tokens, heads, pairs, 1)`.
 fn rope_table(
     config: &DitConfig,
-    text_length: i32,
+    layout: &[Segment],
     rows: i32,
     columns: i32,
     device: Device,
@@ -93,11 +146,12 @@ fn rope_table(
     let (freq_t, freq_h, freq_w) = (frequencies(dim_t), frequencies(dim_h), frequencies(dim_w));
 
     let pairs = config.rope_pairs() as usize;
-    let tokens = (text_length + rows * columns) as usize;
+    let positions = positions(layout, rows, columns);
+    let tokens = positions.len();
     let mut cos = Vec::with_capacity(tokens * heads * pairs);
     let mut sin = Vec::with_capacity(tokens * heads * pairs);
 
-    let mut place = |frame: i32, row: i32, column: i32| {
+    for [frame, row, column] in positions {
         let angles = freq_t
             .iter()
             .map(|f| frame as f64 * f)
@@ -111,22 +165,13 @@ fn rope_table(
                 sin.push(angle.sin() as f32);
             }
         }
-    };
-
-    for position in 0..text_length {
-        place(position, position, position);
-    }
-    for row in -(rows - rows / 2)..rows / 2 {
-        for column in -(columns - columns / 2)..columns / 2 {
-            place(text_length, row, column);
-        }
     }
 
     let shape = [tokens as i32, config.num_heads, config.rope_pairs(), 1];
     Ok(Placed {
         cos: Tensor::from_f32(&shape, &cos)?.to_device(device)?,
         sin: Tensor::from_f32(&shape, &sin)?.to_device(device)?,
-        key: (text_length, rows, columns),
+        key: (layout.to_vec(), rows, columns),
     })
 }
 
@@ -166,6 +211,10 @@ fn heads(g: &Graph, x: Value, norm: &str, count: i32, head_dim: i32, eps: f32) -
 
 /// One block over both streams. `text` is `(1, L, D)` and `image` `(1, N, D)`, both float32;
 /// `now` and `zero` are the step's modulation and timestep zero's.
+///
+/// `text` is the whole prompt: its words, and with `layout` the pictures it names, in order. All
+/// of it is modulated at timestep zero -- `causal_condition` puts a named picture's tokens with the
+/// words' rather than with the picture being drawn.
 #[allow(clippy::too_many_arguments)]
 fn block(
     config: &DitConfig,
@@ -176,6 +225,7 @@ fn block(
     zero: Value,
     cos: Value,
     sin: Value,
+    layout: Option<&[Segment]>,
     narrow: DType,
 ) -> (Value, Value) {
     let d = config.hidden_size;
@@ -207,12 +257,34 @@ fn block(
     let v = g.contiguous(g.transpose(v, 1, 2));
 
     // The prompt reads the prompt, causally; the picture reads everything.
-    let prompt = g.attention(
-        g.contiguous(g.slice(q, 2, 0, split)),
-        g.contiguous(g.slice(k, 2, 0, split)),
-        g.contiguous(g.slice(v, 2, 0, split)),
-        true,
-    );
+    let prompt = match layout {
+        None => g.attention(
+            g.contiguous(g.slice(q, 2, 0, split)),
+            g.contiguous(g.slice(k, 2, 0, split)),
+            g.contiguous(g.slice(v, 2, 0, split)),
+            true,
+        ),
+        // A prompt with pictures in it is causal between runs and whole within a picture: each
+        // run reads every key up to its own end, the words' runs causally -- the mask is aligned
+        // to the bottom right, so the first of them sees everything before the run -- and a
+        // picture's runs without a mask. The same decomposition as `QwenImage21AttnProcessor`.
+        Some(layout) => {
+            let mut start = 0;
+            layout
+                .iter()
+                .filter(|segment| !segment.is_empty())
+                .map(|segment| {
+                    let end = start + segment.len();
+                    let part = |value: Value, from: i32| g.contiguous(g.slice(value, 2, from, end));
+                    let causal = matches!(segment, Segment::Words(_));
+                    let out = g.attention(part(q, start), part(k, 0), part(v, 0), causal);
+                    start = end;
+                    out
+                })
+                .reduce(|left, right| g.cat(left, right, 2))
+                .expect("a prompt is never empty")
+        }
+    };
     let picture = g.attention(g.contiguous(g.slice(q, 2, split, Extent::End)), k, v, false);
     let out = g.contiguous(g.transpose(g.cat(prompt, picture, 2), 1, 2));
     let out = g.view(out, [Extent::At(1), length, d.into()]);
@@ -303,7 +375,7 @@ fn write_control(
     let mut skips = Vec::with_capacity(control.layers.len());
     for index in 0..control.layers.len() {
         let sub = g.subgraph(&format!("control.block{index}"));
-        (text, image) = block(config, &sub, text, image, now, zero, cos, sin, narrow);
+        (text, image) = block(config, &sub, text, image, now, zero, cos, sin, None, narrow);
 
         let joined = g.cat(g.cast(text, narrow), g.cast(image, narrow), 1);
         skips.push(Linear::graph(
@@ -332,8 +404,39 @@ fn add_skip(g: &Graph, text: Value, image: Value, skip: Value, scale: Value) -> 
     )
 }
 
+/// The prompt with the pictures it names put back where their slots were: the words' rows of
+/// `text` and the pictures' tokens of `pictures`, taken in turn as `layout` says.
+fn interleave(g: &Graph, text: Value, pictures: Value, layout: &[Segment]) -> Value {
+    let (mut word, mut token) = (0, 0);
+    layout
+        .iter()
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let count = segment.len();
+            let (source, at) = match segment {
+                Segment::Words(_) => (text, &mut word),
+                Segment::Picture { .. } => (pictures, &mut token),
+            };
+            let part = g.contiguous(g.slice(source, 1, *at, *at + count));
+            *at += count;
+            part
+        })
+        .reduce(|left, right| g.cat(left, right, 1))
+        .expect("a prompt is never empty")
+}
+
 /// The whole denoiser, written into `g`; with `control`, the control chain beside it.
-fn write(config: &DitConfig, control: Option<&ControlConfig>, float_type: DType, g: &Graph) {
+///
+/// With `layout` the prompt names pictures: `context` is then its words alone, `pictures` the
+/// latent tokens of the pictures, `(1, P, C)` in turn, and `layout` how the two go together. The
+/// graph is for that one layout; without one it is for any prompt of words.
+fn write(
+    config: &DitConfig,
+    control: Option<&ControlConfig>,
+    layout: Option<&[Segment]>,
+    float_type: DType,
+    g: &Graph,
+) {
     let tokens = g.cast(g.input("tokens"), float_type);
     let context = g.input("context");
     let sinusoid = g.cast(g.input("sinusoid"), float_type);
@@ -385,13 +488,26 @@ fn write(config: &DitConfig, control: Option<&ControlConfig>, float_type: DType,
         );
         Linear::graph(&sub.subgraph("linear_2"), gelu_tanh(g, hidden), d, d, false)
     };
-    let image = Linear::graph(
-        &g.subgraph("img_in"),
-        tokens,
-        config.latent_channels,
-        d,
-        false,
-    );
+    let img_in = |tokens: Value| {
+        Linear::graph(
+            &g.subgraph("img_in"),
+            tokens,
+            config.latent_channels,
+            d,
+            false,
+        )
+    };
+    let image = img_in(tokens);
+
+    // A named picture comes in the way the picture being drawn does, and sits where its slots
+    // were in the prompt.
+    let text = match layout {
+        Some(layout) => {
+            let pictures = img_in(g.cast(g.input("pictures"), float_type));
+            interleave(g, text, pictures, layout)
+        }
+        None => text,
+    };
 
     // Two residual streams in float32, whatever the sublayers run in.
     let mut text = g.cast(text, DType::Float);
@@ -416,6 +532,7 @@ fn write(config: &DitConfig, control: Option<&ControlConfig>, float_type: DType,
             zero,
             cos,
             sin,
+            layout,
             float_type,
         );
 
@@ -445,11 +562,29 @@ fn write(config: &DitConfig, control: Option<&ControlConfig>, float_type: DType,
     );
 }
 
+/// The pictures a prompt names, as the denoiser reads them beside its words.
+#[derive(Clone)]
+pub struct Pictures {
+    /// The prompt's runs of words and pictures, in order. The words add up to the context the
+    /// pictures are read with, and the pictures to `tokens`.
+    pub layout: Vec<Segment>,
+    /// `(1, P, C)`: each picture's latent, normalized the way the sampler's is, one token per
+    /// latent pixel row by row, the pictures one after another.
+    pub tokens: Tensor,
+}
+
+/// How many layouts' graphs are kept: a guided run alternates between two, the prompt's and the
+/// negative prompt's, and a few more cost nothing to keep.
+const LAYOUTS_KEPT: usize = 4;
+
 pub struct Dit {
     config: DitConfig,
+    name: String,
     ir: Ir,
     /// The same denoiser with the control chain beside it, when a control package was read.
     controlled: Option<(ControlConfig, Ir)>,
+    /// The denoiser for prompts that name pictures, one graph per layout, newest last.
+    laid: RefCell<Vec<(Vec<Segment>, Rc<Ir>)>>,
     weights: Rc<Weights>,
     float_type: DType,
     placed: RefCell<Option<Placed>>,
@@ -468,12 +603,13 @@ impl fmt::Debug for Dit {
 fn compile(
     config: &DitConfig,
     control: Option<&ControlConfig>,
+    layout: Option<&[Segment]>,
     name: &str,
     weights: &Weights,
     float_type: DType,
 ) -> Result<Ir> {
     let graph = Graph::with_weights(config.weight_format);
-    write(config, control, float_type, &graph.subgraph(name));
+    write(config, control, layout, float_type, &graph.subgraph(name));
     check_parameters(&graph, weights)?;
     Ok(Ir::compile(&graph))
 }
@@ -497,10 +633,17 @@ impl Dit {
         weights: &Rc<Weights>,
         float_type: DType,
     ) -> Result<Dit> {
-        let ir = compile(&config, None, name, weights.as_ref(), float_type)?;
+        let ir = compile(&config, None, None, name, weights.as_ref(), float_type)?;
         let controlled = match control {
             Some(control) => {
-                let ir = compile(&config, Some(&control), name, weights.as_ref(), float_type)?;
+                let ir = compile(
+                    &config,
+                    Some(&control),
+                    None,
+                    name,
+                    weights.as_ref(),
+                    float_type,
+                )?;
                 Some((control, ir))
             }
             None => None,
@@ -508,8 +651,10 @@ impl Dit {
 
         Ok(Dit {
             weights: Rc::clone(weights),
+            name: name.to_string(),
             ir,
             controlled,
+            laid: RefCell::new(Vec::new()),
             config,
             float_type,
             placed: RefCell::new(None),
@@ -539,7 +684,64 @@ impl Dit {
     /// embedding multiplies by a thousand on its own; `context` is `(1, L, D)` from the encoder,
     /// the system turn already dropped.
     pub fn forward(&self, latent: &Tensor, timestep: f32, context: &Tensor) -> Result<Tensor> {
-        self.run(&self.ir, latent, timestep, context, None)
+        self.run(&self.ir, latent, timestep, context, None, None)
+    }
+
+    /// [`Dit::forward`] for a prompt that names pictures: `context` is `(1, L, D)`, the prompt's
+    /// words alone -- the encoder's states at the pictures' slots are not read -- and `pictures`
+    /// the pictures' latents and where they go among the words.
+    pub fn forward_with_pictures(
+        &self,
+        latent: &Tensor,
+        timestep: f32,
+        context: &Tensor,
+        pictures: &Pictures,
+    ) -> Result<Tensor> {
+        let (words, tokens) = pictures
+            .layout
+            .iter()
+            .fold((0, 0), |(words, tokens), segment| match segment {
+                Segment::Words(count) => (words + count, tokens),
+                Segment::Picture { .. } => (words, tokens + segment.len()),
+            });
+        let channels = self.config.latent_channels;
+        let shape = pictures.tokens.shape();
+        if context.dim()? != 3 || context.shape_at(1)? != words {
+            return Err(Error::model(format!(
+                "the layout has {words} words, and the context is {:?}",
+                context.shape()
+            )));
+        }
+        if shape[..] != [1, tokens, channels] {
+            return Err(Error::model(format!(
+                "the layout has {tokens} picture tokens of {channels} channels, and the pictures \
+                 are {shape:?}"
+            )));
+        }
+
+        let ir = self.laid_out(&pictures.layout)?;
+        self.run(&ir, latent, timestep, context, None, Some(pictures))
+    }
+
+    /// The graph for `layout`, compiled the first time it is asked for.
+    fn laid_out(&self, layout: &[Segment]) -> Result<Rc<Ir>> {
+        let mut laid = self.laid.borrow_mut();
+        if let Some((_, ir)) = laid.iter().find(|(kept, _)| kept[..] == layout[..]) {
+            return Ok(Rc::clone(ir));
+        }
+        let ir = Rc::new(compile(
+            &self.config,
+            None,
+            Some(layout),
+            &self.name,
+            self.weights.as_ref(),
+            self.float_type,
+        )?);
+        if laid.len() == LAYOUTS_KEPT {
+            laid.remove(0);
+        }
+        laid.push((layout.to_vec(), Rc::clone(&ir)));
+        Ok(ir)
     }
 
     /// [`Dit::forward`] steered by the control chain.
@@ -583,7 +785,7 @@ impl Dit {
         let width = self.config.hidden_size;
         let scale = Tensor::from_f32(&[width], &vec![scale; width as usize])?.to_device(device)?;
 
-        self.run(ir, latent, timestep, context, Some((&tokens, &scale)))
+        self.run(ir, latent, timestep, context, Some((&tokens, &scale)), None)
     }
 
     fn run(
@@ -593,6 +795,7 @@ impl Dit {
         timestep: f32,
         context: &Tensor,
         control: Option<(&Tensor, &Tensor)>,
+        pictures: Option<&Pictures>,
     ) -> Result<Tensor> {
         if latent.dim()? != 4 {
             return Err(Error::model(format!(
@@ -622,15 +825,17 @@ impl Dit {
         let zero = timestep_sinusoid(0.0, self.config.timestep_embed_dim, device)?;
         let sinusoid = crate::flint::functional::cat(&step, &zero, 1)?;
 
+        let words = [Segment::Words(text_length)];
+        let layout = match pictures {
+            Some(pictures) => &pictures.layout[..],
+            None => &words[..],
+        };
         let mut placed = self.placed.borrow_mut();
-        if placed.as_ref().map(|table| table.key) != Some((text_length, rows, columns)) {
-            *placed = Some(rope_table(
-                &self.config,
-                text_length,
-                rows,
-                columns,
-                device,
-            )?);
+        let current = placed.as_ref().is_some_and(|table| {
+            table.key.0 == layout && table.key.1 == rows && table.key.2 == columns
+        });
+        if !current {
+            *placed = Some(rope_table(&self.config, layout, rows, columns, device)?);
         }
         let table = placed.as_ref().expect("it was just built");
 
@@ -645,6 +850,9 @@ impl Dit {
                 .input("control", conditioning)
                 .input("control_scale", scale);
         }
+        if let Some(pictures) = pictures {
+            run = run.input("pictures", &pictures.tokens);
+        }
 
         let outputs = ir.run(&run)?;
         let velocity = outputs
@@ -657,5 +865,45 @@ impl Dit {
             .transpose(1, 2)?
             .contiguous()?
             .view(&[1, channels, rows, columns])?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn places_a_prompt_of_words_the_way_it_always_did() {
+        // Three words, then a 2 x 4 picture at frame 3, centred.
+        let placed = positions(&[Segment::Words(3)], 2, 4);
+        assert_eq!(&placed[..3], &[[0, 0, 0], [1, 1, 1], [2, 2, 2]]);
+        assert_eq!(placed[3], [3, -1, -2]);
+        assert_eq!(placed[6], [3, -1, 1]);
+        assert_eq!(placed[7], [3, 0, -2]);
+        assert_eq!(placed.len(), 3 + 8);
+    }
+
+    #[test]
+    fn places_a_named_picture_the_way_qwen_image_21_rope_does() {
+        // `QwenImage21Rope.forward` with img_shapes [(1, 2, 4), (1, 2, 2)] and two words either
+        // side of the named picture: the picture freezes the frame at 2 and moves it on by
+        // max(2, 4), so the words after it are at 6 and 7 and the picture drawn is at 8.
+        let layout = [
+            Segment::Words(2),
+            Segment::Picture {
+                rows: 2,
+                columns: 4,
+            },
+            Segment::Words(2),
+        ];
+        let placed = positions(&layout, 2, 2);
+        assert_eq!(&placed[..2], &[[0, 0, 0], [1, 1, 1]]);
+        assert_eq!(placed[2], [2, -1, -2]);
+        assert_eq!(placed[9], [2, 0, 1]);
+        assert_eq!(&placed[10..12], &[[6, 6, 6], [7, 7, 7]]);
+        assert_eq!(
+            &placed[12..],
+            &[[8, -1, -1], [8, -1, 0], [8, 0, -1], [8, 0, 0]]
+        );
     }
 }

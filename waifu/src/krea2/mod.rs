@@ -43,12 +43,12 @@
 mod config;
 pub(crate) mod dit;
 mod pipeline;
-mod text_encoder;
+pub(crate) mod text_encoder;
 
 pub use config::{DitConfig, EncoderConfig, Krea2Config, Prediction};
 pub use dit::Dit;
 pub use pipeline::{Krea2, VAE_SCALE};
-pub use text_encoder::TextEncoder;
+pub use text_encoder::{EncoderImages, TextEncoder};
 
 /// The two halves Krea 2 shares with [`Anima`](crate::Anima). The autoencoder is the same
 /// Qwen-Image one, down to the sixteen means and deviations; the sampler is the same straight

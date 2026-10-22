@@ -481,6 +481,36 @@ fn placeholders(prompt: &str) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
+/// The prompt with each `<|name|>` written the way Qwen-Image 2.1 names its pictures --
+/// `<image1>`, `<image2>`, in the order the names first appear -- and that order, which is the
+/// order the pictures go in front of the prompt. A name written twice is one picture.
+///
+/// Called on a prompt [`check_draw`] passed, so every placeholder is a well-formed name.
+fn numbered(prompt: &str) -> (String, Vec<String>) {
+    let mut order: Vec<String> = Vec::new();
+    let mut written = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(at) = rest.find("<|") {
+        let after = &rest[at + 2..];
+        let Some(end) = after.find("|>") else {
+            break;
+        };
+        let name = &after[..end];
+        let index = match order.iter().position(|seen| seen == name) {
+            Some(index) => index,
+            None => {
+                order.push(name.to_string());
+                order.len() - 1
+            }
+        };
+        written.push_str(&rest[..at]);
+        written.push_str(&format!("<image{}>", index + 1));
+        rest = &after[end + 2..];
+    }
+    written.push_str(rest);
+    (written, order)
+}
+
 // -- the thread ------------------------------------------------------------------------------------
 
 /// What the thread has read.
@@ -729,18 +759,32 @@ impl Worker {
         };
 
         // What the model cannot be given, said before anything runs.
-        if let Some((key, _)) = request
+        let named = request
             .images
             .iter()
-            .find(|(key, _)| !KEPT_KEYS.contains(&key.as_str()))
-        {
-            return Ended::failed(
-                Failure::Model,
-                format!(
-                    "{} reads words only: it cannot be shown <|{key}|>",
-                    chosen.full_name
-                ),
-            );
+            .filter(|(key, _)| !KEPT_KEYS.contains(&key.as_str()))
+            .collect::<Vec<_>>();
+        if let Some((key, _)) = named.first() {
+            let most = model.prompt_pictures();
+            if most == 0 {
+                return Ended::failed(
+                    Failure::Model,
+                    format!(
+                        "{} reads words only: it cannot be shown <|{key}|>",
+                        chosen.full_name
+                    ),
+                );
+            }
+            if named.len() > most {
+                return Ended::failed(
+                    Failure::Model,
+                    format!(
+                        "{} reads at most {most} pictures in a prompt, and this one names {}",
+                        chosen.full_name,
+                        named.len()
+                    ),
+                );
+            }
         }
         if request.images.iter().any(|(key, _)| key == CONTROL) {
             return Ended::failed(
@@ -802,6 +846,26 @@ impl Worker {
                     Err(error) => return Ended::failed(Failure::Model, error.to_string()),
                 };
                 model.generate_from_image_reporting(&tensor, &request.prompt, &options, &mut report)
+            }
+            None if !named.is_empty() => {
+                // The model's own names for them, in the order the prompt first names them, and
+                // each picture at the size the model reads one at.
+                let (prompt, order) = numbered(&request.prompt);
+                let mut pictures = Vec::with_capacity(order.len());
+                for name in &order {
+                    let Some((_, image)) = named.iter().find(|(key, _)| key == name) else {
+                        return Ended::failed(Failure::Model, format!("<|{name}|> names no image"));
+                    };
+                    let (width, height) = model
+                        .picture_size(image.width as i32, image.height as i32)
+                        .expect("a model that reads pictures says what size it reads them at");
+                    let scaled = scaled(image, width as u32, height as u32);
+                    match from_rgb8(width, height, &scaled) {
+                        Ok(tensor) => pictures.push(tensor),
+                        Err(error) => return Ended::failed(Failure::Model, error.to_string()),
+                    }
+                }
+                model.generate_with_pictures_reporting(&prompt, &pictures, &options, &mut report)
             }
             None => model.generate_reporting(&request.prompt, &options, &mut report),
         };
@@ -1059,10 +1123,12 @@ fn described(asked: &str) -> serde_json::Value {
         CONTROL.to_string(),
         format!("{} has no ControlNet here", chosen.full_name).into(),
     );
-    why_not.insert(
-        "prompt_images".to_string(),
-        format!("{} reads words only", chosen.full_name).into(),
-    );
+    if chosen.prompt_pictures == 0 {
+        why_not.insert(
+            "prompt_images".to_string(),
+            format!("{} reads words only", chosen.full_name).into(),
+        );
+    }
     serde_json::json!({
         "kind": "image",
         "kinds": ["image"],
@@ -1071,7 +1137,7 @@ fn described(asked: &str) -> serde_json::Value {
         "on_disk": chosen.on_disk,
         "sampler": chosen.sampler,
         "alignment": chosen.alignment,
-        "prompt_images": 0,
+        "prompt_images": chosen.prompt_pictures,
         "image_keys": image_keys,
         "why_not": why_not,
     })
@@ -1148,6 +1214,22 @@ pub(crate) mod tests {
             height: 1,
             rgb: vec![0, 0, 0],
         }
+    }
+
+    #[test]
+    fn names_the_pictures_the_way_qwen_image_does() {
+        let (prompt, order) = numbered("put the girl in <|girl|> into the room in <|room|>");
+        assert_eq!(prompt, "put the girl in <image1> into the room in <image2>");
+        assert_eq!(order, ["girl", "room"]);
+
+        // Numbered by where a name first appears; a name written twice is one picture.
+        let (prompt, order) = numbered("<|b|> beside <|a|>, and <|b|> again");
+        assert_eq!(prompt, "<image1> beside <image2>, and <image1> again");
+        assert_eq!(order, ["b", "a"]);
+
+        let (prompt, order) = numbered("no pictures at all");
+        assert_eq!(prompt, "no pictures at all");
+        assert!(order.is_empty());
     }
 
     #[test]
@@ -1397,6 +1479,29 @@ pub(crate) mod tests {
         }
         assert_eq!(sdxl["image_keys"], serde_json::json!(["start_from"]));
 
+        // Qwen-Image 2.1 reads pictures in its prompt where its package carries the vision tower,
+        // which is what the manifest's `vision_depth` says; one exported before it reads words.
+        let words = describe_json(&a_manifest("qwen-words", crate::QwenImage::MODEL_TYPE)).unwrap();
+        assert_eq!(words["prompt_images"], 0);
+        assert!(words["why_not"]["prompt_images"].is_string());
+        let pictures = a_manifest("qwen-pictures", crate::QwenImage::MODEL_TYPE);
+        let text = std::fs::read_to_string(&pictures).unwrap();
+        std::fs::write(
+            &pictures,
+            format!("{text}  qwen_image:\n    vision_depth: 27\n"),
+        )
+        .unwrap();
+        let pictures = describe_json(&pictures).unwrap();
+        assert_eq!(pictures["prompt_images"], 10);
+        assert!(
+            pictures["why_not"].get("prompt_images").is_none(),
+            "{pictures}"
+        );
+        assert!(pictures["why_not"]["start_from"]
+            .as_str()
+            .unwrap()
+            .contains("<|name|>"));
+
         let anima = describe_json(&a_manifest("anima-turbo", crate::Anima::MODEL_TYPE)).unwrap();
         assert_eq!(anima["image_keys"], serde_json::json!([]));
         assert!(anima["why_not"]["start_from"]
@@ -1405,6 +1510,8 @@ pub(crate) mod tests {
             .contains("Anima"));
         assert_eq!(sdxl["alignment"], 32);
         assert_eq!(anima["alignment"], 16);
+        // Its sides are whole 2 x 2s of latent pixels: what `QwenImage::check_size` refuses.
+        assert_eq!(pictures["alignment"], 32);
 
         let tones = describe_json(TONES).unwrap();
         assert_eq!(tones["kind"], "speech");

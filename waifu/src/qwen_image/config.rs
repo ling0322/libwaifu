@@ -179,6 +179,118 @@ pub enum Prediction {
     Flow,
 }
 
+/// Qwen3-VL's vision tower, which reads the pictures a prompt names. `vision_*` in the package,
+/// copied from the encoder's `vision_config` and its token ids.
+#[derive(Clone, Debug)]
+pub struct VisionConfig {
+    /// 27 blocks of 1152, 16 heads.
+    pub depth: i32,
+    pub hidden_size: i32,
+    pub num_heads: i32,
+    pub mlp_size: i32,
+    /// The encoder's width: 4096. What a merged token is projected to.
+    pub out_hidden_size: i32,
+    /// Sixteen pixels a side.
+    pub patch_size: i32,
+    /// Two: a picture is a clip of two identical frames to a tower that also reads video.
+    pub temporal_patch_size: i32,
+    /// Two: each 2 x 2 of patches becomes one token of the prompt.
+    pub spatial_merge_size: i32,
+    /// A 48 x 48 table, interpolated to the picture's grid.
+    pub num_position_embeddings: i32,
+    /// The blocks whose output is merged a second way and added to the encoder's first layers.
+    pub deepstack_layers: Vec<i32>,
+    pub image_token_id: i64,
+    pub start_token_id: i64,
+    pub end_token_id: i64,
+}
+
+impl VisionConfig {
+    /// `Qwen3VLVisionRotaryEmbedding`'s base, which no configuration file states.
+    pub const ROPE_THETA: f64 = 10000.0;
+
+    /// Every LayerNorm in the tower, as `nn.LayerNorm(..., eps=1e-6)` writes it.
+    pub const NORM_EPS: f32 = 1e-6;
+
+    /// How many pixels one token of the prompt covers on a side: a patch times the merge.
+    pub fn alignment(&self) -> i32 {
+        self.patch_size * self.spatial_merge_size
+    }
+
+    pub fn head_dim(&self) -> i32 {
+        self.hidden_size / self.num_heads
+    }
+
+    /// The side of the square table of learned positions.
+    pub fn grid_side(&self) -> i32 {
+        (self.num_position_embeddings as f64).sqrt().round() as i32
+    }
+
+    /// None for a package exported before the vision tower was, which reads words only.
+    fn from_section(section: &Mapping) -> Result<Option<VisionConfig>> {
+        if !section.has("vision_depth") {
+            return Ok(None);
+        }
+        let vision = VisionConfig {
+            depth: section.get("vision_depth")?,
+            hidden_size: section.get("vision_hidden_size")?,
+            num_heads: section.get("vision_num_heads")?,
+            mlp_size: section.get("vision_mlp_size")?,
+            out_hidden_size: section.get("vision_out_hidden_size")?,
+            patch_size: section.get("vision_patch_size")?,
+            temporal_patch_size: section.get("vision_temporal_patch_size")?,
+            spatial_merge_size: section.get("vision_spatial_merge_size")?,
+            num_position_embeddings: section.get("vision_num_position_embeddings")?,
+            deepstack_layers: number_list(section, "vision_deepstack_layers")?,
+            image_token_id: section.get("vision_image_token_id")?,
+            start_token_id: section.get("vision_start_token_id")?,
+            end_token_id: section.get("vision_end_token_id")?,
+        };
+
+        if vision.num_heads <= 0 || vision.hidden_size % vision.num_heads != 0 {
+            return Err(Error::model(format!(
+                "a vision tower {} wide does not split into {} heads",
+                vision.hidden_size, vision.num_heads
+            )));
+        }
+        // The rotary table gives a quarter of each head to the row and a quarter to the column.
+        if vision.head_dim() % 4 != 0 {
+            return Err(Error::model(format!(
+                "a vision head {} wide does not split into the row's and column's rotary pairs",
+                vision.head_dim()
+            )));
+        }
+        let side = vision.grid_side();
+        if side * side != vision.num_position_embeddings {
+            return Err(Error::model(format!(
+                "{} learned positions are not a square grid",
+                vision.num_position_embeddings
+            )));
+        }
+        if vision.spatial_merge_size != 2 || vision.patch_size <= 0 {
+            return Err(Error::model(format!(
+                "this runtime merges the vision tower's patches 2 x 2, and this package says {}",
+                vision.spatial_merge_size
+            )));
+        }
+        if vision
+            .deepstack_layers
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+            || vision
+                .deepstack_layers
+                .iter()
+                .any(|&layer| layer < 0 || layer >= vision.depth)
+        {
+            return Err(Error::model(format!(
+                "the DeepStack layers {:?} are not rising blocks of a {}-block tower",
+                vision.deepstack_layers, vision.depth
+            )));
+        }
+        Ok(Some(vision))
+    }
+}
+
 /// The whole of it.
 #[derive(Clone, Debug)]
 pub struct QwenImageConfig {
@@ -189,6 +301,8 @@ pub struct QwenImageConfig {
     pub prediction: Prediction,
     /// The system turn every prompt is wrapped in, read by the encoder and then dropped.
     pub system_prompt: String,
+    /// The vision tower, in a package that has one: what a prompt with pictures in it needs.
+    pub vision: Option<VisionConfig>,
 }
 
 fn number_list<T: std::str::FromStr>(section: &Mapping, key: &str) -> Result<Vec<T>> {
@@ -347,6 +461,23 @@ impl QwenImageConfig {
             }
         };
 
+        let vision = VisionConfig::from_section(section)?;
+        if let Some(vision) = &vision {
+            if vision.out_hidden_size != encoder.hidden_size {
+                return Err(Error::model(format!(
+                    "the vision tower makes rows {} wide for an encoder {} wide",
+                    vision.out_hidden_size, encoder.hidden_size
+                )));
+            }
+            if vision.deepstack_layers.len() >= encoder.num_layers as usize {
+                return Err(Error::model(format!(
+                    "{} DeepStack layers for a {}-layer encoder",
+                    vision.deepstack_layers.len(),
+                    encoder.num_layers
+                )));
+            }
+        }
+
         Ok(QwenImageConfig {
             dit,
             encoder,
@@ -354,6 +485,7 @@ impl QwenImageConfig {
             schedule,
             prediction,
             system_prompt: section.get_str("system_prompt")?.to_string(),
+            vision,
         })
     }
 }
@@ -473,6 +605,49 @@ config:
 
         let rising = turbo.replace("[1.0, 0.978453", "[0.5, 0.978453");
         assert!(parse(&rising).is_err());
+    }
+
+    /// The keys the published Turbo package carries for its vision tower.
+    const VISION: &str = "    vision_depth: 27
+    vision_hidden_size: 1152
+    vision_num_heads: 16
+    vision_mlp_size: 4304
+    vision_out_hidden_size: 4096
+    vision_patch_size: 16
+    vision_temporal_patch_size: 2
+    vision_spatial_merge_size: 2
+    vision_num_position_embeddings: 2304
+    vision_deepstack_layers: [8, 16, 24]
+    vision_image_token_id: 151655
+    vision_start_token_id: 151652
+    vision_end_token_id: 151653
+    system_prompt:";
+
+    #[test]
+    fn reads_the_vision_tower_where_the_package_has_one() {
+        assert!(
+            release().vision.is_none(),
+            "a package without it reads words"
+        );
+
+        let with = RELEASE.replace("    system_prompt:", VISION);
+        let vision = parse(&with).unwrap().vision.expect("the tower");
+        assert_eq!(vision.head_dim(), 72);
+        assert_eq!(vision.alignment(), 32);
+        assert_eq!(vision.grid_side(), 48);
+        assert_eq!(vision.deepstack_layers, vec![8, 16, 24]);
+        assert_eq!(vision.image_token_id, 151655);
+
+        let deep = with.replace("[8, 16, 24]", "[8, 16, 27]");
+        assert!(
+            parse(&deep).is_err(),
+            "a DeepStack layer past the last block"
+        );
+        let narrow = with.replace(
+            "vision_out_hidden_size: 4096",
+            "vision_out_hidden_size: 2048",
+        );
+        assert!(parse(&narrow).is_err(), "rows narrower than the encoder");
     }
 
     #[test]

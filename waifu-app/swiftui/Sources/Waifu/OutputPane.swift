@@ -118,7 +118,7 @@ struct OutputPane: View {
                 }
                 .padding(2)
             }
-            .frame(height: pictures ? 62 : 56)
+            .frame(height: pictures ? Thumbnail.side + 6 : 56)
         }
     }
 }
@@ -335,6 +335,10 @@ struct Thumbnail: View {
     var session: Session
     var job: Job
 
+    /// The side of a picture's thumbnail, and of a picture the prompt names, which is shown the
+    /// same way.
+    static let side: CGFloat = 48
+
     var body: some View {
         Group {
             if let image = session.images[job.id] {
@@ -343,7 +347,7 @@ struct Thumbnail: View {
                 Color.secondary.opacity(0.15)
             }
         }
-        .frame(width: 56, height: 56)
+        .frame(width: Self.side, height: Self.side)
         .clipShape(RoundedRectangle(cornerRadius: 5))
         .task(id: job.id) { await session.load(job) }
     }

@@ -94,11 +94,11 @@ class Converter(Krea2Converter):
     # ---- the vision tower ---------------------------------------------------------------
 
     def export_vision(self, ctx: Context, weights: dict) -> None:
-        """Qwen3-VL's vision tower, for reading a reference picture when editing.
+        """Qwen3-VL's vision tower, which reads the pictures a prompt names.
 
-        Nothing in the runtime reads these yet: text-to-image never hands the encoder a picture.
-        They are written under their published names (`visual.` stripped) and never quantized --
-        0.8 GB in float16, and a tower whose outputs are fed straight into the encoder's input.
+        Written under their published names (`visual.` stripped) and never quantized -- 0.8 GB
+        in float16, and a tower whose outputs are fed straight into the encoder's input. The
+        runtime folds the patch embedding's two time slices itself.
         """
         for name, tensor in sorted(weights.items()):
             self._write(ctx.with_subname(name), tensor)
@@ -408,6 +408,9 @@ def generate_control_config(model: dict, weights: dict, fp8: bool) -> tuple:
 # What the reference outputs are computed for.
 TEST_PROMPT = "a red fox sitting in fresh snow, golden hour, photorealistic"
 
+# And for a prompt that names a picture: an edit that suits any photograph `-test_picture` names.
+PICTURE_PROMPT = "Turn this photograph into a watercolor painting"
+
 # 256 by 256 is a 16 by 16 latent: 256 image tokens, 64 of the encoder's image slots. Ten steps of
 # the forty the release wants, which is still a real trajectory and a quarter of the offloading.
 TEST_SIDE = 256
@@ -551,6 +554,153 @@ def export_test_cases(directory: str, prompt: str) -> TensorBag:
         put("decoded", decoded[:, :, 0].float())
 
     return writer
+
+
+def export_picture_test_cases(directory: str, picture_path: str, prompt: str,
+                              writer: TensorBag) -> None:
+    """Add what the reference makes of a prompt naming one picture to `writer`.
+
+    | | what it is |
+    |---|---|
+    | `picture` | the picture as the pipeline reads it: RGBA, `-1..=1`, at its read size |
+    | `picture_ids` | the template with the picture's slots written out, system turn included |
+    | `picture_embeds`, `picture_deepstack{k}` | the vision tower's rows, at float32 |
+    | `picture_hidden` | what the denoiser reads, slots included, from the bfloat16 run |
+    | `picture_slots` | which of those rows are the picture's slots |
+    | `picture_hidden_fp32` | the same states from the encoder at float32 |
+    | `picture_latent` | the picture's latent, from the encoder at float32, normalized |
+    | `picture_noise`, `picture_sigmas` | where the run starts, and the levels it walked |
+    | `picture_step`, `picture_timestep` | the latent entering step `step_at`, and its time |
+    | `picture_velocity` | the denoiser's answer there, the picture's latent in front |
+    | `picture_final_latent` | what the walk leaves behind |
+
+    The picture is read at `output_resolution = TEST_SIDE` -- a quarter megapixel rather than the
+    default megapixel -- so that the run is as light as the words-only one: the reference reads
+    every picture at that area whatever size it draws at. The run is without the prefix cache, as
+    `export_test_cases`' is.
+    """
+    import numpy as np
+    from diffusers import AutoencoderKLQwenImage21, QwenImage21Pipeline
+    from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_dimensions
+    from PIL import Image
+    from transformers import Qwen3VLForConditionalGeneration
+
+    fixed = fixed_sigmas(read_json(directory, "model_index.json"))
+    test_steps = len(fixed) if fixed else TEST_STEPS
+    step_at = test_steps // 2
+
+    ctx = Context("test_case")
+
+    def put(name: str, tensor: torch.Tensor) -> None:
+        writer.write_tensor(ctx.with_subname(name), tensor.contiguous(), preserve_dtype=True)
+
+    pipeline = QwenImage21Pipeline.from_pretrained(directory, torch_dtype=torch.bfloat16)
+    pipeline.enable_sequential_cpu_offload()
+    side = TEST_SIDE // VAE_SCALE
+
+    picture = Image.open(picture_path)
+    if picture.mode != "RGBA":
+        picture = picture.convert("RGBA")
+    width, height, _ = calculate_dimensions(TEST_SIDE * TEST_SIDE,
+                                            picture.size[0] / picture.size[1])
+    resized = pipeline.image_processor.resize(picture, width=width, height=height)
+    put("picture", torch.from_numpy(np.array(resized)).permute(2, 0, 1)[None].float() / 127.5 - 1)
+    rows, columns = height // VAE_SCALE, width // VAE_SCALE
+
+    with torch.no_grad():
+        embeds, mask, image_pad_mask = pipeline.encode_prompt(prompt, image=[resized],
+                                                              device="cuda")
+        if mask is not None:
+            raise SystemExit("one prompt came back padded")
+        put("picture_hidden", embeds.float())
+        put("picture_slots", image_pad_mask.to(torch.int64))
+
+        # The processor's own ids and pixels, as `_get_qwen_prompt_embeds` made them.
+        white = Image.new("RGB", resized.size, (255, 255, 255))
+        white.paste(resized, mask=resized.getchannel("A"))
+        template = pipeline.prompt_template_ti2i.format(prompt)
+        inputs = pipeline.processor(text=[template], images=[white], return_tensors="pt")
+        put("picture_ids", inputs.input_ids.to(torch.int64))
+
+        vae_image = pipeline.image_processor.preprocess(picture, width=width, height=height)
+        generator = torch.Generator().manual_seed(11)
+        noise = torch.randn((1, TEST_CHANNELS, side, side), generator=generator)
+        put("picture_noise", noise)
+
+        def pack(latent):
+            return latent.reshape(1, latent.shape[1], -1).transpose(1, 2)
+
+        def unpack(packed):
+            return packed.transpose(1, 2).reshape(1, TEST_CHANNELS, side, side)
+
+        entering = {}
+
+        def capture(pipe, index, timestep, kwargs):
+            if index == step_at - 1:
+                entering["latent"] = kwargs["latents"].clone()
+            return kwargs
+
+        final = pipeline(
+            prompt=prompt,
+            image=picture,
+            height=TEST_SIDE,
+            width=TEST_SIDE,
+            num_inference_steps=TEST_STEPS,
+            latents=pack(noise).to("cuda", torch.bfloat16),
+            output_type="latent",
+            output_resolution=TEST_SIDE,
+            return_dict=False,
+            use_kv_cache=False,
+            callback_on_step_end=capture,
+            callback_on_step_end_tensor_inputs=["latents"])[0]
+        put("picture_sigmas", pipeline.scheduler.sigmas.float().cpu())
+        put("picture_final_latent", unpack(final).float())
+
+        timestep = pipeline.scheduler.timesteps[step_at].expand(1).to(torch.bfloat16) / 1000
+        put("picture_timestep", timestep.float().cpu())
+        latent = entering["latent"]
+        put("picture_step", unpack(latent).float())
+
+        # The picture's latent the way the run made it, for the velocity below.
+        _, picture_tokens = pipeline.prepare_latents(
+            [vae_image.unsqueeze(2)], 1, TEST_CHANNELS, TEST_SIDE, TEST_SIDE, torch.bfloat16,
+            "cuda", None, latent)
+        slots = torch.ones(1, side * side // 4, dtype=torch.bool, device=image_pad_mask.device)
+        velocity = pipeline.transformer(
+            hidden_states=torch.cat([picture_tokens, latent], dim=1),
+            encoder_hidden_states=embeds,
+            timestep=timestep.to("cuda"),
+            img_shapes=[[(1, rows, columns), (1, side, side)]],
+            img_mask=torch.cat([image_pad_mask, slots], dim=1),
+            return_dict=False)[0]
+        put("picture_velocity", unpack(velocity[:, -side * side:]).float())
+
+        del pipeline
+        # The vision tower and the encoder at float32, with the picture in the prompt.
+        encoder = Qwen3VLForConditionalGeneration.from_pretrained(
+            directory, subfolder="text_encoder", torch_dtype=torch.float32)
+        seen = encoder.model.visual(inputs.pixel_values.float(), grid_thw=inputs.image_grid_thw)
+        put("picture_embeds", seen.pooler_output.float())
+        for index, rows_k in enumerate(seen.deepstack_features):
+            put(f"picture_deepstack{index}", rows_k.float())
+
+        text = encoder.model.language_model
+        handle = text.norm.register_forward_hook(lambda module, args, output: args[0])
+        states = encoder.model(
+            input_ids=inputs.input_ids, attention_mask=inputs.attention_mask,
+            pixel_values=inputs.pixel_values, image_grid_thw=inputs.image_grid_thw,
+            mm_token_type_ids=inputs.mm_token_type_ids, output_hidden_states=True,
+        ).hidden_states[-1]
+        handle.remove()
+        put("picture_hidden_fp32", states[:, inputs.input_ids.shape[1] - embeds.shape[1]:].float())
+        del encoder, text
+
+        vae = AutoencoderKLQwenImage21.from_pretrained(
+            directory, subfolder="vae", torch_dtype=torch.float32).to("cuda")
+        moments = vae.encode(vae_image[:, :, None].to("cuda")).latent_dist.mode().cpu()
+        mean = torch.tensor(vae.config.latents_mean).view(1, TEST_CHANNELS, 1, 1, 1)
+        std = torch.tensor(vae.config.latents_std).view(1, TEST_CHANNELS, 1, 1, 1)
+        put("picture_latent", ((moments - mean) / std)[:, :, 0].float())
 
 
 def export_control_test_cases(directory: str, controlnet: str, control_image: str,
@@ -783,6 +933,10 @@ def main() -> int:
     parser.add_argument("-control_image", type=str, default=None,
                         help="the control picture the ControlNet's reference is computed for: a "
                              "real one, such as VideoX-Fun's `asset/pose.jpg`.")
+    parser.add_argument("-test_picture", type=str, default=None,
+                        help="with -test_output: a photograph for the reference to edit, which "
+                             "adds the cases for a prompt that names a picture. The model test "
+                             "reads them.")
     args = parser.parse_args()
 
     if args.controlnet:
@@ -835,7 +989,11 @@ def main() -> int:
               f"{converter.quantized} quantized")
 
     if args.test_output:
-        export_test_cases(args.model, TEST_PROMPT).save(args.test_output)
+        if not args.test_picture:
+            raise SystemExit("the reference needs a -test_picture: a photograph to edit")
+        cases = export_test_cases(args.model, TEST_PROMPT)
+        export_picture_test_cases(args.model, args.test_picture, PICTURE_PROMPT, cases)
+        cases.save(args.test_output)
         print(f"wrote {args.test_output}")
 
         tokenizer = read_tokenizer(path.join(args.model, "processor"))

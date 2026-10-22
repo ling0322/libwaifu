@@ -124,6 +124,43 @@ impl ImageModel {
         }
     }
 
+    /// How many pictures a prompt may name, or zero where it reads words only. Qwen-Image 2.1's
+    /// package says, by whether it carries the vision tower.
+    pub fn prompt_pictures(&self) -> usize {
+        match self {
+            ImageModel::QwenImage(model) if model.reads_pictures() => QwenImage::MAX_PICTURES,
+            _ => 0,
+        }
+    }
+
+    /// The size a picture `width` by `height` the prompt names is read at, for a model that
+    /// reads any.
+    pub fn picture_size(&self, width: i32, height: i32) -> Option<(i32, i32)> {
+        match self {
+            ImageModel::QwenImage(model) if model.reads_pictures() => {
+                Some(QwenImage::picture_size(width, height))
+            }
+            _ => None,
+        }
+    }
+
+    /// A run whose prompt names `pictures`, each already the size [`ImageModel::picture_size`]
+    /// gives it and in the order the prompt names them.
+    pub fn generate_with_pictures_reporting(
+        &self,
+        prompt: &str,
+        pictures: &[Tensor],
+        options: &GenerationOptions,
+        report: &mut dyn FnMut(GenerationProgress) -> ControlFlow<()>,
+    ) -> crate::Result<Option<Tensor>> {
+        match self {
+            ImageModel::QwenImage(model) => {
+                model.generate_with_pictures_reporting(prompt, pictures, options, report)
+            }
+            _ => Err(crate::Error::model("this model reads words only")),
+        }
+    }
+
     pub fn generate_reporting(
         &self,
         prompt: &str,

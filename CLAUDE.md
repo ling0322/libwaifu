@@ -57,6 +57,8 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     -- --ignored --test-threads=1
 
 # waifu/src/qwen_image/, tools/qwen_image_exporter.py
+# (waifu/src/krea2/text_encoder.rs: run krea2's too -- Qwen-Image reads through it)
+# qwen_image's fixtures are exported with -test_picture; docs/qwen_image.md says how
 # qwen_image_control needs models/qwen-image-2.1-controlnet.yaml and its _test.safetensors
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test qwen_image --test qwen_image_pipeline --test qwen_image_tokenizer \

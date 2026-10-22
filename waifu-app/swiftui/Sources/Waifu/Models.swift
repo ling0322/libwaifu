@@ -49,6 +49,8 @@ struct Chosen: Decodable {
     var avoid: String?
     /// How many images a prompt can name; 0 for words only.
     var promptImages: Int?
+    /// Whether its prompt reads pictures, named in it as <|name|>.
+    var readsPictures: Bool { (promptImages ?? 0) > 0 }
     /// The kept keys it takes images under: "start_from", "control".
     var imageKeys: [String]?
     /// For what it cannot take, the sentence to show in its place.
@@ -227,6 +229,8 @@ struct Made: Codable {
     var device: String?
     /// The picture it started from, as an absolute path.
     var startFrom: String?
+    /// The pictures its prompt named, by the name it wrote as <|name|>, as absolute paths.
+    var promptPictures: [String: String]?
     // A reading.
     var text: String?
     var speed: Double?
@@ -325,7 +329,8 @@ struct ImageRecord: Codable {
             guidance = made.guidance ?? 0
             seed = String(made.seed)
             strength = made.strength
-            inputs = made.startFrom.map { ["start_from": $0] } ?? [:]
+            inputs = made.promptPictures ?? [:]
+            if let startFrom = made.startFrom { inputs["start_from"] = startFrom }
         }
     }
 
@@ -380,6 +385,10 @@ struct ImageRecord: Codable {
         made.seconds = result.generationSeconds
         made.device = parameters.device
         made.startFrom = parameters.inputs["start_from"]
+        // Every other input is a picture the prompt named: "control" is kept for a ControlNet's,
+        // which nothing here draws with.
+        let named = parameters.inputs.filter { $0.key != "start_from" && $0.key != "control" }
+        made.promptPictures = named.isEmpty ? nil : named
         return made
     }
 

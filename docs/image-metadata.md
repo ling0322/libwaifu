@@ -81,9 +81,11 @@ one the engine drew with, never a default or `auto`.
 | `guidance`   | number | The model's own for a model that takes no guidance.                    |
 | `seed`       | string | A u64 in decimal; the one chosen when a random seed was asked for.     |
 | `strength`   | number | `img2img` only, after clamping to 0..1.                                |
-| `inputs`     | object | The pictures drawn from, each an absolute path. `{}` for `txt2img`.    |
+| `inputs`     | object | The pictures drawn from, each an absolute path, by key.                |
 
-`inputs.start_from` is the picture `img2img` starts from.
+`inputs.start_from` is the picture `img2img` starts from. Any other key is a picture the prompt
+names as `<|key|>` and the model reads (Qwen-Image 2.1); a `txt2img` whose prompt names none has
+`{}`.
 
 ### `result`
 
