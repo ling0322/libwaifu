@@ -380,13 +380,19 @@ fn a_memory_limit_is_for_a_device_that_has_one() {
     ));
     assert!(last_error().contains("cpu"), "{}", last_error());
 
-    // Metal has one, where there is Metal: set, and lifted again so that no other test runs
-    // under it.
-    if crate::flint::Device::Metal.is_available() {
-        assert!(waifu_set_memory_limit(
-            WaifuDevice::WAIFU_DEVICE_METAL,
-            1 << 40
-        ));
-        assert!(waifu_set_memory_limit(WaifuDevice::WAIFU_DEVICE_METAL, 0));
+    // Every device with memory of its own has one, where the device is here: set, and lifted again
+    // so that no other test runs under it.
+    for (device, waifu_device) in [
+        (crate::flint::Device::Metal, WaifuDevice::WAIFU_DEVICE_METAL),
+        (crate::flint::Device::Cuda, WaifuDevice::WAIFU_DEVICE_CUDA),
+        (
+            crate::flint::Device::Vulkan,
+            WaifuDevice::WAIFU_DEVICE_VULKAN,
+        ),
+    ] {
+        if device.is_available() {
+            assert!(waifu_set_memory_limit(waifu_device, 1 << 40));
+            assert!(waifu_set_memory_limit(waifu_device, 0));
+        }
     }
 }

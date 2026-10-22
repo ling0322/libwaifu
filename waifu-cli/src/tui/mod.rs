@@ -47,7 +47,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::args::{DeviceOption, Room, Runtime};
+use crate::args::{DeviceOption, Runtime};
 use crate::task::Task;
 
 type Error = Box<dyn std::error::Error>;
@@ -111,12 +111,10 @@ pub fn choose(task: Option<Task>) -> Result<Option<(Task, String)>, Error> {
     chosen
 }
 
-/// Where a model can run: what `-device` said, what this machine can run on, and how much room
-/// its cards had before anything was put on them.
+/// Where a model can run: what `-device` said, and what this machine can run on.
 pub struct Machine {
     device: DeviceOption,
     available: Vec<Runtime>,
-    room: Room,
 }
 
 impl Machine {
@@ -124,41 +122,27 @@ impl Machine {
     ///
     /// Before, because the first question put to a device starts the tensor library, which says
     /// what hardware it found on stderr -- straight over whatever is on the screen at that moment.
-    /// The cards are measured whatever `-device` said: a device that was named is not
-    /// second-guessed, but a run on it that is going to run out of memory is still worth a warning
-    /// before it is started.
     pub fn measure(device: DeviceOption) -> Machine {
-        let (available, room) = crate::runtime::measure();
         Machine {
             device,
-            available,
-            room,
+            available: crate::runtime::measure(),
         }
     }
 
-    /// Where a model of `weights` bytes runs to begin with, and -- where that was worked out from
-    /// the size of the model -- the line that says so.
+    /// Where a model of `weights` bytes runs to begin with, and -- where `-device` left it to this
+    /// tool -- the line that says so.
     pub fn start_for(&self, weights: Option<u64>) -> (Runtime, Option<String>) {
+        let runtime = self.device.resolve(&self.available);
         if self.device != DeviceOption::Auto {
-            return (self.device.resolve(&self.available), None);
+            return (runtime, None);
         }
 
-        let runtime = Runtime::best(weights, &self.available, self.room);
         let why = weights.map(|weights| {
-            // CUDA's room where there is CUDA: that is the card both of its rows are about.
-            match self.room.cuda.or(self.room.vulkan) {
-                Some(free) => format!(
-                    "{} of weights and {} free on the card: {} is where it runs fastest",
-                    gigabytes(weights),
-                    gigabytes(free),
-                    runtime.name()
-                ),
-                None => format!(
-                    "{} of weights: {} is where it runs fastest",
-                    gigabytes(weights),
-                    runtime.name()
-                ),
-            }
+            format!(
+                "{} of weights: {} is where it runs fastest",
+                gigabytes(weights),
+                runtime.name()
+            )
         });
         (runtime, why)
     }

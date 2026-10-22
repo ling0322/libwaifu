@@ -25,7 +25,7 @@ use std::fmt;
 use crate::runtime::Device;
 use crate::task::Task;
 
-pub use crate::runtime::{DeviceOption, Room, Runtime};
+pub use crate::runtime::{DeviceOption, Runtime};
 
 /// What went wrong with what the user typed. Reported rather than exiting, so that the caller
 /// prints the usage that goes with the command they were running.
@@ -180,14 +180,14 @@ impl Args {
 pub fn print_options() {
     eprintln!(
         "  -device string\n    \tinference device, one of cpu, cuda, cuda_cpu_offload, metal, \
-         vulkan or auto (default \"auto\"). auto picks the fastest one the model fits on: cuda \
-         where the weights and room for a run fit in the card's free memory, cuda_cpu_offload \
-         where they do not. It is where the model is read first; the drawing screen's device row \
-         moves it. cuda_cpu_offload keeps the weights in host memory and moves each one onto the \
-         card as it is used, so that a model larger than the card can still draw; it is slower, \
-         since the whole model crosses the bus once per step. metal keeps as many of the weights \
-         on the GPU as fit, the smallest first, and reads the rest off the disk as they are used, \
-         so that a model larger than the Mac's memory can still draw."
+         vulkan or auto (default \"auto\"). auto picks the fastest one this machine has: cuda, \
+         then metal, then vulkan. It is where the model is read first; the drawing screen's device \
+         row moves it. cuda, vulkan and metal keep as many of the weights on the GPU as fit, the \
+         smallest first, and copy the rest onto it as they are used, so that a model larger than \
+         the card can still draw; a run that runs short lets weights on the GPU go. metal reads \
+         the rest off the disk, so that a model larger than the Mac's memory can still draw. \
+         cuda_cpu_offload keeps none of the weights on the card; it is slower, since the whole \
+         model crosses the bus once per step."
     );
     eprintln!(
         "  -m value\n    \tthe model to draw with: either a manifest file, which has the suffix \

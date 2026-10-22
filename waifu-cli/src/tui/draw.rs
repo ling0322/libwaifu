@@ -46,7 +46,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::args::{Room, Runtime};
+use crate::args::Runtime;
 use crate::engine::{
     Chosen, Ended, Engine, GenerationDefaults, GenerationOptions, GenerationProgress, Heard as News,
 };
@@ -110,8 +110,6 @@ pub fn draw(
 
     let mut app = App::for_chosen(launch.task, label, launch.runtime, chosen, output);
     app.available = machine.available.clone();
-    app.room = machine.room;
-    app.weights = chosen.bytes;
 
     // -i only fills the box. Everything about a run is changeable between runs, and a picture
     // named on the command line is no different -- it is where to start, not what to be stuck
@@ -844,11 +842,8 @@ struct App {
     after_reading: Option<String>,
     /// The list of devices, while it is up.
     picking: Option<DevicePicker>,
-    /// What the list is made from: the devices this machine has, how much room its cards had, and
-    /// how big the model is, which together say where it will not fit.
+    /// What the list is made from: the devices this machine has.
     available: Vec<Runtime>,
-    room: Room,
-    weights: Option<u64>,
 }
 
 impl App {
@@ -907,8 +902,6 @@ impl App {
             after_reading: None,
             picking: None,
             available: Runtime::ALL.to_vec(),
-            room: Room::default(),
-            weights: None,
         }
     }
 
@@ -945,13 +938,7 @@ impl App {
         if self.reading() {
             return self.failed("the model is still being read; it can be moved once it is");
         }
-        self.picking = Some(DevicePicker::open(
-            &self.model,
-            self.runtime,
-            &self.available,
-            self.weights,
-            self.room,
-        ));
+        self.picking = Some(DevicePicker::open(self.runtime, &self.available));
     }
 
     /// The screen for a model as libwaifu describes it: its numbers in the boxes, its

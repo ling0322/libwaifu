@@ -17,10 +17,10 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! Where a run goes: which device, where the weights wait, and how to choose for a model.
+//! Where a run goes: which device, and where the weights wait.
 //!
-//! What this machine can run on and how much room its cards have are libwaifu's to say, through
-//! `waifu_devices_json`; which of them suits a model is this tool's, and it is all here.
+//! What this machine can run on is libwaifu's to say, through `waifu_devices_json`; which of them
+//! `auto` means is this tool's, and it is here.
 
 /// A device a run can be sent to, as libwaifu names them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,16 +46,14 @@ use crate::c::{self, WaifuDevice};
 
 /// Where a run goes: a device, and where the weights wait between the steps that read them.
 ///
-/// One name rather than two answers. Where the weights wait is a question about a card the model
-/// does not fit on, so it has one device it can be asked of and one reason to ask it, and asking
-/// it beside the device made a second box whose rows were struck out three times out of four. As
-/// a device name -- `cuda_cpu_offload`, cuda with the weights kept on the host -- the pair that
-/// cannot be built cannot be said either, and there is one list on screen instead of two. Metal
-/// needs no second name: libwaifu keeps on it what fits and the rest in the model's files.
+/// One name rather than two answers. As a device name -- `cuda_cpu_offload`, cuda with none of the
+/// weights kept on the card -- the pair that cannot be built cannot be said either, and there is
+/// one list on screen instead of two. Every other device needs no second name: libwaifu keeps on
+/// it what fits and lets weights go when a run runs short.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Runtime {
     device: Device,
-    /// The weights on the host, each moved onto the card as it is used: cuda_cpu_offload.
+    /// None of the weights kept on the card, each moved onto it as it is used: cuda_cpu_offload.
     offload: bool,
 }
 
@@ -70,7 +68,7 @@ impl Runtime {
     ];
 
     /// Cuda, with the package held on the host and each weight moved onto the card at the
-    /// instruction that reads it. For a card the model does not fit on.
+    /// instruction that reads it, so that the card holds nothing of the model between steps.
     pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
         device: Device::Cuda,
         offload: true,
@@ -108,7 +106,7 @@ impl Runtime {
             false => "ready",
             // The row that has to say more than that. It is the slow answer, and the slow answer
             // picked by someone who was not told is a run that looks broken.
-            true => "ready, slower: for a model larger than the card",
+            true => "ready, slower: keeps none of the model on the card",
         }
     }
 }
@@ -136,8 +134,8 @@ impl DeviceOption {
             DeviceOption::CudaCpuOffload => Runtime::CUDA_CPU_OFFLOAD,
             DeviceOption::Metal => Runtime::on(Device::Metal),
             DeviceOption::Vulkan => Runtime::on(Device::Vulkan),
-            // Never an offload one: with no model in hand there is nothing to measure against
-            // the card. [`Runtime::best`] is the answer once there is.
+            // Never the offload one: the card keeps what fits of a model and lets weights go when
+            // a run runs short, which is faster than keeping none of it there.
             //
             // At most one of CUDA and Metal is ever built, so the order between those two only
             // decides which check runs first. Vulkan comes last because it runs on the same cards
@@ -148,73 +146,6 @@ impl DeviceOption {
                 .find(|runtime| available.contains(runtime))
                 .unwrap_or(Runtime::on(Device::Cpu)),
         }
-    }
-}
-
-/// How much of each card is free, where the card said. `None` is a card that was not asked or
-/// did not answer, which is taken as room enough: that is what `auto` assumed before it measured.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Room {
-    pub cuda: Option<u64>,
-    pub vulkan: Option<u64>,
-}
-
-/// What a model of `weights` bytes wants of a card to run with its weights on it: the weights,
-/// and room beside them for what a run makes -- the latents, the attention, the decoded picture.
-///
-/// A guess, and a generous one. Too small and the run aborts out of memory halfway through a
-/// picture; too large and a model that would have fitted runs offloaded, which is slower but
-/// finishes. SDXL's 7 GB comes to 9.7, and Qwen-Image's 15 GB of fp8 to 18.6, which is what puts
-/// the one on a sixteen gigabyte card and the other beside it.
-pub fn wanted_on_the_card(weights: u64) -> u64 {
-    const GIB: u64 = 1 << 30;
-    weights + weights / 10 + 2 * GIB
-}
-
-impl Runtime {
-    /// What a model of `weights` bytes wants of this runtime's card and what the card has free,
-    /// where the one is more than the other: a run there is likely to abort out of memory.
-    ///
-    /// Only a runtime that puts the weights on a card that was measured can be short. The offload
-    /// one keeps them on the host, Metal's memory is the machine's, and a size or a card that is
-    /// not known is taken as one that fits.
-    pub fn short_of(self, weights: Option<u64>, room: Room) -> Option<(u64, u64)> {
-        let free = match (self.device, self.offload) {
-            (Device::Cuda, false) => room.cuda,
-            (Device::Vulkan, false) => room.vulkan,
-            _ => None,
-        }?;
-        let wanted = wanted_on_the_card(weights?);
-        (wanted > free).then_some((wanted, free))
-    }
-
-    /// The fastest of `available` a model of `weights` bytes will run on, given `room`.
-    ///
-    /// CUDA where the model fits on the card, and CUDA with the weights on the host where it does
-    /// not: slower, but far faster than the processor, and it finishes where the other aborts.
-    /// Then Metal, whose memory is the machine's. Then Vulkan, which has no offload of its own and
-    /// so is only the answer where the model fits. The processor otherwise. A size that is not
-    /// known is taken as one that fits.
-    pub fn best(weights: Option<u64>, available: &[Runtime], room: Room) -> Runtime {
-        let cuda = Runtime::on(Device::Cuda);
-        let metal = Runtime::on(Device::Metal);
-        let vulkan = Runtime::on(Device::Vulkan);
-
-        if available.contains(&cuda) {
-            if cuda.short_of(weights, room).is_none() {
-                return cuda;
-            }
-            if available.contains(&Runtime::CUDA_CPU_OFFLOAD) {
-                return Runtime::CUDA_CPU_OFFLOAD;
-            }
-        }
-        if available.contains(&metal) {
-            return metal;
-        }
-        if available.contains(&vulkan) && vulkan.short_of(weights, room).is_none() {
-            return vulkan;
-        }
-        Runtime::on(Device::Cpu)
     }
 }
 
@@ -238,120 +169,51 @@ impl Runtime {
     }
 }
 
-/// What this machine can run on and how much room its cards have, asked of libwaifu.
+/// What this machine can run on, asked of libwaifu.
 ///
 /// The first time CUDA is asked it builds a context on the card, a few hundred megabytes of it,
 /// and the tensor library says what hardware it found: so this is asked once, before any screen
 /// is up.
-pub fn measure() -> (Vec<Runtime>, Room) {
+pub fn measure() -> Vec<Runtime> {
     let Some(said) = c::waifu_json(c::waifu_devices_json()) else {
-        return (vec![Runtime::on(Device::Cpu)], Room::default());
+        return vec![Runtime::on(Device::Cpu)];
     };
     let mut available = Vec::new();
-    let mut room = Room::default();
     for row in said["devices"].as_array().into_iter().flatten() {
         let Some(runtime) = row["name"].as_str().and_then(Runtime::named) else {
             continue;
         };
-        if row["available"].as_bool() != Some(true) {
-            continue;
-        }
-        available.push(runtime);
-        let free = row["free"].as_u64();
-        match runtime.device() {
-            Device::Cuda if room.cuda.is_none() => room.cuda = free,
-            Device::Vulkan => room.vulkan = free,
-            _ => {}
+        if row["available"].as_bool() == Some(true) {
+            available.push(runtime);
         }
     }
     if available.is_empty() {
         available.push(Runtime::on(Device::Cpu));
     }
-    (available, room)
+    available
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const GB: u64 = 1_000_000_000;
-
     #[test]
-    fn auto_puts_a_model_on_the_card_it_fits_and_offloads_one_it_does_not() {
-        let everything = Runtime::ALL.to_vec();
+    fn auto_is_the_fastest_device_this_machine_has_and_never_the_offload_one() {
+        let cpu = Runtime::on(Device::Cpu);
         let cuda = Runtime::on(Device::Cuda);
-        let sixteen = Room {
-            cuda: Some(16 * GB),
-            vulkan: Some(16 * GB),
-        };
+        let metal = Runtime::on(Device::Metal);
+        let vulkan = Runtime::on(Device::Vulkan);
 
-        // SDXL on a sixteen gigabyte card, and Qwen-Image's fp8 beside it.
-        assert_eq!(Runtime::best(Some(7 * GB), &everything, sixteen), cuda);
+        // However large the model: the card keeps what fits of it and lets weights go.
+        assert_eq!(DeviceOption::Auto.resolve(&Runtime::ALL), cuda);
+        assert_eq!(DeviceOption::Auto.resolve(&[cpu, vulkan]), vulkan);
+        assert_eq!(DeviceOption::Auto.resolve(&[cpu, metal]), metal);
+        assert_eq!(DeviceOption::Auto.resolve(&[cpu]), cpu);
+
+        // A device that was named is the device, whether or not it is here.
         assert_eq!(
-            Runtime::best(Some(15 * GB), &everything, sixteen),
+            DeviceOption::CudaCpuOffload.resolve(&[cpu]),
             Runtime::CUDA_CPU_OFFLOAD
         );
-
-        // A size or a card that did not say is the old answer, which is the card.
-        assert_eq!(Runtime::best(None, &everything, sixteen), cuda);
-        assert_eq!(
-            Runtime::best(Some(40 * GB), &everything, Room::default()),
-            cuda
-        );
-    }
-
-    #[test]
-    fn auto_without_cuda_goes_to_vulkan_only_where_the_model_fits() {
-        let cpu = Runtime::on(Device::Cpu);
-        let vulkan = Runtime::on(Device::Vulkan);
-        let here = [cpu, vulkan];
-        let eight = Room {
-            cuda: None,
-            vulkan: Some(8 * GB),
-        };
-
-        assert_eq!(Runtime::best(Some(3 * GB), &here, eight), vulkan);
-        assert_eq!(Runtime::best(Some(7 * GB), &here, eight), cpu);
-
-        // Metal has the machine's memory, so it has no card to be too big for: what does not fit
-        // stays in the model's files.
-        let mac = [cpu, Runtime::on(Device::Metal)];
-        assert_eq!(
-            Runtime::best(Some(400 * GB), &mac, Room::default()),
-            Runtime::on(Device::Metal)
-        );
-        assert_eq!(
-            Runtime::on(Device::Metal).short_of(Some(400 * GB), Room::default()),
-            None
-        );
-        assert_eq!(Runtime::best(Some(1), &[cpu], Room::default()), cpu);
-    }
-
-    #[test]
-    fn only_a_card_the_weights_go_on_can_be_short_of_room() {
-        let eight = Room {
-            cuda: Some(8 * GB),
-            vulkan: Some(8 * GB),
-        };
-        let cuda = Runtime::on(Device::Cuda);
-
-        assert_eq!(cuda.short_of(Some(3 * GB), eight), None);
-        assert_eq!(
-            cuda.short_of(Some(7 * GB), eight),
-            Some((wanted_on_the_card(7 * GB), 8 * GB))
-        );
-        assert!(Runtime::on(Device::Vulkan)
-            .short_of(Some(7 * GB), eight)
-            .is_some());
-
-        // The offload one keeps the weights on the host, and the processor has no card at all.
-        assert_eq!(
-            Runtime::CUDA_CPU_OFFLOAD.short_of(Some(7 * GB), eight),
-            None
-        );
-        assert_eq!(Runtime::on(Device::Cpu).short_of(Some(7 * GB), eight), None);
-        // Nor is anything short of what was never measured.
-        assert_eq!(cuda.short_of(None, eight), None);
-        assert_eq!(cuda.short_of(Some(7 * GB), Room::default()), None);
     }
 }

@@ -43,7 +43,7 @@ use crate::describe::{self, converter_kind, voice_kind, Chosen, ConverterKind, V
 use crate::image_model::ImageModel;
 use crate::indextts::IndexTts;
 use crate::progress::{Convert, Doing, Run, Say, VOCODER_RATIO};
-use crate::runtime::{DeviceOption, Room, Runtime};
+use crate::runtime::{DeviceOption, Runtime};
 use crate::wav::Sound;
 use crate::{
     from_rgb8, to_rgb8, ConversionOptions, ConversionProgress, Converter, Device,
@@ -1084,19 +1084,15 @@ pub fn machine_json() -> serde_json::Value {
 }
 
 /// Where a run can go: `waifu_devices_json`. Every device the C API names, whether this build
-/// and this machine can take a run there, and -- for CUDA and Vulkan where they can -- how much of
-/// the card is free now, in bytes. Which of them suits a model is the caller's to decide.
+/// and this machine can take a run there, and -- for a device with memory of its own where it can
+/// -- what its allocator may still take, in bytes: the memory limit or the device's memory, less
+/// what this process holds there. See [`crate::runtime::remaining`].
 pub fn devices_json() -> serde_json::Value {
     let available = Runtime::available();
-    let room = Room::measure(&available);
     let devices: Vec<serde_json::Value> = Runtime::ALL
         .iter()
         .map(|runtime| {
-            let free = match runtime.device() {
-                Device::Cuda => room.cuda,
-                Device::Vulkan => room.vulkan,
-                _ => None,
-            };
+            let free = crate::runtime::remaining(runtime.device(), &available);
             serde_json::json!({
                 "name": runtime.name(),
                 "available": available.contains(runtime),

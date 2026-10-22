@@ -42,37 +42,37 @@ API's voice conversion. It changes whose voice it is and keeps the words, timing
 
 ## Low memory mode
 
-`-device cuda_cpu_offload` keeps the weights in host memory and moves each one onto the card as it
-is used, so a model far larger than the card still draws. It costs speed rather than the picture
--- the whole model crosses the bus once per step -- and it is never picked for you, because a card
-the model does not fit on is something to be told about rather than worked around silently.
+`-device cuda`, `-device vulkan` and `-device metal` keep as many of the model's weights on the
+GPU as fit -- the smallest first, up to 85% of the memory limit, which is the whole card (on a Mac,
+the device's budget) where none is set and the "vram (GB)" slider in the Mac app -- and copy the
+rest onto the GPU as each is used. A picture that needs more room than is left lets the largest
+weights on the GPU go as it goes, and reads them across again when they are next used. So a
+model larger than the card still draws, more slowly, rather than running out of memory. On a Mac
+the weights left off the GPU stay in the model's files, each read off the disk as it is used, so a
+model larger than the Mac's memory draws too.
+
+`-device cuda_cpu_offload` keeps none of the weights on the card and moves each one onto it as it
+is used, so the card holds nothing of the model between steps. It costs speed rather than the
+picture -- the whole model crosses the bus once per step.
 
 RTX 5060 Ti, 16 GB, card otherwise free. `krea2:turbo-fp8`, 1024x1024, the eight steps the
 distilled release is for, seed 7:
 
 | `-device` | peak GPU memory | outcome | wall |
 |---|---|---|---|
-| `cuda` | 15.4 GB | `Aborted: out of memory` | - |
 | `cuda_cpu_offload` | 1.2 GB | a picture | 67 s |
 
-On a Mac there is nothing to choose: `-device metal` keeps as many of the model's weights on the
-GPU as fit -- the smallest first, up to the memory limit, which is the device's budget where none
-is set and the "vram (GB)" slider in the Mac app -- and leaves the rest in the model's files, each
-read off the disk as it is used. So a model larger than the Mac's memory still draws, more slowly,
-and a picture that needs more room than is left moves the largest weights back off the GPU as it
-goes.
 The small weights -- norms, biases, scales -- are most of the moves and little of the bytes, so
-what is left to read off the disk each step is the large projections.
+what is left to copy across each step is the large projections.
 
 ## Run
 
 `waifu` asks two things in the terminal -- the task (txt2img or img2img) and the model for it --
 fetches the model under a progress bar if it is not on the disk yet, and then puts up the drawing
-screen while the model is read onto the fastest device it fits on: a prompt, what to steer away
-from, the steps, guidance, size and seed, for img2img a picture to start from (enter on it browses
-the disk) and how far to walk from it, and the device. Enter on the device row lists every device
-this machine has and warns where the model may run out of memory; picking another reads the model
-onto it in the background.
+screen while the model is read onto the fastest device this machine has: a prompt, what to steer
+away from, the steps, guidance, size and seed, for img2img a picture to start from (enter on it
+browses the disk) and how far to walk from it, and the device. Enter on the device row lists every
+device this machine has; picking another reads the model onto it in the background.
 
 ```bash
 $ waifu
@@ -157,12 +157,12 @@ otherwise.
 
 | `-device` | what it means |
 |---|---|
-| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `cuda_cpu_offload` except where the model is measured not to fit: that is for a model the card cannot hold, which is not a thing to decide silently on someone's behalf. |
+| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `cuda_cpu_offload`: `cuda` already keeps what fits on the card and lets weights go when a run runs short. |
 | `cpu` | The CPU kernels. |
-| `cuda` | The card, weights moved once and kept there. |
-| `cuda_cpu_offload` | Weights stay in host memory and each is moved onto the card as it is used, so a model larger than the card still draws. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
+| `cuda` | The card. As many of the weights as fit stay on it, the smallest first, and the rest are moved onto it as they are used; a run that runs short lets weights on the card go, so a model larger than the card still draws. |
+| `cuda_cpu_offload` | None of the weights stay on the card: each is moved onto it as it is used. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
 | `metal` | The GPU on Apple Silicon, through flint's own kernels -- and an M5's neural accelerators. As many of the weights as fit stay on it, the smallest first; the rest are read off the disk as they are used, so a model larger than the Mac's memory still draws. |
-| `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. |
+| `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. Keeps the weights on it as `cuda` does. |
 
 A build only has the devices it was configured with, so `cuda` on a `-DWITH_CUDA=OFF` build is a
 device that is not there. See the matrix above and the build section below.

@@ -102,10 +102,12 @@ pub extern "C" fn waifu_machine_json() -> *mut c_char {
 }
 
 /// Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-/// names them -- cpu, cuda, cuda_cpu_offload, metal, vulkan -- with `free` the
-/// bytes free on the card for CUDA and Vulkan where they can be used, and null otherwise. Asking
-/// CUDA builds a context on the card, a few hundred megabytes of it. Free with waifu_string_free.
-/// NULL on failure.
+/// names them -- cpu, cuda, cuda_cpu_offload, metal, vulkan -- with `free` the bytes the device's
+/// allocator may still take where it can be used -- its memory limit, or the device's memory, less
+/// what this process holds there -- and null for the processor or a device that cannot be used. Not
+/// the card as other programs see it: that is waifu_machine_json's `vram`. Asking CUDA builds a
+/// context on the card, a few hundred megabytes of it. Free with waifu_string_free. NULL on
+/// failure.
 #[no_mangle]
 pub extern "C" fn waifu_devices_json() -> *mut c_char {
     caught(ptr::null_mut(), || {
@@ -417,12 +419,11 @@ pub unsafe extern "C" fn waifu_engine_new_with_options(
     })
 }
 
-/// Limits the memory of `device` -- the tensors of whatever runs on it, the weights an offload
-/// device keeps there, and what it keeps for reuse -- to `bytes`; 0 for no limit but the
-/// device's. For the whole process rather than an engine: set it before an engine reads a model.
-/// On Metal the model's smallest weights fill what it leaves, and a run that then runs short moves
-/// weights back off the device rather than failing. Only Metal has a limit: false, with
-/// waifu_last_error, for any other device.
+/// Limits the memory of `device` -- the tensors of whatever runs on it, the weights kept there
+/// among them -- to `bytes`; 0 for no limit but the device's. For the whole process rather than an
+/// engine: set it before an engine reads a model. The model's smallest weights then fill most of
+/// what it allows, and a run that runs short lets weights on the device go rather than failing.
+/// Metal, CUDA and Vulkan have a limit: false, with waifu_last_error, for the processor.
 #[no_mangle]
 pub extern "C" fn waifu_set_memory_limit(device: WaifuDevice, bytes: u64) -> bool {
     caught(false, || {

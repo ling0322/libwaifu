@@ -19,17 +19,16 @@
 
 //! Where a run goes: which device, and where the weights wait.
 
-use crate::flint::MemorySnapshot;
+use crate::flint::{MemoryBudget, MemorySnapshot};
 use crate::Device;
 
 /// Where a run goes: a device, and where the weights wait between the steps that read them.
 ///
-/// One name rather than two answers. Where the weights wait is a question about a card the model
-/// does not fit on, so it has one device it can be asked of and one reason to ask it, and asking
-/// it beside the device made a second box whose rows were struck out three times out of four. As
-/// a device name -- `cuda_cpu_offload`, cuda with the weights kept on the host -- the pair that
-/// cannot be built cannot be said either, and there is one list on screen instead of two. Metal
-/// needs no second name: it keeps on the device what fits and the rest in the model's files.
+/// One name rather than two answers. As a device name -- `cuda_cpu_offload`, cuda with none of the
+/// weights kept on the card -- the pair that cannot be built cannot be said either, and there is
+/// one list on screen instead of two. Every other device needs no second name: it keeps on the
+/// device what fits, copies the rest over as each is read, and lets weights go when a run runs
+/// short.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Runtime {
     device: Device,
@@ -49,7 +48,7 @@ impl Runtime {
     ];
 
     /// Cuda, with the package held on the host and each weight moved onto the card at the
-    /// instruction that reads it. For a card the model does not fit on.
+    /// instruction that reads it, so that the card holds nothing of the model between steps.
     pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
         device: Device::Cuda,
         device_weight_bytes: 0,
@@ -58,12 +57,12 @@ impl Runtime {
     /// A device, with as many of the weights on it as fit, which each device makes what it can of
     /// -- see [`Weights::from_files`](crate::Weights::from_files).
     ///
-    /// On Metal the smallest weights fill what the memory limit leaves -- the device's budget where
-    /// there is none -- as the model is read; every other weight is read off the disk into the
-    /// device's memory at the instruction that reads it, and a run that runs short moves weights
-    /// back off the device. So a model that fits is all on the device, and one larger than the
-    /// machine still draws. See [`Weights`](crate::Weights) and [`set_memory_limit`]. Everywhere
-    /// else, as things are, every weight is on the device.
+    /// On Metal, CUDA and Vulkan the smallest weights fill most of what the memory limit allows --
+    /// all of the device where there is none -- as the model is read; every other weight is copied
+    /// into the device's memory at the instruction that reads it, and a run that runs short lets
+    /// weights on the device go. So a model that fits is all on the device, and one larger than
+    /// the card still draws. See [`Weights`](crate::Weights) and [`set_memory_limit`]. On the
+    /// processor every weight is where it is read.
     pub const fn on(device: Device) -> Runtime {
         Runtime {
             device,
@@ -92,7 +91,7 @@ impl Runtime {
         match self == Runtime::CUDA_CPU_OFFLOAD {
             // The row that has to say more than that. It is the slow answer, and the slow answer
             // picked by someone who was not told is a run that looks broken.
-            true => "ready, slower: for a model larger than the card",
+            true => "ready, slower: keeps none of the model on the card",
             false => "ready",
         }
     }
@@ -142,48 +141,31 @@ impl DeviceOption {
     }
 }
 
-/// How much of each card is free, where the card said. `None` is a card that was not asked or
-/// did not answer, which is taken as room enough: that is what `auto` assumed before it measured.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Room {
-    pub cuda: Option<u64>,
-    pub vulkan: Option<u64>,
-}
-
-impl Room {
-    /// Asks the cards among `available` how much of them is free.
-    ///
-    /// Not Metal: that backend has no snapshot, and asking for one ends the process. Its memory is
-    /// the machine's, so there is no separate card for a model not to fit on.
-    ///
-    /// The first question to CUDA builds a context on the card, a few hundred megabytes of it --
-    /// which is why this is only asked for `auto`, where a card is about to be used anyway.
-    pub fn measure(available: &[Runtime]) -> Room {
-        let free = |device: Device| match available.contains(&Runtime::on(device)) {
-            true => match MemorySnapshot::capture(device) {
-                Ok(memory) if memory.total > 0 => Some(memory.free.max(0) as u64),
-                _ => None,
-            },
-            false => None,
-        };
-        Room {
-            cuda: free(Device::Cuda),
-            vulkan: free(Device::Vulkan),
-        }
-    }
-}
-
 /// Limit the memory of the device `device` runs on -- the tensors of whatever runs there, the
-/// weights an offload runtime keeps on it, and what it keeps for reuse -- to `bytes`; 0 for no
-/// limit but the device's.
+/// weights kept on it among them -- to `bytes`; 0 for no limit but the device's.
 ///
-/// The process's, not an engine's: there is one allocator per device. Metal fills what the limit
-/// leaves with weights when it reads a model, and a run that then runs short moves weights back
-/// off the device. Only Metal has a limit.
+/// The process's, not an engine's: there is one allocator per device. A model read afterwards
+/// keeps its smallest weights on the device within the limit, and a run that then runs short lets
+/// weights on the device go. Metal, CUDA and Vulkan have a limit; the processor does not.
 pub fn set_memory_limit(device: DeviceOption, bytes: u64) -> Result<(), String> {
     let device = device.resolve().device();
     MemorySnapshot::set_limit(device, bytes.min(i64::MAX as u64) as i64)
         .map_err(|error| format!("{} takes no memory limit: {error}", device.name()))
+}
+
+/// What the allocator of `device` may still take, where this build and this machine can run there
+/// and it says: see [`MemoryBudget`]. `None` for the processor, which keeps no count.
+///
+/// The first question to CUDA builds a context on the card, a few hundred megabytes of it -- which
+/// is why this is only asked of a device a run can go to.
+pub fn remaining(device: Device, available: &[Runtime]) -> Option<u64> {
+    if device == Device::Cpu || !available.contains(&Runtime::on(device)) {
+        return None;
+    }
+    match MemoryBudget::capture(device) {
+        Ok(budget) if budget.capacity > 0 => Some(budget.remaining()),
+        _ => None,
+    }
 }
 
 impl Runtime {
