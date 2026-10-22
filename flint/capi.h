@@ -585,10 +585,25 @@ FLAPI int32_t fl_memory_reset_peak_stats(fl_device_type_t device);
 /// otherwise have reused.
 FLAPI int32_t fl_memory_release_unused(fl_device_type_t device);
 
-/// Limit the memory the allocator of `device` holds -- its tensors and what it keeps for reuse --
-/// to `bytes`; 0 for no limit but the device's. An allocation that would pass it fails as one the
-/// device cannot give does. Only Metal has one: any other device is refused.
+/// Limit the memory the allocator of `device` holds to `bytes`; 0 for no limit but the device's.
+/// An allocation that would pass it fails as one the device cannot give does. Metal counts its
+/// tensors and what it keeps for reuse, CUDA and Vulkan their tensors and workspaces; the CPU is
+/// refused.
 FLAPI int32_t fl_memory_set_limit(fl_device_type_t device, int64_t bytes);
+
+/// What the allocator of one device may hold and holds now, which is what a model's weights are
+/// sized against. Not a snapshot: that is the device as somebody looking at it sees it, other
+/// processes and memory kept for reuse included.
+typedef struct fl_memory_budget_t {
+  /// The memory limit where there is one, and otherwise what the device has -- a card's memory,
+  /// or on Metal what the system suggests one process keep on the GPU. 0 on the CPU.
+  int64_t capacity;
+  /// What this process's allocator holds against it now.
+  int64_t allocated;
+} fl_memory_budget_t;
+
+/// Measure the budget of `device`'s allocator.
+FLAPI int32_t fl_memory_budget(fl_device_type_t device, fl_memory_budget_t *out);
 
 /// What fl_set_fatal_handler() registers.
 typedef void (*fl_fatal_handler_t)(void);

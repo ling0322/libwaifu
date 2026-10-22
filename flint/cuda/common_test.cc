@@ -29,6 +29,7 @@
 #include "flint/device.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
+#include "lutil/error.h"
 
 namespace fl {
 
@@ -169,6 +170,68 @@ CATCH_TEST_CASE("test CUDA FastDivmod (exhaustive small)", "[fl][cuda]") {
       CATCH_REQUIRE(remainder == dividend % divisor);
     }
   }
+}
+
+CATCH_TEST_CASE("test CUDA memory budget counts what flint allocates", "[fl][cuda][memory]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Without a limit, the card is the capacity, whoever else has some of it.
+  MemoryBudget before = MemoryBudget::capture(Device::getCuda());
+  CATCH_REQUIRE(before.capacity == MemorySnapshot::capture(Device::getCuda()).getTotalMemory());
+
+  // The bytes asked for, exactly: what the pool rounds them up to is not counted.
+  {
+    Tensor x = F::empty(Device::getCuda(), {1000, 1001}, DType::kFloat16);
+    MemoryBudget during = MemoryBudget::capture(Device::getCuda());
+    CATCH_REQUIRE(during.allocated == before.allocated + 1000 * 1001 * 2);
+  }
+  CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).allocated == before.allocated);
+}
+
+CATCH_TEST_CASE(
+    "test CUDA allocation past the memory limit is out of memory",
+    "[fl][cuda][memory]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Lifted however the test ends, so that no other test runs under it.
+  struct Unlimited {
+    ~Unlimited() {
+      MemorySnapshot::setLimit(Device::getCuda(), 0);
+    }
+  } unlimited;
+
+  // Room for one 2 MB tensor and not two.
+  constexpr int64_t kTwoMB = 2 << 20;
+  int64_t held = MemoryBudget::capture(Device::getCuda()).allocated;
+  MemorySnapshot::setLimit(Device::getCuda(), held + 3 * (1 << 20));
+  CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).capacity == held + 3 * (1 << 20));
+
+  Tensor first = F::empty(Device::getCuda(), {int(kTwoMB)}, DType::kInt8);
+  CATCH_REQUIRE_THROWS_AS(
+      F::empty(Device::getCuda(), {int(kTwoMB)}, DType::kInt8),
+      lut::OutOfMemoryError);
+  // A workspace an operator asks for is held to the same limit.
+  CATCH_REQUIRE_THROWS_AS(op::cuda::llynCudaAlloc<int8_t>(kTwoMB), lut::OutOfMemoryError);
+  // Refused, nothing was taken.
+  CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).allocated == held + kTwoMB);
+
+  // Given back, the bytes are there for the next tensor, at once and inside the limit.
+  first = Tensor();
+  Tensor again = F::empty(Device::getCuda(), {int(kTwoMB)}, DType::kInt8);
+  again = Tensor();
+  CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).allocated == held);
+}
+
+CATCH_TEST_CASE("test CUDA running out of the card is out of memory", "[fl][cuda][memory]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // More than any card has: the driver refuses it, as itself and not as an abort, and leaves no
+  // error behind for the next launch to find.
+  int64_t held = MemoryBudget::capture(Device::getCuda()).allocated;
+  int64_t tooMuch = MemorySnapshot::capture(Device::getCuda()).getTotalMemory() * 4;
+  CATCH_REQUIRE_THROWS_AS(op::cuda::llynCudaMalloc(tooMuch), lut::OutOfMemoryError);
+  CATCH_REQUIRE(cudaGetLastError() == cudaSuccess);
+  CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).allocated == held);
 }
 
 }  // namespace fl

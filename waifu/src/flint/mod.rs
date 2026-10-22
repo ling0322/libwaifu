@@ -99,7 +99,7 @@ pub use graph::{Graph, Site, WeightFormat};
 pub use ir::{Inst, Ir, RunContext};
 pub use op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
 pub use operators::Operators;
-pub use weights::{check_parameters, Weights};
+pub use weights::{check_parameters, Weights, DEVICE_SHARE};
 
 use operators::{operators_of, transfer_operators};
 
@@ -438,16 +438,51 @@ impl MemorySnapshot {
         check(unsafe { ffi::fl_memory_release_unused(device as i32) })
     }
 
-    /// Limit what the allocator of `device` holds -- its tensors and the memory it keeps for reuse
-    /// -- to `bytes`, 0 for no limit but the device's. An allocation that would pass it fails the
-    /// call that asked for it, as one the device cannot give does, and takes nothing: whatever
-    /// was let go of on the way out is there for the next call.
+    /// Limit what the allocator of `device` holds to `bytes`, 0 for no limit but the device's. An
+    /// allocation that would pass it fails the call that asked for it, as one the device cannot
+    /// give does, and takes nothing: whatever was let go of on the way out is there for the next
+    /// call. See [`MemoryBudget`] for what it leaves.
     ///
-    /// The process's, not a model's: there is one allocator per device. Only Metal has one, and
-    /// any other device is refused.
+    /// The process's, not a model's: there is one allocator per device. Metal, CUDA and Vulkan
+    /// have one, and the processor is refused.
     pub fn set_limit(device: Device, bytes: i64) -> Result<()> {
         init();
         check(unsafe { ffi::fl_memory_set_limit(device as i32, bytes) })
+    }
+}
+
+/// What the allocator of one device may hold and what it holds now, which is what a model's
+/// weights are sized against.
+///
+/// Not a [`MemorySnapshot`]: that is the device as somebody looking at it sees it -- other
+/// processes, and memory an allocator keeps for reuse, included -- and this is the room the
+/// allocator itself has, under its limit or, without one, in the whole of the device.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryBudget {
+    /// The memory limit where there is one -- see [`MemorySnapshot::set_limit`] -- and otherwise
+    /// what the device has: a card's memory, or on Metal what the system suggests one process
+    /// keep on the GPU. 0 on the processor.
+    pub capacity: i64,
+    /// What this process's tensors hold against it now, and on CUDA the operators' workspaces.
+    pub allocated: i64,
+}
+
+impl MemoryBudget {
+    /// Measure the budget of `device`'s allocator.
+    pub fn capture(device: Device) -> Result<MemoryBudget> {
+        init();
+        let mut raw = ffi::FlMemoryBudget::default();
+        check(unsafe { ffi::fl_memory_budget(device as i32, &mut raw) })?;
+        Ok(MemoryBudget {
+            capacity: raw.capacity,
+            allocated: raw.allocated,
+        })
+    }
+
+    /// What the allocator may still take: the capacity less what is held, and never below
+    /// nothing.
+    pub fn remaining(self) -> u64 {
+        (self.capacity - self.allocated).max(0) as u64
     }
 }
 

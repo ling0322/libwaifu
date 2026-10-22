@@ -95,7 +95,9 @@ class Context {
   }
 
   /// A device buffer of at least `bytes` bytes, from the cache when one there is close enough.
-  /// @throw lut::AbortedError when the device is out of memory even after the cache is emptied.
+  /// @throw lut::OutOfMemoryError when the device is out of memory, or the memory limit would be
+  ///     passed, even after the cache is emptied. Nothing is taken then, so a caller that frees
+  ///     something may ask again.
   Buffer allocate(int64_t bytes);
 
   /// Hand `buffer` back to the cache. It is not destroyed, see the class comment.
@@ -106,6 +108,15 @@ class Context {
 
   MemorySnapshot captureMemorySnapshot();
   void resetPeakMemoryStats();
+
+  /// The most the buffers the tensors hold and the cache together may come to, in bytes; 0, the
+  /// default, for no limit but the device's. A buffer out of the cache is taken whatever the
+  /// limit, since it is held already; a new one past it empties the cache first and is refused by
+  /// allocate() if it still does not fit. Lowering it lets nothing in use go.
+  void setMemoryLimit(int64_t bytes);
+
+  /// The limit, or the device's memory without one, and what the tensors hold.
+  MemoryBudget getMemoryBudget();
 
   /// Record a dispatch of the kernel called `kernel` over the given number of workgroups, with
   /// `push` as its arguments.
@@ -217,6 +228,7 @@ class Context {
   int64_t _cachedBytes = 0;
   int64_t _allocatedBytes = 0;
   int64_t _peakAllocatedBytes = 0;
+  int64_t _memoryLimit = 0;  // 0 for none
 
   Context() = default;
 

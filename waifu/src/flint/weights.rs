@@ -21,14 +21,14 @@
 //! what a graph's `load` instructions are answered from. See the IR's documentation for how a run
 //! reads them: [`Ir`](super::Ir).
 
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
 use super::graph::Graph;
 use super::op::Op;
-use super::{AllocHint, Device, MemorySnapshot, Tensor};
+use super::{AllocHint, Device, MemoryBudget, Tensor};
 use crate::error::{Error, Result};
 use crate::tensor_file;
 
@@ -54,36 +54,44 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// A model's weights, read out of its package and kept on the device as far as they were asked to
 /// be and it allows: see [`Weights::from_files`].
 ///
-/// One map of tensors, some on the card and the rest in ordinary host memory -- or all of them on
-/// the card. What differs is only whether a [`load`](Weights::load) has to move the weight -- a
-/// kept one is already where the run wants it and is handed over as a handle, and a waiting one is
-/// copied across the bus, to be given back at the `free` after its last reader.
+/// Every weight as its package holds it, on the host, and beside them a copy on the device of
+/// those kept there. What differs between the two is only whether a [`load`](Weights::load) has to
+/// move the weight -- a kept one is already where the run wants it and is handed over as a
+/// handle, and the rest are copied across the bus, to be given back at the `free` after their last
+/// reader.
 ///
-/// # What low-vram costs
+/// The host's are kept even for a weight on the device, so that letting the device's copy go --
+/// when the device runs out, see [`Weights::evict_one`] -- is nothing more than that: no copy back
+/// across the bus, and no memory of the host's taken for it. A weight read out of a package is its
+/// file's mapping, which costs the process nothing of its own: the pages are the page cache's,
+/// clean, and the kernel drops them under pressure and reads them again from the file. Only a
+/// weight the file did not lay out aligned is a copy (see [`tensor_file`](crate::tensor_file)),
+/// and that copy is held for as long as the model is.
 ///
-/// The copy, once per load per run, which is the whole model across the bus for every sampler
-/// step. So it is slower than keeping the weights on the card and always will be; it is the mode
-/// for when the alternative is not drawing at all.
+/// # What the weights left on the host cost
+///
+/// The copy, once per load per run, which for a model none of which is kept is the whole model
+/// across the bus for every sampler step. So it is slower than keeping the weights on the card and
+/// always will be; it is the mode for when the alternative is not drawing at all.
 ///
 /// And the model's size in host memory, for as long as the model is held -- the page cache the
-/// package is mapped from, which is not page-locked and is not a copy: the kernel may drop it
-/// under pressure and read it again from the file. It used to be locked, because the driver sends
-/// a pageable source at well under the bus's rate. Flint's own upload does not (see `flint/cuda/staged_upload.h`): it stages
-/// through two small locked buffers filled by several threads and sends as fast as a locked
-/// source. Locking the model therefore bought nothing, and cost a limit: Windows locks no more
-/// than half of RAM for the GPU, so a 32 GB machine could not hold a 17 GB model this way. And it
-/// cost a copy: locked memory is the process's own, where the mapping is shared with the page
-/// cache the file is already in.
+/// package is mapped from, which is not page-locked and is not a copy. It used to be locked,
+/// because the driver sends a pageable source at well under the bus's rate. Flint's own upload
+/// does not (see `flint/cuda/staged_upload.h`): it stages through two small locked buffers filled
+/// by several threads and sends as fast as a locked source. Locking the model therefore bought
+/// nothing, and cost a limit: Windows locks no more than half of RAM for the GPU, so a 32 GB
+/// machine could not hold a 17 GB model this way. And it cost a copy: locked memory is the
+/// process's own, where the mapping is shared with the page cache the file is already in.
 ///
 /// # On Metal
 ///
 /// The same, except that the package is not read when the model is. Metal's memory is the
 /// machine's, so a model read into the page cache up front is the whole model in the memory
-/// low-vram is there to spare, and on a machine smaller than the model the end of the package
-/// pushes out its beginning before the first step asks for it. So each weight stays its file's
-/// mapping, untouched, and a load reads it off the disk as it copies it into a buffer of the
-/// device's. Pages read that way are clean, and the kernel drops them
-/// rather than writing them anywhere when memory runs short.
+/// a weight left on the host is there to spare, and on a machine smaller than the model the end of
+/// the package pushes out its beginning before the first step asks for it. So each weight stays
+/// its file's mapping, untouched, and a load reads it off the disk as it copies it into a buffer of
+/// the device's. Pages read that way are clean, and the kernel drops them rather than writing them
+/// anywhere when memory runs short.
 ///
 /// The copy is the host's and synchronous (see `Context::upload` in `flint/metal_native`): it
 /// waits for the device to finish with the buffer it writes into, and the device waits while the
@@ -92,18 +100,20 @@ fn held<'a>(weights: &'a HashMap<String, Tensor>, name: &str, shape: &[i32]) -> 
 /// wrapping the package would hold all of it, and wrapping each weight is what a later version
 /// can do to take the host out of the way.
 pub struct Weights {
-    /// Keyed the way the package keys them, which is what a graph's `load` asks for. Behind a
-    /// cell, because a weight on the device may be moved back to the host in the middle of a run,
-    /// through the `Weights` the run shares: see [`Weights::evict_one`].
-    tensors: RefCell<HashMap<String, Tensor>>,
+    /// Every weight, keyed the way the package keys them, which is what a graph's `load` asks for,
+    /// and where the package put it: the host, or for weights made up rather than read, wherever
+    /// they were made. Never changed once the weights are read.
+    tensors: HashMap<String, Tensor>,
 
-    /// The names of the weights `keep_the_smallest_on_device` put on the device, in the order it
-    /// put them there, smallest first: a stack, whose top -- the largest -- is the first to go
-    /// back to the host when the device runs out. See [`Weights::evict_one`].
-    device_tensors: RefCell<Vec<String>>,
+    /// The copies on the device of the weights kept there, by the same names. Behind a cell,
+    /// because the device may run out in the middle of a run and one of them be let go of through
+    /// the `Weights` the run shares: see [`Weights::evict_one`].
+    device_tensors: RefCell<HashMap<String, Tensor>>,
 
-    /// Where a run wants a weight, which is the device the model was built for. Where any one
-    /// weight waits between runs is its own tensor's to say.
+    /// Which of [`device_tensors`](Weights) goes first when the device runs out.
+    eviction_order: RefCell<EvictionOrder>,
+
+    /// Where a run wants a weight, which is the device the model was built for.
     device: Device,
 }
 
@@ -113,16 +123,18 @@ impl Weights {
     /// fit -- and the rest on the host.
     ///
     /// The one way a model's weights are read. Each file is mapped rather than read, and each of
-    /// its weights is put where it is going straight out of the mapping, so the host holds no
-    /// copy of its own: a weight moved to the card leaves nothing behind, and one kept on the host
-    /// is the page cache. See [`tensor_file`](crate::tensor_file).
+    /// its weights is the mapping, so the host holds no copy of its own: one kept on the host is
+    /// the page cache, and one moved to the card leaves the page cache behind it to drop. See
+    /// [`tensor_file`](crate::tensor_file).
     ///
-    /// The weights kept are the smallest, no more of them than the device has free -- the room its
-    /// memory limit leaves, or, without one, its budget -- and a run that runs short moves the
-    /// largest of them back off it: see [`Weights::evict_one`]. Those not kept are each moved onto
-    /// the device by the load that reads it and given back after its last reader; on Metal, whose
-    /// memory is the machine's, "the host" is the package's file, so a model larger than the
-    /// machine still runs. 0 keeps none.
+    /// The weights kept are the smallest, no more of them than fill [`DEVICE_SHARE`] of what the
+    /// device's allocator may hold -- its memory limit where it has one, the device's memory
+    /// otherwise; see [`MemoryBudget`] -- less what it holds already. The rest of it is for what a
+    /// run makes. A run that runs short anyway lets the device's copies go, one at a time: see
+    /// [`Weights::evict_one`]. Those not kept are each moved onto the device by the load that
+    /// reads it and given back after its last reader; on Metal, whose memory is the machine's,
+    /// "the host" is the package's file, so a model larger than the machine still runs. 0 keeps
+    /// none.
     ///
     /// Smallest first because what a load from the host costs is mostly not its bytes: each one
     /// is a copy the run waits for, and a model's norms, biases and scales are hundreds of loads
@@ -130,8 +142,8 @@ impl Weights {
     /// most of the waits away, and what is left to cross over per pass is the large projections,
     /// whose copies are the ones that run at the bus's rate.
     ///
-    /// What each device can do of that is [`kept_on_device`]'s to say: on the processor and
-    /// Vulkan, and on CUDA asked to fill it, every weight is on the device.
+    /// What each device can do of that is [`kept_on_device`]'s to say: on the processor every
+    /// weight is where it is read already.
     pub fn from_files(
         paths: &[impl AsRef<Path>],
         device: Device,
@@ -153,7 +165,7 @@ impl Weights {
     /// a graph that loads nothing.
     pub fn from_tensors(tensors: HashMap<String, Tensor>, device: Device) -> Result<Weights> {
         Ok(Weights {
-            tensors: RefCell::new(tensors),
+            tensors,
             ..Weights::empty(device)
         })
     }
@@ -184,32 +196,33 @@ impl Weights {
 
     /// How many weights there are.
     pub fn len(&self) -> usize {
-        self.tensors.borrow().len()
+        self.tensors.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tensors.borrow().is_empty()
+        self.tensors.is_empty()
     }
 
     /// No weights yet, for a model running on `device`. [`tensor_file`](crate::tensor_file) fills
     /// it with [`Weights::insert`].
     pub(crate) fn empty(device: Device) -> Weights {
         Weights {
-            tensors: RefCell::new(HashMap::new()),
-            device_tensors: RefCell::new(Vec::new()),
+            tensors: HashMap::new(),
+            device_tensors: RefCell::new(HashMap::new()),
+            eviction_order: RefCell::new(EvictionOrder::default()),
             device,
         }
     }
 
     /// Keep `tensor` under `name`, in the type the file holds it in, and put on the device -- or,
-    /// `on_host`, left where it is until a load wants it.
+    /// `on_host`, left where it is until a load wants it or
+    /// [`keep_the_smallest_on_device`](Weights::keep_the_smallest_on_device) copies it over.
     ///
     /// A name already held is refused rather than replaced -- a model whose weights depend on the
     /// order its files were listed in is worse than one that will not load -- and refused before
     /// anything is moved.
     pub(crate) fn insert(&mut self, name: String, tensor: Tensor, on_host: bool) -> Result<()> {
-        let tensors = self.tensors.get_mut();
-        if tensors.contains_key(&name) {
+        if self.tensors.contains_key(&name) {
             return Err(Error::format(format!(
                 "tensor {name:?} is in more than one file of this model"
             )));
@@ -229,21 +242,20 @@ impl Weights {
             }
         };
 
-        tensors.insert(name, tensor);
+        self.tensors.insert(name, tensor);
         Ok(())
     }
 
-    /// Once every weight is in on the host: the smallest put on the device and kept there, as many
-    /// as fit in `device_weight_bytes` and in what the device has free -- the room its memory
-    /// limit leaves, or, without one, its budget. Given `u64::MAX` bytes, that is as many as the
-    /// device has room for. See [`smallest_within`].
+    /// Once every weight is in on the host: the smallest copied to the device and kept there, as
+    /// many as fit in `device_weight_bytes` and in [`DEVICE_SHARE`] of what the device's allocator
+    /// may hold, less what it holds already. Given `u64::MAX` bytes, that is as many as the
+    /// share has room for. See [`smallest_within`].
     ///
     /// After the whole package rather than as each weight comes, because which are the smallest
     /// is a question about all of them. They are moved in `order`, the order the package lies in,
-    /// so that the disk is read front to back rather than smallest first. Each one moved leaves its
-    /// host copy behind for the page cache to drop, as a resident model's weights do. A device that
-    /// turns out to be full before the last of them -- each weight takes whole pages, which the
-    /// sizes do not count -- keeps those it has.
+    /// so that the disk is read front to back rather than smallest first. A device that turns out
+    /// to be full before the last of them -- each weight takes whole pages, which the sizes do not
+    /// count, and another process may have taken some of the card -- keeps those it has.
     pub(crate) fn keep_the_smallest_on_device(
         &mut self,
         device_weight_bytes: u64,
@@ -253,35 +265,34 @@ impl Weights {
             return Ok(());
         }
 
-        let free = MemorySnapshot::capture(self.device)?.free.max(0) as u64;
-        let allowed = device_weight_bytes.min(free);
+        let budget = MemoryBudget::capture(self.device)?;
+        let share = budget.capacity.max(0) as u64 / 100 * DEVICE_SHARE;
+        let room = share.saturating_sub(budget.allocated.max(0) as u64);
+        let allowed = device_weight_bytes.min(room);
 
-        let tensors = self.tensors.get_mut();
-        let mut sizes = Vec::with_capacity(tensors.len());
-        for (name, tensor) in tensors.iter() {
+        let mut sizes = Vec::with_capacity(self.tensors.len());
+        for (name, tensor) in self.tensors.iter() {
             sizes.push((name.clone(), tensor.nbytes()? as u64));
         }
         let (chosen, _) = smallest_within(sizes, allowed);
 
-        // Moved in the order they lie in, and stacked smallest first, as smallest_within hands
-        // them back, so that the largest is on top.
         let wanted: std::collections::HashSet<&String> = chosen.iter().collect();
         let mut bytes = 0u64;
-        let mut moved = std::collections::HashSet::new();
+        let device_tensors = self.device_tensors.get_mut();
+        let eviction_order = self.eviction_order.get_mut();
         for name in order.iter().filter(|name| wanted.contains(name)) {
-            let tensor = tensors.get_mut(name).expect("a name the map was asked for");
+            let tensor = &self.tensors[name];
             match tensor.to_device_as(self.device, AllocHint::Weight) {
                 Ok(on_device) => {
-                    bytes += on_device.nbytes()? as u64;
-                    *tensor = on_device;
-                    moved.insert(name.clone());
+                    let size = on_device.nbytes()? as u64;
+                    bytes += size;
+                    eviction_order.placed(name.clone(), size);
+                    device_tensors.insert(name.clone(), on_device);
                 }
                 Err(error) if error.is_out_of_memory() => break,
                 Err(error) => return Err(error.into()),
             }
         }
-        let device_tensors = self.device_tensors.get_mut();
-        device_tensors.extend(chosen.into_iter().filter(|name| moved.contains(name)));
 
         crate::log::write(
             crate::log::Level::Info,
@@ -289,7 +300,7 @@ impl Weights {
             &format!(
                 "{} of {} weights kept on {}: {} MB of the {} MB there was room for",
                 device_tensors.len(),
-                tensors.len(),
+                self.tensors.len(),
                 self.device.name(),
                 bytes / 1_000_000,
                 allowed / 1_000_000
@@ -305,26 +316,36 @@ impl Weights {
     /// Synchronous, because the instruction after this one reads what it returns and there is
     /// nothing else for the host to be doing in between.
     pub fn load(&self, name: &str, shape: &[i32]) -> Result<Tensor> {
-        // The map let go of before the device is asked for anything: running out on the way
-        // there is answered by moving a weight off it, which is a change to the map.
-        let tensor = held(&self.tensors.borrow(), name, shape)?.clone();
+        let tensor = held(&self.tensors, name, shape)?;
+
+        // The cell let go of before the device is asked for anything: running out on the way
+        // there is answered by letting a copy on the device go, which is a change to it.
+        let kept = self.device_tensors.borrow().get(name).cloned();
+        if let Some(on_device) = kept {
+            self.eviction_order.borrow_mut().used(name);
+            return Ok(on_device);
+        }
         Ok(tensor.to_device_as(self.device, AllocHint::Weight)?)
     }
 
-    /// Move the weight on top of [`device_tensors`](Weights) -- the largest of those kept on the
-    /// device -- back to the host, and say which it was; `None` where none is left to move.
+    /// Let go of the device's copy of the weight [`EvictionOrder`] says goes first, and say which
+    /// it was; `None` where no weight is left on the device.
     ///
-    /// For when the device runs out in the middle of a run: the weight is copied back to the host
-    /// and the next load of it copies it across again, as a low-vram load does. Its memory on the
-    /// device goes back once nothing holds it -- at once, unless an instruction that is running
-    /// has it in hand, and then after that instruction.
+    /// For when the device runs out in the middle of a run. The weight is still the host's -- its
+    /// file's mapping -- so nothing is copied back, and the next load of it copies it across again,
+    /// as it does a weight that was never kept. Its memory on the device goes back once nothing
+    /// holds it: at once, unless an instruction that is running has it in hand, and then after
+    /// that instruction.
     pub fn evict_one(&self) -> Result<Option<String>> {
-        let Some(name) = self.device_tensors.borrow_mut().pop() else {
+        let Some(name) = self.eviction_order.borrow_mut().next() else {
             return Ok(None);
         };
-        let mut tensors = self.tensors.borrow_mut();
-        let tensor = tensors.get_mut(&name).expect("a name the map holds");
-        *tensor = tensor.to_device(Device::Cpu)?;
+        let gone = self.device_tensors.borrow_mut().remove(&name);
+        debug_assert!(
+            gone.is_some(),
+            "{name:?} was in the eviction order and not on the device"
+        );
+        drop(gone);
         Ok(Some(name))
     }
 
@@ -335,7 +356,7 @@ impl Weights {
     /// ask before it knows what it is asking for. Answered without handing the weight over, for
     /// the same reason `check` is.
     pub fn shape_of(&self, name: &str) -> Option<Vec<i32>> {
-        self.tensors.borrow().get(name).map(|tensor| tensor.shape())
+        self.tensors.get(name).map(|tensor| tensor.shape())
     }
 
     /// Whether there is a weight called `name` here at all, whatever shape it turns out to be.
@@ -343,22 +364,23 @@ impl Weights {
     /// For the half of a model a package may or may not hold -- SDXL's VAE encoder is one -- where
     /// the question has to be answered before there is anything to ask it about a shape.
     pub fn has(&self, name: &str) -> bool {
-        self.tensors.borrow().contains_key(name)
+        self.tensors.contains_key(name)
     }
 
     /// Whether `name` is here with `shape`, answered without handing the weight over.
     ///
-    /// Asked of the map rather than being `load` with its result dropped: checking a low-vram
-    /// model's eight hundred weights by moving each one across the bus would be a whole pass's
+    /// Asked of the map rather than being `load` with its result dropped: checking a model's eight
+    /// hundred weights by moving each one left on the host across the bus would be a whole pass's
     /// worth of copying to learn that the package is the right one. See [`check_parameters`],
     /// which is the only caller.
     pub fn check(&self, name: &str, shape: &[i32]) -> Result<()> {
-        held(&self.tensors.borrow(), name, shape).map(drop)
+        held(&self.tensors, name, shape).map(drop)
     }
 
-    /// Every weight, by name, for the checks made over the whole package once it is read.
-    pub(crate) fn tensors(&self) -> Ref<'_, HashMap<String, Tensor>> {
-        self.tensors.borrow()
+    /// Every weight, by name, as the package holds it, for the checks made over the whole package
+    /// once it is read.
+    pub(crate) fn tensors(&self) -> &HashMap<String, Tensor> {
+        &self.tensors
     }
 }
 
@@ -367,9 +389,49 @@ impl fmt::Debug for Weights {
     /// hundreds of them and they are named in the IR that reads them.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Weights")
-            .field("tensors", &self.tensors.borrow().len())
+            .field("tensors", &self.tensors.len())
+            .field("on_device", &self.device_tensors.borrow().len())
             .field("device", &self.device)
             .finish()
+    }
+}
+
+/// The share of what a device's allocator may hold, in percent, that the weights kept on it may
+/// fill when a model is read. The rest is for what a run makes -- the latents, the attention, the
+/// decoded picture -- and for what the libraries under the operators allocate for themselves,
+/// which no limit of flint's counts and which a full card would refuse in a way no weight let go
+/// of can answer. A run that needs more than the rest lets weights go: see [`Weights::evict_one`].
+pub const DEVICE_SHARE: u64 = 85;
+
+/// Which of the weights on the device goes first when it runs out.
+///
+/// Its own type so that what decides it is in one place, and told what happens to the weights
+/// rather than asked to keep a list in a given order: [`Weights`] says a weight was put on the
+/// device, or read from there, and this says which goes. As things are, the largest goes first --
+/// the one weight whose going gives back the most -- and of two the same size, the one whose name
+/// sorts last, so that the same model under the same limit lets the same weights go. What a run
+/// read last is not asked about yet; [`EvictionOrder::used`] is where it would be.
+#[derive(Debug, Default)]
+struct EvictionOrder {
+    /// The weights on the device, by size and then name, smallest first: the last goes first.
+    by_size: Vec<(u64, String)>,
+}
+
+impl EvictionOrder {
+    /// `name`, of `bytes` bytes, is on the device now.
+    fn placed(&mut self, name: String, bytes: u64) {
+        let entry = (bytes, name);
+        let at = self.by_size.partition_point(|held| *held < entry);
+        self.by_size.insert(at, entry);
+    }
+
+    /// `name`, which is on the device, was handed to a run. Nothing, as things are: the order is
+    /// by size.
+    fn used(&mut self, _name: &str) {}
+
+    /// The weight to let go of next, taken out of the order; `None` once none is on the device.
+    fn next(&mut self) -> Option<String> {
+        self.by_size.pop().map(|(_, name)| name)
     }
 }
 
@@ -377,18 +439,14 @@ impl fmt::Debug for Weights {
 /// for every weight on the device as it is read, and otherwise every weight on the host and as
 /// many bytes of the smallest of them as that on the device, moved there once the package is in.
 ///
-/// Keeping some off the device needs a device whose memory a weight can be moved into and given
-/// back from one load at a time -- CUDA's, through its staged upload, and Metal's. The processor
-/// already holds the weights where it reads them, and Vulkan has no such path, so on those every
-/// weight is on the device. And filling the device -- `u64::MAX` -- needs one that can make room
-/// again, which only Metal can as things are: a card has no limit here, and running out there is
-/// not told apart from any other failure. So on CUDA filling is every weight on the card; a number
-/// of bytes, none among them, is kept as asked.
+/// Every device but the processor keeps them that way, filling it -- `u64::MAX` -- included:
+/// Metal, CUDA and Vulkan can each move a weight onto the device for one load and give it back
+/// after, and each says when it runs out, so a run that does can let a kept weight go and carry on.
+/// The processor already holds the weights where it reads them.
 fn kept_on_device(device: Device, device_weight_bytes: u64) -> Option<u64> {
     match device {
-        Device::Metal => Some(device_weight_bytes),
-        Device::Cuda if device_weight_bytes != u64::MAX => Some(device_weight_bytes),
-        _ => None,
+        Device::Cpu | Device::CudaHost => None,
+        Device::Cuda | Device::Metal | Device::Vulkan => Some(device_weight_bytes),
     }
 }
 
@@ -499,21 +557,33 @@ mod tests {
     fn each_device_does_what_it_can_of_what_is_asked() {
         let (fill, some, none) = (u64::MAX, 1 << 30, 0);
 
-        // Metal does all of it.
-        for asked in [fill, some, none] {
-            assert_eq!(kept_on_device(Device::Metal, asked), Some(asked));
-        }
-        // CUDA keeps a number of bytes, none among them, but cannot make room again, so filling it
-        // is all of the weights on the card.
-        assert_eq!(kept_on_device(Device::Cuda, fill), None);
-        assert_eq!(kept_on_device(Device::Cuda, some), Some(some));
-        assert_eq!(kept_on_device(Device::Cuda, none), Some(none));
-        // The processor and Vulkan have every weight on the device, however they are asked.
-        for device in [Device::Cpu, Device::Vulkan] {
+        // Every device with memory of its own keeps as much as it is asked to, filling it
+        // included: it can make room again by letting a weight go.
+        for device in [Device::Metal, Device::Cuda, Device::Vulkan] {
             for asked in [fill, some, none] {
-                assert_eq!(kept_on_device(device, asked), None);
+                assert_eq!(kept_on_device(device, asked), Some(asked));
             }
         }
+        // The processor has every weight where it reads it, however it is asked.
+        for asked in [fill, some, none] {
+            assert_eq!(kept_on_device(Device::Cpu, asked), None);
+        }
+    }
+
+    #[test]
+    fn the_largest_weight_on_the_device_goes_first() {
+        let mut order = EvictionOrder::default();
+        // Placed in the order a package lies in, which is not the order they go in.
+        order.placed("proj".into(), 400);
+        order.placed("norm".into(), 8);
+        order.placed("scale".into(), 8);
+        order.placed("mlp".into(), 200);
+        order.used("proj");
+
+        // Largest first, and of two the same size the one whose name sorts last.
+        let gone: Vec<String> = std::iter::from_fn(|| order.next()).collect();
+        assert_eq!(gone, ["proj", "mlp", "scale", "norm"]);
+        assert_eq!(order.next(), None);
     }
 
     #[test]

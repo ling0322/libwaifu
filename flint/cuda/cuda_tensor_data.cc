@@ -40,15 +40,7 @@ std::unique_ptr<TensorData> CudaTensorData::create(
   auto tensorData = std::make_unique<CudaTensorData>();
 
   CHECK(numel > 0);
-  int64_t size = dtype.getTotalSize(numel);
-  void *data = nullptr;
-  cudaError_t err = llynCudaMalloc(&data, size, stream);
-  if (err != cudaSuccess) {
-    throw lut::AbortedError(cudaGetErrorString(err));
-  }
-
-  tensorData->_data = data;
-  data = nullptr;
+  tensorData->_data = llynCudaMalloc(dtype.getTotalSize(numel), stream);
 
   tensorData->_stream = stream;
   tensorData->_numel = numel;
@@ -68,7 +60,7 @@ CudaTensorData::~CudaTensorData() {
     // for exactly this. Neither case needs the host to wait: a fetch nobody wanted is freed in
     // the copy stream, where the copy that may still be writing it runs, and one that was taken
     // is freed in the compute stream, which is ordered after that copy.
-    llynCudaFree(_data, _stream);
+    llynCudaFree(_data, _dtype.getTotalSize(_numel), _stream);
     _data = nullptr;
   }
 }

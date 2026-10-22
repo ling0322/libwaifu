@@ -266,13 +266,26 @@ int64_t VramAllocator::getAllocatedBytes() {
 MemorySnapshot VramAllocator::captureMemorySnapshot() {
   std::lock_guard<std::mutex> lock(_mutex);
 
-  // Under a limit, what there is is the limit, and what is free is what it leaves after what the
-  // allocator holds -- the cache included. Without one, the device's budget and everything this
-  // process has on the GPU: one pool of memory for the host and the device.
-  int64_t total = _memoryLimit > 0 ? _memoryLimit : _budgetBytes;
-  int64_t used = _memoryLimit > 0 ? held() : static_cast<int64_t>(_device->currentAllocatedSize());
-  int64_t free = total - used;
-  return MemorySnapshot(total, std::max<int64_t>(0, free), _allocatedBytes, _peakAllocatedBytes);
+  // The device's budget and everything this process has on the GPU: one pool of memory for the
+  // host and the device. The limit is the allocator's and not the device's, and is
+  // getMemoryBudget()'s to say.
+  int64_t used = static_cast<int64_t>(_device->currentAllocatedSize());
+  int64_t free = _budgetBytes - used;
+  return MemorySnapshot(
+      _budgetBytes,
+      std::max<int64_t>(0, free),
+      _allocatedBytes,
+      _peakAllocatedBytes);
+}
+
+MemoryBudget VramAllocator::getMemoryBudget() {
+  std::lock_guard<std::mutex> lock(_mutex);
+  MemoryBudget budget;
+  budget.capacity = _memoryLimit > 0 ? _memoryLimit : _budgetBytes;
+  // What the tensors hold, weights among them, and not the empty chunks: those go back before
+  // anything past the limit is refused.
+  budget.allocated = _allocatedBytes;
+  return budget;
 }
 
 void VramAllocator::resetPeakMemoryStats() {

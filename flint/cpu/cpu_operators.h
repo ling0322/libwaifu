@@ -157,6 +157,7 @@ class CPUOperators : public Operators {
 
   MemorySnapshot captureMemorySnapshot() override;
   void resetPeakMemoryStats() override;
+  MemoryBudget getMemoryBudget() override;
 
  private:
   typedef TensorShape::Elem Shape;

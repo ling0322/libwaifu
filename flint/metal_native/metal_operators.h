@@ -154,6 +154,7 @@ class MetalOperators : public Operators {
   void resetPeakMemoryStats() override;
   void releaseUnusedMemory() override;
   void setMemoryLimit(int64_t bytes) override;
+  MemoryBudget getMemoryBudget() override;
 
   DType getDefaultFloatType() override;
   void synchronize() override;

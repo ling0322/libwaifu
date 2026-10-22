@@ -423,6 +423,10 @@ void Operators::setMemoryLimit(int64_t bytes) {
   NO_KERNEL();
 }
 
+MemoryBudget Operators::getMemoryBudget() {
+  NO_KERNEL();
+}
+
 DType Operators::getDefaultFloatType() {
   NO_KERNEL();
 }

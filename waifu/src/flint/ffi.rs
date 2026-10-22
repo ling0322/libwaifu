@@ -257,6 +257,7 @@ extern "C" {
     pub fn fl_memory_reset_peak_stats(device: FlDeviceType) -> i32;
     pub fn fl_memory_release_unused(device: FlDeviceType) -> i32;
     pub fn fl_memory_set_limit(device: FlDeviceType, bytes: i64) -> i32;
+    pub fn fl_memory_budget(device: FlDeviceType, out: *mut FlMemoryBudget) -> i32;
     pub fn fl_set_fatal_handler(handler: Option<extern "C" fn()>);
     pub fn fl_set_log_sink(
         sink: Option<extern "C" fn(level: i32, source: *const c_char, message: *const c_char)>,
@@ -273,4 +274,12 @@ pub struct FlMemorySnapshot {
     pub free: i64,
     pub allocated: i64,
     pub peak_allocated: i64,
+}
+
+/// Mirrors `fl_memory_budget_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlMemoryBudget {
+    pub capacity: i64,
+    pub allocated: i64,
 }

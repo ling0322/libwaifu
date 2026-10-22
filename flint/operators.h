@@ -354,8 +354,11 @@ class Operators {
 
   /// The most the memory this device's allocator holds may come to, in bytes; 0 for no limit but
   /// the device's. An allocation that would pass it throws lut::OutOfMemoryError, as one the
-  /// device itself cannot give does. Only Metal has one; any other device refuses.
+  /// device itself cannot give does. Metal, CUDA and Vulkan have one; the CPU refuses.
   virtual void setMemoryLimit(int64_t bytes);
+
+  /// What this device's allocator may hold and holds now: see MemoryBudget.
+  virtual MemoryBudget getMemoryBudget();
 
   virtual DType getDefaultFloatType();
 

@@ -93,10 +93,10 @@ pub fn read_safetensors(paths: &[impl AsRef<Path>]) -> Result<HashMap<String, Te
 /// A model's weights out of the files at `paths`, for a model running on `device` with its
 /// weights kept on it as `device_weight_bytes` asks -- what [`Weights::from_files`] is.
 ///
-/// Each tensor borrows its file's mapping rather than a copy of it, and [`Weights::insert`] puts
-/// it where it waits as it arrives, so what the host holds is what the weights keep: nothing, for
-/// a weight moved to the card. Every quantized weight has to have its scale beside it; see
-/// [`check_fp8_pairs`].
+/// Each tensor borrows its file's mapping rather than a copy of it, and [`Weights::insert`] keeps
+/// it as it arrives, so what the host holds is the page cache and nothing of the process's own --
+/// even for a weight copied to the card, whose mapping stays for when the card lets the copy go.
+/// Every quantized weight has to have its scale beside it; see [`check_fp8_pairs`].
 pub(crate) fn collect(
     paths: &[impl AsRef<Path>],
     device: Device,

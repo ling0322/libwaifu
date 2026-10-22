@@ -385,6 +385,10 @@ void MetalOperators::setMemoryLimit(int64_t bytes) {
   _context->getAllocator().setMemoryLimit(bytes);
 }
 
+MemoryBudget MetalOperators::getMemoryBudget() {
+  return _context->getAllocator().getMemoryBudget();
+}
+
 DType MetalOperators::getDefaultFloatType() {
   return DType::kFloat16;
 }

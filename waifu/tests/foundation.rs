@@ -26,8 +26,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use waifu::flint::DEVICE_SHARE;
 use waifu::flint::{check_parameters, Graph, Ir, RunContext, Weights};
-use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
+use waifu::flint::{functional as F, DType, Device, MemoryBudget, MemorySnapshot, Tensor};
 use waifu::{read_safetensors, Embedding, Linear, WeightFormat};
 
 /// A safetensors file holding `tensors`, each given as a name, a shape, and its elements.
@@ -778,12 +779,27 @@ fn a_hybrid_package_keeps_the_smallest_weights_on_metal() {
     assert_eq!(run(&hybrid), expected, "the second step reads the same");
 }
 
-/// The weights a hybrid package keeps on the device go back to the host largest first, one at a
-/// time, as they would when the device runs out -- and the model gives the same answer without
-/// them, reading each across again as it is used.
-#[test]
-#[ignore = "needs a Metal device"]
-fn a_hybrid_package_gives_its_kept_weights_back_largest_first() {
+/// What the allocator of `device` holds, which is what the budget the weights are sized against
+/// counts.
+fn held_on(device: Device) -> i64 {
+    MemoryBudget::capture(device).unwrap().allocated
+}
+
+/// Sets `device`'s memory limit back to none when it goes, however the test that made it ends, so
+/// that no other test runs under the limit it set.
+struct Unlimited(Device);
+
+impl Drop for Unlimited {
+    fn drop(&mut self) {
+        let _ = MemorySnapshot::set_limit(self.0, 0);
+    }
+}
+
+/// The weights a hybrid package keeps on the device are let go of largest first, one at a time, as
+/// they would be when the device runs out -- with nothing copied back, since the host still holds
+/// each -- and the model gives the same answer without them, reading each across again as it is
+/// used.
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first(device: Device) {
     let big: Vec<f32> = (0..256 * 256)
         .map(|i| ((i % 17) as f32 - 8.0) / 16.0)
         .collect();
@@ -808,37 +824,36 @@ fn a_hybrid_package_gives_its_kept_weights_back_largest_first() {
     );
     let ir = Ir::compile(&graph);
 
-    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
     let x = Tensor::from_f32(&[256, 256], &big)
         .unwrap()
-        .to_device(Device::Metal)
+        .to_device(device)
         .unwrap();
     let run = |source: &Weights| {
         let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
         to_host(&out[0].1)
     };
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
+    let kept = Weights::from_files(&[&file.0], device, u64::MAX).unwrap();
     let expected = run(&kept);
     drop(kept);
 
     // Room for the three small ones -- 1, 1 and 4 KB -- and not the big one.
-    let before = allocated();
-    let hybrid = Weights::from_files(&[&file.0], Device::Metal, 7 << 10).unwrap();
-    assert_eq!(allocated() - before, 6 << 10);
+    let before = held_on(device);
+    let hybrid = Weights::from_files(&[&file.0], device, 7 << 10).unwrap();
+    assert_eq!(held_on(device) - before, 6 << 10);
     assert_eq!(run(&hybrid), expected);
 
-    // Largest first, and of two the same size the one that went on last.
+    // Largest first, and of two the same size the one whose name sorts last.
     assert_eq!(
         hybrid.evict_one().unwrap().as_deref(),
         Some("medium.unused")
     );
-    assert_eq!(allocated() - before, 2 << 10);
+    assert_eq!(held_on(device) - before, 2 << 10);
     assert_eq!(hybrid.evict_one().unwrap().as_deref(), Some("small.scale"));
     assert_eq!(hybrid.evict_one().unwrap().as_deref(), Some("small.bias"));
     assert_eq!(hybrid.evict_one().unwrap(), None);
     assert_eq!(
-        allocated() - before,
+        held_on(device) - before,
         0,
         "nothing of the package is left on the device"
     );
@@ -847,12 +862,31 @@ fn a_hybrid_package_gives_its_kept_weights_back_largest_first() {
     assert_eq!(run(&hybrid), expected);
 }
 
-/// Given as many bytes as there are, a hybrid package fills the device with its smallest weights:
-/// up to its memory limit where it has one, and, without one, to its budget.
 #[test]
 #[ignore = "needs a Metal device"]
-fn a_hybrid_package_fills_the_device_to_its_limit() {
-    // Four weights of a page each, which take no more than they say, and one larger.
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first_on_metal() {
+    a_hybrid_package_gives_its_kept_weights_back_largest_first(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first_on_cuda() {
+    a_hybrid_package_gives_its_kept_weights_back_largest_first(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first_on_vulkan() {
+    a_hybrid_package_gives_its_kept_weights_back_largest_first(Device::Vulkan);
+}
+
+/// Given as many bytes as there are, a hybrid package fills [`DEVICE_SHARE`] of what the device's
+/// allocator may hold with its smallest weights: of its memory limit where it has one, and,
+/// without one, of the device.
+fn a_hybrid_package_fills_its_share_of_the_device(device: Device) {
+    // Four weights of 16 KB each -- a page on Metal, so that they take no more than they say --
+    // and one larger.
+    const PAGE: i64 = 16384;
     let page = vec![0.25f32; 4096];
     let big = vec![0.5f32; 256 * 256];
     let file = TempFile::new(&write_laid_out(&[
@@ -863,30 +897,21 @@ fn a_hybrid_package_fills_the_device_to_its_limit() {
         ("big.weight", "F32", &[256, 256], f32_bytes(&big)),
     ]));
     let as_many_as_fit = u64::MAX;
-    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
+    let _unlimited = Unlimited(device);
 
-    // Lifted however the test ends, so that no other test runs under it.
-    struct Unlimited;
-    impl Drop for Unlimited {
-        fn drop(&mut self) {
-            let _ = MemorySnapshot::set_limit(Device::Metal, 0);
-        }
-    }
-    let _unlimited = Unlimited;
+    // A limit whose share, less what is held already, has room for three and a half of the pages:
+    // three of the four.
+    MemorySnapshot::release_unused(device).unwrap();
+    let held = held_on(device);
+    let wanted = held + 3 * PAGE + PAGE / 2;
+    let limit = (wanted / DEVICE_SHARE as i64 + 1) * 100;
+    MemorySnapshot::set_limit(device, limit).unwrap();
+    assert_eq!(MemoryBudget::capture(device).unwrap().capacity, limit);
 
-    // Under a limit a snapshot's total is the limit and what is free is what it leaves, so that
-    // what is held is the difference: three pages more than that is room for three of the four.
-    MemorySnapshot::release_unused(Device::Metal).unwrap();
-    MemorySnapshot::set_limit(Device::Metal, 1 << 40).unwrap();
-    let snapshot = MemorySnapshot::capture(Device::Metal).unwrap();
-    let held = snapshot.total - snapshot.free;
-    MemorySnapshot::set_limit(Device::Metal, held + 3 * 16384).unwrap();
-
-    let before = allocated();
-    let filled = Weights::from_files(&[&file.0], Device::Metal, as_many_as_fit).unwrap();
+    let filled = Weights::from_files(&[&file.0], device, as_many_as_fit).unwrap();
     assert_eq!(
-        allocated() - before,
-        3 * 16384,
+        held_on(device) - held,
+        3 * PAGE,
         "three of the pages, and not the big one"
     );
     assert_eq!(filled.evict_one().unwrap().as_deref(), Some("c.weight"));
@@ -895,18 +920,35 @@ fn a_hybrid_package_fills_the_device_to_its_limit() {
     assert_eq!(filled.evict_one().unwrap(), None);
     drop(filled);
 
-    // Without a limit, the budget has room for the whole package.
-    MemorySnapshot::set_limit(Device::Metal, 0).unwrap();
-    let before = allocated();
-    let _filled = Weights::from_files(&[&file.0], Device::Metal, as_many_as_fit).unwrap();
-    assert_eq!(allocated() - before, 4 * 16384 + 256 * 256 * 4);
+    // Without a limit, the device has room for the whole package.
+    MemorySnapshot::set_limit(device, 0).unwrap();
+    let before = held_on(device);
+    let _filled = Weights::from_files(&[&file.0], device, as_many_as_fit).unwrap();
+    assert_eq!(held_on(device) - before, 4 * PAGE + 256 * 256 * 4);
 }
 
-/// A run that finds the device full -- every byte its limit leaves taken by weights -- moves
-/// weights back to the host until what it makes fits, and gives what it gives with room to spare.
 #[test]
 #[ignore = "needs a Metal device"]
-fn a_run_short_of_memory_moves_weights_off_the_device_and_goes_on() {
+fn a_hybrid_package_fills_its_share_of_metal() {
+    a_hybrid_package_fills_its_share_of_the_device(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_hybrid_package_fills_its_share_of_cuda() {
+    a_hybrid_package_fills_its_share_of_the_device(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_hybrid_package_fills_its_share_of_vulkan() {
+    a_hybrid_package_fills_its_share_of_the_device(Device::Vulkan);
+}
+
+/// A run that finds the device short -- most of what its limit allows taken by weights, and what
+/// the run makes needing more than the rest -- lets weights on the device go until what it makes
+/// fits, and gives what it gives with room to spare.
+fn a_run_short_of_memory_lets_weights_go_and_goes_on(device: Device) {
     const MB: i64 = 1 << 20;
     let names: Vec<String> = (0..16).map(|i| format!("w{i:02}")).collect();
     let tensors: Vec<Vec<f32>> = (0..16)
@@ -923,7 +965,8 @@ fn a_run_short_of_memory_moves_weights_off_the_device_and_goes_on() {
         .collect();
     let file = TempFile::new(&write_laid_out(&laid_out));
 
-    // y = x + sum of x w: the input, the sum and each product are a megabyte apiece.
+    // y = x + sum of x w: the input, the sum and each product are a megabyte apiece, and each
+    // weight a quarter of one.
     let graph = Graph::new();
     let x = graph.input("x");
     let mut y = x;
@@ -939,43 +982,32 @@ fn a_run_short_of_memory_moves_weights_off_the_device_and_goes_on() {
     let run = |weights: &Weights| {
         let x = Tensor::from_f32(&[1024, 256], &input)
             .unwrap()
-            .to_device(Device::Metal)
+            .to_device(device)
             .unwrap();
         ir.run(&RunContext::new(weights).input("x", &x))
             .map(|out| to_host(&out[0].1))
     };
-    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
+    let kept = Weights::from_files(&[&file.0], device, u64::MAX).unwrap();
     let expected = run(&kept).unwrap();
     drop(kept);
-    MemorySnapshot::release_unused(Device::Metal).unwrap();
-    assert_eq!(
-        allocated(),
-        0,
-        "nothing on the device before the limit is set"
-    );
+    MemorySnapshot::release_unused(device).unwrap();
+    let held = held_on(device);
 
-    // Lifted however the test ends, so that no other test runs under it.
-    struct Unlimited;
-    impl Drop for Unlimited {
-        fn drop(&mut self) {
-            let _ = MemorySnapshot::set_limit(Device::Metal, 0);
-        }
-    }
-    let _unlimited = Unlimited;
-
-    // Six megabytes: the input's chunk, two, and the weights the other four -- all of them.
-    MemorySnapshot::set_limit(Device::Metal, 6 * MB).unwrap();
+    // Six megabytes more than is held: a share of it has room for the four megabytes of weights
+    // beside the input, and a run that makes three more -- the input again, the sum and a product
+    // -- does not fit beside them.
+    let _unlimited = Unlimited(device);
+    MemorySnapshot::set_limit(device, held + 6 * MB).unwrap();
     let x = Tensor::from_f32(&[1024, 256], &input)
         .unwrap()
-        .to_device(Device::Metal)
+        .to_device(device)
         .unwrap();
-    let filled = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
+    let filled = Weights::from_files(&[&file.0], device, u64::MAX).unwrap();
     assert_eq!(
-        MemorySnapshot::capture(Device::Metal).unwrap().free,
-        0,
-        "the weights fill what the limit leaves"
+        held_on(device) - held,
+        MB + 16 * 256 * 256 * 4,
+        "every weight is kept"
     );
     drop(x);
 
@@ -986,18 +1018,34 @@ fn a_run_short_of_memory_moves_weights_off_the_device_and_goes_on() {
     while filled.evict_one().unwrap().is_some() {
         left += 1;
     }
-    assert!(left < 16, "no weight was moved off the device");
+    assert!(left < 16, "no weight was let go of");
+}
+
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_run_short_of_memory_lets_weights_go_and_goes_on_on_metal() {
+    a_run_short_of_memory_lets_weights_go_and_goes_on(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_run_short_of_memory_lets_weights_go_and_goes_on_on_cuda() {
+    a_run_short_of_memory_lets_weights_go_and_goes_on(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_run_short_of_memory_lets_weights_go_and_goes_on_on_vulkan() {
+    a_run_short_of_memory_lets_weights_go_and_goes_on(Device::Vulkan);
 }
 
 /// A run that runs out of the memory it is allowed partway through says so and leaves nothing
 /// behind: the same weights run again once there is room, and give what they gave before.
 ///
-/// What letting a weight go when memory runs out is to be built on. Running out is to be a common
-/// path, answered by freeing something and running the instruction again, so what is checked is
-/// that failing is clean and not only that it fails.
-#[test]
-#[ignore = "needs a Metal device"]
-fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again() {
+/// What letting a weight go when memory runs out is built on. Running out is a common path,
+/// answered by freeing something and running the instruction again, so what is checked is that
+/// failing is clean and not only that it fails.
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again(device: Device) {
     const MB: i64 = 1 << 20;
     let a: Vec<f32> = (0..1024 * 1024)
         .map(|i| ((i % 13) as f32 - 6.0) / 64.0)
@@ -1010,7 +1058,7 @@ fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again() {
         ("b.weight", "F32", &[1024, 4096], f32_bytes(&b)),
     ]));
 
-    // y = silu(x a) b: `a` is 4 MB and `b` 16 MB, and both wait in the file until their load. So
+    // y = silu(x a) b: `a` is 4 MB and `b` 16 MB, and both wait on the host until their load. So
     // a run under 8 MB gets through the first product and fails at the second weight.
     let graph = Graph::new();
     let x = graph.input("x");
@@ -1018,38 +1066,25 @@ fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again() {
     graph.output("y", graph.matmul(h, graph.load("b.weight", &[1024, 4096])));
     let ir = Ir::compile(&graph);
 
-    let weights = Weights::from_files(&[&file.0], Device::Metal, 0).unwrap();
+    let weights = Weights::from_files(&[&file.0], device, 0).unwrap();
     let input: Vec<f32> = (0..64 * 1024)
         .map(|i| ((i % 11) as f32 - 5.0) / 8.0)
         .collect();
     let run = |weights: &Weights| {
         let x = Tensor::from_f32(&[64, 1024], &input)
             .unwrap()
-            .to_device(Device::Metal)
+            .to_device(device)
             .unwrap();
         ir.run(&RunContext::new(weights).input("x", &x))
             .map(|out| to_host(&out[0].1))
     };
-    let allocated = || MemorySnapshot::capture(Device::Metal).unwrap().allocated;
 
     let expected = run(&weights).unwrap();
-    MemorySnapshot::release_unused(Device::Metal).unwrap();
-    assert_eq!(
-        allocated(),
-        0,
-        "nothing on the device before the limit is set"
-    );
+    MemorySnapshot::release_unused(device).unwrap();
+    let held = held_on(device);
 
-    // Lifted however the test ends, so that no other test runs under it.
-    struct Unlimited;
-    impl Drop for Unlimited {
-        fn drop(&mut self) {
-            let _ = MemorySnapshot::set_limit(Device::Metal, 0);
-        }
-    }
-    let _unlimited = Unlimited;
-
-    MemorySnapshot::set_limit(Device::Metal, 8 * MB).unwrap();
+    let _unlimited = Unlimited(device);
+    MemorySnapshot::set_limit(device, held + 8 * MB).unwrap();
     let error = run(&weights).unwrap_err().to_string();
     assert!(error.contains("OutOfMemory"), "{error}");
     assert!(
@@ -1057,22 +1092,40 @@ fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again() {
         "failed at the second weight: {error}"
     );
     assert_eq!(
-        allocated(),
-        0,
+        held_on(device),
+        held,
         "the input, the first weight and the product before it are all let go of"
     );
 
     // Room enough under a limit, and no limit at all: the same weights, the same answer.
-    MemorySnapshot::set_limit(Device::Metal, 64 * MB).unwrap();
+    MemorySnapshot::set_limit(device, held + 64 * MB).unwrap();
     assert_eq!(run(&weights).unwrap(), expected);
-    MemorySnapshot::set_limit(Device::Metal, 0).unwrap();
+    MemorySnapshot::set_limit(device, 0).unwrap();
     assert_eq!(run(&weights).unwrap(), expected);
 }
 
-/// Only Metal's allocator takes a limit. Any other device says so rather than taking a number it
-/// would do nothing with, and a limit below nothing is refused before any device is asked.
 #[test]
-fn only_metal_takes_a_memory_limit() {
+#[ignore = "needs a Metal device"]
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again_on_metal() {
+    a_run_past_its_memory_limit_fails_cleanly_and_runs_again(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again_on_cuda() {
+    a_run_past_its_memory_limit_fails_cleanly_and_runs_again(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again_on_vulkan() {
+    a_run_past_its_memory_limit_fails_cleanly_and_runs_again(Device::Vulkan);
+}
+
+/// The processor's allocator takes no limit: it says so rather than taking a number it would do
+/// nothing with, and a limit below nothing is refused before any device is asked.
+#[test]
+fn the_processor_takes_no_memory_limit() {
     let error = MemorySnapshot::set_limit(Device::Cpu, 1 << 30)
         .unwrap_err()
         .to_string();

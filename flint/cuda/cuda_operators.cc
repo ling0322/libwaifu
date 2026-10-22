@@ -551,6 +551,24 @@ void CudaOperators::releaseUnusedMemory() {
 #endif
 }
 
+void CudaOperators::setMemoryLimit(int64_t bytes) {
+  setCudaMemoryLimit(bytes);
+}
+
+MemoryBudget CudaOperators::getMemoryBudget() {
+  MemoryBudget budget;
+  budget.allocated = getCudaAllocatedBytes();
+  budget.capacity = getCudaMemoryLimit();
+  if (!budget.capacity) {
+    // The card's, whoever else has some of it: what is free is the snapshot's to say.
+    size_t freeMemory = 0;
+    size_t totalMemory = 0;
+    LL_CHECK_CUDA_STATUS(cudaMemGetInfo(&freeMemory, &totalMemory));
+    budget.capacity = static_cast<int64_t>(totalMemory);
+  }
+  return budget;
+}
+
 void CudaOperators::copy(TensorView src, TensorView dest) {
   CHECK(src.getDevice().getType() == Device::kCuda);
   CHECK(dest.getDevice().getType() == Device::kCuda);

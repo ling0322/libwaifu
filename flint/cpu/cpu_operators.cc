@@ -605,6 +605,11 @@ MemorySnapshot CPUOperators::captureMemorySnapshot() {
 void CPUOperators::resetPeakMemoryStats() {
 }
 
+// Nothing to size weights against: on the processor every weight is where it is read already.
+MemoryBudget CPUOperators::getMemoryBudget() {
+  return MemoryBudget();
+}
+
 }  // namespace cpu
 }  // namespace op
 }  // namespace fl

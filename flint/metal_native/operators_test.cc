@@ -1010,10 +1010,10 @@ CATCH_TEST_CASE("test Metal allocation past the memory limit is out of memory", 
   constexpr int64_t kBig = 600 << 20;
   allocator.setMemoryLimit(allocator.getHeldBytes() + (1 << 30));
 
-  // What a snapshot says under it: the limit, and the room it leaves.
-  MemorySnapshot limited = allocator.captureMemorySnapshot();
-  CATCH_REQUIRE(limited.getTotalMemory() == allocator.getMemoryLimit());
-  CATCH_REQUIRE(limited.getFreeMemory() == allocator.getMemoryLimit() - allocator.getHeldBytes());
+  // What the budget says under it: the limit, and what the tensors hold against it.
+  MemoryBudget limited = allocator.getMemoryBudget();
+  CATCH_REQUIRE(limited.capacity == allocator.getMemoryLimit());
+  CATCH_REQUIRE(limited.allocated == allocator.getAllocatedBytes());
 
   Buffer first = allocator.allocate(kBig);
   CATCH_REQUIRE(allocator.getHeldBytes() <= allocator.getMemoryLimit());

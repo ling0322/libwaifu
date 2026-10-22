@@ -114,22 +114,27 @@ static_assert(sizeof(PackedOWORD<half2>) == 16, "invalid size of PackedOWORD<hal
 template<typename T>
 using auto_handle = lut::c_ptr<typename std::remove_pointer<T>::type>;
 
-/// Allocate in `stream`'s order. The pointer comes back at once and is final, but the memory
-/// behind it becomes the caller's only where `stream` has reached this call: the block may still
-/// belong to work that was enqueued before it was freed. So whoever writes it first has to be on
-/// `stream`, or has to wait for it. Writing it from another stream reads and writes memory that
-/// another kernel still owns, and nothing reports that.
-inline cudaError_t llynCudaMalloc(void **ptr, size_t size, cudaStream_t stream = 0) {
-#ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
-  return cudaMallocAsync(ptr, size, stream);
-#else
-  return cudaMalloc(ptr, size);
-#endif
-}
+/// Allocate `size` bytes of the card's memory in `stream`'s order. The pointer comes back at once
+/// and is final, but the memory behind it becomes the caller's only where `stream` has reached
+/// this call: the block may still belong to work that was enqueued before it was freed. So whoever
+/// writes it first has to be on `stream`, or has to wait for it. Writing it from another stream
+/// reads and writes memory that another kernel still owns, and nothing reports that.
+///
+/// Every byte of the card flint allocates comes through here, and is counted against the memory
+/// limit: see setCudaMemoryLimit(). The count is what was asked for, not what the pool rounded it
+/// up to, and does not include what cuBLAS and cuDNN allocate for themselves.
+///
+/// @throw lut::OutOfMemoryError where the card has no `size` bytes to give, or the limit would be
+///     passed. Nothing is taken then and nothing is waited for, so a caller that frees something
+///     -- a weight -- may ask again at once: a block freed in `stream` is there for the next
+///     allocation in it.
+/// @throw lut::AbortedError where the driver fails some other way.
+void *llynCudaMalloc(size_t size, cudaStream_t stream = 0);
 
-/// Give the memory back in `stream`'s order, which has to be a stream the last use of it was on.
-/// The block does not become reusable until `stream` reaches here, so freeing on the wrong stream
-/// hands it to the next allocation while the right stream is still reading it.
+/// Give back `size` bytes at `ptr` that llynCudaMalloc() handed out, in `stream`'s order, which has
+/// to be a stream the last use of them was on. The block does not become reusable until `stream`
+/// reaches here, so freeing on the wrong stream hands it to the next allocation while the right
+/// stream is still reading it.
 ///
 /// Reported and not checked, because both callers are destructors -- `CudaTensorData`'s and the
 /// deleter below -- and a destructor is no place to throw. fl_transfer_destroy() says the same thing
@@ -139,22 +144,22 @@ inline cudaError_t llynCudaMalloc(void **ptr, size_t size, cudaStream_t stream =
 /// There is also nothing a check could be for. A free fails when the context is already gone,
 /// which means an earlier call failed first and has its own report; by the time a tensor is being
 /// torn down there is no caller left to hand a code to and nothing anyone could do with one.
-inline void llynCudaFree(void *ptr, cudaStream_t stream = 0) {
-#ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
-  cudaError_t err = cudaFreeAsync(ptr, stream);
-#else
-  cudaError_t err = cudaFree(ptr);
-#endif
-  if (err != cudaSuccess) {
-    LOG(ERROR) << "Error while freeing CUDA memory: " << cudaGetErrorString(err);
-  }
-}
+void llynCudaFree(void *ptr, size_t size, cudaStream_t stream = 0);
+
+/// The most llynCudaMalloc() may have handed out and not had back, in bytes; 0, the default, for no
+/// limit but the card's. Lowering it below what is held lets nothing go: what is in use stays,
+/// and the limit holds from the next allocation on.
+void setCudaMemoryLimit(int64_t bytes);
+int64_t getCudaMemoryLimit();
+
+/// What llynCudaMalloc() has handed out and not had back, in bytes, which is what the limit counts.
+int64_t getCudaAllocatedBytes();
 
 template<typename T>
 lut::c_ptr<T> llynCudaAlloc(int64_t n) {
-  T *p = nullptr;
-  LL_CHECK_CUDA_STATUS(llynCudaMalloc(reinterpret_cast<void **>(&p), n * sizeof(T)));
-  return {p, [](void *ptr) { llynCudaFree(ptr); }};
+  size_t size = n * sizeof(T);
+  T *p = reinterpret_cast<T *>(llynCudaMalloc(size));
+  return {p, [size](void *ptr) { llynCudaFree(ptr, size); }};
 }
 
 /// @brief An uninitialized contiguous tensor of `shape` and `dtype` on the CUDA device.

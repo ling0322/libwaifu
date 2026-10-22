@@ -1337,3 +1337,13 @@ int32_t fl_memory_set_limit(fl_device_type_t device, int64_t bytes) {
     return clearError();
   });
 }
+
+int32_t fl_memory_budget(fl_device_type_t device, fl_memory_budget_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    fl::MemoryBudget budget = fl::MemoryBudget::capture(toDevice(device));
+    out->capacity = budget.capacity;
+    out->allocated = budget.allocated;
+    return clearError();
+  });
+}

@@ -63,9 +63,10 @@ work goes to the GPU in batches without anyone waiting.
 
 ## Weights on the disk
 
-`-device metal` puts as many of the smallest weights as fit in what the memory limit leaves on the
-device as the model is read, and a run that runs short moves the largest of them back off it. The
-rest stay in the package's file, which is what lets a model larger than the Mac's memory draw.
+`-device metal` puts as many of the smallest weights as fit in 85% of the memory limit on the
+device as the model is read, and a run that runs short lets the largest of them go -- the package's
+mapping is still there for each, so nothing is copied back. The rest stay in the package's file,
+which is what lets a model larger than the Mac's memory draw.
 The package stays mapped and is not read when the model is -- `cuda_cpu_offload` reads it
 into the page cache up front, which on a GPU that shares the machine's memory would be the whole
 model in the memory the mode is there to spare. Each `load` copies its weight off the mapping into

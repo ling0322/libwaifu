@@ -59,7 +59,8 @@ class MemorySnapshot {
   static void releaseUnused(Device device);
 
   /// @brief Limit the memory a device's allocator holds to `bytes`, 0 for no limit but the
-  /// device's: an allocation that would pass it throws lut::OutOfMemoryError. Only Metal has one.
+  /// device's: an allocation that would pass it throws lut::OutOfMemoryError. Metal, CUDA and
+  /// Vulkan have one; the CPU refuses. See MemoryBudget for what the allocator then has left.
   /// @param device The device to limit.
   /// @param bytes The limit, at least 0.
   static void setLimit(Device device, int64_t bytes);
@@ -93,6 +94,24 @@ class MemorySnapshot {
   int64_t _freeMemory;
   int64_t _allocatedMemory;
   int64_t _peakAllocatedMemory;
+};
+
+/// @brief What one device's allocator may hold and what it holds now, which is what a model's
+/// weights are sized against -- not a MemorySnapshot, which is the device as a person looking at
+/// it would see it, other processes and memory kept for reuse included.
+struct MemoryBudget {
+  /// @brief Capture the budget of a device's allocator.
+  static MemoryBudget capture(Device device);
+
+  /// The most the allocator may hold: its memory limit where it has one, and otherwise what the
+  /// device has -- a card's memory, or on Metal the share of the machine's the system suggests
+  /// for the GPU. 0 for a device that does not say, which is what the CPU does.
+  int64_t capacity = 0;
+
+  /// What the tensors of this process hold against it now -- and on CUDA the operators'
+  /// workspaces. Not what an allocator keeps for reuse: Vulkan's cache and Metal's empty chunks go
+  /// back before anything past the limit is refused, and CUDA's pool is not counted at all.
+  int64_t allocated = 0;
 };
 
 }  // namespace fl
