@@ -103,7 +103,7 @@ pub(crate) fn collect(
     device_weight_bytes: u64,
 ) -> Result<Weights> {
     let kept = Weights::kept_on(device, device_weight_bytes);
-    let mut weights = Weights::empty(device)?;
+    let mut weights = Weights::empty(device);
     // The order the package lies in, which the weights kept on the device are moved in.
     let mut order = Vec::new();
     each_mapped(paths, &mut |name, tensor| {

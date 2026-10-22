@@ -18,8 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //! A model's weights, read out of its package and kept on the device as far as they fit, and
-//! what a graph's `load` instructions are answered from. See the IR's documentation for how a run reads
-//! them: [`Ir`](super::Ir).
+//! what a graph's `load` instructions are answered from. See the IR's documentation for how a run
+//! reads them: [`Ir`](super::Ir).
 
 use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ use std::path::Path;
 
 use super::graph::Graph;
 use super::op::Op;
-use super::{functional as F, AllocHint, DType, Device, MemorySnapshot, Tensor};
+use super::{AllocHint, Device, MemorySnapshot, Tensor};
 use crate::error::{Error, Result};
 use crate::tensor_file;
 
@@ -96,15 +96,15 @@ pub struct Weights {
     /// cell, because a weight on the device may be moved back to the host in the middle of a run,
     /// through the `Weights` the run shares: see [`Weights::evict_one`].
     tensors: RefCell<HashMap<String, Tensor>>,
+
     /// The names of the weights `keep_the_smallest_on_device` put on the device, in the order it
     /// put them there, smallest first: a stack, whose top -- the largest -- is the first to go
     /// back to the host when the device runs out. See [`Weights::evict_one`].
-    gpu_tensors: RefCell<Vec<String>>,
+    device_tensors: RefCell<Vec<String>>,
+
     /// Where a run wants a weight, which is the device the model was built for. Where any one
     /// weight waits between runs is its own tensor's to say.
     device: Device,
-    /// What `device` computes in, which a half vector is widened to; see [`retype`].
-    computes_in: DType,
 }
 
 impl Weights {
@@ -146,7 +146,7 @@ impl Weights {
         kept_on_device(device, device_weight_bytes)
     }
 
-    /// `tensors` as they are, for a run on `device`: neither retyped nor moved here, so a load
+    /// `tensors` as they are, for a run on `device`: not moved here, so a load
     /// hands back a handle on one already on `device` and copies one that is not.
     ///
     /// For weights that were not read out of a package -- made up by a test, or none at all for
@@ -154,7 +154,7 @@ impl Weights {
     pub fn from_tensors(tensors: HashMap<String, Tensor>, device: Device) -> Result<Weights> {
         Ok(Weights {
             tensors: RefCell::new(tensors),
-            ..Weights::empty(device)?
+            ..Weights::empty(device)
         })
     }
 
@@ -193,22 +193,20 @@ impl Weights {
 
     /// No weights yet, for a model running on `device`. [`tensor_file`](crate::tensor_file) fills
     /// it with [`Weights::insert`].
-    pub(crate) fn empty(device: Device) -> Result<Weights> {
-        Ok(Weights {
+    pub(crate) fn empty(device: Device) -> Weights {
+        Weights {
             tensors: RefCell::new(HashMap::new()),
-            gpu_tensors: RefCell::new(Vec::new()),
+            device_tensors: RefCell::new(Vec::new()),
             device,
-            computes_in: F::default_float_type(device)?,
-        })
+        }
     }
 
-    /// Keep `tensor` under `name`, `retype`d and put on the device -- or, `on_host`, left where it
-    /// is until a load wants it.
+    /// Keep `tensor` under `name`, in the type the file holds it in, and put on the device -- or,
+    /// `on_host`, left where it is until a load wants it.
     ///
-    /// `retype` runs before the move rather than after it, because a conversion is cheaper on a
-    /// tensor that has not been sent anywhere. A name already held is refused rather than
-    /// replaced -- a model whose weights depend on the order its files were listed in is worse
-    /// than one that will not load -- and refused before anything is moved.
+    /// A name already held is refused rather than replaced -- a model whose weights depend on the
+    /// order its files were listed in is worse than one that will not load -- and refused before
+    /// anything is moved.
     pub(crate) fn insert(&mut self, name: String, tensor: Tensor, on_host: bool) -> Result<()> {
         let tensors = self.tensors.get_mut();
         if tensors.contains_key(&name) {
@@ -217,7 +215,6 @@ impl Weights {
             )));
         }
 
-        let tensor = retype(tensor, self.computes_in)?;
         let tensor = match on_host {
             false => tensor.to_device_as(self.device, AllocHint::Weight)?,
             // On the host, a weight is its file's mapping, and nothing below reads it until a run
@@ -283,15 +280,15 @@ impl Weights {
                 Err(error) => return Err(error.into()),
             }
         }
-        let gpu_tensors = self.gpu_tensors.get_mut();
-        gpu_tensors.extend(chosen.into_iter().filter(|name| moved.contains(name)));
+        let device_tensors = self.device_tensors.get_mut();
+        device_tensors.extend(chosen.into_iter().filter(|name| moved.contains(name)));
 
         crate::log::write(
             crate::log::Level::Info,
             "weights",
             &format!(
                 "{} of {} weights kept on {}: {} MB of the {} MB there was room for",
-                gpu_tensors.len(),
+                device_tensors.len(),
                 tensors.len(),
                 self.device.name(),
                 bytes / 1_000_000,
@@ -314,7 +311,7 @@ impl Weights {
         Ok(tensor.to_device_as(self.device, AllocHint::Weight)?)
     }
 
-    /// Move the weight on top of [`gpu_tensors`](Weights) -- the largest of those kept on the
+    /// Move the weight on top of [`device_tensors`](Weights) -- the largest of those kept on the
     /// device -- back to the host, and say which it was; `None` where none is left to move.
     ///
     /// For when the device runs out in the middle of a run: the weight is copied back to the host
@@ -322,7 +319,7 @@ impl Weights {
     /// device goes back once nothing holds it -- at once, unless an instruction that is running
     /// has it in hand, and then after that instruction.
     pub fn evict_one(&self) -> Result<Option<String>> {
-        let Some(name) = self.gpu_tensors.borrow_mut().pop() else {
+        let Some(name) = self.device_tensors.borrow_mut().pop() else {
             return Ok(None);
         };
         let mut tensors = self.tensors.borrow_mut();
@@ -454,29 +451,6 @@ fn read_through(tensor: &Tensor) -> Result<()> {
     }
     std::hint::black_box(sum);
     Ok(())
-}
-
-/// The one thing about a weight that reading it decides, and the one case it decides it in.
-///
-/// A per-channel vector -- a bias, or a normalization's scale -- has to be the type the activation
-/// beside it is, because that is what the operators that read one require: a `layer_norm` or a
-/// `group_norm` refuses a weight of another type outright, and a convolution refuses a bias of
-/// one. The matrices are not like that. A GEMM takes a half weight against a float activation and
-/// converts it as it packs, which every backend here says so in as many words, so a weight of rank
-/// two or more is left exactly as the file wrote it -- and it has to be, since those are the
-/// model: 6.964 GB of SDXL's 6.969, against 5 MB for the 1340 vectors.
-///
-/// So the case is a half weight on a device that cannot compute in half, and x64 is the whole of
-/// it: it has no half kernels, so it reads a half package with float activations. A device that
-/// computes in half leaves a half package alone, and a package written in float is left alone
-/// everywhere -- which is what keeps the autoencoder, written in float32 while the rest of SDXL
-/// is half, from being narrowed to meet a type it does not run in.
-fn retype(tensor: Tensor, computes_in: DType) -> Result<Tensor> {
-    if tensor.dtype() != DType::Float16 || computes_in == DType::Float16 || tensor.dim()? >= 2 {
-        return Ok(tensor);
-    }
-
-    Ok(tensor.cast(computes_in)?)
 }
 
 #[cfg(test)]
