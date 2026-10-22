@@ -85,6 +85,14 @@ struct Held {
     var clip: AudioClip?
 }
 
+/// A picture the prompt reads, under the name it writes as <|name|>.
+struct NamedPicture: Identifiable {
+    var name: String
+    var held: Held
+
+    var id: String { name }
+}
+
 /// How far along things are, as the bar draws it.
 struct BarState {
     var busy = false
@@ -142,6 +150,8 @@ final class Session {
     var playing: String?
 
     private(set) var picture: Held?
+    /// The pictures the prompt names, in the order they were added.
+    private(set) var named: [NamedPicture] = []
     private(set) var recording: Held?
     private(set) var source: Held?
 
@@ -413,7 +423,7 @@ final class Session {
         guard waiting.isEmpty, let model else { return false }
         switch tab {
         case .txt2img:
-            return model.model != nil && !form.prompt.isBlank
+            return model.model != nil && !form.prompt.isBlank && namedTrouble == nil
         case .img2img:
             return model.model?.drawsFromAPicture == true && picture != nil && !form.prompt.isBlank
         case .text2speech:
@@ -521,6 +531,12 @@ final class Session {
             request.images = [(key: "start_from", image: rgb)]
             request.strength = strength
         }
+        // The pictures the prompt names, under their names: the engine writes them the way the
+        // model reads them and scales each to the size it reads one at.
+        let naming = tab == .txt2img && chosen.readsPictures && !named.isEmpty
+        if naming {
+            request.images = named.compactMap { picture in picture.held.rgb.map { (key: picture.name, image: $0) } }
+        }
 
         // What the record calls the model: its published name with the version, or the path of
         // the manifest it was asked for by.
@@ -530,6 +546,7 @@ final class Session {
             steps: form.steps, guidance: chosen.guided ? form.guidance : chosen.guidance,
             strength: fromAPicture ? strength : nil)
         if fromAPicture { asked.startFrom = startFrom()?.path }
+        if naming { asked.promptPictures = namedPaths() }
         let made = asked
 
         start(kind: "image", model: modelName) { engine, report in
@@ -546,14 +563,32 @@ final class Session {
             drawn.seconds = seconds
             drawn.device = engine.device.replacingOccurrences(of: "_", with: "-")
             drawn.startFrom = made.startFrom
+            drawn.promptPictures = made.promptPictures
             return (png, drawn)
         }
     }
 
-    /// The file the held picture is in, for a record to name: the one it was read from, or for one
-    /// pasted or dropped as bytes, a copy kept in the output folder the first time it is drawn from.
+    /// The file the held picture is in, for a record to name.
     private func startFrom() -> URL? {
-        guard let held = picture else { return nil }
+        guard let held = picture, let url = kept(held) else { return nil }
+        picture?.url = url
+        return url
+    }
+
+    /// The files the named pictures are in, by name, for a record to name.
+    private func namedPaths() -> [String: String] {
+        var paths: [String: String] = [:]
+        for index in named.indices {
+            guard let url = kept(named[index].held) else { continue }
+            named[index].held.url = url
+            paths[named[index].name] = url.path
+        }
+        return paths
+    }
+
+    /// The file a held picture is in: the one it was read from, or for one pasted or dropped as
+    /// bytes, a copy kept in the output folder the first time it is drawn from.
+    private func kept(_ held: Held) -> URL? {
         if let url = held.url { return url }
         let jpeg = held.bytes.starts(with: [0xFF, 0xD8, 0xFF])
         let copy = inputs.appendingPathComponent("\(UUID().uuidString.lowercased()).\(jpeg ? "jpg" : "png")")
@@ -563,7 +598,6 @@ final class Session {
         } catch {
             return nil
         }
-        picture?.url = copy
         return copy
     }
 
@@ -634,12 +668,19 @@ final class Session {
         jobs.removeAll { $0.id == job.id }
         outputs[job.id] = nil
         images[job.id] = nil
-        // The copy of a pasted picture it started from, once nothing else names it.
-        if let input = job.made?.startFrom, input.hasPrefix(inputs.path + "/"),
-            picture?.url?.path != input, !jobs.contains(where: { $0.made?.startFrom == input })
-        {
-            try? FileManager.default.removeItem(atPath: input)
+        // The copies of pasted pictures it was drawn from, once nothing else names them.
+        let held = Set(([picture?.url] + named.map(\.held.url)).compactMap { $0?.path })
+        for input in Self.inputPaths(of: job.made) where input.hasPrefix(inputs.path + "/") {
+            if !held.contains(input), !jobs.contains(where: { Self.inputPaths(of: $0.made).contains(input) }) {
+                try? FileManager.default.removeItem(atPath: input)
+            }
         }
+    }
+
+    /// Every picture a job was drawn from, as the paths its record names.
+    private static func inputPaths(of made: Made?) -> [String] {
+        guard let made else { return [] }
+        return [made.startFrom].compactMap { $0 } + (made.promptPictures?.values.map { $0 } ?? [])
     }
 
     /// Deletes every picture or clip in the strip: the current tab's kind, and nothing still going.
@@ -667,6 +708,24 @@ final class Session {
             form.width = made.width ?? form.width
             form.height = made.height ?? form.height
             form.strength = made.strength ?? form.strength
+            // The pictures its prompt named, read again from where the record says they are: a
+            // prompt that names them is no use without them.
+            if let pictures = made.promptPictures, !pictures.isEmpty {
+                var again: [NamedPicture] = []
+                for name in Self.placeholders(in: made.prompt ?? "") where !again.contains(where: { $0.name == name }) {
+                    guard let path = pictures[name] else { continue }
+                    let url = URL(fileURLWithPath: path)
+                    guard let bytes = try? Media.picture(at: url), let image = NSImage(data: bytes),
+                        let rgb = Media.rgb(image)
+                    else {
+                        complaint = "\(url.lastPathComponent), which <|\(name)|> named, is no longer there"
+                        continue
+                    }
+                    again.append(NamedPicture(name: name, held: Held(bytes: bytes, url: url, image: image, rgb: rgb)))
+                }
+                named = again
+                tab = .txt2img
+            }
         case "speech":
             form.text = made.text ?? form.text
             form.speed = made.speed ?? form.speed
@@ -703,6 +762,108 @@ final class Session {
         complaint = nil
         picture = Held(bytes: bytes, url: url?.standardizedFileURL, image: image, rgb: rgb)
         tab = .img2img
+    }
+
+    // MARK: - pictures the prompt names
+
+    /// Whether another picture may be added for the prompt to name.
+    var takesAnotherPicture: Bool {
+        tab == .txt2img && named.count < (model?.model?.promptImages ?? 0)
+    }
+
+    /// Asks for pictures for the prompt to name, as many as are chosen.
+    func chooseNamed() {
+        for url in Media.chooseAll([.image]) { holdNamed(at: url) }
+    }
+
+    func holdNamed(at url: URL) {
+        do {
+            holdNamed(try Media.picture(at: url), from: url)
+        } catch {
+            complaint = error.localizedDescription
+        }
+    }
+
+    /// Adds a picture for the prompt to name, under the next of <|image_0|>, <|image_1|> and on,
+    /// and writes that name into the prompt, at the end, where it is not there already. The first
+    /// one also sets the size to the picture's own shape at a megapixel, which is what the model
+    /// draws an edit at when it is not told otherwise.
+    func holdNamed(_ bytes: Data, from url: URL? = nil) {
+        let most = model?.model?.promptImages ?? 0
+        guard named.count < most else {
+            complaint = "this model reads at most \(most) pictures in a prompt"
+            return
+        }
+        guard let image = NSImage(data: bytes), let rgb = Media.rgb(image) else {
+            complaint = "that is not a picture this Mac can read"
+            return
+        }
+        complaint = nil
+        let name = Self.nextName(after: named.map(\.name))
+        if named.isEmpty {
+            (form.width, form.height) = Self.readSize(width: rgb.width, height: rgb.height)
+        }
+        named.append(NamedPicture(name: name, held: Held(bytes: bytes, url: url?.standardizedFileURL, image: image, rgb: rgb)))
+        if !Self.placeholders(in: form.prompt).contains(name) { writeName(name) }
+    }
+
+    func letGoNamed(_ name: String) {
+        named.removeAll { $0.name == name }
+    }
+
+    /// Writes <|name|> at the end of the prompt.
+    func writeName(_ name: String) {
+        let prompt = form.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        form.prompt = prompt.isEmpty ? "<|\(name)|> " : "\(prompt) <|\(name)|>"
+    }
+
+    /// What stops the prompt and the pictures from going together as they are -- a name with no
+    /// picture, a picture the prompt does not name -- or nil. Said before the engine would refuse
+    /// it, and only for a model that reads pictures: one that reads words only is the engine's to
+    /// refuse, which says why.
+    var namedTrouble: String? {
+        guard tab == .txt2img, model?.model?.readsPictures == true else { return nil }
+        let written = Self.placeholders(in: form.prompt)
+        if let lost = written.first(where: { name in !named.contains { $0.name == name } }) {
+            return "<|\(lost)|> names no picture: add one, or take it out of the prompt"
+        }
+        if let unnamed = named.first(where: { !written.contains($0.name) }) {
+            return "Write <|\(unnamed.name)|> in the prompt where that picture is to be read"
+        }
+        return nil
+    }
+
+    /// The names a prompt writes as <|name|>, in the order they first appear.
+    static func placeholders(in prompt: String) -> [String] {
+        var found: [String] = []
+        var rest = prompt[...]
+        while let open = rest.range(of: "<|") {
+            let after = rest[open.upperBound...]
+            guard let close = after.range(of: "|>") else { break }
+            let name = String(after[..<close.lowerBound])
+            if !found.contains(name) { found.append(name) }
+            rest = after[close.upperBound...]
+        }
+        return found
+    }
+
+    /// The name the next picture is held under: `image_0`, `image_1` and on, the first not held.
+    /// A picture taken away leaves its number for the next, so a prompt that still names it names
+    /// the picture put in its place.
+    static func nextName(after held: [String]) -> String {
+        var index = 0
+        while held.contains("image_\(index)") { index += 1 }
+        return "image_\(index)"
+    }
+
+    /// The size a picture `width` by `height` is read at -- a megapixel at its own shape, each side
+    /// a multiple of 32, as `QwenImage::picture_size` works it out -- which is also what the
+    /// reference draws an edit at when it is not given one.
+    static func readSize(width: Int, height: Int) -> (Int, Int) {
+        let ratio = Double(width) / Double(height)
+        let wide = (1024.0 * 1024.0 * ratio).squareRoot()
+        let snap = { (side: Double) in max(32, Int((side / 32).rounded(.toNearestOrEven)) * 32) }
+        return (snap(wide), snap(wide / ratio))
     }
 
     /// Holds a recording -- to sound like, or to convert -- decoded into the samples the engine

@@ -295,15 +295,33 @@ struct GoBar: View {
             .keyboardShortcut(".", modifiers: .command)
             .help("Stop after the step it is on, or take the waiting job out of line (⌘.)")
         } else {
-            Button {
-                session.go()
-            } label: {
-                Text(goWord).frame(maxWidth: .infinity)
+            HStack(spacing: 8) {
+                // A picture for the prompt to read, for a model that reads any. In the weight of
+                // an ordinary button: it is not what the bar is for.
+                if session.tab == .txt2img, session.model?.model?.readsPictures == true {
+                    Button {
+                        session.chooseNamed()
+                    } label: {
+                        Label("Add Picture", systemImage: "photo.badge.plus")
+                            .font(.system(size: 13, weight: .regular))
+                            .padding(.horizontal, 14)
+                            .fixedSize()
+                    }
+                    .buttonStyle(BigButton(fill: Theme.control))
+                    .disabled(!session.takesAnotherPicture)
+                    .help("Add a picture for the prompt to read")
+                }
+
+                Button {
+                    session.go()
+                } label: {
+                    Text(goWord).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(BigButton(fill: .accentColor))
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!session.canGo)
+                .help("⌘↩")
             }
-            .buttonStyle(BigButton(fill: .accentColor))
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!session.canGo)
-            .help("⌘↩")
         }
     }
 

@@ -107,6 +107,11 @@ struct SettingsColumn: View {
                 // Made again when "Away from" comes or goes: a text field that grows to fit its
                 // lines keeps wrapping them at the width it had, and the prompt's is not the same.
                 .id(chosen.guided)
+
+                if session.tab == .txt2img, chosen.readsPictures {
+                    PromptPictures(session: session)
+                        .padding(.top, -6)
+                }
             }
         case .text2speech:
             FormGroup {
@@ -628,17 +633,83 @@ struct PictureDrop: View {
 
     private func take(_ providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
-        if provider.canLoadObject(ofClass: URL.self) {
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url { Task { @MainActor in session.holdPicture(at: url) } }
-            }
-            return true
-        }
-        provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
-            guard let data, let image = NSImage(data: data), let png = Media.png(image) else { return }
-            Task { @MainActor in session.holdPicture(png) }
-        }
+        takePicture(
+            from: provider, file: { session.holdPicture(at: $0) }, bytes: { session.holdPicture($0) })
         return true
+    }
+}
+
+/// Reads a dropped picture: a file where it is one, which a record can name, or else its bytes
+/// as a PNG.
+private func takePicture(
+    from provider: NSItemProvider, file: @escaping @MainActor (URL) -> Void,
+    bytes: @escaping @MainActor (Data) -> Void
+) {
+    if provider.canLoadObject(ofClass: URL.self) {
+        _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            if let url { Task { @MainActor in file(url) } }
+        }
+        return
+    }
+    provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+        guard let data, let image = NSImage(data: data), let png = Media.png(image) else { return }
+        Task { @MainActor in bytes(png) }
+    }
+}
+
+/// The pictures the prompt names, under it: each with its name in a tooltip, a click that writes
+/// that name into the prompt again, and a cross that takes it away. And what keeps
+/// the prompt and the pictures from going together, where something does.
+struct PromptPictures: View {
+    var session: Session
+
+    var body: some View {
+        if !session.named.isEmpty || session.namedTrouble != nil {
+            VStack(alignment: .leading, spacing: 6) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(session.named) { picture in
+                            chip(picture)
+                        }
+                    }
+                }
+                if let trouble = session.namedTrouble {
+                    Label(trouble + ".", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// The picture alone: its name is in the prompt, and in the tooltip.
+    private func chip(_ picture: NamedPicture) -> some View {
+        Group {
+            if let image = picture.held.image {
+                Image(nsImage: image).resizable().scaledToFill()
+            } else {
+                Color.primary.opacity(0.05)
+            }
+        }
+        .frame(width: Thumbnail.side, height: Thumbnail.side)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(alignment: .topTrailing) {
+            Button {
+                session.letGoNamed(picture.name)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .black.opacity(0.6))
+            }
+            .buttonStyle(.borderless)
+            // Inside the corner rather than over it: the row scrolls, and a scroll view cuts off
+            // whatever sticks out of it, so a cross over the edge would need room the row then
+            // has above it and not below.
+            .padding(3)
+            .help("Remove the picture")
+        }
+        .onTapGesture { session.writeName(picture.name) }
+        .help("<|\(picture.name)|>: click to write it into the prompt again")
     }
 }
 
