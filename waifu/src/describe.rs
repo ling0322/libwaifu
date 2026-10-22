@@ -59,6 +59,9 @@ pub struct Chosen {
     /// offers what the model will refuse is a refusal someone finds out about after waiting, and
     /// one that is simply greyed out is a screen that cannot be asked why.
     pub no_picture_because: Option<String>,
+    /// How many pictures its prompt may name as `<|name|>`: zero for a model that reads words
+    /// only.
+    pub prompt_pictures: usize,
 }
 
 /// The voice the page is set to speak with, as the screen describes it.
@@ -122,11 +125,26 @@ pub const KREA2_DRAWS_FROM_NO_PICTURE: &str =
     "Krea 2 cannot start from a picture yet: its package \
      carries an image encoder, but the layer that reads one is not written";
 
-/// And why Qwen-Image 2.1 cannot, for a different reason: its model edits pictures by reading
-/// them as well as starting from them, and neither half of that is written here.
-pub const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str =
-    "Qwen-Image 2.1 cannot start from a picture yet: \
-     it edits by reading the picture through its text encoder too, and that is not written";
+/// And why Qwen-Image 2.1 does not, for a different reason: it edits a picture by reading it as
+/// part of the prompt, not by starting its walk from it, and the reference has no image to image.
+pub const QWEN_IMAGE_DRAWS_FROM_NO_PICTURE: &str = "Qwen-Image 2.1 does not start from a picture: \
+     it edits one by reading it, so name the picture in the prompt as <|name|> instead";
+
+/// What a package's `qwen_image` section has when it carries the vision tower, which is what
+/// reading a picture named in the prompt needs.
+const QWEN_IMAGE_VISION_KEY: &str = "vision_depth";
+
+/// How many pictures a prompt may name for the model the manifest describes: Qwen-Image 2.1's,
+/// in a package that carries the vision tower. Read off the manifest, as the rest of a choice is.
+fn prompt_pictures(kind: &str, manifest: &Manifest) -> usize {
+    match kind {
+        QwenImage::MODEL_TYPE => match manifest.section(QwenImage::MODEL_TYPE) {
+            Ok(section) if section.has(QWEN_IMAGE_VISION_KEY) => QwenImage::MAX_PICTURES,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
 
 /// What the built-in stand-in voice is called where a name is asked for.
 ///
@@ -256,11 +274,12 @@ pub fn about(kind: &str) -> (&'static str, Option<&'static str>) {
 }
 
 /// What both sides of a picture of `kind` have to be a multiple of: the VAE's eight times the
-/// patch for the transformers, and times the U-Net's two halvings for SDXL. The pipelines check
-/// the same out of the package's config; this is the number for the screen, before one is read.
+/// patch for Anima and Krea 2, Qwen-Image's sixteen times the 2 x 2 its prompt slots cover, and
+/// the VAE's eight times the U-Net's two halvings for SDXL. The pipelines check the same out of
+/// the package's config; this is the number for the screen, before one is read.
 pub fn alignment(kind: &str) -> i32 {
     match kind {
-        Anima::MODEL_TYPE | Krea2::MODEL_TYPE | QwenImage::MODEL_TYPE => 16,
+        Anima::MODEL_TYPE | Krea2::MODEL_TYPE => 16,
         _ => 32,
     }
 }
@@ -286,6 +305,7 @@ pub fn look_at(asked: &str) -> Chosen {
         alignment: alignment(""),
         sampler,
         no_picture_because: no_picture.map(str::to_string),
+        prompt_pictures: 0,
     };
 
     // What the manifest says about itself. It is a few kilobytes of text beside gigabytes of
@@ -307,6 +327,7 @@ pub fn look_at(asked: &str) -> Chosen {
         chosen.sampler = sampler;
         chosen.no_picture_because = no_picture.map(str::to_string);
         chosen.alignment = alignment(&kind);
+        chosen.prompt_pictures = prompt_pictures(&kind, &manifest);
     }
 
     chosen

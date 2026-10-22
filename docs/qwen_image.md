@@ -213,11 +213,80 @@ factor before it averages, so on a temporal stage every even output channel is t
 padded frame -- zero -- and every odd one the 2 x 2 mean of an input channel. The halving
 convolution pads right and bottom only, like SDXL's.
 
+## Pictures in the prompt
+
+The model edits a picture, or draws from up to ten of them, by reading them as part of the prompt
+(`QwenImage21Pipeline(image=...)`). Each picture is read twice -- by Qwen3-VL's vision tower, whose
+rows the encoder reads in the picture's slots, and by the autoencoder's encoder, whose latent the
+denoiser reads where those slots were -- and the picture drawn comes after all of it. The runtime's
+door is `QwenImage::generate_with_pictures`; the C API's is a `<|name|>` in the prompt (see
+`docs/ffi.md`), which the engine numbers `<image1>`, `<image2>` in the order the prompt names them.
+
+**The template.** The user's turn opens with the pictures, then the prompt:
+
+```
+<|im_start|>user
+<image1><|vision_start|><|image_pad|> x slots<|vision_end|> <image2><|vision_start|>...<|vision_end|>{prompt}<|im_end|>
+```
+
+`<imageN>` is plain text, not a token. A picture has one `<|image_pad|>` per 32 x 32 pixels.
+
+**The size a picture is read at** is a megapixel at its own aspect ratio, each side rounded to a
+multiple of 32 (`calculate_dimensions`, Python's rounding) -- whatever size the picture arrives at
+and whatever size is being drawn (`QwenImage::picture_size`). The resize is Lanczos, the
+reference's PIL one and the engine's `image` crate one. An RGBA picture is laid over white for the
+vision tower; the autoencoder reads all four channels, and an RGB one is given an opaque alpha.
+
+**The vision tower** (`vision.rs`) is `Qwen3VLVisionModel`: 27 blocks of 1152 over 16-pixel
+patches, laid out a 2 x 2 block at a time so that four neighbours merge by a reshape into one
+4096-wide row. Its patch embedding is a Conv3d two frames deep, because the tower also reads
+video; a picture is two identical frames, which is one frame through the sum of the kernel's two
+time slices. A learned 48 x 48 table of positions is interpolated bilinearly, corners aligned, to
+the picture's grid; the attention rotates a quarter of each head by the row and a quarter by the
+column. Blocks 8, 16 and 24 are merged a second way (fold four, then normalize: DeepStack). The
+package has carried the tower, never quantized, since the Turbo release; a package without it
+reads words only, and says so.
+
+**The encoder** reads each slot's vision row in place of the `<|image_pad|>` embedding, and adds
+the three DeepStack rows at the slots after its first three layers. Its rotary positions are
+Qwen3-VL's interleaved mRoPE: frequency `i` of a head turns with the row where `i % 3 == 1` and
+with the column where `i % 3 == 2` (twenty each), and with the frame otherwise. A word is at
+`(n, n, n)`; a picture's slots are a grid at `(s, s + row, s + column)`, and the words after it
+start `max(rows, columns)` on from `s` (`get_rope_index`). For a prompt of words alone this is the
+table it always was.
+
+**The denoiser** drops the encoder's states at the slots and puts each picture's latent there --
+four latent tokens per slot, through the same `img_in` -- so the prompt it reads is runs of words
+and pictures (`Segment`, `Pictures`). All of it is modulated at timestep zero, the pictures with
+the words. The attention is causal between runs and whole within a picture: each run reads every
+key up to its own end, causally for words and without a mask for a picture, which is exact
+because flint's causal mask is aligned to the bottom right. A picture's positions are a centred
+block at the frame the words reached, and the frame after it is `max(H, W)` further on, in latent
+pixels this time. The graph is compiled per layout and the last four are kept: a guided run
+alternates between the prompt's and the negative prompt's, which names the same pictures.
+
+**How close it is.** Measured on Metal (Apple M5 Pro) with the published `qwen-image:2.1-turbo-fp8`
+package, the 1024 x 704 cat of diffusers' documentation images read at 608 x 416, against
+transformers' and diffusers' own modules at float32 on the CPU running the *same* weights -- the
+fp8 ones dequantized -- so that what is measured is the runtime and not the quantization:
+
+| | relative RMSE |
+|---|---|
+| the template, 284 ids | identical to `Qwen3VLProcessor`'s |
+| vision rows | 3.8e-2 (float16 torch: 1.9e-2; the bfloat16 the pipeline runs: 1.9e-1) |
+| DeepStack rows after blocks 8, 16, 24 | 3.8e-3, 7.8e-3, 1.5e-2 |
+| encoder, the words' states after the picture | 7.8e-3 |
+| velocity, step one and step five of a Turbo walk | 1.2e-3 and 7.6e-4 -- zeroing the picture's latent moves the reference 7.0e-1 |
+
+The model test (`waifu/tests/qwen_image.rs`, `check_pictures`) asks the same questions of a real
+`QwenImage21Pipeline` run on CUDA, with the words-only bounds of each package; its fixtures need
+`-test_picture`.
+
 ## Not done
 
-* Image editing and reference images. The model reads a condition picture both through the VAE
-  and through Qwen3-VL's vision tower, which is not exported.
-* The prefix KV cache.
+* Pictures in the CLI's `draw` command and the Windows app: the C API takes them and the Mac
+  app asks for them (Add Picture, beside Generate), but these screens do not yet.
+* The prefix KV cache, which with a megapixel picture in the prompt is most of the prompt.
 * The ControlNet's inpainting (a mask and a kept picture), the CLI, and the hub. The runtime
   takes a preprocessed control picture; making one out of a photograph -- a pose detector, a
   depth estimator -- is the caller's.
@@ -228,9 +297,10 @@ convolution pads right and bottom only, like SDXL's.
 hf download Qwen/Qwen-Image-2.1
 .venv/bin/python tools/qwen_image_exporter.py -model <snapshot> -output models/qwen-image-2.1.safetensors
 # reference tensors: needs a diffusers with QwenImage21Pipeline, transformers >= 5.17,
-# torchvision and a CUDA torch; offloads layer by layer, so 16 GB is enough
+# torchvision and a CUDA torch; offloads layer by layer, so 16 GB is enough. The photograph is
+# what the reference edits, for the cases of a prompt that names a picture.
 python tools/qwen_image_exporter.py -test_only -model <snapshot> \
-    -test_output models/qwen-image-2.1_test.safetensors
+    -test_picture <a photograph> -test_output models/qwen-image-2.1_test.safetensors
 ```
 
 Add `-fp8` to the first command for the quantized package; it reads the same `-model` directory,

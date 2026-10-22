@@ -169,7 +169,7 @@ typedef struct {
   // NULL, 0 for none.
   const WaifuImageInput *images;
   size_t image_count;
-  // 64..2048, multiples of the model's `alignment` in its description (16; 32 for SDXL).
+  // 64..2048, multiples of the model's `alignment` in its description (16; 32 for Qwen-Image and SDXL).
   uint32_t width;
   uint32_t height;
   uint32_t steps;

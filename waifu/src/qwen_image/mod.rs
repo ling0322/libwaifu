@@ -29,18 +29,25 @@
 //! What is its own: a denoiser whose attention is block causal and whose prompt is modulated at
 //! timestep zero ([`Dit`]), and a Wan 2.2-style decoder with shortcuts around its upsampling
 //! stages and an alpha channel out ([`VaeDecoder`]). `docs/qwen_image.md` has the whole of it.
+//!
+//! A prompt may name pictures -- to edit one, or to draw from several. Each is read twice: by
+//! Qwen3-VL's vision tower ([`VisionTower`]), whose rows the encoder reads in the picture's slots,
+//! and by the autoencoder's encoder ([`VaeEncoder`]), whose latent the denoiser reads where those
+//! slots were ([`Pictures`]).
 
 mod config;
 mod dit;
 mod pipeline;
 mod vae;
+mod vision;
 
 pub use config::{
-    ControlConfig, DitConfig, Prediction, QwenImageConfig, ScheduleConfig, VaeConfig,
+    ControlConfig, DitConfig, Prediction, QwenImageConfig, ScheduleConfig, VaeConfig, VisionConfig,
 };
-pub use dit::Dit;
-pub use pipeline::QwenImage;
+pub use dit::{Dit, Pictures, Segment};
+pub use pipeline::{Prompted, QwenImage};
 pub use vae::{VaeDecoder, VaeEncoder};
+pub use vision::{SeenPicture, VisionTower};
 
 pub use crate::flow::{FlowSampler, SamplerConfig};
-pub use crate::krea2::{EncoderConfig, TextEncoder};
+pub use crate::krea2::{EncoderConfig, EncoderImages, TextEncoder};

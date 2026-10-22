@@ -299,7 +299,7 @@ pub struct WaifuDrawRequest {
     /// NULL, 0 for none.
     pub images: *const WaifuImageInput,
     pub image_count: usize,
-    /// 64..2048, multiples of the model's `alignment` in its description (16; 32 for SDXL).
+    /// 64..2048, multiples of the model's `alignment` in its description (16; 32 for Qwen-Image and SDXL).
     pub width: u32,
     pub height: u32,
     pub steps: u32,

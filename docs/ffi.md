@@ -385,8 +385,10 @@ typedef struct {
 
 // An image a run is given, by name. A name the prompt writes as <|name|> is an image the model
 // reads as part of what it is told: "put the girl in <|girl|> into the room in <|room|>". The
-// engine writes each one the way the model was taught to read it -- Qwen-Image's "Picture 1:
-// <|vision_start|>...", say -- so the caller never sees that format.
+// engine writes each one the way the model was taught to read it -- for Qwen-Image 2.1, the
+// pictures in front of the prompt as <image1>, <image2> in the order the prompt first names
+// them, and each <|name|> as its <imageN> -- so the caller never sees that format. A named image
+// is read at the model's own size for it, whatever size the run draws at.
 //
 // Two names are kept for images that are not read but drawn with, and the prompt cannot name
 // them:
@@ -408,7 +410,7 @@ typedef struct {
     const char *negative;     // words only; "" for none; ignored by a model without guidance
     const WaifuImageInput *images;  // NULL, 0 for none
     size_t image_count;
-    uint32_t width, height;   // 64..2048, multiples of the model's "alignment" (16; SDXL 32)
+    uint32_t width, height;   // 64..2048, multiples of the model's "alignment" (16; Qwen-Image, SDXL 32)
     uint32_t steps;
     float guidance;
     uint64_t seed;            // the caller's: the same seed and settings draw the same image
@@ -541,8 +543,8 @@ What a model can be given an image for is said here rather than found out from a
 so that a window shows only the boxes that do something:
 
 - `prompt_images`: how many images the prompt can name; 0 for a model that reads words only.
-  Qwen-Image 2.1 reads them through Qwen3-VL's vision tower, and is 0 here until that tower is
-  exported.
+  Qwen-Image 2.1 reads up to 10, through Qwen3-VL's vision tower, in a package that carries the
+  tower (`qwen-image:2.1-turbo-fp8` does); `why_not.prompt_images` is there only where it is 0.
 - `image_keys`: the kept keys it takes images under, of `"start_from"` and `"control"`.
 - `why_not`: for what it cannot take, the sentence to show in its place -- what
   `no_picture_because` was for `start_from` alone.
