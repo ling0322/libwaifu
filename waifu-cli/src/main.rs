@@ -65,7 +65,7 @@ struct Command {
 
 static ALL: &[Command] = &[Command {
     name: "draw",
-    about: "Pick a task and a model, then draw with your waifu in the terminal",
+    about: "Pick a model, then draw with your waifu in the terminal",
     main: draw::main,
 }];
 

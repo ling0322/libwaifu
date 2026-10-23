@@ -44,70 +44,43 @@ impl Device {
 
 use crate::c::{self, WaifuDevice};
 
-/// Where a run goes: a device, and where the weights wait between the steps that read them.
+/// Where a run goes: a device, as libwaifu names it.
 ///
-/// One name rather than two answers. As a device name -- `cuda_cpu_offload`, cuda with none of the
-/// weights kept on the card -- the pair that cannot be built cannot be said either, and there is
-/// one list on screen instead of two. Every other device needs no second name: libwaifu keeps on
-/// it what fits and lets weights go when a run runs short.
+/// One name for each: libwaifu keeps on a device what fits of a model, copies the rest over as
+/// each weight is used, and lets weights go when a run runs short, so there is no second name for
+/// a device with the weights somewhere else.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Runtime {
     device: Device,
-    /// None of the weights kept on the card, each moved onto it as it is used: cuda_cpu_offload.
-    offload: bool,
 }
 
 impl Runtime {
     /// Every place a run can go, in the order the flag's own usage lists them.
-    pub const ALL: [Runtime; 5] = [
+    pub const ALL: [Runtime; 4] = [
         Runtime::on(Device::Cpu),
         Runtime::on(Device::Cuda),
-        Runtime::CUDA_CPU_OFFLOAD,
         Runtime::on(Device::Metal),
         Runtime::on(Device::Vulkan),
     ];
 
-    /// Cuda, with the package held on the host and each weight moved onto the card at the
-    /// instruction that reads it, so that the card holds nothing of the model between steps.
-    pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
-        device: Device::Cuda,
-        offload: true,
-    };
-
-    /// A device with as many of the weights on it as fit, which is what every name but the
-    /// offload one means.
+    /// A device with as many of the weights on it as fit.
     pub const fn on(device: Device) -> Runtime {
-        Runtime {
-            device,
-            offload: false,
-        }
+        Runtime { device }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn device(self) -> Device {
         self.device
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn offload(self) -> bool {
-        self.offload
-    }
-
     /// What it is called on the command line and on screen.
     pub fn name(self) -> &'static str {
-        match self.offload {
-            false => self.device.name(),
-            true => "cuda_cpu_offload",
-        }
+        self.device.name()
     }
 
     /// What the drawing screen's device list says beside the name of one this machine can use.
     pub fn about(self) -> &'static str {
-        match self.offload {
-            false => "ready",
-            // The row that has to say more than that. It is the slow answer, and the slow answer
-            // picked by someone who was not told is a run that looks broken.
-            true => "ready, slower: keeps none of the model on the card",
-        }
+        "ready"
     }
 }
 
@@ -119,7 +92,6 @@ pub enum DeviceOption {
     Auto,
     Cpu,
     Cuda,
-    CudaCpuOffload,
     Metal,
     Vulkan,
 }
@@ -131,12 +103,8 @@ impl DeviceOption {
         match self {
             DeviceOption::Cpu => Runtime::on(Device::Cpu),
             DeviceOption::Cuda => Runtime::on(Device::Cuda),
-            DeviceOption::CudaCpuOffload => Runtime::CUDA_CPU_OFFLOAD,
             DeviceOption::Metal => Runtime::on(Device::Metal),
             DeviceOption::Vulkan => Runtime::on(Device::Vulkan),
-            // Never the offload one: the card keeps what fits of a model and lets weights go when
-            // a run runs short, which is faster than keeping none of it there.
-            //
             // At most one of CUDA and Metal is ever built, so the order between those two only
             // decides which check runs first. Vulkan comes last because it runs on the same cards
             // as either, through kernels of its own that are not the fastest those cards have.
@@ -152,12 +120,11 @@ impl DeviceOption {
 impl Runtime {
     /// The device libwaifu's engine is started on for this.
     pub fn waifu_device(self) -> WaifuDevice {
-        match (self.device, self.offload) {
-            (Device::Cpu, _) => WaifuDevice::WAIFU_DEVICE_CPU,
-            (Device::Cuda, false) => WaifuDevice::WAIFU_DEVICE_CUDA,
-            (Device::Cuda, true) => WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
-            (Device::Metal, _) => WaifuDevice::WAIFU_DEVICE_METAL,
-            (Device::Vulkan, _) => WaifuDevice::WAIFU_DEVICE_VULKAN,
+        match self.device {
+            Device::Cpu => WaifuDevice::WAIFU_DEVICE_CPU,
+            Device::Cuda => WaifuDevice::WAIFU_DEVICE_CUDA,
+            Device::Metal => WaifuDevice::WAIFU_DEVICE_METAL,
+            Device::Vulkan => WaifuDevice::WAIFU_DEVICE_VULKAN,
         }
     }
 
@@ -198,7 +165,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_is_the_fastest_device_this_machine_has_and_never_the_offload_one() {
+    fn auto_is_the_fastest_device_this_machine_has() {
         let cpu = Runtime::on(Device::Cpu);
         let cuda = Runtime::on(Device::Cuda);
         let metal = Runtime::on(Device::Metal);
@@ -211,9 +178,6 @@ mod tests {
         assert_eq!(DeviceOption::Auto.resolve(&[cpu]), cpu);
 
         // A device that was named is the device, whether or not it is here.
-        assert_eq!(
-            DeviceOption::CudaCpuOffload.resolve(&[cpu]),
-            Runtime::CUDA_CPU_OFFLOAD
-        );
+        assert_eq!(DeviceOption::Cuda.resolve(&[cpu]), cuda);
     }
 }

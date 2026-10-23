@@ -20,10 +20,10 @@
 //! The draw command: what the session is for, settled on the command line or on the terminal's
 //! screens, and then the drawing screen for it.
 //!
-//! Everything here happens before a model is read. A flag that is wrong, a picture that is not
-//! there, a directory that cannot be made or a model that cannot do what was asked of it are all
-//! said now, while the terminal is still a terminal and before anything has been fetched -- not a
-//! minute later, over the top of a screen. What comes after is [`tui::draw`].
+//! Everything here happens before a model is read. A flag that is wrong, a directory that cannot
+//! be made or a model that cannot draw are all said now, while the terminal is still a terminal
+//! and before anything has been fetched -- not a minute later, over the top of a screen. What
+//! comes after is [`tui::draw`].
 
 use std::path::{Path, PathBuf};
 
@@ -67,10 +67,9 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     }
 
     let model = with_usage(args.model())?.map(str::to_string);
-    let asked_task = with_usage(args.task())?;
+    let task = with_usage(args.task())?.unwrap_or(Task::Txt2Img);
     let device = with_usage(args.device())?;
     let output = PathBuf::from(args.output());
-    let image = args.image();
 
     // Piped or redirected -- a script, a CI job -- there is nobody at a keyboard to type a prompt,
     // and `ratatui::init` on something that is not a terminal panics rather than reporting it.
@@ -83,25 +82,8 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         ));
     }
 
-    // Looked at now rather than when a run begins, so that a path that is not there is said here
-    // -- and before the terminal is taken over by the screens, which would hide it.
-    if let Some(image) = image {
-        if !Path::new(image).is_file() {
-            return Err(format!("could not read {image}: there is no such file").into());
-        }
-        if asked_task == Some(Task::Txt2Img) {
-            return with_usage(Err(
-                "-i names a picture to start from, which is img2img: leave -task out, or make it \
-                 img2img"
-                    .into(),
-            ));
-        }
-    }
-    // A picture named is a picture to start from, which is where the task list starts too.
-    let task = asked_task.or(image.map(|_| Task::Img2Img));
-
-    // Made now for the same reason: a directory that cannot be written to is something to find
-    // out before a model has been fetched, not after the first picture has been drawn.
+    // Made now rather than when a run begins: a directory that cannot be written to is something
+    // to find out before a model has been fetched, not after the first picture has been drawn.
     std::fs::create_dir_all(&output)
         .map_err(|error| format!("could not make {}: {error}", output.display()))?;
 
@@ -109,25 +91,24 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     // screen is up: the first question put to a device has the tensor library say what it found.
     let machine = tui::Machine::measure(device);
 
-    let (task, model) = match model {
+    let model = match model {
         // Named on the command line: nothing to ask. Fetched here, in the terminal, on a line
         // that rewrites itself rather than under a bar.
         Some(model) => {
-            let task = task.unwrap_or(Task::Txt2Img);
             // What can be told before anything is fetched: a voice is a voice by the catalogue,
             // and a manifest already here says what it can do.
             if manager::is_a_voice(&model) {
                 return with_usage(Err(is_a_voice(&model).into()));
             }
             if let Ok(manifest) = manager::manifest_path(&model) {
-                with_usage(fits(task, &model, &engine::look_at(&manifest)?))?;
+                with_usage(fits(&model, &engine::look_at(&manifest)?))?;
             }
-            (task, model)
+            model
         }
         // Not named: the terminal asks, and fetches what is picked under its own bar.
         None => match tui::choose(task)? {
             Some(chosen) => chosen,
-            // Somebody who looked at the lists and left. Not a failure.
+            // Somebody who looked at the list and left. Not a failure.
             None => return Ok(()),
         },
     };
@@ -135,7 +116,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
     // After the fetch, since it is the packages on the disk that are measured.
     let manifest = manifest_of(&model)?;
     let chosen = engine::look_at(&manifest)?;
-    with_usage(fits(task, &model, &chosen))?;
+    with_usage(fits(&model, &chosen))?;
     let (runtime, why) = machine.start_for(chosen.bytes);
     let launch = Launch {
         task,
@@ -143,7 +124,7 @@ pub fn main(arguments: &[String]) -> Result<(), Error> {
         label: label_of(&model),
         runtime,
     };
-    tui::draw(&launch, why, &chosen, image, &output, &machine)
+    tui::draw(&launch, why, &chosen, &output, &machine)
 }
 
 /// What the screens call a model: as typed when it was a name, because that is what someone
@@ -163,44 +144,14 @@ fn is_a_voice(model: &str) -> String {
     )
 }
 
-/// Whether `model` can do `task`, as its manifest says before any of its weights are read: a
-/// voice or a converter cannot draw, and a picture model can start from a picture or not by its
-/// kind.
-fn fits(task: Task, model: &str, chosen: &Chosen) -> Result<(), String> {
+/// Whether `model` can draw, as its manifest says before any of its weights are read: a voice or
+/// a converter cannot.
+fn fits(model: &str, chosen: &Chosen) -> Result<(), String> {
     if !chosen.draws {
         return Err(is_a_voice(model));
     }
-    if task == Task::Img2Img {
-        if let Some(why) = &chosen.no_picture_because {
-            return Err(format!("{model} cannot do img2img: {why}"));
-        }
-    }
 
     Ok(())
-}
-
-/// Whether a picture model can start from a picture, as far as is known without fetching it:
-/// what the terminal's img2img list is filtered on. Asked of its manifest where one is here --
-/// fetched, or bundled -- and of its kind where none is: a published name starts with its family,
-/// and SDXL is the one family whose layer that reads a picture is written. An SDXL packaged before
-/// that layer existed is still taken as yes until it is here, which a run says otherwise of later.
-pub fn draws_from_a_picture(model: &str) -> bool {
-    match manager::manifest_path(model) {
-        Ok(manifest) => {
-            engine::look_at(&manifest).is_ok_and(|chosen| chosen.no_picture_because.is_none())
-        }
-        Err(_) => family_draws_from_a_picture(model),
-    }
-}
-
-/// Whether a published name's family can start from a picture, before any of it is on the disk.
-/// Anything that is not a published name -- a file that is not there -- is taken as yes, and the
-/// run that cannot find it says why.
-fn family_draws_from_a_picture(model: &str) -> bool {
-    if !manager::catalog().iter().any(|listed| listed.name == model) {
-        return true;
-    }
-    model.split(':').next() == Some("sdxl")
 }
 
 /// The manifest of `model`, fetching the model first where it is a published name that is not on
@@ -281,25 +232,11 @@ mod tests {
     #[test]
     fn a_voice_is_not_something_to_draw_with() {
         let voice = engine::look_at(&a_manifest("voice", "indextts2")).unwrap();
-        let error = fits(Task::Txt2Img, "indextts", &voice).unwrap_err();
+        let error = fits("indextts", &voice).unwrap_err();
         assert!(error.contains("is a voice"), "{error}");
 
         let sdxl = engine::look_at(&a_manifest("sdxl", "sdxl")).unwrap();
-        assert!(fits(Task::Txt2Img, "sdxl:base", &sdxl).is_ok());
-    }
-
-    #[test]
-    fn img2img_is_refused_for_a_model_that_cannot_start_from_a_picture() {
-        // Said of the kind, before a package has been looked at: Anima's layer that reads a
-        // picture is not written.
-        let anima = engine::look_at(&a_manifest("anima", "anima")).unwrap();
-        let error = fits(Task::Img2Img, "anima:turbo", &anima).unwrap_err();
-        assert!(error.contains("cannot do img2img"), "{error}");
-
-        let sdxl = engine::look_at(&a_manifest("sdxl2", "sdxl")).unwrap();
-        assert!(fits(Task::Img2Img, "sdxl:base", &sdxl).is_ok());
-        // And txt2img asks nothing of it.
-        assert!(fits(Task::Txt2Img, "anima:turbo", &anima).is_ok());
+        assert!(fits("sdxl:base", &sdxl).is_ok());
     }
 
     #[test]
@@ -307,19 +244,7 @@ mod tests {
         let path = a_manifest("own", "sdxl");
         // Nothing to fetch, so nothing goes looking for a hub.
         assert_eq!(manifest_of(path.to_str().unwrap()).unwrap(), path);
-        assert!(draws_from_a_picture(path.to_str().unwrap()));
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn a_model_not_yet_fetched_is_judged_by_its_family() {
-        // Said of the kind, before a package has been looked at: Anima's, Krea 2's and
-        // Qwen-Image's layer that reads a picture is not written, and SDXL's is.
-        assert!(!family_draws_from_a_picture("anima:turbo"));
-        assert!(!family_draws_from_a_picture("krea2:turbo"));
-        assert!(!family_draws_from_a_picture("qwen-image:2.1-turbo-fp8"));
-        assert!(family_draws_from_a_picture("sdxl:base"));
-        assert!(family_draws_from_a_picture("/not/here.yaml"));
     }
 
     #[test]

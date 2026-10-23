@@ -19,38 +19,29 @@
 
 //! What a session is for, and what was settled before the drawing screen opened.
 //!
-//! The terminal settles two things -- the task and the model -- and the drawing screen is opened
-//! for exactly those, on the device `-device` or `auto` starts it on. It changes neither of the
-//! two: a different model is a fetch, and they are asked on the screens before it, where the wait
-//! can be watched and stopped. The device it does change, from its device row: that is a read of
-//! the model onto another card, which happens behind the screen.
+//! The terminal settles the model -- the task is txt2img, the one there is -- and the drawing
+//! screen is opened for exactly that, on the device `-device` or `auto` starts it on. It does not
+//! change the model: a different one is a fetch, and it is asked on the screen before it, where
+//! the wait can be watched and stopped. The device it does change, from its device row: that is a
+//! read of the model onto another card, which happens behind the screen.
 
 use crate::args::Runtime;
 
-/// One kind of session: a row in the terminal's first list, and the boxes the drawing screen has.
+/// One kind of session, and the boxes the drawing screen has. There is one, txt2img: it is kept
+/// a name of its own because `-task` still takes it and the drawing screen's heading says it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Task {
     Txt2Img,
-    Img2Img,
 }
 
 impl Task {
-    /// Every task, in the order the terminal lists them and the usage names them.
-    pub const ALL: &'static [Task] = &[Task::Txt2Img, Task::Img2Img];
+    /// Every task, in the order the usage names them.
+    pub const ALL: &'static [Task] = &[Task::Txt2Img];
 
-    /// What it is called: on the command line, in the list, and in the drawing screen's heading.
+    /// What it is called: on the command line and in the drawing screen's heading.
     pub fn name(self) -> &'static str {
         match self {
             Task::Txt2Img => "txt2img",
-            Task::Img2Img => "img2img",
-        }
-    }
-
-    /// What it does, in the one line the list has room for.
-    pub fn about(self) -> &'static str {
-        match self {
-            Task::Txt2Img => "Draw a picture from a prompt",
-            Task::Img2Img => "Draw a picture from a prompt and a picture to start from",
         }
     }
 
@@ -97,11 +88,15 @@ mod tests {
         }
         assert_eq!(Task::named("TXT2IMG"), Some(Task::Txt2Img));
         assert_eq!(Task::named("sing"), None);
+
+        // Drawing from a picture is the engine's, for the programs built over it: the terminal
+        // refuses the name the way it refuses one it never had.
+        assert_eq!(Task::named("img2img"), None);
     }
 
     #[test]
     fn the_terminal_draws_and_does_not_speak() {
-        // Speech is the engine's, for the programs built over it: the terminal's tasks are the two
+        // Speech is the engine's, for the programs built over it: the terminal's task is the one
         // the drawing screen has boxes for.
         assert_eq!(Task::named("text2speech"), None);
         assert_eq!(Task::named("speech2speech"), None);

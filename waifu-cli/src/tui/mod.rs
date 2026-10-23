@@ -20,14 +20,15 @@
 //! The whole of the tool, in the terminal: what to do, with which model, where -- and then the
 //! drawing.
 //!
-//! Two screens to choose on, one after the other -- a task, then a model for it, fetched there if
-//! it is not on the disk -- and then the drawing screen, [`draw`], goes up for what was picked and
-//! reads the model onto a device behind it. Which device starts as what `-device` said, or what
-//! `auto` makes of the model and the machine; the drawing screen's device row opens a box that
-//! changes it, and the model is read onto the new one in the background.
+//! One screen to choose on -- a model, fetched there if it is not on the disk; the task is
+//! txt2img, the one there is, so there is nothing to ask about it -- and then the drawing screen,
+//! [`draw`], goes up for what was picked and reads the model onto a device behind it. Which
+//! device starts as what `-device` said, or what `auto` makes of the model and the machine; the
+//! drawing screen's device row opens a box that changes it, and the model is read onto the new
+//! one in the background.
 //!
-//! On the two, escape goes back a screen, which on the first one is out; `q` and ctrl-c leave
-//! from anywhere. On the drawing screen escape stops a run, or asks before leaving.
+//! On the model list, escape leaves, since there is no screen before it to go back to; `q` and
+//! ctrl-c leave from anywhere. On the drawing screen escape stops a run, or asks before leaving.
 
 mod ask;
 mod devices;
@@ -35,7 +36,6 @@ mod draw;
 mod field;
 mod files;
 mod models;
-mod tasks;
 
 pub use draw::draw;
 
@@ -52,16 +52,15 @@ use crate::task::Task;
 
 type Error = Box<dyn std::error::Error>;
 
-/// Where a screen was left: on to the next one with what it chose, back to the one before, or
-/// out of the program altogether.
+/// Where a screen was left: on to the next one with what it chose, or out of the program
+/// altogether.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Step<T> {
     Next(T),
-    Back,
     Quit,
 }
 
-/// A model chosen on the second screen, and on the disk.
+/// A model chosen on the model list, and on the disk.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Picked {
     /// What to hand the worker: a catalogue name, or the path of a manifest.
@@ -98,17 +97,20 @@ pub fn give_the_screen_back() {
     let _ = ratatui::crossterm::execute!(io::stdout(), ratatui::crossterm::cursor::Show);
 }
 
-/// Asks for a task and a model for it, and fetches the model if it is not here.
+/// Asks for a model for `task`, and fetches it if it is not here.
 ///
-/// `task` is where the task list starts, which is what `-task` said. Where the model runs is not
-/// asked here: the drawing screen opens on what [`Machine::start_for`] makes of it, and its device
-/// row changes it. `None` is somebody leaving, which is not a failure.
-pub fn choose(task: Option<Task>) -> Result<Option<(Task, String)>, Error> {
+/// Where the model runs is not asked here: the drawing screen opens on what
+/// [`Machine::start_for`] makes of it, and its device row changes it. `None` is somebody leaving,
+/// which is not a failure.
+pub fn choose(task: Task) -> Result<Option<String>, Error> {
     let mut terminal = take_the_screen()?;
-    let chosen = walk(&mut terminal, task);
+    let chosen = models::choose(&mut terminal, task);
     ratatui::restore();
 
-    chosen
+    match chosen? {
+        Step::Next(picked) => Ok(Some(picked.model)),
+        Step::Quit => Ok(None),
+    }
 }
 
 /// Where a model can run: what `-device` said, and what this machine can run on.
@@ -148,31 +150,6 @@ impl Machine {
     }
 }
 
-/// The two screens, with the way back through them.
-fn walk(
-    terminal: &mut DefaultTerminal,
-    task: Option<Task>,
-) -> Result<Option<(Task, String)>, Error> {
-    let mut task_at = task
-        .and_then(|task| Task::ALL.iter().position(|one| *one == task))
-        .unwrap_or(0);
-    loop {
-        let task = match tasks::choose(terminal, task_at)? {
-            Step::Next(task) => task,
-            Step::Back | Step::Quit => return Ok(None),
-        };
-        task_at = Task::ALL.iter().position(|one| *one == task).unwrap_or(0);
-
-        // The model list is built again each time it is come back to, so that it says what is on
-        // the disk now: a model fetched on the way through is one that is here on the way back.
-        match models::choose(terminal, task)? {
-            Step::Next(picked) => return Ok(Some((task, picked.model))),
-            Step::Back => continue,
-            Step::Quit => return Ok(None),
-        }
-    }
-}
-
 /// Takes the terminal and paints over whatever was on it.
 ///
 /// The clear is the whole reason this is a function. ratatui writes only what changed since the
@@ -187,7 +164,7 @@ fn take_the_screen() -> Result<DefaultTerminal, Error> {
     Ok(terminal)
 }
 
-/// What built this, and how far through the three screens this one is, as every screen says it.
+/// What built this, and how far through the two screens this one is, as every screen says it.
 ///
 /// What built it is on all of them rather than one: whichever is on screen when something goes
 /// wrong is the one that ends up in a screenshot, and a screenshot that cannot say which code it

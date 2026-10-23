@@ -17,12 +17,12 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The second screen: which model, and the fetch that follows if it is not on the disk.
+//! The first screen: which model, and the fetch that follows if it is not on the disk.
 //!
-//! The list is the task's: picture models to draw with, and only the ones that can start from a
-//! picture for img2img. What is already on disk is marked, what is not is fetched when it is
-//! picked, and the next screen does not come up until it is all here -- so the drawing screen
-//! that opens at the end never has a download to do.
+//! The list is the task's: picture models to draw with, and no voice among them. What is already
+//! on disk is marked, what is not is fetched when it is picked, and the next screen does not come
+//! up until it is all here -- so the drawing screen that opens at the end never has a download to
+//! do.
 //!
 //! The fetch is minutes long, so it runs on a thread of its own and says how it is getting on down
 //! a channel. The screen stays live while it happens: a download that cannot be watched is
@@ -125,13 +125,11 @@ impl Entry {
     }
 }
 
-/// The published models a task can run, in the catalogue's order, and the file row under them.
-fn entries_for(task: Task) -> Vec<Entry> {
+/// The published models there are to draw with, in the catalogue's order, and the file row under
+/// them. Every picture model draws from a prompt, so txt2img asks nothing more of the list.
+fn entries() -> Vec<Entry> {
     let mut entries: Vec<Entry> = manager::pictures()
         .into_iter()
-        // What img2img would only refuse. Asked of the kind and of the manifest where it is here,
-        // which is as much as can be known without reading the weights.
-        .filter(|model| task != Task::Img2Img || crate::draw::draws_from_a_picture(model.name))
         .map(|model| Entry::Published {
             name: model.name,
             full_name: model.full_name,
@@ -319,11 +317,11 @@ fn change_directory(typed: &str) -> Result<(), String> {
     manager::set_directory(Some(&directory))
 }
 
-/// Runs the list until a model is chosen and on the disk, or somebody goes back or leaves.
+/// Runs the list until a model is chosen and on the disk, or somebody leaves.
 pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>, Error> {
     let mut choices = Choices {
         task,
-        entries: entries_for(task),
+        entries: entries(),
         selected: 0,
         directory: model_directory(),
     };
@@ -566,7 +564,8 @@ pub fn choose(terminal: &mut DefaultTerminal, task: Task) -> Result<Step<Picked>
 
                 doing = start_fetching(name);
             }
-            KeyCode::Esc | KeyCode::Left => return Ok(Step::Back),
+            // Nothing comes before this screen, so the way back is the way out.
+            KeyCode::Esc => return Ok(Step::Quit),
             _ if quits(&key) => return Ok(Step::Quit),
             _ => {}
         }
@@ -942,8 +941,8 @@ fn draw_foot(frame: &mut Frame, area: Rect, doing: &Doing, enter: &str, failure:
                 )),
                 None => Line::from(
                     format!(
-                        " up/down choose   enter {enter}   d delete   p model folder   esc back   \
-                         q quit"
+                        " up/down choose   enter {enter}   d delete   p model folder   esc or q \
+                         quit"
                     )
                     .dim(),
                 ),
@@ -1079,19 +1078,15 @@ mod tests {
     #[test]
     fn the_list_is_the_tasks_own() {
         // Pictures for drawing, and no voice among them: the terminal has nothing to say one with.
-        let pictures = entries_for(Task::Txt2Img);
+        let pictures = entries();
         let names: Vec<&str> = pictures.iter().map(Entry::name).collect();
         assert!(names.contains(&"sdxl:base"), "{names:?}");
         assert!(!names.contains(&"indextts"), "{names:?}");
         assert!(!names.contains(&"cosyvoice"), "{names:?}");
 
-        // And only what can start from a picture, for the task that starts from one. Anima
-        // cannot, and says so out of its kind, before a package has been looked at.
-        let from_pictures = entries_for(Task::Img2Img);
-        let names: Vec<&str> = from_pictures.iter().map(Entry::name).collect();
-        assert!(names.contains(&"sdxl:base"), "{names:?}");
+        // Every family draws from a prompt, so none of them is left out of it.
         assert!(
-            !names.iter().any(|name| name.starts_with("anima")),
+            names.iter().any(|name| name.starts_with("anima")),
             "{names:?}"
         );
     }
@@ -1100,7 +1095,7 @@ mod tests {
     fn the_catalogue_says_which_models_draw_explicit_pictures() {
         // The list asks before using those, and it has nothing to go on but this: a catalogue that
         // answered without the label would be a list that never asks.
-        let entries = entries_for(Task::Txt2Img);
+        let entries = entries();
         let explicit = |name: &str| {
             entries
                 .iter()

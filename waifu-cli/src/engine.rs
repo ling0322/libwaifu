@@ -29,9 +29,8 @@ use std::ptr;
 use std::sync::mpsc::{channel, Sender};
 
 use crate::c::{
-    self, WaifuCompletionEvent, WaifuDrawRequest, WaifuEngine, WaifuImage,
-    WaifuImageCompletionEvent, WaifuImageInput, WaifuJob, WaifuProgressEvent, WaifuStage,
-    WaifuStatusCode,
+    self, WaifuCompletionEvent, WaifuDrawRequest, WaifuEngine, WaifuImageCompletionEvent, WaifuJob,
+    WaifuProgressEvent, WaifuStage, WaifuStatusCode,
 };
 use crate::runtime::Runtime;
 
@@ -59,8 +58,6 @@ pub struct GenerationOptions {
     pub negative_prompt: String,
     /// None picks one; the screen always names one, so that the picture can say which.
     pub seed: Option<u64>,
-    /// With a picture to start from: how far the run walks away from it, 0 to 1.
-    pub strength: f32,
 }
 
 impl Default for GenerationOptions {
@@ -72,7 +69,6 @@ impl Default for GenerationOptions {
             guidance_scale: 5.0,
             negative_prompt: String::new(),
             seed: None,
-            strength: 0.8,
         }
     }
 }
@@ -117,8 +113,6 @@ pub struct Chosen {
     pub takes_guidance: bool,
     pub suggested_prompt: Option<String>,
     pub suggested_avoid: Option<String>,
-    /// Why it cannot be handed a picture to start from, or None where it can.
-    pub no_picture_because: Option<String>,
     /// How many bytes its files are, where they are all on the disk.
     pub bytes: Option<u64>,
 }
@@ -132,7 +126,6 @@ impl Default for Chosen {
             takes_guidance: true,
             suggested_prompt: None,
             suggested_avoid: None,
-            no_picture_because: None,
             bytes: None,
         }
     }
@@ -196,7 +189,6 @@ pub fn chosen_from(said: &serde_json::Value) -> Chosen {
         takes_guidance: said["takes_guidance"].as_bool().unwrap_or(true),
         suggested_prompt: said["prompt"].as_str().map(str::to_string),
         suggested_avoid: said["avoid"].as_str().map(str::to_string),
-        no_picture_because: said["why_not"]["start_from"].as_str().map(str::to_string),
         bytes: said["bytes"].as_u64(),
     }
 }
@@ -262,42 +254,31 @@ impl Engine {
         }
     }
 
-    /// Starts drawing; what it says comes down `sender`, ending with [`Heard::Drawn`]. `from` is
-    /// the picture to start from, as rows of RGB, at any size. The job, to cancel it by.
+    /// Starts drawing from noise; what it says comes down `sender`, ending with [`Heard::Drawn`].
+    /// The job, to cancel it by.
     pub fn draw(
         &self,
         prompt: &str,
         options: &GenerationOptions,
-        from: Option<(u32, u32, &[u8])>,
         sender: &Sender<Heard>,
     ) -> Result<WaifuJob, String> {
         let prompt = c::c_string(prompt);
         let negative = c::c_string(&options.negative_prompt);
-        let key = c::c_string("start_from");
-        let image = from.map(|(width, height, rgb)| WaifuImage {
-            width,
-            height,
-            rgb: rgb.as_ptr(),
-            len: rgb.len(),
-        });
-        let input = image.as_ref().map(|image| WaifuImageInput {
-            key: key.as_ptr(),
-            image,
-        });
         let request = WaifuDrawRequest {
             struct_size: std::mem::size_of::<WaifuDrawRequest>() as u32,
             prompt: prompt.as_ptr(),
             negative: negative.as_ptr(),
-            images: input
-                .as_ref()
-                .map_or(ptr::null(), |input| input as *const WaifuImageInput),
-            image_count: input.is_some() as usize,
+            // The terminal hands a run no pictures: what it draws is drawn from a prompt.
+            images: ptr::null(),
+            image_count: 0,
             width: options.width.max(0) as u32,
             height: options.height.max(0) as u32,
             steps: options.num_steps.max(0) as u32,
             guidance: options.guidance_scale,
             seed: options.seed.unwrap_or_default(),
-            strength: options.strength,
+            // Both are read only beside a picture -- "start_from" and "control" -- and there is
+            // none, so they are the values a caller with nothing to say about them passes.
+            strength: 0.8,
             control_scale: 1.0,
         };
         let job = unsafe {
@@ -386,7 +367,6 @@ mod tests {
             "kind": "image", "width": 832, "height": 1216, "steps": 8, "guidance": 1.0,
             "takes_guidance": false, "sizes": [[832, 1216], [1024, 1024], [1216, 832]],
             "prompt": "masterpiece", "avoid": null,
-            "why_not": { "start_from": "Anima cannot start from a picture yet" },
             "bytes": 6938000000u64,
         });
         let chosen = chosen_from(&said);
@@ -395,7 +375,6 @@ mod tests {
         assert_eq!(chosen.sizes.len(), 3);
         assert!(!chosen.takes_guidance);
         assert_eq!(chosen.suggested_prompt.as_deref(), Some("masterpiece"));
-        assert!(chosen.no_picture_because.unwrap().contains("Anima"));
         assert_eq!(chosen.bytes, Some(6_938_000_000));
 
         let voice = chosen_from(&serde_json::json!({ "kind": "speech" }));

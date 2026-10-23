@@ -837,9 +837,9 @@ mod tests {
     fn the_key_hints_fit_inside_the_box_they_are_drawn_in() {
         // A hint clipped by its own border names a key nobody can read. The widest foot either
         // box has is a fractional range beside them, which is the one measured here.
-        let number = Number::ask("strength", "0.80", 0.0, 1.0, false);
+        let number = Number::ask("guidance", "5.0", 1.0, 20.0, false);
         let screen = drawn(|frame| number.render(frame, frame.area()));
-        assert!(screen.contains("0.00 to 1.00"), "{screen}");
+        assert!(screen.contains("1.00 to 20.00"), "{screen}");
         assert!(screen.contains("enter set   esc close"), "{screen}");
 
         let choice = Choice::ask("size", vec!["1024 x 1024".to_string()], 0);

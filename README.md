@@ -51,28 +51,17 @@ model larger than the card still draws, more slowly, rather than running out of 
 the weights left off the GPU stay in the model's files, each read off the disk as it is used, so a
 model larger than the Mac's memory draws too.
 
-`-device cuda_cpu_offload` keeps none of the weights on the card and moves each one onto it as it
-is used, so the card holds nothing of the model between steps. It costs speed rather than the
-picture -- the whole model crosses the bus once per step.
-
-RTX 5060 Ti, 16 GB, card otherwise free. `krea2:turbo-fp8`, 1024x1024, the eight steps the
-distilled release is for, seed 7:
-
-| `-device` | peak GPU memory | outcome | wall |
-|---|---|---|---|
-| `cuda_cpu_offload` | 1.2 GB | a picture | 67 s |
-
 The small weights -- norms, biases, scales -- are most of the moves and little of the bytes, so
 what is left to copy across each step is the large projections.
 
 ## Run
 
-`waifu` asks two things in the terminal -- the task (txt2img or img2img) and the model for it --
-fetches the model under a progress bar if it is not on the disk yet, and then puts up the drawing
-screen while the model is read onto the fastest device this machine has: a prompt, what to steer
-away from, the steps, guidance, size and seed, for img2img a picture to start from (enter on it
-browses the disk) and how far to walk from it, and the device. Enter on the device row lists every
-device this machine has; picking another reads the model onto it in the background.
+`waifu` asks for a model in the terminal, fetches it under a progress bar if it is not on the disk
+yet, and then puts up the drawing screen while the model is read onto the fastest device this
+machine has: a prompt, what to steer away from, the steps, guidance, size and seed, and the device.
+The terminal draws from a prompt (txt2img); drawing from a picture is the library's, for the
+programs built over it. Enter on the device row lists every device this machine has; picking
+another reads the model onto it in the background.
 
 ```bash
 $ waifu
@@ -86,8 +75,7 @@ model: to run another one, leave and run `waifu` again. The choosing can be skip
 model on the command line:
 
 ```bash
-$ waifu -m sdxl:wai -device cuda              # txt2img; img2img if -i names a picture
-$ waifu -task img2img -m sdxl:noob -i cat.png
+$ waifu -m sdxl:wai -device cuda
 ```
 
 Fetched models go into `~/.cache/libwaifu/models` (`%LOCALAPPDATA%\libwaifu\models` on Windows).
@@ -157,10 +145,9 @@ otherwise.
 
 | `-device` | what it means |
 |---|---|
-| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `cuda_cpu_offload`: `cuda` already keeps what fits on the card and lets weights go when a run runs short. |
+| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default. |
 | `cpu` | The CPU kernels. |
 | `cuda` | The card. As many of the weights as fit stay on it, the smallest first, and the rest are moved onto it as they are used; a run that runs short lets weights on the card go, so a model larger than the card still draws. |
-| `cuda_cpu_offload` | None of the weights stay on the card: each is moved onto it as it is used. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
 | `metal` | The GPU on Apple Silicon, through flint's own kernels -- and an M5's neural accelerators. As many of the weights as fit stay on it, the smallest first; the rest are read off the disk as they are used, so a model larger than the Mac's memory still draws. |
 | `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. Keeps the weights on it as `cuda` does. |
 

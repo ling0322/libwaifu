@@ -38,8 +38,8 @@ impl TextField {
     /// A field that already has something in it, with the cursor after it.
     ///
     /// A screen starts its boxes empty but for the two that are answered before there is a screen
-    /// to type into: the picture to draw from, where `-i` names a file, and the prompt, where the
-    /// package carries the one its model card suggested.
+    /// to type into: the prompt and what to steer away from, where the package carries what its
+    /// model card suggested.
     pub fn new(text: &str) -> TextField {
         let characters: Vec<char> = text.chars().collect();
         TextField {
@@ -96,6 +96,54 @@ impl TextField {
 
     pub fn end(&mut self) {
         self.cursor = self.characters.len();
+    }
+
+    /// Moves the cursor to the line above as the text is drawn `width` columns wide, in the same
+    /// column or at the end of a line too short to have it. On the first line it goes to the start:
+    /// there is no line above to go to, and the key is still the box's.
+    pub fn up(&mut self, width: usize) {
+        self.vertical(width, -1);
+    }
+
+    /// Moves the cursor to the line below, as [`TextField::up`] does to the one above. On the last
+    /// line it goes to the end.
+    pub fn down(&mut self, width: usize) {
+        self.vertical(width, 1);
+    }
+
+    /// Whether the cursor is on the last line of the text drawn `width` columns wide, where there
+    /// is no line below for down to go to.
+    pub fn on_last_line(&self, width: usize) -> bool {
+        let breaks = self.breaks(width);
+        !breaks[..breaks.len() - 1]
+            .iter()
+            .any(|line| self.cursor < line.end)
+    }
+
+    fn vertical(&mut self, width: usize, by: isize) {
+        let breaks = self.breaks(width);
+        let row = breaks
+            .iter()
+            .position(|line| self.cursor < line.end)
+            .unwrap_or(breaks.len() - 1);
+        let column = self.cursor - breaks[row].start;
+
+        let target = row as isize + by;
+        if target < 0 {
+            self.cursor = 0;
+            return;
+        }
+        let Some(line) = breaks.get(target as usize) else {
+            self.cursor = self.characters.len();
+            return;
+        };
+        // The last column a cursor on this line can have: its last character -- one past it is the
+        // first of the next line -- except on the last line, which ends at the end of the text.
+        let last = match target as usize + 1 == breaks.len() {
+            true => line.len(),
+            false => line.len() - 1,
+        };
+        self.cursor = line.start + column.min(last);
     }
 
     /// The text either side of the cursor, and the character it is sitting on if there is one.
@@ -301,6 +349,66 @@ mod tests {
         let (lines, cursor) = field.wrapped(6);
         assert_eq!(lines, ["abcdef", ""]);
         assert_eq!(cursor, (1, 0));
+    }
+
+    #[test]
+    fn up_and_down_walk_the_lines_the_text_is_drawn_as() {
+        // Drawn six wide: "hello ", "big ", "world".
+        let mut field = TextField::new("hello big world");
+        field.home();
+        field.right();
+        field.right();
+        assert_eq!(field.wrapped(6).1, (0, 2));
+
+        // Down keeps the column where the line below has it.
+        field.down(6);
+        assert_eq!(field.wrapped(6).1, (1, 2));
+        field.down(6);
+        assert_eq!(field.wrapped(6).1, (2, 2));
+
+        // And on the last line goes to the end of the text, rather than out of the box.
+        field.down(6);
+        assert!(field.at_end());
+
+        // From the end of "world", up to "big ", which is shorter: the cursor stops on its last
+        // character, the space, rather than on the first of the line after it.
+        field.up(6);
+        assert_eq!(field.wrapped(6).1, (1, 3));
+        field.up(6);
+        assert_eq!(field.wrapped(6).1, (0, 3));
+
+        // On the first line it goes to the start.
+        field.up(6);
+        assert!(field.at_start());
+        field.up(6);
+        assert!(field.at_start());
+    }
+
+    #[test]
+    fn says_whether_the_cursor_is_on_the_last_line() {
+        // Drawn six wide: "hello ", "big ", "world".
+        let mut field = TextField::new("hello big world");
+        assert!(field.on_last_line(6));
+        field.up(6);
+        assert!(!field.on_last_line(6));
+        field.home();
+        assert!(!field.on_last_line(6));
+
+        // One line is the last line, wherever the cursor is on it.
+        let mut field = TextField::new("a cat");
+        field.home();
+        assert!(field.on_last_line(80));
+        assert!(TextField::default().on_last_line(80));
+    }
+
+    #[test]
+    fn up_and_down_on_one_line_go_to_its_ends() {
+        let mut field = TextField::new("a cat");
+        field.left();
+        field.down(80);
+        assert!(field.at_end());
+        field.up(80);
+        assert!(field.at_start());
     }
 
     #[test]

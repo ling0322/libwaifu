@@ -141,8 +141,8 @@ impl DevicePicker {
                 Line::from(vec![
                     Span::raw(if chosen { "> " } else { "  " }),
                     Span::styled(
-                        // As wide as the longest name, which is the offload one. A column that
-                        // wanders is harder to read down than one with a gap in it.
+                        // Wider than the longest name. A column that wanders is harder to read
+                        // down than one with a gap in it.
                         format!("{:<16}", choice.runtime.name()),
                         row_style(chosen, choice.available),
                     ),
@@ -205,8 +205,9 @@ mod tests {
 
     #[test]
     fn it_opens_on_the_device_the_model_is_on() {
-        let picker = DevicePicker::open(Runtime::CUDA_CPU_OFFLOAD, &here());
-        assert_eq!(picker.selected, at(Runtime::CUDA_CPU_OFFLOAD));
+        let vulkan = Runtime::on(Device::Vulkan);
+        let picker = DevicePicker::open(vulkan, &here());
+        assert_eq!(picker.selected, at(vulkan));
     }
 
     fn screen(devices: &DevicePicker) -> String {
@@ -224,7 +225,6 @@ mod tests {
             assert!(drawn.contains(runtime.name()), "{} {drawn}", runtime.name());
         }
         assert!(drawn.contains("not available on this machine"), "{drawn}");
-        assert!(drawn.contains("slower"), "{drawn}");
 
         // And it says what choosing one costs: the model is read again.
         assert!(drawn.contains("read onto it again"), "{drawn}");
@@ -250,11 +250,9 @@ mod tests {
     #[test]
     fn enter_hands_back_the_device_the_cursor_is_on_and_escape_closes() {
         let mut devices = devices();
-        devices.selected = at(Runtime::CUDA_CPU_OFFLOAD);
-        assert_eq!(
-            devices.key(press(KeyCode::Enter)),
-            Answer::Given(Runtime::CUDA_CPU_OFFLOAD)
-        );
+        let vulkan = Runtime::on(Device::Vulkan);
+        devices.selected = at(vulkan);
+        assert_eq!(devices.key(press(KeyCode::Enter)), Answer::Given(vulkan));
         assert_eq!(devices.key(press(KeyCode::Esc)), Answer::Cancelled);
     }
 
