@@ -72,7 +72,7 @@ one the engine drew with, never a default or `auto`.
 | Field        | Type   | Means                                                                  |
 | ------------ | ------ | ---------------------------------------------------------------------- |
 | `model`      | string | The catalog name with its version, alias resolved: `anima:turbo:v1.1`. |
-| `device`     | string | `"cpu"`, `"metal"`, `"cuda"`, `"cuda-cpu-offload"` or `"vulkan"`.      |
+| `device`     | string | `"cpu"`, `"metal"`, `"cuda"` or `"vulkan"`; `"cuda-cpu-offload"` in old records. |
 | `prompt`     | string | The text the engine was given.                                         |
 | `negative`   | string | `""` for a model that takes no guidance.                               |
 | `width`      | int    | Pixels.                                                                |

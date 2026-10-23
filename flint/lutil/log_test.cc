@@ -132,12 +132,14 @@ CATCH_TEST_CASE("a failing CHECK unwinds what it passes", "[core][util][log]") {
 namespace {
 
 LogSeverity gSunkSeverity = LogSeverity::kDEBUG;
+std::string gSunkTime;
 std::string gSunkSource;
 std::string gSunkMessage;
 int gSunkLines = 0;
 
-void sinkForTest(LogSeverity severity, const char *source, const char *message) {
+void sinkForTest(LogSeverity severity, const char *time, const char *source, const char *message) {
   gSunkSeverity = severity;
+  gSunkTime = time;
   gSunkSource = source;
   gSunkMessage = message;
   ++gSunkLines;
@@ -158,6 +160,10 @@ CATCH_TEST_CASE("a log sink is handed each line in place of stdout", "[core][uti
   // The line alone, with no level or time in front of it: those are the sink's to write.
   CATCH_REQUIRE(gSunkMessage == "the card is 15 of 16 GB full");
   CATCH_REQUIRE(gSunkSource.rfind("log_test.cc:", 0) == 0);
+  // When, as stdout would have put it in front: UTC to the second, "2026-10-23T18:50:41Z".
+  CATCH_REQUIRE(gSunkTime.size() == 20);
+  CATCH_REQUIRE(gSunkTime[10] == 'T');
+  CATCH_REQUIRE(gSunkTime.back() == 'Z');
 
   // And nothing below the level is made at all, sink or no sink.
   setLogSink(sinkForTest);

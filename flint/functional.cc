@@ -114,7 +114,7 @@ std::unique_ptr<TensorData> allocate(Device device, int64_t numel, DType dtype, 
       return op::cpu::CpuTensorData::create(numel, dtype);
 #ifdef LIBWAIFU_CUDA_ENABLED
     case Device::kCuda:
-      return op::cuda::CudaTensorData::create(numel, dtype);
+      return op::cuda::CudaTensorData::create(numel, dtype, 0, hint);
     case Device::kCudaHost:
       return op::cuda::CudaHostTensorData::create(numel, dtype);
 #endif

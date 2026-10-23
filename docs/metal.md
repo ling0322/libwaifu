@@ -67,8 +67,8 @@ work goes to the GPU in batches without anyone waiting.
 device as the model is read, and a run that runs short lets the largest of them go -- the package's
 mapping is still there for each, so nothing is copied back. The rest stay in the package's file,
 which is what lets a model larger than the Mac's memory draw.
-The package stays mapped and is not read when the model is -- `cuda_cpu_offload` reads it
-into the page cache up front, which on a GPU that shares the machine's memory would be the whole
+The package stays mapped and is not read when the model is -- CUDA and Vulkan read it into
+the page cache up front, which on a GPU that shares the machine's memory would be the whole
 model in the memory the mode is there to spare. Each `load` copies its weight off the mapping into
 a buffer from the allocator, reading the disk for whatever pages are not in the cache, and the
 `free` after its last reader hands the buffer to the next weight. The copy is `Context::upload`:

@@ -144,10 +144,14 @@ pub enum WaifuLogLevel {
 #[repr(C)]
 pub struct WaifuLogEvent {
     pub level: WaifuLogLevel,
-    /// Where it was written: "interface.cc:84" for flint, a module's name for Rust.
+    /// Where it was written, as a file and a line: "interface.cc:84" for flint, "engine.rs:712" for
+    /// Rust.
     pub source: *const c_char,
     /// The line alone, with no level or time in front of it.
     pub message: *const c_char,
+    /// When it was written, in UTC: "2026-10-23T18:50:41Z". Last, so that a caller built against a
+    /// header without it reads the rest where it always did.
+    pub time: *const c_char,
 }
 
 /// Called on whichever thread wrote the line, which can be the caller's own. It must be safe to
@@ -165,7 +169,8 @@ unsafe impl Sync for UserData {}
 pub fn log_sink(user_data: *mut c_void, callback: WaifuLogCallback) -> Option<Sink> {
     let callback = callback?;
     let user_data = UserData(user_data);
-    Some(Box::new(move |level, source, message| {
+    Some(Box::new(move |level, time, source, message| {
+        let time = c_string(time);
         let source = c_string(source);
         let message = c_string(message);
         let event = WaifuLogEvent {
@@ -178,6 +183,7 @@ pub fn log_sink(user_data: *mut c_void, callback: WaifuLogCallback) -> Option<Si
             },
             source: source.as_ptr(),
             message: message.as_ptr(),
+            time: time.as_ptr(),
         };
         let user_data = user_data;
         unsafe { callback(user_data.0, &event) };

@@ -140,7 +140,7 @@ public struct AudioClip: Sendable, Equatable {
 }
 
 public enum Device: Sendable {
-    case auto, cpu, metal, cuda, cudaCPUOffload, vulkan
+    case auto, cpu, metal, cuda, vulkan
 
     var c: WaifuDevice {
         switch self {
@@ -148,7 +148,6 @@ public enum Device: Sendable {
         case .cpu: WAIFU_DEVICE_CPU
         case .metal: WAIFU_DEVICE_METAL
         case .cuda: WAIFU_DEVICE_CUDA
-        case .cudaCPUOffload: WAIFU_DEVICE_CUDA_CPU_OFFLOAD
         case .vulkan: WAIFU_DEVICE_VULKAN
         }
     }
@@ -481,7 +480,7 @@ public final class Engine: @unchecked Sendable {
         waifu_engine_free(handle)
     }
 
-    /// What it runs on, as waifu_devices_json names it: "metal", "cpu", "cuda_cpu_offload". Never
+    /// What it runs on, as waifu_devices_json names it: "metal", "cpu", "cuda". Never
     /// "auto", which the library settles when the engine starts.
     public var device: String {
         guard let said = waifu_engine_device(handle) else { return "" }

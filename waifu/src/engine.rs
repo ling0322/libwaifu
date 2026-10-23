@@ -663,7 +663,10 @@ impl Worker {
         }
         let shown = describe::shown_name(asked);
 
-        reporter.tell(&Doing::Reading { model: shown });
+        info(&format!("reading {shown} onto {}", self.runtime.name()));
+        reporter.tell(&Doing::Reading {
+            model: shown.clone(),
+        });
         let (device, device_weight_bytes) =
             (self.runtime.device(), self.runtime.device_weight_bytes());
         let read = || -> crate::Result<Loaded> {
@@ -701,6 +704,12 @@ impl Worker {
             Ok(loaded) => {
                 self.loaded = loaded;
                 self.name = asked.to_string();
+                info(&format!(
+                    "{shown} read onto {} in {:.1}s; {}",
+                    self.runtime.name(),
+                    reporter.started.elapsed().as_secs_f64(),
+                    crate::flint::memory_of(device)
+                ));
                 Ended::Done(())
             }
             Err(error) => {
@@ -714,6 +723,9 @@ impl Worker {
     /// Drops the model, and hands the memory it was in back to the system: on Metal a dropped
     /// tensor's buffer is otherwise kept for reuse, and the next model is read on top of it.
     fn let_go(&mut self) {
+        if !self.name.is_empty() {
+            info(&format!("let go of {}", describe::shown_name(&self.name)));
+        }
         self.loaded = Loaded::Nothing;
         self.name.clear();
         crate::flint::release_memory();
@@ -775,6 +787,21 @@ impl Worker {
             strength: request.strength.clamp(0.0, 1.0),
         };
 
+        info(&format!(
+            "drawing {}x{}{}, {} steps, guidance {:.1}, seed {}",
+            request.width,
+            request.height,
+            match start_from {
+                Some(_) => format!(" from a picture at strength {:.2}", options.strength),
+                None => String::new(),
+            },
+            request.steps,
+            request.guidance,
+            request.seed
+        ));
+        let device = self.runtime.device();
+        let _ = crate::flint::MemorySnapshot::reset_peak_stats(device);
+
         let started = Instant::now();
         let mut reporter = Reporter {
             on_progress,
@@ -808,9 +835,25 @@ impl Worker {
         };
         let tensor = match drawn {
             Ok(Some(tensor)) => tensor,
-            Ok(None) => return Ended::Cancelled,
+            Ok(None) => {
+                info("stopped before the picture was finished");
+                return Ended::Cancelled;
+            }
             Err(error) => return Ended::failed(Failure::Model, error.to_string()),
         };
+
+        let seconds = started.elapsed().as_secs_f64();
+        let peak = match crate::flint::MemorySnapshot::capture(device) {
+            Ok(memory) if memory.total > 0 => {
+                format!(", {} MB at most", memory.peak_allocated / 1_000_000)
+            }
+            _ => String::new(),
+        };
+        info(&format!(
+            "drawn in {seconds:.1}s, {:.2}s a step{peak}; {}",
+            seconds / request.steps.max(1) as f64,
+            crate::flint::memory_of(device)
+        ));
 
         let shape = tensor.shape();
         match to_rgb8(&tensor) {
@@ -953,6 +996,13 @@ impl Worker {
             Err(error) => Ended::failed(Failure::Model, error.to_string()),
         }
     }
+}
+
+/// One line about what the engine is doing, for whoever is listening: see [`crate::log`]. Said
+/// to come from where this was called.
+#[track_caller]
+fn info(message: &str) {
+    crate::log::write(crate::log::Level::Info, message);
 }
 
 /// `image` stretched to `width` by `height`, Lanczos, as the draw command scales a picture to start from.
@@ -1108,7 +1158,8 @@ pub fn device_option(device: Device) -> DeviceOption {
     match device {
         Device::Cpu => DeviceOption::Cpu,
         Device::Cuda => DeviceOption::Cuda,
-        Device::CudaHost => DeviceOption::CudaCpuOffload,
+        // Page-locked host memory is a place for CUDA's tensors, not a device a run goes to.
+        Device::CudaHost => DeviceOption::Cuda,
         Device::Metal => DeviceOption::Metal,
         Device::Vulkan => DeviceOption::Vulkan,
     }

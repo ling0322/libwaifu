@@ -27,6 +27,8 @@ typedef enum {
   WAIFU_DEVICE_CPU = 1,
   WAIFU_DEVICE_METAL = 2,
   WAIFU_DEVICE_CUDA = 3,
+  // The same as WAIFU_DEVICE_CUDA, which now keeps on the card what fits of a model and copies
+  // the rest over as each weight is used. Kept for callers built against an older header.
   WAIFU_DEVICE_CUDA_CPU_OFFLOAD = 4,
   WAIFU_DEVICE_VULKAN = 5,
   // The same as WAIFU_DEVICE_METAL, which now keeps in the model's files whatever does not fit
@@ -76,10 +78,14 @@ typedef struct WaifuEngine WaifuEngine;
 
 typedef struct {
   WaifuLogLevel level;
-  // Where it was written: "interface.cc:84" for flint, a module's name for Rust.
+  // Where it was written, as a file and a line: "interface.cc:84" for flint, "engine.rs:712" for
+  // Rust.
   const char *source;
   // The line alone, with no level or time in front of it.
   const char *message;
+  // When it was written, in UTC: "2026-10-23T18:50:41Z". Last, so that a caller built against a
+  // header without it reads the rest where it always did.
+  const char *time;
 } WaifuLogEvent;
 
 // Called on whichever thread wrote the line, which can be the caller's own. It must be safe to
@@ -255,7 +261,7 @@ void waifu_set_log_level(WaifuLogLevel level);
 char *waifu_machine_json(void);
 
 // Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-// names them -- cpu, cuda, cuda_cpu_offload, metal, vulkan -- with `free` the bytes the device's
+// names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the device's
 // allocator may still take where it can be used -- its memory limit, or the device's memory, less
 // what this process holds there -- and null for the processor or a device that cannot be used. Not
 // the card as other programs see it: that is waifu_machine_json's `vram`. Asking CUDA builds a

@@ -74,6 +74,8 @@ fl::AllocHint toHint(fl_alloc_hint_t hint) {
       return fl::AllocHint::kWeight;
     case FL_ALLOC_OTHER:
       return fl::AllocHint::kOther;
+    case FL_ALLOC_TEMPORARY_WEIGHT:
+      return fl::AllocHint::kTemporaryWeight;
   }
   throw lut::InvalidArgError("unknown allocation hint " + std::to_string(static_cast<int>(hint)));
 }
@@ -326,9 +328,13 @@ void fl_set_fatal_handler(fl_fatal_handler_t handler) {
 // rather than a cast of the function pointer, which is not a thing C++ allows to be called.
 static std::atomic<fl_log_sink_t> gCLogSink{nullptr};
 
-static void toCLogSink(lut::LogSeverity severity, const char *source, const char *message) {
+static void toCLogSink(
+    lut::LogSeverity severity,
+    const char *time,
+    const char *source,
+    const char *message) {
   fl_log_sink_t sink = gCLogSink.load(std::memory_order_acquire);
-  if (sink) sink(static_cast<int32_t>(severity), source, message);
+  if (sink) sink(static_cast<int32_t>(severity), time, source, message);
 }
 
 void fl_set_log_sink(fl_log_sink_t sink) {
@@ -1344,6 +1350,7 @@ int32_t fl_memory_budget(fl_device_type_t device, fl_memory_budget_t *out) {
     fl::MemoryBudget budget = fl::MemoryBudget::capture(toDevice(device));
     out->capacity = budget.capacity;
     out->allocated = budget.allocated;
+    out->held = budget.held;
     return clearError();
   });
 }

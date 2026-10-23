@@ -25,6 +25,7 @@
 
 #include "lutil/span.h"
 #include "flint/device.h"
+#include "flint/memory.h"
 #include "flint/tensor.h"
 
 namespace fl {
@@ -39,7 +40,15 @@ class CudaTensorData : public TensorData {
   /// work enqueued before it was freed, and it becomes this tensor's only where `stream` has
   /// reached the call. Pass the stream that will write it first. It is remembered, because
   /// giving the block back has the same requirement -- see `_stream`.
-  static std::unique_ptr<TensorData> create(int64_t numel, DType dtype, cudaStream_t stream = 0);
+  ///
+  /// A weight kept on the card -- `hint` AllocHint::kWeight, of kResidentWeightBytes or more --
+  /// has memory of its own instead, outside the pool: see llynCudaMallocResident(). Nothing is
+  /// ordered about it, so `stream` is no more than where it is given back.
+  static std::unique_ptr<TensorData> create(
+      int64_t numel,
+      DType dtype,
+      cudaStream_t stream = 0,
+      AllocHint hint = AllocHint::kActivation);
 
   CudaTensorData();
   ~CudaTensorData();
@@ -69,6 +78,9 @@ class CudaTensorData : public TensorData {
   /// transfer filled is freed long after it was waited on, and by then this is the only record of
   /// where the block came from.
   cudaStream_t _stream;
+
+  /// Whether `_data` is memory of its own rather than the pool's, which is how it goes back.
+  bool _resident = false;
 };
 
 }  // namespace cuda

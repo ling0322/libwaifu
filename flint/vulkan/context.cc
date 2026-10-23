@@ -671,6 +671,7 @@ MemoryBudget Context::getMemoryBudget() {
   budget.capacity = _memoryLimit > 0 ? _memoryLimit : _info.deviceLocalBytes;
   // Not the cache: it is emptied before anything past the limit is refused.
   budget.allocated = _allocatedBytes;
+  budget.held = _allocatedBytes + _cachedBytes;
   return budget;
 }
 

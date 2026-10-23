@@ -260,7 +260,14 @@ extern "C" {
     pub fn fl_memory_budget(device: FlDeviceType, out: *mut FlMemoryBudget) -> i32;
     pub fn fl_set_fatal_handler(handler: Option<extern "C" fn()>);
     pub fn fl_set_log_sink(
-        sink: Option<extern "C" fn(level: i32, source: *const c_char, message: *const c_char)>,
+        sink: Option<
+            extern "C" fn(
+                level: i32,
+                time: *const c_char,
+                source: *const c_char,
+                message: *const c_char,
+            ),
+        >,
     );
     pub fn fl_set_log_level(level: i32);
     pub fn fl_release_memory();
@@ -282,4 +289,5 @@ pub struct FlMemorySnapshot {
 pub struct FlMemoryBudget {
     pub capacity: i64,
     pub allocated: i64,
+    pub held: i64,
 }

@@ -285,6 +285,7 @@ MemoryBudget VramAllocator::getMemoryBudget() {
   // What the tensors hold, weights among them, and not the empty chunks: those go back before
   // anything past the limit is refused.
   budget.allocated = _allocatedBytes;
+  budget.held = held();
   return budget;
 }
 

@@ -202,8 +202,9 @@ typedef enum {
 
 typedef struct {
     WaifuLogLevel level;
-    const char *source;      // where it was written: "interface.cc:84" for flint, a module for Rust
+    const char *source;      // where it was written: "interface.cc:84", "engine.rs:712"
     const char *message;     // the line alone, with no level or time in front of it
+    const char *time;        // when it was written, in UTC: "2026-10-23T18:50:41Z"
 } WaifuLogEvent;
 
 typedef void (*WaifuLogCallback)(void *user_data, const WaifuLogEvent *event);
@@ -324,7 +325,7 @@ typedef enum {
     WAIFU_DEVICE_CPU,
     WAIFU_DEVICE_METAL,
     WAIFU_DEVICE_CUDA,
-    WAIFU_DEVICE_CUDA_CPU_OFFLOAD,
+    WAIFU_DEVICE_CUDA_CPU_OFFLOAD,    // the same as WAIFU_DEVICE_CUDA, for older callers
     WAIFU_DEVICE_VULKAN,
     WAIFU_DEVICE_METAL_DISK_OFFLOAD,  // the same as WAIFU_DEVICE_METAL, for older callers
 } WaifuDevice;

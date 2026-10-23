@@ -115,16 +115,20 @@ typedef enum fl_pad_mode_t {
   FL_PAD_REPLICATE = 2,
 } fl_pad_mode_t;
 
-/// What a tensor's storage is for, which an allocator may treat each in its own way: Metal cuts an
-/// activation from the memory it keeps for reuse, and gives a weight a buffer of its own that goes
-/// back to the device whole when it is freed. Every other device ignores it.
+/// What a tensor's storage is for, which an allocator may treat each in its own way, by how long it
+/// lives: a weight kept on the device is given memory that goes back to the device whole when it is
+/// freed -- a buffer of its own on Metal, its own cudaMalloc on CUDA from 2 MB -- and everything
+/// else is cut from the memory the allocator keeps for reuse. Vulkan ignores it.
 typedef enum fl_alloc_hint_t {
   /// What a pass makes and drops again: the outputs of operators.
   FL_ALLOC_ACTIVATION = 0,
-  /// A model's parameter, kept until it is let go of.
+  /// A model's parameter kept on the device, until it is let go of.
   FL_ALLOC_WEIGHT = 1,
   /// Anything else, treated as an activation.
   FL_ALLOC_OTHER = 2,
+  /// A copy of a weight that waits off the device, made for one pass and dropped after its last
+  /// reader: treated as an activation.
+  FL_ALLOC_TEMPORARY_WEIGHT = 3,
 } fl_alloc_hint_t;
 
 /// Select the operator backends for the machine. Call once before anything else here; later calls
@@ -598,8 +602,10 @@ typedef struct fl_memory_budget_t {
   /// The memory limit where there is one, and otherwise what the device has -- a card's memory,
   /// or on Metal what the system suggests one process keep on the GPU. 0 on the CPU.
   int64_t capacity;
-  /// What this process's allocator holds against it now.
+  /// What this process's tensors hold against it now.
   int64_t allocated;
+  /// What the allocator holds from the device, what it keeps for reuse included.
+  int64_t held;
 } fl_memory_budget_t;
 
 /// Measure the budget of `device`'s allocator.
@@ -625,9 +631,13 @@ typedef void (*fl_fatal_handler_t)(void);
 FLAPI void fl_set_fatal_handler(fl_fatal_handler_t handler);
 
 /// What fl_set_log_sink() registers: a line's level -- 0 debug, 1 info, 2 warning, 3 error,
-/// 4 fatal -- where it was written, as "interface.cc:84", and the line alone. Both strings are
-/// valid only for the call.
-typedef void (*fl_log_sink_t)(int32_t level, const char *source, const char *message);
+/// 4 fatal -- when it was written, in UTC as "2026-10-23T18:50:41Z", where it was written, as
+/// "interface.cc:84", and the line alone. Every string is valid only for the call.
+typedef void (*fl_log_sink_t)(
+    int32_t level,
+    const char *time,
+    const char *source,
+    const char *message);
 
 /// Send every line the library writes to `sink` rather than to stdout; NULL puts them back.
 ///

@@ -229,7 +229,7 @@ impl Weights {
         }
 
         let tensor = match on_host {
-            false => tensor.to_device_as(self.device, AllocHint::Weight)?,
+            false => tensor.to_device_with_hint(self.device, AllocHint::Weight)?,
             // On the host, a weight is its file's mapping, and nothing below reads it until a run
             // does -- so it is read here, in the order the package lies in. Except on Metal, where
             // the host's memory is the device's too and the package stays on the disk until a
@@ -282,7 +282,7 @@ impl Weights {
         let eviction_order = self.eviction_order.get_mut();
         for name in order.iter().filter(|name| wanted.contains(name)) {
             let tensor = &self.tensors[name];
-            match tensor.to_device_as(self.device, AllocHint::Weight) {
+            match tensor.to_device_with_hint(self.device, AllocHint::Weight) {
                 Ok(on_device) => {
                     let size = on_device.nbytes()? as u64;
                     bytes += size;
@@ -296,7 +296,6 @@ impl Weights {
 
         crate::log::write(
             crate::log::Level::Info,
-            "weights",
             &format!(
                 "{} of {} weights kept on {}: {} MB of the {} MB there was room for",
                 device_tensors.len(),
@@ -325,7 +324,10 @@ impl Weights {
             self.eviction_order.borrow_mut().used(name);
             return Ok(on_device);
         }
-        Ok(tensor.to_device_as(self.device, AllocHint::Weight)?)
+        // A copy for this pass only, given back after its last reader -- every step, for every
+        // weight left on the host -- so it is cut from what the allocator keeps for reuse, as an
+        // activation is, rather than made and given back to the device whole.
+        Ok(tensor.to_device_with_hint(self.device, AllocHint::TemporaryWeight)?)
     }
 
     /// Let go of the device's copy of the weight [`EvictionOrder`] says goes first, and say which
@@ -347,6 +349,19 @@ impl Weights {
         );
         drop(gone);
         Ok(Some(name))
+    }
+
+    /// The device a run wants the weights on.
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// How many bytes the weight called `name` is, if there is one here.
+    pub fn bytes_of(&self, name: &str) -> Option<u64> {
+        self.tensors
+            .get(name)
+            .and_then(|tensor| tensor.nbytes().ok())
+            .map(|bytes| bytes as u64)
     }
 
     /// What shape the weight called `name` is, if there is one here.

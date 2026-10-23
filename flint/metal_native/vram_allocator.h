@@ -77,10 +77,11 @@ class VramAllocator {
   VramAllocator(const VramAllocator &) = delete;
   VramAllocator &operator=(const VramAllocator &) = delete;
 
-  /// A buffer of at least `bytes` bytes for what `hint` says it is for. An activation, or anything
-  /// that is not a weight, is cut from a chunk the allocator holds, or from a new one. A weight is
-  /// given a buffer of its own, so that letting it go gives its memory back to the device whole
-  /// rather than leaving a hole in a chunk.
+  /// A buffer of at least `bytes` bytes for what `hint` says it is for. An activation, a temporary
+  /// copy of a weight, or anything else that is not a weight kept on the device, is cut from a
+  /// chunk the allocator holds, or from a new one. A weight is given a buffer of its own, so that
+  /// letting it go gives its memory back to the device whole rather than leaving a hole in a
+  /// chunk.
   /// @throw lut::OutOfMemoryError when the device is out of memory, or the allocator would pass its
   ///     memory limit, even after the empty chunks have gone back.
   ///     Nothing is taken then, so a caller that frees something may ask again.

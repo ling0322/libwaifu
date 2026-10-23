@@ -106,7 +106,7 @@
 
 use std::fmt;
 
-use super::{functional as F, Bound, Tensor};
+use super::{functional as F, Bound, Device, MemoryBudget, MemorySnapshot, Tensor};
 use crate::error::{Error, Result};
 
 use super::graph::{Graph, Site};
@@ -427,34 +427,96 @@ fn blame(value: Value, op: &Op, site: &Site, error: Error) -> Error {
     Error::model(format!("{value} = {op}, built at {site}: {error}"))
 }
 
+/// What a line says of the weights `names` let go of to make room: how many, how large, and the
+/// first few of them by name.
+fn let_go_of(weights: &Weights, names: &[String]) -> String {
+    const NAMED: usize = 3;
+    let bytes: u64 = names.iter().filter_map(|name| weights.bytes_of(name)).sum();
+    let mut named = names
+        .iter()
+        .take(NAMED)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > NAMED {
+        named.push_str(&format!(", and {} more", names.len() - NAMED));
+    }
+    let weights = match names.len() {
+        1 => "1 weight".to_string(),
+        count => format!("{count} weights"),
+    };
+    format!(
+        "{weights} ({} MB) moved off the device: {named}",
+        bytes / 1_000_000
+    )
+}
+
+/// What `device`'s allocator has, as a line says it: what the tensors use, what the allocator
+/// holds from the device -- its pool, cache or chunks among it -- and what it may hold, and what
+/// the device itself has free. Where an allocation failed, a held far above the used is memory
+/// the allocator has and could not hand out.
+pub(crate) fn memory_of(device: Device) -> String {
+    const MB: i64 = 1_000_000;
+    let budget = match MemoryBudget::capture(device) {
+        Ok(budget) if budget.capacity > 0 => budget,
+        _ => return format!("{} says nothing of its memory", device.name()),
+    };
+    let free = match MemorySnapshot::capture(device) {
+        Ok(memory) if memory.total > 0 => format!(", {} MB free on it", memory.free / MB),
+        _ => String::new(),
+    };
+    format!(
+        "{}: {} MB in use, {} MB held of {} MB{free}",
+        device.name(),
+        budget.allocated / MB,
+        budget.held / MB,
+        budget.capacity / MB,
+    )
+}
+
 /// Run one instruction against the slots.
 ///
 /// The whole of what a run does.
 fn step(inst: &Inst, slots: &mut [Option<Tensor>], context: &RunContext<'_>) -> Result<()> {
     match inst {
         Inst::Run { value, op, site } => {
-            // Running out of the device's memory is answered by moving a weight kept there back
-            // to the host and running the instruction again, for as long as there is one to move.
-            // Again is the same: an instruction writes what it makes and nothing it reads, and a
-            // draw has its output before it moves the generator on.
-            let tensor = loop {
+            // Running out of the device's memory is answered by letting a weight kept there go
+            // and running the instruction again, for as long as there is one to let go of. Again
+            // is the same: an instruction writes what it makes and nothing it reads, and a draw
+            // has its output before it moves the generator on. What was let go of is said once,
+            // when the instruction is done one way or the other, rather than a line a weight.
+            let mut let_go = Vec::new();
+            let mut last_refusal = String::new();
+            let outcome = loop {
                 match execute(op, slots, context) {
-                    Ok(tensor) => break tensor,
+                    Ok(tensor) => break Ok(tensor),
                     Err(error) if error.is_out_of_memory() => {
+                        last_refusal = error.to_string();
                         match context.params().evict_one()? {
-                            Some(name) => crate::log::write(
-                                crate::log::Level::Info,
-                                "ir",
-                                &format!(
-                                    "out of memory at {value} = {op}: {name} moved off the device"
-                                ),
-                            ),
-                            None => return Err(blame(*value, op, site, error)),
+                            Some(name) => let_go.push(name),
+                            None => break Err(blame(*value, op, site, error)),
                         }
                     }
-                    Err(error) => return Err(blame(*value, op, site, error)),
+                    Err(error) => break Err(blame(*value, op, site, error)),
                 }
             };
+            if !let_go.is_empty() {
+                let weights = context.params();
+                crate::log::write(
+        crate::log::Level::Info,
+        &format!(
+                        "out of memory at {value} = {op}: {}; {}; the last refusal: {last_refusal}; \
+                         {} now",
+                        let_go_of(weights, &let_go),
+                        match outcome.is_ok() {
+                            true => "then it ran",
+                            false => "and it still did not fit",
+                        },
+                        memory_of(weights.device()),
+                    ),
+                );
+            }
+            let tensor = outcome?;
 
             slots[value.slot()] = Some(tensor);
         }
@@ -1174,6 +1236,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(stray.contains("no input called \"hidde\""), "{stray}");
+    }
+
+    #[test]
+    fn what_was_let_go_of_is_said_in_one_line() {
+        let tensors = (0..5)
+            .map(|i| {
+                let name = format!("w{i}");
+                (
+                    name,
+                    Tensor::from_f32(&[250_000], &vec![0.0; 250_000]).unwrap(),
+                )
+            })
+            .collect();
+        let weights = Weights::from_tensors(tensors, Device::Cpu).unwrap();
+
+        let names: Vec<String> = (0..5).map(|i| format!("w{i}")).collect();
+        assert_eq!(
+            let_go_of(&weights, &names),
+            "5 weights (5 MB) moved off the device: w0, w1, w2, and 2 more"
+        );
+        assert_eq!(
+            let_go_of(&weights, &names[..1]),
+            "1 weight (1 MB) moved off the device: w0"
+        );
     }
 
     #[test]

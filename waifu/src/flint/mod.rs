@@ -96,6 +96,7 @@ mod weights;
 
 pub use fp8::{fp8_available, SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
+pub(crate) use ir::memory_of;
 pub use ir::{Inst, Ir, RunContext};
 pub use op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
 pub use operators::Operators;
@@ -173,22 +174,29 @@ pub enum Device {
     Vulkan = 4,
 }
 
-/// What a tensor's storage is for, which an allocator may treat each in its own way.
+/// What a tensor's storage is for, which an allocator may treat each in its own way, by how long it
+/// lives.
 ///
-/// Metal cuts an activation from the memory it keeps for reuse, and gives a weight a buffer of its
-/// own, which goes back to the device whole when the weight is let go of -- so that dropping a
-/// weight to make room for another frees memory a new one can have, rather than a hole in a chunk.
-/// Every other device ignores it.
+/// A weight kept on the device is given memory that goes back to the device whole when the weight
+/// is let go of -- a buffer of its own on Metal, its own `cudaMalloc` on CUDA from 2 MB -- so that
+/// dropping one to make room frees memory a new allocation can have, rather than a hole in a chunk
+/// or a block of a pool that small tensors beside it keep from going back. Everything else lives
+/// for a pass at most and is cut from the memory the allocator keeps for reuse. Vulkan gives every
+/// tensor a buffer of its own and ignores it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(i32)]
 pub enum AllocHint {
     /// What a pass makes and drops again: the outputs of operators.
     #[default]
     Activation = 0,
-    /// A model's parameter, kept until it is let go of.
+    /// A model's parameter kept on the device, until it is let go of.
     Weight = 1,
     /// Anything else, treated as an activation.
     Other = 2,
+    /// A copy of a weight that waits off the device, made by the load that reads it and dropped
+    /// after its last reader in the same pass: an activation, by how long it lives. See
+    /// [`Weights::load`].
+    TemporaryWeight = 3,
 }
 
 impl Device {
@@ -367,7 +375,14 @@ pub fn init() {
 /// Not after [`init`], unlike the rest of this module: the first thing initialising does is write
 /// what hardware it found, and a sink set after that has already missed it.
 pub(crate) fn set_log_sink(
-    sink: Option<extern "C" fn(level: i32, source: *const c_char, message: *const c_char)>,
+    sink: Option<
+        extern "C" fn(
+            level: i32,
+            time: *const c_char,
+            source: *const c_char,
+            message: *const c_char,
+        ),
+    >,
 ) {
     unsafe { ffi::fl_set_log_sink(sink) };
 }
@@ -465,6 +480,10 @@ pub struct MemoryBudget {
     pub capacity: i64,
     /// What this process's tensors hold against it now, and on CUDA the operators' workspaces.
     pub allocated: i64,
+    /// What the allocator holds from the device: `allocated`, and what it keeps for reuse besides
+    /// -- CUDA's pool, Vulkan's cache, Metal's chunks. Far more than `allocated` when an
+    /// allocation fails is memory the allocator has and cannot hand out.
+    pub held: i64,
 }
 
 impl MemoryBudget {
@@ -476,6 +495,7 @@ impl MemoryBudget {
         Ok(MemoryBudget {
             capacity: raw.capacity,
             allocated: raw.allocated,
+            held: raw.held,
         })
     }
 
@@ -674,11 +694,11 @@ impl Tensor {
     /// for it. Reading an element before writing it gives whatever the allocator handed back, so
     /// this is only worth using when every element is written first.
     pub fn empty(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
-        Tensor::empty_as(shape, dtype, device, AllocHint::Activation)
+        Tensor::empty_with_hint(shape, dtype, device, AllocHint::Activation)
     }
 
     /// [`Tensor::empty`], for what `hint` says the storage is for.
-    pub fn empty_as(
+    pub fn empty_with_hint(
         shape: &[i32],
         dtype: DType,
         device: Device,
@@ -1119,12 +1139,12 @@ impl Tensor {
 
     /// Copy the tensor to another device.
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
-        self.to_device_as(device, AllocHint::Activation)
+        self.to_device_with_hint(device, AllocHint::Activation)
     }
 
     /// [`Tensor::to_device`], with the copy's storage allocated for what `hint` says it is for: a
     /// weight moved onto the device is [`AllocHint::Weight`].
-    pub fn to_device_as(&self, device: Device, hint: AllocHint) -> Result<Tensor> {
+    pub fn to_device_with_hint(&self, device: Device, hint: AllocHint) -> Result<Tensor> {
         // Already there, so nothing is copied and no operator is asked anything.
         if self.device() == device {
             return Ok(self.clone());
@@ -1133,7 +1153,7 @@ impl Tensor {
         // A transfer is a plain copy of one run of bytes, so a strided tensor is packed first, on
         // the side it is on -- the host's operators for either kind of host memory.
         let source = self.contiguous()?;
-        let dest = Tensor::empty_as(&source.layout.shape, source.dtype(), device, hint)?;
+        let dest = Tensor::empty_with_hint(&source.layout.shape, source.dtype(), device, hint)?;
         let operators = transfer_operators(source.device(), device)?;
         check(unsafe { ffi::fl_transfer(operators, source.raw(), dest.raw()) })?;
         Ok(dest)

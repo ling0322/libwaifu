@@ -102,7 +102,7 @@ pub extern "C" fn waifu_machine_json() -> *mut c_char {
 }
 
 /// Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-/// names them -- cpu, cuda, cuda_cpu_offload, metal, vulkan -- with `free` the bytes the device's
+/// names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the device's
 /// allocator may still take where it can be used -- its memory limit, or the device's memory, less
 /// what this process holds there -- and null for the processor or a device that cannot be used. Not
 /// the card as other programs see it: that is waifu_machine_json's `vram`. Asking CUDA builds a
@@ -258,6 +258,8 @@ pub enum WaifuDevice {
     WAIFU_DEVICE_CPU = 1,
     WAIFU_DEVICE_METAL = 2,
     WAIFU_DEVICE_CUDA = 3,
+    /// The same as WAIFU_DEVICE_CUDA, which now keeps on the card what fits of a model and copies
+    /// the rest over as each weight is used. Kept for callers built against an older header.
     WAIFU_DEVICE_CUDA_CPU_OFFLOAD = 4,
     WAIFU_DEVICE_VULKAN = 5,
     /// The same as WAIFU_DEVICE_METAL, which now keeps in the model's files whatever does not fit
@@ -444,7 +446,7 @@ fn device_option(device: WaifuDevice) -> DeviceOption {
         WaifuDevice::WAIFU_DEVICE_CPU => DeviceOption::Cpu,
         WaifuDevice::WAIFU_DEVICE_METAL => DeviceOption::Metal,
         WaifuDevice::WAIFU_DEVICE_CUDA => DeviceOption::Cuda,
-        WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD => DeviceOption::CudaCpuOffload,
+        WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD => DeviceOption::Cuda,
         WaifuDevice::WAIFU_DEVICE_VULKAN => DeviceOption::Vulkan,
         WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD => DeviceOption::Metal,
     }

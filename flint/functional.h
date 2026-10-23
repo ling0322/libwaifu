@@ -51,7 +51,7 @@ namespace F {
 /// @brief Uninitialized storage for `numel` elements of `dtype` on `device` -- Device::kCudaHost
 /// being page-locked host memory the CUDA device reads directly. At least one element is
 /// allocated, so that a tensor with a dimension of zero still has storage to point at. `hint` says
-/// what it is for, which only Metal tells apart.
+/// what it is for, which Metal and CUDA tell apart.
 std::unique_ptr<TensorData> allocate(
     Device device,
     int64_t numel,

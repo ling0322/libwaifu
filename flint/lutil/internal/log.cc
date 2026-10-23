@@ -76,7 +76,7 @@ LogWrapper::~LogWrapper() {
   if (sink) {
     char source[256];
     snprintf(source, sizeof(source), "%s:%d", source_file_, source_line_);
-    sink(severity_, source, message.c_str());
+    sink(severity_, Time(), source, message.c_str());
   } else {
     printf("%s %s %s:%d] %s\n", Severity(), Time(), source_file_, source_line_, message.c_str());
   }

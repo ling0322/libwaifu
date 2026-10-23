@@ -22,11 +22,14 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/test_functional.h"
 #include "flint/cuda/common.h"
 #include "flint/device.h"
+#include "flint/functional.h"
 #include "flint/memory.h"
 #include "flint/operators.h"
 #include "lutil/error.h"
@@ -184,6 +187,8 @@ CATCH_TEST_CASE("test CUDA memory budget counts what flint allocates", "[fl][cud
     Tensor x = F::empty(Device::getCuda(), {1000, 1001}, DType::kFloat16);
     MemoryBudget during = MemoryBudget::capture(Device::getCuda());
     CATCH_REQUIRE(during.allocated == before.allocated + 1000 * 1001 * 2);
+    // What the pool holds is at least what is in use: the pool rounds up, and keeps what is freed.
+    CATCH_REQUIRE(during.held >= during.allocated);
   }
   CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).allocated == before.allocated);
 }
@@ -232,6 +237,61 @@ CATCH_TEST_CASE("test CUDA running out of the card is out of memory", "[fl][cuda
   CATCH_REQUIRE_THROWS_AS(op::cuda::llynCudaMalloc(tooMuch), lut::OutOfMemoryError);
   CATCH_REQUIRE(cudaGetLastError() == cudaSuccess);
   CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).allocated == held);
+}
+
+CATCH_TEST_CASE("test CUDA weights kept on the card have memory of their own", "[fl][cuda][memory]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+#ifndef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
+  CATCH_SKIP("built without the pool, where every allocation is memory of its own");
+#else
+  cudaMemPool_t memoryPool;
+  LL_CHECK_CUDA_STATUS(cudaDeviceGetDefaultMemPool(&memoryPool, 0));
+  auto reserved = [&memoryPool]() {
+    uint64_t bytes = 0;
+    LL_CHECK_CUDA_STATUS(
+        cudaMemPoolGetAttribute(memoryPool, cudaMemPoolAttrReservedMemCurrent, &bytes));
+    return static_cast<int64_t>(bytes);
+  };
+  auto cardFree = []() {
+    size_t free = 0;
+    size_t total = 0;
+    LL_CHECK_CUDA_STATUS(cudaMemGetInfo(&free, &total));
+    return static_cast<int64_t>(free);
+  };
+  constexpr int64_t kFourMB = 4 << 20;
+  constexpr int kCount = 64;
+  MemorySnapshot::releaseUnused(Device::getCuda());
+
+  // Large weights, with small ones and temporary copies in among them, as a model's are.
+  int64_t poolBefore = reserved();
+  MemoryBudget before = MemoryBudget::capture(Device::getCuda());
+  std::vector<std::unique_ptr<TensorData>> large;
+  std::vector<std::unique_ptr<TensorData>> small;
+  for (int i = 0; i < kCount; ++i) {
+    large.push_back(F::allocate(Device::getCuda(), kFourMB, DType::kInt8, AllocHint::kWeight));
+    small.push_back(F::allocate(Device::getCuda(), 4096, DType::kInt8, AllocHint::kWeight));
+    small.push_back(
+        F::allocate(Device::getCuda(), kFourMB, DType::kInt8, AllocHint::kTemporaryWeight));
+  }
+
+  // The large weights are not the pool's, and every byte is counted either way.
+  int64_t smallBytes = kCount * (4096 + kFourMB);
+  MemoryBudget during = MemoryBudget::capture(Device::getCuda());
+  CATCH_REQUIRE(during.allocated == before.allocated + kCount * kFourMB + smallBytes);
+  // The pool grew by the small ones and the temporary copies, and the granule it rounds to: not by
+  // another 256 MB of weights besides.
+  CATCH_REQUIRE(reserved() - poolBefore < smallBytes + kCount * kFourMB / 2);
+  CATCH_REQUIRE(during.held >= reserved() + kCount * kFourMB);
+
+  // Let go of, the large weights' memory is the driver's again -- not the pool's to keep -- with
+  // every small tensor beside them still held. Card-wide, so with room for what else moves it.
+  int64_t freeWhileHeld = cardFree();
+  large.clear();
+  CATCH_REQUIRE(cardFree() - freeWhileHeld >= kCount * kFourMB * 3 / 4);
+  CATCH_REQUIRE(
+      MemoryBudget::capture(Device::getCuda()).allocated == before.allocated + smallBytes);
+#endif
 }
 
 }  // namespace fl

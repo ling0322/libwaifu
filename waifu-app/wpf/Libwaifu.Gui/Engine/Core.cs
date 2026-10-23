@@ -120,13 +120,13 @@ namespace Libwaifu.Gui.Engine
     /// library has on Windows.
     /// </summary>
     /// <remarks>
-    /// "cuda (offload)" is WAIFU_DEVICE_CUDA_CPU_OFFLOAD, which keeps what will not fit in the
-    /// card's memory in the host's and streams it in. It is the answer to a model that is bigger
-    /// than the card, which on a 6 GB laptop card is most of them.
+    /// There is no "cuda (offload)" any more: cuda keeps on the card what fits of a model, copies
+    /// the rest over as each weight is used, and lets weights go when a run runs short, so a model
+    /// bigger than the card -- on a 6 GB laptop card, most of them -- draws on cuda.
     /// </remarks>
     public static class Devices
     {
-        public static readonly string[] All = { "cuda", "cuda (offload)", "vulkan", "cpu" };
+        public static readonly string[] All = { "cuda", "vulkan", "cpu" };
 
         /// <summary>
         /// What to start on. The library has an "auto" of its own, but a list that says which

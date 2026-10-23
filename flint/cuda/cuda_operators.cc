@@ -503,32 +503,17 @@ MemorySnapshot CudaOperators::captureMemorySnapshot() {
   size_t totalMemory = 0;
   LL_CHECK_CUDA_STATUS(cudaMemGetInfo(&freeMemory, &totalMemory));
 
-  uint64_t allocatedMemory = 0;
-  uint64_t peakAllocatedMemory = 0;
-#ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
-  cudaMemPool_t memoryPool;
-  LL_CHECK_CUDA_STATUS(cudaDeviceGetDefaultMemPool(&memoryPool, 0));
-  LL_CHECK_CUDA_STATUS(
-      cudaMemPoolGetAttribute(memoryPool, cudaMemPoolAttrUsedMemCurrent, &allocatedMemory));
-  LL_CHECK_CUDA_STATUS(
-      cudaMemPoolGetAttribute(memoryPool, cudaMemPoolAttrUsedMemHigh, &peakAllocatedMemory));
-#endif
-
+  // flint's own count rather than the pool's, which does not see the weights that have memory of
+  // their own -- and is there with or without the pool.
   return MemorySnapshot(
       static_cast<int64_t>(totalMemory),
       static_cast<int64_t>(freeMemory),
-      static_cast<int64_t>(allocatedMemory),
-      static_cast<int64_t>(peakAllocatedMemory));
+      getCudaAllocatedBytes(),
+      getCudaPeakAllocatedBytes());
 }
 
 void CudaOperators::resetPeakMemoryStats() {
-#ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
-  // the high watermark of a memory pool can only be reset to zero.
-  cudaMemPool_t memoryPool;
-  uint64_t zero = 0;
-  LL_CHECK_CUDA_STATUS(cudaDeviceGetDefaultMemPool(&memoryPool, 0));
-  LL_CHECK_CUDA_STATUS(cudaMemPoolSetAttribute(memoryPool, cudaMemPoolAttrUsedMemHigh, &zero));
-#endif
+  resetCudaPeakAllocatedBytes();
 }
 
 void CudaOperators::releaseUnusedMemory() {
@@ -558,6 +543,15 @@ void CudaOperators::setMemoryLimit(int64_t bytes) {
 MemoryBudget CudaOperators::getMemoryBudget() {
   MemoryBudget budget;
   budget.allocated = getCudaAllocatedBytes();
+  budget.held = budget.allocated;
+#ifdef LIBWAIFU_CUDA_MALLOC_ASYNC_ENABLED
+  cudaMemPool_t memoryPool;
+  uint64_t reserved = 0;
+  LL_CHECK_CUDA_STATUS(cudaDeviceGetDefaultMemPool(&memoryPool, 0));
+  LL_CHECK_CUDA_STATUS(
+      cudaMemPoolGetAttribute(memoryPool, cudaMemPoolAttrReservedMemCurrent, &reserved));
+  budget.held = static_cast<int64_t>(reserved) + getCudaResidentBytes();
+#endif
   budget.capacity = getCudaMemoryLimit();
   if (!budget.capacity) {
     // The card's, whoever else has some of it: what is free is the snapshot's to say.

@@ -906,9 +906,11 @@ CATCH_TEST_CASE("test Vulkan allocation past the memory limit is out of memory",
   CATCH_REQUIRE_THROWS_AS(context->allocate(kTwoMB), lut::OutOfMemoryError);
   CATCH_REQUIRE(vk()->getMemoryBudget().allocated == before.allocated + kTwoMB);
 
-  // Given back, it waits in the cache and is the next buffer, inside the limit.
+  // Given back, it waits in the cache and is the next buffer, inside the limit -- held, and not in
+  // use.
   context->free(first);
   CATCH_REQUIRE(vk()->getMemoryBudget().allocated == before.allocated);
+  CATCH_REQUIRE(vk()->getMemoryBudget().held == before.allocated + kTwoMB);
   op::vulkan::Buffer again = context->allocate(kTwoMB);
   context->free(again);
 

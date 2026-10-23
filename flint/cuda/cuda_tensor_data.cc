@@ -36,11 +36,16 @@ namespace cuda {
 std::unique_ptr<TensorData> CudaTensorData::create(
     int64_t numel,
     DType dtype,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    AllocHint hint) {
   auto tensorData = std::make_unique<CudaTensorData>();
 
   CHECK(numel > 0);
-  tensorData->_data = llynCudaMalloc(dtype.getTotalSize(numel), stream);
+  int64_t size = dtype.getTotalSize(numel);
+  tensorData->_resident =
+      hint == AllocHint::kWeight && size >= static_cast<int64_t>(kResidentWeightBytes);
+  tensorData->_data = tensorData->_resident ? llynCudaMallocResident(size)
+                                            : llynCudaMalloc(size, stream);
 
   tensorData->_stream = stream;
   tensorData->_numel = numel;
@@ -59,8 +64,14 @@ CudaTensorData::~CudaTensorData() {
     // Given back in the order of the stream that last owned these bytes, which `_stream` tracks
     // for exactly this. Neither case needs the host to wait: a fetch nobody wanted is freed in
     // the copy stream, where the copy that may still be writing it runs, and one that was taken
-    // is freed in the compute stream, which is ordered after that copy.
-    llynCudaFree(_data, _dtype.getTotalSize(_numel), _stream);
+    // is freed in the compute stream, which is ordered after that copy. A weight's memory of its
+    // own is the exception: cudaFree waits for the device, which is what lets it go back whole.
+    int64_t size = _dtype.getTotalSize(_numel);
+    if (_resident) {
+      llynCudaFreeResident(_data, size);
+    } else {
+      llynCudaFree(_data, size, _stream);
+    }
     _data = nullptr;
   }
 }

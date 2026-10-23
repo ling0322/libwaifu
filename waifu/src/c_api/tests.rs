@@ -341,7 +341,7 @@ unsafe extern "C" fn on_log(user_data: *mut c_void, event: *const WaifuLogEvent)
 fn a_log_callback_hears_the_library_s_lines() {
     let lines: Box<Mutex<Vec<(WaifuLogLevel, String)>>> = Box::default();
     waifu_set_log_callback(&*lines as *const _ as *mut c_void, Some(on_log));
-    crate::log::write(crate::log::Level::Warning, "test", "a line for the app");
+    crate::log::write(crate::log::Level::Warning, "a line for the app");
     waifu_set_log_callback(ptr::null_mut(), None);
 
     let lines = lines.lock().unwrap();
