@@ -42,39 +42,26 @@ API's voice conversion. It changes whose voice it is and keeps the words, timing
 
 ## Low memory mode
 
-`-device cuda_cpu_offload` keeps the weights in host memory and moves each one onto the card as it
-is used, so a model far larger than the card still draws. It costs speed rather than the picture
--- the whole model crosses the bus once per step -- and it is never picked for you, because a card
-the model does not fit on is something to be told about rather than worked around silently.
+`-device cuda`, `-device vulkan` and `-device metal` keep as many of the model's weights on the
+GPU as fit -- the smallest first, up to 85% of the memory limit, which is the whole card (on a Mac,
+the device's budget) where none is set and the "vram (GB)" slider in the Mac app -- and copy the
+rest onto the GPU as each is used. A picture that needs more room than is left lets the largest
+weights on the GPU go as it goes, and reads them across again when they are next used. So a
+model larger than the card still draws, more slowly, rather than running out of memory. On a Mac
+the weights left off the GPU stay in the model's files, each read off the disk as it is used, so a
+model larger than the Mac's memory draws too.
 
-RTX 5060 Ti, 16 GB, card otherwise free. `krea2:turbo-fp8`, 1024x1024, the eight steps the
-distilled release is for, seed 7:
-
-| `-device` | peak GPU memory | outcome | wall |
-|---|---|---|---|
-| `cuda` | 15.4 GB | `Aborted: out of memory` | - |
-| `cuda_cpu_offload` | 1.2 GB | a picture | 67 s |
-
-`-device metal_disk_offload` is the same for a Mac, whose GPU shares the machine's memory: the
-weights are left in the model's files and each is read off the disk as it is used, so a model
-larger than the Mac's memory still draws. Slower again -- the disk is read once per step for every
-weight the page cache has let go of -- and never picked for you either.
-
-`-device-weights GB` beside either keeps that many gigabytes of the model's weights on the device,
-the smallest first, and moves only the rest: `-device cuda_cpu_offload -device-weights 6`. The
-small weights -- norms, biases, scales -- are most of the moves and little of the bytes, so the
-first gigabyte or so takes away most of the waiting, and what is left to move is the large
-projections. The default is 0, which is the offload device as above.
+The small weights -- norms, biases, scales -- are most of the moves and little of the bytes, so
+what is left to copy across each step is the large projections.
 
 ## Run
 
-`waifu` asks two things in the terminal -- the task (txt2img or img2img) and the model for it --
-fetches the model under a progress bar if it is not on the disk yet, and then puts up the drawing
-screen while the model is read onto the fastest device it fits on: a prompt, what to steer away
-from, the steps, guidance, size and seed, for img2img a picture to start from (enter on it browses
-the disk) and how far to walk from it, and the device. Enter on the device row lists every device
-this machine has and warns where the model may run out of memory; picking another reads the model
-onto it in the background.
+`waifu` asks for a model in the terminal, fetches it under a progress bar if it is not on the disk
+yet, and then puts up the drawing screen while the model is read onto the fastest device this
+machine has: a prompt, what to steer away from, the steps, guidance, size and seed, and the device.
+The terminal draws from a prompt (txt2img); drawing from a picture is the library's, for the
+programs built over it. Enter on the device row lists every device this machine has; picking
+another reads the model onto it in the background.
 
 ```bash
 $ waifu
@@ -88,8 +75,7 @@ model: to run another one, leave and run `waifu` again. The choosing can be skip
 model on the command line:
 
 ```bash
-$ waifu -m sdxl:wai -device cuda              # txt2img; img2img if -i names a picture
-$ waifu -task img2img -m sdxl:noob -i cat.png
+$ waifu -m sdxl:wai -device cuda
 ```
 
 Fetched models go into `~/.cache/libwaifu/models` (`%LOCALAPPDATA%\libwaifu\models` on Windows).
@@ -159,13 +145,11 @@ otherwise.
 
 | `-device` | what it means |
 |---|---|
-| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default, and never `metal_disk_offload`, nor `cuda_cpu_offload` except where the model is measured not to fit: those are for a model the device cannot hold, which is not a thing to decide silently on someone's behalf. |
+| `auto` | The first accelerator this build has -- CUDA, then Metal, then Vulkan -- and the CPU where there is none. The default. |
 | `cpu` | The CPU kernels. |
-| `cuda` | The card, weights moved once and kept there. |
-| `cuda_cpu_offload` | Weights stay in host memory and each is moved onto the card as it is used, so a model larger than the card still draws. Slower: the whole model crosses the bus once per step. Also spelled `cuda-cpu-offload`. |
-| `metal` | The GPU on Apple Silicon, through flint's own kernels -- and an M5's neural accelerators. |
-| `metal_disk_offload` | Metal, with the weights left in the model's files and each read off the disk as it is used, so a model larger than the Mac's memory still draws. Slower. Also spelled `metal-disk-offload`. |
-| `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. |
+| `cuda` | The card. As many of the weights as fit stay on it, the smallest first, and the rest are moved onto it as they are used; a run that runs short lets weights on the card go, so a model larger than the card still draws. |
+| `metal` | The GPU on Apple Silicon, through flint's own kernels -- and an M5's neural accelerators. As many of the weights as fit stay on it, the smallest first; the rest are read off the disk as they are used, so a model larger than the Mac's memory still draws. |
+| `vulkan` | Any GPU with a Vulkan 1.2 driver, through flint's own kernels. Keeps the weights on it as `cuda` does. |
 
 A build only has the devices it was configured with, so `cuda` on a `-DWITH_CUDA=OFF` build is a
 device that is not there. See the matrix above and the build section below.
@@ -175,11 +159,11 @@ device that is not there. See the matrix above and the build section below.
 The Rust API reads a model and hands back an image:
 
 ```rust
-use waifu::{to_rgb8, Device, GenerationOptions, Manifest, Residency, Sdxl};
+use waifu::{to_rgb8, Device, GenerationOptions, Manifest, Sdxl};
 
 fn main() -> Result<(), waifu::Error> {
 	let manifest = Manifest::open("sdxl.yaml")?;
-	let model = Sdxl::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
+	let model = Sdxl::from_manifest(Device::Cuda, u64::MAX, &manifest)?; // as many weights on the card as fit
 
 	let options = GenerationOptions {
 		width: 1024,

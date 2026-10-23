@@ -55,9 +55,10 @@ impl Level {
     }
 }
 
-/// What receives a line: its level, where it was written, and the line alone. Called on
-/// whichever thread wrote it.
-pub type Sink = Box<dyn Fn(Level, &str, &str) + Send + Sync>;
+/// What receives a line: its level, when it was written as the library says it -- empty for the
+/// model manager, which does not -- where it was written, and the line alone. Called on whichever
+/// thread wrote it.
+pub type Sink = Box<dyn Fn(Level, &str, &str, &str) + Send + Sync>;
 
 static SINK: RwLock<Option<Sink>> = RwLock::new(None);
 
@@ -74,14 +75,15 @@ pub fn listen() {
 }
 
 /// A line to the sink where there is one, and the console where there is not.
-fn hand_over(level: Level, source: &str, message: &str) {
+fn hand_over(level: Level, time: &str, source: &str, message: &str) {
     if level == Level::Fatal {
         crate::tui::give_the_screen_back();
     }
     let sink = SINK.read().unwrap_or_else(|held| held.into_inner());
-    match sink.as_ref() {
-        Some(sink) => sink(level, source, message),
-        None => eprintln!("{} {source}] {message}", level.name()),
+    match (sink.as_ref(), time.is_empty()) {
+        (Some(sink), _) => sink(level, time, source, message),
+        (None, true) => eprintln!("{} {source}] {message}", level.name()),
+        (None, false) => eprintln!("{} {time} {source}] {message}", level.name()),
     }
 }
 
@@ -95,7 +97,13 @@ unsafe extern "C" fn from_waifu(_: *mut c_void, event: *const WaifuLogEvent) {
         WaifuLogLevel::WAIFU_LOG_FATAL => Level::Fatal,
     };
     let source = c::text(event.source).unwrap_or_default();
-    hand_over(level, &source, &c::text(event.message).unwrap_or_default());
+    let time = c::text(event.time).unwrap_or_default();
+    hand_over(
+        level,
+        &time,
+        &source,
+        &c::text(event.message).unwrap_or_default(),
+    );
 }
 
 unsafe extern "C" fn from_the_model_manager(
@@ -111,5 +119,10 @@ unsafe extern "C" fn from_the_model_manager(
         WaifuModelManagerLogLevel::WAIFU_MODELMANAGER_LOG_FATAL => Level::Fatal,
     };
     let source = c::text(event.source).unwrap_or_default();
-    hand_over(level, &source, &c::text(event.message).unwrap_or_default());
+    hand_over(
+        level,
+        "",
+        &source,
+        &c::text(event.message).unwrap_or_default(),
+    );
 }

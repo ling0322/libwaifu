@@ -46,6 +46,14 @@ void MemorySnapshot::releaseUnused(Device device) {
   getOperators(device.getType())->releaseUnusedMemory();
 }
 
+void MemorySnapshot::setLimit(Device device, int64_t bytes) {
+  getOperators(device.getType())->setMemoryLimit(bytes);
+}
+
+MemoryBudget MemoryBudget::capture(Device device) {
+  return getOperators(device.getType())->getMemoryBudget();
+}
+
 int64_t MemorySnapshot::getTotalMemory() const {
   return _totalMemory;
 }

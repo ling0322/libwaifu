@@ -37,6 +37,7 @@ enum class ErrorCode : int {
   OutOfRange = 2,
   InvalidArg = 3,
   NotImplemented = 4,
+  OutOfMemory = 5,
 };
 
 class Error : public std::exception {
@@ -74,6 +75,13 @@ class InvalidArgError : public Error {
 class NotImplementedError : public Error {
  public:
   NotImplementedError(const std::string &what);
+};
+
+// A device could not give the memory asked of it, or a limit set on it would be passed: not a
+// fault of the call, and one a caller may answer by freeing something and asking again.
+class OutOfMemoryError : public Error {
+ public:
+  OutOfMemoryError(const std::string &what);
 };
 
 }  // namespace lut

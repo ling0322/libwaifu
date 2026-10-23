@@ -281,9 +281,11 @@ namespace Libwaifu.Gui.Engine
             switch ((name ?? "auto").Trim().ToLowerInvariant())
             {
                 case "cpu": return Native.Device.Cpu;
-                case "cuda": return Native.Device.Cuda;
+                // The offload device's names too, which a saved setting may still hold: cuda is
+                // what it is now.
+                case "cuda":
                 case "cuda (offload)":
-                case "cuda_cpu_offload": return Native.Device.CudaCpuOffload;
+                case "cuda_cpu_offload": return Native.Device.Cuda;
                 case "vulkan": return Native.Device.Vulkan;
                 case "metal": return Native.Device.Metal;
                 default: return Native.Device.Auto;

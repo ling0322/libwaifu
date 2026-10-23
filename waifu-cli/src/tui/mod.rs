@@ -20,14 +20,15 @@
 //! The whole of the tool, in the terminal: what to do, with which model, where -- and then the
 //! drawing.
 //!
-//! Two screens to choose on, one after the other -- a task, then a model for it, fetched there if
-//! it is not on the disk -- and then the drawing screen, [`draw`], goes up for what was picked and
-//! reads the model onto a device behind it. Which device starts as what `-device` said, or what
-//! `auto` makes of the model and the machine; the drawing screen's device row opens a box that
-//! changes it, and the model is read onto the new one in the background.
+//! One screen to choose on -- a model, fetched there if it is not on the disk; the task is
+//! txt2img, the one there is, so there is nothing to ask about it -- and then the drawing screen,
+//! [`draw`], goes up for what was picked and reads the model onto a device behind it. Which
+//! device starts as what `-device` said, or what `auto` makes of the model and the machine; the
+//! drawing screen's device row opens a box that changes it, and the model is read onto the new
+//! one in the background.
 //!
-//! On the two, escape goes back a screen, which on the first one is out; `q` and ctrl-c leave
-//! from anywhere. On the drawing screen escape stops a run, or asks before leaving.
+//! On the model list, escape leaves, since there is no screen before it to go back to; `q` and
+//! ctrl-c leave from anywhere. On the drawing screen escape stops a run, or asks before leaving.
 
 mod ask;
 mod devices;
@@ -35,7 +36,6 @@ mod draw;
 mod field;
 mod files;
 mod models;
-mod tasks;
 
 pub use draw::draw;
 
@@ -47,21 +47,20 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::args::{DeviceOption, Room, Runtime};
+use crate::args::{DeviceOption, Runtime};
 use crate::task::Task;
 
 type Error = Box<dyn std::error::Error>;
 
-/// Where a screen was left: on to the next one with what it chose, back to the one before, or
-/// out of the program altogether.
+/// Where a screen was left: on to the next one with what it chose, or out of the program
+/// altogether.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Step<T> {
     Next(T),
-    Back,
     Quit,
 }
 
-/// A model chosen on the second screen, and on the disk.
+/// A model chosen on the model list, and on the disk.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Picked {
     /// What to hand the worker: a catalogue name, or the path of a manifest.
@@ -98,27 +97,26 @@ pub fn give_the_screen_back() {
     let _ = ratatui::crossterm::execute!(io::stdout(), ratatui::crossterm::cursor::Show);
 }
 
-/// Asks for a task and a model for it, and fetches the model if it is not here.
+/// Asks for a model for `task`, and fetches it if it is not here.
 ///
-/// `task` is where the task list starts, which is what `-task` said. Where the model runs is not
-/// asked here: the drawing screen opens on what [`Machine::start_for`] makes of it, and its device
-/// row changes it. `None` is somebody leaving, which is not a failure.
-pub fn choose(task: Option<Task>) -> Result<Option<(Task, String)>, Error> {
+/// Where the model runs is not asked here: the drawing screen opens on what
+/// [`Machine::start_for`] makes of it, and its device row changes it. `None` is somebody leaving,
+/// which is not a failure.
+pub fn choose(task: Task) -> Result<Option<String>, Error> {
     let mut terminal = take_the_screen()?;
-    let chosen = walk(&mut terminal, task);
+    let chosen = models::choose(&mut terminal, task);
     ratatui::restore();
 
-    chosen
+    match chosen? {
+        Step::Next(picked) => Ok(Some(picked.model)),
+        Step::Quit => Ok(None),
+    }
 }
 
-/// Where a model can run: what `-device` said, what this machine can run on, and how much room
-/// its cards had before anything was put on them.
+/// Where a model can run: what `-device` said, and what this machine can run on.
 pub struct Machine {
     device: DeviceOption,
-    /// What `-device-weights` said, in bytes: weights an offload device keeps on the card.
-    pub device_weight_bytes: u64,
     available: Vec<Runtime>,
-    room: Room,
 }
 
 impl Machine {
@@ -126,69 +124,29 @@ impl Machine {
     ///
     /// Before, because the first question put to a device starts the tensor library, which says
     /// what hardware it found on stderr -- straight over whatever is on the screen at that moment.
-    /// The cards are measured whatever `-device` said: a device that was named is not
-    /// second-guessed, but a run on it that is going to run out of memory is still worth a warning
-    /// before it is started.
-    pub fn measure(device: DeviceOption, device_weight_bytes: u64) -> Machine {
-        let (available, room) = crate::runtime::measure();
+    pub fn measure(device: DeviceOption) -> Machine {
         Machine {
             device,
-            device_weight_bytes,
-            available,
-            room,
+            available: crate::runtime::measure(),
         }
     }
 
-    /// Where a model of `weights` bytes runs to begin with, and -- where that was worked out from
-    /// the size of the model -- the line that says so.
+    /// Where a model of `weights` bytes runs to begin with, and -- where `-device` left it to this
+    /// tool -- the line that says so.
     pub fn start_for(&self, weights: Option<u64>) -> (Runtime, Option<String>) {
+        let runtime = self.device.resolve(&self.available);
         if self.device != DeviceOption::Auto {
-            return (self.device.resolve(&self.available), None);
+            return (runtime, None);
         }
 
-        let runtime = Runtime::best(weights, &self.available, self.room);
         let why = weights.map(|weights| {
-            // CUDA's room where there is CUDA: that is the card both of its rows are about.
-            match self.room.cuda.or(self.room.vulkan) {
-                Some(free) => format!(
-                    "{} of weights and {} free on the card: {} is where it runs fastest",
-                    gigabytes(weights),
-                    gigabytes(free),
-                    runtime.name()
-                ),
-                None => format!(
-                    "{} of weights: {} is where it runs fastest",
-                    gigabytes(weights),
-                    runtime.name()
-                ),
-            }
+            format!(
+                "{} of weights: {} is where it runs fastest",
+                gigabytes(weights),
+                runtime.name()
+            )
         });
         (runtime, why)
-    }
-}
-
-/// The two screens, with the way back through them.
-fn walk(
-    terminal: &mut DefaultTerminal,
-    task: Option<Task>,
-) -> Result<Option<(Task, String)>, Error> {
-    let mut task_at = task
-        .and_then(|task| Task::ALL.iter().position(|one| *one == task))
-        .unwrap_or(0);
-    loop {
-        let task = match tasks::choose(terminal, task_at)? {
-            Step::Next(task) => task,
-            Step::Back | Step::Quit => return Ok(None),
-        };
-        task_at = Task::ALL.iter().position(|one| *one == task).unwrap_or(0);
-
-        // The model list is built again each time it is come back to, so that it says what is on
-        // the disk now: a model fetched on the way through is one that is here on the way back.
-        match models::choose(terminal, task)? {
-            Step::Next(picked) => return Ok(Some((task, picked.model))),
-            Step::Back => continue,
-            Step::Quit => return Ok(None),
-        }
     }
 }
 
@@ -206,7 +164,7 @@ fn take_the_screen() -> Result<DefaultTerminal, Error> {
     Ok(terminal)
 }
 
-/// What built this, and how far through the three screens this one is, as every screen says it.
+/// What built this, and how far through the two screens this one is, as every screen says it.
 ///
 /// What built it is on all of them rather than one: whichever is on screen when something goes
 /// wrong is the one that ends up in a screenshot, and a screenshot that cannot say which code it

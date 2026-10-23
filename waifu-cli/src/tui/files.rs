@@ -25,9 +25,9 @@
 //! in an `Option`, hands it the keys while it is there, gives it an area to draw in, and takes the
 //! path back out of [`Outcome`].
 //!
-//! That is the whole of the interface, and it is why this is worth having as a module rather than
-//! as part of the model list: the drawing screen wants a picture off the disk as well, and needs
-//! three lines for it rather than another list.
+//! That is the whole of the interface. The model list is the one host it has, for a manifest off
+//! the disk; it is a module of its own all the same, because a list of files is a thing of its
+//! own and the model list is long enough without one inside it.
 
 use std::cell::Cell;
 use std::fs;
@@ -149,8 +149,8 @@ impl FilePicker {
         picker
     }
 
-    /// Where the picker is looking: what the drawing screen opens it on again next time, and what
-    /// the tests walk it around by.
+    /// Where the picker is looking, which is what the tests walk it around by.
+    #[cfg(test)]
     pub fn directory(&self) -> &Path {
         &self.directory
     }

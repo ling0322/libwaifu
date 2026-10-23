@@ -20,7 +20,7 @@
 //! IndexTTS-2.5, whole: a recording and a sentence in, the sentence in that voice out.
 //!
 //! ```text
-//! let tts = IndexTts::from_manifest(Device::Cuda, Residency::Device, &manifest)?;
+//! let tts = IndexTts::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
 //! let voice = tts.listen(&recording)?;                  // once per voice
 //! let sound = tts.say("今天天气很好。", &voice, &options, &mut report)?;
 //! ```
@@ -107,9 +107,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use crate::flint::{
-    functional as F, DType, Device, Graph, Ir, Residency, RunContext, Tensor, Weights,
-};
+use crate::flint::{functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Weights};
 use crate::{
     Error, Manifest, Result, Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Tokenizer, Voice,
 };
@@ -265,7 +263,7 @@ impl IndexTts {
     /// Read the whole model `manifest` describes, onto `device`.
     pub fn from_manifest(
         device: Device,
-        residency: Residency,
+        device_weight_bytes: u64,
         manifest: &Manifest,
     ) -> Result<IndexTts> {
         let model_type = manifest.section("model")?.get_str("type")?.to_string();
@@ -281,7 +279,7 @@ impl IndexTts {
         let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
-            residency,
+            device_weight_bytes,
         )?);
 
         Ok(IndexTts {
@@ -316,8 +314,8 @@ impl IndexTts {
     /// order they were declared.
     ///
     /// Most of the graphs here have a length built into them and are compiled once per recording
-    /// or per sentence. That is cheap: under [`Residency::Device`] a weight is moved onto the card
-    /// once, and a second graph asking for it gets the tensor that is already there.
+    /// or per sentence. That is cheap: a weight kept on the card was moved onto it once, and a
+    /// second graph asking for it gets the tensor that is already there.
     fn run(&self, g: &Graph, inputs: &[(&str, &Tensor)]) -> Result<Vec<Tensor>> {
         let ir = Ir::compile(g);
 

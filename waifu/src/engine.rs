@@ -43,7 +43,7 @@ use crate::describe::{self, converter_kind, voice_kind, Chosen, ConverterKind, V
 use crate::image_model::ImageModel;
 use crate::indextts::IndexTts;
 use crate::progress::{Convert, Doing, Run, Say, VOCODER_RATIO};
-use crate::runtime::{DeviceOption, Room, Runtime};
+use crate::runtime::{DeviceOption, Runtime};
 use crate::wav::Sound;
 use crate::{
     from_rgb8, to_rgb8, ConversionOptions, ConversionProgress, Converter, Device,
@@ -59,14 +59,11 @@ pub const START_FROM: &str = "start_from";
 pub const CONTROL: &str = "control";
 const KEPT_KEYS: &[&str] = &[START_FROM, CONTROL];
 
-/// How an engine is started: where it runs, and how much of an offload model it keeps there.
+/// How an engine is started: where it runs. How much of the device it may use is the process's,
+/// not an engine's: see [`crate::runtime::set_memory_limit`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EngineOptions {
     pub device: DeviceOption,
-    /// Bytes of each model's smallest weights an offload device keeps on the device, moving only
-    /// the rest as they are used; see [`Runtime::with_device_weight_bytes`]. 0 keeps none, and
-    /// anything else is refused for a device that is not an offload one.
-    pub device_weight_bytes: u64,
 }
 
 /// A picture as rows of RGB, three bytes a pixel, top to bottom.
@@ -242,12 +239,9 @@ impl Work {
 
 impl Engine {
     /// Starts an engine the way `options` says. Refused where the device is not one this build
-    /// can use on this machine, and for weights kept on a device that is not an offload one.
+    /// can use on this machine.
     pub fn new(options: EngineOptions) -> Result<Engine, String> {
-        let runtime = options
-            .device
-            .resolve()
-            .with_device_weight_bytes(options.device_weight_bytes)?;
+        let runtime = options.device.resolve();
         if !runtime.device().is_available() {
             return Err(format!(
                 "{} is not available on this machine",
@@ -699,27 +693,37 @@ impl Worker {
         }
         let shown = describe::shown_name(asked);
 
-        reporter.tell(&Doing::Reading { model: shown });
-        let (device, residency) = (self.runtime.device(), self.runtime.residency());
+        info(&format!("reading {shown} onto {}", self.runtime.name()));
+        reporter.tell(&Doing::Reading {
+            model: shown.clone(),
+        });
+        let (device, device_weight_bytes) =
+            (self.runtime.device(), self.runtime.device_weight_bytes());
         let read = || -> crate::Result<Loaded> {
             if let Some(kind) = voice_kind(&path) {
                 let manifest = Manifest::open(&path)?;
                 return Ok(match kind {
-                    VoiceKind::CosyVoice3 => {
-                        Loaded::CosyVoice(CosyVoice3::from_manifest(device, residency, &manifest)?)
-                    }
+                    VoiceKind::CosyVoice3 => Loaded::CosyVoice(CosyVoice3::from_manifest(
+                        device,
+                        device_weight_bytes,
+                        &manifest,
+                    )?),
                     VoiceKind::IndexTts => Loaded::Voice(Box::new(IndexTts::from_manifest(
-                        device, residency, &manifest,
+                        device,
+                        device_weight_bytes,
+                        &manifest,
                     )?)),
                 });
             }
             if let Some(ConverterKind::CosyVoice3) = converter_kind(&path) {
                 let manifest = Manifest::open(&path)?;
                 return Ok(Loaded::CosyVoice(CosyVoice3::from_manifest(
-                    device, residency, &manifest,
+                    device,
+                    device_weight_bytes,
+                    &manifest,
                 )?));
             }
-            let model = ImageModel::from_manifest(&path, device, residency)?;
+            let model = ImageModel::from_manifest(&path, device, device_weight_bytes)?;
             let mut chosen = describe::look_at(asked);
             chosen.no_picture_because = model.no_picture_because().map(str::to_string);
             chosen.on_disk = true;
@@ -730,6 +734,12 @@ impl Worker {
             Ok(loaded) => {
                 self.loaded = loaded;
                 self.name = asked.to_string();
+                info(&format!(
+                    "{shown} read onto {} in {:.1}s; {}",
+                    self.runtime.name(),
+                    reporter.started.elapsed().as_secs_f64(),
+                    crate::flint::memory_of(device)
+                ));
                 Ended::Done(())
             }
             Err(error) => {
@@ -743,6 +753,9 @@ impl Worker {
     /// Drops the model, and hands the memory it was in back to the system: on Metal a dropped
     /// tensor's buffer is otherwise kept for reuse, and the next model is read on top of it.
     fn let_go(&mut self) {
+        if !self.name.is_empty() {
+            info(&format!("let go of {}", describe::shown_name(&self.name)));
+        }
         self.loaded = Loaded::Nothing;
         self.name.clear();
         crate::flint::release_memory();
@@ -818,6 +831,21 @@ impl Worker {
             strength: request.strength.clamp(0.0, 1.0),
         };
 
+        info(&format!(
+            "drawing {}x{}{}, {} steps, guidance {:.1}, seed {}",
+            request.width,
+            request.height,
+            match start_from {
+                Some(_) => format!(" from a picture at strength {:.2}", options.strength),
+                None => String::new(),
+            },
+            request.steps,
+            request.guidance,
+            request.seed
+        ));
+        let device = self.runtime.device();
+        let _ = crate::flint::MemorySnapshot::reset_peak_stats(device);
+
         let started = Instant::now();
         let mut reporter = Reporter {
             on_progress,
@@ -871,9 +899,25 @@ impl Worker {
         };
         let tensor = match drawn {
             Ok(Some(tensor)) => tensor,
-            Ok(None) => return Ended::Cancelled,
+            Ok(None) => {
+                info("stopped before the picture was finished");
+                return Ended::Cancelled;
+            }
             Err(error) => return Ended::failed(Failure::Model, error.to_string()),
         };
+
+        let seconds = started.elapsed().as_secs_f64();
+        let peak = match crate::flint::MemorySnapshot::capture(device) {
+            Ok(memory) if memory.total > 0 => {
+                format!(", {} MB at most", memory.peak_allocated / 1_000_000)
+            }
+            _ => String::new(),
+        };
+        info(&format!(
+            "drawn in {seconds:.1}s, {:.2}s a step{peak}; {}",
+            seconds / request.steps.max(1) as f64,
+            crate::flint::memory_of(device)
+        ));
 
         let shape = tensor.shape();
         match to_rgb8(&tensor) {
@@ -1018,6 +1062,13 @@ impl Worker {
     }
 }
 
+/// One line about what the engine is doing, for whoever is listening: see [`crate::log`]. Said
+/// to come from where this was called.
+#[track_caller]
+fn info(message: &str) {
+    crate::log::write(crate::log::Level::Info, message);
+}
+
 /// `image` stretched to `width` by `height`, Lanczos, as the draw command scales a picture to start from.
 fn scaled(image: &Image, width: u32, height: u32) -> Vec<u8> {
     if image.width == width && image.height == height {
@@ -1149,19 +1200,15 @@ pub fn machine_json() -> serde_json::Value {
 }
 
 /// Where a run can go: `waifu_devices_json`. Every device the C API names, whether this build
-/// and this machine can take a run there, and -- for CUDA and Vulkan where they can -- how much of
-/// the card is free now, in bytes. Which of them suits a model is the caller's to decide.
+/// and this machine can take a run there, and -- for a device with memory of its own where it can
+/// -- what its allocator may still take, in bytes: the memory limit or the device's memory, less
+/// what this process holds there. See [`crate::runtime::remaining`].
 pub fn devices_json() -> serde_json::Value {
     let available = Runtime::available();
-    let room = Room::measure(&available);
     let devices: Vec<serde_json::Value> = Runtime::ALL
         .iter()
         .map(|runtime| {
-            let free = match runtime.device() {
-                Device::Cuda => room.cuda,
-                Device::Vulkan => room.vulkan,
-                _ => None,
-            };
+            let free = crate::runtime::remaining(runtime.device(), &available);
             serde_json::json!({
                 "name": runtime.name(),
                 "available": available.contains(runtime),
@@ -1177,7 +1224,8 @@ pub fn device_option(device: Device) -> DeviceOption {
     match device {
         Device::Cpu => DeviceOption::Cpu,
         Device::Cuda => DeviceOption::Cuda,
-        Device::CudaHost => DeviceOption::CudaCpuOffload,
+        // Page-locked host memory is a place for CUDA's tensors, not a device a run goes to.
+        Device::CudaHost => DeviceOption::Cuda,
         Device::Metal => DeviceOption::Metal,
         Device::Vulkan => DeviceOption::Vulkan,
     }
@@ -1304,7 +1352,6 @@ pub(crate) mod tests {
     fn an_engine() -> Engine {
         Engine::new(EngineOptions {
             device: DeviceOption::Cpu,
-            ..EngineOptions::default()
         })
         .expect("an engine on the CPU")
     }

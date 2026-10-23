@@ -579,6 +579,20 @@ Buffer Context::allocate(int64_t bytes) {
   VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                              VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+  // Past the limit, what the cache holds is memory nothing is using, and it goes back first.
+  if (_memoryLimit > 0 && _allocatedBytes + _cachedBytes + size > _memoryLimit) {
+    synchronize();
+    emptyCache();
+    if (_allocatedBytes + size > _memoryLimit) {
+      throw lut::OutOfMemoryError(lut::sprintf(
+          "the Vulkan memory limit is %d bytes, %d of them held by tensors, and %d more were "
+          "asked for",
+          _memoryLimit,
+          _allocatedBytes,
+          size));
+    }
+  }
+
   VmaAllocationCreateFlags flags = _info.memoryBudget ? VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT : 0;
   Buffer buffer = createBuffer(size, usage, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, flags);
   if (!buffer.buffer) {
@@ -588,8 +602,8 @@ Buffer Context::allocate(int64_t bytes) {
     buffer = createBuffer(size, usage, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, flags);
   }
   if (!buffer.buffer) {
-    throw lut::AbortedError(lut::sprintf(
-        "out of memory: the Vulkan device could not allocate %d bytes (%d held by tensors)",
+    throw lut::OutOfMemoryError(lut::sprintf(
+        "the Vulkan device could not allocate %d bytes (%d held by tensors)",
         size,
         _allocatedBytes));
   }
@@ -644,6 +658,21 @@ MemorySnapshot Context::captureMemorySnapshot() {
 void Context::resetPeakMemoryStats() {
   std::lock_guard<std::recursive_mutex> lock(_mutex);
   _peakAllocatedBytes = _allocatedBytes;
+}
+
+void Context::setMemoryLimit(int64_t bytes) {
+  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  _memoryLimit = bytes;
+}
+
+MemoryBudget Context::getMemoryBudget() {
+  std::lock_guard<std::recursive_mutex> lock(_mutex);
+  MemoryBudget budget;
+  budget.capacity = _memoryLimit > 0 ? _memoryLimit : _info.deviceLocalBytes;
+  // Not the cache: it is emptied before anything past the limit is refused.
+  budget.allocated = _allocatedBytes;
+  budget.held = _allocatedBytes + _cachedBytes;
+  return budget;
 }
 
 VkCommandBuffer Context::beginCommand(const std::string &label) {

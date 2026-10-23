@@ -97,7 +97,7 @@ void makeEmpty(
     const std::vector<int32_t> &shape,
     fl_dtype_t dtype,
     Tensor *out) {
-  CATCH_REQUIRE(fl_tensor_data_create(device, dtype, numelOf(shape), &out->data) == FL_OK);
+  CATCH_REQUIRE(fl_tensor_data_create(device, dtype, numelOf(shape), FL_ALLOC_ACTIVATION, &out->data) == FL_OK);
   out->numel = numelOf(shape);
   std::vector<int32_t> stride = stridesOf(shape);
   CATCH_REQUIRE(
@@ -118,7 +118,7 @@ void makeViewOver(
     const std::vector<int32_t> &shape,
     fl_dtype_t dtype,
     Tensor *out) {
-  CATCH_REQUIRE(fl_tensor_data_create(device, dtype, storageNumel, &out->data) == FL_OK);
+  CATCH_REQUIRE(fl_tensor_data_create(device, dtype, storageNumel, FL_ALLOC_ACTIVATION, &out->data) == FL_OK);
   out->numel = numelOf(shape);
   std::vector<int32_t> stride = stridesOf(shape);
   CATCH_REQUIRE(
@@ -261,8 +261,11 @@ CATCH_TEST_CASE("flint C API makes storage and views over it", "[core][flint][ca
   fl_tensor_view_destroy(nullptr);
 
   fl_tensor_data_t none = nullptr;
-  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_FLOAT, 0, &none) == FL_ERROR_INVALID_ARG);
-  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_UNKNOWN, 4, &none) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_FLOAT, 0, FL_ALLOC_ACTIVATION, &none) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_UNKNOWN, 4, FL_ALLOC_ACTIVATION, &none) == FL_ERROR_INVALID_ARG);
+  CATCH_REQUIRE(
+      fl_tensor_data_create(FL_DEVICE_CPU, FL_DTYPE_FLOAT, 4, static_cast<fl_alloc_hint_t>(7), &none) ==
+      FL_ERROR_INVALID_ARG);
   CATCH_REQUIRE(none == nullptr);
 }
 

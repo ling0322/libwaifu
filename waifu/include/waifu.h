@@ -27,11 +27,13 @@ typedef enum {
   WAIFU_DEVICE_CPU = 1,
   WAIFU_DEVICE_METAL = 2,
   WAIFU_DEVICE_CUDA = 3,
+  // The same as WAIFU_DEVICE_CUDA, which now keeps on the card what fits of a model and copies
+  // the rest over as each weight is used. Kept for callers built against an older header.
   WAIFU_DEVICE_CUDA_CPU_OFFLOAD = 4,
   WAIFU_DEVICE_VULKAN = 5,
-  // Metal with the weights left in the model's files, each read off the disk as it is used:
-  // for a model larger than the Mac's memory, and slower. Last, so the numbers above keep
-  // their meaning.
+  // The same as WAIFU_DEVICE_METAL, which now keeps in the model's files whatever does not fit
+  // on the device. Kept for callers built against an older header, and last, so the numbers
+  // above keep their meaning.
   WAIFU_DEVICE_METAL_DISK_OFFLOAD = 6,
 } WaifuDevice;
 
@@ -76,10 +78,14 @@ typedef struct WaifuEngine WaifuEngine;
 
 typedef struct {
   WaifuLogLevel level;
-  // Where it was written: "interface.cc:84" for flint, a module's name for Rust.
+  // Where it was written, as a file and a line: "interface.cc:84" for flint, "engine.rs:712" for
+  // Rust.
   const char *source;
   // The line alone, with no level or time in front of it.
   const char *message;
+  // When it was written, in UTC: "2026-10-23T18:50:41Z". Last, so that a caller built against a
+  // header without it reads the rest where it always did.
+  const char *time;
 } WaifuLogEvent;
 
 // Called on whichever thread wrote the line, which can be the caller's own. It must be safe to
@@ -92,10 +98,6 @@ typedef struct {
   // sizeof(WaifuEngineOptions), as the caller was compiled with.
   uint32_t struct_size;
   WaifuDevice device;
-  // For WAIFU_DEVICE_CUDA_CPU_OFFLOAD and WAIFU_DEVICE_METAL_DISK_OFFLOAD: up to this many bytes
-  // of each model's weights are kept on the device, the smallest first, and only the rest are
-  // moved over as they are used. 0 keeps none; more than 0 is refused for any other device.
-  uint64_t device_weight_bytes;
 } WaifuEngineOptions;
 
 // 0 is never a job: an _async call returns it when it refuses at the call, with the reason in
@@ -259,10 +261,12 @@ void waifu_set_log_level(WaifuLogLevel level);
 char *waifu_machine_json(void);
 
 // Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-// names them -- cpu, cuda, cuda_cpu_offload, metal, metal_disk_offload, vulkan -- with `free` the
-// bytes free on the card for CUDA and Vulkan where they can be used, and null otherwise. Asking
-// CUDA builds a context on the card, a few hundred megabytes of it. Free with waifu_string_free.
-// NULL on failure.
+// names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the device's
+// allocator may still take where it can be used -- its memory limit, or the device's memory, less
+// what this process holds there -- and null for the processor or a device that cannot be used. Not
+// the card as other programs see it: that is waifu_machine_json's `vram`. Asking CUDA builds a
+// context on the card, a few hundred megabytes of it. Free with waifu_string_free. NULL on
+// failure.
 char *waifu_devices_json(void);
 
 // This build, as JSON: `{"version", "revision"}`, the crate's version and the full commit it was
@@ -281,6 +285,13 @@ WaifuEngine *waifu_engine_new(WaifuDevice device);
 // As waifu_engine_new, the way `options` says. NULL, with waifu_last_error, if the device is not
 // available or the options are refused.
 WaifuEngine *waifu_engine_new_with_options(const WaifuEngineOptions *options);
+
+// Limits the memory of `device` -- the tensors of whatever runs on it, the weights kept there
+// among them -- to `bytes`; 0 for no limit but the device's. For the whole process rather than an
+// engine: set it before an engine reads a model. The model's smallest weights then fill most of
+// what it allows, and a run that runs short lets weights on the device go rather than failing.
+// Metal, CUDA and Vulkan have a limit: false, with waifu_last_error, for the processor.
+bool waifu_set_memory_limit(WaifuDevice device, uint64_t bytes);
 
 // Stops what is running, cancels what waits (each gets on_complete with WAIFU_CANCELLED), drops
 // the model and joins the thread -- which can take until the end of the step that is running.

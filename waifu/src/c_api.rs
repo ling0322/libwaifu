@@ -43,7 +43,7 @@ use crate::engine::{
     self, DrawRequest, Ended, Engine, EngineOptions, Failure, SpeakRequest, Stage,
     VoiceConversionRequest,
 };
-use crate::runtime::DeviceOption;
+use crate::runtime::{self, DeviceOption};
 use crate::wav::Sound;
 
 use WaifuStatusCode::*;
@@ -102,10 +102,12 @@ pub extern "C" fn waifu_machine_json() -> *mut c_char {
 }
 
 /// Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-/// names them -- cpu, cuda, cuda_cpu_offload, metal, metal_disk_offload, vulkan -- with `free` the
-/// bytes free on the card for CUDA and Vulkan where they can be used, and null otherwise. Asking
-/// CUDA builds a context on the card, a few hundred megabytes of it. Free with waifu_string_free.
-/// NULL on failure.
+/// names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the device's
+/// allocator may still take where it can be used -- its memory limit, or the device's memory, less
+/// what this process holds there -- and null for the processor or a device that cannot be used. Not
+/// the card as other programs see it: that is waifu_machine_json's `vram`. Asking CUDA builds a
+/// context on the card, a few hundred megabytes of it. Free with waifu_string_free. NULL on
+/// failure.
 #[no_mangle]
 pub extern "C" fn waifu_devices_json() -> *mut c_char {
     caught(ptr::null_mut(), || {
@@ -256,11 +258,13 @@ pub enum WaifuDevice {
     WAIFU_DEVICE_CPU = 1,
     WAIFU_DEVICE_METAL = 2,
     WAIFU_DEVICE_CUDA = 3,
+    /// The same as WAIFU_DEVICE_CUDA, which now keeps on the card what fits of a model and copies
+    /// the rest over as each weight is used. Kept for callers built against an older header.
     WAIFU_DEVICE_CUDA_CPU_OFFLOAD = 4,
     WAIFU_DEVICE_VULKAN = 5,
-    /// Metal with the weights left in the model's files, each read off the disk as it is used:
-    /// for a model larger than the Mac's memory, and slower. Last, so the numbers above keep
-    /// their meaning.
+    /// The same as WAIFU_DEVICE_METAL, which now keeps in the model's files whatever does not fit
+    /// on the device. Kept for callers built against an older header, and last, so the numbers
+    /// above keep their meaning.
     WAIFU_DEVICE_METAL_DISK_OFFLOAD = 6,
 }
 
@@ -377,10 +381,6 @@ pub struct WaifuEngineOptions {
     /// sizeof(WaifuEngineOptions), as the caller was compiled with.
     pub struct_size: u32,
     pub device: WaifuDevice,
-    /// For WAIFU_DEVICE_CUDA_CPU_OFFLOAD and WAIFU_DEVICE_METAL_DISK_OFFLOAD: up to this many bytes
-    /// of each model's weights are kept on the device, the smallest first, and only the rest are
-    /// moved over as they are used. 0 keeps none; more than 0 is refused for any other device.
-    pub device_weight_bytes: u64,
 }
 
 /// Starts the engine's thread. NULL, with waifu_last_error, if the device is not available.
@@ -389,7 +389,6 @@ pub extern "C" fn waifu_engine_new(device: WaifuDevice) -> *mut WaifuEngine {
     let options = WaifuEngineOptions {
         struct_size: std::mem::size_of::<WaifuEngineOptions>() as u32,
         device,
-        device_weight_bytes: 0,
     };
     unsafe { waifu_engine_new_with_options(&options) }
 }
@@ -409,18 +408,8 @@ pub unsafe extern "C" fn waifu_engine_new_with_options(
                 return ptr::null_mut();
             }
         };
-        let device = match options.device {
-            WaifuDevice::WAIFU_DEVICE_AUTO => DeviceOption::Auto,
-            WaifuDevice::WAIFU_DEVICE_CPU => DeviceOption::Cpu,
-            WaifuDevice::WAIFU_DEVICE_METAL => DeviceOption::Metal,
-            WaifuDevice::WAIFU_DEVICE_CUDA => DeviceOption::Cuda,
-            WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD => DeviceOption::CudaCpuOffload,
-            WaifuDevice::WAIFU_DEVICE_VULKAN => DeviceOption::Vulkan,
-            WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD => DeviceOption::MetalDiskOffload,
-        };
         let options = EngineOptions {
-            device,
-            device_weight_bytes: options.device_weight_bytes,
+            device: device_option(options.device),
         };
         match Engine::new(options) {
             Ok(engine) => Box::into_raw(Box::new(WaifuEngine { engine })),
@@ -430,6 +419,37 @@ pub unsafe extern "C" fn waifu_engine_new_with_options(
             }
         }
     })
+}
+
+/// Limits the memory of `device` -- the tensors of whatever runs on it, the weights kept there
+/// among them -- to `bytes`; 0 for no limit but the device's. For the whole process rather than an
+/// engine: set it before an engine reads a model. The model's smallest weights then fill most of
+/// what it allows, and a run that runs short lets weights on the device go rather than failing.
+/// Metal, CUDA and Vulkan have a limit: false, with waifu_last_error, for the processor.
+#[no_mangle]
+pub extern "C" fn waifu_set_memory_limit(device: WaifuDevice, bytes: u64) -> bool {
+    caught(false, || {
+        match runtime::set_memory_limit(device_option(device), bytes) {
+            Ok(()) => true,
+            Err(error) => {
+                set_last_error(&error);
+                false
+            }
+        }
+    })
+}
+
+/// The device a caller asked for, as the engine names it.
+fn device_option(device: WaifuDevice) -> DeviceOption {
+    match device {
+        WaifuDevice::WAIFU_DEVICE_AUTO => DeviceOption::Auto,
+        WaifuDevice::WAIFU_DEVICE_CPU => DeviceOption::Cpu,
+        WaifuDevice::WAIFU_DEVICE_METAL => DeviceOption::Metal,
+        WaifuDevice::WAIFU_DEVICE_CUDA => DeviceOption::Cuda,
+        WaifuDevice::WAIFU_DEVICE_CUDA_CPU_OFFLOAD => DeviceOption::Cuda,
+        WaifuDevice::WAIFU_DEVICE_VULKAN => DeviceOption::Vulkan,
+        WaifuDevice::WAIFU_DEVICE_METAL_DISK_OFFLOAD => DeviceOption::Metal,
+    }
 }
 
 /// Stops what is running, cancels what waits (each gets on_complete with WAIFU_CANCELLED), drops

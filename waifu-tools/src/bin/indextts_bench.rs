@@ -33,7 +33,7 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use waifu::indextts::IndexTts;
-use waifu::{wav, Device, Manifest, Residency, SpeechOptions, SpeechProgress};
+use waifu::{wav, Device, Manifest, SpeechOptions, SpeechProgress};
 
 const TEXTS: [(&str, &str); 3] = [
     (
@@ -70,11 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or(5);
 
-    let tts = IndexTts::from_manifest(
-        Device::Cuda,
-        Residency::Device,
-        &Manifest::open(&arguments[1])?,
-    )?;
+    let tts = IndexTts::from_manifest(Device::Cuda, u64::MAX, &Manifest::open(&arguments[1])?)?;
     let recording = wav::read(&std::fs::read(&arguments[2])?)?;
 
     // Listening, once to warm up and then timed.

@@ -26,8 +26,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use waifu::flint::{check_parameters, Graph, Ir, Residency, RunContext, Weights};
-use waifu::flint::{functional as F, DType, Device, MemorySnapshot, Tensor};
+use waifu::flint::DEVICE_SHARE;
+use waifu::flint::{check_parameters, Graph, Ir, RunContext, Weights};
+use waifu::flint::{functional as F, DType, Device, MemoryBudget, MemorySnapshot, Tensor};
 use waifu::{read_safetensors, Embedding, Linear, WeightFormat};
 
 /// A safetensors file holding `tensors`, each given as a name, a shape, and its elements.
@@ -69,8 +70,8 @@ fn read_bytes(bytes: &[u8]) -> waifu::Result<HashMap<String, Tensor>> {
 }
 
 /// A model's weights out of a file of `bytes`, the way a model reads its package.
-fn weights_from(bytes: &[u8], device: Device, residency: Residency) -> waifu::Result<Weights> {
-    Weights::from_files(&[&TempFile::new(bytes).0], device, residency)
+fn weights_from(bytes: &[u8], device: Device, device_weight_bytes: u64) -> waifu::Result<Weights> {
+    Weights::from_files(&[&TempFile::new(bytes).0], device, device_weight_bytes)
 }
 
 /// What a file holding `tensors` reads back as, exactly as stored.
@@ -79,8 +80,12 @@ fn stored(tensors: &[(&str, &[i32], &[f32])]) -> HashMap<String, Tensor> {
 }
 
 /// A source read out of a file holding `tensors`, the way a model reads its package.
-fn source(tensors: &[(&str, &[i32], &[f32])], device: Device, residency: Residency) -> Rc<Weights> {
-    Rc::new(weights_from(&write_params(tensors), device, residency).unwrap())
+fn source(
+    tensors: &[(&str, &[i32], &[f32])],
+    device: Device,
+    device_weight_bytes: u64,
+) -> Rc<Weights> {
+    Rc::new(weights_from(&write_params(tensors), device, device_weight_bytes).unwrap())
 }
 
 /// The same, for a file whose tensors are not all one element type: each is given the name
@@ -317,7 +322,7 @@ fn multiplies_by_a_quantized_weight_on_the_card() {
     let x = g.input("x");
     g.output("y", Linear::graph(&g.subgraph("proj"), x, 16, 8, false));
 
-    let weights = weights_from(&bytes, Device::Cuda, Residency::Device).unwrap();
+    let weights = weights_from(&bytes, Device::Cuda, u64::MAX).unwrap();
     assert_eq!(
         weights.load("proj.weight", &[8, 16]).unwrap().dtype(),
         DType::Fp8E4M3,
@@ -499,7 +504,7 @@ fn a_source_answers_for_a_shape_without_handing_the_weight_over() {
     // A model that works out its own architecture by looking for weights -- Anima's autoencoder
     // counts its stages this way -- asks this hundreds of times, and from a low-vram source
     // handing the weight over would be a copy across the bus each time.
-    let weights = source(&[("a", &[2, 3], &[0.0; 6])], Device::Cpu, Residency::Device);
+    let weights = source(&[("a", &[2, 3], &[0.0; 6])], Device::Cpu, u64::MAX);
 
     assert_eq!(weights.shape_of("a"), Some(vec![2, 3]));
     assert_eq!(weights.shape_of("missing"), None);
@@ -543,18 +548,12 @@ fn a_low_vram_run_computes_what_a_resident_one_does() {
     // and nothing the IR says.
     let ir = Ir::compile(&graph);
 
-    let on_the_card = source(tensors, Device::Cuda, Residency::Device);
+    let on_the_card = source(tensors, Device::Cuda, u64::MAX);
     let kept = ir
         .run(&RunContext::new(on_the_card.as_ref()).input("x", &x))
         .unwrap();
 
-    let over_the_bus = source(
-        tensors,
-        Device::Cuda,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    );
+    let over_the_bus = source(tensors, Device::Cuda, 0);
     assert!(over_the_bus.has("proj.weight"));
 
     let streamed = ir
@@ -596,16 +595,10 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
     drop(F::matmul(&warm, &warm).unwrap());
     drop(warm);
 
-    // Read the way a model reads it, through `Residency`. The whole package is on the host now,
+    // Read the way a model reads it, through `Weights::from_files`. The whole package is on the host now,
     // and none of it is on the card.
     let before = allocated();
-    let on_the_host = source(
-        tensors,
-        Device::Cuda,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    );
+    let on_the_host = source(tensors, Device::Cuda, 0);
     assert_eq!(
         allocated(),
         before,
@@ -632,7 +625,7 @@ fn a_low_vram_source_leaves_the_weights_off_the_card() {
 
     // Against which: the same package read to keep its weights does put the model on the card as
     // it is read, and holds it there.
-    let kept = source(tensors, Device::Cuda, Residency::Device);
+    let kept = source(tensors, Device::Cuda, u64::MAX);
 
     assert!(allocated() - before >= bytes);
     drop(kept);
@@ -667,18 +660,11 @@ fn a_disk_offloaded_package_on_metal_runs_like_a_resident_one() {
         to_host(&out[0].1)
     };
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     let expected = run(&kept);
     drop(kept);
 
-    let offloaded = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    )
-    .unwrap();
+    let offloaded = Weights::from_files(&[&file.0], Device::Metal, 0).unwrap();
     assert_eq!(run(&offloaded), expected);
     assert_eq!(
         run(&offloaded),
@@ -707,14 +693,7 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
     let x = Tensor::zeros(&[256, 256], DType::Float, Device::Metal).unwrap();
 
     let before = allocated();
-    let offloaded = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    )
-    .unwrap();
+    let offloaded = Weights::from_files(&[&file.0], Device::Metal, 0).unwrap();
     assert_eq!(
         allocated(),
         before,
@@ -735,7 +714,7 @@ fn a_disk_offloaded_package_leaves_the_weights_off_metal() {
     drop(out);
 
     // Against which: the same package read to keep its weights holds the model on the device.
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     assert!(allocated() - before >= weight_bytes);
     drop(kept);
 }
@@ -778,20 +757,13 @@ fn a_hybrid_package_keeps_the_smallest_weights_on_metal() {
         to_host(&out[0].1)
     };
 
-    let kept = Weights::from_files(&[&file.0], Device::Metal, Residency::Device).unwrap();
+    let kept = Weights::from_files(&[&file.0], Device::Metal, u64::MAX).unwrap();
     let expected = run(&kept);
     drop(kept);
 
     // Room for the two small ones and not the big one: they stay, and it does not.
     let before = allocated();
-    let hybrid = Weights::from_files(
-        &[&file.0],
-        Device::Metal,
-        Residency::Hybrid {
-            device_weight_bytes: small_bytes as u64 + 1024,
-        },
-    )
-    .unwrap();
+    let hybrid = Weights::from_files(&[&file.0], Device::Metal, small_bytes as u64 + 1024).unwrap();
     assert_eq!(
         allocated() - before,
         small_bytes,
@@ -805,6 +777,364 @@ fn a_hybrid_package_keeps_the_smallest_weights_on_metal() {
         "the big weight is given back after the pass"
     );
     assert_eq!(run(&hybrid), expected, "the second step reads the same");
+}
+
+/// What the allocator of `device` holds, which is what the budget the weights are sized against
+/// counts.
+fn held_on(device: Device) -> i64 {
+    MemoryBudget::capture(device).unwrap().allocated
+}
+
+/// Sets `device`'s memory limit back to none when it goes, however the test that made it ends, so
+/// that no other test runs under the limit it set.
+struct Unlimited(Device);
+
+impl Drop for Unlimited {
+    fn drop(&mut self) {
+        let _ = MemorySnapshot::set_limit(self.0, 0);
+    }
+}
+
+/// The weights a hybrid package keeps on the device are let go of largest first, one at a time, as
+/// they would be when the device runs out -- with nothing copied back, since the host still holds
+/// each -- and the model gives the same answer without them, reading each across again as it is
+/// used.
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first(device: Device) {
+    let big: Vec<f32> = (0..256 * 256)
+        .map(|i| ((i % 17) as f32 - 8.0) / 16.0)
+        .collect();
+    let small: Vec<f32> = (0..256).map(|i| (i % 5) as f32 / 4.0).collect();
+    let medium = vec![0.5f32; 1024];
+    let bytes = write_laid_out(&[
+        ("big.weight", "F32", &[256, 256], f32_bytes(&big)),
+        ("small.bias", "F32", &[256], f32_bytes(&small)),
+        ("small.scale", "F32", &[256], f32_bytes(&small)),
+        ("medium.unused", "F32", &[1024], f32_bytes(&medium)),
+    ]);
+    let file = TempFile::new(&bytes);
+
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let weight = graph.load("big.weight", &[256, 256]);
+    let bias = graph.load("small.bias", &[256]);
+    let scale = graph.load("small.scale", &[256]);
+    graph.output(
+        "y",
+        graph.mul(graph.add(graph.matmul(x, weight), bias), scale),
+    );
+    let ir = Ir::compile(&graph);
+
+    let x = Tensor::from_f32(&[256, 256], &big)
+        .unwrap()
+        .to_device(device)
+        .unwrap();
+    let run = |source: &Weights| {
+        let out = ir.run(&RunContext::new(source).input("x", &x)).unwrap();
+        to_host(&out[0].1)
+    };
+
+    let kept = Weights::from_files(&[&file.0], device, u64::MAX).unwrap();
+    let expected = run(&kept);
+    drop(kept);
+
+    // Room for the three small ones -- 1, 1 and 4 KB -- and not the big one.
+    let before = held_on(device);
+    let hybrid = Weights::from_files(&[&file.0], device, 7 << 10).unwrap();
+    assert_eq!(held_on(device) - before, 6 << 10);
+    assert_eq!(run(&hybrid), expected);
+
+    // Largest first, and of two the same size the one whose name sorts last.
+    assert_eq!(
+        hybrid.evict_one().unwrap().as_deref(),
+        Some("medium.unused")
+    );
+    assert_eq!(held_on(device) - before, 2 << 10);
+    assert_eq!(hybrid.evict_one().unwrap().as_deref(), Some("small.scale"));
+    assert_eq!(hybrid.evict_one().unwrap().as_deref(), Some("small.bias"));
+    assert_eq!(hybrid.evict_one().unwrap(), None);
+    assert_eq!(
+        held_on(device) - before,
+        0,
+        "nothing of the package is left on the device"
+    );
+
+    // Read across again as each is used, to the same answer.
+    assert_eq!(run(&hybrid), expected);
+}
+
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first_on_metal() {
+    a_hybrid_package_gives_its_kept_weights_back_largest_first(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first_on_cuda() {
+    a_hybrid_package_gives_its_kept_weights_back_largest_first(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_hybrid_package_gives_its_kept_weights_back_largest_first_on_vulkan() {
+    a_hybrid_package_gives_its_kept_weights_back_largest_first(Device::Vulkan);
+}
+
+/// Given as many bytes as there are, a hybrid package fills [`DEVICE_SHARE`] of what the device's
+/// allocator may hold with its smallest weights: of its memory limit where it has one, and,
+/// without one, of the device.
+fn a_hybrid_package_fills_its_share_of_the_device(device: Device) {
+    // Four weights of 16 KB each -- a page on Metal, so that they take no more than they say --
+    // and one larger.
+    const PAGE: i64 = 16384;
+    let page = vec![0.25f32; 4096];
+    let big = vec![0.5f32; 256 * 256];
+    let file = TempFile::new(&write_laid_out(&[
+        ("a.weight", "F32", &[4096], f32_bytes(&page)),
+        ("b.weight", "F32", &[4096], f32_bytes(&page)),
+        ("c.weight", "F32", &[4096], f32_bytes(&page)),
+        ("d.weight", "F32", &[4096], f32_bytes(&page)),
+        ("big.weight", "F32", &[256, 256], f32_bytes(&big)),
+    ]));
+    let as_many_as_fit = u64::MAX;
+    let _unlimited = Unlimited(device);
+
+    // A limit whose share, less what is held already, has room for three and a half of the pages:
+    // three of the four.
+    MemorySnapshot::release_unused(device).unwrap();
+    let held = held_on(device);
+    let wanted = held + 3 * PAGE + PAGE / 2;
+    let limit = (wanted / DEVICE_SHARE as i64 + 1) * 100;
+    MemorySnapshot::set_limit(device, limit).unwrap();
+    assert_eq!(MemoryBudget::capture(device).unwrap().capacity, limit);
+
+    let filled = Weights::from_files(&[&file.0], device, as_many_as_fit).unwrap();
+    assert_eq!(
+        held_on(device) - held,
+        3 * PAGE,
+        "three of the pages, and not the big one"
+    );
+    assert_eq!(filled.evict_one().unwrap().as_deref(), Some("c.weight"));
+    assert_eq!(filled.evict_one().unwrap().as_deref(), Some("b.weight"));
+    assert_eq!(filled.evict_one().unwrap().as_deref(), Some("a.weight"));
+    assert_eq!(filled.evict_one().unwrap(), None);
+    drop(filled);
+
+    // Without a limit, the device has room for the whole package.
+    MemorySnapshot::set_limit(device, 0).unwrap();
+    let before = held_on(device);
+    let _filled = Weights::from_files(&[&file.0], device, as_many_as_fit).unwrap();
+    assert_eq!(held_on(device) - before, 4 * PAGE + 256 * 256 * 4);
+}
+
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_hybrid_package_fills_its_share_of_metal() {
+    a_hybrid_package_fills_its_share_of_the_device(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_hybrid_package_fills_its_share_of_cuda() {
+    a_hybrid_package_fills_its_share_of_the_device(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_hybrid_package_fills_its_share_of_vulkan() {
+    a_hybrid_package_fills_its_share_of_the_device(Device::Vulkan);
+}
+
+/// A run that finds the device short -- most of what its limit allows taken by weights, and what
+/// the run makes needing more than the rest -- lets weights on the device go until what it makes
+/// fits, and gives what it gives with room to spare.
+fn a_run_short_of_memory_lets_weights_go_and_goes_on(device: Device) {
+    const MB: i64 = 1 << 20;
+    let names: Vec<String> = (0..16).map(|i| format!("w{i:02}")).collect();
+    let tensors: Vec<Vec<f32>> = (0..16)
+        .map(|i| {
+            (0..256 * 256)
+                .map(|j| (((i + j) % 13) as f32 - 6.0) / 256.0)
+                .collect()
+        })
+        .collect();
+    let laid_out: Vec<(&str, &str, &[i32], Vec<u8>)> = names
+        .iter()
+        .zip(&tensors)
+        .map(|(name, values)| (name.as_str(), "F32", &[256, 256][..], f32_bytes(values)))
+        .collect();
+    let file = TempFile::new(&write_laid_out(&laid_out));
+
+    // y = x + sum of x w: the input, the sum and each product are a megabyte apiece, and each
+    // weight a quarter of one.
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let mut y = x;
+    for name in &names {
+        y = graph.add(y, graph.matmul(x, graph.load(name, &[256, 256])));
+    }
+    graph.output("y", y);
+    let ir = Ir::compile(&graph);
+
+    let input: Vec<f32> = (0..1024 * 256)
+        .map(|i| ((i % 11) as f32 - 5.0) / 8.0)
+        .collect();
+    let run = |weights: &Weights| {
+        let x = Tensor::from_f32(&[1024, 256], &input)
+            .unwrap()
+            .to_device(device)
+            .unwrap();
+        ir.run(&RunContext::new(weights).input("x", &x))
+            .map(|out| to_host(&out[0].1))
+    };
+
+    let kept = Weights::from_files(&[&file.0], device, u64::MAX).unwrap();
+    let expected = run(&kept).unwrap();
+    drop(kept);
+    MemorySnapshot::release_unused(device).unwrap();
+    let held = held_on(device);
+
+    // Six megabytes more than is held: a share of it has room for the four megabytes of weights
+    // beside the input, and a run that makes three more -- the input again, the sum and a product
+    // -- does not fit beside them.
+    let _unlimited = Unlimited(device);
+    MemorySnapshot::set_limit(device, held + 6 * MB).unwrap();
+    let x = Tensor::from_f32(&[1024, 256], &input)
+        .unwrap()
+        .to_device(device)
+        .unwrap();
+    let filled = Weights::from_files(&[&file.0], device, u64::MAX).unwrap();
+    assert_eq!(
+        held_on(device) - held,
+        MB + 16 * 256 * 256 * 4,
+        "every weight is kept"
+    );
+    drop(x);
+
+    assert_eq!(run(&filled).unwrap(), expected);
+
+    // Some of them had to go to make room, and those that are left are still there to go.
+    let mut left = 0;
+    while filled.evict_one().unwrap().is_some() {
+        left += 1;
+    }
+    assert!(left < 16, "no weight was let go of");
+}
+
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_run_short_of_memory_lets_weights_go_and_goes_on_on_metal() {
+    a_run_short_of_memory_lets_weights_go_and_goes_on(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_run_short_of_memory_lets_weights_go_and_goes_on_on_cuda() {
+    a_run_short_of_memory_lets_weights_go_and_goes_on(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_run_short_of_memory_lets_weights_go_and_goes_on_on_vulkan() {
+    a_run_short_of_memory_lets_weights_go_and_goes_on(Device::Vulkan);
+}
+
+/// A run that runs out of the memory it is allowed partway through says so and leaves nothing
+/// behind: the same weights run again once there is room, and give what they gave before.
+///
+/// What letting a weight go when memory runs out is built on. Running out is a common path,
+/// answered by freeing something and running the instruction again, so what is checked is that
+/// failing is clean and not only that it fails.
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again(device: Device) {
+    const MB: i64 = 1 << 20;
+    let a: Vec<f32> = (0..1024 * 1024)
+        .map(|i| ((i % 13) as f32 - 6.0) / 64.0)
+        .collect();
+    let b: Vec<f32> = (0..1024 * 4096)
+        .map(|i| ((i % 7) as f32 - 3.0) / 64.0)
+        .collect();
+    let file = TempFile::new(&write_laid_out(&[
+        ("a.weight", "F32", &[1024, 1024], f32_bytes(&a)),
+        ("b.weight", "F32", &[1024, 4096], f32_bytes(&b)),
+    ]));
+
+    // y = silu(x a) b: `a` is 4 MB and `b` 16 MB, and both wait on the host until their load. So
+    // a run under 8 MB gets through the first product and fails at the second weight.
+    let graph = Graph::new();
+    let x = graph.input("x");
+    let h = graph.silu(graph.matmul(x, graph.load("a.weight", &[1024, 1024])));
+    graph.output("y", graph.matmul(h, graph.load("b.weight", &[1024, 4096])));
+    let ir = Ir::compile(&graph);
+
+    let weights = Weights::from_files(&[&file.0], device, 0).unwrap();
+    let input: Vec<f32> = (0..64 * 1024)
+        .map(|i| ((i % 11) as f32 - 5.0) / 8.0)
+        .collect();
+    let run = |weights: &Weights| {
+        let x = Tensor::from_f32(&[64, 1024], &input)
+            .unwrap()
+            .to_device(device)
+            .unwrap();
+        ir.run(&RunContext::new(weights).input("x", &x))
+            .map(|out| to_host(&out[0].1))
+    };
+
+    let expected = run(&weights).unwrap();
+    MemorySnapshot::release_unused(device).unwrap();
+    let held = held_on(device);
+
+    let _unlimited = Unlimited(device);
+    MemorySnapshot::set_limit(device, held + 8 * MB).unwrap();
+    let error = run(&weights).unwrap_err().to_string();
+    assert!(error.contains("OutOfMemory"), "{error}");
+    assert!(
+        error.contains("b.weight"),
+        "failed at the second weight: {error}"
+    );
+    assert_eq!(
+        held_on(device),
+        held,
+        "the input, the first weight and the product before it are all let go of"
+    );
+
+    // Room enough under a limit, and no limit at all: the same weights, the same answer.
+    MemorySnapshot::set_limit(device, held + 64 * MB).unwrap();
+    assert_eq!(run(&weights).unwrap(), expected);
+    MemorySnapshot::set_limit(device, 0).unwrap();
+    assert_eq!(run(&weights).unwrap(), expected);
+}
+
+#[test]
+#[ignore = "needs a Metal device"]
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again_on_metal() {
+    a_run_past_its_memory_limit_fails_cleanly_and_runs_again(Device::Metal);
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again_on_cuda() {
+    a_run_past_its_memory_limit_fails_cleanly_and_runs_again(Device::Cuda);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_run_past_its_memory_limit_fails_cleanly_and_runs_again_on_vulkan() {
+    a_run_past_its_memory_limit_fails_cleanly_and_runs_again(Device::Vulkan);
+}
+
+/// The processor's allocator takes no limit: it says so rather than taking a number it would do
+/// nothing with, and a limit below nothing is refused before any device is asked.
+#[test]
+fn the_processor_takes_no_memory_limit() {
+    let error = MemorySnapshot::set_limit(Device::Cpu, 1 << 30)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no kernel on this device"), "{error}");
+
+    let error = MemorySnapshot::set_limit(Device::Cpu, -1)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("at least 0"), "{error}");
 }
 
 /// Asking a device to hand its spare memory back is a question every device answers, including
@@ -977,13 +1307,8 @@ fn a_mapped_package_runs_like_one_read_into_memory() {
         .unwrap();
     let by_hand = HashMap::from([("big.weight".to_string(), by_hand)]);
     let expected = run(&Weights::from_tensors(by_hand, Device::Cuda).unwrap());
-    for residency in [
-        Residency::Device,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    ] {
-        let mapped = Weights::from_files(&[&file.0], Device::Cuda, residency).unwrap();
-        assert_eq!(run(&mapped), expected, "{residency:?}");
+    for device_weight_bytes in [u64::MAX, 0] {
+        let mapped = Weights::from_files(&[&file.0], Device::Cuda, device_weight_bytes).unwrap();
+        assert_eq!(run(&mapped), expected, "{device_weight_bytes:?}");
     }
 }

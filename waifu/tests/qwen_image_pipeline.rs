@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use waifu::flint::Tensor;
 use waifu::qwen_image::QwenImage;
-use waifu::{DType, Device, GenerationOptions, GenerationProgress, Manifest, Residency};
+use waifu::{DType, Device, GenerationOptions, GenerationProgress, Manifest};
 
 const PROMPT: &str = "a red fox sitting in fresh snow, golden hour, photorealistic";
 
@@ -95,14 +95,7 @@ fn write_ppm(pixels: &[f32], height: usize, width: usize) -> PathBuf {
 #[ignore = "needs the qwen-image-2.1 package"]
 fn draws_an_opaque_picture_and_can_be_stopped() {
     let manifest = Manifest::open(models_dir().join("qwen-image-2.1.yaml")).unwrap();
-    let model = QwenImage::from_manifest(
-        Device::Cuda,
-        Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-        &manifest,
-    )
-    .unwrap();
+    let model = QwenImage::from_manifest(Device::Cuda, 0, &manifest).unwrap();
 
     let options = GenerationOptions {
         width: 512,

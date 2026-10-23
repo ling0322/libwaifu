@@ -19,112 +19,56 @@
 
 //! Where a run goes: which device, and where the weights wait.
 
-use crate::flint::MemorySnapshot;
-use crate::{Device, Residency};
+use crate::flint::{MemoryBudget, MemorySnapshot};
+use crate::Device;
 
-/// Where a run goes: a device, and where the weights wait between the steps that read them.
+/// Where a run goes: a device.
 ///
-/// One name rather than two answers. Where the weights wait is a question about a card the model
-/// does not fit on, so it has one device it can be asked of and one reason to ask it, and asking
-/// it beside the device made a second box whose rows were struck out three times out of four. As
-/// a device name -- `cuda_cpu_offload`, cuda with the weights kept on the host, and
-/// `metal_disk_offload`, metal with them left on the disk -- the pair that cannot be built cannot
-/// be said either, and there is one list on screen instead of two.
+/// Its own type rather than a [`Device`] because it is what a run is asked of, and the weights a
+/// run keeps on the device are the runtime's to say. Every device keeps what fits there, copies
+/// the rest over as each is read, and lets weights go when a run runs short, so there is no second
+/// name for a device with the weights somewhere else.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Runtime {
     device: Device,
-    residency: Residency,
 }
 
 impl Runtime {
     /// Every place a run can go, in the order the flag's own usage lists them.
-    pub const ALL: [Runtime; 6] = [
+    pub const ALL: [Runtime; 4] = [
         Runtime::on(Device::Cpu),
         Runtime::on(Device::Cuda),
-        Runtime::CUDA_CPU_OFFLOAD,
         Runtime::on(Device::Metal),
-        Runtime::METAL_DISK_OFFLOAD,
         Runtime::on(Device::Vulkan),
     ];
 
-    /// Cuda, with the package held on the host and each weight moved onto the card at the
-    /// instruction that reads it. For a card the model does not fit on.
-    pub const CUDA_CPU_OFFLOAD: Runtime = Runtime {
-        device: Device::Cuda,
-        residency: Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    };
-
-    /// Metal, with the package left in its file and each weight read off the disk into the
-    /// device's memory at the instruction that reads it. Metal's memory is the machine's, so this
-    /// is for a model larger than the machine; see [`Weights`](crate::Weights).
-    pub const METAL_DISK_OFFLOAD: Runtime = Runtime {
-        device: Device::Metal,
-        residency: Residency::Hybrid {
-            device_weight_bytes: 0,
-        },
-    };
-
-    /// A device with the weights on it, which is what every name but the offload ones means.
+    /// A device, with as many of the weights on it as fit, which each device makes what it can of
+    /// -- see [`Weights::from_files`](crate::Weights::from_files).
+    ///
+    /// On Metal, CUDA and Vulkan the smallest weights fill most of what the memory limit allows --
+    /// all of the device where there is none -- as the model is read; every other weight is copied
+    /// into the device's memory at the instruction that reads it, and a run that runs short lets
+    /// weights on the device go. So a model that fits is all on the device, and one larger than
+    /// the card still draws. See [`Weights`](crate::Weights) and [`set_memory_limit`]. On the
+    /// processor every weight is where it is read.
     pub const fn on(device: Device) -> Runtime {
-        Runtime {
-            device,
-            residency: Residency::Device,
-        }
+        Runtime { device }
     }
 
     pub fn device(self) -> Device {
         self.device
     }
 
-    pub fn residency(self) -> Residency {
-        self.residency
+    /// How many bytes of a model's weights to keep on the device: as many as fit, always. A
+    /// smaller share is a memory limit's to ask for -- see [`set_memory_limit`] -- rather than a
+    /// runtime's.
+    pub fn device_weight_bytes(self) -> u64 {
+        u64::MAX
     }
 
-    /// This offload runtime with the smallest weights kept on the device, as many as fit in
-    /// `bytes`: [`Residency::Hybrid`]. Nothing is the runtime as it is.
-    ///
-    /// Refused for a runtime that is not an offload one, since it keeps the whole model on the
-    /// device already and there is nothing a number of bytes would change.
-    pub fn with_device_weight_bytes(self, bytes: u64) -> Result<Runtime, String> {
-        match (self.residency, bytes) {
-            (_, 0) => Ok(self),
-            (Residency::Hybrid { .. }, _) => Ok(Runtime {
-                residency: Residency::Hybrid {
-                    device_weight_bytes: bytes,
-                },
-                ..self
-            }),
-            (Residency::Device, _) => Err(format!(
-                "{} keeps every weight on the device already: the bytes of weights to keep there \
-                 are for cuda_cpu_offload and metal_disk_offload",
-                self.name()
-            )),
-        }
-    }
-
-    /// What it is called on the command line and on screen. A hybrid runtime goes by its offload
-    /// device's name: it is that device with a number beside it.
+    /// What it is called on the command line and on screen.
     pub fn name(self) -> &'static str {
-        match (self.device, self.residency) {
-            (device, Residency::Device) => device.name(),
-            (Device::Metal, Residency::Hybrid { .. }) => "metal_disk_offload",
-            (_, Residency::Hybrid { .. }) => "cuda_cpu_offload",
-        }
-    }
-
-    /// What the drawing screen's device list says beside the name of one this machine can use.
-    pub fn about(self) -> &'static str {
-        match (self.device, self.residency) {
-            (_, Residency::Device) => "ready",
-            // The rows that have to say more than that. They are the slow answers, and the slow
-            // answer picked by someone who was not told is a run that looks broken.
-            (Device::Metal, Residency::Hybrid { .. }) => {
-                "ready, slower: for a model larger than the memory"
-            }
-            (_, Residency::Hybrid { .. }) => "ready, slower: for a model larger than the card",
-        }
+        self.device.name()
     }
 }
 
@@ -137,9 +81,7 @@ pub enum DeviceOption {
     Auto,
     Cpu,
     Cuda,
-    CudaCpuOffload,
     Metal,
-    MetalDiskOffload,
     Vulkan,
 }
 
@@ -149,12 +91,8 @@ impl DeviceOption {
         match self {
             DeviceOption::Cpu => Runtime::on(Device::Cpu),
             DeviceOption::Cuda => Runtime::on(Device::Cuda),
-            DeviceOption::CudaCpuOffload => Runtime::CUDA_CPU_OFFLOAD,
             DeviceOption::Metal => Runtime::on(Device::Metal),
-            DeviceOption::MetalDiskOffload => Runtime::METAL_DISK_OFFLOAD,
             DeviceOption::Vulkan => Runtime::on(Device::Vulkan),
-            // Never an offload one: with no model in hand there is nothing to measure against
-            // the card. Which one suits a model is the caller's: see `waifu_devices_json`.
             DeviceOption::Auto => {
                 // At most one of CUDA and Metal is ever built, so the order between those two only
                 // decides which check runs first. Vulkan comes last because it runs on the same
@@ -174,34 +112,42 @@ impl DeviceOption {
     }
 }
 
-/// How much of each card is free, where the card said. `None` is a card that was not asked or
-/// did not answer, which is taken as room enough: that is what `auto` assumed before it measured.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Room {
-    pub cuda: Option<u64>,
-    pub vulkan: Option<u64>,
+/// Limit the memory of the device `device` runs on -- the tensors of whatever runs there, the
+/// weights kept on it among them -- to `bytes`; 0 for no limit but the device's.
+///
+/// The process's, not an engine's: there is one allocator per device. A model read afterwards
+/// keeps its smallest weights on the device within the limit, and a run that then runs short lets
+/// weights on the device go. Metal, CUDA and Vulkan have a limit; the processor does not.
+pub fn set_memory_limit(device: DeviceOption, bytes: u64) -> Result<(), String> {
+    let device = device.resolve().device();
+    MemorySnapshot::set_limit(device, bytes.min(i64::MAX as u64) as i64)
+        .map_err(|error| format!("{} takes no memory limit: {error}", device.name()))?;
+    crate::log::write(
+        crate::log::Level::Info,
+        &match bytes {
+            0 => format!("no memory limit on {}", device.name()),
+            _ => format!(
+                "memory limit on {}: {} MB",
+                device.name(),
+                bytes / 1_000_000
+            ),
+        },
+    );
+    Ok(())
 }
 
-impl Room {
-    /// Asks the cards among `available` how much of them is free.
-    ///
-    /// Not Metal: that backend has no snapshot, and asking for one ends the process. Its memory is
-    /// the machine's, so there is no separate card for a model not to fit on.
-    ///
-    /// The first question to CUDA builds a context on the card, a few hundred megabytes of it --
-    /// which is why this is only asked for `auto`, where a card is about to be used anyway.
-    pub fn measure(available: &[Runtime]) -> Room {
-        let free = |device: Device| match available.contains(&Runtime::on(device)) {
-            true => match MemorySnapshot::capture(device) {
-                Ok(memory) if memory.total > 0 => Some(memory.free.max(0) as u64),
-                _ => None,
-            },
-            false => None,
-        };
-        Room {
-            cuda: free(Device::Cuda),
-            vulkan: free(Device::Vulkan),
-        }
+/// What the allocator of `device` may still take, where this build and this machine can run there
+/// and it says: see [`MemoryBudget`]. `None` for the processor, which keeps no count.
+///
+/// The first question to CUDA builds a context on the card, a few hundred megabytes of it -- which
+/// is why this is only asked of a device a run can go to.
+pub fn remaining(device: Device, available: &[Runtime]) -> Option<u64> {
+    if device == Device::Cpu || !available.contains(&Runtime::on(device)) {
+        return None;
+    }
+    match MemoryBudget::capture(device) {
+        Ok(budget) if budget.capacity > 0 => Some(budget.remaining()),
+        _ => None,
     }
 }
 
@@ -214,5 +160,26 @@ impl Runtime {
             .into_iter()
             .filter(|runtime| runtime.device().is_available())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_device_has_one_name_and_keeps_what_fits() {
+        for option in [
+            DeviceOption::Cpu,
+            DeviceOption::Cuda,
+            DeviceOption::Metal,
+            DeviceOption::Vulkan,
+        ] {
+            assert_eq!(option.resolve().device_weight_bytes(), u64::MAX);
+        }
+        assert_eq!(DeviceOption::Metal.resolve().device(), Device::Metal);
+
+        let names: Vec<&str> = Runtime::ALL.iter().map(|runtime| runtime.name()).collect();
+        assert_eq!(names, ["cpu", "cuda", "metal", "vulkan"]);
     }
 }

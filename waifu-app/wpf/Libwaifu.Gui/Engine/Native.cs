@@ -85,6 +85,7 @@ namespace Libwaifu.Gui.Engine
             Cpu = 1,
             Metal = 2,
             Cuda = 3,
+            // The same as Cuda now, kept so that the numbers after it keep their meaning.
             CudaCpuOffload = 4,
             Vulkan = 5,
         }

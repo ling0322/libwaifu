@@ -49,6 +49,9 @@ struct Chunk {
   int64_t size = 0;
   Block *first = nullptr;
   uint64_t emptiedAt = 0;  // when it last became wholly free, in BlockAllocator::give calls
+  // Holds one block at a time: what that block leaves free is nobody else's, and the chunk is
+  // handed out whole again only by BlockAllocator::takeDedicated.
+  bool dedicated = false;
 
   bool empty() const {
     return first->free && first->size == size;
@@ -62,6 +65,10 @@ struct Chunk {
 /// free; a block given back joins the free blocks on either side. So the bytes one tensor held can
 /// go to any tensor that fits in them, or to two smaller ones, or -- with a neighbour -- to one
 /// larger, which a cache of whole buffers cannot do.
+///
+/// Except in a dedicated chunk, which holds one block at a time and is none of that: its free
+/// bytes are never cut from by take(), and it is had again whole, by takeDedicated(), or not at
+/// all.
 class BlockAllocator {
  public:
   /// Every block and offset is a multiple of this.
@@ -76,11 +83,18 @@ class BlockAllocator {
   static int64_t roundUp(int64_t bytes);
 
   /// A block of `size` bytes, rounded up, from the free ones, or nullptr if none is large enough.
+  /// Never from a dedicated chunk.
   Block *take(int64_t size);
 
-  /// Adds a chunk of `size` bytes, wholly free. It is not counted as emptied, so the next take
-  /// that fits uses it before anything else is given back.
-  Chunk *addChunk(void *handle, int64_t size);
+  /// A block of `size` bytes, rounded up, at the start of the smallest empty dedicated chunk of no
+  /// more than `largestChunk` bytes it fits in, or nullptr if there is none. What it leaves of the
+  /// chunk stays free and is nobody's until the block is given back.
+  Block *takeDedicated(int64_t size, int64_t largestChunk);
+
+  /// Adds a chunk of `size` bytes, wholly free -- and, if `dedicated`, kept for one block at a
+  /// time. It is not counted as emptied, so the next take that fits uses it before anything else
+  /// is given back.
+  Chunk *addChunk(void *handle, int64_t size, bool dedicated = false);
 
   /// Gives a block back, as last used by batch `lastUse`, and merges it with its free neighbours.
   void give(Block *block, uint64_t lastUse);

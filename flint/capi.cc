@@ -66,6 +66,20 @@ int32_t clearError() {
   return FL_OK;
 }
 
+fl::AllocHint toHint(fl_alloc_hint_t hint) {
+  switch (hint) {
+    case FL_ALLOC_ACTIVATION:
+      return fl::AllocHint::kActivation;
+    case FL_ALLOC_WEIGHT:
+      return fl::AllocHint::kWeight;
+    case FL_ALLOC_OTHER:
+      return fl::AllocHint::kOther;
+    case FL_ALLOC_TEMPORARY_WEIGHT:
+      return fl::AllocHint::kTemporaryWeight;
+  }
+  throw lut::InvalidArgError("unknown allocation hint " + std::to_string(static_cast<int>(hint)));
+}
+
 fl::DType toDType(fl_dtype_t dtype) {
   switch (dtype) {
     case FL_DTYPE_FLOAT:
@@ -179,6 +193,8 @@ int32_t guard(Body &&body) {
     return body();
   } catch (const lut::InvalidArgError &error) {
     return setError(FL_ERROR_INVALID_ARG, error.what());
+  } catch (const lut::OutOfMemoryError &error) {
+    return setError(FL_ERROR_OUT_OF_MEMORY, error.what());
   } catch (const std::bad_alloc &) {
     return setError(FL_ERROR_ABORTED, "out of memory");
   } catch (const std::exception &error) {
@@ -312,9 +328,13 @@ void fl_set_fatal_handler(fl_fatal_handler_t handler) {
 // rather than a cast of the function pointer, which is not a thing C++ allows to be called.
 static std::atomic<fl_log_sink_t> gCLogSink{nullptr};
 
-static void toCLogSink(lut::LogSeverity severity, const char *source, const char *message) {
+static void toCLogSink(
+    lut::LogSeverity severity,
+    const char *time,
+    const char *source,
+    const char *message) {
   fl_log_sink_t sink = gCLogSink.load(std::memory_order_acquire);
-  if (sink) sink(static_cast<int32_t>(severity), source, message);
+  if (sink) sink(static_cast<int32_t>(severity), time, source, message);
 }
 
 void fl_set_log_sink(fl_log_sink_t sink) {
@@ -350,13 +370,14 @@ int32_t fl_tensor_data_create(
     fl_device_type_t device,
     fl_dtype_t dtype,
     int64_t numel,
+    fl_alloc_hint_t hint,
     fl_tensor_data_t *out) {
   return guard([&]() {
     if (!out) throw lut::InvalidArgError("out is null");
     if (numel < 1) throw lut::InvalidArgError("storage holds at least one element");
 
     *out = reinterpret_cast<fl_tensor_data_t>(
-        fl::F::allocate(toDevice(device), numel, toDType(dtype)).release());
+        fl::F::allocate(toDevice(device), numel, toDType(dtype), toHint(hint)).release());
     return clearError();
   });
 }
@@ -1311,6 +1332,25 @@ int32_t fl_memory_reset_peak_stats(fl_device_type_t device) {
 int32_t fl_memory_release_unused(fl_device_type_t device) {
   return guard([&]() {
     fl::MemorySnapshot::releaseUnused(toDevice(device));
+    return clearError();
+  });
+}
+
+int32_t fl_memory_set_limit(fl_device_type_t device, int64_t bytes) {
+  return guard([&]() {
+    if (bytes < 0) throw lut::InvalidArgError("a memory limit is at least 0");
+    fl::MemorySnapshot::setLimit(toDevice(device), bytes);
+    return clearError();
+  });
+}
+
+int32_t fl_memory_budget(fl_device_type_t device, fl_memory_budget_t *out) {
+  return guard([&]() {
+    if (!out) throw lut::InvalidArgError("out is null");
+    fl::MemoryBudget budget = fl::MemoryBudget::capture(toDevice(device));
+    out->capacity = budget.capacity;
+    out->allocated = budget.allocated;
+    out->held = budget.held;
     return clearError();
   });
 }

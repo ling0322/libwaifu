@@ -44,7 +44,7 @@ use waifu_tools::settings;
 fn main() -> Result<(), waifu::Error> {
     let mut arguments: Vec<String> = std::env::args().skip(1).collect();
 
-    let residency = waifu_tools::residency(&mut arguments)?;
+    let device_weight_bytes = waifu_tools::device_weight_bytes(&mut arguments)?;
 
     let mut arguments = arguments.into_iter();
     let (Some(model_path), Some(prompt)) = (arguments.next(), arguments.next()) else {
@@ -74,7 +74,10 @@ fn main() -> Result<(), waifu::Error> {
 
     let manifest = Manifest::open(&model_path)?;
     let kind = manifest.section("model")?.get_str("type")?.to_string();
-    eprintln!("drawing a {kind} on {device:?}, weights {residency:?}");
+    eprintln!(
+        "drawing a {kind} on {device:?}, weights kept on it: {}",
+        waifu_tools::bytes_kept(device_weight_bytes)
+    );
 
     // What the kind of model wants, and then what this one says over it, as the model manager
     // works it out for a screen. A model with no `suggested:` block gets exactly its kind's.
@@ -85,13 +88,12 @@ fn main() -> Result<(), waifu::Error> {
     );
 
     let image = match kind.as_str() {
-        Anima::MODEL_TYPE => {
-            Anima::from_manifest(device, residency, &manifest)?.generate(&prompt, &options)?
-        }
-        Krea2::MODEL_TYPE => {
-            Krea2::from_manifest(device, residency, &manifest)?.generate(&prompt, &options)?
-        }
-        _ => Sdxl::from_manifest(device, residency, &manifest)?.generate(&prompt, &options)?,
+        Anima::MODEL_TYPE => Anima::from_manifest(device, device_weight_bytes, &manifest)?
+            .generate(&prompt, &options)?,
+        Krea2::MODEL_TYPE => Krea2::from_manifest(device, device_weight_bytes, &manifest)?
+            .generate(&prompt, &options)?,
+        _ => Sdxl::from_manifest(device, device_weight_bytes, &manifest)?
+            .generate(&prompt, &options)?,
     };
     let pixels = to_rgb8(&image)?;
 

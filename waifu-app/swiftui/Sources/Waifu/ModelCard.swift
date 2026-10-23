@@ -107,10 +107,10 @@ struct ModelCard: View {
         }
     }
 
-    /// ", with 2.5 GB on the GPU" where `placement` keeps any weights there, and nothing otherwise.
+    /// ", within 6.5 GB of VRAM" where `placement` has a memory limit, and nothing otherwise.
     private func onGPU(_ placement: Placement) -> String {
-        placement.deviceWeightBytes == 0
-            ? "" : String(format: ", with %.1f GB on the GPU", Double(placement.deviceWeightBytes) / 1e9)
+        placement.memoryLimitBytes == 0
+            ? "" : String(format: ", within %.1f GB of VRAM", Double(placement.memoryLimitBytes) / 1e9)
     }
 
     /// Where the chosen model is: not fetched yet, fetched, or loaded -- or why it is not a model.

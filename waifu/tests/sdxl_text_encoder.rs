@@ -31,8 +31,7 @@ use std::rc::Rc;
 
 use waifu::flint::{functional as F, Tensor, Weights};
 use waifu::{
-    read_safetensors, ClipTextConfig, ClipTextEncoder, DType, Device, Manifest, Residency,
-    WeightFormat,
+    read_safetensors, ClipTextConfig, ClipTextEncoder, DType, Device, Manifest, WeightFormat,
 };
 
 fn models_dir() -> PathBuf {
@@ -56,12 +55,7 @@ fn weights() -> Rc<Weights> {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("sdxl-base.yaml")).unwrap();
             Rc::new(
-                Weights::from_files(
-                    &manifest.weight_paths().unwrap(),
-                    device(),
-                    Residency::Device,
-                )
-                .unwrap(),
+                Weights::from_files(&manifest.weight_paths().unwrap(), device(), u64::MAX).unwrap(),
             )
         }))
     })

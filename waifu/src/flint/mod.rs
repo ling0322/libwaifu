@@ -92,12 +92,15 @@ mod graph;
 mod ir;
 mod op;
 mod operators;
+mod weights;
 
 pub use fp8::{fp8_available, SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
-pub use ir::{check_parameters, Inst, Ir, Residency, RunContext, Weights};
+pub(crate) use ir::memory_of;
+pub use ir::{Inst, Ir, RunContext};
 pub use op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
 pub use operators::Operators;
+pub use weights::{check_parameters, Weights, DEVICE_SHARE};
 
 use operators::{operators_of, transfer_operators};
 
@@ -169,6 +172,31 @@ pub enum Device {
     CudaHost = 2,
     Metal = 3,
     Vulkan = 4,
+}
+
+/// What a tensor's storage is for, which an allocator may treat each in its own way, by how long it
+/// lives.
+///
+/// A weight kept on the device is given memory that goes back to the device whole when the weight
+/// is let go of -- a buffer of its own on Metal, its own `cudaMalloc` on CUDA from 2 MB -- so that
+/// dropping one to make room frees memory a new allocation can have, rather than a hole in a chunk
+/// or a block of a pool that small tensors beside it keep from going back. Everything else lives
+/// for a pass at most and is cut from the memory the allocator keeps for reuse. Vulkan gives every
+/// tensor a buffer of its own and ignores it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(i32)]
+pub enum AllocHint {
+    /// What a pass makes and drops again: the outputs of operators.
+    #[default]
+    Activation = 0,
+    /// A model's parameter kept on the device, until it is let go of.
+    Weight = 1,
+    /// Anything else, treated as an activation.
+    Other = 2,
+    /// A copy of a weight that waits off the device, made by the load that reads it and dropped
+    /// after its last reader in the same pass: an activation, by how long it lives. See
+    /// [`Weights::load`].
+    TemporaryWeight = 3,
 }
 
 impl Device {
@@ -245,10 +273,17 @@ impl Error {
         self.code == ffi::FL_ERROR_INVALID_ARG
     }
 
-    /// Whether the call was accepted but could not be carried out, such as running out of memory
-    /// or asking for a device the build does not support.
+    /// Whether the call was accepted but could not be carried out, such as asking for a device the
+    /// build does not support. Running out of memory is not this but [`Error::is_out_of_memory`].
     pub fn is_aborted(&self) -> bool {
         self.code == ffi::FL_ERROR_ABORTED
+    }
+
+    /// Whether the device could not give the memory the call needed, or its limit would have been
+    /// passed: see [`MemorySnapshot::set_limit`]. Nothing was taken, so the call may be made again
+    /// once something has been let go of.
+    pub fn is_out_of_memory(&self) -> bool {
+        self.code == ffi::FL_ERROR_OUT_OF_MEMORY
     }
 
     fn unsupported(message: String) -> Error {
@@ -340,7 +375,14 @@ pub fn init() {
 /// Not after [`init`], unlike the rest of this module: the first thing initialising does is write
 /// what hardware it found, and a sink set after that has already missed it.
 pub(crate) fn set_log_sink(
-    sink: Option<extern "C" fn(level: i32, source: *const c_char, message: *const c_char)>,
+    sink: Option<
+        extern "C" fn(
+            level: i32,
+            time: *const c_char,
+            source: *const c_char,
+            message: *const c_char,
+        ),
+    >,
 ) {
     unsafe { ffi::fl_set_log_sink(sink) };
 }
@@ -410,6 +452,58 @@ impl MemorySnapshot {
         init();
         check(unsafe { ffi::fl_memory_release_unused(device as i32) })
     }
+
+    /// Limit what the allocator of `device` holds to `bytes`, 0 for no limit but the device's. An
+    /// allocation that would pass it fails the call that asked for it, as one the device cannot
+    /// give does, and takes nothing: whatever was let go of on the way out is there for the next
+    /// call. See [`MemoryBudget`] for what it leaves.
+    ///
+    /// The process's, not a model's: there is one allocator per device. Metal, CUDA and Vulkan
+    /// have one, and the processor is refused.
+    pub fn set_limit(device: Device, bytes: i64) -> Result<()> {
+        init();
+        check(unsafe { ffi::fl_memory_set_limit(device as i32, bytes) })
+    }
+}
+
+/// What the allocator of one device may hold and what it holds now, which is what a model's
+/// weights are sized against.
+///
+/// Not a [`MemorySnapshot`]: that is the device as somebody looking at it sees it -- other
+/// processes, and memory an allocator keeps for reuse, included -- and this is the room the
+/// allocator itself has, under its limit or, without one, in the whole of the device.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryBudget {
+    /// The memory limit where there is one -- see [`MemorySnapshot::set_limit`] -- and otherwise
+    /// what the device has: a card's memory, or on Metal what the system suggests one process
+    /// keep on the GPU. 0 on the processor.
+    pub capacity: i64,
+    /// What this process's tensors hold against it now, and on CUDA the operators' workspaces.
+    pub allocated: i64,
+    /// What the allocator holds from the device: `allocated`, and what it keeps for reuse besides
+    /// -- CUDA's pool, Vulkan's cache, Metal's chunks. Far more than `allocated` when an
+    /// allocation fails is memory the allocator has and cannot hand out.
+    pub held: i64,
+}
+
+impl MemoryBudget {
+    /// Measure the budget of `device`'s allocator.
+    pub fn capture(device: Device) -> Result<MemoryBudget> {
+        init();
+        let mut raw = ffi::FlMemoryBudget::default();
+        check(unsafe { ffi::fl_memory_budget(device as i32, &mut raw) })?;
+        Ok(MemoryBudget {
+            capacity: raw.capacity,
+            allocated: raw.allocated,
+            held: raw.held,
+        })
+    }
+
+    /// What the allocator may still take: the capacity less what is held, and never below
+    /// nothing.
+    pub fn remaining(self) -> u64 {
+        (self.capacity - self.allocated).max(0) as u64
+    }
 }
 
 /// Storage: a run of elements of one dtype on one device, owned here and shared by every tensor
@@ -426,12 +520,18 @@ struct Storage {
 }
 
 impl Storage {
-    /// Uninitialized storage for `numel` elements, at least one.
-    fn allocate(numel: i64, dtype: DType, device: Device) -> Result<Rc<Storage>> {
+    /// Uninitialized storage for `numel` elements, at least one, for what `hint` says it is for.
+    fn allocate(numel: i64, dtype: DType, device: Device, hint: AllocHint) -> Result<Rc<Storage>> {
         init();
         let mut raw: ffi::FlTensorData = std::ptr::null_mut();
         check(unsafe {
-            ffi::fl_tensor_data_create(device as i32, dtype as i32, numel.max(1), &mut raw)
+            ffi::fl_tensor_data_create(
+                device as i32,
+                dtype as i32,
+                numel.max(1),
+                hint as i32,
+                &mut raw,
+            )
         })?;
         Ok(Rc::new(Storage {
             raw,
@@ -594,13 +694,23 @@ impl Tensor {
     /// for it. Reading an element before writing it gives whatever the allocator handed back, so
     /// this is only worth using when every element is written first.
     pub fn empty(shape: &[i32], dtype: DType, device: Device) -> Result<Tensor> {
+        Tensor::empty_with_hint(shape, dtype, device, AllocHint::Activation)
+    }
+
+    /// [`Tensor::empty`], for what `hint` says the storage is for.
+    pub fn empty_with_hint(
+        shape: &[i32],
+        dtype: DType,
+        device: Device,
+        hint: AllocHint,
+    ) -> Result<Tensor> {
         if let Some(&n) = shape.iter().find(|&&n| n < 0) {
             return Err(Error::invalid(format!(
                 "a tensor cannot have a dimension of {n}"
             )));
         }
         let numel: i64 = shape.iter().map(|&n| n as i64).product();
-        let storage = Storage::allocate(numel, dtype, device)?;
+        let storage = Storage::allocate(numel, dtype, device, hint)?;
         Tensor::over(storage, shape.to_vec(), contiguous_strides(shape), 0)
     }
 
@@ -1029,6 +1139,12 @@ impl Tensor {
 
     /// Copy the tensor to another device.
     pub fn to_device(&self, device: Device) -> Result<Tensor> {
+        self.to_device_with_hint(device, AllocHint::Activation)
+    }
+
+    /// [`Tensor::to_device`], with the copy's storage allocated for what `hint` says it is for: a
+    /// weight moved onto the device is [`AllocHint::Weight`].
+    pub fn to_device_with_hint(&self, device: Device, hint: AllocHint) -> Result<Tensor> {
         // Already there, so nothing is copied and no operator is asked anything.
         if self.device() == device {
             return Ok(self.clone());
@@ -1037,7 +1153,7 @@ impl Tensor {
         // A transfer is a plain copy of one run of bytes, so a strided tensor is packed first, on
         // the side it is on -- the host's operators for either kind of host memory.
         let source = self.contiguous()?;
-        let dest = Tensor::empty(&source.layout.shape, source.dtype(), device)?;
+        let dest = Tensor::empty_with_hint(&source.layout.shape, source.dtype(), device, hint)?;
         let operators = transfer_operators(source.device(), device)?;
         check(unsafe { ffi::fl_transfer(operators, source.raw(), dest.raw()) })?;
         Ok(dest)

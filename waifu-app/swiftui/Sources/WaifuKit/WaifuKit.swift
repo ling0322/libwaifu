@@ -140,16 +140,14 @@ public struct AudioClip: Sendable, Equatable {
 }
 
 public enum Device: Sendable {
-    case auto, cpu, metal, metalDiskOffload, cuda, cudaCPUOffload, vulkan
+    case auto, cpu, metal, cuda, vulkan
 
     var c: WaifuDevice {
         switch self {
         case .auto: WAIFU_DEVICE_AUTO
         case .cpu: WAIFU_DEVICE_CPU
         case .metal: WAIFU_DEVICE_METAL
-        case .metalDiskOffload: WAIFU_DEVICE_METAL_DISK_OFFLOAD
         case .cuda: WAIFU_DEVICE_CUDA
-        case .cudaCPUOffload: WAIFU_DEVICE_CUDA_CPU_OFFLOAD
         case .vulkan: WAIFU_DEVICE_VULKAN
         }
     }
@@ -457,14 +455,21 @@ func call<T>(
 public final class Engine: @unchecked Sendable {
     private let handle: OpaquePointer
 
-    /// An engine on `device`. On `.metalDiskOffload` and `.cudaCPUOffload`, up to
-    /// `deviceWeightBytes` of each model's weights -- the smallest first -- stay on the device and
-    /// only the rest are read as they are used; any other device refuses more than 0.
-    public init(device: Device, deviceWeightBytes: UInt64 = 0) throws {
+    /// Limits the memory of `device` -- the tensors of whatever runs on it, the weights kept there,
+    /// and what it keeps for reuse -- to `bytes`; 0 for no limit but the device's. For the whole
+    /// process rather than an engine, so set before an engine reads a model. Only Metal has one.
+    public static func setMemoryLimit(_ bytes: UInt64, on device: Device) throws {
+        guard waifu_set_memory_limit(device.c, bytes) else {
+            throw WaifuError.refused(lastError())
+        }
+    }
+
+    /// An engine on `device`. On `.metal` the model's smallest weights fill what the memory limit
+    /// leaves -- see setMemoryLimit -- and the rest are read off the disk as they are used.
+    public init(device: Device) throws {
         var options = WaifuEngineOptions(
             struct_size: UInt32(MemoryLayout<WaifuEngineOptions>.size),
-            device: device.c,
-            device_weight_bytes: deviceWeightBytes)
+            device: device.c)
         guard let handle = waifu_engine_new_with_options(&options) else {
             throw WaifuError.refused(lastError())
         }
@@ -475,7 +480,7 @@ public final class Engine: @unchecked Sendable {
         waifu_engine_free(handle)
     }
 
-    /// What it runs on, as waifu_devices_json names it: "metal", "cpu", "metal_disk_offload". Never
+    /// What it runs on, as waifu_devices_json names it: "metal", "cpu", "cuda". Never
     /// "auto", which the library settles when the engine starts.
     public var device: String {
         guard let said = waifu_engine_device(handle) else { return "" }

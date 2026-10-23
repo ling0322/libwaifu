@@ -38,7 +38,7 @@ use waifu::anima::{
     VaeConfig, VaeDecoder,
 };
 use waifu::flint::{Tensor, Weights};
-use waifu::{read_safetensors, DType, Device, Manifest, Residency, WeightFormat};
+use waifu::{read_safetensors, DType, Device, Manifest, WeightFormat};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")
@@ -58,12 +58,7 @@ fn weights() -> Rc<Weights> {
         Rc::clone(cell.get_or_init(|| {
             let manifest = Manifest::open(models_dir().join("anima-turbo-v11.yaml")).unwrap();
             Rc::new(
-                Weights::from_files(
-                    &manifest.weight_paths().unwrap(),
-                    device(),
-                    Residency::Device,
-                )
-                .unwrap(),
+                Weights::from_files(&manifest.weight_paths().unwrap(), device(), u64::MAX).unwrap(),
             )
         }))
     })

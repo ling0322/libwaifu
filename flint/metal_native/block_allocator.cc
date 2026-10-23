@@ -72,6 +72,25 @@ Block *BlockAllocator::take(int64_t size) {
   return block;
 }
 
+Block *BlockAllocator::takeDedicated(int64_t size, int64_t largestChunk) {
+  size = roundUp(size);
+  CHECK(size > 0);
+
+  Chunk *best = nullptr;
+  for (Chunk *chunk : _chunks) {
+    if (!chunk->dedicated || !chunk->empty()) continue;
+    if (chunk->size < size || chunk->size > largestChunk) continue;
+    if (!best || chunk->size < best->size) best = chunk;
+  }
+  if (!best) return nullptr;
+
+  Block *block = best->first;
+  split(block, size);
+  block->free = false;
+  _usedBytes += block->size;
+  return block;
+}
+
 void BlockAllocator::split(Block *block, int64_t size) {
   if (block->size == size) return;
 
@@ -86,16 +105,17 @@ void BlockAllocator::split(Block *block, int64_t size) {
   if (block->next) block->next->prev = rest;
   block->next = rest;
   block->size = size;
-  _free.insert(rest);
+  if (!block->chunk->dedicated) _free.insert(rest);
 }
 
-Chunk *BlockAllocator::addChunk(void *handle, int64_t size) {
+Chunk *BlockAllocator::addChunk(void *handle, int64_t size, bool dedicated) {
   CHECK(size > 0 && size % kAlignment == 0);
 
   Chunk *chunk = new Chunk();
   chunk->handle = handle;
   chunk->size = size;
   chunk->emptiedAt = ++_numGiven;
+  chunk->dedicated = dedicated;
 
   Block *block = new Block();
   block->chunk = chunk;
@@ -103,7 +123,7 @@ Chunk *BlockAllocator::addChunk(void *handle, int64_t size) {
   chunk->first = block;
 
   _chunks.push_back(chunk);
-  _free.insert(block);
+  if (!dedicated) _free.insert(block);
   _heldBytes += size;
   return chunk;
 }
@@ -132,7 +152,8 @@ void BlockAllocator::give(Block *block, uint64_t lastUse) {
     absorb(prev, block);
     block = prev;
   }
-  _free.insert(block);
+  // A dedicated chunk's free bytes are in no list: erasing them from it above found nothing.
+  if (!block->chunk->dedicated) _free.insert(block);
 
   if (block->chunk->empty()) block->chunk->emptiedAt = ++_numGiven;
 }

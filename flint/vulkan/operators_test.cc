@@ -29,7 +29,10 @@
 #include "flint/test_functional.h"
 #include "flint/device.h"
 #include "flint/functional.h"
+#include "flint/memory.h"
 #include "flint/operators.h"
+#include "flint/vulkan/context.h"
+#include "lutil/error.h"
 
 // Every operator the Vulkan device has, checked against the CPU's answer to the same question.
 // Half precision is checked against the CPU in float, which is what it approximates.
@@ -874,6 +877,57 @@ CATCH_TEST_CASE("test Vulkan memory statistics", "[op][vulkan]") {
   MemorySnapshot after = vk()->captureMemorySnapshot();
   CATCH_REQUIRE(after.getAllocatedMemory() == before.getAllocatedMemory());
   CATCH_REQUIRE(after.getPeakAllocatedMemory() >= before.getAllocatedMemory() + (128 << 20));
+  vk()->releaseUnusedMemory();
+}
+
+CATCH_TEST_CASE("test Vulkan allocation past the memory limit is out of memory", "[op][vulkan]") {
+  SKIP_WITHOUT_VULKAN();
+  std::shared_ptr<op::vulkan::Context> context = op::vulkan::Context::get();
+
+  // Lifted however the test ends, so that no other test runs under it.
+  struct Unlimited {
+    ~Unlimited() {
+      vk()->setMemoryLimit(0);
+    }
+  } unlimited;
+
+  // Without a limit, the device's memory is the capacity.
+  vk()->releaseUnusedMemory();
+  MemoryBudget before = vk()->getMemoryBudget();
+  CATCH_REQUIRE(before.capacity == context->getInfo().deviceLocalBytes);
+
+  // Room for one 2 MB buffer and not two -- 2 MB being one of the allocator's size classes.
+  constexpr int64_t kTwoMB = 2 << 20;
+  vk()->setMemoryLimit(before.allocated + 3 * (1 << 20));
+  CATCH_REQUIRE(vk()->getMemoryBudget().capacity == before.allocated + 3 * (1 << 20));
+
+  op::vulkan::Buffer first = context->allocate(kTwoMB);
+  CATCH_REQUIRE(vk()->getMemoryBudget().allocated == before.allocated + kTwoMB);
+  CATCH_REQUIRE_THROWS_AS(context->allocate(kTwoMB), lut::OutOfMemoryError);
+  CATCH_REQUIRE(vk()->getMemoryBudget().allocated == before.allocated + kTwoMB);
+
+  // Given back, it waits in the cache and is the next buffer, inside the limit -- held, and not in
+  // use.
+  context->free(first);
+  CATCH_REQUIRE(vk()->getMemoryBudget().allocated == before.allocated);
+  CATCH_REQUIRE(vk()->getMemoryBudget().held == before.allocated + kTwoMB);
+  op::vulkan::Buffer again = context->allocate(kTwoMB);
+  context->free(again);
+
+  // The cache is emptied before a buffer of another size is refused: 1 MB more fits once the
+  // cached 2 MB has gone back.
+  vk()->setMemoryLimit(before.allocated + 2 * (1 << 20));
+  op::vulkan::Buffer a = context->allocate(1 << 20);
+  op::vulkan::Buffer b = context->allocate(1 << 20);
+  CATCH_REQUIRE_THROWS_AS(context->allocate(1 << 20), lut::OutOfMemoryError);
+  context->free(a);
+  context->free(b);
+
+  // More than the device has is refused the same way, with no limit set.
+  vk()->setMemoryLimit(0);
+  CATCH_REQUIRE_THROWS_AS(
+      context->allocate(context->getInfo().deviceLocalBytes * 2),
+      lut::OutOfMemoryError);
   vk()->releaseUnusedMemory();
 }
 

@@ -28,10 +28,11 @@
 //! one, so every finished run is written out where an image viewer can open it, with the prompt
 //! and the settings that drew it written inside, and the screen keeps the list of what it wrote.
 //!
-//! Which boxes there are is the task's and the model's to say: a picture to start from only for
-//! img2img, and guidance and a negative prompt only for a model that has a second pass for them
-//! to reach.
+//! Which boxes there are is the model's to say: guidance and a negative prompt only for a model
+//! that has a second pass for them to reach.
 
+use std::cell::Cell;
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,7 +47,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::args::{Room, Runtime};
+use crate::args::Runtime;
 use crate::engine::{
     Chosen, Ended, Engine, GenerationDefaults, GenerationOptions, GenerationProgress, Heard as News,
 };
@@ -55,7 +56,6 @@ use crate::task::{Launch, Task};
 use crate::tui::ask::{self, Answer};
 use crate::tui::devices::DevicePicker;
 use crate::tui::field::{edit_text, TextField};
-use crate::tui::files::{FilePicker, Outcome};
 use crate::tui::{bar, centred, heading, take_the_screen, Machine};
 
 type Error = Box<dyn std::error::Error>;
@@ -71,24 +71,17 @@ const BUTTON_WIDTH: u16 = 24;
 /// SDXL is happiest at, in the built-in list.
 const DEFAULT_SIZE: usize = 4;
 
-/// How far a run that starts from a picture walks away from it, before anyone says otherwise.
-const DEFAULT_STRENGTH: f32 = 0.8;
-
-/// What the picture picker offers, which is what the image crate is built to read.
-const PICTURES: &[&str] = &["png", "jpg", "jpeg"];
-
 /// Puts the drawing screen up for `launch` and reads its model onto its device behind it, until
 /// somebody leaves.
 ///
 /// `launch.model` is the model's manifest, already on the disk, and `chosen` what libwaifu says
 /// of it. `why` is what `auto` said about the device it picked, if it picked one; `machine` is
-/// what the device row offers instead. `image` fills the draw from box, where `-i` named one, and
-/// `output` is the directory every picture is written into.
+/// what the device row offers instead, and `output` is the directory every picture is written
+/// into.
 pub fn draw(
     launch: &Launch,
     why: Option<String>,
     chosen: &Chosen,
-    image: Option<&str>,
     output: &Path,
     machine: &Machine,
 ) -> Result<(), Error> {
@@ -105,31 +98,11 @@ pub fn draw(
         let cancel = Arc::clone(&cancel);
         let output = output.to_path_buf();
         let label = label.clone();
-        let device_weight_bytes = machine.device_weight_bytes;
-        move || {
-            paint(
-                &manifest,
-                &label,
-                &output,
-                device_weight_bytes,
-                &waiting,
-                &updates,
-                &cancel,
-            )
-        }
+        move || paint(&manifest, &label, &output, &waiting, &updates, &cancel)
     });
 
     let mut app = App::for_chosen(launch.task, label, launch.runtime, chosen, output);
     app.available = machine.available.clone();
-    app.room = machine.room;
-    app.weights = chosen.bytes;
-
-    // -i only fills the box. Everything about a run is changeable between runs, and a picture
-    // named on the command line is no different -- it is where to start, not what to be stuck
-    // with.
-    if let Some(image) = image {
-        app.from = TextField::new(image);
-    }
 
     // Said once the model is on the device, since until then the status line is saying that it
     // is being read: why it is there, and what the card suggests.
@@ -143,24 +116,24 @@ pub fn draw(
 
     // The libraries' lines go to the screen rather than over it from here on: what the tensor
     // library found on a device it is asked about for the first time is written to the console
-    // otherwise, and the console is under the screen. A warning or an error is put on the status
-    // line; the rest is let go of, since nothing on this screen would read it.
+    // otherwise, and the console is under the screen. Every line goes into the log at the bottom
+    // of the screen, and a warning or an error is put on the status line as well.
     let heard: Heard = Arc::default();
     crate::log::set_sink(Some(Box::new({
         let heard = Arc::clone(&heard);
-        move |level, source, message| match level {
+        move |level, time, source, message| match level {
             // The last line before the process ends. The screen is given back first, so that it
             // is a line somebody can read in the terminal afterwards.
             Level::Fatal => {
                 super::give_the_screen_back();
-                eprintln!("{} {source}] {message}", level.name());
+                eprintln!("{} {time} {source}] {message}", level.name());
             }
-            Level::Warning | Level::Error => {
+            Level::Debug | Level::Info | Level::Warning | Level::Error => {
+                let logged = Logged::line(level, time, source, message);
                 if let Ok(mut heard) = heard.lock() {
-                    heard.push((level, message.to_string()));
+                    heard.push(logged);
                 }
             }
-            Level::Debug | Level::Info => {}
         }
     })));
 
@@ -169,10 +142,10 @@ pub fn draw(
     ratatui::restore();
     crate::log::set_sink(None);
 
-    // Waited for rather than left where it is. Offloaded to the host, the model is some hundreds
-    // of page-locked host allocations, and page-locked memory is the CUDA driver's rather
-    // than the operating system's. A process that exits with this thread still holding it has two
-    // teardowns running at once -- the driver unloading, and this thread dropping the model as its
+    // Waited for rather than left where it is. A model on CUDA holds page-locked host memory --
+    // the buffers its uploads are staged through -- and page-locked memory is the CUDA driver's
+    // rather than the operating system's. A process that exits with this thread still holding it
+    // has two teardowns running at once -- the driver unloading, and this thread dropping the model as its
     // channel closes -- and the one that loses gives its memory back to a driver that is already
     // gone.
     //
@@ -189,7 +162,7 @@ pub fn draw(
 }
 
 /// What the tensor library has said that is worth putting on the screen, waiting to be.
-type Heard = Arc<Mutex<Vec<(Level, String)>>>;
+type Heard = Arc<Mutex<Vec<Logged>>>;
 
 /// Draws, reads the keyboard, and passes what the two channels carry between them.
 fn run(
@@ -233,8 +206,8 @@ fn run(
             Ok(mut heard) => std::mem::take(&mut *heard),
             Err(_) => Vec::new(),
         };
-        for (level, line) in lines {
-            app.heard(level, line);
+        for logged in lines {
+            app.heard(logged);
         }
     }
 
@@ -254,10 +227,6 @@ struct Job {
     /// With the seed always in it: one the box named, or one picked for this run, so that the
     /// picture can say which and be drawn again.
     options: GenerationOptions,
-    /// The picture to start from, where the run is not starting from noise. Handed over as the
-    /// path it was typed as: reading it is minutes of work away and belongs on the thread that
-    /// does the work, not on the one drawing the screen.
-    from: Option<PathBuf>,
 }
 
 impl Job {
@@ -270,18 +239,14 @@ impl Job {
             lines.push(format!("Negative prompt: {}", options.negative_prompt));
         }
 
-        let mut settings = format!(
+        lines.push(format!(
             "Steps: {}, CFG scale: {}, Seed: {}, Size: {}x{}, Model: {model}",
             options.num_steps,
             options.guidance_scale,
             options.seed.unwrap_or_default(),
             options.width,
             options.height,
-        );
-        if self.from.is_some() {
-            settings.push_str(&format!(", Denoising strength: {}", options.strength));
-        }
-        lines.push(settings);
+        ));
 
         lines.join("\n")
     }
@@ -316,7 +281,6 @@ fn paint(
     manifest: &Path,
     label: &str,
     output: &Path,
-    device_weight_bytes: u64,
     requests: &Receiver<Request>,
     updates: &Sender<Update>,
     cancel: &AtomicBool,
@@ -329,7 +293,7 @@ fn paint(
                 // Let go of first. Two copies on one card is twice the memory, and a move that
                 // ran out of it would lose the model that was working as well as the new one.
                 drop(engine.take());
-                let update = match Engine::new(runtime, device_weight_bytes) {
+                let update = match Engine::new(runtime) {
                     Ok(started) => match started.load(manifest) {
                         Ended::Done(()) => {
                             engine = Some(started);
@@ -358,24 +322,8 @@ fn paint(
         cancel.store(false, Ordering::Relaxed);
         let started = Instant::now();
 
-        // A picture to start from is read and scaled here, before the run, so that a path that
-        // is not there is one message rather than a run that fails partway.
-        let started_from = match &job.from {
-            Some(path) => match read_image(path, job.options.width, job.options.height) {
-                Ok(image) => Some(image),
-                Err(error) => {
-                    let _ = updates.send(Update::Failed(format!("{}: {error}", path.display())));
-                    continue;
-                }
-            },
-            None => None,
-        };
-
         let (say, news) = channel::<News>();
-        let from = started_from
-            .as_ref()
-            .map(|(width, height, rgb)| (*width, *height, rgb.as_slice()));
-        let drawn = match engine.draw(&job.prompt, &job.options, from, &say) {
+        let drawn = match engine.draw(&job.prompt, &job.options, &say) {
             Ok(id) => wait_for_the_picture(engine, id, &news, updates, cancel),
             Err(error) => Ended::Failed(error),
         };
@@ -435,29 +383,6 @@ fn wait_for_the_picture(
             asked_to_stop = true;
         }
     }
-}
-
-/// A picture from a file, as the rows of RGB a run can start from, and its size.
-///
-/// Scaled to the size the screen asks for rather than kept at its own: the model works at
-/// multiples of 32, and a picture off a camera or a phone is not one. Stretched to it rather than
-/// cropped, so that the whole of what was handed in is what the run sees -- the sizes on offer
-/// include portrait and landscape ones, which is where to say what shape the picture is.
-///
-/// Lanczos, because this is the direction that loses pixels -- a photograph is larger than
-/// anything SDXL draws -- and a cheaper filter leaves stair steps that the run then faithfully
-/// keeps.
-fn read_image(path: &Path, width: i32, height: i32) -> Result<(u32, u32, Vec<u8>), Error> {
-    let opened = image::ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()?;
-    let scaled = opened.resize_exact(
-        width as u32,
-        height as u32,
-        image::imageops::FilterType::Lanczos3,
-    );
-
-    Ok((width as u32, height as u32, scaled.to_rgb8().into_raw()))
 }
 
 /// Writes the picture a run ends with -- rows of RGB, `width` by `height` -- into the first
@@ -586,8 +511,7 @@ fn fresh_seed() -> u64 {
     hasher.finish()
 }
 
-/// The boxes on the screen. Which of them are there is the task's and the model's to say; see
-/// [`layout`].
+/// The boxes on the screen. Which of them are there is the model's to say; see [`layout`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Field {
     Prompt,
@@ -595,8 +519,6 @@ enum Field {
     Steps,
     Guidance,
     Size,
-    From,
-    Strength,
     Seed,
     /// Where the model runs: a row whose enter opens the list of devices.
     Device,
@@ -625,11 +547,9 @@ impl Field {
         match self {
             Field::Prompt => "prompt",
             Field::Negative => "away from",
-            Field::From => "draw from",
             Field::Steps => "steps",
             Field::Guidance => "guidance",
             Field::Size => "size",
-            Field::Strength => "strength",
             Field::Seed => "seed",
             Field::Device => "device",
             Field::Generate => "generate",
@@ -637,28 +557,23 @@ impl Field {
     }
 }
 
-/// The boxes for `task` with a model that does or does not take guidance: in the order tab walks
-/// them, and row by row as they sit on the screen.
+/// The boxes for a model that does or does not take guidance: in the order tab walks them, and
+/// row by row as they sit on the screen.
 ///
 /// Tab walks the first list in order and does not care how they are arranged; up and down walk the
 /// second, because what is above the row of numbers is the box above it and not the number to its
 /// left. Down the left are the boxes of text, the prompt over the negative one, each beside its
 /// half of the panel's rows; then the button, on a row of its own.
 ///
-/// A picture to start from, and how far to walk from it, are img2img's. Guidance and a negative
-/// prompt are not offered to a model with no second pass for them to reach -- a distilled release
-/// -- where the dial would be a setting that changes nothing and the box text nothing reads.
-fn layout(task: Task, takes_guidance: bool) -> (Vec<Field>, Vec<Vec<Field>>) {
-    let from_a_picture = task == Task::Img2Img;
-
+/// Guidance and a negative prompt are not offered to a model with no second pass for them to
+/// reach -- a distilled release -- where the dial would be a setting that changes nothing and the
+/// box text nothing reads.
+fn layout(takes_guidance: bool) -> (Vec<Field>, Vec<Vec<Field>>) {
     let mut panel = vec![Field::Steps];
     if takes_guidance {
         panel.push(Field::Guidance);
     }
     panel.push(Field::Size);
-    if from_a_picture {
-        panel.extend([Field::From, Field::Strength]);
-    }
     // Last: it is not about the picture, and changing it is a minute of reading rather than a
     // number in the next run.
     panel.extend([Field::Seed, Field::Device]);
@@ -694,11 +609,9 @@ fn layout(task: Task, takes_guidance: bool) -> (Vec<Field>, Vec<Vec<Field>>) {
 /// so the box is not opened for it.
 fn accepts(field: Field) -> fn(&char) -> bool {
     match field {
-        Field::Prompt | Field::Negative | Field::From => |_| true,
+        Field::Prompt | Field::Negative => |_| true,
         Field::Steps | Field::Seed => char::is_ascii_digit,
-        Field::Guidance | Field::Strength => {
-            |character| character.is_ascii_digit() || *character == '.'
-        }
+        Field::Guidance => |character| character.is_ascii_digit() || *character == '.',
         // A list and a button. Neither is a box anything is typed into.
         Field::Size | Field::Device | Field::Generate => |_| false,
     }
@@ -719,10 +632,6 @@ fn about(field: Field) -> [&'static str; 2] {
             "What to keep out. Left empty the model is still steered away from the empty",
             "prompt, which is not the same as steering away from nothing at all.",
         ],
-        Field::From => [
-            "A picture to start from rather than noise. Press enter to browse for one,",
-            "or type a path. It is stretched to the size above; strength says how far.",
-        ],
         Field::Steps => [
             "How many times the model is asked what to take out. More is more detail and",
             "costs its share of the time; past about forty there is little left to add.",
@@ -734,10 +643,6 @@ fn about(field: Field) -> [&'static str; 2] {
         Field::Size => [
             "How big, in pixels. These are the shapes the model was trained at -- far from",
             "them it starts drawing a body twice rather than one body larger.",
-        ],
-        Field::Strength => [
-            "How far to walk from the picture above. Around 0.8 redraws it and keeps its",
-            "composition; below about 0.3 there is little left for the prompt to do.",
         ],
         Field::Seed => [
             "Which noise to start from. The same seed with everything else the same draws",
@@ -782,8 +687,6 @@ struct App {
     task: Task,
     prompt: TextField,
     negative: TextField,
-    /// The picture to draw from. Read only for img2img, which is the task that has the box.
-    from: TextField,
     /// Empty means a different picture every time; a number means the same one every time.
     seed: TextField,
     steps: i32,
@@ -794,9 +697,6 @@ struct App {
     /// built-in list otherwise. Carried rather than reached for, because which list this is was
     /// settled when the model was opened and does not change while the screen is up.
     sizes: Vec<(i32, i32)>,
-    /// How far a run that starts from a picture walks away from it, by deciding how much noise
-    /// it starts under. Not how many steps run -- that is the box beside it, either way.
-    strength: f32,
     /// The boxes there are, in the order tab walks them, and row by row; see [`layout`].
     fields: Vec<Field>,
     rows: Vec<Vec<Field>>,
@@ -811,16 +711,11 @@ struct App {
     message: String,
     /// Whether that thing was bad news.
     unhappy: bool,
-    /// What has been written out this session, newest first.
-    written: Vec<String>,
+    /// What happened this session, oldest first: the libraries' lines, and the pictures written
+    /// out. No more than [`LOG_LINES`] of it, the oldest let go of first.
+    log: VecDeque<Logged>,
     /// The job the loop is about to hand to the painter.
     pending: Option<Job>,
-    /// The file picker, while it is up. Everything else on the screen keeps its state behind it,
-    /// so closing one puts the screen back exactly as it was.
-    browsing: Option<FilePicker>,
-    /// Where the picker was last looking, so that closing it without picking anything and opening
-    /// it again does not walk back to where the program was started from.
-    browsed: Option<PathBuf>,
     /// The box asking for one value, while it is up.
     asking: Option<Asking>,
     /// The box asking whether to leave, while it is up.
@@ -832,6 +727,10 @@ struct App {
     /// seven boxes and "along the text" in two. Enter or the first character typed goes in;
     /// enter or escape comes back out.
     editing: bool,
+    /// How wide the box being typed into was last drawn, which is where its lines break and so
+    /// what up and down in it move over. Set by drawing, which is the only thing that knows; 0
+    /// before the box has been drawn.
+    text_width: Cell<u16>,
     quit: bool,
 
     /// What the run was pointed at. Shown rather than kept, because a picture that came out wrong
@@ -840,9 +739,9 @@ struct App {
     model: String,
     /// Where the run goes, which the heading shows beside the model.
     ///
-    /// An offload run is slower by enough to be noticed, so someone wondering why this one is
-    /// taking longer than the last should be able to see it rather than have to remember which
-    /// device they last picked.
+    /// One device is slower than another by enough to be noticed, so someone wondering why this
+    /// run is taking longer than the last should be able to see it rather than have to remember
+    /// which device they last picked.
     runtime: Runtime,
     /// Where pictures are written, which the list of them says.
     output: PathBuf,
@@ -856,11 +755,8 @@ struct App {
     after_reading: Option<String>,
     /// The list of devices, while it is up.
     picking: Option<DevicePicker>,
-    /// What the list is made from: the devices this machine has, how much room its cards had, and
-    /// how big the model is, which together say where it will not fit.
+    /// What the list is made from: the devices this machine has.
     available: Vec<Runtime>,
-    room: Room,
-    weights: Option<u64>,
 }
 
 impl App {
@@ -879,7 +775,7 @@ impl App {
             .iter()
             .position(|&wh| wh == (defaults.width, defaults.height))
             .unwrap_or(DEFAULT_SIZE.min(sizes.len().saturating_sub(1)));
-        let (fields, rows) = layout(task, takes_guidance);
+        let (fields, rows) = layout(takes_guidance);
 
         App {
             task,
@@ -888,15 +784,11 @@ impl App {
             output: PathBuf::from(crate::args::DEFAULT_OUTPUT),
             prompt: TextField::default(),
             negative: TextField::default(),
-            from: TextField::default(),
             seed: TextField::default(),
             steps: defaults.num_steps,
             guidance: defaults.guidance_scale,
             size,
             sizes,
-            // What every image to image interface starts at: enough to redraw the picture in the
-            // style asked for, not so much that its composition is gone.
-            strength: DEFAULT_STRENGTH,
             fields,
             rows,
             focus: 0,
@@ -904,13 +796,12 @@ impl App {
             status: Status::Ready,
             message: "type a prompt, then press enter on generate".to_string(),
             unhappy: false,
-            written: Vec::new(),
+            log: VecDeque::new(),
             pending: None,
-            browsing: None,
-            browsed: None,
             asking: None,
             leaving: None,
             editing: false,
+            text_width: Cell::new(0),
             quit: false,
             // As if the model were already on the device it is given. `draw` asks for the read,
             // with [`App::read_onto`], before the first frame.
@@ -919,8 +810,6 @@ impl App {
             after_reading: None,
             picking: None,
             available: Runtime::ALL.to_vec(),
-            room: Room::default(),
-            weights: None,
         }
     }
 
@@ -938,13 +827,23 @@ impl App {
         matches!(self.status, Status::Reading { .. })
     }
 
-    /// A line the tensor library wrote while the screen was up: a warning or an error, said where
-    /// the last thing that happened is said.
-    fn heard(&mut self, level: Level, line: String) {
-        match level {
-            Level::Error | Level::Fatal => self.failed(line),
-            _ => self.said(line),
+    /// A line one of the libraries wrote while the screen was up, which goes into the log -- and,
+    /// for a warning or an error, is said where the last thing that happened is said as well.
+    fn heard(&mut self, logged: Logged) {
+        match logged.level {
+            Level::Error | Level::Fatal => self.failed(logged.text.clone()),
+            Level::Warning => self.said(logged.text.clone()),
+            Level::Debug | Level::Info => {}
         }
+        self.logged(logged);
+    }
+
+    /// Puts `logged` at the end of the log, letting the oldest line go where there are too many.
+    fn logged(&mut self, logged: Logged) {
+        if self.log.len() == LOG_LINES {
+            self.log.pop_front();
+        }
+        self.log.push_back(logged);
     }
 
     /// Opens the list of devices, where nothing is using the model.
@@ -957,13 +856,7 @@ impl App {
         if self.reading() {
             return self.failed("the model is still being read; it can be moved once it is");
         }
-        self.picking = Some(DevicePicker::open(
-            &self.model,
-            self.runtime,
-            &self.available,
-            self.weights,
-            self.room,
-        ));
+        self.picking = Some(DevicePicker::open(self.runtime, &self.available));
     }
 
     /// The screen for a model as libwaifu describes it: its numbers in the boxes, its
@@ -983,7 +876,7 @@ impl App {
             chosen.sizes.clone(),
             chosen.takes_guidance,
         );
-        app.output = output.to_path_buf();
+        app.writes_to(output);
 
         // What the model card suggested drawing with, which the exporter wrote into the package. A
         // fine tune is worth what it is prompted with -- one wants danbooru tags, another a
@@ -1005,6 +898,15 @@ impl App {
         }
 
         app
+    }
+
+    /// Writes pictures into `output` from now on, and says so in the log -- the first line of it,
+    /// for a screen just opened, so that where the pictures land is there to be read before the
+    /// first of them is.
+    fn writes_to(&mut self, output: &Path) {
+        self.output = output.to_path_buf();
+        let said = format!("pictures go to {}", output.display());
+        self.logged(Logged::line(Level::Info, "", "", &said));
     }
 
     fn focused(&self) -> Field {
@@ -1069,6 +971,7 @@ impl App {
             // A read that did not work leaves no model anywhere: the old one was let go of first.
             Update::Failed(error) if self.reading() => {
                 self.status = Status::Ready;
+                self.logged(Logged::line(Level::Error, "", "", &error));
                 self.failed(format!(
                     "could not read {} onto {}: {error}. Pick another device",
                     self.model,
@@ -1089,17 +992,14 @@ impl App {
             Update::Done { kept, elapsed } => {
                 self.status = Status::Ready;
                 self.said(format!("written to {}", kept.path.display()));
-                self.written.insert(
-                    0,
-                    format!(
-                        "{}   {} by {}   seed {}   {:.1}s",
-                        kept.path.display(),
-                        kept.width,
-                        kept.height,
-                        kept.seed,
-                        elapsed.as_secs_f64()
-                    ),
-                );
+                self.logged(Logged::picture(format!(
+                    "written to {}   {} by {}   seed {}   {:.1}s",
+                    kept.path.display(),
+                    kept.width,
+                    kept.height,
+                    kept.seed,
+                    elapsed.as_secs_f64()
+                )));
             }
             Update::Stopped => {
                 self.status = Status::Ready;
@@ -1107,6 +1007,7 @@ impl App {
             }
             Update::Failed(error) => {
                 self.status = Status::Ready;
+                self.logged(Logged::line(Level::Error, "", "", &error));
                 self.failed(error);
             }
         }
@@ -1147,7 +1048,6 @@ impl App {
                         match field {
                             Field::Steps => self.steps = value as i32,
                             Field::Guidance => self.guidance = value as f32,
-                            Field::Strength => self.strength = value as f32,
                             _ => {}
                         }
                         self.asking = None;
@@ -1159,7 +1059,6 @@ impl App {
                     Answer::Given(text) => {
                         match field {
                             Field::Seed => self.seed = TextField::new(&text),
-                            Field::From => self.from = TextField::new(&text),
                             _ => {}
                         }
                         self.asking = None;
@@ -1192,18 +1091,6 @@ impl App {
             return;
         }
 
-        if let Some(browsing) = &mut self.browsing {
-            let outcome = browsing.key(key);
-            if outcome != Outcome::Open {
-                self.browsed = Some(browsing.directory().to_path_buf());
-                self.browsing = None;
-            }
-            if let Outcome::Picked(path) = outcome {
-                self.from = TextField::new(&path.to_string_lossy());
-            }
-            return;
-        }
-
         // In a box, the keys are the box's -- except the ones that walk out of it, which are the
         // two that say "done", the two that move between boxes anyway, and an arrow pressed where
         // there is nothing left in the box for it to move over.
@@ -1213,10 +1100,12 @@ impl App {
                 KeyCode::Tab => self.step_focus(1),
                 KeyCode::BackTab => self.step_focus(-1),
 
-                // Up and down are never the box's: it holds one run of text, not lines to walk
-                // between, so they mean what they mean everywhere else on the screen.
-                KeyCode::Up => self.move_row(-1),
-                KeyCode::Down => self.move_row(1),
+                // Up and down walk the lines the text is drawn as: a prompt is long enough to wrap,
+                // and moving through it is what they are pressed for here. Down on the last line
+                // has no line to go to, and goes to the box below, as it would outside the box;
+                // up on the first goes to the start of the text.
+                KeyCode::Up => self.vertical(-1),
+                KeyCode::Down => self.vertical(1),
 
                 // And left and right spill over the ends. A cursor at the end of the prompt with
                 // right pressed is asking for the box after it, since there is nothing else that
@@ -1352,6 +1241,33 @@ impl App {
         }
     }
 
+    /// Moves the cursor in the box being typed into `by` lines, as wide as it was last drawn -- or,
+    /// down from the last line, out of the box to the one below. A box not drawn yet is taken as
+    /// one line.
+    fn vertical(&mut self, by: isize) {
+        let width = match self.text_width.get() {
+            0 => usize::MAX,
+            width => width as usize,
+        };
+        let on_last_line = match self.focused() {
+            Field::Prompt => self.prompt.on_last_line(width),
+            Field::Negative => self.negative.on_last_line(width),
+            _ => return,
+        };
+        if by > 0 && on_last_line {
+            return self.move_row(1);
+        }
+        let text = match self.focused() {
+            Field::Prompt => &mut self.prompt,
+            Field::Negative => &mut self.negative,
+            _ => return,
+        };
+        match by < 0 {
+            true => text.up(width),
+            false => text.down(width),
+        }
+    }
+
     /// The keys that mean something to the box the cursor is in.
     ///
     /// Only the boxes typed into have any: a value is changed by opening a box for it, which is
@@ -1367,7 +1283,6 @@ impl App {
     /// What enter does, which is whatever the box the cursor is in is for.
     fn enter(&mut self) {
         match self.focused() {
-            Field::From => self.browse(),
             Field::Device => self.pick_a_device(),
             Field::Generate => self.start(),
 
@@ -1406,30 +1321,6 @@ impl App {
                     1.0,
                     20.0,
                     false,
-                ),
-            ),
-            // Down to zero, which keeps the picture and only sends it through the autoencoder,
-            // and up to one, which keeps nothing of it and is the same walk as from noise.
-            Field::Strength => Asking::Number(
-                field,
-                ask::Number::ask(
-                    "strength",
-                    &typed.unwrap_or_else(|| format!("{:.2}", self.strength)),
-                    0.0,
-                    1.0,
-                    false,
-                ),
-            ),
-            // Enter on this one is the picker's, so this is what typing a path opens. A box
-            // rather than the row itself, because a path is longer than the panel is wide and
-            // the row has room to say which file, not where it is.
-            Field::From => Asking::Text(
-                field,
-                ask::Text::ask(
-                    "draw from",
-                    &typed.unwrap_or_else(|| self.from.text()),
-                    "a png or a jpeg",
-                    |_| true,
                 ),
             ),
             // Not a Number, though it is written with digits: a seed is sixty-four bits, which is
@@ -1474,34 +1365,7 @@ impl App {
                 false => String::new(),
             },
             seed: self.seed.text().trim().parse().ok(),
-            strength: self.strength,
         }
-    }
-
-    /// Opens the picker where the box is already pointing, or in this directory when it is empty.
-    fn browse(&mut self) {
-        // Somewhere that is there, whatever is in the box. What is typed wins where it exists --
-        // someone who typed a path means that one -- then where the picker was last left, and a
-        // path that is not there at all is not somewhere to open: a typo in the box would
-        // otherwise put a list up that says only that it cannot be read.
-        let start = [self.from(), self.browsed.clone()]
-            .into_iter()
-            .flatten()
-            .find(|path| path.exists())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        self.browsing = Some(FilePicker::open("a picture to draw from", &start, PICTURES));
-    }
-
-    /// The picture this run starts from, or None where it starts from noise -- which is every run
-    /// of txt2img, whatever the box was left holding.
-    fn from(&self) -> Option<PathBuf> {
-        if self.task != Task::Img2Img {
-            return None;
-        }
-
-        let typed = self.from.text();
-        let typed = typed.trim();
-        (!typed.is_empty()).then(|| PathBuf::from(typed))
     }
 
     /// Hands the prompt over, if there is one and there is nothing already being drawn.
@@ -1524,12 +1388,6 @@ impl App {
             return self.failed("there is no prompt to draw");
         }
 
-        let from = self.from();
-        if self.task == Task::Img2Img && from.is_none() {
-            return self
-                .failed("there is no picture to draw from: press enter on draw from to pick one");
-        }
-
         let mut options = self.options();
         options.seed = Some(options.seed.unwrap_or_else(fresh_seed));
 
@@ -1539,17 +1397,13 @@ impl App {
             started: Instant::now(),
         };
         self.said(String::new());
-        self.pending = Some(Job {
-            prompt,
-            options,
-            from,
-        });
+        self.pending = Some(Job { prompt, options });
     }
 
     // -- the screen -----------------------------------------------------------------------
 
     fn render(&self, frame: &mut Frame) {
-        let [top, inputs, generate, status, written, about, keys] = Layout::vertical([
+        let [top, inputs, generate, status, log, about, keys] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(10),
             Constraint::Length(BUTTON),
@@ -1592,17 +1446,13 @@ impl App {
 
         self.render_generate(frame, generate);
         self.render_status(frame, status);
-        self.render_written(frame, written);
+        self.render_log(frame, log);
         self.render_about(frame, about);
 
         // A box on top carries its own line of key hints, and while one is up these are not what
         // the keys do. Two rows saying different things about the same keys is worse than one.
         //
         // Last, so that it is on top of everything above rather than under it.
-        if let Some(browsing) = &self.browsing {
-            browsing.render(frame, frame.area());
-            return;
-        }
         if let Some(picking) = &self.picking {
             picking.render(frame, frame.area());
             return;
@@ -1755,6 +1605,10 @@ impl App {
             .collect();
         frame.render_widget(Paragraph::new(shown), inner);
 
+        if self.focused() == field {
+            self.text_width.set(inner.width);
+        }
+
         // Only while the keys are going into it. A cursor blinking in a box that will not take
         // what is typed at it is the screen saying something that is not so.
         if self.focused() == field && self.editing {
@@ -1771,16 +1625,6 @@ impl App {
                 let (width, height) = self.sizes[self.size];
                 format!("{width}x{height}")
             }
-            // Its name rather than the path it was found down, which is the part that says which
-            // picture and the only part there is room for beside the label.
-            Field::From => match self.from() {
-                Some(path) => path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-                None => "none".to_string(),
-            },
-            Field::Strength => format!("{:.2}", self.strength),
             Field::Seed => match self.seed.text().trim() {
                 "" => "any".to_string(),
                 seed => seed.to_string(),
@@ -1834,9 +1678,9 @@ impl App {
                 Paragraph::new(Span::styled(format!("  {}", field.title()), label_style)),
                 label_area,
             );
-            // Cut with a mark rather than silently. A file name is the one value in here that
-            // can be longer than the panel is wide, and one that stops partway without saying so
-            // reads as the name.
+            // Cut with a mark rather than silently. A seed is up to twenty digits, more than a
+            // narrow panel is wide, and one that stops partway without saying so reads as the
+            // seed.
             let value = self.value_of(field);
             let room = value_width as usize;
             let value: String = match value.chars().count() > room {
@@ -1939,48 +1783,144 @@ impl App {
         }
     }
 
-    /// What this session has drawn, which is the only place a finished picture shows up: a
+    /// What happened this session, newest at the bottom as in a terminal, each line wrapped to
+    /// the box and only as much as there is room for. A finished picture shows up here too -- a
     /// terminal is no place to look at one, so the file name is what is worth keeping on screen.
-    fn render_written(&self, frame: &mut Frame, area: Rect) {
+    fn render_log(&self, frame: &mut Frame, area: Rect) {
         let outline = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(Color::DarkGray))
-            .title(Span::styled(
-                format!(" pictures written to {} ", self.output.display()),
-                Style::new().fg(Color::DarkGray),
-            ));
+            .title(Span::styled(" log ", Style::new().fg(Color::DarkGray)));
         let inner = outline.inner(area);
         frame.render_widget(outline, area);
         if inner.is_empty() {
             return;
         }
 
-        if self.written.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Line::raw("nothing yet").fg(Color::DarkGray)),
-                inner,
-            );
-            return;
+        // From the newest back, until the box is full: a long line takes the rows it wraps to.
+        let width = inner.width as usize;
+        let height = inner.height as usize;
+        let mut rows: Vec<Line> = Vec::new();
+        for logged in self.log.iter().rev() {
+            if rows.len() >= height {
+                break;
+            }
+            let mut lines = logged.rows(width);
+            lines.reverse();
+            rows.extend(lines);
         }
-
-        // Newest first, and only as many as there is room for.
-        let lines: Vec<Line> = self
-            .written
-            .iter()
-            .take(inner.height as usize)
-            .enumerate()
-            .map(|(index, written)| {
-                let colour = if index == 0 {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                };
-                Line::raw(written.clone()).fg(colour)
-            })
-            .collect();
-        frame.render_widget(Paragraph::new(lines), inner);
+        rows.truncate(height);
+        rows.reverse();
+        frame.render_widget(Paragraph::new(rows), inner);
     }
 }
+
+/// One line of the log at the bottom of the screen: when, how much it matters, where it was
+/// written -- "interface.cc:68" -- and what it says. The time and the place are the library's to
+/// say, as it says them; a line of this screen's own, about a picture or a run, has neither.
+#[derive(Clone, Debug, PartialEq)]
+struct Logged {
+    at: String,
+    level: Level,
+    source: String,
+    text: String,
+    /// A picture written out, which is said in green whatever its level.
+    picture: bool,
+}
+
+impl Logged {
+    /// A line written at `at` from `source`, as a library says them -- both empty for one of this
+    /// screen's own.
+    fn line(level: Level, at: &str, source: &str, text: &str) -> Logged {
+        Logged {
+            at: at.to_string(),
+            level,
+            source: source.to_string(),
+            text: text.to_string(),
+            picture: false,
+        }
+    }
+
+    /// A picture written out, as `text` says.
+    fn picture(text: String) -> Logged {
+        Logged {
+            picture: true,
+            ..Logged::line(Level::Info, "", "", &text)
+        }
+    }
+
+    /// What goes in front of the text: when and where it was written, where it says.
+    fn prefix(&self) -> String {
+        match (self.at.is_empty(), self.source.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => format!("{}] ", self.source),
+            (false, true) => format!("{} ", self.at),
+            (false, false) => format!("{} {}] ", self.at, self.source),
+        }
+    }
+
+    /// The rows it is drawn as `width` columns wide: the time and the source dim on the first,
+    /// and the text in the colour of its level, wrapped at spaces.
+    fn rows(&self, width: usize) -> Vec<Line<'static>> {
+        let colour = match (self.picture, self.level) {
+            (true, _) => Color::Green,
+            (false, Level::Error | Level::Fatal) => Color::Red,
+            (false, Level::Warning) => Color::Yellow,
+            (false, Level::Info) => Color::Reset,
+            (false, Level::Debug) => Color::DarkGray,
+        };
+        let prefix = self.prefix();
+        let prefix_width = prefix.chars().count();
+        wrap(&format!("{prefix}{}", self.text), width)
+            .into_iter()
+            .enumerate()
+            .map(
+                |(index, row)| match index == 0 && prefix_width < row.chars().count() {
+                    true => {
+                        let text: String = row.chars().skip(prefix_width).collect();
+                        Line::from(vec![
+                            Span::raw(prefix.clone()).fg(Color::DarkGray),
+                            Span::raw(text).fg(colour),
+                        ])
+                    }
+                    false => Line::raw(row).fg(colour),
+                },
+            )
+            .collect()
+    }
+}
+
+/// `text` as rows of at most `width` characters, broken after the last space that fits and, for a
+/// word longer than a row -- a path, as often as not -- inside it.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let characters: Vec<char> = text.chars().collect();
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while characters.len() - start > width {
+        let window = &characters[start..start + width];
+        // A row that ends just before a space ends at a word's end already, and is taken whole.
+        let end = match window.iter().rposition(|character| *character == ' ') {
+            _ if characters[start + width] == ' ' => start + width + 1,
+            Some(space) if space > 0 => start + space + 1,
+            _ => start + width,
+        };
+        rows.push(
+            characters[start..end]
+                .iter()
+                .collect::<String>()
+                .trim_end()
+                .to_string(),
+        );
+        start = end;
+    }
+    rows.push(characters[start..].iter().collect());
+    rows
+}
+
+/// The most lines the log keeps. A session that draws all afternoon writes a few lines a picture;
+/// this is hours of it, and no screen shows more than a page.
+const LOG_LINES: usize = 1000;
 
 /// How far along a run is, as a bar can show it.
 ///
@@ -2019,33 +1959,23 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    /// A screen as it is when the model has been read, which is as it starts: img2img with a model
-    /// that takes guidance, which is the screen with every box on it.
+    /// A screen as it is when the model has been read, which is as it starts: a model that takes
+    /// guidance, which is the screen with every box on it.
     fn ready() -> App {
         on(Runtime::ALL[0])
     }
 
     fn on(runtime: Runtime) -> App {
-        App::new(
-            Task::Img2Img,
+        let mut app = App::new(
+            Task::Txt2Img,
             "sdxl:wai".to_string(),
             runtime,
             GenerationDefaults::default(),
             SIZES.to_vec(),
             true,
-        )
-    }
-
-    /// The same model, for a session that draws from a prompt alone.
-    fn drawing_from_noise() -> App {
-        App::new(
-            Task::Txt2Img,
-            "sdxl:wai".to_string(),
-            Runtime::ALL[0],
-            GenerationDefaults::default(),
-            SIZES.to_vec(),
-            true,
-        )
+        );
+        app.writes_to(Path::new(crate::args::DEFAULT_OUTPUT));
+        app
     }
 
     /// A distilled model, which has no second pass for guidance or a negative prompt to reach.
@@ -2176,44 +2106,34 @@ mod tests {
     }
 
     #[test]
-    fn the_boxes_are_the_tasks_and_the_models() {
-        let all = |task, guided| layout(task, guided).0;
+    fn the_boxes_are_the_models() {
+        let all = |guided| layout(guided).0;
 
-        // img2img has a picture to start from and how far to walk from it; txt2img has neither.
-        assert!(all(Task::Img2Img, true).contains(&Field::From));
-        assert!(all(Task::Img2Img, true).contains(&Field::Strength));
-        assert!(!all(Task::Txt2Img, true).contains(&Field::From));
-        assert!(!all(Task::Txt2Img, true).contains(&Field::Strength));
-
-        // And a model with no second pass is offered neither the dial nor the box it reads.
-        for task in Task::ALL {
-            assert!(!all(*task, false).contains(&Field::Guidance));
-            assert!(!all(*task, false).contains(&Field::Negative));
-            assert!(all(*task, false).contains(&Field::Prompt));
-            assert_eq!(all(*task, false).last(), Some(&Field::Generate));
-        }
+        // A model with no second pass is offered neither the dial nor the box it reads.
+        assert!(all(true).contains(&Field::Guidance));
+        assert!(all(true).contains(&Field::Negative));
+        assert!(!all(false).contains(&Field::Guidance));
+        assert!(!all(false).contains(&Field::Negative));
+        assert!(all(false).contains(&Field::Prompt));
+        assert_eq!(all(false).last(), Some(&Field::Generate));
 
         // Every screen has the device row, at the foot of the panel.
-        for task in Task::ALL {
-            for guided in [true, false] {
-                let panel: Vec<Field> = layout(*task, guided)
-                    .0
-                    .into_iter()
-                    .filter(|field| field.in_the_panel())
-                    .collect();
-                assert_eq!(panel.last(), Some(&Field::Device), "{task:?} {guided}");
-            }
+        for guided in [true, false] {
+            let panel: Vec<Field> = all(guided)
+                .into_iter()
+                .filter(|field| field.in_the_panel())
+                .collect();
+            assert_eq!(panel.last(), Some(&Field::Device), "{guided}");
         }
 
-        // The full screen, row by row: the prompt beside the top half of the panel.
+        // The full screen, row by row: the prompt beside the top half of the panel, taking the
+        // odd row.
         assert_eq!(
-            layout(Task::Img2Img, true).1,
+            layout(true).1,
             vec![
                 vec![Field::Prompt, Field::Steps],
                 vec![Field::Prompt, Field::Guidance],
                 vec![Field::Prompt, Field::Size],
-                vec![Field::Prompt, Field::From],
-                vec![Field::Negative, Field::Strength],
                 vec![Field::Negative, Field::Seed],
                 vec![Field::Negative, Field::Device],
                 vec![Field::Generate],
@@ -2221,7 +2141,7 @@ mod tests {
         );
         // With no negative box, the prompt is beside every row of the panel.
         assert_eq!(
-            layout(Task::Txt2Img, false).1,
+            layout(false).1,
             vec![
                 vec![Field::Prompt, Field::Steps],
                 vec![Field::Prompt, Field::Size],
@@ -2236,18 +2156,16 @@ mod tests {
     fn the_grid_and_the_tab_order_hold_the_same_boxes() {
         // Two lists of the same boxes, and a box in one and not the other is either unreachable
         // by tab or nowhere the arrows can go.
-        for task in Task::ALL {
-            for guided in [true, false] {
-                let (order, rows) = layout(*task, guided);
-                let mut on_screen: Vec<Field> =
-                    rows.iter().flat_map(|row| row.iter().copied()).collect();
-                on_screen.sort_by_key(|field| format!("{field:?}"));
-                on_screen.dedup();
-                let mut in_order = order.clone();
-                in_order.sort_by_key(|field| format!("{field:?}"));
+        for guided in [true, false] {
+            let (order, rows) = layout(guided);
+            let mut on_screen: Vec<Field> =
+                rows.iter().flat_map(|row| row.iter().copied()).collect();
+            on_screen.sort_by_key(|field| format!("{field:?}"));
+            on_screen.dedup();
+            let mut in_order = order.clone();
+            in_order.sort_by_key(|field| format!("{field:?}"));
 
-                assert_eq!(on_screen, in_order, "{task:?} guided {guided}");
-            }
+            assert_eq!(on_screen, in_order, "guided {guided}");
         }
     }
 
@@ -2273,7 +2191,7 @@ mod tests {
     #[test]
     fn tab_goes_round_and_back_again() {
         let cancel = AtomicBool::new(false);
-        for mut app in [ready(), drawing_from_noise(), distilled()] {
+        for mut app in [ready(), distilled()] {
             for _ in 0..app.fields.len() {
                 app.key(press(KeyCode::Tab), &cancel);
             }
@@ -2298,13 +2216,11 @@ mod tests {
         app.key(press(KeyCode::Down), &cancel);
         assert_eq!(app.focused(), Field::Generate, "down walked off the screen");
 
-        // Right column walks through all seven config items.
+        // Right column walks through all five config items.
         app.focus_on(Field::Steps);
         for wanted in [
             Field::Guidance,
             Field::Size,
-            Field::From,
-            Field::Strength,
             Field::Seed,
             Field::Device,
             Field::Generate,
@@ -2319,7 +2235,7 @@ mod tests {
         app.key(press(KeyCode::Up), &cancel);
         assert_eq!(app.focused(), Field::Seed);
         app.key(press(KeyCode::Up), &cancel);
-        assert_eq!(app.focused(), Field::Strength);
+        assert_eq!(app.focused(), Field::Size);
 
         // And nothing above the top.
         app.focus_on(Field::Prompt);
@@ -2382,22 +2298,52 @@ mod tests {
     }
 
     #[test]
-    fn down_out_of_a_prompt_leaves_it_and_goes_to_the_next_row() {
+    fn down_in_a_prompt_goes_to_the_next_line_and_off_the_last_one_to_the_box_below() {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
 
         app.focus_on(Field::Prompt);
         app.key(press(KeyCode::Enter), &cancel);
-        typing_into(&mut app, "a cat", &cancel);
-        app.key(press(KeyCode::Down), &cancel);
-        assert!(!app.editing, "down left the box open");
-        assert_eq!(app.focused(), Field::Negative);
+        let prompt = "a cat sitting on a windowsill in the late afternoon sun, \
+                      watercolour, soft light, the street below out of focus";
+        typing_into(&mut app, prompt, &cancel);
+        // Drawn, so that the box knows where its lines break: narrow enough that this wraps.
+        screen(&app, 90, 30);
+        let width = app.text_width.get() as usize;
+        assert!(width > 0 && width < prompt.len(), "{width}");
+        let lines = app.prompt.wrapped(width).0.len();
 
-        app.focus_on(Field::Negative);
+        // Up from the end of the text is the line above, in the box and still typing into it.
+        app.key(press(KeyCode::Up), &cancel);
+        assert!(app.editing, "up left the box");
+        assert_eq!(app.focused(), Field::Prompt);
+        assert_eq!(
+            app.prompt.wrapped(width).1 .0 + 2,
+            lines,
+            "not on the line above the last"
+        );
+
+        // Down is the next line -- the last -- and still the box's.
+        app.key(press(KeyCode::Down), &cancel);
+        assert!(app.editing, "down to the last line left the box");
+        assert_eq!(app.focused(), Field::Prompt);
+        assert_eq!(app.prompt.wrapped(width).1 .0 + 1, lines);
+
+        // And down again, with no line below, is the box below, as it is outside the box.
+        app.key(press(KeyCode::Down), &cancel);
+        assert!(!app.editing, "down off the last line left the box open");
+        assert_eq!(app.focused(), Field::Negative);
+        assert_eq!(
+            app.prompt.text(),
+            prompt,
+            "nothing typed went anywhere else"
+        );
+
+        // The negative prompt the same, off the end of its one line to the button.
         app.key(press(KeyCode::Enter), &cancel);
         typing_into(&mut app, "blurry", &cancel);
         app.key(press(KeyCode::Down), &cancel);
-        assert!(!app.editing, "down left the box open");
+        assert!(!app.editing);
         assert_eq!(app.focused(), Field::Generate);
     }
 
@@ -2446,11 +2392,9 @@ mod tests {
         for (field, wanted) in [
             (Field::Prompt, "What to draw"),
             (Field::Negative, "What to keep out"),
-            (Field::From, "A picture to start from"),
             (Field::Steps, "More is more detail"),
             (Field::Guidance, "Five to eight"),
             (Field::Size, "was trained at"),
-            (Field::Strength, "0.8 redraws it"),
             (Field::Seed, "the same picture again"),
             (Field::Device, "reads the"),
             (Field::Generate, "Draws it"),
@@ -2462,15 +2406,15 @@ mod tests {
 
         // And it says which box it is about, since it is the only thing on the screen that moves
         // when the cursor does without the cursor being on it.
-        app.focus_on(Field::Strength);
-        assert!(screen(&app, 100, 30).contains("strength"), "unnamed");
+        app.focus_on(Field::Guidance);
+        assert!(screen(&app, 100, 30).contains("guidance"), "unnamed");
     }
 
     #[test]
     fn every_line_of_it_fits_the_box_it_is_drawn_in() {
         // Cut off by its own border it would be explaining half of something. The narrowest
         // terminal this is drawn for is eighty, less two for the border.
-        for field in layout(Task::Img2Img, true).0 {
+        for field in layout(true).0 {
             for line in about(field) {
                 assert!(
                     line.chars().count() <= 78,
@@ -2526,12 +2470,12 @@ mod tests {
         app.key(press(KeyCode::Left), &cancel);
         assert_eq!(app.focused(), Field::Prompt);
 
-        // The prompt is four rows of the panel tall, so left off any of those four lands in it.
-        app.focus_on(Field::From);
+        // The prompt is three rows of the panel tall, so left off any of those three lands in it.
+        app.focus_on(Field::Size);
         app.key(press(KeyCode::Left), &cancel);
         assert_eq!(app.focused(), Field::Prompt);
 
-        app.focus_on(Field::Strength);
+        app.focus_on(Field::Seed);
         app.key(press(KeyCode::Left), &cancel);
         assert_eq!(app.focused(), Field::Negative);
 
@@ -2572,20 +2516,6 @@ mod tests {
         assert_eq!(app.prompt.text(), "c-at", "left did not move the cursor");
     }
 
-    /// Types a path into the draw-from box and presses enter.
-    ///
-    /// Its own helper because enter on that row is the picker's, so what opens the box for
-    /// typing is the first character rather than enter.
-    fn set_from(app: &mut App, path: &str, cancel: &AtomicBool) {
-        app.focus_on(Field::From);
-        typing_into(app, path, cancel);
-        assert!(
-            app.asking.is_some(),
-            "typing did not open the draw-from box"
-        );
-        app.key(press(KeyCode::Enter), cancel);
-    }
-
     /// Opens the box on `field`, types `text` into it, and presses enter.
     fn set(app: &mut App, field: Field, text: &str, cancel: &AtomicBool) {
         app.focus_on(field);
@@ -2616,9 +2546,6 @@ mod tests {
 
         set(&mut app, Field::Guidance, "7.5", &cancel);
         assert_eq!(app.guidance, 7.5);
-
-        set(&mut app, Field::Strength, "0.35", &cancel);
-        assert!((app.strength - 0.35).abs() < 1e-6);
     }
 
     #[test]
@@ -2746,7 +2673,7 @@ mod tests {
         // So that a picture worth keeping can be drawn again: the seed it was drawn with goes with
         // the job, into the file and onto the list.
         let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
 
         app.start();
@@ -2775,203 +2702,9 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_the_draw_from_box_opens_the_picker_rather_than_drawing() {
-        let cancel = AtomicBool::new(false);
-        let mut app = ready();
-        type_in(&mut app, "a cat", &cancel);
-
-        // The box under the screen says what enter does there, and only while the cursor is on it.
-        assert!(!screen(&app, 90, 26).contains("enter to browse"));
-        app.focus_on(Field::From);
-        assert!(screen(&app, 90, 26).contains("enter to browse"));
-
-        app.key(press(KeyCode::Enter), &cancel);
-        assert!(app.browsing.is_some(), "the picker did not open");
-        assert!(app.pending.is_none(), "it started a run instead");
-
-        // And what is on screen is the picker, over everything that was there.
-        let drawn = screen(&app, 90, 26);
-        assert!(drawn.contains("a picture to draw from"), "{drawn}");
-
-        // Esc takes it down again, leaving everything behind it as it was.
-        app.key(press(KeyCode::Esc), &cancel);
-        assert!(app.browsing.is_none(), "esc did not close the picker");
-        assert!(!app.quit, "esc closed the program rather than the picker");
-        assert_eq!(app.prompt.text(), "a cat");
-    }
-
-    #[test]
-    fn the_picker_opens_somewhere_that_is_there_whatever_is_in_the_box() {
-        let cancel = AtomicBool::new(false);
-        let mut app = ready();
-
-        // A typo in the box would otherwise put up a list saying only that it cannot be read.
-        set_from(&mut app, "/no/such/place/at/all.png", &cancel);
-        app.key(press(KeyCode::Enter), &cancel);
-
-        let here = std::env::current_dir().unwrap();
-        assert_eq!(app.browsing.as_ref().unwrap().directory(), here);
-
-        // And a path that is there is the one it opens on.
-        app.key(press(KeyCode::Esc), &cancel);
-        set_from(&mut app, here.parent().unwrap().to_str().unwrap(), &cancel);
-        app.key(press(KeyCode::Enter), &cancel);
-        assert_eq!(
-            app.browsing.as_ref().unwrap().directory(),
-            here.parent().unwrap()
-        );
-    }
-
-    #[test]
-    fn what_the_picker_hands_back_goes_into_the_box() {
-        let cancel = AtomicBool::new(false);
-        let mut app = ready();
-
-        // A directory of its own with one picture in it, so that what is picked is known.
-        let root = std::env::temp_dir().join(format!("waifu-draw-picker-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("only.png"), b"x").unwrap();
-
-        set_from(&mut app, root.to_str().unwrap(), &cancel);
-        app.key(press(KeyCode::Enter), &cancel);
-
-        // Past "..", onto the one picture, and take it.
-        app.key(press(KeyCode::Down), &cancel);
-        app.key(press(KeyCode::Enter), &cancel);
-
-        assert!(app.browsing.is_none(), "the picker stayed open");
-        assert_eq!(app.from(), Some(root.join("only.png")));
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn while_the_picker_is_up_the_keys_behind_it_are_left_alone() {
-        let cancel = AtomicBool::new(false);
-        let mut app = ready();
-        type_in(&mut app, "a cat", &cancel);
-
-        app.focus_on(Field::From);
-        app.key(press(KeyCode::Enter), &cancel);
-
-        // Tab would move the cursor and typing would go into a box, were the picker not there.
-        let focus = app.focus;
-        app.key(press(KeyCode::Tab), &cancel);
-        type_in(&mut app, "zzz", &cancel);
-
-        assert_eq!(app.focus, focus, "tab moved the screen behind the picker");
-        assert_eq!(app.from.text(), "", "what was typed went into a box");
-        assert!(app.browsing.is_some());
-
-        // Ctrl-C still means what it always means.
-        app.key(
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            &cancel,
-        );
-        assert!(
-            app.quit,
-            "ctrl-c did not end the program from inside the picker"
-        );
-    }
-
-    #[test]
-    fn a_picture_off_the_disk_becomes_rgb_at_the_size_asked_for() {
-        // Through a real file rather than a buffer: the point of this one is that what the image
-        // crate decodes and scales comes out as the rows of RGB the engine reads.
-        let path =
-            std::env::temp_dir().join(format!("waifu-read-image-{}.png", std::process::id()));
-        let pixels: Vec<u8> = (0..32 * 32)
-            .flat_map(|i| [i as u8, 255 - i as u8, 7])
-            .collect();
-        image::save_buffer(&path, &pixels, 32, 32, image::ColorType::Rgb8).unwrap();
-
-        // A size that is neither the file's nor a whole multiple of it, since the run decides the
-        // size and a picture off a camera never happens to be it.
-        let (width, height, rgb) = read_image(&path, 192, 128).unwrap();
-        std::fs::remove_file(&path).unwrap();
-
-        assert_eq!((width, height), (192, 128));
-        assert_eq!(rgb.len(), 192 * 128 * 3);
-
-        // The third channel was one value everywhere, so scaling cannot have made it anything
-        // else -- which is the check that the channels did not get shuffled on the way through.
-        assert!(
-            rgb.chunks(3).all(|pixel| pixel[2].abs_diff(7) <= 1),
-            "the channels came back in the wrong order"
-        );
-    }
-
-    #[test]
-    fn a_picture_that_is_not_there_is_said_so_rather_than_drawn_over() {
-        let missing = std::env::temp_dir().join("waifu-no-such-picture.png");
-        assert!(read_image(&missing, 64, 64).is_err());
-    }
-
-    #[test]
-    fn img2img_with_nothing_to_draw_from_is_refused() {
-        // A run from noise is txt2img's, and a session started for img2img that ran one would be
-        // drawing something nobody asked for.
-        let cancel = AtomicBool::new(false);
-        let mut app = ready();
-        type_in(&mut app, "a cat", &cancel);
-        generate(&mut app, &cancel);
-
-        assert!(app.pending.is_none());
-        assert!(app.unhappy);
-        assert!(app.message.contains("draw from"), "{}", app.message);
-    }
-
-    #[test]
-    fn txt2img_draws_from_noise_whatever_the_draw_from_box_holds() {
-        // There is no box for it on that screen, so nothing left in it can reach a run.
-        let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
-        app.from = TextField::new("cat.png");
-        type_in(&mut app, "a cat", &cancel);
-        generate(&mut app, &cancel);
-
-        let job = app.pending.take().unwrap();
-        assert!(job.from.is_none());
-        assert!(!job.parameters("m").contains("Denoising strength"));
-
-        let drawn = screen(&app, 90, 28);
-        assert!(!drawn.contains("draw from"), "{drawn}");
-        assert!(!drawn.contains("strength"), "{drawn}");
-    }
-
-    #[test]
-    fn a_path_in_the_draw_from_box_is_handed_over_with_the_job() {
-        let cancel = AtomicBool::new(false);
-        let mut app = ready();
-        type_in(&mut app, "a cat", &cancel);
-
-        set_from(&mut app, "  cat.png  ", &cancel);
-        set(&mut app, Field::Strength, "0.75", &cancel);
-        app.start();
-
-        let job = app.pending.take().unwrap();
-        // Trimmed, because a path typed with a space either side is the path.
-        assert_eq!(job.from, Some(PathBuf::from("cat.png")));
-        assert!((job.options.strength - 0.75).abs() < 1e-6);
-        assert!(
-            job.parameters("m").contains("Denoising strength: 0.75"),
-            "{}",
-            job.parameters("m")
-        );
-
-        // The number is on the screen.
-        assert!(
-            screen(&app, 90, 28).contains("0.75"),
-            "{}",
-            screen(&app, 90, 28)
-        );
-    }
-
-    #[test]
     fn enter_hands_over_what_the_boxes_say() {
         let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
         generate(&mut app, &cancel);
 
@@ -2985,7 +2718,7 @@ mod tests {
     #[test]
     fn a_second_prompt_while_the_first_is_being_drawn_is_refused() {
         let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
 
         generate(&mut app, &cancel);
@@ -3000,7 +2733,7 @@ mod tests {
     #[test]
     fn an_empty_prompt_is_not_sent() {
         let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         type_in(&mut app, "   ", &cancel);
 
         generate(&mut app, &cancel);
@@ -3012,7 +2745,7 @@ mod tests {
     #[test]
     fn escape_stops_a_run_but_asks_before_leaving_an_idle_one() {
         let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
         generate(&mut app, &cancel);
 
@@ -3080,7 +2813,6 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
-        set_from(&mut app, "cat.png", &cancel);
 
         for field in [Field::Prompt, Field::Negative] {
             app.focus_on(field);
@@ -3091,13 +2823,7 @@ mod tests {
             app.key(press(KeyCode::Esc), &cancel);
         }
 
-        for field in [
-            Field::Steps,
-            Field::Guidance,
-            Field::Size,
-            Field::Strength,
-            Field::Seed,
-        ] {
+        for field in [Field::Steps, Field::Guidance, Field::Size, Field::Seed] {
             app.focus_on(field);
             app.key(press(KeyCode::Enter), &cancel);
             assert!(app.pending.is_none(), "enter on {field:?} started a run");
@@ -3133,8 +2859,17 @@ mod tests {
         }
     }
 
+    /// The pictures in the log, oldest first.
+    fn pictures(app: &App) -> Vec<String> {
+        app.log
+            .iter()
+            .filter(|logged| logged.picture)
+            .map(|logged| logged.text.clone())
+            .collect()
+    }
+
     #[test]
-    fn a_finished_run_is_listed_and_a_failed_one_leaves_the_reason() {
+    fn a_finished_run_is_logged_and_a_failed_one_leaves_the_reason() {
         let mut app = ready();
         app.update(Update::Done {
             kept: kept("waifu-0001.png", 1024, 7),
@@ -3142,22 +2877,28 @@ mod tests {
         });
         assert!(!app.unhappy);
         assert!(app.message.contains("waifu-0001.png"), "{}", app.message);
-        assert_eq!(app.written.len(), 1);
-        assert!(
-            app.written[0].contains("1024 by 1024"),
-            "{}",
-            app.written[0]
-        );
-        assert!(app.written[0].contains("seed 7"), "{}", app.written[0]);
+        let written = pictures(&app);
+        assert_eq!(written.len(), 1);
+        assert!(written[0].contains("1024 by 1024"), "{}", written[0]);
+        assert!(written[0].contains("seed 7"), "{}", written[0]);
 
         app.update(Update::Failed("out of memory".to_string()));
         assert!(app.unhappy);
         assert_eq!(app.message, "out of memory");
-        assert_eq!(app.written.len(), 1, "what was drawn is still on the list");
+        assert_eq!(
+            pictures(&app).len(),
+            1,
+            "what was drawn is still in the log"
+        );
+        assert_eq!(
+            newest(&app),
+            Some((Level::Error, "out of memory")),
+            "and why the run failed is logged after it"
+        );
     }
 
     #[test]
-    fn the_newest_picture_is_at_the_top_of_the_list() {
+    fn the_newest_line_is_at_the_bottom_of_the_log() {
         let mut app = ready();
         for number in 1..=3 {
             app.update(Update::Done {
@@ -3166,15 +2907,113 @@ mod tests {
             });
         }
 
-        assert_eq!(app.written.len(), 3);
-        let names: Vec<&str> = app
-            .written
+        let names: Vec<String> = pictures(&app)
             .iter()
-            .map(|line| line.split_whitespace().next().unwrap())
+            .map(|line| line.split_whitespace().nth(2).unwrap().to_string())
             .collect();
         assert_eq!(
             names,
-            ["waifu-0003.png", "waifu-0002.png", "waifu-0001.png"]
+            ["waifu-0001.png", "waifu-0002.png", "waifu-0003.png"]
+        );
+
+        // Drawn as a terminal draws: the newest is the line nearest the bottom. Looked for by the
+        // log's own line, since the status line above it names the newest picture too.
+        let drawn = screen(&app, 90, 28);
+        let at = |name: &str| drawn.find(&format!("{name}   512")).unwrap();
+        assert!(at("waifu-0001.png") < at("waifu-0003.png"), "{drawn}");
+    }
+
+    /// The level and text of the newest line of the log.
+    fn newest(app: &App) -> Option<(Level, &str)> {
+        app.log
+            .back()
+            .map(|logged| (logged.level, logged.text.as_str()))
+    }
+
+    /// A line as the library writes one.
+    fn from_flint(level: Level, text: &str) -> Logged {
+        Logged::line(level, "2026-10-23T18:50:41Z", "weights.rs:301", text)
+    }
+
+    #[test]
+    fn every_line_the_libraries_write_is_logged_and_only_bad_news_is_said() {
+        let mut app = ready();
+        let before = app.log.len();
+        app.heard(from_flint(Level::Info, "12 of 1400 weights kept on cuda"));
+        assert_eq!(
+            newest(&app),
+            Some((Level::Info, "12 of 1400 weights kept on cuda"))
+        );
+        assert!(
+            !app.message.contains("weights kept"),
+            "an ordinary line took the status line: {}",
+            app.message
+        );
+        // With when it was written and where, as the library said them, in front of it.
+        let drawn = screen(&app, 90, 28);
+        assert!(
+            drawn.contains("2026-10-23T18:50:41Z weights.rs:301] 12 of 1400 weights kept"),
+            "{drawn}"
+        );
+
+        app.heard(from_flint(Level::Warning, "the card is nearly full"));
+        assert_eq!(app.message, "the card is nearly full");
+        assert_eq!(app.log.len(), before + 2);
+    }
+
+    #[test]
+    fn where_pictures_go_is_the_first_line_of_the_log() {
+        let app = ready();
+        assert_eq!(
+            app.log.front().map(|logged| logged.text.as_str()),
+            Some("pictures go to waifu-output")
+        );
+        let drawn = screen(&app, 90, 28);
+        assert!(drawn.contains(" log "), "{drawn}");
+        assert!(
+            !drawn.contains("log ·"),
+            "the title still says where pictures go: {drawn}"
+        );
+    }
+
+    #[test]
+    fn a_long_line_wraps_at_spaces_and_a_long_word_is_cut() {
+        assert_eq!(
+            wrap("out of memory at a conv: 42 weights moved", 16),
+            ["out of memory at", "a conv: 42", "weights moved"]
+        );
+        assert_eq!(wrap("aaaaaaaaaa", 4), ["aaaa", "aaaa", "aa"]);
+        assert_eq!(wrap("short", 80), ["short"]);
+        assert_eq!(wrap("", 80), [""]);
+    }
+
+    #[test]
+    fn a_line_longer_than_the_box_is_drawn_whole_on_the_rows_it_wraps_to() {
+        let mut app = ready();
+        let long = "out of memory at %477 = conv2d(%474, %475, %476): 42 weights (1590 MB) moved \
+                    off the device: qwen_image.vae.decoder.up_blocks.0.resnets.0.conv1.weight, \
+                    and 41 more; then it ran";
+        app.heard(from_flint(Level::Info, long));
+
+        // Its last words are on the screen, a row or two under its first: nothing is cut off the
+        // end of it.
+        let drawn = screen(&app, 90, 28);
+        assert!(drawn.contains("out of memory at %477"), "{drawn}");
+        assert!(drawn.contains("and 41 more; then it ran"), "{drawn}");
+        assert!(app.log.back().unwrap().rows(86).len() > 1);
+    }
+
+    #[test]
+    fn the_log_lets_its_oldest_lines_go() {
+        let mut app = ready();
+        for number in 0..LOG_LINES + 5 {
+            app.heard(from_flint(Level::Info, &format!("line {number}")));
+        }
+        assert_eq!(app.log.len(), LOG_LINES);
+        // The oldest let go of first: where pictures go, and the five lines after it.
+        assert_eq!(
+            app.log.front().map(|logged| logged.text.as_str()),
+            Some("line 5")
         );
     }
 
@@ -3187,7 +3026,6 @@ mod tests {
                 seed: Some(42),
                 ..GenerationOptions::default()
             },
-            from: None,
         };
         assert_eq!(
             job.parameters("sdxl:wai"),
@@ -3336,15 +3174,14 @@ mod tests {
         let heading = |app: &App| screen(app, 80, 30).chars().take(80).collect::<String>();
 
         let ordinary = heading(&ready());
-        assert!(ordinary.contains("img2img"), "{ordinary}");
+        assert!(ordinary.contains("txt2img"), "{ordinary}");
         assert!(ordinary.contains("sdxl:wai"), "{ordinary}");
         assert!(ordinary.contains("cpu"), "{ordinary}");
-        assert!(!ordinary.contains("cuda_cpu_offload"), "{ordinary}");
+        assert!(!ordinary.contains("vulkan"), "{ordinary}");
 
-        // The slow one says so, because someone wondering why this run is taking longer than
-        // the last should be able to read the answer rather than have to remember it.
-        let said = heading(&on(Runtime::CUDA_CPU_OFFLOAD));
-        assert!(said.contains("cuda_cpu_offload"), "{said}");
+        // And another device is named as itself.
+        let said = heading(&on(Runtime::on(crate::runtime::Device::Vulkan)));
+        assert!(said.contains("vulkan"), "{said}");
     }
 
     #[test]
@@ -3360,7 +3197,7 @@ mod tests {
         assert!(app.picking.is_some(), "enter opened no list");
         let drawn = screen(&app, 100, 30);
         assert!(drawn.contains("read onto it again"), "{drawn}");
-        assert!(drawn.contains("cuda_cpu_offload"), "{drawn}");
+        assert!(drawn.contains("vulkan"), "{drawn}");
 
         // Escape takes it down and moves nothing.
         app.key(press(KeyCode::Esc), &cancel);
@@ -3404,7 +3241,6 @@ mod tests {
             "{}",
             app.message
         );
-        app.from = TextField::new("cat.png");
         app.start();
         assert!(app.pending.is_some());
     }
@@ -3425,7 +3261,7 @@ mod tests {
     #[test]
     fn the_model_is_not_moved_from_under_a_run() {
         let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         type_in(&mut app, "a cat", &cancel);
         generate(&mut app, &cancel);
 
@@ -3438,8 +3274,9 @@ mod tests {
     #[test]
     fn a_read_that_fails_leaves_nothing_to_draw_with_until_another_works() {
         let cancel = AtomicBool::new(false);
-        let mut app = drawing_from_noise();
-        app.read_onto(Runtime::CUDA_CPU_OFFLOAD);
+        let mut app = ready();
+        let vulkan = Runtime::on(crate::runtime::Device::Vulkan);
+        app.read_onto(vulkan);
         app.update(Update::Failed("out of memory".to_string()));
 
         assert!(!app.reading());
@@ -3460,12 +3297,12 @@ mod tests {
         app.focus_on(Field::Device);
         app.key(press(KeyCode::Enter), &cancel);
         app.key(press(KeyCode::Enter), &cancel);
-        assert_eq!(app.moving, Some(Runtime::CUDA_CPU_OFFLOAD));
+        assert_eq!(app.moving, Some(vulkan));
     }
 
     #[test]
     fn what_was_waiting_to_be_said_is_said_once_the_model_is_read() {
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         app.after_reading = Some("cuda is where it runs fastest".to_string());
         app.read_onto(Runtime::ALL[0]);
         app.update(Update::Ready);
@@ -3480,12 +3317,12 @@ mod tests {
 
     #[test]
     fn what_the_tensor_library_warns_about_is_on_the_status_line() {
-        let mut app = drawing_from_noise();
-        app.heard(Level::Warning, "the card is nearly full".to_string());
+        let mut app = ready();
+        app.heard(from_flint(Level::Warning, "the card is nearly full"));
         assert!(!app.unhappy);
         assert_eq!(app.message, "the card is nearly full");
 
-        app.heard(Level::Error, "a kernel failed".to_string());
+        app.heard(from_flint(Level::Error, "a kernel failed"));
         assert!(app.unhappy);
     }
 
@@ -3514,10 +3351,8 @@ mod tests {
             "1024x1024",
             "seed",
             "any",
-            "draw from",
-            "strength",
             "generate",
-            "pictures written to waifu-output",
+            "pictures go to waifu-output",
             "waifu-0007.png",
             "device",
             "tab or arrows move",
@@ -3556,40 +3391,33 @@ mod tests {
         assert!(has("steps"), "config panel missing steps");
         assert!(has("guidance"), "config panel missing guidance");
 
-        // Including the picture to draw from, which is a row in the panel rather than a box of
-        // its own down the left: everything a run is given but the two prompts is in one place.
+        // Including the seed, which is a row in the panel rather than a box of its own down the
+        // left: everything a run is given but the two prompts is in one place.
         let row = lines
             .iter()
-            .find(|line| line.contains("draw from"))
-            .expect("config panel missing draw from");
+            .find(|line| line.contains("seed"))
+            .expect("config panel missing seed");
         assert!(
-            row.find("draw from").unwrap() >= 40,
-            "draw from is not in the config panel: {row:?}"
+            row.find("seed").unwrap() >= 40,
+            "seed is not in the config panel: {row:?}"
         );
     }
 
     #[test]
-    fn a_name_too_long_for_the_panel_is_cut_with_a_mark_on_it() {
-        // The picture to draw from is the one value in the panel that can outgrow it, and a name
-        // that stops partway with nothing to say so reads as the whole name.
+    fn a_value_too_long_for_the_panel_is_cut_with_a_mark_on_it() {
+        // A seed of twenty digits is more than a narrow panel is wide, and one that stops partway
+        // with nothing to say so reads as the whole seed.
         let cancel = AtomicBool::new(false);
         let mut app = ready();
-        set_from(
-            &mut app,
-            "/pictures/a-rather-long-name-for-a-cat.png",
-            &cancel,
-        );
+        set(&mut app, Field::Seed, "18446744073709551615", &cancel);
 
-        let drawn = screen(&app, 80, 30);
-        assert!(drawn.contains('…'), "a cut name with nothing to say so");
-        assert!(drawn.contains("a-rather-long"), "{drawn}");
+        let drawn = screen(&app, 60, 30);
+        assert!(drawn.contains('…'), "a cut seed with nothing to say so");
+        assert!(drawn.contains("1844674"), "{drawn}");
 
-        // With room for it, the whole name and no mark.
+        // With room for it, the whole seed and no mark.
         let drawn = screen(&app, 140, 30);
-        assert!(
-            drawn.contains("a-rather-long-name-for-a-cat.png"),
-            "{drawn}"
-        );
+        assert!(drawn.contains("18446744073709551615"), "{drawn}");
         assert!(!drawn.contains('…'), "{drawn}");
     }
 
@@ -3615,7 +3443,7 @@ mod tests {
     #[test]
     fn what_it_is_doing_takes_one_row_and_still_says_both_things() {
         // Idle: the last thing that happened, where the bar would be.
-        let mut app = drawing_from_noise();
+        let mut app = ready();
         app.said("written to a.png");
         let drawn = screen(&app, 80, 30);
         assert!(drawn.contains("written to a.png"), "{drawn}");

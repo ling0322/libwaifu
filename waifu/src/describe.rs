@@ -345,8 +345,7 @@ pub fn on_disk(asked: &str) -> Option<PathBuf> {
     bytes_on_disk(asked).map(|_| PathBuf::from(asked))
 }
 
-/// How many bytes the files the manifest at `asked` names are, where all of them are here: what
-/// choosing a device it fits on weighs.
+/// How many bytes the files the manifest at `asked` names are, where all of them are here.
 pub fn bytes_on_disk(asked: &str) -> Option<u64> {
     let manifest = Manifest::open(manifest_of(asked)?).ok()?;
     let mut bytes = 0;

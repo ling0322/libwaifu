@@ -22,10 +22,10 @@
 use std::fmt;
 
 #[allow(unused_imports)]
-use crate::runtime::{Device, Residency};
+use crate::runtime::Device;
 use crate::task::Task;
 
-pub use crate::runtime::{DeviceOption, Room, Runtime};
+pub use crate::runtime::{DeviceOption, Runtime};
 
 /// What went wrong with what the user typed. Reported rather than exiting, so that the caller
 /// prints the usage that goes with the command they were running.
@@ -48,8 +48,6 @@ pub const DEFAULT_OUTPUT: &str = "waifu-output";
 pub struct Args {
     models: Vec<String>,
     device: Option<String>,
-    device_weights: Option<String>,
-    image: Option<String>,
     output: Option<String>,
     task: Option<String>,
     help: bool,
@@ -81,10 +79,6 @@ impl Args {
             match name {
                 "-m" | "--m" => args.models.push(value("-m")?),
                 "-device" | "--device" => args.device = Some(value("-device")?),
-                "-device-weights" | "--device-weights" => {
-                    args.device_weights = Some(value("-device-weights")?)
-                }
-                "-i" | "--i" | "-image" | "--image" => args.image = Some(value("-i")?),
                 "-output" | "--output" => args.output = Some(value("-output")?),
                 "-task" | "--task" => args.task = Some(value("-task")?),
                 "-h" | "--h" | "-help" | "--help" => args.help = true,
@@ -116,18 +110,10 @@ impl Args {
         }
     }
 
-    /// The picture a run should start from, if one was named.
-    ///
-    /// Not opened here: this only fills the box on the screen, which is where it can be changed
-    /// between runs, and the file is read by the thread that owns the model when a run begins.
-    pub fn image(&self) -> Option<&str> {
-        self.image.as_deref()
-    }
-
     /// The task the drawing screen is opened for, if one was named.
     ///
-    /// None is not an error: beside `-m` it is img2img where `-i` names a picture and txt2img
-    /// otherwise, and without `-m` the terminal asks.
+    /// None is not an error: it is txt2img, the one task there is. The flag is still read so that
+    /// a script that names it keeps working, and so that a task there is not is refused.
     pub fn task(&self) -> Result<Option<Task>, ArgError> {
         let Some(task) = &self.task else {
             return Ok(None);
@@ -148,45 +134,6 @@ impl Args {
         self.output.as_deref().unwrap_or(DEFAULT_OUTPUT)
     }
 
-    /// How many bytes of the smallest weights an offload device keeps on the card, as
-    /// `-device-weights` gives them in gigabytes: `6`, `6.5` or `6GB`. Nothing when it is left out.
-    ///
-    /// Refused beside a device that is not an offload one, which keeps every weight on the card
-    /// already. Beside `auto` it is taken, and used if `auto` -- or the device row -- picks an
-    /// offload device.
-    pub fn device_weight_bytes(&self) -> Result<u64, ArgError> {
-        let Some(typed) = &self.device_weights else {
-            return Ok(0);
-        };
-
-        let number = typed.trim();
-        let number = ["GB", "gb", "Gb", "G", "g"]
-            .iter()
-            .find_map(|unit| number.strip_suffix(unit))
-            .unwrap_or(number)
-            .trim();
-        let gigabytes: f64 = number
-            .parse()
-            .ok()
-            .filter(|gigabytes: &f64| gigabytes.is_finite() && *gigabytes >= 0.0)
-            .ok_or_else(|| {
-                ArgError(format!(
-                    "invalid -device-weights \"{typed}\": expected gigabytes, as 6 or 6.5GB"
-                ))
-            })?;
-
-        match self.device()? {
-            DeviceOption::Auto | DeviceOption::CudaCpuOffload | DeviceOption::MetalDiskOffload => {
-                Ok((gigabytes * 1e9) as u64)
-            }
-            _ => Err(ArgError(
-                "-device-weights is for cuda_cpu_offload and metal_disk_offload: every other \
-                 device keeps all of the weights on it already"
-                    .to_string(),
-            )),
-        }
-    }
-
     pub fn device(&self) -> Result<DeviceOption, ArgError> {
         match self
             .device
@@ -198,11 +145,7 @@ impl Args {
             "auto" => Ok(DeviceOption::Auto),
             "cpu" => Ok(DeviceOption::Cpu),
             "cuda" => Ok(DeviceOption::Cuda),
-            // The names with a hyphen in them as well, because a name with several words in it
-            // is typed both ways and being told off over the punctuation helps nobody.
-            "cuda_cpu_offload" | "cuda-cpu-offload" => Ok(DeviceOption::CudaCpuOffload),
             "metal" => Ok(DeviceOption::Metal),
-            "metal_disk_offload" | "metal-disk-offload" => Ok(DeviceOption::MetalDiskOffload),
             "vulkan" => Ok(DeviceOption::Vulkan),
             // Every name it would have taken, built from the list rather than written out
             // again: a name refused here is most often a name that was nearly right, and a list
@@ -223,28 +166,18 @@ impl Args {
 /// The flags every command prints under `Options:`.
 pub fn print_options() {
     eprintln!(
-        "  -device string\n    \tinference device, one of cpu, cuda, cuda_cpu_offload, metal, \
-         metal_disk_offload, vulkan or auto (default \"auto\"). auto picks the fastest one the \
-         model fits on: cuda where the weights and room for a run fit in the card's free memory, \
-         cuda_cpu_offload where they do not. It is where the model is read first; the drawing \
-         screen's device row moves it. cuda_cpu_offload keeps the weights in host memory and \
-         moves each one onto the card as it is used, so that a model larger than the card can still draw; it \
-         is slower, since the whole model crosses the bus once per step. metal_disk_offload \
-         leaves the weights in the model's files and reads each one off the disk as it is used, \
-         so that a model larger than the Mac's memory can still draw; it is slower again, and \
-         auto never picks it."
-    );
-    eprintln!(
-        "  -device-weights gigabytes\n    \tfor cuda_cpu_offload and metal_disk_offload: keep this \
-         many gigabytes of the model's weights on the device, the smallest first, and move only \
-         the rest over as they are used (default 0, none). The small weights are most of the \
-         moves and little of the bytes, so a few gigabytes take away most of the waiting."
+        "  -device string\n    \tinference device, one of cpu, cuda, metal, vulkan or auto \
+         (default \"auto\"). auto picks the fastest one this machine has: cuda, then metal, then \
+         vulkan. It is where the model is read first; the drawing screen's device row moves it. cuda, vulkan and metal keep as many of the weights on the GPU as fit, the \
+         smallest first, and copy the rest onto it as they are used, so that a model larger than \
+         the card can still draw; a run that runs short lets weights on the GPU go. metal reads \
+         the rest off the disk, so that a model larger than the Mac's memory can still draw."
     );
     eprintln!(
         "  -m value\n    \tthe model to draw with: either a manifest file, which has the suffix \
          \".yaml\" and names the packages the weights are in, or the name of a published model, \
          which is fetched before the drawing screen opens. Left out, the terminal asks for the \
-         task and the model, and fetches what is picked. The names are: {}.",
+         model, and fetches what is picked. The names are: {}.",
         crate::manager::pictures()
             .into_iter()
             .map(|model| model.name)
@@ -252,13 +185,7 @@ pub fn print_options() {
             .join(", ")
     );
     eprintln!(
-        "  -i string\n    \ta picture to draw from rather than from noise, as a PNG or a JPEG. \
-         It fills the draw from box, is scaled to the size chosen there, and how far the run walks \
-         away from it is what the strength box says."
-    );
-    eprintln!(
-        "  -task string\n    \twhat the drawing screen is for, one of {}. Beside -m it can be left \
-         out: img2img where -i names a picture, txt2img otherwise.",
+        "  -task string\n    \twhat the drawing screen is for, one of {} (default \"txt2img\").",
         Task::names()
     );
     eprintln!(
@@ -293,76 +220,22 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_picture_to_start_from() {
-        assert_eq!(args(&["-i", "cat.png"]).unwrap().image(), Some("cat.png"));
-        assert_eq!(args(&["--image=cat.png"]).unwrap().image(), Some("cat.png"));
-        assert_eq!(args(&["-m", "x.waifupkg"]).unwrap().image(), None);
+    fn a_picture_to_start_from_is_not_a_flag() {
+        // Drawing from a picture is the engine's and not the terminal's, so -i is refused the way
+        // any flag it never had is, rather than read and then ignored.
+        for typed in [&["-i", "cat.png"][..], &["--image=cat.png"]] {
+            let error = args(typed).unwrap_err().to_string();
+            assert!(error.contains("not defined"), "{error}");
+        }
     }
 
     #[test]
-    fn keeps_the_weights_on_the_card_unless_the_offload_device_is_named() {
-        // Where the weights wait is part of the device name now, so it is not a question anyone
-        // is asked twice, and every other name answers it the same way.
-        for device in [
-            DeviceOption::Auto,
-            DeviceOption::Cpu,
-            DeviceOption::Cuda,
-            DeviceOption::Metal,
-        ] {
-            assert_eq!(device.resolve(&Runtime::ALL).residency(), Residency::Device);
-        }
-
-        let asked = args(&["-device", "metal_disk_offload"]).unwrap();
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL),
-            Runtime::METAL_DISK_OFFLOAD
-        );
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::Hybrid
-        );
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL).device(),
-            Device::Metal
-        );
-
-        let asked = args(&["-device", "cuda_cpu_offload"]).unwrap();
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL),
-            Runtime::CUDA_CPU_OFFLOAD
-        );
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL).residency(),
-            Residency::Hybrid
-        );
-        assert_eq!(
-            asked.device().unwrap().resolve(&Runtime::ALL).device(),
-            Device::Cuda,
-            "the weights can only wait off a card there is a card for"
-        );
-    }
-
-    #[test]
-    fn the_offload_device_is_taken_with_a_hyphen_as_well_as_an_underscore() {
-        // Two words in a device name is two ways to type it, and a run refused over the
-        // punctuation between them would be a run refused for nothing.
-        for typed in ["cuda_cpu_offload", "cuda-cpu-offload", "CUDA_CPU_OFFLOAD"] {
-            assert_eq!(
-                args(&["-device", typed]).unwrap().device().unwrap(),
-                DeviceOption::CudaCpuOffload,
-                "{typed}"
-            );
-        }
-        for typed in [
-            "metal_disk_offload",
-            "metal-disk-offload",
-            "Metal_Disk_Offload",
-        ] {
-            assert_eq!(
-                args(&["-device", typed]).unwrap().device().unwrap(),
-                DeviceOption::MetalDiskOffload,
-                "{typed}"
-            );
+    fn the_offload_device_is_gone() {
+        // The card keeps what fits of a model and lets weights go when a run runs short, so there
+        // is no second name for it -- and one typed is refused with the names there are.
+        for typed in ["cuda_cpu_offload", "cuda-cpu-offload"] {
+            let error = args(&["-device", typed]).unwrap().device().unwrap_err();
+            assert!(error.to_string().contains("\"cuda\""), "{error}");
         }
     }
 
@@ -450,16 +323,6 @@ mod tests {
             DeviceOption::Cuda.resolve(&Runtime::ALL).device(),
             Device::Cuda
         );
-        assert_eq!(
-            DeviceOption::CudaCpuOffload.resolve(&Runtime::ALL).device(),
-            Device::Cuda
-        );
-        assert_eq!(
-            DeviceOption::MetalDiskOffload
-                .resolve(&Runtime::ALL)
-                .device(),
-            Device::Metal
-        );
     }
 
     #[test]
@@ -477,13 +340,17 @@ mod tests {
     fn reads_the_task_and_refuses_one_there_is_not() {
         assert_eq!(args(&[]).unwrap().task().unwrap(), None);
         assert_eq!(
-            args(&["-task", "img2img"]).unwrap().task().unwrap(),
-            Some(Task::Img2Img)
+            args(&["-task", "txt2img"]).unwrap().task().unwrap(),
+            Some(Task::Txt2Img)
         );
         assert_eq!(
             args(&["--task=txt2img"]).unwrap().task().unwrap(),
             Some(Task::Txt2Img)
         );
+
+        // img2img is gone from the terminal, and naming it is a task there is not.
+        let error = args(&["-task", "img2img"]).unwrap().task().unwrap_err();
+        assert!(error.to_string().contains("txt2img"), "{error}");
 
         // Every name it would have taken, for the reason the device's refusal lists them.
         let error = args(&["-task", "sing"]).unwrap().task().unwrap_err();
@@ -493,57 +360,9 @@ mod tests {
     }
 
     #[test]
-    fn the_offload_device_says_what_it_costs() {
-        // The rows in the drawing screen's device list anybody has to be told something about.
-        assert!(Runtime::CUDA_CPU_OFFLOAD.about().contains("slower"));
-        assert!(Runtime::METAL_DISK_OFFLOAD.about().contains("slower"));
-        assert!(Runtime::METAL_DISK_OFFLOAD.about().contains("memory"));
-        assert!(!Runtime::ALL[0].about().contains("slower"));
-    }
-
-    #[test]
     fn recognises_a_request_for_help() {
         assert!(args(&["-h"]).unwrap().wants_help());
         assert!(args(&["--help"]).unwrap().wants_help());
         assert!(!args(&["-m", "x"]).unwrap().wants_help());
-    }
-
-    #[test]
-    fn reads_the_gigabytes_of_weights_an_offload_device_keeps() {
-        let kept = |arguments: &[&str]| args(arguments).unwrap().device_weight_bytes();
-
-        assert_eq!(kept(&[]).unwrap(), 0);
-        for typed in ["6", "6GB", "6gb", "6G", " 6 GB"] {
-            assert_eq!(
-                kept(&["-device", "cuda_cpu_offload", "-device-weights", typed]).unwrap(),
-                6_000_000_000,
-                "{typed}"
-            );
-        }
-        assert_eq!(
-            kept(&["-device=metal_disk_offload", "-device-weights=0.5"]).unwrap(),
-            500_000_000
-        );
-        // Beside auto it is taken, for whichever offload device auto or the device row picks.
-        assert_eq!(kept(&["-device-weights", "2"]).unwrap(), 2_000_000_000);
-
-        for typed in ["", "six", "-1", "6TB", "inf"] {
-            let error = kept(&["-device", "cuda_cpu_offload", "-device-weights", typed])
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("expected gigabytes"), "{typed}: {error}");
-        }
-    }
-
-    #[test]
-    fn refuses_weights_kept_on_a_device_that_keeps_them_all() {
-        for device in ["cuda", "metal", "vulkan", "cpu"] {
-            let error = args(&["-device", device, "-device-weights", "6"])
-                .unwrap()
-                .device_weight_bytes()
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains("cuda_cpu_offload"), "{device}: {error}");
-        }
     }
 }

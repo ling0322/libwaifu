@@ -29,7 +29,7 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use waifu::flint::{Device, Graph, Ir, Residency, RunContext, Tensor, Value, Weights};
+use waifu::flint::{Device, Graph, Ir, RunContext, Tensor, Value, Weights};
 use waifu::indextts::gpt::{self, Config, Gpt, Sampling};
 use waifu::Result;
 
@@ -872,18 +872,16 @@ fn probed(scores: &Tensor, limit: usize) -> Vec<f32> {
 #[ignore = "needs the exported IndexTTS-2.5 GPT in models/"]
 fn the_released_gpt_is_the_released_gpt() {
     // Read onto the device once. 574 M parameters is 2.2 GB, which is what this machine has room
-    // for; a package too large for that is what `Residency::Hybrid` is for, and nothing in this
+    // for; a package too large for that is what keeping fewer weights on the device is for, and nothing in this
     // test would change but the argument.
     let name = "indextts25-gpt.safetensors";
     let weights: Rc<Weights> = Rc::new(
-        Weights::from_files(&[models_dir().join(name)], CPU, Residency::Device).unwrap_or_else(
-            |error| {
-                panic!(
-                    "{name}: {error}\nExport it first:\n    .venv/bin/python \
+        Weights::from_files(&[models_dir().join(name)], CPU, u64::MAX).unwrap_or_else(|error| {
+            panic!(
+                "{name}: {error}\nExport it first:\n    .venv/bin/python \
                      tools/indextts_gpt_exporter.py -output models/indextts25-gpt.safetensors"
-                )
-            },
-        ),
+            )
+        }),
     );
     let model = Gpt::build(Config::indextts(), "", &weights, F32, CPU).unwrap();
 

@@ -118,9 +118,8 @@ pub fn describe(runtime: Runtime) -> Value {
 /// card at all, and a sidebar that made a context behind their back would be spending their VRAM
 /// on a picture of their VRAM.
 ///
-/// Metal answers nothing for a different reason: that backend implements no snapshot, and asking
-/// for one ends the process. Its card has the machine's memory anyway, which the line above
-/// already shows -- that is what `unified` is for.
+/// Metal answers nothing for a different reason: its card has the machine's memory, which the
+/// line above already shows -- that is what `unified` is for.
 fn vram(runtime: Runtime) -> (Value, Value) {
     let device = runtime.device();
     if device != Device::Cuda && device != Device::Vulkan {

@@ -369,6 +369,14 @@ void VulkanOperators::releaseUnusedMemory() {
   _context->releaseUnusedMemory();
 }
 
+void VulkanOperators::setMemoryLimit(int64_t bytes) {
+  _context->setMemoryLimit(bytes);
+}
+
+MemoryBudget VulkanOperators::getMemoryBudget() {
+  return _context->getMemoryBudget();
+}
+
 DType VulkanOperators::getDefaultFloatType() {
   return DType::kFloat16;
 }

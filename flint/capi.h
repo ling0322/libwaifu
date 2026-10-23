@@ -48,6 +48,10 @@ extern "C" {
 #define FL_OK 0
 #define FL_ERROR_INVALID_ARG 0x0100
 #define FL_ERROR_ABORTED 0x0102
+/// A device could not give the memory a call needed, or its memory limit would have been passed
+/// -- see fl_memory_set_limit(). Nothing was taken, so the call may be made again once something
+/// has been freed.
+#define FL_ERROR_OUT_OF_MEMORY 0x0103
 
 
 /// Storage: a run of elements of one dtype on one device, and nothing about their shape.
@@ -111,6 +115,22 @@ typedef enum fl_pad_mode_t {
   FL_PAD_REPLICATE = 2,
 } fl_pad_mode_t;
 
+/// What a tensor's storage is for, which an allocator may treat each in its own way, by how long it
+/// lives: a weight kept on the device is given memory that goes back to the device whole when it is
+/// freed -- a buffer of its own on Metal, its own cudaMalloc on CUDA from 2 MB -- and everything
+/// else is cut from the memory the allocator keeps for reuse. Vulkan ignores it.
+typedef enum fl_alloc_hint_t {
+  /// What a pass makes and drops again: the outputs of operators.
+  FL_ALLOC_ACTIVATION = 0,
+  /// A model's parameter kept on the device, until it is let go of.
+  FL_ALLOC_WEIGHT = 1,
+  /// Anything else, treated as an activation.
+  FL_ALLOC_OTHER = 2,
+  /// A copy of a weight that waits off the device, made for one pass and dropped after its last
+  /// reader: treated as an activation.
+  FL_ALLOC_TEMPORARY_WEIGHT = 3,
+} fl_alloc_hint_t;
+
 /// Select the operator backends for the machine. Call once before anything else here; later calls
 /// do nothing. Failures are reported through fl_get_last_error_code().
 FLAPI void fl_init(void);
@@ -144,13 +164,14 @@ FLAPI int32_t fl_get_default_float_type(fl_operators_t operators, fl_dtype_t *ou
 
 // --- Storage ----------------------------------------------------------------------------------
 
-/// Allocate uninitialized storage for `numel` elements of `dtype` on `device`. FL_DEVICE_CUDA_HOST
-/// is page-locked host memory, which only a CUDA build can allocate.
+/// Allocate uninitialized storage for `numel` elements of `dtype` on `device`, for what `hint` says
+/// it is for. FL_DEVICE_CUDA_HOST is page-locked host memory, which only a CUDA build can allocate.
 /// @param numel at least one.
 FLAPI int32_t fl_tensor_data_create(
     fl_device_type_t device,
     fl_dtype_t dtype,
     int64_t numel,
+    fl_alloc_hint_t hint,
     fl_tensor_data_t *out);
 
 /// Storage on the CPU that *is* `numel` elements of `dtype` at `data`, rather than a copy of them:
@@ -568,6 +589,28 @@ FLAPI int32_t fl_memory_reset_peak_stats(fl_device_type_t device);
 /// otherwise have reused.
 FLAPI int32_t fl_memory_release_unused(fl_device_type_t device);
 
+/// Limit the memory the allocator of `device` holds to `bytes`; 0 for no limit but the device's.
+/// An allocation that would pass it fails as one the device cannot give does. Metal counts its
+/// tensors and what it keeps for reuse, CUDA and Vulkan their tensors and workspaces; the CPU is
+/// refused.
+FLAPI int32_t fl_memory_set_limit(fl_device_type_t device, int64_t bytes);
+
+/// What the allocator of one device may hold and holds now, which is what a model's weights are
+/// sized against. Not a snapshot: that is the device as somebody looking at it sees it, other
+/// processes and memory kept for reuse included.
+typedef struct fl_memory_budget_t {
+  /// The memory limit where there is one, and otherwise what the device has -- a card's memory,
+  /// or on Metal what the system suggests one process keep on the GPU. 0 on the CPU.
+  int64_t capacity;
+  /// What this process's tensors hold against it now.
+  int64_t allocated;
+  /// What the allocator holds from the device, what it keeps for reuse included.
+  int64_t held;
+} fl_memory_budget_t;
+
+/// Measure the budget of `device`'s allocator.
+FLAPI int32_t fl_memory_budget(fl_device_type_t device, fl_memory_budget_t *out);
+
 /// What fl_set_fatal_handler() registers.
 typedef void (*fl_fatal_handler_t)(void);
 
@@ -588,9 +631,13 @@ typedef void (*fl_fatal_handler_t)(void);
 FLAPI void fl_set_fatal_handler(fl_fatal_handler_t handler);
 
 /// What fl_set_log_sink() registers: a line's level -- 0 debug, 1 info, 2 warning, 3 error,
-/// 4 fatal -- where it was written, as "interface.cc:84", and the line alone. Both strings are
-/// valid only for the call.
-typedef void (*fl_log_sink_t)(int32_t level, const char *source, const char *message);
+/// 4 fatal -- when it was written, in UTC as "2026-10-23T18:50:41Z", where it was written, as
+/// "interface.cc:84", and the line alone. Every string is valid only for the call.
+typedef void (*fl_log_sink_t)(
+    int32_t level,
+    const char *time,
+    const char *source,
+    const char *message);
 
 /// Send every line the library writes to `sink` rather than to stdout; NULL puts them back.
 ///

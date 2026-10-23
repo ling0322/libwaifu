@@ -9,6 +9,7 @@ use std::os::raw::{c_char, c_int, c_void};
 pub const FL_OK: i32 = 0;
 pub const FL_ERROR_INVALID_ARG: i32 = 0x0100;
 pub const FL_ERROR_ABORTED: i32 = 0x0102;
+pub const FL_ERROR_OUT_OF_MEMORY: i32 = 0x0103;
 
 /// Opaque storage handle, owned by whoever made it. Only ever held behind a pointer.
 #[repr(C)]
@@ -63,6 +64,7 @@ extern "C" {
         device: FlDeviceType,
         dtype: FlDType,
         numel: i64,
+        hint: i32,
         out: *mut FlTensorData,
     ) -> i32;
     pub fn fl_tensor_data_borrow(
@@ -254,9 +256,18 @@ extern "C" {
     pub fn fl_memory_capture(device: FlDeviceType, out: *mut FlMemorySnapshot) -> i32;
     pub fn fl_memory_reset_peak_stats(device: FlDeviceType) -> i32;
     pub fn fl_memory_release_unused(device: FlDeviceType) -> i32;
+    pub fn fl_memory_set_limit(device: FlDeviceType, bytes: i64) -> i32;
+    pub fn fl_memory_budget(device: FlDeviceType, out: *mut FlMemoryBudget) -> i32;
     pub fn fl_set_fatal_handler(handler: Option<extern "C" fn()>);
     pub fn fl_set_log_sink(
-        sink: Option<extern "C" fn(level: i32, source: *const c_char, message: *const c_char)>,
+        sink: Option<
+            extern "C" fn(
+                level: i32,
+                time: *const c_char,
+                source: *const c_char,
+                message: *const c_char,
+            ),
+        >,
     );
     pub fn fl_set_log_level(level: i32);
     pub fn fl_release_memory();
@@ -270,4 +281,13 @@ pub struct FlMemorySnapshot {
     pub free: i64,
     pub allocated: i64,
     pub peak_allocated: i64,
+}
+
+/// Mirrors `fl_memory_budget_t`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FlMemoryBudget {
+    pub capacity: i64,
+    pub allocated: i64,
+    pub held: i64,
 }

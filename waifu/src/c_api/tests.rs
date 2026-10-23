@@ -341,7 +341,7 @@ unsafe extern "C" fn on_log(user_data: *mut c_void, event: *const WaifuLogEvent)
 fn a_log_callback_hears_the_library_s_lines() {
     let lines: Box<Mutex<Vec<(WaifuLogLevel, String)>>> = Box::default();
     waifu_set_log_callback(&*lines as *const _ as *mut c_void, Some(on_log));
-    crate::log::write(crate::log::Level::Warning, "test", "a line for the app");
+    crate::log::write(crate::log::Level::Warning, "a line for the app");
     waifu_set_log_callback(ptr::null_mut(), None);
 
     let lines = lines.lock().unwrap();
@@ -355,30 +355,6 @@ fn a_log_callback_hears_the_library_s_lines() {
 }
 
 #[test]
-fn weights_kept_on_the_device_are_for_the_offload_devices_alone() {
-    let options = |device_weight_bytes| WaifuEngineOptions {
-        struct_size: std::mem::size_of::<WaifuEngineOptions>() as u32,
-        device: WaifuDevice::WAIFU_DEVICE_CPU,
-        device_weight_bytes,
-    };
-    unsafe {
-        // Nothing kept is the engine waifu_engine_new starts, on any device.
-        let engine = waifu_engine_new_with_options(&options(0));
-        assert!(!engine.is_null(), "{}", last_error());
-        waifu_engine_free(engine);
-
-        // A device that keeps the whole model already has nothing for the number to change.
-        let engine = waifu_engine_new_with_options(&options(1 << 30));
-        assert!(engine.is_null());
-        assert!(
-            last_error().contains("cuda_cpu_offload"),
-            "{}",
-            last_error()
-        );
-    }
-}
-
-#[test]
 fn engine_options_compiled_against_another_header_are_refused() {
     unsafe {
         let engine = waifu_engine_new_with_options(ptr::null());
@@ -386,12 +362,37 @@ fn engine_options_compiled_against_another_header_are_refused() {
         assert!(last_error().contains("NULL"), "{}", last_error());
 
         let short = WaifuEngineOptions {
-            struct_size: 8,
+            struct_size: 4,
             device: WaifuDevice::WAIFU_DEVICE_CPU,
-            device_weight_bytes: 0,
         };
         let engine = waifu_engine_new_with_options(&short);
         assert!(engine.is_null());
         assert!(last_error().contains("struct_size"), "{}", last_error());
+    }
+}
+
+#[test]
+fn a_memory_limit_is_for_a_device_that_has_one() {
+    // The processor's allocator holds nothing back, so there is nothing for a limit to limit.
+    assert!(!waifu_set_memory_limit(
+        WaifuDevice::WAIFU_DEVICE_CPU,
+        1 << 30
+    ));
+    assert!(last_error().contains("cpu"), "{}", last_error());
+
+    // Every device with memory of its own has one, where the device is here: set, and lifted again
+    // so that no other test runs under it.
+    for (device, waifu_device) in [
+        (crate::flint::Device::Metal, WaifuDevice::WAIFU_DEVICE_METAL),
+        (crate::flint::Device::Cuda, WaifuDevice::WAIFU_DEVICE_CUDA),
+        (
+            crate::flint::Device::Vulkan,
+            WaifuDevice::WAIFU_DEVICE_VULKAN,
+        ),
+    ] {
+        if device.is_available() {
+            assert!(waifu_set_memory_limit(waifu_device, 1 << 40));
+            assert!(waifu_set_memory_limit(waifu_device, 0));
+        }
     }
 }

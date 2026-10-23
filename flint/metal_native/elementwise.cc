@@ -228,8 +228,8 @@ void copyKernel(const TensorView &src, const TensorView &dest) {
   // ends start on one -- and the only copy there is for a type no kernel is built for.
   if (src.getDType() == dest.getDType() && src.isContiguous() && dest.isContiguous()) {
     int64_t bytes = src.getDType().getTotalSize(src.getNumEl());
-    Arg from = getArg(src);
-    Arg to = getArg(dest);
+    CommandStream::Arg from = getArg(src);
+    CommandStream::Arg to = getArg(dest);
     bool words = bytes % 4 == 0 && from.offset % 4 == 0 && to.offset % 4 == 0;
     uint32_t count = static_cast<uint32_t>(words ? bytes / 4 : bytes);
     getContext(src)->dispatch(
