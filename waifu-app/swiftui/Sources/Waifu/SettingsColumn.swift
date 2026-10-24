@@ -51,7 +51,7 @@ struct SettingsColumn: View {
                         if session.model != nil {
                             Group {
                                 switch session.tab {
-                                case .txt2img, .img2img: pictureSettings
+                                case .text2img, .img2img: pictureSettings
                                 case .text2speech: speechSettings
                                 case .speech2speech: conversionSettings
                                 }
@@ -79,7 +79,7 @@ struct SettingsColumn: View {
     /// again here.
     @ViewBuilder private var what: some View {
         switch session.tab {
-        case .txt2img, .img2img:
+        case .text2img, .img2img:
             if let chosen = session.model?.model {
                 // Side by side: what to draw, and what to draw it away from.
                 HStack(alignment: .top, spacing: 12) {
@@ -108,23 +108,64 @@ struct SettingsColumn: View {
                 // lines keeps wrapping them at the width it had, and the prompt's is not the same.
                 .id(chosen.guided)
 
-                if session.tab == .txt2img, chosen.readsPictures {
+                if session.tab == .text2img, chosen.readsPictures {
                     PromptPictures(session: session)
                         .padding(.top, -6)
                 }
             }
         case .text2speech:
-            FormGroup {
-                PromptField(
-                    text: $session.form.text,
-                    placeholder: "The text to read out. Punctuation is where it pauses",
-                    lines: 5...14)
-            } header: {
-                Header("What to say")
-            } footer: {
-                if let why = session.model?.voice?.notAVoiceBecause {
-                    Label(why + ".", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
+            if let voice = session.model?.voice {
+                // Side by side: what to say, and whose voice to say it in. The two boxes are one
+                // height, whichever is taller, so their footers go in a row of their own under
+                // them: a footer in either group would push its box up off the other's line.
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top, spacing: 12) {
+                        FormGroup {
+                            PromptField(
+                                text: $session.form.text,
+                                placeholder: "The text to read out. Punctuation is where it pauses",
+                                lines: 5...14)
+                        } header: {
+                            Header("What to say")
+                        }
+
+                        FormGroup {
+                            if voice.noLikenessBecause == nil {
+                                RecordingDrop(session: session, which: .recording)
+                            }
+                        } header: {
+                            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                                Header("Recording to sound like")
+                                // Speak waits for one: this voice has none of its own.
+                                if voice.needsARecording == true {
+                                    Text("(Required)").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        // Held while a job runs, as the settings are: the reading is in this voice.
+                        .disabled(session.canStop)
+                    }
+                    .environment(\.groupFillsHeight, true)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    if voice.notAVoiceBecause != nil || voice.noLikenessBecause != nil {
+                        HStack(alignment: .top, spacing: 12) {
+                            Group {
+                                if let why = voice.notAVoiceBecause {
+                                    Label(why + ".", systemImage: "exclamationmark.triangle.fill")
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Group {
+                                if let why = voice.noLikenessBecause {
+                                    Footnote("This voice cannot be handed a recording: \(why).")
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 2)
+                    }
                 }
             }
         case .speech2speech:
@@ -179,18 +220,6 @@ struct SettingsColumn: View {
 
     @ViewBuilder private var speechSettings: some View {
         if let voice = session.model?.voice {
-            FormGroup {
-                if voice.noLikenessBecause == nil {
-                    RecordingDrop(session: session, which: .recording)
-                }
-            } header: {
-                Header("Recording to sound like")
-            } footer: {
-                if let why = voice.noLikenessBecause {
-                    Footnote("This voice cannot be handed a recording: \(why).")
-                }
-            }
-
             if let styles = voice.styles, !styles.isEmpty {
                 FormGroup {
                     StylePicker(styles: styles, style: $session.form.style)
@@ -298,10 +327,21 @@ private struct RowPaddingKey: EnvironmentKey {
     static let defaultValue: CGFloat = 8
 }
 
+/// Whether a group's box fills the height it is offered rather than fitting its rows: for groups
+/// side by side whose boxes are to end on one line.
+private struct GroupFillsHeightKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     var rowPadding: CGFloat {
         get { self[RowPaddingKey.self] }
         set { self[RowPaddingKey.self] = newValue }
+    }
+
+    var groupFillsHeight: Bool {
+        get { self[GroupFillsHeightKey.self] }
+        set { self[GroupFillsHeightKey.self] = newValue }
     }
 }
 
@@ -309,6 +349,7 @@ extension EnvironmentValues {
 /// the last.
 private struct Rows: _VariadicView_UnaryViewRoot {
     @Environment(\.rowPadding) private var rowPadding
+    @Environment(\.groupFillsHeight) private var fillsHeight
 
     func body(children: _VariadicView.Children) -> some View {
         if !children.isEmpty {
@@ -323,6 +364,7 @@ private struct Rows: _VariadicView_UnaryViewRoot {
                     }
                 }
             }
+            .frame(maxHeight: fillsHeight ? .infinity : nil, alignment: .top)
             .background(Theme.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -599,6 +641,10 @@ struct DropBox<Content: View>: View {
     var height: CGFloat
     @ViewBuilder var content: Content
 
+    /// In a group whose box fills its height, the box grows to fill it too, rather than leaving
+    /// the room under it empty.
+    @Environment(\.groupFillsHeight) private var grows
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 8)
@@ -608,7 +654,7 @@ struct DropBox<Content: View>: View {
                 .foregroundStyle(over ? Color.accentColor : Color.secondary.opacity(0.5))
             content
         }
-        .frame(maxWidth: .infinity, minHeight: height, maxHeight: height)
+        .frame(maxWidth: .infinity, minHeight: height, maxHeight: grows ? .infinity : height)
         .contentShape(Rectangle())
     }
 }
