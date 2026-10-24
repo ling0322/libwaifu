@@ -31,8 +31,11 @@ enum Theme {
     static let sidebar = Color(white: 0.125)
     static let card = Color(white: 0.22)
     static let field = Color(white: 0.11)
-    /// What a pop-up button is filled with in dark mode, for the fields that sit beside one.
-    static let control = Color(white: 0.416)
+    /// What a pop-up button is filled with in dark mode, for the fields that sit beside one: on a
+    /// card, from macOS 26, a darker grey than the one it had before.
+    static var control: Color {
+        if #available(macOS 26, *) { Color(white: 0.305) } else { Color(white: 0.416) }
+    }
 }
 
 struct MainView: View {
@@ -50,8 +53,7 @@ struct MainView: View {
                 task
             }
         }
-        .toolbarBackground(Theme.window, for: .windowToolbar)
-        .toolbarBackground(.visible, for: .windowToolbar)
+        .toolbarFill()
         .navigationTitle(session.showingModels ? "Model Manager" : session.tab.rawValue)
         .navigationSubtitle(session.showingModels ? "" : subtitle)
         .toolbar {
@@ -174,6 +176,21 @@ struct Sidebar: View {
                 MachineView(machine: machine)
                     .padding(12)
             }
+        }
+    }
+}
+
+extension View {
+    /// The toolbar in the window's grey before macOS 26. From 26 the sidebar is a panel that runs
+    /// up to the top of the window with the window's buttons in it, as Mail's does, and a toolbar
+    /// of its own colour would cut the top off it; nor is it the system's, which the desktop
+    /// picture tints: there it is not drawn, and the columns' own greys show through.
+    @ViewBuilder fileprivate func toolbarFill() -> some View {
+        if #available(macOS 26, *) {
+            toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            toolbarBackground(Theme.window, for: .windowToolbar)
+                .toolbarBackground(.visible, for: .windowToolbar)
         }
     }
 }

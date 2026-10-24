@@ -79,6 +79,7 @@ struct ModelCard: View {
                     Text("Choose a Manifest…").tag(ModelCard.manifest)
                 }
                 .labelsHidden()
+                .fillsRow()
                 .help(current)
             }
             // Held while a job runs, like the settings under the card: the job is of this model,
