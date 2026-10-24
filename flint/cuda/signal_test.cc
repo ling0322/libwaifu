@@ -88,6 +88,8 @@ std::vector<float> hann(int n) {
 }  // namespace
 
 CATCH_TEST_CASE("CUDA convTranspose1d agrees with the CPU", "[op][cuda][signal]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
   struct Case {
     int n, c, l, k, r, stride, padding, outputPadding, groups;
   } cases[] = {
@@ -134,6 +136,8 @@ CATCH_TEST_CASE("CUDA convTranspose1d agrees with the CPU", "[op][cuda][signal]"
 }
 
 CATCH_TEST_CASE("CUDA snake agrees with the CPU", "[op][cuda][signal]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
   int n = 2, c = 24, l = 301;
   Tensor x = onCpu({n, c, l}, spread(n * c * l, 4));
   std::vector<float> alpha = spread(c, 5), beta = spread(c, 6);
@@ -166,6 +170,8 @@ CATCH_TEST_CASE("CUDA snake agrees with the CPU", "[op][cuda][signal]") {
 }
 
 CATCH_TEST_CASE("CUDA pad1d agrees with the CPU", "[op][cuda][signal]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
   Tensor x = onCpu({2, 3, 37}, spread(2 * 3 * 37, 7));
   struct Case {
     PadMode mode;
@@ -191,6 +197,8 @@ CATCH_TEST_CASE("CUDA pad1d agrees with the CPU", "[op][cuda][signal]") {
 }
 
 CATCH_TEST_CASE("CUDA clamp agrees with the CPU", "[op][cuda][signal]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
   float inf = std::numeric_limits<float>::infinity();
   Tensor x = onCpu({5, 77}, spread(5 * 77, 8));
 
@@ -251,6 +259,8 @@ CATCH_TEST_CASE("CUDA clamp agrees with the CPU", "[op][cuda][signal]") {
 }
 
 CATCH_TEST_CASE("CUDA stft and istft agree with the CPU", "[op][cuda][signal]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
   // HiFT's own transform, sixteen points at a hop of four, and a mel spectrogram's.
   for (auto [nFft, hop] : std::vector<std::pair<int, int>>{{16, 4}, {1024, 256}}) {
     CATCH_INFO("nFft " << nFft);
@@ -269,6 +279,8 @@ CATCH_TEST_CASE("CUDA stft and istft agree with the CPU", "[op][cuda][signal]") 
 }
 
 CATCH_TEST_CASE("CUDA istft in half has no NaN at the ends", "[op][cuda][signal]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
   // Not centred, so the ends are kept: there the squared window's overlap is far below what half
   // can hold -- zero at the first sample of a Hann window, 9e-11 at the next -- and dividing by it
   // in half made NaNs. Away from the ends the round trip is the signal, to what half allows.
