@@ -1247,16 +1247,18 @@ mod tests {
 
     #[test]
     fn a_typed_directory_is_written_down_whole() {
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+        let home = PathBuf::from(home.unwrap());
         assert_eq!(typed_directory("~/models").unwrap(), home.join("models"));
         assert_eq!(typed_directory("~").unwrap(), home);
         assert_eq!(
             typed_directory("models").unwrap(),
             std::env::current_dir().unwrap().join("models")
         );
+        // Rooted but, on Windows, without a drive: the current one is put in front.
         assert_eq!(
             typed_directory("/data/models").unwrap(),
-            PathBuf::from("/data/models")
+            std::path::absolute("/data/models").unwrap()
         );
         // Somebody's name, not somebody's home.
         assert!(typed_directory("~someone").unwrap().ends_with("~someone"));
