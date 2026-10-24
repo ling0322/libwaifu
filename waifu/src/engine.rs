@@ -1135,6 +1135,7 @@ fn described(asked: &str) -> serde_json::Value {
             "rate": voice.rate,
             "takes_a_recording": voice.no_likeness_because.is_none(),
             "no_likeness_because": voice.no_likeness_because,
+            "needs_a_recording": voice.needs_a_recording,
             "styles": voice.styles.iter().map(|style| serde_json::json!({
                 "label": style.label,
                 "instruction": style.instruction,
@@ -1562,12 +1563,18 @@ pub(crate) mod tests {
 
         let tones = describe_json(TONES).unwrap();
         assert_eq!(tones["kind"], "speech");
+        // The stand-in takes a pitch from a recording where it has one, and hums without.
+        assert_eq!(tones["needs_a_recording"], false);
 
         let cosyvoice = describe_json(&a_manifest("cosyvoice3", CosyVoice3::MODEL_TYPE)).unwrap();
         assert_eq!(
             cosyvoice["kinds"],
             serde_json::json!(["speech", "conversion"])
         );
+        // Neither real voice has one of its own: a page asks for a recording before a run.
+        assert_eq!(cosyvoice["needs_a_recording"], true);
+        let indextts = describe_json(&a_manifest("indextts25", IndexTts::MODEL_TYPE)).unwrap();
+        assert_eq!(indextts["needs_a_recording"], true);
         assert!(
             cosyvoice["conversion"]["rate"].as_u64().unwrap() > 0,
             "{cosyvoice}"

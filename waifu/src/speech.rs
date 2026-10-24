@@ -190,6 +190,12 @@ pub trait Voice {
         None
     }
 
+    /// Whether it has no voice of its own, and so says nothing without a recording to sound like:
+    /// a page asks for one before the run rather than reading the model only to be refused.
+    fn needs_a_recording(&self) -> bool {
+        false
+    }
+
     /// The ways of saying something it was taught to follow, for a page to offer. Empty where it
     /// takes no [`SpeechOptions::style`], which is most voices.
     fn styles(&self) -> &'static [Style] {

@@ -198,7 +198,7 @@ extension View {
 extension Tab {
     var color: Color {
         switch self {
-        case .txt2img: .blue
+        case .text2img: .blue
         case .img2img: .purple
         case .text2speech: .pink
         case .speech2speech: .orange
@@ -315,7 +315,7 @@ struct GoBar: View {
             HStack(spacing: 8) {
                 // A picture for the prompt to read, for a model that reads any. In the weight of
                 // an ordinary button: it is not what the bar is for.
-                if session.tab == .txt2img, session.model?.model?.readsPictures == true {
+                if session.tab == .text2img, session.model?.model?.readsPictures == true {
                     Button {
                         session.chooseNamed()
                     } label: {
@@ -344,7 +344,7 @@ struct GoBar: View {
 
     private var goWord: String {
         switch session.tab {
-        case .txt2img, .img2img: "Generate"
+        case .text2img, .img2img: "Generate"
         case .text2speech: "Speak"
         case .speech2speech: "Convert"
         }

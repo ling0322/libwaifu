@@ -74,6 +74,7 @@ pub trait Voice: Send {
     fn defaults(&self) -> SpeechDefaults;
     fn name(&self) -> &'static str;
     fn no_likeness_because(&self) -> Option<&'static str> { None }
+    fn needs_a_recording(&self) -> bool { false }
     fn styles(&self) -> &'static [Style] { &[] }
     fn not_a_voice_because(&self) -> Option<&'static str> { None }
 }
@@ -117,7 +118,10 @@ Two things the prediction did not cover:
   are not `Send` either. Nothing moves a voice between threads.
 - **A voice can refuse to speak without a recording.** IndexTTS-2.5 has no voice of its own; upstream
   takes the speaker's audio as a required argument. Asked to speak with none, it says so on the
-  bar, in a sentence, rather than guessing at a voice.
+  bar, in a sentence, rather than guessing at a voice. CosyVoice3 is the same. Both say it before
+  a run as well: `needs_a_recording()` is true for them, and `waifu_describe_json` carries it as
+  `needs_a_recording`, so the macOS app holds Speak until a recording is dropped rather than
+  reading five gigabytes only to be refused.
 
 ### Styles
 

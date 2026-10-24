@@ -75,6 +75,8 @@ struct Voice: Decodable {
     var rate: Int
     var takesARecording: Bool?
     var noLikenessBecause: String?
+    /// Whether it has no voice of its own and says nothing without a recording to sound like.
+    var needsARecording: Bool?
     var styles: [Style]?
     var notAVoiceBecause: String?
 }

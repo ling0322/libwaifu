@@ -32,13 +32,13 @@ import WaifuKit
 
 /// The tabs, which what the model does decides.
 enum Tab: String, CaseIterable, Identifiable {
-    case txt2img, img2img, text2speech, speech2speech
+    case text2img, img2img, text2speech, speech2speech
 
     var id: String { rawValue }
 
     var symbol: String {
         switch self {
-        case .txt2img: "text.below.photo"
+        case .text2img: "text.below.photo"
         case .img2img: "photo.on.rectangle"
         case .text2speech: "waveform"
         case .speech2speech: "person.wave.2"
@@ -48,7 +48,7 @@ enum Tab: String, CaseIterable, Identifiable {
     /// What a job of this tab is, as jobs are kept.
     var kind: String {
         switch self {
-        case .txt2img, .img2img: "image"
+        case .text2img, .img2img: "image"
         case .text2speech: "speech"
         case .speech2speech: "conversion"
         }
@@ -140,7 +140,7 @@ final class Session {
     /// What went wrong with the last thing that was clicked.
     var complaint: String?
 
-    var tab: Tab = .txt2img
+    var tab: Tab = .text2img
     /// Whether the Model Manager page is on show rather than a task.
     var showingModels = false
     var form = JobForm()
@@ -178,6 +178,17 @@ final class Session {
     /// What the Model card offers to run on, as the library names them.
     static let devices = ["auto", "metal", "cpu"]
 
+    /// What vramLimitGB starts at: a third of this Mac's memory, rounded up to a whole gigabyte --
+    /// gigabytes as the slider counts them, 1e9 bytes. Room left for the system and the apps
+    /// beside this one, which share that memory with the GPU.
+    static var defaultVramLimitGB: Double {
+        defaultVramLimitGB(memory: ProcessInfo.processInfo.physicalMemory)
+    }
+
+    static func defaultVramLimitGB(memory bytes: UInt64) -> Double {
+        max(1, (Double(bytes) / 1e9 / 3).rounded(.up))
+    }
+
     init(folder: URL) {
         self.folder = folder
         // Before any model is described: every published model's manifest, fetched when the app
@@ -190,7 +201,11 @@ final class Session {
         // What metal_disk_offload was, metal is now: it keeps in the model's files what does not fit.
         let stored = UserDefaults.standard.string(forKey: "device") ?? "auto"
         device = stored == "metal_disk_offload" ? "metal" : stored
-        vramLimitGB = max(0, UserDefaults.standard.double(forKey: "vramLimitGB"))
+        // A limit somebody set, no limit among them, is kept; a Mac that has never set one starts
+        // at the default.
+        vramLimitGB =
+            UserDefaults.standard.object(forKey: "vramLimitGB") == nil
+            ? Session.defaultVramLimitGB : max(0, UserDefaults.standard.double(forKey: "vramLimitGB"))
         for kind in Session.kinds {
             if let name = UserDefaults.standard.string(forKey: "model.\(kind)"), !name.isBlank {
                 chosen[kind] = name
@@ -372,9 +387,9 @@ final class Session {
     /// What is on show in the strip: the current tab's kind only.
     var done: [Job] { jobs.filter { $0.isDone && $0.kind == tab.kind } }
 
-    /// The tasks the sidebar offers. Only drawing from words for now; the others are written and
-    /// come back by being listed here.
-    var tabs: [Tab] { [.txt2img] }
+    /// The tasks the sidebar offers: drawing from words, and reading words out. The others are
+    /// written and come back by being listed here.
+    var tabs: [Tab] { [.text2img, .text2speech] }
 
     /// The picture or clip on show: the one picked, or the newest.
     var shown: Job? {
@@ -424,15 +439,21 @@ final class Session {
     var canGo: Bool {
         guard waiting.isEmpty, let model else { return false }
         switch tab {
-        case .txt2img:
+        case .text2img:
             return model.model != nil && !form.prompt.isBlank && namedTrouble == nil
         case .img2img:
             return model.model?.drawsFromAPicture == true && picture != nil && !form.prompt.isBlank
         case .text2speech:
-            return model.voice != nil && !form.text.isBlank
+            return model.voice != nil && !form.text.isBlank && !wantsARecording
         case .speech2speech:
             return model.converter != nil && source != nil && recording != nil
         }
+    }
+
+    /// Whether the voice has none of its own and no recording is held for it to sound like: said
+    /// before the run, which would otherwise read the whole model only to be refused.
+    var wantsARecording: Bool {
+        tab == .text2speech && model?.voice?.needsARecording == true && recording == nil
     }
 
     // MARK: - doing
@@ -440,7 +461,7 @@ final class Session {
     func go() {
         guard canGo else { return }
         switch tab {
-        case .txt2img, .img2img: generate()
+        case .text2img, .img2img: generate()
         case .text2speech: speak()
         case .speech2speech: convert()
         }
@@ -535,7 +556,7 @@ final class Session {
         }
         // The pictures the prompt names, under their names: the engine writes them the way the
         // model reads them and scales each to the size it reads one at.
-        let naming = tab == .txt2img && chosen.readsPictures && !named.isEmpty
+        let naming = tab == .text2img && chosen.readsPictures && !named.isEmpty
         if naming {
             request.images = named.compactMap { picture in picture.held.rgb.map { (key: picture.name, image: $0) } }
         }
@@ -611,11 +632,14 @@ final class Session {
             text: form.text, like: recording?.clip, speed: form.speed, temperature: form.temperature,
             style: style, seed: seed)
 
-        var settings = "Speed: \(form.speed), Temperature: \(form.temperature), Seed: \(seed), Rate: \(voice.rate) Hz, Voice: \(modelName)"
+        // As a picture's record names its model: the published name with its version, or the
+        // path of the manifest it was asked for by.
+        let named = ModelManager.versionedName(modelName) ?? modelName
+        var settings = "Speed: \(form.speed), Temperature: \(form.temperature), Seed: \(seed), Rate: \(voice.rate) Hz, Voice: \(named)"
         if recording != nil { settings += ", From a recording: yes" }
         if let style { settings += ", Style: \(style)" }
         let made = Made(
-            seed: seed, seconds: 0, model: modelName, parameters: "\(form.text)\n\(settings)",
+            seed: seed, seconds: 0, model: named, parameters: "\(form.text)\n\(settings)",
             text: form.text, speed: form.speed, temperature: form.temperature, style: style,
             fromARecording: recording != nil)
 
@@ -726,7 +750,7 @@ final class Session {
                     again.append(NamedPicture(name: name, held: Held(bytes: bytes, url: url, image: image, rgb: rgb)))
                 }
                 named = again
-                tab = .txt2img
+                tab = .text2img
             }
         case "speech":
             form.text = made.text ?? form.text
@@ -770,7 +794,7 @@ final class Session {
 
     /// Whether another picture may be added for the prompt to name.
     var takesAnotherPicture: Bool {
-        tab == .txt2img && named.count < (model?.model?.promptImages ?? 0)
+        tab == .text2img && named.count < (model?.model?.promptImages ?? 0)
     }
 
     /// Asks for pictures for the prompt to name, as many as are chosen.
@@ -824,7 +848,7 @@ final class Session {
     /// it, and only for a model that reads pictures: one that reads words only is the engine's to
     /// refuse, which says why.
     var namedTrouble: String? {
-        guard tab == .txt2img, model?.model?.readsPictures == true else { return nil }
+        guard tab == .text2img, model?.model?.readsPictures == true else { return nil }
         let written = Self.placeholders(in: form.prompt)
         if let lost = written.first(where: { name in !named.contains { $0.name == name } }) {
             return "<|\(lost)|> names no picture: add one, or take it out of the prompt"
