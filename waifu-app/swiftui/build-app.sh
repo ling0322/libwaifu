@@ -30,8 +30,23 @@ if [ ! -f "$manager" ]; then
     exit 1
 fi
 
-swift build --package-path "$here" -c release
-binary=$(swift build --package-path "$here" -c release --show-bin-path)/Waifu
+# The SDK is named to the link as -isysroot as well as the --sysroot the driver gives it: clang reads
+# the SDK's version from -isysroot or SDKROOT and not from --sysroot, and Swift 6.4's build system
+# runs the link with no SDKROOT, so without it the app says it was built with the SDK of its
+# deployment target -- and macOS draws an app built with the macOS 14 SDK as it drew them then.
+# swiftlang/swift-package-manager#10696.
+sdk=$(xcrun --sdk macosx --show-sdk-path)
+swift_build() {
+    swift build --package-path "$here" -c release \
+        -Xswiftc -Xclang-linker -Xswiftc -isysroot -Xswiftc -Xclang-linker -Xswiftc "$sdk" "$@"
+}
+swift_build
+binary=$(swift_build --show-bin-path)/Waifu
+built_with=$(vtool -show-build "$binary" | awk '$1 == "sdk" { print $2 }')
+if [ "$built_with" != "$(xcrun --sdk macosx --show-sdk-version)" ]; then
+    echo "$binary says it was built with the macOS $built_with SDK, not $sdk" >&2
+    exit 1
+fi
 
 # Every published model's manifest, a few KB each and none of their weights, fetched now so that the
 # app knows what each model suggests the moment it is chosen, with nothing to download first.

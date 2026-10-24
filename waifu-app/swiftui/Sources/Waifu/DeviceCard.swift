@@ -33,6 +33,7 @@ struct DeviceCard: View {
                     ForEach(Session.devices, id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
+                .fillsRow()
                 .help("Where the model runs")
             }
             .disabled(session.canStop)
@@ -41,18 +42,7 @@ struct DeviceCard: View {
             if session.limitsVram {
                 SliderRow(
                     label: "vram (GB)", value: vramLimit, range: 1...macMemory, step: 0.5,
-                    decimals: 1,
-                    explanation: """
-                        The most of the GPU's memory the model and its jobs may hold. The \
-                        model's weights fill it as the model is read, the smallest first, and \
-                        the rest are read off the disk as they are used. When a job needs more \
-                        room than is left, the largest go back to the disk until it fits.
-
-                        At the end of the slider there is no limit but this Mac's.
-
-                        Takes effect when the model is next read.
-                        """
-                )
+                    decimals: 1)
                 .disabled(session.canStop)
             }
         } header: {

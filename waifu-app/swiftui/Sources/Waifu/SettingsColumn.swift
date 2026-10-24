@@ -334,12 +334,18 @@ private struct Rows: _VariadicView_UnaryViewRoot {
 extension View {
     /// A box around a small field, in the grey of a pop-up button, so that a number that can be
     /// typed over looks like a control rather than like a label. As tall and as round as the
-    /// pop-up beside it, which is 20 points: the app is linked against the macOS 14 SDK, and
-    /// macOS 26 draws it the old way.
+    /// pop-up beside it: 24 points and 6 round from macOS 26, 20 and 5 before.
     func fieldBox() -> some View {
-        padding(.horizontal, 6)
-            .frame(height: 20)
-            .background(Theme.control, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        let new = if #available(macOS 26, *) { true } else { false }
+        return padding(.horizontal, 6)
+            .frame(height: new ? 24 : 20)
+            .background(Theme.control, in: RoundedRectangle(cornerRadius: new ? 6 : 5, style: .continuous))
+    }
+
+    /// A pop-up as wide as the control column, as every other control of a row is. Before macOS 26
+    /// a pop-up fills the room it is given; from 26 it is as wide as what it says unless asked.
+    @ViewBuilder func fillsRow() -> some View {
+        if #available(macOS 26, *) { buttonSizing(.flexible) } else { self }
     }
 }
 
@@ -501,6 +507,7 @@ struct SizeRows: View {
                 }
             }
             .labelsHidden()
+            .fillsRow()
         }
         LabeledContent("W × H") {
             Halves {
@@ -579,6 +586,7 @@ struct StylePicker: View {
                 ForEach(styles, id: \.self) { one in Text(one.label).tag(one.instruction) }
             }
             .labelsHidden()
+            .fillsRow()
         }
     }
 }
