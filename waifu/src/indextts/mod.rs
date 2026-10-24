@@ -765,6 +765,10 @@ impl Voice for IndexTts {
     fn name(&self) -> &'static str {
         Self::NAME
     }
+
+    fn needs_a_recording(&self) -> bool {
+        true
+    }
 }
 
 /// Which recording this is, for [`IndexTts`]'s memory of the last one: its rate and every

@@ -664,6 +664,10 @@ impl Voice for CosyVoice3 {
         Self::NAME
     }
 
+    fn needs_a_recording(&self) -> bool {
+        true
+    }
+
     fn styles(&self) -> &'static [Style] {
         Self::STYLES
     }

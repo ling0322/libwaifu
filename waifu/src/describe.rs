@@ -87,6 +87,8 @@ pub struct Spoken {
     pub rate: u32,
     /// Why it cannot be handed a recording to sound like, or None where it can.
     pub no_likeness_because: Option<String>,
+    /// Whether it says nothing without a recording to sound like, so the page asks for one first.
+    pub needs_a_recording: bool,
     /// The ways of saying something it was taught, for the page to list. Empty where it takes no
     /// style, which is where the page offers none.
     pub styles: &'static [Style],
@@ -178,6 +180,8 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         in_memory: false,
         rate,
         no_likeness_because: None,
+        // Neither kind of package has a voice of its own: both speak in a recording's.
+        needs_a_recording: true,
         styles,
         not_a_voice_because: None,
     }
@@ -217,6 +221,7 @@ pub fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken 
         in_memory,
         rate: voice.rate(),
         no_likeness_because: voice.no_likeness_because().map(str::to_string),
+        needs_a_recording: voice.needs_a_recording(),
         styles: voice.styles(),
         not_a_voice_because: voice.not_a_voice_because().map(str::to_string),
     }
