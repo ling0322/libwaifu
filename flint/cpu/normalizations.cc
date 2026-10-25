@@ -202,9 +202,7 @@ void groupNormKernel(
 
 void rmsNorm(const TensorView &tensor, const TensorView &weight, float eps, const TensorView &C) {
   if (tensor.getDType() == DType::kFloat) return rmsNormKernel<float>(tensor, weight, eps, C);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (tensor.getDType() == DType::kFloat16) return rmsNormKernel<Float16>(tensor, weight, eps, C);
-#endif
 
   NOT_IMPL();
 }
@@ -222,11 +220,9 @@ void layerNorm(
   if (tensor.getDType() == DType::kFloat) {
     return layerNormKernel<float>(tensor, weight, bias, eps, C);
   }
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (tensor.getDType() == DType::kFloat16) {
     return layerNormKernel<Float16>(tensor, weight, bias, eps, C);
   }
-#endif
 
   NOT_IMPL();
 }
@@ -252,11 +248,9 @@ void groupNorm(
   if (tensor.getDType() == DType::kFloat) {
     return groupNormKernel<float>(tensor, weight, bias, groups, eps, C);
   }
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (tensor.getDType() == DType::kFloat16) {
     return groupNormKernel<Float16>(tensor, weight, bias, groups, eps, C);
   }
-#endif
 
   NOT_IMPL();
 }

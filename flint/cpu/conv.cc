@@ -332,11 +332,9 @@ void conv2d(
   }
 
   if (input.getDType() == DType::kFloat) return conv2dImpl<float>(input, weight, bias, p, output);
-#if LUT_CPU_ARCH == LUT_AARCH64
-  // Half throughout, which is what the default float type is on this architecture. The GEMM sums
-  // in float, so the reduction over the filter and the channel depth is no worse for it.
+  // Half throughout, which is what the default float type is. The GEMM sums in float, so the
+  // reduction over the filter and the channel depth is no worse for it.
   if (input.getDType() == DType::kFloat16) return conv2dImpl<Float16>(input, weight, bias, p, output);
-#endif
 
   NOT_IMPL();
 }
@@ -413,11 +411,9 @@ void conv1d(
   if (input.getDType() == DType::kFloat) {
     return conv2dImpl<float>(input, weight, bias, p, output);
   }
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (input.getDType() == DType::kFloat16) {
     return conv2dImpl<Float16>(input, weight, bias, p, output);
   }
-#endif
 
   NOT_IMPL();
 }

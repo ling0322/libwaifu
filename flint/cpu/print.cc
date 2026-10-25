@@ -45,7 +45,6 @@ struct CpuPrinterImpl {
     LongType value = valAcc[index];
     printf("%" PRId64, value);
   }
-#if LUT_CPU_ARCH == LUT_AARCH64
   static void printValue(accessor_type<const Float16, 1> valAcc, int index) {
     float value = valAcc[index];
     if (std::abs(value) > 100 || std::abs(value) < 0.01) {
@@ -54,17 +53,14 @@ struct CpuPrinterImpl {
       printf("%.4f", value);
     }
   }
-#endif
 };
 
 void print(const TensorView &tensor) {
   TensorPrinter<CpuPrinterImpl> printer;
 
   if (tensor.getDType() == DType::kFloat) printer.print<float>(tensor);
-#if LUT_CPU_ARCH == LUT_AARCH64
   else if (tensor.getDType() == DType::kFloat16)
     printer.print<Float16>(tensor);
-#endif
   else if (tensor.getDType() == DType::kLong)
     printer.print<LongType>(tensor);
   else

@@ -58,9 +58,7 @@ void softmaxKernel(const TensorView &A, const TensorView &C) {
 
 void softmax(const TensorView &A, const TensorView &C) {
   if (A.getDType() == DType::kFloat) return softmaxKernel<float>(A, C);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16) return softmaxKernel<Float16>(A, C);
-#endif
 
   NOT_IMPL();
 }

@@ -72,9 +72,7 @@ void gatedLinear(const TensorView &A, const TensorView &C) {
   CHECK(A.getShape(-1) % 2 == 0);
 
   if (A.getDType() == DType::kFloat) return gatedLinearKernel<float, OP>(A, C);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16) return gatedLinearKernel<Float16, OP>(A, C);
-#endif
 
   NOT_IMPL();
 }

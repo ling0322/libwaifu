@@ -244,9 +244,8 @@ CATCH_TEST_CASE("test conv2d on the CPU (half weight)", "[core][nn][operators]")
   }
 }
 
-#if LUT_CPU_ARCH == LUT_AARCH64
 CATCH_TEST_CASE("test conv2d on the CPU (half throughout)", "[core][nn][operators]") {
-  // Half is the default float type on this architecture, so this is the path the U-Net takes.
+  // Half is the default float type on the CPU, so this is the path the U-Net takes.
   // The reference is the longhand convolution in float, and the tolerance is what half can hold
   // rather than what the kernel can: the GEMM sums in float, so what is left is the rounding of
   // the inputs and of the result.
@@ -296,7 +295,6 @@ CATCH_TEST_CASE("test conv2d on the CPU (half throughout)", "[core][nn][operator
             5e-3f));
   }
 }
-#endif  // LUT_CPU_ARCH == LUT_AARCH64
 
 }  // namespace cpu
 }  // namespace op

@@ -64,6 +64,15 @@ inline void cvtKernel<Float16, float, CpuMathBackend::AVX512>(
   return hscvtAvx2Kernel(n, x + offsetX, y + offsetY);
 }
 template<>
+inline void cvtKernel<float, Float16, CpuMathBackend::AVX512>(
+    int n,
+    const float *x,
+    int64_t offsetX,
+    Float16 *y,
+    int64_t offsetY) {
+  return shcvtAvx2Kernel(n, x + offsetX, y + offsetY);
+}
+template<>
 inline void gemmKernel<float, float, float, 12, 32, CpuMathBackend::AVX512>(
     int64_t kc,
     const float *a,

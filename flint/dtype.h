@@ -25,14 +25,39 @@
 #include <type_traits>
 
 #include "lutil/attributes.h"
+#include "lutil/half.h"
 
 namespace fl {
 
 #if defined(LUT_ARCH_AARCH64)
 typedef _Float16 Float16;
 #elif defined(LUT_ARCH_AMD64)
+/// x64 has no half arithmetic, so a half is stored as its bits and converts to and from float:
+/// `a + b` is computed in float and rounded to half once, when it is stored. That is what lets a
+/// kernel written for aarch64's _Float16 be compiled here unchanged. `v` is still the bits.
 struct Float16 {
   uint16_t v;
+
+  Float16() = default;
+  Float16(float f)
+      : v(lut::cvtss_sh(f)) {
+  }
+  operator float() const {
+    return lut::cvtsh_ss(v);
+  }
+
+  Float16 &operator+=(float rhs) {
+    return *this = float(*this) + rhs;
+  }
+  Float16 &operator-=(float rhs) {
+    return *this = float(*this) - rhs;
+  }
+  Float16 &operator*=(float rhs) {
+    return *this = float(*this) * rhs;
+  }
+  Float16 &operator/=(float rhs) {
+    return *this = float(*this) / rhs;
+  }
 };
 #else
 #error unknown CPU architecture

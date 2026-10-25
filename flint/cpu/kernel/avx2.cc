@@ -403,6 +403,33 @@ void hscvtAvx2Kernel(int64_t n, const Float16 *x, float *y) {
   }
 }
 
+void shcvtAvx2Kernel(int64_t n, const float *x, Float16 *y) {
+  int nb = n / 8;
+  for (int i = 0; i < nb; ++i) {
+    __m256 x0 = _mm256_loadu_ps(x);
+    __m128i y0 = _mm256_cvtps_ph(x0, _MM_FROUND_TO_NEAREST_INT);
+    _mm_storeu_si128((__m128i *)y, y0);
+
+    x += 8;
+    y += 8;
+  }
+
+  int nr = n % 8;
+  if (nr == 0) return;
+
+  float xr[8] = {0};
+  Float16 yr[8];
+  for (int i = 0; i < nr; ++i) {
+    xr[i] = x[i];
+  }
+  __m256 x0 = _mm256_loadu_ps(xr);
+  __m128i y0 = _mm256_cvtps_ph(x0, _MM_FROUND_TO_NEAREST_INT);
+  _mm_storeu_si128((__m128i *)yr, y0);
+  for (int i = 0; i < nr; ++i) {
+    y[i] = yr[i];
+  }
+}
+
 }  // namespace kernel
 }  // namespace cpu
 }  // namespace op

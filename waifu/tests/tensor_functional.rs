@@ -318,12 +318,8 @@ fn compares_within_a_tolerance() {
 
 #[test]
 fn reports_the_default_float_type() {
-    let dt = F::default_float_type(Device::Cpu).unwrap();
-    if cfg!(target_arch = "aarch64") {
-        assert_eq!(dt, DType::Float16);
-    } else {
-        assert_eq!(dt, DType::Float);
-    }
+    // Half on every architecture: x64 computes it in float and stores it in half.
+    assert_eq!(F::default_float_type(Device::Cpu).unwrap(), DType::Float16);
 }
 
 #[test]

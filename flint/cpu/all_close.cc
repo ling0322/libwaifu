@@ -80,9 +80,7 @@ bool allCloseKernel(const TensorView &A, const TensorView &B, float rtol, float 
 
 bool allClose(const TensorView &A, const TensorView &B, float rtol, float atol) {
   if (A.getDType() == DType::kFloat) return allCloseKernel<float>(A, B, rtol, atol);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16) return allCloseKernel<Float16>(A, B, rtol, atol);
-#endif
 
   NOT_IMPL();
 }

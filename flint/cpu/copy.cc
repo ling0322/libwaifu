@@ -46,11 +46,7 @@ void copy(const TensorView &src, const TensorView &dest) {
   if (src.getDType() == DType::kFloat) {
     copyKernel<float>(src, dest);
   } else if (src.getDType() == DType::kFloat16) {
-#if LUT_CPU_ARCH == LUT_AARCH64
     copyKernel<Float16>(src, dest);
-#else
-    NOT_IMPL();
-#endif
   } else {
     NOT_IMPL();
   }

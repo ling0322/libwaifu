@@ -49,6 +49,19 @@ CATCH_TEST_CASE("test hscvtAvx2Kernel", "[cpu_kernel][kernel][avx2]") {
   tester.test(129, 17);
 }
 
+CATCH_TEST_CASE("test shcvtAvx2Kernel", "[cpu_kernel][kernel][avx2]") {
+  CvtKernelTester<float, Float16, CpuMathBackend::AVX2> tester;
+  tester.test(1);
+  tester.test(7);
+  tester.test(8);
+  tester.test(9);
+  tester.test(127);
+  tester.test(128);
+  tester.test(129);
+  tester.test(129, 1);
+  tester.test(129, 17);
+}
+
 CATCH_TEST_CASE("test sgemm6x16Avx2Kernel", "[cpu_kernel][kernel][avx2]") {
   GemmMicroKernelTester<float, float, float, 6, 16, CpuMathBackend::AVX2> tester;
   tester.test(1);

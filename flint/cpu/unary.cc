@@ -100,9 +100,7 @@ void unaryOpKernel(const TensorView &A, UnaryOp op, const TensorView &C) {
 
 void unaryOp(const TensorView &A, UnaryOp op, const TensorView &C) {
   if (A.getDType() == DType::kFloat) return unaryOpKernel<float>(A, op, C);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16) return unaryOpKernel<Float16>(A, op, C);
-#endif
 
   NOT_IMPL();
 }

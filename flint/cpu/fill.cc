@@ -27,7 +27,7 @@ namespace op {
 namespace cpu {
 
 template<typename T>
-void fillKernel(const TensorView &A, float value) {
+void fillKernel(const TensorView &A, T value) {
   TensorList<T, 1> vC = TensorList<T, 1>::fromTensor(A);
   int numRows = vC.getLength();
 #pragma omp parallel for schedule(dynamic, 1)
@@ -49,16 +49,15 @@ void fill(const TensorView &src, float value) {
     }
     return;
   }
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (src.getDType() == DType::kFloat16) {
+    Float16 h = value;
     if (src.getNumEl() == 1) {
-      *getDataPtrCpu<Float16>(src) = value;
+      *getDataPtrCpu<Float16>(src) = h;
     } else {
-      fillKernel<Float16>(src, value);
+      fillKernel<Float16>(src, h);
     }
     return;
   }
-#endif
 
   NOT_IMPL();
 }

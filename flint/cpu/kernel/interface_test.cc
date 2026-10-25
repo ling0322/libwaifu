@@ -53,10 +53,10 @@ void refGemm(
 
   for (int m = 0; m < M; ++m) {
     for (int n = 0; n < N; ++n) {
-      float sum = C[ldc * m + n];
+      float sum = cvtf<float>(C[ldc * m + n]);
       for (int k = 0; k < K; ++k) {
-        T va = A[stride0A * m + k * stride1A];
-        T vb = B[stride0B * k + n * stride1B];
+        float va = cvtf<float>(A[stride0A * m + k * stride1A]);
+        float vb = cvtf<float>(B[stride0B * k + n * stride1B]);
         sum += va * vb;
       }
       C[ldc * m + n] = cvtf<T>(sum);
@@ -169,7 +169,6 @@ CATCH_TEST_CASE("test lymath_half2float", "[cpu_kernel][interface][cvt]") {
 
 #endif  // LUT_ARCH_AMD64
 
-#ifdef LUT_ARCH_AARCH64
 CATCH_TEST_CASE("test hgemm", "[cpu_kernel][interface][hgemm]") {
   int (*pshape)[3];
 
@@ -185,6 +184,53 @@ CATCH_TEST_CASE("test hgemm", "[cpu_kernel][interface][hgemm]") {
   }
 }
 
+#ifdef LUT_ARCH_AMD64
+/// x64 widens a half GEMM to float32 and rounds it back once at the end. The default backend picks
+/// one of AVX2 and AVX512 at startup, so AVX2 is asked for by name; and the C here is a slice of a
+/// wider matrix holding values already, which is what says the widened copy of C is read from and
+/// written back to the right rows, and added to rather than overwritten.
+CATCH_TEST_CASE("test hgemm on avx2 into a strided C", "[cpu_kernel][interface][hgemm]") {
+  for (int (*pshape)[3] = &gemmTestShapes[0]; **pshape != 0; ++pshape) {
+    int m = (*pshape)[0];
+    int k = (*pshape)[1];
+    int n = (*pshape)[2];
+    int ldc = n + 3;
+
+    for (Mode mode : {Mode::OMP, Mode::SingleThread}) {
+      for (int trans = 0; trans < 4; ++trans) {
+        bool transA = trans & 1;
+        bool transB = trans & 2;
+
+        std::vector<Float16> A(m * k);
+        std::vector<Float16> B(k * n);
+        std::vector<Float16> C(m * ldc);
+
+        lut::Random random(MagicNumber);
+        fillRandom(&random, lut::makeSpan<Float16>(A));
+        fillRandom(&random, lut::makeSpan<Float16>(B));
+        fillRandom(&random, lut::makeSpan<Float16>(C));
+        std::vector<Float16> refC = C;
+
+        int lda = transA ? m : k;
+        int ldb = transB ? k : n;
+        refGemm<Float16>(
+            transA, transB, m, n, k, A.data(), lda, B.data(), ldb, refC.data(), ldc);
+        gemmHalf(
+            transA, transB, m, n, k, A.data(), lda, B.data(), ldb, C.data(), ldc, mode,
+            CpuMathBackend::AVX2);
+
+        CATCH_INFO(
+            "shape (" << m << ", " << k << ", " << n << ") transA " << transA << " transB "
+                      << transB << " single thread " << (mode == Mode::SingleThread));
+        CATCH_REQUIRE(getMaxDiff<Float16>(C, refC) / getMeanAbs<Float16>(refC) < 0.01);
+      }
+    }
+  }
+}
+
+#endif  // LUT_ARCH_AMD64
+
+#ifdef LUT_ARCH_AARCH64
 /// The two aarch64 half kernels are picked between at startup, so only one of them runs on any
 /// given machine. Asking for each by name is what says the other one is still right.
 CATCH_TEST_CASE("test hgemm agrees between asimdhp and asimdfhm", "[cpu_kernel][interface][hgemm]") {

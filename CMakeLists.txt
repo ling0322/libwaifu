@@ -366,6 +366,18 @@ message("CMAKE_HOST_SYSTEM_PROCESSOR=" ${CMAKE_HOST_SYSTEM_PROCESSOR})
 if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)")
     set(LIBWAIFU_KERNEL_X86_64 ON)
 endif()
+
+# Half is the CPU's default float type, and x64 has no arithmetic in it: every load and store of
+# one is a conversion, made in fl::Float16, in every source file. F16C makes that one instruction
+# rather than a dozen, so the whole library is built with it, and a processor without it -- one
+# from before 2012 -- is refused at start-up rather than left to die on its first half.
+#
+# The CUDA host pass is given it too: lut::cvtss_sh is inline, and one body for every translation
+# unit is what keeps the definitions the same. cl has F16C's intrinsics without asking.
+if(LIBWAIFU_KERNEL_X86_64 AND UNIX)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mf16c")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=-mf16c")
+endif()
 if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "(aarch64)|(arm64)")
     set(LIBWAIFU_KERNEL_AARCH64 ON)
 endif()

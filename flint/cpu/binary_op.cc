@@ -66,9 +66,7 @@ void binaryOpKernel(const TensorView &A, const TensorView &B, BinaryOp op, const
 
 void binaryOp(const TensorView &A, const TensorView &B, BinaryOp op, const TensorView &C) {
   if (A.getDType() == DType::kFloat) return binaryOpKernel<float>(A, B, op, C);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16) return binaryOpKernel<Float16>(A, B, op, C);
-#endif
 
   NOT_IMPL();
 }
