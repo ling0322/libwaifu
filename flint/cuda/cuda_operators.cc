@@ -21,6 +21,8 @@
 
 #include <math.h>
 
+#include <algorithm>
+
 #include "flint/cuda/arange.h"
 #include "flint/cuda/binary.h"
 #include "flint/cuda/binary_scalar.h"
@@ -58,6 +60,18 @@ namespace fl {
 namespace op {
 namespace cuda {
 
+namespace {
+
+/// What the default memory limit leaves to the card beyond what this process asks for: the
+/// driver's own memory, which grows; whatever another program takes after this is worked out;
+/// and what the pool rounds every block up by. The larger of the two, because neither alone
+/// holds across card sizes -- a share of a 6 GB card is not enough to be a margin at all, and a
+/// fixed number on a 48 GB one is not enough to matter.
+constexpr int64_t kMinimumMemoryMargin = 384LL << 20;
+constexpr int64_t kMemoryMarginShare = 16;
+
+}  // namespace
+
 bool CudaOperators::isAvailable() {
   return getCudaDeviceCount() > 0;
 }
@@ -92,6 +106,27 @@ std::shared_ptr<Operators> CudaOperators::create(int options) {
     op->_matmul = MatMul::create();
   }
   op->_rand = Rand::newRand();
+
+  // The line this process will not hand out past, worked out now that the context and the
+  // operators' own allocations are already counted in what is free.
+  //
+  // From what is free rather than from what the card has, so that whatever else is on it is
+  // counted, and less a margin, because the driver's own memory grows, another program may take
+  // more, and the pool rounds every block up. Windows will not refuse an allocation the card
+  // cannot back -- it puts it in host memory and says nothing -- so the refusal has to be ours
+  // or there is none.
+  {
+    size_t freeMemory = 0;
+    size_t totalMemory = 0;
+    LL_CHECK_CUDA_STATUS(cudaMemGetInfo(&freeMemory, &totalMemory));
+    int64_t margin = std::max<int64_t>(
+        kMinimumMemoryMargin,
+        static_cast<int64_t>(totalMemory) / kMemoryMarginShare);
+    int64_t limit = std::max<int64_t>(0, static_cast<int64_t>(freeMemory) - margin);
+    setCudaDefaultMemoryLimit(limit);
+    LOG(INFO) << "cuda:0 memory = " << totalMemory / 1000000 << " MB, " << freeMemory / 1000000
+              << " MB of it free; handing out at most " << limit / 1000000 << " MB";
+  }
 
   LOG(INFO) << "cuda numDevices = " << getCudaDeviceCount();
   LOG(INFO) << "cuda:0 maxThreadsPerMultiProcessor = "
@@ -554,11 +589,12 @@ MemoryBudget CudaOperators::getMemoryBudget() {
 #endif
   budget.capacity = getCudaMemoryLimit();
   if (!budget.capacity) {
-    // The card's, whoever else has some of it: what is free is the snapshot's to say.
+    // No limit worked out yet, which is to say no device was created to work one out from. What
+    // this process could reach if it asked now: what it holds, and what nobody has taken.
     size_t freeMemory = 0;
     size_t totalMemory = 0;
     LL_CHECK_CUDA_STATUS(cudaMemGetInfo(&freeMemory, &totalMemory));
-    budget.capacity = static_cast<int64_t>(totalMemory);
+    budget.capacity = budget.allocated + static_cast<int64_t>(freeMemory);
   }
   return budget;
 }
