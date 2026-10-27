@@ -28,11 +28,8 @@ namespace fl {
 namespace op {
 namespace cpu {
 
-#if LUT_CPU_ARCH == LUT_AARCH64
+/// Half on every architecture: aarch64 computes in it, x64 computes in float and stores in it.
 typedef Float16 DefaultFloatType;
-#else
-typedef float DefaultFloatType;
-#endif
 
 TensorView expandBatchDims(const TensorView &input, lut::Span<const Tensor::ShapeType> shape);
 

@@ -181,11 +181,9 @@ void overlapAdd1d(
   if (out.getDType() == DType::kFloat) {
     return overlapAdd1dKernel<float>(columns, bias, length, stride, padding, kernel, out);
   }
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (out.getDType() == DType::kFloat16) {
     return overlapAdd1dKernel<Float16>(columns, bias, length, stride, padding, kernel, out);
   }
-#endif
 
   NOT_IMPL();
 }
@@ -212,11 +210,9 @@ void snake(
   out.throwIfInvalidShape(input.getShape(), "snake");
 
   if (input.getDType() == DType::kFloat) return snakeKernel<float>(input, alpha, beta, eps, out);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (input.getDType() == DType::kFloat16) {
     return snakeKernel<Float16>(input, alpha, beta, eps, out);
   }
-#endif
 
   NOT_IMPL();
 }
@@ -257,9 +253,7 @@ void clamp(const TensorView &input, float lo, float hi, const TensorView &out) {
   out.throwIfInvalidShape(input.getShape(), "clamp");
 
   if (input.getDType() == DType::kFloat) return clampKernel<float>(input, lo, hi, out);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (input.getDType() == DType::kFloat16) return clampKernel<Float16>(input, lo, hi, out);
-#endif
 
   NOT_IMPL();
 }

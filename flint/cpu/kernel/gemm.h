@@ -248,6 +248,94 @@ void wgemm(const GemmArgs<T, TW, T> &args) {
   }
 }
 
+/// @brief GEMM with A, B and C all in TS, computed in T: for a backend with no arithmetic in TS,
+///        which is a half GEMM on x64. Both operands are widened while packing, as wgemm widens
+///        its weight, and C is accumulated in a T copy of itself so that the sum over K is rounded
+///        to TS once rather than once per KC panel.
+template<
+    int MC,
+    int KC,
+    int NC,
+    int MR,
+    int NR,
+    typename T,
+    typename TS,
+    CpuMathBackend TYPE,
+    Mode MODE>
+void xgemm(const GemmArgs<TS, TS, TS> &args) {
+  if (args.M == 0 || args.N == 0) return;
+
+  // C, widened. It is the kernels' to accumulate into, as C itself is in gemm.
+  int64_t numC = int64_t(args.M) * args.N;
+  lut::c_ptr<T> packedC = alignedAlloc<T>(numC);
+  T *pc = packedC.get();
+  if (args.ldc == args.N) {
+    cvt<TS, T, TYPE, MODE>(numC, args.C, 0, pc, 0);
+  } else {
+    for (int m = 0; m < args.M; ++m) {
+      cvtKernel<TS, T, TYPE>(args.N, args.C, int64_t(m) * args.ldc, pc, int64_t(m) * args.N);
+    }
+  }
+
+  if (args.M == 1 || args.N == 1) {
+    // A GEMV: the matrix stays in TS and goes to the TS-weight kernels wgemm's GEMV uses; only
+    // the vector, which is one row of A or one column of B, is widened.
+    bool rowA = args.M == 1;
+    int incX = rowA ? (args.transA ? args.lda : 1) : (args.transB ? 1 : args.ldb);
+    const TS *x = rowA ? args.A : args.B;
+    lut::c_ptr<T> packedX = alignedAlloc<T>(args.K);
+    for (int k = 0; k < args.K; ++k) {
+      packedX.get()[k] = cvtf<T>(x[int64_t(k) * incX]);
+    }
+
+    if (rowA) {
+      gemv<TS, T, T, TYPE, MODE>(GemvArgs<TS, T, T>{
+          !args.transB,
+          args.transB ? args.N : args.K,
+          args.transB ? args.K : args.N,
+          args.B,
+          args.ldb,
+          packedX.get(),
+          1,
+          pc,
+          1});
+    } else {
+      gemv<TS, T, T, TYPE, MODE>(GemvArgs<TS, T, T>{
+          args.transA,
+          args.transA ? args.K : args.M,
+          args.transA ? args.M : args.K,
+          args.A,
+          args.lda,
+          packedX.get(),
+          1,
+          pc,
+          1});
+    }
+  } else {
+    GemmArgs<TS, TS, T> cArgs{
+        args.transA,
+        args.transB,
+        args.M,
+        args.N,
+        args.K,
+        args.A,
+        args.lda,
+        args.B,
+        args.ldb,
+        pc,
+        args.N};
+    Gemm<MC, KC, NC, MR, NR, T, TYPE, MODE, TS, TS>().apply(cArgs);
+  }
+
+  if (args.ldc == args.N) {
+    cvt<T, TS, TYPE, MODE>(numC, pc, 0, args.C, 0);
+  } else {
+    for (int m = 0; m < args.M; ++m) {
+      cvtKernel<T, TS, TYPE>(args.N, pc, int64_t(m) * args.N, args.C, int64_t(m) * args.ldc);
+    }
+  }
+}
+
 }  // namespace kernel
 }  // namespace cpu
 }  // namespace op

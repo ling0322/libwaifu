@@ -70,12 +70,10 @@ void repetitionPenalty(const TensorView &logits, const TensorView &history, floa
     repetitionPenalty2DKernel<float>(logits, history, weight);
   else if (logits.getDType() == DType::kFloat && logits.getDim() == 1)
     repetitionPenalty2DKernel<float>(logits.unsqueeze(0), history.unsqueeze(0), weight);
-#if LUT_CPU_ARCH == LUT_AARCH64
   else if (logits.getDType() == DType::kFloat16 && logits.getDim() == 2)
     repetitionPenalty2DKernel<Float16>(logits, history, weight);
   else if (logits.getDType() == DType::kFloat16 && logits.getDim() == 1)
     repetitionPenalty2DKernel<Float16>(logits.unsqueeze(0), history.unsqueeze(0), weight);
-#endif
   else
     NOT_IMPL();
 }

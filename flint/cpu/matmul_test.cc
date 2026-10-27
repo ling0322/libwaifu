@@ -147,6 +147,50 @@ CATCH_TEST_CASE("float32 GEMV BVT", "[core][nn][gemv]") {
 
 #endif
 
+/// A half matmul against the float32 one of the same, widened, operands. x64 has no half
+/// arithmetic, so this is what says its half matmul is the float32 one rounded once: the 2-D GEMM,
+/// an activation of higher rank against a weight, the GEMV shapes, and two batched operands.
+CATCH_TEST_CASE("float16 matmul agrees with float32", "[core][nn][gemm]") {
+  // batchA and batchB are the leading dimensions of each; B is held (n, k) and transposed when
+  // transB is set, which is how a linear layer's weight is stored.
+  auto check = [](std::vector<int> batchA, std::vector<int> batchB, int m, int k, int n,
+                  bool transB) {
+    std::vector<int> shapeA = batchA, shapeB = batchB;
+    shapeA.insert(shapeA.end(), {m, k});
+    if (transB) {
+      shapeB.insert(shapeB.end(), {n, k});
+    } else {
+      shapeB.insert(shapeB.end(), {k, n});
+    }
+
+    // cast asks for a contiguous tensor, so B is transposed once it has been cast.
+    Tensor hA = F::rand(Device::getCpu(), shapeA, DType::kFloat);
+    Tensor hB = F::rand(Device::getCpu(), shapeB, DType::kFloat);
+    hA = F::cast(cpuOps(), hA, DType::kFloat16);
+    hB = F::cast(cpuOps(), hB, DType::kFloat16);
+    Tensor A = F::cast(cpuOps(), hA, DType::kFloat);
+    Tensor B = F::cast(cpuOps(), hB, DType::kFloat);
+    if (transB) {
+      hB = hB.transpose(-1, -2);
+      B = B.transpose(-1, -2);
+    }
+
+    Tensor C = F::cast(cpuOps(), F::matmul(cpuOps(), hA, hB), DType::kFloat);
+    Tensor C_ref = F::matmul(cpuOps(), A, B);
+
+    CATCH_REQUIRE(cpuOps()->allClose(C, C_ref, 1e-2, 1e-2));
+  };
+
+  for (bool transB : {false, true}) {
+    CATCH_INFO("transB " << transB);
+    check({}, {}, 50, 70, 30, transB);
+    check({}, {}, 1, 300, 200, transB);
+    check({}, {}, 200, 300, 1, transB);
+    check({2, 17}, {}, 5, 64, 48, transB);
+    check({2, 3}, {2, 3}, 17, 64, 48, transB);
+  }
+}
+
 }  // namespace cpu
 }  // namespace op
 }  // namespace fl

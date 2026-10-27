@@ -30,6 +30,7 @@ namespace cpu {
 namespace kernel {
 
 void hscvtAvx2Kernel(int64_t n, const Float16 *x, float *y);
+void shcvtAvx2Kernel(int64_t n, const float *x, Float16 *y);
 void sgemm6x16Avx2Kernel(int64_t kc, const float *a, const float *b, float *c, int64_t rs_c);
 float sdotAvx2Kernel(int64_t n, const float *x, const float *y);
 void saxpyAvx2Kernel(int64_t n, float a, const float *x, float *y);
@@ -80,6 +81,15 @@ inline void cvtKernel<Float16, float, CpuMathBackend::AVX2>(
     float *y,
     int64_t offsetY) {
   return hscvtAvx2Kernel(n, x + offsetX, y + offsetY);
+}
+template<>
+inline void cvtKernel<float, Float16, CpuMathBackend::AVX2>(
+    int n,
+    const float *x,
+    int64_t offsetX,
+    Float16 *y,
+    int64_t offsetY) {
+  return shcvtAvx2Kernel(n, x + offsetX, y + offsetY);
 }
 template<>
 inline void gemmKernel<float, float, float, 6, 16, CpuMathBackend::AVX2>(

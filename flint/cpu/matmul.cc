@@ -289,9 +289,9 @@ void matmul(const TensorView &A, const TensorView &B, const TensorView &C) {
   if (typeA == DType::kFloat && typeB == DType::kFloat) return matmulFloat<float>(A, B, C);
   if (typeA == DType::kFloat && typeB == DType::kFloat16) return matmulHalfWeight(A, B, C);
 
-#if LUT_CPU_ARCH == LUT_AARCH64
+  // On x64 this is computed in float32 and rounded to half once, at the end; aarch64 has the
+  // half arithmetic to do it in half.
   if (typeA == DType::kFloat16 && typeB == DType::kFloat16) return matmulFloat<Float16>(A, B, C);
-#endif
 
   NOT_IMPL();
 }

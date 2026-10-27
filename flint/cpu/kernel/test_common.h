@@ -123,7 +123,7 @@ float getMaxDiff(lut::Span<const T> A, lut::Span<const T> B) {
 
   float maxDiff = 0;
   for (int i = 0; i < A.size(); ++i) {
-    float diff = fabs(cvtf<float>(A[i] - B[i]));
+    float diff = fabs(cvtf<float>(A[i]) - cvtf<float>(B[i]));
     if (diff > maxDiff) {
       maxDiff = diff;
     }

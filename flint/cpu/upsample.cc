@@ -125,9 +125,7 @@ void upsampleNearest2d(const TensorView &input, int scale, const TensorView &out
   if (scale < 1) THROW(InvalidArg, "upsampleNearest2d: the scale is below one");
 
   if (input.getDType() == DType::kFloat) return upsampleNearest2dKernel<float>(input, scale, output);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (input.getDType() == DType::kFloat16) return upsampleNearest2dKernel<Float16>(input, scale, output);
-#endif
 
   NOT_IMPL();
 }

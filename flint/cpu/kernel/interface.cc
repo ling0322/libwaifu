@@ -114,6 +114,13 @@ CpuMathBackend getCpuMathBackend(CpuMathBackend fromBackend) {
 }
 
 void init() {
+#if LUT_CPU_ARCH == LUT_AMD64
+  // The library is built with F16C (see CMakeLists.txt): every half it touches converts with it.
+  ruapu_init();
+  if (ruapu_supports("f16c") <= 0) {
+    LOG(FATAL) << "libwaifu needs a processor with F16C, which this one does not have.";
+  }
+#endif
   gDefaultBackend = findBestCpuMathBackend();
 }
 
@@ -206,7 +213,17 @@ void gemmHalf(
 
   backendType = getCpuMathBackend(backendType);
   if (false) {
-#if LUT_CPU_ARCH == LUT_AARCH64
+#if LUT_CPU_ARCH == LUT_AMD64
+  } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::OMP) {
+    xgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::AVX2, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::SingleThread) {
+    xgemm<288, 512, 4096, 6, 16, float, Float16, CpuMathBackend::AVX2, Mode::SingleThread>(args);
+  } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::OMP) {
+    xgemm<576, 512, 4096, 12, 32, float, Float16, CpuMathBackend::AVX512, Mode::OMP>(args);
+  } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::SingleThread) {
+    xgemm<576, 512, 4096, 12, 32, float, Float16, CpuMathBackend::AVX512, Mode::SingleThread>(
+        args);
+#elif LUT_CPU_ARCH == LUT_AARCH64
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::OMP) {
     gemm<288, 512, 4096, 6, 16, Float16, CpuMathBackend::ASIMDHP, Mode::OMP>(args);
   } else if (backendType == CpuMathBackend::ASIMDHP && mode == Mode::SingleThread) {
@@ -307,9 +324,9 @@ void convertFloatToHalf(int n, const float *x, Float16 *y, Mode mode, CpuMathBac
     cvt<float, Float16, CpuMathBackend::ASIMDFHM, Mode::OMP>(n, x, 0, y, 0);
 #elif LUT_CPU_ARCH == LUT_AMD64
   } else if (backendType == CpuMathBackend::AVX2 && mode == Mode::OMP) {
-    cvt<float, Float16, CpuMathBackend::FALLBACK, Mode::OMP>(n, x, 0, y, 0);
+    cvt<float, Float16, CpuMathBackend::AVX2, Mode::OMP>(n, x, 0, y, 0);
   } else if (backendType == CpuMathBackend::AVX512 && mode == Mode::OMP) {
-    cvt<float, Float16, CpuMathBackend::FALLBACK, Mode::OMP>(n, x, 0, y, 0);
+    cvt<float, Float16, CpuMathBackend::AVX512, Mode::OMP>(n, x, 0, y, 0);
 #endif
   } else {
     NOT_IMPL();

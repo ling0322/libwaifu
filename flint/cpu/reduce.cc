@@ -109,14 +109,12 @@ void reduce(const TensorView &A, MapReduceType reduceType, const TensorView &out
     return reduceKernel<float, ReduceType::MAX>(A, out);
   if (A.getDType() == DType::kFloat && reduceType == MapReduceType::MIN)
     return reduceKernel<float, ReduceType::MIN>(A, out);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (A.getDType() == DType::kFloat16 && reduceType == MapReduceType::SUM)
     return reduceKernel<Float16, ReduceType::SUM>(A, out);
   if (A.getDType() == DType::kFloat16 && reduceType == MapReduceType::MAX)
     return reduceKernel<Float16, ReduceType::MAX>(A, out);
   if (A.getDType() == DType::kFloat16 && reduceType == MapReduceType::MIN)
     return reduceKernel<Float16, ReduceType::MIN>(A, out);
-#endif
 
   NOT_IMPL();
 }

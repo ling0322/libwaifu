@@ -42,11 +42,9 @@ void fillZero(const TensorView &tensor) {
   if (tensor.getDType() == DType::kFloat) {
     fillZeroKernel<float>(tensor);
   }
-#if LUT_CPU_ARCH == LUT_AARCH64
   else if (tensor.getDType() == DType::kFloat16) {
     fillZeroKernel<Float16>(tensor);
   }
-#endif
   else {
     NOT_IMPL();
   }
@@ -71,9 +69,7 @@ void causalMaskKernel(const TensorView &mask) {
 
 void causalMask(const TensorView &out) {
   if (out.getDType() == DType::kFloat) return causalMaskKernel<float>(out);
-#if LUT_CPU_ARCH == LUT_AARCH64
   if (out.getDType() == DType::kFloat16) return causalMaskKernel<Float16>(out);
-#endif
 
   NOT_IMPL();
 }

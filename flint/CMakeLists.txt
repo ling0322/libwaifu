@@ -62,6 +62,7 @@ set(flint_test_SOURCES
     "cpu/signal_test.cc"
     "cpu/sampling_test.cc"
     "cpu/softmax_test.cc"
+    "cpu/test_float16.cc"
     "cpu/unary_test.cc"
     "tensor_test.cc")
 
@@ -265,7 +266,6 @@ if(LIBWAIFU_KERNEL_AARCH64)
     set(flint_SOURCES ${flint_SOURCES} "cpu/kernel/asimdhp.cc" "cpu/kernel/asimdfhm.cc")
     set(flint_test_SOURCES 
         ${flint_test_SOURCES}
-        "cpu/test_float16.cc"
         "cpu/kernel/asimdhp_test.cc")
 endif()
 

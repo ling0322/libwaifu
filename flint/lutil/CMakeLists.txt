@@ -3,7 +3,6 @@ set(lutil_SOURCES
     "internal/sprintf.cc"
     "env.cc"
     "error.cc"
-    "half.cc"
     "is_debug.cc"
     "path.cc"
     "random.cc"
