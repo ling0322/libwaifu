@@ -26,10 +26,10 @@
 //! A third argument names the device -- cpu, cuda or metal. Left out, it takes the first
 //! accelerator this build can reach.
 //!
-//! Any of the three kinds of model draws here. Which one this is comes out of the manifest, the
+//! Any of the four kinds of model draws here. Which one this is comes out of the manifest, the
 //! same way `load` asks, and it decides the numbers as much as the code: the distilled releases
-//! -- Anima's turbo and Krea 2 Turbo -- want eight steps at no guidance and come out burnt at the
-//! thirty and five SDXL likes. So the request starts at what this build believes about the kind of model, and then
+//! -- Anima's turbo, Krea 2 Turbo and Qwen-Image 2.1 Turbo -- want few steps at no guidance and
+//! come out burnt at the thirty and five SDXL likes. So the request starts at what this build believes about the kind of model, and then
 //! takes whatever the model's own `suggested:` block says over that -- which is the order the
 //! screen asks them in too.
 //!
@@ -38,7 +38,7 @@
 
 use std::io::Write;
 
-use waifu::{to_rgb8, Anima, Device, Krea2, Manifest, Sdxl};
+use waifu::{to_rgb8, Anima, Device, Krea2, Manifest, QwenImage, Sdxl};
 use waifu_tools::settings;
 
 fn main() -> Result<(), waifu::Error> {
@@ -91,6 +91,8 @@ fn main() -> Result<(), waifu::Error> {
         Anima::MODEL_TYPE => Anima::from_manifest(device, device_weight_bytes, &manifest)?
             .generate(&prompt, &options)?,
         Krea2::MODEL_TYPE => Krea2::from_manifest(device, device_weight_bytes, &manifest)?
+            .generate(&prompt, &options)?,
+        QwenImage::MODEL_TYPE => QwenImage::from_manifest(device, device_weight_bytes, &manifest)?
             .generate(&prompt, &options)?,
         _ => Sdxl::from_manifest(device, device_weight_bytes, &manifest)?
             .generate(&prompt, &options)?,
