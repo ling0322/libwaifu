@@ -178,9 +178,12 @@ CATCH_TEST_CASE("test CUDA FastDivmod (exhaustive small)", "[fl][cuda]") {
 CATCH_TEST_CASE("test CUDA memory budget counts what flint allocates", "[fl][cuda][memory]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  // Without a limit, the card is the capacity, whoever else has some of it.
+  // Without a limit of its own, the capacity is the one the card put on it at startup: worked
+  // out from what was free, less a margin, so under what the card has however empty it was.
   MemoryBudget before = MemoryBudget::capture(Device::getCuda());
-  CATCH_REQUIRE(before.capacity == MemorySnapshot::capture(Device::getCuda()).getTotalMemory());
+  MemorySnapshot card = MemorySnapshot::capture(Device::getCuda());
+  CATCH_REQUIRE(before.capacity > 0);
+  CATCH_REQUIRE(before.capacity < card.getTotalMemory());
 
   // The bytes asked for, exactly: what the pool rounds them up to is not counted.
   {
@@ -230,10 +233,19 @@ CATCH_TEST_CASE(
 CATCH_TEST_CASE("test CUDA running out of the card is out of memory", "[fl][cuda][memory]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
+  // Lifted however the test ends, so that no other test runs under it.
+  struct Unlimited {
+    ~Unlimited() {
+      MemorySnapshot::setLimit(Device::getCuda(), 0);
+    }
+  } unlimited;
+
   // More than any card has: the driver refuses it, as itself and not as an abort, and leaves no
-  // error behind for the next launch to find.
+  // error behind for the next launch to find. Asked for past the limit this process sets itself,
+  // so that what refuses is the driver and not llynCudaMalloc's own count.
   int64_t held = MemoryBudget::capture(Device::getCuda()).allocated;
   int64_t tooMuch = MemorySnapshot::capture(Device::getCuda()).getTotalMemory() * 4;
+  MemorySnapshot::setLimit(Device::getCuda(), tooMuch * 2);
   CATCH_REQUIRE_THROWS_AS(op::cuda::llynCudaMalloc(tooMuch), lut::OutOfMemoryError);
   CATCH_REQUIRE(cudaGetLastError() == cudaSuccess);
   CATCH_REQUIRE(MemoryBudget::capture(Device::getCuda()).allocated == held);

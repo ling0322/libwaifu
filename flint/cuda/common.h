@@ -166,11 +166,21 @@ void llynCudaFreeResident(void *ptr, size_t size);
 /// the driver's each would cost more than they are, and they are the last a card lets go of.
 constexpr size_t kResidentWeightBytes = 2 << 20;
 
-/// The most llynCudaMalloc() may have handed out and not had back, in bytes; 0, the default, for no
-/// limit but the card's. Lowering it below what is held lets nothing go: what is in use stays,
-/// and the limit holds from the next allocation on.
+/// The most llynCudaMalloc() may have handed out and not had back, in bytes; 0 for the card's own,
+/// which is setCudaDefaultMemoryLimit()'s to say. Lowering it below what is held lets nothing go:
+/// what is in use stays, and the limit holds from the next allocation on.
 void setCudaMemoryLimit(int64_t bytes);
 int64_t getCudaMemoryLimit();
+
+/// What a limit of 0 comes to: the line the card itself puts on what may be handed out, worked
+/// out once the device is there and left alone afterwards.
+///
+/// There has to be one. Windows answers an allocation a card cannot back by putting it in host
+/// memory rather than by refusing it, so a run with no limit of its own is never told it has
+/// gone too far -- it is simply handed memory across the bus and draws an order of magnitude
+/// slower. The limit is what makes the telling ours: llynCudaMalloc() refuses before the driver
+/// is asked, and the refusal is the signal a run answers by letting a weight on the card go.
+void setCudaDefaultMemoryLimit(int64_t bytes);
 
 /// What llynCudaMalloc() and llynCudaMallocResident() have handed out and not had back, in bytes,
 /// which is what the limit counts.

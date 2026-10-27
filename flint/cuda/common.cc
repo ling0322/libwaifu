@@ -44,6 +44,10 @@ std::atomic<int64_t> gResidentBytes{0};
 std::atomic<int64_t> gPeakAllocatedBytes{0};
 std::atomic<int64_t> gMemoryLimit{0};
 
+// What a limit of 0 means: the line the card puts on what may be handed out. Read only when the
+// limit is set, never on the way to an allocation, so the hot path stays one atomic load.
+std::atomic<int64_t> gDefaultMemoryLimit{0};
+
 // Counts `bytes` as handed out, or throws where the limit would be passed and counts nothing.
 // Returns what was handed out before, for a refusal to say.
 int64_t take(int64_t bytes) {
@@ -129,7 +133,14 @@ void llynCudaFreeResident(void *ptr, size_t size) {
 }
 
 void setCudaMemoryLimit(int64_t bytes) {
-  gMemoryLimit.store(bytes);
+  gMemoryLimit.store(bytes > 0 ? bytes : gDefaultMemoryLimit.load());
+}
+
+void setCudaDefaultMemoryLimit(int64_t bytes) {
+  gDefaultMemoryLimit.store(bytes);
+  // Nobody has asked for one of their own yet, so this is the one in force.
+  int64_t none = 0;
+  gMemoryLimit.compare_exchange_strong(none, bytes);
 }
 
 int64_t getCudaMemoryLimit() {
