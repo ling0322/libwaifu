@@ -150,8 +150,8 @@ impl Watching<'_> {
     }
 }
 
-/// What a name resolves to, once fetched: something that draws pictures or something that reads
-/// sentences. The two are not offered in the same list -- [`listed`] is pictures and
+/// What a name resolves to, once fetched: something that draws pictures, something that reads
+/// sentences, or something that takes a picture apart. The first two are not offered in the same list -- [`listed`] is pictures and
 /// [`listed_voices`] is voices, and which one the terminal shows is the task's -- but they are
 /// fetched, cached and named through the one table and the one set of functions, since none of
 /// that differs by kind.
@@ -159,6 +159,10 @@ impl Watching<'_> {
 enum Kind {
     Picture,
     Voice,
+    /// Takes a picture apart into the layers it was drawn in: img2layers. Fetched by name like
+    /// any other, but in neither list -- it draws nothing from a prompt and reads no sentence, so
+    /// either picker offering it would offer a name that fails once chosen.
+    Layers,
 }
 
 /// A model that has a name, and where it is published.
@@ -287,6 +291,17 @@ const CATALOG: &[Published] = &[
         manifest: "cosyvoice3.yaml",
         explicit: false,
         kind: Kind::Voice,
+    },
+    // Named `<family>:<version>` as a voice is: there is one See-through to name. The version is
+    // upstream's release, seethroughv0.0.2 -- its layers model; the depth model beside it in the
+    // one package is v0.0.1.
+    Published {
+        name: "see-through:v0.0.2",
+        full_name: "See-through v0.0.2",
+        repo: "ling0322/libwaifu-see-through",
+        manifest: "see-through.yaml",
+        explicit: false,
+        kind: Kind::Layers,
     },
 ];
 
@@ -421,6 +436,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("qwen-image:2.1-turbo-fp8", "qwen-image:2.1-turbo-fp8:v1.0"),
     ("indextts", "indextts:v2.5"),
     ("cosyvoice", "cosyvoice:v3"),
+    ("see-through", "see-through:v0.0.2"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1880,6 +1896,24 @@ mod tests {
     }
 
     #[test]
+    fn a_layers_model_is_fetched_by_name_and_offered_in_no_list() {
+        // See-through resolves like anything else, so a caller that asks for it by name can
+        // fetch it; but it is neither a picture model nor a voice, and the lists are pickers.
+        let model = published("see-through").expect("an alias resolves");
+        assert_eq!(model.name, "see-through:v0.0.2");
+        assert_eq!(model.repo, "ling0322/libwaifu-see-through");
+        assert_eq!(model.manifest, "see-through.yaml");
+        assert!(names().contains(&"see-through"));
+        assert!(!is_voice("see-through") && !is_conversion("see-through"));
+
+        let offered = listed()
+            .into_iter()
+            .chain(listed_voices())
+            .chain(listed_conversions());
+        assert!(!offered.into_iter().any(|one| one.name == "see-through"));
+    }
+
+    #[test]
     fn the_name_a_model_used_to_have_still_finds_it() {
         // `sdxl:noob:v11` went out in the README and is in scripts by now. It has to keep meaning
         // NoobAI-XL v1.1, whatever the catalogue calls that today.
@@ -1923,20 +1957,21 @@ mod tests {
         // all: a name is what someone types before they have the model, so it should say what
         // they are about to fetch. Add to this list when the runtime learns another -- of a
         // picture model or, as `indextts` and `cosyvoice` did, of a voice.
-        const FAMILIES: [&str; 6] = [
+        const FAMILIES: [&str; 7] = [
             "sdxl",
             "anima",
             "krea2",
             "qwen-image",
             "indextts",
             "cosyvoice",
+            "see-through",
         ];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
             let expected = match model.kind {
                 Kind::Picture => 3,
-                Kind::Voice => 2,
+                Kind::Voice | Kind::Layers => 2,
             };
             assert_eq!(
                 fields.len(),
