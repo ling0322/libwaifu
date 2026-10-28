@@ -21,6 +21,10 @@
 //!
 //! `tools/see_through_reference.py` runs upstream's two pipelines on the illustration in its own
 //! repository and records what goes in and out of each model; every input here is one of those.
+//!
+//! The bar is upstream's own. Each model is run again on those inputs in float32 and in bfloat16,
+//! which is what upstream runs in, and the runtime passes where it is no further from float32 than
+//! bfloat16 is: `<name>.f32` is the answer, `<name>.bf16_error` the distance it has to beat.
 //! The package is eleven gigabytes, so it is read once, by the one test that asks the models
 //! anything, and that test asks all of its questions in turn.
 
@@ -65,6 +69,18 @@ fn relative_rmse(actual: &[f32], reference: &[f32]) -> f32 {
         energy += (*b as f64).powi(2);
     }
     (error / energy.max(1e-30)).sqrt() as f32
+}
+
+/// That `actual` is no further from upstream's float32 answer `name` than upstream's bfloat16 is.
+fn within_bfloat16(cases: &HashMap<String, Tensor>, name: &str, actual: &[f32]) -> f32 {
+    let error = relative_rmse(actual, &host(&cases[&format!("{name}.f32")]));
+    let bound = host(&cases[&format!("{name}.bf16_error")])[0];
+    eprintln!("{name}: {error:.3e} from float32; bfloat16 is {bound:.3e}");
+    assert!(
+        error <= bound,
+        "{name} is {error:.3e} from float32, further than upstream's bfloat16 at {bound:.3e}"
+    );
+    error
 }
 
 fn on_cuda(tensor: &Tensor, dtype: DType) -> Tensor {
@@ -116,12 +132,8 @@ fn see_through_matches_the_reference() {
     let page = &pictures(&cases["layers.page"].unsqueeze(0).unwrap())[0];
 
     // The picture's latent, which the U-Net reads beside every layer.
-    // Against the autoencoder in float32, as it runs here: upstream's bfloat16 is six percent
-    // from that on its own.
     let latent = model.layers_encoder().forward(&rgb_input(page)).unwrap();
-    let error = relative_rmse(&host(&latent), &host(&cases["layers.page_latent_f32"]));
-    eprintln!("picture latent: {error}");
-    assert!(error < 1e-3, "the picture's latent is {error} away");
+    within_bfloat16(&cases, "layers.page_latent", &host(&latent));
 
     // One step of the U-Net partway along the real trajectory.
     let (context, pooled) = model.condition(0);
@@ -139,9 +151,7 @@ fn see_through_matches_the_reference() {
             },
         )
         .unwrap();
-    let error = relative_rmse(&host(&eps), &host(&cases["layers.unet_output"]));
-    eprintln!("layers U-Net: {error}");
-    assert!(error < 3e-2, "the layers U-Net is {error} away");
+    within_bfloat16(&cases, "layers.unet", &host(&eps));
 
     // The sampler's first two steps, which are its two orders, on what upstream handed it.
     let schedule = model.config().layers_schedule.clone();
@@ -153,39 +163,28 @@ fn see_through_matches_the_reference() {
         let out = sampler
             .step(step, &at("eps"), &at("sample"), &at("noise"))
             .unwrap();
-        // diffusers steps in float32 and hands the result back in the model's bfloat16, whose
-        // rounding alone is a tenth of a percent or two.
-        let error = relative_rmse(&host(&out), &host(&at("out")));
-        eprintln!("sampler step {step}: {error}");
-        assert!(error < 5e-3, "sampler step {step} is {error} away");
+        within_bfloat16(&cases, &format!("layers.step{step}"), &host(&out));
     }
 
-    // Every layer the model finished, decoded. The alpha decoder runs in float32 and upstream's
-    // in bfloat16, so a few levels out of 255 is agreement.
-    let page_alpha: Vec<f32> = (0..page.width * page.height)
-        .map(|p| page.data[p * 4 + 3] as f32 / 255.0)
-        .collect();
+    // The first three layers the model finished, decoded: the autoencoder, then the alpha decoder
+    // reading what it decoded and the latent it came from.
     let finals = &cases["layers.final"];
-    let reference = pictures(&cases["layers.rgba"]);
-    for (frame, expected) in reference.iter().enumerate() {
-        let frame = frame as i32;
+    let scale = model.config().layers_vae.scaling_factor;
+    let (mut decoded, mut alphas) = (Vec::new(), Vec::new());
+    for frame in 0..3 {
         let latent = on_cuda(&finals.slice(0, frame, frame + 1).unwrap(), DType::Float);
-        let layer = model.decode_layer(&latent, &page_alpha).unwrap();
-        let alpha = mean_difference(&layer, expected, 3);
-        eprintln!(
-            "layer {frame}: alpha {alpha}, red {}",
-            mean_difference(&layer, expected, 0)
-        );
-        assert!(
-            alpha < 3.0,
-            "layer {frame}'s alpha is {alpha} out of 255 away"
-        );
-        let colour = mean_difference(&layer, expected, 0);
-        assert!(
-            colour < 4.0,
-            "layer {frame}'s red is {colour} out of 255 away"
-        );
+        let pixel = model.layers_decoder().forward(&latent).unwrap();
+        decoded.extend(host(&pixel));
+        let unit: Vec<f32> = host(&pixel).iter().map(|v| v * 0.5 + 0.5).collect();
+        let unit = Tensor::from_f32(&pixel.shape(), &unit).unwrap();
+        let unscaled = F::mul_scalar(&latent, 1.0 / scale).unwrap();
+        alphas.extend(host(
+            &model.alpha_decoder().forward(&unit, &unscaled).unwrap(),
+        ));
     }
+    within_bfloat16(&cases, "layers.decode", &decoded);
+    within_bfloat16(&cases, "layers.alpha", &alphas);
+    let reference = pictures(&cases["layers.rgba"]);
 
     // -- the depth model -------------------------------------------------------------------
     let body = &model.config().body_tags;
@@ -237,14 +236,11 @@ fn see_through_matches_the_reference() {
     }
 
     // The latents the depth model is conditioned on, from the reference's own small slots.
-    let condition = host(&cases["depth.slot_latents_f32"]);
-    let per_frame = condition.len() / small.len();
-    for (index, slot) in small.iter().enumerate() {
-        let latent = host(&model.encode_slot(slot).unwrap());
-        let reference = &condition[index * per_frame..(index + 1) * per_frame];
-        let error = relative_rmse(&latent, reference);
-        assert!(error < 2e-3, "slot {index}'s latent is {error} away");
+    let mut latents = Vec::new();
+    for slot in &small {
+        latents.extend(host(&model.encode_slot(slot).unwrap()));
     }
+    within_bfloat16(&cases, "depth.slot_latents", &latents);
 
     // One step of the depth U-Net on the real trajectory, and the schedule it was on.
     let sampler = DdimVelocity::new(&model.config().depth_schedule, 4).unwrap();
@@ -268,21 +264,16 @@ fn see_through_matches_the_reference() {
             },
         )
         .unwrap();
-    let error = relative_rmse(&host(&velocity), &host(&cases["depth.unet_output"]));
-    eprintln!("depth U-Net: {error}");
-    assert!(error < 3e-2, "the depth U-Net is {error} away");
+    within_bfloat16(&cases, "depth.unet", &host(&velocity));
 
     // And every depth map decoded from the latents the depth model finished on.
     let finals = &cases["depth.final"];
-    let maps = host(&cases["depth.maps"]);
-    let plane = maps.len() / finals.shape_at(0).unwrap() as usize;
+    let mut maps = Vec::new();
     for frame in 0..finals.shape_at(0).unwrap() {
         let latent = on_cuda(&finals.slice(0, frame, frame + 1).unwrap(), DType::Float);
-        let map = model.decode_depth(&latent).unwrap();
-        let at = frame as usize * plane;
-        let error = relative_rmse(&map.data, &maps[at..at + plane]);
-        assert!(error < 2e-2, "depth map {frame} is {error} away");
+        maps.extend(model.decode_depth(&latent).unwrap().data);
     }
+    within_bfloat16(&cases, "depth.maps", &maps);
 
     // -- the whole of it, at the reference's size ------------------------------------------
     let options = SeeThroughOptions {

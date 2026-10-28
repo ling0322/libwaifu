@@ -16,6 +16,10 @@ stacks them by depth into a Photoshop document. The task is `img2layers`; the co
 
 Both U-Nets are published in bfloat16. Neither is gated.
 
+The package below is published as `ling0322/libwaifu-see-through` on Hugging Face and on
+ModelScope, with both upstream licences and a `NOTICE` of what was changed. Its reference tensors
+are `see-through_test.safetensors` in `ling0322/libwaifu_test_data`.
+
 ## The package
 
 `tools/see_through_exporter.py` writes one package of both models, 11.4 GB in float16 with the
@@ -146,6 +150,26 @@ against bfloat16, and gives the same layers.
 `tools/see_through_reference.py`, which runs upstream's own pipelines on upstream's own
 `test_image.png` at 512 and 384 and keeps what goes in and out of every model: a latent off the
 real trajectory, the layers the model really drew.
+
+**The bar is upstream's own precision.** Every model is run again on those inputs in float32
+(TF32 off; the layers U-Net on the CPU) and in bfloat16, which upstream runs in. The test passes
+where the runtime is no further from float32 than upstream's bfloat16 is:
+
+```
+error(runtime, torch float32)  <=  error(torch bfloat16, torch float32)
+```
+
+for the layers U-Net, the sampler's two orders, the picture's encoding, the autoencoder and the
+alpha decoder, the depth model's slot encodings, its U-Net and its depth maps. The record keeps the
+float32 answer as `<name>.f32` and the bound as `<name>.bf16_error`. As measured, the runtime is
+within a seventh of that bound for both U-Nets and far inside it for the float32 autoencoders:
+
+| | runtime vs float32 | bfloat16 vs float32 |
+|---|---|---|
+| layers U-Net, one step | 0.035 % | 0.26 % |
+| depth U-Net, one step | 0.041 % | 0.25 % |
+| autoencoder decode | 0.0004 % | 2.4 % |
+| autoencoder + alpha decoder | 0.058 % | 0.54 % |
 
 ```bash
 PYTHONPATH=~/.cache/libwaifu/src/see-through/common:tools \

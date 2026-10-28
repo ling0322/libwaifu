@@ -29,6 +29,9 @@ Two things upstream leaves to an unseeded generator are pinned so the record mea
 VAE encoding of the picture is its mean rather than a draw from it, and the noise the SDE sampler
 adds at every step is drawn from a seeded generator and written down beside the step it went into.
 
+Each model is then run again on those inputs in float32 and in bfloat16 (`precision_bounds`): the
+test holds the runtime to being no further from float32 than upstream's own bfloat16 is.
+
 Only the body pass is recorded; the head pass is the same model on a crop. The resolutions are
 smaller than upstream's 1280 and 768 so that the record is a few tens of megabytes and a test
 reads it in seconds; every block is exercised at either size.
@@ -173,21 +176,6 @@ def main():
     del pipe, unet, trans_vae
     torch.cuda.empty_cache()
 
-    # The autoencoders again in float32, which is what the runtime runs them in: upstream's
-    # bfloat16 is six percent from float32 on its own, which would drown any real disagreement.
-    from diffusers import AutoencoderKL
-
-    def encode32(root, images):
-        vae = AutoencoderKL.from_pretrained(root, subfolder="vae", torch_dtype=torch.float32).to(device)
-        with torch.no_grad():
-            latents = [vae.encode(image[None].to(device)).latent_dist.mean * vae.config.scaling_factor
-                       for image in images]
-        del vae
-        return torch.cat(latents)
-
-    rgb = torch.from_numpy(page[..., :3]).float().permute(2, 0, 1) / 127.5 - 1
-    keep("layers.page_latent_f32", encode32(args.layers, [rgb]))
-
     # ---- depth -----------------------------------------------------------------------------
     depth_unet = UNetFrameConditionModel.from_pretrained(args.depth, subfolder="unet")
     depth_pipe = MarigoldDepthPipeline.from_pretrained(args.depth, unet=depth_unet)
@@ -237,7 +225,6 @@ def main():
         argb = np.concatenate([image[..., 3:], image[..., :3]], axis=2)
         argb = torch.from_numpy(argb.astype(np.float32) / 255).permute(2, 0, 1)[None]
         padded.append(pad_rgb_torch(argb, return_format="rgb")[0] * 2 - 1)
-    keep("depth.slot_latents_f32", encode32(args.depth, padded))
 
     depth_calls = []
     depth_forward = depth_pipe.unet.forward
@@ -273,10 +260,145 @@ def main():
          else depth_out.depth_tensor)
     print(f"depth: {len(depth_calls)} steps")
 
+    # The recording hooks hold the pipelines through their bound methods; let all of it go before
+    # the models are loaded again, or the bfloat16 U-Net does not fit beside its own copy.
+    del depth_pipe, depth_unet, depth_forward, recording_depth_unet, decode, recording_decode
+    del unet_forward, recording_unet, scheduler_step, recording_step, decoder_forward, recording_decoder
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(f"before the precision bounds: {torch.cuda.memory_allocated() / 1e6:.0f} MB on the GPU")
+    precision_bounds(args, out, keep, padded)
+
     from safetensors.torch import save_file
     save_file(out, args.output)
     total = sum(t.numel() * t.element_size() for t in out.values())
     print(f"wrote {args.output}: {len(out)} tensors, {total / 1e6:.1f} MB")
+
+
+def rel(a, b):
+    a, b = a.double().cpu(), b.double().cpu()
+    return ((a - b).pow(2).sum() / b.pow(2).sum()).sqrt()
+
+
+@torch.no_grad()
+def precision_bounds(args, out, keep, padded):
+    """The bar every comparison in the test is held to.
+
+    Each component is run again on the inputs recorded above, in float32 -- TF32 off, the layers
+    U-Net on the CPU since it does not fit a 16 GB card -- and in bfloat16, which is what upstream
+    runs. `<name>.f32` is the float32 answer and `<name>.bf16_error` how far upstream's own
+    bfloat16 is from it: the runtime passes when it is no further from float32 than upstream is.
+    The text the layers U-Net reads is encoded once in float32 and handed to both.
+    """
+    from diffusers import AutoencoderKL, DPMSolverMultistepScheduler
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+    from modules.layerdiffuse.layerdiff3d import UNetFrameConditionModel
+    from modules.layerdiffuse.vae import TransparentVAE
+
+    def bound(name, f32, bf16):
+        keep(f"{name}.f32", f32)
+        error = rel(bf16.float(), f32.float())
+        keep(f"{name}.bf16_error", error.reshape(1))
+        print(f"{name}: bfloat16 is {error.item():.3e} from float32")
+
+    precisions = (("f32", torch.float32), ("bf16", torch.bfloat16))
+
+    # The layers U-Net, one step on the recorded latent.
+    body = ["front hair", "back hair", "head", "neck", "neckwear", "topwear", "handwear",
+            "bottomwear", "legwear", "footwear", "tail", "wings", "objects"]
+    tokenizers = [CLIPTokenizer.from_pretrained(args.layers, subfolder=s) for s in ("tokenizer", "tokenizer_2")]
+    encoders = [CLIPTextModel.from_pretrained(args.layers, subfolder="text_encoder"),
+                CLIPTextModelWithProjection.from_pretrained(args.layers, subfolder="text_encoder_2")]
+    hidden, pooled = [], None
+    for tokenizer, encoder in zip(tokenizers, encoders):
+        ids = tokenizer(body, padding="max_length", max_length=77, truncation=True, return_tensors="pt").input_ids
+        o = encoder(ids, output_hidden_states=True, return_dict=False)
+        pooled, hidden = o[0], hidden + [o[-1][-2]]
+    context = torch.cat(hidden, -1)
+    del encoders
+    side = float(out["layers.page"].shape[0])
+    time_ids = torch.tensor([[side, side, 0, 0, side, side]]).expand(len(body), -1)
+    x, t = out["layers.unet_input"][None], out["layers.unet_timestep"][0]
+    answers = {}
+    for name, dtype in precisions:
+        device = "cpu" if dtype == torch.float32 else "cuda"
+        unet = UNetFrameConditionModel.from_pretrained(args.layers, subfolder="unet", torch_dtype=dtype).to(device)
+        answers[name] = unet(
+            x.to(device, dtype), t.to(device), encoder_hidden_states=context.to(device, dtype),
+            added_cond_kwargs={"text_embeds": pooled.to(device, dtype), "time_ids": time_ids.to(device, dtype)},
+            return_dict=False, group_index=0)[0][0].float().cpu()
+        del unet
+        torch.cuda.empty_cache()
+    bound("layers.unet", answers["f32"], answers["bf16"])
+
+    # The sampler's first two steps, on the noise the U-Net reported: float32 as handed in, and
+    # the same with the model's answer in bfloat16, which is what diffusers then returns in.
+    for name, dtype in precisions:
+        scheduler = DPMSolverMultistepScheduler.from_pretrained(args.layers, subfolder="scheduler")
+        scheduler.set_timesteps(30)
+        for step in range(2):
+            eps = out[f"layers.step{step}.eps"][None].to(dtype)
+            sample = out[f"layers.step{step}.sample"][None]
+            noise = out[f"layers.step{step}.noise"][None]
+            stepped = scheduler.step(eps, scheduler.timesteps[step], sample, variance_noise=noise,
+                                     return_dict=False)[0][0].float()
+            answers[f"step{step}.{name}"] = stepped
+    for step in range(2):
+        bound(f"layers.step{step}", answers[f"step{step}.f32"], answers[f"step{step}.bf16"])
+
+    # The autoencoders and the alpha decoder, on the GPU.
+    page = torch.from_numpy(out["layers.page"].numpy()[..., :3].astype("float32")).permute(2, 0, 1)[None] / 127.5 - 1
+    finals = out["layers.final"][:3]
+    for name, dtype in precisions:
+        vae = AutoencoderKL.from_pretrained(args.layers, subfolder="vae", torch_dtype=dtype).cuda()
+        alpha = TransparentVAE.from_pretrained(args.layers, subfolder="trans_vae").decoder.model.to("cuda", dtype)
+        scale = vae.config.scaling_factor
+        answers[f"page.{name}"] = (vae.encode(page.cuda().to(dtype)).latent_dist.mean * scale).float().cpu()
+        pixels, alphas = [], []
+        for latent in finals:
+            z = (latent[None] / scale).cuda().to(dtype)
+            pixel = vae.decode(z).sample
+            pixels.append(pixel.float().cpu())
+            alphas.append(alpha(pixel * 0.5 + 0.5, z).clamp(0, 1).float().cpu())
+        answers[f"decode.{name}"], answers[f"alpha.{name}"] = torch.cat(pixels), torch.cat(alphas)
+        del vae, alpha
+        torch.cuda.empty_cache()
+    bound("layers.page_latent", answers["page.f32"], answers["page.bf16"])
+    bound("layers.decode", answers["decode.f32"], answers["decode.bf16"])
+    bound("layers.alpha", answers["alpha.f32"], answers["alpha.bf16"])
+
+    # The depth model: its slots encoded, one U-Net step, and its maps decoded.
+    tokenizer = CLIPTokenizer.from_pretrained(args.depth, subfolder="tokenizer")
+    encoder = CLIPTextModel.from_pretrained(args.depth, subfolder="text_encoder")
+    empty = encoder(tokenizer("", padding="do_not_pad", return_tensors="pt").input_ids)[0]
+    del encoder
+    x, t = out["depth.unet_input"][None], out["depth.unet_timestep"][0]
+    for name, dtype in precisions:
+        vae = AutoencoderKL.from_pretrained(args.depth, subfolder="vae", torch_dtype=dtype).cuda()
+        scale = vae.config.scaling_factor
+        answers[f"slots.{name}"] = torch.cat([
+            (vae.encode(image[None].cuda().to(dtype)).latent_dist.mean * scale).float().cpu() for image in padded])
+        maps = []
+        for latent in out["depth.final"]:
+            decoded = vae.decode((latent[None] / scale).cuda().to(dtype)).sample.float()
+            maps.append(((decoded.mean(1).clamp(-1, 1) + 1) / 2).cpu())
+        answers[f"maps.{name}"] = torch.cat(maps)
+        del vae
+        unet = UNetFrameConditionModel.from_pretrained(args.depth, subfolder="unet", torch_dtype=dtype).cuda()
+        answers[f"depth.{name}"] = unet(
+            x.cuda().to(dtype), t.cuda(),
+            encoder_hidden_states=empty.expand(x.shape[1], -1, -1).cuda().to(dtype)).sample[0].float().cpu()
+        del unet
+        torch.cuda.empty_cache()
+    bound("depth.slot_latents", answers["slots.f32"], answers["slots.bf16"])
+    bound("depth.unet", answers["depth.f32"], answers["depth.bf16"])
+    bound("depth.maps", answers["maps.f32"], answers["maps.bf16"])
+
+    # What these replace: the bfloat16 run's own answers, and the float32 encodes made above.
+    for name in ("layers.unet_output", "depth.unet_output", "depth.maps", "layers.page_latent_f32",
+                 "depth.slot_latents_f32", "layers.step0.out", "layers.step1.out"):
+        out.pop(name, None)
 
 
 if __name__ == "__main__":
