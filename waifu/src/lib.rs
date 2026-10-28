@@ -80,6 +80,7 @@ mod qwen_vae;
 mod reader;
 pub mod runtime;
 mod sdxl;
+pub mod see_through;
 /// Turning text into a waveform. [`Voice`] is the shape of the question and [`Tones`] is the one
 /// answer to it there is so far -- a stand-in that makes a noise where the syllables are, so that
 /// the screen and everything under it can be written before there is a model to put behind it.

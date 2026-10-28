@@ -128,24 +128,7 @@ impl SdxlConfig {
         Ok(SdxlConfig {
             text: text_encoder("text", activation("text")?)?,
             text2: text_encoder("text2", activation("text2")?)?,
-            unet: UnetConfig {
-                latent_channels: section.get("latent_channels")?,
-                block_out_channels: number_list(section, "unet_block_out_channels")?,
-                layers_per_block: section.get("unet_layers_per_block")?,
-                transformer_layers_per_block: number_list(
-                    section,
-                    "unet_transformer_layers_per_block",
-                )?,
-                // diffusers calls this the head dimension and stores the head count in it, which
-                // is a mistake old enough that every SDXL checkpoint now depends on it.
-                num_heads: number_list(section, "unet_attention_head_dim")?,
-                norm_num_groups: section.get("unet_norm_num_groups")?,
-                cross_attention_dim: section.get("unet_cross_attention_dim")?,
-                addition_time_embed_dim: section.get("unet_addition_time_embed_dim")?,
-                projection_class_embeddings_input_dim: section
-                    .get("unet_projection_class_embeddings_input_dim")?,
-                weight_format,
-            },
+            unet: UnetConfig::from_section(section, "unet", weight_format)?,
             vae: VaeConfig {
                 latent_channels: section.get("latent_channels")?,
                 block_out_channels: number_list(section, "vae_block_out_channels")?,
@@ -429,7 +412,7 @@ impl Sdxl {
         }
         let condition = UnetCondition {
             context: &context,
-            pooled: &pooled,
+            pooled: Some(&pooled),
             time_ids,
         };
 

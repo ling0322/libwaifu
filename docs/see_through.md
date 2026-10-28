@@ -1,0 +1,156 @@
+# See-through: img2layers
+
+Notes on running [See-through](https://github.com/shitagaki-lab/see-through) (SIGGRAPH 2026) in
+libwaifu. It takes an anime illustration apart into the layers it was drawn in -- up to
+twenty-four of them, hair, face, eyes, clothing, what is held -- with what each hides drawn in, and
+stacks them by depth into a Photoshop document. The task is `img2layers`; the code is
+`waifu/src/see_through/`, and what it does is upstream's `inference/scripts/inference_psd.py`.
+
+## What is published
+
+| repository | licence | what |
+|---|---|---|
+| `layerdifforg/seethroughv0.0.2_layerdiff3d` | OpenRAIL++ | the layers model: an Animagine XL 4.0 U-Net, both CLIPs, SDXL's VAE, LayerDiffuse's alpha decoder |
+| `layerdifforg/seethroughv0.0.1_marigold` | OpenRAIL++ | the depth model: Marigold on Stable Diffusion 2 |
+| `shitagaki-lab/see-through` | Apache-2.0 | the code this is read off |
+
+Both U-Nets are published in bfloat16. Neither is gated.
+
+## The package
+
+`tools/see_through_exporter.py` writes one package of both models, 11.4 GB in float16 with the
+two autoencoders in float32, in parts under 2 GB:
+
+```bash
+uv venv -p 3.12 .venv-see-through
+VIRTUAL_ENV=.venv-see-through uv pip install -r tools/requirements-see-through.txt --torch-backend cu128
+git clone https://github.com/shitagaki-lab/see-through ~/.cache/libwaifu/src/see-through
+
+PYTHONPATH=~/.cache/libwaifu/src/see-through/common:tools \
+    .venv-see-through/bin/python tools/see_through_exporter.py \
+    -layers layerdifforg/seethroughv0.0.2_layerdiff3d \
+    -depth layerdifforg/seethroughv0.0.1_marigold \
+    -output models/see-through.safetensors -part-size 2GB
+```
+
+| namespace | what |
+|---|---|
+| `see_through.layers.unet` | the layers U-Net, 4.1 B parameters |
+| `see_through.layers.vae`, `.vae.encoder` | SDXL's autoencoder, both halves |
+| `see_through.layers.alpha` | the alpha decoder |
+| `see_through.layers.{body,head}.{context,pooled}` | what the two CLIPs make of each layer's name, group embeddings folded in |
+| `see_through.depth.unet` | the depth U-Net |
+| `see_through.depth.vae`, `.vae.encoder` | Stable Diffusion's autoencoder |
+| `see_through.depth.context` | the empty prompt, `(1, 2, 1024)` |
+
+**No text encoders.** Neither model reads a prompt anyone writes. The layers model is conditioned
+on the name of each layer -- `"front hair"`, `"irides"` -- and the depth model on the empty prompt,
+so what the encoders make of those is computed by the exporter and carried instead. The layers
+model's group embeddings, which tell it which of its two passes it is on, are added to those same
+tensors there (`e + group_embeds2[g](e)`, `t + group_embeds[g](t)`), since that is all the U-Net
+ever does with them.
+
+## The two U-Nets
+
+Both are `UNetFrameConditionModel`: diffusers' U-Net with a block after transformer layers that
+attends across the batch instead of across the picture. The batch is one picture's layers, so every
+pixel of every layer sees the same pixel of the others -- the hair knows where the face is.
+
+```
+x  = (N, H*W, C)                    # N layers
+x' = x.transpose(0, 1)              # (H*W, N, C): each pixel a batch, the layers its sequence
+x' = x' + ff_in(norm_in(x'))        # GEGLU, 4C inside
+x' = x' + attn1(norm1(x'))          # self attention over N, heads of 64, no positions
+y  = ff(norm3(x'))                  # GEGLU; no residual -- the caller adds it
+x  = x + y.transpose(0, 1)
+```
+
+One follows every layer of a transformer up to two deep, every second from three: SDXL's
+ten-layer transformers carry five and its two-layer ones two, forty blocks in all. These are
+`UnetConfig::frame_attention` in `waifu/src/sdxl/unet.rs`; with it off the pass is SDXL's as before.
+
+| | layers | depth |
+|---|---|---|
+| layout | SDXL, `[320, 640, 1280]` | Stable Diffusion 2, `[320, 640, 1280, 1280]` |
+| in | 8: noisy latent, picture latent | 12: picture latent, layer latent, noisy depth |
+| conditioned on | layer names, 2048 wide, and SDXL's added embedding | the empty prompt, 1024 wide; no added embedding |
+| sampler | DPM-Solver++ 2M SDE, midpoint, 30 leading steps | DDIM, v-prediction, zero terminal SNR, 4 trailing steps |
+| frames | 13 body, then 11 head | 19 slots and the full page |
+
+The depth layout needed three things SDXL's did not: an input wider than the output, a middle
+transformer as deep as it likes (one) where the narrowest level has none, and no added embedding.
+They are `in_channels`, `mid_transformer_layers` and `projection_class_embeddings_input_dim: 0`.
+
+## How a picture is taken apart
+
+1. **Square.** The picture is centred in a square of transparent black and scaled to 1280 (area
+   to shrink, linear to grow). Its colour, alpha dropped, is encoded -- the mean, not a draw.
+2. **Body.** Thirteen layers, every one starting from the same noise, thirty steps; each step adds
+   fresh noise per layer. Each latent is decoded by the VAE, then the alpha decoder reads that RGB
+   and the latent and says `[alpha, R, G, B]`. Alpha is multiplied by the picture's own.
+3. **Head.** The head layer's box, alpha above 15, is mapped back to the original picture, widened
+   by a fifth either side unless it is already half of it, cut out, squared and scaled to 1280, and
+   drawn as eleven layers of its own. They are scaled back and put where the head was.
+4. **Depth.** Nineteen slots: each layer with alpha below 15 cleared, `hair` the two hairs and
+   `eyes` the four parts of an eye laid over each other, and the page with its alpha the layers'
+   summed. Each is scaled to 768, its transparent parts filled from around them by Lvmin's pyramid
+   (`pad_rgb`), and encoded. Four DDIM steps; each map is the mean of the three channels decoded.
+   A composite's parts take its depth where they show and the median of it where a nearer part
+   covers them.
+5. **Parts.** Each layer is cut to where alpha is above 10, with fewer than five such pixels in the
+   top left nine tenths taken for nothing. With `split_pairs`, handwear, the four eye parts and the
+   ears are split into their two largest pieces, `-r` the one further left. The nose and mouth
+   take their colour from the picture. Each part's depth is its median; nose and mouth go in front
+   of the face. Farthest first is the document's order.
+
+The canvas the parts are on is the 1280 square, as upstream's is; `Decomposition::picture` says
+where in it the picture is.
+
+## What is left out
+
+- **Upstream's dead branches.** `further_extr` has an `eyes` split into eyes and brows and a `hair`
+  split by k-means and LaMa inpainting; both look for parts by names the v3 model does not draw.
+- **Upstream's unseeded randomness.** It draws the picture's latent from the VAE's distribution
+  and its SDE noise from the global CUDA generator with no seed, so the same picture gives a
+  different document each time. Here both come from the seed.
+- **Precision.** Upstream runs everything in bfloat16. Here the U-Nets and the alpha decoder are
+  float16 -- the alpha decoder's activations peak near 100 on real layers, and it lands within a
+  level of 255 of float32 -- and the two autoencoders float32, since SDXL's overflows float16.
+
+## Speed and memory
+
+One 928 x 1232 illustration at the defaults, on an RTX 5060 Ti 16 GB:
+
+| | libwaifu, no FlashAttention | libwaifu, `WITH_FLASH_ATTN=ON` | upstream, PyTorch |
+|---|---|---|---|
+| body, 30 steps | 308 s | 190 s | 153 s |
+| head, 30 steps | 270 s | 164 s | 180 s |
+| depth, 4 steps | 12 s | 6 s | 7 s |
+| whole run | 722 s | 472 s | 398 s, loading included |
+
+Both models are read onto the device at once, 11.4 GB. Decoding the thirteen body layers at 1280
+peaks at 16.9 GB, past what a 16 GB card holds, and lets about 2.4 GB of weights go back to the host
+for the rest of the run; upstream peaks at 15.1 GB, but loads the depth model only when it gets to
+it. Most of what is left between the two is the decoding, whose autoencoder runs in float32 here.
+
+A replay of upstream's recorded 1280 run -- its noise handed to the runtime step by step -- stays
+with it to 2.6 % (body) and 3.9 % (head) of the latent at the last step, the drift of float16
+against bfloat16, and gives the same layers.
+
+## Tests
+
+`waifu/tests/see_through.rs` is one test, because the package is eleven gigabytes. Its record is
+`tools/see_through_reference.py`, which runs upstream's own pipelines on upstream's own
+`test_image.png` at 512 and 384 and keeps what goes in and out of every model: a latent off the
+real trajectory, the layers the model really drew.
+
+```bash
+PYTHONPATH=~/.cache/libwaifu/src/see-through/common:tools \
+    .venv-see-through/bin/python tools/see_through_reference.py \
+    -layers ~/.cache/libwaifu/hf/seethroughv0.0.2_layerdiff3d \
+    -depth ~/.cache/libwaifu/hf/seethroughv0.0.1_marigold \
+    -output models/see-through_test.safetensors
+
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test see_through -- --ignored --test-threads=1
+```

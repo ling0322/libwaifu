@@ -44,6 +44,9 @@ use crate::image_model::ImageModel;
 use crate::indextts::IndexTts;
 use crate::progress::{Convert, Doing, Run, Say, VOCODER_RATIO};
 use crate::runtime::{DeviceOption, Runtime};
+use crate::see_through::{
+    Image as SeeThroughImage, SeeThrough, SeeThroughOptions, SeeThroughProgress,
+};
 use crate::wav::Sound;
 use crate::{
     from_rgb8, to_rgb8, ConversionOptions, ConversionProgress, Converter, Device,
@@ -109,6 +112,53 @@ pub struct VoiceConversionRequest {
     pub steps: u32,
     pub convert_style: bool,
     pub seed: u64,
+}
+
+/// A picture as rows of RGBA, four bytes a pixel, not premultiplied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RgbaImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// What taking a picture apart is asked for. See `WaifuLayersRequest` in docs/ffi.md.
+#[derive(Clone, Debug)]
+pub struct LayersRequest {
+    pub image: RgbaImage,
+    /// 0 for the model's own.
+    pub steps: u32,
+    /// 0 for the model's own.
+    pub depth_steps: u32,
+    /// The side of the square the layers are drawn at, a multiple of 64; 0 for the model's own.
+    pub resolution: u32,
+    /// Split what comes in pairs -- hands, eyes, ears -- into a left and a right layer.
+    pub split_pairs: bool,
+    pub seed: u64,
+}
+
+/// One layer of a picture taken apart.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerOut {
+    pub name: String,
+    /// Where its top left corner is on the canvas.
+    pub left: i32,
+    pub top: i32,
+    pub image: RgbaImage,
+    /// How far away it is, 0 near to 1 far: the order the layers are in.
+    pub depth: f32,
+}
+
+/// A picture taken apart: its layers bottom first, and the documents made of them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layers {
+    /// The side of the square canvas the layers are on.
+    pub canvas: u32,
+    pub layers: Vec<LayerOut>,
+    /// A Photoshop document of the layers.
+    pub psd: Vec<u8>,
+    /// The same document with each layer's depth in place of its colour.
+    pub depth_psd: Vec<u8>,
 }
 
 /// Which part of a job a progress report is about.
@@ -220,6 +270,11 @@ enum Work {
         on_progress: OnProgress,
         on_complete: OnComplete<Sound>,
     },
+    Layers {
+        request: LayersRequest,
+        on_progress: OnProgress,
+        on_complete: OnComplete<Layers>,
+    },
 }
 
 impl Work {
@@ -233,6 +288,7 @@ impl Work {
             Work::Speak { on_complete, .. } | Work::VoiceConversion { on_complete, .. } => {
                 on_complete(Ended::Cancelled)
             }
+            Work::Layers { on_complete, .. } => on_complete(Ended::Cancelled),
         }
     }
 }
@@ -349,6 +405,33 @@ impl Engine {
             return Err("both recordings are needed, and one of them is empty".to_string());
         }
         Ok(self.submit(Work::VoiceConversion {
+            request,
+            on_progress,
+            on_complete,
+        }))
+    }
+
+    /// Takes a picture apart into the layers it was drawn in, with a model that does that loaded.
+    pub fn layers(
+        &self,
+        request: LayersRequest,
+        on_progress: OnProgress,
+        on_complete: OnComplete<Layers>,
+    ) -> Result<JobId, String> {
+        let image = &request.image;
+        if image.width == 0 || image.height == 0 {
+            return Err("there is nothing to take apart: the picture is empty".to_string());
+        }
+        let expected = image.width as u64 * image.height as u64 * 4;
+        if image.rgba.len() as u64 != expected {
+            return Err(format!(
+                "a {} by {} picture is {expected} bytes of RGBA, and this one is {}",
+                image.width,
+                image.height,
+                image.rgba.len()
+            ));
+        }
+        Ok(self.submit(Work::Layers {
             request,
             on_progress,
             on_complete,
@@ -505,6 +588,14 @@ fn numbered(prompt: &str) -> (String, Vec<String>) {
     (written, order)
 }
 
+/// Whether the manifest at `path` is a See-through package, which is read before the models that
+/// draw are asked: it has no prompt, and none of them could read it.
+fn is_see_through(path: &Path) -> bool {
+    Manifest::open(path)
+        .and_then(|manifest| Ok(manifest.section("model")?.get_str("type")?.to_string()))
+        .is_ok_and(|kind| kind == SeeThrough::MODEL_TYPE)
+}
+
 // -- the thread ------------------------------------------------------------------------------------
 
 /// What the thread has read.
@@ -517,6 +608,8 @@ enum Loaded {
     Voice(Box<dyn Voice>),
     /// Both a voice and a converter: one model, used as either.
     CosyVoice(CosyVoice3),
+    /// What takes a picture apart into layers.
+    Layers(Box<SeeThrough>),
 }
 
 /// What the thread keeps between jobs.
@@ -613,6 +706,15 @@ impl Reporter<'_> {
                     (Stage::Sounding, done.max(0) as u64, total.max(0) as u64)
                 }
             },
+            Doing::Layering { progress, .. } => match progress {
+                SeeThroughProgress::Layers { done, total, .. }
+                | SeeThroughProgress::Depth { done, total } => (
+                    Stage::Drawing,
+                    (*done).max(0) as u64,
+                    (*total).max(0) as u64,
+                ),
+                SeeThroughProgress::Assembling => (Stage::Decoding, 0, 0),
+            },
         };
 
         (self.on_progress)(&Progress {
@@ -670,6 +772,15 @@ impl Worker {
                 let ended = guarded(|| self.convert(&request, &mut on_progress, &stop));
                 on_complete(ended);
             }
+            Work::Layers {
+                request,
+                mut on_progress,
+                on_complete,
+            } => {
+                let ended = guarded(|| self.layers(&request, &mut on_progress, &stop));
+                crate::flint::release_memory();
+                on_complete(ended);
+            }
         }
     }
 
@@ -714,6 +825,14 @@ impl Worker {
                         &manifest,
                     )?)),
                 });
+            }
+            if is_see_through(&path) {
+                let manifest = Manifest::open(&path)?;
+                return Ok(Loaded::Layers(Box::new(SeeThrough::from_manifest(
+                    device,
+                    device_weight_bytes,
+                    &manifest,
+                )?)));
             }
             if let Some(ConverterKind::CosyVoice3) = converter_kind(&path) {
                 let manifest = Manifest::open(&path)?;
@@ -928,6 +1047,96 @@ impl Worker {
             }),
             Err(error) => Ended::failed(Failure::Model, error.to_string()),
         }
+    }
+
+    fn layers(
+        &mut self,
+        request: &LayersRequest,
+        on_progress: &mut OnProgress,
+        stop: &dyn Fn() -> bool,
+    ) -> Ended<Layers> {
+        let Loaded::Layers(model) = &self.loaded else {
+            return Ended::failed(
+                Failure::NotLoaded,
+                "no model that takes a picture apart into layers is loaded",
+            );
+        };
+        let config = model.config();
+        let options = SeeThroughOptions {
+            seed: request.seed,
+            steps: (request.steps > 0).then_some(request.steps as i32),
+            depth_steps: (request.depth_steps > 0).then_some(request.depth_steps as i32),
+            split_pairs: request.split_pairs,
+            resolution: (request.resolution > 0).then_some(request.resolution as usize),
+            depth_resolution: None,
+        };
+        let (steps, depth_steps) = (
+            options.steps.unwrap_or(config.steps),
+            options.depth_steps.unwrap_or(config.depth_steps),
+        );
+        info(&format!(
+            "taking a {}x{} picture apart, {steps} and {depth_steps} steps, seed {}",
+            request.image.width, request.image.height, request.seed
+        ));
+
+        let started = Instant::now();
+        let mut reporter = Reporter {
+            on_progress,
+            started,
+        };
+        let mut report = |progress| {
+            reporter.tell(&Doing::Layering {
+                progress,
+                steps,
+                depth_steps,
+            });
+            match stop() {
+                true => ControlFlow::Break(()),
+                false => ControlFlow::Continue(()),
+            }
+        };
+
+        let picture = SeeThroughImage::from_data(
+            request.image.width as usize,
+            request.image.height as usize,
+            4,
+            request.image.rgba.clone(),
+        );
+        let decomposition = match model.decompose(&picture, &options, &mut report) {
+            Ok(Some(decomposition)) => decomposition,
+            Ok(None) => {
+                info("stopped before the picture was taken apart");
+                return Ended::Cancelled;
+            }
+            Err(error) => return Ended::failed(Failure::Model, error.to_string()),
+        };
+        info(&format!(
+            "{} layers in {:.1}s",
+            decomposition.parts.len(),
+            started.elapsed().as_secs_f64()
+        ));
+
+        let layers = decomposition
+            .parts
+            .iter()
+            .map(|part| LayerOut {
+                name: part.tag.clone(),
+                left: part.left as i32,
+                top: part.top as i32,
+                image: RgbaImage {
+                    width: part.pixels.width as u32,
+                    height: part.pixels.height as u32,
+                    rgba: part.pixels.data.clone(),
+                },
+                depth: part.depth_median,
+            })
+            .collect();
+        Ended::Done(Layers {
+            canvas: decomposition.canvas as u32,
+            layers,
+            psd: decomposition.to_psd(),
+            depth_psd: decomposition.to_depth_psd(),
+        })
     }
 
     fn voice(&self) -> Option<&dyn Voice> {

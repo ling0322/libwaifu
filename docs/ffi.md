@@ -482,10 +482,57 @@ WaifuJob waifu_engine_voice_conversion_async(WaifuEngine *engine,
                                              void *user_data,
                                              WaifuProgressCallback on_progress,
                                              WaifuAudioCompleteCallback on_complete);
+
+// A picture as rows of RGBA, not premultiplied: what img2layers takes and gives.
+typedef struct {
+    uint32_t width, height;
+    const uint8_t *rgba;      // width * height * 4 bytes, rows top to bottom
+    size_t len;
+} WaifuRgbaImage;
+
+typedef struct {
+    uint32_t struct_size;
+    const WaifuRgbaImage *image;  // the illustration, any size; transparent is fine
+    uint32_t steps;               // 0: the model's own
+    uint32_t depth_steps;         // 0: the model's own
+    uint32_t resolution;          // 0: the model's own, 1280; a multiple of 64
+    bool split_pairs;             // hands, eyes, eyebrows, ears into -l and -r layers
+    uint64_t seed;
+} WaifuLayersRequest;
+
+typedef struct {
+    const char *name;             // "front hair", "irides", "topwear"
+    int32_t left, top;            // on the canvas
+    WaifuRgbaImage image;         // only as large as what is drawn
+    float depth;                  // 0 near .. 1 far; the layers come farthest first
+} WaifuLayer;
+
+typedef struct {
+    WaifuStatus status;
+    uint32_t canvas;              // the side of the square canvas the layers are on
+    const WaifuLayer *layers;     // bottom first
+    size_t layer_count;
+    const uint8_t *psd;           // a Photoshop document of the layers
+    size_t psd_len;
+    const uint8_t *depth_psd;     // the same with each layer's depth for its colour
+    size_t depth_psd_len;
+} WaifuLayersCompletionEvent;
+
+typedef void (*WaifuLayersCompleteCallback)(void *user_data, const WaifuLayersCompletionEvent *event);
+
+// Takes an illustration apart into the layers it was drawn in, with See-through loaded: the
+// img2layers task. Progress is DRAWING for the steps of both of its models and DECODING for
+// cutting the layers out; `words` says which.
+WaifuJob waifu_engine_layers_async(WaifuEngine *engine,
+                                   const WaifuLayersRequest *request,
+                                   void *user_data,
+                                   WaifuProgressCallback on_progress,
+                                   WaifuLayersCompleteCallback on_complete);
 ```
 
-Cancelled jobs get `on_complete` with `WAIFU_CANCELLED` and a NULL image or audio: there is no
-half an image, and no half a recording.
+Cancelled jobs get `on_complete` with `WAIFU_CANCELLED` and a NULL image, audio or layers: there
+is no half an image, no half a recording, and no half a document. What a layers event points at --
+the layers, their names and pixels, both documents -- is valid until `on_complete` returns.
 
 **What comes back is only the image or the audio.** Everything else about a job is the caller's
 already: the seed is part of the request -- a caller that wants a fresh one each time picks it,
@@ -586,7 +633,7 @@ pub struct Engine {
 enum Command {
     Load { job: JobId, model: String, events: Box<dyn Events> },
     Draw { job: JobId, request: DrawRequest, events: Box<dyn Events<Image>> },
-    Speak { .. }, VoiceConversion { .. }, Unload { .. },
+    Speak { .. }, VoiceConversion { .. }, Layers { .. }, Unload { .. },
     Quit,
 }
 ```

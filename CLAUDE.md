@@ -64,6 +64,11 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test qwen_image --test qwen_image_pipeline --test qwen_image_tokenizer \
     --test qwen_image_control -- --ignored --test-threads=1
 
+# waifu/src/see_through/, tools/see_through_* (waifu/src/sdxl/unet.rs: run sdxl's too)
+# needs models/see-through.yaml and models/see-through_test.safetensors; docs/see_through.md says how
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test see_through -- --ignored --test-threads=1
+
 # waifu/src/cosyvoice3/, tools/cosyvoice3_*
 # needs models/cosyvoice3.yaml and models/cosyvoice3_test.safetensors; docs/cosyvoice3.md says how
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \

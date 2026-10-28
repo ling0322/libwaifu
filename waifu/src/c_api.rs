@@ -40,8 +40,8 @@ pub use support::{
 };
 
 use crate::engine::{
-    self, DrawRequest, Ended, Engine, EngineOptions, Failure, SpeakRequest, Stage,
-    VoiceConversionRequest,
+    self, DrawRequest, Ended, Engine, EngineOptions, Failure, LayersRequest, RgbaImage,
+    SpeakRequest, Stage, VoiceConversionRequest,
 };
 use crate::runtime::{self, DeviceOption};
 use crate::wav::Sound;
@@ -373,6 +373,67 @@ pub struct WaifuAudioCompletionEvent {
 
 pub type WaifuAudioCompleteCallback =
     Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuAudioCompletionEvent)>;
+
+/// A picture as rows of RGBA, not premultiplied.
+#[repr(C)]
+pub struct WaifuRgbaImage {
+    pub width: u32,
+    pub height: u32,
+    /// width * height * 4 bytes, rows top to bottom.
+    pub rgba: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+pub struct WaifuLayersRequest {
+    /// sizeof(WaifuLayersRequest), as the caller was compiled with.
+    pub struct_size: u32,
+    /// The illustration: any size, centred and scaled by the engine. Transparent is fine.
+    pub image: *const WaifuRgbaImage,
+    /// 0 for the model's own.
+    pub steps: u32,
+    /// 0 for the model's own.
+    pub depth_steps: u32,
+    /// The side of the square the layers are drawn at, a multiple of 64; 0 for the model's own,
+    /// 1280. Smaller is faster and needs less memory.
+    pub resolution: u32,
+    /// Split what comes in pairs -- hands, eyes, eyebrows, ears -- into a -l and a -r layer.
+    pub split_pairs: bool,
+    pub seed: u64,
+}
+
+/// One layer of a picture taken apart.
+#[repr(C)]
+pub struct WaifuLayer {
+    /// What it is: "front hair", "irides", "topwear".
+    pub name: *const c_char,
+    /// Where its top left corner is on the canvas.
+    pub left: i32,
+    pub top: i32,
+    /// Only as large as what is drawn.
+    pub image: WaifuRgbaImage,
+    /// How far away it is, 0 near to 1 far; the layers come farthest first.
+    pub depth: f32,
+}
+
+#[repr(C)]
+pub struct WaifuLayersCompletionEvent {
+    pub status: WaifuStatus,
+    /// The side of the square canvas the layers are on; 0 unless status.code is WAIFU_OK.
+    pub canvas: u32,
+    /// Bottom first; NULL, 0 unless status.code is WAIFU_OK.
+    pub layers: *const WaifuLayer,
+    pub layer_count: usize,
+    /// A Photoshop document of the layers; NULL, 0 unless status.code is WAIFU_OK.
+    pub psd: *const u8,
+    pub psd_len: usize,
+    /// The same document with each layer's depth in place of its colour, in grayscale.
+    pub depth_psd: *const u8,
+    pub depth_psd_len: usize,
+}
+
+pub type WaifuLayersCompleteCallback =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuLayersCompletionEvent)>;
 
 /// How an engine is started. Zeroed, apart from struct_size, it is waifu_engine_new on
 /// WAIFU_DEVICE_AUTO.
@@ -763,6 +824,119 @@ pub unsafe extern "C" fn waifu_engine_voice_conversion_async(
             request,
             progress_to(&gate, user_data, on_progress),
             audio_completion_to(&gate, user_data, on_complete),
+        )
+    })
+}
+
+// -- layers ----------------------------------------------------------------------------------
+
+unsafe fn rgba_in(image: *const WaifuRgbaImage, what: &str) -> Result<RgbaImage, String> {
+    let image = image.as_ref().ok_or_else(|| format!("{what} is NULL"))?;
+    if image.rgba.is_null() && image.len > 0 {
+        return Err(format!("{what} has no pixels"));
+    }
+    let rgba = match image.len {
+        0 => Vec::new(),
+        len => std::slice::from_raw_parts(image.rgba, len).to_vec(),
+    };
+    Ok(RgbaImage {
+        width: image.width,
+        height: image.height,
+        rgba,
+    })
+}
+
+/// Takes an illustration apart into the layers it was drawn in, with See-through loaded.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_engine_layers_async(
+    engine: *mut WaifuEngine,
+    request: *const WaifuLayersRequest,
+    user_data: *mut c_void,
+    on_progress: WaifuProgressCallback,
+    on_complete: WaifuLayersCompleteCallback,
+) -> WaifuJob {
+    let gate = Gate::default();
+    submitted(&gate, || {
+        let engine = engine.as_ref().ok_or("the engine is NULL")?;
+        let size = request.as_ref().map_or(0, |request| request.struct_size);
+        let request = request_in(request, size, "WaifuLayersRequest")?;
+        let request = LayersRequest {
+            image: rgba_in(request.image, "image")?,
+            steps: request.steps,
+            depth_steps: request.depth_steps,
+            resolution: request.resolution,
+            split_pairs: request.split_pairs,
+            seed: request.seed,
+        };
+
+        let user_data = UserData(user_data);
+        let on_complete = {
+            let gate = gate.clone();
+            Box::new(move |ended: Ended<engine::Layers>| {
+                let Some(callback) = on_complete else {
+                    return;
+                };
+                gate.wait();
+                let (code, message) = status_of(&ended);
+                // The names have to outlive the event, and be NUL terminated: kept here until the
+                // callback returns.
+                let (names, layers): (Vec<CString>, Vec<&engine::LayerOut>) = match &ended {
+                    Ended::Done(done) => done
+                        .layers
+                        .iter()
+                        .map(|layer| {
+                            let name = CString::new(layer.name.replace('\0', ""))
+                                .expect("NULs are removed");
+                            (name, layer)
+                        })
+                        .unzip(),
+                    _ => (Vec::new(), Vec::new()),
+                };
+                let out: Vec<WaifuLayer> = names
+                    .iter()
+                    .zip(&layers)
+                    .map(|(name, layer)| WaifuLayer {
+                        name: name.as_ptr(),
+                        left: layer.left,
+                        top: layer.top,
+                        image: WaifuRgbaImage {
+                            width: layer.image.width,
+                            height: layer.image.height,
+                            rgba: layer.image.rgba.as_ptr(),
+                            len: layer.image.rgba.len(),
+                        },
+                        depth: layer.depth,
+                    })
+                    .collect();
+                let (canvas, psd, depth_psd) = match &ended {
+                    Ended::Done(done) => (done.canvas, &done.psd[..], &done.depth_psd[..]),
+                    _ => (0, &[][..], &[][..]),
+                };
+                let pointer = |bytes: &[u8]| match bytes.is_empty() {
+                    true => ptr::null(),
+                    false => bytes.as_ptr(),
+                };
+                let event = WaifuLayersCompletionEvent {
+                    status: status(code, &message),
+                    canvas,
+                    layers: match out.is_empty() {
+                        true => ptr::null(),
+                        false => out.as_ptr(),
+                    },
+                    layer_count: out.len(),
+                    psd: pointer(psd),
+                    psd_len: psd.len(),
+                    depth_psd: pointer(depth_psd),
+                    depth_psd_len: depth_psd.len(),
+                };
+                let user_data = user_data;
+                unsafe { callback(user_data.0, &event) };
+            })
+        };
+        engine.engine.layers(
+            request,
+            progress_to(&gate, user_data, on_progress),
+            on_complete,
         )
     })
 }

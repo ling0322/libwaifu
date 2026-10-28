@@ -1,0 +1,35 @@
+# What `see_through_exporter.py` and `see_through_reference.py` need, in a venv of their own:
+#
+#     uv venv -p 3.12 .venv-see-through
+#     VIRTUAL_ENV=.venv-see-through uv pip install -r tools/requirements-see-through.txt \
+#         --torch-backend cu128
+#
+# and See-through's own source beside it, which the reference imports rather than vendors:
+#
+#     git clone https://github.com/shitagaki-lab/see-through ~/.cache/libwaifu/src/see-through
+#
+# The pins are the ones See-through's `requirements.txt` is pinned to for what its inference path
+# touches: its UNet subclasses diffusers 0.37's blocks, and a different diffusers is a different
+# reference. Nothing here fits tools/requirements.txt's pair, which is why it is a venv of its own.
+# Its UI, training and annotator dependencies are left out; the inference path never imports them.
+torch
+torchvision
+diffusers==0.37.0
+transformers==5.0.0
+huggingface-hub==1.7.2
+tokenizers==0.22.2
+accelerate==1.13.0
+safetensors==0.7.0
+numpy==2.2.6
+opencv-python-headless==4.13.0.92
+pillow==12.1.1
+einops==0.8.2
+omegaconf==2.3.0
+tqdm
+pyyaml
+# `utils/cv.py` imports pycocotools at module scope for masks the inference path never decodes,
+# and Marigold's `util/image_util.py` imports matplotlib for a colour map it is never asked for.
+pycocotools==2.0.11
+matplotlib==3.9.4
+# The reference PSD the runtime's is compared against.
+psd-tools==1.14.2
