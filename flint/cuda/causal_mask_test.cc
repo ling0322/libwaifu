@@ -51,8 +51,11 @@ Tensor toCpu(const Tensor &a) {
 CATCH_TEST_CASE("test CUDA causalMask", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
+  // The CPU's default float type is half, and toCpu() hands back float: the reference is made in
+  // float so that the two compare. The mask is 0 and -inf only, which half holds exactly.
   constexpr int Dim = 129;
-  Tensor xr = F::softmax(cpuOps(), F::causalMask(Device::getCpu(), Dim));
+  Tensor mask = F::cast(cpuOps(), F::causalMask(Device::getCpu(), Dim), DType::kFloat);
+  Tensor xr = F::softmax(cpuOps(), mask);
   Tensor x = F::softmax(cudaOps(), F::causalMask(Device::getCuda(), Dim));
 
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), xr, 1e-3, 1e-4));
