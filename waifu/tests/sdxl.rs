@@ -221,7 +221,7 @@ fn a_batch_of_two_is_two_batches_of_one() {
                 801.0,
                 &UnetCondition {
                     context: &embedding.context,
-                    pooled: Some(&embedding.pooled),
+                    pooled: &embedding.pooled,
                     time_ids,
                 },
             )
@@ -239,7 +239,7 @@ fn a_batch_of_two_is_two_batches_of_one() {
             801.0,
             &UnetCondition {
                 context: &context,
-                pooled: Some(&pooled),
+                pooled: &pooled,
                 time_ids,
             },
         )

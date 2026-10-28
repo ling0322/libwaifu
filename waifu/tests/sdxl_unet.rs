@@ -64,17 +64,14 @@ fn cases() -> HashMap<String, Tensor> {
 fn config() -> UnetConfig {
     UnetConfig {
         latent_channels: 4,
-        in_channels: 4,
         block_out_channels: vec![320, 640, 1280],
         layers_per_block: 2,
         transformer_layers_per_block: vec![0, 2, 10],
         num_heads: vec![5, 10, 20],
-        mid_transformer_layers: 10,
         norm_num_groups: 32,
         cross_attention_dim: 2048,
         addition_time_embed_dim: 256,
         projection_class_embeddings_input_dim: 2816,
-        frame_attention: false,
         weight_format: WeightFormat::Float,
     }
 }
@@ -143,7 +140,7 @@ fn inputs(cases: &HashMap<String, Tensor>) -> Inputs {
 fn condition(inputs: &Inputs) -> UnetCondition<'_> {
     UnetCondition {
         context: &inputs.context,
-        pooled: Some(&inputs.pooled),
+        pooled: &inputs.pooled,
         time_ids: inputs.time_ids,
     }
 }
@@ -213,7 +210,7 @@ fn the_prompt_changes_the_answer() {
             inputs.timestep,
             &UnetCondition {
                 context: &empty,
-                pooled: Some(&inputs.pooled),
+                pooled: &inputs.pooled,
                 time_ids: inputs.time_ids,
             },
         )

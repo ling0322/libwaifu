@@ -50,16 +50,10 @@
 //! here computes. They stay on the host, where [`timestep_embedding`] has always computed them in
 //! double precision, and arrive as inputs already widened to a row per latent.
 //!
-//! # The same U-Net, asked about several pictures at once
-//!
-//! See-through's two models are this U-Net with one thing added: every transformer is followed,
-//! at intervals, by a block that attends across the batch rather than across the picture. The
-//! latents in the batch are the layers of one illustration -- hair, face, clothing -- and that
-//! block is what lets each of them know what the others are drawing. [`UnetConfig::frame_attention`]
-//! turns it on, and its batch is then one picture's layers and never two pictures. Its depth model
-//! is the same idea on the narrower Stable Diffusion 2 layout, which is why the input can be wider
-//! than the output, the middle transformer need not be as deep as the narrowest level's, and the
-//! added embedding SDXL is conditioned on may be absent.
+//! **A similar implementation lives in [`crate::see_through`]'s `unet.rs`**: See-through's U-Nets
+//! are this one with attention across the batch added, copied rather than shared because the models
+//! are not the same. It mirrors these blocks one for one, so a fix to a block here very likely
+//! belongs there too.
 
 use std::fmt;
 use std::rc::Rc;
@@ -70,7 +64,6 @@ use crate::flint::{
     Weights,
 };
 use crate::layers::{Conv2d, GroupNorm, LayerNorm, Linear};
-use crate::mapping::Mapping;
 
 /// The largest period the sinusoidal timestep embedding uses, which is what everything derived
 /// from the original DDPM code has used since.
@@ -79,11 +72,7 @@ const MAX_PERIOD: f64 = 10000.0;
 /// What the package records about the U-Net.
 #[derive(Clone, Debug)]
 pub struct UnetConfig {
-    /// How deep a latent is, which is what comes out.
     pub latent_channels: i32,
-    /// How deep what goes in is. The latent itself for SDXL; a model conditioned on a picture
-    /// reads that picture's latent concatenated onto it, and is wider here than it is out.
-    pub in_channels: i32,
     /// The width at each resolution, narrowest first. The first entry is also the width of the
     /// timestep embedding before it is projected.
     pub block_out_channels: Vec<i32>,
@@ -96,83 +85,19 @@ pub struct UnetConfig {
     pub transformer_layers_per_block: Vec<i32>,
     /// Attention heads per resolution. The head is what is left over: 64 wide at every one.
     pub num_heads: Vec<i32>,
-    /// Transformer layers in the middle block, which sits at the narrowest resolution with the
-    /// heads that resolution has. SDXL's is as deep as that resolution's own; Stable Diffusion 2's
-    /// narrowest resolution has no attention and its middle block has one layer all the same.
-    pub mid_transformer_layers: i32,
     pub norm_num_groups: i32,
     /// How wide the conditioning is, which for SDXL is the two text encoders concatenated.
     pub cross_attention_dim: i32,
     /// How wide each of the six numbers describing the image size is embedded.
     pub addition_time_embed_dim: i32,
     /// What the added embedding reads: the pooled text vector and those six numbers embedded.
-    ///
-    /// Zero for a U-Net that has no added embedding at all, which is Stable Diffusion 2's: it is
-    /// conditioned on the timestep alone, and is handed no pooled vector and no sizes.
     pub projection_class_embeddings_input_dim: i32,
-    /// Whether every transformer is followed, at intervals, by attention across the batch. See the
-    /// module documentation.
-    pub frame_attention: bool,
     /// How the package stored the matrices this multiplies by, which decides what its projections
     /// are built out of. See [`WeightFormat`].
     pub weight_format: WeightFormat,
 }
 
 impl UnetConfig {
-    /// The U-Net a package describes under keys that start `{prefix}_`.
-    ///
-    /// The keys SDXL has always written are required. The ones added for See-through default to
-    /// what an SDXL package means by leaving them out: as wide in as out, a middle transformer as
-    /// deep as the narrowest level's, and no attention across the batch.
-    pub fn from_section(
-        section: &Mapping,
-        prefix: &str,
-        weight_format: WeightFormat,
-    ) -> Result<UnetConfig> {
-        let key = |name: &str| format!("{prefix}_{name}");
-        let numbers = |name: &str| -> Result<Vec<i32>> {
-            section
-                .get_str(&key(name))?
-                .split(',')
-                .map(|part| {
-                    part.trim().parse::<i32>().map_err(|_| {
-                        Error::model(format!(
-                            "{} is not a list of numbers: {:?}",
-                            key(name),
-                            part.trim()
-                        ))
-                    })
-                })
-                .collect()
-        };
-
-        let latent_channels: i32 = section.get("latent_channels")?;
-        let transformer_layers_per_block = numbers("transformer_layers_per_block")?;
-        let deepest = transformer_layers_per_block.last().copied().unwrap_or(0);
-
-        Ok(UnetConfig {
-            latent_channels,
-            in_channels: section.get_or(&key("in_channels"), latent_channels)?,
-            block_out_channels: numbers("block_out_channels")?,
-            layers_per_block: section.get(&key("layers_per_block"))?,
-            transformer_layers_per_block,
-            // diffusers calls this the head dimension and stores the head count in it, which is a
-            // mistake old enough that every SDXL checkpoint now depends on it.
-            num_heads: numbers("attention_head_dim")?,
-            mid_transformer_layers: section.get_or(&key("mid_transformer_layers"), deepest)?,
-            norm_num_groups: section.get(&key("norm_num_groups"))?,
-            cross_attention_dim: section.get(&key("cross_attention_dim"))?,
-            addition_time_embed_dim: section.get_or(&key("addition_time_embed_dim"), 0)?,
-            projection_class_embeddings_input_dim: section
-                .get_or(&key("projection_class_embeddings_input_dim"), 0)?,
-            frame_attention: match section.has(&key("frame_attention")) {
-                true => section.get_bool(&key("frame_attention"))?,
-                false => false,
-            },
-            weight_format,
-        })
-    }
-
     /// The width of the timestep embedding once it has been projected, which is what every
     /// residual block is handed.
     fn time_embed_dim(&self) -> i32 {
@@ -190,11 +115,6 @@ impl UnetConfig {
     /// turned out to be -- and the graph does, since a shape it writes down is a shape it checks.
     fn pooled_dim(&self) -> i32 {
         self.projection_class_embeddings_input_dim - 6 * self.addition_time_embed_dim
-    }
-
-    /// Whether the timestep is joined by the pooled prompt and the image's sizes.
-    pub fn has_added_embedding(&self) -> bool {
-        self.projection_class_embeddings_input_dim > 0
     }
 }
 
@@ -438,61 +358,22 @@ fn transformer_block(
     // The gated feed forward projects to twice its inner width, half of which gates the other
     // half, so what comes out of the gate is four times as wide as what goes back in.
     let normed = LayerNorm::graph(&g.subgraph("norm3"), x, channels, 1e-5);
-    g.add(x, feed_forward(&g.subgraph("ff"), normed, channels))
-}
-
-/// A gated feed forward, `channels` in and out, four times as wide inside.
-fn feed_forward(g: &Graph, input: Value, channels: i32) -> Value {
-    let x = Linear::graph(
-        &g.subgraph("gate.proj"),
-        input,
+    let feed_forward = Linear::graph(
+        &g.subgraph("ff.gate.proj"),
+        normed,
         channels,
         8 * channels,
         true,
     );
-    Linear::graph(
-        &g.subgraph("out_proj"),
-        g.geglu(x),
+    let feed_forward = Linear::graph(
+        &g.subgraph("ff.out_proj"),
+        g.geglu(feed_forward),
         4 * channels,
         channels,
         true,
-    )
-}
-
-/// Attention across the batch: every pixel attends to the same pixel in every other latent.
-///
-/// `input` is `(N, H * W, C)` with N the layers of one picture, and is turned on its side to
-/// `(H * W, N, C)` so that each pixel is a batch of its own and the layers are its sequence. It
-/// has no positional embedding: which layer is which is something the U-Net was told through its
-/// conditioning, not here.
-///
-/// What comes back is the feed forward's output alone, without the residual around it -- the
-/// reference returns that and adds it to the transformer's stream itself, and so does the caller.
-fn frame_block(g: &Graph, input: Value, channels: i32, num_heads: i32) -> Value {
-    let x = g.contiguous(g.transpose(input, 0, 1));
-
-    let normed = LayerNorm::graph(&g.subgraph("norm_in"), x, channels, 1e-5);
-    let x = g.add(x, feed_forward(&g.subgraph("ff_in"), normed, channels));
-
-    let normed = LayerNorm::graph(&g.subgraph("norm1"), x, channels, 1e-5);
-    let x = g.add(
-        x,
-        attention(&g.subgraph("attn1"), normed, None, channels, num_heads),
     );
 
-    let normed = LayerNorm::graph(&g.subgraph("norm3"), x, channels, 1e-5);
-    let x = feed_forward(&g.subgraph("ff"), normed, channels);
-
-    g.contiguous(g.transpose(x, 0, 1))
-}
-
-/// Whether the transformer block at `index` of `depth` is followed by attention across the batch.
-///
-/// After every one of them in a shallow transformer, and after every second one from three layers
-/// up: SDXL's ten-layer transformers carry five, its two-layer ones two.
-fn has_frame_block(depth: i32, index: i32) -> bool {
-    let stride = if depth >= 3 { 2 } else { 1 };
-    (index + 1) % stride == 0
+    g.add(x, feed_forward)
 }
 
 /// A stack of transformer blocks that reads an image as a sequence of pixels.
@@ -531,7 +412,6 @@ fn transformer(
     let x = g.contiguous(g.transpose(x, 1, 2));
 
     let mut x = Linear::graph(&g.subgraph("in_proj"), x, channels, channels, true);
-    let mut frame_blocks = 0;
     for index in 0..depth {
         x = transformer_block(
             &g.subgraph(&format!("block{index}")),
@@ -541,16 +421,6 @@ fn transformer(
             channels,
             num_heads,
         );
-        if config.frame_attention && has_frame_block(depth, index) {
-            let mixed = frame_block(
-                &g.subgraph(&format!("frame{frame_blocks}")),
-                x,
-                channels,
-                num_heads,
-            );
-            x = g.add(x, mixed);
-            frame_blocks += 1;
-        }
     }
     let x = Linear::graph(&g.subgraph("out_proj"), x, channels, channels, true);
 
@@ -736,9 +606,6 @@ fn conditioning(config: &UnetConfig, g: &Graph) -> Value {
         time_embed_dim,
         true,
     );
-    if !config.has_added_embedding() {
-        return temb;
-    }
 
     // The pooled prompt and the six numbers about the image, side by side.
     let pooled = g.input("pooled");
@@ -784,7 +651,7 @@ fn write(config: &UnetConfig, g: &Graph) {
     let mut x = Conv2d::graph(
         &g.subgraph("conv_in"),
         latent,
-        config.in_channels,
+        config.latent_channels,
         config.block_out_channels[0],
         3,
         1,
@@ -819,7 +686,7 @@ fn write(config: &UnetConfig, g: &Graph) {
         cond.context,
         widest,
         config.num_heads[levels - 1],
-        config.mid_transformer_layers,
+        config.transformer_layers_per_block[levels - 1],
     );
     x = resnet_block(
         &g.subgraph("mid.resnet1"),
@@ -877,9 +744,8 @@ pub struct UnetCondition<'a> {
     /// One row per latent in the batch. Guidance sends the prompt and its absence through
     /// together, so N is two there and the rows must be in the same order as the latents.
     pub context: &'a Tensor,
-    /// `(N, 1280)`: the pooled vector of the second encoder, a row per latent. None for a U-Net
-    /// with no added embedding, which reads neither it nor `time_ids`.
-    pub pooled: Option<&'a Tensor>,
+    /// `(N, 1280)`: the pooled vector of the second encoder, a row per latent.
+    pub pooled: &'a Tensor,
     /// The size SDXL is told about: the original height and width, the top and left it was
     /// cropped at, and the height and width being asked for.
     pub time_ids: [f32; 6],
@@ -951,10 +817,10 @@ impl Unet {
         }
 
         let channels = latent.shape_at(1)?;
-        if channels != self.config.in_channels {
+        if channels != self.config.latent_channels {
             return Err(Error::model(format!(
                 "a latent of {channels} channels is not the {} this U-Net reads",
-                self.config.in_channels
+                self.config.latent_channels
             )));
         }
 
@@ -971,45 +837,23 @@ impl Unet {
             )));
         }
 
-        let (device, dtype) = (condition.context.device(), condition.context.dtype());
-        let batch = condition.context.shape_at(0)?;
-        if batch != latent.shape_at(0)? {
-            return Err(Error::model(format!(
-                "{batch} rows of conditioning for {} latents",
-                latent.shape_at(0)?
-            )));
-        }
+        let (device, dtype) = (condition.pooled.device(), condition.pooled.dtype());
+        let batch = condition.pooled.shape_at(0)?;
 
         let time = timestep_embedding(timestep as f64, self.config.block_out_channels[0])?
             .to_device(device)?
             .cast(dtype)?;
-        let time = repeat_rows(&time, batch)?;
+        let sizes = time_ids_embedding(&condition.time_ids, self.config.addition_time_embed_dim)?
+            .to_device(device)?
+            .cast(dtype)?;
 
-        let added = match (self.config.has_added_embedding(), condition.pooled) {
-            (false, _) => None,
-            (true, Some(pooled)) => {
-                let sizes =
-                    time_ids_embedding(&condition.time_ids, self.config.addition_time_embed_dim)?
-                        .to_device(device)?
-                        .cast(dtype)?;
-                Some((pooled, repeat_rows(&sizes, batch)?))
-            }
-            (true, None) => {
-                return Err(Error::model(
-                    "this U-Net is conditioned on a pooled prompt, and was handed none",
-                ))
-            }
-        };
-
-        let mut context = RunContext::new(&*self.weights)
+        let (time, sizes) = (repeat_rows(&time, batch)?, repeat_rows(&sizes, batch)?);
+        let context = RunContext::new(&*self.weights)
             .input("latent", latent)
             .input("context", condition.context)
-            .input("timestep_embedding", &time);
-        if let Some((pooled, sizes)) = &added {
-            context = context
-                .input("pooled", pooled)
-                .input("time_ids_embedding", sizes);
-        }
+            .input("pooled", condition.pooled)
+            .input("timestep_embedding", &time)
+            .input("time_ids_embedding", &sizes);
 
         let outputs = self.ir.run(&context)?;
 
@@ -1068,24 +912,7 @@ fn check(config: &UnetConfig) -> Result<()> {
         }
     }
 
-    if config.in_channels <= 0 || config.mid_transformer_layers < 0 {
-        return Err(Error::model(format!(
-            "a U-Net reading {} channels with {} middle transformer layers",
-            config.in_channels, config.mid_transformer_layers
-        )));
-    }
-
-    // A middle transformer reads the narrowest level's head count whether or not that level has
-    // attention of its own, which Stable Diffusion 2's does not.
-    let widest = config.block_out_channels[levels - 1];
-    let mid_heads = config.num_heads[levels - 1];
-    if config.mid_transformer_layers > 0 && (mid_heads <= 0 || widest % mid_heads != 0) {
-        return Err(Error::model(format!(
-            "{widest} channels in the middle block do not divide into {mid_heads} heads"
-        )));
-    }
-
-    if config.has_added_embedding() && config.pooled_dim() <= 0 {
+    if config.pooled_dim() <= 0 {
         return Err(Error::model(format!(
             "the added embedding reads {} numbers, which is not more than the {} the six sizes \
              take",
@@ -1104,17 +931,14 @@ mod tests {
     fn config() -> UnetConfig {
         UnetConfig {
             latent_channels: 4,
-            in_channels: 4,
             block_out_channels: vec![320, 640, 1280],
             layers_per_block: 2,
             transformer_layers_per_block: vec![0, 2, 10],
             num_heads: vec![5, 10, 20],
-            mid_transformer_layers: 10,
             norm_num_groups: 32,
             cross_attention_dim: 2048,
             addition_time_embed_dim: 256,
             projection_class_embeddings_input_dim: 2816,
-            frame_attention: false,
             weight_format: WeightFormat::Float,
         }
     }
@@ -1193,83 +1017,6 @@ mod tests {
             "no folded extent in the listing"
         );
         assert!(listing.contains("dim(%"), "no read extent in the listing");
-    }
-
-    /// See-through's layer model: SDXL, wider going in, with attention across the batch.
-    fn layered() -> UnetConfig {
-        UnetConfig {
-            in_channels: 8,
-            frame_attention: true,
-            ..config()
-        }
-    }
-
-    /// See-through's depth model: the Stable Diffusion 2 layout, with no added embedding.
-    fn layered_depth() -> UnetConfig {
-        UnetConfig {
-            latent_channels: 4,
-            in_channels: 12,
-            block_out_channels: vec![320, 640, 1280, 1280],
-            layers_per_block: 2,
-            transformer_layers_per_block: vec![1, 1, 1, 0],
-            num_heads: vec![5, 10, 20, 20],
-            mid_transformer_layers: 1,
-            norm_num_groups: 32,
-            cross_attention_dim: 1024,
-            addition_time_embed_dim: 0,
-            projection_class_embeddings_input_dim: 0,
-            frame_attention: true,
-            weight_format: WeightFormat::Float,
-        }
-    }
-
-    fn listing(config: &UnetConfig) -> String {
-        let graph = Graph::new();
-        write(config, &graph.subgraph("unet"));
-        graph.to_string()
-    }
-
-    #[test]
-    fn a_frame_block_follows_every_second_layer_of_a_deep_transformer() {
-        let listing = listing(&layered());
-
-        // Ten layers carry five, after the second, fourth ... tenth; two layers carry two.
-        assert!(listing.contains("unet.down2.attn0.frame4.attn1.qkv_proj.weight"));
-        assert!(!listing.contains("unet.down2.attn0.frame5."));
-        assert!(listing.contains("unet.down1.attn1.frame1.ff_in.gate.proj.weight"));
-        assert!(!listing.contains("unet.down1.attn1.frame2."));
-        assert!(listing.contains("unet.mid.attn0.frame4.norm3.weight"));
-        assert!(listing.contains("unet.up0.attn2.frame4.ff.out_proj.weight"));
-
-        // And none without it.
-        assert!(!self::listing(&config()).contains(".frame0."));
-    }
-
-    #[test]
-    fn has_frame_block_counts_from_one() {
-        let ten: Vec<i32> = (0..10).filter(|&i| has_frame_block(10, i)).collect();
-        assert_eq!(ten, vec![1, 3, 5, 7, 9]);
-        let two: Vec<i32> = (0..2).filter(|&i| has_frame_block(2, i)).collect();
-        assert_eq!(two, vec![0, 1]);
-        let one: Vec<i32> = (0..1).filter(|&i| has_frame_block(1, i)).collect();
-        assert_eq!(one, vec![0]);
-    }
-
-    #[test]
-    fn the_depth_layout_has_attention_where_sdxl_has_none_and_none_where_it_has() {
-        let config = layered_depth();
-        check(&config).unwrap();
-        let listing = listing(&config);
-
-        assert!(listing.contains("unet.down0.attn0.block0.attn2.kv_proj.weight"));
-        assert!(!listing.contains("unet.down3.attn0."));
-        assert!(listing.contains("unet.mid.attn0.block0.attn2.kv_proj.weight"));
-        assert!(listing.contains("unet.mid.attn0.frame0.attn1.qkv_proj.weight"));
-        assert!(!listing.contains("unet.mid.attn0.block1."));
-
-        // Conditioned on the timestep alone.
-        assert!(!listing.contains("add_embd"));
-        assert!(listing.contains("unet.time_embd.linear2.weight"));
     }
 
     #[test]

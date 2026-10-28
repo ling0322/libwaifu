@@ -109,17 +109,18 @@ fn load(drawn: &Drawn) -> Option<Piece> {
 /// `part_lr_split`: the two largest pieces of a part apart, the one further left in the picture
 /// named `-r` -- the character's right -- and the other `-l`. A part in one piece is left whole.
 ///
-/// The largest label is dropped first, as upstream drops it: it is meant to be the background,
-/// which in a crop as tight as these it almost always is.
+/// Only the drawn pieces compete: label 0 is the background. Upstream sorts every label and drops
+/// the largest, meaning the background, which in a tight crop holding two large pieces is not the
+/// largest -- and then a real piece is dropped and the background split off in its place.
 fn split(piece: Piece) -> Vec<Piece> {
     let mask = mask_above(&piece.pixels, 3, PART_ALPHA);
     let (labels, stats) = connected_components(&mask);
     if stats.len() <= 2 {
         return vec![piece];
     }
-    let mut order: Vec<usize> = (0..stats.len()).collect();
+    let mut order: Vec<usize> = (1..stats.len()).collect();
     order.sort_by(|&a, &b| stats[b].area.cmp(&stats[a].area));
-    let (a, b) = (order[1], order[2]);
+    let (a, b) = (order[0], order[1]);
     let centre = |i: usize| stats[i].x as f64 + stats[i].width as f64 / 2.0;
     let (right, left) = match centre(b) < centre(a) {
         true => (b, a),
@@ -353,6 +354,27 @@ mod tests {
         assert_eq!(tags, vec!["handwear-r", "handwear-l"]);
         assert_eq!(parts[0].left, 2);
         assert_eq!(parts[1].left, 20);
+    }
+
+    #[test]
+    fn two_pieces_larger_than_the_background_are_both_kept() {
+        // A 61 by 10 crop: two 30 by 10 pieces a column apart. Each covers 300 pixels and the
+        // background between them only 10.
+        let mut both = square(61, 10, 0, 0, 30, 10);
+        both.paste(&square(30, 10, 0, 0, 30, 10), 31, 0);
+        let depth = Image::from_data(61, 10, 1, vec![100; 610]);
+        let parts = assemble(
+            &[Drawn {
+                tag: "ears",
+                pixels: &both,
+                depth: &depth,
+            }],
+            &Image::new(61, 10, 4),
+            true,
+        );
+        let tags: Vec<(&str, usize)> = parts.iter().map(|p| (p.tag.as_str(), p.left)).collect();
+        assert_eq!(tags, vec![("ears-r", 0), ("ears-l", 31)]);
+        assert!(parts.iter().all(|p| p.pixels.width == 30));
     }
 
     #[test]

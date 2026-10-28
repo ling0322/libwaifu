@@ -66,8 +66,11 @@ x  = x + y.transpose(0, 1)
 ```
 
 One follows every layer of a transformer up to two deep, every second from three: SDXL's
-ten-layer transformers carry five and its two-layer ones two, forty blocks in all. These are
-`UnetConfig::frame_attention` in `waifu/src/sdxl/unet.rs`; with it off the pass is SDXL's as before.
+ten-layer transformers carry five and its two-layer ones two, forty blocks in all.
+
+The U-Net is `waifu/src/see_through/unet.rs`, a copy of `waifu/src/sdxl/unet.rs` with these
+blocks added and SDXL left untouched: the two are different models, so their code is kept apart,
+and each file names the other because a fix to a shared block likely belongs in both.
 
 | | layers | depth |
 |---|---|---|

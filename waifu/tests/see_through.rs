@@ -31,8 +31,9 @@ use std::path::PathBuf;
 use waifu::flint::{functional as F, Tensor};
 use waifu::see_through::{
     image as picture, DdimVelocity, DpmSolverSde, Image, Rgba, SeeThrough, SeeThroughOptions,
+    UnetCondition,
 };
-use waifu::{read_safetensors, DType, Device, Manifest, UnetCondition};
+use waifu::{read_safetensors, DType, Device, Manifest};
 
 fn models_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../models")

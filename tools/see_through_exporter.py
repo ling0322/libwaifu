@@ -307,7 +307,6 @@ def unet_config(prefix: str, unet) -> dict:
         f"{prefix}_attention_head_dim": [int(n) for n in _per_level(heads, len(attention))],
         f"{prefix}_norm_num_groups": str(config.norm_num_groups),
         f"{prefix}_cross_attention_dim": str(config.cross_attention_dim),
-        f"{prefix}_frame_attention": "true",
     }
     if getattr(unet, "add_embedding", None) is not None:
         section[f"{prefix}_addition_time_embed_dim"] = str(config.addition_time_embed_dim)

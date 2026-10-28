@@ -45,6 +45,7 @@ mod compose;
 pub mod image;
 mod psd;
 mod sampler;
+mod unet;
 
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -54,13 +55,14 @@ use crate::error::{Error, Result};
 use crate::flint::{functional as F, DType, Device, Tensor, WeightFormat, Weights};
 use crate::manifest::Manifest;
 use crate::mapping::Mapping;
-use crate::sdxl::{Unet, UnetCondition, UnetConfig, VaeConfig, VaeDecoder, VaeEncoder};
+use crate::sdxl::{VaeConfig, VaeDecoder, VaeEncoder};
 
 pub use alpha::{AlphaConfig, AlphaDecoder};
 pub use compose::Part;
 pub use image::{Image, Rgba, Square};
 pub use psd::{Layer as PsdLayer, Mode as PsdMode};
 pub use sampler::{DdimVelocity, DpmSolverSde, ScheduleConfig};
+pub use unet::{Unet, UnetCondition, UnetConfig};
 
 use compose::{Drawn, LAYER_ALPHA};
 use image::{center_square_pad_resize, mask_above, smart_resize_u8};
@@ -245,16 +247,27 @@ impl Decomposition {
         psd::write(&layers, self.canvas, self.canvas, psd::Mode::Rgb)
     }
 
-    /// The same document with each part's depth in place of its colour, in grayscale.
+    /// The same document with each part's depth in place of its colour, in grayscale, under the
+    /// part's own alpha.
     pub fn to_depth_psd(&self) -> Vec<u8> {
         let layers: Vec<psd::Layer> = self
             .parts
             .iter()
-            .map(|part| psd::Layer {
-                name: part.tag.clone(),
-                left: part.left as i32,
-                top: part.top as i32,
-                pixels: part.depth.clone(),
+            .map(|part| {
+                // Each part's depth under its own alpha, so a part's cut-out corners show what is
+                // beneath them rather than a rectangle of the depth around it.
+                let n = part.depth.width * part.depth.height;
+                let mut pixels = Image::new(part.depth.width, part.depth.height, 2);
+                for p in 0..n {
+                    pixels.data[p * 2] = part.depth.data[p];
+                    pixels.data[p * 2 + 1] = part.pixels.data[p * 4 + 3];
+                }
+                psd::Layer {
+                    name: part.tag.clone(),
+                    left: part.left as i32,
+                    top: part.top as i32,
+                    pixels,
+                }
             })
             .collect();
         psd::write(&layers, self.canvas, self.canvas, psd::Mode::Grayscale)
