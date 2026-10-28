@@ -171,6 +171,13 @@ within a seventh of that bound for both U-Nets and far inside it for the float32
 | autoencoder decode | 0.0004 % | 2.4 % |
 | autoencoder + alpha decoder | 0.058 % | 0.54 % |
 
+That bound is the floor, and for what runs in float32 here it is thousands of times too loose to
+catch a float32 path going wrong, so those are held to float32 as well: the picture's latent within
+1e-3, and each decoded layer, each slot's latent and each depth map on its own within 1e-4, 2e-3
+and 1e-5 -- each, because one error over all twenty slots is the full page's and could hide an
+empty slot gone wrong. And every layer `decode_layer` finishes, the picture's alpha multiplied in
+and in eight bits, is compared with upstream's own: within 3 levels of 255 in alpha and 4 in red.
+
 ```bash
 PYTHONPATH=~/.cache/libwaifu/src/see-through/common:tools \
     .venv-see-through/bin/python tools/see_through_reference.py \

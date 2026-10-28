@@ -83,6 +83,43 @@ fn within_bfloat16(cases: &HashMap<String, Tensor>, name: &str, actual: &[f32]) 
     error
 }
 
+/// That a model running in float32 here, as the autoencoders do, is within `cap` of float32.
+///
+/// bfloat16's distance is the floor every model must clear, but for these it is thousands of times
+/// what the runtime measures, so on its own it would let a float32 path fall a long way.
+fn within_float32(name: &str, error: f32, cap: f32) {
+    assert!(
+        error < cap,
+        "{name} is {error:.3e} from float32, past the {cap:.0e} a float32 path is held to"
+    );
+}
+
+/// That each of `pieces` equal pieces of `actual` -- a slot, a frame -- is within `cap` of the same
+/// piece of `name`'s float32 answer. One error over all of them is weighted towards the pieces
+/// with the most energy, so a nearly empty one could be wrong and not be seen.
+fn each_within_float32(
+    cases: &HashMap<String, Tensor>,
+    name: &str,
+    actual: &[f32],
+    pieces: usize,
+    cap: f32,
+) {
+    let reference = host(&cases[&format!("{name}.f32")]);
+    assert_eq!(actual.len(), reference.len(), "{name}");
+    let size = reference.len() / pieces;
+    let mut worst = 0f32;
+    for piece in 0..pieces {
+        let range = piece * size..(piece + 1) * size;
+        let error = relative_rmse(&actual[range.clone()], &reference[range]);
+        worst = worst.max(error);
+        assert!(
+            error < cap,
+            "{name} {piece} is {error:.3e} from float32, past the {cap:.0e} a float32 path is held to"
+        );
+    }
+    eprintln!("{name}: {pieces} pieces, the worst {worst:.3e} from float32");
+}
+
 fn on_cuda(tensor: &Tensor, dtype: DType) -> Tensor {
     tensor.to_device(Device::Cuda).unwrap().cast(dtype).unwrap()
 }
@@ -133,7 +170,8 @@ fn see_through_matches_the_reference() {
 
     // The picture's latent, which the U-Net reads beside every layer.
     let latent = model.layers_encoder().forward(&rgb_input(page)).unwrap();
-    within_bfloat16(&cases, "layers.page_latent", &host(&latent));
+    let error = within_bfloat16(&cases, "layers.page_latent", &host(&latent));
+    within_float32("layers.page_latent", error, 1e-3);
 
     // One step of the U-Net partway along the real trajectory.
     let (context, pooled) = model.condition(0);
@@ -183,8 +221,32 @@ fn see_through_matches_the_reference() {
         ));
     }
     within_bfloat16(&cases, "layers.decode", &decoded);
+    each_within_float32(&cases, "layers.decode", &decoded, 3, 1e-4);
     within_bfloat16(&cases, "layers.alpha", &alphas);
+
+    // And every layer the model finished, as decode_layer gives it -- the picture's alpha
+    // multiplied in, the channels in order, in eight bits -- against what upstream made of it. That
+    // is upstream's bfloat16, so a few levels out of 255 is agreement.
+    let page_alpha: Vec<f32> = (0..page.width * page.height)
+        .map(|p| page.data[p * 4 + 3] as f32 / 255.0)
+        .collect();
     let reference = pictures(&cases["layers.rgba"]);
+    for (frame, expected) in reference.iter().enumerate() {
+        let frame = frame as i32;
+        let latent = on_cuda(&finals.slice(0, frame, frame + 1).unwrap(), DType::Float);
+        let layer = model.decode_layer(&latent, &page_alpha).unwrap();
+        let alpha = mean_difference(&layer, expected, 3);
+        let colour = mean_difference(&layer, expected, 0);
+        eprintln!("layer {frame}: alpha {alpha}, red {colour}");
+        assert!(
+            alpha < 3.0,
+            "layer {frame}'s alpha is {alpha} out of 255 away"
+        );
+        assert!(
+            colour < 4.0,
+            "layer {frame}'s red is {colour} out of 255 away"
+        );
+    }
 
     // -- the depth model -------------------------------------------------------------------
     let body = &model.config().body_tags;
@@ -241,6 +303,7 @@ fn see_through_matches_the_reference() {
         latents.extend(host(&model.encode_slot(slot).unwrap()));
     }
     within_bfloat16(&cases, "depth.slot_latents", &latents);
+    each_within_float32(&cases, "depth.slot_latents", &latents, small.len(), 2e-3);
 
     // One step of the depth U-Net on the real trajectory, and the schedule it was on.
     let sampler = DdimVelocity::new(&model.config().depth_schedule, 4).unwrap();
@@ -274,6 +337,8 @@ fn see_through_matches_the_reference() {
         maps.extend(model.decode_depth(&latent).unwrap().data);
     }
     within_bfloat16(&cases, "depth.maps", &maps);
+    let frames = finals.shape_at(0).unwrap() as usize;
+    each_within_float32(&cases, "depth.maps", &maps, frames, 1e-5);
 
     // -- the whole of it, at the reference's size ------------------------------------------
     let options = SeeThroughOptions {
