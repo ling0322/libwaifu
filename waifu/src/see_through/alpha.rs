@@ -377,8 +377,11 @@ impl AlphaDecoder {
             )));
         }
 
-        let pixel = pixel.cast(self.dtype)?;
-        let latent = latent.cast(self.dtype)?;
+        // Brought to the weights and their precision, wherever they were made: a picture read off
+        // the disk is on the host whatever the model is on, as the autoencoder's halves allow too.
+        let device = self.weights.device();
+        let pixel = pixel.to_device(device)?.cast(self.dtype)?;
+        let latent = latent.to_device(device)?.cast(self.dtype)?;
         let context = RunContext::new(&*self.weights)
             .input("pixel", &pixel)
             .input("latent", &latent);

@@ -40,6 +40,17 @@ the voice to convert it to, and a clip out -- the same package that reads text, 
 API's voice conversion. It changes whose voice it is and keeps the words, timing and accent (see
 [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion)).
 
+## Layer decomposition
+
+**See-through** takes an anime illustration apart into the layers it was drawn in -- hair, face,
+eyes, clothing, up to twenty-four of them, with what each hides drawn in -- and stacks them by
+depth into a Photoshop document: the `img2layers` task, in the library and through the C API's
+`waifu_engine_layers_async` (see [docs/see_through.md](docs/see_through.md)).
+
+| name | model | published as |
+|---|---|---|
+| `see-through` | See-through v0.0.2: LayerDiff 3D and its Marigold depth model | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-see-through)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-see-through)\] |
+
 ## Low memory mode
 
 `-device cuda`, `-device vulkan` and `-device metal` keep as many of the model's weights on the
@@ -90,6 +101,9 @@ model_dir = 'D:\models'
 
 ## Recent updates
 
+- [2026-10-28] See-through (`img2layers`): a picture taken apart into a layered, depth-sorted
+  PSD, in the library and through the C API. Published as `see-through`; every reference check
+  holds it as close to float32 as upstream's own bfloat16 run is, or closer.
 - [2026-10-13] Drawing is back in the terminal, on the screen it had before the web page, and the
   web page is removed: `waifu` picks a task, a model and a device and then draws right there,
   writing every picture into `waifu-output`. Speech is the C API's and the macOS app's.
