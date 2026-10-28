@@ -49,6 +49,11 @@
 //! of the timestep and of the six numbers about the image are sines and cosines, which nothing
 //! here computes. They stay on the host, where [`timestep_embedding`] has always computed them in
 //! double precision, and arrive as inputs already widened to a row per latent.
+//!
+//! **A similar implementation lives in [`crate::see_through`]'s `unet.rs`**: See-through's U-Nets
+//! are this one with attention across the batch added, copied rather than shared because the models
+//! are not the same. It mirrors these blocks one for one, so a fix to a block here very likely
+//! belongs there too.
 
 use std::fmt;
 use std::rc::Rc;

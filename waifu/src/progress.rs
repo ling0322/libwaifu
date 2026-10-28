@@ -21,6 +21,7 @@
 
 use std::time::Instant;
 
+use crate::see_through::SeeThroughProgress;
 use crate::{ConversionProgress, GenerationProgress, SpeechProgress};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
@@ -141,6 +142,12 @@ pub enum Doing {
     Drawing(Run),
     Speaking(Say),
     Converting(Convert),
+    /// Taking a picture apart into layers: two passes of `steps`, then `depth_steps` of depth.
+    Layering {
+        progress: SeeThroughProgress,
+        steps: i32,
+        depth_steps: i32,
+    },
 }
 
 impl Doing {
@@ -159,6 +166,11 @@ impl Doing {
             Doing::Drawing(run) => Some(drawn(run.progress, run.steps)),
             Doing::Speaking(say) => Some(spoken(say, Instant::now())),
             Doing::Converting(convert) => Some(converted(convert)),
+            Doing::Layering {
+                progress,
+                steps,
+                depth_steps,
+            } => Some(layered(*progress, *steps, *depth_steps)),
         }
     }
 
@@ -195,8 +207,30 @@ impl Doing {
                     total => format!("making the sound, {} of {total}", (done + 1).min(total)),
                 },
             },
+            Doing::Layering { progress, .. } => match progress {
+                SeeThroughProgress::Layers { pass, done, total } => match pass {
+                    0 => format!("drawing the layers, step {done} of {total}"),
+                    _ => format!("drawing the head's layers, step {done} of {total}"),
+                },
+                SeeThroughProgress::Depth { done, total } => {
+                    format!("ordering the layers, step {done} of {total}")
+                }
+                SeeThroughProgress::Assembling => "cutting the layers into parts".to_string(),
+            },
         }
     }
+}
+
+/// How far along taking a picture apart is: the steps of all three walks, one after the other.
+fn layered(progress: SeeThroughProgress, steps: i32, depth_steps: i32) -> f64 {
+    let (steps, depth_steps) = (f64::from(steps.max(1)), f64::from(depth_steps.max(1)));
+    let all = 2.0 * steps + depth_steps + 1.0;
+    let done = match progress {
+        SeeThroughProgress::Layers { pass, done, .. } => f64::from(pass) * steps + f64::from(done),
+        SeeThroughProgress::Depth { done, .. } => 2.0 * steps + f64::from(done),
+        SeeThroughProgress::Assembling => 2.0 * steps + depth_steps,
+    };
+    (done / all).min(1.0)
 }
 
 /// How far along a run is, as a bar can show it.

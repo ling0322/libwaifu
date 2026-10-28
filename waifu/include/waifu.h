@@ -235,6 +235,62 @@ typedef struct {
   uint64_t seed;
 } WaifuVoiceConversionRequest;
 
+// A picture as rows of RGBA, not premultiplied.
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  // width * height * 4 bytes, rows top to bottom.
+  const uint8_t *rgba;
+  size_t len;
+} WaifuRgbaImage;
+
+typedef struct {
+  // sizeof(WaifuLayersRequest), as the caller was compiled with.
+  uint32_t struct_size;
+  // The illustration: any size, centred and scaled by the engine. Transparent is fine.
+  const WaifuRgbaImage *image;
+  // 0 for the model's own.
+  uint32_t steps;
+  // 0 for the model's own.
+  uint32_t depth_steps;
+  // The side of the square the layers are drawn at, a multiple of 64; 0 for the model's own,
+  // 1280. Smaller is faster and needs less memory.
+  uint32_t resolution;
+  // Split what comes in pairs -- hands, eyes, eyebrows, ears -- into a -l and a -r layer.
+  bool split_pairs;
+  uint64_t seed;
+} WaifuLayersRequest;
+
+// One layer of a picture taken apart.
+typedef struct {
+  // What it is: "front hair", "irides", "topwear".
+  const char *name;
+  // Where its top left corner is on the canvas.
+  int32_t left;
+  int32_t top;
+  // Only as large as what is drawn.
+  WaifuRgbaImage image;
+  // How far away it is, 0 near to 1 far; the layers come farthest first.
+  float depth;
+} WaifuLayer;
+
+typedef struct {
+  WaifuStatus status;
+  // The side of the square canvas the layers are on; 0 unless status.code is WAIFU_OK.
+  uint32_t canvas;
+  // Bottom first; NULL, 0 unless status.code is WAIFU_OK.
+  const WaifuLayer *layers;
+  size_t layer_count;
+  // A Photoshop document of the layers; NULL, 0 unless status.code is WAIFU_OK.
+  const uint8_t *psd;
+  size_t psd_len;
+  // The same document with each layer's depth in place of its colour, in grayscale.
+  const uint8_t *depth_psd;
+  size_t depth_psd_len;
+} WaifuLayersCompletionEvent;
+
+typedef void (*WaifuLayersCompleteCallback)(void *user_data, const WaifuLayersCompletionEvent *event);
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -340,6 +396,13 @@ WaifuJob waifu_engine_voice_conversion_async(WaifuEngine *engine,
                                              void *user_data,
                                              WaifuProgressCallback on_progress,
                                              WaifuAudioCompleteCallback on_complete);
+
+// Takes an illustration apart into the layers it was drawn in, with See-through loaded.
+WaifuJob waifu_engine_layers_async(WaifuEngine *engine,
+                                   const WaifuLayersRequest *request,
+                                   void *user_data,
+                                   WaifuProgressCallback on_progress,
+                                   WaifuLayersCompleteCallback on_complete);
 
 #ifdef __cplusplus
 }  // extern "C"
