@@ -91,11 +91,22 @@ struct Converter: Decodable {
     var noStyleBecause: String?
 }
 
+/// A model that takes a picture apart into layers: See-through.
+struct Layerer: Decodable {
+    var name: String
+    var fullName: String?
+    var onDisk: Bool
+    var steps: Int
+    var depthSteps: Int
+    /// The side of the square it draws the layers at.
+    var resolution: Int
+}
+
 /// The model that is loaded, and what it can be asked for.
 struct ModelInfo {
     /// What it was loaded as: a published name, or a manifest's path.
     var name: String
-    /// "image", "speech" or "conversion": what it is first.
+    /// "image", "speech", "conversion" or "layers": what it is first.
     var kind: String
     /// Everything it does: CosyVoice3 reads and converts.
     var kinds: [String]
@@ -106,6 +117,7 @@ struct ModelInfo {
     var model: Chosen?
     var voice: Voice?
     var converter: Converter?
+    var layerer: Layerer?
 
     /// What the library says of `name`, for a model about to be, or just, loaded.
     static func describe(_ name: String, device: String) throws -> ModelInfo {
@@ -125,6 +137,8 @@ struct ModelInfo {
         switch kinds.kind {
         case "image":
             info.model = try decoder.decode(Chosen.self, from: data)
+        case "layers":
+            info.layerer = try decoder.decode(Layerer.self, from: data)
         case "speech":
             info.voice = try decoder.decode(Voice.self, from: data)
             info.converter = try decoder.decode(Both.self, from: data).conversion
@@ -135,12 +149,12 @@ struct ModelInfo {
     }
 
     var fullName: String {
-        model?.fullName ?? voice?.fullName ?? converter?.fullName ?? name
+        model?.fullName ?? voice?.fullName ?? converter?.fullName ?? layerer?.fullName ?? name
     }
 
     /// Whether it is already fetched: one that is not is fetched by the first job that needs it.
     var onDisk: Bool {
-        model?.onDisk ?? voice?.onDisk ?? converter?.onDisk ?? false
+        model?.onDisk ?? voice?.onDisk ?? converter?.onDisk ?? layerer?.onDisk ?? false
     }
 }
 
@@ -244,6 +258,14 @@ struct Made: Codable {
     // A sound.
     var length: Double?
     var rate: Int?
+    // A picture taken apart: the picture it was, and the steps, which are `steps`, of both models.
+    var depthSteps: Int?
+    var resolution: Int?
+    var splitPairs: Bool?
+    /// The side of the square canvas the layers are on.
+    var canvas: Int?
+    /// Bottom first, each in a PNG of its own in the job's folder.
+    var layers: [KeptLayer]?
 
     /// A picture's settings, with the lines that are copied and shown under it.
     static func picture(
@@ -262,12 +284,24 @@ struct Made: Codable {
     }
 }
 
+/// One layer of a picture taken apart, as it is kept: where on the canvas, how far away, and the
+/// file of its pixels, named in the job's own folder.
+struct KeptLayer: Codable, Hashable {
+    var name: String
+    var left: Int
+    var top: Int
+    var width: Int
+    var height: Int
+    var depth: Float
+    var file: String
+}
+
 /// A job this window asked for, or one read back out of the output folder.
 struct Job: Identifiable {
     enum Status { case queued, running, done, failed, cancelled }
 
     var id: String
-    /// "image", "speech" or "conversion".
+    /// "image", "speech", "conversion" or "layers".
     var kind: String
     var status: Status
     /// Milliseconds since 1970, as file names are made from.
@@ -403,7 +437,7 @@ struct ImageRecord: Codable {
     }
 }
 
-/// What is kept on the disk for a finished reading or conversion -- a picture has an
+/// What is kept on the disk for a finished reading, conversion or picture taken apart -- a picture has an
 /// `ImageRecord` -- and for a picture made before that: its id, kind and when, and what made it,
 /// beside a file of the same id holding what it made.
 struct Record: Codable {

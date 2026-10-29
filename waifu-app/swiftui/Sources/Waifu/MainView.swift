@@ -36,6 +36,15 @@ enum Theme {
     static var control: Color {
         if #available(macOS 26, *) { Color(white: 0.305) } else { Color(white: 0.416) }
     }
+
+    /// How far under its toolbar a column's first heading starts, given what it would be: from
+    /// macOS 26 the sidebar runs up to the top of the window and its "Tasks" sits just under the
+    /// window's buttons, while the columns beside it start under their toolbars -- so they start
+    /// all but at once, which puts their first headings on its line. Before 26 every column starts
+    /// under the toolbar, and `regular` lines them up already.
+    static func top(_ regular: CGFloat, from26: CGFloat) -> CGFloat {
+        if #available(macOS 26, *) { from26 } else { regular }
+    }
 }
 
 struct MainView: View {
@@ -98,7 +107,8 @@ struct MainView: View {
         guard let model = session.model else { return "no model chosen" }
         let name =
             model.model?.fullName ?? model.voice?.fullName ?? model.converter?.fullName
-            ?? model.model?.name ?? model.voice?.name ?? model.converter?.name ?? ""
+            ?? model.layerer?.fullName ?? model.model?.name ?? model.voice?.name
+            ?? model.converter?.name ?? model.layerer?.name ?? ""
         return [name, session.device].compactMap { $0 }.filter { !$0.isEmpty }
             .joined(separator: " on ")
     }
@@ -200,6 +210,7 @@ extension Tab {
         switch self {
         case .text2img: .blue
         case .img2img: .purple
+        case .img2layers: .teal
         case .text2speech: .pink
         case .speech2speech: .orange
         }
@@ -345,6 +356,7 @@ struct GoBar: View {
     private var goWord: String {
         switch session.tab {
         case .text2img, .img2img: "Generate"
+        case .img2layers: "Split into Layers"
         case .text2speech: "Speak"
         case .speech2speech: "Convert"
         }

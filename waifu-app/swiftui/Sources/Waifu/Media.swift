@@ -87,6 +87,78 @@ enum Media {
         return RGBImage(width: width, height: height, rgb: rgb)
     }
 
+    /// A picture as img2layers takes it: 8-bit RGBA, row by row, at its pixel size, with its
+    /// transparency, and not premultiplied -- which CoreGraphics only draws, so it is undone here.
+    static func rgba(_ image: NSImage) -> RGBAImage? {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let width = cg.width
+        let height = cg.height
+        guard width > 0, height > 0 else { return nil }
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = rgba.withUnsafeMutableBytes { buffer -> Bool in
+            guard
+                let context = CGContext(
+                    data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                    bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            context.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        unpremultiply(&rgba)
+        return RGBAImage(width: width, height: height, rgba: rgba)
+    }
+
+    /// Each pixel's colour divided by its alpha, rounded: what was premultiplied, back as it was
+    /// to within a level. A pixel with no alpha has no colour to give back, and is left black.
+    static func unpremultiply(_ rgba: inout [UInt8]) {
+        for at in stride(from: 0, to: rgba.count - 3, by: 4) {
+            let alpha = Int(rgba[at + 3])
+            guard alpha > 0, alpha < 255 else { continue }
+            for channel in 0..<3 {
+                rgba[at + channel] = UInt8(min(255, (Int(rgba[at + channel]) * 255 + alpha / 2) / alpha))
+            }
+        }
+    }
+
+    /// An RGBA picture the engine made, as the bytes of a PNG file with its transparency.
+    static func png(_ image: RGBAImage) -> Data? {
+        guard image.width > 0, image.height > 0, image.rgba.count == image.width * image.height * 4,
+            let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: image.width, pixelsHigh: image.height,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bitmapFormat: .alphaNonpremultiplied,
+                bytesPerRow: image.width * 4, bitsPerPixel: 32),
+            let pixels = bitmap.bitmapData
+        else { return nil }
+        image.rgba.withUnsafeBytes { pixels.update(from: $0.bindMemory(to: UInt8.self).baseAddress!, count: $0.count) }
+        return bitmap.representation(using: .png, properties: [:])
+    }
+
+    /// The layers laid over each other, bottom first, on a transparent square `canvas` pixels a
+    /// side: what the picture looks like put back together, as a PNG.
+    static func composite(_ layers: [Layer], canvas: Int) -> Data? {
+        guard canvas > 0,
+            let context = CGContext(
+                data: nil, width: canvas, height: canvas, bitsPerComponent: 8, bytesPerRow: canvas * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        for layer in layers {
+            guard let png = png(layer.image), let image = NSImage(data: png),
+                let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            else { continue }
+            // CoreGraphics counts up from the bottom; the canvas counts down from the top.
+            let box = CGRect(
+                x: layer.left, y: canvas - layer.top - layer.image.height, width: layer.image.width,
+                height: layer.image.height)
+            context.draw(cg, in: box)
+        }
+        guard let made = context.makeImage() else { return nil }
+        return NSBitmapImageRep(cgImage: made).representation(using: .png, properties: [:])
+    }
+
     /// What the engine drew, as the bytes of a PNG file.
     static func png(_ image: RGBImage) -> Data? {
         guard image.width > 0, image.height > 0, image.rgb.count == image.width * image.height * 3,
@@ -172,15 +244,27 @@ enum Media {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = formatter.string(from: Date(timeIntervalSince1970: milliseconds / 1000))
-        return "waifu-\(stamp).\(kind == "image" ? "png" : "wav")"
+        return "waifu-\(stamp).\(fileExtension(kind))"
     }
+
+    /// What a job of `kind` makes is kept as: a picture a PNG, a picture taken apart a Photoshop
+    /// document, and a sound a WAV.
+    static func fileExtension(_ kind: String) -> String {
+        switch kind {
+        case "image": "png"
+        case "layers": "psd"
+        default: "wav"
+        }
+    }
+
+    static let psd = UTType(filenameExtension: "psd") ?? .data
 
     /// Asks where to save `bytes`, and saves them there.
     @MainActor
     static func save(_ bytes: Data, suggesting name: String) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
-        panel.allowedContentTypes = [name.hasSuffix(".png") ? .png : .wav]
+        panel.allowedContentTypes = [name.hasSuffix(".png") ? .png : name.hasSuffix(".psd") ? psd : .wav]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

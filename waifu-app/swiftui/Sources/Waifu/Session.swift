@@ -32,7 +32,7 @@ import WaifuKit
 
 /// The tabs, which what the model does decides.
 enum Tab: String, CaseIterable, Identifiable {
-    case text2img, img2img, text2speech, speech2speech
+    case text2img, img2img, img2layers, text2speech, speech2speech
 
     var id: String { rawValue }
 
@@ -40,6 +40,7 @@ enum Tab: String, CaseIterable, Identifiable {
         switch self {
         case .text2img: "text.below.photo"
         case .img2img: "photo.on.rectangle"
+        case .img2layers: "square.3.layers.3d"
         case .text2speech: "waveform"
         case .speech2speech: "person.wave.2"
         }
@@ -49,6 +50,7 @@ enum Tab: String, CaseIterable, Identifiable {
     var kind: String {
         switch self {
         case .text2img, .img2img: "image"
+        case .img2layers: "layers"
         case .text2speech: "speech"
         case .speech2speech: "conversion"
         }
@@ -71,6 +73,10 @@ struct JobForm {
     var conversionSteps = 30
     var convertStyle = false
     var style = ""
+    var layerSteps = 30
+    var depthSteps = 4
+    var layerResolution = 1280
+    var splitPairs = false
 }
 
 /// A picture or a recording this window is holding to start from: as the engine takes it, and as
@@ -82,6 +88,8 @@ struct Held {
     var url: URL?
     var image: NSImage?
     var rgb: RGBImage?
+    /// The same with its transparency, which img2layers takes.
+    var rgba: RGBAImage?
     var clip: AudioClip?
 }
 
@@ -106,7 +114,7 @@ struct BarState {
 final class Session {
     /// The engine, and what is loaded into it.
     let launcher = Launcher()
-    /// The model chosen for each kind of job -- "image", "speech", "conversion" -- as it is asked
+    /// The model chosen for each kind of job -- "image", "speech", "conversion", "layers" -- as it is asked
     /// for: a published name or a manifest's path. Kept from one run of the app to the next.
     private(set) var chosen: [String: String] = [:]
     /// What each chosen model is, as the library says without reading it -- which is all the
@@ -173,7 +181,7 @@ final class Session {
     /// for the job that needs it and not out from under the one before.
     private var last: Task<Void, Never>?
 
-    static let kinds = ["image", "speech", "conversion"]
+    static let kinds = ["image", "speech", "conversion", "layers"]
 
     /// What the Model card offers to run on, as the library names them.
     static let devices = ["auto", "metal", "cpu"]
@@ -289,13 +297,27 @@ final class Session {
         if let converter = model.converter {
             form.conversionSteps = converter.steps
         }
+        if let layerer = model.layerer {
+            form.layerSteps = layerer.steps
+            form.depthSteps = layerer.depthSteps
+            form.layerResolution = layerer.resolution
+        }
     }
 
     // MARK: - what is kept on the disk
 
     private func file(_ id: String, kind: String) -> URL {
-        folder.appendingPathComponent("\(id).\(kind == "image" ? "png" : "wav")")
+        folder.appendingPathComponent("\(id).\(Media.fileExtension(kind))")
     }
+
+    /// What a picture taken apart keeps beside its document: the picture put back together, the
+    /// depth document, and each layer in a PNG of its own.
+    func besideFolder(_ id: String) -> URL {
+        folder.appendingPathComponent("\(id).layers")
+    }
+
+    nonisolated static let composite = "composite.png"
+    nonisolated static let depthDocument = "depth.psd"
 
     private func recordFile(_ id: String) -> URL {
         folder.appendingPathComponent("\(id).json")
@@ -336,6 +358,25 @@ final class Session {
         guard let bytes = await Task.detached(operation: { try? Data(contentsOf: url) }).value else { return }
         outputs[job.id] = bytes
         if job.kind == "image" { images[job.id] = NSImage(data: bytes) }
+        if job.kind == "layers" {
+            let composite = besideFolder(job.id).appendingPathComponent(Self.composite)
+            let png = await Task.detached { try? Data(contentsOf: composite) }.value
+            images[job.id] = png.flatMap(NSImage.init(data:))
+        }
+    }
+
+    /// Each layer of a picture taken apart, by its file, read off the disk.
+    func layerImages(_ job: Job) async -> [String: NSImage] {
+        let folder = besideFolder(job.id)
+        let files = (job.made?.layers ?? []).map(\.file)
+        let read = await Task.detached {
+            var read: [String: Data] = [:]
+            for file in files {
+                read[file] = try? Data(contentsOf: folder.appendingPathComponent(file))
+            }
+            return read
+        }.value
+        return read.compactMapValues(NSImage.init(data:))
     }
 
     /// The record kept beside what job `id` made, as it is written on the disk: nil where there is
@@ -346,8 +387,9 @@ final class Session {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Writes what a job made, and what made it, and shows it.
-    private func keep(_ id: String, bytes: Data, made: Made) {
+    /// Writes what a job made, and what made it, and shows it. `beside` is what a picture taken
+    /// apart keeps in its folder beside the document, by file name.
+    private func keep(_ id: String, bytes: Data, made: Made, beside: [String: Data] = [:]) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         let finished = Date().timeIntervalSince1970 * 1000
         jobs[index].status = .done
@@ -355,6 +397,7 @@ final class Session {
         jobs[index].made = made
         outputs[id] = bytes
         if jobs[index].kind == "image" { images[id] = NSImage(data: bytes) }
+        if jobs[index].kind == "layers" { images[id] = beside[Self.composite].flatMap(NSImage.init(data:)) }
         // What was asked for last is what should be on show.
         showing = nil
         playing = nil
@@ -363,6 +406,11 @@ final class Session {
         let output = file(id, kind: kind)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            if !beside.isEmpty {
+                let besides = besideFolder(id)
+                try FileManager.default.createDirectory(at: besides, withIntermediateDirectories: true)
+                for (name, data) in beside { try data.write(to: besides.appendingPathComponent(name)) }
+            }
             try bytes.write(to: output)
             let json: Data
             if kind == "image" {
@@ -381,30 +429,48 @@ final class Session {
 
     // MARK: - what the screen reads
 
+    /// Every job of this window's still going, whichever tab asked for it: one at a time, on the
+    /// one engine.
     var going: [Job] { jobs.filter(\.isGoing) }
     var running: Job? { jobs.first { $0.status == .running } }
     var waiting: [Job] { jobs.filter { $0.status == .queued } }
+    /// Whether anything is going at all: what the cards every tab shares -- the device, the
+    /// Model Manager -- are held for.
+    var busy: Bool { !going.isEmpty }
+    /// The jobs still going of the tab on show: its bar, its Cancel, and its settings held.
+    var goingHere: [Job] { going.filter { $0.kind == tab.kind } }
+    /// The tab a job going elsewhere was asked for from, for saying why this one has to wait.
+    var busyElsewhere: Tab? {
+        guard let job = going.first(where: { $0.kind != tab.kind }) else { return nil }
+        return tabs.first { $0.kind == job.kind } ?? Tab.allCases.first { $0.kind == job.kind }
+    }
     /// What is on show in the strip: the current tab's kind only.
     var done: [Job] { jobs.filter { $0.isDone && $0.kind == tab.kind } }
 
-    /// The tasks the sidebar offers: drawing from words, and reading words out. The others are
-    /// written and come back by being listed here.
-    var tabs: [Tab] { [.text2img, .text2speech] }
+    /// The tasks the sidebar offers: drawing from words, taking a picture apart, and reading words
+    /// out. The others are written and come back by being listed here.
+    var tabs: [Tab] { [.text2img, .img2layers, .text2speech] }
+
+    /// Whether what this tab makes is looked at rather than listened to.
+    var showsPictures: Bool { tab.kind == "image" || tab.kind == "layers" }
 
     /// The picture or clip on show: the one picked, or the newest.
     var shown: Job? {
-        let picked = tab.kind == "image" ? showing : playing
+        let picked = showsPictures ? showing : playing
         return done.first { $0.id == picked } ?? done.first
     }
 
+    /// The bar of the tab on show: its own job's, and nothing of another tab's.
     var bar: BarState {
-        var bar = BarState(busy: !going.isEmpty)
-        // Fetching or reading the model, which the job waits on before it has a step to report.
-        if case .loading(_, let line, let fraction) = launcher.state {
-            bar.busy = true
+        let here = goingHere
+        var bar = BarState(busy: !here.isEmpty)
+        let running = here.first { $0.status == .running }
+        // Fetching or reading the model, which the job waits on before it has a step to report:
+        // the job running is the one it is read for.
+        if let running, case .loading(_, let line, let fraction) = launcher.state {
             bar.doing = line
             bar.fraction = fraction
-            if let running { bar.stopping = stopping.contains(running.id) }
+            bar.stopping = stopping.contains(running.id)
             return bar
         }
         if let running, let progress, progress.job == running.id {
@@ -414,35 +480,40 @@ final class Session {
             bar.stopping = stopping.contains(running.id)
         } else if running != nil {
             bar.doing = "starting"
-        } else if !waiting.isEmpty {
+        } else if !here.isEmpty {
             bar.doing = "waiting for the job before it"
         }
         return bar
     }
 
-    /// What to say over the output: a complaint about the last click, or what the last job
-    /// came to.
+    /// What to say over the output: a complaint about the last click, why nothing can be asked
+    /// for while another tab's job runs, or what this tab's last job came to.
     var note: (said: String, bad: Bool)? {
         if let complaint { return (complaint, true) }
-        switch jobs.first?.status {
-        case .failed: return (jobs.first?.error ?? "it failed", true)
+        if goingHere.isEmpty, let elsewhere = busyElsewhere {
+            return ("\(elsewhere.rawValue) is running: this waits until it is done, or is stopped there", false)
+        }
+        let last = jobs.first { $0.kind == tab.kind }
+        switch last?.status {
+        case .failed: return (last?.error ?? "it failed", true)
         case .cancelled: return ("stopped where it was", false)
         default: return nil
         }
     }
 
-    /// Whether there is anything of this window's to stop.
-    var canStop: Bool { !going.isEmpty }
+    /// Whether the tab on show has a job of its own to stop.
+    var canStop: Bool { !goingHere.isEmpty }
 
-    /// A job can be asked for while another runs -- it waits its turn -- but not while one is
-    /// already waiting: a second click is not a second job.
+    /// One job at a time, from whichever tab: while one is going, nothing else can be asked for.
     var canGo: Bool {
-        guard waiting.isEmpty, let model else { return false }
+        guard going.isEmpty, let model else { return false }
         switch tab {
         case .text2img:
             return model.model != nil && !form.prompt.isBlank && namedTrouble == nil
         case .img2img:
             return model.model?.drawsFromAPicture == true && picture != nil && !form.prompt.isBlank
+        case .img2layers:
+            return model.layerer != nil && picture?.rgba != nil
         case .text2speech:
             return model.voice != nil && !form.text.isBlank && !wantsARecording
         case .speech2speech:
@@ -462,6 +533,7 @@ final class Session {
         guard canGo else { return }
         switch tab {
         case .text2img, .img2img: generate()
+        case .img2layers: takeApart()
         case .text2speech: speak()
         case .speech2speech: convert()
         }
@@ -476,10 +548,10 @@ final class Session {
 
     /// Starts a job of `kind` on `model`: listed at once, run when the one before it has ended --
     /// fetching and reading the model first where it is not the one loaded -- and kept when it
-    /// ends.
+    /// ends: what `run` hands back is the file, what made it, and what is kept beside the file.
     private func start(
         kind: String, model: String,
-        _ run: @escaping (Engine, @escaping ProgressHandler) async throws -> (Data, Made)?
+        _ run: @escaping (Engine, @escaping ProgressHandler) async throws -> (Data, Made, [String: Data])?
     ) {
         complaint = nil
         let id = UUID().uuidString.lowercased()
@@ -504,8 +576,8 @@ final class Session {
                 let wasLoaded = launcher.has(model, on: placement)
                 let engine = try await launcher.ensure(model, on: placement)
                 if !wasLoaded { refresh(model) }
-                if let (bytes, made) = try await run(engine, report) {
-                    keep(id, bytes: bytes, made: made)
+                if let (bytes, made, beside) = try await run(engine, report) {
+                    keep(id, bytes: bytes, made: made, beside: beside)
                 } else {
                     ended(id, as: .cancelled)
                 }
@@ -587,7 +659,7 @@ final class Session {
             drawn.device = engine.device.replacingOccurrences(of: "_", with: "-")
             drawn.startFrom = made.startFrom
             drawn.promptPictures = made.promptPictures
-            return (png, drawn)
+            return (png, drawn, [:])
         }
     }
 
@@ -650,7 +722,7 @@ final class Session {
             made.seconds = Date().timeIntervalSince(started)
             made.length = clip.seconds
             made.rate = clip.rate
-            return (Media.wav(clip.samples, rate: clip.rate), made)
+            return (Media.wav(clip.samples, rate: clip.rate), made, [:])
         }
     }
 
@@ -674,13 +746,73 @@ final class Session {
             made.seconds = Date().timeIntervalSince(started)
             made.length = clip.seconds
             made.rate = clip.rate
-            return (Media.wav(clip.samples, rate: clip.rate), made)
+            return (Media.wav(clip.samples, rate: clip.rate), made, [:])
         }
     }
 
-    /// Stops the running job after the step it is on, or takes the waiting one out of line.
+    /// Takes the held picture apart into its layers: the document is what is kept, and beside it
+    /// the depth document, the picture put back together, and each layer as a PNG.
+    private func takeApart() {
+        guard model?.layerer != nil, let modelName = model?.name, let rgba = picture?.rgba else { return }
+        let seed = seed
+        // A multiple of 64, as the engine takes it.
+        let resolution = max(64, (form.layerResolution + 32) / 64 * 64)
+        var request = LayersRequest(image: rgba, seed: seed)
+        request.steps = form.layerSteps
+        request.depthSteps = form.depthSteps
+        request.resolution = resolution
+        request.splitPairs = form.splitPairs
+
+        let named = ModelManager.versionedName(modelName) ?? modelName
+        var asked = Made(
+            seed: seed, seconds: 0, model: named,
+            parameters: "Steps: \(form.layerSteps), Depth steps: \(form.depthSteps), Resolution: \(resolution), "
+                + "Split pairs: \(form.splitPairs ? "yes" : "no"), Seed: \(seed), Model: \(named)",
+            width: rgba.width, height: rgba.height, steps: form.layerSteps)
+        asked.depthSteps = form.depthSteps
+        asked.resolution = resolution
+        asked.splitPairs = form.splitPairs
+        asked.startFrom = startFrom()?.path
+        let made = asked
+
+        start(kind: "layers", model: modelName) { engine, report in
+            let started = Date()
+            guard let taken = try await engine.layers(request, progress: report) else { return nil }
+            var made = made
+            made.seconds = Date().timeIntervalSince(started)
+            made.device = engine.device.replacingOccurrences(of: "_", with: "-")
+            made.canvas = taken.canvas
+            let (kept, beside) = await Task.detached { Self.files(of: taken) }.value
+            made.layers = kept
+            return (taken.psd, made, beside)
+        }
+    }
+
+    /// What a picture taken apart keeps beside its document, by file name, and the list of its
+    /// layers that names them: made off the main thread, since it is two dozen PNGs.
+    nonisolated static func files(of taken: Layers) -> ([KeptLayer], [String: Data]) {
+        var beside: [String: Data] = [depthDocument: taken.depthPSD]
+        if let composite = Media.composite(taken.layers, canvas: taken.canvas) {
+            beside[Self.composite] = composite
+        }
+        var kept: [KeptLayer] = []
+        for (index, layer) in taken.layers.enumerated() {
+            guard let png = Media.png(layer.image) else { continue }
+            let file = String(format: "%02d.png", index)
+            beside[file] = png
+            kept.append(
+                KeptLayer(
+                    name: layer.name, left: layer.left, top: layer.top, width: layer.image.width,
+                    height: layer.image.height, depth: layer.depth, file: file))
+        }
+        return (kept, beside)
+    }
+
+    /// Stops the tab on show's running job after the step it is on, or takes its waiting one out
+    /// of line.
     func stop() {
-        guard let job = running ?? waiting.first else { return }
+        let here = goingHere
+        guard let job = here.first(where: { $0.status == .running }) ?? here.first else { return }
         stopping.insert(job.id)
         tasks[job.id]?.cancel()
         // One that has not had its turn is out of line at once, not when the one before it ends.
@@ -691,6 +823,7 @@ final class Session {
     func forget(_ job: Job) {
         try? FileManager.default.removeItem(at: file(job.id, kind: job.kind))
         try? FileManager.default.removeItem(at: recordFile(job.id))
+        if job.kind == "layers" { try? FileManager.default.removeItem(at: besideFolder(job.id)) }
         jobs.removeAll { $0.id == job.id }
         outputs[job.id] = nil
         images[job.id] = nil
@@ -721,7 +854,7 @@ final class Session {
         // What it was drawn on, where the record says and the card offers it -- a record spells
         // it with hyphens -- and not while a job is going, when the card cannot change it either.
         if let device = made.device?.replacingOccurrences(of: "-", with: "_"),
-            Session.devices.contains(device), !canStop
+            Session.devices.contains(device), !busy
         {
             self.device = device
         }
@@ -757,6 +890,20 @@ final class Session {
             form.speed = made.speed ?? form.speed
             form.temperature = made.temperature ?? form.temperature
             form.style = made.style ?? ""
+        case "layers":
+            form.layerSteps = made.steps ?? form.layerSteps
+            form.depthSteps = made.depthSteps ?? form.depthSteps
+            form.layerResolution = made.resolution ?? form.layerResolution
+            form.splitPairs = made.splitPairs ?? form.splitPairs
+            // The picture it took apart, where it still is.
+            if let path = made.startFrom {
+                let url = URL(fileURLWithPath: path)
+                if FileManager.default.fileExists(atPath: path) {
+                    holdPicture(at: url)
+                } else {
+                    complaint = "\(url.lastPathComponent), which it took apart, is no longer there"
+                }
+            }
         default:
             form.conversionSteps = made.steps ?? form.conversionSteps
             form.convertStyle = made.convertStyle ?? false
@@ -766,6 +913,22 @@ final class Session {
     func save(_ job: Job) {
         guard let bytes = outputs[job.id] else { return }
         Media.save(bytes, suggesting: Media.fileName(created: job.finished ?? job.created, kind: job.kind))
+    }
+
+    /// Saves a picture taken apart's depth document: each layer's depth in place of its colour.
+    func saveDepth(_ job: Job) {
+        let url = besideFolder(job.id).appendingPathComponent(Self.depthDocument)
+        guard let bytes = try? Data(contentsOf: url) else {
+            complaint = "its depth document is no longer in \(folder.path)"
+            return
+        }
+        let name = Media.fileName(created: job.finished ?? job.created, kind: job.kind)
+        Media.save(bytes, suggesting: name.replacingOccurrences(of: ".psd", with: "-depth.psd"))
+    }
+
+    /// Shows a picture taken apart's document, and the folder of its layers, in Finder.
+    func reveal(_ job: Job) {
+        NSWorkspace.shared.activateFileViewerSelecting([file(job.id, kind: job.kind), besideFolder(job.id)])
     }
 
     // MARK: - what is held
@@ -786,8 +949,9 @@ final class Session {
             return
         }
         complaint = nil
-        picture = Held(bytes: bytes, url: url?.standardizedFileURL, image: image, rgb: rgb)
-        tab = .img2img
+        picture = Held(bytes: bytes, url: url?.standardizedFileURL, image: image, rgb: rgb, rgba: Media.rgba(image))
+        // A picture to take apart stays on img2layers; anywhere else it is one to draw from.
+        if tab != .img2layers { tab = .img2img }
     }
 
     // MARK: - pictures the prompt names

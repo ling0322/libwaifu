@@ -28,7 +28,8 @@ struct OutputPane: View {
     @State private var deleting: Job?
     @State private var deletingAll = false
 
-    private var pictures: Bool { session.tab.kind == "image" }
+    private var pictures: Bool { session.showsPictures }
+    private var layers: Bool { session.tab.kind == "layers" }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -42,7 +43,13 @@ struct OutputPane: View {
 
             Group {
                 if let job = session.shown {
-                    if pictures { PictureFrame(session: session, job: job) } else { ClipFrame(session: session, job: job) }
+                    if layers {
+                        LayersFrame(session: session, job: job).id(job.id)
+                    } else if pictures {
+                        PictureFrame(session: session, job: job)
+                    } else {
+                        ClipFrame(session: session, job: job)
+                    }
                 } else {
                     Text(nothing).foregroundStyle(.secondary)
                 }
@@ -71,15 +78,21 @@ struct OutputPane: View {
         switch session.tab.kind {
         case "speech": "Nothing said yet."
         case "conversion": "Nothing converted yet."
+        case "layers": "Nothing split into layers yet."
         default: "Nothing drawn yet."
         }
     }
 
     private func actions(_ job: Job) -> some View {
         HStack {
-            Button("Save…") { session.save(job) }
+            Button(layers ? "Save PSD…" : "Save…") { session.save(job) }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(session.outputs[job.id] == nil)
+            if layers {
+                Button("Save Depth PSD…") { session.saveDepth(job) }
+                    .help("The same document with each layer's depth in place of its colour")
+                Button("Show in Finder") { session.reveal(job) }
+            }
             Button("Reuse these settings") { session.reuse(job) }
             Spacer()
             Button("Delete", role: .destructive) { deleting = job }
@@ -329,6 +342,152 @@ struct PointingHand: NSViewRepresentable {
 
     func makeNSView(context: Context) -> Area { Area() }
     func updateNSView(_ view: Area, context: Context) { view.window?.invalidateCursorRects(for: view) }
+}
+
+/// img2layers: the layers stacked on their canvas, on a checkerboard so that what is transparent
+/// shows, and beside them their list, nearest first as an editor lists them: an eye that hides one,
+/// and a click that shows it alone.
+struct LayersFrame: View {
+    var session: Session
+    var job: Job
+
+    /// Each layer's picture, by its file, once read.
+    @State private var read: [String: NSImage] = [:]
+    @State private var hidden: Set<String> = []
+    /// The one layer on show by itself, where one was clicked.
+    @State private var alone: String?
+
+    private var layers: [KeptLayer] { job.made?.layers ?? [] }
+    private var canvas: CGFloat { CGFloat(max(1, job.made?.canvas ?? 1280)) }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            stack.frame(maxWidth: .infinity, maxHeight: .infinity)
+            list.frame(width: 240)
+        }
+        .task(id: job.id) {
+            await session.load(job)
+            read = await session.layerImages(job)
+        }
+    }
+
+    private func shows(_ layer: KeptLayer) -> Bool {
+        if let alone { return layer.file == alone }
+        return !hidden.contains(layer.file)
+    }
+
+    /// Bottom first, each where it is on the canvas, the canvas fitted into the room there is.
+    private var stack: some View {
+        GeometryReader { space in
+            let scale = min(space.size.width, space.size.height) / canvas
+            ZStack(alignment: .topLeading) {
+                Checkerboard()
+                ForEach(layers, id: \.file) { layer in
+                    if shows(layer), let image = read[layer.file] {
+                        Image(nsImage: image)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: CGFloat(layer.width) * scale, height: CGFloat(layer.height) * scale)
+                            .offset(x: CGFloat(layer.left) * scale, y: CGFloat(layer.top) * scale)
+                    }
+                }
+            }
+            .frame(width: canvas * scale, height: canvas * scale, alignment: .topLeading)
+            .clipped()
+            .frame(width: space.size.width, height: space.size.height)
+        }
+        .overlay {
+            if read.isEmpty && !layers.isEmpty { ProgressView() }
+        }
+        .help(job.made?.parameters ?? "")
+    }
+
+    private var list: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("\(layers.count) layers").font(.headline)
+                Spacer()
+                if alone != nil || !hidden.isEmpty {
+                    Button("Show All") {
+                        alone = nil
+                        hidden = []
+                    }
+                    .buttonStyle(.link)
+                }
+            }
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(layers.reversed(), id: \.file) { layer in row(layer) }
+                }
+            }
+        }
+        .padding(8)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func row(_ layer: KeptLayer) -> some View {
+        let on = alone == layer.file
+        let off = hidden.contains(layer.file)
+        return HStack(spacing: 8) {
+            Button {
+                if off { hidden.remove(layer.file) } else { hidden.insert(layer.file) }
+            } label: {
+                Image(systemName: off ? "eye.slash" : "eye").frame(width: 18)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(Color.secondary.opacity(off ? 0.5 : 1))
+            .help(off ? "Show this layer" : "Hide this layer")
+
+            ZStack {
+                Checkerboard()
+                if let image = read[layer.file] {
+                    Image(nsImage: image).resizable().scaledToFit()
+                }
+            }
+            .frame(width: 32, height: 32)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(layer.name).lineLimit(1)
+                Text(String(format: "depth %.2f", layer.depth))
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+            .opacity(off ? 0.5 : 1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(on ? Color.accentColor.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+        .onTapGesture { alone = on ? nil : layer.file }
+        .contextMenu {
+            if let image = read[layer.file] {
+                Button("Copy") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.writeObjects([image])
+                }
+            }
+        }
+        .help(on ? "Click to show every layer again" : "Click to show this layer alone")
+    }
+}
+
+/// Grey squares in two shades, which is how an editor shows what is transparent.
+struct Checkerboard: View {
+    var side: CGFloat = 8
+
+    var body: some View {
+        Canvas { context, size in
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(white: 0.30)))
+            var light = Path()
+            for row in 0..<Int((size.height / side).rounded(.up)) {
+                for column in 0..<Int((size.width / side).rounded(.up)) where (row + column) % 2 == 0 {
+                    light.addRect(CGRect(x: CGFloat(column) * side, y: CGFloat(row) * side, width: side, height: side))
+                }
+            }
+            context.fill(light, with: .color(Color(white: 0.36)))
+        }
+    }
 }
 
 struct Thumbnail: View {
