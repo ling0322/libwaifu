@@ -371,9 +371,12 @@ struct LayersFrame: View {
         }
     }
 
+    /// An eye closed hides a layer whatever else: the one shown alone too, so that its eye says
+    /// what the canvas shows.
     private func shows(_ layer: KeptLayer) -> Bool {
+        if hidden.contains(layer.file) { return false }
         if let alone { return layer.file == alone }
-        return !hidden.contains(layer.file)
+        return true
     }
 
     /// Bottom first, each where it is on the canvas, the canvas fitted into the room there is.
@@ -459,7 +462,12 @@ struct LayersFrame: View {
         .padding(.vertical, 4)
         .background(on ? Color.accentColor.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
-        .onTapGesture { alone = on ? nil : layer.file }
+        .onTapGesture {
+            // Shown alone is shown: a layer whose eye was closed opens it, rather than leaving
+            // the canvas empty.
+            if !on { hidden.remove(layer.file) }
+            alone = on ? nil : layer.file
+        }
         .contextMenu {
             if let image = read[layer.file] {
                 Button("Copy") {

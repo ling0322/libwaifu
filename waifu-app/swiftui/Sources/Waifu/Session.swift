@@ -75,7 +75,6 @@ struct JobForm {
     var style = ""
     var layerSteps = 30
     var depthSteps = 4
-    var layerResolution = 1280
     var splitPairs = false
 }
 
@@ -122,6 +121,10 @@ final class Session {
     private(set) var described: [String: ModelInfo] = [:]
     /// Why a chosen model could not be described: a name nobody published, a manifest moved.
     private(set) var notDescribed: [String: String] = [:]
+    /// Whether the manifests are being fetched for a default that had none here.
+    private(set) var fetchingManifests = false
+    /// The model chosen for the tab on show, as it was asked for.
+    var chosenHere: String? { chosen[tab.kind] }
     /// What the models run on.
     var device: String {
         didSet { UserDefaults.standard.set(device, forKey: "device") }
@@ -183,6 +186,16 @@ final class Session {
 
     static let kinds = ["image", "speech", "conversion", "layers"]
 
+    /// What each kind of job runs on until somebody chooses otherwise: a task opens ready to run,
+    /// not asking which model. Not kept as a choice, so a Mac that never chose follows this list
+    /// as it changes; one chosen in the Model card is kept.
+    static let defaultModels = [
+        "image": "anima:turbo",
+        "speech": "cosyvoice",
+        "conversion": "cosyvoice",
+        "layers": "see-through",
+    ]
+
     /// What the Model card offers to run on, as the library names them.
     static let devices = ["auto", "metal", "cpu"]
 
@@ -225,6 +238,25 @@ final class Session {
         if chosen.isEmpty, let old = UserDefaults.standard.string(forKey: "model"), !old.isBlank {
             choose(old)
             UserDefaults.standard.removeObject(forKey: "model")
+        }
+        for (kind, name) in Session.defaultModels where chosen[kind] == nil {
+            chosen[kind] = name
+            describe(kind)
+            if let info = described[kind] { adopt(info) }
+        }
+        // A default whose manifest is not here -- run without the bundle's, or published after
+        // it was built -- is described once the manifests are fetched, a few kilobytes each.
+        if Session.kinds.contains(where: { chosen[$0] != nil && described[$0] == nil }) {
+            fetchingManifests = true
+            Task { [weak self] in
+                try? await ModelManager.fetchManifests()
+                guard let self else { return }
+                for kind in Session.kinds where chosen[kind] != nil && described[kind] == nil {
+                    describe(kind)
+                    if let info = described[kind] { adopt(info) }
+                }
+                fetchingManifests = false
+            }
         }
         readHistory()
         polling = Task { [weak self] in
@@ -300,7 +332,6 @@ final class Session {
         if let layerer = model.layerer {
             form.layerSteps = layerer.steps
             form.depthSteps = layerer.depthSteps
-            form.layerResolution = layerer.resolution
         }
     }
 
@@ -388,43 +419,50 @@ final class Session {
     }
 
     /// Writes what a job made, and what made it, and shows it. `beside` is what a picture taken
-    /// apart keeps in its folder beside the document, by file name.
-    private func keep(_ id: String, bytes: Data, made: Made, beside: [String: Data] = [:]) {
-        guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
+    /// apart keeps in its folder beside the document, by file name. The files are written off the
+    /// main thread -- a picture taken apart is two documents and a PNG a layer, tens of megabytes
+    /// -- and the job is shown done once they are.
+    private func keep(_ id: String, bytes: Data, made: Made, beside: [String: Data] = [:]) async {
+        guard let job = jobs.first(where: { $0.id == id }) else { return }
         let finished = Date().timeIntervalSince1970 * 1000
+        let kind = job.kind
+        let output = file(id, kind: kind)
+        let (folder, besides, recordFile) = (folder, besideFolder(id), recordFile(id))
+        let record: Data?
+        if kind == "image" {
+            record = try? ImageRecord(made: made, output: output, finished: finished, library: LibraryVersion.current).json()
+        } else {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            record = try? encoder.encode(Record(id: id, kind: kind, created: job.created, finished: finished, made: made))
+        }
+
+        let failed = await Task.detached { () -> String? in
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                if !beside.isEmpty {
+                    try FileManager.default.createDirectory(at: besides, withIntermediateDirectories: true)
+                    for (name, data) in beside { try data.write(to: besides.appendingPathComponent(name)) }
+                }
+                try bytes.write(to: output)
+                try record?.write(to: recordFile)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }.value
+        if let failed { complaint = "could not keep it in \(folder.path): \(failed)" }
+
+        guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
         jobs[index].status = .done
         jobs[index].finished = finished
         jobs[index].made = made
         outputs[id] = bytes
-        if jobs[index].kind == "image" { images[id] = NSImage(data: bytes) }
-        if jobs[index].kind == "layers" { images[id] = beside[Self.composite].flatMap(NSImage.init(data:)) }
+        if kind == "image" { images[id] = NSImage(data: bytes) }
+        if kind == "layers" { images[id] = beside[Self.composite].flatMap(NSImage.init(data:)) }
         // What was asked for last is what should be on show.
         showing = nil
         playing = nil
-
-        let kind = jobs[index].kind
-        let output = file(id, kind: kind)
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            if !beside.isEmpty {
-                let besides = besideFolder(id)
-                try FileManager.default.createDirectory(at: besides, withIntermediateDirectories: true)
-                for (name, data) in beside { try data.write(to: besides.appendingPathComponent(name)) }
-            }
-            try bytes.write(to: output)
-            let json: Data
-            if kind == "image" {
-                json = try ImageRecord(made: made, output: output, finished: finished, library: LibraryVersion.current).json()
-            } else {
-                let record = Record(id: id, kind: kind, created: jobs[index].created, finished: finished, made: made)
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                json = try encoder.encode(record)
-            }
-            try json.write(to: recordFile(id))
-        } catch {
-            complaint = "could not keep it in \(folder.path): \(error.localizedDescription)"
-        }
     }
 
     // MARK: - what the screen reads
@@ -576,8 +614,10 @@ final class Session {
                 let wasLoaded = launcher.has(model, on: placement)
                 let engine = try await launcher.ensure(model, on: placement)
                 if !wasLoaded { refresh(model) }
-                if let (bytes, made, beside) = try await run(engine, report) {
-                    keep(id, bytes: bytes, made: made, beside: beside)
+                // Cancelled once the engine was done -- while a picture taken apart was turned into
+                // files -- is cancelled all the same: nothing is kept.
+                if let (bytes, made, beside) = try await run(engine, report), !Task.isCancelled {
+                    await keep(id, bytes: bytes, made: made, beside: beside)
                 } else {
                     ended(id, as: .cancelled)
                 }
@@ -755,22 +795,17 @@ final class Session {
     private func takeApart() {
         guard model?.layerer != nil, let modelName = model?.name, let rgba = picture?.rgba else { return }
         let seed = seed
-        // A multiple of 64, as the engine takes it.
-        let resolution = max(64, (form.layerResolution + 32) / 64 * 64)
+        // At the model's own resolution, which is upstream's: the request leaves it at 0.
         var request = LayersRequest(image: rgba, seed: seed)
         request.steps = form.layerSteps
         request.depthSteps = form.depthSteps
-        request.resolution = resolution
         request.splitPairs = form.splitPairs
 
         let named = ModelManager.versionedName(modelName) ?? modelName
         var asked = Made(
-            seed: seed, seconds: 0, model: named,
-            parameters: "Steps: \(form.layerSteps), Depth steps: \(form.depthSteps), Resolution: \(resolution), "
-                + "Split pairs: \(form.splitPairs ? "yes" : "no"), Seed: \(seed), Model: \(named)",
+            seed: seed, seconds: 0, model: named, parameters: "",
             width: rgba.width, height: rgba.height, steps: form.layerSteps)
         asked.depthSteps = form.depthSteps
-        asked.resolution = resolution
         asked.splitPairs = form.splitPairs
         asked.startFrom = startFrom()?.path
         let made = asked
@@ -781,8 +816,19 @@ final class Session {
             var made = made
             made.seconds = Date().timeIntervalSince(started)
             made.device = engine.device.replacingOccurrences(of: "_", with: "-")
+            // What it was drawn at, which the engine settled: the canvas is that square.
             made.canvas = taken.canvas
-            let (kept, beside) = await Task.detached { Self.files(of: taken) }.value
+            made.resolution = taken.canvas
+            made.parameters =
+                "Steps: \(made.steps ?? 0), Depth steps: \(made.depthSteps ?? 0), Resolution: \(taken.canvas), "
+                + "Split pairs: \(made.splitPairs == true ? "yes" : "no"), Seed: \(seed), Model: \(named)"
+            // Off the main thread, and stopped where it is by a Cancel: the job is not kept then.
+            let export = Task.detached { Self.files(of: taken) }
+            let (kept, beside) = await withTaskCancellationHandler {
+                await export.value
+            } onCancel: {
+                export.cancel()
+            }
             made.layers = kept
             return (taken.psd, made, beside)
         }
@@ -797,6 +843,8 @@ final class Session {
         }
         var kept: [KeptLayer] = []
         for (index, layer) in taken.layers.enumerated() {
+            // Half of it is no use to anybody: a Cancel stops here, and the job is not kept.
+            if Task.isCancelled { break }
             guard let png = Media.png(layer.image) else { continue }
             let file = String(format: "%02d.png", index)
             beside[file] = png
@@ -893,7 +941,6 @@ final class Session {
         case "layers":
             form.layerSteps = made.steps ?? form.layerSteps
             form.depthSteps = made.depthSteps ?? form.depthSteps
-            form.layerResolution = made.resolution ?? form.layerResolution
             form.splitPairs = made.splitPairs ?? form.splitPairs
             // The picture it took apart, where it still is.
             if let path = made.startFrom {

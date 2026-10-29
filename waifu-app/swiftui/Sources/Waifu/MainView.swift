@@ -88,7 +88,7 @@ struct MainView: View {
                     Divider()
                     OutputPane(session: session)
                 } else {
-                    NoModel(tab: session.tab) { showSettings = true }
+                    NoModel(session: session)
                 }
             }
             .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
@@ -114,17 +114,23 @@ struct MainView: View {
     }
 }
 
-/// The middle of a task no model has been chosen for: where to choose one.
+/// The middle of a task whose model cannot be described yet: every task has one, so this is the
+/// moment its manifest is being fetched, or why it could not be.
 struct NoModel: View {
-    var tab: Tab
-    var showCard: () -> Void
+    var session: Session
 
     var body: some View {
         VStack(spacing: 10) {
-            Image(systemName: "shippingbox").font(.system(size: 36)).foregroundStyle(.secondary)
-            Text("No model for \(tab.rawValue)").font(.title3)
-            Button("Choose one in the Model card on the right", action: showCard)
-                .buttonStyle(.link)
+            if session.fetchingManifests, let name = session.chosenHere {
+                ProgressView()
+                Text("Reading what \(name) is…").foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "exclamationmark.triangle").font(.system(size: 36)).foregroundStyle(.secondary)
+                Text(session.notDescribed[session.tab.kind] ?? "No model for \(session.tab.rawValue)")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

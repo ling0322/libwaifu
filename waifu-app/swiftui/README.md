@@ -56,7 +56,9 @@ The icon is `Resources/AppIcon.icon`, the Icon Composer format, which `build-app
 
 The sidebar lists the tasks -- text2img, img2layers and text2speech -- and the Model Manager.
 
-On a task, the Model card at the top of the right column chooses the model and the device. Nothing
+Each task opens on a model of its own -- `anima:turbo` for text2img, `see-through` for
+img2layers, `cosyvoice` for text2speech -- until another is chosen. On a task, the Model card at
+the top of the right column chooses the model and the device. Nothing
 is loaded from there: **Generate** fetches the model if it has to and reads it onto the device,
 unloading the one before, with the download and the read on the bar. The settings are held while a
 job runs.

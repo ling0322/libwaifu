@@ -121,15 +121,14 @@ struct SettingsColumn: View {
                         FormGroup {
                             PromptField(
                                 text: $session.form.text,
-                                placeholder: "The text to read out. Punctuation is where it pauses",
-                                lines: 8)
+                                placeholder: "The text to read out. Punctuation is where it pauses")
                         } header: {
                             Header("What to say")
                         }
 
                         FormGroup {
                             if voice.noLikenessBecause == nil {
-                                RecordingDrop(session: session, which: .recording)
+                                RecordingDrop(session: session, which: .recording, height: PromptField.height)
                             }
                         } header: {
                             HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -178,7 +177,7 @@ struct SettingsColumn: View {
             .disabled(session.canStop)
         case .speech2speech:
             FormGroup {
-                RecordingDrop(session: session, which: .source)
+                RecordingDrop(session: session, which: .source, height: PromptField.height)
             } header: {
                 Header("Recording to convert")
             }
@@ -188,7 +187,23 @@ struct SettingsColumn: View {
     // MARK: - a picture taken apart
 
     @ViewBuilder private var layersSettings: some View {
+        // What comes back, then how it is drawn, as a picture's Size comes before its Sampling. No
+        // resolution: upstream draws at the model's own 1280, and nothing has judged the layers
+        // drawn at any other.
         if session.model?.layerer != nil {
+            FormGroup {
+                LabeledContent("Split pairs") {
+                    Toggle("Split pairs", isOn: $session.form.splitPairs)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                .help("Hands, eyes, eyebrows and ears as a left and a right layer each")
+            } header: {
+                Header("Layers")
+            } footer: {
+                Footnote("Every layer is drawn whole, with what was hidden behind the others filled in.")
+            }
+
             FormGroup {
                 SliderRow(
                     label: "Steps", value: intBinding(\.layerSteps), range: 1...100, slider: 1...60,
@@ -198,21 +213,11 @@ struct SettingsColumn: View {
                     label: "Depth steps", value: intBinding(\.depthSteps), range: 1...50, slider: 1...20,
                     step: 1, decimals: 0,
                     explanation: "How many steps the depth model takes to say how far away each layer is, which orders them.")
-                SliderRow(
-                    label: "Resolution", value: intBinding(\.layerResolution), range: 512...2048,
-                    slider: 512...1536, step: 64, decimals: 0,
-                    explanation: "The side of the square the layers are drawn at. Smaller is faster and needs less memory; the model was trained at 1280.")
-                LabeledContent("Split pairs") {
-                    Toggle("Split pairs", isOn: $session.form.splitPairs)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                }
-                .help("Hands, eyes, eyebrows and ears as a left and a right layer each")
                 SeedRow(seed: $session.form.seed)
             } header: {
-                Header("Layers")
+                Header("Sampling")
             } footer: {
-                Footnote("Every layer is drawn whole, with what was hidden behind the others filled in. A run takes minutes.")
+                Footnote("A run takes minutes.")
             }
         }
     }
@@ -907,37 +912,41 @@ struct PromptPictures: View {
 }
 
 /// A recording to hold: to sound like, to convert, or the voice to convert it to.
+/// One box of one height, held or not, so that nothing beside or under it moves: the player and
+/// its cross inside it once there is a recording, and what dropping or clicking does under them.
 struct RecordingDrop: View {
     var session: Session
     var which: Session.Which
+    var height: CGFloat = 56
     @State private var over = false
     @State private var reading = false
 
     private var held: Held? { which == .source ? session.source : session.recording }
 
     var body: some View {
-        if let held {
-            HStack {
-                Player(bytes: held.bytes)
-                Button {
-                    session.letGo(which)
-                } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+        DropBox(over: over, height: height) {
+            VStack(spacing: 6) {
+                if let held, !reading {
+                    HStack {
+                        Player(bytes: held.bytes)
+                        Button {
+                            session.letGo(which)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove the recording")
+                    }
+                    Text("Drop or choose another").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Label(
+                        reading ? "Reading it…" : "Drop or choose a recording",
+                        systemImage: "waveform.badge.plus"
+                    )
+                    .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderless)
-                .help("Remove the recording")
             }
-        }
-        DropBox(over: over, height: 56) {
-            Label(
-                reading
-                    ? "Reading it…"
-                    : held == nil
-                        ? "Drop or choose a recording"
-                        : "Drop or choose another",
-                systemImage: "waveform.badge.plus"
-            )
-            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
         }
         .onTapGesture {
             if let url = Media.choose([.audio]) { hold(url) }
