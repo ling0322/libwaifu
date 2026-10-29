@@ -707,9 +707,21 @@ impl Reporter<'_> {
                 }
             },
             Doing::Layering { progress, .. } => match progress {
+                SeeThroughProgress::Encoding { .. } => (Stage::Encoding, 0, 0),
+                SeeThroughProgress::DepthEncoding { done, total } => (
+                    Stage::Encoding,
+                    (*done).max(0) as u64,
+                    (*total).max(0) as u64,
+                ),
                 SeeThroughProgress::Layers { done, total, .. }
                 | SeeThroughProgress::Depth { done, total } => (
                     Stage::Drawing,
+                    (*done).max(0) as u64,
+                    (*total).max(0) as u64,
+                ),
+                SeeThroughProgress::Decoding { done, total, .. }
+                | SeeThroughProgress::DepthDecoding { done, total } => (
+                    Stage::Decoding,
                     (*done).max(0) as u64,
                     (*total).max(0) as u64,
                 ),
@@ -1312,6 +1324,18 @@ pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
 }
 
 fn described(asked: &str) -> serde_json::Value {
+    // Takes a picture apart: no prompt, no size, nothing of a picture model's to say. What its
+    // boxes start at is the model manager's.
+    if is_see_through(Path::new(asked)) {
+        return serde_json::json!({
+            "kind": "layers",
+            "kinds": ["layers"],
+            "name": asked,
+            "full_name": describe::shown_name(asked),
+            "on_disk": describe::on_disk(asked).is_some(),
+        });
+    }
+
     let mut kinds = Vec::new();
     if describe::is_a_voice(asked) {
         kinds.push("speech");
@@ -1784,6 +1808,13 @@ pub(crate) mod tests {
         assert_eq!(cosyvoice["needs_a_recording"], true);
         let indextts = describe_json(&a_manifest("indextts25", IndexTts::MODEL_TYPE)).unwrap();
         assert_eq!(indextts["needs_a_recording"], true);
+
+        // See-through draws nothing from a prompt: a kind of its own, and none of a picture's keys.
+        let layers = describe_json(&a_manifest("see-through", SeeThrough::MODEL_TYPE)).unwrap();
+        assert_eq!(layers["kind"], "layers");
+        assert_eq!(layers["kinds"], serde_json::json!(["layers"]));
+        assert!(layers.get("image_keys").is_none(), "{layers}");
+        assert_eq!(layers["on_disk"], false);
         assert!(
             cosyvoice["conversion"]["rate"].as_u64().unwrap() > 0,
             "{cosyvoice}"

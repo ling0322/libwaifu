@@ -216,6 +216,11 @@ pub fn catalog_json() -> serde_json::Value {
                 .into_iter()
                 .map(|listed| entry(listed, "conversion")),
         )
+        .chain(
+            hub::listed_layers()
+                .into_iter()
+                .map(|listed| entry(listed, "layers")),
+        )
         .collect();
     serde_json::json!({ "models": models })
 }
@@ -264,6 +269,10 @@ mod tests {
             .iter()
             .any(|model| model["name"] == "sdxl:base" && model["kind"] == "image"));
         assert!(models.iter().any(|model| model["kind"] == "speech"));
+        // In no picker of the terminal's, but in what a screen reads, under a kind of its own.
+        assert!(models
+            .iter()
+            .any(|model| model["name"] == "see-through" && model["kind"] == "layers"));
     }
 
     #[test]

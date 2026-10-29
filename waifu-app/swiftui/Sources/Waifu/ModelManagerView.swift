@@ -101,6 +101,7 @@ struct ModelManagerView: View {
 
     private static let kinds: [(kind: String, title: String)] = [
         ("image", "Pictures"), ("speech", "Voices"), ("conversion", "Voice conversion"),
+        ("layers", "Layers"),
     ]
 
     var body: some View {
@@ -198,7 +199,7 @@ struct ModelManagerView: View {
                 }
                 .controlSize(.small)
                 .help("Delete \(entry.name)")
-                .disabled(session.canStop)
+                .disabled(session.busy)
             } else {
                 if entry.bytesOnDisk > 0 {
                     Text("\(bytes(entry.bytesOnDisk)) of it here")

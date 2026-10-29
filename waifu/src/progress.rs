@@ -207,28 +207,67 @@ impl Doing {
                     total => format!("making the sound, {} of {total}", (done + 1).min(total)),
                 },
             },
-            Doing::Layering { progress, .. } => match progress {
-                SeeThroughProgress::Layers { pass, done, total } => match pass {
-                    0 => format!("drawing the layers, step {done} of {total}"),
-                    _ => format!("drawing the head's layers, step {done} of {total}"),
-                },
-                SeeThroughProgress::Depth { done, total } => {
-                    format!("ordering the layers, step {done} of {total}")
+            Doing::Layering { progress, .. } => {
+                // The one being done is the one after those already done.
+                let at = |done: &i32, total: &i32| (done + 1).min(*total);
+                match progress {
+                    SeeThroughProgress::Encoding { pass } => match pass {
+                        0 => "encoding the picture".to_string(),
+                        _ => "encoding the head".to_string(),
+                    },
+                    SeeThroughProgress::Layers { pass, done, total } => match pass {
+                        0 => format!("drawing the layers, step {done} of {total}"),
+                        _ => format!("drawing the head's layers, step {done} of {total}"),
+                    },
+                    SeeThroughProgress::Decoding { pass, done, total } => match pass {
+                        0 => format!("decoding the layers, {} of {total}", at(done, total)),
+                        _ => format!("decoding the head's layers, {} of {total}", at(done, total)),
+                    },
+                    SeeThroughProgress::DepthEncoding { done, total } => {
+                        format!(
+                            "encoding the layers for depth, {} of {total}",
+                            at(done, total)
+                        )
+                    }
+                    SeeThroughProgress::Depth { done, total } => {
+                        format!("ordering the layers, step {done} of {total}")
+                    }
+                    SeeThroughProgress::DepthDecoding { done, total } => {
+                        format!("decoding the depth, {} of {total}", at(done, total))
+                    }
+                    SeeThroughProgress::Assembling => "cutting the layers into parts".to_string(),
                 }
-                SeeThroughProgress::Assembling => "cutting the layers into parts".to_string(),
-            },
+            }
         }
     }
 }
 
-/// How far along taking a picture apart is: the steps of all three walks, one after the other.
+/// How far along taking a picture apart is: each of its three walks encoded, stepped and decoded,
+/// one after the other, with the encoding and the decoding weighed as a picture run's are.
 fn layered(progress: SeeThroughProgress, steps: i32, depth_steps: i32) -> f64 {
     let (steps, depth_steps) = (f64::from(steps.max(1)), f64::from(depth_steps.max(1)));
-    let all = 2.0 * steps + depth_steps + 1.0;
+    let pass = ENCODING + steps + DECODING;
+    let depth = ENCODING + depth_steps + DECODING;
+    let all = 2.0 * pass + depth + 1.0;
+    let part = |done: i32, total: i32| f64::from(done.max(0)) / f64::from(total.max(1));
     let done = match progress {
-        SeeThroughProgress::Layers { pass, done, .. } => f64::from(pass) * steps + f64::from(done),
-        SeeThroughProgress::Depth { done, .. } => 2.0 * steps + f64::from(done),
-        SeeThroughProgress::Assembling => 2.0 * steps + depth_steps,
+        SeeThroughProgress::Encoding { pass: p } => f64::from(p) * pass,
+        SeeThroughProgress::Layers { pass: p, done, .. } => {
+            f64::from(p) * pass + ENCODING + f64::from(done)
+        }
+        SeeThroughProgress::Decoding {
+            pass: p,
+            done,
+            total,
+        } => f64::from(p) * pass + ENCODING + steps + DECODING * part(done, total),
+        SeeThroughProgress::DepthEncoding { done, total } => {
+            2.0 * pass + ENCODING * part(done, total)
+        }
+        SeeThroughProgress::Depth { done, .. } => 2.0 * pass + ENCODING + f64::from(done),
+        SeeThroughProgress::DepthDecoding { done, total } => {
+            2.0 * pass + ENCODING + depth_steps + DECODING * part(done, total)
+        }
+        SeeThroughProgress::Assembling => 2.0 * pass + depth,
     };
     (done / all).min(1.0)
 }
@@ -299,6 +338,88 @@ mod tests {
     use super::*;
 
     use std::time::Duration;
+
+    #[test]
+    fn taking_a_picture_apart_moves_the_bar_through_every_part_of_it() {
+        // A whole run, small: what the encoder, each pass, the decoder and the depth model say,
+        // in the order they say it.
+        let (steps, depth_steps, body, head, slots) = (3, 2, 4, 3, 5);
+        let mut said = Vec::new();
+        for (pass, layers) in [(0, body), (1, head)] {
+            said.push(SeeThroughProgress::Encoding { pass });
+            for done in 1..=steps {
+                said.push(SeeThroughProgress::Layers {
+                    pass,
+                    done,
+                    total: steps,
+                });
+            }
+            for done in 0..layers {
+                said.push(SeeThroughProgress::Decoding {
+                    pass,
+                    done,
+                    total: layers,
+                });
+            }
+        }
+        for done in 0..slots {
+            said.push(SeeThroughProgress::DepthEncoding { done, total: slots });
+        }
+        for done in 1..=depth_steps {
+            said.push(SeeThroughProgress::Depth {
+                done,
+                total: depth_steps,
+            });
+        }
+        for done in 0..slots - 1 {
+            said.push(SeeThroughProgress::DepthDecoding {
+                done,
+                total: slots - 1,
+            });
+        }
+        said.push(SeeThroughProgress::Assembling);
+
+        let bar: Vec<f64> = said
+            .iter()
+            .map(|&p| layered(p, steps, depth_steps))
+            .collect();
+        assert_eq!(bar[0], 0.0, "encoding the picture is where it starts");
+        // Never back. The last step and the first decode are one moment, with nothing between.
+        for (at, pair) in bar.windows(2).enumerate() {
+            assert!(
+                pair[1] >= pair[0],
+                "{:?} then {:?}: {bar:?}",
+                said[at],
+                said[at + 1]
+            );
+        }
+        assert!(
+            *bar.last().unwrap() < 1.0,
+            "there is still the document to write"
+        );
+
+        // And the words say what it is doing, not that it is starting.
+        let words = |progress| {
+            Doing::Layering {
+                progress,
+                steps,
+                depth_steps,
+            }
+            .words()
+        };
+        assert_eq!(
+            words(SeeThroughProgress::Encoding { pass: 0 }),
+            "encoding the picture"
+        );
+        assert_eq!(
+            words(SeeThroughProgress::Decoding {
+                pass: 0,
+                done: 0,
+                total: 13
+            }),
+            "decoding the layers, 1 of 13"
+        );
+    }
 
     #[test]
     fn the_bar_weighs_the_parts_that_are_not_steps() {

@@ -139,8 +139,8 @@ pub fn label_of(model: &str) -> String {
 
 fn is_a_voice(model: &str) -> String {
     format!(
-        "{model} is a voice, and the terminal draws pictures: speech is the engine's, for the \
-         programs built over libwaifu"
+        "{model} does not draw from a prompt, and the terminal does: speech and img2layers are \
+         the engine's, for the programs built over libwaifu"
     )
 }
 
@@ -233,7 +233,10 @@ mod tests {
     fn a_voice_is_not_something_to_draw_with() {
         let voice = engine::look_at(&a_manifest("voice", "indextts2")).unwrap();
         let error = fits("indextts", &voice).unwrap_err();
-        assert!(error.contains("is a voice"), "{error}");
+        assert!(error.contains("does not draw from a prompt"), "{error}");
+        // Nor See-through, which takes a picture apart.
+        let layers = engine::look_at(&a_manifest("see-through", "see_through")).unwrap();
+        assert!(fits("see-through", &layers).is_err());
 
         let sdxl = engine::look_at(&a_manifest("sdxl", "sdxl")).unwrap();
         assert!(fits("sdxl:base", &sdxl).is_ok());

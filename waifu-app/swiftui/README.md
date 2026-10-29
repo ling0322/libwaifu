@@ -54,9 +54,11 @@ The icon is `Resources/AppIcon.icon`, the Icon Composer format, which `build-app
 
 ## Use
 
-The sidebar lists the tasks -- txt2img for now -- and the Model Manager.
+The sidebar lists the tasks -- text2img, img2layers and text2speech -- and the Model Manager.
 
-On a task, the Model card at the top of the right column chooses the model and the device. Nothing
+Each task opens on a model of its own -- `anima:turbo` for text2img, `see-through` for
+img2layers, `cosyvoice` for text2speech -- until another is chosen. On a task, the Model card at
+the top of the right column chooses the model and the device. Nothing
 is loaded from there: **Generate** fetches the model if it has to and reads it onto the device,
 unloading the one before, with the download and the read on the bar. The settings are held while a
 job runs.
@@ -65,6 +67,13 @@ What is made is kept in the app's own folder, `~/Library/Application Support/lib
 **File > Show Output Folder** (⇧⌘O) opens in Finder. Clicking the picture in the middle opens it in
 a window of its own, fitted to the window (Esc closes it). **Delete All…** deletes every picture in
 the strip, after asking; what is still being made is left alone.
+
+**img2layers** takes a picture apart with See-through (`see-through`, docs/see_through.md): drop
+an illustration on it and **Split into Layers**. What comes back is a Photoshop document, kept as
+`<id>.psd`, and beside it in `<id>.layers/` the depth document, the layers put back together, and
+every layer as a PNG. The middle shows them stacked on their canvas, and beside that their list,
+nearest first: the eye hides one, a click shows it alone. **Save PSD…** and **Save Depth PSD…**
+save the two documents.
 
 The Model Manager lists every published model, with how much of it is on this Mac: a download with
 its progress, and a delete.

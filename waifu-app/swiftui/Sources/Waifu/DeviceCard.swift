@@ -36,14 +36,14 @@ struct DeviceCard: View {
                 .fillsRow()
                 .help("Where the model runs")
             }
-            .disabled(session.canStop)
+            .disabled(session.busy)
             // Only where the model runs on Metal, which auto is on a Mac: the processor has no GPU
             // memory to limit.
             if session.limitsVram {
                 SliderRow(
                     label: "vram (GB)", value: vramLimit, range: 1...macMemory, step: 0.5,
                     decimals: 1)
-                .disabled(session.canStop)
+                .disabled(session.busy)
             }
         } header: {
             Header("Device")

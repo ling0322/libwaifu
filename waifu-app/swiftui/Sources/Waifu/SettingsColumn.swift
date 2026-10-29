@@ -42,7 +42,8 @@ struct SettingsColumn: View {
                     GoBar(session: session)
                         .padding(.top, -6)
                 }
-                .padding(16)
+                .padding([.horizontal, .bottom], 16)
+                .padding(.top, Theme.top(16, from26: 2))
             case .settings:
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
@@ -52,6 +53,7 @@ struct SettingsColumn: View {
                             Group {
                                 switch session.tab {
                                 case .text2img, .img2img: pictureSettings
+                                case .img2layers: layersSettings
                                 case .text2speech: speechSettings
                                 case .speech2speech: conversionSettings
                                 }
@@ -61,7 +63,8 @@ struct SettingsColumn: View {
                             .disabled(session.canStop)
                         }
                     }
-                    .padding(12)
+                    .padding([.horizontal, .bottom], 12)
+                    .padding(.top, Theme.top(12, from26: 1))
                 }
                 // Tighter rows than the prompts' cards: this column is a list of settings.
                 .environment(\.rowPadding, 5)
@@ -86,8 +89,7 @@ struct SettingsColumn: View {
                     FormGroup {
                         PromptField(
                             text: $session.form.prompt,
-                            placeholder: "What to draw: a list of tags, the most important first",
-                            lines: 4...10)
+                            placeholder: "What to draw: a list of tags, the most important first")
                     } header: {
                         Header("Prompt")
                     }
@@ -97,16 +99,12 @@ struct SettingsColumn: View {
                     if chosen.guided {
                         FormGroup {
                             PromptField(
-                                text: $session.form.negative, placeholder: "What to keep out: worst quality, bad hands",
-                                lines: 4...10)
+                                text: $session.form.negative, placeholder: "What to keep out: worst quality, bad hands")
                         } header: {
                             Header("Away from")
                         }
                     }
                 }
-                // Made again when "Away from" comes or goes: a text field that grows to fit its
-                // lines keeps wrapping them at the width it had, and the prompt's is not the same.
-                .id(chosen.guided)
 
                 if session.tab == .text2img, chosen.readsPictures {
                     PromptPictures(session: session)
@@ -123,15 +121,14 @@ struct SettingsColumn: View {
                         FormGroup {
                             PromptField(
                                 text: $session.form.text,
-                                placeholder: "The text to read out. Punctuation is where it pauses",
-                                lines: 5...14)
+                                placeholder: "The text to read out. Punctuation is where it pauses")
                         } header: {
                             Header("What to say")
                         }
 
                         FormGroup {
                             if voice.noLikenessBecause == nil {
-                                RecordingDrop(session: session, which: .recording)
+                                RecordingDrop(session: session, which: .recording, height: PromptField.height)
                             }
                         } header: {
                             HStack(alignment: .firstTextBaseline, spacing: 4) {
@@ -168,11 +165,59 @@ struct SettingsColumn: View {
                     }
                 }
             }
+        case .img2layers:
+            FormGroup {
+                PictureDrop(session: session)
+            } header: {
+                Header("Picture to split")
+            } footer: {
+                Footnote("An anime illustration of one character works best. Transparent is fine.")
+            }
+            // Held while a job runs, as the settings are: the layers are of this picture.
+            .disabled(session.canStop)
         case .speech2speech:
             FormGroup {
-                RecordingDrop(session: session, which: .source)
+                RecordingDrop(session: session, which: .source, height: PromptField.height)
             } header: {
                 Header("Recording to convert")
+            }
+        }
+    }
+
+    // MARK: - a picture taken apart
+
+    @ViewBuilder private var layersSettings: some View {
+        // What comes back, then how it is drawn, as a picture's Size comes before its Sampling. No
+        // resolution: upstream draws at the model's own 1280, and nothing has judged the layers
+        // drawn at any other.
+        if session.model?.layerer != nil {
+            FormGroup {
+                LabeledContent("Split pairs") {
+                    Toggle("Split pairs", isOn: $session.form.splitPairs)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                .help("Hands, eyes, eyebrows and ears as a left and a right layer each")
+            } header: {
+                Header("Layers")
+            } footer: {
+                Footnote("Every layer is drawn whole, with what was hidden behind the others filled in.")
+            }
+
+            FormGroup {
+                SliderRow(
+                    label: "Steps", value: intBinding(\.layerSteps), range: 1...100, slider: 1...60,
+                    step: 1, decimals: 0,
+                    explanation: "How many steps each of its two passes draws the layers in: the body, then the head.")
+                SliderRow(
+                    label: "Depth steps", value: intBinding(\.depthSteps), range: 1...50, slider: 1...20,
+                    step: 1, decimals: 0,
+                    explanation: "How many steps the depth model takes to say how far away each layer is, which orders them.")
+                SeedRow(seed: $session.form.seed)
+            } header: {
+                Header("Sampling")
+            } footer: {
+                Footnote("A run takes minutes.")
             }
         }
     }
@@ -439,17 +484,103 @@ struct Halves<Left: View, Gap: View, Right: View>: View {
 
 // MARK: - the rows
 
-/// Several lines of text that fill a row of the form: the field the system draws, with the hint
-/// in it until something is typed.
+/// Several lines of text that fill a row of the form, `lines` high whatever is in them, with the
+/// hint in it until something is typed. What does not fit scrolls, with a scroll bar that shows
+/// whenever there is more than fits: a field that grew with its text moved everything under it at
+/// every line, and the system's, held to a height, scrolled with nothing to say there was more.
 struct PromptField: View {
     @Binding var text: String
     var placeholder: String
-    var lines: ClosedRange<Int>
+    var lines: Int = PromptField.lines
+
+    /// How many lines a prompt's box is, and how tall that is: what the box a picture is dropped
+    /// in beside or in place of the prompts is too, so that the two line up.
+    static let lines = 5
+    static var height: CGFloat { CGFloat(lines) * ScrollingText.lineHeight }
 
     var body: some View {
-        TextField("", text: $text, prompt: Text(placeholder), axis: .vertical)
-            .labelsHidden()
-            .lineLimit(lines)
+        ScrollingText(text: $text)
+            .frame(height: CGFloat(lines) * ScrollingText.lineHeight)
+            .overlay(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text(placeholder)
+                        .font(Font(ScrollingText.font))
+                        .foregroundStyle(.tertiary)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+/// AppKit's text view in its scroll view: plain text in the system font, no fill of its own, and
+/// a scroll bar of the kind that takes room and stays while the text is longer than the box -- an
+/// overlay one only shows while it is being scrolled. Tab moves on, as it does from a field.
+struct ScrollingText: NSViewRepresentable {
+    @Binding var text: String
+
+    static let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+    static let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .legacy
+        guard let view = scroll.documentView as? NSTextView else { return scroll }
+        view.delegate = context.coordinator
+        view.font = Self.font
+        view.textColor = .labelColor
+        view.drawsBackground = false
+        view.isRichText = false
+        view.allowsUndo = true
+        view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticDashSubstitutionEnabled = false
+        view.isAutomaticTextReplacementEnabled = false
+        // The text starts where the hint over it does.
+        view.textContainerInset = .zero
+        view.textContainer?.lineFragmentPadding = 0
+        view.string = text
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.text = $text
+        guard let view = scroll.documentView as? NSTextView else { return }
+        // Only when the text changed from outside -- a model's suggestion, settings reused --
+        // since setting it moves the caret to the end.
+        if view.string != text { view.string = text }
+        view.isEditable = context.environment.isEnabled
+        view.isSelectable = context.environment.isEnabled
+        view.textColor = context.environment.isEnabled ? .labelColor : .disabledControlTextColor
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) { self.text = text }
+
+        func textDidChange(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            text.wrappedValue = view.string
+        }
+
+        func textView(_ view: NSTextView, doCommandBy selector: Selector) -> Bool {
+            switch selector {
+            case #selector(NSResponder.insertTab(_:)):
+                view.window?.selectNextKeyView(nil)
+                return true
+            case #selector(NSResponder.insertBacktab(_:)):
+                view.window?.selectPreviousKeyView(nil)
+                return true
+            default:
+                return false
+            }
+        }
     }
 }
 
@@ -665,7 +796,9 @@ struct PictureDrop: View {
     @State private var over = false
 
     var body: some View {
-        DropBox(over: over, height: session.picture == nil ? 90 : 180) {
+        // One size, with a picture or without, so that what is under it stays where it is: a
+        // prompt's, which img2layers shows it in place of.
+        DropBox(over: over, height: PromptField.height) {
             if let image = session.picture?.image {
                 Image(nsImage: image).resizable().scaledToFit().padding(6)
             } else {
@@ -673,15 +806,26 @@ struct PictureDrop: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .overlay(alignment: .topTrailing) {
+            if session.picture != nil {
+                Button {
+                    session.letGo(.picture)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .black.opacity(0.6))
+                }
+                .buttonStyle(.borderless)
+                .padding(8)
+                .help("Remove the picture")
+            }
+        }
         .onTapGesture {
             if let url = Media.choose([.image]) { session.holdPicture(at: url) }
         }
         .onDrop(of: [.fileURL, .image], isTargeted: $over) { providers in
             take(providers)
-        }
-
-        if session.picture != nil {
-            Button("Remove the picture", role: .destructive) { session.letGo(.picture) }
         }
     }
 
@@ -768,37 +912,41 @@ struct PromptPictures: View {
 }
 
 /// A recording to hold: to sound like, to convert, or the voice to convert it to.
+/// One box of one height, held or not, so that nothing beside or under it moves: the player and
+/// its cross inside it once there is a recording, and what dropping or clicking does under them.
 struct RecordingDrop: View {
     var session: Session
     var which: Session.Which
+    var height: CGFloat = 56
     @State private var over = false
     @State private var reading = false
 
     private var held: Held? { which == .source ? session.source : session.recording }
 
     var body: some View {
-        if let held {
-            HStack {
-                Player(bytes: held.bytes)
-                Button {
-                    session.letGo(which)
-                } label: {
-                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+        DropBox(over: over, height: height) {
+            VStack(spacing: 6) {
+                if let held, !reading {
+                    HStack {
+                        Player(bytes: held.bytes)
+                        Button {
+                            session.letGo(which)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove the recording")
+                    }
+                    Text("Drop or choose another").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Label(
+                        reading ? "Reading it…" : "Drop or choose a recording",
+                        systemImage: "waveform.badge.plus"
+                    )
+                    .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderless)
-                .help("Remove the recording")
             }
-        }
-        DropBox(over: over, height: 56) {
-            Label(
-                reading
-                    ? "Reading it…"
-                    : held == nil
-                        ? "Drop or choose a recording"
-                        : "Drop or choose another",
-                systemImage: "waveform.badge.plus"
-            )
-            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
         }
         .onTapGesture {
             if let url = Media.choose([.audio]) { hold(url) }

@@ -126,6 +126,20 @@ public struct RGBImage: Sendable, Equatable {
     }
 }
 
+/// A picture as rows of RGBA, four bytes a pixel, top to bottom, not premultiplied: what
+/// img2layers takes and gives.
+public struct RGBAImage: Sendable, Equatable {
+    public var width: Int
+    public var height: Int
+    public var rgba: [UInt8]
+
+    public init(width: Int, height: Int, rgba: [UInt8]) {
+        self.width = width
+        self.height = height
+        self.rgba = rgba
+    }
+}
+
 /// Mono samples, -1 to 1, and their rate.
 public struct AudioClip: Sendable, Equatable {
     public var samples: [Float]
@@ -210,6 +224,62 @@ public struct VoiceConversionRequest: Sendable {
         self.steps = steps
         self.convertStyle = convertStyle
         self.seed = seed
+    }
+}
+
+public struct LayersRequest: Sendable {
+    /// The illustration: any size, transparent where it likes.
+    public var image: RGBAImage
+    /// 0 for the model's own, as are the two below.
+    public var steps: Int = 0
+    public var depthSteps: Int = 0
+    /// The side of the square the layers are drawn at, a multiple of 64.
+    public var resolution: Int = 0
+    /// Hands, eyes, eyebrows and ears as a -l and a -r layer each.
+    public var splitPairs: Bool = false
+    public var seed: UInt64
+
+    public init(image: RGBAImage, seed: UInt64) {
+        self.image = image
+        self.seed = seed
+    }
+}
+
+/// One layer of a picture taken apart.
+public struct Layer: Sendable, Equatable {
+    /// What it is: "front hair", "irides", "topwear".
+    public var name: String
+    /// Where its top left corner is on the canvas.
+    public var left: Int
+    public var top: Int
+    /// Only as large as what is drawn.
+    public var image: RGBAImage
+    /// 0 near to 1 far.
+    public var depth: Float
+
+    public init(name: String, left: Int, top: Int, image: RGBAImage, depth: Float) {
+        self.name = name
+        self.left = left
+        self.top = top
+        self.image = image
+        self.depth = depth
+    }
+}
+
+/// A picture taken apart: its layers bottom first, on a square canvas, and the two Photoshop
+/// documents made of them.
+public struct Layers: Sendable, Equatable {
+    public var canvas: Int
+    public var layers: [Layer]
+    public var psd: Data
+    /// The same document with each layer's depth in place of its colour.
+    public var depthPSD: Data
+
+    public init(canvas: Int, layers: [Layer], psd: Data, depthPSD: Data) {
+        self.canvas = canvas
+        self.layers = layers
+        self.psd = psd
+        self.depthPSD = depthPSD
     }
 }
 
@@ -373,6 +443,36 @@ private let onAudio: WaifuAudioCompleteCallback = { userData, event in
     pending.finish(event.pointee.status.code, message(event.pointee.status), clip)
 }
 
+private func rgba(_ image: WaifuRgbaImage) -> RGBAImage {
+    let pixels = image.rgba.map { Array(UnsafeBufferPointer(start: $0, count: image.len)) } ?? []
+    return RGBAImage(width: Int(image.width), height: Int(image.height), rgba: pixels)
+}
+
+private func bytes(_ start: UnsafePointer<UInt8>?, _ count: Int) -> Data {
+    start.map { Data(bytes: $0, count: count) } ?? Data()
+}
+
+private let onLayers: WaifuLayersCompleteCallback = { userData, event in
+    guard let userData, let event else { return }
+    let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
+    let said = event.pointee
+    // Copied now, every layer and both documents: they are the library's only until this returns.
+    var layers: Layers?
+    if said.status.code == WAIFU_OK {
+        let parts = said.layers.map { Array(UnsafeBufferPointer(start: $0, count: said.layer_count)) } ?? []
+        layers = Layers(
+            canvas: Int(said.canvas),
+            layers: parts.map { part in
+                Layer(
+                    name: part.name.map { String(cString: $0) } ?? "", left: Int(part.left),
+                    top: Int(part.top), image: rgba(part.image), depth: part.depth)
+            },
+            psd: bytes(said.psd, said.psd_len),
+            depthPSD: bytes(said.depth_psd, said.depth_psd_len))
+    }
+    pending.finish(said.status.code, message(said.status), layers)
+}
+
 /// Memory for one call's strings and buffers, freed when the call has returned: the library
 /// copies what it keeps.
 final class Scratch {
@@ -407,6 +507,10 @@ final class Scratch {
 
     func image(_ image: RGBImage) -> UnsafePointer<WaifuImage> {
         one(WaifuImage(width: UInt32(image.width), height: UInt32(image.height), rgb: array(image.rgb), len: image.rgb.count))
+    }
+
+    func image(_ image: RGBAImage) -> UnsafePointer<WaifuRgbaImage> {
+        one(WaifuRgbaImage(width: UInt32(image.width), height: UInt32(image.height), rgba: array(image.rgba), len: image.rgba.count))
     }
 
     func audio(_ clip: AudioClip) -> UnsafePointer<WaifuAudio> {
@@ -571,6 +675,26 @@ public final class Engine: @unchecked Sendable {
             )
             return withExtendedLifetime(scratch) {
                 waifu_engine_voice_conversion_async(handle, &c, userData, onProgress, onAudio)
+            }
+        }
+    }
+
+    /// The illustration taken apart into its layers, with See-through loaded, or nil where it was
+    /// cancelled.
+    public func layers(_ request: LayersRequest, progress: ProgressHandler? = nil) async throws -> Layers? {
+        try await call(progress: progress, cancel: cancel) { userData in
+            let scratch = Scratch()
+            var c = WaifuLayersRequest(
+                struct_size: UInt32(MemoryLayout<WaifuLayersRequest>.size),
+                image: scratch.image(request.image),
+                steps: UInt32(clamping: request.steps),
+                depth_steps: UInt32(clamping: request.depthSteps),
+                resolution: UInt32(clamping: request.resolution),
+                split_pairs: request.splitPairs,
+                seed: request.seed
+            )
+            return withExtendedLifetime(scratch) {
+                waifu_engine_layers_async(handle, &c, userData, onProgress, onLayers)
             }
         }
     }
