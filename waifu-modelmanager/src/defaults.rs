@@ -117,6 +117,17 @@ fn manifest(path: &Path) -> Option<BTreeMap<String, Node>> {
     Some(top)
 }
 
+/// The whole number `config: <section>: <key>:` holds, where it holds one.
+fn config_number(top: &BTreeMap<String, Node>, section: &str, key: &str) -> Option<i64> {
+    let Some(Node::Map(config)) = top.get("config") else {
+        return None;
+    };
+    let Some(Node::Map(section)) = config.get(section) else {
+        return None;
+    };
+    section.get(key)?.as_str()?.trim().parse().ok()
+}
+
 /// `config: model: type:`, the kind of model a manifest is.
 fn kind(top: &BTreeMap<String, Node>) -> Option<String> {
     let Some(Node::Map(config)) = top.get("config") else {
@@ -142,7 +153,8 @@ fn suggestions(top: &BTreeMap<String, Node>) -> Suggestions {
 /// - a picture model: `width`, `height`, `steps`, `guidance`, `takes_guidance`, `sizes`, `prompt`
 ///   and `avoid`;
 /// - a voice: `speed` and `temperature`, and a `conversion` holding `steps` for one that also
-///   converts.
+///   converts;
+/// - a model that takes a picture apart: `steps`, `depth_steps` and `resolution`.
 ///
 /// None for anything that is not a manifest on the disk.
 pub fn defaults_json(asked: &str) -> Option<Value> {
@@ -163,6 +175,20 @@ pub fn defaults_json(asked: &str) -> Option<Value> {
                 "temperature": 1.0,
                 "conversion": { "steps": 10 },
             }))
+        }
+        // What the package was exported to run at, where it says, and upstream's numbers where
+        // it does not.
+        "see_through" => {
+            let number = |key, otherwise| {
+                top.as_ref()
+                    .and_then(|top| config_number(top, "see_through", key))
+                    .unwrap_or(otherwise)
+            };
+            return Some(json!({
+                "steps": number("layers_steps", 30),
+                "depth_steps": number("depth_steps", 4),
+                "resolution": number("layers_resolution", 1280),
+            }));
         }
         _ => {}
     }
@@ -259,5 +285,21 @@ mod tests {
         assert_eq!(cosy["temperature"], 1.0);
         assert_eq!(cosy["conversion"]["steps"], 10);
         assert!(defaults_json("/no/such/model.yaml").is_none());
+
+        // See-through says what it was exported to run at; a manifest that does not, upstream's.
+        // Its section is written in after the type, which is where a manifest has it.
+        let exported = defaults_json(&a_manifest(
+            "see-through",
+            "see_through\n  see_through:\n    layers_steps: 24\n    depth_steps: 4\n    layers_resolution: 1024",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(exported["steps"], 24);
+        assert_eq!(exported["resolution"], 1024);
+        assert!(exported.get("width").is_none(), "{exported}");
+        let silent = defaults_json(&a_manifest("see-through-silent", "see_through", "")).unwrap();
+        assert_eq!(silent["steps"], 30);
+        assert_eq!(silent["depth_steps"], 4);
+        assert_eq!(silent["resolution"], 1280);
     }
 }

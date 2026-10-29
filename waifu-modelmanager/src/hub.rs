@@ -853,6 +853,12 @@ pub fn listed_conversions() -> Vec<Listed> {
     listed_where(converts)
 }
 
+/// And what takes a picture apart into layers: `see-through`. No picker in the terminal offers
+/// these; the catalogue a screen reads does, under a kind of their own.
+pub fn listed_layers() -> Vec<Listed> {
+    listed_of(Kind::Layers)
+}
+
 /// Every unversioned name of one kind, which is every alias: each published model has one, and
 /// counting colons would not do -- a voice's versioned name has as many as a picture's alias.
 fn listed_of(kind: Kind) -> Vec<Listed> {

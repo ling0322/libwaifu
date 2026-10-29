@@ -521,8 +521,9 @@ typedef struct {
 typedef void (*WaifuLayersCompleteCallback)(void *user_data, const WaifuLayersCompletionEvent *event);
 
 // Takes an illustration apart into the layers it was drawn in, with See-through loaded: the
-// img2layers task. Progress is DRAWING for the steps of both of its models and DECODING for
-// cutting the layers out; `words` says which.
+// img2layers task. Progress is ENCODING for the picture (and the head) and the depth model's
+// slots, DRAWING for the steps of both of its models, and DECODING for the layers, the depth maps
+// and cutting the layers out; `words` says which.
 WaifuJob waifu_engine_layers_async(WaifuEngine *engine,
                                    const WaifuLayersRequest *request,
                                    void *user_data,

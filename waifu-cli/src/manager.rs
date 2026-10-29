@@ -99,7 +99,8 @@ pub fn pictures() -> Vec<Listed> {
         .collect()
 }
 
-/// Whether `name` is a published model that speaks or converts rather than draws.
+/// Whether `name` is a published model that speaks, converts or takes a picture apart rather than
+/// draws.
 pub fn is_a_voice(name: &str) -> bool {
     catalog()
         .iter()

@@ -212,10 +212,19 @@ impl Default for SeeThroughOptions {
 /// Where a run is, for a caller that wants to show it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeeThroughProgress {
+    /// The picture encoded for a pass of the layers model, the body's (0) or the head's (1): said
+    /// before the encoder runs, which in float32 at 1280 takes a while.
+    Encoding { pass: i32 },
     /// A step of the layers model on the body (pass 0) or the head (pass 1).
     Layers { pass: i32, done: i32, total: i32 },
+    /// A pass's layers decoded, `done` of `total` already: said before each one.
+    Decoding { pass: i32, done: i32, total: i32 },
+    /// The depth model's slots encoded, `done` of `total` already: said before each one.
+    DepthEncoding { done: i32, total: i32 },
     /// A step of the depth model.
     Depth { done: i32, total: i32 },
+    /// The depth maps decoded, `done` of `total` already: said before each one.
+    DepthDecoding { done: i32, total: i32 },
     /// Cutting the layers into parts.
     Assembling,
 }
@@ -715,6 +724,9 @@ impl SeeThrough {
             }
         }
         let rgb = Tensor::from_f32(&[1, 3, side as i32, side as i32], &rgb)?;
+        if report(SeeThroughProgress::Encoding { pass }).is_break() {
+            return Ok(None);
+        }
         let encoded = self.layers_encoder.forward(&rgb)?.cast(self.dtype)?;
         let picture = repeat(&encoded, frames)?;
 
@@ -758,6 +770,14 @@ impl SeeThrough {
             .collect();
         let mut layers = Vec::with_capacity(frames as usize);
         for frame in 0..frames {
+            let progress = SeeThroughProgress::Decoding {
+                pass,
+                done: frame,
+                total: frames,
+            };
+            if report(progress).is_break() {
+                return Ok(None);
+            }
             let latent = latent.slice(0, frame, frame + 1)?.contiguous()?;
             layers.push(self.decode_layer(&latent, &page_alpha)?);
         }
@@ -781,7 +801,14 @@ impl SeeThrough {
         let slots = self.depth_slots(page, layers);
         let frames = slots.len() as i32;
         let mut encoded = Vec::with_capacity(slots.len());
-        for slot in &slots {
+        for (done, slot) in slots.iter().enumerate() {
+            let progress = SeeThroughProgress::DepthEncoding {
+                done: done as i32,
+                total: frames,
+            };
+            if report(progress).is_break() {
+                return Ok(None);
+            }
             encoded.push(self.encode_slot(&smart_resize_u8(slot, side, side))?);
         }
         let mut stacked = encoded[0].clone();
@@ -819,6 +846,13 @@ impl SeeThrough {
         // Each slot's depth, in [0, 1] and at the canvas's size. The full page's is not wanted.
         let mut maps = Vec::with_capacity(self.config.depth_tags.len());
         for frame in 0..frames - 1 {
+            let progress = SeeThroughProgress::DepthDecoding {
+                done: frame,
+                total: frames - 1,
+            };
+            if report(progress).is_break() {
+                return Ok(None);
+            }
             let latent = depth.slice(0, frame, frame + 1)?.contiguous()?;
             let map = image::resize_linear(&self.decode_depth(&latent)?, canvas, canvas);
             maps.push(Image::from_data(
