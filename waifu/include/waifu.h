@@ -73,6 +73,13 @@ typedef enum {
   WAIFU_ERR_INTERNAL = 7,
 } WaifuStatusCode;
 
+// What kind of document waifu_psd_write makes: img2layers' layers, or its depth.
+typedef enum {
+  WAIFU_PSD_RGB = 0,
+  // Each layer's red is its gray: the depth document's.
+  WAIFU_PSD_GRAYSCALE = 1,
+} WaifuPsdMode;
+
 // One thread that holds a model and runs jobs on it, one at a time, in the order asked.
 typedef struct WaifuEngine WaifuEngine;
 
@@ -291,6 +298,34 @@ typedef struct {
 
 typedef void (*WaifuLayersCompleteCallback)(void *user_data, const WaifuLayersCompletionEvent *event);
 
+// One layer of a document to write.
+typedef struct {
+  const char *name;
+  // Where its top left corner is on the canvas.
+  int32_t left;
+  int32_t top;
+  // RGBA, not premultiplied; in a grayscale document, red is the gray.
+  WaifuRgbaImage image;
+} WaifuPsdLayer;
+
+// A layer of a document and its depth, as stratification takes and gives them.
+typedef struct {
+  const char *name;
+  // Where its top left corner is on the canvas.
+  int32_t left;
+  int32_t top;
+  // RGBA, not premultiplied.
+  WaifuRgbaImage image;
+  // Its depth, the same size: red is the depth, 0 near to 255 far, as img2layers keeps it.
+  WaifuRgbaImage depth;
+} WaifuDepthLayer;
+
+// What waifu_stratify gives: layers bottom first, valid until waifu_depth_layers_free.
+typedef struct {
+  const WaifuDepthLayer *layers;
+  size_t count;
+} WaifuDepthLayers;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -403,6 +438,34 @@ WaifuJob waifu_engine_layers_async(WaifuEngine *engine,
                                    void *user_data,
                                    WaifuProgressCallback on_progress,
                                    WaifuLayersCompleteCallback on_complete);
+
+// A Photoshop document of `layers`, bottom first, `width` by `height`: what img2layers writes,
+// for a caller that has changed its layers -- renamed them, put them in another order -- to
+// write again. `depths`, where there are any, are the layers' depth (red the gray, as
+// img2layers writes it), kept after them in the hidden group `depth`; RGB only. `*len` is set to
+// its length. Free with waifu_bytes_free. NULL, with waifu_last_error, for a layer whose pixels
+// are not width * height * 4 bytes or whose name is not UTF-8.
+uint8_t *waifu_psd_write(const WaifuPsdLayer *layers,
+                         size_t count,
+                         const WaifuPsdLayer *depths,
+                         size_t depth_count,
+                         uint32_t width,
+                         uint32_t height,
+                         WaifuPsdMode mode,
+                         size_t *len);
+
+// Frees what waifu_psd_write returned, given the length it said. NULL is fine.
+void waifu_bytes_free(uint8_t *bytes, size_t len);
+
+// `layers`, bottom first, with hair, hands, top and bottom each cut into a near (`-0`) and a far
+// (`-1`) layer by their own depth (docs/see_through.md): a collar's back behind the neck and its
+// flaps in front. The document's order is kept, the fronts in their layers' places and the backs
+// gone down past what is nearer than them. Free with waifu_depth_layers_free. NULL, with
+// waifu_last_error, for a layer whose pixels or depth are not its size or whose name is not UTF-8.
+WaifuDepthLayers *waifu_stratify(const WaifuDepthLayer *layers, size_t count);
+
+// Frees what waifu_stratify returned. NULL is fine.
+void waifu_depth_layers_free(WaifuDepthLayers *layers);
 
 #ifdef __cplusplus
 }  // extern "C"

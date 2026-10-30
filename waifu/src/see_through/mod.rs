@@ -45,6 +45,7 @@ mod compose;
 pub mod image;
 mod psd;
 mod sampler;
+mod stratify;
 mod unet;
 
 use std::collections::HashMap;
@@ -60,8 +61,12 @@ use crate::sdxl::{VaeConfig, VaeDecoder, VaeEncoder};
 pub use alpha::{AlphaConfig, AlphaDecoder};
 pub use compose::Part;
 pub use image::{Image, Rgba, Square};
-pub use psd::{Layer as PsdLayer, Mode as PsdMode};
+pub use psd::{
+    read as read_psd, write as write_psd, write_with_hidden as write_psd_with_hidden,
+    Document as PsdDocument, HiddenGroup as PsdHiddenGroup, Layer as PsdLayer, Mode as PsdMode,
+};
 pub use sampler::{DdimVelocity, DpmSolverSde, ScheduleConfig};
+pub use stratify::{stratify, DepthLayer, STRATIFIED};
 pub use unet::{Unet, UnetCondition, UnetConfig};
 
 use compose::{Drawn, LAYER_ALPHA};
@@ -240,20 +245,57 @@ pub struct Decomposition {
     pub parts: Vec<Part>,
 }
 
-impl Decomposition {
-    /// A Photoshop document of the parts, bottom first, on the square canvas.
-    pub fn to_psd(&self) -> Vec<u8> {
-        let layers: Vec<psd::Layer> = self
-            .parts
-            .iter()
-            .map(|part| psd::Layer {
-                name: part.tag.clone(),
+/// The group a document keeps its parts' depth in: hidden and closed, after every part, so that it
+/// is at the top of the layer panel and out of the way, and the document is whole without the
+/// depth document beside it. Each part's depth is a layer of it named [`depth_layer_name`].
+pub const DEPTH_GROUP: &str = "depth";
+
+/// What a part's depth is called in [`DEPTH_GROUP`]: `depth/topwear`.
+pub fn depth_layer_name(tag: &str) -> String {
+    format!("{DEPTH_GROUP}/{tag}")
+}
+
+/// `parts`, bottom first, as a document on a `width` by `height` canvas, with each one's depth --
+/// gray, 0 near to 255 far, under the part's own alpha -- in [`DEPTH_GROUP`] after them.
+pub fn document_with_depth(parts: &[Part], width: usize, height: usize) -> Vec<u8> {
+    let layers: Vec<psd::Layer> = parts
+        .iter()
+        .map(|part| psd::Layer {
+            name: part.tag.clone(),
+            left: part.left as i32,
+            top: part.top as i32,
+            pixels: part.pixels.clone(),
+        })
+        .collect();
+    let depths: Vec<psd::Layer> = parts
+        .iter()
+        .map(|part| {
+            let n = part.depth.width * part.depth.height;
+            let mut pixels = Image::new(part.depth.width, part.depth.height, 4);
+            for p in 0..n {
+                pixels.data[p * 4..p * 4 + 3].fill(part.depth.data[p]);
+                pixels.data[p * 4 + 3] = part.pixels.data[p * 4 + 3];
+            }
+            psd::Layer {
+                name: depth_layer_name(&part.tag),
                 left: part.left as i32,
                 top: part.top as i32,
-                pixels: part.pixels.clone(),
-            })
-            .collect();
-        psd::write(&layers, self.canvas, self.canvas, psd::Mode::Rgb)
+                pixels,
+            }
+        })
+        .collect();
+    let group = psd::HiddenGroup {
+        name: DEPTH_GROUP,
+        layers: &depths,
+    };
+    psd::write_with_hidden(&layers, Some(group), width, height, psd::Mode::Rgb)
+}
+
+impl Decomposition {
+    /// A Photoshop document of the parts, bottom first, on the square canvas, each one's depth in
+    /// a hidden group after them ([`document_with_depth`]).
+    pub fn to_psd(&self) -> Vec<u8> {
+        document_with_depth(&self.parts, self.canvas, self.canvas)
     }
 
     /// The same document with each part's depth in place of its colour, in grayscale, under the

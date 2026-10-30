@@ -396,3 +396,154 @@ fn a_memory_limit_is_for_a_device_that_has_one() {
         }
     }
 }
+
+#[test]
+fn a_document_is_written_from_layers_and_freed_by_the_caller() {
+    let name = CString::new("front hair").unwrap();
+    let pixels = [10u8, 20, 30, 255, 40, 50, 60, 128];
+    let layer = WaifuPsdLayer {
+        name: name.as_ptr(),
+        left: 3,
+        top: 4,
+        image: WaifuRgbaImage {
+            width: 2,
+            height: 1,
+            rgba: pixels.as_ptr(),
+            len: pixels.len(),
+        },
+    };
+    for mode in [
+        WaifuPsdMode::WAIFU_PSD_RGB,
+        WaifuPsdMode::WAIFU_PSD_GRAYSCALE,
+    ] {
+        let mut len = 0;
+        let written = unsafe { waifu_psd_write(&layer, 1, ptr::null(), 0, 8, 8, mode, &mut len) };
+        assert!(!written.is_null(), "{}", last_error());
+        let bytes = unsafe { std::slice::from_raw_parts(written, len) };
+        assert_eq!(&bytes[..4], b"8BPS");
+        // The colour mode the header names: RGB is 3, grayscale 1.
+        let colour = u16::from_be_bytes([bytes[24], bytes[25]]);
+        assert_eq!(
+            colour,
+            if mode == WaifuPsdMode::WAIFU_PSD_RGB {
+                3
+            } else {
+                1
+            }
+        );
+        unsafe { waifu_bytes_free(written, len) };
+    }
+
+    // Pixels that are not the layer's size are refused, and say so.
+    let short = WaifuPsdLayer {
+        image: WaifuRgbaImage {
+            width: 3,
+            ..layer.image
+        },
+        ..layer
+    };
+    let mut len = 0;
+    let refused = unsafe {
+        waifu_psd_write(
+            &short,
+            1,
+            ptr::null(),
+            0,
+            8,
+            8,
+            WaifuPsdMode::WAIFU_PSD_RGB,
+            &mut len,
+        )
+    };
+    assert!(refused.is_null());
+    assert!(last_error().contains("front hair"), "{}", last_error());
+    unsafe { waifu_bytes_free(ptr::null_mut(), 0) };
+
+    // With its depth, kept after it in the hidden group, and read back in that order.
+    let depth_name = CString::new("depth/front hair").unwrap();
+    let whole = |name: &CString| WaifuPsdLayer {
+        name: name.as_ptr(),
+        left: 3,
+        top: 4,
+        image: WaifuRgbaImage {
+            width: 2,
+            height: 1,
+            rgba: pixels.as_ptr(),
+            len: pixels.len(),
+        },
+    };
+    let depth = whole(&depth_name);
+    let written = unsafe {
+        waifu_psd_write(
+            &whole(&name),
+            1,
+            &depth,
+            1,
+            8,
+            8,
+            WaifuPsdMode::WAIFU_PSD_RGB,
+            &mut len,
+        )
+    };
+    assert!(!written.is_null(), "{}", last_error());
+    let document =
+        crate::see_through::read_psd(unsafe { std::slice::from_raw_parts(written, len) }).unwrap();
+    let names: Vec<&str> = document.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["front hair", "depth/front hair"]);
+    unsafe { waifu_bytes_free(written, len) };
+}
+
+#[test]
+fn a_top_of_two_depths_is_stratified_and_freed_by_the_caller() {
+    // A top 20 by 10, its left half near and its right half far.
+    let (w, h) = (20usize, 10usize);
+    let pixels: Vec<u8> = (0..w * h).flat_map(|_| [90, 90, 90, 255]).collect();
+    let depth: Vec<u8> = (0..w * h)
+        .flat_map(|p| {
+            let d = if p % w < 10 { 40 } else { 200 };
+            [d, d, d, 255]
+        })
+        .collect();
+    let name = CString::new("topwear").unwrap();
+    let image = |data: &Vec<u8>| WaifuRgbaImage {
+        width: w as u32,
+        height: h as u32,
+        rgba: data.as_ptr(),
+        len: data.len(),
+    };
+    let layer = WaifuDepthLayer {
+        name: name.as_ptr(),
+        left: 5,
+        top: 6,
+        image: image(&pixels),
+        depth: image(&depth),
+    };
+    unsafe {
+        let out = waifu_stratify(&layer, 1);
+        assert!(!out.is_null(), "{}", last_error());
+        let layers = std::slice::from_raw_parts((*out).layers, (*out).count);
+        let names: Vec<String> = layers
+            .iter()
+            .map(|l| CStr::from_ptr(l.name).to_string_lossy().into_owned())
+            .collect();
+        // The back under the front, both where the top was.
+        assert_eq!(names, ["topwear-1", "topwear-0"]);
+        assert_eq!((layers[1].left, layers[1].top), (5, 6));
+        let back = &layers[0];
+        assert_eq!((back.image.width, back.depth.width), (20, 20));
+        assert_eq!(*back.depth.rgba.add(4 * 19), 200, "its depth, red");
+        waifu_depth_layers_free(out);
+
+        // A depth that is not the layer's size is refused.
+        let short = WaifuDepthLayer {
+            depth: WaifuRgbaImage {
+                width: 3,
+                ..image(&depth)
+            },
+            ..layer
+        };
+        assert!(waifu_stratify(&short, 1).is_null());
+        assert!(last_error().contains("topwear"), "{}", last_error());
+        waifu_depth_layers_free(ptr::null_mut());
+    }
+}
