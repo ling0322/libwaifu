@@ -130,8 +130,8 @@ this to hair, hands, tops and bottoms. Upstream ships it only as a step to run b
 
 Here it is done to a document after img2layers wrote it, as upstream's `seg_wdepth` is, and not
 as part of taking a picture apart: what img2layers writes is the model's, and what the layers are
-cut into is for what they are used for. `see_through::stratify` (`waifu_stratify` in the C API;
-**Split by depth** on the app's live2d page) takes a document's layers with their depth and does it
+cut into is for what they are used for. `see_through::stratify` (`waifu_stratify` in the C API,
+and the `see_through_stratify` tool below) takes a document's layers with their depth and does it
 to `front hair`, `back hair`, `handwear` and its `-l`/`-r`, `topwear` and `bottomwear`
 (`waifu/src/see_through/stratify.rs`):
 

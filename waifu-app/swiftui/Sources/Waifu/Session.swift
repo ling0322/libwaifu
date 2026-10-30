@@ -154,10 +154,6 @@ final class Session {
     var tab: Tab = .text2img
     /// Whether the Model Manager page is on show rather than a task.
     var showingModels = false
-    /// Whether the live2d page is on show rather than a task.
-    var showingRig = false
-    /// The live2d page's document and how it blinks.
-    let rig = RigStage()
     var form = JobForm()
 
     /// The picture in the big frame and the clip in the player, until something new comes in.
@@ -1106,14 +1102,6 @@ final class Session {
     func reveal(_ job: Job) {
         NSWorkspace.shared.activateFileViewerSelecting([file(job.id, kind: job.kind), besideFolder(job.id)])
     }
-
-    /// Opens a picture taken apart's document on the live2d page, and shows the page.
-    func openInRig(_ job: Job) {
-        rig.open(file(job.id, kind: job.kind))
-        showingModels = false
-        showingRig = true
-    }
-
     // MARK: - what is held
 
     enum Which { case picture, recording, source }

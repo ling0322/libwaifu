@@ -58,8 +58,7 @@ struct WaifuApp: App {
     }
 
     /// `Waifu -m sdxl:base [-device metal]` chooses that model, and shows its task, as the window
-    /// opens -- the way `waifu -m` does. The first job loads it. `-rig <document.psd>` opens that
-    /// document on the live2d page instead.
+    /// opens -- the way `waifu -m` does. The first job loads it.
     private func startFromTheCommandLine() {
         let arguments = Array(CommandLine.arguments.dropFirst())
         func value(_ names: String...) -> String? {
@@ -71,11 +70,6 @@ struct WaifuApp: App {
 
         if let device = value("-device", "--device") { session.device = device }
         if let model = value("-m", "--m") { session.choose(model) }
-        if let document = value("-rig", "--rig") {
-            session.rig.open(URL(fileURLWithPath: (document as NSString).expandingTildeInPath))
-            session.showingModels = false
-            session.showingRig = true
-        }
     }
 }
 

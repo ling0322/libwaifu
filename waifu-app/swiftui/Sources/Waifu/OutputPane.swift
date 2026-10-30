@@ -92,8 +92,6 @@ struct OutputPane: View {
                 Button("Save Depth PSD…") { session.saveDepth(job) }
                     .help("The same document with each layer's depth in place of its colour")
                 Button("Show in Finder") { session.reveal(job) }
-                Button("Open in live2d") { session.openInRig(job) }
-                    .help("Make these layers blink")
             }
             Button("Reuse these settings") { session.reuse(job) }
             Spacer()
