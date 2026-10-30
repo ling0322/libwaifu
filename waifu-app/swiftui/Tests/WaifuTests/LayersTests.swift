@@ -110,4 +110,84 @@ final class LayersTests: XCTestCase {
         XCTAssertEqual(again.made.layers, kept)
         XCTAssertEqual(again.made.canvas, 8)
     }
+
+    private func kept(_ name: String, _ depth: Float, _ file: String) -> KeptLayer {
+        KeptLayer(name: name, left: 0, top: 0, width: 1, height: 1, depth: depth, file: file)
+    }
+
+    func testLayersAreLaidFarthestFirstAndTiesKeepTheirOrder() {
+        let order = Session.ordered([kept("a", 0.2, "0"), kept("b", 0.9, "1"), kept("c", 0.2, "2"), kept("d", 0.5, "3")])
+        XCTAssertEqual(order.map(\.name), ["b", "d", "a", "c"])
+    }
+
+    /// A picture taken apart as it is kept -- its document, its depth document, its record -- with
+    /// one layer renamed and another given a depth that puts it on top: both documents are written
+    /// again in the new order under the new names, every pixel as it was.
+    func testChangedLayersAreWrittenAgainPixelForPixel() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("waifu-rewrite-\(ProcessInfo.processInfo.processIdentifier)")
+        let besides = folder.appendingPathComponent("x.layers")
+        try FileManager.default.createDirectory(at: besides, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let red = RGBAImage(width: 2, height: 1, rgba: [255, 0, 0, 255, 200, 0, 0, 100])
+        let blue = RGBAImage(width: 1, height: 2, rgba: [0, 0, 255, 255, 0, 0, 250, 30])
+        let near = RGBAImage(width: 1, height: 1, rgba: [70, 70, 70, 255])
+        let far = RGBAImage(width: 1, height: 1, rgba: [180, 180, 180, 255])
+        let document = folder.appendingPathComponent("x.psd")
+        // With its depth in the hidden group, as img2layers writes it: red the gray.
+        let gray = { (image: RGBAImage) in
+            RGBAImage(width: image.width, height: image.height, rgba: image.rgba.enumerated().map { $0.offset % 4 == 3 ? $0.element : image.rgba[$0.offset / 4 * 4] })
+        }
+        try PSD.write(
+            [PSD.Layer(name: "back hair", left: 0, top: 0, image: red), PSD.Layer(name: "face", left: 3, top: 1, image: blue)],
+            width: 4, height: 4,
+            depths: [
+                PSD.Layer(name: PSD.depthName(of: "back hair"), left: 0, top: 0, image: gray(far)),
+                PSD.Layer(name: PSD.depthName(of: "face"), left: 3, top: 1, image: gray(near)),
+            ]
+        ).write(to: document)
+        try PSD.write(
+            [PSD.Layer(name: "back hair", left: 0, top: 0, image: far), PSD.Layer(name: "face", left: 3, top: 1, image: near)],
+            width: 4, height: 4, grayscale: true
+        ).write(to: besides.appendingPathComponent(Session.depthDocument))
+
+        let old = [kept("back hair", 0.8, "00.png"), kept("face", 0.4, "01.png")]
+        var changed = old
+        changed[0].name = "hair"
+        changed[0].depth = 0.1
+        let new = Session.ordered(changed)
+        XCTAssertEqual(new.map(\.name), ["face", "hair"])
+        var made = Made(seed: 1, seconds: 0, model: "see-through", parameters: "")
+        made.layers = new
+        let recordFile = folder.appendingPathComponent("x.json")
+        let (psd, composite) = try Session.rewritten(
+            document: document, besides: besides,
+            record: Record(id: "x", kind: "layers", created: 0, finished: 0, made: made), recordFile: recordFile,
+            from: old, to: new)
+
+        let again = try PSDDocument.read(psd)
+        let (shown, depths) = again.splitDepth()
+        XCTAssertEqual(shown.map(\.name), ["face", "hair"])
+        XCTAssertEqual(shown[0].image, blue)
+        XCTAssertEqual(shown[1].image, red)
+        XCTAssertEqual([shown[0].left, shown[0].top], [3, 1])
+        // The depth in the hidden group, in the new order under the new names, every pixel as it was.
+        XCTAssertEqual(depths.map(\.name), ["depth/face", "depth/hair"])
+        XCTAssertEqual(depths.map(\.visible), [false, false])
+        XCTAssertEqual(depths[0].image, gray(near))
+        XCTAssertEqual(again.depth(of: "hair")?.image, gray(far))
+        XCTAssertEqual(try PSDDocument.read(Data(contentsOf: document)).splitDepth().layers.map(\.name), ["face", "hair"])
+
+        // The depth document in the same order, its gray read into red, green and blue.
+        let depth = try PSDDocument.read(Data(contentsOf: besides.appendingPathComponent(Session.depthDocument)))
+        XCTAssertEqual(depth.layers.map(\.name), ["face", "hair"])
+        XCTAssertEqual(depth.layers[0].image, near)
+        XCTAssertEqual(depth.layers[1].image, far)
+
+        XCTAssertNotNil(composite)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: besides.appendingPathComponent(Session.composite).path))
+        let record = try JSONDecoder().decode(Record.self, from: Data(contentsOf: recordFile))
+        XCTAssertEqual(record.made.layers?.map(\.name), ["face", "hair"])
+    }
 }

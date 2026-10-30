@@ -54,7 +54,7 @@ The icon is `Resources/AppIcon.icon`, the Icon Composer format, which `build-app
 
 ## Use
 
-The sidebar lists the tasks -- text2img, img2layers and text2speech -- and the Model Manager.
+The sidebar lists the tasks -- text2img, img2layers, text2speech and live2d -- and the Model Manager.
 
 Each task opens on a model of its own -- `anima:turbo` for text2img, `see-through` for
 img2layers, `cosyvoice` for text2speech -- until another is chosen. On a task, the Model card at
@@ -70,14 +70,33 @@ the strip, after asking; what is still being made is left alone.
 
 **img2layers** takes a picture apart with See-through (`see-through`, docs/see_through.md): drop
 an illustration on it and **Split into Layers**. What comes back is a Photoshop document, kept as
-`<id>.psd`, and beside it in `<id>.layers/` the depth document, the layers put back together, and
-every layer as a PNG. The middle shows them stacked on their canvas, and beside that their list,
-nearest first: the eye hides one, a click shows it alone. **Save PSD…** and **Save Depth PSD…**
-save the two documents.
+`<id>.psd` -- with each layer's depth in a hidden group `depth`, at the top of the layer panel --
+and beside it in `<id>.layers/` the depth document, the layers put back together, and every layer
+as a PNG. The middle shows them stacked on their canvas, and beside that their list,
+nearest first: the eye hides one, a click shows it alone. Its pencil opens a small window to change
+its name and depth (0 nearest, 1 farthest) in; on Save the list takes the new order, and both
+documents, the picture put back together and the record are written again -- through
+`waifu_psd_write`, every pixel as it was. **Reset** puts back what the model gave. **Save PSD…**
+and **Save Depth PSD…** save the two documents; **Open in live2d** makes them blink.
+
+**live2d** makes a drawing in layers blink, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
+does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedEyes.swift` under its licence). Drop a
+`.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers writes. Layers
+named as See-through names them blink: `eyewhite`, `irides`, `eyelash`, with `eyebrow` and
+`eye_close` where there are any, and Anime2.5DRig's English and Japanese names (`白目`, `瞳`,
+`まつげ`, `閉じ目`) too. An eye layer drawn as one is cut in two at the middle of the face; a
+document with no closed eye is given a stock one, fitted to each eye and in the colour of its lashes.
+The eyes are squashed toward a line 62 % of the way down each white and fade into the closed eye
+when they are a quarter open; on its own it blinks every 1.6 to 5.4 seconds. **Split by depth**
+cuts hair, hands, top and bottom each into a near and a far layer by their own depth first, as the
+See-through paper does -- the back of a collar behind the neck, its flaps in front -- from the
+depth the document keeps, or the depth document img2layers wrote beside it (docs/see_through.md).
+Nothing on the page runs a model.
 
 The Model Manager lists every published model, with how much of it is on this Mac: a download with
 its progress, and a delete.
 
-From a terminal, `Waifu -m sdxl:base -device metal` chooses that model as the window opens.
+From a terminal, `Waifu -m sdxl:base -device metal` chooses that model as the window opens, and
+`Waifu -rig drawing.psd` opens that document on the live2d page.
 
 ⌘↩ generates, ⌘. cancels, ⌘S saves what is on show.

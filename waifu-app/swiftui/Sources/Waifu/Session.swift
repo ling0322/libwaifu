@@ -154,6 +154,10 @@ final class Session {
     var tab: Tab = .text2img
     /// Whether the Model Manager page is on show rather than a task.
     var showingModels = false
+    /// Whether the live2d page is on show rather than a task.
+    var showingRig = false
+    /// The live2d page's document and how it blinks.
+    let rig = RigStage()
     var form = JobForm()
 
     /// The picture in the big frame and the clip in the player, until something new comes in.
@@ -962,6 +966,131 @@ final class Session {
         Media.save(bytes, suggesting: Media.fileName(created: job.finished ?? job.created, kind: job.kind))
     }
 
+    // MARK: - a picture taken apart, changed
+
+    /// The rewrites asked for, one after another: each reads the documents the one before wrote.
+    private var rewriting: Task<Void, Never>?
+
+    /// Renames layer `file` of `job`, or gives it another depth -- 0 near to 1 far, which is
+    /// another place among the others -- and writes its documents again. What the model said is
+    /// kept the first time, for Reset.
+    func editLayer(_ job: Job, file: String, name: String? = nil, depth: Float? = nil) {
+        guard let layers = jobs.first(where: { $0.id == job.id })?.made?.layers,
+            let at = layers.firstIndex(where: { $0.file == file })
+        else { return }
+        var layer = layers[at]
+        if let name = name?.trimmingCharacters(in: .whitespaces), !name.isEmpty, name != layer.name {
+            if layer.modelName == nil { layer.modelName = layer.name }
+            layer.name = name
+        }
+        if let depth = depth.map({ min(max($0, 0), 1) }), depth != layer.depth {
+            if layer.modelDepth == nil { layer.modelDepth = layer.depth }
+            layer.depth = depth
+        }
+        guard layer != layers[at] else { return }
+        var changed = layers
+        changed[at] = layer
+        rewrite(job.id, from: layers, to: Self.ordered(changed))
+    }
+
+    /// Puts back every name and depth the model gave, and the order they made.
+    func resetLayers(_ job: Job) {
+        guard let layers = jobs.first(where: { $0.id == job.id })?.made?.layers, layers.contains(where: \.edited) else {
+            return
+        }
+        let back = layers.map { layer -> KeptLayer in
+            var layer = layer
+            layer.name = layer.modelName ?? layer.name
+            layer.depth = layer.modelDepth ?? layer.depth
+            layer.modelName = nil
+            layer.modelDepth = nil
+            return layer
+        }
+        rewrite(job.id, from: layers, to: Self.ordered(back))
+    }
+
+    /// Farthest first, as the documents lay them; those at one depth in the order they were.
+    nonisolated static func ordered(_ layers: [KeptLayer]) -> [KeptLayer] {
+        layers.enumerated()
+            .sorted { ($0.element.depth, -$0.offset) > ($1.element.depth, -$1.offset) }
+            .map(\.element)
+    }
+
+    /// Shows `new` at once, and writes it -- both documents, the picture put back together, the
+    /// record -- off the main thread after whatever is being written already.
+    private func rewrite(_ id: String, from old: [KeptLayer], to new: [KeptLayer]) {
+        guard let index = jobs.firstIndex(where: { $0.id == id }), var made = jobs[index].made else { return }
+        made.layers = new
+        jobs[index].made = made
+        let job = jobs[index]
+        let record = Record(id: id, kind: job.kind, created: job.created, finished: job.finished ?? job.created, made: made)
+        let (document, besides, recordFile) = (file(id, kind: job.kind), besideFolder(id), recordFile(id))
+        let previous = rewriting
+        rewriting = Task {
+            await previous?.value
+            let written = await Task.detached { () -> Result<(Data, Data?), Error> in
+                Result { try Self.rewritten(document: document, besides: besides, record: record, recordFile: recordFile, from: old, to: new) }
+            }.value
+            switch written {
+            case .success(let (psd, composite)):
+                outputs[id] = psd
+                if let composite { images[id] = NSImage(data: composite) }
+            case .failure(let error):
+                complaint = "could not write its documents again: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// The documents of a picture taken apart in the order and under the names of `new`, out of
+    /// the ones on the disk, which are in the order of `old`: every layer's pixels as they are,
+    /// read back rather than made again. Hands back the document and the picture put together.
+    nonisolated static func rewritten(
+        document: URL, besides: URL, record: Record, recordFile: URL, from old: [KeptLayer], to new: [KeptLayer]
+    ) throws -> (Data, Data?) {
+        let main = try PSDDocument.read(Data(contentsOf: document))
+        // The layers, and the depth img2layers keeps after them in its hidden group, in their order.
+        let (shown, depths) = main.splitDepth()
+        guard shown.count == old.count else {
+            throw PSDError(message: "its document has \(shown.count) layers and its record \(old.count)")
+        }
+        // Each layer's pixels by its file, which neither a name nor a depth changes.
+        let pixels = Dictionary(uniqueKeysWithValues: zip(old.map(\.file), shown))
+        let layers = try new.map { kept -> PSD.Layer in
+            guard let layer = pixels[kept.file] else { throw PSDError(message: "\(kept.name) is not in its document") }
+            return PSD.Layer(name: kept.name, left: layer.left, top: layer.top, image: layer.image)
+        }
+        // The depth, where there is one for every layer, in the new order under the new names.
+        var depthLayers: [PSD.Layer] = []
+        if depths.count == old.count {
+            let byFile = Dictionary(uniqueKeysWithValues: zip(old.map(\.file), depths))
+            depthLayers = new.compactMap { kept in
+                byFile[kept.file].map {
+                    PSD.Layer(name: PSD.depthName(of: kept.name), left: $0.left, top: $0.top, image: $0.image)
+                }
+            }
+        }
+        let psd = try PSD.write(layers, width: main.width, height: main.height, depths: depthLayers)
+
+        // The depth document, where there is one in the same order.
+        let depthFile = besides.appendingPathComponent(depthDocument)
+        if let depth = try? PSDDocument.read(Data(contentsOf: depthFile)), depth.layers.count == old.count {
+            let grays = Dictionary(uniqueKeysWithValues: zip(old.map(\.file), depth.layers))
+            let layers = new.compactMap { kept in
+                grays[kept.file].map { PSD.Layer(name: kept.name, left: $0.left, top: $0.top, image: $0.image) }
+            }
+            try PSD.write(layers, width: depth.width, height: depth.height, grayscale: true).write(to: depthFile)
+        }
+
+        let composite = Media.composite(
+            layers.map { Layer(name: $0.name, left: $0.left, top: $0.top, image: $0.image, depth: 0) }, canvas: main.width)
+        try composite?.write(to: besides.appendingPathComponent(Self.composite))
+        try psd.write(to: document)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(record).write(to: recordFile)
+        return (psd, composite)
+    }
+
     /// Saves a picture taken apart's depth document: each layer's depth in place of its colour.
     func saveDepth(_ job: Job) {
         let url = besideFolder(job.id).appendingPathComponent(Self.depthDocument)
@@ -976,6 +1105,13 @@ final class Session {
     /// Shows a picture taken apart's document, and the folder of its layers, in Finder.
     func reveal(_ job: Job) {
         NSWorkspace.shared.activateFileViewerSelecting([file(job.id, kind: job.kind), besideFolder(job.id)])
+    }
+
+    /// Opens a picture taken apart's document on the live2d page, and shows the page.
+    func openInRig(_ job: Job) {
+        rig.open(file(job.id, kind: job.kind))
+        showingModels = false
+        showingRig = true
     }
 
     // MARK: - what is held

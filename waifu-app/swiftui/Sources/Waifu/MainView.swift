@@ -58,13 +58,16 @@ struct MainView: View {
         } detail: {
             if session.showingModels {
                 ModelManagerView(session: session)
+            } else if session.showingRig {
+                rigPage
             } else {
                 task
             }
         }
         .toolbarFill()
-        .navigationTitle(session.showingModels ? "Model Manager" : session.tab.rawValue)
-        .navigationSubtitle(session.showingModels ? "" : subtitle)
+        .navigationTitle(session.showingModels ? "Model Manager" : session.showingRig ? "live2d" : session.tab.rawValue)
+        .navigationSubtitle(
+            session.showingModels ? "" : session.showingRig ? session.rig.file?.lastPathComponent ?? "no drawing" : subtitle)
         .toolbar {
             if !session.showingModels {
                 ToolbarItem(placement: .primaryAction) {
@@ -77,6 +80,19 @@ struct MainView: View {
                 }
             }
         }
+    }
+
+    /// The live2d page: the drawing blinking in the middle, and how it blinks on the right.
+    private var rigPage: some View {
+        RigPage(stage: session.rig)
+            .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.window)
+            .inspector(isPresented: $showSettings) {
+                RigSettings(stage: session.rig)
+                    .frame(maxHeight: .infinity)
+                    .background(Theme.sidebar)
+                    .inspectorColumnWidth(min: 300, ideal: 300, max: 420)
+            }
     }
 
     /// A task: what to make, the button that makes it, and what came of it in the middle, and
@@ -139,9 +155,10 @@ struct NoModel: View {
 
 // MARK: - the side
 
-/// What the sidebar picks between: a task, or the Model Manager page.
+/// What the sidebar picks between: a task, the live2d page, or the Model Manager page.
 enum Page: Hashable {
     case task(Tab)
+    case live2d
     case models
 }
 
@@ -150,14 +167,19 @@ struct Sidebar: View {
 
     private var page: Binding<Page?> {
         Binding(
-            get: { session.showingModels ? .models : .task(session.tab) },
+            get: { session.showingModels ? .models : session.showingRig ? .live2d : .task(session.tab) },
             set: { picked in
                 switch picked {
                 case .task(let tab):
                     session.tab = tab
                     session.showingModels = false
+                    session.showingRig = false
+                case .live2d:
+                    session.showingRig = true
+                    session.showingModels = false
                 case .models:
                     session.showingModels = true
+                    session.showingRig = false
                 case nil:
                     break
                 }
@@ -175,6 +197,12 @@ struct Sidebar: View {
                     }
                     .tag(Page.task(tab))
                 }
+                Label {
+                    Text("live2d")
+                } icon: {
+                    SettingsIcon(symbol: "eye", color: .green)
+                }
+                .tag(Page.live2d)
             }
             Section("Models") {
                 Label {
