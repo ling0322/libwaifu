@@ -92,6 +92,8 @@ struct OutputPane: View {
                 Button("Save Depth PSD…") { session.saveDepth(job) }
                     .help("The same document with each layer's depth in place of its colour")
                 Button("Show in Finder") { session.reveal(job) }
+                Button("Open in waifu2d") { session.openInRig(job) }
+                    .help("Make these layers move")
             }
             Button("Reuse these settings") { session.reuse(job) }
             Spacer()
@@ -356,8 +358,13 @@ struct LayersFrame: View {
     @State private var hidden: Set<String> = []
     /// The one layer on show by itself, where one was clicked.
     @State private var alone: String?
+    /// The layers as Split by depth saves them, and their pictures, while it is on.
+    @State private var split: (layers: [KeptLayer], images: [String: NSImage])?
 
-    private var layers: [KeptLayer] { job.made?.layers ?? [] }
+    /// Whether the layers shown are split by depth: changing them is for the model's own.
+    private var splitting: Bool { session.form.splitByDepth && split != nil }
+    private var layers: [KeptLayer] { splitting ? split!.layers : job.made?.layers ?? [] }
+    private var pictures: [String: NSImage] { splitting ? split!.images : read }
     private var canvas: CGFloat { CGFloat(max(1, job.made?.canvas ?? 1280)) }
 
     var body: some View {
@@ -368,6 +375,14 @@ struct LayersFrame: View {
         .task(id: job.id) {
             await session.load(job)
             read = await session.layerImages(job)
+        }
+        .task(id: "\(job.id) \(session.form.splitByDepth)") {
+            alone = nil
+            hidden = []
+            split = nil
+            guard session.form.splitByDepth else { return }
+            await session.load(job)
+            split = await session.splitLayers(job)
         }
     }
 
@@ -386,7 +401,7 @@ struct LayersFrame: View {
             ZStack(alignment: .topLeading) {
                 Checkerboard()
                 ForEach(layers, id: \.file) { layer in
-                    if shows(layer), let image = read[layer.file] {
+                    if shows(layer), let image = pictures[layer.file] {
                         Image(nsImage: image)
                             .resizable()
                             .interpolation(.high)
@@ -400,7 +415,7 @@ struct LayersFrame: View {
             .frame(width: space.size.width, height: space.size.height)
         }
         .overlay {
-            if read.isEmpty && !layers.isEmpty { ProgressView() }
+            if (pictures.isEmpty && !layers.isEmpty) || (session.form.splitByDepth && split == nil) { ProgressView() }
         }
         .help(job.made?.parameters ?? "")
     }
@@ -417,18 +432,24 @@ struct LayersFrame: View {
                     }
                     .buttonStyle(.link)
                 }
-                if layers.contains(where: \.edited) {
+                if !splitting, layers.contains(where: \.edited) {
                     Button("Reset") { session.resetLayers(job) }
                         .buttonStyle(.link)
                         .help("Put back every name and depth the model gave, and its order")
                 }
             }
+            if splitting {
+                Text("Split by depth, as it is saved. Turn it off to change names and depths.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(layers.reversed(), id: \.file) { layer in
                         LayerRow(
-                            layer: layer, image: read[layer.file], alone: alone == layer.file,
-                            hidden: hidden.contains(layer.file),
+                            layer: layer, image: pictures[layer.file], alone: alone == layer.file,
+                            hidden: hidden.contains(layer.file), editable: !splitting,
                             toggleHidden: {
                                 if hidden.contains(layer.file) { hidden.remove(layer.file) } else { hidden.insert(layer.file) }
                             },
@@ -455,6 +476,8 @@ struct LayerRow: View {
     var image: NSImage?
     var alone: Bool
     var hidden: Bool
+    /// Whether its name and depth can be changed: not while the list is split by depth.
+    var editable = true
     var toggleHidden: () -> Void
     var toggleAlone: () -> Void
     var edit: (_ name: String?, _ depth: Float?) -> Void
@@ -492,23 +515,25 @@ struct LayerRow: View {
             .opacity(hidden ? 0.5 : 1)
             Spacer(minLength: 0)
 
-            Button {
-                editing = true
-            } label: {
-                // Heavier than the system draws it: at its own weight it is a hairline beside the eye.
-                Image(systemName: "pencil")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 18)
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(Color.primary.opacity(0.75))
-            .help("Change its name or depth")
-            .popover(isPresented: $editing, arrowEdge: .leading) {
-                LayerEditor(layer: layer) { name, depth in
-                    edit(name, depth)
-                    editing = false
-                } cancel: {
-                    editing = false
+            if editable {
+                Button {
+                    editing = true
+                } label: {
+                    // Heavier than the system draws it: at its own weight it is a hairline beside the eye.
+                    Image(systemName: "pencil")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 18)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Color.primary.opacity(0.75))
+                .help("Change its name or depth")
+                .popover(isPresented: $editing, arrowEdge: .leading) {
+                    LayerEditor(layer: layer) { name, depth in
+                        edit(name, depth)
+                        editing = false
+                    } cancel: {
+                        editing = false
+                    }
                 }
             }
         }
@@ -519,7 +544,7 @@ struct LayerRow: View {
         .onTapGesture(perform: toggleAlone)
         .help(alone ? "Click to show every layer again" : "Click to show this layer alone")
         .contextMenu {
-            Button("Edit…") { editing = true }
+            if editable { Button("Edit…") { editing = true } }
             Button(alone ? "Show Every Layer" : "Show Alone", action: toggleAlone)
             if let image {
                 Button("Copy") {
