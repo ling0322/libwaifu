@@ -700,6 +700,118 @@ public final class Engine: @unchecked Sendable {
     }
 }
 
+// MARK: - Photoshop documents
+
+/// Photoshop documents, written by the writer img2layers uses: for layers changed after it.
+public enum PSD {
+    public struct Layer: Sendable {
+        public var name: String
+        public var left: Int
+        public var top: Int
+        /// In a grayscale document, red is the gray.
+        public var image: RGBAImage
+
+        public init(name: String, left: Int, top: Int, image: RGBAImage) {
+            self.name = name
+            self.left = left
+            self.top = top
+            self.image = image
+        }
+    }
+
+    /// The group a document keeps its layers' depth in, hidden, after them: img2layers' `depth`.
+    public static let depthGroup = "depth"
+
+    /// What a layer's depth is called in that group: `depth/topwear`.
+    public static func depthName(of name: String) -> String { "\(depthGroup)/\(name)" }
+
+    /// A document of `layers`, bottom first, `width` by `height`: RGB, or grayscale as the depth
+    /// document is. `depths`, in an RGB one, are kept after them in the hidden group `depth`.
+    public static func write(
+        _ layers: [Layer], width: Int, height: Int, grayscale: Bool = false, depths: [Layer] = []
+    ) throws -> Data {
+        let scratch = Scratch()
+        let c = { (layers: [Layer]) in
+            layers.map { layer in
+                WaifuPsdLayer(
+                    name: scratch.string(layer.name), left: Int32(clamping: layer.left), top: Int32(clamping: layer.top),
+                    image: WaifuRgbaImage(
+                        width: UInt32(clamping: layer.image.width), height: UInt32(clamping: layer.image.height),
+                        rgba: scratch.array(layer.image.rgba), len: layer.image.rgba.count))
+            }
+        }
+        let (shown, hidden) = (c(layers), c(depths))
+        var len = 0
+        let written = withExtendedLifetime(scratch) {
+            shown.withUnsafeBufferPointer { layers in
+                hidden.withUnsafeBufferPointer { depths in
+                    waifu_psd_write(
+                        layers.baseAddress, layers.count, depths.baseAddress, depths.count,
+                        UInt32(clamping: width), UInt32(clamping: height),
+                        grayscale ? WAIFU_PSD_GRAYSCALE : WAIFU_PSD_RGB, &len)
+                }
+            }
+        }
+        guard let written else { throw WaifuError.refused(lastError()) }
+        defer { waifu_bytes_free(written, len) }
+        return Data(bytes: written, count: len)
+    }
+}
+
+// MARK: - stratification
+
+/// Hair, hands, top and bottom each cut into a near (-0) and a far (-1) layer by their own depth:
+/// the back of a collar behind the neck and its flaps in front. No engine; it returns at once.
+public enum Stratify {
+    public struct Layer: Sendable {
+        public var name: String
+        public var left: Int
+        public var top: Int
+        public var image: RGBAImage
+        /// The same size; red is the depth, 0 near to 255 far.
+        public var depth: RGBAImage
+
+        public init(name: String, left: Int, top: Int, image: RGBAImage, depth: RGBAImage) {
+            self.name = name
+            self.left = left
+            self.top = top
+            self.image = image
+            self.depth = depth
+        }
+    }
+
+    /// `layers`, bottom first, stratified: the document's order kept, each front in its layer's
+    /// place and each back gone down past what is nearer than it.
+    public static func layers(_ layers: [Layer]) throws -> [Layer] {
+        let scratch = Scratch()
+        let image = { (image: RGBAImage) in
+            WaifuRgbaImage(
+                width: UInt32(clamping: image.width), height: UInt32(clamping: image.height),
+                rgba: scratch.array(image.rgba), len: image.rgba.count)
+        }
+        let c = layers.map { layer in
+            WaifuDepthLayer(
+                name: scratch.string(layer.name), left: Int32(clamping: layer.left), top: Int32(clamping: layer.top),
+                image: image(layer.image), depth: image(layer.depth))
+        }
+        let out = withExtendedLifetime(scratch) {
+            c.withUnsafeBufferPointer { waifu_stratify($0.baseAddress, $0.count) }
+        }
+        guard let out else { throw WaifuError.refused(lastError()) }
+        defer { waifu_depth_layers_free(out) }
+        let copy = { (image: WaifuRgbaImage) in
+            RGBAImage(
+                width: Int(image.width), height: Int(image.height),
+                rgba: image.rgba.map { Array(UnsafeBufferPointer(start: $0, count: image.len)) } ?? [])
+        }
+        return UnsafeBufferPointer(start: out.pointee.layers, count: out.pointee.count).map { layer in
+            Layer(
+                name: layer.name.map { String(cString: $0) } ?? "", left: Int(layer.left), top: Int(layer.top),
+                image: copy(layer.image), depth: copy(layer.depth))
+        }
+    }
+}
+
 // MARK: - the model manager
 
 /// What is published, what is here, and fetching it: libwaifu_modelmanager's. None of it needs an

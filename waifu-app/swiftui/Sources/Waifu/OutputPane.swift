@@ -417,33 +417,62 @@ struct LayersFrame: View {
                     }
                     .buttonStyle(.link)
                 }
+                if layers.contains(where: \.edited) {
+                    Button("Reset") { session.resetLayers(job) }
+                        .buttonStyle(.link)
+                        .help("Put back every name and depth the model gave, and its order")
+                }
             }
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    ForEach(layers.reversed(), id: \.file) { layer in row(layer) }
+                    ForEach(layers.reversed(), id: \.file) { layer in
+                        LayerRow(
+                            layer: layer, image: read[layer.file], alone: alone == layer.file,
+                            hidden: hidden.contains(layer.file),
+                            toggleHidden: {
+                                if hidden.contains(layer.file) { hidden.remove(layer.file) } else { hidden.insert(layer.file) }
+                            },
+                            toggleAlone: {
+                                // Shown alone is shown: a layer whose eye was closed opens it,
+                                // rather than leaving the canvas empty.
+                                if alone != layer.file { hidden.remove(layer.file) }
+                                alone = alone == layer.file ? nil : layer.file
+                            },
+                            edit: { name, depth in session.editLayer(job, file: layer.file, name: name, depth: depth) })
+                    }
                 }
             }
         }
         .padding(8)
         .background(Theme.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
+}
 
-    private func row(_ layer: KeptLayer) -> some View {
-        let on = alone == layer.file
-        let off = hidden.contains(layer.file)
-        return HStack(spacing: 8) {
-            Button {
-                if off { hidden.remove(layer.file) } else { hidden.insert(layer.file) }
-            } label: {
-                Image(systemName: off ? "eye.slash" : "eye").frame(width: 18)
+/// One layer in the list: its eye, its picture, its name and depth, and a pencil that opens a
+/// small window to change them in. A click anywhere else on it shows it alone.
+struct LayerRow: View {
+    var layer: KeptLayer
+    var image: NSImage?
+    var alone: Bool
+    var hidden: Bool
+    var toggleHidden: () -> Void
+    var toggleAlone: () -> Void
+    var edit: (_ name: String?, _ depth: Float?) -> Void
+
+    @State private var editing = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: toggleHidden) {
+                Image(systemName: hidden ? "eye.slash" : "eye").frame(width: 18)
             }
             .buttonStyle(.borderless)
-            .foregroundStyle(Color.secondary.opacity(off ? 0.5 : 1))
-            .help(off ? "Show this layer" : "Hide this layer")
+            .foregroundStyle(Color.secondary.opacity(hidden ? 0.5 : 1))
+            .help(hidden ? "Show this layer" : "Hide this layer")
 
             ZStack {
                 Checkerboard()
-                if let image = read[layer.file] {
+                if let image {
                     Image(nsImage: image).resizable().scaledToFit()
                 }
             }
@@ -452,31 +481,128 @@ struct LayersFrame: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(layer.name).lineLimit(1)
-                Text(String(format: "depth %.2f", layer.depth))
-                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                HStack(spacing: 4) {
+                    Text(String(format: "depth %.2f", layer.depth))
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    if layer.edited {
+                        Text("edited").font(.caption2).foregroundStyle(.orange)
+                    }
+                }
             }
-            .opacity(off ? 0.5 : 1)
+            .opacity(hidden ? 0.5 : 1)
             Spacer(minLength: 0)
+
+            Button {
+                editing = true
+            } label: {
+                // Heavier than the system draws it: at its own weight it is a hairline beside the eye.
+                Image(systemName: "pencil")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 18)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(Color.primary.opacity(0.75))
+            .help("Change its name or depth")
+            .popover(isPresented: $editing, arrowEdge: .leading) {
+                LayerEditor(layer: layer) { name, depth in
+                    edit(name, depth)
+                    editing = false
+                } cancel: {
+                    editing = false
+                }
+            }
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
-        .background(on ? Color.accentColor.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .background(alone ? Color.accentColor.opacity(0.25) : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
-        .onTapGesture {
-            // Shown alone is shown: a layer whose eye was closed opens it, rather than leaving
-            // the canvas empty.
-            if !on { hidden.remove(layer.file) }
-            alone = on ? nil : layer.file
-        }
+        .onTapGesture(perform: toggleAlone)
+        .help(alone ? "Click to show every layer again" : "Click to show this layer alone")
         .contextMenu {
-            if let image = read[layer.file] {
+            Button("Edit…") { editing = true }
+            Button(alone ? "Show Every Layer" : "Show Alone", action: toggleAlone)
+            if let image {
                 Button("Copy") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.writeObjects([image])
                 }
             }
         }
-        .help(on ? "Click to show every layer again" : "Click to show this layer alone")
+    }
+}
+
+/// The small window a layer is changed in: its name and its depth, kept on Save and dropped on
+/// Cancel. What the model said is shown where either has been changed.
+struct LayerEditor: View {
+    var layer: KeptLayer
+    var save: (_ name: String, _ depth: Float) -> Void
+    var cancel: () -> Void
+
+    @State private var name: String
+    /// As typed: a number field keeps what is typed only once it is left, which a click on Save
+    /// does not do.
+    @State private var typed: String
+
+    init(layer: KeptLayer, save: @escaping (String, Float) -> Void, cancel: @escaping () -> Void) {
+        self.layer = layer
+        self.save = save
+        self.cancel = cancel
+        _name = State(initialValue: layer.name)
+        _typed = State(initialValue: String(format: "%.2f", layer.depth))
+    }
+
+    /// The depth typed, where it is a number from 0 to 1.
+    private var depth: Float? {
+        Float(typed.trimmingCharacters(in: .whitespaces)).flatMap { (0...1).contains($0) ? $0 : nil }
+    }
+
+    private var valid: Bool { !name.isBlank && depth != nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Edit Layer").font(.headline)
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Name").gridColumnAlignment(.trailing)
+                    TextField("Name", text: $name)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                }
+                if let model = layer.modelName {
+                    GridRow {
+                        Color.clear.frame(width: 1, height: 1)
+                        Text("The model called it \(model).").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                GridRow {
+                    Text("Depth")
+                    TextField("Depth", text: $typed)
+                        .textFieldStyle(.roundedBorder)
+                        .monospacedDigit()
+                        .frame(width: 70)
+                }
+                GridRow {
+                    Color.clear.frame(width: 1, height: 1)
+                    Text(
+                        "0 is nearest, 1 farthest: a layer is drawn over every one farther than it."
+                            + (layer.modelDepth.map { String(format: " The model said %.2f.", $0) } ?? "")
+                    )
+                    .font(.caption)
+                    .foregroundStyle(depth != nil ? Color.secondary : Color.red)
+                    .frame(width: 180, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { if let depth { save(name, depth) } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!valid)
+            }
+        }
+        .padding(16)
     }
 }
 

@@ -512,8 +512,8 @@ typedef struct {
     uint32_t canvas;              // the side of the square canvas the layers are on
     const WaifuLayer *layers;     // bottom first
     size_t layer_count;
-    const uint8_t *psd;           // a Photoshop document of the layers
-    size_t psd_len;
+    const uint8_t *psd;           // a Photoshop document of the layers, their depth in its
+    size_t psd_len;               // hidden group "depth" (docs/see_through.md)
     const uint8_t *depth_psd;     // the same with each layer's depth for its colour
     size_t depth_psd_len;
 } WaifuLayersCompletionEvent;
@@ -534,6 +534,52 @@ WaifuJob waifu_engine_layers_async(WaifuEngine *engine,
 Cancelled jobs get `on_complete` with `WAIFU_CANCELLED` and a NULL image, audio or layers: there
 is no half an image, no half a recording, and no half a document. What a layers event points at --
 the layers, their names and pixels, both documents -- is valid until `on_complete` returns.
+
+A caller that changes the layers -- renames one, gives it another depth and so another place --
+writes the documents again with the same writer img2layers uses. It needs no engine and returns at
+once:
+
+```c
+typedef enum { WAIFU_PSD_RGB = 0, WAIFU_PSD_GRAYSCALE = 1 } WaifuPsdMode;
+
+typedef struct {
+    const char *name;
+    int32_t left, top;            // on the canvas
+    WaifuRgbaImage image;         // RGBA; in a grayscale document, red is the gray
+} WaifuPsdLayer;
+
+// A document of `layers`, bottom first, and its length in *len; `depths`, where there are any,
+// after them in the hidden group "depth", as img2layers writes it (RGB only). Free with
+// waifu_bytes_free; NULL, with waifu_last_error, for pixels that are not the layer's size or a
+// name not UTF-8.
+uint8_t *waifu_psd_write(const WaifuPsdLayer *layers, size_t count,
+                         const WaifuPsdLayer *depths, size_t depth_count,
+                         uint32_t width, uint32_t height, WaifuPsdMode mode, size_t *len);
+void waifu_bytes_free(uint8_t *bytes, size_t len);
+```
+
+And one that wants the layers stratified -- hair, hands, top and bottom each cut into a near and
+a far layer by their own depth, a collar's back behind the neck and its flaps in front
+(docs/see_through.md) -- hands them over with the depth img2layers keeps. No engine, at once:
+
+```c
+typedef struct {
+    const char *name;
+    int32_t left, top;            // on the canvas
+    WaifuRgbaImage image;         // RGBA
+    WaifuRgbaImage depth;         // the same size; red is the depth, 0 near .. 255 far
+} WaifuDepthLayer;
+
+typedef struct {
+    const WaifuDepthLayer *layers;  // bottom first; valid until waifu_depth_layers_free
+    size_t count;
+} WaifuDepthLayers;
+
+// The document's order kept: a front <tag>-0 in its layer's place, a back <tag>-1 gone down past
+// what is nearer than it. NULL, with waifu_last_error, for a depth not its layer's size.
+WaifuDepthLayers *waifu_stratify(const WaifuDepthLayer *layers, size_t count);
+void waifu_depth_layers_free(WaifuDepthLayers *layers);
+```
 
 **What comes back is only the image or the audio.** Everything else about a job is the caller's
 already: the seed is part of the request -- a caller that wants a fresh one each time picks it,

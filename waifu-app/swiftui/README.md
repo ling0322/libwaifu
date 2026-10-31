@@ -70,10 +70,14 @@ the strip, after asking; what is still being made is left alone.
 
 **img2layers** takes a picture apart with See-through (`see-through`, docs/see_through.md): drop
 an illustration on it and **Split into Layers**. What comes back is a Photoshop document, kept as
-`<id>.psd`, and beside it in `<id>.layers/` the depth document, the layers put back together, and
-every layer as a PNG. The middle shows them stacked on their canvas, and beside that their list,
-nearest first: the eye hides one, a click shows it alone. **Save PSD…** and **Save Depth PSD…**
-save the two documents.
+`<id>.psd` -- with each layer's depth in a hidden group `depth`, at the top of the layer panel --
+and beside it in `<id>.layers/` the depth document, the layers put back together, and every layer
+as a PNG. The middle shows them stacked on their canvas, and beside that their list,
+nearest first: the eye hides one, a click shows it alone. Its pencil opens a small window to change
+its name and depth (0 nearest, 1 farthest) in; on Save the list takes the new order, and both
+documents, the picture put back together and the record are written again -- through
+`waifu_psd_write`, every pixel as it was. **Reset** puts back what the model gave. **Save PSD…**
+and **Save Depth PSD…** save the two documents.
 
 The Model Manager lists every published model, with how much of it is on this Mac: a download with
 its progress, and a delete.

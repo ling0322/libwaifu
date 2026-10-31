@@ -113,6 +113,69 @@ They are `in_channels`, `mid_transformer_layers` and `projection_class_embedding
 The canvas the parts are on is the 1280 square, as upstream's is; `Decomposition::picture` says
 where in it the picture is.
 
+The document carries each part's depth too: a layer of it named `depth/<tag>`, gray (0 near, 255
+far) under the part's own alpha, in a group `depth` that is hidden and closed and comes after every
+part -- at the top of Photoshop's layer panel, out of the way, and out of the merged picture. It is
+what the depth document (`to_depth_psd`) holds, in RGB, so that one file is enough to stratify.
+
+## Stratification
+
+One depth a part cannot say that it is in front of another part in one place and behind it in
+another: a V collar whose back is behind the neck and whose flaps are in front, drawn whole as one
+`topwear`, is laid over the whole neck and covers what of it the V shows. The paper calls this the
+"sandwich" (section 4.2.2) and stratifies: each part's pixel depth, where it is drawn, is cut in two
+by k-means (k = 2), and the near and far clusters become layers of their own. Its PSD export does
+this to hair, hands, tops and bottoms. Upstream ships it only as a step to run by hand
+(`heuristic_partseg.py seg_wdepth`, `cluster_inpaint_part` in `common/utils/torchcv.py`).
+
+Here it is done to a document after img2layers wrote it, as upstream's `seg_wdepth` is, and not
+as part of taking a picture apart: what img2layers writes is the model's, and what the layers are
+cut into is for what they are used for. `see_through::stratify` (`waifu_stratify` in the C API,
+and the `see_through_stratify` tool below) takes a document's layers with their depth and does it
+to `front hair`, `back hair`, `handwear` and its `-l`/`-r`, `topwear` and `bottomwear`
+(`waifu/src/see_through/stratify.rs`):
+
+- `<tag>-0`, the near cluster: the part's colour, its alpha under the cluster's mask feathered by
+  a 3 x 3 Gaussian. It takes the part's place in the document.
+- `<tag>-1`, the far one: the whole part, its outline the part's own, with the near cluster's
+  place, grown by a 7 x 7 ellipse, filled in with colour from around it, and its depth there the
+  median of the rest. It lies under `-0`, which covers most of it, and goes down from the part's
+  place past every layer right under it that is nearer than its own median depth.
+- The rest of the document's order is kept, where upstream sorts every part by depth again: a
+  document may have been put in order by hand.
+
+Where upstream fills the far layer with LaMa, a model of its own that is not here, this takes
+upstream's other branch, which fills with `cv2.inpaint`, and fills by Lvmin's pyramid (`pad_rgb`)
+instead. What it fills lies under the near layer, so the document looks the same either way; it
+shows only when the near layer is hidden or moved. The rest that differs from upstream:
+
+- The k-means runs exactly, on a histogram of the 256 depths from both ends, where upstream's is
+  seeded at random on 2000 samples.
+- Specks are not clustered. A model's layer is scattered with faint pieces of a few pixels all
+  over the canvas, at depths far from the part's own; clustered with it, they are the far half,
+  and the part comes out as itself and a layer of specks. Pieces under 40 pixels, Anime2.5DRig's
+  floor for the same specks, stay with the far layer and decide nothing.
+- A side under a twentieth of what is clustered leaves the part whole. On hair and hands the far
+  side was otherwise a hundredth or so: depth noise along an edge, cut off for nothing.
+- The near layer keeps the part's own soft edge under its mask, and the far one the part's own
+  outline. Upstream's near layer is its mask alone, and its far layer's alpha is filled in like
+  its colour, which where the near cluster reaches the part's edge brings the transparency around
+  the part in, and leaves a faint ghost of it.
+
+From a terminal, a document is stratified into another, its depth kept in its group; one written
+before documents kept their depth is read with its depth document:
+
+```bash
+cargo run --release -p waifu-tools --bin see_through_stratify -- \
+    picture.psd stratified.psd [depth.psd]
+```
+
+On a Hatsune Miku bust with a V collar it cut only `topwear`, its far eighth -- the collar's back,
+among the rest -- going behind the neck. Flattened against the picture it was taken from, the mean
+error over the collar halved (16.3 to 7.6 levels of 255), and the whole picture's went from 4.93 to
+4.70. It cuts by depth alone, which the paper says is not always a clean edge (section 6); one
+picture is not a test of it.
+
 ## What is left out
 
 - **Upstream's dead branches.** `further_extr` has an `eyes` split into eyes and brows and a `hair`

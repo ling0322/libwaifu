@@ -941,5 +941,282 @@ pub unsafe extern "C" fn waifu_engine_layers_async(
     })
 }
 
+// -- Photoshop documents ---------------------------------------------------------------------
+
+/// What kind of document waifu_psd_write makes: img2layers' layers, or its depth.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WaifuPsdMode {
+    WAIFU_PSD_RGB = 0,
+    /// Each layer's red is its gray: the depth document's.
+    WAIFU_PSD_GRAYSCALE = 1,
+}
+
+/// One layer of a document to write.
+#[repr(C)]
+pub struct WaifuPsdLayer {
+    pub name: *const c_char,
+    /// Where its top left corner is on the canvas.
+    pub left: i32,
+    pub top: i32,
+    /// RGBA, not premultiplied; in a grayscale document, red is the gray.
+    pub image: WaifuRgbaImage,
+}
+
+/// `count` layers at `layers` as a document holds them, `what` naming them in what is said of one
+/// that is wrong.
+unsafe fn psd_layers_in(
+    layers: *const WaifuPsdLayer,
+    count: usize,
+    mode: WaifuPsdMode,
+    what: &str,
+) -> Result<Vec<crate::see_through::PsdLayer>, String> {
+    if layers.is_null() && count > 0 {
+        return Err(format!("{what} is NULL"));
+    }
+    let given = match count {
+        0 => &[][..],
+        count => std::slice::from_raw_parts(layers, count),
+    };
+    let mut out = Vec::with_capacity(given.len());
+    for (i, layer) in given.iter().enumerate() {
+        let name = required(layer.name, &format!("{what} {i}'s name"))?;
+        let image = rgba_in(&layer.image, &format!("{what} {i}"))?;
+        let (w, h) = (image.width as usize, image.height as usize);
+        if image.rgba.len() != w * h * 4 {
+            return Err(format!(
+                "{what} {i} ({name}) is {w} by {h} but has {} bytes, not {}",
+                image.rgba.len(),
+                w * h * 4
+            ));
+        }
+        let pixels = match mode {
+            WaifuPsdMode::WAIFU_PSD_RGB => {
+                crate::see_through::Image::from_data(w, h, 4, image.rgba)
+            }
+            WaifuPsdMode::WAIFU_PSD_GRAYSCALE => crate::see_through::Image::from_data(
+                w,
+                h,
+                2,
+                image.rgba.chunks(4).flat_map(|p| [p[0], p[3]]).collect(),
+            ),
+        };
+        out.push(crate::see_through::PsdLayer {
+            name,
+            left: layer.left,
+            top: layer.top,
+            pixels,
+        });
+    }
+    Ok(out)
+}
+
+/// A Photoshop document of `layers`, bottom first, `width` by `height`: what img2layers writes,
+/// for a caller that has changed its layers -- renamed them, put them in another order -- to
+/// write again. `depths`, where there are any, are the layers' depth (red the gray, as
+/// img2layers writes it), kept after them in the hidden group `depth`; RGB only. `*len` is set to
+/// its length. Free with waifu_bytes_free. NULL, with waifu_last_error, for a layer whose pixels
+/// are not width * height * 4 bytes or whose name is not UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_psd_write(
+    layers: *const WaifuPsdLayer,
+    count: usize,
+    depths: *const WaifuPsdLayer,
+    depth_count: usize,
+    width: u32,
+    height: u32,
+    mode: WaifuPsdMode,
+    len: *mut usize,
+) -> *mut u8 {
+    caught(ptr::null_mut(), || {
+        let written = || -> Result<Vec<u8>, String> {
+            if len.is_null() {
+                return Err("len is NULL".to_string());
+            }
+            if depth_count > 0 && mode != WaifuPsdMode::WAIFU_PSD_RGB {
+                return Err("depth is kept in an RGB document only".to_string());
+            }
+            let out = psd_layers_in(layers, count, mode, "layer")?;
+            let depths = psd_layers_in(depths, depth_count, mode, "depth")?;
+            let psd_mode = match mode {
+                WaifuPsdMode::WAIFU_PSD_RGB => crate::see_through::PsdMode::Rgb,
+                WaifuPsdMode::WAIFU_PSD_GRAYSCALE => crate::see_through::PsdMode::Grayscale,
+            };
+            let group = (!depths.is_empty()).then(|| crate::see_through::PsdHiddenGroup {
+                name: crate::see_through::DEPTH_GROUP,
+                layers: &depths,
+            });
+            Ok(crate::see_through::write_psd_with_hidden(
+                &out,
+                group,
+                width as usize,
+                height as usize,
+                psd_mode,
+            ))
+        };
+        match written() {
+            Ok(bytes) => {
+                *len = bytes.len();
+                Box::into_raw(bytes.into_boxed_slice()) as *mut u8
+            }
+            Err(error) => {
+                set_last_error(&error);
+                ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Frees what waifu_psd_write returned, given the length it said. NULL is fine.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_bytes_free(bytes: *mut u8, len: usize) {
+    if !bytes.is_null() {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            bytes, len,
+        )));
+    }
+}
+
+/// A layer of a document and its depth, as stratification takes and gives them.
+#[repr(C)]
+pub struct WaifuDepthLayer {
+    pub name: *const c_char,
+    /// Where its top left corner is on the canvas.
+    pub left: i32,
+    pub top: i32,
+    /// RGBA, not premultiplied.
+    pub image: WaifuRgbaImage,
+    /// Its depth, the same size: red is the depth, 0 near to 255 far, as img2layers keeps it.
+    pub depth: WaifuRgbaImage,
+}
+
+/// What waifu_stratify gives: layers bottom first, valid until waifu_depth_layers_free.
+#[repr(C)]
+pub struct WaifuDepthLayers {
+    pub layers: *const WaifuDepthLayer,
+    pub count: usize,
+}
+
+/// A WaifuDepthLayers and everything it points at, freed as one.
+#[repr(C)]
+struct Stratified {
+    // First, so that a pointer to it is a pointer to this.
+    out: WaifuDepthLayers,
+    layers: Vec<WaifuDepthLayer>,
+    names: Vec<CString>,
+    pixels: Vec<Vec<u8>>,
+}
+
+/// `layers`, bottom first, with hair, hands, top and bottom each cut into a near (`-0`) and a far
+/// (`-1`) layer by their own depth (docs/see_through.md): a collar's back behind the neck and its
+/// flaps in front. The document's order is kept, the fronts in their layers' places and the backs
+/// gone down past what is nearer than them. Free with waifu_depth_layers_free. NULL, with
+/// waifu_last_error, for a layer whose pixels or depth are not its size or whose name is not UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_stratify(
+    layers: *const WaifuDepthLayer,
+    count: usize,
+) -> *mut WaifuDepthLayers {
+    caught(ptr::null_mut(), || {
+        let given = || -> Result<Vec<crate::see_through::DepthLayer>, String> {
+            if layers.is_null() && count > 0 {
+                return Err("layers is NULL".to_string());
+            }
+            let given = match count {
+                0 => &[][..],
+                count => std::slice::from_raw_parts(layers, count),
+            };
+            let mut out = Vec::with_capacity(given.len());
+            for (i, layer) in given.iter().enumerate() {
+                let name = required(layer.name, &format!("layer {i}'s name"))?;
+                let image = rgba_in(&layer.image, &format!("layer {i}"))?;
+                let depth = rgba_in(&layer.depth, &format!("layer {i}'s depth"))?;
+                let (w, h) = (image.width as usize, image.height as usize);
+                if image.rgba.len() != w * h * 4
+                    || (depth.width, depth.height) != (image.width, image.height)
+                    || depth.rgba.len() != w * h * 4
+                {
+                    return Err(format!(
+                        "layer {i} ({name}): its pixels and its depth are not both {w} by {h} of RGBA"
+                    ));
+                }
+                out.push(crate::see_through::DepthLayer {
+                    name,
+                    left: layer.left,
+                    top: layer.top,
+                    pixels: crate::see_through::Image::from_data(w, h, 4, image.rgba),
+                    depth: crate::see_through::Image::from_data(
+                        w,
+                        h,
+                        1,
+                        depth.rgba.chunks(4).map(|p| p[0]).collect(),
+                    ),
+                });
+            }
+            Ok(out)
+        };
+        let layers = match given() {
+            Ok(layers) => crate::see_through::stratify(layers),
+            Err(error) => {
+                set_last_error(&error);
+                return ptr::null_mut();
+            }
+        };
+
+        // Each layer's name and pixels kept beside the array that points at them.
+        let mut held = Box::new(Stratified {
+            out: WaifuDepthLayers {
+                layers: ptr::null(),
+                count: 0,
+            },
+            layers: Vec::with_capacity(layers.len()),
+            names: Vec::with_capacity(layers.len()),
+            pixels: Vec::with_capacity(layers.len() * 2),
+        });
+        for layer in layers {
+            let (w, h) = (layer.pixels.width, layer.pixels.height);
+            let depth: Vec<u8> = (0..w * h)
+                .flat_map(|p| {
+                    let d = layer.depth.data[p];
+                    [d, d, d, layer.pixels.data[p * 4 + 3]]
+                })
+                .collect();
+            held.names
+                .push(CString::new(layer.name.replace('\0', " ")).expect("no NUL left"));
+            held.pixels.push(layer.pixels.data);
+            held.pixels.push(depth);
+            let image = &held.pixels[held.pixels.len() - 2];
+            let depth = &held.pixels[held.pixels.len() - 1];
+            let rgba = |data: &Vec<u8>| WaifuRgbaImage {
+                width: w as u32,
+                height: h as u32,
+                rgba: data.as_ptr(),
+                len: data.len(),
+            };
+            let layer = WaifuDepthLayer {
+                name: held.names.last().expect("just pushed").as_ptr(),
+                left: layer.left,
+                top: layer.top,
+                image: rgba(image),
+                depth: rgba(depth),
+            };
+            held.layers.push(layer);
+        }
+        held.out = WaifuDepthLayers {
+            layers: held.layers.as_ptr(),
+            count: held.layers.len(),
+        };
+        Box::into_raw(held) as *mut WaifuDepthLayers
+    })
+}
+
+/// Frees what waifu_stratify returned. NULL is fine.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_depth_layers_free(layers: *mut WaifuDepthLayers) {
+    if !layers.is_null() {
+        drop(Box::from_raw(layers as *mut Stratified));
+    }
+}
+
 #[cfg(test)]
 mod tests;

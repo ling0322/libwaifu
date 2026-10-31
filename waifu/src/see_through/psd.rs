@@ -218,14 +218,76 @@ fn flatten(layers: &[Layer], width: usize, height: usize, mode: Mode) -> Vec<Vec
 /// Every layer's pixels have [`Mode::layer_channels`] channels; a layer with any other number is a
 /// caller's mistake, and panics.
 pub fn write(layers: &[Layer], width: usize, height: usize, mode: Mode) -> Vec<u8> {
+    write_with_hidden(layers, None, width, height, mode)
+}
+
+/// A group of layers kept after every other, hidden and closed: what a document carries that is
+/// not to be seen -- img2layers' depth -- out of the way, at the top of the layer panel.
+pub struct HiddenGroup<'a> {
+    pub name: &'a str,
+    pub layers: &'a [Layer],
+}
+
+/// The name a group's end is written under, as Photoshop writes it.
+const GROUP_END: &str = "</Layer group>";
+
+/// [`write`], with `hidden` after every layer of `layers` where there is one. The merged picture
+/// is of `layers` alone.
+pub fn write_with_hidden(
+    layers: &[Layer],
+    hidden: Option<HiddenGroup>,
+    width: usize,
+    height: usize,
+    mode: Mode,
+) -> Vec<u8> {
     let colour = mode.colour_channels();
-    for layer in layers {
+    let grouped = hidden.as_ref().map_or(&[][..], |group| group.layers);
+    for layer in layers.iter().chain(grouped) {
         assert_eq!(
             layer.pixels.channels,
             mode.layer_channels(),
             "layer {:?} is not the colour and alpha of a {mode:?} document",
             layer.name
         );
+    }
+
+    // Every record, bottom first: the layers, then -- for a group -- its end, what is in it, and
+    // the group itself, which a document has after what it holds.
+    struct Entry<'a> {
+        name: &'a str,
+        layer: Option<&'a Layer>,
+        hidden: bool,
+        /// `lsct`: 0 for a layer, 2 for a closed group, 3 for a group's end.
+        divider: u32,
+    }
+    let mut entries: Vec<Entry> = layers
+        .iter()
+        .map(|layer| Entry {
+            name: &layer.name,
+            layer: Some(layer),
+            hidden: false,
+            divider: 0,
+        })
+        .collect();
+    if let Some(group) = &hidden {
+        entries.push(Entry {
+            name: GROUP_END,
+            layer: None,
+            hidden: true,
+            divider: 3,
+        });
+        entries.extend(group.layers.iter().map(|layer| Entry {
+            name: &layer.name,
+            layer: Some(layer),
+            hidden: true,
+            divider: 0,
+        }));
+        entries.push(Entry {
+            name: group.name,
+            layer: None,
+            hidden: true,
+            divider: 2,
+        });
     }
     // The merged picture carries its alpha too, so a viewer that reads only it still sees what is
     // transparent.
@@ -247,13 +309,16 @@ pub fn write(layers: &[Layer], width: usize, height: usize, mode: Mode) -> Vec<u
     let layer_and_mask = w.reserve();
     let layer_info = w.reserve();
     // Negative: the merged picture's first extra channel is its transparency.
-    w.i16(-(layers.len() as i16));
+    w.i16(-(entries.len() as i16));
 
     // The channels of every layer, alpha first, compressed now so their lengths are known for the
-    // records that come before them.
-    let channel_data: Vec<Vec<(i16, Vec<u8>)>> = layers
+    // records that come before them. A group's records have no pixels: a compression code each.
+    let channel_data: Vec<Vec<(i16, Vec<u8>)>> = entries
         .iter()
-        .map(|layer| {
+        .map(|entry| {
+            let Some(layer) = entry.layer else {
+                return (-1..colour as i16).map(|id| (id, vec![0, 0])).collect();
+            };
             let p = &layer.pixels;
             let mut channels = vec![(-1, rle_channel(&plane(p, colour), p.width, p.height, false))];
             for c in 0..colour {
@@ -266,12 +331,20 @@ pub fn write(layers: &[Layer], width: usize, height: usize, mode: Mode) -> Vec<u
         })
         .collect();
 
-    for (layer, channels) in layers.iter().zip(&channel_data) {
-        let p = &layer.pixels;
-        w.i32(layer.top);
-        w.i32(layer.left);
-        w.i32(layer.top + p.height as i32);
-        w.i32(layer.left + p.width as i32);
+    for (entry, channels) in entries.iter().zip(&channel_data) {
+        let (top, left, bottom, right) = match entry.layer {
+            Some(layer) => (
+                layer.top,
+                layer.left,
+                layer.top + layer.pixels.height as i32,
+                layer.left + layer.pixels.width as i32,
+            ),
+            None => (0, 0, 0, 0),
+        };
+        w.i32(top);
+        w.i32(left);
+        w.i32(bottom);
+        w.i32(right);
         w.u16(channels.len() as u16);
         for (id, data) in channels {
             w.i16(*id);
@@ -281,7 +354,12 @@ pub fn write(layers: &[Layer], width: usize, height: usize, mode: Mode) -> Vec<u
         w.bytes(b"norm");
         w.u8(255); // opacity
         w.u8(0); // clipping: base
-        w.u8(0); // flags: visible
+                 // Flags: 2 is hidden; a group's records also say their pixels mean nothing (8 | 16).
+        let mut flags = if entry.hidden { 2 } else { 0 };
+        if entry.divider != 0 {
+            flags |= 0x18;
+        }
+        w.u8(flags);
         w.u8(0); // filler
 
         let extra = w.reserve();
@@ -289,19 +367,24 @@ pub fn write(layers: &[Layer], width: usize, height: usize, mode: Mode) -> Vec<u
         w.u32(0); // blending ranges
 
         // The name, as a Pascal string padded to a multiple of four with its length byte.
-        let name: Vec<u8> = layer.name.bytes().take(255).collect();
+        let name: Vec<u8> = entry.name.bytes().take(255).collect();
         w.u8(name.len() as u8);
         w.bytes(&name);
         for _ in 0..(4 - (name.len() + 1) % 4) % 4 {
             w.u8(0);
         }
         // The name again in UTF-16, which is what Photoshop shows for a name that is not ASCII.
-        let units: Vec<u16> = layer.name.encode_utf16().collect();
+        let units: Vec<u16> = entry.name.encode_utf16().collect();
         w.bytes(b"8BIMluni");
         w.u32((4 + units.len() * 2) as u32);
         w.u32(units.len() as u32);
         for unit in &units {
             w.u16(*unit);
+        }
+        if entry.divider != 0 {
+            w.bytes(b"8BIMlsct");
+            w.u32(4);
+            w.u32(entry.divider);
         }
         w.fill(extra);
     }
@@ -333,6 +416,242 @@ pub fn write(layers: &[Layer], width: usize, height: usize, mode: Mode) -> Vec<u
     w.0
 }
 
+/// A document read back: its canvas, its kind, and its layers bottom first.
+#[derive(Clone, Debug)]
+pub struct Document {
+    pub width: usize,
+    pub height: usize,
+    pub mode: Mode,
+    pub layers: Vec<Layer>,
+}
+
+/// Reads a document front to back.
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Reader<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8], String> {
+        let end = self
+            .at
+            .checked_add(n)
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or("the document ends where more of it was expected")?;
+        let out = &self.bytes[self.at..end];
+        self.at = end;
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, String> {
+        let b = self.take(2)?;
+        Ok(u16::from_be_bytes([b[0], b[1]]))
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        let b = self.take(4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn i32(&mut self) -> Result<i32, String> {
+        Ok(self.u32()? as i32)
+    }
+
+    /// `width` by `height` bytes of one channel: raw, or PackBits row by row.
+    fn plane(&mut self, width: usize, height: usize) -> Result<Vec<u8>, String> {
+        match self.u16()? {
+            0 => Ok(self.take(width * height)?.to_vec()),
+            1 => {
+                let counts = (0..height)
+                    .map(|_| self.u16().map(usize::from))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut plane = vec![0u8; width * height];
+                for (row, count) in counts.into_iter().enumerate() {
+                    let data = self.take(count)?;
+                    let (mut i, mut x) = (0, 0);
+                    while i < data.len() && x < width {
+                        let n = data[i] as i8;
+                        i += 1;
+                        if n >= 0 {
+                            let run = (n as usize + 1).min(width - x).min(data.len() - i);
+                            plane[row * width + x..row * width + x + run]
+                                .copy_from_slice(&data[i..i + run]);
+                            i += n as usize + 1;
+                            x += run;
+                        } else if n != -128 && i < data.len() {
+                            let run = ((1 - n as isize) as usize).min(width - x);
+                            plane[row * width + x..row * width + x + run].fill(data[i]);
+                            i += 1;
+                            x += run;
+                        }
+                    }
+                }
+                Ok(plane)
+            }
+            other => Err(format!(
+                "a channel is compressed in a way not read here ({other})"
+            )),
+        }
+    }
+}
+
+/// A document [`write`] wrote, or one like it -- version 1, eight bits, RGB or grayscale, channels
+/// raw or PackBits -- read back. Groups' own records are not layers; a layer with no area is
+/// left out, and so are masks.
+pub fn read(bytes: &[u8]) -> Result<Document, String> {
+    let mut r = Reader { bytes, at: 0 };
+    if r.take(4)? != b"8BPS" {
+        return Err("this is not a Photoshop document".into());
+    }
+    if r.u16()? != 1 {
+        return Err("this is not a version 1 document (a .psd)".into());
+    }
+    r.take(6)?;
+    r.u16()?;
+    let height = r.u32()? as usize;
+    let width = r.u32()? as usize;
+    if r.u16()? != 8 {
+        return Err("this document is not eight bits a channel".into());
+    }
+    let mode = match r.u16()? {
+        3 => Mode::Rgb,
+        1 => Mode::Grayscale,
+        other => {
+            return Err(format!(
+                "this document's colour mode ({other}) is not read here"
+            ))
+        }
+    };
+    let skip = r.u32()? as usize;
+    r.take(skip)?;
+    let skip = r.u32()? as usize;
+    r.take(skip)?;
+
+    let mut layers = Vec::new();
+    let section = r.u32()? as usize;
+    if section == 0 {
+        return Ok(Document {
+            width,
+            height,
+            mode,
+            layers,
+        });
+    }
+    let info = r.u32()? as usize;
+    if info == 0 {
+        return Ok(Document {
+            width,
+            height,
+            mode,
+            layers,
+        });
+    }
+    let count = (r.u16()? as i16).unsigned_abs() as usize;
+
+    struct Record {
+        name: String,
+        top: i32,
+        left: i32,
+        width: usize,
+        height: usize,
+        channels: Vec<(i16, usize)>,
+        divider: bool,
+    }
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (top, left, bottom, right) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+        let n = r.u16()?;
+        let mut channels = Vec::new();
+        for _ in 0..n {
+            channels.push((r.u16()? as i16, r.u32()? as usize));
+        }
+        r.take(12)?; // signature, blend mode, opacity, clipping, flags, filler
+        let extra = r.u32()? as usize;
+        let end = r.at + extra;
+        let skip = r.u32()? as usize;
+        r.take(skip)?;
+        let skip = r.u32()? as usize;
+        r.take(skip)?;
+        let short = r.u8()? as usize;
+        let mut name = String::from_utf8_lossy(r.take(short)?).into_owned();
+        r.take((4 - (short + 1) % 4) % 4)?;
+        let mut divider = false;
+        while r.at + 12 <= end {
+            let signature = r.take(4)?.to_vec();
+            if signature != b"8BIM" && signature != b"8B64" {
+                break;
+            }
+            let key = r.take(4)?.to_vec();
+            let size = r.u32()? as usize;
+            let start = r.at;
+            match key.as_slice() {
+                b"luni" => {
+                    let units = r.u32()? as usize;
+                    let utf16 = (0..units).map(|_| r.u16()).collect::<Result<Vec<_>, _>>()?;
+                    name = String::from_utf16_lossy(&utf16);
+                }
+                b"lsct" | b"lsdk" => divider = r.u32()? != 0,
+                _ => {}
+            }
+            r.at = start + size;
+        }
+        r.at = end;
+        records.push(Record {
+            name,
+            top,
+            left,
+            width: (right - left).max(0) as usize,
+            height: (bottom - top).max(0) as usize,
+            channels,
+            divider,
+        });
+    }
+
+    let colour = mode.colour_channels();
+    let stride = mode.layer_channels();
+    for record in records {
+        let area = record.width * record.height;
+        let mut pixels = Image::new(record.width, record.height, stride);
+        // Opaque unless an alpha says otherwise.
+        for p in 0..area {
+            pixels.data[p * stride + colour] = 255;
+        }
+        for (id, length) in &record.channels {
+            let end = r.at + length;
+            let at = match *id {
+                -1 => Some(colour),
+                c if (0..colour as i16).contains(&c) => Some(c as usize),
+                _ => None,
+            };
+            if let (Some(at), true) = (at, area > 0) {
+                let plane = r.plane(record.width, record.height)?;
+                for p in 0..area {
+                    pixels.data[p * stride + at] = plane[p];
+                }
+            }
+            r.at = end;
+        }
+        if area > 0 && !record.divider {
+            layers.push(Layer {
+                name: record.name,
+                left: record.left,
+                top: record.top,
+                pixels,
+            });
+        }
+    }
+    Ok(Document {
+        width,
+        height,
+        mode,
+        layers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +670,74 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_document_reads_back_as_it_was_written() {
+        let mut rgba = Image::new(3, 2, 4);
+        for (i, v) in rgba.data.iter_mut().enumerate() {
+            *v = (i * 11 % 256) as u8;
+        }
+        let mut gray = Image::new(2, 2, 2);
+        gray.data
+            .copy_from_slice(&[10, 255, 20, 128, 30, 0, 40, 255]);
+        for (mode, pixels) in [(Mode::Rgb, rgba), (Mode::Grayscale, gray)] {
+            let layers = vec![Layer {
+                name: "髪 front".into(),
+                left: -1,
+                top: 4,
+                pixels,
+            }];
+            let document = read(&write(&layers, 8, 9, mode)).unwrap();
+            assert_eq!(
+                (document.width, document.height, document.mode),
+                (8, 9, mode)
+            );
+            assert_eq!(document.layers.len(), 1);
+            let back = &document.layers[0];
+            assert_eq!(
+                (back.name.as_str(), back.left, back.top),
+                ("髪 front", -1, 4)
+            );
+            assert_eq!(back.pixels.data, layers[0].pixels.data);
+        }
+        assert!(read(b"not a document").is_err());
+    }
+
+    #[test]
+    fn a_hidden_group_comes_after_the_layers_and_out_of_the_merged_picture() {
+        let solid = |v: u8| {
+            let mut pixels = Image::new(2, 2, 4);
+            pixels.data.fill(v);
+            pixels
+        };
+        let layers = [Layer {
+            name: "face".into(),
+            left: 0,
+            top: 0,
+            pixels: solid(200),
+        }];
+        let depths = [Layer {
+            name: "depth/face".into(),
+            left: 0,
+            top: 0,
+            pixels: solid(50),
+        }];
+        let group = HiddenGroup {
+            name: "depth",
+            layers: &depths,
+        };
+        let bytes = write_with_hidden(&layers, Some(group), 2, 2, Mode::Rgb);
+        // Its own end and its own record are not layers; what is in it is, after the rest.
+        let document = read(&bytes).unwrap();
+        let names: Vec<&str> = document.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["face", "depth/face"]);
+        assert_eq!(document.layers[1].pixels.data, depths[0].pixels.data);
+        // The merged picture, at the end of the document, is the face's alone: the same as a
+        // document of the face without the group.
+        let plain = write(&layers, 2, 2, Mode::Rgb);
+        let tail = 16;
+        assert_eq!(bytes[bytes.len() - tail..], plain[plain.len() - tail..]);
     }
 
     #[test]

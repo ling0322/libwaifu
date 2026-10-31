@@ -294,6 +294,13 @@ struct KeptLayer: Codable, Hashable {
     var height: Int
     var depth: Float
     var file: String
+    /// What the model named it and how far away it said it was, kept the first time either is
+    /// changed: what Reset puts back. Nil while they are the model's.
+    var modelName: String?
+    var modelDepth: Float?
+
+    /// Whether its name or depth is somebody's rather than the model's.
+    var edited: Bool { modelName != nil || modelDepth != nil }
 }
 
 /// A job this window asked for, or one read back out of the output folder.
