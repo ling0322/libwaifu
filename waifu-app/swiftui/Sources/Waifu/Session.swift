@@ -76,6 +76,9 @@ struct JobForm {
     var layerSteps = 30
     var depthSteps = 4
     var splitPairs = false
+    /// Whether a picture taken apart is saved with hair, hands, top and bottom cut by their depth.
+    /// Only what is saved: the job's own document stays as the model made it.
+    var splitByDepth = false
 }
 
 /// A picture or a recording this window is holding to start from: as the engine takes it, and as
@@ -154,6 +157,10 @@ final class Session {
     var tab: Tab = .text2img
     /// Whether the Model Manager page is on show rather than a task.
     var showingModels = false
+    /// Whether the waifu2d page is on show rather than a task.
+    var showingRig = false
+    /// The waifu2d page's document and how it blinks.
+    let rig = RigStage()
     var form = JobForm()
 
     /// The picture in the big frame and the clip in the player, until something new comes in.
@@ -958,8 +965,92 @@ final class Session {
     }
 
     func save(_ job: Job) {
-        guard let bytes = outputs[job.id] else { return }
+        guard var bytes = outputs[job.id] else { return }
+        if job.kind == "layers", form.splitByDepth {
+            do {
+                bytes = try Self.splitByDepth(bytes, besides: depthDocument(of: job)).document
+            } catch {
+                complaint = "could not split it by depth: \(error.localizedDescription)"
+                return
+            }
+        }
         Media.save(bytes, suggesting: Media.fileName(created: job.finished ?? job.created, kind: job.kind))
+    }
+
+    /// The depth document img2layers keeps beside a picture taken apart, where it still is.
+    private func depthDocument(of job: Job) -> Data? {
+        try? Data(contentsOf: besideFolder(job.id).appendingPathComponent(Self.depthDocument))
+    }
+
+    /// A picture taken apart's layers with hair, hands, top and bottom each cut into a near (-0)
+    /// and a far (-1) layer by their own depth, as the See-through paper does -- the back of a
+    /// collar behind the neck, its flaps in front -- bottom first, each with its depth. The depth is
+    /// the document's own, in its hidden group, or else -- in one written before img2layers kept it
+    /// there -- `besides`, the depth document beside it, its layers in order.
+    nonisolated static func split(_ psd: Data, besides: Data? = nil) throws -> (width: Int, height: Int, layers: [Stratify.Layer]) {
+        let document = try PSDDocument.read(psd)
+        let (layers, depths) = document.splitDepth()
+        var byName = Dictionary(depths.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        if depths.isEmpty, let besides, let beside = try? PSDDocument.read(besides), beside.layers.count == layers.count {
+            byName = Dictionary(
+                zip(layers.map { PSD.depthName(of: $0.name) }, beside.layers), uniquingKeysWith: { first, _ in first })
+        }
+        let cut = try Stratify.layers(
+            layers.map { layer in
+                guard let depth = byName[PSD.depthName(of: layer.name)] else {
+                    throw PSDError(message: "\(layer.name) has no depth, in its document or beside it")
+                }
+                return Stratify.Layer(name: layer.name, left: layer.left, top: layer.top, image: layer.image, depth: depth.image)
+            })
+        return (document.width, document.height, cut)
+    }
+
+    /// `split`, as the documents saved: the layers with their depth in its hidden group, and the
+    /// depth document of them.
+    nonisolated static func splitByDepth(_ psd: Data, besides: Data? = nil) throws -> (document: Data, depth: Data) {
+        let (width, height, cut) = try split(psd, besides: besides)
+        let shown = cut.map { PSD.Layer(name: $0.name, left: $0.left, top: $0.top, image: $0.image) }
+        let gray = cut.map { PSD.Layer(name: $0.name, left: $0.left, top: $0.top, image: $0.depth) }
+        return (
+            try PSD.write(
+                shown, width: width, height: height,
+                depths: gray.map { PSD.Layer(name: PSD.depthName(of: $0.name), left: $0.left, top: $0.top, image: $0.image) }),
+            try PSD.write(gray, width: width, height: height, grayscale: true)
+        )
+    }
+
+    /// A picture taken apart's layers as Split by depth saves them, to show in place of its own:
+    /// each with its pictures by a file name of its own, `split/<n>`, and its depth the mean of
+    /// what is drawn of it, 0 near to 1 far. Nil, and a complaint, where it cannot be split.
+    func splitLayers(_ job: Job) async -> (layers: [KeptLayer], images: [String: NSImage])? {
+        guard let psd = outputs[job.id] else { return nil }
+        let besides = depthDocument(of: job)
+        let made = await Task.detached { Result { try Self.split(psd, besides: besides).layers } }.value
+        switch made {
+        case .failure(let error):
+            complaint = "could not split it by depth: \(error.localizedDescription)"
+            return nil
+        case .success(let cut):
+            var layers: [KeptLayer] = []
+            var images: [String: NSImage] = [:]
+            for (i, layer) in cut.enumerated() {
+                let file = "split/\(i)"
+                var (sum, count) = (0.0, 0.0)
+                for p in stride(from: 0, to: min(layer.image.rgba.count, layer.depth.rgba.count), by: 4)
+                where layer.image.rgba[p + 3] > 16 {
+                    sum += Double(layer.depth.rgba[p])
+                    count += 1
+                }
+                layers.append(
+                    KeptLayer(
+                        name: layer.name, left: layer.left, top: layer.top, width: layer.image.width,
+                        height: layer.image.height, depth: Float(count > 0 ? sum / count / 255 : 1), file: file))
+                if let image = Pixels.cgImage(layer.image) {
+                    images[file] = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                }
+            }
+            return (layers, images)
+        }
     }
 
     // MARK: - a picture taken apart, changed
@@ -1090,9 +1181,22 @@ final class Session {
     /// Saves a picture taken apart's depth document: each layer's depth in place of its colour.
     func saveDepth(_ job: Job) {
         let url = besideFolder(job.id).appendingPathComponent(Self.depthDocument)
-        guard let bytes = try? Data(contentsOf: url) else {
-            complaint = "its depth document is no longer in \(folder.path)"
-            return
+        let bytes: Data
+        if form.splitByDepth {
+            // Of the layers the document is saved as, cut by their depth.
+            guard let psd = outputs[job.id] else { return }
+            do {
+                bytes = try Self.splitByDepth(psd, besides: try? Data(contentsOf: url)).depth
+            } catch {
+                complaint = "could not split it by depth: \(error.localizedDescription)"
+                return
+            }
+        } else {
+            guard let read = try? Data(contentsOf: url) else {
+                complaint = "its depth document is no longer in \(folder.path)"
+                return
+            }
+            bytes = read
         }
         let name = Media.fileName(created: job.finished ?? job.created, kind: job.kind)
         Media.save(bytes, suggesting: name.replacingOccurrences(of: ".psd", with: "-depth.psd"))
@@ -1102,6 +1206,14 @@ final class Session {
     func reveal(_ job: Job) {
         NSWorkspace.shared.activateFileViewerSelecting([file(job.id, kind: job.kind), besideFolder(job.id)])
     }
+
+    /// Opens a picture taken apart's document on the waifu2d page, and shows the page.
+    func openInRig(_ job: Job) {
+        rig.open(file(job.id, kind: job.kind))
+        showingModels = false
+        showingRig = true
+    }
+
     // MARK: - what is held
 
     enum Which { case picture, recording, source }

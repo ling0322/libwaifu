@@ -54,7 +54,7 @@ The icon is `Resources/AppIcon.icon`, the Icon Composer format, which `build-app
 
 ## Use
 
-The sidebar lists the tasks -- text2img, img2layers and text2speech -- and the Model Manager.
+The sidebar lists the tasks -- text2img, img2layers, text2speech and waifu2d -- and the Model Manager.
 
 Each task opens on a model of its own -- `anima:turbo` for text2img, `see-through` for
 img2layers, `cosyvoice` for text2speech -- until another is chosen. On a task, the Model card at
@@ -77,11 +77,35 @@ nearest first: the eye hides one, a click shows it alone. Its pencil opens a sma
 its name and depth (0 nearest, 1 farthest) in; on Save the list takes the new order, and both
 documents, the picture put back together and the record are written again -- through
 `waifu_psd_write`, every pixel as it was. **Reset** puts back what the model gave. **Save PSD…**
-and **Save Depth PSD…** save the two documents.
+and **Save Depth PSD…** save the two documents; **Open in waifu2d** makes them move. With **Split by
+depth** on, the layers shown and saved have hair, hands, top and bottom each cut into a near and a
+far layer by their own depth, as the See-through paper does -- the back of a collar behind the neck,
+its flaps in front (docs/see_through.md); names and depths are changed with it off. The document
+kept, and what waifu2d opens, stay as the model made them.
+
+**waifu2d** makes a drawing in layers move, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
+does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedParts.swift` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers
+writes. Layers are known by See-through's names and Anime2.5DRig's English and Japanese ones
+(`前髪`, `白目`, `口`, ...), each with how far in front of the face it is and whether it moves with
+the head or the body. Every layer is a grid of triangles drawn with Metal and moved vertex by vertex:
+
+- **Blink.** The eyes are squashed toward a line 62 % of the way down each white and fade into the
+  closed eye when they are a quarter open; the irises are cut by the whites. An eye layer drawn as
+  one is cut in two at the middle of the face; a document with no closed eye is given a stock one,
+  fitted to each eye and in the colour of its lashes. On its own it blinks every 1.6 to 5.4 seconds.
+- **Head.** It turns about the neck toward the pointer, each layer by its depth -- front hair
+  farther than the face, back hair less -- and the body follows a little and leans about its foot.
+  With no pointer over it, it sways and looks around on its own.
+- **Hair.** Each hair layer hangs in strands found at the tips of its bottom edge, each swinging on
+  a stiff spring at the root and a soft one at the tip after the head; earrings and tails sway. It
+  breathes, its shoulders rising.
+
+Nothing on the page runs a model.
 
 The Model Manager lists every published model, with how much of it is on this Mac: a download with
 its progress, and a delete.
 
-From a terminal, `Waifu -m sdxl:base -device metal` chooses that model as the window opens.
+From a terminal, `Waifu -m sdxl:base -device metal` chooses that model as the window opens, and
+`Waifu -rig drawing.psd` opens that document on the waifu2d page.
 
 ⌘↩ generates, ⌘. cancels, ⌘S saves what is on show.

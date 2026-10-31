@@ -198,10 +198,19 @@ struct SettingsColumn: View {
                         .toggleStyle(.switch)
                 }
                 .help("Hands, eyes, eyebrows and ears as a left and a right layer each")
+                LabeledContent("Split by depth") {
+                    Toggle("Split by depth", isOn: $session.form.splitByDepth)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                .help("Show and save hair, hands, top and bottom each as a near and a far layer, by their own depth")
             } header: {
                 Header("Layers")
             } footer: {
-                Footnote("Every layer is drawn whole, with what was hidden behind the others filled in.")
+                Footnote(
+                    "Every layer is drawn whole, with what was hidden behind the others filled in. Split by depth "
+                        + "cuts the layers shown and saved -- the back of a collar behind the neck, its flaps in "
+                        + "front -- and leaves the document kept as the model made it.")
             }
 
             FormGroup {
