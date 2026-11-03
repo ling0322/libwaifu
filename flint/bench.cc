@@ -72,7 +72,7 @@ void sortEntries() {
 /// Whether a group's numbers are the card's or the processor's, which is what the kept file is
 /// named after.
 bool runsOnCuda(Group group) {
-  return group == Group::kSdxlCuda;
+  return group == Group::kSdxlCuda || group == Group::kAttentionCuda;
 }
 
 /// The first line of /proc that begins with `key`, minus the key and the colon. Empty where there
@@ -305,7 +305,8 @@ void reportMachine() {
 
 void list() {
   sortEntries();
-  for (Group group : {Group::kSdxlCuda, Group::kSdxlCpu, Group::kSdxlMetal}) {
+  for (Group group :
+       {Group::kSdxlCuda, Group::kSdxlCpu, Group::kSdxlMetal, Group::kAttentionCuda}) {
     print("%s\n", nameOf(group));
     for (const Entry &entry : entries()) {
       if (entry.group == group) print("    %s\n", entry.name.c_str());
@@ -337,6 +338,8 @@ const char *nameOf(Group group) {
       return "sdxl_cpu";
     case Group::kSdxlMetal:
       return "sdxl_metal";
+    case Group::kAttentionCuda:
+      return "attention_cuda";
   }
   return "unknown";
 }
@@ -385,7 +388,8 @@ int run(int argc, char **argv) {
 
   Group group = Group::kSdxlCuda;
   bool found = false;
-  for (Group candidate : {Group::kSdxlCuda, Group::kSdxlCpu, Group::kSdxlMetal}) {
+  for (Group candidate :
+       {Group::kSdxlCuda, Group::kSdxlCpu, Group::kSdxlMetal, Group::kAttentionCuda}) {
     if (std::string(wanted) == nameOf(candidate)) {
       group = candidate;
       found = true;

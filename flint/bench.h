@@ -37,6 +37,8 @@ enum class Group {
   kSdxlCpu,
   /// The same, on the Metal GPU.
   kSdxlMetal,
+  /// Every attention implementation the CUDA build has, side by side, in the shapes the models run.
+  kAttentionCuda,
 };
 
 /// @brief What a group is called on the command line and in a saved file's name.

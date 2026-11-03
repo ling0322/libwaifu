@@ -86,6 +86,7 @@ if (WITH_CUDA)
     set(flint_SOURCES
         ${flint_SOURCES}
         "cuda/arange.cu"
+        "cuda/attention.cu"
         "cuda/binary.cu"
         "cuda/binary_scalar.cu"
         "cuda/cast.cu"

@@ -26,6 +26,7 @@
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/test_functional.h"
+#include "flint/cuda/attention.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -246,6 +247,167 @@ CATCH_TEST_CASE("test CUDA attention (causal boundaries)", "[op][cuda]") {
     CATCH_INFO("length = " << length);
     CATCH_REQUIRE(runAttentionCase(8, 2, length, length, 128, true));
   }
+}
+
+namespace {
+
+/// As runAttentionCase, with a batch: each sequence of it is read through its own batch stride,
+/// which a batch of one never exercises.
+bool runBatchedCase(
+    int batch,
+    int numHeads,
+    int numKeyValueHeads,
+    int queryLength,
+    int keyValueLength,
+    int headDim,
+    bool causal) {
+  Tensor q = F::rand(Device::getCpu(), {batch, queryLength, numHeads, headDim}, DType::kFloat);
+  Tensor k =
+      F::rand(Device::getCpu(), {batch, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor v =
+      F::rand(Device::getCpu(), {batch, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor xr =
+      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+
+  Tensor x = F::attention(
+      cudaOps(),
+      toCuda(q).transpose(1, 2),
+      toCuda(k).transpose(1, 2),
+      toCuda(v).transpose(1, 2),
+      causal);
+
+  return cpuOps()->allClose(toCpu(x), xr, 5e-3f);
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test CUDA attention (fused kernel tiles)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // The fused kernel takes 64 queries and 64 keys at a time, a warp to sixteen of the queries.
+  // Lengths on and off those boundaries, in every head dimension it is built for: a block of
+  // queries that is short, a warp of it that holds nothing, and a block of keys that is.
+  for (bool causal : {false, true}) {
+    for (int headDim : {32, 64, 128}) {
+      for (int queryLength : {1, 15, 16, 17, 63, 64, 65, 200}) {
+        for (int keyValueLength : {queryLength, queryLength + 1, queryLength + 77, 300}) {
+          if (keyValueLength < queryLength) continue;
+          CATCH_INFO(
+              "headDim = " << headDim << ", causal = " << causal << ", L = " << queryLength
+                           << ", S = " << keyValueLength);
+          CATCH_REQUIRE(
+              runBatchedCase(2, 4, 2, queryLength, keyValueLength, headDim, causal));
+        }
+      }
+    }
+  }
+}
+
+namespace {
+
+/// The fused kernel alone, its keys split `splits` ways, against the CPU's attention. Grouped
+/// query heads are packed into the rows of one CTA, so a group of seven with one query is seven
+/// rows and with five queries thirty-five, which a CTA of one warp no longer holds.
+bool runSplitCase(
+    int numHeads,
+    int numKeyValueHeads,
+    int queryLength,
+    int keyValueLength,
+    int headDim,
+    bool causal,
+    int splits) {
+  Tensor q = F::rand(Device::getCpu(), {2, queryLength, numHeads, headDim}, DType::kFloat);
+  Tensor k = F::rand(Device::getCpu(), {2, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor v = F::rand(Device::getCpu(), {2, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor xr =
+      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+
+  Tensor x = F::empty(Device::getCuda(), {2, numHeads, queryLength, headDim}, DType::kFloat16);
+  bool ran = op::cuda::attention(
+      toCuda(q).transpose(1, 2),
+      toCuda(k).transpose(1, 2),
+      toCuda(v).transpose(1, 2),
+      causal,
+      x,
+      splits);
+  return ran && cpuOps()->allClose(toCpu(x), xr, 5e-3f);
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test CUDA attention (grouped heads packed, keys split)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Qwen2's fourteen heads to two, which packs seven heads to a row block; one, two and three
+  // queries are one warp's rows, five are a CTA of four warps. Key lengths on and off a block of
+  // 64, split one way, a few, and more ways than there are blocks, which is cut back to one block
+  // a split.
+  for (bool causal : {false, true}) {
+    for (int headDim : {32, 64, 128}) {
+      for (int queryLength : {1, 2, 3, 5}) {
+        for (int keyValueLength : {5, 63, 64, 65, 1000}) {
+          if (keyValueLength < queryLength) continue;
+          for (int splits : {1, 2, 3, 7, 100}) {
+            CATCH_INFO(
+                "headDim = " << headDim << ", causal = " << causal << ", L = " << queryLength
+                             << ", S = " << keyValueLength << ", splits = " << splits);
+            CATCH_REQUIRE(
+                runSplitCase(14, 2, queryLength, keyValueLength, headDim, causal, splits));
+          }
+        }
+      }
+    }
+  }
+
+  // Multi-head attention, a group of one, from a single query to a warp's sixteen and past it.
+  for (bool causal : {false, true}) {
+    for (int queryLength : {1, 7, 16, 17}) {
+      for (int splits : {1, 4}) {
+        CATCH_INFO("MHA, causal = " << causal << ", L = " << queryLength << ", splits = " << splits);
+        CATCH_REQUIRE(runSplitCase(8, 8, queryLength, 700, 64, causal, splits));
+      }
+    }
+  }
+
+  // A group of every query head to one key-value head.
+  CATCH_REQUIRE(runSplitCase(16, 1, 1, 333, 128, true, 0));
+  CATCH_REQUIRE(runSplitCase(16, 1, 4, 333, 128, true, 0));
+}
+
+CATCH_TEST_CASE("test CUDA attention (scores past half's range)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Every query is 64 across the head and every key a constant across it, so a score is 64 * 64 *
+  // the key's constant / 8: 81920 for the key of 160 and at most 76800 for the rest, all past what
+  // half holds and with the largest 5000 clear of the next. The answer is that key's value row,
+  // exactly. A score matrix written out in half -- the composition's -- is infinite there and its
+  // softmax not a number.
+  constexpr int kQueries = 4;
+  constexpr int kKeys = 10;
+  constexpr int kHeadDim = 64;
+  constexpr int kLargest = 3;
+  Tensor q = F::empty(Device::getCpu(), {1, 1, kQueries, kHeadDim}, DType::kFloat);
+  Tensor k = F::empty(Device::getCpu(), {1, 1, kKeys, kHeadDim}, DType::kFloat);
+  Tensor v = F::rand(Device::getCpu(), {1, 1, kKeys, kHeadDim}, DType::kFloat);
+  float *pq = q.getInternalData()->getData<float>(q.getInternalOffset());
+  float *pk = k.getInternalData()->getData<float>(k.getInternalOffset());
+  for (int i = 0; i < kQueries * kHeadDim; ++i) pq[i] = 64.0f;
+  for (int key = 0; key < kKeys; ++key) {
+    float value = key == kLargest ? 160.0f : 100.0f + 5.0f * key;
+    for (int d = 0; d < kHeadDim; ++d) pk[key * kHeadDim + d] = value;
+  }
+
+  Tensor x = toCpu(F::attention(cudaOps(), toCuda(q), toCuda(k), toCuda(v), false));
+
+  // The value row, through half and back, as the kernel was handed it.
+  Tensor rounded = toCpu(toCuda(v));
+  Tensor expected = F::empty(Device::getCpu(), {1, 1, kQueries, kHeadDim}, DType::kFloat);
+  const float *pv = rounded.getInternalData()->getData<float>(rounded.getInternalOffset());
+  float *pe = expected.getInternalData()->getData<float>(expected.getInternalOffset());
+  for (int query = 0; query < kQueries; ++query) {
+    for (int d = 0; d < kHeadDim; ++d) pe[query * kHeadDim + d] = pv[kLargest * kHeadDim + d];
+  }
+  CATCH_REQUIRE(cpuOps()->allClose(x, expected, 1e-3f));
 }
 
 }  // namespace fl

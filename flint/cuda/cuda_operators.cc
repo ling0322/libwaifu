@@ -24,6 +24,7 @@
 #include <algorithm>
 
 #include "flint/cuda/arange.h"
+#include "flint/cuda/attention.h"
 #include "flint/cuda/binary.h"
 #include "flint/cuda/binary_scalar.h"
 #include "flint/cpu/all_close.h"
@@ -487,6 +488,7 @@ void CudaOperators::attention(
 #ifdef LIBWAIFU_FLASH_ATTN_ENABLED
   if (op::cuda::flashAttention(q, k, v, causal, out)) return;
 #endif
+  if (op::cuda::attention(q, k, v, causal, out)) return;
 
   F::composedAttention(this, q, k, v, causal, out);
 }

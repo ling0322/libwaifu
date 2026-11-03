@@ -13,12 +13,15 @@
 #include "flint/bench.h"
 #include "lutil/span.h"
 #include "lutil/strings.h"
+#include "flint/cuda/attention.h"
 #include "flint/cuda/common.h"
 #include "flint/cuda/conv2d.h"
 #ifdef LIBWAIFU_CUDNN_ENABLED
 #include "flint/cuda/conv2d_cudnn.h"
 #endif
 #include "flint/cuda/cuda_operators.h"
+#include "flint/cuda/flash_attn.h"
+#include "flint/functional.h"
 #include "flint/tensor.h"
 
 namespace fl {
@@ -341,6 +344,135 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL convolution") {
   benchmarkConv2d(operators, "unet 128x128x320 downsample 3x3/2", 1, 320, 320, 128, 3, 2);
   benchmarkConv2d(operators, "unet 64x64x640 1x1", 1, 640, 640, 64, 1, 1);
   benchmarkConv2d(operators, "vae 512x512x256 3x3", 1, 256, 256, 512, 3, 1);
+}
+
+namespace {
+
+/// The largest difference between two tensors of one shape, brought to the host as float. A NaN
+/// anywhere is infinitely far.
+float maxAbsDiff(const Tensor &a, const Tensor &b) {
+  Operators *cuda = getOperators(Device::kCuda);
+  Tensor ha = F::toDevice(cuda, F::cast(cuda, a, DType::kFloat), Device::getCpu());
+  Tensor hb = F::toDevice(cuda, F::cast(cuda, b, DType::kFloat), Device::getCpu());
+  const float *pa = ha.getInternalData()->getData<float>(ha.getInternalOffset());
+  const float *pb = hb.getInternalData()->getData<float>(hb.getInternalOffset());
+  float worst = 0.0f;
+  for (int64_t i = 0; i < ha.getNumEl(); ++i) {
+    float diff = std::fabs(pa[i] - pb[i]);
+    if (std::isnan(diff)) return INFINITY;
+    worst = std::max(worst, diff);
+  }
+  return worst;
+}
+
+}  // namespace
+
+LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
+  // The fused kernel against FlashAttention -- where the build has it -- and the composition of
+  // matmul, softmax and matmul, on the same operands, in the shapes the models run. Each is
+  // called directly rather than through CudaOperators::attention, which would pick one. The error
+  // is each one's largest difference from the composition run in float32 on the same operands.
+  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
+
+  struct Shape {
+    const char *what;
+    int batch;
+    int heads;
+    int keyValueHeads;
+    int queryLength;
+    int keyLength;
+    int headDim;
+    bool causal;
+  };
+  const Shape shapes[] = {
+      {"sdxl self 64x64", 1, 10, 10, 4096, 4096, 64, false},
+      {"sdxl self 32x32", 1, 20, 20, 1024, 1024, 64, false},
+      {"sdxl cross 64x64", 1, 10, 10, 4096, 77, 64, false},
+      {"cosyvoice3 dit cfg", 2, 16, 16, 1500, 1500, 64, false},
+      {"cosyvoice3 lm prefill", 1, 14, 2, 300, 300, 64, true},
+      {"cosyvoice3 lm decode 300", 1, 14, 2, 1, 300, 64, true},
+      {"cosyvoice3 lm decode 1000", 1, 14, 2, 1, 1000, 64, true},
+      {"cosyvoice3 lm decode 4000", 1, 14, 2, 1, 4000, 64, true},
+      {"cosyvoice3 lm 4 queries 1000", 1, 14, 2, 4, 1000, 64, true},
+      {"hdim128 2048", 1, 8, 8, 2048, 2048, 128, false},
+      {"hdim128 2048 causal", 1, 8, 8, 2048, 2048, 128, true},
+  };
+
+  bench::print(
+      "%-28s %12s %12s %12s %8s  %9s %9s %9s\n",
+      "",
+      "fused us",
+      "flash us",
+      "composed us",
+      "TFLOP/s",
+      "err fused",
+      "err flash",
+      "err comp");
+  for (const Shape &s : shapes) {
+    Tensor q = randHalf(operators, {s.batch, s.heads, s.queryLength, s.headDim});
+    Tensor k = randHalf(operators, {s.batch, s.keyValueHeads, s.keyLength, s.headDim});
+    Tensor v = randHalf(operators, {s.batch, s.keyValueHeads, s.keyLength, s.headDim});
+    auto output = [&](DType dtype) {
+      return F::empty(Device::getCuda(), {s.batch, s.heads, s.queryLength, s.headDim}, dtype);
+    };
+
+    // The pairs of a query and a key that a causal mask leaves, two multiply-adds of D each.
+    double pairs = 0;
+    int offset = s.keyLength - s.queryLength;
+    for (int i = 0; i < s.queryLength; ++i) {
+      pairs += s.causal ? std::min(s.keyLength, i + offset + 1) : s.keyLength;
+    }
+    double flop = 4.0 * s.batch * s.heads * pairs * s.headDim;
+
+    Tensor reference = output(DType::kFloat);
+    F::composedAttention(
+        operators.get(),
+        F::cast(operators.get(), q, DType::kFloat),
+        F::cast(operators.get(), k, DType::kFloat),
+        F::cast(operators.get(), v, DType::kFloat),
+        s.causal,
+        reference);
+
+    std::string line = lut::sprintf("%-28s", s.what);
+    Tensor fused = output(DType::kFloat16);
+    float fusedMs = 0.0f;
+    float fusedError = NAN;
+    if (op::cuda::attention(q, k, v, s.causal, fused)) {
+      fusedMs = benchmarkCuda([&] { op::cuda::attention(q, k, v, s.causal, fused); });
+      fusedError = maxAbsDiff(fused, reference);
+      line += lut::sprintf(" %12.1f", fusedMs * 1000.0f);
+    } else {
+      line += lut::sprintf(" %12s", "-");
+    }
+
+    float flashError = NAN;
+#ifdef LIBWAIFU_FLASH_ATTN_ENABLED
+    Tensor flash = output(DType::kFloat16);
+    if (op::cuda::flashAttention(q, k, v, s.causal, flash)) {
+      float flashMs = benchmarkCuda([&] { op::cuda::flashAttention(q, k, v, s.causal, flash); });
+      flashError = maxAbsDiff(flash, reference);
+      line += lut::sprintf(" %12.1f", flashMs * 1000.0f);
+    } else {
+      line += lut::sprintf(" %12s", "-");
+    }
+#else
+    line += lut::sprintf(" %12s", "off");
+#endif
+
+    Tensor composed = output(DType::kFloat16);
+    float composedMs = benchmarkCuda(
+        [&] { F::composedAttention(operators.get(), q, k, v, s.causal, composed); });
+    float composedError = maxAbsDiff(composed, reference);
+    line += lut::sprintf(" %12.1f", composedMs * 1000.0f);
+
+    line += lut::sprintf(
+        " %8.2f  %9.2e %9.2e %9.2e",
+        fusedMs > 0.0f ? flop / (fusedMs * 1.0e9) : 0.0,
+        fusedError,
+        flashError,
+        composedError);
+    bench::print("%s\n", line.c_str());
+  }
 }
 
 }  // namespace fl
