@@ -17,6 +17,10 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#include <algorithm>
+#include <cmath>
+
+#include "flint/functional.h"
 #include "flint/test_functional.h"
 #include "flint/operators.h"
 #include "flint/tensor.h"
@@ -112,6 +116,26 @@ CATCH_TEST_CASE("test view infers a dimension", "[core][nn][tensor]") {
   // the inferred dimension can sit anywhere in the request, not only first.
   CATCH_REQUIRE(strided.view({6, 5, -1}).getShape() == std::vector<int>{6, 5, 4});
   CATCH_REQUIRE(strided.view({6, -1, 4}).getShape() == std::vector<int>{6, 5, 4});
+}
+
+CATCH_TEST_CASE("test allClose with values that are not finite", "[core][tensor]") {
+  // Every test reads its answers through allClose, so what it calls close is what every test
+  // passes on. The same infinity is equal to itself, though its difference is a NaN; a NaN is
+  // close to nothing, not even itself; and an infinity is not close to a finite number.
+  auto row = [](std::initializer_list<float> values) {
+    Tensor t = F::empty(Device::getCpu(), {static_cast<int>(values.size())}, DType::kFloat);
+    std::copy(values.begin(), values.end(), t.getInternalData()->getData<float>(0));
+    return t;
+  };
+  float inf = INFINITY;
+  float nan = NAN;
+
+  CATCH_REQUIRE(cpuOps()->allClose(row({1.0f, inf, -inf}), row({1.0f, inf, -inf})));
+  CATCH_REQUIRE_FALSE(cpuOps()->allClose(row({1.0f, inf}), row({1.0f, -inf})));
+  CATCH_REQUIRE_FALSE(cpuOps()->allClose(row({1.0f, inf}), row({1.0f, 2.0f})));
+  CATCH_REQUIRE_FALSE(cpuOps()->allClose(row({1.0f, nan}), row({1.0f, 2.0f})));
+  CATCH_REQUIRE_FALSE(cpuOps()->allClose(row({1.0f, 2.0f}), row({1.0f, nan})));
+  CATCH_REQUIRE_FALSE(cpuOps()->allClose(row({nan, nan}), row({nan, nan})));
 }
 
 }  // namespace fl

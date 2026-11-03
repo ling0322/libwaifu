@@ -41,10 +41,15 @@ float maxDiffKernel(const TensorView &A, const TensorView &B) {
     TensorAccessor<const T, 1> b = vB.getTensor(j);
 
     for (int i = 0; i < a.getShape(0); ++i) {
-      float diff = fabs(static_cast<float>(a[i]) - static_cast<float>(b[i]));
-      // A NaN on either side compares false against everything, so `diff > maxDiff` alone would
-      // pass it over and call two tensors close that are not. Nothing is close to a NaN.
-      if (std::isnan(diff)) return INFINITY;
+      float x = static_cast<float>(a[i]);
+      float y = static_cast<float>(b[i]);
+      // The same infinity on both sides is equal, though its difference is a NaN. A NaN on either
+      // side compares false against everything, so `diff > maxDiff` alone would pass it over and
+      // call two tensors close that are not: nothing is close to a NaN. Checked on the operands
+      // rather than the difference, which cannot tell the two apart.
+      if (x == y) continue;
+      if (std::isnan(x) || std::isnan(y)) return INFINITY;
+      float diff = fabs(x - y);
       if (diff > maxDiff) maxDiff = diff;
     }
   }
