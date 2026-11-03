@@ -13,3 +13,7 @@ description = "Tools for working on libwaifu: checking an export, timing a model
 [dependencies]
 waifu = { path = "../waifu" }
 waifu-modelmanager = { path = "../waifu-modelmanager" }
+
+# img2layers reads a picture and writes the parts it is cut into as PNGs: the one tool here that
+# needs a codec, which the library itself does not carry.
+image = { version = "0.25", default-features = false, features = ["png"] }
