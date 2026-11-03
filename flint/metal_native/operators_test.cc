@@ -698,6 +698,24 @@ CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]
   }
 }
 
+CATCH_TEST_CASE("test Metal attention refuses the block sizes it does not define", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // Shapes the kernel takes -- half and float, heads of 64 and 32, a few dozen keys -- so that a
+  // negative block reaches the kernel's dispatch rather than the composition's, where it was once
+  // run as no mask at all. A block larger than one has no kernel here and no composition.
+  Tensor q = randn({1, 2, 16, 64});
+  Tensor k = randn({1, 2, 16, 64});
+  Tensor qh = toMetal(q, DType::kFloat16);
+  Tensor kh = toMetal(k, DType::kFloat16);
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, -1));
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, 4));
+
+  Tensor qf = toMetal(randn({2, 4, 37, 32}));
+  Tensor kf = toMetal(randn({2, 2, 37, 32}));
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qf, kf, kf, -1));
+}
+
 namespace {
 
 // What an E4M3 code means, worked out the long way: the kernel's bit trick is not what this
