@@ -37,7 +37,7 @@ use waifu::flint::{Graph, Ir, RunContext, Tensor};
 use waifu::indextts;
 use waifu::indextts::features::resample;
 
-use waifu::cosyvoice3::CosyVoice3;
+use waifu::cosyvoice3::{CosyVoice3, Precision};
 use waifu::{
     read_safetensors, wav, DType, Device, Manifest, Sound, SpeechOptions, SpeechProgress, Weights,
 };
@@ -246,9 +246,9 @@ fn the_frontend_hears_the_recording_as_upstream_does() {
 
 /// What a package holds the language model and the DiT as -- float32, or half where it was
 /// exported with `-half lm,flow`, as the published one is -- which is what they run at, and what
-/// the bounds below are chosen by. `CosyVoice3::from_manifest` checks every weight of each agrees.
-fn stored(weights: &Weights, name: &str) -> DType {
-    weights.dtype_of(name).expect("the package has the weight")
+/// the bounds below are chosen by. Read as `from_manifest` reads it, every weight checked.
+fn precision(weights: &Weights) -> Precision {
+    CosyVoice3::precision(weights).unwrap()
 }
 
 /// Teacher-forced over the 231 tokens upstream said, through the prefill and then every step:
@@ -265,7 +265,7 @@ fn the_language_model_scores_what_upstream_said_as_upstream_does() {
     let cases = fixture();
     let config = lm::Config::cosyvoice3();
     let weights = weights(&manifest);
-    let dtype = stored(&weights, "cosyvoice3.lm.layers.0.self_attn.q_proj.weight");
+    let dtype = precision(&weights).lm;
     let lm = Lm::build(config, "cosyvoice3.lm", &weights, dtype, DEVICE).unwrap();
 
     let text = ints(&cases, "text_ids");
@@ -354,10 +354,7 @@ fn the_flow_draws_the_mel_upstream_draws() {
     let cases = fixture();
     let config = flow::Config::cosyvoice3();
     let weights = weights(&manifest);
-    let dtype = stored(
-        &weights,
-        "cosyvoice3.flow.decoder.estimator.proj_out.weight",
-    );
+    let dtype = precision(&weights).flow;
     let flow = Flow::build(config, "cosyvoice3.flow", &weights, dtype, DEVICE).unwrap();
     let float = dtype == DType::Float;
 
@@ -553,7 +550,7 @@ fn the_sampler_reads_about_as_long_as_upstream() {
     let cases = fixture();
     let config = lm::Config::cosyvoice3();
     let weights = weights(&manifest);
-    let dtype = stored(&weights, "cosyvoice3.lm.layers.0.self_attn.q_proj.weight");
+    let dtype = precision(&weights).lm;
     let lm = Lm::build(config, "cosyvoice3.lm", &weights, dtype, DEVICE).unwrap();
     let text = ints(&cases, "text_ids");
 

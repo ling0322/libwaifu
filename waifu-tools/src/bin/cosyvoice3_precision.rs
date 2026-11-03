@@ -64,39 +64,33 @@ struct Models {
     hift: Hift,
 }
 
-/// What the weight `name` is stored as, which is what the model it belongs to runs at:
-/// `CosyVoice3::from_manifest` checks every weight of each agrees.
-fn stored(weights: &Weights, name: &str) -> DType {
-    weights
-        .dtype_of(name)
-        .unwrap_or_else(|| panic!("the package has no {name}"))
-}
-
+/// One package's models, each at the type its weights are stored in -- read, and every weight
+/// checked, by `CosyVoice3::precision`, as `from_manifest` reads it, so that a package the runtime
+/// would refuse is refused here too rather than compared.
 fn models(manifest: &Manifest) -> Result<Models, Box<dyn std::error::Error>> {
     let weights = Rc::new(Weights::from_files(
         &manifest.weight_paths()?,
         DEVICE,
         u64::MAX,
     )?);
-    let lm_dtype = stored(&weights, "cosyvoice3.lm.layers.0.self_attn.q_proj.weight");
-    let flow_dtype = stored(
-        &weights,
-        "cosyvoice3.flow.decoder.estimator.proj_out.weight",
+    let precision = CosyVoice3::precision(&weights)?;
+    eprintln!(
+        "  language model {:?}, DiT {:?}",
+        precision.lm, precision.flow
     );
-    eprintln!("  language model {lm_dtype:?}, DiT {flow_dtype:?}");
     Ok(Models {
         lm: Lm::build(
             lm::Config::cosyvoice3(),
             "cosyvoice3.lm",
             &weights,
-            lm_dtype,
+            precision.lm,
             DEVICE,
         )?,
         flow: Flow::build(
             flow::Config::cosyvoice3(),
             "cosyvoice3.flow",
             &weights,
-            flow_dtype,
+            precision.flow,
             DEVICE,
         )?,
         hift: Hift::build("cosyvoice3.hift", &weights, DType::Float, DEVICE)?,

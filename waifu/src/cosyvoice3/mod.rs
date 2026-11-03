@@ -181,6 +181,14 @@ pub struct Reference {
     pub speaker: Tensor,
 }
 
+/// What a package's language model and DiT run at, as [`CosyVoice3::precision`] reads it off the
+/// package. Everything else runs at float32 in every package.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Precision {
+    pub lm: DType,
+    pub flow: DType,
+}
+
 /// Fun-CosyVoice3-0.5B, with every model it runs read and waiting.
 pub struct CosyVoice3 {
     settings: Settings,
@@ -277,29 +285,17 @@ impl CosyVoice3 {
             device_weight_bytes,
         )?);
 
-        // The language model and the DiT run at the type the package holds them in: float32, as
-        // upstream runs them unless asked for fp16, or half where the exporter was given `-half`.
-        // The rest is float32 in every package -- HiFT's source cannot be half, and the flow's
-        // condition, the speech tokenizer and CAMPPlus are written to read float32 -- and a package
-        // that holds them otherwise is refused here rather than at the first product that meets it.
-        let either = [DType::Float, DType::Float16];
-        let estimator = format!("{FLOW}.decoder.estimator.");
-        let lm_dtype = stored_as(&weights, &format!("{LM}."), None, &either)?;
-        let flow_dtype = stored_as(&weights, &estimator, None, &either)?;
+        let precision = Self::precision(&weights)?;
         let dtype = DType::Float;
-        for namespace in [FLOW, HIFT, SPEECH_TOKENIZER, CAMPPLUS] {
-            let skip = (namespace == FLOW).then_some(estimator.as_str());
-            stored_as(&weights, &format!("{namespace}."), skip, &[dtype])?;
-        }
 
         Ok(CosyVoice3 {
             settings: Settings::from_manifest(manifest),
-            lm: Lm::build(lm::Config::cosyvoice3(), LM, &weights, lm_dtype, device)?,
+            lm: Lm::build(lm::Config::cosyvoice3(), LM, &weights, precision.lm, device)?,
             flow: Flow::build(
                 flow::Config::cosyvoice3(),
                 FLOW,
                 &weights,
-                flow_dtype,
+                precision.flow,
                 device,
             )?,
             hift: Hift::build(HIFT, &weights, dtype, device)?,
@@ -311,6 +307,27 @@ impl CosyVoice3 {
             dtype,
             heard: RefCell::new(None),
         })
+    }
+
+    /// What the language model and the DiT run at: the type the package holds them in, float32 as
+    /// upstream runs them unless asked for fp16, or half where the exporter was given `-half`.
+    ///
+    /// Every weight is looked at. The rest of the package is float32 in every package -- HiFT's
+    /// source cannot be half, and the flow's condition, the speech tokenizer and CAMPPlus are
+    /// written to read float32 -- and a package that holds any of it otherwise, or holds one model
+    /// at more than one type, is refused here rather than at the first product that meets it.
+    /// Whatever builds the models from a package asks this first: `from_manifest`, the reference
+    /// tests, and `waifu-tools`' `cosyvoice3_precision`.
+    pub fn precision(weights: &Weights) -> Result<Precision> {
+        let either = [DType::Float, DType::Float16];
+        let estimator = format!("{FLOW}.decoder.estimator.");
+        let lm = stored_as(weights, &format!("{LM}."), None, &either)?;
+        let flow = stored_as(weights, &estimator, None, &either)?;
+        for namespace in [FLOW, HIFT, SPEECH_TOKENIZER, CAMPPLUS] {
+            let skip = (namespace == FLOW).then_some(estimator.as_str());
+            stored_as(weights, &format!("{namespace}."), skip, &[DType::Float])?;
+        }
+        Ok(Precision { lm, flow })
     }
 
     pub fn settings(&self) -> &Settings {
@@ -846,10 +863,10 @@ fn instructed(system: &str, instruction: &str) -> Result<String> {
     Ok(format!("{} {instruction}{END_OF_PROMPT}", head.trim_end()))
 }
 
-/// The one floating type every weight named under `prefix` is stored as -- but those under `skip`,
-/// which are another model's -- refused unless it is one of `allowed`. Integers are the package's
-/// tables, not weights, and are passed over; a model with none at all is a package with the
-/// model missing.
+/// The one type every tensor named under `prefix` is stored as -- but those under `skip`, which
+/// are another model's -- refused unless it is one of `allowed`. Every tensor counts: the exporter
+/// writes no integer tables into these namespaces, so a tensor of any other type is a package
+/// that is not this one's, and a model with no tensors at all is a package with the model missing.
 fn stored_as(
     weights: &Weights,
     prefix: &str,
@@ -862,9 +879,6 @@ fn stored_as(
             continue;
         }
         let dtype = tensor.dtype();
-        if !matches!(dtype, DType::Float | DType::Float16) {
-            continue;
-        }
         match found {
             None => found = Some((dtype, name)),
             Some((first, other)) if first != dtype => {
@@ -902,6 +916,100 @@ fn fingerprint(sound: &Sound) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A package of one small tensor per part of CosyVoice3, at the types given, with `extra`
+    /// beside them: what `CosyVoice3::precision` reads, without a model behind it.
+    fn package(lm: DType, estimator: DType, rest: DType, extra: &[(&str, DType)]) -> Weights {
+        let mut tensors = std::collections::HashMap::new();
+        let mut put = |name: &str, dtype: DType| {
+            tensors.insert(
+                name.to_string(),
+                Tensor::empty(&[2], dtype, Device::Cpu).unwrap(),
+            );
+        };
+        put("cosyvoice3.lm.layers.0.self_attn.q_proj.weight", lm);
+        put("cosyvoice3.lm.llm_decoder.weight", lm);
+        put(
+            "cosyvoice3.flow.decoder.estimator.proj_out.weight",
+            estimator,
+        );
+        put(
+            "cosyvoice3.flow.decoder.estimator.time_embed.weight",
+            estimator,
+        );
+        put("cosyvoice3.flow.input_embedding.weight", rest);
+        put("cosyvoice3.flow.rand_noise", rest);
+        put("cosyvoice3.hift.conv_post.weight", rest);
+        put("cosyvoice3.speech_tokenizer.conv1.weight", rest);
+        put("cosyvoice3.campplus.head.weight", rest);
+        for (name, dtype) in extra {
+            put(name, *dtype);
+        }
+        Weights::from_tensors(tensors, Device::Cpu).unwrap()
+    }
+
+    #[test]
+    fn the_precision_is_what_the_package_holds_the_language_model_and_the_dit_in() {
+        use DType::{Float, Float16};
+        let precision = |weights: &Weights| CosyVoice3::precision(weights);
+
+        assert_eq!(
+            precision(&package(Float, Float, Float, &[])).unwrap(),
+            Precision {
+                lm: Float,
+                flow: Float
+            }
+        );
+        // The published package: the two in half, the flow's condition and the rest float32.
+        assert_eq!(
+            precision(&package(Float16, Float16, Float, &[])).unwrap(),
+            Precision {
+                lm: Float16,
+                flow: Float16
+            }
+        );
+        assert_eq!(
+            precision(&package(Float16, Float, Float, &[])).unwrap(),
+            Precision {
+                lm: Float16,
+                flow: Float
+            }
+        );
+    }
+
+    #[test]
+    fn a_package_the_runtime_cannot_run_is_refused_at_load() {
+        use DType::{Float, Float16, Int8, UInt8};
+        let refused = |weights: Weights| CosyVoice3::precision(&weights).is_err();
+
+        // One model at two precisions.
+        let lm_half = ("cosyvoice3.lm.layers.1.mlp.up_proj.weight", Float16);
+        assert!(refused(package(Float, Float, Float, &[lm_half])));
+        let dit_float = ("cosyvoice3.flow.decoder.estimator.ff.weight", Float);
+        assert!(refused(package(Float16, Float16, Float, &[dit_float])));
+        // A type the language model and the DiT do not run at, among weights they do: skipped
+        // once as though it were a table of integers, so let through to fail mid-reading.
+        let dit_int8 = ("cosyvoice3.flow.decoder.estimator.ff.weight", Int8);
+        assert!(refused(package(Float16, Float16, Float, &[dit_int8])));
+        let lm_uint8 = ("cosyvoice3.lm.layers.1.mlp.up_proj.weight", UInt8);
+        assert!(refused(package(Float16, Float16, Float, &[lm_uint8])));
+        // Half where only float32 runs: HiFT, the flow's condition.
+        let hift_half = ("cosyvoice3.hift.f0_predictor.weight", Float16);
+        assert!(refused(package(Float16, Float16, Float, &[hift_half])));
+        assert!(refused(package(Float16, Float16, Float16, &[])));
+        let condition_half = ("cosyvoice3.flow.spk_embed_affine_layer.weight", Float16);
+        assert!(refused(package(Float16, Float16, Float, &[condition_half])));
+
+        // A model missing altogether.
+        let mut tensors = std::collections::HashMap::new();
+        tensors.insert(
+            "cosyvoice3.lm.layers.0.self_attn.q_proj.weight".to_string(),
+            Tensor::empty(&[2], Float, Device::Cpu).unwrap(),
+        );
+        assert!(refused(
+            Weights::from_tensors(tensors, Device::Cpu).unwrap()
+        ));
+    }
 
     #[test]
     fn a_long_source_is_cut_where_it_is_quiet_and_nothing_is_lost() {
