@@ -70,7 +70,8 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test see_through -- --ignored --test-threads=1
 
 # waifu/src/cosyvoice3/, tools/cosyvoice3_*
-# needs models/cosyvoice3.yaml and models/cosyvoice3_test.safetensors; docs/cosyvoice3.md says how
+# needs models/cosyvoice3.yaml -- the published package is half, a float32 export is held to
+# tighter bounds -- and models/cosyvoice3_test.safetensors; docs/cosyvoice3.md says how
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test cosyvoice3 -- --ignored --test-threads=1
 

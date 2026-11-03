@@ -19,6 +19,8 @@ let sound = tts.say_after("今天天气很好。", "录音里说的话。", &voi
 
 It is published as `cosyvoice:v3` (`ling0322/libwaifu-cosyvoice-3` on Hugging Face and
 ModelScope), so `waifu -m cosyvoice` fetches it; or build the package below and choose it by path.
+The published package holds the language model and the DiT in half -- see
+[In half](#in-half) -- so it needs a GPU; on the processor, export the float32 package below.
 
 ## Building the package
 
@@ -30,8 +32,8 @@ PYTHONPATH=~/.cache/libwaifu/src/S3Tokenizer:<onnx, onnxruntime> \
 ```
 
 What comes out is `models/cosyvoice3.yaml`, three weight files and a `tokenizer.json`: 1 109 M
-parameters, all float32, which is the precision upstream runs every one of these at. Five
-namespaces:
+parameters, all float32, which is the precision upstream runs every one of these at -- and the
+precision the reference tests hold to upstream's most tightly. Five namespaces:
 
 | namespace | from | |
 | --- | --- | --- |
@@ -43,6 +45,31 @@ namespaces:
 
 The exporter checks the written `tokenizer.json` against the tokenizer upstream calls, and that
 `<|endofprompt|>` comes out as 151646, which the language model asserts.
+
+### In half
+
+```bash
+PYTHONPATH=~/.cache/libwaifu/src/S3Tokenizer:<onnx> .venv/bin/python tools/cosyvoice3_exporter.py \
+    -output models/cosyvoice3.safetensors -part_size 2GB -half lm,flow
+```
+
+is the published package: the language model and the flow's DiT in half, 2.76 GB where float32
+is 4.44 GB, in two files. `CosyVoice3::from_manifest` runs each model at the type its weights
+are stored in -- there is no setting, and both packages load. It refuses a package that mixes
+types within one model, or that holds anything else in half:
+
+| | half | float32, always |
+| --- | --- | --- |
+| `cosyvoice3.lm` | all of it, `llm_decoder` too | |
+| `cosyvoice3.flow` | `decoder.estimator.*`, the DiT | the token embedding, the look-ahead layer, the speaker projection, `rand_noise`; the Euler step and the guidance mix |
+| `cosyvoice3.hift` | | all: its source integrates the pitch to a phase of 131 176 rad on this reading, past half's 65 504, and a quarter of `source_resblocks`' weights are below half's smallest normal |
+| speech tokenizer, CAMPPlus | | all; they run once a voice |
+
+What makes half safe in the DiT and the language model is in flint rather than here: the CUDA
+attention keeps its scores, their softmax and its accumulator in float, and the norms sum in
+float. The DiT's `gelu_new` and Mish overflow in half on their way to the right answer (x³ reaches
+1.2e7; `tanh(±inf)` and `rsqrt(inf)` bring both back). Half needs a GPU: x64's processor has no
+kernel taking a half weight against a float activation, so it keeps the float32 package.
 
 ## The order
 
@@ -143,8 +170,15 @@ On the RTX 5060 Ti, upstream's `cross_lingual_prompt.wav` (13.75 s) into the voi
 
 `tools/cosyvoice3_reference.py` constructs upstream's own `CosyVoice3` from the release and runs it
 on `asset/zero_shot_prompt.wav` -- the recording its examples use -- recording every stage into
-`models/cosyvoice3_test.safetensors`. `waifu/tests/cosyvoice3.rs` then checks each stage on the
-inputs upstream really handed it (on this machine's RTX 5060 Ti):
+`models/cosyvoice3_test.safetensors` -- published as `cosyvoice3_test.safetensors` in
+`ling0322/libwaifu_test_data` on Hugging Face, so the tests need only that and the package.
+`waifu/tests/cosyvoice3.rs` then checks each stage on the inputs upstream really handed it (on
+this machine's RTX 5060 Ti):
+
+(Upstream's frontend reaches wetext, which fetches its FSTs from ModelScope at construction; where
+that fails it logs "no frontend is avaliable" and skips its normalizer. The sentence and the
+transcript here have nothing for it to do -- no numbers, no symbols -- and the text-id test
+agrees, but a run that reads anything else needs it.)
 
 | stage | against upstream |
 | --- | --- |
@@ -155,6 +189,17 @@ inputs upstream really handed it (on this machine's RTX 5060 Ti):
 | flow: condition, first velocity, ten-step mel | 1.5e-5; 3.5e-3 of 14.4; 5.9e-3 max, 2.4e-4 mean |
 | HiFT: pitch, excitation, filter, whole | 1.5e-3 Hz; 2.1e-4; 2.8e-5; 46.5 dB |
 | reading length, eight seeds | mean 205 tokens against upstream's 212 |
+| **half** language model, teacher-forced over 231 tokens | at the token said, 4.0e-3 mean and 1.7e-2 worst; the same likeliest token in 99.6% of rows |
+| **half** flow, ten-step mel | 2.9e-1 max, 1.9e-2 mean |
+
+The tests read the precision off `models/cosyvoice3.yaml` and hold each to its own bounds: a
+float32 package to the rows above it, the published half one at 0.01 mean and 0.05 worst at the
+token said, 97% agreement, and a mel of 0.04 mean and 1.5 worst.
+Against this crate's float32 the half package's DiT moves the mel by 0.018 on average; through
+the same vocoder on the same noise, the two readings heard again as mels are 0.09 apart, where
+one mel on two draws of the vocoder's noise is 0.026 apart, and CAMPPlus puts both at the same
+likeness to the recording (0.761 and 0.766). `waifu-tools`' `cosyvoice3_precision` measures all
+of that for any two packages.
 
 and then the whole pipeline. Whisper large-v3 transcribes the Chinese sentence exactly both ways
 and the English one ("The train leaves at 7 tonight, and the ticket costs $25."); CAMPPlus puts
@@ -172,8 +217,12 @@ About real time: 9.4 s of audio in 8.2 s, of which the language model's 234 step
 step concatenates every layer's cache each token rather than writing into a preallocated one;
 that is the first thing to change if it needs to be faster.
 
+In half, on the RTX 5060 Ti, against the float32 package in the same build: the language model
+takes 5.9 ms a token where float32 takes 12.8, and the flow draws 11.9 s of audio in 339 ms where
+float32 takes 861.
+
 ## Not here
 
-Streaming, fp16, and a place on the page to type the recording's transcript.
+Streaming, and a place on the page to type the recording's transcript.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
 are the zero-shot path's with a different prefix.

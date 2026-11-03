@@ -271,18 +271,37 @@ impl CosyVoice3 {
             )));
         }
 
-        // Upstream runs every model in float32 unless asked for fp16, and so does this.
-        let dtype = DType::Float;
         let weights: Rc<Weights> = Rc::new(Weights::from_files(
             &manifest.weight_paths()?,
             device,
             device_weight_bytes,
         )?);
 
+        // The language model and the DiT run at the type the package holds them in: float32, as
+        // upstream runs them unless asked for fp16, or half where the exporter was given `-half`.
+        // The rest is float32 in every package -- HiFT's source cannot be half, and the flow's
+        // condition, the speech tokenizer and CAMPPlus are written to read float32 -- and a package
+        // that holds them otherwise is refused here rather than at the first product that meets it.
+        let either = [DType::Float, DType::Float16];
+        let estimator = format!("{FLOW}.decoder.estimator.");
+        let lm_dtype = stored_as(&weights, &format!("{LM}."), None, &either)?;
+        let flow_dtype = stored_as(&weights, &estimator, None, &either)?;
+        let dtype = DType::Float;
+        for namespace in [FLOW, HIFT, SPEECH_TOKENIZER, CAMPPLUS] {
+            let skip = (namespace == FLOW).then_some(estimator.as_str());
+            stored_as(&weights, &format!("{namespace}."), skip, &[dtype])?;
+        }
+
         Ok(CosyVoice3 {
             settings: Settings::from_manifest(manifest),
-            lm: Lm::build(lm::Config::cosyvoice3(), LM, &weights, dtype, device)?,
-            flow: Flow::build(flow::Config::cosyvoice3(), FLOW, &weights, dtype, device)?,
+            lm: Lm::build(lm::Config::cosyvoice3(), LM, &weights, lm_dtype, device)?,
+            flow: Flow::build(
+                flow::Config::cosyvoice3(),
+                FLOW,
+                &weights,
+                flow_dtype,
+                device,
+            )?,
             hift: Hift::build(HIFT, &weights, dtype, device)?,
             tokenizer: Tokenizer::open(manifest)?,
             tokenizer_rotary: speech_tokenizer::rotary_on(Self::TOKENIZER_POSITIONS, device)?,
@@ -825,6 +844,49 @@ fn instructed(system: &str, instruction: &str) -> Result<String> {
         )));
     };
     Ok(format!("{} {instruction}{END_OF_PROMPT}", head.trim_end()))
+}
+
+/// The one floating type every weight named under `prefix` is stored as -- but those under `skip`,
+/// which are another model's -- refused unless it is one of `allowed`. Integers are the package's
+/// tables, not weights, and are passed over; a model with none at all is a package with the
+/// model missing.
+fn stored_as(
+    weights: &Weights,
+    prefix: &str,
+    skip: Option<&str>,
+    allowed: &[DType],
+) -> Result<DType> {
+    let mut found: Option<(DType, &str)> = None;
+    for (name, tensor) in weights.tensors() {
+        if !name.starts_with(prefix) || skip.is_some_and(|skip| name.starts_with(skip)) {
+            continue;
+        }
+        let dtype = tensor.dtype();
+        if !matches!(dtype, DType::Float | DType::Float16) {
+            continue;
+        }
+        match found {
+            None => found = Some((dtype, name)),
+            Some((first, other)) if first != dtype => {
+                return Err(Error::model(format!(
+                    "the package holds {other} as {first:?} and {name} as {dtype:?}: one model \
+                     runs at one precision, and these are the same model"
+                )))
+            }
+            Some(_) => {}
+        }
+    }
+    let Some((dtype, name)) = found else {
+        return Err(Error::model(format!(
+            "the package has no weights under {prefix}"
+        )));
+    };
+    if !allowed.contains(&dtype) {
+        return Err(Error::model(format!(
+            "the package holds {name} as {dtype:?}, and {prefix}* runs only at {allowed:?}"
+        )));
+    }
+    Ok(dtype)
 }
 
 /// Which recording this is: its rate and every sample's bits, hashed.

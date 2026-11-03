@@ -244,22 +244,29 @@ fn the_frontend_hears_the_recording_as_upstream_does() {
     assert!(error < 2e-3);
 }
 
+/// What a package holds the language model and the DiT as -- float32, or half where it was
+/// exported with `-half lm,flow`, as the published one is -- which is what they run at, and what
+/// the bounds below are chosen by. `CosyVoice3::from_manifest` checks every weight of each agrees.
+fn stored(weights: &Weights, name: &str) -> DType {
+    weights.dtype_of(name).expect("the package has the weight")
+}
+
 /// Teacher-forced over the 231 tokens upstream said, through the prefill and then every step:
 /// each row of log probabilities against upstream's, and the text as the tokenizer reads it.
+///
+/// At float32 every row is held to upstream's. In half the bound is on what moves a reading -- the
+/// token said, and which token is likeliest -- with room over what half measured against this
+/// crate's float32: a mean error of 0.004 and a worst of 0.023 at the token said, the likeliest
+/// token the same in 98-99% of rows.
 #[test]
 #[ignore]
 fn the_language_model_scores_what_upstream_said_as_upstream_does() {
     let manifest = manifest();
     let cases = fixture();
     let config = lm::Config::cosyvoice3();
-    let lm = Lm::build(
-        config,
-        "cosyvoice3.lm",
-        &weights(&manifest),
-        DType::Float,
-        DEVICE,
-    )
-    .unwrap();
+    let weights = weights(&manifest);
+    let dtype = stored(&weights, "cosyvoice3.lm.layers.0.self_attn.q_proj.weight");
+    let lm = Lm::build(config, "cosyvoice3.lm", &weights, dtype, DEVICE).unwrap();
 
     let text = ints(&cases, "text_ids");
     let said = ints(&cases, "said");
@@ -268,8 +275,7 @@ fn the_language_model_scores_what_upstream_said_as_upstream_does() {
     assert_eq!(want.len(), (said.len() + 1) * rows);
 
     let mut reading = lm.prefill(&text, &[]).unwrap();
-    let mut worst = 0.0f32;
-    let mut disagreements = 0;
+    let (mut worst, mut worst_said, mut said_sum, mut disagreements) = (0f32, 0f32, 0f64, 0);
     for (index, token) in said.iter().chain(std::iter::once(&-1)).enumerate() {
         let got = reading.log_probabilities().unwrap();
         let row = &want[index * rows..(index + 1) * rows];
@@ -278,18 +284,42 @@ fn the_language_model_scores_what_upstream_said_as_upstream_does() {
             disagreements += 1;
         }
         if *token >= 0 {
+            let error = (got[*token as usize] - row[*token as usize]).abs();
+            worst_said = worst_said.max(error);
+            said_sum += error as f64;
             reading = lm.step(&reading, *token).unwrap();
         }
     }
+    let mean_said = said_sum / said.len() as f64;
+    let agree = 1.0 - disagreements as f64 / (said.len() + 1) as f64;
     println!(
-        "{} rows: worst log probability error {worst:.2e}, {disagreements} argmax disagreements",
+        "{dtype:?}, {} rows: over every token above -12, worst {worst:.2e}; at the token said, \
+         worst {worst_said:.2e} and mean {mean_said:.2e}; {disagreements} argmax disagreements",
         said.len() + 1
     );
-    assert!(worst < 2e-2, "log probabilities drift by {worst}");
-    assert!(
-        disagreements <= 2,
-        "{disagreements} rows pick a different likeliest token"
-    );
+    match dtype {
+        DType::Float => {
+            assert!(worst < 2e-2, "log probabilities drift by {worst}");
+            assert!(
+                disagreements <= 2,
+                "{disagreements} rows pick a different likeliest token"
+            );
+        }
+        _ => {
+            assert!(
+                mean_said <= 0.01,
+                "the token said drifts by {mean_said} on average"
+            );
+            assert!(
+                worst_said <= 0.05,
+                "the token said drifts by {worst_said} at worst"
+            );
+            assert!(
+                agree >= 0.97,
+                "the likeliest token is upstream's in only {agree} of rows"
+            );
+        }
+    }
 
     // The zero-shot prefix: transcript and prompt tokens, one row.
     let ids = ints(&cases, "zero_shot_ids");
@@ -298,7 +328,7 @@ fn the_language_model_scores_what_upstream_said_as_upstream_does() {
     let got = reading.log_probabilities().unwrap();
     let error = logp_error(&got, &floats(&cases, "zero_shot_logp"));
     println!("zero-shot prefix: error {error:.2e}");
-    assert!(error < 2e-2);
+    assert!(error < if dtype == DType::Float { 2e-2 } else { 0.1 });
 }
 
 /// `(C, T)` channel-major as `(T, C)` frame-major.
@@ -312,20 +342,24 @@ fn frame_major(values: &[f32], channels: usize) -> Vec<f32> {
 
 /// The flow on the tokens upstream said: its condition, one call of the estimator against
 /// upstream's first, and the whole ten-step mel.
+///
+/// The condition is float32 in every package. The DiT is held to upstream at float32, and in half
+/// with room over what half measured against this crate's float32, a mel of 0.018 mean and 0.84
+/// worst: the mean is the bound that matters, the worst only what a few frames may reach without
+/// coming apart.
 #[test]
 #[ignore]
 fn the_flow_draws_the_mel_upstream_draws() {
     let manifest = manifest();
     let cases = fixture();
     let config = flow::Config::cosyvoice3();
-    let flow = Flow::build(
-        config,
-        "cosyvoice3.flow",
-        &weights(&manifest),
-        DType::Float,
-        DEVICE,
-    )
-    .unwrap();
+    let weights = weights(&manifest);
+    let dtype = stored(
+        &weights,
+        "cosyvoice3.flow.decoder.estimator.proj_out.weight",
+    );
+    let flow = Flow::build(config, "cosyvoice3.flow", &weights, dtype, DEVICE).unwrap();
+    let float = dtype == DType::Float;
 
     let prompt = ints(&cases, "flow_prompt_tokens");
     let said = ints(&cases, "said");
@@ -363,8 +397,8 @@ fn the_flow_draws_the_mel_upstream_draws() {
         .collect();
     let error = max_error(&velocity, &want);
     let scale = want.iter().map(|v| v.abs()).fold(0.0, f32::max);
-    println!("first velocity: max error {error:.2e} of {scale:.2}");
-    assert!(error < 5e-3 * scale.max(1.0));
+    println!("{dtype:?}, first velocity: max error {error:.2e} of {scale:.2}");
+    assert!(error < if float { 5e-3 } else { 5e-2 } * scale.max(1.0));
 
     let mel = host(&flow.draw(&condition, &prompt_mel, 10, 0.7).unwrap());
     let want = frame_major(&floats(&cases, "mel"), 80);
@@ -376,10 +410,16 @@ fn the_flow_draws_the_mel_upstream_draws() {
         .sum::<f32>()
         / mel.len() as f32;
     println!(
-        "mel: {} frames, max error {error:.2e}, mean {mean:.2e}",
+        "{dtype:?}, mel: {} frames, max error {error:.2e}, mean {mean:.2e}",
         mel.len() / 80
     );
-    assert!(mean < 1e-2 && error < 0.2);
+    match float {
+        true => assert!(mean < 1e-2 && error < 0.2),
+        false => {
+            assert!(mean <= 0.04, "the mel drifts by {mean} on average");
+            assert!(error <= 1.5, "the mel drifts by {error} at worst");
+        }
+    }
 }
 
 /// The vocoder on the mel upstream's flow drew, with the noise upstream's source was handed: the
@@ -512,14 +552,9 @@ fn the_sampler_reads_about_as_long_as_upstream() {
     let manifest = manifest();
     let cases = fixture();
     let config = lm::Config::cosyvoice3();
-    let lm = Lm::build(
-        config,
-        "cosyvoice3.lm",
-        &weights(&manifest),
-        DType::Float,
-        DEVICE,
-    )
-    .unwrap();
+    let weights = weights(&manifest);
+    let dtype = stored(&weights, "cosyvoice3.lm.layers.0.self_attn.q_proj.weight");
+    let lm = Lm::build(config, "cosyvoice3.lm", &weights, dtype, DEVICE).unwrap();
     let text = ints(&cases, "text_ids");
 
     let lengths: Vec<usize> = (1..=8u64)

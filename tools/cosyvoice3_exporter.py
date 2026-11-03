@@ -59,10 +59,22 @@ upstream does rather than from its own draw of the same distribution.
 `llm.model.lm_head` -- the Qwen text head, which a model that emits speech tokens never uses --
 and HiFT's random buffers, which are not in `hift.pt` either (see `docs/cosyvoice3.md`).
 
-# Nothing is narrowed
+# What is narrowed
 
-Every tensor is written at float32, which is the precision upstream runs every one of these
-models at unless it is asked for `fp16`.
+By default nothing: every tensor is written at float32, which is the precision upstream runs every
+one of these models at unless it is asked for `fp16`. `-half lm,flow` writes the language model
+and the flow's DiT in half instead, and the runtime runs each of them at the type its weights are
+stored in:
+
+| `-half` | what goes to half | what stays float32 |
+| --- | --- | --- |
+| `lm` | all of `cosyvoice3.lm` | -- |
+| `flow` | `cosyvoice3.flow.decoder.estimator.*`, the DiT | the token embedding, the look-ahead layer, the speaker projection and `rand_noise`, which the flow's condition reads in float32 |
+
+HiFT, the speech tokenizer and CAMPPlus are never narrowed: HiFT's source accumulates a phase into
+the hundreds of thousands of radians, which half cannot hold, and the other two run once a voice.
+See `docs/cosyvoice3.md`. A weight that comes out of the cast as anything but a finite number stops
+the export; how many values it takes to zero is printed.
 """
 
 import argparse
@@ -131,6 +143,22 @@ CONFIG = {
 # How many tensors each namespace has to come out with; a count that moves is an export that
 # changed shape, and cheaper to notice here than as a missing parameter at load.
 COUNTS = {"lm": 292, "flow": 331, "hift": 246, "speech_tokenizer": 198, "campplus": 573}
+
+# What `-half` may name, and which of a namespace's tensors it takes to half. See the module note.
+HALF = {
+    "lm": lambda key: True,
+    "flow": lambda key: key.startswith("decoder.estimator."),
+}
+
+
+def halved(name, tensor):
+    """`tensor` in half, and how many of its values the cast took to zero. A value past half's
+    range stops the export; one below its smallest subnormal, 6e-8, is counted rather than refused,
+    since what it was is nothing a product of activations would notice."""
+    half = tensor.half()
+    if not torch.isfinite(half).all():
+        raise SystemExit(f"{name} has values past half's range, the largest {tensor.abs().max()}")
+    return half, int(((half == 0) & (tensor != 0)).sum())
 
 
 def checkpoint_dir(given):
@@ -241,7 +269,13 @@ def main():
     parser.add_argument("-output", required=True, help="the package, e.g. models/cosyvoice3.safetensors")
     parser.add_argument("-checkpoint", help="a local copy of the release; the HF cache otherwise")
     parser.add_argument("-part_size", default="2G", help="how large one file of weights may be")
+    parser.add_argument("-half", default="",
+                        help="what to write in half, of " + ",".join(HALF) + "; nothing by default")
     arguments = parser.parse_args()
+    halves = [name for name in arguments.half.split(",") if name]
+    for name in halves:
+        if name not in HALF:
+            raise SystemExit(f"-half takes {', '.join(HALF)}, not {name!r}")
 
     source = checkpoint_dir(arguments.checkpoint)
     directory = path.dirname(path.abspath(arguments.output))
@@ -268,14 +302,23 @@ def main():
             raise SystemExit(f"{namespace} came out as {len(tensors)} tensors, not "
                              f"{COUNTS[namespace]} -- the release or an exporter has changed")
 
+        narrowed = 0
+        zeroed = 0
         for key in sorted(tensors):
+            name = f"{MODEL_TYPE}.{namespace}.{key}"
             tensor = tensors[key].detach()
             if tensor.dtype not in (torch.float32, torch.int64):
                 tensor = tensor.float()
-            writer.write_tensor(Context(f"{MODEL_TYPE}.{namespace}.{key}"), tensor,
-                                preserve_dtype=True)
+            if namespace in halves and tensor.dtype == torch.float32 and HALF[namespace](key):
+                tensor, lost = halved(name, tensor)
+                narrowed += 1
+                zeroed += lost
+            writer.write_tensor(Context(name), tensor, preserve_dtype=True)
             total += tensor.numel()
-        print(f"  {MODEL_TYPE}.{namespace}: {len(tensors)} tensors")
+        line = f"  {MODEL_TYPE}.{namespace}: {len(tensors)} tensors"
+        if narrowed:
+            line += f", {narrowed} of them in half ({zeroed} values taken to zero)"
+        print(line)
 
     config = {"model": {"type": MODEL_TYPE}, MODEL_TYPE: CONFIG}
     for name in writer.finish(config, None, {"tokenizer": tokenizer_file}):

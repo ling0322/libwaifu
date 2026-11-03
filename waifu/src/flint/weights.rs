@@ -28,7 +28,7 @@ use std::path::Path;
 
 use super::graph::Graph;
 use super::op::Op;
-use super::{AllocHint, Device, MemoryBudget, Tensor};
+use super::{AllocHint, DType, Device, MemoryBudget, Tensor};
 use crate::error::{Error, Result};
 use crate::tensor_file;
 
@@ -374,6 +374,14 @@ impl Weights {
         self.tensors.get(name).map(|tensor| tensor.shape())
     }
 
+    /// What type the weight called `name` is stored as, if there is one here.
+    ///
+    /// For a package that says what precision a model runs at by what it holds -- CosyVoice3's
+    /// language model and DiT run in half where they were written in half -- asked before the
+    /// graphs that read it are built.
+    pub fn dtype_of(&self, name: &str) -> Option<DType> {
+        self.tensors.get(name).map(|tensor| tensor.dtype())
+    }
     /// Whether there is a weight called `name` here at all, whatever shape it turns out to be.
     ///
     /// For the half of a model a package may or may not hold -- SDXL's VAE encoder is one -- where
