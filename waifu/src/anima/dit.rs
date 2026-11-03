@@ -36,7 +36,7 @@ use super::config::DitConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value,
-    Weights,
+    Weights, NO_MASK,
 };
 use crate::layers::Linear;
 
@@ -187,7 +187,7 @@ fn attention(g: &Graph, query: Value, key: Value, value: Value, config: &DitConf
         g.contiguous(g.transpose(query, 1, 2)),
         g.contiguous(g.transpose(key, 1, 2)),
         g.contiguous(g.transpose(value, 1, 2)),
-        false,
+        NO_MASK,
     );
     let out = g.contiguous(g.transpose(out, 1, 2));
     let out = g.view(out, [Extent::At(1), length, config.hidden_size.into()]);

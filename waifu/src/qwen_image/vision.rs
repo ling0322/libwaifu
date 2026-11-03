@@ -54,7 +54,7 @@ use std::rc::Rc;
 use super::config::VisionConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, NO_MASK,
 };
 use crate::krea2::dit::gelu_tanh;
 use crate::krea2::text_encoder::rotate;
@@ -142,7 +142,7 @@ fn block(
     let k = turn(split(1));
     let v = g.contiguous(g.transpose(split(2), 1, 2));
 
-    let out = g.attention(q, k, v, false);
+    let out = g.attention(q, k, v, NO_MASK);
     let out = g.contiguous(g.transpose(out, 1, 2));
     let out = g.view(out, [Extent::At(1), length, d.into()]);
     let out = Linear::graph(&g.subgraph("attn.proj"), out, d, d, true);

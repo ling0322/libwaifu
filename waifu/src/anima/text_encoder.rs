@@ -40,7 +40,7 @@ use std::rc::Rc;
 use super::config::TextConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
+    check_parameters, DType, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, CAUSAL,
 };
 use crate::layers::{Embedding, Linear};
 
@@ -173,7 +173,7 @@ fn layer(config: &TextConfig, g: &Graph, input: Value, cos: Value, sin: Value) -
     let q = g.transpose(q, 1, 2);
     let k = g.transpose(k, 1, 2);
     let v = g.transpose(v, 1, 2);
-    let out = g.attention(q, k, v, true);
+    let out = g.attention(q, k, v, CAUSAL);
     // Transposing back leaves the heads interleaved rather than laid end to end, and a view
     // cannot see past that, so it is made whole first.
     let out = g.contiguous(g.transpose(out, 1, 2));

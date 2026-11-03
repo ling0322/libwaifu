@@ -67,6 +67,10 @@ Tensor emptyLike(const TensorView &input);
 
 // --- Attention ------------------------------------------------------------------------------
 
+/// @brief Refuses a block size Operators::attention does not define: a negative one, or a block of
+/// more than one key over fewer keys than queries.
+void checkAttentionBlockSize(TensorView q, TensorView k, int blockSize);
+
 /// @brief Attention as matmul, softmax and matmul, a block of queries at a time, written into
 /// `out`. What Operators::attention does on a device with no kernel of its own.
 void composedAttention(

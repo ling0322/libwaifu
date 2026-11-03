@@ -84,7 +84,7 @@ use std::rc::Rc;
 use crate::error::Error;
 use crate::flint::{
     check_parameters, functional as F, Bound, DType, Device, Extent, Graph, Ir, RunContext, Tensor,
-    Value, Weights,
+    Value, Weights, CAUSAL,
 };
 use crate::Result;
 
@@ -269,7 +269,7 @@ fn block(
     // Causal: a token reads what came before it and nothing after. The mask is aligned to the
     // bottom right, so one query against a long history sees all of it -- which is what a step
     // wants, and is the reason a step needs no second attention written for it.
-    let attended = g.attention(part(0), kept.keys, kept.values, true);
+    let attended = g.attention(part(0), kept.keys, kept.values, CAUSAL);
     let merged = g.view(
         g.contiguous(g.transpose(attended, 1, 2)),
         [Extent::of(x, 0), Extent::of(x, 1), Extent::At(dim)],

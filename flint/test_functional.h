@@ -161,7 +161,7 @@ Tensor lookup(Operators *op, TensorView table, TensorView indices);
 
 // --- Attention and sampling -----------------------------------------------------------------
 
-Tensor attention(Operators *op, TensorView q, TensorView k, TensorView v, bool causal);
+Tensor attention(Operators *op, TensorView q, TensorView k, TensorView v, int blockSize);
 
 Tensor pagedAttention(
     Operators *op,

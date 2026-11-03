@@ -155,7 +155,7 @@ class CudaOperators : public Operators {
       TensorView topPs,
       TensorView out) override;
   void softmax(TensorView input, TensorView out) override;
-  void attention(TensorView q, TensorView k, TensorView v, bool causal, TensorView out) override;
+  void attention(TensorView q, TensorView k, TensorView v, int blockSize, TensorView out) override;
   void pagedAttention(
       TensorView q,
       TensorView keyCache,

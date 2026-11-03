@@ -46,7 +46,7 @@ use std::rc::Rc;
 
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, NO_MASK,
 };
 use crate::layers::{Conv2d, Linear};
 
@@ -175,7 +175,7 @@ pub(crate) fn attention(g: &Graph, input: Value, channels: i32) -> Value {
         ));
     }
 
-    let x = g.attention(parts[0], parts[1], parts[2], false);
+    let x = g.attention(parts[0], parts[1], parts[2], NO_MASK);
     let x = g.view(x, [batch, positions, Extent::At(channels)]);
     let x = g.contiguous(g.transpose(x, 1, 2));
     let x = g.view(x, [batch, Extent::At(channels), height, width]);

@@ -56,7 +56,8 @@ use std::rc::Rc;
 use super::config::{ControlConfig, DitConfig};
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights,
+    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, CAUSAL,
+    NO_MASK,
 };
 use crate::krea2::dit::{gelu_tanh, rotate, timestep_sinusoid};
 use crate::layers::Linear;
@@ -262,7 +263,7 @@ fn block(
             g.contiguous(g.slice(q, 2, 0, split)),
             g.contiguous(g.slice(k, 2, 0, split)),
             g.contiguous(g.slice(v, 2, 0, split)),
-            true,
+            CAUSAL,
         ),
         // A prompt with pictures in it is causal between runs and whole within a picture: each
         // run reads every key up to its own end, the words' runs causally -- the mask is aligned
@@ -277,7 +278,12 @@ fn block(
                     let end = start + segment.len();
                     let part = |value: Value, from: i32| g.contiguous(g.slice(value, 2, from, end));
                     let causal = matches!(segment, Segment::Words(_));
-                    let out = g.attention(part(q, start), part(k, 0), part(v, 0), causal);
+                    let out = g.attention(
+                        part(q, start),
+                        part(k, 0),
+                        part(v, 0),
+                        if causal { CAUSAL } else { NO_MASK },
+                    );
                     start = end;
                     out
                 })
@@ -285,7 +291,12 @@ fn block(
                 .expect("a prompt is never empty")
         }
     };
-    let picture = g.attention(g.contiguous(g.slice(q, 2, split, Extent::End)), k, v, false);
+    let picture = g.attention(
+        g.contiguous(g.slice(q, 2, split, Extent::End)),
+        k,
+        v,
+        NO_MASK,
+    );
     let out = g.contiguous(g.transpose(g.cat(prompt, picture, 2), 1, 2));
     let out = g.view(out, [Extent::At(1), length, d.into()]);
     let out = Linear::graph(&g.subgraph("attn.out_proj"), out, d, d, false);

@@ -483,14 +483,15 @@ void CudaOperators::attention(
     TensorView q,
     TensorView k,
     TensorView v,
-    bool causal,
+    int blockSize,
     TensorView out) {
+  F::checkAttentionBlockSize(q, k, blockSize);
 #ifdef LIBWAIFU_FLASH_ATTN_ENABLED
-  if (op::cuda::flashAttention(q, k, v, causal, out)) return;
+  if (blockSize <= 1 && op::cuda::flashAttention(q, k, v, blockSize == 1, out)) return;
 #endif
-  if (op::cuda::attention(q, k, v, causal, out)) return;
+  if (op::cuda::attention(q, k, v, blockSize, out)) return;
 
-  F::composedAttention(this, q, k, v, causal, out);
+  Operators::attention(q, k, v, blockSize, out);
 }
 
 void CudaOperators::storeKVCache(

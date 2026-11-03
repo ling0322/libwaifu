@@ -564,7 +564,7 @@ Tensor lookup(Operators *op, TensorView table, TensorView indices) {
 
 // --- Attention and sampling -----------------------------------------------------------------
 
-Tensor attention(Operators *op, TensorView q, TensorView k, TensorView v, bool causal) {
+Tensor attention(Operators *op, TensorView q, TensorView k, TensorView v, int blockSize) {
   if (q.getDim() != 4 || k.getDim() != 4 || v.getDim() != 4) {
     THROW(InvalidArg, "attention: q, k and v must be 4-D");
   }
@@ -576,7 +576,7 @@ Tensor attention(Operators *op, TensorView q, TensorView k, TensorView v, bool c
       q.getDevice(),
       {q.getShape(0), q.getShape(1), q.getShape(2), v.getShape(3)},
       q.getDType());
-  op->attention(q, k, v, causal, out);
+  op->attention(q, k, v, blockSize, out);
   return out;
 }
 

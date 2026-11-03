@@ -215,7 +215,7 @@ extern "C" {
     pub fn fl_max(operators: Ops, input: V, out: V) -> i32;
     pub fn fl_min(operators: Ops, input: V, out: V) -> i32;
 
-    pub fn fl_attention(operators: Ops, q: V, k: V, v: V, causal: i32, out: V) -> i32;
+    pub fn fl_attention(operators: Ops, q: V, k: V, v: V, block_size: i32, out: V) -> i32;
     pub fn fl_paged_attention_available(out: *mut i32) -> i32;
     pub fn fl_paged_attention(
         operators: Ops,

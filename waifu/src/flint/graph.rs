@@ -873,12 +873,15 @@ impl Graph {
     }
 
     #[track_caller]
-    pub fn attention(&self, query: Value, key: Value, value: Value, causal: bool) -> Value {
+    /// Attention of `query` over `key` and `value` under the mask `block_size` names:
+    /// [`NO_MASK`](super::NO_MASK), [`CAUSAL`](super::CAUSAL), or a block-causal mask of that many
+    /// keys a block. See [`functional::attention`](super::functional::attention).
+    pub fn attention(&self, query: Value, key: Value, value: Value, block_size: i32) -> Value {
         self.push(Op::Attention {
             query,
             key,
             value,
-            causal,
+            block_size,
         })
     }
 

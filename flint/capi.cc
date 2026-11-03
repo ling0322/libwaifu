@@ -1181,12 +1181,12 @@ int32_t fl_attention(
     fl_tensor_view_t q,
     fl_tensor_view_t k,
     fl_tensor_view_t v,
-    int32_t causal,
+    int32_t block_size,
     fl_tensor_view_t out) {
   return onDevice(
       operators,
       {{q, "q"}, {k, "k"}, {v, "v"}, {out, "out"}},
-      [&](fl::Operators *op) { op->attention(deref(q), deref(k), deref(v), causal != 0, deref(out)); });
+      [&](fl::Operators *op) { op->attention(deref(q), deref(k), deref(v), block_size, deref(out)); });
 }
 
 int32_t fl_paged_attention_available(int32_t *out) {

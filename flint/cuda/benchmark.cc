@@ -382,20 +382,22 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     int queryLength;
     int keyLength;
     int headDim;
-    bool causal;
+    // As Operators::attention has it: 0 no mask, 1 causal, larger a block-causal mask.
+    int blockSize;
   };
   const Shape shapes[] = {
-      {"sdxl self 64x64", 1, 10, 10, 4096, 4096, 64, false},
-      {"sdxl self 32x32", 1, 20, 20, 1024, 1024, 64, false},
-      {"sdxl cross 64x64", 1, 10, 10, 4096, 77, 64, false},
-      {"cosyvoice3 dit cfg", 2, 16, 16, 1500, 1500, 64, false},
-      {"cosyvoice3 lm prefill", 1, 14, 2, 300, 300, 64, true},
-      {"cosyvoice3 lm decode 300", 1, 14, 2, 1, 300, 64, true},
-      {"cosyvoice3 lm decode 1000", 1, 14, 2, 1, 1000, 64, true},
-      {"cosyvoice3 lm decode 4000", 1, 14, 2, 1, 4000, 64, true},
-      {"cosyvoice3 lm 4 queries 1000", 1, 14, 2, 4, 1000, 64, true},
-      {"hdim128 2048", 1, 8, 8, 2048, 2048, 128, false},
-      {"hdim128 2048 causal", 1, 8, 8, 2048, 2048, 128, true},
+      {"sdxl self 64x64", 1, 10, 10, 4096, 4096, 64, 0},
+      {"sdxl self 32x32", 1, 20, 20, 1024, 1024, 64, 0},
+      {"sdxl cross 64x64", 1, 10, 10, 4096, 77, 64, 0},
+      {"cosyvoice3 dit cfg", 2, 16, 16, 1500, 1500, 64, 0},
+      {"cosyvoice3 dit cfg block 50", 2, 16, 16, 1500, 1500, 64, 50},
+      {"cosyvoice3 lm prefill", 1, 14, 2, 300, 300, 64, 1},
+      {"cosyvoice3 lm decode 300", 1, 14, 2, 1, 300, 64, 1},
+      {"cosyvoice3 lm decode 1000", 1, 14, 2, 1, 1000, 64, 1},
+      {"cosyvoice3 lm decode 4000", 1, 14, 2, 1, 4000, 64, 1},
+      {"cosyvoice3 lm 4 queries 1000", 1, 14, 2, 4, 1000, 64, 1},
+      {"hdim128 2048", 1, 8, 8, 2048, 2048, 128, 0},
+      {"hdim128 2048 causal", 1, 8, 8, 2048, 2048, 128, 1},
   };
 
   bench::print(
@@ -416,30 +418,40 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
       return F::empty(Device::getCuda(), {s.batch, s.heads, s.queryLength, s.headDim}, dtype);
     };
 
-    // The pairs of a query and a key that a causal mask leaves, two multiply-adds of D each.
+    // The pairs of a query and a key that the mask leaves, two multiply-adds of D each.
     double pairs = 0;
     int offset = s.keyLength - s.queryLength;
     for (int i = 0; i < s.queryLength; ++i) {
-      pairs += s.causal ? std::min(s.keyLength, i + offset + 1) : s.keyLength;
+      int seen = s.keyLength;
+      if (s.blockSize > 0) {
+        int position = i + offset;
+        seen = std::min(s.keyLength, (position / s.blockSize + 1) * s.blockSize);
+      }
+      pairs += seen;
     }
+    // Neither FlashAttention nor the composition has a block larger than one: the fused kernel's
+    // error there is against nothing, and the other two columns are empty.
+    bool blocked = s.blockSize > 1;
     double flop = 4.0 * s.batch * s.heads * pairs * s.headDim;
 
     Tensor reference = output(DType::kFloat);
-    F::composedAttention(
-        operators.get(),
-        F::cast(operators.get(), q, DType::kFloat),
-        F::cast(operators.get(), k, DType::kFloat),
-        F::cast(operators.get(), v, DType::kFloat),
-        s.causal,
-        reference);
+    if (!blocked) {
+      F::composedAttention(
+          operators.get(),
+          F::cast(operators.get(), q, DType::kFloat),
+          F::cast(operators.get(), k, DType::kFloat),
+          F::cast(operators.get(), v, DType::kFloat),
+          s.blockSize == 1,
+          reference);
+    }
 
     std::string line = lut::sprintf("%-28s", s.what);
     Tensor fused = output(DType::kFloat16);
     float fusedMs = 0.0f;
     float fusedError = NAN;
-    if (op::cuda::attention(q, k, v, s.causal, fused)) {
-      fusedMs = benchmarkCuda([&] { op::cuda::attention(q, k, v, s.causal, fused); });
-      fusedError = maxAbsDiff(fused, reference);
+    if (op::cuda::attention(q, k, v, s.blockSize, fused)) {
+      fusedMs = benchmarkCuda([&] { op::cuda::attention(q, k, v, s.blockSize, fused); });
+      if (!blocked) fusedError = maxAbsDiff(fused, reference);
       line += lut::sprintf(" %12.1f", fusedMs * 1000.0f);
     } else {
       line += lut::sprintf(" %12s", "-");
@@ -448,8 +460,9 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     float flashError = NAN;
 #ifdef LIBWAIFU_FLASH_ATTN_ENABLED
     Tensor flash = output(DType::kFloat16);
-    if (op::cuda::flashAttention(q, k, v, s.causal, flash)) {
-      float flashMs = benchmarkCuda([&] { op::cuda::flashAttention(q, k, v, s.causal, flash); });
+    if (!blocked && op::cuda::flashAttention(q, k, v, s.blockSize == 1, flash)) {
+      float flashMs =
+          benchmarkCuda([&] { op::cuda::flashAttention(q, k, v, s.blockSize == 1, flash); });
       flashError = maxAbsDiff(flash, reference);
       line += lut::sprintf(" %12.1f", flashMs * 1000.0f);
     } else {
@@ -459,11 +472,17 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     line += lut::sprintf(" %12s", "off");
 #endif
 
-    Tensor composed = output(DType::kFloat16);
-    float composedMs = benchmarkCuda(
-        [&] { F::composedAttention(operators.get(), q, k, v, s.causal, composed); });
-    float composedError = maxAbsDiff(composed, reference);
-    line += lut::sprintf(" %12.1f", composedMs * 1000.0f);
+    float composedError = NAN;
+    if (!blocked) {
+      Tensor composed = output(DType::kFloat16);
+      float composedMs = benchmarkCuda([&] {
+        F::composedAttention(operators.get(), q, k, v, s.blockSize == 1, composed);
+      });
+      composedError = maxAbsDiff(composed, reference);
+      line += lut::sprintf(" %12.1f", composedMs * 1000.0f);
+    } else {
+      line += lut::sprintf(" %12s", "-");
+    }
 
     line += lut::sprintf(
         " %8.2f  %9.2e %9.2e %9.2e",
@@ -472,6 +491,62 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
         flashError,
         composedError);
     bench::print("%s\n", line.c_str());
+  }
+}
+
+LL_BENCHMARK(bench::Group::kAttentionCuda, "attention masks") {
+  // The fused kernel on one shape under every mask: none, causal, and blocks of 50 -- CosyVoice3's
+  // flow streams in those -- and of 64, the kernel's own tile. What a mask leaves is printed beside
+  // what it costs, so that what skipping the masked blocks saves can be read off against what it
+  // could.
+  std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
+
+  struct Shape {
+    const char *what;
+    int batch;
+    int heads;
+    int length;
+    int headDim;
+  };
+  const Shape shapes[] = {
+      {"cosyvoice3 dit cfg 1500", 2, 16, 1500, 64},
+      {"cosyvoice3 dit cfg 3000", 2, 16, 3000, 64},
+      {"sdxl 4096", 1, 10, 4096, 64},
+      {"hdim128 2048", 1, 8, 2048, 128},
+  };
+  const int blockSizes[] = {0, 1, 50, 64};
+
+  bench::print("%-26s %8s %12s %10s %10s %8s\n", "", "mask", "fused us", "vs none", "work", "TFLOP/s");
+  for (const Shape &s : shapes) {
+    Tensor q = randHalf(operators, {s.batch, s.heads, s.length, s.headDim});
+    Tensor k = randHalf(operators, {s.batch, s.heads, s.length, s.headDim});
+    Tensor v = randHalf(operators, {s.batch, s.heads, s.length, s.headDim});
+    Tensor out = F::empty(Device::getCuda(), {s.batch, s.heads, s.length, s.headDim}, DType::kFloat16);
+
+    float unmasked = 0.0f;
+    for (int blockSize : blockSizes) {
+      double pairs = 0;
+      for (int i = 0; i < s.length; ++i) {
+        pairs += blockSize == 0 ? s.length
+                                : std::min(s.length, (i / blockSize + 1) * blockSize);
+      }
+      double whole = static_cast<double>(s.length) * s.length;
+      double flop = 4.0 * s.batch * s.heads * pairs * s.headDim;
+
+      float ms = benchmarkCuda([&] { op::cuda::attention(q, k, v, blockSize, out); });
+      if (blockSize == 0) unmasked = ms;
+      std::string mask = blockSize == 0   ? "none"
+                         : blockSize == 1 ? "causal"
+                                          : lut::sprintf("block %d", blockSize);
+      bench::print(
+          "%-26s %8s %12.1f %9.0f%% %9.0f%% %8.2f\n",
+          s.what,
+          mask.c_str(),
+          ms * 1000.0f,
+          100.0 * ms / unmasked,
+          100.0 * pairs / whole,
+          flop / (ms * 1.0e9));
+    }
   }
 }
 

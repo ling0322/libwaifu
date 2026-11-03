@@ -226,9 +226,17 @@ class Operators {
   /// [batch, numKeyValueHeads, keyValueLength, headDim]. numHeads is a multiple of
   /// numKeyValueHeads, so grouped-query and multi-query attention need no expanded k and v.
   ///
+  /// `blockSize` is the mask. 0 is none. Otherwise the keys are cut into blocks of `blockSize`
+  /// from key 0, and query i -- at position i + keyValueLength - queryLength, aligned to the
+  /// bottom right of the score matrix -- sees every key of its own block and of every block
+  /// before it: 1 is the causal mask, and a larger one the block-causal mask a streaming
+  /// diffusion transformer is trained under. A block of more than one needs keyValueLength >=
+  /// queryLength.
+  ///
   /// A device without a kernel of its own gets the composition in `flint/functional.h` --
-  /// matmul, softmax, matmul, a block of queries at a time -- written into `out`.
-  virtual void attention(TensorView q, TensorView k, TensorView v, bool causal, TensorView out);
+  /// matmul, softmax, matmul, a block of queries at a time -- written into `out`, for a block of 0
+  /// or 1. A larger block has no composition: where no kernel takes it, it is NotImplemented.
+  virtual void attention(TensorView q, TensorView k, TensorView v, int blockSize, TensorView out);
 
   /// Scaled dot product attention of a packed (varlen) batch of queries over a paged KV cache.
   virtual void pagedAttention(

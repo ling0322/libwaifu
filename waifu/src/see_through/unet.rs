@@ -46,7 +46,7 @@ use std::rc::Rc;
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, functional as F, Extent, Graph, Ir, RunContext, Tensor, Value, WeightFormat,
-    Weights,
+    Weights, NO_MASK,
 };
 use crate::layers::{Conv2d, GroupNorm, LayerNorm, Linear};
 use crate::mapping::Mapping;
@@ -367,7 +367,7 @@ fn attention(
         split_heads(g, query, num_heads, head_dim),
         split_heads(g, key, num_heads, head_dim),
         split_heads(g, value, num_heads, head_dim),
-        false,
+        NO_MASK,
     );
     let x = g.view(
         g.contiguous(g.transpose(x, 1, 2)),

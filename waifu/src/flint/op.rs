@@ -546,12 +546,13 @@ pub enum Op {
         input: Value,
         size: Extent,
     },
-    /// Scaled dot product attention over `(N, nHead, L, D)` queries.
+    /// Scaled dot product attention over `(N, nHead, L, D)` queries, under the mask `block_size`
+    /// names: see [`functional::attention`](super::functional::attention).
     Attention {
         query: Value,
         key: Value,
         value: Value,
-        causal: bool,
+        block_size: i32,
     },
     /// Join two values along `dim`, which is the only dimension they may disagree on.
     Cat {
@@ -916,7 +917,12 @@ impl fmt::Display for Op {
                 call.arg(format_args!("hop={hop}"))?;
                 call.arg(format_args!("centered={centered}"))?;
             }
-            Op::Attention { causal, .. } => call.arg(format_args!("causal={causal}"))?,
+            // Printed as the mask it is, which for the two that are not blocks is a word.
+            Op::Attention { block_size, .. } => match *block_size {
+                0 => {}
+                1 => call.arg(format_args!("causal"))?,
+                block => call.arg(format_args!("block_size={block}"))?,
+            },
 
             Op::View { shape, .. } => call.arg(shape_of(shape))?,
             Op::Transpose { dim0, dim1, .. } => {

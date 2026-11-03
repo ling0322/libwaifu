@@ -54,7 +54,7 @@ use std::rc::Rc;
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, functional as F, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value,
-    Weights,
+    Weights, NO_MASK,
 };
 use crate::layers::{Conv2d, GroupNorm, Linear};
 
@@ -153,7 +153,7 @@ fn attention_block(g: &Graph, config: &VaeConfig, input: Value, channels: i32) -
         ));
     }
 
-    let x = g.attention(parts[0], parts[1], parts[2], false);
+    let x = g.attention(parts[0], parts[1], parts[2], NO_MASK);
     let x = g.view(x, [batch, positions, Extent::At(channels)]);
     let x = Linear::graph(&g.subgraph("out_proj"), x, channels, channels, true);
 

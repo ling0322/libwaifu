@@ -24,6 +24,10 @@
 // compiled in and falls back to the portable operator otherwise -- unlike flash_attn_test.cc,
 // this file is built whenever WITH_CUDA is on so both paths stay covered.
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/test_functional.h"
 #include "flint/cuda/attention.h"
@@ -408,6 +412,161 @@ CATCH_TEST_CASE("test CUDA attention (scores past half's range)", "[op][cuda]") 
     for (int d = 0; d < kHeadDim; ++d) pe[query * kHeadDim + d] = pv[kLargest * kHeadDim + d];
   }
   CATCH_REQUIRE(cpuOps()->allClose(x, expected, 1e-3f));
+}
+
+namespace {
+
+/// Attention under a block-causal mask, written out on the host in float with nothing shared with
+/// any operator: the reference the kernel's blocks are checked against, since the composition
+/// has no block larger than one. q is (N, L, H, D), k and v (N, S, KVH, D), contiguous; the answer
+/// (N, H, L, D).
+Tensor blockCausalReference(const Tensor &q, const Tensor &k, const Tensor &v, int blockSize) {
+  int batch = q.getShape(0), queryLength = q.getShape(1), numHeads = q.getShape(2);
+  int headDim = q.getShape(3), keyLength = k.getShape(1), numKeyValueHeads = k.getShape(2);
+  int group = numHeads / numKeyValueHeads;
+  const float *pq = q.getInternalData()->getData<float>(q.getInternalOffset());
+  const float *pk = k.getInternalData()->getData<float>(k.getInternalOffset());
+  const float *pv = v.getInternalData()->getData<float>(v.getInternalOffset());
+  Tensor out = F::empty(Device::getCpu(), {batch, numHeads, queryLength, headDim}, DType::kFloat);
+  float *po = out.getInternalData()->getData<float>(out.getInternalOffset());
+
+  float scale = 1.0f / sqrtf(static_cast<float>(headDim));
+  std::vector<float> scores(keyLength);
+  for (int n = 0; n < batch; ++n) {
+    for (int h = 0; h < numHeads; ++h) {
+      int kvh = h / group;
+      for (int i = 0; i < queryLength; ++i) {
+        int position = i + keyLength - queryLength;
+        int lastKey = keyLength - 1;
+        if (blockSize > 0) {
+          lastKey = std::min(keyLength - 1, (position / blockSize) * blockSize + blockSize - 1);
+        }
+        const float *qi = pq + ((n * queryLength + i) * numHeads + h) * headDim;
+        float largest = -INFINITY;
+        for (int j = 0; j <= lastKey; ++j) {
+          const float *kj = pk + ((n * keyLength + j) * numKeyValueHeads + kvh) * headDim;
+          float dot = 0.0f;
+          for (int d = 0; d < headDim; ++d) dot += qi[d] * kj[d];
+          scores[j] = dot * scale;
+          largest = std::max(largest, scores[j]);
+        }
+        float sum = 0.0f;
+        for (int j = 0; j <= lastKey; ++j) {
+          scores[j] = expf(scores[j] - largest);
+          sum += scores[j];
+        }
+        float *oi = po + ((n * numHeads + h) * queryLength + i) * headDim;
+        for (int d = 0; d < headDim; ++d) oi[d] = 0.0f;
+        for (int j = 0; j <= lastKey; ++j) {
+          const float *vj = pv + ((n * keyLength + j) * numKeyValueHeads + kvh) * headDim;
+          for (int d = 0; d < headDim; ++d) oi[d] += scores[j] / sum * vj[d];
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/// The fused kernel under a block of `blockSize`, its keys split `splits` ways (0 the card's
+/// choice), against the reference on the same operands rounded to half as the kernel reads them.
+bool runBlockCase(
+    int numHeads,
+    int numKeyValueHeads,
+    int queryLength,
+    int keyLength,
+    int headDim,
+    int blockSize,
+    int splits) {
+  auto rounded = [](std::initializer_list<int> shape) {
+    return toCpu(toCuda(F::rand(Device::getCpu(), shape, DType::kFloat)));
+  };
+  Tensor q = rounded({2, queryLength, numHeads, headDim});
+  Tensor k = rounded({2, keyLength, numKeyValueHeads, headDim});
+  Tensor v = rounded({2, keyLength, numKeyValueHeads, headDim});
+
+  Tensor x = F::empty(Device::getCuda(), {2, numHeads, queryLength, headDim}, DType::kFloat16);
+  bool ran = op::cuda::attention(
+      toCuda(q).transpose(1, 2),
+      toCuda(k).transpose(1, 2),
+      toCuda(v).transpose(1, 2),
+      blockSize,
+      x,
+      splits);
+  return ran && cpuOps()->allClose(toCpu(x), blockCausalReference(q, k, v, blockSize), 5e-3f);
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test CUDA attention (block-causal mask)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Blocks of one -- the causal mask, against a reference that is not the composition -- of a few
+  // keys, of the 50 frames CosyVoice3's flow streams in, of exactly the kernel's 64, and larger
+  // than every key there is. Query lengths that are a decode step, a short run packed with its
+  // group, a CTA's worth and past it; key lengths equal to them, past them by a little, and long.
+  for (int blockSize : {1, 2, 7, 50, 64, 1000}) {
+    for (int headDim : {32, 64, 128}) {
+      for (int queryLength : {1, 17, 64, 130}) {
+        for (int keyLength : {queryLength, queryLength + 37, 300}) {
+          if (keyLength < queryLength) continue;
+          for (int splits : {0, 3}) {
+            CATCH_INFO(
+                "block = " << blockSize << ", headDim = " << headDim << ", L = " << queryLength
+                           << ", S = " << keyLength << ", splits = " << splits);
+            CATCH_REQUIRE(
+                runBlockCase(4, 2, queryLength, keyLength, headDim, blockSize, splits));
+          }
+        }
+      }
+    }
+  }
+
+  // Key lengths on and off a block of 50, under Qwen2's grouping of seven heads to one.
+  for (int keyLength : {49, 50, 51, 99, 100, 101}) {
+    CATCH_INFO("S = " << keyLength);
+    CATCH_REQUIRE(runBlockCase(14, 2, keyLength, keyLength, 64, 50, 0));
+    CATCH_REQUIRE(runBlockCase(14, 2, 1, keyLength, 64, 50, 0));
+  }
+}
+
+CATCH_TEST_CASE("test CUDA attention (a block past every key is no mask)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // With as many queries as keys and a block at least as long as the keys, every query sees
+  // every key: the same work as no mask at all, to the bit. Of the fused kernel itself, since
+  // CudaOperators::attention hands a block of 0 to FlashAttention where that is built in.
+  Tensor q = toCuda(F::rand(Device::getCpu(), {2, 8, 300, 64}, DType::kFloat));
+  Tensor k = toCuda(F::rand(Device::getCpu(), {2, 8, 300, 64}, DType::kFloat));
+  Tensor v = toCuda(F::rand(Device::getCpu(), {2, 8, 300, 64}, DType::kFloat));
+  Tensor unmasked = F::empty(Device::getCuda(), {2, 8, 300, 64}, DType::kFloat16);
+  Tensor blocked = F::empty(Device::getCuda(), {2, 8, 300, 64}, DType::kFloat16);
+  CATCH_REQUIRE(op::cuda::attention(q, k, v, 0, unmasked));
+  CATCH_REQUIRE(op::cuda::attention(q, k, v, 300, blocked));
+  // allClose's bounds are strict, so "to the bit" is a difference below the smallest float.
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(unmasked), toCpu(blocked), 0.0f, 1e-38f));
+}
+
+CATCH_TEST_CASE("test CUDA attention (blocks it does not take)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // A block larger than one has no composition, so what the fused kernel does not take -- float,
+  // a head of 16, the processor -- is refused rather than answered some other way.
+  Tensor q = F::rand(Device::getCpu(), {1, 2, 8, 64}, DType::kFloat);
+  Tensor k = F::rand(Device::getCpu(), {1, 2, 8, 64}, DType::kFloat);
+  CATCH_REQUIRE_THROWS(F::attention(cpuOps(), q, k, k, 4));
+
+  Tensor qf = F::toDevice(cudaOps(), q, Device::getCuda());
+  Tensor kf = F::toDevice(cudaOps(), k, Device::getCuda());
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qf, kf, kf, 4));
+
+  Tensor q16 = toCuda(F::rand(Device::getCpu(), {1, 2, 8, 16}, DType::kFloat));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), q16, q16, q16, 4));
+
+  // And what Operators::attention does not define at all.
+  Tensor qh = toCuda(q);
+  Tensor kh = toCuda(F::rand(Device::getCpu(), {1, 2, 4, 64}, DType::kFloat));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, kh, kh, 2));  // fewer keys than queries
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, qh, qh, -1));
 }
 
 }  // namespace fl

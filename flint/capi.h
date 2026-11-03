@@ -494,14 +494,17 @@ FLAPI int32_t fl_max(fl_operators_t operators, fl_tensor_view_t input, fl_tensor
 FLAPI int32_t fl_min(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out);
 
 /// Scaled dot product attention. `q` is (N, nHead, L, D) and `k` and `v` are (N, nKvHead, S, D),
-/// where nKvHead may divide nHead; `out` is (N, nHead, L, D). `causal` masks the future
-/// positions, aligned to the bottom right of the score matrix.
+/// where nKvHead may divide nHead; `out` is (N, nHead, L, D). `block_size` is the mask: 0 none,
+/// 1 the causal mask aligned to the bottom right of the score matrix, and a larger one the same at
+/// the granularity of blocks of that many keys counted from key 0 -- a query sees its own block
+/// whole and every block before it. 0 and 1 are what this argument meant when it was `causal`.
+/// A block of more than one fails, with the reason, where no kernel takes it.
 FLAPI int32_t fl_attention(
     fl_operators_t operators,
     fl_tensor_view_t q,
     fl_tensor_view_t k,
     fl_tensor_view_t v,
-    int32_t causal,
+    int32_t block_size,
     fl_tensor_view_t out);
 
 /// Whether this build has fl_paged_attention(), which rides on the FlashAttention kernels.

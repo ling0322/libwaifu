@@ -51,6 +51,7 @@ use std::rc::Rc;
 use crate::error::{Error, Result};
 use crate::flint::{
     check_parameters, DType, Extent, Graph, Ir, RunContext, Tensor, Value, WeightFormat, Weights,
+    CAUSAL,
 };
 use crate::layers::{Embedding, LayerNorm, Linear};
 
@@ -133,7 +134,7 @@ fn attention(config: &ClipTextConfig, g: &Graph, input: Value) -> Value {
     }
 
     // A text encoder reads left to right, so a position may not see what follows it.
-    let x = g.attention(parts[0], parts[1], parts[2], true);
+    let x = g.attention(parts[0], parts[1], parts[2], CAUSAL);
     let x = g.contiguous(g.transpose(x, 1, 2));
     let x = g.view(x, [Extent::At(1), length, Extent::At(d)]);
 

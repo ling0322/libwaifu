@@ -145,6 +145,24 @@ Tensor emptyLike(const TensorView &input) {
 
 // --- Attention ------------------------------------------------------------------------------
 
+void checkAttentionBlockSize(TensorView q, TensorView k, int blockSize) {
+  if (blockSize < 0) {
+    THROW(InvalidArg, lut::sprintf("attention: a block size of %d", blockSize));
+  }
+  // Under the causal mask a query with no key to see has always been the caller's to avoid; a
+  // block of more than one is new, and has no such history to keep.
+  if (blockSize > 1 && k.getShape(2) < q.getShape(2)) {
+    THROW(
+        InvalidArg,
+        lut::sprintf(
+            "attention: a block size of %d over %d keys and %d queries, which leaves the first "
+            "queries before every key",
+            blockSize,
+            k.getShape(2),
+            q.getShape(2)));
+  }
+}
+
 void composedAttention(
     Operators *op,
     TensorView q,

@@ -108,8 +108,10 @@ struct Params {
   int64_t vStrideL;
   // 1 / sqrt(D), times log2(e): the scores go into exp2.
   float scaleLog2;
-  // The last query sees every key, the first keyLength - queryLength + 1.
-  int causal;
+  // The mask, as Operators::attention has it: 0 none, otherwise blocks of this many keys from key
+  // 0, a query seeing its own block and every block before it. 1 is the causal mask, under which
+  // the last query sees every key and the first keyLength - queryLength + 1.
+  int blockSize;
   // Where a split writes, when there is more than one: <float>(batch, kvHeads, splits, rows, D),
   // and the maximum and the sum of each row, <float>(batch, kvHeads, splits, rows).
   float *partialOut;
@@ -158,6 +160,16 @@ struct Row {
   int query;
   int head;
 };
+
+/// The last key a query at `position` -- its index plus keyLength - queryLength -- may see: the
+/// last of its block, or of the keys, whichever comes first. Under the causal mask, a block of
+/// one, that is the position itself.
+__device__ inline int lastKeyOf(const Params &p, int position) {
+  if (p.blockSize == 0) return p.keyLength - 1;
+  // The causal mask without the division, which is most of what this costs and buys it nothing.
+  if (p.blockSize == 1) return position;
+  return min(p.keyLength - 1, (position / p.blockSize) * p.blockSize + p.blockSize - 1);
+}
 
 __device__ inline Row rowOf(const Params &p, int kvHead, int row) {
   Row r;
@@ -223,15 +235,15 @@ __global__ void __launch_bounds__(WARPS * 32) attentionKernel(Params p) {
   int lastKey[2];
 #pragma unroll
   for (int r = 0; r < 2; ++r) {
-    lastKey[r] = p.causal ? rows[r].query + offset : p.keyLength - 1;
+    lastKey[r] = lastKeyOf(p, rows[r].query + offset);
   }
 
   // This split's keys, and no further than the last any row of this CTA may see.
   int keyBegin = split * p.keysPerSplit;
   int keyEnd = min(p.keyLength, keyBegin + p.keysPerSplit);
-  if (p.causal) {
+  if (p.blockSize > 0) {
     int lastQuery = min(p.queryLength - 1, (r0 + kBlockM - 1) / p.headsPerKeyValueHead);
-    keyEnd = min(keyEnd, lastQuery + offset + 1);
+    keyEnd = min(keyEnd, lastKeyOf(p, lastQuery + offset) + 1);
   }
 
   for (int k0 = keyBegin; k0 < keyEnd; k0 += kBlockN) {
@@ -436,16 +448,16 @@ bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
-    bool causal,
+    int blockSize,
     const TensorView &out) {
-  return attention(q, k, v, causal, out, 0);
+  return attention(q, k, v, blockSize, out, 0);
 }
 
 bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
-    bool causal,
+    int blockSize,
     const TensorView &out,
     int splits) {
   if (q.getDim() != 4 || k.getDim() != 4 || v.getDim() != 4 || out.getDim() != 4) return false;
@@ -467,7 +479,7 @@ bool attention(
   }
   if (numKeyValueHeads == 0 || numHeads % numKeyValueHeads != 0) return false;
   if (queryLength == 0 || keyLength == 0) return false;
-  if (causal && keyLength < queryLength) return false;
+  if (blockSize < 0 || (blockSize > 0 && keyLength < queryLength)) return false;
   if (q.getStride(3) != 1 || k.getStride(3) != 1 || v.getStride(3) != 1) return false;
   if (!out.isContiguous() || out.getShape() != q.getShape()) return false;
 
@@ -500,7 +512,7 @@ bool attention(
   params.vStrideH = v.getStride(1);
   params.vStrideL = v.getStride(2);
   params.scaleLog2 = 1.4426950408889634f / sqrtf(static_cast<float>(headDim));
-  params.causal = causal ? 1 : 0;
+  params.blockSize = blockSize;
   params.partialOut = nullptr;
   params.partialMax = nullptr;
   params.partialSum = nullptr;

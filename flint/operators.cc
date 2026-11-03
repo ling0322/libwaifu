@@ -201,8 +201,17 @@ void Operators::softmax(TensorView input, TensorView out) {
   NO_KERNEL();
 }
 
-void Operators::attention(TensorView q, TensorView k, TensorView v, bool causal, TensorView out) {
-  F::composedAttention(this, q, k, v, causal, out);
+void Operators::attention(TensorView q, TensorView k, TensorView v, int blockSize, TensorView out) {
+  F::checkAttentionBlockSize(q, k, blockSize);
+  if (blockSize > 1) {
+    THROW(
+        NotImplemented,
+        lut::sprintf(
+            "attention with a block size of %d has no kernel on this device for these operands, "
+            "and no composition",
+            blockSize));
+  }
+  F::composedAttention(this, q, k, v, blockSize == 1, out);
 }
 
 void Operators::pagedAttention(

@@ -5,7 +5,7 @@
 //! run with `cargo test --test cuda -- --ignored`. On a machine without one, the library ends the
 //! process rather than reporting an error, which is why they do not simply detect and skip.
 
-use waifu::flint::{fp8_available, functional as F, DType, Device, Tensor};
+use waifu::flint::{fp8_available, functional as F, DType, Device, Tensor, CAUSAL};
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
 fn cuda_float() -> DType {
@@ -229,7 +229,7 @@ fn attends_over_a_batch() {
     let k = F::rand(&[1, 1, 2, HEAD_DIM], cuda_float(), Device::Cuda).unwrap();
     let v = F::rand(&[1, 1, 2, HEAD_DIM], cuda_float(), Device::Cuda).unwrap();
 
-    let out = F::attention(&q, &k, &v, true).unwrap();
+    let out = F::attention(&q, &k, &v, CAUSAL).unwrap();
     assert_eq!(out.shape(), vec![1, 1, 2, HEAD_DIM]);
 
     // With a causal mask the first query sees only the first value, unchanged.
@@ -307,7 +307,7 @@ fn stores_and_reads_a_paged_kv_cache() {
             .transpose(1, 2)
             .unwrap()
     };
-    let dense = F::attention(&batched(&q), &batched(&k), &batched(&v), true).unwrap();
+    let dense = F::attention(&batched(&q), &batched(&k), &batched(&v), CAUSAL).unwrap();
 
     let expected = to_host_f32(&dense);
     let actual = to_host_f32(&paged);
