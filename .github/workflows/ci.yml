@@ -40,6 +40,11 @@ jobs:
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
 
+      - name: Test (tools)
+        run: cargo test -p waifu-tools --bins
+        env:
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
   macos-metal:
     name: macOS (CPU + Metal)
     runs-on: macos-latest

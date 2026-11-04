@@ -25,8 +25,9 @@
 //!
 //! The document carries each part's depth in a hidden group (`depth/<tag>`), which is what
 //! `see_through_stratify` and the waifu2d page read. `<out>.layers/` gets a PNG of every part,
-//! numbered bottom first as the app numbers them (`00-<tag>.png` is the lowest). The part PNGs an
-//! earlier run left there are removed first; nothing else in the directory is touched.
+//! numbered bottom first as the app numbers them (`00-<tag>.png` is the lowest), and a list of them
+//! in `.img2layers`. A rerun removes the PNGs that list names and nothing else, so a PNG somebody
+//! put there survives -- unless it has a name this run writes itself.
 //!
 //! Handwear, eyes and ears are split into a left and a right by default, as the rig wants -- unlike
 //! the app, whose box starts off -- and `no-pairs` keeps them whole. `seed=N` is 0 unless named;
@@ -136,7 +137,8 @@ fn part_file_name(index: usize, tag: &str) -> String {
     format!("{index:02}-{}.png", tag.replace('/', "_"))
 }
 
-/// Whether `name` is one `part_file_name` could have written.
+/// Whether `name` is one `part_file_name` could have written: a bare file name, so that a list
+/// somebody edited cannot point the cleanup outside the directory.
 fn is_part_file_name(name: &str) -> bool {
     let Some((index, tag)) = name
         .strip_suffix(".png")
@@ -144,21 +146,38 @@ fn is_part_file_name(name: &str) -> bool {
     else {
         return false;
     };
-    index.len() >= 2 && index.bytes().all(|b| b.is_ascii_digit()) && !tag.is_empty()
+    index.len() >= 2
+        && index.bytes().all(|b| b.is_ascii_digit())
+        && !tag.is_empty()
+        && !name.contains(['/', '\\'])
 }
 
-/// Makes `dir` if it is not there and removes the part PNGs an earlier run left in it, so that what
-/// is in it afterwards is this run's parts and whatever else somebody put there.
-fn clear_part_files(dir: &Path) -> std::io::Result<()> {
+/// The file in a layers directory naming the PNGs the last run wrote there, one a line: the only
+/// ones a later run removes.
+const PART_LIST: &str = ".img2layers";
+
+/// Makes `dir` if it is not there and points it at this run's parts: removes the PNGs the last run's
+/// list names, then writes the list of `names` before any of them is written, so a run stopped
+/// halfway still leaves every file it made on the list. A PNG the list does not name -- one somebody
+/// put there, or one a run before the list existed wrote -- is left alone.
+fn replace_part_list(dir: &Path, names: &[String]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let ours = entry.file_name().to_str().is_some_and(is_part_file_name);
-        if ours && entry.file_type()?.is_file() {
-            std::fs::remove_file(entry.path())?;
+    let list = dir.join(PART_LIST);
+    match std::fs::read_to_string(&list) {
+        Ok(last) => {
+            for name in last.lines().filter(|name| is_part_file_name(name)) {
+                match std::fs::remove_file(dir.join(name)) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+            }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
-    Ok(())
+    let mut text = names.join("\n");
+    text.push('\n');
+    std::fs::write(list, text)
 }
 
 fn main() -> Result<(), waifu::Error> {
@@ -207,10 +226,13 @@ fn main() -> Result<(), waifu::Error> {
     std::fs::write(&out_path, decomposition.to_psd())?;
 
     let layers_dir = PathBuf::from(&out_path).with_extension("layers");
-    clear_part_files(&layers_dir)?;
-    for (index, part) in decomposition.parts.iter().enumerate() {
+    let names: Vec<String> = (decomposition.parts.iter().enumerate())
+        .map(|(index, part)| part_file_name(index, &part.tag))
+        .collect();
+    replace_part_list(&layers_dir, &names)?;
+    for (part, name) in decomposition.parts.iter().zip(&names) {
         image::save_buffer(
-            layers_dir.join(part_file_name(index, &part.tag)),
+            layers_dir.join(name),
             &part.pixels.data,
             part.pixels.width as u32,
             part.pixels.height as u32,
@@ -307,30 +329,50 @@ mod tests {
             "00-.png",
             "ab-c.png",
             "00-a.psd",
+            "00-../../x.png",
+            "00-a\\b.png",
         ] {
             assert!(!is_part_file_name(name), "{name}");
         }
     }
 
     #[test]
-    fn a_rerun_removes_only_the_old_parts() {
+    fn a_rerun_removes_only_the_listed_parts() {
         let dir = std::env::temp_dir().join(format!("img2layers-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        for name in ["00-body.png", "21-old.png", "notes.txt", "composite.png"] {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let left = || {
+            let mut left: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect();
+            left.sort();
+            left
+        };
+
+        // The first run, into a directory that is not there, makes it and removes nothing.
+        replace_part_list(&dir, &names(&["00-body.png", "01-hair.png"])).unwrap();
+        for name in [
+            "00-body.png",
+            "01-hair.png",
+            "00-reference.png",
+            "notes.txt",
+        ] {
             std::fs::write(dir.join(name), b"x").unwrap();
         }
-        clear_part_files(&dir).unwrap();
-        let mut left: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .collect();
-        left.sort();
-        assert_eq!(left, ["composite.png", "notes.txt"]);
-        std::fs::remove_dir_all(&dir).unwrap();
+        // The second removes the first's two, one of which is gone already, and nothing else.
+        std::fs::remove_file(dir.join("01-hair.png")).unwrap();
+        replace_part_list(&dir, &names(&["00-face.png"])).unwrap();
+        assert_eq!(left(), [".img2layers", "00-reference.png", "notes.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(PART_LIST)).unwrap(),
+            "00-face.png\n"
+        );
 
-        clear_part_files(&dir).unwrap();
-        assert!(dir.is_dir());
+        // A list naming something outside the directory is not followed.
+        std::fs::write(dir.join(PART_LIST), "00-../notes.txt\nnotes.txt\n").unwrap();
+        replace_part_list(&dir, &[]).unwrap();
+        assert_eq!(left(), [".img2layers", "00-reference.png", "notes.txt"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
