@@ -164,7 +164,6 @@ final class WaifuKitTests: XCTestCase {
         XCTAssertEqual(described?["takes_guidance"] as? Bool, true)
 
         XCTAssertThrowsError(try ModelManager.describeJSON("no-such-model:v9"))
-        XCTAssertNotNil(MachineInfo.json())
     }
 
     func testTheLogHandlerHearsTheLibrary() async throws {

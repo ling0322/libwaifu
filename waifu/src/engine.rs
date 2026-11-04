@@ -1428,24 +1428,18 @@ fn described(asked: &str) -> serde_json::Value {
     })
 }
 
-/// The machine: `waifu_machine_json`. Measured for the device `auto` would choose.
-pub fn machine_json() -> serde_json::Value {
-    crate::machine::describe(DeviceOption::Auto.resolve())
-}
-
-/// Where a run can go: `waifu_devices_json`. Every device the C API names, whether this build
-/// and this machine can take a run there, and -- for a device with memory of its own where it can
-/// -- what its allocator may still take, in bytes: the memory limit or the device's memory, less
-/// what this process holds there. See [`crate::runtime::remaining`].
+/// Where a run can go: `waifu_devices_json`. Every device this build and this machine can take a
+/// run to, and -- for a device with memory of its own -- what its allocator may still take, in
+/// bytes: the memory limit or the device's memory, less what this process holds there. See
+/// [`crate::runtime::remaining`].
 pub fn devices_json() -> serde_json::Value {
     let available = Runtime::available();
-    let devices: Vec<serde_json::Value> = Runtime::ALL
+    let devices: Vec<serde_json::Value> = available
         .iter()
         .map(|runtime| {
             let free = crate::runtime::remaining(runtime.device(), &available);
             serde_json::json!({
                 "name": runtime.name(),
-                "available": available.contains(runtime),
                 "free": free,
             })
         })

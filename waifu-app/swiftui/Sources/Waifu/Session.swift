@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 // One window's worth of working with the loaded model: what is in the boxes, the jobs asked for
-// and what they made, and the machine they run on.
+// and what they made.
 //
 // A job is a call on the engine, awaited in a task of its own: its progress arrives as it goes, and
 // cancelling the task cancels the job. What a job makes is this app's to keep -- the engine keeps
@@ -150,7 +150,6 @@ final class Session {
 
     /// This window's jobs and those read back for the model's kinds, newest first.
     private(set) var jobs: [Job] = []
-    private(set) var machine: Machine?
     /// What went wrong with the last thing that was clicked.
     var complaint: String?
 
@@ -182,7 +181,6 @@ final class Session {
     /// Each job's task, for cancelling it.
     private var tasks: [String: Task<Void, Never>] = [:]
     private var stopping: Set<String> = []
-    private var polling: Task<Void, Never>?
     /// What the prompts were last filled in with, so that a box still holding it is the model's
     /// and a box holding anything else is somebody's.
     private var suggested: (prompt: String, negative: String) = ("", "")
@@ -266,13 +264,6 @@ final class Session {
             }
         }
         readHistory()
-        polling = Task { [weak self] in
-            while !Task.isCancelled {
-                let machine = await Task.detached { Machine.now() }.value
-                if let machine { self?.machine = machine }
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
     }
 
     // MARK: - the model

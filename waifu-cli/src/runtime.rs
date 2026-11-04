@@ -145,15 +145,13 @@ pub fn measure() -> Vec<Runtime> {
     let Some(said) = c::waifu_json(c::waifu_devices_json()) else {
         return vec![Runtime::on(Device::Cpu)];
     };
-    let mut available = Vec::new();
-    for row in said["devices"].as_array().into_iter().flatten() {
-        let Some(runtime) = row["name"].as_str().and_then(Runtime::named) else {
-            continue;
-        };
-        if row["available"].as_bool() == Some(true) {
-            available.push(runtime);
-        }
-    }
+    // Every device listed is one a run can go to.
+    let mut available: Vec<Runtime> = said["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["name"].as_str().and_then(Runtime::named))
+        .collect();
     if available.is_empty() {
         available.push(Runtime::on(Device::Cpu));
     }

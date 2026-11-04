@@ -17,7 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// What the library says about models and the machine, as the JSON WaifuKit hands over, and what
+// What the library says about models, as the JSON WaifuKit hands over, and what
 // this app keeps of the jobs it ran.
 
 import Foundation
@@ -186,41 +186,6 @@ struct CatalogEntry: Decodable, Identifiable, Hashable {
         return models.enumerated()
             .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
             .map(\.element)
-    }
-}
-
-// MARK: - the machine
-
-struct Machine: Decodable {
-    struct Memory: Decodable {
-        var total: Double?
-        var used: Double?
-    }
-
-    struct GPU: Decodable {
-        var name: String
-        var unified: Bool?
-    }
-
-    struct VRAM: Decodable {
-        var used: Double?
-        var total: Double?
-        var ours: Double?
-    }
-
-    var cpu: String?
-    var cores: Int?
-    var threads: Int?
-    var memory: Memory?
-    var gpu: GPU?
-    var vram: VRAM?
-    var whyNoVram: String?
-    var accelerators: [String]?
-
-    /// As the library measures it now. Runs sysctl and vm_stat: off the main thread.
-    static func now() -> Machine? {
-        guard let data = MachineInfo.json() else { return nil }
-        return try? decoder.decode(Machine.self, from: data)
     }
 }
 

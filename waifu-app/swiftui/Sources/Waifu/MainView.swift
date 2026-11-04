@@ -17,9 +17,9 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// The window once the program is answering: the page's layout in native controls. The tabs and
-// the machine down the side; what to make across the top; its settings on the left and what came
-// of it on the right.
+// The window once the program is answering: the page's layout in native controls. The tabs down
+// the side; what to make across the top; its settings on the left and what came of it on the
+// right.
 
 import SwiftUI
 
@@ -215,12 +215,6 @@ struct Sidebar: View {
         }
         .scrollContentBackground(.hidden)
         .background(Theme.sidebar)
-        .safeAreaInset(edge: .bottom) {
-            if let machine = session.machine {
-                MachineView(machine: machine)
-                    .padding(12)
-            }
-        }
     }
 }
 
@@ -263,81 +257,6 @@ struct SettingsIcon: View {
             .frame(width: 20, height: 20)
             .background(color.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
-}
-
-/// What this is running on: the processor, how much memory is left, the card. What is *left* is
-/// what answers why a run that worked yesterday now aborts.
-struct MachineView: View {
-    var machine: Machine
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("This Mac").font(.headline)
-
-            if let cpu = machine.cpu {
-                part("CPU") {
-                    Text(cpu).lineLimit(1).help(cpu)
-                    let counted = [machine.cores.map { "\($0) cores" }, machine.threads.map { "\($0) threads" }]
-                        .compactMap { $0 }
-                    if !counted.isEmpty { Text(counted.joined(separator: " · ")).foregroundStyle(.secondary) }
-                }
-            }
-            if let total = machine.memory?.total {
-                part("Memory") { Meter(used: machine.memory?.used, total: total) }
-            }
-            if let gpu = machine.gpu {
-                part("GPU") {
-                    Text(gpu.name).lineLimit(1).help(gpu.name)
-                    if gpu.unified == true {
-                        Text("memory is shared with the CPU").foregroundStyle(.secondary)
-                    } else if let vram = machine.vram, let total = vram.total {
-                        Meter(used: vram.used, total: total)
-                    } else if let why = machine.whyNoVram {
-                        Text(why).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            part("Accelerators") {
-                let accelerators = machine.accelerators ?? []
-                Text(accelerators.isEmpty ? "none -- runs go to the processor" : accelerators.joined(separator: " · "))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .font(.caption)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func part<Content: View>(_ what: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(what.uppercased()).font(.caption2).foregroundStyle(.tertiary)
-            content()
-        }
-    }
-}
-
-struct Meter: View {
-    var used: Double?
-    var total: Double
-
-    var body: some View {
-        if let used, total > 0 {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("\(room(used)) of \(room(total))").foregroundStyle(.secondary)
-                ProgressView(value: min(1, max(0, used / total)))
-                    .controlSize(.mini)
-                    .tint(used / total > 0.9 ? .red : .accentColor)
-            }
-        } else {
-            Text(room(total)).foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// How much room something takes, in the unit that says it in two or three digits.
-func room(_ bytes: Double) -> String {
-    if bytes >= 1e9 { return String(format: "%.1f GB", bytes / 1e9) }
-    if bytes >= 1e6 { return String(format: "%.0f MB", bytes / 1e6) }
-    return String(format: "%.0f kB", bytes / 1e3)
 }
 
 // MARK: - the middle

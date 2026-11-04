@@ -26,7 +26,7 @@ using Microsoft.Win32;
 
 namespace Libwaifu.Gui.Engine
 {
-    /// <summary>What the foot of the sidebar says about this machine.</summary>
+    /// <summary>What Windows says about this machine.</summary>
     public class MachineSnapshot
     {
         public string CpuName { get; set; }
@@ -61,14 +61,11 @@ namespace Libwaifu.Gui.Engine
     }
 
     /// <summary>
-    /// Reads the machine, for the lines under "This PC".
+    /// Reads the machine from Windows: what the Model card compares a model's size against.
     /// </summary>
     /// <remarks>
-    /// The real screen asks the library (<c>waifu_machine_json</c>), which answers the same
-    /// questions on every platform. This reads them from Windows directly so that the sidebar is
-    /// true before the two are joined up. Everything that does not change -- the processor's
-    /// name, how many cores it has, which card is in the machine -- is read once; only the memory
-    /// is read again every two seconds.
+    /// Everything that does not change -- the processor's name, how many cores it has, which
+    /// card is in the machine -- is read once; only the memory is read again every two seconds.
     /// </remarks>
     public static class Machine
     {
@@ -76,82 +73,7 @@ namespace Libwaifu.Gui.Engine
 
         public static MachineSnapshot Read()
         {
-            var snapshot = Windows();
-
-            // The library knows two things this side cannot: how much of the card is in use, and
-            // which accelerators this build can actually reach. It answers null for whatever it
-            // has nothing to say about -- on Windows, today, that is most of the processor and
-            // the memory -- so what comes back is laid over what Windows said rather than
-            // replacing it.
-            if (Library.Available)
-            {
-                try
-                {
-                    Lay(NativeModels.Machine(), snapshot);
-                }
-                catch (Exception error)
-                {
-                    Log.Write("warn", "machine", error.Message);
-                }
-            }
-
-            return snapshot;
-        }
-
-        private static void Lay(MachineSnapshot said, MachineSnapshot onto)
-        {
-            if (said == null)
-            {
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(said.CpuName))
-            {
-                onto.CpuName = said.CpuName;
-            }
-
-            if (said.Cores > 0)
-            {
-                onto.Cores = said.Cores;
-            }
-
-            if (said.Threads > 0)
-            {
-                onto.Threads = said.Threads;
-            }
-
-            if (said.MemoryTotal > 0)
-            {
-                onto.MemoryTotal = said.MemoryTotal;
-                onto.MemoryUsed = said.MemoryUsed;
-            }
-
-            if (!string.IsNullOrEmpty(said.GpuName))
-            {
-                onto.GpuName = said.GpuName;
-            }
-
-            if (said.Vram > 0)
-            {
-                onto.Vram = said.Vram;
-                onto.VramUsed = said.VramUsed;
-                onto.VramKnown = said.VramKnown;
-            }
-
-            if (said.Unified)
-            {
-                onto.Unified = true;
-            }
-
-            if (!string.IsNullOrEmpty(said.WhyNoVram))
-            {
-                onto.WhyNoVram = said.WhyNoVram;
-            }
-
-            if (said.Accelerators != null && said.Accelerators.Count > 0)
-            {
-                onto.Accelerators = said.Accelerators;
-            }
+            return Windows();
         }
 
         private static MachineSnapshot Windows()

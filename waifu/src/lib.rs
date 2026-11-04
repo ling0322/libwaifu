@@ -71,7 +71,6 @@ pub mod indextts;
 pub mod krea2;
 mod layers;
 pub mod log;
-pub mod machine;
 mod manifest;
 mod mapping;
 pub mod progress;

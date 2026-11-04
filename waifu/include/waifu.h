@@ -11,7 +11,9 @@
 
 // What a caller compiled against this header expects. Bumped when anything in it changes in a
 // way an older caller would misread.
-#define WAIFU_ABI_VERSION 2
+//
+// 3: waifu_machine_json is gone, and waifu_devices_json lists only the devices that can be used.
+#define WAIFU_ABI_VERSION 3
 
 typedef enum {
   WAIFU_LOG_DEBUG = 0,
@@ -347,17 +349,12 @@ void waifu_set_log_callback(void *user_data, WaifuLogCallback callback);
 // Lines below the level are not made at all. INFO unless set.
 void waifu_set_log_level(WaifuLogLevel level);
 
-// The processor, the memory, the card and the accelerators this build can use, as JSON. Free
-// with waifu_string_free. NULL on failure.
-char *waifu_machine_json(void);
-
-// Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-// names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the device's
-// allocator may still take where it can be used -- its memory limit, or the device's memory, less
-// what this process holds there -- and null for the processor or a device that cannot be used. Not
-// the card as other programs see it: that is waifu_machine_json's `vram`. Asking CUDA builds a
-// context on the card, a few hundred megabytes of it. Free with waifu_string_free. NULL on
-// failure.
+// The devices this build can use on this machine, as JSON: `{"devices": [{"name", "free"}]}`,
+// named as the -device flag names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the
+// device's allocator may still take -- its memory limit, or the device's memory, less what this
+// process holds there -- and null for the processor. A device this build or this machine cannot
+// take a run to is not listed. Asking CUDA builds a context on the card, a few hundred megabytes
+// of it. Free with waifu_string_free. NULL on failure.
 char *waifu_devices_json(void);
 
 // This build, as JSON: `{"version", "revision"}`, the crate's version and the full commit it was

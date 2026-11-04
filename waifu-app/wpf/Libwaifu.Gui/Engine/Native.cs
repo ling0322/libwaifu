@@ -53,7 +53,7 @@ namespace Libwaifu.Gui.Engine
         public const string ModelManagerLibrary = "waifu_modelmanager.dll";
 
         /// <summary>What a caller compiled against this header expects, from waifu.h.</summary>
-        public const uint AbiVersion = 2;
+        public const uint AbiVersion = 3;
 
         /// <summary>The same, from waifu_modelmanager.h.</summary>
         public const uint ModelManagerAbiVersion = 1;
@@ -293,9 +293,6 @@ namespace Libwaifu.Gui.Engine
 
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
         public static extern void waifu_set_log_level(LogLevel level);
-
-        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr waifu_machine_json();
 
         /// <summary>What the manifest at a path says, or "tones": see waifu_modelmanager_manifest_path.</summary>
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]

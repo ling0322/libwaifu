@@ -1000,17 +1000,6 @@ public enum ModelManager {
     }
 }
 
-// MARK: - the machine
-
-public enum MachineInfo {
-    /// The processor, the memory, the card and the accelerators this build can use, as JSON.
-    public static func json() -> Data? {
-        guard let said = waifu_machine_json() else { return nil }
-        defer { waifu_string_free(said) }
-        return Data(String(cString: said).utf8)
-    }
-}
-
 // MARK: - the log
 
 public enum LogLevel: Int, Sendable, Comparable {

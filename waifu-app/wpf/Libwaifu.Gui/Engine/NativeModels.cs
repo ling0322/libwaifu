@@ -26,8 +26,7 @@ using System.Windows.Threading;
 namespace Libwaifu.Gui.Engine
 {
     /// <summary>
-    /// What the library says about models and about this machine, read out of the three JSON
-    /// documents it answers with.
+    /// What the library says about models, read out of the JSON documents it answers with.
     /// </summary>
     public static class NativeModels
     {
@@ -279,55 +278,6 @@ namespace Libwaifu.Gui.Engine
 
             Log.Write("error", "models", name + ": " + Library.ModelManagerLastError());
             return false;
-        }
-
-        // -- the machine ------------------------------------------------------------------------
-
-        /// <summary>
-        /// The processor, the memory, the card and the accelerators, as the library measures
-        /// them. Called on a thread of its own: it asks the system and the driver.
-        /// </summary>
-        public static MachineSnapshot Machine()
-        {
-            var text = Utf8.Take(Native.waifu_machine_json());
-            if (text == null)
-            {
-                return null;
-            }
-
-            var node = Json.Parse(text);
-            var memory = Json.Field(node, "memory");
-            var gpu = Json.Field(node, "gpu");
-            var vram = Json.Field(node, "vram");
-
-            // What it does not know it answers null for, and on Windows that is most of the
-            // processor and the memory today. Nulls are left as nothing here so that whatever
-            // merges this can fill them from what Windows itself says.
-            var snapshot = new MachineSnapshot
-            {
-                CpuName = Json.Text(node, "cpu"),
-                Cores = Json.Count(node, "cores"),
-                Threads = Json.Count(node, "threads"),
-                MemoryTotal = (ulong)Json.Number(memory, "total"),
-                MemoryUsed = (ulong)Json.Number(memory, "used"),
-                GpuName = Json.Text(gpu, "name"),
-                Unified = Json.Flag(gpu, "unified"),
-                WhyNoVram = Json.Text(node, "why_no_vram"),
-            };
-
-            if (vram != null)
-            {
-                snapshot.Vram = (ulong)Json.Number(vram, "total");
-                snapshot.VramUsed = (ulong)Json.Number(vram, "used");
-                snapshot.VramKnown = snapshot.Vram > 0;
-            }
-
-            foreach (var name in Json.Items(node, "accelerators").OfType<string>())
-            {
-                snapshot.Accelerators.Add(name);
-            }
-
-            return snapshot;
         }
     }
 

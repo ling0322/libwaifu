@@ -50,7 +50,9 @@ use WaifuStatusCode::*;
 
 /// What a caller compiled against this header expects. Bumped when anything in it changes in a
 /// way an older caller would misread.
-pub const WAIFU_ABI_VERSION: u32 = 2;
+///
+/// 3: waifu_machine_json is gone, and waifu_devices_json lists only the devices that can be used.
+pub const WAIFU_ABI_VERSION: u32 = 3;
 
 // -- status ----------------------------------------------------------------------------------
 
@@ -90,24 +92,14 @@ pub extern "C" fn waifu_set_log_level(level: WaifuLogLevel) {
     caught((), || crate::log::set_level(support::log_level(level)))
 }
 
-// -- the machine -----------------------------------------------------------------------------
+// -- the devices -----------------------------------------------------------------------------
 
-/// The processor, the memory, the card and the accelerators this build can use, as JSON. Free
-/// with waifu_string_free. NULL on failure.
-#[no_mangle]
-pub extern "C" fn waifu_machine_json() -> *mut c_char {
-    caught(ptr::null_mut(), || {
-        string_out(&engine::machine_json().to_string())
-    })
-}
-
-/// Every device, as JSON: `{"devices": [{"name", "available", "free"}]}`, named as the -device flag
-/// names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the device's
-/// allocator may still take where it can be used -- its memory limit, or the device's memory, less
-/// what this process holds there -- and null for the processor or a device that cannot be used. Not
-/// the card as other programs see it: that is waifu_machine_json's `vram`. Asking CUDA builds a
-/// context on the card, a few hundred megabytes of it. Free with waifu_string_free. NULL on
-/// failure.
+/// The devices this build can use on this machine, as JSON: `{"devices": [{"name", "free"}]}`,
+/// named as the -device flag names them -- cpu, cuda, metal, vulkan -- with `free` the bytes the
+/// device's allocator may still take -- its memory limit, or the device's memory, less what this
+/// process holds there -- and null for the processor. A device this build or this machine cannot
+/// take a run to is not listed. Asking CUDA builds a context on the card, a few hundred megabytes
+/// of it. Free with waifu_string_free. NULL on failure.
 #[no_mangle]
 pub extern "C" fn waifu_devices_json() -> *mut c_char {
     caught(ptr::null_mut(), || {

@@ -64,9 +64,6 @@ the device, and `-output <folder>` changes where results are written for that ru
 - **Model Manager.** The library's own folder, Show in Explorer, Change..., and a row per model
   with its size and the one button for it. Downloads run through the library, show its progress,
   and can be cancelled between files; deleting one asks first and then deletes the package.
-- **This PC.** Processor, cores and threads, memory with a bar that turns red past ninety percent,
-  the card with how much of its memory is in use, and the accelerators this build can reach. Read
-  every two seconds on a thread of its own.
 - **Shortcuts.** Ctrl+Enter generates, Ctrl+. and Esc cancel, Ctrl+S saves,
   Ctrl+Shift+O opens the output folder.
 
@@ -80,7 +77,7 @@ nothing above that line knows which it got.
 
 Around the engine, everything the library can answer comes from it: `Engine/NativeModels.cs`
 reads `waifu_modelmanager_catalog_json` and `_directory` from `waifu_modelmanager.dll`, and
-`waifu_describe_json` and `waifu_machine_json` from `waifu.dll`, and runs downloads through
+`waifu_describe_json` from `waifu.dll`, and runs downloads through
 `waifu_modelmanager_fetch_async`. `Engine/Models.cs` is the one door
 the view models knock on, and it is what decides between the library and the stand-in.
 
@@ -122,8 +119,7 @@ pressed, and what the `cuda (offload)` device is there for.
 - A picture cannot be dragged out of the main display (section 7 asks for it); Copy and Copy
   parameters are on its menu.
 - There is no menu bar; the shortcuts above do what the File menu does on the mac.
-- `waifu_machine_json` answers null for the processor and the memory on Windows today, so those
-  lines are read off Windows here and the library's answer is laid over them -- which is where
-  the video memory and the accelerator list come from.
+- How large the card is, which the Model card compares a model's size against, is read off
+  Windows (`Engine/Machine.cs`) rather than asked of the library.
 - No manifests are shipped beside the program yet. `Library.cs` hands over a `manifests\` folder
   if it finds one; `cargo run -p waifu-tools --bin fetch_manifests -- <dir>` is what fills it.

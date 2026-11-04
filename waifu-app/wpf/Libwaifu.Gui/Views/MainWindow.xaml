@@ -101,52 +101,6 @@
     <Border Grid.Row="1" Grid.Column="0" Background="{StaticResource SidebarBrush}">
       <DockPanel LastChildFill="True">
 
-        <!-- What this machine is, read again every two seconds. -->
-        <StackPanel DockPanel.Dock="Bottom" Margin="12">
-          <TextBlock Text="This PC" Style="{StaticResource HeadlineText}" Margin="0,0,0,8" />
-
-          <TextBlock Text="CPU" Style="{StaticResource Caption2Text}" />
-          <TextBlock Text="{Binding Machine.CpuName}" ToolTip="{Binding Machine.CpuName}" />
-          <TextBlock Text="{Binding Machine.Threads}" Style="{StaticResource CaptionText}"
-                     Margin="0,0,0,10" />
-
-          <TextBlock Text="MEMORY" Style="{StaticResource Caption2Text}" />
-          <TextBlock Text="{Binding Machine.Memory}" />
-          <ProgressBar Value="{Binding Machine.MemoryFraction, Mode=OneWay}" Margin="0,4,0,10"
-                       Style="{StaticResource MiniProgress}">
-            <ProgressBar.Resources>
-              <Style TargetType="ProgressBar" BasedOn="{StaticResource MiniProgress}">
-                <Style.Triggers>
-                  <DataTrigger Binding="{Binding Machine.MemoryTight}" Value="True">
-                    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
-                  </DataTrigger>
-                </Style.Triggers>
-              </Style>
-            </ProgressBar.Resources>
-          </ProgressBar>
-
-          <TextBlock Text="GPU" Style="{StaticResource Caption2Text}" />
-          <TextBlock Text="{Binding Machine.GpuName}" ToolTip="{Binding Machine.GpuName}" />
-          <TextBlock Text="{Binding Machine.Vram}" Style="{StaticResource CaptionText}" />
-          <ProgressBar Value="{Binding Machine.VramFraction, Mode=OneWay}" Margin="0,4,0,0"
-                       Style="{StaticResource MiniProgress}"
-                       Visibility="{Binding Machine.VramMeasured, Converter={StaticResource BoolToVisible}}">
-            <ProgressBar.Resources>
-              <Style TargetType="ProgressBar" BasedOn="{StaticResource MiniProgress}">
-                <Style.Triggers>
-                  <DataTrigger Binding="{Binding Machine.VramTight}" Value="True">
-                    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
-                  </DataTrigger>
-                </Style.Triggers>
-              </Style>
-            </ProgressBar.Resources>
-          </ProgressBar>
-          <Border Height="10" />
-
-          <TextBlock Text="ACCELERATORS" Style="{StaticResource Caption2Text}" />
-          <TextBlock Text="{Binding Machine.Accelerators}" Style="{StaticResource CaptionText}" />
-        </StackPanel>
-
         <StackPanel Margin="8,8,8,0">
           <TextBlock Text="Tasks" Style="{StaticResource CaptionText}" Margin="8,2,0,4" />
           <ListBox Style="{StaticResource SidebarList}"

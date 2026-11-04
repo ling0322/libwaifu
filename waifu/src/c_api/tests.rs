@@ -119,7 +119,7 @@ fn the_abi_is_the_header_s() {
 }
 
 #[test]
-fn what_a_model_is_and_the_machine_are_json_and_freed_by_the_caller() {
+fn what_a_model_is_and_the_devices_are_json_and_freed_by_the_caller() {
     unsafe {
         let manifest =
             std::ffi::CString::new(crate::engine::tests::a_manifest("c-api-sdxl", "sdxl")).unwrap();
@@ -134,9 +134,14 @@ fn what_a_model_is_and_the_machine_are_json_and_freed_by_the_caller() {
             last_error()
         );
 
-        let machine = waifu_machine_json();
-        assert!(text(machine).unwrap().contains("\"accelerators\""));
-        waifu_string_free(machine);
+        // Only what can be used is listed, and the processor always can.
+        let devices = waifu_devices_json();
+        let listed: serde_json::Value = serde_json::from_str(&text(devices).unwrap()).unwrap();
+        waifu_string_free(devices);
+        let rows = listed["devices"].as_array().unwrap();
+        assert_eq!(rows[0]["name"], "cpu");
+        assert!(rows[0]["free"].is_null());
+        assert!(rows.iter().all(|row| row.get("available").is_none()));
     }
 }
 
