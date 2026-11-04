@@ -25,89 +25,161 @@
 //!
 //! The document carries each part's depth in a hidden group (`depth/<tag>`), which is what
 //! `see_through_stratify` and the waifu2d page read. `<out>.layers/` gets a PNG of every part,
-//! bottom first, for a look without Photoshop.
+//! numbered bottom first as the app numbers them (`00-<tag>.png` is the lowest). The part PNGs an
+//! earlier run left there are removed first; nothing else in the directory is touched.
 //!
-//! `pairs` splits handwear, eyes and ears into a left and a right, as the rig wants; `seed=N`,
+//! Handwear, eyes and ears are split into a left and a right by default, as the rig wants -- unlike
+//! the app, whose box starts off -- and `no-pairs` keeps them whole. `seed=N` is 0 unless named;
 //! `steps=N`, `depth-steps=N` and `resolution=N` are the model's own unless named.
 
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use waifu::see_through::{Image, Rgba, SeeThrough, SeeThroughOptions, SeeThroughProgress};
 use waifu::{Device, Manifest};
 
-fn main() -> Result<(), waifu::Error> {
-    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+const USAGE: &str = "usage: img2layers MODEL.yaml PICTURE.png OUT.psd [cpu|cuda|vulkan|metal] \\\n\
+    \x20   [pairs (default)|no-pairs] [seed=N] [steps=N] [depth-steps=N] [resolution=N] \\\n\
+    \x20   [lowvram|hybrid=GB]";
 
-    let device_weight_bytes = waifu_tools::device_weight_bytes(&mut arguments)?;
+/// The largest square the tool draws at: a mistyped `resolution=` is an error, not an allocation
+/// the size of the machine.
+const MAX_RESOLUTION: usize = 4096;
 
+/// What the command line asked for, once `lowvram` and `hybrid=` are out of it.
+#[derive(Debug)]
+struct Arguments {
+    model_path: String,
+    picture_path: String,
+    out_path: String,
+    /// `None` for the best one there is.
+    device: Option<Device>,
+    options: SeeThroughOptions,
+}
+
+/// Reads the command line, checking every number against what the model can take, so that a bad
+/// one is said before a model is loaded.
+fn parse_arguments(arguments: Vec<String>) -> Result<Arguments, String> {
     let mut options = SeeThroughOptions {
         seed: 0,
         split_pairs: true,
         ..Default::default()
     };
-    let number = |a: &str, key: &str| -> Option<i64> {
-        a.strip_prefix(key).map(|value| {
-            value.parse().unwrap_or_else(|_| {
-                eprintln!("{a}: expected {key}N");
-                std::process::exit(1);
-            })
-        })
-    };
-    arguments.retain(|a| {
-        match a.as_str() {
-            "pairs" => options.split_pairs = true,
-            "no-pairs" => options.split_pairs = false,
-            _ => {
-                if let Some(v) = number(a, "seed=") {
-                    options.seed = v as u64;
-                } else if let Some(v) = number(a, "steps=") {
-                    options.steps = Some(v as i32);
-                } else if let Some(v) = number(a, "depth-steps=") {
-                    options.depth_steps = Some(v as i32);
-                } else if let Some(v) = number(a, "resolution=") {
-                    options.resolution = Some(v as usize);
-                } else {
-                    return true;
-                }
-            }
+    let mut positional = Vec::new();
+    for a in arguments {
+        let bad = |key: &str, what: &str| format!("{a}: expected {key}N, N {what}");
+        if a == "pairs" {
+            options.split_pairs = true;
+        } else if a == "no-pairs" {
+            options.split_pairs = false;
+        } else if let Some(v) = a.strip_prefix("seed=") {
+            options.seed = v
+                .parse()
+                .map_err(|_| bad("seed=", "a whole number from 0"))?;
+        } else if let Some(v) = a.strip_prefix("steps=") {
+            options.steps = Some(steps(v).ok_or_else(|| bad("steps=", "at least 1"))?);
+        } else if let Some(v) = a.strip_prefix("depth-steps=") {
+            options.depth_steps = Some(steps(v).ok_or_else(|| bad("depth-steps=", "at least 1"))?);
+        } else if let Some(v) = a.strip_prefix("resolution=") {
+            let what = format!("a multiple of 64 from 64 to {MAX_RESOLUTION}");
+            options.resolution = Some(resolution(v).ok_or_else(|| bad("resolution=", &what))?);
+        } else {
+            positional.push(a);
         }
-        false
-    });
+    }
 
-    let mut arguments = arguments.into_iter();
+    let mut positional = positional.into_iter();
     let (Some(model_path), Some(picture_path), Some(out_path)) =
-        (arguments.next(), arguments.next(), arguments.next())
+        (positional.next(), positional.next(), positional.next())
     else {
-        eprintln!(
-            "usage: img2layers MODEL.yaml PICTURE.png OUT.psd [cpu|cuda|vulkan] \\\n\
-            \x20   [pairs|no-pairs] [seed=N] [steps=N] [depth-steps=N] [resolution=N] \\\n\
-            \x20   [lowvram|hybrid=GB]"
-        );
-        std::process::exit(1);
+        return Err(USAGE.to_string());
     };
-
-    let device = match arguments.next().as_deref() {
-        Some("cpu") => Device::Cpu,
-        Some("cuda") => Device::Cuda,
-        Some("vulkan") => Device::Vulkan,
-        Some("metal") => Device::Metal,
-        None => {
-            if Device::Cuda.is_available() {
-                Device::Cuda
-            } else if Device::Vulkan.is_available() {
-                Device::Vulkan
-            } else if Device::Metal.is_available() {
-                Device::Metal
-            } else {
-                Device::Cpu
-            }
-        }
+    let device = match positional.next().as_deref() {
+        None => None,
+        Some("cpu") => Some(Device::Cpu),
+        Some("cuda") => Some(Device::Cuda),
+        Some("vulkan") => Some(Device::Vulkan),
+        Some("metal") => Some(Device::Metal),
         Some(other) => {
-            eprintln!("unknown device {other}: expected cpu, cuda, vulkan or metal");
-            std::process::exit(1);
+            return Err(format!(
+                "unknown device {other}: expected cpu, cuda, vulkan or metal"
+            ))
         }
     };
+    let rest: Vec<String> = positional.collect();
+    if !rest.is_empty() {
+        return Err(format!("unexpected {}\n{USAGE}", rest.join(" ")));
+    }
+    Ok(Arguments {
+        model_path,
+        picture_path,
+        out_path,
+        device,
+        options,
+    })
+}
+
+fn steps(value: &str) -> Option<i32> {
+    value.parse().ok().filter(|steps: &i32| *steps >= 1)
+}
+
+fn resolution(value: &str) -> Option<usize> {
+    value
+        .parse()
+        .ok()
+        .filter(|side: &usize| (64..=MAX_RESOLUTION).contains(side) && side.is_multiple_of(64))
+}
+
+/// The file a part is written to: its place counted from the bottom, as the app counts, and its
+/// tag with any `/` made safe for a file name.
+fn part_file_name(index: usize, tag: &str) -> String {
+    format!("{index:02}-{}.png", tag.replace('/', "_"))
+}
+
+/// Whether `name` is one `part_file_name` could have written.
+fn is_part_file_name(name: &str) -> bool {
+    let Some((index, tag)) = name
+        .strip_suffix(".png")
+        .and_then(|stem| stem.split_once('-'))
+    else {
+        return false;
+    };
+    index.len() >= 2 && index.bytes().all(|b| b.is_ascii_digit()) && !tag.is_empty()
+}
+
+/// Makes `dir` if it is not there and removes the part PNGs an earlier run left in it, so that what
+/// is in it afterwards is this run's parts and whatever else somebody put there.
+fn clear_part_files(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ours = entry.file_name().to_str().is_some_and(is_part_file_name);
+        if ours && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), waifu::Error> {
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    let device_weight_bytes = waifu_tools::device_weight_bytes(&mut arguments)?;
+    let Arguments {
+        model_path,
+        picture_path,
+        out_path,
+        device,
+        options,
+    } = parse_arguments(arguments).unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(1);
+    });
+    let device = device.unwrap_or_else(|| {
+        [Device::Cuda, Device::Vulkan, Device::Metal]
+            .into_iter()
+            .find(|device| device.is_available())
+            .unwrap_or(Device::Cpu)
+    });
 
     let manifest = Manifest::open(&model_path)?;
     eprintln!(
@@ -135,15 +207,10 @@ fn main() -> Result<(), waifu::Error> {
     std::fs::write(&out_path, decomposition.to_psd())?;
 
     let layers_dir = PathBuf::from(&out_path).with_extension("layers");
-    std::fs::create_dir_all(&layers_dir)?;
+    clear_part_files(&layers_dir)?;
     for (index, part) in decomposition.parts.iter().enumerate() {
-        let name = format!(
-            "{:02}-{}.png",
-            decomposition.parts.len() - 1 - index,
-            part.tag
-        );
         image::save_buffer(
-            layers_dir.join(name.replace('/', "_")),
+            layers_dir.join(part_file_name(index, &part.tag)),
             &part.pixels.data,
             part.pixels.width as u32,
             part.pixels.height as u32,
@@ -161,4 +228,109 @@ fn main() -> Result<(), waifu::Error> {
         layers_dir.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &str) -> Result<Arguments, String> {
+        parse_arguments(line.split_whitespace().map(String::from).collect())
+    }
+
+    #[test]
+    fn defaults_and_named_values() {
+        let a = parse("m.yaml p.png o.psd").unwrap();
+        assert_eq!(
+            (a.model_path.as_str(), a.out_path.as_str()),
+            ("m.yaml", "o.psd")
+        );
+        assert_eq!(a.device, None);
+        assert!(a.options.split_pairs);
+        assert_eq!(a.options.seed, 0);
+        assert_eq!(a.options.steps, None);
+
+        let a =
+            parse("m.yaml p.png o.psd cuda no-pairs seed=7 steps=12 depth-steps=3 resolution=640")
+                .unwrap();
+        assert_eq!(a.device, Some(Device::Cuda));
+        assert!(!a.options.split_pairs);
+        assert_eq!(a.options.seed, 7);
+        assert_eq!(a.options.steps, Some(12));
+        assert_eq!(a.options.depth_steps, Some(3));
+        assert_eq!(a.options.resolution, Some(640));
+    }
+
+    #[test]
+    fn numbers_out_of_range_are_refused() {
+        for bad in [
+            "resolution=-64",
+            "resolution=0",
+            "resolution=100",
+            "resolution=8192",
+            "resolution=18446744073709551552",
+            "steps=0",
+            "steps=-1",
+            "steps=4294967326",
+            "depth-steps=0",
+            "seed=-1",
+            "seed=x",
+        ] {
+            let error = parse(&format!("m.yaml p.png o.psd {bad}")).unwrap_err();
+            assert!(error.starts_with(bad), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn extra_and_missing_arguments_are_refused() {
+        assert!(parse("m.yaml p.png o.psd cuda typo")
+            .unwrap_err()
+            .starts_with("unexpected typo"));
+        assert!(parse("m.yaml p.png o.psd gpu")
+            .unwrap_err()
+            .starts_with("unknown device gpu"));
+        assert!(parse("m.yaml p.png").unwrap_err().starts_with("usage:"));
+    }
+
+    #[test]
+    fn parts_are_numbered_bottom_first() {
+        assert_eq!(part_file_name(0, "back hair"), "00-back hair.png");
+        assert_eq!(part_file_name(12, "eyes/left"), "12-eyes_left.png");
+        assert_eq!(part_file_name(123, "face"), "123-face.png");
+        for name in ["00-a.png", "12-eyes_left.png", "123-face.png"] {
+            assert!(is_part_file_name(name), "{name}");
+        }
+        for name in [
+            "notes.txt",
+            "composite.png",
+            "1-a.png",
+            "00-.png",
+            "ab-c.png",
+            "00-a.psd",
+        ] {
+            assert!(!is_part_file_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_rerun_removes_only_the_old_parts() {
+        let dir = std::env::temp_dir().join(format!("img2layers-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["00-body.png", "21-old.png", "notes.txt", "composite.png"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        clear_part_files(&dir).unwrap();
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["composite.png", "notes.txt"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        clear_part_files(&dir).unwrap();
+        assert!(dir.is_dir());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
