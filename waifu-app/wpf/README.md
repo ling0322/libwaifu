@@ -12,11 +12,14 @@ title, and draws nothing.
 ## Build
 
 This machine has Visual Studio 2026 with the C++ workload and no .NET SDK, so the project is
-.NET Framework 4.8 and builds with MSBuild alone -- there is nothing to restore and nothing to
-install. It is built as x64 because the library is: an AnyCPU program would be loaded as a
-32-bit one and could not open it at all.
+.NET Framework 4.8 and builds with MSBuild alone. One package comes from NuGet -- SkiaSharp,
+which the waifu2d page draws with -- so the first build restores once, and every build after
+that is MSBuild alone. It is built as x64 because the library is: an AnyCPU program would be
+loaded as a 32-bit one and could not open it at all.
 
 ```powershell
+& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
+    waifu-app\wpf\Libwaifu.Gui\Libwaifu.Gui.csproj -t:restore  # once, or open it in VS
 & "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
     waifu-app\wpf\Libwaifu.Gui\Libwaifu.Gui.csproj -p:Configuration=Release
 waifu-app\wpf\Libwaifu.Gui\bin\Release\libwaifu-gui.exe
@@ -35,7 +38,8 @@ repository's `build\`, and for `waifu_modelmanager.dll` beside whichever it foun
 next to the exe is what an installed copy would look like.
 
 `-m <model>` chooses a model and turns to the page of the task it is for, `-device <name>` picks
-the device, and `-output <folder>` changes where results are written for that run only.
+the device, `-output <folder>` changes where results are written for that run only, and
+`-psd <file>` turns to waifu2d and opens that layered document.
 
 ## What is in it
 
@@ -64,6 +68,14 @@ the device, and `-output <folder>` changes where results are written for that ru
 - **Model Manager.** The library's own folder, Show in Explorer, Change..., and a row per model
   with its size and the one button for it. Downloads run through the library, show its progress,
   and can be cancelled between files; deleting one asks first and then deletes the package.
+- **waifu2d.** The same page the mac has, in the sidebar's Play section. A layered PSD made by
+  `img2layers` opens by the button, by dropping it on the drawing, or by `-psd`, and the figure
+  in it moves: pointer follow, idle sway, look-around, hair and hem springs, blinking and winks,
+  talking off a slider or the microphone, expression dials, wind with gusts, nod, shake and
+  jump, and a swinging part can be grabbed and pulled. Where the mac draws each part's mesh
+  with Metal, this one draws the same triangle grid with SkiaSharp into a bitmap -- on the CPU,
+  which a 1280x1280 document of two dozen parts holds at the display's 60 fps on a middling
+  core. `Waifu2d/` is a port of the mac's `PSD.swift`, `Rig.swift` and `RigMotion.swift`.
 - **Shortcuts.** Ctrl+Enter generates, Ctrl+. and Esc cancel, Ctrl+S saves,
   Ctrl+Shift+O opens the output folder.
 

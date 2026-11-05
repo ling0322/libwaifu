@@ -64,6 +64,7 @@
   <SolidColorBrush x:Key="TaskSpeechBrush" Color="#FF375F" />
   <SolidColorBrush x:Key="TaskConversionBrush" Color="#FF9F0A" />
   <SolidColorBrush x:Key="TaskModelsBrush" Color="#8E8E93" />
+  <SolidColorBrush x:Key="TaskWaifuBrush" Color="#30D158" />
 
   <!-- — type ============================================================================== -->
 

@@ -75,6 +75,17 @@ namespace Libwaifu.Gui.ViewModels
 
             ModelManager = new ModelManagerViewModel(this);
             ModelPages = new List<ModelManagerViewModel> { ModelManager };
+            Waifu2d = new Waifu2dViewModel();
+            Waifu2dPages = new List<Waifu2dViewModel> { Waifu2d };
+            // The toolbar's line under "waifu2d" is the page's own status, which it updates as a
+            // document opens or fails to.
+            Waifu2d.PropertyChanged += delegate(object sender, System.ComponentModel.PropertyChangedEventArgs e)
+            {
+                if (e.PropertyName == "Status")
+                {
+                    Raise("Subtitle");
+                }
+            };
             Machine = new MachineViewModel();
 
             ToggleInspector = new Command(delegate { InspectorVisible = !InspectorVisible; });
@@ -134,6 +145,11 @@ namespace Libwaifu.Gui.ViewModels
         /// </summary>
         public List<ModelManagerViewModel> ModelPages { get; private set; }
 
+        /// <summary>The waifu2d page, the one row of the sidebar's Play section.</summary>
+        public Waifu2dViewModel Waifu2d { get; private set; }
+
+        public List<Waifu2dViewModel> Waifu2dPages { get; private set; }
+
         public MachineViewModel Machine { get; private set; }
 
         public Command ToggleInspector { get; private set; }
@@ -157,11 +173,13 @@ namespace Libwaifu.Gui.ViewModels
 
                 Raise("CurrentTask");
                 Raise("OnModelManager");
+                Raise("OnWaifu2d");
                 Raise("Title");
                 Raise("Subtitle");
                 Raise("InspectorButtonVisible");
                 Raise("SelectedTask");
                 Raise("SelectedModels");
+                Raise("SelectedWaifu2d");
             }
         }
 
@@ -197,6 +215,22 @@ namespace Libwaifu.Gui.ViewModels
             }
         }
 
+        /// <summary>
+        /// The waifu2d row, a one-row section of its own below Models for the same reason: it is
+        /// not a task -- nothing runs, nothing is produced -- and not a model either.
+        /// </summary>
+        public Waifu2dViewModel SelectedWaifu2d
+        {
+            get { return page as Waifu2dViewModel; }
+            set
+            {
+                if (value != null)
+                {
+                    Page = value;
+                }
+            }
+        }
+
         public TaskViewModel CurrentTask
         {
             get { return page as TaskViewModel; }
@@ -207,9 +241,27 @@ namespace Libwaifu.Gui.ViewModels
             get { return page is ModelManagerViewModel; }
         }
 
+        public bool OnWaifu2d
+        {
+            get { return page is Waifu2dViewModel; }
+        }
+
         public string Title
         {
-            get { return OnModelManager ? "Model Manager" : CurrentTask.Name; }
+            get
+            {
+                if (OnModelManager)
+                {
+                    return "Model Manager";
+                }
+
+                if (OnWaifu2d)
+                {
+                    return Waifu2d.Name;
+                }
+
+                return CurrentTask.Name;
+            }
         }
 
         /// <summary>"&lt;model&gt; on &lt;device&gt;", under the task's name in the toolbar.</summary>
@@ -217,6 +269,11 @@ namespace Libwaifu.Gui.ViewModels
         {
             get
             {
+                if (OnWaifu2d)
+                {
+                    return Waifu2d.Status;
+                }
+
                 if (OnModelManager || CurrentTask == null)
                 {
                     return null;
@@ -244,9 +301,13 @@ namespace Libwaifu.Gui.ViewModels
             set { Set(ref sidebarVisible, value); }
         }
 
+        /// <summary>
+        /// The settings column belongs to a task's model card; the Model Manager and waifu2d
+        /// keep what they would set inside the page instead, so the button goes with them.
+        /// </summary>
         public bool InspectorButtonVisible
         {
-            get { return !OnModelManager; }
+            get { return CurrentTask != null; }
         }
 
         public string Device

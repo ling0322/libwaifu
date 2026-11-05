@@ -1,0 +1,212 @@
+<!--
+  The waifu2d page: the document open button and its line up top, the drawing moving in the
+  middle, and the motion's settings in a column of their own on the right. That is where this
+  app's per-page settings live, but inside the page itself, since a document open in waifu2d
+  has no model card to put in the settings column.
+-->
+<UserControl x:Class="Libwaifu.Gui.Views.Waifu2dView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:c="clr-namespace:Libwaifu.Gui.Controls">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <!-- the document to open, and what the rig made of it -->
+    <DockPanel Grid.Row="0" Margin="16,14,16,10" LastChildFill="False">
+      <Button DockPanel.Dock="Left" Style="{StaticResource SmallButton}"
+              Content="Open a .psd..." Command="{Binding Open}"
+              IsEnabled="{Binding Reading, Converter={StaticResource Not}}" />
+      <TextBlock DockPanel.Dock="Left" Text="{Binding Status}" VerticalAlignment="Center"
+                 Margin="10,0,0,0" TextTrimming="CharacterEllipsis" />
+      <Button DockPanel.Dock="Right" Style="{StaticResource SmallButton}"
+              Content="Blink Now" Command="{Binding BlinkNow}" />
+    </DockPanel>
+
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" MinWidth="300" />
+        <ColumnDefinition Width="290" />
+      </Grid.ColumnDefinitions>
+
+      <!-- the drawing moving under the box; a .psd drops here to open it -->
+      <Border Grid.Column="0" Margin="16,0,0,12" BorderThickness="1"
+              BorderBrush="{StaticResource PaneSplitBrush}" AllowDrop="True"
+              Drop="OnDrop" DragOver="OnDragOver">
+        <Border.Background>
+          <DrawingBrush TileMode="Tile" Viewport="0,0,16,16" ViewportUnits="Absolute">
+            <DrawingBrush.Drawing>
+              <DrawingGroup>
+                <GeometryDrawing Brush="#FF26262A">
+                  <GeometryDrawing.Geometry>
+                    <RectangleGeometry Rect="0,0,16,16" />
+                  </GeometryDrawing.Geometry>
+                </GeometryDrawing>
+                <GeometryDrawing Brush="#FF303034">
+                  <GeometryDrawing.Geometry>
+                    <GeometryGroup>
+                      <RectangleGeometry Rect="0,0,8,8" />
+                      <RectangleGeometry Rect="8,8,8,8" />
+                    </GeometryGroup>
+                  </GeometryDrawing.Geometry>
+                </GeometryDrawing>
+              </DrawingGroup>
+            </DrawingBrush.Drawing>
+          </DrawingBrush>
+        </Border.Background>
+        <Grid x:Name="Stage" MouseMove="OnMouseMove" MouseLeave="OnMouseLeave"
+              MouseLeftButtonDown="OnMouseDown" MouseLeftButtonUp="OnMouseUp">
+          <Image x:Name="Picture" Stretch="Uniform" />
+        </Grid>
+      </Border>
+
+      <!-- how it moves -->
+      <ScrollViewer Grid.Column="1" Margin="0,0,12,12" VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+          <c:FormGroup Title="Motion" RowPadding="{StaticResource InspectorRowPadding}">
+            <c:SettingRow Label="Pointer">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding FollowPointer}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Sway">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding Sway}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Look around">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding LookAround}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Hair swings">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding HairSwings}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Up and down">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding UpDown, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="2"
+                        Value="{Binding UpDown}" />
+              </DockPanel>
+            </c:SettingRow>
+            <c:SettingRow Label="Body follows">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding BodyFollows, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="2"
+                        Value="{Binding BodyFollows}" />
+              </DockPanel>
+            </c:SettingRow>
+          </c:FormGroup>
+
+          <c:FormGroup Title="Blink" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}">
+            <c:SettingRow Label="On its own">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding BlinkOnOwn}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Eyes open">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding EyesOpen, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="1"
+                        Value="{Binding EyesOpen}" />
+              </DockPanel>
+            </c:SettingRow>
+            <c:SettingRow Label="Closes at">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding ClosesAt, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="1"
+                        Value="{Binding ClosesAt}" />
+              </DockPanel>
+            </c:SettingRow>
+          </c:FormGroup>
+
+          <c:FormGroup Title="Talk" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}">
+            <c:SettingRow Label="Auto talk">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding AutoTalk}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Microphone">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding Microphone}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Mouth open">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding MouthOpen, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="1"
+                        Value="{Binding MouthOpen}" />
+              </DockPanel>
+            </c:SettingRow>
+          </c:FormGroup>
+
+          <c:FormGroup Title="Expression" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}">
+            <c:SettingRow Label="Smile">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding Smile, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="-1" Maximum="1"
+                        Value="{Binding Smile}" />
+              </DockPanel>
+            </c:SettingRow>
+            <c:SettingRow Label="Brows">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding Brows, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="-1" Maximum="1"
+                        Value="{Binding Brows}" />
+              </DockPanel>
+            </c:SettingRow>
+            <c:SettingRow Label="Wink left">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding WinkLeft}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Wink right">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding WinkRight}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Twist">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding Twist, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="-1" Maximum="1"
+                        Value="{Binding Twist}" />
+              </DockPanel>
+            </c:SettingRow>
+            <c:SettingRow Label="Gestures">
+              <StackPanel Orientation="Horizontal">
+                <Button Style="{StaticResource SmallButton}" Content="Nod" Command="{Binding Nod}" />
+                <Button Style="{StaticResource SmallButton}" Content="Shake"
+                        Margin="6,0,0,0" Command="{Binding Shake}" />
+                <Button Style="{StaticResource SmallButton}" Content="Jump"
+                        Margin="6,0,0,0" Command="{Binding Jump}" />
+              </StackPanel>
+            </c:SettingRow>
+          </c:FormGroup>
+
+          <c:FormGroup Title="World" Margin="0,12,0,0" RowPadding="{StaticResource InspectorRowPadding}">
+            <c:SettingRow Label="Wind">
+              <ToggleButton Style="{StaticResource Switch}" IsChecked="{Binding Wind}" />
+            </c:SettingRow>
+            <c:SettingRow Label="Wind gusts">
+              <DockPanel>
+                <TextBox DockPanel.Dock="Right" Width="52" Margin="8,0,0,0"
+                         Style="{StaticResource FieldBox}"
+                         Text="{Binding WindGusts, StringFormat={}{0:0.00}, UpdateSourceTrigger=LostFocus}" />
+                <Slider Style="{StaticResource MacSlider}" Minimum="0" Maximum="3"
+                        Value="{Binding WindGusts}" />
+              </DockPanel>
+            </c:SettingRow>
+          </c:FormGroup>
+
+          <TextBlock Text="Move the pointer over the drawing and the head and eyes follow.
+Drag the hair or skirt to pull it. Space jumps."
+                     Style="{StaticResource CaptionText}" TextWrapping="Wrap" Margin="2,10,0,0" />
+          <TextBlock Text="{Binding Notes}" Style="{StaticResource CaptionText}"
+                     TextWrapping="Wrap" Margin="2,8,0,0" />
+        </StackPanel>
+      </ScrollViewer>
+    </Grid>
+  </Grid>
+</UserControl>

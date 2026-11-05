@@ -126,6 +126,13 @@
               </DataTemplate>
             </ListBox.ItemTemplate>
           </ListBox>
+
+          <!-- Not a task: nothing runs, nothing is produced. A layered picture is made to move. -->
+          <TextBlock Text="Play" Style="{StaticResource CaptionText}" Margin="8,14,0,4" />
+          <ListBox Style="{StaticResource SidebarList}"
+                   ItemsSource="{Binding Waifu2dPages}"
+                   SelectedItem="{Binding SelectedWaifu2d}"
+                   ItemTemplate="{StaticResource SidebarTaskTemplate}" />
         </StackPanel>
       </DockPanel>
     </Border>

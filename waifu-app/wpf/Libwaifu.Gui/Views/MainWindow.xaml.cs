@@ -67,6 +67,13 @@ namespace Libwaifu.Gui.Views
                 }
             }
 
+            // `-psd` turns to the waifu2d page and opens the document there.
+            if (App.AskedForPsd != null)
+            {
+                model.Page = model.Waifu2d;
+                model.Waifu2d.OpenDocument(App.AskedForPsd);
+            }
+
             Layout();
         }
 
@@ -122,11 +129,12 @@ namespace Libwaifu.Gui.Views
 
         /// <summary>
         /// Which of the three columns are there. The Model Manager is one page across the middle
-        /// and the right, so it puts the settings column away whether or not it was showing.
+        /// and the right, so it puts the settings column away whether or not it was showing; so
+        /// does waifu2d, whose settings live inside the page.
         /// </summary>
         private void Layout()
         {
-            var inspector = model.InspectorVisible && !model.OnModelManager;
+            var inspector = model.InspectorVisible && model.CurrentTask != null;
             if (!inspector && InspectorColumn.Width.Value > 0)
             {
                 inspectorWas = InspectorColumn.Width;

@@ -28,12 +28,14 @@ namespace Libwaifu.Gui
     public partial class App : Application
     {
         /// <summary>
-        /// What was asked for on the command line: a model to start on, a device, and an output
-        /// folder for this run only.
+        /// What was asked for on the command line: a model to start on, a device, an output
+        /// folder for this run only, and a layered document for waifu2d to open.
         /// </summary>
         public static string AskedForModel { get; private set; }
 
         public static string AskedForDevice { get; private set; }
+
+        public static string AskedForPsd { get; private set; }
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -71,6 +73,11 @@ namespace Libwaifu.Gui
                 {
                     // This run only, and not written to the settings: that is what the flag means.
                     Places.Overridden = value;
+                    i++;
+                }
+                else if (flag == "psd")
+                {
+                    AskedForPsd = value;
                     i++;
                 }
             }
