@@ -173,6 +173,31 @@ pub trait Voice {
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>>;
 
+    /// Says `text` as [`speak`](Voice::speak) does, handing each part of the waveform to `heard`
+    /// as soon as it is made -- for a caller that plays the start while the rest is being said --
+    /// and the whole of it back at the end, the parts end to end. `heard` asking to stop stops the
+    /// reading, as `report` does.
+    ///
+    /// The parts are what the voice can make on their own: a sentence at a time for CosyVoice3.
+    /// This default makes all of it and hands it over as one part, which is what a voice that has
+    /// nothing smaller to offer does either way; a caller sees the same sound from both methods.
+    fn speak_streaming(
+        &self,
+        text: &str,
+        like: Option<&Sound>,
+        options: &SpeechOptions,
+        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>> {
+        let Some(sound) = self.speak(text, like, options, report)? else {
+            return Ok(None);
+        };
+        if heard(&sound).is_break() {
+            return Ok(None);
+        }
+        Ok(Some(sound))
+    }
+
     /// The rate it speaks at, which is a property of the model rather than a setting.
     fn rate(&self) -> u32;
 
@@ -705,6 +730,41 @@ mod tests {
         // And it is told how to say nothing: a style is something a voice opts into.
         assert!(Real.styles().is_empty());
         assert!(tones.styles().is_empty());
+    }
+
+    #[test]
+    fn a_voice_with_nothing_smaller_streams_its_whole_reading_as_one_part() {
+        // The default every voice but CosyVoice3 keeps: one part, the whole of it, the same sound
+        // `speak` makes -- so a caller that asks for parts is never handed a different reading.
+        let tones = Tones::new();
+        let mut parts: Vec<Sound> = Vec::new();
+        let streamed = tones
+            .speak_streaming(
+                "hello there",
+                None,
+                &at_a_seed(3),
+                &mut |_| ControlFlow::Continue(()),
+                &mut |part| {
+                    parts.push(part.clone());
+                    ControlFlow::Continue(())
+                },
+            )
+            .unwrap()
+            .expect("nothing stopped it");
+        assert_eq!(parts, vec![streamed.clone()]);
+        assert_eq!(streamed, said("hello there", at_a_seed(3)));
+
+        // A part that asks to stop stops the reading, as the progress callback does.
+        let stopped = tones
+            .speak_streaming(
+                "hello there",
+                None,
+                &at_a_seed(3),
+                &mut |_| ControlFlow::Continue(()),
+                &mut |_| ControlFlow::Break(()),
+            )
+            .unwrap();
+        assert!(stopped.is_none());
     }
 
     #[test]

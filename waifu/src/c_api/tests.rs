@@ -35,6 +35,8 @@ enum Heard {
     Progress(WaifuStage, String),
     Complete(WaifuStatusCode, Option<String>),
     Audio(WaifuStatusCode, usize, u32),
+    /// A part of a streaming reading: its samples and its rate.
+    Part(Vec<f32>, u32),
     Image(WaifuStatusCode, Option<(u32, u32, usize)>),
 }
 
@@ -66,6 +68,12 @@ unsafe extern "C" fn on_audio(user_data: *mut c_void, event: *const WaifuAudioCo
         .as_ref()
         .map_or((0, 0), |audio| (audio.count, audio.rate));
     let _ = sender(user_data).send(Heard::Audio(event.status.code, count, rate));
+}
+
+unsafe extern "C" fn on_part(user_data: *mut c_void, audio: *const WaifuAudio) {
+    let audio = &*audio;
+    let samples = std::slice::from_raw_parts(audio.samples, audio.count).to_vec();
+    let _ = sender(user_data).send(Heard::Part(samples, audio.rate));
 }
 
 unsafe extern "C" fn on_image(user_data: *mut c_void, event: *const WaifuImageCompletionEvent) {
@@ -305,6 +313,85 @@ fn freeing_the_engine_ends_every_job_it_had() {
             .filter(|heard| !matches!(heard, Heard::Progress(..)))
             .count();
         assert_eq!(ends, 4);
+    }
+}
+
+#[test]
+fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
+    unsafe {
+        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
+        assert!(!engine.is_null(), "{}", last_error());
+        let (send, heard) = a_channel();
+        waifu_engine_load_async(
+            engine,
+            c"tones".as_ptr(),
+            user_data(&send),
+            None,
+            Some(on_complete),
+        );
+        assert_eq!(
+            the_end(&heard),
+            Heard::Complete(WaifuStatusCode::WAIFU_OK, None)
+        );
+
+        // Every part before the end, and the end the parts end to end.
+        let (send, heard) = a_channel();
+        let request = a_speak_request(c"hello there");
+        let job = waifu_engine_speak_stream_async(
+            engine,
+            &request,
+            user_data(&send),
+            Some(on_progress),
+            Some(on_part),
+            Some(on_audio),
+        );
+        assert_ne!(job, 0);
+        let mut parts = Vec::new();
+        let end = loop {
+            match heard.recv_timeout(WAIT).expect("an end") {
+                Heard::Progress(..) => continue,
+                Heard::Part(samples, rate) => parts.push((samples, rate)),
+                end => break end,
+            }
+        };
+        assert!(!parts.is_empty());
+        let count: usize = parts.iter().map(|(samples, _)| samples.len()).sum();
+        match end {
+            Heard::Audio(WaifuStatusCode::WAIFU_OK, whole, rate) => {
+                assert_eq!(whole, count);
+                assert!(parts.iter().all(|(_, part_rate)| *part_rate == rate));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // No part callback is no parts, and still the whole at the end.
+        let (send, heard) = a_channel();
+        waifu_engine_speak_stream_async(
+            engine,
+            &request,
+            user_data(&send),
+            None,
+            None,
+            Some(on_audio),
+        );
+        assert!(matches!(
+            the_end(&heard),
+            Heard::Audio(WaifuStatusCode::WAIFU_OK, count, _) if count > 0
+        ));
+
+        // A request that is not one is refused at the call, as speaking refuses it.
+        assert_eq!(
+            waifu_engine_speak_stream_async(
+                engine,
+                ptr::null(),
+                user_data(&send),
+                None,
+                Some(on_part),
+                Some(on_audio)
+            ),
+            0
+        );
+        waifu_engine_free(engine);
     }
 }
 

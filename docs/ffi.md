@@ -470,6 +470,20 @@ WaifuJob waifu_engine_speak_async(WaifuEngine *engine, const WaifuSpeakRequest *
                                   void *user_data,
                                   WaifuProgressCallback on_progress,
                                   WaifuAudioCompleteCallback on_complete);
+
+// A part of a streaming reading, in order; the samples are valid for the call.
+typedef void (*WaifuAudioPartCallback)(void *user_data, const WaifuAudio *audio);
+
+// As waifu_engine_speak_async, with each part of the audio handed to on_audio as soon as it is
+// made -- a sentence at a time for CosyVoice3, the whole reading at once for a voice with nothing
+// smaller to offer -- and the whole of it, the parts end to end, still to on_complete. The parts
+// are the samples speak_async makes of the same request. Cancelling stops it after the part it is
+// on: the parts already handed over are all there will be, and on_complete hears WAIFU_CANCELLED.
+WaifuJob waifu_engine_speak_stream_async(WaifuEngine *engine, const WaifuSpeakRequest *request,
+                                         void *user_data,
+                                         WaifuProgressCallback on_progress,
+                                         WaifuAudioPartCallback on_audio,
+                                         WaifuAudioCompleteCallback on_complete);
 // Says a recording again in another voice: what is said, and how, is the source's; whose voice
 // it is, the reference's.
 WaifuJob waifu_engine_voice_conversion_async(WaifuEngine *engine,

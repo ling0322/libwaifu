@@ -452,7 +452,7 @@ impl CosyVoice3 {
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
-        self.read(text, None, reference, options, report)
+        self.read(text, None, reference, options, report, None)
     }
 
     /// `text` continuing `reference`, whose words were `transcript`: upstream's zero-shot reading.
@@ -465,7 +465,26 @@ impl CosyVoice3 {
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
-        self.read(text, Some(transcript), reference, options, report)
+        self.read(text, Some(transcript), reference, options, report, None)
+    }
+
+    /// [`say`](CosyVoice3::say), or [`say_after`](CosyVoice3::say_after) where there is a
+    /// `transcript`, handing each sentence's audio to `heard` as soon as it is made, and the whole
+    /// reading back at the end -- the sentences end to end, the same samples `say` makes. `heard`
+    /// asking to stop stops the reading as `report` does.
+    ///
+    /// A sentence is a piece of `frontend::sentences`: 60 to 80 characters of Chinese, or tokens of
+    /// anything else. The first is heard once it alone is said and sounded, however long the text.
+    pub fn say_streaming(
+        &self,
+        text: &str,
+        transcript: Option<&str>,
+        reference: &Reference,
+        options: &SpeechOptions,
+        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>> {
+        self.read(text, transcript, reference, options, report, Some(heard))
     }
 
     fn read(
@@ -475,6 +494,7 @@ impl CosyVoice3 {
         reference: &Reference,
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>>,
     ) -> Result<Option<Sound>> {
         if report(SpeechProgress::Reading).is_break() {
             return Ok(None);
@@ -552,39 +572,71 @@ impl CosyVoice3 {
             expected += count(piece)? as i32 * rate;
         }
 
-        let mut said_all: Vec<Vec<i32>> = Vec::with_capacity(readings.len());
-        let mut done = 0;
-        for (ids, own) in &readings {
-            let said =
-                self.lm
-                    .generate(ids, prompt, *own, &sampling, &mut sampler, &mut |count| {
-                        report(SpeechProgress::Saying {
-                            done: done + count,
-                            expected: expected.max(done + count),
-                        })
-                    })?;
-            let Some(said) = said else {
-                return Ok(None);
-            };
-            done += said.len() as i32;
-            said_all.push(said);
-        }
-
-        if report(SpeechProgress::Sounding).is_break() {
-            return Ok(None);
-        }
+        // One piece's tokens, `done` said before it, the bar told as they come.
+        let mut say = |ids: &[i32],
+                       own: usize,
+                       done: i32,
+                       report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>|
+         -> Result<Option<Vec<i32>>> {
+            self.lm
+                .generate(ids, prompt, own, &sampling, &mut sampler, &mut |count| {
+                    report(SpeechProgress::Saying {
+                        done: done + count,
+                        expected: expected.max(done + count),
+                    })
+                })
+        };
 
         let mut samples: Vec<f32> = Vec::new();
-        for said in &said_all {
-            if said.is_empty() {
-                continue;
+        let mut done = 0;
+        let Some(heard) = heard else {
+            // Every piece said before any is sounded: the order the bar's two stages assume,
+            // saying and then sounding, and what the vocoder's share of the time is measured by.
+            let mut said_all: Vec<Vec<i32>> = Vec::with_capacity(readings.len());
+            for (ids, own) in &readings {
+                let Some(said) = say(ids, *own, done, report)? else {
+                    return Ok(None);
+                };
+                done += said.len() as i32;
+                said_all.push(said);
             }
-            samples.extend(self.sound(said, reference, options.speed)?);
             if report(SpeechProgress::Sounding).is_break() {
                 return Ok(None);
             }
-        }
+            for said in &said_all {
+                if said.is_empty() {
+                    continue;
+                }
+                samples.extend(self.sound(said, reference, options.speed)?);
+                if report(SpeechProgress::Sounding).is_break() {
+                    return Ok(None);
+                }
+            }
+            return Ok(Some(Sound::new(samples, RATE)));
+        };
 
+        // Each piece sounded as soon as it is said and handed over, so that the first is heard
+        // after one piece rather than after all of them, and the bar goes from saying to sounding
+        // once a piece. The samples are the same as the order above makes: the sampler draws from
+        // the host's generator and the vocoder's noise from the device's, so neither moves the
+        // other by going first.
+        for (ids, own) in &readings {
+            let Some(said) = say(ids, *own, done, report)? else {
+                return Ok(None);
+            };
+            done += said.len() as i32;
+            if said.is_empty() {
+                continue;
+            }
+            if report(SpeechProgress::Sounding).is_break() {
+                return Ok(None);
+            }
+            let part = Sound::new(self.sound(&said, reference, options.speed)?, RATE);
+            if heard(&part).is_break() {
+                return Ok(None);
+            }
+            samples.extend_from_slice(&part.samples);
+        }
         Ok(Some(Sound::new(samples, RATE)))
     }
 
@@ -686,6 +738,26 @@ impl Voice for CosyVoice3 {
 
         let reference = self.hear(like)?;
         self.say(text, &reference, options, report)
+    }
+
+    /// A sentence at a time: see [`CosyVoice3::say_streaming`].
+    fn speak_streaming(
+        &self,
+        text: &str,
+        like: Option<&Sound>,
+        options: &SpeechOptions,
+        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>> {
+        let Some(like) = like else {
+            return Err(Error::model(Self::NEEDS_A_RECORDING));
+        };
+        if report(SpeechProgress::Reading).is_break() {
+            return Ok(None);
+        }
+
+        let reference = self.hear(like)?;
+        self.say_streaming(text, None, &reference, options, report, heard)
     }
 
     fn rate(&self) -> u32 {

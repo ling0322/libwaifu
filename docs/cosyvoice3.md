@@ -123,6 +123,21 @@ word for word: happy, sad and angry, fast and slow, loud and soft, Peppa Pig, a 
 seventeen dialects. Those are what the model was taught; other wording is taken and is a guess. A
 style and a transcript are refused together, because upstream never combines them.
 
+### A sentence at a time
+
+[`CosyVoice3::say_streaming`](../waifu/src/cosyvoice3/mod.rs) -- under it `Voice::speak_streaming`,
+`Engine::speak_streaming` and `waifu_engine_speak_stream_async` ([ffi.md](ffi.md)) -- hands each
+piece's audio over as soon as it is sounded, and the whole reading at the end. A piece is said,
+sounded and handed over before the next is said, so the first is heard once one piece alone is
+done, however long the text: on the RTX 5060 Ti, 18.5 s of audio at 3.3 s into a reading of three
+sentences that takes 5.8 s whole. `say` says every piece before it sounds any, the order the
+progress bar's two stages assume.
+
+The samples are the same either way, to the bit: the sampler draws from the host's generator and
+HiFT's noise from the device's, so the order the two take turns in moves neither. Upstream's own
+streaming -- 25 tokens at a time inside a sentence, its DiT under a block-causal mask -- is not
+here yet.
+
 ## Voice conversion
 
 The same package converts one recording into the voice of another, as upstream's `inference_vc`
@@ -223,6 +238,7 @@ float32 takes 861.
 
 ## Not here
 
-Streaming, and a place on the page to type the recording's transcript.
+Streaming inside a sentence (upstream's `stream=True`), and a place on the page to type the
+recording's transcript.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
 are the zero-shot path's with a different prefix.

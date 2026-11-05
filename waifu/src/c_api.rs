@@ -366,6 +366,10 @@ pub struct WaifuAudioCompletionEvent {
 pub type WaifuAudioCompleteCallback =
     Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuAudioCompletionEvent)>;
 
+/// A part of a streaming reading's audio, in order; the samples are valid for the call.
+pub type WaifuAudioPartCallback =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, audio: *const WaifuAudio)>;
+
 /// A picture as rows of RGBA, not premultiplied.
 #[repr(C)]
 pub struct WaifuRgbaImage {
@@ -766,26 +770,81 @@ pub unsafe extern "C" fn waifu_engine_speak_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let engine = engine.as_ref().ok_or("the engine is NULL")?;
-        let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let request = request_in(request, size, "WaifuSpeakRequest")?;
-        let like = match request.like.is_null() {
-            true => None,
-            false => Some(audio_in(request.like, "like")?),
-        };
-        let request = SpeakRequest {
-            text: required(request.text, "text")?,
-            like,
-            speed: request.speed,
-            temperature: request.temperature,
-            style: string_in(request.style, "style")?,
-            seed: request.seed,
-        };
+        let request = speak_request_in(request)?;
         let user_data = UserData(user_data);
         engine.engine.speak(
             request,
             progress_to(&gate, user_data, on_progress),
             audio_completion_to(&gate, user_data, on_complete),
         )
+    })
+}
+
+/// As waifu_engine_speak_async, with each part of the audio handed to on_audio as soon as it is
+/// made -- a sentence at a time for CosyVoice3, the whole reading at once for a voice with nothing
+/// smaller to offer -- for a caller that plays the start while the rest is said. on_complete still
+/// gets the whole of it, the parts end to end. Cancelling stops it after the part it is on.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_engine_speak_stream_async(
+    engine: *mut WaifuEngine,
+    request: *const WaifuSpeakRequest,
+    user_data: *mut c_void,
+    on_progress: WaifuProgressCallback,
+    on_audio: WaifuAudioPartCallback,
+    on_complete: WaifuAudioCompleteCallback,
+) -> WaifuJob {
+    let gate = Gate::default();
+    submitted(&gate, || {
+        let engine = engine.as_ref().ok_or("the engine is NULL")?;
+        let request = speak_request_in(request)?;
+        let user_data = UserData(user_data);
+        engine.engine.speak_streaming(
+            request,
+            progress_to(&gate, user_data, on_progress),
+            audio_parts_to(&gate, user_data, on_audio),
+            audio_completion_to(&gate, user_data, on_complete),
+        )
+    })
+}
+
+/// A WaifuSpeakRequest as the engine takes it.
+unsafe fn speak_request_in(request: *const WaifuSpeakRequest) -> Result<SpeakRequest, String> {
+    let size = request.as_ref().map_or(0, |request| request.struct_size);
+    let request = request_in(request, size, "WaifuSpeakRequest")?;
+    let like = match request.like.is_null() {
+        true => None,
+        false => Some(audio_in(request.like, "like")?),
+    };
+    Ok(SpeakRequest {
+        text: required(request.text, "text")?,
+        like,
+        speed: request.speed,
+        temperature: request.temperature,
+        style: string_in(request.style, "style")?,
+        seed: request.seed,
+    })
+}
+
+/// The engine's part callback, calling the caller's with the samples of one part, valid for the
+/// call.
+fn audio_parts_to(
+    gate: &Gate,
+    user_data: UserData,
+    callback: WaifuAudioPartCallback,
+) -> engine::OnAudio {
+    let gate = gate.clone();
+    Box::new(move |part: &Sound| {
+        let Some(callback) = callback else {
+            return;
+        };
+        gate.wait();
+        let audio = WaifuAudio {
+            samples: part.samples.as_ptr(),
+            count: part.samples.len(),
+            rate: part.rate,
+        };
+        let user_data = user_data;
+        unsafe { callback(user_data.0, &audio) };
     })
 }
 

@@ -540,6 +540,78 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
     assert_eq!(again.samples, first.samples);
 }
 
+/// Three sentences, read a piece at a time: a part for each, each handed over before the next is
+/// said, and the parts end to end the same samples the reading makes all at once -- the sampler
+/// draws from the host's generator and the vocoder's noise from the device's, so the order the two
+/// take turns in moves neither.
+#[test]
+#[ignore]
+fn a_reading_streamed_a_sentence_at_a_time_is_the_reading() {
+    let cases = fixture();
+    let tts = CosyVoice3::from_manifest(DEVICE, u64::MAX, &manifest()).unwrap();
+    let heard = tts
+        .listen(&Sound::new(floats(&cases, "prompt_24k"), 24000))
+        .unwrap();
+    let options = SpeechOptions {
+        speed: 1.0,
+        temperature: 1.0,
+        seed: Some(7),
+        style: None,
+    };
+    let text = format!("{TEXT}{TEXT}{TEXT}");
+    let mut carry_on = |_: SpeechProgress| ControlFlow::Continue(());
+
+    for transcript in [None, Some(PROMPT_TEXT)] {
+        let whole = match transcript {
+            None => tts.say(&text, &heard, &options, &mut carry_on),
+            Some(words) => tts.say_after(&text, words, &heard, &options, &mut carry_on),
+        }
+        .unwrap()
+        .unwrap();
+
+        let mut parts: Vec<Sound> = Vec::new();
+        let streamed = tts
+            .say_streaming(
+                &text,
+                transcript,
+                &heard,
+                &options,
+                &mut carry_on,
+                &mut |part| {
+                    parts.push(part.clone());
+                    ControlFlow::Continue(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let lengths: Vec<f64> = parts.iter().map(|part| part.seconds()).collect();
+        println!(
+            "transcript {}: parts of {lengths:.2?} s",
+            transcript.is_some()
+        );
+        // 120 characters are two or three pieces of 60 to 80, as the frontend joins them.
+        assert!(
+            parts.len() >= 2,
+            "a part a piece, and {} parts",
+            parts.len()
+        );
+        let joined: Vec<f32> = parts.iter().flat_map(|part| part.samples.clone()).collect();
+        assert_eq!(joined, streamed.samples);
+        assert_eq!(streamed.samples, whole.samples);
+    }
+
+    // A part that asks to stop stops the reading after it.
+    let mut parts = 0;
+    let stopped = tts
+        .say_streaming(&text, None, &heard, &options, &mut carry_on, &mut |_| {
+            parts += 1;
+            ControlFlow::Break(())
+        })
+        .unwrap();
+    assert!(stopped.is_none());
+    assert_eq!(parts, 1);
+}
+
 /// How long the language model's readings run, over eight seeds, against upstream's over eight
 /// of its own. One draw says nothing about a sampler; the length of many is what a sampler that
 /// struck out the wrong tokens, or stopped at the wrong ones, gets wrong first.

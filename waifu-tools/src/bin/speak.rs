@@ -23,12 +23,15 @@
 //! cargo run --release -p waifu-tools --bin speak -- models/indextts25.yaml voice.wav "Hello there." out.wav
 //! cargo run --release -p waifu-tools --bin speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav 7 "它的文字稿。"
 //! cargo run --release -p waifu-tools --bin speak -- models/cosyvoice3.yaml voice.wav "你好。" out.wav 7 --style=请非常开心地说一句话。
+//! cargo run --release -p waifu-tools --bin speak -- --stream models/cosyvoice3.yaml voice.wav "你好。" out.wav
 //! ```
 //!
 //! The whole pipeline from the command line, with nothing of the web page in the way: what each
 //! stage took is printed as it finishes, which is what this is for. Which model runs is the
 //! manifest's `model.type`. CosyVoice3 takes a sixth argument: the transcript of the recording,
-//! which reads zero-shot, or `--style=` and an instruction, which reads instruct2.
+//! which reads zero-shot, or `--style=` and an instruction, which reads instruct2. `--stream`, for
+//! CosyVoice3, reads a sentence at a time and prints when each part was handed over: the first is
+//! how long a listener waits.
 
 use std::ops::ControlFlow;
 use std::time::Instant;
@@ -38,10 +41,12 @@ use waifu::indextts::IndexTts;
 use waifu::{wav, Device, Manifest, Sound, SpeechOptions, SpeechProgress};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let arguments: Vec<String> = std::env::args().collect();
+    let mut arguments: Vec<String> = std::env::args().collect();
+    let stream = arguments.iter().any(|it| it == "--stream");
+    arguments.retain(|it| it != "--stream");
     if arguments.len() < 5 {
         eprintln!(
-            "usage: speak <manifest.yaml> <voice.wav> <text> <out.wav> [seed] \
+            "usage: speak [--stream] <manifest.yaml> <voice.wav> <text> <out.wav> [seed] \
              [transcript | --style=<instruction>]"
         );
         std::process::exit(2);
@@ -92,11 +97,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 style: style.map(str::to_string),
                 ..CosyVoice3::DEFAULTS.options()
             };
-            match transcript {
-                Some(words) => tts.say_after(text, words, &reference, &options, &mut report)?,
-                None => tts.say(text, &reference, &options, &mut report)?,
+            let words = transcript.map(String::as_str);
+            match (stream, words) {
+                (true, _) => {
+                    let reading = Instant::now();
+                    let mut parts = 0;
+                    let mut heard = |part: &Sound| {
+                        parts += 1;
+                        eprintln!(
+                            "  part {parts}: {:.2} s of audio, handed over at {:.2} s",
+                            part.seconds(),
+                            reading.elapsed().as_secs_f64()
+                        );
+                        ControlFlow::Continue(())
+                    };
+                    tts.say_streaming(text, words, &reference, &options, &mut report, &mut heard)?
+                }
+                (false, Some(words)) => {
+                    tts.say_after(text, words, &reference, &options, &mut report)?
+                }
+                (false, None) => tts.say(text, &reference, &options, &mut report)?,
             }
         }
+        _ if stream => return Err("only CosyVoice3 reads a sentence at a time".into()),
         _ => {
             let tts = IndexTts::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
             eprintln!("read the model in {:.1} s", clock.elapsed().as_secs_f64());

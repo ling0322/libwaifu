@@ -214,6 +214,8 @@ impl<T> Ended<T> {
 
 pub type OnProgress = Box<dyn FnMut(&Progress) + Send>;
 pub type OnComplete<T> = Box<dyn FnOnce(Ended<T>) + Send>;
+/// A part of a reading's audio as soon as it is made: see [`Engine::speak_streaming`].
+pub type OnAudio = Box<dyn FnMut(&Sound) + Send>;
 
 /// The engine: a thread, a queue to it, and how to stop what is on it.
 ///
@@ -263,6 +265,8 @@ enum Work {
     Speak {
         request: SpeakRequest,
         on_progress: OnProgress,
+        /// Where each part goes as it is made, for a streaming reading.
+        on_audio: Option<OnAudio>,
         on_complete: OnComplete<Sound>,
     },
     VoiceConversion {
@@ -391,6 +395,30 @@ impl Engine {
         Ok(self.submit(Work::Speak {
             request,
             on_progress,
+            on_audio: None,
+            on_complete,
+        }))
+    }
+
+    /// As [`speak`](Engine::speak), with each part of the audio handed to `on_audio` as soon as
+    /// it is made -- a sentence at a time for CosyVoice3, the whole reading at once for a voice
+    /// with nothing smaller to offer -- and the whole of it, the parts end to end, to
+    /// `on_complete`. Cancelling stops it after the part it is on; the parts handed over are all
+    /// there will be, and `on_complete` is told it was cancelled.
+    pub fn speak_streaming(
+        &self,
+        request: SpeakRequest,
+        on_progress: OnProgress,
+        on_audio: OnAudio,
+        on_complete: OnComplete<Sound>,
+    ) -> Result<JobId, String> {
+        if request.text.trim().is_empty() {
+            return Err("there is nothing to say: the text is empty".to_string());
+        }
+        Ok(self.submit(Work::Speak {
+            request,
+            on_progress,
+            on_audio: Some(on_audio),
             on_complete,
         }))
     }
@@ -771,9 +799,11 @@ impl Worker {
             Work::Speak {
                 request,
                 mut on_progress,
+                mut on_audio,
                 on_complete,
             } => {
-                let ended = guarded(|| self.speak(&request, &mut on_progress, &stop));
+                let ended =
+                    guarded(|| self.speak(&request, &mut on_progress, on_audio.as_mut(), &stop));
                 on_complete(ended);
             }
             Work::VoiceConversion {
@@ -1163,6 +1193,7 @@ impl Worker {
         &mut self,
         request: &SpeakRequest,
         on_progress: &mut OnProgress,
+        on_audio: Option<&mut OnAudio>,
         stop: &dyn Fn() -> bool,
     ) -> Ended<Sound> {
         let ratio = self.vocoder_ratio;
@@ -1219,11 +1250,27 @@ impl Worker {
             }
         };
 
-        let spoken = voice.speak(&request.text, request.like.as_ref(), &options, &mut report);
+        let like = request.like.as_ref();
+        // A streaming reading takes turns between saying and sounding a sentence at a time, so
+        // the vocoder's share of it is no measure of a reading that says everything first.
+        let streaming = on_audio.is_some();
+        let spoken = match on_audio {
+            None => voice.speak(&request.text, like, &options, &mut report),
+            Some(on_audio) => {
+                let mut heard = |part: &Sound| {
+                    on_audio(part);
+                    match stop() {
+                        true => ControlFlow::Break(()),
+                        false => ControlFlow::Continue(()),
+                    }
+                };
+                voice.speak_streaming(&request.text, like, &options, &mut report, &mut heard)
+            }
+        };
         let measured = say.measured_ratio(Instant::now());
         match spoken {
             Ok(Some(sound)) => {
-                if let Some(ratio) = measured {
+                if let (Some(ratio), false) = (measured, streaming) {
                     self.vocoder_ratio = ratio;
                 }
                 Ended::Done(sound)
@@ -1650,6 +1697,48 @@ pub(crate) mod tests {
             heard.recv_timeout(WAIT).unwrap(),
             Ended::Failed(Failure::UnknownModel, _)
         ));
+    }
+
+    #[test]
+    fn a_streaming_reading_hands_over_its_parts_and_then_the_whole() {
+        let engine = an_engine();
+        let (progress, complete, loaded) = listen::<()>();
+        engine.load(TONES, progress, complete);
+        assert_eq!(loaded.recv_timeout(WAIT).unwrap(), Ended::Done(()));
+
+        // The parts, in order, before the end -- which is the whole, the parts end to end.
+        let (part, parts) = mpsc::channel::<Sound>();
+        let (progress, complete, heard) = listen::<Sound>();
+        engine
+            .speak_streaming(
+                a_speaking(),
+                progress,
+                Box::new(move |sound| part.send(sound.clone()).unwrap()),
+                complete,
+            )
+            .unwrap();
+        let Ended::Done(whole) = heard.recv_timeout(WAIT).unwrap() else {
+            panic!("the reading did not finish");
+        };
+        let parts: Vec<Sound> = parts.try_iter().collect();
+        assert!(!parts.is_empty());
+        let joined: Vec<f32> = parts.iter().flat_map(|p| p.samples.clone()).collect();
+        assert_eq!(joined, whole.samples);
+
+        // And it is the reading `speak` makes of the same request.
+        let (progress, complete, heard) = listen::<Sound>();
+        engine.speak(a_speaking(), progress, complete).unwrap();
+        assert_eq!(heard.recv_timeout(WAIT).unwrap(), Ended::Done(whole));
+
+        // Nothing to say is refused at the call, as `speak` refuses it.
+        let empty = SpeakRequest {
+            text: "  ".to_string(),
+            ..a_speaking()
+        };
+        let (progress, complete, _) = listen::<Sound>();
+        assert!(engine
+            .speak_streaming(empty, progress, Box::new(|_| {}), complete)
+            .is_err());
     }
 
     #[test]
