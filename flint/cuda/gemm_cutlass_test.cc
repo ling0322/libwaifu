@@ -42,7 +42,7 @@ Operators *cpuOps() {
   return getOperators(Device::kCpu);
 }
 
-/// A @ B through `mm`, into a result allocated the way F::matmul would.
+/// A @ B through `mm`, into a result allocated the way fl::test::matmul would.
 Tensor apply(op::cuda::MatMul *mm, const Tensor &A, const Tensor &B) {
   std::vector<int> shape = A.getShape();
   shape.back() = B.getShape(-1);
@@ -59,19 +59,19 @@ CATCH_TEST_CASE("test matmul gemm (cutlass)", "[fl][op][cuda][cutlass]") {
 
   std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
 
-  Tensor a = F::rand(Device::getCpu(), {10, 128}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {40, 256}, DType::kFloat);
-  Tensor xr = F::matmul(cpuOps(), a, b.slice(1, {128, 256}).transpose(1, 0));
+  Tensor a = fl::test::rand(Device::getCpu(), {10, 128}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {40, 256}, DType::kFloat);
+  Tensor xr = fl::test::matmul(cpuOps(), a, b.slice(1, {128, 256}).transpose(1, 0));
 
-  Tensor x = F::toDevice(cudaOps(), a, Device::getCuda());
-  Tensor y = F::toDevice(cudaOps(), b, Device::getCuda());
-  x = F::cast(cudaOps(), x, DType::kFloat16);
-  y = F::cast(cudaOps(), y, DType::kFloat16);
+  Tensor x = fl::test::toDevice(cudaOps(), a, Device::getCuda());
+  Tensor y = fl::test::toDevice(cudaOps(), b, Device::getCuda());
+  x = fl::test::cast(cudaOps(), x, DType::kFloat16);
+  y = fl::test::cast(cudaOps(), y, DType::kFloat16);
   y = y.slice(1, {128, 256});
   y = y.transpose(1, 0);
   x = apply(mm.get(), x, y);
-  x = F::cast(cudaOps(), x, DType::kFloat);
-  x = F::toDevice(cudaOps(), x, Device::getCpu());
+  x = fl::test::cast(cudaOps(), x, DType::kFloat);
+  x = fl::test::toDevice(cudaOps(), x, Device::getCpu());
 
   CATCH_REQUIRE(cpuOps()->allClose(x, xr, 1e-2f));
 }
@@ -81,19 +81,19 @@ CATCH_TEST_CASE("test matmul bmm (cutlass)", "[fl][op][cuda][cutlass]") {
 
   std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
 
-  Tensor a = F::rand(Device::getCpu(), {5, 10, 8, 24}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {10, 64, 24}, DType::kFloat);
-  Tensor xr = F::matmul(cpuOps(), a, b.slice(1, {8, 32}).transpose(-1, -2));
+  Tensor a = fl::test::rand(Device::getCpu(), {5, 10, 8, 24}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {10, 64, 24}, DType::kFloat);
+  Tensor xr = fl::test::matmul(cpuOps(), a, b.slice(1, {8, 32}).transpose(-1, -2));
 
-  Tensor x = F::toDevice(cudaOps(), a, Device::getCuda());
-  Tensor y = F::toDevice(cudaOps(), b, Device::getCuda());
-  x = F::cast(cudaOps(), x, DType::kFloat16);
-  y = F::cast(cudaOps(), y, DType::kFloat16);
+  Tensor x = fl::test::toDevice(cudaOps(), a, Device::getCuda());
+  Tensor y = fl::test::toDevice(cudaOps(), b, Device::getCuda());
+  x = fl::test::cast(cudaOps(), x, DType::kFloat16);
+  y = fl::test::cast(cudaOps(), y, DType::kFloat16);
   y = y.slice(1, {8, 32});
   y = y.transpose(-1, -2);
   x = apply(mm.get(), x, y);
-  x = F::cast(cudaOps(), x, DType::kFloat);
-  x = F::toDevice(cudaOps(), x, Device::getCpu());
+  x = fl::test::cast(cudaOps(), x, DType::kFloat);
+  x = fl::test::toDevice(cudaOps(), x, Device::getCpu());
 
   CATCH_REQUIRE(cpuOps()->allClose(x, xr, 5e-3f));
 }
@@ -113,18 +113,18 @@ CATCH_TEST_CASE("test matmul gemm accumulates in float (cutlass)", "[fl][op][cud
 
   std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
 
-  Tensor a = F::rand(Device::getCpu(), {kM, kK}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {kK, kN}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {kM, kK}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {kK, kN}, DType::kFloat);
 
   // The reference is computed from the half values, not the float ones, so what this measures is
   // the accumulation rather than the rounding of the inputs.
-  Tensor halfA = F::cast(cpuOps(), F::cast(cpuOps(), a, DType::kFloat16), DType::kFloat);
-  Tensor halfB = F::cast(cpuOps(), F::cast(cpuOps(), b, DType::kFloat16), DType::kFloat);
-  Tensor expected = F::matmul(cpuOps(), halfA, halfB);
+  Tensor halfA = fl::test::cast(cpuOps(), fl::test::cast(cpuOps(), a, DType::kFloat16), DType::kFloat);
+  Tensor halfB = fl::test::cast(cpuOps(), fl::test::cast(cpuOps(), b, DType::kFloat16), DType::kFloat);
+  Tensor expected = fl::test::matmul(cpuOps(), halfA, halfB);
 
-  Tensor x = F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
-  Tensor y = F::cast(cudaOps(), F::toDevice(cudaOps(), b, Device::getCuda()), DType::kFloat16);
-  Tensor actual = F::toDevice(cudaOps(), F::cast(cudaOps(), apply(mm.get(), x, y), DType::kFloat), Device::getCpu());
+  Tensor x = fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  Tensor y = fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), b, Device::getCuda()), DType::kFloat16);
+  Tensor actual = fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), apply(mm.get(), x, y), DType::kFloat), Device::getCpu());
 
   CATCH_REQUIRE(cpuOps()->allClose(actual, expected, 2e-3f));
 }
@@ -146,13 +146,13 @@ CATCH_TEST_CASE("test matmul gemm (cutlass, unaligned K)", "[fl][op][cuda][cutla
 
   std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
 
-  Tensor a = F::rand(Device::getCpu(), {kM, kK}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {kK, kN}, DType::kFloat);
-  Tensor expected = F::matmul(cpuOps(), a, b);
+  Tensor a = fl::test::rand(Device::getCpu(), {kM, kK}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {kK, kN}, DType::kFloat);
+  Tensor expected = fl::test::matmul(cpuOps(), a, b);
 
-  Tensor x = F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
-  Tensor y = F::cast(cudaOps(), F::toDevice(cudaOps(), b, Device::getCuda()), DType::kFloat16);
-  Tensor actual = F::toDevice(cudaOps(), F::cast(cudaOps(), apply(mm.get(), x, y), DType::kFloat), Device::getCpu());
+  Tensor x = fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  Tensor y = fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), b, Device::getCuda()), DType::kFloat16);
+  Tensor actual = fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), apply(mm.get(), x, y), DType::kFloat), Device::getCpu());
 
   CATCH_REQUIRE(cpuOps()->allClose(actual, expected, 1e-2f));
 }
@@ -171,13 +171,13 @@ CATCH_TEST_CASE("test matmul gemm (cutlass, odd leading dimension)", "[fl][op][c
   std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
 
   auto runCase = [&mm](int m, int k, int n) {
-    Tensor a = F::rand(Device::getCpu(), {m, k}, DType::kFloat);
-    Tensor b = F::rand(Device::getCpu(), {k, n}, DType::kFloat);
-    Tensor expected = F::matmul(cpuOps(), a, b);
+    Tensor a = fl::test::rand(Device::getCpu(), {m, k}, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), {k, n}, DType::kFloat);
+    Tensor expected = fl::test::matmul(cpuOps(), a, b);
 
-    Tensor x = F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
-    Tensor y = F::cast(cudaOps(), F::toDevice(cudaOps(), b, Device::getCuda()), DType::kFloat16);
-    Tensor actual = F::toDevice(cudaOps(), F::cast(cudaOps(), apply(mm.get(), x, y), DType::kFloat), Device::getCpu());
+    Tensor x = fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+    Tensor y = fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), b, Device::getCuda()), DType::kFloat16);
+    Tensor actual = fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), apply(mm.get(), x, y), DType::kFloat), Device::getCpu());
 
     CATCH_INFO("m = " << m << ", k = " << k << ", n = " << n);
     CATCH_REQUIRE(actual.getShape() == std::vector<int>{m, n});

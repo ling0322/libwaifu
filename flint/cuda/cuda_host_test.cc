@@ -60,8 +60,8 @@ bool equalFloat(Tensor a, Tensor b) {
 CATCH_TEST_CASE("cuda-host memory is host memory the CPU can read", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor host = F::rand(Device::getCpu(), {4, 8}, DType::kFloat);
-  Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
+  Tensor host = fl::test::rand(Device::getCpu(), {4, 8}, DType::kFloat);
+  Tensor locked = fl::test::toDevice(cudaOps(), host, Device::getCudaHost());
 
   CATCH_REQUIRE(locked.getDevice().getType() == Device::kCudaHost);
   CATCH_REQUIRE(locked.getDevice().isHost());
@@ -80,7 +80,7 @@ CATCH_TEST_CASE("cuda-host memory can be allocated directly", "[op][cuda]") {
   CATCH_REQUIRE(locked.getNumEl() == 6);
 
   // Written by the CPU where it lies, which is what makes it usable as a staging buffer.
-  Tensor source = F::rand(Device::getCpu(), {2, 3}, DType::kFloat);
+  Tensor source = fl::test::rand(Device::getCpu(), {2, 3}, DType::kFloat);
   cpuOps()->copy(source, locked);
   CATCH_REQUIRE(equalFloat(source, locked));
 }
@@ -88,14 +88,14 @@ CATCH_TEST_CASE("cuda-host memory can be allocated directly", "[op][cuda]") {
 CATCH_TEST_CASE("cuda-host memory makes the round trip to the GPU unchanged", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor host = F::rand(Device::getCpu(), {16, 16}, DType::kFloat);
+  Tensor host = fl::test::rand(Device::getCpu(), {16, 16}, DType::kFloat);
 
   Tensor there =
-      F::toDevice(cudaOps(), F::toDevice(cudaOps(), host, Device::getCudaHost()), Device::getCuda());
+      fl::test::toDevice(cudaOps(), fl::test::toDevice(cudaOps(), host, Device::getCudaHost()), Device::getCuda());
   CATCH_REQUIRE(there.getDevice().getType() == Device::kCuda);
 
   Tensor back =
-      F::toDevice(cudaOps(), F::toDevice(cudaOps(), there, Device::getCudaHost()), Device::getCpu());
+      fl::test::toDevice(cudaOps(), fl::test::toDevice(cudaOps(), there, Device::getCudaHost()), Device::getCpu());
   CATCH_REQUIRE(back.getDevice().getType() == Device::kCpu);
   CATCH_REQUIRE(equalFloat(host, back));
 }
@@ -119,21 +119,21 @@ Tensor arrive(const Tensor &src, bool sync = false) {
 CATCH_TEST_CASE("an asynchronous copy arrives, once waited on", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor host = F::rand(Device::getCpu(), {32, 32}, DType::kFloat);
-  Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
+  Tensor host = fl::test::rand(Device::getCpu(), {32, 32}, DType::kFloat);
+  Tensor locked = fl::test::toDevice(cudaOps(), host, Device::getCudaHost());
 
   Tensor there = arrive(locked);
 
   CATCH_REQUIRE(there.getDevice().getType() == Device::kCuda);
   CATCH_REQUIRE_NOTHROW(there.getInternalData()->getRawData());
-  CATCH_REQUIRE(equalFloat(host, F::toDevice(cudaOps(), there, Device::getCpu())));
+  CATCH_REQUIRE(equalFloat(host, fl::test::toDevice(cudaOps(), there, Device::getCpu())));
 }
 
 CATCH_TEST_CASE("a synchronous wait waits for the copy rather than ordering it", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor host = F::rand(Device::getCpu(), {32, 32}, DType::kFloat);
-  Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
+  Tensor host = fl::test::rand(Device::getCpu(), {32, 32}, DType::kFloat);
+  Tensor locked = fl::test::toDevice(cudaOps(), host, Device::getCudaHost());
 
   // The bytes are there when this returns, not merely ordered to be. Nothing here can tell the
   // two apart -- reading through cudaMemcpy would be correct either way -- so what this pins down
@@ -141,7 +141,7 @@ CATCH_TEST_CASE("a synchronous wait waits for the copy rather than ordering it",
   Tensor there = arrive(locked, true);
 
   CATCH_REQUIRE_NOTHROW(there.getInternalData()->getRawData());
-  CATCH_REQUIRE(equalFloat(host, F::toDevice(cudaOps(), there, Device::getCpu())));
+  CATCH_REQUIRE(equalFloat(host, fl::test::toDevice(cudaOps(), there, Device::getCpu())));
 }
 
 CATCH_TEST_CASE("many copies in flight all land where they belong", "[op][cuda]") {
@@ -154,15 +154,15 @@ CATCH_TEST_CASE("many copies in flight all land where they belong", "[op][cuda]"
   std::vector<Tensor> locked;
   std::vector<op::cuda::PendingTransfer> flying;
   for (int index = 0; index < kCount; ++index) {
-    Tensor host = F::rand(Device::getCpu(), {16, 16}, DType::kFloat);
+    Tensor host = fl::test::rand(Device::getCpu(), {16, 16}, DType::kFloat);
     sources.push_back(host);
-    locked.push_back(F::toDevice(cudaOps(), host, Device::getCudaHost()));
+    locked.push_back(fl::test::toDevice(cudaOps(), host, Device::getCudaHost()));
     flying.push_back(op::cuda::startTransferAsync(Device::getCuda(), locked.back()));
   }
 
   for (int index = 0; index < kCount; ++index) {
     Tensor landed = arrive(std::move(flying[index]), locked[index], false);
-    CATCH_REQUIRE(equalFloat(sources[index], F::toDevice(cudaOps(), landed, Device::getCpu())));
+    CATCH_REQUIRE(equalFloat(sources[index], fl::test::toDevice(cudaOps(), landed, Device::getCpu())));
   }
 }
 
@@ -173,8 +173,8 @@ CATCH_TEST_CASE("an asynchronous copy nobody waited on is thrown away safely", "
   // the event destroyed while pending, and the storage freed. The memory goes back in the copy
   // stream's order rather than the compute stream's, so it cannot be handed to the next
   // allocation while the copy engine is still writing it.
-  Tensor host = F::rand(Device::getCpu(), {64, 64}, DType::kFloat);
-  Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
+  Tensor host = fl::test::rand(Device::getCpu(), {64, 64}, DType::kFloat);
+  Tensor locked = fl::test::toDevice(cudaOps(), host, Device::getCudaHost());
   for (int index = 0; index < 32; ++index) {
     op::cuda::PendingTransfer discarded = op::cuda::startTransferAsync(Device::getCuda(), locked);
     cudaEventDestroy(discarded.event);
@@ -182,15 +182,15 @@ CATCH_TEST_CASE("an asynchronous copy nobody waited on is thrown away safely", "
 
   // Whatever was reused afterwards is still correct.
   Tensor kept = arrive(locked);
-  CATCH_REQUIRE(equalFloat(host, F::toDevice(cudaOps(), kept, Device::getCpu())));
+  CATCH_REQUIRE(equalFloat(host, fl::test::toDevice(cudaOps(), kept, Device::getCpu())));
 }
 
 CATCH_TEST_CASE("an asynchronous copy refuses every direction but one", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor host = F::rand(Device::getCpu(), {4, 4}, DType::kFloat);
-  Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
-  Tensor there = F::toDevice(cudaOps(), host, Device::getCuda());
+  Tensor host = fl::test::rand(Device::getCpu(), {4, 4}, DType::kFloat);
+  Tensor locked = fl::test::toDevice(cudaOps(), host, Device::getCudaHost());
+  Tensor there = fl::test::toDevice(cudaOps(), host, Device::getCuda());
 
   // Pageable host memory is the one that matters: the driver would stage it through a buffer of
   // its own and the copy would be synchronous under an asynchronous name.
@@ -206,8 +206,8 @@ CATCH_TEST_CASE("an asynchronous copy refuses every direction but one", "[op][cu
 CATCH_TEST_CASE("the C interface hands the copy over to be waited on", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor host = F::rand(Device::getCpu(), {16, 16}, DType::kFloat);
-  Tensor locked = F::toDevice(cudaOps(), host, Device::getCudaHost());
+  Tensor host = fl::test::rand(Device::getCpu(), {16, 16}, DType::kFloat);
+  Tensor locked = fl::test::toDevice(cudaOps(), host, Device::getCudaHost());
 
   TensorView lockedView(locked);
   fl_tensor_view_t source = reinterpret_cast<fl_tensor_view_t>(&lockedView);

@@ -266,7 +266,7 @@ void checkAgainstRecurrence(const Inputs &in, float tolerance) {
   referenceRecurrence(in, &expectedO, &expectedState);
 
   Tensors t = toTensors(in);
-  Tensor o = F::gatedDeltaNetPrefill(cpuOps(), 
+  Tensor o = fl::test::gatedDeltaNetPrefill(cpuOps(), 
       t.q,
       t.k,
       t.v,
