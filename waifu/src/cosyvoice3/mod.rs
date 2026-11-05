@@ -499,7 +499,9 @@ impl CosyVoice3 {
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
         heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
-        if options.speed > 0.0 && (options.speed - 1.0).abs() > 1e-6 {
+        // Every speed but one: zero, a negative one and NaN too, which `say` reads at one rather
+        // than refusing, but a streaming reading promises to refuse.
+        if !options.speed.is_finite() || (options.speed - 1.0).abs() > 1e-6 {
             return Err(Error::model(
                 "a streaming reading is at the speed it is said: upstream does not stream at \
                  another, and a hop stretched on its own would not meet the next",

@@ -698,24 +698,27 @@ fn a_reading_streamed_a_hop_at_a_time_is_upstreams() {
         .unwrap();
     assert!(stopped.is_none());
     assert_eq!(handed, 1);
-    let faster = SpeechOptions {
-        speed: 1.5,
-        ..options
-    };
-    let mut said_anything = false;
-    let refused = tts.say_streaming(
-        TEXT,
-        None,
-        &heard,
-        &faster,
-        &mut |_| {
-            said_anything = true;
-            ControlFlow::Continue(())
-        },
-        &mut |_| ControlFlow::Continue(()),
-    );
-    assert!(refused.is_err());
-    assert!(!said_anything);
+    // Every speed but one, the ones `say` reads at one included.
+    for speed in [1.5, 0.0, -1.0, f32::NAN, f32::INFINITY] {
+        let other = SpeechOptions {
+            speed,
+            ..options.clone()
+        };
+        let mut said_anything = false;
+        let refused = tts.say_streaming(
+            TEXT,
+            None,
+            &heard,
+            &other,
+            &mut |_| {
+                said_anything = true;
+                ControlFlow::Continue(())
+            },
+            &mut |_| ControlFlow::Continue(()),
+        );
+        assert!(refused.is_err(), "speed {speed} was streamed");
+        assert!(!said_anything, "speed {speed} said something first");
+    }
 }
 
 /// How long the language model's readings run, over eight seeds, against upstream's over eight
