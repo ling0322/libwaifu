@@ -79,7 +79,7 @@ Tensor referenceAttention(
       query.unsqueeze(0).transpose(1, 2),
       key.unsqueeze(0).transpose(1, 2),
       value.unsqueeze(0).transpose(1, 2),
-      causal);
+      F::causalIf(causal));
 
   return F::contiguous(cpuOps(), x.subtensor(0).transpose(0, 1));
 }
@@ -135,7 +135,7 @@ bool runCase(
       F::toDevice(cudaOps(), seqlensK, Device::getCuda()),
       maxQueryLength,
       maxKeyLength,
-      causal);
+      F::causalIf(causal));
 
   if (x.getShape() != std::vector<int>{totalQueryLength, numHeads, headDim}) return false;
   Tensor output = toCpu(x);
@@ -149,7 +149,7 @@ bool runCase(
         query.slice(0, {begin, end}),
         gatherFromPool(keyPool, sequence),
         gatherFromPool(valuePool, sequence),
-        causal);
+        F::causalIf(causal));
 
     if (!cpuOps()->allClose(output.slice(0, {begin, end}), expected, 5e-3f)) return false;
   }

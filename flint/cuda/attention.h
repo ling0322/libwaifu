@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "flint/operators.h"
 #include "flint/tensor_view.h"
 
 namespace fl {
@@ -27,13 +28,13 @@ namespace cuda {
 
 /// Scaled dot product attention in one pass over the keys, on the tensor cores: q <half>[b, nHead,
 /// L, D] and k, v <half>[b, nKvHead, S, D], into `out` <half>[b, nHead, L, D], contiguous. nKvHead
-/// divides nHead for grouped-query attention. `blockSize` is the mask as Operators::attention has
-/// it: 0 none, 1 causal, aligned to the bottom right of the score matrix, and a larger one causal
-/// between blocks of that many keys counted from key 0 and whole within them.
+/// divides nHead for grouped-query attention. `maskType` and `blockSize` are the mask as
+/// Operators::attention has them -- see MaskType -- every one of the four, aligned to the bottom
+/// right of the score matrix.
 ///
 /// The scores, their softmax and the output's accumulator are all float, so what half precision
 /// cannot hold -- a score past 65504, or one that has to keep more than eleven bits -- never has to
-/// be held in it. That is the difference from the composition in flint/functional.h, which writes
+/// be held in it. That is the difference from the composition in flint/operators.cc, which writes
 /// the score matrix out in the inputs' type.
 ///
 /// The query heads that share a key-value head are taken together, nHead / nKvHead of them, so
@@ -44,11 +45,12 @@ namespace cuda {
 /// Returns false, with `out` untouched, for anything it was not built for: a type other than half,
 /// a head dimension other than 32, 64 or 128, a last dimension that is not contiguous, operands not
 /// aligned to sixteen bytes, a mask over fewer keys than queries, or a device before Ampere. The
-/// caller then runs the composition, which has no block larger than one.
+/// caller then runs the composition, which has no block mask.
 bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
+    MaskType maskType,
     int blockSize,
     const TensorView &out);
 
@@ -59,6 +61,7 @@ bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
+    MaskType maskType,
     int blockSize,
     const TensorView &out,
     int splits);

@@ -21,6 +21,7 @@
 
 #include "lutil/error.h"
 #include "lutil/log.h"
+#include "lutil/strings.h"
 #include "flint/cpu/all_close.h"
 #include "flint/cpu/print.h"
 #include "flint/functional.h"
@@ -172,19 +173,68 @@ void MetalOperators::clamp(TensorView input, float lo, float hi, TensorView out)
   metal_native::clamp(input, lo, hi, out);
 }
 
+namespace {
+
+/// The mask MetalOperators::attention was handed, refused where it is not one. See MaskType. The
+/// composition Operators::attention falls back to checks the same for itself, and goes when every
+/// device has kernels of its own; this is Metal's, and stays.
+void checkAttentionMask(TensorView q, TensorView k, MaskType maskType, int blockSize) {
+  int queries = q.getShape(2);
+  int keys = k.getShape(2);
+  switch (maskType) {
+    case MaskType::kNone:
+    case MaskType::kCausal:
+      if (blockSize != 0) {
+        THROW(
+            InvalidArg,
+            lut::sprintf("attention: a block size of %d without a block mask", blockSize));
+      }
+      return;
+    case MaskType::kBlockCausal:
+    case MaskType::kBlockDiagonal:
+      if (blockSize <= 0) {
+        THROW(InvalidArg, lut::sprintf("attention: a block mask of %d keys a block", blockSize));
+      }
+      if (maskType == MaskType::kBlockCausal && keys < queries) {
+        THROW(
+            InvalidArg,
+            lut::sprintf(
+                "attention: a block causal mask over %d keys and %d queries, which leaves the "
+                "first queries before every key",
+                keys,
+                queries));
+      }
+      if (maskType == MaskType::kBlockDiagonal && keys != queries) {
+        THROW(
+            InvalidArg,
+            lut::sprintf(
+                "attention: a block diagonal mask is self-attention, and this is %d queries over "
+                "%d keys",
+                queries,
+                keys));
+      }
+      return;
+  }
+  THROW(InvalidArg, lut::sprintf("attention: no mask type %d", static_cast<int>(maskType)));
+}
+
+}  // namespace
+
 void MetalOperators::attention(
     TensorView q,
     TensorView k,
     TensorView v,
+    MaskType maskType,
     int blockSize,
     TensorView out) {
-  // Checked before the kernel, which would otherwise run a negative block as no mask at all.
-  F::checkAttentionBlockSize(q, k, blockSize);
+  // Checked before the kernel, which would otherwise run a mask it does not know as no mask.
+  checkAttentionMask(q, k, maskType, blockSize);
 
   // The kernel where it takes these, and the composition where it does not. The kernel has no
-  // block larger than one.
-  if (blockSize <= 1 && metal_native::attention(q, k, v, blockSize == 1, out)) return;
-  Operators::attention(q, k, v, blockSize, out);
+  // block mask, and neither has the composition: one of those is NotImplemented there.
+  bool plain = maskType == MaskType::kNone || maskType == MaskType::kCausal;
+  if (plain && metal_native::attention(q, k, v, maskType == MaskType::kCausal, out)) return;
+  Operators::attention(q, k, v, maskType, blockSize, out);
 }
 
 void MetalOperators::softmax(TensorView input, TensorView out) {

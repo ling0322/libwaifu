@@ -1181,12 +1181,19 @@ int32_t fl_attention(
     fl_tensor_view_t q,
     fl_tensor_view_t k,
     fl_tensor_view_t v,
+    fl_mask_type_t mask_type,
     int32_t block_size,
     fl_tensor_view_t out) {
-  return onDevice(
-      operators,
-      {{q, "q"}, {k, "k"}, {v, "v"}, {out, "out"}},
-      [&](fl::Operators *op) { op->attention(deref(q), deref(k), deref(v), block_size, deref(out)); });
+  return onDevice(operators, {{q, "q"}, {k, "k"}, {v, "v"}, {out, "out"}}, [&](fl::Operators *op) {
+    // Whatever arrives is handed on: the operator refuses a mask type it does not define.
+    op->attention(
+        deref(q),
+        deref(k),
+        deref(v),
+        static_cast<fl::MaskType>(mask_type),
+        block_size,
+        deref(out));
+  });
 }
 
 int32_t fl_paged_attention_available(int32_t *out) {

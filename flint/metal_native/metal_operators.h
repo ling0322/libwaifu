@@ -102,7 +102,13 @@ class MetalOperators : public Operators {
   void pad1d(TensorView input, int left, int right, PadMode mode, TensorView out) override;
   void clamp(TensorView input, float lo, float hi, TensorView out) override;
   void softmax(TensorView input, TensorView out) override;
-  void attention(TensorView q, TensorView k, TensorView v, int blockSize, TensorView out) override;
+  void attention(
+      TensorView q,
+      TensorView k,
+      TensorView v,
+      MaskType maskType,
+      int blockSize,
+      TensorView out) override;
 
   void add(TensorView input, TensorView other, TensorView out) override;
   void sub(TensorView input, TensorView other, TensorView out) override;

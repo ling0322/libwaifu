@@ -39,6 +39,29 @@ enum class PadMode {
   kReplicate = 2,
 };
 
+/// Which keys a query may see in `Operators::attention`. The values are the C API's `FL_MASK_*`.
+///
+/// Query i sits at position p = i + keyLength - queryLength, aligned to the bottom right of the
+/// score matrix, and sees the keys first(p)..last(p). The block masks cut the keys into blocks of
+/// `blockSize` from key 0:
+///
+/// | type            | blockSize | first(p)           | last(p)                                    |
+/// | --------------- | --------- | ------------------ | ------------------------------------------ |
+/// | kNone           | 0         | 0                  | keyLength - 1                              |
+/// | kCausal         | 0         | 0                  | p                                          |
+/// | kBlockCausal    | n > 0     | 0                  | min(keyLength - 1, p / n * n + n - 1)      |
+/// | kBlockDiagonal  | n > 0     | p / n * n          | min(keyLength - 1, p / n * n + n - 1)      |
+///
+/// A block causal mask sees its own block and every block before it, the mask a streaming
+/// diffusion transformer is trained under; it needs keyLength >= queryLength. A block diagonal one
+/// sees its own block alone, windowed self-attention; it needs keyLength == queryLength.
+enum class MaskType {
+  kNone = 0,
+  kCausal = 1,
+  kBlockCausal = 2,
+  kBlockDiagonal = 3,
+};
+
 /// @brief What a device computes with: one kernel per method, reading the views it is given and
 /// writing the one it is told to write.
 ///
@@ -226,17 +249,20 @@ class Operators {
   /// [batch, numKeyValueHeads, keyValueLength, headDim]. numHeads is a multiple of
   /// numKeyValueHeads, so grouped-query and multi-query attention need no expanded k and v.
   ///
-  /// `blockSize` is the mask. 0 is none. Otherwise the keys are cut into blocks of `blockSize`
-  /// from key 0, and query i -- at position i + keyValueLength - queryLength, aligned to the
-  /// bottom right of the score matrix -- sees every key of its own block and of every block
-  /// before it: 1 is the causal mask, and a larger one the block-causal mask a streaming
-  /// diffusion transformer is trained under. A block of more than one needs keyValueLength >=
-  /// queryLength.
+  /// `maskType` and `blockSize` are the mask; see `MaskType`. A mask that is not one -- a block
+  /// size beside kNone or kCausal, none beside a block mask, keys too few for it -- is InvalidArg.
   ///
-  /// A device without a kernel of its own gets the composition in `flint/functional.h` --
-  /// matmul, softmax, matmul, a block of queries at a time -- written into `out`, for a block of 0
-  /// or 1. A larger block has no composition: where no kernel takes it, it is NotImplemented.
-  virtual void attention(TensorView q, TensorView k, TensorView v, int blockSize, TensorView out);
+  /// A device checks what it is handed and runs its own kernels. What none of them takes comes
+  /// here: a composition -- matmul, softmax, matmul, a block of queries at a time -- for kNone and
+  /// kCausal, kept until every device has kernels of its own. A block mask has no composition, and
+  /// is NotImplemented here.
+  virtual void attention(
+      TensorView q,
+      TensorView k,
+      TensorView v,
+      MaskType maskType,
+      int blockSize,
+      TensorView out);
 
   /// Scaled dot product attention of a packed (varlen) batch of queries over a paged KV cache.
   virtual void pagedAttention(

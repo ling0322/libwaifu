@@ -334,7 +334,7 @@ CATCH_TEST_CASE("test CPU fp16 lookup, attention and sampling", "[op][cpu][float
   for (bool causal : {false, true}) {
     CATCH_INFO("causal " << causal);
     requireHalfAgrees(
-        "attention", [causal](auto &t) { return F::attention(cpuOps(), t[0], t[1], t[2], causal); },
+        "attention", [causal](auto &t) { return F::attention(cpuOps(), t[0], t[1], t[2], F::causalIf(causal)); },
         {q, k, v}, 2e-2f, 2e-2f);
   }
 

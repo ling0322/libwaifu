@@ -29,8 +29,8 @@
 //! row gets on its own.
 
 use waifu::flint::functional as F;
+use waifu::flint::MaskType;
 use waifu::flint::Tensor;
-use waifu::flint::NO_MASK;
 use waifu::{DType, Device};
 
 /// How far apart two rows may be before something is wrong, per device.
@@ -205,11 +205,11 @@ fn attention_does_not_look_across_the_batch() {
             &F::cat(&q[0], &q[1], 0).unwrap(),
             &F::cat(&k[0], &k[1], 0).unwrap(),
             &F::cat(&v[0], &v[1], 0).unwrap(),
-            NO_MASK,
+            MaskType::None,
         )
         .unwrap();
         let alone: Vec<Tensor> = (0..2)
-            .map(|i| F::attention(&q[i], &k[i], &v[i], NO_MASK).unwrap())
+            .map(|i| F::attention(&q[i], &k[i], &v[i], MaskType::None).unwrap())
             .collect();
 
         let gap = row_gap(&batched, &alone);

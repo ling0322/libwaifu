@@ -27,7 +27,7 @@ use std::rc::Rc;
 
 use super::{DType, Device, Tensor};
 
-use super::op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
+use super::op::{Binary, Extent, MaskType, Op, PadMode, Reduce, Scalar, Unary, Value};
 
 /// A forward pass written down rather than run.
 ///
@@ -873,15 +873,14 @@ impl Graph {
     }
 
     #[track_caller]
-    /// Attention of `query` over `key` and `value` under the mask `block_size` names:
-    /// [`NO_MASK`](super::NO_MASK), [`CAUSAL`](super::CAUSAL), or a block-causal mask of that many
-    /// keys a block. See [`functional::attention`](super::functional::attention).
-    pub fn attention(&self, query: Value, key: Value, value: Value, block_size: i32) -> Value {
+    /// Attention of `query` over `key` and `value` under `mask`: see [`MaskType`] and
+    /// [`functional::attention`](super::functional::attention).
+    pub fn attention(&self, query: Value, key: Value, value: Value, mask: MaskType) -> Value {
         self.push(Op::Attention {
             query,
             key,
             value,
-            block_size,
+            mask,
         })
     }
 

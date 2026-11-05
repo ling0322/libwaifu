@@ -108,9 +108,10 @@ struct Params {
   int64_t vStrideL;
   // 1 / sqrt(D), times log2(e): the scores go into exp2.
   float scaleLog2;
-  // The mask, as Operators::attention has it: 0 none, otherwise blocks of this many keys from key
-  // 0, a query seeing its own block and every block before it. 1 is the causal mask, under which
-  // the last query sees every key and the first keyLength - queryLength + 1.
+  // The mask, as Operators::attention has it: a MaskType, and for the block masks how many keys a
+  // block is, counted from key 0. Under the causal mask the last query sees every key and the
+  // first keyLength - queryLength + 1; under a block diagonal one a query sees its own block only.
+  int maskType;
   int blockSize;
   // Where a split writes, when there is more than one: <float>(batch, kvHeads, splits, rows, D),
   // and the maximum and the sum of each row, <float>(batch, kvHeads, splits, rows).
@@ -161,13 +162,19 @@ struct Row {
   int head;
 };
 
-/// The last key a query at `position` -- its index plus keyLength - queryLength -- may see: the
-/// last of its block, or of the keys, whichever comes first. Under the causal mask, a block of
-/// one, that is the position itself.
+/// The first key a query at `position` -- its index plus keyLength - queryLength -- may see: the
+/// first of its own block under a block diagonal mask, and key 0 under every other.
+__device__ inline int firstKeyOf(const Params &p, int position) {
+  if (p.maskType != static_cast<int>(MaskType::kBlockDiagonal)) return 0;
+  return (position / p.blockSize) * p.blockSize;
+}
+
+/// The last key a query at `position` may see: every key with no mask, the position itself under
+/// the causal one, and the last of its block, or of the keys, whichever comes first, under either
+/// block mask.
 __device__ inline int lastKeyOf(const Params &p, int position) {
-  if (p.blockSize == 0) return p.keyLength - 1;
-  // The causal mask without the division, which is most of what this costs and buys it nothing.
-  if (p.blockSize == 1) return position;
+  if (p.maskType == static_cast<int>(MaskType::kNone)) return p.keyLength - 1;
+  if (p.maskType == static_cast<int>(MaskType::kCausal)) return position;
   return min(p.keyLength - 1, (position / p.blockSize) * p.blockSize + p.blockSize - 1);
 }
 
@@ -232,17 +239,24 @@ __global__ void __launch_bounds__(WARPS * 32) attentionKernel(Params p) {
   float rowMax[2] = {-INFINITY, -INFINITY};
   float rowSum[2] = {0.0f, 0.0f};
   int offset = p.keyLength - p.queryLength;
+  int firstKey[2];
   int lastKey[2];
 #pragma unroll
   for (int r = 0; r < 2; ++r) {
+    firstKey[r] = firstKeyOf(p, rows[r].query + offset);
     lastKey[r] = lastKeyOf(p, rows[r].query + offset);
   }
 
-  // This split's keys, and no further than the last any row of this CTA may see.
+  // This split's keys, from no earlier than the first any row of this CTA may see and to no
+  // further than the last. The rows are queries in order, so the first row's first key and the
+  // last row's last key bound them all. A split the bounds leave empty walks nothing, and its rows
+  // keep a maximum of -inf and a sum of 0, which the combine weighs as nothing.
   int keyBegin = split * p.keysPerSplit;
   int keyEnd = min(p.keyLength, keyBegin + p.keysPerSplit);
-  if (p.blockSize > 0) {
+  if (p.maskType != static_cast<int>(MaskType::kNone)) {
+    int firstQuery = min(p.queryLength - 1, r0 / p.headsPerKeyValueHead);
     int lastQuery = min(p.queryLength - 1, (r0 + kBlockM - 1) / p.headsPerKeyValueHead);
+    keyBegin = max(keyBegin, firstKeyOf(p, firstQuery + offset));
     keyEnd = min(keyEnd, lastKeyOf(p, lastQuery + offset) + 1);
   }
 
@@ -289,7 +303,8 @@ __global__ void __launch_bounds__(WARPS * 32) attentionKernel(Params p) {
         for (int j = 0; j < 2; ++j) {
           int key = k0 + nt * 8 + column + j;
           float &x = s[nt].x[2 * r + j];
-          x = key < keyEnd && key <= lastKey[r] ? x * p.scaleLog2 : -INFINITY;
+          bool seen = key < keyEnd && key >= firstKey[r] && key <= lastKey[r];
+          x = seen ? x * p.scaleLog2 : -INFINITY;
           blockMax = fmaxf(blockMax, x);
         }
       }
@@ -448,15 +463,17 @@ bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
+    MaskType maskType,
     int blockSize,
     const TensorView &out) {
-  return attention(q, k, v, blockSize, out, 0);
+  return attention(q, k, v, maskType, blockSize, out, 0);
 }
 
 bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
+    MaskType maskType,
     int blockSize,
     const TensorView &out,
     int splits) {
@@ -479,7 +496,13 @@ bool attention(
   }
   if (numKeyValueHeads == 0 || numHeads % numKeyValueHeads != 0) return false;
   if (queryLength == 0 || keyLength == 0) return false;
-  if (blockSize < 0 || (blockSize > 0 && keyLength < queryLength)) return false;
+  // The mask is the caller's to have checked; what is left is what this kernel was not built
+  // for. A causal mask over fewer keys than queries leaves rows that see nothing, which the
+  // composition has always been the one to answer.
+  bool blockMask = maskType == MaskType::kBlockCausal || maskType == MaskType::kBlockDiagonal;
+  if (blockMask && blockSize <= 0) return false;
+  if (maskType != MaskType::kNone && keyLength < queryLength) return false;
+  if (maskType == MaskType::kBlockDiagonal && keyLength != queryLength) return false;
   if (q.getStride(3) != 1 || k.getStride(3) != 1 || v.getStride(3) != 1) return false;
   if (!out.isContiguous() || out.getShape() != q.getShape()) return false;
 
@@ -512,7 +535,8 @@ bool attention(
   params.vStrideH = v.getStride(1);
   params.vStrideL = v.getStride(2);
   params.scaleLog2 = 1.4426950408889634f / sqrtf(static_cast<float>(headDim));
-  params.blockSize = blockSize;
+  params.maskType = static_cast<int>(maskType);
+  params.blockSize = blockMask ? blockSize : 0;
   params.partialOut = nullptr;
   params.partialMax = nullptr;
   params.partialSum = nullptr;

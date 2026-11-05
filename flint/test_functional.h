@@ -161,7 +161,19 @@ Tensor lookup(Operators *op, TensorView table, TensorView indices);
 
 // --- Attention and sampling -----------------------------------------------------------------
 
-Tensor attention(Operators *op, TensorView q, TensorView k, TensorView v, int blockSize);
+/// Attention into a fresh tensor, under the mask `maskType` and `blockSize` name; see MaskType.
+Tensor attention(
+    Operators *op,
+    TensorView q,
+    TensorView k,
+    TensorView v,
+    MaskType maskType,
+    int blockSize = 0);
+
+/// The causal mask where `causal`, and none otherwise: for the tests that run both.
+inline MaskType causalIf(bool causal) {
+  return causal ? MaskType::kCausal : MaskType::kNone;
+}
 
 Tensor pagedAttention(
     Operators *op,

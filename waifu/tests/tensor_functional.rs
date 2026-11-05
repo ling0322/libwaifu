@@ -463,3 +463,24 @@ fn resizes_the_last_dimension_the_way_torch_interpolate_does() {
     assert_eq!(picked[76..79], [44.0, 44.0, 45.0]);
     assert_eq!(picked.iter().sum::<f32>(), 6808.0);
 }
+
+#[test]
+fn a_block_mask_is_refused_where_no_kernel_takes_it() {
+    use waifu::flint::MaskType;
+
+    let q = F::rand(&[1, 2, 8, 16], DType::Float, Device::Cpu).unwrap();
+    let longer = F::rand(&[1, 2, 12, 16], DType::Float, Device::Cpu).unwrap();
+
+    // The processor has the composition, which takes none and causal and no block mask.
+    assert!(F::attention(&q, &q, &q, MaskType::None).is_ok());
+    assert!(F::attention(&q, &q, &q, MaskType::Causal).is_ok());
+    let refused = F::attention(&q, &q, &q, MaskType::BlockDiagonal(4)).unwrap_err();
+    assert!(refused.to_string().contains("no kernel"), "{refused}");
+    assert!(F::attention(&q, &q, &q, MaskType::BlockCausal(4)).is_err());
+
+    // And what is not a mask at all, refused before anything runs.
+    let empty = F::attention(&q, &q, &q, MaskType::BlockDiagonal(0)).unwrap_err();
+    assert!(empty.to_string().contains("0 keys a block"), "{empty}");
+    let unequal = F::attention(&q, &longer, &longer, MaskType::BlockDiagonal(4)).unwrap_err();
+    assert!(unequal.to_string().contains("self-attention"), "{unequal}");
+}

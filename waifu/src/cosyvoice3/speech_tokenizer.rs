@@ -29,7 +29,7 @@
 //! read as a digit in base three. The eight projections come out of the graph; the rest is on the
 //! host, where a rounding that ties to even is one call rather than an operator.
 
-use crate::flint::{DType, Device, Extent, Graph, Tensor, Value, NO_MASK};
+use crate::flint::{DType, Device, Extent, Graph, MaskType, Tensor, Value};
 use crate::layers::Linear;
 use crate::Result;
 
@@ -104,7 +104,7 @@ fn block(g: &Graph, x: Value, cos: Value, sin: Value) -> Value {
         g.contiguous(g.transpose(q, 1, 2)),
         g.contiguous(g.transpose(k, 1, 2)),
         g.contiguous(g.transpose(heads(v), 1, 2)),
-        NO_MASK,
+        MaskType::None,
     );
     let attended = g.view(
         g.contiguous(g.transpose(attended, 1, 2)),

@@ -49,8 +49,8 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, PadMode, RunContext,
-    Tensor, Value, Weights, NO_MASK,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, MaskType, PadMode,
+    RunContext, Tensor, Value, Weights,
 };
 use crate::indextts::gpt::gelu_new;
 use crate::layers::Linear;
@@ -281,7 +281,7 @@ fn block(
         );
         g.contiguous(g.transpose(split, 1, 2))
     };
-    let attended = g.attention(heads(q), heads(k), heads(v), NO_MASK);
+    let attended = g.attention(heads(q), heads(k), heads(v), MaskType::None);
     let attended = g.view(
         g.contiguous(g.transpose(attended, 1, 2)),
         [batch, length, Extent::At(dim)],
