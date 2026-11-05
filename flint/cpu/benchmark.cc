@@ -101,12 +101,12 @@ void benchmarkConv2d(
     int kernel,
     int stride) {
   int padding = kernel / 2;
-  Tensor input = F::rand(Device::getCpu(), {batch, inChannel, size, size}, DType::kFloat);
-  Tensor weight = F::rand(Device::getCpu(), {outChannel, inChannel, kernel, kernel}, DType::kFloat);
-  Tensor bias = F::rand(Device::getCpu(), {outChannel}, DType::kFloat);
+  Tensor input = fl::test::rand(Device::getCpu(), {batch, inChannel, size, size}, DType::kFloat);
+  Tensor weight = fl::test::rand(Device::getCpu(), {outChannel, inChannel, kernel, kernel}, DType::kFloat);
+  Tensor bias = fl::test::rand(Device::getCpu(), {outChannel}, DType::kFloat);
 
   double milliseconds =
-      fastestMs([&] { F::conv2d(cpuOps(), input, weight, bias, stride, padding, 1, 1); });
+      fastestMs([&] { fl::test::conv2d(cpuOps(), input, weight, bias, stride, padding, 1, 1); });
 
   int outSize = (size + 2 * padding - kernel) / stride + 1;
   double flop = 2.0 * batch * outChannel * outSize * outSize * inChannel * kernel * kernel;
@@ -131,7 +131,7 @@ double floatBytes(std::initializer_list<int> shape) {
 }
 
 Tensor randFloat(std::initializer_list<int> shape) {
-  return F::rand(Device::getCpu(), shape, DType::kFloat);
+  return fl::test::rand(Device::getCpu(), shape, DType::kFloat);
 }
 
 }  // namespace
@@ -163,17 +163,17 @@ LL_BENCHMARK(bench::Group::kSdxlCpu, "SDXL elementwise") {
 
     printBandwidth(
         std::string("group_norm   ") + level.what,
-        fastestMs([&] { F::groupNorm(cpuOps(), x, scale, shift, 32, 1e-5f); }),
+        fastestMs([&] { fl::test::groupNorm(cpuOps(), x, scale, shift, 32, 1e-5f); }),
         moved);
     printBandwidth(
         std::string("silu         ") + level.what,
-        fastestMs([&] { F::silu(cpuOps(), x); }),
+        fastestMs([&] { fl::test::silu(cpuOps(), x); }),
         moved);
 
     Tensor other = randFloat({1, level.channels, level.size, level.size});
     printBandwidth(
         std::string("add          ") + level.what,
-        fastestMs([&] { F::add(cpuOps(), x, other); }),
+        fastestMs([&] { fl::test::add(cpuOps(), x, other); }),
         1.5 * moved);
   }
 
@@ -191,14 +191,14 @@ LL_BENCHMARK(bench::Group::kSdxlCpu, "SDXL elementwise") {
     Tensor shift = randFloat({block.width});
     printBandwidth(
         std::string("layer_norm   ") + block.what,
-        fastestMs([&] { F::layerNorm(cpuOps(), hidden, scale, shift, 1e-5f); }),
+        fastestMs([&] { fl::test::layerNorm(cpuOps(), hidden, scale, shift, 1e-5f); }),
         2 * floatBytes({1, block.tokens, block.width}));
 
     int inner = block.width * 4;
     Tensor gated = randFloat({1, block.tokens, 2 * inner});
     printBandwidth(
         std::string("geglu        ") + block.what,
-        fastestMs([&] { F::geglu(cpuOps(), gated); }),
+        fastestMs([&] { fl::test::geglu(cpuOps(), gated); }),
         1.5 * floatBytes({1, block.tokens, 2 * inner}));
   }
 
@@ -207,7 +207,7 @@ LL_BENCHMARK(bench::Group::kSdxlCpu, "SDXL elementwise") {
     Tensor x = randFloat({1, level.channels, level.size, level.size});
     printBandwidth(
         std::string("upsample     ") + level.what,
-        fastestMs([&] { F::upsampleNearest2d(cpuOps(), x, 2); }),
+        fastestMs([&] { fl::test::upsampleNearest2d(cpuOps(), x, 2); }),
         5 * floatBytes({1, level.channels, level.size, level.size}));
   }
 }

@@ -46,11 +46,11 @@ Operators *cpuOps() {
 }
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 }  // namespace
@@ -58,10 +58,10 @@ Tensor toCpu(const Tensor &a) {
 CATCH_TEST_CASE("test CUDA to and cast", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand(Device::getCpu(), {100, 200}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {100, 200}, DType::kFloat);
 
   Tensor roundTrip =
-      F::toDevice(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), Device::getCpu());
+      fl::test::toDevice(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), Device::getCpu());
   CATCH_REQUIRE(cpuOps()->allClose(roundTrip, a));
 
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(toCuda(a)), a));
@@ -78,9 +78,9 @@ CATCH_TEST_CASE("test CUDA to (rank and dtype)", "[op][cuda]") {
            {3, 5},
            {2, 3, 4},
            {2, 3, 4, 5}}) {
-    Tensor a = F::rand(Device::getCpu(), shape, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
     Tensor roundTrip =
-        F::toDevice(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), Device::getCpu());
+        fl::test::toDevice(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), Device::getCpu());
     CATCH_INFO("shape rank = " << shape.size());
     CATCH_REQUIRE(roundTrip.getShape() == shape);
     CATCH_REQUIRE(cpuOps()->allClose(roundTrip, a));
@@ -90,7 +90,7 @@ CATCH_TEST_CASE("test CUDA to (rank and dtype)", "[op][cuda]") {
   // round trip must come back exactly.
   Tensor ids = Tensor::create<LongType>({2, 3}, {-1, 0, 1, 2, 3, LongType{1} << 40});
   Tensor idsRoundTrip =
-      F::toDevice(cudaOps(), F::toDevice(cudaOps(), ids, Device::getCuda()), Device::getCpu());
+      fl::test::toDevice(cudaOps(), fl::test::toDevice(cudaOps(), ids, Device::getCuda()), Device::getCpu());
   const LongType *data = idsRoundTrip.getInternalData()->getData<LongType>(
       idsRoundTrip.getInternalOffset());
   CATCH_REQUIRE(data[0] == -1);
@@ -106,9 +106,9 @@ CATCH_TEST_CASE("test CUDA to from pageable memory through the staging buffers",
   // Either side of the threshold, exactly one buffer, and three buffers' worth with a ragged end,
   // which uses both buffers and comes back round to the first.
   for (int numel : {MinFloats - 1, MinFloats, ChunkFloats, 2 * ChunkFloats + 1234}) {
-    Tensor a = F::rand(Device::getCpu(), {numel}, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), {numel}, DType::kFloat);
     Tensor roundTrip =
-        F::toDevice(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), Device::getCpu());
+        fl::test::toDevice(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), Device::getCpu());
     CATCH_INFO("numel = " << numel);
     CATCH_REQUIRE(roundTrip.getShape() == a.getShape());
     CATCH_REQUIRE(std::memcmp(
@@ -123,18 +123,18 @@ CATCH_TEST_CASE("test CUDA staged copy has read its source when it returns", "[o
 
   constexpr int ChunkFloats = static_cast<int>(op::cuda::StagedUpload::ChunkBytes / 4);
   int numel = 3 * ChunkFloats + 7;
-  Tensor a = F::rand(Device::getCpu(), {numel}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {numel}, DType::kFloat);
   std::vector<float> expected(
       a.getInternalData()->getData<float>(0),
       a.getInternalData()->getData<float>(0) + numel);
 
   // The last buffers may still be on the bus, but they are the staging buffers', not the
   // source's: overwriting the source now must not reach the device.
-  Tensor x = F::toDevice(cudaOps(), a, Device::getCuda());
+  Tensor x = fl::test::toDevice(cudaOps(), a, Device::getCuda());
   float *source = a.getInternalData()->getData<float>(0);
   std::fill(source, source + numel, -1.0f);
 
-  Tensor back = F::toDevice(cudaOps(), x, Device::getCpu());
+  Tensor back = fl::test::toDevice(cudaOps(), x, Device::getCpu());
   CATCH_REQUIRE(std::memcmp(
                     back.getInternalData()->getData<float>(0),
                     expected.data(),
@@ -150,21 +150,21 @@ CATCH_TEST_CASE("test CUDA staged copies are seen by the kernels after them", "[
   constexpr int ChunkFloats = static_cast<int>(op::cuda::StagedUpload::ChunkBytes / 4);
   int numel = 2 * ChunkFloats + 99;
   for (int round = 0; round < 3; ++round) {
-    Tensor a = F::rand(Device::getCpu(), {numel}, DType::kFloat);
-    Tensor b = F::rand(Device::getCpu(), {numel}, DType::kFloat);
-    Tensor sum = F::add(cudaOps(), 
-        F::toDevice(cudaOps(), a, Device::getCuda()),
-        F::toDevice(cudaOps(), b, Device::getCuda()));
+    Tensor a = fl::test::rand(Device::getCpu(), {numel}, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), {numel}, DType::kFloat);
+    Tensor sum = fl::test::add(cudaOps(), 
+        fl::test::toDevice(cudaOps(), a, Device::getCuda()),
+        fl::test::toDevice(cudaOps(), b, Device::getCuda()));
     CATCH_INFO("round " << round);
-    CATCH_REQUIRE(cpuOps()->allClose(F::toDevice(cudaOps(), sum, Device::getCpu()), F::add(cpuOps(), a, b)));
+    CATCH_REQUIRE(cpuOps()->allClose(fl::test::toDevice(cudaOps(), sum, Device::getCpu()), fl::test::add(cpuOps(), a, b)));
   }
 }
 
 CATCH_TEST_CASE("test CUDA cast is a no-op for the same dtype", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::toDevice(cudaOps(), F::rand(Device::getCpu(), {4, 8}, DType::kFloat), Device::getCuda());
-  Tensor same = F::cast(cudaOps(), a, DType::kFloat);
+  Tensor a = fl::test::toDevice(cudaOps(), fl::test::rand(Device::getCpu(), {4, 8}, DType::kFloat), Device::getCuda());
+  Tensor same = fl::test::cast(cudaOps(), a, DType::kFloat);
 
   // the same dtype short-circuits, so no copy is made and the storage is shared.
   CATCH_REQUIRE(same.getInternalData() == a.getInternalData());

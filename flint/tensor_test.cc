@@ -98,7 +98,7 @@ CATCH_TEST_CASE("test subtensor and slice", "[core][nn][tensor]") {
 }
 
 CATCH_TEST_CASE("test view infers a dimension", "[core][nn][tensor]") {
-  Tensor tensor = F::rand(Device::getCpu(), {2, 3, 4, 5}, DType::kFloat);
+  Tensor tensor = fl::test::rand(Device::getCpu(), {2, 3, 4, 5}, DType::kFloat);
 
   // A contiguous tensor and a strided one take different code paths, and only the contiguous one
   // resolves the inferred -1 before walking the strides.

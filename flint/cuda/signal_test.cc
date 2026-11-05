@@ -64,12 +64,12 @@ Tensor onCpu(std::initializer_list<int> shape, const std::vector<float> &values)
 
 /// `x`, a float tensor on the CPU, on the GPU as `dtype`.
 Tensor onCuda(const Tensor &x, DType dtype) {
-  Tensor moved = F::toDevice(cudaOps(), x, Device::getCuda());
-  return dtype == DType::kFloat ? moved : F::cast(cudaOps(), moved, dtype);
+  Tensor moved = fl::test::toDevice(cudaOps(), x, Device::getCuda());
+  return dtype == DType::kFloat ? moved : fl::test::cast(cudaOps(), moved, dtype);
 }
 
 Tensor backToCpu(const Tensor &x) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), x, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), x, DType::kFloat), Device::getCpu());
 }
 
 bool closeTo(const Tensor &cuda, const Tensor &cpu, DType dtype) {
@@ -105,10 +105,10 @@ CATCH_TEST_CASE("CUDA convTranspose1d agrees with the CPU", "[op][cuda][signal]"
     Tensor w = onCpu({t.c, t.k / t.groups, t.r}, spread(t.c * t.k / t.groups * t.r, 2));
     Tensor b = onCpu({t.k}, spread(t.k, 3));
     Tensor expected =
-        F::convTranspose1d(cpuOps(), x, w, b, t.stride, t.padding, t.outputPadding, t.groups);
+        fl::test::convTranspose1d(cpuOps(), x, w, b, t.stride, t.padding, t.outputPadding, t.groups);
 
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
-      Tensor got = F::convTranspose1d(
+      Tensor got = fl::test::convTranspose1d(
           cudaOps(),
           onCuda(x, dtype),
           onCuda(w, dtype),
@@ -120,7 +120,7 @@ CATCH_TEST_CASE("CUDA convTranspose1d agrees with the CPU", "[op][cuda][signal]"
       CATCH_REQUIRE(closeTo(got, expected, dtype));
     }
 
-    Tensor composed = F::zeros(Device::getCuda(), expected.getShape(), DType::kFloat);
+    Tensor composed = fl::test::zeros(Device::getCuda(), expected.getShape(), DType::kFloat);
     F::composedConvTranspose1d(
         cudaOps(),
         onCuda(x, DType::kFloat),
@@ -146,9 +146,9 @@ CATCH_TEST_CASE("CUDA snake agrees with the CPU", "[op][cuda][signal]") {
   Tensor a = onCpu({c}, alpha), b = onCpu({c}, beta);
 
   for (bool withBeta : {false, true}) {
-    Tensor expected = F::snake(cpuOps(), x, a, withBeta ? b : Tensor(), 1e-9f);
+    Tensor expected = fl::test::snake(cpuOps(), x, a, withBeta ? b : Tensor(), 1e-9f);
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
-      Tensor got = F::snake(
+      Tensor got = fl::test::snake(
           cudaOps(),
           onCuda(x, dtype),
           onCuda(a, dtype),
@@ -157,7 +157,7 @@ CATCH_TEST_CASE("CUDA snake agrees with the CPU", "[op][cuda][signal]") {
       CATCH_REQUIRE(closeTo(got, expected, dtype));
     }
 
-    Tensor composed = F::zeros(Device::getCuda(), {n, c, l}, DType::kFloat);
+    Tensor composed = fl::test::zeros(Device::getCuda(), {n, c, l}, DType::kFloat);
     F::composedSnake(
         cudaOps(),
         onCuda(x, DType::kFloat),
@@ -184,13 +184,13 @@ CATCH_TEST_CASE("CUDA pad1d agrees with the CPU", "[op][cuda][signal]") {
 
   for (const Case &p : cases) {
     CATCH_INFO("mode " << int(p.mode));
-    Tensor expected = F::pad1d(cpuOps(), x, p.left, p.right, p.mode);
+    Tensor expected = fl::test::pad1d(cpuOps(), x, p.left, p.right, p.mode);
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
       CATCH_REQUIRE(
-          closeTo(F::pad1d(cudaOps(), onCuda(x, dtype), p.left, p.right, p.mode), expected, dtype));
+          closeTo(fl::test::pad1d(cudaOps(), onCuda(x, dtype), p.left, p.right, p.mode), expected, dtype));
     }
 
-    Tensor composed = F::zeros(Device::getCuda(), expected.getShape(), DType::kFloat);
+    Tensor composed = fl::test::zeros(Device::getCuda(), expected.getShape(), DType::kFloat);
     F::composedPad1d(cudaOps(), onCuda(x, DType::kFloat), p.left, p.right, p.mode, composed);
     CATCH_REQUIRE(closeTo(composed, expected, DType::kFloat));
   }
@@ -203,12 +203,12 @@ CATCH_TEST_CASE("CUDA clamp agrees with the CPU", "[op][cuda][signal]") {
   Tensor x = onCpu({5, 77}, spread(5 * 77, 8));
 
   for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, 0.25f}, {0.1f, inf}, {-inf, -0.2f}}) {
-    Tensor expected = F::clamp(cpuOps(), x, lo, hi);
+    Tensor expected = fl::test::clamp(cpuOps(), x, lo, hi);
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
-      CATCH_REQUIRE(closeTo(F::clamp(cudaOps(), onCuda(x, dtype), lo, hi), expected, dtype));
+      CATCH_REQUIRE(closeTo(fl::test::clamp(cudaOps(), onCuda(x, dtype), lo, hi), expected, dtype));
     }
 
-    Tensor composed = F::zeros(Device::getCuda(), {5, 77}, DType::kFloat);
+    Tensor composed = fl::test::zeros(Device::getCuda(), {5, 77}, DType::kFloat);
     F::composedClamp(cudaOps(), onCuda(x, DType::kFloat), lo, hi, composed);
     CATCH_REQUIRE(closeTo(composed, expected, DType::kFloat));
   }
@@ -220,15 +220,15 @@ CATCH_TEST_CASE("CUDA clamp agrees with the CPU", "[op][cuda][signal]") {
   for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, 0.25f}, {-inf, 100.0f}}) {
     CATCH_INFO("lo " << lo << " hi " << hi);
     Tensor rounded = backToCpu(onCuda(small, DType::kFloat16));
-    Tensor expected = F::clamp(cpuOps(), rounded, lo, hi);
+    Tensor expected = fl::test::clamp(cpuOps(), rounded, lo, hi);
     // The bounds too are only what half can hold of them.
     Tensor halfBounds = backToCpu(onCuda(onCpu({2}, {std::isinf(lo) ? 0.0f : lo, hi}), DType::kFloat16));
     const float *b = halfBounds.getInternalData()->getData<float>(halfBounds.getInternalOffset());
-    if (!std::isinf(lo)) expected = F::clamp(cpuOps(), rounded, b[0], b[1]);
-    else expected = F::clamp(cpuOps(), rounded, lo, b[1]);
+    if (!std::isinf(lo)) expected = fl::test::clamp(cpuOps(), rounded, b[0], b[1]);
+    else expected = fl::test::clamp(cpuOps(), rounded, lo, b[1]);
 
-    Tensor kernel = backToCpu(F::clamp(cudaOps(), onCuda(small, DType::kFloat16), lo, hi));
-    Tensor composed = F::zeros(Device::getCuda(), {1, 8}, DType::kFloat16);
+    Tensor kernel = backToCpu(fl::test::clamp(cudaOps(), onCuda(small, DType::kFloat16), lo, hi));
+    Tensor composed = fl::test::zeros(Device::getCuda(), {1, 8}, DType::kFloat16);
     F::composedClamp(cudaOps(), onCuda(small, DType::kFloat16), lo, hi, composed);
     for (const Tensor &got : {kernel, backToCpu(composed)}) {
       const float *v = got.getInternalData()->getData<float>(got.getInternalOffset());
@@ -245,8 +245,8 @@ CATCH_TEST_CASE("CUDA clamp agrees with the CPU", "[op][cuda][signal]") {
   float nan = std::numeric_limits<float>::quiet_NaN();
   Tensor special = onCpu({1, 4}, {nan, inf, -inf, 0.1f});
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
-    Tensor kernel = backToCpu(F::clamp(cudaOps(), onCuda(special, dtype), -0.5f, 0.25f));
-    Tensor composed = F::zeros(Device::getCuda(), {1, 4}, dtype);
+    Tensor kernel = backToCpu(fl::test::clamp(cudaOps(), onCuda(special, dtype), -0.5f, 0.25f));
+    Tensor composed = fl::test::zeros(Device::getCuda(), {1, 4}, dtype);
     F::composedClamp(cudaOps(), onCuda(special, dtype), -0.5f, 0.25f, composed);
     for (const Tensor &got : {kernel, backToCpu(composed)}) {
       const float *v = got.getInternalData()->getData<float>(got.getInternalOffset());
@@ -268,12 +268,12 @@ CATCH_TEST_CASE("CUDA stft and istft agree with the CPU", "[op][cuda][signal]") 
     Tensor x = onCpu({2, 1, length}, spread(2 * length, 9));
     Tensor window = onCpu({nFft}, hann(nFft));
 
-    Tensor expected = F::stft(cpuOps(), x, window, nFft, hop, true);
+    Tensor expected = fl::test::stft(cpuOps(), x, window, nFft, hop, true);
     Tensor spectrum =
-        F::stft(cudaOps(), onCuda(x, DType::kFloat), onCuda(window, DType::kFloat), nFft, hop, true);
+        fl::test::stft(cudaOps(), onCuda(x, DType::kFloat), onCuda(window, DType::kFloat), nFft, hop, true);
     CATCH_REQUIRE(cpuOps()->allClose(backToCpu(spectrum), expected, 1e-3f, 1e-3f));
 
-    Tensor back = F::istft(cudaOps(), spectrum, onCuda(window, DType::kFloat), nFft, hop, true);
+    Tensor back = fl::test::istft(cudaOps(), spectrum, onCuda(window, DType::kFloat), nFft, hop, true);
     CATCH_REQUIRE(cpuOps()->allClose(backToCpu(back), x, 1e-3f, 1e-3f));
   }
 }
@@ -291,8 +291,8 @@ CATCH_TEST_CASE("CUDA istft in half has no NaN at the ends", "[op][cuda][signal]
   for (bool centered : {false, true}) {
     CATCH_INFO("centered " << centered);
     DType h = DType::kFloat16;
-    Tensor spectrum = F::stft(cudaOps(), onCuda(x, h), onCuda(window, h), nFft, hop, centered);
-    Tensor back = backToCpu(F::istft(cudaOps(), spectrum, onCuda(window, h), nFft, hop, centered));
+    Tensor spectrum = fl::test::stft(cudaOps(), onCuda(x, h), onCuda(window, h), nFft, hop, centered);
+    Tensor back = backToCpu(fl::test::istft(cudaOps(), spectrum, onCuda(window, h), nFft, hop, centered));
     CATCH_REQUIRE(back.getNumEl() == length);
 
     const float *got = back.getInternalData()->getData<float>(back.getInternalOffset());

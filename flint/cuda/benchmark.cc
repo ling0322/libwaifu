@@ -65,7 +65,7 @@ void printMatmul(const std::string &name, float milliseconds, int m, int n, int 
 }
 
 Tensor randHalf(const std::shared_ptr<Operators> &operators, std::initializer_list<int> shape) {
-  return F::rand(Device::getCuda(), shape, DType::kFloat16);
+  return fl::test::rand(Device::getCuda(), shape, DType::kFloat16);
 }
 
 /// The bytes an operator has to move at least once: what it reads plus what it writes. A norm or
@@ -199,7 +199,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL GEMM") {
     for (const std::shared_ptr<Operators> &backend : {cublas, cutlass}) {
       if (!backend) continue;
 
-      float milliseconds = benchmarkCuda([&] { F::matmul(backend.get(), input, weight); });
+      float milliseconds = benchmarkCuda([&] { fl::test::matmul(backend.get(), input, weight); });
       line += lut::sprintf(
           " %10.1f us %10.2f",
           milliseconds * 1000.0f,
@@ -245,18 +245,18 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
 
     printBandwidth(
         std::string("group_norm   ") + level.what,
-        benchmarkCuda([&] { F::groupNorm(operators.get(), x, scale, shift, 32, 1e-5f); }),
+        benchmarkCuda([&] { fl::test::groupNorm(operators.get(), x, scale, shift, 32, 1e-5f); }),
         moved);
     printBandwidth(
         std::string("silu         ") + level.what,
-        benchmarkCuda([&] { F::silu(operators.get(), x); }),
+        benchmarkCuda([&] { fl::test::silu(operators.get(), x); }),
         moved);
 
     // Three tensors rather than two: a residual reads both of its inputs.
     Tensor other = randHalf(operators, {1, level.channels, level.size, level.size});
     printBandwidth(
         std::string("add          ") + level.what,
-        benchmarkCuda([&] { F::add(operators.get(), x, other); }),
+        benchmarkCuda([&] { fl::test::add(operators.get(), x, other); }),
         1.5 * moved);
   }
 
@@ -276,14 +276,14 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor shift = randHalf(operators, {width});
     printBandwidth(
         std::string("layer_norm   ") + attention.what,
-        benchmarkCuda([&] { F::layerNorm(operators.get(), hidden, scale, shift, 1e-5f); }),
+        benchmarkCuda([&] { fl::test::layerNorm(operators.get(), hidden, scale, shift, 1e-5f); }),
         2 * halfBytes({1, attention.tokens, width}));
 
     Tensor q = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     Tensor k = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     Tensor v = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     double flop = 4.0 * attention.heads * attention.tokens * attention.tokens * 64;
-    float milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, k, v, MaskType::kNone); });
+    float milliseconds = benchmarkCuda([&] { fl::test::attention(operators.get(), q, k, v, MaskType::kNone); });
     bench::print(
         "%-44s %10.3f us  %8.2f TFLOP/s\n",
         (std::string("self attention ") + attention.what).c_str(),
@@ -294,7 +294,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor ck = randHalf(operators, {1, attention.heads, 77, 64});
     Tensor cv = randHalf(operators, {1, attention.heads, 77, 64});
     double crossFlop = 4.0 * attention.heads * attention.tokens * 77 * 64;
-    milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, ck, cv, MaskType::kNone); });
+    milliseconds = benchmarkCuda([&] { fl::test::attention(operators.get(), q, ck, cv, MaskType::kNone); });
     bench::print(
         "%-44s %10.3f us  %8.2f TFLOP/s\n",
         (std::string("cross attention ") + attention.what).c_str(),
@@ -306,7 +306,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor gated = randHalf(operators, {1, attention.tokens, 2 * inner});
     printBandwidth(
         std::string("geglu        ") + attention.what,
-        benchmarkCuda([&] { F::geglu(operators.get(), gated); }),
+        benchmarkCuda([&] { fl::test::geglu(operators.get(), gated); }),
         1.5 * halfBytes({1, attention.tokens, 2 * inner}));
   }
 
@@ -316,7 +316,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor x = randHalf(operators, {1, level.channels, level.size, level.size});
     printBandwidth(
         std::string("upsample     ") + level.what,
-        benchmarkCuda([&] { F::upsampleNearest2d(operators.get(), x, 2); }),
+        benchmarkCuda([&] { fl::test::upsampleNearest2d(operators.get(), x, 2); }),
         5 * halfBytes({1, level.channels, level.size, level.size}));
   }
 }
@@ -352,8 +352,8 @@ namespace {
 /// anywhere is infinitely far.
 float maxAbsDiff(const Tensor &a, const Tensor &b) {
   Operators *cuda = getOperators(Device::kCuda);
-  Tensor ha = F::toDevice(cuda, F::cast(cuda, a, DType::kFloat), Device::getCpu());
-  Tensor hb = F::toDevice(cuda, F::cast(cuda, b, DType::kFloat), Device::getCpu());
+  Tensor ha = fl::test::toDevice(cuda, fl::test::cast(cuda, a, DType::kFloat), Device::getCpu());
+  Tensor hb = fl::test::toDevice(cuda, fl::test::cast(cuda, b, DType::kFloat), Device::getCpu());
   const float *pa = ha.getInternalData()->getData<float>(ha.getInternalOffset());
   const float *pb = hb.getInternalData()->getData<float>(hb.getInternalOffset());
   float worst = 0.0f;
@@ -455,9 +455,9 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     // asked of the base class directly.
     if (!blocked) {
       operators->Operators::attention(
-          F::cast(operators.get(), q, DType::kFloat),
-          F::cast(operators.get(), k, DType::kFloat),
-          F::cast(operators.get(), v, DType::kFloat),
+          fl::test::cast(operators.get(), q, DType::kFloat),
+          fl::test::cast(operators.get(), k, DType::kFloat),
+          fl::test::cast(operators.get(), v, DType::kFloat),
           s.maskType,
           0,
           reference);

@@ -43,17 +43,17 @@ Operators *cpuOps() {
 }
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 /// A float tensor moved to the device as it stands. The autoencoder runs in float32, so the
 /// strided copies behind `contiguous` and `cat` have to take that type as well as half.
 Tensor toCudaFloat(const Tensor &a) {
-  return F::toDevice(cudaOps(), a, Device::getCuda());
+  return fl::test::toDevice(cudaOps(), a, Device::getCuda());
 }
 
 /// A copy moves the bits it was given, so its result is exact rather than close. `allClose`
@@ -81,7 +81,7 @@ CATCH_TEST_CASE("test CUDA copy", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   auto runCase = [](std::initializer_list<int> shape, bool transpose) {
-    Tensor a = F::rand(Device::getCpu(), shape, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
 
     Tensor x = toCuda(a);
     if (transpose) x = x.transpose(1, 0);
@@ -105,7 +105,7 @@ CATCH_TEST_CASE("test CUDA copy (float)", "[op][cuda]") {
   // The same shapes as the half case. A float copy moves the bits it was given, so the result is
   // exact rather than close: anything else means an element went to the wrong place.
   auto runCase = [](std::initializer_list<int> shape, bool transpose) {
-    Tensor a = F::rand(Device::getCpu(), shape, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
 
     Tensor x = toCudaFloat(a);
     if (transpose) x = x.transpose(1, 0);
@@ -113,8 +113,8 @@ CATCH_TEST_CASE("test CUDA copy (float)", "[op][cuda]") {
     CATCH_REQUIRE(dest.getDType() == DType::kFloat);
     cudaOps()->copy(x, dest);
 
-    dest = F::toDevice(cudaOps(), dest, Device::getCpu());
-    if (transpose) dest = F::contiguous(cpuOps(), dest.transpose(1, 0));
+    dest = fl::test::toDevice(cudaOps(), dest, Device::getCpu());
+    if (transpose) dest = fl::test::contiguous(cpuOps(), dest.transpose(1, 0));
     return equalFloat(a, dest);
   };
 
@@ -129,10 +129,10 @@ CATCH_TEST_CASE("test CUDA copy (long)", "[op][cuda]") {
 
   Tensor a = Tensor::create<LongType>({2, 5}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 0});
 
-  Tensor x = F::toDevice(cudaOps(), a, Device::getCuda());
+  Tensor x = fl::test::toDevice(cudaOps(), a, Device::getCuda());
   Tensor dest = F::emptyLike(x);
   cudaOps()->copy(x, dest);
-  dest = F::toDevice(cudaOps(), dest, Device::getCpu());
+  dest = fl::test::toDevice(cudaOps(), dest, Device::getCpu());
 
   CATCH_REQUIRE(equalLong(dest, a));
 }
@@ -140,8 +140,8 @@ CATCH_TEST_CASE("test CUDA copy (long)", "[op][cuda]") {
 CATCH_TEST_CASE("test CUDA copy (expanded 5D)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand(Device::getCpu(), {10, 2, 5, 20}, DType::kFloat);
-  Tensor xr = F::contiguous(cpuOps(), a.unsqueeze(1).expand({10, 4, 2, 5, 20}));
+  Tensor a = fl::test::rand(Device::getCpu(), {10, 2, 5, 20}, DType::kFloat);
+  Tensor xr = fl::test::contiguous(cpuOps(), a.unsqueeze(1).expand({10, 4, 2, 5, 20}));
 
   Tensor x = toCuda(a).unsqueeze(1).expand({10, 4, 2, 5, 20});
   Tensor dest = F::emptyLike(x);
@@ -157,22 +157,22 @@ CATCH_TEST_CASE("test CUDA copy (into a strided destination)", "[op][cuda]") {
   // kernel has to honour the destination strides and leave everything outside the window alone.
   constexpr int Rows = 4;
   constexpr int Cols = 10;
-  Tensor dest = F::zeros(Device::getCuda(), {Rows, Cols}, DType::kFloat16);
+  Tensor dest = fl::test::zeros(Device::getCuda(), {Rows, Cols}, DType::kFloat16);
   Tensor window = dest.slice(1, {2, 6});
   CATCH_REQUIRE(!window.isContiguous());
 
-  Tensor src = F::rand(Device::getCpu(), {Rows, 4}, DType::kFloat);
+  Tensor src = fl::test::rand(Device::getCpu(), {Rows, 4}, DType::kFloat);
   cudaOps()->copy(toCuda(src), window);
 
   Tensor host = toCpu(dest);
-  CATCH_REQUIRE(cpuOps()->allClose(F::contiguous(cpuOps(), host.slice(1, {2, 6})), src, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(fl::test::contiguous(cpuOps(), host.slice(1, {2, 6})), src, 5e-3));
   // the columns either side of the window are still zero.
   CATCH_REQUIRE(cpuOps()->allClose(
-      F::contiguous(cpuOps(), host.slice(1, {0, 2})),
-      F::zeros(Device::getCpu(), {Rows, 2}, DType::kFloat)));
+      fl::test::contiguous(cpuOps(), host.slice(1, {0, 2})),
+      fl::test::zeros(Device::getCpu(), {Rows, 2}, DType::kFloat)));
   CATCH_REQUIRE(cpuOps()->allClose(
-      F::contiguous(cpuOps(), host.slice(1, {6, 10})),
-      F::zeros(Device::getCpu(), {Rows, 4}, DType::kFloat)));
+      fl::test::contiguous(cpuOps(), host.slice(1, {6, 10})),
+      fl::test::zeros(Device::getCpu(), {Rows, 4}, DType::kFloat)));
 }
 
 CATCH_TEST_CASE("test CUDA copy (single element and single row)", "[op][cuda]") {
@@ -186,7 +186,7 @@ CATCH_TEST_CASE("test CUDA copy (single element and single row)", "[op][cuda]") 
            {5, 1},
            {1, 1, 1},
            {1, 1, 1, 1}}) {
-    Tensor a = F::rand(Device::getCpu(), shape, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
     Tensor x = toCuda(a);
     Tensor dest = F::emptyLike(x);
     cudaOps()->copy(x, dest);
@@ -201,7 +201,7 @@ CATCH_TEST_CASE("test CUDA copy (crosses the grid-stride loop)", "[op][cuda]") {
 
   // Larger than the grid the launcher caps at, so every thread runs the loop body more than once
   // and a kernel that assumed one element per thread would drop the tail.
-  Tensor a = F::rand(Device::getCpu(), {512, 1024}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {512, 1024}, DType::kFloat);
   Tensor x = toCuda(a).transpose(1, 0);
   Tensor dest = F::emptyLike(x);
   cudaOps()->copy(x, dest);
@@ -212,12 +212,12 @@ CATCH_TEST_CASE("test CUDA copy (crosses the grid-stride loop)", "[op][cuda]") {
 CATCH_TEST_CASE("test CUDA cat", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand(Device::getCpu(), {2, 10, 16}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {2, 2, 16}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 10, 16}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {2, 2, 16}, DType::kFloat);
 
-  Tensor x = F::cat(cudaOps(), toCuda(a), toCuda(b), 1);
+  Tensor x = fl::test::cat(cudaOps(), toCuda(a), toCuda(b), 1);
 
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), F::cat(cpuOps(), a, b, 1), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), fl::test::cat(cpuOps(), a, b, 1), 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA cat (every axis)", "[op][cuda]") {
@@ -225,19 +225,19 @@ CATCH_TEST_CASE("test CUDA cat (every axis)", "[op][cuda]") {
 
   // Concatenating on the first axis keeps both halves contiguous; on the last axis neither half
   // is, which is the case that needs the strided copy kernel.
-  Tensor a = F::rand(Device::getCpu(), {3, 4, 6}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {3, 4, 6}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {3, 4, 6}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {3, 4, 6}, DType::kFloat);
 
   for (int dim : {0, 1, 2}) {
-    Tensor x = F::cat(cudaOps(), toCuda(a), toCuda(b), dim);
+    Tensor x = fl::test::cat(cudaOps(), toCuda(a), toCuda(b), dim);
     CATCH_INFO("dim = " << dim);
-    CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), F::cat(cpuOps(), a, b, dim), 5e-3));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), fl::test::cat(cpuOps(), a, b, dim), 5e-3));
   }
 
   // negative axes address the same dimensions from the back.
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(F::cat(cudaOps(), toCuda(a), toCuda(b), -1)),
-      F::cat(cpuOps(), a, b, 2),
+      toCpu(fl::test::cat(cudaOps(), toCuda(a), toCuda(b), -1)),
+      fl::test::cat(cpuOps(), a, b, 2),
       5e-3));
 }
 
@@ -245,19 +245,19 @@ CATCH_TEST_CASE("test CUDA cat (uneven and single-element parts)", "[op][cuda]")
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   // A one-token append is the shape the decode loop produces every step.
-  Tensor a = F::rand(Device::getCpu(), {2, 7, 16}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {2, 1, 16}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 7, 16}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {2, 1, 16}, DType::kFloat);
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(F::cat(cudaOps(), toCuda(a), toCuda(b), 1)),
-      F::cat(cpuOps(), a, b, 1),
+      toCpu(fl::test::cat(cudaOps(), toCuda(a), toCuda(b), 1)),
+      fl::test::cat(cpuOps(), a, b, 1),
       5e-3));
 
   // 2D, and a left operand that is itself only one row.
-  Tensor c = F::rand(Device::getCpu(), {1, 8}, DType::kFloat);
-  Tensor d = F::rand(Device::getCpu(), {3, 8}, DType::kFloat);
+  Tensor c = fl::test::rand(Device::getCpu(), {1, 8}, DType::kFloat);
+  Tensor d = fl::test::rand(Device::getCpu(), {3, 8}, DType::kFloat);
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(F::cat(cudaOps(), toCuda(c), toCuda(d), 0)),
-      F::cat(cpuOps(), c, d, 0),
+      toCpu(fl::test::cat(cudaOps(), toCuda(c), toCuda(d), 0)),
+      fl::test::cat(cpuOps(), c, d, 0),
       5e-3));
 }
 

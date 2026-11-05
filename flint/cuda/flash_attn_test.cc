@@ -40,11 +40,11 @@ Operators *cpuOps() {
 }
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 /// One sequence of a packed batch, and the blocks it owns.
@@ -62,7 +62,7 @@ Tensor gatherFromPool(const Tensor &pool, const Sequence &sequence) {
   for (int offset = 0; offset < sequence.keyLength; offset += blockSize) {
     int length = std::min(blockSize, sequence.keyLength - offset);
     Tensor part = pool.subtensor(sequence.blockIds[offset / blockSize]).slice(0, {0, length});
-    gathered = offset == 0 ? part : F::cat(cpuOps(), gathered, part, 0);
+    gathered = offset == 0 ? part : fl::test::cat(cpuOps(), gathered, part, 0);
   }
 
   return gathered;
@@ -75,13 +75,13 @@ Tensor referenceAttention(
     const Tensor &value,
     bool causal) {
   // The dense operator wants <float>(batch, head, length, headDim).
-  Tensor x = F::attention(cpuOps(), 
+  Tensor x = fl::test::attention(cpuOps(), 
       query.unsqueeze(0).transpose(1, 2),
       key.unsqueeze(0).transpose(1, 2),
       value.unsqueeze(0).transpose(1, 2),
-      F::causalIf(causal));
+      fl::test::causalIf(causal));
 
-  return F::contiguous(cpuOps(), x.subtensor(0).transpose(0, 1));
+  return fl::test::contiguous(cpuOps(), x.subtensor(0).transpose(0, 1));
 }
 
 bool runCase(
@@ -104,10 +104,10 @@ bool runCase(
     maxKeyLength = std::max(maxKeyLength, sequence.keyLength);
   }
 
-  Tensor keyPool = F::rand(Device::getCpu(), {numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor keyPool = fl::test::rand(Device::getCpu(), {numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
   Tensor valuePool =
-      F::rand(Device::getCpu(), {numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
-  Tensor query = F::rand(Device::getCpu(), {totalQueryLength, numHeads, headDim}, DType::kFloat);
+      fl::test::rand(Device::getCpu(), {numBlocks, blockSize, numKeyValueHeads, headDim}, DType::kFloat);
+  Tensor query = fl::test::rand(Device::getCpu(), {totalQueryLength, numHeads, headDim}, DType::kFloat);
 
   std::vector<IntType> blockTableData(numSequences * maxNumBlocks, 0);
   std::vector<IntType> cuSeqlensQData(numSequences + 1, 0);
@@ -126,16 +126,16 @@ bool runCase(
   Tensor cuSeqlensQ = Tensor::create<IntType>({numSequences + 1}, cuSeqlensQData);
   Tensor seqlensK = Tensor::create<IntType>({numSequences}, seqlensKData);
 
-  Tensor x = F::pagedAttention(cudaOps(), 
+  Tensor x = fl::test::pagedAttention(cudaOps(), 
       toCuda(query),
       toCuda(keyPool),
       toCuda(valuePool),
-      F::toDevice(cudaOps(), blockTable, Device::getCuda()),
-      F::toDevice(cudaOps(), cuSeqlensQ, Device::getCuda()),
-      F::toDevice(cudaOps(), seqlensK, Device::getCuda()),
+      fl::test::toDevice(cudaOps(), blockTable, Device::getCuda()),
+      fl::test::toDevice(cudaOps(), cuSeqlensQ, Device::getCuda()),
+      fl::test::toDevice(cudaOps(), seqlensK, Device::getCuda()),
       maxQueryLength,
       maxKeyLength,
-      F::causalIf(causal));
+      fl::test::causalIf(causal));
 
   if (x.getShape() != std::vector<int>{totalQueryLength, numHeads, headDim}) return false;
   Tensor output = toCpu(x);
@@ -149,7 +149,7 @@ bool runCase(
         query.slice(0, {begin, end}),
         gatherFromPool(keyPool, sequence),
         gatherFromPool(valuePool, sequence),
-        F::causalIf(causal));
+        fl::test::causalIf(causal));
 
     if (!cpuOps()->allClose(output.slice(0, {begin, end}), expected, 5e-3f)) return false;
   }

@@ -42,7 +42,7 @@ Operators *cpuOps() {
 }
 
 Tensor toCpuFloat(Tensor tensor) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), tensor, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), tensor, DType::kFloat), Device::getCpu());
 }
 
 Tensor baselineRotaryEmbedding(Tensor input, Tensor roPE) {
@@ -54,13 +54,13 @@ Tensor baselineRotaryEmbedding(Tensor input, Tensor roPE) {
   int halfDim = input.getShape(-1) / 2;
   Tensor rotated = F::emptyLike(input);
   Tensor first = input.slice(-1, {0, halfDim});
-  Tensor second = F::mul(cudaOps(), input.slice(-1, {halfDim, None}), -1.0f);
+  Tensor second = fl::test::mul(cudaOps(), input.slice(-1, {halfDim, None}), -1.0f);
   cudaOps()->copy(first, rotated.slice(-1, {halfDim, None}));
   cudaOps()->copy(second, rotated.slice(-1, {0, halfDim}));
 
-  return F::add(cudaOps(), 
-      F::mul(cudaOps(), input, F::contiguous(cudaOps(), cos)),
-      F::mul(cudaOps(), rotated, F::contiguous(cudaOps(), sin)));
+  return fl::test::add(cudaOps(), 
+      fl::test::mul(cudaOps(), input, fl::test::contiguous(cudaOps(), cos)),
+      fl::test::mul(cudaOps(), rotated, fl::test::contiguous(cudaOps(), sin)));
 }
 
 bool runCase(int numQueryHeads, int numKeyHeads, int headDim) {
@@ -68,18 +68,18 @@ bool runCase(int numQueryHeads, int numKeyHeads, int headDim) {
   int numTokens = static_cast<int>(positionValues.size());
   Device device = Device::getCuda();
 
-  Tensor positions = F::toDevice(cudaOps(), Tensor::create<LongType>({numTokens}, positionValues), device);
-  Tensor query = F::rand(Device::getCuda(), {numTokens, numQueryHeads, headDim}, DType::kFloat16);
-  Tensor key = F::rand(Device::getCuda(), {numTokens, numKeyHeads, headDim}, DType::kFloat16);
-  Tensor cache = F::rand(Device::getCuda(), {64, 2 * headDim}, DType::kFloat16);
+  Tensor positions = fl::test::toDevice(cudaOps(), Tensor::create<LongType>({numTokens}, positionValues), device);
+  Tensor query = fl::test::rand(Device::getCuda(), {numTokens, numQueryHeads, headDim}, DType::kFloat16);
+  Tensor key = fl::test::rand(Device::getCuda(), {numTokens, numKeyHeads, headDim}, DType::kFloat16);
+  Tensor cache = fl::test::rand(Device::getCuda(), {64, 2 * headDim}, DType::kFloat16);
 
-  Tensor gathered = F::lookup(cudaOps(), cache, positions);
+  Tensor gathered = fl::test::lookup(cudaOps(), cache, positions);
   gathered = gathered.view({numTokens, 2, 1, headDim}).transpose(0, 1);
   Tensor expectedQuery = baselineRotaryEmbedding(query, gathered);
   Tensor expectedKey = baselineRotaryEmbedding(key, gathered);
 
-  Tensor actualQuery = F::contiguous(cudaOps(), query);
-  Tensor actualKey = F::contiguous(cudaOps(), key);
+  Tensor actualQuery = fl::test::contiguous(cudaOps(), query);
+  Tensor actualKey = fl::test::contiguous(cudaOps(), key);
   cudaOps()->rotaryEmbedding(positions, actualQuery, actualKey, cache);
 
   return cpuOps()->allClose(toCpuFloat(actualQuery), toCpuFloat(expectedQuery), 5e-3f) &&

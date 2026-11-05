@@ -50,7 +50,7 @@ bool equalLong(Tensor a, Tensor b) {
 CATCH_TEST_CASE("test CUDA arange", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor arange = F::toDevice(cudaOps(), F::arangeLong(Device::getCuda(), 0, 10, 2), Device::getCpu());
+  Tensor arange = fl::test::toDevice(cudaOps(), fl::test::arangeLong(Device::getCuda(), 0, 10, 2), Device::getCpu());
   CATCH_REQUIRE(equalLong(arange, Tensor::create<LongType>({5}, {0, 2, 4, 6, 8})));
 }
 
@@ -59,20 +59,20 @@ CATCH_TEST_CASE("test CUDA arange (step and bounds)", "[op][cuda]") {
 
   // The length is a truncating division, so a step that does not divide the span evenly stops
   // short of the end rather than overshooting it.
-  Tensor uneven = F::toDevice(cudaOps(), F::arangeLong(Device::getCuda(), 0, 10, 3), Device::getCpu());
+  Tensor uneven = fl::test::toDevice(cudaOps(), fl::test::arangeLong(Device::getCuda(), 0, 10, 3), Device::getCpu());
   CATCH_REQUIRE(uneven.getShape() == std::vector<int>{3});
   CATCH_REQUIRE(equalLong(uneven, Tensor::create<LongType>({3}, {0, 3, 6})));
 
   // a step of 1 is the common case, and a non-zero start offsets every element.
-  Tensor unit = F::toDevice(cudaOps(), F::arangeLong(Device::getCuda(), 5, 9, 1), Device::getCpu());
+  Tensor unit = fl::test::toDevice(cudaOps(), fl::test::arangeLong(Device::getCuda(), 5, 9, 1), Device::getCpu());
   CATCH_REQUIRE(equalLong(unit, Tensor::create<LongType>({4}, {5, 6, 7, 8})));
 
   // a negative start walks up through zero.
-  Tensor negative = F::toDevice(cudaOps(), F::arangeLong(Device::getCuda(), -3, 3, 2), Device::getCpu());
+  Tensor negative = fl::test::toDevice(cudaOps(), fl::test::arangeLong(Device::getCuda(), -3, 3, 2), Device::getCpu());
   CATCH_REQUIRE(equalLong(negative, Tensor::create<LongType>({3}, {-3, -1, 1})));
 
   // a single element.
-  Tensor one = F::toDevice(cudaOps(), F::arangeLong(Device::getCuda(), 7, 8, 1), Device::getCpu());
+  Tensor one = fl::test::toDevice(cudaOps(), fl::test::arangeLong(Device::getCuda(), 7, 8, 1), Device::getCpu());
   CATCH_REQUIRE(one.getShape() == std::vector<int>{1});
   CATCH_REQUIRE(equalLong(one, Tensor::create<LongType>({1}, {7})));
 }
@@ -82,7 +82,7 @@ CATCH_TEST_CASE("test CUDA arange (descending)", "[op][cuda]") {
 
   // A negative step makes both the span and the step negative, so the length stays positive and
   // the values count down.
-  Tensor down = F::toDevice(cudaOps(), F::arangeLong(Device::getCuda(), 10, 0, -2), Device::getCpu());
+  Tensor down = fl::test::toDevice(cudaOps(), fl::test::arangeLong(Device::getCuda(), 10, 0, -2), Device::getCpu());
   CATCH_REQUIRE(down.getShape() == std::vector<int>{5});
   CATCH_REQUIRE(equalLong(down, Tensor::create<LongType>({5}, {10, 8, 6, 4, 2})));
 }
@@ -93,7 +93,7 @@ CATCH_TEST_CASE("test CUDA arange (crosses a block boundary)", "[op][cuda]") {
   // More elements than one 256-thread block covers, so the tail past the boundary would be left
   // uninitialised by a kernel that forgot its bounds check.
   constexpr int Count = 300;
-  Tensor x = F::toDevice(cudaOps(), F::arangeLong(Device::getCuda(), 0, Count, 1), Device::getCpu());
+  Tensor x = fl::test::toDevice(cudaOps(), fl::test::arangeLong(Device::getCuda(), 0, Count, 1), Device::getCpu());
   CATCH_REQUIRE(x.getShape() == std::vector<int>{Count});
 
   std::vector<LongType> expected(Count);
