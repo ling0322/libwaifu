@@ -79,9 +79,43 @@ pub struct Say {
     /// How long the vocoder is expected to take, as a multiple of everything before it: what the
     /// last reading with this program took, or [`VOCODER_RATIO`] before there was one.
     pub ratio: f64,
+    /// Whether it takes turns, saying and sounding a piece at a time, as a streaming reading
+    /// does -- so that `Sounding` comes once a piece rather than once, and the bar is the tokens.
+    pub streaming: bool,
+    /// The most tokens it has said, which a streaming reading's bar is drawn from.
+    pub said: i32,
 }
 
 impl Say {
+    /// A reading of `expected` tokens, started now, nothing yet said.
+    pub fn new(expected: i32, ratio: f64, streaming: bool) -> Say {
+        Say {
+            progress: SpeechProgress::Reading,
+            expected,
+            started: Instant::now(),
+            sounding: None,
+            ratio,
+            streaming,
+            said: 0,
+        }
+    }
+
+    /// What the voice said it is doing, kept as the bar reads it: the estimate and the count
+    /// from a token, and when the vocoder first started.
+    pub fn told(&mut self, progress: SpeechProgress) {
+        self.progress = progress;
+        match progress {
+            SpeechProgress::Saying { done, expected } => {
+                self.expected = expected;
+                self.said = self.said.max(done);
+            }
+            SpeechProgress::Sounding if self.sounding.is_none() => {
+                self.sounding = Some(Instant::now())
+            }
+            _ => {}
+        }
+    }
+
     /// How long the vocoder took against everything before it, for a reading that has finished.
     pub fn measured_ratio(&self, finished: Instant) -> Option<f64> {
         let sounding = self.sounding?;
@@ -295,6 +329,17 @@ fn drawn(progress: GenerationProgress, steps: i32) -> f64 {
 fn spoken(say: &Say, now: Instant) -> f64 {
     let tokens = 1.0 / (1.0 + say.ratio.max(0.0));
     let expected = f64::from(say.expected.max(1));
+
+    // A streaming reading says and sounds a piece at a time, so a share for the tokens and one for
+    // the vocoder after them is a bar that goes back to the tokens at every piece. The tokens said
+    // over the tokens expected is how far along it is; it stands still while a piece is sounded
+    // and only moves on, and it is held short of the end until the end.
+    if say.streaming {
+        return match say.progress {
+            SpeechProgress::Reading => 0.0,
+            _ => (f64::from(say.said.max(0)).min(expected) / expected).min(HELD),
+        };
+    }
 
     match say.progress {
         SpeechProgress::Reading => 0.0,
@@ -533,11 +578,43 @@ mod tests {
         let started = now - Duration::from_secs(before);
         Say {
             progress,
-            expected,
             started,
             sounding: matches!(progress, SpeechProgress::Sounding).then_some(now),
-            ratio,
+            ..Say::new(expected, ratio, false)
         }
+    }
+
+    #[test]
+    fn a_streaming_reading_moves_its_bar_only_forward_through_its_pieces() {
+        // Two pieces of forty tokens, each said and then sounded. Split into saying and sounding
+        // shares, the second piece's tokens took the bar back from where the first one's
+        // vocoder had left it, and its vocoder ran on the first one's clock.
+        let mut say = Say::new(0, 2.0, true);
+        let mut bar = vec![spoken(&say, Instant::now())];
+        let mut tell = |say: &mut Say, progress| {
+            say.told(progress);
+            let now = say
+                .sounding
+                .map_or(Instant::now(), |at| at + Duration::from_secs(600));
+            bar.push(spoken(say, now));
+        };
+        for piece in 0..2 {
+            for count in 1..=40 {
+                let progress = SpeechProgress::Saying {
+                    done: piece * 40 + count,
+                    expected: 80,
+                };
+                tell(&mut say, progress);
+            }
+            tell(&mut say, SpeechProgress::Sounding);
+        }
+
+        assert!(bar.windows(2).all(|w| w[0] <= w[1]), "{bar:?}");
+        // Halfway is halfway, while the first piece is sounded as much as when it was said.
+        assert_eq!(bar[41], 0.5);
+        assert_eq!(bar[40], 0.5);
+        // And the end is held for the end.
+        assert_eq!(*bar.last().unwrap(), HELD);
     }
 
     #[test]
@@ -632,10 +709,7 @@ mod tests {
                 done: 3,
                 expected: 40,
             },
-            expected: 40,
-            started: Instant::now(),
-            sounding: None,
-            ratio: VOCODER_RATIO,
+            ..Say::new(40, VOCODER_RATIO, false)
         });
 
         assert!(saying.is_busy());

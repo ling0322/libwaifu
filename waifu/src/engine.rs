@@ -1226,23 +1226,17 @@ impl Worker {
             on_progress,
             started,
         };
+        // A streaming reading takes turns between saying and sounding a sentence at a time, so
+        // the vocoder's share of it is no measure of a reading that says everything first, and
+        // its bar is drawn from the tokens alone.
+        let streaming = on_audio.is_some();
         let mut say = Say {
-            progress: SpeechProgress::Reading,
-            expected: 0,
             started,
-            sounding: None,
-            ratio,
+            ..Say::new(0, ratio, streaming)
         };
         reporter.tell(&Doing::Speaking(say.clone()));
         let mut report = |progress| {
-            say.progress = progress;
-            match progress {
-                SpeechProgress::Saying { expected, .. } => say.expected = expected,
-                SpeechProgress::Sounding if say.sounding.is_none() => {
-                    say.sounding = Some(Instant::now())
-                }
-                _ => {}
-            }
+            say.told(progress);
             reporter.tell(&Doing::Speaking(say.clone()));
             match stop() {
                 true => ControlFlow::Break(()),
@@ -1251,9 +1245,6 @@ impl Worker {
         };
 
         let like = request.like.as_ref();
-        // A streaming reading takes turns between saying and sounding a sentence at a time, so
-        // the vocoder's share of it is no measure of a reading that says everything first.
-        let streaming = on_audio.is_some();
         let spoken = match on_audio {
             None => voice.speak(&request.text, like, &options, &mut report),
             Some(on_audio) => {
