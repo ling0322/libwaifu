@@ -50,24 +50,24 @@ Operators *cpu() {
 }
 
 Tensor toVulkan(const Tensor &a, DType dtype = DType::kFloat) {
-  return F::cast(vk(), F::toDevice(vk(), a, Device::getVulkan()), dtype);
+  return fl::test::cast(vk(), fl::test::toDevice(vk(), a, Device::getVulkan()), dtype);
 }
 
 Tensor toCpu(const Tensor &a) {
-  Tensor x = a.getDType().isFloat() ? F::cast(vk(), a, DType::kFloat) : a;
-  return F::toDevice(vk(), x, Device::getCpu());
+  Tensor x = a.getDType().isFloat() ? fl::test::cast(vk(), a, DType::kFloat) : a;
+  return fl::test::toDevice(vk(), x, Device::getCpu());
 }
 
 // `x + value` on the CPU, the value broadcast over `x`.
 Tensor plus(const Tensor &x, float value) {
-  Tensor scalar = F::zeros(Device::getCpu(), {1}, x.getDType());
+  Tensor scalar = fl::test::zeros(Device::getCpu(), {1}, x.getDType());
   cpu()->fill(scalar, value);
-  return F::add(cpu(), x, scalar);
+  return fl::test::add(cpu(), x, scalar);
 }
 
 // A random float tensor on the CPU, spread over [-2, 2) so that signs and saturation are seen.
 Tensor randn(std::initializer_list<int> shape) {
-  return plus(F::mul(cpu(), F::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), -2.0f);
+  return plus(fl::test::mul(cpu(), fl::test::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), -2.0f);
 }
 
 bool close(const Tensor &vulkan, const Tensor &reference, float rtol, float atol) {
@@ -75,7 +75,7 @@ bool close(const Tensor &vulkan, const Tensor &reference, float rtol, float atol
 }
 
 std::vector<float> values(const Tensor &a) {
-  Tensor x = F::contiguous(cpu(), a.getDevice().getType() == Device::kCpu ? a : toCpu(a));
+  Tensor x = fl::test::contiguous(cpu(), a.getDevice().getType() == Device::kCpu ? a : toCpu(a));
   const float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
   return std::vector<float>(data, data + x.getNumEl());
 }
@@ -100,8 +100,8 @@ CATCH_TEST_CASE("test Vulkan toDevice", "[op][vulkan]") {
   CATCH_REQUIRE(half.getDType() == DType::kFloat16);
   CATCH_REQUIRE(close(half, a, 1e-3f, 1e-3f));
 
-  Tensor longs = F::arangeLong(Device::getCpu(), -5, 100, 3);
-  Tensor back = toCpu(F::toDevice(vk(), longs, Device::getVulkan()));
+  Tensor longs = fl::test::arangeLong(Device::getCpu(), -5, 100, 3);
+  Tensor back = toCpu(fl::test::toDevice(vk(), longs, Device::getVulkan()));
   CATCH_REQUIRE(back.getDType() == DType::kLong);
   for (int i = 0; i < longs.getShape(0); ++i) {
     CATCH_REQUIRE(back.getInternalData()->getData<LongType>(0)[i] == -5 + 3 * i);
@@ -121,47 +121,47 @@ CATCH_TEST_CASE("test Vulkan binary operators", "[op][vulkan]") {
     Tensor x = toVulkan(a, dtype).transpose(2, 1).slice(1, {1, 9});
     Tensor y = toVulkan(b, dtype);
 
-    CATCH_REQUIRE(close(F::add(vk(), x, y), F::add(cpu(), at, b), tol, tol));
-    CATCH_REQUIRE(close(F::sub(vk(), x, y), F::sub(cpu(), at, b), tol, tol));
-    CATCH_REQUIRE(close(F::mul(vk(), x, y), F::mul(cpu(), at, b), tol, tol));
-    CATCH_REQUIRE(close(F::divTensor(vk(), x, y), F::divTensor(cpu(), at, b), 1e-2f, tol));
-    CATCH_REQUIRE(close(F::mul(vk(), x, 0.1f), F::mul(cpu(), at, 0.1f), tol, tol));
-    CATCH_REQUIRE(close(F::div(vk(), x, 4.0f), F::div(cpu(), at, 4.0f), tol, tol));
+    CATCH_REQUIRE(close(fl::test::add(vk(), x, y), fl::test::add(cpu(), at, b), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sub(vk(), x, y), fl::test::sub(cpu(), at, b), tol, tol));
+    CATCH_REQUIRE(close(fl::test::mul(vk(), x, y), fl::test::mul(cpu(), at, b), tol, tol));
+    CATCH_REQUIRE(close(fl::test::divTensor(vk(), x, y), fl::test::divTensor(cpu(), at, b), 1e-2f, tol));
+    CATCH_REQUIRE(close(fl::test::mul(vk(), x, 0.1f), fl::test::mul(cpu(), at, 0.1f), tol, tol));
+    CATCH_REQUIRE(close(fl::test::div(vk(), x, 4.0f), fl::test::div(cpu(), at, 4.0f), tol, tol));
 
     // A bias broadcast over (N, C, H, W), the pattern a convolution adds its bias in.
     Tensor image = randn({2, 3, 4, 5});
     Tensor bias = randn({3});
-    Tensor vkSum = F::add(vk(), toVulkan(image, dtype), toVulkan(bias, dtype).view({1, 3, 1, 1}));
-    CATCH_REQUIRE(close(vkSum, F::add(cpu(), image, bias.view({1, 3, 1, 1})), tol, tol));
+    Tensor vkSum = fl::test::add(vk(), toVulkan(image, dtype), toVulkan(bias, dtype).view({1, 3, 1, 1}));
+    CATCH_REQUIRE(close(vkSum, fl::test::add(cpu(), image, bias.view({1, 3, 1, 1})), tol, tol));
   }
 }
 
 CATCH_TEST_CASE("test Vulkan integer and bool operators", "[op][vulkan]") {
   SKIP_WITHOUT_VULKAN();
 
-  Tensor longs = F::arangeLong(Device(Device::kVulkan), -7, 20, 2);
-  Tensor remainders = toCpu(F::mod(vk(), longs, 5));
+  Tensor longs = fl::test::arangeLong(Device(Device::kVulkan), -7, 20, 2);
+  Tensor remainders = toCpu(fl::test::mod(vk(), longs, 5));
   for (int i = 0; i < longs.getShape(0); ++i) {
     LongType x = -7 + 2 * i;
     CATCH_REQUIRE(remainders.getInternalData()->getData<LongType>(0)[i] == x % 5);
   }
 
-  Tensor sum = toCpu(F::add(vk(), longs, longs));
+  Tensor sum = toCpu(fl::test::add(vk(), longs, longs));
   CATCH_REQUIRE(sum.getInternalData()->getData<LongType>(0)[3] == 2 * (-7 + 6));
 
   Tensor a = toVulkan(randn({4, 6}));
-  Tensor same = F::eq(vk(), a, a);
+  Tensor same = fl::test::eq(vk(), a, a);
   CATCH_REQUIRE(same.getDType() == DType::kBool);
   CATCH_REQUIRE(vk()->all(same));
-  CATCH_REQUIRE(!vk()->all(F::eq(vk(), a, F::add(vk(), a, a))));
-  CATCH_REQUIRE(vk()->all(F::eq(vk(), longs, longs)));
+  CATCH_REQUIRE(!vk()->all(fl::test::eq(vk(), a, fl::test::add(vk(), a, a))));
+  CATCH_REQUIRE(vk()->all(fl::test::eq(vk(), longs, longs)));
 }
 
 CATCH_TEST_CASE("test Vulkan unary operators", "[op][vulkan]") {
   SKIP_WITHOUT_VULKAN();
 
   Tensor a = randn({2, 5, 10});
-  Tensor positive = plus(F::abs(cpu(), a), 0.1f);
+  Tensor positive = plus(fl::test::abs(cpu(), a), 0.1f);
   Tensor at = a.transpose(2, 1).slice(1, {1, 9});
 
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
@@ -170,21 +170,21 @@ CATCH_TEST_CASE("test Vulkan unary operators", "[op][vulkan]") {
     Tensor x = toVulkan(a, dtype).transpose(2, 1).slice(1, {1, 9});
     Tensor p = toVulkan(positive, dtype);
 
-    CATCH_REQUIRE(close(F::neg(vk(), x), F::neg(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::abs(vk(), x), F::abs(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::exp(vk(), x), F::exp(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::square(vk(), x), F::square(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::sigmoid(vk(), x), F::sigmoid(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::tanh(vk(), x), F::tanh(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::relu(vk(), x), F::relu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::gelu(vk(), x), F::gelu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::silu(vk(), x), F::silu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::quickGelu(vk(), x), F::quickGelu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::sin(vk(), x), F::sin(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::cos(vk(), x), F::cos(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::sqrt(vk(), p), F::sqrt(cpu(), positive), tol, tol));
-    CATCH_REQUIRE(close(F::rsqrt(vk(), p), F::rsqrt(cpu(), positive), tol, tol));
-    CATCH_REQUIRE(close(F::log(vk(), p), F::log(cpu(), positive), tol, tol));
+    CATCH_REQUIRE(close(fl::test::neg(vk(), x), fl::test::neg(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::abs(vk(), x), fl::test::abs(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::exp(vk(), x), fl::test::exp(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::square(vk(), x), fl::test::square(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sigmoid(vk(), x), fl::test::sigmoid(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::tanh(vk(), x), fl::test::tanh(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::relu(vk(), x), fl::test::relu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::gelu(vk(), x), fl::test::gelu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::silu(vk(), x), fl::test::silu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::quickGelu(vk(), x), fl::test::quickGelu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sin(vk(), x), fl::test::sin(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::cos(vk(), x), fl::test::cos(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sqrt(vk(), p), fl::test::sqrt(cpu(), positive), tol, tol));
+    CATCH_REQUIRE(close(fl::test::rsqrt(vk(), p), fl::test::rsqrt(cpu(), positive), tol, tol));
+    CATCH_REQUIRE(close(fl::test::log(vk(), p), fl::test::log(cpu(), positive), tol, tol));
   }
 }
 
@@ -196,7 +196,7 @@ CATCH_TEST_CASE("test Vulkan log at its edges", "[op][vulkan]") {
   Tensor x = Tensor::create<float>({5}, {0.0f, -1.0f, INFINITY, 1.0f, 2.718281828f});
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
     CATCH_INFO("dtype = " << dtype.toString());
-    std::vector<float> y = values(F::log(vk(), toVulkan(x, dtype)));
+    std::vector<float> y = values(fl::test::log(vk(), toVulkan(x, dtype)));
     CATCH_REQUIRE((isinf(y[0]) && y[0] < 0));
     CATCH_REQUIRE(isnan(y[1]));
     CATCH_REQUIRE((isinf(y[2]) && y[2] > 0));
@@ -217,7 +217,7 @@ CATCH_TEST_CASE("test Vulkan round and cast to int64", "[op][vulkan]") {
     CATCH_INFO(dtype.toString());
     Tensor onDevice = toVulkan(x, dtype);
 
-    Tensor r = F::round(vk(), onDevice);
+    Tensor r = fl::test::round(vk(), onDevice);
     CATCH_REQUIRE(r.getDType() == dtype);
     CATCH_REQUIRE(values(r) == rounded);
 
@@ -227,11 +227,11 @@ CATCH_TEST_CASE("test Vulkan round and cast to int64", "[op][vulkan]") {
       const LongType *data = host.getInternalData()->getData<LongType>(host.getInternalOffset());
       return std::vector<LongType>(data, data + host.getNumEl());
     };
-    Tensor ids = F::cast(vk(), r, DType::kLong);
+    Tensor ids = fl::test::cast(vk(), r, DType::kLong);
     CATCH_REQUIRE(ids.getDType() == DType::kLong);
     std::vector<LongType> nearest(rounded.begin(), rounded.end());
     CATCH_REQUIRE(asLongs(ids) == nearest);
-    CATCH_REQUIRE(asLongs(F::cast(vk(), onDevice, DType::kLong)) == truncated);
+    CATCH_REQUIRE(asLongs(fl::test::cast(vk(), onDevice, DType::kLong)) == truncated);
   }
 }
 
@@ -248,47 +248,47 @@ CATCH_TEST_CASE("test Vulkan signal operators", "[op][vulkan][signal]") {
   Tensor b = randn({4});
   Tensor upsample = randn({1, 16, 40});
   Tensor upsampleWeight = randn({16, 8, 16});
-  Tensor alpha = plus(F::abs(cpu(), randn({6})), 0.2f);
-  Tensor beta = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor alpha = plus(fl::test::abs(cpu(), randn({6})), 0.2f);
+  Tensor beta = plus(fl::test::abs(cpu(), randn({6})), 0.2f);
 
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
     CATCH_INFO("dtype = " << dtype.toString());
     float tol = dtype == DType::kFloat ? 1e-4f : 2e-2f;
 
     CATCH_REQUIRE(close(
-        F::convTranspose1d(
+        fl::test::convTranspose1d(
             vk(), toVulkan(x, dtype), toVulkan(w, dtype), toVulkan(b, dtype), 3, 2, 1, 2),
-        F::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2),
+        fl::test::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2),
         tol,
         tol));
     // A vocoder's: the kernel twice the stride, no bias.
     CATCH_REQUIRE(close(
-        F::convTranspose1d(
+        fl::test::convTranspose1d(
             vk(), toVulkan(upsample, dtype), toVulkan(upsampleWeight, dtype), Tensor(), 8, 4, 0, 1),
-        F::convTranspose1d(cpu(), upsample, upsampleWeight, Tensor(), 8, 4, 0, 1),
+        fl::test::convTranspose1d(cpu(), upsample, upsampleWeight, Tensor(), 8, 4, 0, 1),
         tol,
         tol));
 
     for (bool withBeta : {false, true}) {
       CATCH_REQUIRE(close(
-          F::snake(
+          fl::test::snake(
               vk(),
               toVulkan(x, dtype),
               toVulkan(alpha, dtype),
               withBeta ? toVulkan(beta, dtype) : Tensor(),
               1e-9f),
-          F::snake(cpu(), x, alpha, withBeta ? beta : Tensor(), 1e-9f),
+          fl::test::snake(cpu(), x, alpha, withBeta ? beta : Tensor(), 1e-9f),
           tol,
           tol));
     }
 
     // Arguments to twenty radians: GLSL bounds sin only inside [-pi, pi], and the kernel reduces
     // the angle into it first rather than trusting the driver beyond.
-    Tensor far = F::mul(cpu(), x, 5.0f);
-    Tensor wide = plus(F::abs(cpu(), randn({6})), 1.0f);
+    Tensor far = fl::test::mul(cpu(), x, 5.0f);
+    Tensor wide = plus(fl::test::abs(cpu(), randn({6})), 1.0f);
     CATCH_REQUIRE(close(
-        F::snake(vk(), toVulkan(far, dtype), toVulkan(wide, dtype), Tensor(), 1e-9f),
-        F::snake(cpu(), toCpu(toVulkan(far, dtype)), toCpu(toVulkan(wide, dtype)), Tensor(), 1e-9f),
+        fl::test::snake(vk(), toVulkan(far, dtype), toVulkan(wide, dtype), Tensor(), 1e-9f),
+        fl::test::snake(cpu(), toCpu(toVulkan(far, dtype)), toCpu(toVulkan(wide, dtype)), Tensor(), 1e-9f),
         tol,
         tol));
 
@@ -297,36 +297,36 @@ CATCH_TEST_CASE("test Vulkan signal operators", "[op][vulkan][signal]") {
     Tensor rounded = toCpu(toVulkan(x, dtype));
     for (PadMode mode : {PadMode::kZero, PadMode::kReflect, PadMode::kReplicate}) {
       CATCH_REQUIRE(close(
-          F::pad1d(vk(), toVulkan(x, dtype), 5, 9, mode),
-          F::pad1d(cpu(), rounded, 5, 9, mode),
+          fl::test::pad1d(vk(), toVulkan(x, dtype), 5, 9, mode),
+          fl::test::pad1d(cpu(), rounded, 5, 9, mode),
           0.0f,
           1e-6f));
     }
     CATCH_REQUIRE(close(
-        F::pad1d(vk(), toVulkan(x, dtype), 40, 33, PadMode::kReplicate),
-        F::pad1d(cpu(), rounded, 40, 33, PadMode::kReplicate),
+        fl::test::pad1d(vk(), toVulkan(x, dtype), 40, 33, PadMode::kReplicate),
+        fl::test::pad1d(cpu(), rounded, 40, 33, PadMode::kReplicate),
         0.0f,
         1e-6f));
 
     CATCH_REQUIRE(close(
-        F::clamp(vk(), toVulkan(x, dtype), -0.5f, inf),
-        F::clamp(cpu(), rounded, -0.5f, inf),
+        fl::test::clamp(vk(), toVulkan(x, dtype), -0.5f, inf),
+        fl::test::clamp(cpu(), rounded, -0.5f, inf),
         0.0f,
         1e-6f));
     CATCH_REQUIRE(close(
-        F::clamp(vk(), toVulkan(x, dtype), -1.0f, 0.5f),
-        F::clamp(cpu(), rounded, -1.0f, 0.5f),
+        fl::test::clamp(vk(), toVulkan(x, dtype), -1.0f, 0.5f),
+        fl::test::clamp(cpu(), rounded, -1.0f, 0.5f),
         0.0f,
         1e-6f));
 
     // A NaN stays one, which GLSL's min and max do not promise; an infinity goes to its bound.
-    Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+    Tensor special = fl::test::zeros(Device::getCpu(), {4}, DType::kFloat);
     float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
     raw[0] = std::numeric_limits<float>::quiet_NaN();
     raw[1] = inf;
     raw[2] = -inf;
     raw[3] = 0.125f;
-    std::vector<float> clamped = values(F::clamp(vk(), toVulkan(special, dtype), -0.5f, 0.25f));
+    std::vector<float> clamped = values(fl::test::clamp(vk(), toVulkan(special, dtype), -0.5f, 0.25f));
     CATCH_REQUIRE(std::isnan(clamped[0]));
     CATCH_REQUIRE(clamped[1] == 0.25f);
     CATCH_REQUIRE(clamped[2] == -0.5f);
@@ -338,20 +338,20 @@ CATCH_TEST_CASE("test Vulkan signal operators", "[op][vulkan][signal]") {
   // does.
   int nFft = 16, hop = 4;
   Tensor wave = randn({2, 1, 64});
-  Tensor window = F::zeros(Device::getCpu(), {nFft}, DType::kFloat);
+  Tensor window = fl::test::zeros(Device::getCpu(), {nFft}, DType::kFloat);
   float *taps = window.getInternalData()->getData<float>(window.getInternalOffset());
   for (int i = 0; i < nFft; ++i) taps[i] = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / nFft);
-  Tensor spectrum = F::stft(vk(), toVulkan(wave), toVulkan(window), nFft, hop, true);
-  CATCH_REQUIRE(close(spectrum, F::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
+  Tensor spectrum = fl::test::stft(vk(), toVulkan(wave), toVulkan(window), nFft, hop, true);
+  CATCH_REQUIRE(close(spectrum, fl::test::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
   CATCH_REQUIRE(
-      close(F::istft(vk(), spectrum, toVulkan(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
+      close(fl::test::istft(vk(), spectrum, toVulkan(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
 
   // In half and not centred, the ends are kept, where the window's overlap is below what half can
   // hold: dividing by it there made NaNs.
-  Tensor halfSpectrum = F::stft(
+  Tensor halfSpectrum = fl::test::stft(
       vk(), toVulkan(wave, DType::kFloat16), toVulkan(window, DType::kFloat16), nFft, hop, false);
   std::vector<float> back =
-      values(F::istft(vk(), halfSpectrum, toVulkan(window, DType::kFloat16), nFft, hop, false));
+      values(fl::test::istft(vk(), halfSpectrum, toVulkan(window, DType::kFloat16), nFft, hop, false));
   std::vector<float> want = values(wave);
   for (size_t i = 0; i < back.size(); ++i) {
     CATCH_INFO("sample " << i);
@@ -374,44 +374,44 @@ CATCH_TEST_CASE("test Vulkan signal operators by composition", "[op][vulkan][sig
   Tensor x = randn({2, 6, 29});
   Tensor w = randn({6, 2, 7});
   Tensor b = randn({4});
-  Tensor alpha = plus(F::abs(cpu(), randn({6})), 0.2f);
-  Tensor beta = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor alpha = plus(fl::test::abs(cpu(), randn({6})), 0.2f);
+  Tensor beta = plus(fl::test::abs(cpu(), randn({6})), 0.2f);
   Tensor vx = toVulkan(x);
 
-  Tensor transposed = F::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2);
-  Tensor out = F::zeros(Device::getVulkan(), transposed.getShape(), DType::kFloat);
+  Tensor transposed = fl::test::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2);
+  Tensor out = fl::test::zeros(Device::getVulkan(), transposed.getShape(), DType::kFloat);
   F::composedConvTranspose1d(vk(), vx, toVulkan(w), toVulkan(b), 3, 2, 1, 2, out);
   CATCH_REQUIRE(close(out, transposed, 1e-4f, 1e-4f));
 
-  out = F::zeros(Device::getVulkan(), x.getShape(), DType::kFloat);
+  out = fl::test::zeros(Device::getVulkan(), x.getShape(), DType::kFloat);
   F::composedSnake(vk(), vx, toVulkan(alpha), toVulkan(beta), 1e-9f, out);
-  CATCH_REQUIRE(close(out, F::snake(cpu(), x, alpha, beta, 1e-9f), 1e-4f, 1e-4f));
+  CATCH_REQUIRE(close(out, fl::test::snake(cpu(), x, alpha, beta, 1e-9f), 1e-4f, 1e-4f));
 
   for (PadMode mode : {PadMode::kZero, PadMode::kReflect, PadMode::kReplicate}) {
-    out = F::zeros(Device::getVulkan(), {2, 6, 43}, DType::kFloat);
+    out = fl::test::zeros(Device::getVulkan(), {2, 6, 43}, DType::kFloat);
     F::composedPad1d(vk(), vx, 5, 9, mode, out);
-    CATCH_REQUIRE(close(out, F::pad1d(cpu(), x, 5, 9, mode), 0.0f, 1e-6f));
+    CATCH_REQUIRE(close(out, fl::test::pad1d(cpu(), x, 5, 9, mode), 0.0f, 1e-6f));
   }
 
   for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, inf}, {-1.0f, 0.5f}}) {
-    out = F::zeros(Device::getVulkan(), x.getShape(), DType::kFloat);
+    out = fl::test::zeros(Device::getVulkan(), x.getShape(), DType::kFloat);
     F::composedClamp(vk(), vx, lo, hi, out);
-    std::vector<float> got = values(out), want = values(F::clamp(cpu(), x, lo, hi));
+    std::vector<float> got = values(out), want = values(fl::test::clamp(cpu(), x, lo, hi));
     for (size_t i = 0; i < got.size(); ++i) CATCH_REQUIRE(got[i] == want[i]);
   }
 
   // In half, exactly what the kernel gives: a value inside the interval is itself however small,
   // and one beyond it is exactly the bound.
-  Tensor small = F::zeros(Device::getCpu(), {8}, DType::kFloat);
+  Tensor small = fl::test::zeros(Device::getCpu(), {8}, DType::kFloat);
   float *s = small.getInternalData()->getData<float>(small.getInternalOffset());
   float smallValues[] = {1e-4f, -1e-4f, 3e-5f, 0.2499f, -0.4999f, -1e4f, 1e4f, 99.9f};
   std::copy(smallValues, smallValues + 8, s);
   for (auto [lo, hi] : std::vector<std::pair<float, float>>{{-0.5f, 0.25f}, {-inf, 100.0f}}) {
     CATCH_INFO("lo " << lo << " hi " << hi);
-    Tensor composed = F::zeros(Device::getVulkan(), {8}, DType::kFloat16);
+    Tensor composed = fl::test::zeros(Device::getVulkan(), {8}, DType::kFloat16);
     F::composedClamp(vk(), toVulkan(small, DType::kFloat16), lo, hi, composed);
     std::vector<float> got = values(composed);
-    std::vector<float> want = values(F::clamp(vk(), toVulkan(small, DType::kFloat16), lo, hi));
+    std::vector<float> want = values(fl::test::clamp(vk(), toVulkan(small, DType::kFloat16), lo, hi));
     for (int i = 0; i < 8; ++i) {
       CATCH_INFO("element " << i << ": " << got[i] << " against " << want[i]);
       CATCH_REQUIRE(got[i] == want[i]);
@@ -421,13 +421,13 @@ CATCH_TEST_CASE("test Vulkan signal operators by composition", "[op][vulkan][sig
     for (int i = 0; i < 5; ++i) CATCH_REQUIRE(got[i] == rounded[i]);
   }
 
-  Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+  Tensor special = fl::test::zeros(Device::getCpu(), {4}, DType::kFloat);
   float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
   raw[0] = std::numeric_limits<float>::quiet_NaN();
   raw[1] = inf;
   raw[2] = -inf;
   raw[3] = 0.125f;
-  out = F::zeros(Device::getVulkan(), {4}, DType::kFloat);
+  out = fl::test::zeros(Device::getVulkan(), {4}, DType::kFloat);
   F::composedClamp(vk(), toVulkan(special), -0.5f, 0.25f, out);
   std::vector<float> clamped = values(out);
   CATCH_REQUIRE(std::isnan(clamped[0]));
@@ -446,25 +446,25 @@ CATCH_TEST_CASE("test Vulkan softmax and reductions", "[op][vulkan]") {
       CATCH_INFO("dtype = " << dtype.toString());
       float tol = dtype == DType::kFloat ? 1e-5f : 5e-3f;
       Tensor x = toVulkan(a, dtype);
-      CATCH_REQUIRE(close(F::softmax(vk(), x), F::softmax(cpu(), a), tol, tol));
-      CATCH_REQUIRE(close(F::max(vk(), x), F::max(cpu(), a), tol, tol));
-      CATCH_REQUIRE(close(F::min(vk(), x), F::min(cpu(), a), tol, tol));
+      CATCH_REQUIRE(close(fl::test::softmax(vk(), x), fl::test::softmax(cpu(), a), tol, tol));
+      CATCH_REQUIRE(close(fl::test::max(vk(), x), fl::test::max(cpu(), a), tol, tol));
+      CATCH_REQUIRE(close(fl::test::min(vk(), x), fl::test::min(cpu(), a), tol, tol));
       // A sum of thousands of elements reaches the tens, where a half is only good to a
       // hundredth, so the tolerance is that of the result's type rather than of the inputs'.
       float sumTol = dtype == DType::kFloat ? 1e-3f : 1e-2f;
-      CATCH_REQUIRE(close(F::sum(vk(), x, -1), F::sum(cpu(), a, -1), sumTol, sumTol));
+      CATCH_REQUIRE(close(fl::test::sum(vk(), x, -1), fl::test::sum(cpu(), a, -1), sumTol, sumTol));
     }
   }
 
   // Along a dimension other than the last, and over everything.
   Tensor a = randn({3, 4, 5});
   Tensor x = toVulkan(a);
-  CATCH_REQUIRE(close(F::sum(vk(), x, 0), F::sum(cpu(), a, 0), 1e-5f, 1e-5f));
-  CATCH_REQUIRE(close(F::sum(vk(), x, 1), F::sum(cpu(), a, 1), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::sum(vk(), x, 0), fl::test::sum(cpu(), a, 0), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::sum(vk(), x, 1), fl::test::sum(cpu(), a, 1), 1e-5f, 1e-5f));
 
   float total = 0.0f;
   for (float v : values(a)) total += v;
-  Tensor all = F::sum(vk(), x.view({-1}), 0);
+  Tensor all = fl::test::sum(vk(), x.view({-1}), 0);
   CATCH_REQUIRE(all.getNumEl() == 1);
   CATCH_REQUIRE(fabsf(vk()->elem(all) - total) < 1e-4f);
 }
@@ -476,36 +476,36 @@ CATCH_TEST_CASE("test Vulkan cumsum", "[op][vulkan]") {
   // the carry from one tile into the next is what the longer ones check.
   for (int length : {1, 7, 256, 257, 1000, 4099}) {
     CATCH_INFO("length = " << length);
-    Tensor a = F::rand(Device::getCpu(), {3, 5, length}, DType::kFloat);
-    Tensor got = F::cumsum(vk(), toVulkan(a), -1);
+    Tensor a = fl::test::rand(Device::getCpu(), {3, 5, length}, DType::kFloat);
+    Tensor got = fl::test::cumsum(vk(), toVulkan(a), -1);
     CATCH_REQUIRE(got.getShape() == a.getShape());
-    CATCH_REQUIRE(close(got, F::cumsum(cpu(), a, -1), 1e-4f, 1e-4f));
+    CATCH_REQUIRE(close(got, fl::test::cumsum(cpu(), a, -1), 1e-4f, 1e-4f));
   }
 
   // Every dimension, counted from either end.
-  Tensor b = F::rand(Device::getCpu(), {4, 300, 9}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {4, 300, 9}, DType::kFloat);
   for (int dim : {0, 1, 2, -1, -2, -3}) {
     CATCH_INFO("dim = " << dim);
-    CATCH_REQUIRE(close(F::cumsum(vk(), toVulkan(b), dim), F::cumsum(cpu(), b, dim), 1e-4f, 1e-4f));
+    CATCH_REQUIRE(close(fl::test::cumsum(vk(), toVulkan(b), dim), fl::test::cumsum(cpu(), b, dim), 1e-4f, 1e-4f));
   }
 
   // A strided view, scanned along its middle dimension.
   Tensor strided = toVulkan(b).transpose(0, 2);
   CATCH_REQUIRE(close(
-      F::cumsum(vk(), strided, 1), F::cumsum(cpu(), F::contiguous(cpu(), b.transpose(0, 2)), 1), 1e-4f, 1e-4f));
+      fl::test::cumsum(vk(), strided, 1), fl::test::cumsum(cpu(), fl::test::contiguous(cpu(), b.transpose(0, 2)), 1), 1e-4f, 1e-4f));
 
   // Half, accumulated in float and rounded once: within half a unit of the ~300 a row sums to.
-  Tensor c = F::rand(Device::getCpu(), {2, 600}, DType::kFloat);
-  Tensor half = F::cumsum(vk(), toVulkan(c, DType::kFloat16), -1);
+  Tensor c = fl::test::rand(Device::getCpu(), {2, 600}, DType::kFloat);
+  Tensor half = fl::test::cumsum(vk(), toVulkan(c, DType::kFloat16), -1);
   CATCH_REQUIRE(half.getDType() == DType::kFloat16);
-  Tensor want = F::cumsum(cpu(), F::cast(cpu(), F::cast(cpu(), c, DType::kFloat16), DType::kFloat), -1);
+  Tensor want = fl::test::cumsum(cpu(), fl::test::cast(cpu(), fl::test::cast(cpu(), c, DType::kFloat16), DType::kFloat), -1);
   CATCH_REQUIRE(close(half, want, 1e-3f, 1e-3f));
 
   // Known values, so a dropped or double-counted element is a wrong total and not noise.
   Tensor d = Tensor::create<float>({2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
-  CATCH_REQUIRE(values(F::cumsum(vk(), toVulkan(d), -1)) ==
+  CATCH_REQUIRE(values(fl::test::cumsum(vk(), toVulkan(d), -1)) ==
                 std::vector<float>({1.0f, 3.0f, 6.0f, 4.0f, 9.0f, 15.0f}));
-  CATCH_REQUIRE(values(F::cumsum(vk(), toVulkan(d), 0)) ==
+  CATCH_REQUIRE(values(fl::test::cumsum(vk(), toVulkan(d), 0)) ==
                 std::vector<float>({1.0f, 2.0f, 3.0f, 5.0f, 7.0f, 9.0f}));
 }
 
@@ -527,31 +527,31 @@ CATCH_TEST_CASE("test Vulkan norms", "[op][vulkan]") {
     Tensor b = toVulkan(bias, dtype);
 
     CATCH_REQUIRE(close(
-        F::layerNorm(vk(), x, w, b, 1e-5f),
-        F::layerNorm(cpu(), a, weight, bias, 1e-5f),
+        fl::test::layerNorm(vk(), x, w, b, 1e-5f),
+        fl::test::layerNorm(cpu(), a, weight, bias, 1e-5f),
         tol,
         tol));
     CATCH_REQUIRE(close(
-        F::layerNorm(vk(), x, Tensor(), Tensor(), 1e-6f),
-        F::layerNorm(cpu(), a, Tensor(), Tensor(), 1e-6f),
+        fl::test::layerNorm(vk(), x, Tensor(), Tensor(), 1e-6f),
+        fl::test::layerNorm(cpu(), a, Tensor(), Tensor(), 1e-6f),
         tol,
         tol));
-    CATCH_REQUIRE(close(F::rmsNorm(vk(), x, w, 1e-6f), F::rmsNorm(cpu(), a, weight, 1e-6f), tol, tol));
+    CATCH_REQUIRE(close(fl::test::rmsNorm(vk(), x, w, 1e-6f), fl::test::rmsNorm(cpu(), a, weight, 1e-6f), tol, tol));
 
     Tensor vkImage = toVulkan(image, dtype);
     CATCH_REQUIRE(close(
-        F::groupNorm(vk(), 
+        fl::test::groupNorm(vk(), 
             vkImage,
             toVulkan(channelWeight, dtype),
             toVulkan(channelBias, dtype),
             32,
             1e-5f),
-        F::groupNorm(cpu(), image, channelWeight, channelBias, 32, 1e-5f),
+        fl::test::groupNorm(cpu(), image, channelWeight, channelBias, 32, 1e-5f),
         tol,
         tol));
     CATCH_REQUIRE(close(
-        F::groupNorm(vk(), vkImage, Tensor(), Tensor(), 8, 1e-6f),
-        F::groupNorm(cpu(), image, Tensor(), Tensor(), 8, 1e-6f),
+        fl::test::groupNorm(vk(), vkImage, Tensor(), Tensor(), 8, 1e-6f),
+        fl::test::groupNorm(cpu(), image, Tensor(), Tensor(), 8, 1e-6f),
         tol,
         tol));
   }
@@ -582,10 +582,10 @@ CATCH_TEST_CASE("test Vulkan matmul", "[op][vulkan]") {
   };
 
   for (const Case &c : cases) {
-    Tensor a = F::rand(Device::getCpu(), c.shapeA, DType::kFloat);
-    Tensor b = F::rand(Device::getCpu(), c.shapeB, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), c.shapeA, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), c.shapeB, DType::kFloat);
     Tensor bt = c.transposeB ? b.transpose(-1, -2) : b;
-    Tensor reference = F::matmul(cpu(), a, bt);
+    Tensor reference = fl::test::matmul(cpu(), a, bt);
 
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
       CATCH_INFO("A = " << a.getShapeString() << ", B = " << bt.getShapeString()
@@ -594,16 +594,16 @@ CATCH_TEST_CASE("test Vulkan matmul", "[op][vulkan]") {
       Tensor y = toVulkan(b, dtype);
       if (c.transposeB) y = y.transpose(-1, -2);
       float tol = dtype == DType::kFloat ? 1e-4f : 2e-2f;
-      CATCH_REQUIRE(close(F::matmul(vk(), x, y), reference, tol, tol));
+      CATCH_REQUIRE(close(fl::test::matmul(vk(), x, y), reference, tol, tol));
     }
   }
 
   // A transposed on the left, as attention's second product sees it.
-  Tensor a = F::rand(Device::getCpu(), {64, 48}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {64, 32}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {64, 48}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {64, 32}, DType::kFloat);
   CATCH_REQUIRE(close(
-      F::matmul(vk(), toVulkan(a).transpose(0, 1), toVulkan(b)),
-      F::matmul(cpu(), a.transpose(0, 1), b),
+      fl::test::matmul(vk(), toVulkan(a).transpose(0, 1), toVulkan(b)),
+      fl::test::matmul(cpu(), a.transpose(0, 1), b),
       1e-4f,
       1e-4f));
 }
@@ -628,9 +628,9 @@ CATCH_TEST_CASE("test Vulkan convolutions", "[op][vulkan]") {
     Tensor weight = randn({c.K, c.C / c.groups, c.R, c.R});
     Tensor bias = randn({c.K});
     Tensor reference =
-        F::conv2d(cpu(), input, weight, bias, c.stride, c.padding, c.dilation, c.groups);
+        fl::test::conv2d(cpu(), input, weight, bias, c.stride, c.padding, c.dilation, c.groups);
     Tensor noBias =
-        F::conv2d(cpu(), input, weight, Tensor(), c.stride, c.padding, c.dilation, c.groups);
+        fl::test::conv2d(cpu(), input, weight, Tensor(), c.stride, c.padding, c.dilation, c.groups);
 
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
       CATCH_INFO("input = " << input.getShapeString() << ", weight = "
@@ -641,12 +641,12 @@ CATCH_TEST_CASE("test Vulkan convolutions", "[op][vulkan]") {
       Tensor x = toVulkan(input, dtype);
       Tensor w = toVulkan(weight, dtype);
       CATCH_REQUIRE(close(
-          F::conv2d(vk(), x, w, toVulkan(bias, dtype), c.stride, c.padding, c.dilation, c.groups),
+          fl::test::conv2d(vk(), x, w, toVulkan(bias, dtype), c.stride, c.padding, c.dilation, c.groups),
           reference,
           tol,
           tol));
       CATCH_REQUIRE(close(
-          F::conv2d(vk(), x, w, Tensor(), c.stride, c.padding, c.dilation, c.groups),
+          fl::test::conv2d(vk(), x, w, Tensor(), c.stride, c.padding, c.dilation, c.groups),
           noBias,
           tol,
           tol));
@@ -655,9 +655,9 @@ CATCH_TEST_CASE("test Vulkan convolutions", "[op][vulkan]") {
 
   Tensor signal = randn({2, 6, 50});
   Tensor kernel = randn({6, 1, 7});
-  Tensor reference = F::conv1d(cpu(), signal, kernel, Tensor(), 1, 3, 1, 6);
+  Tensor reference = fl::test::conv1d(cpu(), signal, kernel, Tensor(), 1, 3, 1, 6);
   CATCH_REQUIRE(close(
-      F::conv1d(vk(), toVulkan(signal), toVulkan(kernel), Tensor(), 1, 3, 1, 6),
+      fl::test::conv1d(vk(), toVulkan(signal), toVulkan(kernel), Tensor(), 1, 3, 1, 6),
       reference,
       1e-4f,
       1e-4f));
@@ -665,8 +665,8 @@ CATCH_TEST_CASE("test Vulkan convolutions", "[op][vulkan]") {
   Tensor dense = randn({4, 6, 3});
   Tensor denseBias = randn({4});
   CATCH_REQUIRE(close(
-      F::conv1d(vk(), toVulkan(signal), toVulkan(dense), toVulkan(denseBias), 2, 1, 2, 1),
-      F::conv1d(cpu(), signal, dense, denseBias, 2, 1, 2, 1),
+      fl::test::conv1d(vk(), toVulkan(signal), toVulkan(dense), toVulkan(denseBias), 2, 1, 2, 1),
+      fl::test::conv1d(cpu(), signal, dense, denseBias, 2, 1, 2, 1),
       1e-4f,
       1e-4f));
 }
@@ -679,18 +679,18 @@ CATCH_TEST_CASE("test Vulkan attention", "[op][vulkan]") {
   Tensor v = randn({2, 2, 37, 32});
   for (bool causal : {false, true}) {
     CATCH_INFO("causal = " << causal);
-    Tensor reference = F::attention(cpu(), q, k, v, F::causalIf(causal));
+    Tensor reference = fl::test::attention(cpu(), q, k, v, fl::test::causalIf(causal));
     CATCH_REQUIRE(close(
-        F::attention(vk(), toVulkan(q), toVulkan(k), toVulkan(v), F::causalIf(causal)),
+        fl::test::attention(vk(), toVulkan(q), toVulkan(k), toVulkan(v), fl::test::causalIf(causal)),
         reference,
         1e-4f,
         1e-4f));
     CATCH_REQUIRE(close(
-        F::attention(vk(), 
+        fl::test::attention(vk(), 
             toVulkan(q, DType::kFloat16),
             toVulkan(k, DType::kFloat16),
             toVulkan(v, DType::kFloat16),
-            F::causalIf(causal)),
+            fl::test::causalIf(causal)),
         reference,
         3e-2f,
         3e-2f));
@@ -703,45 +703,45 @@ CATCH_TEST_CASE("test Vulkan shape operators", "[op][vulkan]") {
   Tensor table = randn({10, 7});
   Tensor ids = Tensor::create<LongType>({2, 3}, {3, 0, 9, 9, 1, 4});
   CATCH_REQUIRE(close(
-      F::lookup(vk(), toVulkan(table, DType::kFloat16), F::toDevice(vk(), ids, Device::getVulkan())),
-      F::lookup(cpu(), table, ids),
+      fl::test::lookup(vk(), toVulkan(table, DType::kFloat16), fl::test::toDevice(vk(), ids, Device::getVulkan())),
+      fl::test::lookup(cpu(), table, ids),
       1e-3f,
       1e-3f));
 
   Tensor image = randn({2, 3, 4, 5});
   CATCH_REQUIRE(close(
-      F::upsampleNearest2d(vk(), toVulkan(image), 2),
-      F::upsampleNearest2d(cpu(), image, 2),
+      fl::test::upsampleNearest2d(vk(), toVulkan(image), 2),
+      fl::test::upsampleNearest2d(cpu(), image, 2),
       1e-6f,
       1e-6f));
 
   Tensor frames = randn({2, 3, 90});
   CATCH_REQUIRE(close(
-      F::upsampleNearest1d(vk(), toVulkan(frames), 154),
-      F::upsampleNearest1d(cpu(), frames, 154),
+      fl::test::upsampleNearest1d(vk(), toVulkan(frames), 154),
+      fl::test::upsampleNearest1d(cpu(), frames, 154),
       1e-6f,
       1e-6f));
   CATCH_REQUIRE(close(
-      F::upsampleNearest1d(vk(), toVulkan(frames), 41),
-      F::upsampleNearest1d(cpu(), frames, 41),
+      fl::test::upsampleNearest1d(vk(), toVulkan(frames), 41),
+      fl::test::upsampleNearest1d(cpu(), frames, 41),
       1e-6f,
       1e-6f));
 
   Tensor gated = randn({3, 4, 16});
-  CATCH_REQUIRE(close(F::geglu(vk(), toVulkan(gated)), F::geglu(cpu(), gated), 1e-5f, 1e-5f));
-  CATCH_REQUIRE(close(F::swiglu(vk(), toVulkan(gated)), F::swiglu(cpu(), gated), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::geglu(vk(), toVulkan(gated)), fl::test::geglu(cpu(), gated), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::swiglu(vk(), toVulkan(gated)), fl::test::swiglu(cpu(), gated), 1e-5f, 1e-5f));
 
   Tensor a = randn({3, 4});
   Tensor b = randn({3, 2});
-  CATCH_REQUIRE(close(F::cat(vk(), toVulkan(a), toVulkan(b), 1), F::cat(cpu(), a, b, 1), 1e-6f, 1e-6f));
+  CATCH_REQUIRE(close(fl::test::cat(vk(), toVulkan(a), toVulkan(b), 1), fl::test::cat(cpu(), a, b, 1), 1e-6f, 1e-6f));
   CATCH_REQUIRE(close(
-      F::contiguous(vk(), toVulkan(image).transpose(1, 3)),
-      F::contiguous(cpu(), image.transpose(1, 3)),
+      fl::test::contiguous(vk(), toVulkan(image).transpose(1, 3)),
+      fl::test::contiguous(cpu(), image.transpose(1, 3)),
       1e-6f,
       1e-6f));
 
-  Tensor zeros = F::zeros(Device(Device::kVulkan), {3, 5}, DType::kFloat16);
-  CATCH_REQUIRE(close(zeros, F::zeros(Device::getCpu(), {3, 5}, DType::kFloat), 1e-6f, 1e-6f));
+  Tensor zeros = fl::test::zeros(Device(Device::kVulkan), {3, 5}, DType::kFloat16);
+  CATCH_REQUIRE(close(zeros, fl::test::zeros(Device::getCpu(), {3, 5}, DType::kFloat), 1e-6f, 1e-6f));
 
   Tensor filled = F::empty(Device(Device::kVulkan), {4, 6}, DType::kFloat);
   vk()->fill(filled, 2.5f);
@@ -751,7 +751,7 @@ CATCH_TEST_CASE("test Vulkan shape operators", "[op][vulkan]") {
   cpu()->fill(expected.slice(1, {2, 4}), -1.0f);
   CATCH_REQUIRE(close(filled, expected, 1e-6f, 1e-6f));
 
-  Tensor mask = F::causalMask(Device(Device::kVulkan), 5);
+  Tensor mask = fl::test::causalMask(Device(Device::kVulkan), 5);
   std::vector<float> maskValues = values(mask);
   CATCH_REQUIRE(maskValues[0 * 5 + 0] == 0.0f);
   CATCH_REQUIRE(maskValues[1 * 5 + 0] == 0.0f);
@@ -769,7 +769,7 @@ CATCH_TEST_CASE("test Vulkan rotary embedding", "[op][vulkan]") {
 
   Tensor x = toVulkan(q, DType::kFloat16);
   vk()->rotaryEmbedding(
-      F::toDevice(vk(), positions, Device::getVulkan()),
+      fl::test::toDevice(vk(), positions, Device::getVulkan()),
       x,
       toVulkan(q, DType::kFloat16),
       toVulkan(cache, DType::kFloat16));
@@ -831,8 +831,8 @@ CATCH_TEST_CASE("test Vulkan rand draws the CUDA operators' numbers", "[op][vulk
 
   const float kTwoPow32Inv = 2.3283064e-10f;
   vk()->manualSeed(1234);
-  F::rand(Device(Device::kVulkan), {5}, DType::kFloat);  // moves the counter on by two blocks
-  std::vector<float> uniform = values(F::rand(Device(Device::kVulkan), {9}, DType::kFloat));
+  fl::test::rand(Device(Device::kVulkan), {5}, DType::kFloat);  // moves the counter on by two blocks
+  std::vector<float> uniform = values(fl::test::rand(Device(Device::kVulkan), {9}, DType::kFloat));
   for (int i = 0; i < 9; ++i) {
     uint32_t bits[4];
     philox(1234, 2 + i / 4, bits);
@@ -841,7 +841,7 @@ CATCH_TEST_CASE("test Vulkan rand draws the CUDA operators' numbers", "[op][vulk
 
   // Normal, which only has to agree to within what the device's transcendentals round to.
   vk()->manualSeed(99);
-  Tensor normal = F::randNormal(Device(Device::kVulkan), {2, 50000});
+  Tensor normal = fl::test::randNormal(Device(Device::kVulkan), {2, 50000});
   CATCH_REQUIRE(normal.getDType() == DType::kFloat);
   std::vector<float> z = values(normal);
   uint32_t bits[4];
@@ -870,7 +870,7 @@ CATCH_TEST_CASE("test Vulkan memory statistics", "[op][vulkan]") {
   MemorySnapshot before = vk()->captureMemorySnapshot();
   CATCH_REQUIRE(before.getTotalMemory() > 0);
   {
-    Tensor big = F::zeros(Device(Device::kVulkan), {64, 1024, 1024}, DType::kFloat16);
+    Tensor big = fl::test::zeros(Device(Device::kVulkan), {64, 1024, 1024}, DType::kFloat16);
     MemorySnapshot during = vk()->captureMemorySnapshot();
     CATCH_REQUIRE(during.getAllocatedMemory() - before.getAllocatedMemory() >= 128 << 20);
   }
@@ -960,10 +960,10 @@ CATCH_TEST_CASE("benchmark Vulkan matmul and conv2d", "[.][vulkan-benchmark]") {
       {"p.v 20x4096x64x4096", {20, 4096, 4096}, {20, 4096, 64}, false},
   };
   for (const Case &c : cases) {
-    Tensor a = F::cast(vk(), F::rand(Device(Device::kVulkan), c.a, DType::kFloat), DType::kFloat16);
-    Tensor b = F::cast(vk(), F::rand(Device(Device::kVulkan), c.b, DType::kFloat), DType::kFloat16);
+    Tensor a = fl::test::cast(vk(), fl::test::rand(Device(Device::kVulkan), c.a, DType::kFloat), DType::kFloat16);
+    Tensor b = fl::test::cast(vk(), fl::test::rand(Device(Device::kVulkan), c.b, DType::kFloat), DType::kFloat16);
     Tensor bt = c.transposeB ? b.transpose(-1, -2) : b;
-    double seconds = time([&]() { F::matmul(vk(), a, bt); });
+    double seconds = time([&]() { fl::test::matmul(vk(), a, bt); });
     double flops = 2.0 * a.getNumEl() * bt.getShape(-1);
     printf("%-28s %8.3f ms %7.1f TFLOPS\n", c.name, seconds * 1e3, flops / seconds / 1e12);
   }
@@ -979,9 +979,9 @@ CATCH_TEST_CASE("benchmark Vulkan matmul and conv2d", "[.][vulkan-benchmark]") {
       {"conv 3x3 1x256x512 f32", 1, 256, 512, 256, DType::kFloat},
   };
   for (const ConvCase &c : convs) {
-    Tensor x = F::cast(vk(), F::rand(Device(Device::kVulkan), {c.N, c.C, c.H, c.H}, DType::kFloat), c.dtype);
-    Tensor w = F::cast(vk(), F::rand(Device(Device::kVulkan), {c.K, c.C, 3, 3}, DType::kFloat), c.dtype);
-    double seconds = time([&]() { F::conv2d(vk(), x, w, Tensor(), 1, 1, 1, 1); });
+    Tensor x = fl::test::cast(vk(), fl::test::rand(Device(Device::kVulkan), {c.N, c.C, c.H, c.H}, DType::kFloat), c.dtype);
+    Tensor w = fl::test::cast(vk(), fl::test::rand(Device(Device::kVulkan), {c.K, c.C, 3, 3}, DType::kFloat), c.dtype);
+    double seconds = time([&]() { fl::test::conv2d(vk(), x, w, Tensor(), 1, 1, 1, 1); });
     double flops = 2.0 * c.N * c.H * c.H * c.K * c.C * 9;
     printf("%-28s %8.3f ms %7.1f TFLOPS\n", c.name, seconds * 1e3, flops / seconds / 1e12);
   }

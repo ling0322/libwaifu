@@ -73,15 +73,15 @@ void normalizeRows(std::vector<float> &data, int rows, int dim) {
 }
 
 Tensor toCudaHalf(const Tensor &a) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCudaFloat(const Tensor &a) {
-  return F::toDevice(cudaOps(), a, Device::getCuda());
+  return fl::test::toDevice(cudaOps(), a, Device::getCuda());
 }
 
 Tensor toCpuFloat(const Tensor &a) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 // The regimes the decays and the write strengths are drawn from. The default is what a trained
@@ -202,7 +202,7 @@ void compareBackends(
 
   // The path is forced rather than left to kAuto: these head counts are far below what kAuto reads
   // as enough CTAs to fuse, so kAuto alone would never reach the fused kernel here.
-  Tensor expected = F::gatedDeltaNetPrefill(cpuOps(), 
+  Tensor expected = fl::test::gatedDeltaNetPrefill(cpuOps(), 
       q,
       k,
       v,

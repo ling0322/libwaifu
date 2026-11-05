@@ -62,7 +62,7 @@ Tensor tensorOf(std::initializer_list<int> shape, const std::vector<float> &valu
 }
 
 std::vector<float> valuesOf(const Tensor &tensor) {
-  Tensor dense = F::contiguous(cpuOps(), tensor);
+  Tensor dense = fl::test::contiguous(cpuOps(), tensor);
   const float *data = dense.getInternalData()->getData<float>(dense.getInternalOffset());
   return std::vector<float>(data, data + dense.getNumEl());
 }
@@ -144,11 +144,11 @@ CATCH_TEST_CASE("convTranspose1d matches its definition, kernel and composition"
     Tensor bias = t.withBias ? tensorOf({t.k}, b) : Tensor();
     std::vector<float> expected = transposedReference(t, x, w, b);
 
-    Tensor kernel = F::convTranspose1d(
+    Tensor kernel = fl::test::convTranspose1d(
         cpuOps(), input, weight, bias, t.stride, t.padding, t.outputPadding, t.groups);
     requireClose(valuesOf(kernel), expected, 1e-5f);
 
-    Tensor composed = F::zeros(Device::kCpu, kernel.getShape(), DType::kFloat);
+    Tensor composed = fl::test::zeros(Device::kCpu, kernel.getShape(), DType::kFloat);
     F::composedConvTranspose1d(
         cpuOps(), input, weight, bias, t.stride, t.padding, t.outputPadding, t.groups, composed);
     requireClose(valuesOf(composed), expected, 1e-5f);
@@ -175,9 +175,9 @@ CATCH_TEST_CASE("snake matches its definition, kernel and composition", "[op][cp
     Tensor a = tensorOf({c}, alpha);
     Tensor b = withBeta ? tensorOf({c}, beta) : Tensor();
 
-    requireClose(valuesOf(F::snake(cpuOps(), input, a, b, eps)), expected, 1e-5f);
+    requireClose(valuesOf(fl::test::snake(cpuOps(), input, a, b, eps)), expected, 1e-5f);
 
-    Tensor composed = F::zeros(Device::kCpu, {n, c, l}, DType::kFloat);
+    Tensor composed = fl::test::zeros(Device::kCpu, {n, c, l}, DType::kFloat);
     F::composedSnake(cpuOps(), input, a, b, eps, composed);
     requireClose(valuesOf(composed), expected, 1e-5f);
   }
@@ -201,15 +201,15 @@ CATCH_TEST_CASE("pad1d fills as each mode says, kernel and composition", "[op][c
 
   for (const Case &c : cases) {
     CATCH_INFO("mode " << int(c.mode) << " left " << c.left << " right " << c.right);
-    requireClose(valuesOf(F::pad1d(cpuOps(), input, c.left, c.right, c.mode)), c.expected, 0);
+    requireClose(valuesOf(fl::test::pad1d(cpuOps(), input, c.left, c.right, c.mode)), c.expected, 0);
 
-    Tensor composed = F::zeros(
+    Tensor composed = fl::test::zeros(
         Device::kCpu, {2, 4 + c.left + c.right}, DType::kFloat);
     F::composedPad1d(cpuOps(), input, c.left, c.right, c.mode, composed);
     requireClose(valuesOf(composed), c.expected, 0);
   }
 
-  CATCH_REQUIRE_THROWS(F::pad1d(cpuOps(), input, 4, 0, PadMode::kReflect));
+  CATCH_REQUIRE_THROWS(fl::test::pad1d(cpuOps(), input, 4, 0, PadMode::kReflect));
 }
 
 CATCH_TEST_CASE("clamp bounds either side or both, kernel and composition", "[op][cpu][signal]") {
@@ -229,9 +229,9 @@ CATCH_TEST_CASE("clamp bounds either side or both, kernel and composition", "[op
     std::vector<float> expected;
     for (float v : x) expected.push_back(std::isnan(v) ? v : std::min(std::max(v, lo), hi));
 
-    requireClose(valuesOf(F::clamp(cpuOps(), input, lo, hi)), expected, 0);
+    requireClose(valuesOf(fl::test::clamp(cpuOps(), input, lo, hi)), expected, 0);
 
-    Tensor composed = F::zeros(Device::kCpu, {4, 4}, DType::kFloat);
+    Tensor composed = fl::test::zeros(Device::kCpu, {4, 4}, DType::kFloat);
     F::composedClamp(cpuOps(), input, lo, hi, composed);
     requireClose(valuesOf(composed), expected, 0);
   }
@@ -270,7 +270,7 @@ CATCH_TEST_CASE("stft is the windowed DFT of each frame", "[op][cpu][signal]") {
       }
     }
 
-    Tensor spectrum = F::stft(cpuOps(), tensorOf({1, 1, length}, x), tensorOf({nFft}, window),
+    Tensor spectrum = fl::test::stft(cpuOps(), tensorOf({1, 1, length}, x), tensorOf({nFft}, window),
                               nFft, hop, centered);
     CATCH_REQUIRE(spectrum.getShape() == std::vector<int>{1, 2 * bins, frames});
     requireClose(valuesOf(spectrum), expected, 1e-4f);
@@ -284,8 +284,8 @@ CATCH_TEST_CASE("istft undoes stft", "[op][cpu][signal]") {
   for (int i = 0; i < nFft; ++i) window[i] = 0.5f - 0.5f * cosf(2.0f * float(kPi) * i / nFft);
   Tensor w = tensorOf({nFft}, window);
 
-  Tensor spectrum = F::stft(cpuOps(), tensorOf({2, 1, length}, x), w, nFft, hop, true);
-  Tensor back = F::istft(cpuOps(), spectrum, w, nFft, hop, true);
+  Tensor spectrum = fl::test::stft(cpuOps(), tensorOf({2, 1, length}, x), w, nFft, hop, true);
+  Tensor back = fl::test::istft(cpuOps(), spectrum, w, nFft, hop, true);
   CATCH_REQUIRE(back.getShape() == std::vector<int>{2, 1, length});
   requireClose(valuesOf(back), x, 1e-4f);
 }

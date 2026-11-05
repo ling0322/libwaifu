@@ -23,7 +23,10 @@
 
 namespace fl {
 
-/// @brief Tensors in, a tensor out: the C++ tests' way of calling the operators.
+/// @brief Tensors in, a tensor out: the C++ tests' and benchmarks' way of calling the operators.
+///
+/// Not the library's: fl::F is `flint/functional.h`, and these are in a namespace of their own
+/// so that a call says which it is. Callers name them in full, `fl::test::rand(...)`.
 ///
 /// Every function here works out its result's shape and type from the inputs, allocates it on
 /// their device, and hands everything to the operator as views, the result last. These are the
@@ -32,7 +35,7 @@ namespace fl {
 /// library itself calls them.
 ///
 /// `op` is the operators the caller chose, which are the inputs' device's.
-namespace F {
+namespace test {
 
 /// @brief A tensor of `shape` and `dtype` on `device`, every element zero.
 Tensor zeros(Device device, lut::Span<const int> shape, DType dtype);
@@ -203,5 +206,5 @@ Tensor sample(
     TensorView topKs,
     TensorView topPs);
 
-}  // namespace F
+}  // namespace test
 }  // namespace fl
