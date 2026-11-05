@@ -53,6 +53,9 @@ handed in a reading.
 | `mel` | `(1, 80, M - prompt)`, what the flow drew for `said` |
 | `hift_*_noise`, `hift_rand_ini` | the noise HiFT's source was handed; see below |
 | `f0`, `source`, `wave` | the vocoder's pitch, excitation and 24 kHz output |
+| `stream_kept` | `said` as `llm_job` hands it to the flow: no more than five silent tokens in a row |
+| `stream_offsets`, `stream_lengths` | each part's `token_offset`, and its samples |
+| `stream_mel`, `stream_wave` | the same streamed with `stream=True`: the mel kept, the parts end to end |
 
 # HiFT's noise is chosen here
 
@@ -247,6 +250,55 @@ def main():
     out["source"] = source.float()
     out["wave"] = wave.float()
     print(f"mel {tuple(mel.shape)}, wave {tuple(wave.shape)}")
+
+    # The same tokens streamed, as `CosyVoice3Model.tts` with `stream=True` streams them once the
+    # language model has said them all: `llm_job`'s cap on silent tokens, then a hop each time
+    # enough is said, then the rest with `finalize=True`. Which hops are drawn depends only on how
+    # many tokens there are, so this is the loop's own order. The vocoder reads the same noise.
+    model = cosy.model
+    kept, run = [], 0
+    for token in said:
+        if token in model.silent_tokens:
+            run += 1
+            if run > 5:
+                continue
+        else:
+            run = 0
+        kept.append(token)
+    assert 2 * len(kept) <= mel.shape[2], "the streamed reading needs more noise than was drawn"
+    out["stream_kept"] = torch.tensor(kept, dtype=torch.int64)
+
+    model.token_hop_len = 25
+    uuid = "stream"
+    model.hift_cache_dict[uuid] = None
+    prompt_token = cross["flow_prompt_speech_token"]
+    lookahead = model.flow.pre_lookahead_len
+    pad = int(np.ceil(prompt_token.shape[1] / model.token_hop_len) * model.token_hop_len
+              - prompt_token.shape[1])
+    common = dict(prompt_token=prompt_token, prompt_feat=cross["prompt_speech_feat"],
+                  embedding=cross["flow_embedding"], uuid=uuid)
+    parts, offsets, offset = [], [], 0
+    with torch.inference_mode():
+        while True:
+            hop = model.token_hop_len + pad if offset == 0 else model.token_hop_len
+            if len(kept) - offset < hop + lookahead:
+                break
+            token = torch.tensor([kept[:offset + hop + lookahead]])
+            parts.append(model.token2wav(token=token, token_offset=offset, stream=True,
+                                         finalize=False, **common))
+            offsets.append(offset)
+            offset += hop
+            model.token_hop_len = min(model.token_max_hop_len,
+                                      model.token_hop_len * model.stream_scale_factor)
+        parts.append(model.token2wav(token=torch.tensor([kept]), token_offset=offset,
+                                     finalize=True, **common))
+        offsets.append(offset)
+    out["stream_offsets"] = torch.tensor(offsets, dtype=torch.int64)
+    out["stream_lengths"] = torch.tensor([part.shape[1] for part in parts], dtype=torch.int64)
+    out["stream_mel"] = model.hift_cache_dict[uuid]["mel"].float()
+    out["stream_wave"] = torch.cat(parts, dim=1).float()
+    print(f"streamed in {len(parts)} parts of {[part.shape[1] for part in parts]} samples, "
+          f"the mel {tuple(out['stream_mel'].shape)}")
 
     from safetensors.torch import save_file
 

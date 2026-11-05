@@ -185,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let b = models(&other_manifest)?;
 
     let sampling = Sampling::cosyvoice3();
-    let mut quiet = |_| ControlFlow::Continue(());
+    let mut quiet = |_: &[i32]| ControlFlow::Continue(());
     for (index, sentence) in SENTENCES.iter().enumerate() {
         println!("\n== sentence {index}: {sentence}");
         let ids = tokenizer.encode(&format!("{SYSTEM}{sentence}"))?;

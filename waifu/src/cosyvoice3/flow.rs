@@ -74,6 +74,8 @@ pub struct Config {
     pub time_dim: i32,
     /// How many frames of fixed noise the package holds: three hundred seconds.
     pub noise_frames: i32,
+    /// The DiT's `static_chunk_size`: how many frames a block of its streaming attention is.
+    pub block: i32,
 }
 
 impl Config {
@@ -94,6 +96,7 @@ impl Config {
             position_groups: 16,
             time_dim: 256,
             noise_frames: 15000,
+            block: 50,
         }
     }
 }
@@ -233,6 +236,7 @@ fn chunk(g: &Graph, modulation: Value, index: i32, dim: i32) -> Value {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn block(
     g: &Graph,
     x: Value,
@@ -241,6 +245,7 @@ fn block(
     sin: Value,
     one: Value,
     config: &Config,
+    mask: i32,
     dtype: DType,
     device: Device,
 ) -> Result<Value> {
@@ -281,7 +286,7 @@ fn block(
         );
         g.contiguous(g.transpose(split, 1, 2))
     };
-    let attended = g.attention(heads(q), heads(k), heads(v), NO_MASK);
+    let attended = g.attention(heads(q), heads(k), heads(v), mask);
     let attended = g.view(
         g.contiguous(g.transpose(attended, 1, 2)),
         [batch, length, Extent::At(dim)],
@@ -307,7 +312,15 @@ fn block(
 
 /// The estimator: `x` `(B, M, 80)`, `context` `(B, M, 240)` -- the prompt's mel, `mu` and the
 /// speaker, in that order -- and the time's sinusoid `(1, 256)`, in; the velocity `(B, M, 80)` out.
-fn write_estimator(g: &Graph, config: &Config, dtype: DType, device: Device) -> Result<()> {
+/// `mask` is its attention's: every frame seeing every other, or `config.block` for upstream's
+/// `streaming=True`.
+fn write_estimator(
+    g: &Graph,
+    config: &Config,
+    mask: i32,
+    dtype: DType,
+    device: Device,
+) -> Result<()> {
     let dim = config.dim;
     let one = constant(g, 1.0, dtype, device)?;
     let two = constant(g, 2.0, dtype, device)?;
@@ -374,6 +387,7 @@ fn write_estimator(g: &Graph, config: &Config, dtype: DType, device: Device) -> 
             sin,
             one,
             config,
+            mask,
             dtype,
             device,
         )?;
@@ -485,6 +499,29 @@ impl Condition {
     pub fn frames(&self) -> i32 {
         self.frames
     }
+
+    /// The condition of the first `frames` frames alone: what upstream's `finalize=False` builds
+    /// when the tokens past them are handed to the look-ahead layer as its `context`.
+    ///
+    /// The look-ahead layer's first convolution reads three tokens ahead and its second only
+    /// behind, so a token's row reads the tokens up to three past it and nothing further: the rows
+    /// of all but the last three tokens are the same whether the three after them are the zeros a
+    /// whole sentence ends in or the tokens they are given as context. So the condition of every
+    /// token with the last three cut off is this one's rows, and the noise is the same noise's.
+    pub fn prefix(&self, frames: i32) -> Result<Condition> {
+        if frames < 0 || frames > self.frames {
+            return Err(Error::model(format!(
+                "{frames} frames of a condition of {}",
+                self.frames
+            )));
+        }
+        Ok(Condition {
+            mu: self.mu.slice(1, 0, frames)?.contiguous()?,
+            speaker: self.speaker.clone(),
+            noise: self.noise.slice(1, 0, frames)?.contiguous()?,
+            frames,
+        })
+    }
 }
 
 /// The flow with its weights behind it.
@@ -492,6 +529,9 @@ pub struct Flow {
     config: Config,
     condition: Ir,
     estimator: Ir,
+    /// The estimator whose attention is in blocks of `config.block` frames, as upstream's
+    /// `streaming=True` runs it.
+    in_blocks: Ir,
     weights: Rc<Weights>,
     device: Device,
     /// The rotary cosines and sines of every frame the flow can draw, `(noise_frames, head_dim / 2,
@@ -520,23 +560,25 @@ impl Flow {
         write_condition(&condition.subgraph(name), &config, DType::Float, device)?;
         check_parameters(&condition, weights.as_ref())?;
 
-        let estimator = Graph::new();
-        write_estimator(
-            &estimator
-                .subgraph(name)
-                .subgraph("decoder")
-                .subgraph("estimator"),
-            &config,
-            dtype,
-            device,
-        )?;
-        check_parameters(&estimator, weights.as_ref())?;
+        let estimator = |mask: i32| -> Result<Ir> {
+            let g = Graph::new();
+            write_estimator(
+                &g.subgraph(name).subgraph("decoder").subgraph("estimator"),
+                &config,
+                mask,
+                dtype,
+                device,
+            )?;
+            check_parameters(&g, weights.as_ref())?;
+            Ok(Ir::compile(&g))
+        };
 
         Ok(Flow {
             rotary: rotary_table(&config, config.noise_frames, device)?,
-            config,
             condition: Ir::compile(&condition),
-            estimator: Ir::compile(&estimator),
+            estimator: estimator(NO_MASK)?,
+            in_blocks: estimator(config.block)?,
+            config,
             weights: Rc::clone(weights),
             device,
         })
@@ -652,13 +694,24 @@ impl Flow {
         time: &Tensor,
         rotary: &(Tensor, Tensor),
     ) -> Result<Tensor> {
+        self.velocity_of(&self.estimator, x, context, time, rotary)
+    }
+
+    fn velocity_of(
+        &self,
+        estimator: &Ir,
+        x: &Tensor,
+        context: &Tensor,
+        time: &Tensor,
+        rotary: &(Tensor, Tensor),
+    ) -> Result<Tensor> {
         let run = RunContext::new(&*self.weights)
             .input("x", x)
             .input("context", context)
             .input("time", time)
             .input("cos", &rotary.0)
             .input("sin", &rotary.1);
-        Ok(self.estimator.run(&run)?.remove(0).1)
+        Ok(estimator.run(&run)?.remove(0).1)
     }
 
     /// Ten Euler steps from the fixed noise to the mel of the sentence: `(1, frames, 80)`
@@ -669,6 +722,34 @@ impl Flow {
     /// guidance mixes the estimator's two answers, and the step adds `dt` of that to `x`.
     pub fn draw(
         &self,
+        condition: &Condition,
+        prompt_mel: &Tensor,
+        steps: usize,
+        cfg_rate: f32,
+    ) -> Result<Tensor> {
+        self.draw_with(&self.estimator, condition, prompt_mel, steps, cfg_rate)
+    }
+
+    /// [`Flow::draw`] with the DiT's attention in blocks of [`Config::block`] frames counted from
+    /// the first frame of the prompt, each seeing itself and every block before it: upstream's
+    /// `streaming=True`. A frame is drawn from nothing after its own block, so the frames of a
+    /// condition's [`prefix`](Condition::prefix) that ends on a block are drawn the same in it as
+    /// in the whole -- which is what lets a streaming reading draw a hop at a time.
+    ///
+    /// Only an attention kernel that takes blocks runs it: CUDA's, at half, on Ampere or later.
+    pub fn draw_in_blocks(
+        &self,
+        condition: &Condition,
+        prompt_mel: &Tensor,
+        steps: usize,
+        cfg_rate: f32,
+    ) -> Result<Tensor> {
+        self.draw_with(&self.in_blocks, condition, prompt_mel, steps, cfg_rate)
+    }
+
+    fn draw_with(
+        &self,
+        estimator: &Ir,
         condition: &Condition,
         prompt_mel: &Tensor,
         steps: usize,
@@ -696,7 +777,8 @@ impl Flow {
         let mut dt = span[1] - span[0];
         for step in 1..span.len() {
             let doubled = F::cat(&x, &x, 0)?;
-            let velocity = self.velocity(&doubled, &context, &times[step - 1], &rotary)?;
+            let velocity =
+                self.velocity_of(estimator, &doubled, &context, &times[step - 1], &rotary)?;
             let guided = velocity.slice(0, 0, 1)?;
             let unguided = velocity.slice(0, 1, 2)?;
             let mixed = F::sub(

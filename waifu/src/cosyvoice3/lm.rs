@@ -585,7 +585,7 @@ impl Lm {
     }
 
     /// Say `text`, continuing `prompt`, and hand back the speech tokens -- or `None` where
-    /// `report`, handed the count so far, asked to stop. `text_len` is what the length limits are
+    /// `report`, handed every token said so far after each one, asked to stop. `text_len` is what the length limits are
     /// worked out from: upstream's `text_len - prompt_text_len`.
     pub fn generate(
         &self,
@@ -594,7 +594,7 @@ impl Lm {
         text_len: usize,
         sampling: &Sampling,
         sampler: &mut Sampler,
-        report: &mut dyn FnMut(i32) -> std::ops::ControlFlow<()>,
+        report: &mut dyn FnMut(&[i32]) -> std::ops::ControlFlow<()>,
     ) -> Result<Option<Vec<i32>>> {
         let min_len = text_len * 2;
         let max_len = text_len * 20;
@@ -614,7 +614,7 @@ impl Lm {
             }
 
             said.push(token);
-            if report(said.len() as i32).is_break() {
+            if report(&said).is_break() {
                 return Ok(None);
             }
             reading = self.step(&reading, token)?;

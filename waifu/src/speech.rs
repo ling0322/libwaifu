@@ -45,7 +45,7 @@
 use std::ops::ControlFlow;
 
 use crate::wav::Sound;
-use crate::Result;
+use crate::{Error, Result};
 
 /// What a run is asked for, beyond the words themselves.
 ///
@@ -178,24 +178,22 @@ pub trait Voice {
     /// and the whole of it back at the end, the parts end to end. `heard` asking to stop stops the
     /// reading, as `report` does.
     ///
-    /// The parts are what the voice can make on their own: a sentence at a time for CosyVoice3.
-    /// This default makes all of it and hands it over as one part, which is what a voice that has
-    /// nothing smaller to offer does either way; a caller sees the same sound from both methods.
+    /// The parts are what the voice makes while it is still reading: CosyVoice3's every hop of
+    /// tokens, Tones' every note. This default refuses: a voice that can only hand over the whole
+    /// of a reading at the end does not stream, and handing that over as one part would be
+    /// passing it off as streaming.
     fn speak_streaming(
         &self,
-        text: &str,
-        like: Option<&Sound>,
-        options: &SpeechOptions,
-        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
-        heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
+        _text: &str,
+        _like: Option<&Sound>,
+        _options: &SpeechOptions,
+        _report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        _heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
-        let Some(sound) = self.speak(text, like, options, report)? else {
-            return Ok(None);
-        };
-        if heard(&sound).is_break() {
-            return Ok(None);
-        }
-        Ok(Some(sound))
+        Err(Error::model(format!(
+            "{} does not stream: it hands over a reading only when the whole of it is made",
+            self.name()
+        )))
     }
 
     /// The rate it speaks at, which is a property of the model rather than a setting.
@@ -417,6 +415,32 @@ impl Voice for Tones {
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
+        self.play(text, like, options, report, None)
+    }
+
+    /// Every note handed over as soon as it is sung, with the rests before it.
+    fn speak_streaming(
+        &self,
+        text: &str,
+        like: Option<&Sound>,
+        options: &SpeechOptions,
+        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>> {
+        self.play(text, like, options, report, Some(heard))
+    }
+}
+
+impl Tones {
+    /// What [`Voice::speak`] and [`Voice::speak_streaming`] both do, the second with `heard`.
+    fn play(
+        &self,
+        text: &str,
+        like: Option<&Sound>,
+        options: &SpeechOptions,
+        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        mut heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>>,
+    ) -> Result<Option<Sound>> {
         if report(SpeechProgress::Reading).is_break() {
             return Ok(None);
         }
@@ -435,6 +459,16 @@ impl Voice for Tones {
         let mut seed = Rolling::from(options.seed.unwrap_or(0));
         let mut samples = Vec::new();
         let mut done = 0;
+        // How many of `samples` are handed over.
+        let mut handed = 0;
+        let mut hand = |samples: &[f32], handed: &mut usize| -> ControlFlow<()> {
+            let Some(heard) = heard.as_mut() else {
+                return ControlFlow::Continue(());
+            };
+            let part = Sound::new(samples[*handed..].to_vec(), RATE);
+            *handed = samples.len();
+            heard(&part)
+        };
 
         for note in &notes {
             let seconds = note.seconds() / speed;
@@ -454,6 +488,9 @@ impl Voice for Tones {
                     if report(SpeechProgress::Saying { done, expected }).is_break() {
                         return Ok(None);
                     }
+                    if hand(&samples, &mut handed).is_break() {
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -467,6 +504,10 @@ impl Voice for Tones {
         // reads as a bug rather than as "there was nothing to say".
         if samples.is_empty() {
             samples.resize((RATE / 10) as usize, 0.0);
+        }
+        // The rests after the last note, or the silence that stands for none.
+        if handed < samples.len() && hand(&samples, &mut handed).is_break() {
+            return Ok(None);
         }
 
         Ok(Some(Sound::new(samples, RATE)))
@@ -733,9 +774,9 @@ mod tests {
     }
 
     #[test]
-    fn a_voice_with_nothing_smaller_streams_its_whole_reading_as_one_part() {
-        // The default every voice but CosyVoice3 keeps: one part, the whole of it, the same sound
-        // `speak` makes -- so a caller that asks for parts is never handed a different reading.
+    fn tones_hand_over_every_note_as_it_is_sung() {
+        // A part a note, the rests with the note after them: the parts end to end are the sound
+        // `speak` makes, so a caller that asks for parts is never handed a different reading.
         let tones = Tones::new();
         let mut parts: Vec<Sound> = Vec::new();
         let streamed = tones
@@ -751,7 +792,9 @@ mod tests {
             )
             .unwrap()
             .expect("nothing stopped it");
-        assert_eq!(parts, vec![streamed.clone()]);
+        assert!(parts.len() > 1, "{} parts", parts.len());
+        let joined: Vec<f32> = parts.iter().flat_map(|p| p.samples.clone()).collect();
+        assert_eq!(joined, streamed.samples);
         assert_eq!(streamed, said("hello there", at_a_seed(3)));
 
         // A part that asks to stop stops the reading, as the progress callback does.

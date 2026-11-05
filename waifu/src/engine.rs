@@ -401,10 +401,10 @@ impl Engine {
     }
 
     /// As [`speak`](Engine::speak), with each part of the audio handed to `on_audio` as soon as
-    /// it is made -- a sentence at a time for CosyVoice3, the whole reading at once for a voice
-    /// with nothing smaller to offer -- and the whole of it, the parts end to end, to
-    /// `on_complete`. Cancelling stops it after the part it is on; the parts handed over are all
-    /// there will be, and `on_complete` is told it was cancelled.
+    /// it is made, while the rest is still being said -- see [`Voice::speak_streaming`] -- and the
+    /// whole of it, the parts end to end, to `on_complete`. A voice that cannot stream is refused
+    /// there. Cancelling stops it after the part it is on; the parts handed over are all there
+    /// will be, and `on_complete` is told it was cancelled.
     pub fn speak_streaming(
         &self,
         request: SpeakRequest,
@@ -1226,7 +1226,7 @@ impl Worker {
             on_progress,
             started,
         };
-        // A streaming reading takes turns between saying and sounding a sentence at a time, so
+        // A streaming reading takes turns between saying and sounding a hop at a time, so
         // the vocoder's share of it is no measure of a reading that says everything first, and
         // its bar is drawn from the tokens alone.
         let streaming = on_audio.is_some();
