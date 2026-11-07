@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cosyvoice3::{self, CosyVoice3};
 use crate::indextts::{self, IndexTts};
+use crate::qwen3_asr::{config::Config as Qwen3AsrConfig, Qwen3Asr};
 use crate::{Anima, Krea2, Manifest, QwenImage, Sdxl, Style, Tones, Voice};
 
 /// The model the page is set to draw with, as the screen describes it.
@@ -262,6 +263,65 @@ pub fn converter_kind(path: &Path) -> Option<ConverterKind> {
     match manifest.section("model").ok()?.get_str("type").ok()? {
         CosyVoice3::MODEL_TYPE => Some(ConverterKind::CosyVoice3),
         _ => None,
+    }
+}
+
+/// The transcriber the page is set to write down a recording with, as the screen describes it:
+/// what [`Spoken`] is for a voice, said out of the manifest without reading any weights.
+#[derive(Clone, Debug)]
+pub struct ChosenTranscriber {
+    /// What to ask for when the time comes to read it: the path of its manifest.
+    pub name: String,
+    pub full_name: String,
+    pub on_disk: bool,
+    /// The rate it hears at. A recording at any other is resampled to it, so this is for saying,
+    /// not for the caller to match.
+    pub rate: u32,
+    /// The languages a request may name, as the package lists them; empty where it cannot be
+    /// told one.
+    pub languages: Vec<String>,
+}
+
+/// The models a package can write down a recording with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriberKind {
+    Qwen3Asr,
+}
+
+/// Which transcriber the manifest at `path` describes, by its `model.type`.
+pub fn transcriber_kind(path: &Path) -> Option<TranscriberKind> {
+    let manifest = Manifest::open(path).ok()?;
+    match manifest.section("model").ok()?.get_str("type").ok()? {
+        Qwen3Asr::MODEL_TYPE => Some(TranscriberKind::Qwen3Asr),
+        _ => None,
+    }
+}
+
+/// Whether `asked` writes down a recording: a manifest on the disk whose `model.type` is one.
+pub fn is_a_transcriber(asked: &str) -> bool {
+    manifest_of(asked)
+        .as_deref()
+        .and_then(transcriber_kind)
+        .is_some()
+}
+
+/// The transcriber `asked` names, as the screen describes it, from its manifest alone.
+pub fn look_at_transcriber(asked: &str) -> ChosenTranscriber {
+    let manifest = manifest_of(asked).and_then(|path| Manifest::open(path).ok());
+    let section = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.section(Qwen3Asr::MODEL_TYPE).ok());
+    ChosenTranscriber {
+        name: asked.to_string(),
+        // The kind's name: what the catalogue calls a published one is the model manager's.
+        full_name: Qwen3Asr::NAME.to_string(),
+        on_disk: on_disk(asked).is_some(),
+        rate: section
+            .and_then(|section| section.get("sample_rate").ok())
+            .unwrap_or(16000),
+        languages: section
+            .and_then(|section| Qwen3AsrConfig::languages_of(section).ok())
+            .unwrap_or_default(),
     }
 }
 

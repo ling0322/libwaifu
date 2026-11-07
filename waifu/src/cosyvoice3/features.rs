@@ -154,6 +154,9 @@ impl Features {
     /// `torch.stft` centred with reflection, a periodic Hann of 400, the power spectrum with its
     /// last frame dropped, Slaney's filterbank, `log10` floored at 1e-10, then everything more than
     /// eight below the loudest raised to it and the lot mapped by `(x + 4) / 4`.
+    ///
+    /// A similar implementation lives in `qwen3_asr::features::Features::mel`; a fix to one likely
+    /// belongs in the other too.
     pub fn whisper_mel(&self, wave: &[f32]) -> Result<Tensor> {
         if wave.len() < 2 * WHISPER_HOP as usize || wave.len() <= WHISPER_FFT / 2 {
             return Err(Error::model(

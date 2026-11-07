@@ -25,6 +25,9 @@
 //! It runs once over the whole prompt and what comes back is every position's final hidden state,
 //! which [`Adapter`](super::Adapter) then cross-attends into.
 //!
+//! A similar implementation lives in `qwen3_asr::decoder`, the same Qwen3 layers with a cache and
+//! a head; a fix to the shared parts of one likely belongs in the other too.
+//!
 //! It is still a causal model and is run as one. Nothing here generates -- there is no cache and
 //! no lm_head, and the token after the prompt is of no interest -- but the mask is the mask it was
 //! trained with, and taking it off would change every state it produces.

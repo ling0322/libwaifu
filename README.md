@@ -40,6 +40,22 @@ the voice to convert it to, and a clip out -- the same package that reads text, 
 API's voice conversion. It changes whose voice it is and keeps the words, timing and accent (see
 [docs/cosyvoice3.md](docs/cosyvoice3.md#voice-conversion)).
 
+## Speech recognition
+
+**Qwen3-ASR** writes down what is said in a recording -- thirty languages, told or found out, at
+any rate and of any length -- with a sentence of context to help it hear names: the `speech2text`
+task, in the library and through the C API's `waifu_engine_transcribe_async` (see
+[docs/qwen3_asr.md](docs/qwen3_asr.md)). Not published yet: build the package and choose it by
+path.
+
+```bash
+cargo run --release -p waifu-tools --bin transcribe -- models/qwen3-asr.yaml speech.wav
+```
+
+| name | model | published as |
+|---|---|---|
+| -- | Qwen3-ASR 0.6B | not yet; `tools/qwen3_asr_exporter.py` builds it |
+
 ## Layer decomposition
 
 **See-through** takes an anime illustration apart into the layers it was drawn in -- hair, face,

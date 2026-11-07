@@ -101,6 +101,21 @@ impl Tokenizer {
         Ok(encoded.get_ids().iter().map(|&id| id as i32).collect())
     }
 
+    /// The text of `ids`, as the `tokenizer.json`'s decoder writes it: what a model that writes
+    /// words hands back. `skip_special` leaves out the special tokens -- the chat markers, the end
+    /// of text -- as transformers' `decode(..., skip_special_tokens=True)` does.
+    pub fn decode(&self, ids: &[i32], skip_special: bool) -> Result<String> {
+        let ids: Vec<u32> = ids
+            .iter()
+            .map(|&id| {
+                u32::try_from(id).map_err(|_| Error::model(format!("{id} is not a token id")))
+            })
+            .collect::<Result<_>>()?;
+        self.inner
+            .decode(&ids, skip_special)
+            .map_err(|err| Error::model(format!("cannot decode {} ids: {err}", ids.len())))
+    }
+
     /// The id of a token, by the text that names it.
     ///
     /// A missing one is an error rather than the unknown token: a pipeline naming a marker the
