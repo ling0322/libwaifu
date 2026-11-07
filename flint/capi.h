@@ -115,6 +115,21 @@ typedef enum fl_pad_mode_t {
   FL_PAD_REPLICATE = 2,
 } fl_pad_mode_t;
 
+/// Which keys a query may see in fl_attention(). Query i sits at position p = i + S - L, aligned
+/// to the bottom right of the score matrix; the block masks cut the keys into blocks of
+/// `block_size` from key 0.
+typedef enum fl_mask_type_t {
+  /// Every key. `block_size` 0.
+  FL_MASK_NONE = 0,
+  /// Keys 0..p. `block_size` 0.
+  FL_MASK_CAUSAL = 1,
+  /// p's own block and every block before it, as a streaming diffusion transformer is trained.
+  /// Needs S >= L.
+  FL_MASK_BLOCK_CAUSAL = 2,
+  /// p's own block alone: windowed self-attention. Needs S == L.
+  FL_MASK_BLOCK_DIAGONAL = 3,
+} fl_mask_type_t;
+
 /// What a tensor's storage is for, which an allocator may treat each in its own way, by how long it
 /// lives: a weight kept on the device is given memory that goes back to the device whole when it is
 /// freed -- a buffer of its own on Metal, its own cudaMalloc on CUDA from 2 MB -- and everything
@@ -494,16 +509,16 @@ FLAPI int32_t fl_max(fl_operators_t operators, fl_tensor_view_t input, fl_tensor
 FLAPI int32_t fl_min(fl_operators_t operators, fl_tensor_view_t input, fl_tensor_view_t out);
 
 /// Scaled dot product attention. `q` is (N, nHead, L, D) and `k` and `v` are (N, nKvHead, S, D),
-/// where nKvHead may divide nHead; `out` is (N, nHead, L, D). `block_size` is the mask: 0 none,
-/// 1 the causal mask aligned to the bottom right of the score matrix, and a larger one the same at
-/// the granularity of blocks of that many keys counted from key 0 -- a query sees its own block
-/// whole and every block before it. 0 and 1 are what this argument meant when it was `causal`.
-/// A block of more than one fails, with the reason, where no kernel takes it.
+/// where nKvHead may divide nHead; `out` is (N, nHead, L, D). `mask_type` and `block_size` are
+/// the mask; see fl_mask_type_t. A mask that is not one -- a block size beside FL_MASK_NONE or
+/// FL_MASK_CAUSAL, none beside a block mask -- fails as an invalid argument, and a block mask
+/// fails, with the reason, where no kernel takes it.
 FLAPI int32_t fl_attention(
     fl_operators_t operators,
     fl_tensor_view_t q,
     fl_tensor_view_t k,
     fl_tensor_view_t v,
+    fl_mask_type_t mask_type,
     int32_t block_size,
     fl_tensor_view_t out);
 

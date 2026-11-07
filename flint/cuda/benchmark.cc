@@ -283,7 +283,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor k = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     Tensor v = randHalf(operators, {1, attention.heads, attention.tokens, 64});
     double flop = 4.0 * attention.heads * attention.tokens * attention.tokens * 64;
-    float milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, k, v, false); });
+    float milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, k, v, MaskType::kNone); });
     bench::print(
         "%-44s %10.3f us  %8.2f TFLOP/s\n",
         (std::string("self attention ") + attention.what).c_str(),
@@ -294,7 +294,7 @@ LL_BENCHMARK(bench::Group::kSdxlCuda, "SDXL elementwise") {
     Tensor ck = randHalf(operators, {1, attention.heads, 77, 64});
     Tensor cv = randHalf(operators, {1, attention.heads, 77, 64});
     double crossFlop = 4.0 * attention.heads * attention.tokens * 77 * 64;
-    milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, ck, cv, false); });
+    milliseconds = benchmarkCuda([&] { F::attention(operators.get(), q, ck, cv, MaskType::kNone); });
     bench::print(
         "%-44s %10.3f us  %8.2f TFLOP/s\n",
         (std::string("cross attention ") + attention.what).c_str(),
@@ -367,6 +367,23 @@ float maxAbsDiff(const Tensor &a, const Tensor &b) {
 
 }  // namespace
 
+/// How many keys a query at `position` sees under the mask, of `keys`: MaskType's table, for
+/// counting the work a mask leaves.
+static int seenKeys(MaskType maskType, int blockSize, int position, int keys) {
+  switch (maskType) {
+    case MaskType::kNone:
+      return keys;
+    case MaskType::kCausal:
+      return position + 1;
+    case MaskType::kBlockCausal:
+      return std::min(keys, (position / blockSize + 1) * blockSize);
+    case MaskType::kBlockDiagonal:
+      return std::min(keys, (position / blockSize + 1) * blockSize) -
+             (position / blockSize) * blockSize;
+  }
+  return keys;
+}
+
 LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
   // The fused kernel against FlashAttention -- where the build has it -- and the composition of
   // matmul, softmax and matmul, on the same operands, in the shapes the models run. Each is
@@ -382,22 +399,25 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     int queryLength;
     int keyLength;
     int headDim;
-    // As Operators::attention has it: 0 no mask, 1 causal, larger a block-causal mask.
+    MaskType maskType;
+    // For the block masks: how many keys a block is. 0 for the others.
     int blockSize;
   };
   const Shape shapes[] = {
-      {"sdxl self 64x64", 1, 10, 10, 4096, 4096, 64, 0},
-      {"sdxl self 32x32", 1, 20, 20, 1024, 1024, 64, 0},
-      {"sdxl cross 64x64", 1, 10, 10, 4096, 77, 64, 0},
-      {"cosyvoice3 dit cfg", 2, 16, 16, 1500, 1500, 64, 0},
-      {"cosyvoice3 dit cfg block 50", 2, 16, 16, 1500, 1500, 64, 50},
-      {"cosyvoice3 lm prefill", 1, 14, 2, 300, 300, 64, 1},
-      {"cosyvoice3 lm decode 300", 1, 14, 2, 1, 300, 64, 1},
-      {"cosyvoice3 lm decode 1000", 1, 14, 2, 1, 1000, 64, 1},
-      {"cosyvoice3 lm decode 4000", 1, 14, 2, 1, 4000, 64, 1},
-      {"cosyvoice3 lm 4 queries 1000", 1, 14, 2, 4, 1000, 64, 1},
-      {"hdim128 2048", 1, 8, 8, 2048, 2048, 128, 0},
-      {"hdim128 2048 causal", 1, 8, 8, 2048, 2048, 128, 1},
+      {"sdxl self 64x64", 1, 10, 10, 4096, 4096, 64, MaskType::kNone, 0},
+      {"sdxl self 32x32", 1, 20, 20, 1024, 1024, 64, MaskType::kNone, 0},
+      {"sdxl cross 64x64", 1, 10, 10, 4096, 77, 64, MaskType::kNone, 0},
+      {"cosyvoice3 dit cfg", 2, 16, 16, 1500, 1500, 64, MaskType::kNone, 0},
+      {"cosyvoice3 dit cfg block 50", 2, 16, 16, 1500, 1500, 64, MaskType::kBlockCausal, 50},
+      {"cosyvoice3 lm prefill", 1, 14, 2, 300, 300, 64, MaskType::kCausal, 0},
+      {"cosyvoice3 lm decode 300", 1, 14, 2, 1, 300, 64, MaskType::kCausal, 0},
+      {"cosyvoice3 lm decode 1000", 1, 14, 2, 1, 1000, 64, MaskType::kCausal, 0},
+      {"cosyvoice3 lm decode 4000", 1, 14, 2, 1, 4000, 64, MaskType::kCausal, 0},
+      {"cosyvoice3 lm 4 queries 1000", 1, 14, 2, 4, 1000, 64, MaskType::kCausal, 0},
+      {"hdim128 2048", 1, 8, 8, 2048, 2048, 128, MaskType::kNone, 0},
+      {"hdim128 2048 causal", 1, 8, 8, 2048, 2048, 128, MaskType::kCausal, 0},
+      {"qwen3-asr audio 20 s", 1, 14, 14, 260, 260, 64, MaskType::kBlockDiagonal, 104},
+      {"qwen3-asr audio 5 min", 1, 14, 14, 3900, 3900, 64, MaskType::kBlockDiagonal, 104},
   };
 
   bench::print(
@@ -422,26 +442,24 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     double pairs = 0;
     int offset = s.keyLength - s.queryLength;
     for (int i = 0; i < s.queryLength; ++i) {
-      int seen = s.keyLength;
-      if (s.blockSize > 0) {
-        int position = i + offset;
-        seen = std::min(s.keyLength, (position / s.blockSize + 1) * s.blockSize);
-      }
-      pairs += seen;
+      pairs += seenKeys(s.maskType, s.blockSize, i + offset, s.keyLength);
     }
-    // Neither FlashAttention nor the composition has a block larger than one: the fused kernel's
-    // error there is against nothing, and the other two columns are empty.
-    bool blocked = s.blockSize > 1;
+    // Neither FlashAttention nor the composition has a block mask: the fused kernel's error there
+    // is against nothing, and the other two columns are empty.
+    bool blocked = s.maskType == MaskType::kBlockCausal || s.maskType == MaskType::kBlockDiagonal;
+    bool causal = s.maskType == MaskType::kCausal;
     double flop = 4.0 * s.batch * s.heads * pairs * s.headDim;
 
     Tensor reference = output(DType::kFloat);
+    // The composition is Operators::attention's own, which CudaOperators would only fall back to:
+    // asked of the base class directly.
     if (!blocked) {
-      F::composedAttention(
-          operators.get(),
+      operators->Operators::attention(
           F::cast(operators.get(), q, DType::kFloat),
           F::cast(operators.get(), k, DType::kFloat),
           F::cast(operators.get(), v, DType::kFloat),
-          s.blockSize == 1,
+          s.maskType,
+          0,
           reference);
     }
 
@@ -449,8 +467,9 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     Tensor fused = output(DType::kFloat16);
     float fusedMs = 0.0f;
     float fusedError = NAN;
-    if (op::cuda::attention(q, k, v, s.blockSize, fused)) {
-      fusedMs = benchmarkCuda([&] { op::cuda::attention(q, k, v, s.blockSize, fused); });
+    if (op::cuda::attention(q, k, v, s.maskType, s.blockSize, fused)) {
+      fusedMs = benchmarkCuda(
+          [&] { op::cuda::attention(q, k, v, s.maskType, s.blockSize, fused); });
       if (!blocked) fusedError = maxAbsDiff(fused, reference);
       line += lut::sprintf(" %12.1f", fusedMs * 1000.0f);
     } else {
@@ -460,9 +479,8 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     float flashError = NAN;
 #ifdef LIBWAIFU_FLASH_ATTN_ENABLED
     Tensor flash = output(DType::kFloat16);
-    if (!blocked && op::cuda::flashAttention(q, k, v, s.blockSize == 1, flash)) {
-      float flashMs =
-          benchmarkCuda([&] { op::cuda::flashAttention(q, k, v, s.blockSize == 1, flash); });
+    if (!blocked && op::cuda::flashAttention(q, k, v, causal, flash)) {
+      float flashMs = benchmarkCuda([&] { op::cuda::flashAttention(q, k, v, causal, flash); });
       flashError = maxAbsDiff(flash, reference);
       line += lut::sprintf(" %12.1f", flashMs * 1000.0f);
     } else {
@@ -475,9 +493,8 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
     float composedError = NAN;
     if (!blocked) {
       Tensor composed = output(DType::kFloat16);
-      float composedMs = benchmarkCuda([&] {
-        F::composedAttention(operators.get(), q, k, v, s.blockSize == 1, composed);
-      });
+      float composedMs = benchmarkCuda(
+          [&] { operators->Operators::attention(q, k, v, s.maskType, 0, composed); });
       composedError = maxAbsDiff(composed, reference);
       line += lut::sprintf(" %12.1f", composedMs * 1000.0f);
     } else {
@@ -495,10 +512,10 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention implementations") {
 }
 
 LL_BENCHMARK(bench::Group::kAttentionCuda, "attention masks") {
-  // The fused kernel on one shape under every mask: none, causal, and blocks of 50 -- CosyVoice3's
-  // flow streams in those -- and of 64, the kernel's own tile. What a mask leaves is printed beside
-  // what it costs, so that what skipping the masked blocks saves can be read off against what it
-  // could.
+  // The fused kernel on one shape under every mask: none, causal, block causal in blocks of 50 --
+  // CosyVoice3's flow streams in those -- and of 64, the kernel's own tile, and block diagonal in
+  // Qwen3-ASR's windows of 104 and in 64. What a mask leaves is printed beside what it costs, so
+  // that what skipping the masked blocks saves can be read off against what it could.
   std::shared_ptr<Operators> operators = getOperatorsSharedPtr(Device::kCuda);
 
   struct Shape {
@@ -514,7 +531,18 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention masks") {
       {"sdxl 4096", 1, 10, 4096, 64},
       {"hdim128 2048", 1, 8, 2048, 128},
   };
-  const int blockSizes[] = {0, 1, 50, 64};
+  struct Mask {
+    MaskType maskType;
+    int blockSize;
+  };
+  const Mask masks[] = {
+      {MaskType::kNone, 0},
+      {MaskType::kCausal, 0},
+      {MaskType::kBlockCausal, 50},
+      {MaskType::kBlockCausal, 64},
+      {MaskType::kBlockDiagonal, 104},
+      {MaskType::kBlockDiagonal, 64},
+  };
 
   bench::print("%-26s %8s %12s %10s %10s %8s\n", "", "mask", "fused us", "vs none", "work", "TFLOP/s");
   for (const Shape &s : shapes) {
@@ -524,20 +552,20 @@ LL_BENCHMARK(bench::Group::kAttentionCuda, "attention masks") {
     Tensor out = F::empty(Device::getCuda(), {s.batch, s.heads, s.length, s.headDim}, DType::kFloat16);
 
     float unmasked = 0.0f;
-    for (int blockSize : blockSizes) {
+    for (const Mask &m : masks) {
       double pairs = 0;
-      for (int i = 0; i < s.length; ++i) {
-        pairs += blockSize == 0 ? s.length
-                                : std::min(s.length, (i / blockSize + 1) * blockSize);
-      }
+      for (int i = 0; i < s.length; ++i) pairs += seenKeys(m.maskType, m.blockSize, i, s.length);
       double whole = static_cast<double>(s.length) * s.length;
       double flop = 4.0 * s.batch * s.heads * pairs * s.headDim;
 
-      float ms = benchmarkCuda([&] { op::cuda::attention(q, k, v, blockSize, out); });
-      if (blockSize == 0) unmasked = ms;
-      std::string mask = blockSize == 0   ? "none"
-                         : blockSize == 1 ? "causal"
-                                          : lut::sprintf("block %d", blockSize);
+      float ms = benchmarkCuda(
+          [&] { op::cuda::attention(q, k, v, m.maskType, m.blockSize, out); });
+      if (m.maskType == MaskType::kNone) unmasked = ms;
+      std::string mask = m.maskType == MaskType::kNone     ? "none"
+                         : m.maskType == MaskType::kCausal ? "causal"
+                         : m.maskType == MaskType::kBlockCausal
+                             ? lut::sprintf("causal %d", m.blockSize)
+                             : lut::sprintf("window %d", m.blockSize);
       bench::print(
           "%-26s %8s %12.1f %9.0f%% %9.0f%% %8.2f\n",
           s.what,

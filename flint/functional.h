@@ -65,22 +65,6 @@ Tensor empty(Device device, lut::Span<const int> shape, DType dtype);
 /// @brief An uninitialized contiguous tensor of `input`'s shape, type and device.
 Tensor emptyLike(const TensorView &input);
 
-// --- Attention ------------------------------------------------------------------------------
-
-/// @brief Refuses a block size Operators::attention does not define: a negative one, or a block of
-/// more than one key over fewer keys than queries.
-void checkAttentionBlockSize(TensorView q, TensorView k, int blockSize);
-
-/// @brief Attention as matmul, softmax and matmul, a block of queries at a time, written into
-/// `out`. What Operators::attention does on a device with no kernel of its own.
-void composedAttention(
-    Operators *op,
-    TensorView q,
-    TensorView k,
-    TensorView v,
-    bool causal,
-    TensorView out);
-
 // --- Signal ---------------------------------------------------------------------------------
 //
 // What the operators of the same names do on a device with no kernel of their own, out of

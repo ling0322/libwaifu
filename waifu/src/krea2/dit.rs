@@ -61,7 +61,8 @@ use std::rc::Rc;
 use super::config::DitConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, NO_MASK,
+    check_parameters, DType, Device, Extent, Graph, Ir, MaskType, RunContext, Tensor, Value,
+    Weights,
 };
 use crate::layers::Linear;
 
@@ -332,7 +333,7 @@ fn attend(
     let v = g.contiguous(g.transpose(v, 1, 2));
 
     // A picture is looked at whole, and so is the prompt in front of it: nothing here is causal.
-    let out = g.attention(q, k, v, NO_MASK);
+    let out = g.attention(q, k, v, MaskType::None);
     let out = g.contiguous(g.transpose(out, 1, 2));
     let out = g.view(out, [batch, length, queries.into()]);
 

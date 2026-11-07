@@ -79,7 +79,7 @@ Tensor referenceAttention(
       query.unsqueeze(0).transpose(1, 2),
       key.unsqueeze(0).transpose(1, 2),
       value.unsqueeze(0).transpose(1, 2),
-      causal);
+      F::causalIf(causal));
 
   return F::contiguous(cpuOps(), x.subtensor(0).transpose(0, 1));
 }

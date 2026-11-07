@@ -679,9 +679,9 @@ CATCH_TEST_CASE("test Vulkan attention", "[op][vulkan]") {
   Tensor v = randn({2, 2, 37, 32});
   for (bool causal : {false, true}) {
     CATCH_INFO("causal = " << causal);
-    Tensor reference = F::attention(cpu(), q, k, v, causal);
+    Tensor reference = F::attention(cpu(), q, k, v, F::causalIf(causal));
     CATCH_REQUIRE(close(
-        F::attention(vk(), toVulkan(q), toVulkan(k), toVulkan(v), causal),
+        F::attention(vk(), toVulkan(q), toVulkan(k), toVulkan(v), F::causalIf(causal)),
         reference,
         1e-4f,
         1e-4f));
@@ -690,7 +690,7 @@ CATCH_TEST_CASE("test Vulkan attention", "[op][vulkan]") {
             toVulkan(q, DType::kFloat16),
             toVulkan(k, DType::kFloat16),
             toVulkan(v, DType::kFloat16),
-            causal),
+            F::causalIf(causal)),
         reference,
         3e-2f,
         3e-2f));

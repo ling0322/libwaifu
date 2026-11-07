@@ -38,7 +38,8 @@ use std::rc::Rc;
 use super::config::AdapterConfig;
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, NO_MASK,
+    check_parameters, DType, Device, Extent, Graph, Ir, MaskType, RunContext, Tensor, Value,
+    Weights,
 };
 use crate::layers::{Embedding, Linear};
 
@@ -143,7 +144,7 @@ fn attention(
         g.transpose(query, 1, 2),
         g.transpose(key, 1, 2),
         g.transpose(value, 1, 2),
-        NO_MASK,
+        MaskType::None,
     );
     let out = g.contiguous(g.transpose(out, 1, 2));
     let out = g.view(out, [Extent::At(1), length, config.hidden_size.into()]);

@@ -55,7 +55,7 @@
 //! would have chosen between them commented out just above. So the embedding is never reached and
 //! the projection always is. This follows the code rather than the configuration.
 
-use crate::flint::{functional as F, DType, Device, Extent, Graph, Tensor, Value, NO_MASK};
+use crate::flint::{functional as F, DType, Device, Extent, Graph, MaskType, Tensor, Value};
 use crate::layers::Linear;
 use crate::Result;
 
@@ -302,7 +302,7 @@ fn attention(g: &Graph, x: Value, config: &Config, frames: i32, cos: Value, sin:
 
     // Not causal: this reads a whole utterance at once, and the reference's mask is all true for
     // a batch of one at full length. See the module note.
-    let out = g.attention(query, key, value, NO_MASK);
+    let out = g.attention(query, key, value, MaskType::None);
 
     let merged = g.view(
         g.contiguous(g.transpose(out, 1, 2)),

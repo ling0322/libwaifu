@@ -56,8 +56,8 @@ use std::rc::Rc;
 use super::config::{ControlConfig, DitConfig};
 use crate::error::{Error, Result};
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, CAUSAL,
-    NO_MASK,
+    check_parameters, DType, Device, Extent, Graph, Ir, MaskType, RunContext, Tensor, Value,
+    Weights,
 };
 use crate::krea2::dit::{gelu_tanh, rotate, timestep_sinusoid};
 use crate::layers::Linear;
@@ -263,7 +263,7 @@ fn block(
             g.contiguous(g.slice(q, 2, 0, split)),
             g.contiguous(g.slice(k, 2, 0, split)),
             g.contiguous(g.slice(v, 2, 0, split)),
-            CAUSAL,
+            MaskType::Causal,
         ),
         // A prompt with pictures in it is causal between runs and whole within a picture: each
         // run reads every key up to its own end, the words' runs causally -- the mask is aligned
@@ -282,7 +282,11 @@ fn block(
                         part(q, start),
                         part(k, 0),
                         part(v, 0),
-                        if causal { CAUSAL } else { NO_MASK },
+                        if causal {
+                            MaskType::Causal
+                        } else {
+                            MaskType::None
+                        },
                     );
                     start = end;
                     out
@@ -295,7 +299,7 @@ fn block(
         g.contiguous(g.slice(q, 2, split, Extent::End)),
         k,
         v,
-        NO_MASK,
+        MaskType::None,
     );
     let out = g.contiguous(g.transpose(g.cat(prompt, picture, 2), 1, 2));
     let out = g.view(out, [Extent::At(1), length, d.into()]);

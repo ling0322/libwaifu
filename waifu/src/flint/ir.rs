@@ -726,8 +726,8 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
             query,
             key,
             value,
-            block_size,
-        } => F::attention(get(query), get(key), get(value), *block_size)?,
+            mask,
+        } => F::attention(get(query), get(key), get(value), *mask)?,
         Op::Cat { lhs, rhs, dim } => F::cat(get(lhs), get(rhs), *dim)?,
 
         Op::View { input, shape } => get(input).view(&sizes(slots, shape)?)?,

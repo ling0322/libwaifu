@@ -73,13 +73,13 @@ CATCH_TEST_CASE("test CUDA attention", "[op][cuda]") {
     Tensor k = F::rand(Device::getCpu(), {1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
     Tensor v = F::rand(Device::getCpu(), {1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
     Tensor xr =
-      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), F::causalIf(causal));
 
     Tensor x = F::attention(cudaOps(), 
         toCuda(q).transpose(1, 2),
         toCuda(k).transpose(1, 2),
         toCuda(v).transpose(1, 2),
-        causal);
+        F::causalIf(causal));
 
     return cpuOps()->allClose(toCpu(x), xr, 5e-3f);
   };
@@ -114,13 +114,13 @@ bool runAttentionCase(
   Tensor k = F::rand(Device::getCpu(), {1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
   Tensor v = F::rand(Device::getCpu(), {1, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
   Tensor xr =
-      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), F::causalIf(causal));
 
   Tensor x = F::attention(cudaOps(), 
       toCuda(q).transpose(1, 2),
       toCuda(k).transpose(1, 2),
       toCuda(v).transpose(1, 2),
-      causal);
+      F::causalIf(causal));
 
   return cpuOps()->allClose(toCpu(x), xr, 5e-3f);
 }
@@ -162,7 +162,7 @@ CATCH_TEST_CASE("test CUDA attention (blocked over the queries)", "[op][cuda]") 
   Tensor k = toCuda(F::rand(Device::getCpu(), {1, 8, 4200, 32}, DType::kFloat));
   Tensor v = toCuda(F::rand(Device::getCpu(), {1, 8, 4200, 32}, DType::kFloat));
 
-  Tensor actual = F::attention(cudaOps(), q, k, v, false);
+  Tensor actual = F::attention(cudaOps(), q, k, v, MaskType::kNone);
   CATCH_REQUIRE(actual.getShape() == std::vector<int>{1, 8, 4200, 32});
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, false)), 5e-3));
 
@@ -171,7 +171,7 @@ CATCH_TEST_CASE("test CUDA attention (blocked over the queries)", "[op][cuda]") 
   Tensor k1 = toCuda(F::rand(Device::getCpu(), {1, 1, 4200, 32}, DType::kFloat));
   Tensor v1 = toCuda(F::rand(Device::getCpu(), {1, 1, 4200, 32}, DType::kFloat));
 
-  Tensor whole = F::attention(cudaOps(), q1, k1, v1, false);
+  Tensor whole = F::attention(cudaOps(), q1, k1, v1, MaskType::kNone);
   CATCH_REQUIRE(whole.getShape() == std::vector<int>{1, 1, 4200, 32});
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(whole), toCpu(wholeAttention(q1, k1, v1, false)), 5e-3));
 }
@@ -188,7 +188,7 @@ CATCH_TEST_CASE("test CUDA attention (blocked and causal)", "[op][cuda]") {
   Tensor k = toCuda(F::rand(Device::getCpu(), {1, 8, 4200, 32}, DType::kFloat));
   Tensor v = toCuda(F::rand(Device::getCpu(), {1, 8, 4200, 32}, DType::kFloat));
 
-  Tensor actual = F::attention(cudaOps(), q, k, v, true);
+  Tensor actual = F::attention(cudaOps(), q, k, v, MaskType::kCausal);
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(actual), toCpu(wholeAttention(q, k, v, true)), 5e-3));
 }
 
@@ -271,14 +271,14 @@ bool runBatchedCase(
   Tensor v =
       F::rand(Device::getCpu(), {batch, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
   Tensor xr =
-      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), F::causalIf(causal));
 
   Tensor x = F::attention(
       cudaOps(),
       toCuda(q).transpose(1, 2),
       toCuda(k).transpose(1, 2),
       toCuda(v).transpose(1, 2),
-      causal);
+      F::causalIf(causal));
 
   return cpuOps()->allClose(toCpu(x), xr, 5e-3f);
 }
@@ -324,14 +324,15 @@ bool runSplitCase(
   Tensor k = F::rand(Device::getCpu(), {2, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
   Tensor v = F::rand(Device::getCpu(), {2, keyValueLength, numKeyValueHeads, headDim}, DType::kFloat);
   Tensor xr =
-      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), causal);
+      F::attention(cpuOps(), q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), F::causalIf(causal));
 
   Tensor x = F::empty(Device::getCuda(), {2, numHeads, queryLength, headDim}, DType::kFloat16);
   bool ran = op::cuda::attention(
       toCuda(q).transpose(1, 2),
       toCuda(k).transpose(1, 2),
       toCuda(v).transpose(1, 2),
-      causal,
+      F::causalIf(causal),
+      0,
       x,
       splits);
   return ran && cpuOps()->allClose(toCpu(x), xr, 5e-3f);
@@ -401,7 +402,7 @@ CATCH_TEST_CASE("test CUDA attention (scores past half's range)", "[op][cuda]") 
     for (int d = 0; d < kHeadDim; ++d) pk[key * kHeadDim + d] = value;
   }
 
-  Tensor x = toCpu(F::attention(cudaOps(), toCuda(q), toCuda(k), toCuda(v), false));
+  Tensor x = toCpu(F::attention(cudaOps(), toCuda(q), toCuda(k), toCuda(v), MaskType::kNone));
 
   // The value row, through half and back, as the kernel was handed it.
   Tensor rounded = toCpu(toCuda(v));
@@ -416,11 +417,16 @@ CATCH_TEST_CASE("test CUDA attention (scores past half's range)", "[op][cuda]") 
 
 namespace {
 
-/// Attention under a block-causal mask, written out on the host in float with nothing shared with
-/// any operator: the reference the kernel's blocks are checked against, since the composition
-/// has no block larger than one. q is (N, L, H, D), k and v (N, S, KVH, D), contiguous; the answer
-/// (N, H, L, D).
-Tensor blockCausalReference(const Tensor &q, const Tensor &k, const Tensor &v, int blockSize) {
+/// Attention under `maskType`, written out on the host in float with nothing shared with any
+/// operator -- the mask worked out here from MaskType's table, not from the kernel's: the
+/// reference the kernel's block masks are checked against, since the composition has none. q is
+/// (N, L, H, D), k and v (N, S, KVH, D), contiguous; the answer (N, H, L, D).
+Tensor maskReference(
+    const Tensor &q,
+    const Tensor &k,
+    const Tensor &v,
+    MaskType maskType,
+    int blockSize) {
   int batch = q.getShape(0), queryLength = q.getShape(1), numHeads = q.getShape(2);
   int headDim = q.getShape(3), keyLength = k.getShape(1), numKeyValueHeads = k.getShape(2);
   int group = numHeads / numKeyValueHeads;
@@ -437,13 +443,17 @@ Tensor blockCausalReference(const Tensor &q, const Tensor &k, const Tensor &v, i
       int kvh = h / group;
       for (int i = 0; i < queryLength; ++i) {
         int position = i + keyLength - queryLength;
+        int firstKey = 0;
         int lastKey = keyLength - 1;
-        if (blockSize > 0) {
-          lastKey = std::min(keyLength - 1, (position / blockSize) * blockSize + blockSize - 1);
+        if (maskType == MaskType::kCausal) lastKey = position;
+        if (maskType == MaskType::kBlockCausal || maskType == MaskType::kBlockDiagonal) {
+          int block = position / blockSize;
+          lastKey = std::min(keyLength - 1, block * blockSize + blockSize - 1);
+          if (maskType == MaskType::kBlockDiagonal) firstKey = block * blockSize;
         }
         const float *qi = pq + ((n * queryLength + i) * numHeads + h) * headDim;
         float largest = -INFINITY;
-        for (int j = 0; j <= lastKey; ++j) {
+        for (int j = firstKey; j <= lastKey; ++j) {
           const float *kj = pk + ((n * keyLength + j) * numKeyValueHeads + kvh) * headDim;
           float dot = 0.0f;
           for (int d = 0; d < headDim; ++d) dot += qi[d] * kj[d];
@@ -451,13 +461,13 @@ Tensor blockCausalReference(const Tensor &q, const Tensor &k, const Tensor &v, i
           largest = std::max(largest, scores[j]);
         }
         float sum = 0.0f;
-        for (int j = 0; j <= lastKey; ++j) {
+        for (int j = firstKey; j <= lastKey; ++j) {
           scores[j] = expf(scores[j] - largest);
           sum += scores[j];
         }
         float *oi = po + ((n * numHeads + h) * queryLength + i) * headDim;
         for (int d = 0; d < headDim; ++d) oi[d] = 0.0f;
-        for (int j = 0; j <= lastKey; ++j) {
+        for (int j = firstKey; j <= lastKey; ++j) {
           const float *vj = pv + ((n * keyLength + j) * numKeyValueHeads + kvh) * headDim;
           for (int d = 0; d < headDim; ++d) oi[d] += scores[j] / sum * vj[d];
         }
@@ -467,14 +477,16 @@ Tensor blockCausalReference(const Tensor &q, const Tensor &k, const Tensor &v, i
   return out;
 }
 
-/// The fused kernel under a block of `blockSize`, its keys split `splits` ways (0 the card's
-/// choice), against the reference on the same operands rounded to half as the kernel reads them.
+/// The fused kernel under `maskType` in blocks of `blockSize`, its keys split `splits` ways (0 the
+/// card's choice), against the reference on the same operands rounded to half as the kernel reads
+/// them.
 bool runBlockCase(
     int numHeads,
     int numKeyValueHeads,
     int queryLength,
     int keyLength,
     int headDim,
+    MaskType maskType,
     int blockSize,
     int splits) {
   auto rounded = [](std::initializer_list<int> shape) {
@@ -489,10 +501,12 @@ bool runBlockCase(
       toCuda(q).transpose(1, 2),
       toCuda(k).transpose(1, 2),
       toCuda(v).transpose(1, 2),
+      maskType,
       blockSize,
       x,
       splits);
-  return ran && cpuOps()->allClose(toCpu(x), blockCausalReference(q, k, v, blockSize), 5e-3f);
+  return ran &&
+         cpuOps()->allClose(toCpu(x), maskReference(q, k, v, maskType, blockSize), 5e-3f);
 }
 
 }  // namespace
@@ -513,8 +527,8 @@ CATCH_TEST_CASE("test CUDA attention (block-causal mask)", "[op][cuda]") {
             CATCH_INFO(
                 "block = " << blockSize << ", headDim = " << headDim << ", L = " << queryLength
                            << ", S = " << keyLength << ", splits = " << splits);
-            CATCH_REQUIRE(
-                runBlockCase(4, 2, queryLength, keyLength, headDim, blockSize, splits));
+            CATCH_REQUIRE(runBlockCase(
+                4, 2, queryLength, keyLength, headDim, MaskType::kBlockCausal, blockSize, splits));
           }
         }
       }
@@ -524,49 +538,117 @@ CATCH_TEST_CASE("test CUDA attention (block-causal mask)", "[op][cuda]") {
   // Key lengths on and off a block of 50, under Qwen2's grouping of seven heads to one.
   for (int keyLength : {49, 50, 51, 99, 100, 101}) {
     CATCH_INFO("S = " << keyLength);
-    CATCH_REQUIRE(runBlockCase(14, 2, keyLength, keyLength, 64, 50, 0));
-    CATCH_REQUIRE(runBlockCase(14, 2, 1, keyLength, 64, 50, 0));
+    CATCH_REQUIRE(runBlockCase(14, 2, keyLength, keyLength, 64, MaskType::kBlockCausal, 50, 0));
+    CATCH_REQUIRE(runBlockCase(14, 2, 1, keyLength, 64, MaskType::kBlockCausal, 50, 0));
   }
+}
+
+CATCH_TEST_CASE("test CUDA attention (block-diagonal mask)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // Self-attention in windows: blocks of one -- every query its own key alone -- of a few keys, of
+  // less than the kernel's 64 and exactly it and past it, of Qwen3-ASR's 104, and larger than
+  // every key there is, which is no mask. Lengths a single query, a warp and one past it, a CTA's
+  // worth and past it, a short last window and a long run.
+  for (int blockSize : {1, 7, 50, 64, 104, 1000}) {
+    for (int headDim : {32, 64, 128}) {
+      for (int length : {1, 17, 64, 130, 179, 300}) {
+        for (int splits : {0, 3}) {
+          CATCH_INFO(
+              "block = " << blockSize << ", headDim = " << headDim << ", L = S = " << length
+                         << ", splits = " << splits);
+          CATCH_REQUIRE(runBlockCase(
+              4, 2, length, length, headDim, MaskType::kBlockDiagonal, blockSize, splits));
+        }
+      }
+    }
+  }
+
+  // Qwen3-ASR's audio encoder: fourteen heads of 64, no grouping, windows of 104 over one, two
+  // and three of them with a short one last.
+  for (int length : {45, 104, 179, 208, 300}) {
+    CATCH_INFO("Qwen3-ASR, L = S = " << length);
+    CATCH_REQUIRE(runBlockCase(14, 14, length, length, 64, MaskType::kBlockDiagonal, 104, 0));
+  }
+
+  // Splits that put whole windows, or none of a row's, in a split: seven ways over 300 keys is a
+  // split of 64, and a row of the third window sees nothing in the first four.
+  for (int splits : {2, 5, 7, 100}) {
+    CATCH_INFO("splits = " << splits);
+    CATCH_REQUIRE(runBlockCase(8, 2, 300, 300, 64, MaskType::kBlockDiagonal, 104, splits));
+    CATCH_REQUIRE(runBlockCase(14, 2, 300, 300, 128, MaskType::kBlockDiagonal, 50, splits));
+  }
+
+  // Through CudaOperators::attention, which takes it to the fused kernel.
+  Tensor q = toCuda(F::rand(Device::getCpu(), {1, 14, 179, 64}, DType::kFloat));
+  Tensor k = toCuda(F::rand(Device::getCpu(), {1, 14, 179, 64}, DType::kFloat));
+  Tensor v = toCuda(F::rand(Device::getCpu(), {1, 14, 179, 64}, DType::kFloat));
+  Tensor x = F::attention(cudaOps(), q, k, v, MaskType::kBlockDiagonal, 104);
+  Tensor qc = F::contiguous(cpuOps(), toCpu(q).transpose(1, 2));
+  Tensor kc = F::contiguous(cpuOps(), toCpu(k).transpose(1, 2));
+  Tensor vc = F::contiguous(cpuOps(), toCpu(v).transpose(1, 2));
+  CATCH_REQUIRE(cpuOps()->allClose(
+      toCpu(x), maskReference(qc, kc, vc, MaskType::kBlockDiagonal, 104), 5e-3f));
 }
 
 CATCH_TEST_CASE("test CUDA attention (a block past every key is no mask)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   // With as many queries as keys and a block at least as long as the keys, every query sees
-  // every key: the same work as no mask at all, to the bit. Of the fused kernel itself, since
-  // CudaOperators::attention hands a block of 0 to FlashAttention where that is built in.
+  // every key under either block mask: the same work as no mask at all, to the bit. Of the fused
+  // kernel itself, since CudaOperators::attention hands no mask to FlashAttention where that is
+  // built in.
   Tensor q = toCuda(F::rand(Device::getCpu(), {2, 8, 300, 64}, DType::kFloat));
   Tensor k = toCuda(F::rand(Device::getCpu(), {2, 8, 300, 64}, DType::kFloat));
   Tensor v = toCuda(F::rand(Device::getCpu(), {2, 8, 300, 64}, DType::kFloat));
   Tensor unmasked = F::empty(Device::getCuda(), {2, 8, 300, 64}, DType::kFloat16);
   Tensor blocked = F::empty(Device::getCuda(), {2, 8, 300, 64}, DType::kFloat16);
-  CATCH_REQUIRE(op::cuda::attention(q, k, v, 0, unmasked));
-  CATCH_REQUIRE(op::cuda::attention(q, k, v, 300, blocked));
+  Tensor windowed = F::empty(Device::getCuda(), {2, 8, 300, 64}, DType::kFloat16);
+  CATCH_REQUIRE(op::cuda::attention(q, k, v, MaskType::kNone, 0, unmasked));
+  CATCH_REQUIRE(op::cuda::attention(q, k, v, MaskType::kBlockCausal, 300, blocked));
+  CATCH_REQUIRE(op::cuda::attention(q, k, v, MaskType::kBlockDiagonal, 300, windowed));
   // allClose's bounds are strict, so "to the bit" is a difference below the smallest float.
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(unmasked), toCpu(blocked), 0.0f, 1e-38f));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(unmasked), toCpu(windowed), 0.0f, 1e-38f));
 }
 
 CATCH_TEST_CASE("test CUDA attention (blocks it does not take)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  // A block larger than one has no composition, so what the fused kernel does not take -- float,
-  // a head of 16, the processor -- is refused rather than answered some other way.
+  // A block mask has no composition, so what the fused kernel does not take -- float, a head of
+  // 16, the processor -- is refused rather than answered some other way.
   Tensor q = F::rand(Device::getCpu(), {1, 2, 8, 64}, DType::kFloat);
   Tensor k = F::rand(Device::getCpu(), {1, 2, 8, 64}, DType::kFloat);
-  CATCH_REQUIRE_THROWS(F::attention(cpuOps(), q, k, k, 4));
+  for (MaskType block : {MaskType::kBlockCausal, MaskType::kBlockDiagonal}) {
+    CATCH_INFO("mask " << static_cast<int>(block));
+    CATCH_REQUIRE_THROWS(F::attention(cpuOps(), q, k, k, block, 4));
 
-  Tensor qf = F::toDevice(cudaOps(), q, Device::getCuda());
-  Tensor kf = F::toDevice(cudaOps(), k, Device::getCuda());
-  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qf, kf, kf, 4));
+    Tensor qf = F::toDevice(cudaOps(), q, Device::getCuda());
+    Tensor kf = F::toDevice(cudaOps(), k, Device::getCuda());
+    CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qf, kf, kf, block, 4));
 
-  Tensor q16 = toCuda(F::rand(Device::getCpu(), {1, 2, 8, 16}, DType::kFloat));
-  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), q16, q16, q16, 4));
+    Tensor q16 = toCuda(F::rand(Device::getCpu(), {1, 2, 8, 16}, DType::kFloat));
+    CATCH_REQUIRE_THROWS(F::attention(cudaOps(), q16, q16, q16, block, 4));
+  }
 
-  // And what Operators::attention does not define at all.
+  // And what Operators::attention does not define at all: a block mask over fewer keys than
+  // queries, a block diagonal one over more, a block of none, and a block size without a block
+  // mask.
   Tensor qh = toCuda(q);
   Tensor kh = toCuda(F::rand(Device::getCpu(), {1, 2, 4, 64}, DType::kFloat));
-  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, kh, kh, 2));  // fewer keys than queries
-  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, qh, qh, -1));
+  Tensor longer = toCuda(F::rand(Device::getCpu(), {1, 2, 12, 64}, DType::kFloat));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, kh, kh, MaskType::kBlockCausal, 2));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, kh, kh, MaskType::kBlockDiagonal, 2));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, longer, longer, MaskType::kBlockDiagonal, 2));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, qh, qh, MaskType::kBlockCausal, 0));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, qh, qh, MaskType::kBlockDiagonal, -1));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, qh, qh, MaskType::kNone, 4));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, qh, qh, MaskType::kCausal, 1));
+  CATCH_REQUIRE_THROWS(F::attention(cudaOps(), qh, qh, qh, static_cast<MaskType>(7)));
+  // The same refusals from the processor's composition, which checks for itself.
+  Tensor qc = toCpu(qh);
+  CATCH_REQUIRE_THROWS(F::attention(cpuOps(), qc, qc, qc, MaskType::kNone, 4));
+  CATCH_REQUIRE_THROWS(F::attention(cpuOps(), qc, qc, qc, static_cast<MaskType>(7)));
 }
 
 }  // namespace fl

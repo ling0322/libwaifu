@@ -952,12 +952,10 @@ pub fn causal_mask(max_len: i32, device: Device) -> Result<Tensor> {
 ///
 /// `q` is `<float>(N, nHead, L, D)` and `k` and `v` are `<float>(N, nKvHead, S, D)`, where
 /// `nKvHead` may divide `nHead` for grouped-query attention rather than being expanded first.
-/// `block_size` is the mask: [`NO_MASK`](super::NO_MASK), [`CAUSAL`](super::CAUSAL) -- the
-/// future positions masked, aligned to the bottom right of the score matrix -- or the same at the
-/// granularity of blocks of `block_size` keys counted from key 0, a query seeing its own block
-/// whole and every block before it. A block of more than one needs `S >= L`, and a kernel: there
-/// is no composition of it, so where none takes it this fails.
-pub fn attention(q: &Tensor, k: &Tensor, v: &Tensor, block_size: i32) -> Result<Tensor> {
+/// `mask` is which keys each query sees: see [`MaskType`](super::MaskType). A block mask needs a
+/// block of at least one key, and a kernel: there is no composition of it, so where none takes it
+/// this fails.
+pub fn attention(q: &Tensor, k: &Tensor, v: &Tensor, mask: super::MaskType) -> Result<Tensor> {
     if q.dim()? != 4 || k.dim()? != 4 || v.dim()? != 4 {
         return Err(Error::invalid("attention: q, k and v must be 4-D"));
     }
@@ -968,10 +966,27 @@ pub fn attention(q: &Tensor, k: &Tensor, v: &Tensor, block_size: i32) -> Result<
         ));
     }
 
+    if let super::MaskType::BlockCausal(n) | super::MaskType::BlockDiagonal(n) = mask {
+        if n <= 0 {
+            return Err(Error::invalid(format!(
+                "attention: a block mask of {n} keys a block"
+            )));
+        }
+    }
+
     let operators = operators_of(q)?;
     let out = beside(q, &[sq[0], sq[1], sq[2], sv[3]], q.dtype())?;
+    let (mask_type, block_size) = mask.code();
     check(unsafe {
-        ffi::fl_attention(operators, q.raw(), k.raw(), v.raw(), block_size, out.raw())
+        ffi::fl_attention(
+            operators,
+            q.raw(),
+            k.raw(),
+            v.raw(),
+            mask_type,
+            block_size,
+            out.raw(),
+        )
     })?;
     Ok(out)
 }

@@ -56,6 +56,7 @@
 #include "flint/cuda/unary.h"
 #include "flint/functional.h"
 #include "lutil/error.h"
+#include "lutil/strings.h"
 
 namespace fl {
 namespace op {
@@ -479,19 +480,72 @@ void CudaOperators::causalMask(TensorView out) {
   op::cuda::causalMask(out);
 }
 
+namespace {
+
+/// The mask CudaOperators::attention was handed, refused where it is not one. See MaskType. The
+/// composition Operators::attention falls back to checks the same for itself, and goes when every
+/// device has kernels of its own; this is CUDA's, and stays.
+void checkAttentionMask(TensorView q, TensorView k, MaskType maskType, int blockSize) {
+  int queries = q.getShape(2);
+  int keys = k.getShape(2);
+  switch (maskType) {
+    case MaskType::kNone:
+    case MaskType::kCausal:
+      if (blockSize != 0) {
+        THROW(
+            InvalidArg,
+            lut::sprintf("attention: a block size of %d without a block mask", blockSize));
+      }
+      return;
+    case MaskType::kBlockCausal:
+      if (blockSize <= 0) {
+        THROW(InvalidArg, lut::sprintf("attention: a block mask of %d keys a block", blockSize));
+      }
+      if (keys < queries) {
+        THROW(
+            InvalidArg,
+            lut::sprintf(
+                "attention: a block causal mask over %d keys and %d queries, which leaves the "
+                "first queries before every key",
+                keys,
+                queries));
+      }
+      return;
+    case MaskType::kBlockDiagonal:
+      if (blockSize <= 0) {
+        THROW(InvalidArg, lut::sprintf("attention: a block mask of %d keys a block", blockSize));
+      }
+      if (keys != queries) {
+        THROW(
+            InvalidArg,
+            lut::sprintf(
+                "attention: a block diagonal mask is self-attention, and this is %d queries over "
+                "%d keys",
+                queries,
+                keys));
+      }
+      return;
+  }
+  THROW(InvalidArg, lut::sprintf("attention: no mask type %d", static_cast<int>(maskType)));
+}
+
+}  // namespace
+
 void CudaOperators::attention(
     TensorView q,
     TensorView k,
     TensorView v,
+    MaskType maskType,
     int blockSize,
     TensorView out) {
-  F::checkAttentionBlockSize(q, k, blockSize);
+  checkAttentionMask(q, k, maskType, blockSize);
 #ifdef LIBWAIFU_FLASH_ATTN_ENABLED
-  if (blockSize <= 1 && op::cuda::flashAttention(q, k, v, blockSize == 1, out)) return;
+  bool plain = maskType == MaskType::kNone || maskType == MaskType::kCausal;
+  if (plain && op::cuda::flashAttention(q, k, v, maskType == MaskType::kCausal, out)) return;
 #endif
-  if (op::cuda::attention(q, k, v, blockSize, out)) return;
+  if (op::cuda::attention(q, k, v, maskType, blockSize, out)) return;
 
-  Operators::attention(q, k, v, blockSize, out);
+  Operators::attention(q, k, v, maskType, blockSize, out);
 }
 
 void CudaOperators::storeKVCache(

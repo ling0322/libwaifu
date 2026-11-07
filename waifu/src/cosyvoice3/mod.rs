@@ -91,7 +91,9 @@ use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use crate::flint::{functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Weights};
+use crate::flint::{
+    functional as F, DType, Device, Graph, Ir, MaskType, RunContext, Tensor, Weights,
+};
 use crate::indextts::{campplus, features::resample};
 use crate::{
     ConversionDefaults, ConversionOptions, ConversionProgress, Converter, Error, Manifest, Result,
@@ -525,7 +527,7 @@ impl CosyVoice3 {
             .cast(dtype)?)
         };
         let (q, kv) = (probe()?, probe()?);
-        match F::attention(&q, &kv, &kv, config.block) {
+        match F::attention(&q, &kv, &kv, MaskType::BlockCausal(config.block)) {
             Ok(_) => Ok(()),
             Err(error) => Err(Error::model(format!(
                 "a streaming reading draws with the DiT's attention in blocks, which nothing \

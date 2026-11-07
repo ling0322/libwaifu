@@ -49,8 +49,8 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::flint::{
-    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, PadMode, RunContext,
-    Tensor, Value, Weights, NO_MASK,
+    check_parameters, functional as F, DType, Device, Extent, Graph, Ir, MaskType, PadMode,
+    RunContext, Tensor, Value, Weights,
 };
 use crate::indextts::gpt::gelu_new;
 use crate::layers::Linear;
@@ -245,7 +245,7 @@ fn block(
     sin: Value,
     one: Value,
     config: &Config,
-    mask: i32,
+    mask: MaskType,
     dtype: DType,
     device: Device,
 ) -> Result<Value> {
@@ -312,12 +312,12 @@ fn block(
 
 /// The estimator: `x` `(B, M, 80)`, `context` `(B, M, 240)` -- the prompt's mel, `mu` and the
 /// speaker, in that order -- and the time's sinusoid `(1, 256)`, in; the velocity `(B, M, 80)` out.
-/// `mask` is its attention's: every frame seeing every other, or `config.block` for upstream's
-/// `streaming=True`.
+/// `mask` is its attention's: every frame seeing every other, or blocks of `config.block` for
+/// upstream's `streaming=True`.
 fn write_estimator(
     g: &Graph,
     config: &Config,
-    mask: i32,
+    mask: MaskType,
     dtype: DType,
     device: Device,
 ) -> Result<()> {
@@ -560,7 +560,7 @@ impl Flow {
         write_condition(&condition.subgraph(name), &config, DType::Float, device)?;
         check_parameters(&condition, weights.as_ref())?;
 
-        let estimator = |mask: i32| -> Result<Ir> {
+        let estimator = |mask: MaskType| -> Result<Ir> {
             let g = Graph::new();
             write_estimator(
                 &g.subgraph(name).subgraph("decoder").subgraph("estimator"),
@@ -576,8 +576,8 @@ impl Flow {
         Ok(Flow {
             rotary: rotary_table(&config, config.noise_frames, device)?,
             condition: Ir::compile(&condition),
-            estimator: estimator(NO_MASK)?,
-            in_blocks: estimator(config.block)?,
+            estimator: estimator(MaskType::None)?,
+            in_blocks: estimator(MaskType::BlockCausal(config.block))?,
             config,
             weights: Rc::clone(weights),
             device,

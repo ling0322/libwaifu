@@ -98,16 +98,9 @@ pub use fp8::{fp8_available, SCALE_SUFFIX};
 pub use graph::{Graph, Site, WeightFormat};
 pub(crate) use ir::memory_of;
 pub use ir::{Inst, Ir, RunContext};
-pub use op::{Binary, Extent, Op, PadMode, Reduce, Scalar, Unary, Value};
+pub use op::{Binary, Extent, MaskType, Op, PadMode, Reduce, Scalar, Unary, Value};
 pub use operators::Operators;
 pub use weights::{check_parameters, Weights, DEVICE_SHARE};
-
-/// [`functional::attention`]'s and [`Graph::attention`]'s `block_size` for no mask at all.
-pub const NO_MASK: i32 = 0;
-
-/// Their `block_size` for the causal mask: every key up to the query's own position, which is a
-/// block of one. A larger block is the same at the granularity of that many keys.
-pub const CAUSAL: i32 = 1;
 
 use operators::{operators_of, transfer_operators};
 

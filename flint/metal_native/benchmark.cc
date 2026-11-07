@@ -231,7 +231,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     Tensor v = randHalf({1, attention.heads, attention.tokens, 64});
     double flop = 4.0 * attention.heads * attention.tokens * attention.tokens * 64;
     double milliseconds = fastestMs([&] {
-      Tensor out = F::attention(getOperators(Device::kMetal), q, k, v, false);
+      Tensor out = F::attention(getOperators(Device::kMetal), q, k, v, MaskType::kNone);
       sync();
     });
     bench::print(
@@ -244,7 +244,7 @@ LL_BENCHMARK(bench::Group::kSdxlMetal, "SDXL elementwise") {
     Tensor cv = randHalf({1, attention.heads, 77, 64});
     double crossFlop = 4.0 * attention.heads * attention.tokens * 77 * 64;
     milliseconds = fastestMs([&] {
-      Tensor out = F::attention(getOperators(Device::kMetal), q, ck, cv, false);
+      Tensor out = F::attention(getOperators(Device::kMetal), q, ck, cv, MaskType::kNone);
       sync();
     });
     bench::print(

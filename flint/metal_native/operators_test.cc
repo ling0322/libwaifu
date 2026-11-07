@@ -646,9 +646,9 @@ CATCH_TEST_CASE("test Metal attention", "[op][metal]") {
   Tensor v = randn({2, 2, 37, 32});
   for (bool causal : {false, true}) {
     CATCH_INFO("causal = " << causal);
-    Tensor reference = F::attention(cpu(), q, k, v, causal);
+    Tensor reference = F::attention(cpu(), q, k, v, F::causalIf(causal));
     CATCH_REQUIRE(close(
-        F::attention(mtl(), toMetal(q), toMetal(k), toMetal(v), causal),
+        F::attention(mtl(), toMetal(q), toMetal(k), toMetal(v), F::causalIf(causal)),
         reference,
         1e-4f,
         1e-4f));
@@ -657,7 +657,7 @@ CATCH_TEST_CASE("test Metal attention", "[op][metal]") {
             toMetal(q, DType::kFloat16),
             toMetal(k, DType::kFloat16),
             toMetal(v, DType::kFloat16),
-            causal),
+            F::causalIf(causal)),
         reference,
         3e-2f,
         3e-2f));
@@ -685,7 +685,7 @@ CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]
     Tensor q = randn({1, c.queryLength, c.heads, c.headDim});
     Tensor k = randn({1, c.keyValueHeads, c.keyLength, c.headDim});
     Tensor v = randn({1, c.keyValueHeads, c.keyLength, c.headDim});
-    Tensor reference = F::attention(cpu(), q.transpose(1, 2), k, v, c.causal);
+    Tensor reference = F::attention(cpu(), q.transpose(1, 2), k, v, F::causalIf(c.causal));
 
     Tensor mq = toMetal(q, DType::kFloat16).transpose(1, 2);
     Tensor got = F::attention(
@@ -693,27 +693,30 @@ CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]
         mq,
         toMetal(k, DType::kFloat16),
         toMetal(v, DType::kFloat16),
-        c.causal);
+        F::causalIf(c.causal));
     CATCH_REQUIRE(close(got, reference, 3e-2f, 3e-2f));
   }
 }
 
-CATCH_TEST_CASE("test Metal attention refuses the block sizes it does not define", "[op][metal]") {
+CATCH_TEST_CASE("test Metal attention refuses the masks it does not define", "[op][metal]") {
   SKIP_WITHOUT_METAL();
 
   // Shapes the kernel takes -- half and float, heads of 64 and 32, a few dozen keys -- so that a
-  // negative block reaches the kernel's dispatch rather than the composition's, where it was once
-  // run as no mask at all. A block larger than one has no kernel here and no composition.
+  // mask that is not one reaches the kernel's dispatch rather than the composition's, where a
+  // block size was once run as no mask at all. A block mask has no kernel here and no
+  // composition.
   Tensor q = randn({1, 2, 16, 64});
   Tensor k = randn({1, 2, 16, 64});
   Tensor qh = toMetal(q, DType::kFloat16);
   Tensor kh = toMetal(k, DType::kFloat16);
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, -1));
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, 4));
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, MaskType::kNone, 4));
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, static_cast<MaskType>(7)));
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, MaskType::kBlockCausal, 4));
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, MaskType::kBlockDiagonal, 4));
 
   Tensor qf = toMetal(randn({2, 4, 37, 32}));
   Tensor kf = toMetal(randn({2, 2, 37, 32}));
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qf, kf, kf, -1));
+  CATCH_REQUIRE_THROWS(F::attention(mtl(), qf, kf, kf, MaskType::kCausal, 1));
 }
 
 namespace {

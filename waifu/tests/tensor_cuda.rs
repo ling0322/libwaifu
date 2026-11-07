@@ -5,7 +5,7 @@
 //! run with `cargo test --test cuda -- --ignored`. On a machine without one, the library ends the
 //! process rather than reporting an error, which is why they do not simply detect and skip.
 
-use waifu::flint::{fp8_available, functional as F, DType, Device, Tensor, CAUSAL};
+use waifu::flint::{fp8_available, functional as F, DType, Device, MaskType, Tensor};
 
 /// The float type the CUDA operators work in, which the inputs have to be in already.
 fn cuda_float() -> DType {
@@ -229,7 +229,7 @@ fn attends_over_a_batch() {
     let k = F::rand(&[1, 1, 2, HEAD_DIM], cuda_float(), Device::Cuda).unwrap();
     let v = F::rand(&[1, 1, 2, HEAD_DIM], cuda_float(), Device::Cuda).unwrap();
 
-    let out = F::attention(&q, &k, &v, CAUSAL).unwrap();
+    let out = F::attention(&q, &k, &v, MaskType::Causal).unwrap();
     assert_eq!(out.shape(), vec![1, 1, 2, HEAD_DIM]);
 
     // With a causal mask the first query sees only the first value, unchanged.
@@ -307,7 +307,7 @@ fn stores_and_reads_a_paged_kv_cache() {
             .transpose(1, 2)
             .unwrap()
     };
-    let dense = F::attention(&batched(&q), &batched(&k), &batched(&v), CAUSAL).unwrap();
+    let dense = F::attention(&batched(&q), &batched(&k), &batched(&v), MaskType::Causal).unwrap();
 
     let expected = to_host_f32(&dense);
     let actual = to_host_f32(&paged);
@@ -397,4 +397,63 @@ fn multiplies_by_an_fp8_weight() {
         .to_device(Device::Cuda)
         .unwrap();
     assert!(F::fp8_matmul(&a, &codes, &per_row).is_err());
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn a_block_diagonal_mask_is_attention_window_by_window() {
+    // Qwen3-ASR's audio encoder: fourteen heads of 64, windows of 104 over 179 tokens, the second
+    // window short. Each window attended to alone, with no mask, is what the mask means.
+    const HEADS: i32 = 14;
+    const LENGTH: i32 = 179;
+    const WINDOW: i32 = 104;
+    let random = || F::rand(&[1, HEADS, LENGTH, 64], cuda_float(), Device::Cuda).unwrap();
+    let (q, k, v) = (random(), random(), random());
+
+    let masked = F::attention(&q, &k, &v, MaskType::BlockDiagonal(WINDOW)).unwrap();
+
+    let window = |from: i32, to: i32| {
+        let part = |x: &Tensor| x.slice(2, from, to).unwrap().contiguous().unwrap();
+        F::attention(&part(&q), &part(&k), &part(&v), MaskType::None).unwrap()
+    };
+    let first = to_host_f32(&window(0, WINDOW));
+    let second = to_host_f32(&window(WINDOW, LENGTH));
+    let got = to_host_f32(&masked);
+
+    // Head by head: rows 0..104 against the first window, 104..179 against the second.
+    let row = 64usize;
+    let short = (LENGTH - WINDOW) as usize;
+    let mut worst = 0f32;
+    for head in 0..HEADS as usize {
+        for position in 0..LENGTH as usize {
+            let at = (head * LENGTH as usize + position) * row;
+            let want = match position < WINDOW as usize {
+                true => {
+                    let at = (head * WINDOW as usize + position) * row;
+                    &first[at..at + row]
+                }
+                false => {
+                    let at = (head * short + position - WINDOW as usize) * row;
+                    &second[at..at + row]
+                }
+            };
+            for (g, w) in got[at..at + row].iter().zip(want) {
+                worst = worst.max((g - w).abs());
+            }
+        }
+    }
+    assert!(
+        worst < 2e-3,
+        "the masked attention is {worst} off the windows"
+    );
+
+    // A window as long as the sequence is no mask at all.
+    let whole = F::attention(&q, &k, &v, MaskType::BlockDiagonal(1000)).unwrap();
+    let unmasked = F::attention(&q, &k, &v, MaskType::None).unwrap();
+    let worst = to_host_f32(&whole)
+        .iter()
+        .zip(to_host_f32(&unmasked))
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(worst < 2e-3, "{worst}");
 }

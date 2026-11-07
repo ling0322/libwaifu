@@ -55,7 +55,8 @@ use std::rc::Rc;
 
 use crate::error::Error;
 use crate::flint::{
-    check_parameters, DType, Device, Extent, Graph, Ir, RunContext, Tensor, Value, Weights, CAUSAL,
+    check_parameters, DType, Device, Extent, Graph, Ir, MaskType, RunContext, Tensor, Value,
+    Weights,
 };
 use crate::layers::Linear;
 use crate::Result;
@@ -214,7 +215,7 @@ fn layer(
     };
 
     // Causal, aligned to the bottom right: one query against the whole history sees all of it.
-    let out = g.attention(q, kept.keys, kept.values, CAUSAL);
+    let out = g.attention(q, kept.keys, kept.values, MaskType::Causal);
     let out = g.view(
         g.contiguous(g.transpose(out, 1, 2)),
         [Extent::At(1), length, Extent::At(heads * head_dim)],

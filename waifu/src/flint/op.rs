@@ -200,6 +200,46 @@ pub enum Unary {
     Geglu,
 }
 
+/// Which keys a query may see in [`Op::Attention`].
+///
+/// Query `i` sits at position `p = i + S - L`, aligned to the bottom right of the score matrix,
+/// and sees the keys `first(p)..=last(p)`. The block masks cut the keys into blocks of `n` from key
+/// 0:
+///
+/// | mask | `first(p)` | `last(p)` |
+/// | --- | --- | --- |
+/// | `None` | 0 | `S - 1` |
+/// | `Causal` | 0 | `p` |
+/// | `BlockCausal(n)` | 0 | `min(S - 1, p / n * n + n - 1)` |
+/// | `BlockDiagonal(n)` | `p / n * n` | `min(S - 1, p / n * n + n - 1)` |
+///
+/// The block masks have no composition: where no kernel takes one it fails. Today that is CUDA's
+/// fused kernel alone, in half, on Ampere and after.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MaskType {
+    /// Every key.
+    None,
+    /// Every key up to the query's own position.
+    Causal,
+    /// The query's own block of `n` keys and every block before it: the mask a streaming diffusion
+    /// transformer is trained under. Needs `S >= L`.
+    BlockCausal(i32),
+    /// The query's own block of `n` keys alone: windowed self-attention. Needs `S == L`.
+    BlockDiagonal(i32),
+}
+
+impl MaskType {
+    /// What the C API calls it, `FL_MASK_*`, and the block size it is handed beside it.
+    pub fn code(self) -> (i32, i32) {
+        match self {
+            MaskType::None => (0, 0),
+            MaskType::Causal => (1, 0),
+            MaskType::BlockCausal(n) => (2, n),
+            MaskType::BlockDiagonal(n) => (3, n),
+        }
+    }
+}
+
 /// What [`Op::Pad1d`] puts in the positions it adds.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PadMode {
@@ -546,13 +586,13 @@ pub enum Op {
         input: Value,
         size: Extent,
     },
-    /// Scaled dot product attention over `(N, nHead, L, D)` queries, under the mask `block_size`
-    /// names: see [`functional::attention`](super::functional::attention).
+    /// Scaled dot product attention over `(N, nHead, L, D)` queries, under `mask`: see
+    /// [`functional::attention`](super::functional::attention).
     Attention {
         query: Value,
         key: Value,
         value: Value,
-        block_size: i32,
+        mask: MaskType,
     },
     /// Join two values along `dim`, which is the only dimension they may disagree on.
     Cat {
@@ -917,11 +957,13 @@ impl fmt::Display for Op {
                 call.arg(format_args!("hop={hop}"))?;
                 call.arg(format_args!("centered={centered}"))?;
             }
-            // Printed as the mask it is, which for the two that are not blocks is a word.
-            Op::Attention { block_size, .. } => match *block_size {
-                0 => {}
-                1 => call.arg(format_args!("causal"))?,
-                block => call.arg(format_args!("block_size={block}"))?,
+            // Printed as the mask it is: nothing for none, a word for causal, and a block's kind
+            // and size for the others.
+            Op::Attention { mask, .. } => match *mask {
+                MaskType::None => {}
+                MaskType::Causal => call.arg(format_args!("causal"))?,
+                MaskType::BlockCausal(n) => call.arg(format_args!("block_causal={n}"))?,
+                MaskType::BlockDiagonal(n) => call.arg(format_args!("block_diagonal={n}"))?,
             },
 
             Op::View { shape, .. } => call.arg(shape_of(shape))?,
