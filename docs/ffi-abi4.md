@@ -1,0 +1,454 @@
+# libwaifu's C API, ABI 4
+
+Status: designed, not implemented. `docs/ffi.md` and `waifu/include/waifu.h` describe ABI 3, which
+is what the library speaks today. This is what it is to speak next, agreed point by point; what is
+still open is at the end.
+
+ABI 4 takes every JSON document out of libwaifu, asks about models and devices through an enum and
+a getter instead, names every task as a verb and a noun, and drops what only a test or only one
+screen needed. A caller built against it has two things to free and nothing to parse.
+
+## Rules
+
+- **No JSON.** What a model can do, what a device has and which build this is are asked one
+  property at a time: `waifu_model_get_int_property(model, WAIFU_MODEL_CAN_DRAW_IMAGE, &v)`.
+- **Enums only grow.** A number, once published, keeps its meaning and is never reused; a new
+  property, stage or capability is a new number at the end of its range, and is not an ABI change.
+  A library asked about a number it does not know answers as for a property the model does not
+  have: `false`. A caller handed a stage it does not know shows a generic line.
+- **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end.
+- **Two things to free**: an engine (`waifu_engine_free`) and a model (`waifu_model_free`).
+  Everything else is the library's: a model's strings live until the model is freed, the version
+  strings forever, `waifu_last_error` until the thread's next call, and everything a callback is
+  handed until it returns. A caller that keeps a result copies it.
+- **Requests are copied at the call.** Nothing a caller passes in has to outlive the call that took
+  it -- not a request, not an image in one, not the `WaifuModel` a load is given.
+- **Names say what they are.** A task is a verb and a noun, the upstream project's verb where it has
+  one (See-through's paper is "Single-image Layer Decomposition": `decompose_image`), and the same
+  word in its function, request, result and callback. A capability is `CAN_` and a sentence. A
+  constraint is the request field it constrains and the constraint
+  (`DRAW_IMAGE_WIDTH_HEIGHT_MULTIPLE_OF`).
+- **Nothing only a test needs.** `"tones"`, the stand-in voice, still loads -- the tests run on it
+  without a download -- but no property, enum or string of the API is there for it.
+- **Encoding files is the caller's.** The library hands over pixels and samples; PNG, WAV and PSD
+  are written by the app.
+
+## The header
+
+```c
+#define WAIFU_ABI_VERSION 4
+
+/* -- enums --------------------------------------------------------------------------------- */
+
+typedef enum {
+  WAIFU_LOG_DEBUG = 0,
+  WAIFU_LOG_INFO = 1,
+  WAIFU_LOG_WARNING = 2,
+  WAIFU_LOG_ERROR = 3,
+  WAIFU_LOG_FATAL = 4,        // the process aborts when the callback returns
+} WaifuLogLevel;
+
+typedef enum {
+  WAIFU_DEVICE_AUTO = 0,
+  WAIFU_DEVICE_CPU = 1,
+  WAIFU_DEVICE_METAL = 2,
+  WAIFU_DEVICE_CUDA = 3,
+  WAIFU_DEVICE_VULKAN = 5,
+  // 4 and 6 were CUDA_CPU_OFFLOAD and METAL_DISK_OFFLOAD, aliases kept for older headers: not reused
+} WaifuDevice;
+
+typedef enum {
+  WAIFU_OK = 0,
+  WAIFU_CANCELLED = 1,
+  WAIFU_ERR_INVALID_ARGUMENT = 2,  // a NULL, a string that is not UTF-8, a size out of range
+  WAIFU_ERR_UNKNOWN_MODEL = 3,     // no manifest at the path
+  // 4 was FETCH, which libwaifu never said once downloads were libwaifu_modelmanager's: not reused
+  WAIFU_ERR_MODEL = 5,             // the model could not be read, or cannot do what was asked
+  WAIFU_ERR_NOT_LOADED = 6,        // no model loaded, or one that does not do this kind of task
+  WAIFU_ERR_INTERNAL = 7,          // a panic in the library: a bug
+} WaifuStatusCode;
+
+// What a job is doing. Ranges by task; done/total count what the comment says, 0, 0 otherwise.
+typedef enum {
+  WAIFU_STAGE_LOAD_MODEL_READING_WEIGHTS = 1,
+
+  WAIFU_STAGE_DRAW_IMAGE_ENCODING_PROMPT = 100,
+  WAIFU_STAGE_DRAW_IMAGE_DENOISING = 101,             // steps
+  WAIFU_STAGE_DRAW_IMAGE_DECODING_IMAGE = 102,
+
+  WAIFU_STAGE_SPEAK_TEXT_READING_TEXT = 200,
+  WAIFU_STAGE_SPEAK_TEXT_GENERATING_TOKENS = 201,     // tokens; total is an estimate, and can be passed
+  WAIFU_STAGE_SPEAK_TEXT_SYNTHESIZING_AUDIO = 202,
+
+  WAIFU_STAGE_CONVERT_VOICE_READING_RECORDINGS = 300,
+  WAIFU_STAGE_CONVERT_VOICE_GENERATING_TOKENS = 301,  // tokens; total is an estimate
+  WAIFU_STAGE_CONVERT_VOICE_DENOISING = 302,          // steps
+  WAIFU_STAGE_CONVERT_VOICE_SYNTHESIZING_AUDIO = 303, // vocoder windows
+
+  // The whole picture, then the head, then the depth model that orders the layers.
+  WAIFU_STAGE_DECOMPOSE_IMAGE_ENCODING_IMAGE = 400,
+  WAIFU_STAGE_DECOMPOSE_IMAGE_DENOISING_LAYERS = 401,       // steps
+  WAIFU_STAGE_DECOMPOSE_IMAGE_DECODING_LAYERS = 402,        // layers
+  WAIFU_STAGE_DECOMPOSE_IMAGE_ENCODING_HEAD = 403,
+  WAIFU_STAGE_DECOMPOSE_IMAGE_DENOISING_HEAD_LAYERS = 404,  // steps
+  WAIFU_STAGE_DECOMPOSE_IMAGE_DECODING_HEAD_LAYERS = 405,   // layers
+  WAIFU_STAGE_DECOMPOSE_IMAGE_ENCODING_FOR_DEPTH = 406,     // layers
+  WAIFU_STAGE_DECOMPOSE_IMAGE_DENOISING_DEPTH = 407,        // steps
+  WAIFU_STAGE_DECOMPOSE_IMAGE_DECODING_DEPTH = 408,         // layers
+  WAIFU_STAGE_DECOMPOSE_IMAGE_CUTTING_INTO_PARTS = 409,
+} WaifuStage;
+
+// What can be asked of a model. CAN_ properties are integers, 1 or 0; where 0, the string property
+// of the same number is why, in words to show. The rest are an integer or a string, as marked.
+typedef enum {
+  WAIFU_MODEL_CAN_DRAW_IMAGE = 1,
+  WAIFU_MODEL_CAN_SPEAK_TEXT = 2,
+  WAIFU_MODEL_CAN_CONVERT_VOICE = 3,
+  WAIFU_MODEL_CAN_DECOMPOSE_IMAGE = 4,
+
+  WAIFU_MODEL_CAN_DRAW_FROM_START_IMAGE = 100,        // img2img
+  WAIFU_MODEL_CAN_DRAW_WITH_CONTROL_IMAGE = 101,      // a ControlNet
+  WAIFU_MODEL_CAN_DRAW_WITH_PROMPT_IMAGES = 102,      // images the prompt names as <|key|>
+
+  WAIFU_MODEL_CAN_SPEAK_LIKE_REFERENCE = 200,         // in the voice of a recording
+  WAIFU_MODEL_CAN_SPEAK_WITHOUT_REFERENCE = 201,      // CosyVoice3 cannot
+  WAIFU_MODEL_CAN_SPEAK_WITH_STYLE = 202,             // follows an instruction such as "speak happily"
+
+  WAIFU_MODEL_CAN_CONVERT_STYLE = 300,                // the manner as well as the voice
+
+  WAIFU_MODEL_SIZE_ON_DISK = 1000,                    // integer, bytes; absent until every file is here
+  WAIFU_MODEL_SAMPLE_RATE = 1001,                     // integer, of what it says or converts
+  WAIFU_MODEL_DRAW_IMAGE_WIDTH_HEIGHT_MULTIPLE_OF = 1100,     // integer: 16, or 32 for SDXL and Qwen-Image
+  WAIFU_MODEL_DRAW_IMAGE_SAMPLER = 1101,                      // string: "Euler"
+  WAIFU_MODEL_DRAW_IMAGE_MAX_PROMPT_IMAGES = 1102,            // integer
+  WAIFU_MODEL_DECOMPOSE_IMAGE_RESOLUTION_MULTIPLE_OF = 1400,  // integer: 64
+} WaifuModelProperty;
+
+// What can be asked of a device. All of it is this process's, not the card as other programs see it.
+typedef enum {
+  WAIFU_DEVICE_MEMORY_BUDGET = 1,     // the most it may hold there: the memory limit, or the device's memory
+  WAIFU_DEVICE_MEMORY_HELD = 2,       // what its allocator holds now, what it keeps for reuse included
+  WAIFU_DEVICE_MEMORY_AVAILABLE = 3,  // BUDGET - HELD, never below 0
+  WAIFU_DEVICE_MEMORY_LIMIT = 4,      // what waifu_set_memory_limit set; absent where nothing did
+} WaifuDeviceProperty;
+
+typedef enum {
+  WAIFU_LAYER_PART = 0,             // a part as the model drew it
+  WAIFU_LAYER_STRATIFIED_NEAR = 1,  // stratify_layers: the near half of a part
+  WAIFU_LAYER_STRATIFIED_FAR = 2,   // stratify_layers: the far half of a part
+} WaifuLayerType;
+
+/* -- the library --------------------------------------------------------------------------- */
+
+uint32_t waifu_abi_version(void);
+const char *waifu_last_error(void);   // this thread's; valid until its next call into the library
+const char *waifu_version(void);      // "0.1.0"; static
+const char *waifu_revision(void);     // the full commit, or NULL for a build made without git; static
+
+typedef struct {
+  WaifuLogLevel level;
+  const char *source;                 // "engine.rs:712"
+  const char *message;
+  const char *time;                   // "2026-10-23T18:50:41Z"
+} WaifuLog;
+
+// Called on whichever thread wrote the line, which can be the caller's own. Must not call into the
+// library.
+typedef void (*WaifuLogCallback)(void *user_data, const WaifuLog *log);
+void waifu_set_log_callback(void *user_data, WaifuLogCallback callback);  // NULL: the console again
+void waifu_set_log_level(WaifuLogLevel level);                            // INFO unless set
+
+/* -- devices ------------------------------------------------------------------------------- */
+
+bool waifu_device_is_available(WaifuDevice device);
+
+// false for the processor, a device that cannot be used, or a property this library does not
+// know. Asking CUDA builds a context on the card, a few hundred megabytes of it.
+bool waifu_device_get_int_property(WaifuDevice device, WaifuDeviceProperty property, int64_t *value);
+
+// For the whole process, one per device: set it before a model is loaded. 0 for no limit but the
+// device's. The processor has none, and is refused.
+bool waifu_set_memory_limit(WaifuDevice device, uint64_t bytes);
+
+/* -- models -------------------------------------------------------------------------------- */
+
+typedef struct WaifuModel WaifuModel;
+
+// Reads the manifest at `manifest_path` -- a few kilobytes, and none of the weights. NULL, with
+// waifu_last_error, where there is none or it cannot be read.
+WaifuModel *waifu_model_open(const char *manifest_path);
+void waifu_model_free(WaifuModel *model);
+
+// false where the model has no such property or this library does not know it; *value untouched.
+bool waifu_model_get_int_property(const WaifuModel *model, WaifuModelProperty property, int64_t *value);
+// NULL where there is none; valid until waifu_model_free.
+const char *waifu_model_get_string_property(const WaifuModel *model, WaifuModelProperty property);
+
+/* -- the engine ---------------------------------------------------------------------------- */
+
+typedef struct WaifuEngine WaifuEngine;   // one thread that holds a model and runs jobs on it in order
+
+WaifuEngine *waifu_engine_new(WaifuDevice device);      // NULL, with waifu_last_error, if unavailable
+void waifu_engine_free(WaifuEngine *engine);  // stops what runs, cancels what waits, joins the thread
+WaifuDevice waifu_engine_device(const WaifuEngine *engine);   // never AUTO
+
+/* -- jobs ---------------------------------------------------------------------------------- */
+
+// 0: refused at the call, with the reason in waifu_last_error, and no callback is ever called.
+// Any other id: on_progress any number of times, then on_complete exactly once. Callbacks run on
+// a thread of the library's, must return quickly, and may call nothing but waifu_engine_cancel.
+typedef uint64_t WaifuJob;
+
+void waifu_engine_cancel(WaifuEngine *engine, WaifuJob job);  // after the step it is on, or before it starts
+void waifu_engine_cancel_all(WaifuEngine *engine);
+
+typedef struct {
+  WaifuStage stage;
+  double fraction;                    // 0..1 of the whole job, or -1 where nothing can say
+  uint64_t done;                      // of the stage, done already
+  uint64_t total;
+  double seconds;                     // since the job started
+} WaifuProgress;
+typedef void (*WaifuProgressCallback)(void *user_data, const WaifuProgress *progress);
+
+typedef struct {
+  WaifuStatusCode code;
+  const char *message;                // why, or NULL for WAIFU_OK
+} WaifuStatus;
+
+// Every pointer in a result is valid until the callback returns.
+typedef struct {
+  WaifuStatus status;
+} WaifuResult;
+typedef void (*WaifuCallback)(void *user_data, const WaifuResult *result);
+
+// Reads the model's weights onto the engine's device, dropping the model before. The call copies
+// the manifest, not the weights, which the engine's thread reads from the files: `model` may be
+// freed as soon as it returns. "tones", the stand-in voice the tests use, opens as a model too.
+WaifuJob waifu_engine_load_model_async(WaifuEngine *engine, const WaifuModel *model, void *user_data,
+                                       WaifuProgressCallback on_progress, WaifuCallback on_complete);
+WaifuJob waifu_engine_unload_model_async(WaifuEngine *engine, void *user_data, WaifuCallback on_complete);
+
+/* -- draw_image ---------------------------------------------------------------------------- */
+
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  const uint8_t *rgb;                 // width * height * 3, rows top to bottom
+  size_t len;
+} WaifuImage;
+
+typedef struct {
+  const char *key;                    // the <|key|> the prompt names it by: letters, digits and _
+  const WaifuImage *image;
+} WaifuPromptImage;
+
+typedef struct {
+  uint32_t struct_size;
+  const char *prompt;
+  const char *negative;               // NULL or "" for none
+  uint32_t width;                     // 64..2048, a multiple of DRAW_IMAGE_WIDTH_HEIGHT_MULTIPLE_OF
+  uint32_t height;
+  uint32_t steps;
+  float guidance;
+  uint64_t seed;
+  const WaifuImage *start_image;      // img2img; NULL for none
+  float start_image_strength;         // how far it walks away from it, 0..1
+  const WaifuImage *control_image;    // a ControlNet's condition; NULL for none
+  float control_image_scale;          // how hard it holds to it
+  const WaifuPromptImage *prompt_images;
+  size_t prompt_image_count;
+} WaifuDrawImageRequest;
+
+typedef struct {
+  WaifuStatus status;
+  const WaifuImage *image;            // NULL unless WAIFU_OK
+} WaifuDrawImageResult;
+typedef void (*WaifuDrawImageCallback)(void *user_data, const WaifuDrawImageResult *result);
+
+WaifuJob waifu_engine_draw_image_async(WaifuEngine *engine, const WaifuDrawImageRequest *request,
+                                       void *user_data, WaifuProgressCallback on_progress,
+                                       WaifuDrawImageCallback on_complete);
+
+/* -- speak_text and convert_voice ---------------------------------------------------------- */
+
+typedef struct {
+  const float *samples;               // mono, -1..1
+  size_t count;
+  uint32_t sample_rate;
+} WaifuAudio;
+
+typedef struct {
+  uint32_t struct_size;
+  const char *text;
+  const WaifuAudio *reference;        // a recording to sound like, or NULL
+  float speed;
+  float temperature;
+  const char *style;                  // any instruction; NULL or "" for the voice's own way
+  uint64_t seed;
+} WaifuSpeakTextRequest;
+
+typedef struct {
+  uint32_t struct_size;
+  const WaifuAudio *source;           // what is said, and how
+  const WaifuAudio *reference;        // whose voice to say it in
+  uint32_t steps;
+  bool convert_style;
+  uint64_t seed;
+} WaifuConvertVoiceRequest;
+
+typedef struct {
+  WaifuStatus status;
+  const WaifuAudio *audio;            // NULL unless WAIFU_OK
+} WaifuAudioResult;
+typedef void (*WaifuAudioCallback)(void *user_data, const WaifuAudioResult *result);
+
+WaifuJob waifu_engine_speak_text_async(WaifuEngine *engine, const WaifuSpeakTextRequest *request,
+                                       void *user_data, WaifuProgressCallback on_progress,
+                                       WaifuAudioCallback on_complete);
+WaifuJob waifu_engine_convert_voice_async(WaifuEngine *engine, const WaifuConvertVoiceRequest *request,
+                                          void *user_data, WaifuProgressCallback on_progress,
+                                          WaifuAudioCallback on_complete);
+
+/* -- decompose_image ----------------------------------------------------------------------- */
+
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  const uint8_t *rgba;                // width * height * 4, not premultiplied
+  size_t len;
+} WaifuRgbaImage;
+
+typedef struct {
+  uint32_t struct_size;
+  const WaifuRgbaImage *image;        // any size, centred and scaled by the engine; transparent is fine
+  uint32_t steps;                     // 0 for the model's own
+  uint32_t depth_steps;               // 0 for the model's own
+  uint32_t resolution;                // a multiple of DECOMPOSE_IMAGE_RESOLUTION_MULTIPLE_OF; 0 for 1280
+  bool split_pairs;                   // hands, eyes, eyebrows, ears into a -l and a -r layer
+  bool stratify_layers;               // hair, hands, top and bottom also cut into a near and a far half
+  uint64_t seed;
+} WaifuDecomposeImageRequest;
+
+typedef struct {
+  WaifuLayerType type;
+  const char *name;                   // "topwear"; its halves "topwear-0" and "topwear-1"
+  int32_t left;                       // where its top left corner is on the canvas
+  int32_t top;
+  WaifuRgbaImage image;               // only as large as what is drawn
+  // How far away it is: 0 nearest, 1 farthest. Sorted from the largest, stably, the layers are the
+  // stack from the bottom up. A near half has its part's depth, so it stays in its part's place;
+  // at one depth a far half is under a near one, and the rest keep their order in `layers`.
+  float depth;
+  int32_t stratified_from;            // a half: the index in `layers` of its part; a part: -1
+} WaifuLayer;
+
+typedef struct {
+  WaifuStatus status;
+  uint32_t canvas;                    // the side of the square canvas; 0 unless WAIFU_OK
+  const WaifuLayer *layers;           // every part, bottom first; then, with stratify_layers, the halves
+  size_t layer_count;
+} WaifuDecomposeImageResult;
+typedef void (*WaifuDecomposeImageCallback)(void *user_data, const WaifuDecomposeImageResult *result);
+
+WaifuJob waifu_engine_decompose_image_async(WaifuEngine *engine, const WaifuDecomposeImageRequest *request,
+                                            void *user_data, WaifuProgressCallback on_progress,
+                                            WaifuDecomposeImageCallback on_complete);
+```
+
+## What changes from ABI 3
+
+| ABI 3 | ABI 4 |
+|---|---|
+| `waifu_describe_json` | `waifu_model_open`, `waifu_model_get_int_property`, `waifu_model_get_string_property`, `waifu_model_free` |
+| `waifu_devices_json` | `waifu_device_is_available`, `waifu_device_get_int_property` |
+| `waifu_version_json` | `waifu_version`, `waifu_revision` |
+| `waifu_string_free` | gone: nothing returns a string to free |
+| `waifu_engine_new_with_options`, `WaifuEngineOptions` | gone: `device` was its only field; `waifu_engine_new` |
+| `waifu_engine_device` returns `char *` | returns `WaifuDevice` |
+| `waifu_engine_load_async(engine, "path")` | `waifu_engine_load_model_async(engine, model)` |
+| `waifu_engine_unload_async` | `waifu_engine_unload_model_async` |
+| `draw_async`, `WaifuDrawRequest` | `draw_image_async`, `WaifuDrawImageRequest` |
+| `speak_async`, `WaifuSpeakRequest` | `speak_text_async`, `WaifuSpeakTextRequest` |
+| `voice_conversion_async`, `WaifuVoiceConversionRequest` | `convert_voice_async`, `WaifuConvertVoiceRequest` |
+| `layers_async`, `WaifuLayersRequest` | `decompose_image_async`, `WaifuDecomposeImageRequest` |
+| `…CompletionEvent`, `…CompleteCallback` | `…Result`, `…Callback` |
+| `WaifuProgressEvent`, `WaifuLogEvent` | `WaifuProgress`, `WaifuLog` |
+| images under the keys `"start_from"` and `"control"` | `start_image`, `control_image`; `WaifuImageInput` is `WaifuPromptImage` |
+| `WaifuSpeakRequest.like`, `WaifuAudio.rate` | `reference`, `sample_rate` |
+| `WaifuProgressEvent.words`, `part`, `parts`, `file` | gone: one `WaifuStage` for each thing a job does |
+| seven `WaifuStage`s | twenty, by task |
+| `waifu_psd_write`, `waifu_bytes_free`, PSDs in the layers' result | gone: a PSD is the app's to write |
+| `waifu_stratify`, `waifu_depth_layers_free` | `stratify_layers` in the request |
+| `WAIFU_DEVICE_CUDA_CPU_OFFLOAD`, `_METAL_DISK_OFFLOAD`, `WAIFU_ERR_FETCH` | gone; their numbers are not reused |
+| a voice's `styles`, `not_a_voice_because` | gone |
+
+## Why
+
+**Properties, not JSON and not structs.** JSON was written for one screen: a flag beside the
+sentence saying why not (`takes_a_recording`, `no_likeness_because`), a map keyed by magic strings
+(`why_not`), a `kind` and a `kinds`, the path asked with handed back. Structs in its place would
+have been cleaner, and every field added to one an ABI change for every caller. A property is a
+number: one more is a number more, and an old library asked about it says so instead of misreading
+a layout.
+
+**The description stays in libwaifu.** libwaifu_modelmanager already keeps a table by model type
+for a screen's defaults, and describing a model there would have been a second copy of what the
+engine itself checks -- which sizes a model draws at, whether it reads a picture -- free to drift
+from it.
+
+**A model is a handle, and a load takes one.** The path is checked when it is opened, at the call,
+rather than at the end of a job; what a model can do is asked of the same thing that is then
+loaded; and a caller that has already looked does not name the file twice.
+
+**Stages, not words.** `words` -- "step 3 of 20", "ordering the layers" -- carried what `WaifuStage`
+could not: a decomposition's seven stages, two of them run twice, were folded into a picture's
+encoding, drawing and decoding. Each is a stage now,
+and the words are the app's, in its own language.
+
+**No style list.** `CosyVoice3::STYLES` is upstream's `instruct_list`
+(`cosyvoice/utils/common.py`), which its README calls instructions "such as" these: examples, not
+the set. `style` is any instruction, and `CAN_SPEAK_WITH_STYLE` says whether one is followed; the
+examples are the app's to offer.
+
+**No PSD.** A Photoshop document is a file format, and files are the app's. The layers' pixels,
+places and depths are all in the result.
+
+## Stratification
+
+`stratify_layers` runs See-through's depth-guided stratification (section 4.2.2 of the paper) after
+the model: hair, hands, top and bottom are each cut, by k-means on their own pixels' depth, into a
+near half (`<tag>-0`) and a far half (`<tag>-1`), appended to `layers` after every part.
+
+The halves' order changes with ABI 4. Until now the near half took its part's place and the far
+half sank, from there, past every layer under it that was nearer -- an order that only
+`waifu/src/see_through/stratify.rs` could work out, and that a caller would have needed as a list
+of indices. Now:
+
+- the near half's `depth` is its part's;
+- the far half's is the median of its own pixels, as before;
+- the stack is a stable sort of every layer by `depth`, farthest first, a far half under a near one
+  at the same depth.
+
+A caller sorts by `depth` and has the stack. On `waifu-output/waifu-0015.png` the two rules differ
+in one layer -- the near half of the back hair is under the back of the top rather than over it --
+and in 255 of the 1280 x 1280 pixels drawn, thin lines along the shoulders.
+
+A near half's `depth` is therefore its part's and not its own: the strands of back hair that fall
+over the chest are at 0.427 and say 0.953. That is what keeps it in its part's place, and it is in
+the header.
+
+## What has to change with it
+
+- `waifu/src/c_api.rs`, `waifu/src/engine.rs`, `waifu/src/progress.rs`, the See-through pipeline
+  and `stratify.rs`, and their tests; `waifu.h` is regenerated.
+- `waifu-cli`: the new names, `WaifuModel`, its own words for each stage.
+- The SwiftUI app: the same; a PSD writer of its own; the style picker offers CosyVoice3's examples
+  and free text.
+- The WPF app: the same, without the PSD.
+- `bindings/rust` is written against ABI 4 afterwards, in a pull request of its own.
+
+## Not in ABI 4
+
+- libwaifu_modelmanager's API -- its catalogue, defaults and directory JSON, and the words in its
+  download progress -- has the same faults and its own ABI; it is a design of its own.
