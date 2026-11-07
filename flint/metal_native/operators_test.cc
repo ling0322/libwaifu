@@ -50,24 +50,24 @@ Operators *cpu() {
 }
 
 Tensor toMetal(const Tensor &a, DType dtype = DType::kFloat) {
-  return F::cast(mtl(), F::toDevice(mtl(), a, Device::getMetal()), dtype);
+  return fl::test::cast(mtl(), fl::test::toDevice(mtl(), a, Device::getMetal()), dtype);
 }
 
 Tensor toCpu(const Tensor &a) {
-  Tensor x = a.getDType().isFloat() ? F::cast(mtl(), a, DType::kFloat) : a;
-  return F::toDevice(mtl(), x, Device::getCpu());
+  Tensor x = a.getDType().isFloat() ? fl::test::cast(mtl(), a, DType::kFloat) : a;
+  return fl::test::toDevice(mtl(), x, Device::getCpu());
 }
 
 // `x + value` on the CPU, the value broadcast over `x`.
 Tensor plus(const Tensor &x, float value) {
-  Tensor scalar = F::zeros(Device::getCpu(), {1}, x.getDType());
+  Tensor scalar = fl::test::zeros(Device::getCpu(), {1}, x.getDType());
   cpu()->fill(scalar, value);
-  return F::add(cpu(), x, scalar);
+  return fl::test::add(cpu(), x, scalar);
 }
 
 // A random float tensor on the CPU, spread over [-2, 2) so that signs and saturation are seen.
 Tensor randn(std::initializer_list<int> shape) {
-  return plus(F::mul(cpu(), F::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), -2.0f);
+  return plus(fl::test::mul(cpu(), fl::test::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), -2.0f);
 }
 
 bool close(const Tensor &metal, const Tensor &reference, float rtol, float atol) {
@@ -75,7 +75,7 @@ bool close(const Tensor &metal, const Tensor &reference, float rtol, float atol)
 }
 
 std::vector<float> values(const Tensor &a) {
-  Tensor x = F::contiguous(cpu(), a.getDevice().getType() == Device::kCpu ? a : toCpu(a));
+  Tensor x = fl::test::contiguous(cpu(), a.getDevice().getType() == Device::kCpu ? a : toCpu(a));
   const float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
   return std::vector<float>(data, data + x.getNumEl());
 }
@@ -100,8 +100,8 @@ CATCH_TEST_CASE("test Metal toDevice", "[op][metal]") {
   CATCH_REQUIRE(half.getDType() == DType::kFloat16);
   CATCH_REQUIRE(close(half, a, 1e-3f, 1e-3f));
 
-  Tensor longs = F::arangeLong(Device::getCpu(), -5, 100, 3);
-  Tensor back = toCpu(F::toDevice(mtl(), longs, Device::getMetal()));
+  Tensor longs = fl::test::arangeLong(Device::getCpu(), -5, 100, 3);
+  Tensor back = toCpu(fl::test::toDevice(mtl(), longs, Device::getMetal()));
   CATCH_REQUIRE(back.getDType() == DType::kLong);
   for (int i = 0; i < longs.getShape(0); ++i) {
     CATCH_REQUIRE(back.getInternalData()->getData<LongType>(0)[i] == -5 + 3 * i);
@@ -121,47 +121,47 @@ CATCH_TEST_CASE("test Metal binary operators", "[op][metal]") {
     Tensor x = toMetal(a, dtype).transpose(2, 1).slice(1, {1, 9});
     Tensor y = toMetal(b, dtype);
 
-    CATCH_REQUIRE(close(F::add(mtl(), x, y), F::add(cpu(), at, b), tol, tol));
-    CATCH_REQUIRE(close(F::sub(mtl(), x, y), F::sub(cpu(), at, b), tol, tol));
-    CATCH_REQUIRE(close(F::mul(mtl(), x, y), F::mul(cpu(), at, b), tol, tol));
-    CATCH_REQUIRE(close(F::divTensor(mtl(), x, y), F::divTensor(cpu(), at, b), 1e-2f, tol));
-    CATCH_REQUIRE(close(F::mul(mtl(), x, 0.1f), F::mul(cpu(), at, 0.1f), tol, tol));
-    CATCH_REQUIRE(close(F::div(mtl(), x, 4.0f), F::div(cpu(), at, 4.0f), tol, tol));
+    CATCH_REQUIRE(close(fl::test::add(mtl(), x, y), fl::test::add(cpu(), at, b), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sub(mtl(), x, y), fl::test::sub(cpu(), at, b), tol, tol));
+    CATCH_REQUIRE(close(fl::test::mul(mtl(), x, y), fl::test::mul(cpu(), at, b), tol, tol));
+    CATCH_REQUIRE(close(fl::test::divTensor(mtl(), x, y), fl::test::divTensor(cpu(), at, b), 1e-2f, tol));
+    CATCH_REQUIRE(close(fl::test::mul(mtl(), x, 0.1f), fl::test::mul(cpu(), at, 0.1f), tol, tol));
+    CATCH_REQUIRE(close(fl::test::div(mtl(), x, 4.0f), fl::test::div(cpu(), at, 4.0f), tol, tol));
 
     // A bias broadcast over (N, C, H, W), the pattern a convolution adds its bias in.
     Tensor image = randn({2, 3, 4, 5});
     Tensor bias = randn({3});
-    Tensor mtlSum = F::add(mtl(), toMetal(image, dtype), toMetal(bias, dtype).view({1, 3, 1, 1}));
-    CATCH_REQUIRE(close(mtlSum, F::add(cpu(), image, bias.view({1, 3, 1, 1})), tol, tol));
+    Tensor mtlSum = fl::test::add(mtl(), toMetal(image, dtype), toMetal(bias, dtype).view({1, 3, 1, 1}));
+    CATCH_REQUIRE(close(mtlSum, fl::test::add(cpu(), image, bias.view({1, 3, 1, 1})), tol, tol));
   }
 }
 
 CATCH_TEST_CASE("test Metal integer and bool operators", "[op][metal]") {
   SKIP_WITHOUT_METAL();
 
-  Tensor longs = F::arangeLong(Device(Device::kMetal), -7, 20, 2);
-  Tensor remainders = toCpu(F::mod(mtl(), longs, 5));
+  Tensor longs = fl::test::arangeLong(Device(Device::kMetal), -7, 20, 2);
+  Tensor remainders = toCpu(fl::test::mod(mtl(), longs, 5));
   for (int i = 0; i < longs.getShape(0); ++i) {
     LongType x = -7 + 2 * i;
     CATCH_REQUIRE(remainders.getInternalData()->getData<LongType>(0)[i] == x % 5);
   }
 
-  Tensor sum = toCpu(F::add(mtl(), longs, longs));
+  Tensor sum = toCpu(fl::test::add(mtl(), longs, longs));
   CATCH_REQUIRE(sum.getInternalData()->getData<LongType>(0)[3] == 2 * (-7 + 6));
 
   Tensor a = toMetal(randn({4, 6}));
-  Tensor same = F::eq(mtl(), a, a);
+  Tensor same = fl::test::eq(mtl(), a, a);
   CATCH_REQUIRE(same.getDType() == DType::kBool);
   CATCH_REQUIRE(mtl()->all(same));
-  CATCH_REQUIRE(!mtl()->all(F::eq(mtl(), a, F::add(mtl(), a, a))));
-  CATCH_REQUIRE(mtl()->all(F::eq(mtl(), longs, longs)));
+  CATCH_REQUIRE(!mtl()->all(fl::test::eq(mtl(), a, fl::test::add(mtl(), a, a))));
+  CATCH_REQUIRE(mtl()->all(fl::test::eq(mtl(), longs, longs)));
 }
 
 CATCH_TEST_CASE("test Metal unary operators", "[op][metal]") {
   SKIP_WITHOUT_METAL();
 
   Tensor a = randn({2, 5, 10});
-  Tensor positive = plus(F::abs(cpu(), a), 0.1f);
+  Tensor positive = plus(fl::test::abs(cpu(), a), 0.1f);
   Tensor at = a.transpose(2, 1).slice(1, {1, 9});
 
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
@@ -170,21 +170,21 @@ CATCH_TEST_CASE("test Metal unary operators", "[op][metal]") {
     Tensor x = toMetal(a, dtype).transpose(2, 1).slice(1, {1, 9});
     Tensor p = toMetal(positive, dtype);
 
-    CATCH_REQUIRE(close(F::neg(mtl(), x), F::neg(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::abs(mtl(), x), F::abs(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::exp(mtl(), x), F::exp(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::square(mtl(), x), F::square(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::sigmoid(mtl(), x), F::sigmoid(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::tanh(mtl(), x), F::tanh(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::relu(mtl(), x), F::relu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::gelu(mtl(), x), F::gelu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::silu(mtl(), x), F::silu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::quickGelu(mtl(), x), F::quickGelu(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::sin(mtl(), x), F::sin(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::cos(mtl(), x), F::cos(cpu(), at), tol, tol));
-    CATCH_REQUIRE(close(F::sqrt(mtl(), p), F::sqrt(cpu(), positive), tol, tol));
-    CATCH_REQUIRE(close(F::rsqrt(mtl(), p), F::rsqrt(cpu(), positive), tol, tol));
-    CATCH_REQUIRE(close(F::log(mtl(), p), F::log(cpu(), positive), tol, tol));
+    CATCH_REQUIRE(close(fl::test::neg(mtl(), x), fl::test::neg(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::abs(mtl(), x), fl::test::abs(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::exp(mtl(), x), fl::test::exp(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::square(mtl(), x), fl::test::square(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sigmoid(mtl(), x), fl::test::sigmoid(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::tanh(mtl(), x), fl::test::tanh(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::relu(mtl(), x), fl::test::relu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::gelu(mtl(), x), fl::test::gelu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::silu(mtl(), x), fl::test::silu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::quickGelu(mtl(), x), fl::test::quickGelu(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sin(mtl(), x), fl::test::sin(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::cos(mtl(), x), fl::test::cos(cpu(), at), tol, tol));
+    CATCH_REQUIRE(close(fl::test::sqrt(mtl(), p), fl::test::sqrt(cpu(), positive), tol, tol));
+    CATCH_REQUIRE(close(fl::test::rsqrt(mtl(), p), fl::test::rsqrt(cpu(), positive), tol, tol));
+    CATCH_REQUIRE(close(fl::test::log(mtl(), p), fl::test::log(cpu(), positive), tol, tol));
   }
 }
 
@@ -196,7 +196,7 @@ CATCH_TEST_CASE("test Metal log at its edges", "[op][metal]") {
   Tensor x = Tensor::create<float>({5}, {0.0f, -1.0f, INFINITY, 1.0f, 2.718281828f});
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
     CATCH_INFO("dtype = " << dtype.toString());
-    std::vector<float> y = values(F::log(mtl(), toMetal(x, dtype)));
+    std::vector<float> y = values(fl::test::log(mtl(), toMetal(x, dtype)));
     CATCH_REQUIRE((isinf(y[0]) && y[0] < 0));
     CATCH_REQUIRE(isnan(y[1]));
     CATCH_REQUIRE((isinf(y[2]) && y[2] > 0));
@@ -217,7 +217,7 @@ CATCH_TEST_CASE("test Metal round and cast to int64", "[op][metal]") {
     CATCH_INFO(dtype.toString());
     Tensor onDevice = toMetal(x, dtype);
 
-    Tensor r = F::round(mtl(), onDevice);
+    Tensor r = fl::test::round(mtl(), onDevice);
     CATCH_REQUIRE(r.getDType() == dtype);
     CATCH_REQUIRE(values(r) == rounded);
 
@@ -227,11 +227,11 @@ CATCH_TEST_CASE("test Metal round and cast to int64", "[op][metal]") {
       const LongType *data = host.getInternalData()->getData<LongType>(host.getInternalOffset());
       return std::vector<LongType>(data, data + host.getNumEl());
     };
-    Tensor ids = F::cast(mtl(), r, DType::kLong);
+    Tensor ids = fl::test::cast(mtl(), r, DType::kLong);
     CATCH_REQUIRE(ids.getDType() == DType::kLong);
     std::vector<LongType> nearest(rounded.begin(), rounded.end());
     CATCH_REQUIRE(asLongs(ids) == nearest);
-    CATCH_REQUIRE(asLongs(F::cast(mtl(), onDevice, DType::kLong)) == truncated);
+    CATCH_REQUIRE(asLongs(fl::test::cast(mtl(), onDevice, DType::kLong)) == truncated);
   }
 }
 
@@ -246,25 +246,25 @@ CATCH_TEST_CASE("test Metal softmax and reductions", "[op][metal]") {
       CATCH_INFO("dtype = " << dtype.toString());
       float tol = dtype == DType::kFloat ? 1e-5f : 5e-3f;
       Tensor x = toMetal(a, dtype);
-      CATCH_REQUIRE(close(F::softmax(mtl(), x), F::softmax(cpu(), a), tol, tol));
-      CATCH_REQUIRE(close(F::max(mtl(), x), F::max(cpu(), a), tol, tol));
-      CATCH_REQUIRE(close(F::min(mtl(), x), F::min(cpu(), a), tol, tol));
+      CATCH_REQUIRE(close(fl::test::softmax(mtl(), x), fl::test::softmax(cpu(), a), tol, tol));
+      CATCH_REQUIRE(close(fl::test::max(mtl(), x), fl::test::max(cpu(), a), tol, tol));
+      CATCH_REQUIRE(close(fl::test::min(mtl(), x), fl::test::min(cpu(), a), tol, tol));
       // A sum of thousands of elements reaches the tens, where a half is only good to a
       // hundredth, so the tolerance is that of the result's type rather than of the inputs'.
       float sumTol = dtype == DType::kFloat ? 1e-3f : 1e-2f;
-      CATCH_REQUIRE(close(F::sum(mtl(), x, -1), F::sum(cpu(), a, -1), sumTol, sumTol));
+      CATCH_REQUIRE(close(fl::test::sum(mtl(), x, -1), fl::test::sum(cpu(), a, -1), sumTol, sumTol));
     }
   }
 
   // Along a dimension other than the last, and over everything.
   Tensor a = randn({3, 4, 5});
   Tensor x = toMetal(a);
-  CATCH_REQUIRE(close(F::sum(mtl(), x, 0), F::sum(cpu(), a, 0), 1e-5f, 1e-5f));
-  CATCH_REQUIRE(close(F::sum(mtl(), x, 1), F::sum(cpu(), a, 1), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::sum(mtl(), x, 0), fl::test::sum(cpu(), a, 0), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::sum(mtl(), x, 1), fl::test::sum(cpu(), a, 1), 1e-5f, 1e-5f));
 
   float total = 0.0f;
   for (float v : values(a)) total += v;
-  Tensor all = F::sum(mtl(), x.view({-1}), 0);
+  Tensor all = fl::test::sum(mtl(), x.view({-1}), 0);
   CATCH_REQUIRE(all.getNumEl() == 1);
   CATCH_REQUIRE(fabsf(mtl()->elem(all) - total) < 1e-4f);
 }
@@ -276,36 +276,36 @@ CATCH_TEST_CASE("test Metal cumsum", "[op][metal]") {
   // the carry from one tile into the next is what the longer ones check.
   for (int length : {1, 7, 256, 257, 1000, 4099}) {
     CATCH_INFO("length = " << length);
-    Tensor a = F::rand(Device::getCpu(), {3, 5, length}, DType::kFloat);
-    Tensor got = F::cumsum(mtl(), toMetal(a), -1);
+    Tensor a = fl::test::rand(Device::getCpu(), {3, 5, length}, DType::kFloat);
+    Tensor got = fl::test::cumsum(mtl(), toMetal(a), -1);
     CATCH_REQUIRE(got.getShape() == a.getShape());
-    CATCH_REQUIRE(close(got, F::cumsum(cpu(), a, -1), 1e-4f, 1e-4f));
+    CATCH_REQUIRE(close(got, fl::test::cumsum(cpu(), a, -1), 1e-4f, 1e-4f));
   }
 
   // Every dimension, counted from either end.
-  Tensor b = F::rand(Device::getCpu(), {4, 300, 9}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {4, 300, 9}, DType::kFloat);
   for (int dim : {0, 1, 2, -1, -2, -3}) {
     CATCH_INFO("dim = " << dim);
-    CATCH_REQUIRE(close(F::cumsum(mtl(), toMetal(b), dim), F::cumsum(cpu(), b, dim), 1e-4f, 1e-4f));
+    CATCH_REQUIRE(close(fl::test::cumsum(mtl(), toMetal(b), dim), fl::test::cumsum(cpu(), b, dim), 1e-4f, 1e-4f));
   }
 
   // A strided view, scanned along its middle dimension.
   Tensor strided = toMetal(b).transpose(0, 2);
   CATCH_REQUIRE(close(
-      F::cumsum(mtl(), strided, 1), F::cumsum(cpu(), F::contiguous(cpu(), b.transpose(0, 2)), 1), 1e-4f, 1e-4f));
+      fl::test::cumsum(mtl(), strided, 1), fl::test::cumsum(cpu(), fl::test::contiguous(cpu(), b.transpose(0, 2)), 1), 1e-4f, 1e-4f));
 
   // Half, accumulated in float and rounded once: within half a unit of the ~300 a row sums to.
-  Tensor c = F::rand(Device::getCpu(), {2, 600}, DType::kFloat);
-  Tensor half = F::cumsum(mtl(), toMetal(c, DType::kFloat16), -1);
+  Tensor c = fl::test::rand(Device::getCpu(), {2, 600}, DType::kFloat);
+  Tensor half = fl::test::cumsum(mtl(), toMetal(c, DType::kFloat16), -1);
   CATCH_REQUIRE(half.getDType() == DType::kFloat16);
-  Tensor want = F::cumsum(cpu(), F::cast(cpu(), F::cast(cpu(), c, DType::kFloat16), DType::kFloat), -1);
+  Tensor want = fl::test::cumsum(cpu(), fl::test::cast(cpu(), fl::test::cast(cpu(), c, DType::kFloat16), DType::kFloat), -1);
   CATCH_REQUIRE(close(half, want, 1e-3f, 1e-3f));
 
   // Known values, so a dropped or double-counted element is a wrong total and not noise.
   Tensor d = Tensor::create<float>({2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
-  CATCH_REQUIRE(values(F::cumsum(mtl(), toMetal(d), -1)) ==
+  CATCH_REQUIRE(values(fl::test::cumsum(mtl(), toMetal(d), -1)) ==
                 std::vector<float>({1.0f, 3.0f, 6.0f, 4.0f, 9.0f, 15.0f}));
-  CATCH_REQUIRE(values(F::cumsum(mtl(), toMetal(d), 0)) ==
+  CATCH_REQUIRE(values(fl::test::cumsum(mtl(), toMetal(d), 0)) ==
                 std::vector<float>({1.0f, 2.0f, 3.0f, 5.0f, 7.0f, 9.0f}));
 }
 
@@ -327,31 +327,31 @@ CATCH_TEST_CASE("test Metal norms", "[op][metal]") {
     Tensor b = toMetal(bias, dtype);
 
     CATCH_REQUIRE(close(
-        F::layerNorm(mtl(), x, w, b, 1e-5f),
-        F::layerNorm(cpu(), a, weight, bias, 1e-5f),
+        fl::test::layerNorm(mtl(), x, w, b, 1e-5f),
+        fl::test::layerNorm(cpu(), a, weight, bias, 1e-5f),
         tol,
         tol));
     CATCH_REQUIRE(close(
-        F::layerNorm(mtl(), x, Tensor(), Tensor(), 1e-6f),
-        F::layerNorm(cpu(), a, Tensor(), Tensor(), 1e-6f),
+        fl::test::layerNorm(mtl(), x, Tensor(), Tensor(), 1e-6f),
+        fl::test::layerNorm(cpu(), a, Tensor(), Tensor(), 1e-6f),
         tol,
         tol));
-    CATCH_REQUIRE(close(F::rmsNorm(mtl(), x, w, 1e-6f), F::rmsNorm(cpu(), a, weight, 1e-6f), tol, tol));
+    CATCH_REQUIRE(close(fl::test::rmsNorm(mtl(), x, w, 1e-6f), fl::test::rmsNorm(cpu(), a, weight, 1e-6f), tol, tol));
 
     Tensor mtlImage = toMetal(image, dtype);
     CATCH_REQUIRE(close(
-        F::groupNorm(mtl(), 
+        fl::test::groupNorm(mtl(), 
             mtlImage,
             toMetal(channelWeight, dtype),
             toMetal(channelBias, dtype),
             32,
             1e-5f),
-        F::groupNorm(cpu(), image, channelWeight, channelBias, 32, 1e-5f),
+        fl::test::groupNorm(cpu(), image, channelWeight, channelBias, 32, 1e-5f),
         tol,
         tol));
     CATCH_REQUIRE(close(
-        F::groupNorm(mtl(), mtlImage, Tensor(), Tensor(), 8, 1e-6f),
-        F::groupNorm(cpu(), image, Tensor(), Tensor(), 8, 1e-6f),
+        fl::test::groupNorm(mtl(), mtlImage, Tensor(), Tensor(), 8, 1e-6f),
+        fl::test::groupNorm(cpu(), image, Tensor(), Tensor(), 8, 1e-6f),
         tol,
         tol));
   }
@@ -383,10 +383,10 @@ void checkMatmul() {
   };
 
   for (const Case &c : cases) {
-    Tensor a = F::rand(Device::getCpu(), c.shapeA, DType::kFloat);
-    Tensor b = F::rand(Device::getCpu(), c.shapeB, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), c.shapeA, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), c.shapeB, DType::kFloat);
     Tensor bt = c.transposeB ? b.transpose(-1, -2) : b;
-    Tensor reference = F::matmul(cpu(), a, bt);
+    Tensor reference = fl::test::matmul(cpu(), a, bt);
 
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
       CATCH_INFO("A = " << a.getShapeString() << ", B = " << bt.getShapeString()
@@ -395,16 +395,16 @@ void checkMatmul() {
       Tensor y = toMetal(b, dtype);
       if (c.transposeB) y = y.transpose(-1, -2);
       float tol = dtype == DType::kFloat ? 1e-4f : 2e-2f;
-      CATCH_REQUIRE(close(F::matmul(mtl(), x, y), reference, tol, tol));
+      CATCH_REQUIRE(close(fl::test::matmul(mtl(), x, y), reference, tol, tol));
     }
   }
 
   // A transposed on the left, as attention's second product sees it.
-  Tensor a = F::rand(Device::getCpu(), {64, 48}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {64, 32}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {64, 48}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {64, 32}, DType::kFloat);
   CATCH_REQUIRE(close(
-      F::matmul(mtl(), toMetal(a).transpose(0, 1), toMetal(b)),
-      F::matmul(cpu(), a.transpose(0, 1), b),
+      fl::test::matmul(mtl(), toMetal(a).transpose(0, 1), toMetal(b)),
+      fl::test::matmul(cpu(), a.transpose(0, 1), b),
       1e-4f,
       1e-4f));
 }
@@ -456,9 +456,9 @@ void checkConvolutions() {
     Tensor weight = randn({c.K, c.C / c.groups, c.R, c.R});
     Tensor bias = randn({c.K});
     Tensor reference =
-        F::conv2d(cpu(), input, weight, bias, c.stride, c.padding, c.dilation, c.groups);
+        fl::test::conv2d(cpu(), input, weight, bias, c.stride, c.padding, c.dilation, c.groups);
     Tensor noBias =
-        F::conv2d(cpu(), input, weight, Tensor(), c.stride, c.padding, c.dilation, c.groups);
+        fl::test::conv2d(cpu(), input, weight, Tensor(), c.stride, c.padding, c.dilation, c.groups);
 
     for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
       CATCH_INFO("input = " << input.getShapeString() << ", weight = "
@@ -469,12 +469,12 @@ void checkConvolutions() {
       Tensor x = toMetal(input, dtype);
       Tensor w = toMetal(weight, dtype);
       CATCH_REQUIRE(close(
-          F::conv2d(mtl(), x, w, toMetal(bias, dtype), c.stride, c.padding, c.dilation, c.groups),
+          fl::test::conv2d(mtl(), x, w, toMetal(bias, dtype), c.stride, c.padding, c.dilation, c.groups),
           reference,
           tol,
           tol));
       CATCH_REQUIRE(close(
-          F::conv2d(mtl(), x, w, Tensor(), c.stride, c.padding, c.dilation, c.groups),
+          fl::test::conv2d(mtl(), x, w, Tensor(), c.stride, c.padding, c.dilation, c.groups),
           noBias,
           tol,
           tol));
@@ -483,9 +483,9 @@ void checkConvolutions() {
 
   Tensor signal = randn({2, 6, 50});
   Tensor kernel = randn({6, 1, 7});
-  Tensor reference = F::conv1d(cpu(), signal, kernel, Tensor(), 1, 3, 1, 6);
+  Tensor reference = fl::test::conv1d(cpu(), signal, kernel, Tensor(), 1, 3, 1, 6);
   CATCH_REQUIRE(close(
-      F::conv1d(mtl(), toMetal(signal), toMetal(kernel), Tensor(), 1, 3, 1, 6),
+      fl::test::conv1d(mtl(), toMetal(signal), toMetal(kernel), Tensor(), 1, 3, 1, 6),
       reference,
       1e-4f,
       1e-4f));
@@ -493,8 +493,8 @@ void checkConvolutions() {
   Tensor dense = randn({4, 6, 3});
   Tensor denseBias = randn({4});
   CATCH_REQUIRE(close(
-      F::conv1d(mtl(), toMetal(signal), toMetal(dense), toMetal(denseBias), 2, 1, 2, 1),
-      F::conv1d(cpu(), signal, dense, denseBias, 2, 1, 2, 1),
+      fl::test::conv1d(mtl(), toMetal(signal), toMetal(dense), toMetal(denseBias), 2, 1, 2, 1),
+      fl::test::conv1d(cpu(), signal, dense, denseBias, 2, 1, 2, 1),
       1e-4f,
       1e-4f));
 }
@@ -526,46 +526,46 @@ CATCH_TEST_CASE("test Metal signal operators", "[op][metal]") {
   Tensor b = randn({4});
   Tensor upsample = randn({1, 16, 40});
   Tensor upsampleWeight = randn({16, 8, 16});
-  Tensor alpha = plus(F::abs(cpu(), randn({6})), 0.2f);
-  Tensor beta = plus(F::abs(cpu(), randn({6})), 0.2f);
+  Tensor alpha = plus(fl::test::abs(cpu(), randn({6})), 0.2f);
+  Tensor beta = plus(fl::test::abs(cpu(), randn({6})), 0.2f);
 
   for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
     CATCH_INFO("dtype = " << dtype.toString());
     float tol = dtype == DType::kFloat ? 1e-4f : 2e-2f;
 
     CATCH_REQUIRE(close(
-        F::convTranspose1d(
+        fl::test::convTranspose1d(
             mtl(), toMetal(x, dtype), toMetal(w, dtype), toMetal(b, dtype), 3, 2, 1, 2),
-        F::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2),
+        fl::test::convTranspose1d(cpu(), x, w, b, 3, 2, 1, 2),
         tol,
         tol));
     // A vocoder's: the kernel twice the stride, no bias.
     CATCH_REQUIRE(close(
-        F::convTranspose1d(
+        fl::test::convTranspose1d(
             mtl(), toMetal(upsample, dtype), toMetal(upsampleWeight, dtype), Tensor(), 8, 4, 0, 1),
-        F::convTranspose1d(cpu(), upsample, upsampleWeight, Tensor(), 8, 4, 0, 1),
+        fl::test::convTranspose1d(cpu(), upsample, upsampleWeight, Tensor(), 8, 4, 0, 1),
         tol,
         tol));
 
     for (bool withBeta : {false, true}) {
       CATCH_REQUIRE(close(
-          F::snake(
+          fl::test::snake(
               mtl(),
               toMetal(x, dtype),
               toMetal(alpha, dtype),
               withBeta ? toMetal(beta, dtype) : Tensor(),
               1e-9f),
-          F::snake(cpu(), x, alpha, withBeta ? beta : Tensor(), 1e-9f),
+          fl::test::snake(cpu(), x, alpha, withBeta ? beta : Tensor(), 1e-9f),
           tol,
           tol));
     }
 
     // Arguments to twenty radians, where an approximate sin would drift.
-    Tensor far = F::mul(cpu(), x, 5.0f);
-    Tensor wide = plus(F::abs(cpu(), randn({6})), 1.0f);
+    Tensor far = fl::test::mul(cpu(), x, 5.0f);
+    Tensor wide = plus(fl::test::abs(cpu(), randn({6})), 1.0f);
     CATCH_REQUIRE(close(
-        F::snake(mtl(), toMetal(far, dtype), toMetal(wide, dtype), Tensor(), 1e-9f),
-        F::snake(cpu(), toCpu(toMetal(far, dtype)), toCpu(toMetal(wide, dtype)), Tensor(), 1e-9f),
+        fl::test::snake(mtl(), toMetal(far, dtype), toMetal(wide, dtype), Tensor(), 1e-9f),
+        fl::test::snake(cpu(), toCpu(toMetal(far, dtype)), toCpu(toMetal(wide, dtype)), Tensor(), 1e-9f),
         tol,
         tol));
 
@@ -574,36 +574,36 @@ CATCH_TEST_CASE("test Metal signal operators", "[op][metal]") {
     Tensor rounded = toCpu(toMetal(x, dtype));
     for (PadMode mode : {PadMode::kZero, PadMode::kReflect, PadMode::kReplicate}) {
       CATCH_REQUIRE(close(
-          F::pad1d(mtl(), toMetal(x, dtype), 5, 9, mode),
-          F::pad1d(cpu(), rounded, 5, 9, mode),
+          fl::test::pad1d(mtl(), toMetal(x, dtype), 5, 9, mode),
+          fl::test::pad1d(cpu(), rounded, 5, 9, mode),
           0.0f,
           1e-6f));
     }
     CATCH_REQUIRE(close(
-        F::pad1d(mtl(), toMetal(x, dtype), 40, 33, PadMode::kReplicate),
-        F::pad1d(cpu(), rounded, 40, 33, PadMode::kReplicate),
+        fl::test::pad1d(mtl(), toMetal(x, dtype), 40, 33, PadMode::kReplicate),
+        fl::test::pad1d(cpu(), rounded, 40, 33, PadMode::kReplicate),
         0.0f,
         1e-6f));
 
     CATCH_REQUIRE(close(
-        F::clamp(mtl(), toMetal(x, dtype), -0.5f, inf),
-        F::clamp(cpu(), rounded, -0.5f, inf),
+        fl::test::clamp(mtl(), toMetal(x, dtype), -0.5f, inf),
+        fl::test::clamp(cpu(), rounded, -0.5f, inf),
         0.0f,
         1e-6f));
     CATCH_REQUIRE(close(
-        F::clamp(mtl(), toMetal(x, dtype), -1.0f, 0.5f),
-        F::clamp(cpu(), rounded, -1.0f, 0.5f),
+        fl::test::clamp(mtl(), toMetal(x, dtype), -1.0f, 0.5f),
+        fl::test::clamp(cpu(), rounded, -1.0f, 0.5f),
         0.0f,
         1e-6f));
 
     // A NaN stays one, which Metal's min and max do not keep; an infinity goes to its bound.
-    Tensor special = F::zeros(Device::getCpu(), {4}, DType::kFloat);
+    Tensor special = fl::test::zeros(Device::getCpu(), {4}, DType::kFloat);
     float *raw = special.getInternalData()->getData<float>(special.getInternalOffset());
     raw[0] = std::numeric_limits<float>::quiet_NaN();
     raw[1] = inf;
     raw[2] = -inf;
     raw[3] = 0.125f;
-    std::vector<float> clamped = values(F::clamp(mtl(), toMetal(special, dtype), -0.5f, 0.25f));
+    std::vector<float> clamped = values(fl::test::clamp(mtl(), toMetal(special, dtype), -0.5f, 0.25f));
     CATCH_REQUIRE(std::isnan(clamped[0]));
     CATCH_REQUIRE(clamped[1] == 0.25f);
     CATCH_REQUIRE(clamped[2] == -0.5f);
@@ -613,20 +613,20 @@ CATCH_TEST_CASE("test Metal signal operators", "[op][metal]") {
   // A transform and its inverse, which every device composes out of the operators above.
   int nFft = 16, hop = 4;
   Tensor wave = randn({2, 1, 64});
-  Tensor window = F::zeros(Device::getCpu(), {nFft}, DType::kFloat);
+  Tensor window = fl::test::zeros(Device::getCpu(), {nFft}, DType::kFloat);
   float *taps = window.getInternalData()->getData<float>(window.getInternalOffset());
   for (int i = 0; i < nFft; ++i) taps[i] = 0.5f - 0.5f * cosf(2.0f * 3.14159265f * i / nFft);
-  Tensor spectrum = F::stft(mtl(), toMetal(wave), toMetal(window), nFft, hop, true);
-  CATCH_REQUIRE(close(spectrum, F::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
+  Tensor spectrum = fl::test::stft(mtl(), toMetal(wave), toMetal(window), nFft, hop, true);
+  CATCH_REQUIRE(close(spectrum, fl::test::stft(cpu(), wave, window, nFft, hop, true), 1e-4f, 1e-4f));
   CATCH_REQUIRE(
-      close(F::istft(mtl(), spectrum, toMetal(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
+      close(fl::test::istft(mtl(), spectrum, toMetal(window), nFft, hop, true), wave, 1e-4f, 1e-4f));
 
   // In half and not centred, the ends are kept, where the window's overlap is below what half can
   // hold: dividing by it there made NaNs.
-  Tensor halfSpectrum = F::stft(
+  Tensor halfSpectrum = fl::test::stft(
       mtl(), toMetal(wave, DType::kFloat16), toMetal(window, DType::kFloat16), nFft, hop, false);
   std::vector<float> back =
-      values(F::istft(mtl(), halfSpectrum, toMetal(window, DType::kFloat16), nFft, hop, false));
+      values(fl::test::istft(mtl(), halfSpectrum, toMetal(window, DType::kFloat16), nFft, hop, false));
   std::vector<float> want = values(wave);
   for (size_t i = 0; i < back.size(); ++i) {
     CATCH_INFO("sample " << i);
@@ -646,18 +646,18 @@ CATCH_TEST_CASE("test Metal attention", "[op][metal]") {
   Tensor v = randn({2, 2, 37, 32});
   for (bool causal : {false, true}) {
     CATCH_INFO("causal = " << causal);
-    Tensor reference = F::attention(cpu(), q, k, v, F::causalIf(causal));
+    Tensor reference = fl::test::attention(cpu(), q, k, v, fl::test::causalIf(causal));
     CATCH_REQUIRE(close(
-        F::attention(mtl(), toMetal(q), toMetal(k), toMetal(v), F::causalIf(causal)),
+        fl::test::attention(mtl(), toMetal(q), toMetal(k), toMetal(v), fl::test::causalIf(causal)),
         reference,
         1e-4f,
         1e-4f));
     CATCH_REQUIRE(close(
-        F::attention(mtl(), 
+        fl::test::attention(mtl(), 
             toMetal(q, DType::kFloat16),
             toMetal(k, DType::kFloat16),
             toMetal(v, DType::kFloat16),
-            F::causalIf(causal)),
+            fl::test::causalIf(causal)),
         reference,
         3e-2f,
         3e-2f));
@@ -685,15 +685,15 @@ CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]
     Tensor q = randn({1, c.queryLength, c.heads, c.headDim});
     Tensor k = randn({1, c.keyValueHeads, c.keyLength, c.headDim});
     Tensor v = randn({1, c.keyValueHeads, c.keyLength, c.headDim});
-    Tensor reference = F::attention(cpu(), q.transpose(1, 2), k, v, F::causalIf(c.causal));
+    Tensor reference = fl::test::attention(cpu(), q.transpose(1, 2), k, v, fl::test::causalIf(c.causal));
 
     Tensor mq = toMetal(q, DType::kFloat16).transpose(1, 2);
-    Tensor got = F::attention(
+    Tensor got = fl::test::attention(
         mtl(),
         mq,
         toMetal(k, DType::kFloat16),
         toMetal(v, DType::kFloat16),
-        F::causalIf(c.causal));
+        fl::test::causalIf(c.causal));
     CATCH_REQUIRE(close(got, reference, 3e-2f, 3e-2f));
   }
 }
@@ -709,14 +709,14 @@ CATCH_TEST_CASE("test Metal attention refuses the masks it does not define", "[o
   Tensor k = randn({1, 2, 16, 64});
   Tensor qh = toMetal(q, DType::kFloat16);
   Tensor kh = toMetal(k, DType::kFloat16);
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, MaskType::kNone, 4));
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, static_cast<MaskType>(7)));
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, MaskType::kBlockCausal, 4));
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qh, kh, kh, MaskType::kBlockDiagonal, 4));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, MaskType::kNone, 4));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, static_cast<MaskType>(7)));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, MaskType::kBlockCausal, 4));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, MaskType::kBlockDiagonal, 4));
 
   Tensor qf = toMetal(randn({2, 4, 37, 32}));
   Tensor kf = toMetal(randn({2, 2, 37, 32}));
-  CATCH_REQUIRE_THROWS(F::attention(mtl(), qf, kf, kf, MaskType::kCausal, 1));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qf, kf, kf, MaskType::kCausal, 1));
 }
 
 namespace {
@@ -765,8 +765,8 @@ void checkFp8Matmul() {
     Tensor scales = Tensor::create<float>({1}, {scale});
 
     // The activation in half, from [-2, 2), and the product the long way, in float.
-    Tensor uniform = F::rand(Device::getCpu(), c.shapeA, DType::kFloat);
-    Tensor a = toMetal(plus(F::mul(cpu(), uniform, 4.0f), -2.0f), DType::kFloat16);
+    Tensor uniform = fl::test::rand(Device::getCpu(), c.shapeA, DType::kFloat);
+    Tensor a = toMetal(plus(fl::test::mul(cpu(), uniform, 4.0f), -2.0f), DType::kFloat16);
     std::vector<float> activation = values(a);
     int m = static_cast<int>(activation.size()) / k;
     std::vector<float> reference(static_cast<size_t>(m) * c.rows);
@@ -783,8 +783,8 @@ void checkFp8Matmul() {
     Tensor out = F::empty(Device::getMetal(), outShape, DType::kFloat16);
     op::metal_native::fp8Matmul(
         a,
-        F::toDevice(mtl(), codes, Device::getMetal()),
-        F::toDevice(mtl(), scales, Device::getMetal()),
+        fl::test::toDevice(mtl(), codes, Device::getMetal()),
+        fl::test::toDevice(mtl(), scales, Device::getMetal()),
         out);
     std::vector<float> got = values(out);
 
@@ -817,45 +817,45 @@ CATCH_TEST_CASE("test Metal shape operators", "[op][metal]") {
   Tensor table = randn({10, 7});
   Tensor ids = Tensor::create<LongType>({2, 3}, {3, 0, 9, 9, 1, 4});
   CATCH_REQUIRE(close(
-      F::lookup(mtl(), toMetal(table, DType::kFloat16), F::toDevice(mtl(), ids, Device::getMetal())),
-      F::lookup(cpu(), table, ids),
+      fl::test::lookup(mtl(), toMetal(table, DType::kFloat16), fl::test::toDevice(mtl(), ids, Device::getMetal())),
+      fl::test::lookup(cpu(), table, ids),
       1e-3f,
       1e-3f));
 
   Tensor image = randn({2, 3, 4, 5});
   CATCH_REQUIRE(close(
-      F::upsampleNearest2d(mtl(), toMetal(image), 2),
-      F::upsampleNearest2d(cpu(), image, 2),
+      fl::test::upsampleNearest2d(mtl(), toMetal(image), 2),
+      fl::test::upsampleNearest2d(cpu(), image, 2),
       1e-6f,
       1e-6f));
 
   Tensor frames = randn({2, 3, 90});
   CATCH_REQUIRE(close(
-      F::upsampleNearest1d(mtl(), toMetal(frames), 154),
-      F::upsampleNearest1d(cpu(), frames, 154),
+      fl::test::upsampleNearest1d(mtl(), toMetal(frames), 154),
+      fl::test::upsampleNearest1d(cpu(), frames, 154),
       1e-6f,
       1e-6f));
   CATCH_REQUIRE(close(
-      F::upsampleNearest1d(mtl(), toMetal(frames), 41),
-      F::upsampleNearest1d(cpu(), frames, 41),
+      fl::test::upsampleNearest1d(mtl(), toMetal(frames), 41),
+      fl::test::upsampleNearest1d(cpu(), frames, 41),
       1e-6f,
       1e-6f));
 
   Tensor gated = randn({3, 4, 16});
-  CATCH_REQUIRE(close(F::geglu(mtl(), toMetal(gated)), F::geglu(cpu(), gated), 1e-5f, 1e-5f));
-  CATCH_REQUIRE(close(F::swiglu(mtl(), toMetal(gated)), F::swiglu(cpu(), gated), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::geglu(mtl(), toMetal(gated)), fl::test::geglu(cpu(), gated), 1e-5f, 1e-5f));
+  CATCH_REQUIRE(close(fl::test::swiglu(mtl(), toMetal(gated)), fl::test::swiglu(cpu(), gated), 1e-5f, 1e-5f));
 
   Tensor a = randn({3, 4});
   Tensor b = randn({3, 2});
-  CATCH_REQUIRE(close(F::cat(mtl(), toMetal(a), toMetal(b), 1), F::cat(cpu(), a, b, 1), 1e-6f, 1e-6f));
+  CATCH_REQUIRE(close(fl::test::cat(mtl(), toMetal(a), toMetal(b), 1), fl::test::cat(cpu(), a, b, 1), 1e-6f, 1e-6f));
   CATCH_REQUIRE(close(
-      F::contiguous(mtl(), toMetal(image).transpose(1, 3)),
-      F::contiguous(cpu(), image.transpose(1, 3)),
+      fl::test::contiguous(mtl(), toMetal(image).transpose(1, 3)),
+      fl::test::contiguous(cpu(), image.transpose(1, 3)),
       1e-6f,
       1e-6f));
 
-  Tensor zeros = F::zeros(Device(Device::kMetal), {3, 5}, DType::kFloat16);
-  CATCH_REQUIRE(close(zeros, F::zeros(Device::getCpu(), {3, 5}, DType::kFloat), 1e-6f, 1e-6f));
+  Tensor zeros = fl::test::zeros(Device(Device::kMetal), {3, 5}, DType::kFloat16);
+  CATCH_REQUIRE(close(zeros, fl::test::zeros(Device::getCpu(), {3, 5}, DType::kFloat), 1e-6f, 1e-6f));
 
   Tensor filled = F::empty(Device(Device::kMetal), {4, 6}, DType::kFloat);
   mtl()->fill(filled, 2.5f);
@@ -865,7 +865,7 @@ CATCH_TEST_CASE("test Metal shape operators", "[op][metal]") {
   cpu()->fill(expected.slice(1, {2, 4}), -1.0f);
   CATCH_REQUIRE(close(filled, expected, 1e-6f, 1e-6f));
 
-  Tensor mask = F::causalMask(Device(Device::kMetal), 5);
+  Tensor mask = fl::test::causalMask(Device(Device::kMetal), 5);
   std::vector<float> maskValues = values(mask);
   CATCH_REQUIRE(maskValues[0 * 5 + 0] == 0.0f);
   CATCH_REQUIRE(maskValues[1 * 5 + 0] == 0.0f);
@@ -883,7 +883,7 @@ CATCH_TEST_CASE("test Metal rotary embedding", "[op][metal]") {
 
   Tensor x = toMetal(q, DType::kFloat16);
   mtl()->rotaryEmbedding(
-      F::toDevice(mtl(), positions, Device::getMetal()),
+      fl::test::toDevice(mtl(), positions, Device::getMetal()),
       x,
       toMetal(q, DType::kFloat16),
       toMetal(cache, DType::kFloat16));
@@ -945,8 +945,8 @@ CATCH_TEST_CASE("test Metal rand draws the CUDA operators' numbers", "[op][metal
 
   const float kTwoPow32Inv = 2.3283064e-10f;
   mtl()->manualSeed(1234);
-  F::rand(Device(Device::kMetal), {5}, DType::kFloat);  // moves the counter on by two blocks
-  std::vector<float> uniform = values(F::rand(Device(Device::kMetal), {9}, DType::kFloat));
+  fl::test::rand(Device(Device::kMetal), {5}, DType::kFloat);  // moves the counter on by two blocks
+  std::vector<float> uniform = values(fl::test::rand(Device(Device::kMetal), {9}, DType::kFloat));
   for (int i = 0; i < 9; ++i) {
     uint32_t bits[4];
     philox(1234, 2 + i / 4, bits);
@@ -955,7 +955,7 @@ CATCH_TEST_CASE("test Metal rand draws the CUDA operators' numbers", "[op][metal
 
   // Normal, which only has to agree to within what the device's transcendentals round to.
   mtl()->manualSeed(99);
-  Tensor normal = F::randNormal(Device(Device::kMetal), {2, 50000});
+  Tensor normal = fl::test::randNormal(Device(Device::kMetal), {2, 50000});
   CATCH_REQUIRE(normal.getDType() == DType::kFloat);
   std::vector<float> z = values(normal);
   uint32_t bits[4];
@@ -984,7 +984,7 @@ CATCH_TEST_CASE("test Metal memory statistics", "[op][metal]") {
   MemorySnapshot before = mtl()->captureMemorySnapshot();
   CATCH_REQUIRE(before.getTotalMemory() > 0);
   {
-    Tensor big = F::zeros(Device(Device::kMetal), {64, 1024, 1024}, DType::kFloat16);
+    Tensor big = fl::test::zeros(Device(Device::kMetal), {64, 1024, 1024}, DType::kFloat16);
     MemorySnapshot during = mtl()->captureMemorySnapshot();
     CATCH_REQUIRE(during.getAllocatedMemory() - before.getAllocatedMemory() >= 128 << 20);
   }
@@ -1176,10 +1176,10 @@ CATCH_TEST_CASE("benchmark Metal matmul and conv2d", "[.][metal-benchmark]") {
       {"p.v 20x4096x64x4096", {20, 4096, 4096}, {20, 4096, 64}, false},
   };
   for (const Case &c : cases) {
-    Tensor a = F::cast(mtl(), F::rand(Device(Device::kMetal), c.a, DType::kFloat), DType::kFloat16);
-    Tensor b = F::cast(mtl(), F::rand(Device(Device::kMetal), c.b, DType::kFloat), DType::kFloat16);
+    Tensor a = fl::test::cast(mtl(), fl::test::rand(Device(Device::kMetal), c.a, DType::kFloat), DType::kFloat16);
+    Tensor b = fl::test::cast(mtl(), fl::test::rand(Device(Device::kMetal), c.b, DType::kFloat), DType::kFloat16);
     Tensor bt = c.transposeB ? b.transpose(-1, -2) : b;
-    double seconds = time([&]() { F::matmul(mtl(), a, bt); });
+    double seconds = time([&]() { fl::test::matmul(mtl(), a, bt); });
     double flops = 2.0 * a.getNumEl() * bt.getShape(-1);
     printf("%-28s %8.3f ms %7.1f TFLOPS\n", c.name, seconds * 1e3, flops / seconds / 1e12);
   }
@@ -1195,9 +1195,9 @@ CATCH_TEST_CASE("benchmark Metal matmul and conv2d", "[.][metal-benchmark]") {
       {"conv 3x3 1x256x512 f32", 1, 256, 512, 256, DType::kFloat},
   };
   for (const ConvCase &c : convs) {
-    Tensor x = F::cast(mtl(), F::rand(Device(Device::kMetal), {c.N, c.C, c.H, c.H}, DType::kFloat), c.dtype);
-    Tensor w = F::cast(mtl(), F::rand(Device(Device::kMetal), {c.K, c.C, 3, 3}, DType::kFloat), c.dtype);
-    double seconds = time([&]() { F::conv2d(mtl(), x, w, Tensor(), 1, 1, 1, 1); });
+    Tensor x = fl::test::cast(mtl(), fl::test::rand(Device(Device::kMetal), {c.N, c.C, c.H, c.H}, DType::kFloat), c.dtype);
+    Tensor w = fl::test::cast(mtl(), fl::test::rand(Device(Device::kMetal), {c.K, c.C, 3, 3}, DType::kFloat), c.dtype);
+    double seconds = time([&]() { fl::test::conv2d(mtl(), x, w, Tensor(), 1, 1, 1, 1); });
     double flops = 2.0 * c.N * c.H * c.H * c.K * c.C * 9;
     printf("%-28s %8.3f ms %7.1f TFLOPS\n", c.name, seconds * 1e3, flops / seconds / 1e12);
   }
@@ -1236,10 +1236,10 @@ CATCH_TEST_CASE("benchmark Metal fp8 matmul", "[.][metal-benchmark]") {
       uint8_t x = static_cast<uint8_t>(rng() % 256);
       code[i].v = (x & 0x7f) == 0x7f ? 0x3c : x;
     }
-    Tensor weight = F::toDevice(mtl(), codes, Device::getMetal());
+    Tensor weight = fl::test::toDevice(mtl(), codes, Device::getMetal());
     Tensor scales = F::empty(Device::getMetal(), {1}, DType::kFloat);
     mtl()->fill(scales, 0.01f);
-    Tensor a = toMetal(F::rand(Device::getCpu(), {c.m, c.k}, DType::kFloat), DType::kFloat16);
+    Tensor a = toMetal(fl::test::rand(Device::getCpu(), {c.m, c.k}, DType::kFloat), DType::kFloat16);
     Tensor out = F::empty(Device::getMetal(), {c.m, c.rows}, DType::kFloat16);
 
     auto run = [&]() { op::metal_native::fp8Matmul(a, weight, scales, out); };

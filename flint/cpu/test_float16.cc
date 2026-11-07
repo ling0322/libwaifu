@@ -47,51 +47,51 @@ namespace {
 
 // the CPU fp16 kernels are checked against the fp32 kernels on the same device.
 Tensor toFp16(const Tensor &a) {
-  return F::cast(cpuOps(), a, DType::kFloat16);
+  return fl::test::cast(cpuOps(), a, DType::kFloat16);
 }
 
 Tensor toFp32(const Tensor &a) {
-  return F::cast(cpuOps(), a, DType::kFloat);
+  return fl::test::cast(cpuOps(), a, DType::kFloat);
 }
 
 }  // namespace
 
 CATCH_TEST_CASE("test CPU fp16 binary operators", "[op][cpu][float16]") {
-  Tensor a = F::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {5}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {5}, DType::kFloat);
   Tensor at = a.transpose(2, 1).slice(1, {1, 9});
   Tensor xt = toFp16(a).transpose(2, 1).slice(1, {1, 9});
   Tensor y = toFp16(b);
 
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(F::add(cpuOps(), xt, y)), F::add(cpuOps(), at, b), 5e-3));
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(F::mul(cpuOps(), xt, y)), F::mul(cpuOps(), at, b), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(fl::test::add(cpuOps(), xt, y)), fl::test::add(cpuOps(), at, b), 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(fl::test::mul(cpuOps(), xt, y)), fl::test::mul(cpuOps(), at, b), 5e-3));
 }
 
 CATCH_TEST_CASE("test CPU fp16 copy operators", "[op][cpu][float16]") {
-  Tensor a = F::rand(Device::getCpu(), {2, 10, 50}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 10, 50}, DType::kFloat);
   Tensor x = toFp16(a).transpose(1, 0);
   Tensor dest = F::emptyLike(x);
   cpuOps()->copy(x, dest);
   CATCH_REQUIRE(cpuOps()->allClose(toFp32(dest).transpose(1, 0), a));
 
-  Tensor b = F::rand(Device::getCpu(), {10, 2, 5, 20}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {10, 2, 5, 20}, DType::kFloat);
   Tensor expanded = toFp16(b).unsqueeze(1).expand({10, 4, 2, 5, 20});
   Tensor dest5d = F::emptyLike(expanded);
   cpuOps()->copy(expanded, dest5d);
   CATCH_REQUIRE(
       cpuOps()->allClose(
           toFp32(dest5d),
-          F::contiguous(cpuOps(), b.unsqueeze(1).expand({10, 4, 2, 5, 20}))));
+          fl::test::contiguous(cpuOps(), b.unsqueeze(1).expand({10, 4, 2, 5, 20}))));
 }
 
 CATCH_TEST_CASE("test CPU fp16 matmul operators", "[op][cpu][float16]") {
   auto runCase = [](std::initializer_list<int> shapeA, std::initializer_list<int> shapeB) {
-    Tensor a = F::rand(Device::getCpu(), shapeA, DType::kFloat);
-    Tensor b = F::rand(Device::getCpu(), shapeB, DType::kFloat);
-    Tensor xr = F::matmul(cpuOps(), a, b.slice(-1, {8, 28}).transpose(-1, -2));
+    Tensor a = fl::test::rand(Device::getCpu(), shapeA, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), shapeB, DType::kFloat);
+    Tensor xr = fl::test::matmul(cpuOps(), a, b.slice(-1, {8, 28}).transpose(-1, -2));
 
     Tensor y = toFp16(b).slice(-1, {8, 28}).transpose(-1, -2);
-    Tensor x = F::matmul(cpuOps(), toFp16(a), y);
+    Tensor x = fl::test::matmul(cpuOps(), toFp16(a), y);
 
     return cpuOps()->allClose(toFp32(x), xr, 5e-2);
   };
@@ -102,19 +102,19 @@ CATCH_TEST_CASE("test CPU fp16 matmul operators", "[op][cpu][float16]") {
 }
 
 CATCH_TEST_CASE("test CPU fp16 rmsNorm operator", "[op][cpu][float16]") {
-  Tensor a = F::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
-  Tensor w = F::rand(Device::getCpu(), {10}, DType::kFloat);
-  Tensor x = F::rmsNorm(cpuOps(), toFp16(a), toFp16(w), 1e-5);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
+  Tensor w = fl::test::rand(Device::getCpu(), {10}, DType::kFloat);
+  Tensor x = fl::test::rmsNorm(cpuOps(), toFp16(a), toFp16(w), 1e-5);
 
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(x), F::rmsNorm(cpuOps(), a, w, 1e-5), 5e-2));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(x), fl::test::rmsNorm(cpuOps(), a, w, 1e-5), 5e-2));
 }
 
 CATCH_TEST_CASE("test CPU fp16 activation operators", "[op][cpu][float16]") {
-  Tensor a = F::rand(Device::getCpu(), {2, 5, 150}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 5, 150}, DType::kFloat);
 
   CATCH_REQUIRE(
-      cpuOps()->allClose(toFp32(F::softmax(cpuOps(), toFp16(a))), F::softmax(cpuOps(), a), 5e-2));
-  CATCH_REQUIRE(cpuOps()->allClose(toFp32(F::swiglu(cpuOps(), toFp16(a))), F::swiglu(cpuOps(), a), 5e-2));
+      cpuOps()->allClose(toFp32(fl::test::softmax(cpuOps(), toFp16(a))), fl::test::softmax(cpuOps(), a), 5e-2));
+  CATCH_REQUIRE(cpuOps()->allClose(toFp32(fl::test::swiglu(cpuOps(), toFp16(a))), fl::test::swiglu(cpuOps(), a), 5e-2));
 }
 
 namespace {
@@ -134,7 +134,7 @@ void requireHalfAgrees(
   std::vector<Tensor> half, wide;
   for (const Tensor &t : inputs) {
     bool isFloat = !t.empty() && t.getDType() == DType::kFloat;
-    Tensor h = isFloat ? toFp16(F::contiguous(cpuOps(), t)) : t;
+    Tensor h = isFloat ? toFp16(fl::test::contiguous(cpuOps(), t)) : t;
     half.push_back(h);
     wide.push_back(isFloat ? toFp32(h) : t);
   }
@@ -146,11 +146,11 @@ void requireHalfAgrees(
 }
 
 Tensor signedRand(std::initializer_list<int> shape) {
-  return F::randNormal(Device::getCpu(), shape);
+  return fl::test::randNormal(Device::getCpu(), shape);
 }
 
 Tensor positiveRand(std::initializer_list<int> shape) {
-  return F::exp(cpuOps(), F::randNormal(Device::getCpu(), shape));
+  return fl::test::exp(cpuOps(), fl::test::randNormal(Device::getCpu(), shape));
 }
 
 }  // namespace
@@ -207,7 +207,7 @@ CATCH_TEST_CASE("test F16C conversions agree with the portable ones", "[op][cpu]
 CATCH_TEST_CASE("test CPU fp16 is the default float type", "[op][cpu][float16]") {
   CATCH_REQUIRE(cpuOps()->getDefaultFloatType() == DType::kFloat16);
 
-  Tensor mask = F::causalMask(Device::getCpu(), 5);
+  Tensor mask = fl::test::causalMask(Device::getCpu(), 5);
   CATCH_REQUIRE(mask.getDType() == DType::kFloat16);
   Tensor wide = toFp32(mask);
   const float *m = wide.getInternalData()->getData<float>(wide.getInternalOffset());
@@ -222,7 +222,7 @@ CATCH_TEST_CASE("test CPU fp16 is the default float type", "[op][cpu][float16]")
     }
   }
 
-  Tensor filled = F::zeros(Device::getCpu(), {3, 7}, DType::kFloat16);
+  Tensor filled = fl::test::zeros(Device::getCpu(), {3, 7}, DType::kFloat16);
   cpuOps()->fill(filled, 1.5f);
   Tensor filledWide = toFp32(filled);
   const float *f = filledWide.getInternalData()->getData<float>(filledWide.getInternalOffset());
@@ -233,47 +233,47 @@ CATCH_TEST_CASE("test CPU fp16 unary operators", "[op][cpu][float16]") {
   Tensor x = signedRand({4, 37});
   Tensor p = positiveRand({4, 37});
 
-  requireHalfAgrees("neg", [](auto &t) { return F::neg(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("abs", [](auto &t) { return F::abs(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("exp", [](auto &t) { return F::exp(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("log", [](auto &t) { return F::log(cpuOps(), t[0]); }, {p});
-  requireHalfAgrees("round", [](auto &t) { return F::round(cpuOps(), F::mul(cpuOps(), t[0], 4.0f)); }, {x});
-  requireHalfAgrees("square", [](auto &t) { return F::square(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("sqrt", [](auto &t) { return F::sqrt(cpuOps(), t[0]); }, {p});
-  requireHalfAgrees("rsqrt", [](auto &t) { return F::rsqrt(cpuOps(), t[0]); }, {p});
-  requireHalfAgrees("sigmoid", [](auto &t) { return F::sigmoid(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("tanh", [](auto &t) { return F::tanh(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("relu", [](auto &t) { return F::relu(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("gelu", [](auto &t) { return F::gelu(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("silu", [](auto &t) { return F::silu(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("sin", [](auto &t) { return F::sin(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("cos", [](auto &t) { return F::cos(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("quickGelu", [](auto &t) { return F::quickGelu(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("clamp", [](auto &t) { return F::clamp(cpuOps(), t[0], -0.5f, 0.75f); }, {x});
-  requireHalfAgrees("mul scalar", [](auto &t) { return F::mul(cpuOps(), t[0], 3.0f); }, {x});
-  requireHalfAgrees("div scalar", [](auto &t) { return F::div(cpuOps(), t[0], 3.0f); }, {x});
-  requireHalfAgrees("geglu", [](auto &t) { return F::geglu(cpuOps(), t[0]); }, {x.slice(1, {0, 36})});
+  requireHalfAgrees("neg", [](auto &t) { return fl::test::neg(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("abs", [](auto &t) { return fl::test::abs(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("exp", [](auto &t) { return fl::test::exp(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("log", [](auto &t) { return fl::test::log(cpuOps(), t[0]); }, {p});
+  requireHalfAgrees("round", [](auto &t) { return fl::test::round(cpuOps(), fl::test::mul(cpuOps(), t[0], 4.0f)); }, {x});
+  requireHalfAgrees("square", [](auto &t) { return fl::test::square(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("sqrt", [](auto &t) { return fl::test::sqrt(cpuOps(), t[0]); }, {p});
+  requireHalfAgrees("rsqrt", [](auto &t) { return fl::test::rsqrt(cpuOps(), t[0]); }, {p});
+  requireHalfAgrees("sigmoid", [](auto &t) { return fl::test::sigmoid(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("tanh", [](auto &t) { return fl::test::tanh(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("relu", [](auto &t) { return fl::test::relu(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("gelu", [](auto &t) { return fl::test::gelu(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("silu", [](auto &t) { return fl::test::silu(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("sin", [](auto &t) { return fl::test::sin(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("cos", [](auto &t) { return fl::test::cos(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("quickGelu", [](auto &t) { return fl::test::quickGelu(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("clamp", [](auto &t) { return fl::test::clamp(cpuOps(), t[0], -0.5f, 0.75f); }, {x});
+  requireHalfAgrees("mul scalar", [](auto &t) { return fl::test::mul(cpuOps(), t[0], 3.0f); }, {x});
+  requireHalfAgrees("div scalar", [](auto &t) { return fl::test::div(cpuOps(), t[0], 3.0f); }, {x});
+  requireHalfAgrees("geglu", [](auto &t) { return fl::test::geglu(cpuOps(), t[0]); }, {x.slice(1, {0, 36})});
 }
 
 CATCH_TEST_CASE("test CPU fp16 binary operators, all four", "[op][cpu][float16]") {
   Tensor a = signedRand({3, 5, 16});
   Tensor b = positiveRand({16});
 
-  requireHalfAgrees("add", [](auto &t) { return F::add(cpuOps(), t[0], t[1]); }, {a, b});
-  requireHalfAgrees("sub", [](auto &t) { return F::sub(cpuOps(), t[0], t[1]); }, {a, b});
-  requireHalfAgrees("mul", [](auto &t) { return F::mul(cpuOps(), t[0], t[1]); }, {a, b});
-  requireHalfAgrees("divTensor", [](auto &t) { return F::divTensor(cpuOps(), t[0], t[1]); }, {a, b});
+  requireHalfAgrees("add", [](auto &t) { return fl::test::add(cpuOps(), t[0], t[1]); }, {a, b});
+  requireHalfAgrees("sub", [](auto &t) { return fl::test::sub(cpuOps(), t[0], t[1]); }, {a, b});
+  requireHalfAgrees("mul", [](auto &t) { return fl::test::mul(cpuOps(), t[0], t[1]); }, {a, b});
+  requireHalfAgrees("divTensor", [](auto &t) { return fl::test::divTensor(cpuOps(), t[0], t[1]); }, {a, b});
 }
 
 CATCH_TEST_CASE("test CPU fp16 reductions", "[op][cpu][float16]") {
   Tensor x = signedRand({3, 6, 64});
 
-  requireHalfAgrees("sum last", [](auto &t) { return F::sum(cpuOps(), t[0], -1); }, {x}, 2e-2f, 5e-2f);
-  requireHalfAgrees("sum first", [](auto &t) { return F::sum(cpuOps(), t[0], 0); }, {x}, 2e-2f, 5e-2f);
-  requireHalfAgrees("cumsum", [](auto &t) { return F::cumsum(cpuOps(), t[0], 1); }, {x});
-  requireHalfAgrees("max", [](auto &t) { return F::max(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("min", [](auto &t) { return F::min(cpuOps(), t[0]); }, {x});
-  requireHalfAgrees("softmax", [](auto &t) { return F::softmax(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("sum last", [](auto &t) { return fl::test::sum(cpuOps(), t[0], -1); }, {x}, 2e-2f, 5e-2f);
+  requireHalfAgrees("sum first", [](auto &t) { return fl::test::sum(cpuOps(), t[0], 0); }, {x}, 2e-2f, 5e-2f);
+  requireHalfAgrees("cumsum", [](auto &t) { return fl::test::cumsum(cpuOps(), t[0], 1); }, {x});
+  requireHalfAgrees("max", [](auto &t) { return fl::test::max(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("min", [](auto &t) { return fl::test::min(cpuOps(), t[0]); }, {x});
+  requireHalfAgrees("softmax", [](auto &t) { return fl::test::softmax(cpuOps(), t[0]); }, {x});
 }
 
 CATCH_TEST_CASE("test CPU fp16 normalizations and resampling", "[op][cpu][float16]") {
@@ -285,18 +285,18 @@ CATCH_TEST_CASE("test CPU fp16 normalizations and resampling", "[op][cpu][float1
   Tensor rb = signedRand({40});
 
   requireHalfAgrees(
-      "layerNorm", [](auto &t) { return F::layerNorm(cpuOps(), t[0], t[1], t[2], 1e-5f); },
+      "layerNorm", [](auto &t) { return fl::test::layerNorm(cpuOps(), t[0], t[1], t[2], 1e-5f); },
       {row, rw, rb}, 2e-2f, 2e-2f);
   requireHalfAgrees(
-      "rmsNorm", [](auto &t) { return F::rmsNorm(cpuOps(), t[0], t[1], 1e-5f); }, {row, rw},
+      "rmsNorm", [](auto &t) { return fl::test::rmsNorm(cpuOps(), t[0], t[1], 1e-5f); }, {row, rw},
       2e-2f, 2e-2f);
   requireHalfAgrees(
-      "groupNorm", [](auto &t) { return F::groupNorm(cpuOps(), t[0], t[1], t[2], 4, 1e-5f); },
+      "groupNorm", [](auto &t) { return fl::test::groupNorm(cpuOps(), t[0], t[1], t[2], 4, 1e-5f); },
       {x, w, b}, 2e-2f, 2e-2f);
   requireHalfAgrees(
-      "upsampleNearest2d", [](auto &t) { return F::upsampleNearest2d(cpuOps(), t[0], 2); }, {x});
+      "upsampleNearest2d", [](auto &t) { return fl::test::upsampleNearest2d(cpuOps(), t[0], 2); }, {x});
   requireHalfAgrees(
-      "upsampleNearest1d", [](auto &t) { return F::upsampleNearest1d(cpuOps(), t[0], 17); },
+      "upsampleNearest1d", [](auto &t) { return fl::test::upsampleNearest1d(cpuOps(), t[0], 17); },
       {row.slice(2, {0, 7})});
 }
 
@@ -309,24 +309,24 @@ CATCH_TEST_CASE("test CPU fp16 signal operators", "[op][cpu][float16]") {
   Tensor beta = positiveRand({4});
 
   requireHalfAgrees(
-      "conv1d", [](auto &t) { return F::conv1d(cpuOps(), t[0], t[1], t[2], 2, 1, 1, 1); },
+      "conv1d", [](auto &t) { return fl::test::conv1d(cpuOps(), t[0], t[1], t[2], 2, 1, 1, 1); },
       {x, w, b}, 2e-2f, 2e-2f);
   requireHalfAgrees(
       "convTranspose1d",
-      [](auto &t) { return F::convTranspose1d(cpuOps(), t[0], t[1], Tensor(), 2, 1, 1, 1); },
+      [](auto &t) { return fl::test::convTranspose1d(cpuOps(), t[0], t[1], Tensor(), 2, 1, 1, 1); },
       {x, tw}, 2e-2f, 2e-2f);
   requireHalfAgrees(
-      "snake", [](auto &t) { return F::snake(cpuOps(), t[0], t[1], t[2], 1e-6f); },
+      "snake", [](auto &t) { return fl::test::snake(cpuOps(), t[0], t[1], t[2], 1e-6f); },
       {x, alpha, beta});
   requireHalfAgrees(
-      "pad1d", [](auto &t) { return F::pad1d(cpuOps(), t[0], 3, 2, PadMode::kReflect); }, {x});
+      "pad1d", [](auto &t) { return fl::test::pad1d(cpuOps(), t[0], 3, 2, PadMode::kReflect); }, {x});
 }
 
 CATCH_TEST_CASE("test CPU fp16 lookup, attention and sampling", "[op][cpu][float16]") {
   Tensor table = signedRand({50, 16});
   Tensor indices = Tensor::create<LongType>({2, 3}, {0, 7, 49, 3, 3, 12});
   requireHalfAgrees(
-      "lookup", [](auto &t) { return F::lookup(cpuOps(), t[0], t[1]); }, {table, indices}, 1e-6f, 1e-6f);
+      "lookup", [](auto &t) { return fl::test::lookup(cpuOps(), t[0], t[1]); }, {table, indices}, 1e-6f, 1e-6f);
 
   Tensor q = signedRand({1, 4, 9, 32});
   Tensor k = signedRand({1, 2, 9, 32});
@@ -334,7 +334,7 @@ CATCH_TEST_CASE("test CPU fp16 lookup, attention and sampling", "[op][cpu][float
   for (bool causal : {false, true}) {
     CATCH_INFO("causal " << causal);
     requireHalfAgrees(
-        "attention", [causal](auto &t) { return F::attention(cpuOps(), t[0], t[1], t[2], F::causalIf(causal)); },
+        "attention", [causal](auto &t) { return fl::test::attention(cpuOps(), t[0], t[1], t[2], fl::test::causalIf(causal)); },
         {q, k, v}, 2e-2f, 2e-2f);
   }
 
@@ -344,15 +344,15 @@ CATCH_TEST_CASE("test CPU fp16 lookup, attention and sampling", "[op][cpu][float
   Tensor topKs = Tensor::create<IntType>({3}, {-1, -1, -1});
   Tensor topPs = Tensor::create<float>({3}, {1.0f, 1.0f, 1.0f});
   Tensor h = toFp16(logits);
-  Tensor fromHalf = F::sample(cpuOps(), h, temperatures, topKs, topPs);
-  Tensor fromFloat = F::sample(cpuOps(), toFp32(h), temperatures, topKs, topPs);
+  Tensor fromHalf = fl::test::sample(cpuOps(), h, temperatures, topKs, topPs);
+  Tensor fromFloat = fl::test::sample(cpuOps(), toFp32(h), temperatures, topKs, topPs);
   const LongType *sh = fromHalf.getInternalData()->getData<LongType>(fromHalf.getInternalOffset());
   const LongType *sf = fromFloat.getInternalData()->getData<LongType>(fromFloat.getInternalOffset());
   for (int i = 0; i < 3; ++i) CATCH_REQUIRE(sh[i] == sf[i]);
 
   // The repetition penalty is in place, on the logits of either type.
   Tensor history = Tensor::create<LongType>({3, 2}, {1, 5, 2, 2, 99, 0});
-  Tensor penalizedHalf = F::contiguous(cpuOps(), h);
+  Tensor penalizedHalf = fl::test::contiguous(cpuOps(), h);
   Tensor penalizedFloat = toFp32(h);
   cpuOps()->repetitionPenalty(penalizedHalf, history, 1.3f);
   cpuOps()->repetitionPenalty(penalizedFloat, history, 1.3f);

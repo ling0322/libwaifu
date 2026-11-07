@@ -42,11 +42,11 @@ Operators *cpuOps() {
 }
 
 Tensor toCuda(const Tensor &a) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 }  // namespace
@@ -54,16 +54,16 @@ Tensor toCpu(const Tensor &a) {
 CATCH_TEST_CASE("test CUDA binary operators", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {5}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 5, 10}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {5}, DType::kFloat);
   Tensor at = a.transpose(2, 1).slice(1, {1, 9});
   Tensor xt = toCuda(a).transpose(2, 1).slice(1, {1, 9});
   Tensor y = toCuda(b);
 
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::add(cudaOps(), xt, y)), F::add(cpuOps(), at, b), 5e-3, 5e-3));
-  CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::sub(cudaOps(), xt, y)), F::sub(cpuOps(), at, b), 5e-3, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(fl::test::add(cudaOps(), xt, y)), fl::test::add(cpuOps(), at, b), 5e-3, 5e-3));
+  CATCH_REQUIRE(cpuOps()->allClose(toCpu(fl::test::sub(cudaOps(), xt, y)), fl::test::sub(cpuOps(), at, b), 5e-3, 5e-3));
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(F::mul(cudaOps(), xt, 0.1f)), F::mul(cpuOps(), at, 0.1f), 1e-3, 1e-4));
+      cpuOps()->allClose(toCpu(fl::test::mul(cudaOps(), xt, 0.1f)), fl::test::mul(cpuOps(), at, 0.1f), 1e-3, 1e-4));
 }
 
 CATCH_TEST_CASE("test CUDA binary operators (contiguous fast path)", "[op][cuda]") {
@@ -77,8 +77,8 @@ CATCH_TEST_CASE("test CUDA binary operators (contiguous fast path)", "[op][cuda]
            {4, 5},
            {2, 3, 4},
            {2, 3, 4, 5}}) {
-    Tensor a = F::rand(Device::getCpu(), shape, DType::kFloat);
-    Tensor b = F::rand(Device::getCpu(), shape, DType::kFloat);
+    Tensor a = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
     Tensor x = toCuda(a);
     Tensor y = toCuda(b);
 
@@ -87,31 +87,31 @@ CATCH_TEST_CASE("test CUDA binary operators (contiguous fast path)", "[op][cuda]
     // meaningful. An absolute tolerance above half's round-off covers that without hiding a
     // kernel that returns a wholly wrong value.
     CATCH_INFO("shape rank = " << shape.size());
-    CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::add(cudaOps(), x, y)), F::add(cpuOps(), a, b), 5e-3, 5e-3));
-    CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::sub(cudaOps(), x, y)), F::sub(cpuOps(), a, b), 5e-3, 5e-3));
-    CATCH_REQUIRE(cpuOps()->allClose(toCpu(F::mul(cudaOps(), x, y)), F::mul(cpuOps(), a, b), 5e-3, 5e-3));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpu(fl::test::add(cudaOps(), x, y)), fl::test::add(cpuOps(), a, b), 5e-3, 5e-3));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpu(fl::test::sub(cudaOps(), x, y)), fl::test::sub(cpuOps(), a, b), 5e-3, 5e-3));
+    CATCH_REQUIRE(cpuOps()->allClose(toCpu(fl::test::mul(cudaOps(), x, y)), fl::test::mul(cpuOps(), a, b), 5e-3, 5e-3));
   }
 }
 
 CATCH_TEST_CASE("test CUDA binary operators (broadcast shapes)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
-  Tensor a = F::rand(Device::getCpu(), {2, 3, 4}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 3, 4}, DType::kFloat);
 
   // A operand with fewer dims gets leading axes of stride 0; a size-1 axis is stretched in
   // place. Both make the right-hand side non-contiguous and force the generic kernel.
   for (std::vector<int> shape :
        std::vector<std::vector<int>>{{4}, {1, 4}, {3, 4}, {1, 1, 4}, {1, 3, 4}, {2, 1, 4}}) {
-    Tensor b = F::rand(Device::getCpu(), shape, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
     CATCH_INFO("rhs rank = " << shape.size());
     CATCH_REQUIRE(cpuOps()->allClose(
-        toCpu(F::add(cudaOps(), toCuda(a), toCuda(b))),
-        F::add(cpuOps(), a, b),
+        toCpu(fl::test::add(cudaOps(), toCuda(a), toCuda(b))),
+        fl::test::add(cpuOps(), a, b),
         5e-3,
         5e-3));
     CATCH_REQUIRE(cpuOps()->allClose(
-        toCpu(F::mul(cudaOps(), toCuda(a), toCuda(b))),
-        F::mul(cpuOps(), a, b),
+        toCpu(fl::test::mul(cudaOps(), toCuda(a), toCuda(b))),
+        fl::test::mul(cpuOps(), a, b),
         5e-3,
         5e-3));
   }
@@ -122,31 +122,31 @@ CATCH_TEST_CASE("test CUDA binary operators (4D strided)", "[op][cuda]") {
 
   // 4 is the highest rank the generic kernel is instantiated for, so it is the one that would
   // fall off the end of the dispatch chain.
-  Tensor a = F::rand(Device::getCpu(), {2, 3, 4, 5}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {5}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {2, 3, 4, 5}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {5}, DType::kFloat);
 
   Tensor at = a.transpose(1, 3);
   Tensor xt = toCuda(a).transpose(1, 3);
   CATCH_REQUIRE(!xt.isContiguous());
 
   // after the transpose the last axis is 3 long, so broadcast a matching operand instead.
-  Tensor c = F::rand(Device::getCpu(), {3}, DType::kFloat);
+  Tensor c = fl::test::rand(Device::getCpu(), {3}, DType::kFloat);
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(F::add(cudaOps(), xt, toCuda(c))), F::add(cpuOps(), at, c), 5e-3, 5e-3));
+      cpuOps()->allClose(toCpu(fl::test::add(cudaOps(), xt, toCuda(c))), fl::test::add(cpuOps(), at, c), 5e-3, 5e-3));
   CATCH_REQUIRE(
-      cpuOps()->allClose(toCpu(F::sub(cudaOps(), xt, toCuda(c))), F::sub(cpuOps(), at, c), 5e-3, 5e-3));
+      cpuOps()->allClose(toCpu(fl::test::sub(cudaOps(), xt, toCuda(c))), fl::test::sub(cpuOps(), at, c), 5e-3, 5e-3));
 }
 
 CATCH_TEST_CASE("test CUDA binary operators (crosses the grid-stride loop)", "[op][cuda]") {
   if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
 
   // More elements than the capped grid can cover in one pass, so each thread loops.
-  Tensor a = F::rand(Device::getCpu(), {256, 1024}, DType::kFloat);
-  Tensor b = F::rand(Device::getCpu(), {1024}, DType::kFloat);
+  Tensor a = fl::test::rand(Device::getCpu(), {256, 1024}, DType::kFloat);
+  Tensor b = fl::test::rand(Device::getCpu(), {1024}, DType::kFloat);
 
   CATCH_REQUIRE(cpuOps()->allClose(
-      toCpu(F::add(cudaOps(), toCuda(a), toCuda(b))),
-      F::add(cpuOps(), a, b),
+      toCpu(fl::test::add(cudaOps(), toCuda(a), toCuda(b))),
+      fl::test::add(cpuOps(), a, b),
       5e-3,
       5e-3));
 }

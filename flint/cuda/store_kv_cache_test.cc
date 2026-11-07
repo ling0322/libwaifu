@@ -42,11 +42,11 @@ Operators *cpuOps() {
 }
 
 Tensor toCudaHalf(const Tensor &tensor) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), tensor, Device::getCuda()), DType::kFloat16);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), tensor, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &tensor) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), F::contiguous(cudaOps(), tensor), DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), fl::test::contiguous(cudaOps(), tensor), DType::kFloat), Device::getCpu());
 }
 
 Tensor makeInput(
@@ -82,7 +82,7 @@ Tensor makeCache(
     int prefix,
     int suffix) {
   int elementsPerToken = numHeads * headDim;
-  Tensor storage = F::zeros(Device::getCuda(), 
+  Tensor storage = fl::test::zeros(Device::getCuda(), 
       {numBlocks, blockSize, prefix + elementsPerToken + suffix},
       DType::kFloat16);
   return storage.slice(2, {prefix, prefix + elementsPerToken})
@@ -122,8 +122,8 @@ CATCH_TEST_CASE("test CUDA storeKVCache follows slot mapping", "[op][cuda]") {
       3 * BlockSize + 7,
       1 * BlockSize};
 
-  Tensor k = F::rand(Device::getCpu(), {static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
-  Tensor v = F::rand(Device::getCpu(), {static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
+  Tensor k = fl::test::rand(Device::getCpu(), {static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
+  Tensor v = fl::test::rand(Device::getCpu(), {static_cast<int>(slots.size()), NumHeads, HeadDim}, DType::kFloat);
   Tensor keyCache = makeCache(NumBlocks, BlockSize, NumHeads, HeadDim, 0, 0);
   Tensor valueCache = makeCache(NumBlocks, BlockSize, NumHeads, HeadDim, 0, 0);
   Tensor slotMapping = Tensor::create<IntType>({static_cast<int>(slots.size())}, slots);
@@ -133,14 +133,14 @@ CATCH_TEST_CASE("test CUDA storeKVCache follows slot mapping", "[op][cuda]") {
       toCudaHalf(v),
       keyCache,
       valueCache,
-      F::toDevice(cudaOps(), slotMapping, Device::getCuda()));
+      fl::test::toDevice(cudaOps(), slotMapping, Device::getCuda()));
 
   checkStored(keyCache, k, lut::makeConstSpan(slots), BlockSize);
   checkStored(valueCache, v, lut::makeConstSpan(slots), BlockSize);
 
   Tensor untouched = toCpuFloat(keyCache).subtensor(0);
   CATCH_REQUIRE(
-      cpuOps()->allClose(untouched, F::zeros(Device::getCpu(), untouched.getShape(), DType::kFloat)));
+      cpuOps()->allClose(untouched, fl::test::zeros(Device::getCpu(), untouched.getShape(), DType::kFloat)));
 }
 
 CATCH_TEST_CASE("test CUDA storeKVCache handles strided model views", "[op][cuda]") {
@@ -172,14 +172,14 @@ CATCH_TEST_CASE("test CUDA storeKVCache handles strided model views", "[op][cuda
       v,
       keyCache,
       valueCache,
-      F::toDevice(cudaOps(), slotMapping, Device::getCuda()));
+      fl::test::toDevice(cudaOps(), slotMapping, Device::getCuda()));
 
   checkStored(keyCache, expectedK, lut::makeConstSpan(slots), BlockSize);
   checkStored(valueCache, expectedV, lut::makeConstSpan(slots), BlockSize);
 
   Tensor untouched = toCpuFloat(valueCache).subtensor(2).subtensor(0);
   CATCH_REQUIRE(
-      cpuOps()->allClose(untouched, F::zeros(Device::getCpu(), untouched.getShape(), DType::kFloat)));
+      cpuOps()->allClose(untouched, fl::test::zeros(Device::getCpu(), untouched.getShape(), DType::kFloat)));
 }
 
 }  // namespace fl
