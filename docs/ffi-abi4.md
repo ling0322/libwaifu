@@ -24,7 +24,7 @@ needed. A caller built against it has two things to free and nothing to parse.
 - **Requests are copied at the call.** Nothing a caller passes in has to outlive the call that took
   it -- not a request, not an image in one, not the `WaifuModel` a load is given.
 - **One name per task, a noun phrase**, the field's or the upstream project's own:
-  `IMAGE_GENERATION`, `TEXT_TO_SPEECH`, `VOICE_CONVERSION`, `LAYER_DECOMPOSITION` (See-through's
+  `IMAGE_GENERATION`, `TEXT_TO_SPEECH`, `SPEECH_TO_TEXT`, `VOICE_CONVERSION`, `LAYER_DECOMPOSITION` (See-through's
   paper is "Single-image Layer Decomposition"). It is the same in the pipeline type, the run
   function, the request, the result, the stages and the capability. A capability is `SUPPORTS_`
   and the task; a constraint is the request field it constrains and the constraint
@@ -64,6 +64,7 @@ typedef enum {
   WAIFU_PIPELINE_TEXT_TO_SPEECH = 2,
   WAIFU_PIPELINE_VOICE_CONVERSION = 3,
   WAIFU_PIPELINE_LAYER_DECOMPOSITION = 4,
+  WAIFU_PIPELINE_SPEECH_TO_TEXT = 5,
 } WaifuPipelineType;
 
 typedef enum {
@@ -107,6 +108,9 @@ typedef enum {
   WAIFU_STAGE_LAYER_DECOMPOSITION_DENOISING_DEPTH = 407,        // steps
   WAIFU_STAGE_LAYER_DECOMPOSITION_DECODING_DEPTH = 408,         // layers
   WAIFU_STAGE_LAYER_DECOMPOSITION_CUTTING_INTO_PARTS = 409,
+
+  WAIFU_STAGE_SPEECH_TO_TEXT_READING_RECORDING = 500,       // pieces the recording is cut into
+  WAIFU_STAGE_SPEECH_TO_TEXT_GENERATING_TOKENS = 501,       // tokens; total is an estimate, and can be passed
 } WaifuStage;
 
 // What can be asked of a model. SUPPORTS_ properties are integers, 1 or 0; where 0, the string
@@ -117,6 +121,7 @@ typedef enum {
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH = 2,
   WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION = 3,
   WAIFU_MODEL_SUPPORTS_LAYER_DECOMPOSITION = 4,
+  WAIFU_MODEL_SUPPORTS_SPEECH_TO_TEXT = 5,
 
   WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_FROM_START_IMAGE = 100,  // img2img
   WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_CONTROL_IMAGE = 101,  // a ControlNet
@@ -125,6 +130,7 @@ typedef enum {
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE = 200,      // in the voice of a recording
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE = 201,   // CosyVoice3 does not
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE = 202,          // follows an instruction such as "speak happily"
+  WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_STREAMING = 203,           // hands over audio while the rest is said
 
   WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE = 300,          // the manner as well as the voice
 
@@ -134,6 +140,7 @@ typedef enum {
   WAIFU_MODEL_IMAGE_GENERATION_SAMPLER = 1101,                   // string: "Euler"
   WAIFU_MODEL_IMAGE_GENERATION_MAX_PROMPT_IMAGES = 1102,         // integer
   WAIFU_MODEL_LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF = 1400, // integer: 64
+  WAIFU_MODEL_SPEECH_TO_TEXT_LANGUAGES = 1500,                   // string: "Chinese,English,...", comma separated
 } WaifuModelProperty;
 
 // What can be asked of a device. All of it is this process's, not the card as other programs see it.
@@ -330,6 +337,20 @@ WaifuJob waifu_pipeline_run_text_to_speech_async(WaifuPipeline *pipeline,
                                                  const WaifuTextToSpeechRequest *request,
                                                  void *user_data, WaifuProgressCallback on_progress,
                                                  WaifuAudioCallback on_complete);
+
+// A part of a streaming reading's audio, in order; the samples are valid until it returns.
+typedef void (*WaifuAudioPartCallback)(void *user_data, const WaifuAudio *part);
+
+// As run_text_to_speech, with each part of the audio handed to on_part as soon as it is made --
+// CosyVoice3's a hop of tokens at a time, as upstream's stream=True -- for a caller that plays the
+// start while the rest is said. on_complete still gets the whole of it, the parts end to end.
+// Refused at the call where the model does not support it (SUPPORTS_TEXT_TO_SPEECH_STREAMING);
+// a request it cannot stream ends with WAIFU_ERR_MODEL and why.
+WaifuJob waifu_pipeline_run_text_to_speech_streaming_async(WaifuPipeline *pipeline,
+                                                           const WaifuTextToSpeechRequest *request,
+                                                           void *user_data, WaifuProgressCallback on_progress,
+                                                           WaifuAudioPartCallback on_part,
+                                                           WaifuAudioCallback on_complete);
 WaifuJob waifu_pipeline_run_voice_conversion_async(WaifuPipeline *pipeline,
                                                    const WaifuVoiceConversionRequest *request,
                                                    void *user_data, WaifuProgressCallback on_progress,
@@ -380,6 +401,31 @@ WaifuJob waifu_pipeline_run_layer_decomposition_async(WaifuPipeline *pipeline,
                                                       const WaifuLayerDecompositionRequest *request,
                                                       void *user_data, WaifuProgressCallback on_progress,
                                                       WaifuLayerDecompositionCallback on_complete);
+
+/* -- speech to text ------------------------------------------------------------------------ */
+
+typedef struct {
+  uint32_t struct_size;
+  const WaifuAudio *audio;            // any rate, any length; resampled and cut into pieces by the engine
+  // The language it is in, one of SPEECH_TO_TEXT_LANGUAGES -- "English", "chinese" -- or NULL or ""
+  // for the model to tell.
+  const char *language;
+  const char *context;                // words that help it hear: names, terms, the subject; NULL or ""
+} WaifuSpeechToTextRequest;
+
+typedef struct {
+  WaifuStatus status;
+  const char *text;                   // what was said; "" for nothing said; NULL unless WAIFU_OK
+  // The language it was said in, as the model names it -- "Chinese" -- or several, comma
+  // separated, for a recording that changes; "" where none was heard. NULL unless WAIFU_OK.
+  const char *language;
+} WaifuSpeechToTextResult;
+typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTextResult *result);
+
+WaifuJob waifu_pipeline_run_speech_to_text_async(WaifuPipeline *pipeline,
+                                                 const WaifuSpeechToTextRequest *request,
+                                                 void *user_data, WaifuProgressCallback on_progress,
+                                                 WaifuSpeechToTextCallback on_complete);
 ```
 
 ## What changes from ABI 3
@@ -392,6 +438,9 @@ WaifuJob waifu_pipeline_run_layer_decomposition_async(WaifuPipeline *pipeline,
 | `waifu_engine_load_async(engine, "path")`, `_unload_async` | `waifu_pipeline_load_model_async(pipeline, model)`, `_unload_model_async` |
 | `waifu_engine_draw_async`, `WaifuDrawRequest` | `waifu_pipeline_run_image_generation_async`, `WaifuImageGenerationRequest` |
 | `waifu_engine_speak_async`, `WaifuSpeakRequest` | `waifu_pipeline_run_text_to_speech_async`, `WaifuTextToSpeechRequest` |
+| `waifu_engine_speak_stream_async`, `on_audio` | `waifu_pipeline_run_text_to_speech_streaming_async`, `on_part`; `SUPPORTS_TEXT_TO_SPEECH_STREAMING` |
+| `waifu_engine_transcribe_async`, `WaifuTranscribeRequest`, `WaifuTranscriptCompletionEvent` | `waifu_pipeline_run_speech_to_text_async`, `WaifuSpeechToTextRequest`, `WaifuSpeechToTextResult` |
+| a transcriber's `languages` list | `SPEECH_TO_TEXT_LANGUAGES`, one comma-separated string |
 | `waifu_engine_voice_conversion_async` | `waifu_pipeline_run_voice_conversion_async` |
 | `waifu_engine_layers_async`, `WaifuLayersRequest` | `waifu_pipeline_run_layer_decomposition_async`, `WaifuLayerDecompositionRequest` |
 | `…CompletionEvent`, `…CompleteCallback` | `…Result`, `…Callback` |
@@ -404,7 +453,7 @@ WaifuJob waifu_pipeline_run_layer_decomposition_async(WaifuPipeline *pipeline,
 | images under the keys `"start_from"` and `"control"` | `start_image`, `control_image`; `WaifuImageInput` is `WaifuPromptImage` |
 | `WaifuSpeakRequest.like`, `WaifuAudio.rate` | `reference`, `sample_rate` |
 | `WaifuProgressEvent.words`, `part`, `parts`, `file` | gone: one `WaifuStage` for each thing a job does |
-| seven `WaifuStage`s | twenty, by task |
+| eight `WaifuStage`s | twenty-three, by task |
 | `waifu_psd_write`, `waifu_bytes_free`, PSDs in the layers' result | gone: a PSD is the app's to write |
 | `waifu_stratify`, `waifu_depth_layers_free` | `stratify_layers` in the request |
 | `WAIFU_DEVICE_CUDA_CPU_OFFLOAD`, `_METAL_DISK_OFFLOAD`, `WAIFU_ERR_FETCH` | gone; their numbers are not reused |
@@ -416,7 +465,7 @@ WaifuJob waifu_pipeline_run_layer_decomposition_async(WaifuPipeline *pipeline,
 asked of a voice was accepted and failed at the end, and `NOT_LOADED` meant both "nothing is
 loaded" and "the wrong thing is". A pipeline is made for one task: a model that task is not
 supported by, or another task's run, is refused at the call, and `NOT_LOADED` is only a run with no
-model. It stays one opaque type with one `new` and one set of shared functions -- four types,
+model. It stays one opaque type with one `new` and one set of shared functions -- a type per task,
 each with its own copy of all of them, were tried and were twice the API for nothing a caller
 needs. It is created empty and loaded on its own queue, as the engine was, so a load and a run can
 be asked for back to back, and a new model is only read once the old one is dropped.
@@ -425,6 +474,15 @@ CosyVoice3 does both speech tasks; used for both, it is loaded into two pipeline
 device twice. A call that lets a second pipeline share the first's weights can be added later
 without changing anything here. Pipelines on one device run side by side, as two engines did, and
 share its memory limit.
+
+Streaming a reading is not a pipeline of its own: it is the same model asked the same thing, with
+the audio handed over as it is made, so it is a second run of text to speech -- a pipeline of its
+own would have read the voice onto the device twice. A model that cannot stream says so through
+`SUPPORTS_TEXT_TO_SPEECH_STREAMING`, as one that takes no style does through its own.
+
+Speech to text is `SPEECH_TO_TEXT`, text to speech's own name turned round and the task's name in
+this repository (`speech2text`). The languages a transcriber can be told are a list, and a property
+is one value: they are one string, comma separated, as its result already gives several languages.
 
 **Properties, not JSON and not structs.** JSON was written for one screen: a flag beside the
 sentence saying why not (`takes_a_recording`, `no_likeness_because`), a map keyed by magic strings
@@ -482,8 +540,9 @@ the header.
 ## What has to change with it
 
 - `waifu/src/c_api.rs`, `waifu/src/engine.rs` (an engine bound to one task),
-  `waifu/src/progress.rs`, the See-through pipeline and `stratify.rs`, and their tests; `waifu.h` is
-  regenerated.
+  `waifu/src/describe.rs`, `waifu/src/progress.rs`, the See-through pipeline and `stratify.rs`,
+  and their tests; `waifu.h` is regenerated. A transcription's hearing of its recording, which ABI 3
+  shares with a voice conversion as `WAIFU_STAGE_LISTENING`, becomes a stage of its own.
 - `waifu-cli`: pipelines, `WaifuModel`, its own words for each stage.
 - The SwiftUI app: the same; a PSD writer of its own; the style picker offers CosyVoice3's examples
   and free text.
