@@ -37,7 +37,8 @@ use waifu::flint::{Graph, Ir, RunContext, Tensor};
 use waifu::indextts;
 use waifu::indextts::features::resample;
 
-use waifu::cosyvoice3::{CosyVoice3, Precision};
+use waifu::cosyvoice3::stream::Hops;
+use waifu::cosyvoice3::{CosyVoice3, Precision, Reference, Streaming};
 use waifu::{
     read_safetensors, wav, DType, Device, Manifest, Sound, SpeechOptions, SpeechProgress, Weights,
 };
@@ -540,15 +541,115 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
     assert_eq!(again.samples, first.samples);
 }
 
-/// Three sentences, read a piece at a time: a part for each, each handed over before the next is
-/// said, and the parts end to end the same samples the reading makes all at once -- the sampler
-/// draws from the host's generator and the vocoder's noise from the device's, so the order the two
-/// take turns in moves neither.
+/// Upstream's `stream=True` on the tokens its language model said, against [`Streaming`] on the
+/// same: the vocoder alone on the mel upstream drew a hop at a time, then the flow and the hops on
+/// the tokens, then a whole reading through [`CosyVoice3::say_streaming`].
 #[test]
 #[ignore]
-fn a_reading_streamed_a_sentence_at_a_time_is_the_reading() {
+fn a_reading_streamed_a_hop_at_a_time_is_upstreams() {
     let cases = fixture();
     let tts = CosyVoice3::from_manifest(DEVICE, u64::MAX, &manifest()).unwrap();
+    let float = precision(&weights(&manifest())).flow == DType::Float;
+
+    // Upstream's own inputs to the flow, rather than what `listen` hears.
+    let prompt = ints(&cases, "flow_prompt_tokens");
+    let reference = Reference {
+        mel: upload(
+            &[1, 2 * prompt.len() as i32, 80],
+            &floats(&cases, "flow_prompt_feat"),
+        ),
+        speaker: upload(&[1, 192], &floats(&cases, "speaker")),
+        tokens: prompt,
+    };
+    let want_mel = frame_major(&floats(&cases, "stream_mel"), 80);
+    let frames = (want_mel.len() / 80) as i32;
+    let noise = || upload(&[1, frames * 480, 9], &floats(&cases, "hift_sine_noise"));
+    let lengths: Vec<usize> = ints(&cases, "stream_lengths")
+        .iter()
+        .map(|n| *n as usize)
+        .collect();
+    let want_wave = floats(&cases, "stream_wave");
+    let want_parts: Vec<&[f32]> = {
+        let mut rest = want_wave.as_slice();
+        lengths
+            .iter()
+            .map(|n| {
+                let (part, after) = rest.split_at(*n);
+                rest = after;
+                part
+            })
+            .collect()
+    };
+    let snr = |got: &[f32], want: &[f32]| -> f32 {
+        let noise: f32 = got.iter().zip(want).map(|(a, b)| (a - b) * (a - b)).sum();
+        let signal: f32 = want.iter().map(|b| b * b).sum();
+        10.0 * (signal / noise).log10()
+    };
+
+    // The vocoder alone, a hop of upstream's mel at a time: every part as long as upstream's, and
+    // sounded as upstream sounds it -- short of the frames the next hop changes, and to the end at
+    // the last.
+    let offsets = ints(&cases, "stream_offsets");
+    let mut bounds: Vec<i32> = offsets[1..].iter().map(|offset| 2 * offset).collect();
+    bounds.push(frames);
+    let mut streaming = Streaming::new(&tts, &reference, &Hops::default()).with_noise(noise());
+    let mut from = 0;
+    for (index, to) in bounds.iter().enumerate() {
+        let new = upload(
+            &[1, to - from, 80],
+            &want_mel[(from * 80) as usize..(to * 80) as usize],
+        );
+        let part = streaming.sound(&new, index == bounds.len() - 1).unwrap();
+        let snr = snr(&part.samples, want_parts[index]);
+        println!(
+            "vocoder, part {index}: {} samples, {snr:.1} dB against upstream",
+            part.samples.len()
+        );
+        assert_eq!(part.samples.len(), lengths[index]);
+        assert!(snr > 30.0);
+        from = *to;
+    }
+
+    // The flow and the hops, upstream's tokens handed over one at a time as they are said.
+    let mut hops = Hops::default();
+    let mut streaming = Streaming::new(&tts, &reference, &hops).with_noise(noise());
+    let mut parts: Vec<Sound> = Vec::new();
+    for token in ints(&cases, "stream_kept") {
+        streaming.hear(token);
+        if let Some(reads) = streaming.due(&hops) {
+            parts.push(streaming.hop(reads, &mut hops).unwrap());
+        }
+    }
+    parts.push(streaming.finish().unwrap());
+    let got_lengths: Vec<usize> = parts.iter().map(|part| part.samples.len()).collect();
+    assert_eq!(got_lengths, lengths);
+
+    let mel = host(streaming.mel().unwrap());
+    let error = max_error(&mel, &want_mel);
+    let mean: f32 = mel
+        .iter()
+        .zip(&want_mel)
+        .map(|(a, b)| (a - b).abs())
+        .sum::<f32>()
+        / mel.len() as f32;
+    let joined: Vec<f32> = parts.iter().flat_map(|part| part.samples.clone()).collect();
+    println!(
+        "flow, streamed: {} parts of {got_lengths:?} samples, mel max error {error:.2e}, mean \
+         {mean:.2e}; {:.1} dB against upstream's wave",
+        parts.len(),
+        snr(&joined, &want_wave)
+    );
+    match float {
+        true => assert!(mean < 1e-2 && error < 0.2),
+        false => {
+            assert!(mean <= 0.04, "the mel drifts by {mean} on average");
+            assert!(error <= 1.5, "the mel drifts by {error} at worst");
+        }
+    }
+
+    // A whole reading: the language model's tokens streamed as they are said. The first part is
+    // the first hop less what the vocoder holds back, whatever is said in it; the reading is as
+    // long as `say`'s, which says the same tokens at the same seed.
     let heard = tts
         .listen(&Sound::new(floats(&cases, "prompt_24k"), 24000))
         .unwrap();
@@ -558,58 +659,66 @@ fn a_reading_streamed_a_sentence_at_a_time_is_the_reading() {
         seed: Some(7),
         style: None,
     };
-    let text = format!("{TEXT}{TEXT}{TEXT}");
     let mut carry_on = |_: SpeechProgress| ControlFlow::Continue(());
-
-    for transcript in [None, Some(PROMPT_TEXT)] {
-        let whole = match transcript {
-            None => tts.say(&text, &heard, &options, &mut carry_on),
-            Some(words) => tts.say_after(&text, words, &heard, &options, &mut carry_on),
-        }
+    let mut parts: Vec<Sound> = Vec::new();
+    let streamed = tts
+        .say_streaming(TEXT, None, &heard, &options, &mut carry_on, &mut |part| {
+            parts.push(part.clone());
+            ControlFlow::Continue(())
+        })
         .unwrap()
         .unwrap();
+    let joined: Vec<f32> = parts.iter().flat_map(|part| part.samples.clone()).collect();
+    assert_eq!(joined, streamed.samples);
+    assert_eq!(parts[0].samples.len(), lengths[0]);
+    let whole = tts
+        .say(TEXT, &heard, &options, &mut carry_on)
+        .unwrap()
+        .unwrap();
+    assert_eq!(streamed.samples.len(), whole.samples.len());
+    println!(
+        "said streaming: {} parts, {:.2} s",
+        parts.len(),
+        streamed.seconds()
+    );
+    std::fs::write(
+        models_dir().join("cosyvoice3-streamed.wav"),
+        wav::write(&streamed),
+    )
+    .unwrap();
 
-        let mut parts: Vec<Sound> = Vec::new();
-        let streamed = tts
-            .say_streaming(
-                &text,
-                transcript,
-                &heard,
-                &options,
-                &mut carry_on,
-                &mut |part| {
-                    parts.push(part.clone());
-                    ControlFlow::Continue(())
-                },
-            )
-            .unwrap()
-            .unwrap();
-        let lengths: Vec<f64> = parts.iter().map(|part| part.seconds()).collect();
-        println!(
-            "transcript {}: parts of {lengths:.2?} s",
-            transcript.is_some()
-        );
-        // 120 characters are two or three pieces of 60 to 80, as the frontend joins them.
-        assert!(
-            parts.len() >= 2,
-            "a part a piece, and {} parts",
-            parts.len()
-        );
-        let joined: Vec<f32> = parts.iter().flat_map(|part| part.samples.clone()).collect();
-        assert_eq!(joined, streamed.samples);
-        assert_eq!(streamed.samples, whole.samples);
-    }
-
-    // A part that asks to stop stops the reading after it.
-    let mut parts = 0;
+    // A part that asks to stop stops the reading after it, and a speed is refused before anything
+    // is said.
+    let mut handed = 0;
     let stopped = tts
-        .say_streaming(&text, None, &heard, &options, &mut carry_on, &mut |_| {
-            parts += 1;
+        .say_streaming(TEXT, None, &heard, &options, &mut carry_on, &mut |_| {
+            handed += 1;
             ControlFlow::Break(())
         })
         .unwrap();
     assert!(stopped.is_none());
-    assert_eq!(parts, 1);
+    assert_eq!(handed, 1);
+    // Every speed but one, the ones `say` reads at one included.
+    for speed in [1.5, 0.0, -1.0, f32::NAN, f32::INFINITY] {
+        let other = SpeechOptions {
+            speed,
+            ..options.clone()
+        };
+        let mut said_anything = false;
+        let refused = tts.say_streaming(
+            TEXT,
+            None,
+            &heard,
+            &other,
+            &mut |_| {
+                said_anything = true;
+                ControlFlow::Continue(())
+            },
+            &mut |_| ControlFlow::Continue(()),
+        );
+        assert!(refused.is_err(), "speed {speed} was streamed");
+        assert!(!said_anything, "speed {speed} said something first");
+    }
 }
 
 /// How long the language model's readings run, over eight seeds, against upstream's over eight

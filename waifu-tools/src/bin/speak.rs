@@ -30,7 +30,7 @@
 //! stage took is printed as it finishes, which is what this is for. Which model runs is the
 //! manifest's `model.type`. CosyVoice3 takes a sixth argument: the transcript of the recording,
 //! which reads zero-shot, or `--style=` and an instruction, which reads instruct2. `--stream`, for
-//! CosyVoice3, reads a sentence at a time and prints when each part was handed over: the first is
+//! CosyVoice3, streams a hop of tokens at a time and prints when each part is handed over: the first is
 //! how long a listener waits.
 
 use std::ops::ControlFlow;
@@ -119,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (false, None) => tts.say(text, &reference, &options, &mut report)?,
             }
         }
-        _ if stream => return Err("only CosyVoice3 reads a sentence at a time".into()),
+        _ if stream => return Err("only CosyVoice3 streams".into()),
         _ => {
             let tts = IndexTts::from_manifest(Device::Cuda, u64::MAX, &manifest)?;
             eprintln!("read the model in {:.1} s", clock.elapsed().as_secs_f64());

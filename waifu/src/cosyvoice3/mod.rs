@@ -82,6 +82,8 @@ pub mod hift;
 pub mod lm;
 /// S3Tokenizer v3: a recording in, speech tokens out.
 pub mod speech_tokenizer;
+/// When a streaming reading sounds what it has said, and which tokens the flow is handed.
+pub mod stream;
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -89,7 +91,9 @@ use std::hash::{Hash, Hasher};
 use std::ops::ControlFlow;
 use std::rc::Rc;
 
-use crate::flint::{functional as F, DType, Device, Graph, Ir, RunContext, Tensor, Weights};
+use crate::flint::{
+    functional as F, DType, Device, Graph, Ir, MaskType, RunContext, Tensor, Weights,
+};
 use crate::indextts::{campplus, features::resample};
 use crate::{
     ConversionDefaults, ConversionOptions, ConversionProgress, Converter, Error, Manifest, Result,
@@ -99,6 +103,7 @@ use crate::{
 use self::flow::Flow;
 use self::hift::Hift;
 use self::lm::{Lm, Sampler, Sampling};
+use self::stream::{Hops, Sentence, Silence, LOOKAHEAD};
 
 const LM: &str = "cosyvoice3.lm";
 const FLOW: &str = "cosyvoice3.flow";
@@ -199,6 +204,7 @@ pub struct CosyVoice3 {
     tokenizer: Tokenizer,
     device: Device,
     dtype: DType,
+    precision: Precision,
     /// The three spectrograms' banks and filterbanks, on the device.
     features: features::Features,
     /// The speech tokenizer's rotary table for the longest recording it reads, on the device, and
@@ -305,6 +311,7 @@ impl CosyVoice3 {
             weights,
             device,
             dtype,
+            precision,
             heard: RefCell::new(None),
         })
     }
@@ -469,12 +476,22 @@ impl CosyVoice3 {
     }
 
     /// [`say`](CosyVoice3::say), or [`say_after`](CosyVoice3::say_after) where there is a
-    /// `transcript`, handing each sentence's audio to `heard` as soon as it is made, and the whole
-    /// reading back at the end -- the sentences end to end, the same samples `say` makes. `heard`
-    /// asking to stop stops the reading as `report` does.
+    /// `transcript`, streamed as upstream's `stream=True` streams it: each hop of tokens -- see
+    /// [`stream`] -- sounded and handed to `heard` while the language model goes on saying the
+    /// rest, and the whole reading back at the end, the parts end to end. `heard` asking to stop
+    /// stops the reading as `report` does.
     ///
-    /// A sentence is a piece of `frontend::sentences`: 60 to 80 characters of Chinese, or tokens of
-    /// anything else. The first is heard once it alone is said and sounded, however long the text.
+    /// The flow draws each hop over everything said in the sentence so far, with the DiT's
+    /// attention in blocks so that what it drew before does not move, and the vocoder sounds the
+    /// sentence's mel so far and hands over what it had not, short of the eight frames at the end
+    /// it would sound differently once it has the frames after them. The last of a sentence is
+    /// drawn as `say` draws it, every frame seeing every other -- upstream's `token2wav` is not
+    /// handed `stream` for it -- and sounded to the end. So it is not the sound `say` makes, but
+    /// another reading of the same tokens.
+    ///
+    /// Refused before anything is said where it cannot be done: at a speed, which upstream does
+    /// not stream either, or where the DiT's attention in blocks has no kernel -- anywhere but
+    /// CUDA at half on Ampere or later.
     pub fn say_streaming(
         &self,
         text: &str,
@@ -484,7 +501,40 @@ impl CosyVoice3 {
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
         heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
+        // Every speed but one: zero, a negative one and NaN too, which `say` reads at one rather
+        // than refusing, but a streaming reading promises to refuse.
+        if !options.speed.is_finite() || (options.speed - 1.0).abs() > 1e-6 {
+            return Err(Error::model(
+                "a streaming reading is at the speed it is said: upstream does not stream at \
+                 another, and a hop stretched on its own would not meet the next",
+            ));
+        }
+        self.streams()?;
         self.read(text, transcript, reference, options, report, Some(heard))
+    }
+
+    /// Whether the DiT's attention in blocks runs here, tried on a block of nothing at the type
+    /// the DiT runs at. Only CUDA's kernel takes blocks, and only at half on Ampere or later.
+    fn streams(&self) -> Result<()> {
+        let config = self.flow.config();
+        let dtype = self.precision.flow;
+        let probe = || -> Result<Tensor> {
+            Ok(Tensor::zeros(
+                &[1, 1, config.block, config.head_dim],
+                DType::Float,
+                self.device,
+            )?
+            .cast(dtype)?)
+        };
+        let (q, kv) = (probe()?, probe()?);
+        match F::attention(&q, &kv, &kv, MaskType::BlockCausal(config.block)) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(Error::model(format!(
+                "a streaming reading draws with the DiT's attention in blocks, which nothing \
+                 runs on {:?} at {dtype:?}: only CUDA does, at half, on Ampere or later ({error})",
+                self.device
+            ))),
+        }
     }
 
     fn read(
@@ -579,7 +629,8 @@ impl CosyVoice3 {
                        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>|
          -> Result<Option<Vec<i32>>> {
             self.lm
-                .generate(ids, prompt, own, &sampling, &mut sampler, &mut |count| {
+                .generate(ids, prompt, own, &sampling, &mut sampler, &mut |said| {
+                    let count = said.len() as i32;
                     report(SpeechProgress::Saying {
                         done: done + count,
                         expected: expected.max(done + count),
@@ -604,10 +655,11 @@ impl CosyVoice3 {
                 return Ok(None);
             }
             for said in &said_all {
-                if said.is_empty() {
+                let kept = Silence::kept(said);
+                if kept.is_empty() {
                     continue;
                 }
-                samples.extend(self.sound(said, reference, options.speed)?);
+                samples.extend(self.sound(&kept, reference, options.speed)?);
                 if report(SpeechProgress::Sounding).is_break() {
                     return Ok(None);
                 }
@@ -615,27 +667,67 @@ impl CosyVoice3 {
             return Ok(Some(Sound::new(samples, RATE)));
         };
 
-        // Each piece sounded as soon as it is said and handed over, so that the first is heard
-        // after one piece rather than after all of them, and the bar goes from saying to sounding
-        // once a piece. The samples are the same as the order above makes: the sampler draws from
-        // the host's generator and the vocoder's noise from the device's, so neither moves the
-        // other by going first.
+        // Each piece streamed as it is said: a hop sounded and handed over each time the language
+        // model has said enough for one, inside its report, and the rest once it stops. The hop
+        // is kept from one piece to the next. The sampler draws from the host's generator and the
+        // vocoder's noise from the device's, so neither moves the other by going first.
+        let mut hops = Hops::default();
         for (ids, own) in &readings {
-            let Some(said) = say(ids, *own, done, report)? else {
+            let mut part = Streaming::new(self, reference, &hops);
+            let mut seen = 0;
+            let mut failed: Option<Error> = None;
+            let said =
+                self.lm
+                    .generate(ids, prompt, *own, &sampling, &mut sampler, &mut |said| {
+                        let count = said.len() as i32;
+                        let progress = SpeechProgress::Saying {
+                            done: done + count,
+                            expected: expected.max(done + count),
+                        };
+                        if report(progress).is_break() {
+                            return ControlFlow::Break(());
+                        }
+                        for token in &said[seen..] {
+                            part.hear(*token);
+                        }
+                        seen = said.len();
+
+                        let Some(reads) = part.due(&hops) else {
+                            return ControlFlow::Continue(());
+                        };
+                        if report(SpeechProgress::Sounding).is_break() {
+                            return ControlFlow::Break(());
+                        }
+                        match part.hop(reads, &mut hops) {
+                            Ok(sound) => {
+                                samples.extend_from_slice(&sound.samples);
+                                heard(&sound)
+                            }
+                            Err(error) => {
+                                failed = Some(error);
+                                ControlFlow::Break(())
+                            }
+                        }
+                    })?;
+            if let Some(error) = failed {
+                return Err(error);
+            }
+            let Some(said) = said else {
                 return Ok(None);
             };
             done += said.len() as i32;
-            if said.is_empty() {
+
+            if part.kept().is_empty() {
                 continue;
             }
             if report(SpeechProgress::Sounding).is_break() {
                 return Ok(None);
             }
-            let part = Sound::new(self.sound(&said, reference, options.speed)?, RATE);
-            if heard(&part).is_break() {
+            let sound = part.finish()?;
+            samples.extend_from_slice(&sound.samples);
+            if heard(&sound).is_break() {
                 return Ok(None);
             }
-            samples.extend_from_slice(&part.samples);
         }
         Ok(Some(Sound::new(samples, RATE)))
     }
@@ -676,6 +768,195 @@ impl CosyVoice3 {
         )?;
         let wave = self.hift.forward(&mel, &noise)?;
         Self::host(&wave)
+    }
+}
+
+/// One sentence of a streaming reading: what the flow has been handed of what was said, what it
+/// drew of it, and how much of that the vocoder has handed over -- upstream's `hift_cache_dict`.
+///
+/// [`CosyVoice3::say_streaming`] runs one a sentence, handing it the language model's tokens as
+/// they are said. It is public so that a test can hand it upstream's tokens and noise, or the mel
+/// upstream drew, and hear what comes out.
+pub struct Streaming<'a> {
+    tts: &'a CosyVoice3,
+    reference: &'a Reference,
+    sentence: Sentence,
+    silence: Silence,
+    /// The tokens the flow is handed.
+    kept: Vec<i32>,
+    /// The sentence's mel so far, `(1, frames, 80)` on the device.
+    mel: Option<Tensor>,
+    /// How many samples of it are handed over.
+    handed: usize,
+    /// The vocoder's noise, `(1, samples, 9)`: drawn as it is needed and never again, so that the
+    /// samples it sounds again are sounded from the same noise -- as upstream's `SineGen2` draws
+    /// one buffer when it is built and reads every sentence from its start.
+    noise: Option<Tensor>,
+    /// Whether the noise was handed in, and is not to be drawn more of.
+    noise_given: bool,
+}
+
+/// The frames at the end of a mel the vocoder sounds differently once it has the frames after
+/// them: three its pitch reads ahead, four its first convolution does, and the last its inverse
+/// transform overlaps. Upstream's `finalize=False` cuts them off; with every convolution after
+/// those two reading only behind, the rest is what the whole sounds.
+pub const UNSETTLED: i32 = 8;
+
+impl<'a> Streaming<'a> {
+    /// A sentence continuing `reference`, at the hop `hops` is at.
+    pub fn new(tts: &'a CosyVoice3, reference: &'a Reference, hops: &Hops) -> Streaming<'a> {
+        Streaming {
+            tts,
+            reference,
+            sentence: hops.sentence(reference.tokens.len()),
+            silence: Silence::default(),
+            kept: Vec::new(),
+            mel: None,
+            handed: 0,
+            noise: None,
+            noise_given: false,
+        }
+    }
+
+    /// The vocoder's noise handed in, `(1, samples, 9)` uniform on the device, for as many samples
+    /// as the sentence will be.
+    pub fn with_noise(mut self, noise: Tensor) -> Streaming<'a> {
+        self.noise = Some(noise);
+        self.noise_given = true;
+        self
+    }
+
+    /// One more token the language model said.
+    pub fn hear(&mut self, token: i32) {
+        if self.silence.keeps(token) {
+            self.kept.push(token);
+        }
+    }
+
+    /// What the flow is handed of what was said.
+    pub fn kept(&self) -> &[i32] {
+        &self.kept
+    }
+
+    /// The sentence's mel so far, `(1, frames, 80)`.
+    pub fn mel(&self) -> Option<&Tensor> {
+        self.mel.as_ref()
+    }
+
+    /// How many of the kept tokens the next hop reads, where one is due.
+    pub fn due(&self, hops: &Hops) -> Option<usize> {
+        self.sentence.due(hops, self.kept.len())
+    }
+
+    /// The hop that ends `reads` tokens in, less the look-ahead -- [`Streaming::due`]'s answer --
+    /// drawn in blocks, and what the vocoder has settled of the sentence so far.
+    pub fn hop(&mut self, reads: usize, hops: &mut Hops) -> Result<Sound> {
+        let tts = self.tts;
+        let condition = tts.flow.condition(
+            &self.reference.tokens,
+            &self.kept[..reads],
+            &self.reference.speaker,
+        )?;
+        let ratio = tts.flow.config().token_mel_ratio;
+        let frames = (self.reference.tokens.len() + reads - LOOKAHEAD) as i32 * ratio;
+        let mel = tts.flow.draw_in_blocks(
+            &condition.prefix(frames)?,
+            &self.reference.mel,
+            tts.settings.diffusion_steps,
+            tts.settings.cfg_rate,
+        )?;
+        let new = self.unsounded(&mel)?;
+        self.sentence.sounded_hop(hops);
+        self.sound(&new, false)
+    }
+
+    /// Everything kept after the last hop, drawn as `say` draws it, and the sentence sounded to
+    /// its end.
+    pub fn finish(&mut self) -> Result<Sound> {
+        if self.kept.len() <= self.sentence.sounded() {
+            return self.sound_nothing_more();
+        }
+        let tts = self.tts;
+        let condition =
+            tts.flow
+                .condition(&self.reference.tokens, &self.kept, &self.reference.speaker)?;
+        let mel = tts.flow.draw(
+            &condition,
+            &self.reference.mel,
+            tts.settings.diffusion_steps,
+            tts.settings.cfg_rate,
+        )?;
+        let new = self.unsounded(&mel)?;
+        self.sound(&new, true)
+    }
+
+    /// The frames of `mel` -- all the sentence's, drawn again -- from the first not yet sounded:
+    /// upstream's `tts_mel[:, :, token_offset * token_mel_ratio:]`.
+    fn unsounded(&self, mel: &Tensor) -> Result<Tensor> {
+        let from = self.sentence.sounded() as i32 * self.tts.flow.config().token_mel_ratio;
+        Ok(mel.slice(1, from, mel.shape_at(1)?)?.contiguous()?)
+    }
+
+    fn sound_nothing_more(&mut self) -> Result<Sound> {
+        match self.mel.is_some() {
+            true => self.vocode(true),
+            false => Ok(Sound::new(Vec::new(), RATE)),
+        }
+    }
+
+    /// `new` frames of mel `(1, frames, 80)` after the sentence's so far, and the samples of the
+    /// whole the vocoder had not handed over: up to the end where `last`, and short of the
+    /// [`UNSETTLED`] frames otherwise.
+    pub fn sound(&mut self, new: &Tensor, last: bool) -> Result<Sound> {
+        self.mel = Some(match &self.mel {
+            None => new.clone(),
+            Some(kept) => F::cat(kept, new, 1)?,
+        });
+        self.vocode(last)
+    }
+
+    fn vocode(&mut self, last: bool) -> Result<Sound> {
+        let tts = self.tts;
+        let mel = self.mel.as_ref().expect("a mel to sound");
+        let frames = mel.shape_at(1)?;
+        let samples = frames * hift::HOP as i32;
+
+        let width = hift::HARMONICS as i32;
+        let drawn = match &self.noise {
+            Some(noise) => noise.shape_at(1)?,
+            None => 0,
+        };
+        if drawn < samples {
+            if self.noise_given {
+                return Err(Error::model(format!(
+                    "{samples} samples to sound and {drawn} of noise handed in"
+                )));
+            }
+            let more = F::rand(&[1, samples - drawn, width], DType::Float, tts.device)?;
+            self.noise = Some(match &self.noise {
+                None => more,
+                Some(noise) => F::cat(noise, &more, 1)?,
+            });
+        }
+        let noise = self
+            .noise
+            .as_ref()
+            .expect("drawn above")
+            .slice(1, 0, samples)?
+            .contiguous()?;
+
+        let wave = tts
+            .hift
+            .forward(&mel.transpose(1, 2)?.contiguous()?, &noise)?;
+        let settled = match last {
+            true => frames,
+            false => (frames - UNSETTLED).max(0),
+        } as usize
+            * hift::HOP;
+        let start = self.handed.min(settled);
+        let wave = wave.slice(0, start as i32, settled as i32)?;
+        self.handed = settled.max(self.handed);
+        Ok(Sound::new(CosyVoice3::host(&wave)?, RATE))
     }
 }
 
@@ -740,7 +1021,7 @@ impl Voice for CosyVoice3 {
         self.say(text, &reference, options, report)
     }
 
-    /// A sentence at a time: see [`CosyVoice3::say_streaming`].
+    /// A hop of tokens at a time: see [`CosyVoice3::say_streaming`].
     fn speak_streaming(
         &self,
         text: &str,

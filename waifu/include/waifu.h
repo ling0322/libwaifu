@@ -425,9 +425,11 @@ WaifuJob waifu_engine_speak_async(WaifuEngine *engine,
                                   WaifuAudioCompleteCallback on_complete);
 
 // As waifu_engine_speak_async, with each part of the audio handed to on_audio as soon as it is
-// made -- a sentence at a time for CosyVoice3, the whole reading at once for a voice with nothing
-// smaller to offer -- for a caller that plays the start while the rest is said. on_complete still
-// gets the whole of it, the parts end to end. Cancelling stops it after the part it is on.
+// made, while the rest is still being said -- CosyVoice3's a hop of tokens at a time, as
+// upstream's stream=True -- for a caller that plays the start while the rest is said. on_complete
+// still gets the whole of it, the parts end to end. A voice that cannot stream, or a reading it
+// cannot stream, is refused, and on_complete hears why. Cancelling stops it after the part it is
+// on.
 WaifuJob waifu_engine_speak_stream_async(WaifuEngine *engine,
                                          const WaifuSpeakRequest *request,
                                          void *user_data,

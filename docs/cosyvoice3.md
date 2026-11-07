@@ -123,20 +123,46 @@ word for word: happy, sad and angry, fast and slow, loud and soft, Peppa Pig, a 
 seventeen dialects. Those are what the model was taught; other wording is taken and is a guess. A
 style and a transcript are refused together, because upstream never combines them.
 
-### A sentence at a time
+### Streaming
 
 [`CosyVoice3::say_streaming`](../waifu/src/cosyvoice3/mod.rs) -- under it `Voice::speak_streaming`,
-`Engine::speak_streaming` and `waifu_engine_speak_stream_async` ([ffi.md](ffi.md)) -- hands each
-piece's audio over as soon as it is sounded, and the whole reading at the end. A piece is said,
-sounded and handed over before the next is said, so the first is heard once one piece alone is
-done, however long the text: on the RTX 5060 Ti, 18.5 s of audio at 3.3 s into a reading of three
-sentences that takes 5.8 s whole. `say` says every piece before it sounds any, the order the
-progress bar's two stages assume.
+`Engine::speak_streaming` and `waifu_engine_speak_stream_async` ([ffi.md](ffi.md)) -- is
+upstream's `stream=True`: the audio is handed over a hop of tokens at a time while the language
+model goes on saying the rest, and the whole reading at the end.
+[`stream`](../waifu/src/cosyvoice3/stream.rs) says when:
 
-The samples are the same either way, to the bit: the sampler draws from the host's generator and
-HiFT's noise from the device's, so the order the two take turns in moves neither. Upstream's own
-streaming -- 25 tokens at a time inside a sentence, its DiT under a block-causal mask -- is not
-here yet.
+- **A hop** is 25 tokens, doubling each time to at most 100, kept across the sentences of a
+  reading as upstream keeps `token_hop_len` (upstream keeps it across readings too; this starts
+  every reading at 25). The first of a sentence is longer by however many tokens bring the
+  recording's up to a multiple of the hop, so every hop starts on a block of the DiT's attention.
+  A hop is drawn once three tokens past it are said: the look-ahead the flow's condition reads.
+- **The flow** draws everything said in the sentence so far, prompt and all, with the DiT's
+  attention in blocks of 50 frames counted from the prompt's first (`Flow::draw_in_blocks`, under
+  it flint's `attention(q, k, v, 50)`), and keeps the frames after the last hop. A frame there is
+  drawn from nothing after its own block, so what was drawn before does not move. The condition is
+  the whole one's rows less the look-ahead -- the same rows upstream's `finalize=False` builds by
+  handing the three tokens over as context. The last of a sentence is drawn every frame seeing
+  every other: upstream's `tts` does not hand `token2wav` its `stream` for that one.
+- **HiFT** sounds the sentence's mel so far and hands over what it had not, short of the last
+  eight frames -- three its pitch reads ahead, four its first convolution, one its inverse
+  transform -- which upstream's `finalize=False` cuts off and the next hop sounds. Every
+  convolution after those reads only behind, so this is the whole run's start. Its noise is drawn
+  once a sentence and only made longer, as upstream's `SineGen2` reads one buffer from its start.
+- **Silent tokens**: `llm_job` hands the flow at most five of upstream's eleven silent and breath
+  tokens in a row; the language model goes on reading the rest. Every reading does this, streaming
+  or not.
+
+It is another reading of the same tokens, not `say`'s samples: the blocks change what the DiT
+draws. The flow redraws the whole sentence every hop, as upstream does -- at most a prompt of 30 s
+and a sentence of about 20, so a hop takes at most about a second -- and the language model waits
+while it does. On the RTX 5060 Ti, with the 9.1 s recording and 23 s of Chinese, the first 1.76 s
+are handed over 0.59 s in, and every later part before the one ahead of it has finished playing;
+the reading takes 8.8 s, where `say` takes 5.0. `say` takes 3.3 s to its first sentence, which a reading a sentence
+at a time used to start with.
+
+Streaming is refused before anything is said where it cannot be done: at a speed other than one,
+which upstream refuses too, or where no attention kernel takes blocks -- anywhere but CUDA at half,
+on Ampere or later. It is not a reading a sentence at a time instead.
 
 ## Voice conversion
 
@@ -206,6 +232,8 @@ agrees, but a run that reads anything else needs it.)
 | reading length, eight seeds | mean 205 tokens against upstream's 212 |
 | **half** language model, teacher-forced over 231 tokens | at the token said, 4.0e-3 mean and 1.7e-2 worst; the same likeliest token in 99.6% of rows |
 | **half** flow, ten-step mel | 2.9e-1 max, 1.9e-2 mean |
+| streaming: hops, and HiFT on upstream's mel a hop at a time | four parts of upstream's lengths to the sample; 71.8, 61.6, 51.3 and 34.0 dB |
+| **half** streaming flow, the sentence's mel | 8.4e-1 max, 1.8e-2 mean |
 
 The tests read the precision off `models/cosyvoice3.yaml` and hold each to its own bounds: a
 float32 package to the rows above it, the published half one at 0.01 mean and 0.05 worst at the
@@ -238,7 +266,8 @@ float32 takes 861.
 
 ## Not here
 
-Streaming inside a sentence (upstream's `stream=True`), and a place on the page to type the
-recording's transcript.
+Streaming anywhere but CUDA: Metal's attention kernel does not take blocks yet. A DiT that draws
+only each new hop, keeping what it computed of the frames before, rather than all of them again.
+A place on the page to type the recording's transcript.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
 are the zero-shot path's with a different prefix.

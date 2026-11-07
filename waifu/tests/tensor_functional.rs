@@ -468,8 +468,10 @@ fn resizes_the_last_dimension_the_way_torch_interpolate_does() {
 fn a_block_mask_is_refused_where_no_kernel_takes_it() {
     use waifu::flint::MaskType;
 
-    let q = F::rand(&[1, 2, 8, 16], DType::Float, Device::Cpu).unwrap();
-    let longer = F::rand(&[1, 2, 12, 16], DType::Float, Device::Cpu).unwrap();
+    // Zeros, not a draw: the values do not matter here, and a draw would move the generator under
+    // a test that holds `GENERATOR` to seed it and draw.
+    let q = Tensor::zeros(&[1, 2, 8, 16], DType::Float, Device::Cpu).unwrap();
+    let longer = Tensor::zeros(&[1, 2, 12, 16], DType::Float, Device::Cpu).unwrap();
 
     // The processor has the composition, which takes none and causal and no block mask.
     assert!(F::attention(&q, &q, &q, MaskType::None).is_ok());
