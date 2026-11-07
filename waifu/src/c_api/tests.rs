@@ -289,6 +289,104 @@ fn a_voice_is_loaded_and_speaks_through_the_c_api() {
     }
 }
 
+unsafe extern "C" fn on_transcript(
+    user_data: *mut c_void,
+    event: *const WaifuTranscriptCompletionEvent,
+) {
+    let event = &*event;
+    // Text and language are both there or both NULL.
+    assert_eq!(event.text.is_null(), event.language.is_null());
+    let _ = sender(user_data).send(Heard::Complete(event.status.code, text(event.text)));
+}
+
+#[test]
+fn a_transcription_is_refused_at_the_door_or_by_what_is_loaded() {
+    unsafe {
+        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
+        assert!(!engine.is_null(), "{}", last_error());
+        let (send, heard) = a_channel();
+
+        // No samples: refused at the call.
+        let empty = WaifuAudio {
+            samples: ptr::null(),
+            count: 0,
+            rate: 16000,
+        };
+        let request = WaifuTranscribeRequest {
+            struct_size: std::mem::size_of::<WaifuTranscribeRequest>() as u32,
+            audio: &empty,
+            language: ptr::null(),
+            context: ptr::null(),
+        };
+        let job = waifu_engine_transcribe_async(
+            engine,
+            &request,
+            user_data(&send),
+            Some(on_progress),
+            Some(on_transcript),
+        );
+        assert_eq!(job, 0);
+        assert!(last_error().contains("empty"), "{}", last_error());
+
+        // No recording at all.
+        let null = WaifuTranscribeRequest {
+            audio: ptr::null(),
+            ..request
+        };
+        assert_eq!(
+            waifu_engine_transcribe_async(engine, &null, user_data(&send), None, None),
+            0
+        );
+        assert!(last_error().contains("audio"), "{}", last_error());
+        assert!(heard.recv_timeout(Duration::from_millis(100)).is_err());
+
+        // A voice cannot write a recording down: said at the end, with no text.
+        let (send, heard) = a_channel();
+        let job = waifu_engine_load_async(
+            engine,
+            c"tones".as_ptr(),
+            user_data(&send),
+            None,
+            Some(on_complete),
+        );
+        assert_ne!(job, 0);
+        assert_eq!(
+            the_end(&heard),
+            Heard::Complete(WaifuStatusCode::WAIFU_OK, None)
+        );
+
+        let second = vec![0.0f32; 16000];
+        let audio = WaifuAudio {
+            samples: second.as_ptr(),
+            count: second.len(),
+            rate: 16000,
+        };
+        let request = WaifuTranscribeRequest {
+            audio: &audio,
+            language: c"English".as_ptr(),
+            context: c"".as_ptr(),
+            ..request
+        };
+        let (send, heard) = a_channel();
+        assert_ne!(
+            waifu_engine_transcribe_async(
+                engine,
+                &request,
+                user_data(&send),
+                None,
+                Some(on_transcript)
+            ),
+            0
+        );
+        assert_eq!(
+            the_end(&heard),
+            Heard::Complete(WaifuStatusCode::WAIFU_ERR_NOT_LOADED, None)
+        );
+
+        waifu_engine_free(engine);
+    }
+}
+
 #[test]
 fn freeing_the_engine_ends_every_job_it_had() {
     unsafe {

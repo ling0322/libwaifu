@@ -225,9 +225,10 @@ typedef enum {
     WAIFU_STAGE_ENCODING,    // the prompt, or the picture img2img starts from
     WAIFU_STAGE_DRAWING,     // done/total in steps
     WAIFU_STAGE_DECODING,
-    WAIFU_STAGE_LISTENING,   // a conversion reading its recordings
+    WAIFU_STAGE_LISTENING,   // a conversion or a transcription reading its recordings
     WAIFU_STAGE_SAYING,      // done/total in tokens; total is an estimate and can be passed
     WAIFU_STAGE_SOUNDING,    // the vocoder
+    WAIFU_STAGE_WRITING,     // a transcription's words: done/total in tokens, total an estimate
 } WaifuStage;
 
 typedef struct {
@@ -494,6 +495,35 @@ WaifuJob waifu_engine_voice_conversion_async(WaifuEngine *engine,
                                              WaifuProgressCallback on_progress,
                                              WaifuAudioCompleteCallback on_complete);
 
+typedef struct {
+    uint32_t struct_size;
+    const WaifuAudio *audio;      // any rate, any length: resampled and cut by the engine
+    const char *language;         // a name from the description's `languages`, any case;
+                                  // NULL or "" for the model to tell
+    const char *context;          // names, terms, what it is about; NULL or "" for none
+} WaifuTranscribeRequest;
+
+typedef struct {
+    WaifuStatus status;
+    const char *text;             // UTF-8; "" where nothing was said. NULL unless WAIFU_OK
+    const char *language;         // "Chinese", or "Chinese,English" for a long recording that
+                                  // changes; "" where none was heard. NULL unless WAIFU_OK
+} WaifuTranscriptCompletionEvent;
+
+typedef void (*WaifuTranscriptCompleteCallback)(void *user_data,
+                                                const WaifuTranscriptCompletionEvent *event);
+
+// Writes down what is said in a recording, with a model that does that loaded (Qwen3-ASR): the
+// speech2text task. Progress is LISTENING while the recording is heard, once per twenty-minute
+// piece, then WRITING with done/total in tokens; `words` says which. An empty recording is
+// refused at the call; a language the model does not know ends with WAIFU_ERR_MODEL, naming the
+// ones it does.
+WaifuJob waifu_engine_transcribe_async(WaifuEngine *engine,
+                                       const WaifuTranscribeRequest *request,
+                                       void *user_data,
+                                       WaifuProgressCallback on_progress,
+                                       WaifuTranscriptCompleteCallback on_complete);
+
 // A picture as rows of RGBA, not premultiplied: what img2layers takes and gives.
 typedef struct {
     uint32_t width, height;
@@ -542,9 +572,10 @@ WaifuJob waifu_engine_layers_async(WaifuEngine *engine,
                                    WaifuLayersCompleteCallback on_complete);
 ```
 
-Cancelled jobs get `on_complete` with `WAIFU_CANCELLED` and a NULL image, audio or layers: there
-is no half an image, no half a recording, and no half a document. What a layers event points at --
-the layers, their names and pixels, both documents -- is valid until `on_complete` returns.
+Cancelled jobs get `on_complete` with `WAIFU_CANCELLED` and a NULL image, audio, layers or text:
+there is no half an image, no half a recording, no half a document and no half a transcript. What
+a layers event points at -- the layers, their names and pixels, both documents -- and a
+transcript's two strings are valid until `on_complete` returns.
 
 A caller that changes the layers -- renames one, gives it another depth and so another place --
 writes the documents again with the same writer img2layers uses. It needs no engine and returns at
@@ -628,7 +659,8 @@ one to describe. `directory` is where its packages are, once any of them is: nul
 `versioned_name` is `name` with its version, the alias followed: what a picture's record calls the
 model.
 
-`kind` is `image`, `speech` or `conversion`; a model that does two is listed twice.
+`kind` is `image`, `speech`, `conversion`, `layers` or `transcription`; a model that does two is
+listed twice.
 
 `waifu_describe_json` -- what a request for the model may hold, under one object with a `kind`.
 `name` is the path it was asked with and `full_name` the manifest's file name; what the catalogue
@@ -659,6 +691,16 @@ so that a window shows only the boxes that do something:
 A request that asks for more than this anyway ends with `WAIFU_ERR_MODEL` and the same sentence.
 Everything else a request says -- size, steps, guidance, the negative prompt -- is run as given.
 
+A model that writes down a recording is `kind` `transcription`, with the rate it hears at -- a
+recording at any other is resampled, so this is for saying rather than matching -- and the
+languages a request may name, read from the manifest:
+
+```json
+{ "kind": "transcription", "kinds": ["transcription"], "name": ".../qwen3-asr.yaml",
+  "full_name": "Qwen3-ASR", "on_disk": true, "bytes": 1576000000, "rate": 16000,
+  "languages": ["Chinese", "English", "Cantonese", "..."] }
+```
+
 `waifu_modelmanager_defaults_json` -- what a screen starts the boxes at: the kind of model's own
 defaults, with the manifest's `suggested:` block laid over them. For a picture model:
 
@@ -672,7 +714,8 @@ otherwise. `takes_guidance` is false for a kind with no second pass (Krea 2), or
 manifest says so, or where it suggests a guidance of 1 and says nothing else -- a screen offers
 neither a guidance nor a negative prompt then. For a voice it is `{"speed", "temperature"}`, and
 for one that also converts `{"speed", "temperature", "conversion": {"steps"}}` -- the
-`conversion` going inside `waifu_describe_json`'s.
+`conversion` going inside `waifu_describe_json`'s. For a transcriber it is
+`{"language": "", "context": ""}`: the model tells the language, and there is no context.
 
 ## Inside the engine
 
@@ -688,7 +731,7 @@ pub struct Engine {
 enum Command {
     Load { job: JobId, model: String, events: Box<dyn Events> },
     Draw { job: JobId, request: DrawRequest, events: Box<dyn Events<Image>> },
-    Speak { .. }, VoiceConversion { .. }, Layers { .. }, Unload { .. },
+    Speak { .. }, VoiceConversion { .. }, Layers { .. }, Transcribe { .. }, Unload { .. },
     Quit,
 }
 ```

@@ -39,10 +39,14 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use crate::cosyvoice3::CosyVoice3;
-use crate::describe::{self, converter_kind, voice_kind, Chosen, ConverterKind, VoiceKind, TONES};
+use crate::describe::{
+    self, converter_kind, transcriber_kind, voice_kind, Chosen, ConverterKind, TranscriberKind,
+    VoiceKind, TONES,
+};
 use crate::image_model::ImageModel;
 use crate::indextts::IndexTts;
-use crate::progress::{Convert, Doing, Run, Say, VOCODER_RATIO};
+use crate::progress::{Convert, Doing, Run, Say, Transcribing, VOCODER_RATIO};
+use crate::qwen3_asr::Qwen3Asr;
 use crate::runtime::{DeviceOption, Runtime};
 use crate::see_through::{
     Image as SeeThroughImage, SeeThrough, SeeThroughOptions, SeeThroughProgress,
@@ -50,7 +54,8 @@ use crate::see_through::{
 use crate::wav::Sound;
 use crate::{
     from_rgb8, to_rgb8, ConversionOptions, ConversionProgress, Converter, Device,
-    GenerationOptions, GenerationProgress, Manifest, SpeechOptions, SpeechProgress, Tones, Voice,
+    GenerationOptions, GenerationProgress, Manifest, SpeechOptions, SpeechProgress, Tones,
+    Transcriber, Transcript, TranscriptionOptions, TranscriptionProgress, Voice,
 };
 
 /// A job, as the engine numbers them. Never 0, which the C API keeps for a refusal.
@@ -122,6 +127,17 @@ pub struct RgbaImage {
     pub rgba: Vec<u8>,
 }
 
+/// What writing down a recording is asked for. See `WaifuTranscribeRequest` in docs/ffi.md.
+#[derive(Clone, Debug)]
+pub struct TranscribeRequest {
+    pub recording: Sound,
+    /// The language it is in, by a name the model's description lists; `None` for the model to
+    /// tell.
+    pub language: Option<String>,
+    /// Words that help it hear the recording -- names, terms, what it is about; empty for none.
+    pub context: String,
+}
+
 /// What taking a picture apart is asked for. See `WaifuLayersRequest` in docs/ffi.md.
 #[derive(Clone, Debug)]
 pub struct LayersRequest {
@@ -171,6 +187,8 @@ pub enum Stage {
     Listening,
     Saying,
     Sounding,
+    /// Writing down what a recording says: done/total in tokens, total an estimate.
+    Writing,
 }
 
 /// How far along a job is: what `on_progress` is told.
@@ -279,6 +297,11 @@ enum Work {
         on_progress: OnProgress,
         on_complete: OnComplete<Layers>,
     },
+    Transcribe {
+        request: TranscribeRequest,
+        on_progress: OnProgress,
+        on_complete: OnComplete<Transcript>,
+    },
 }
 
 impl Work {
@@ -293,6 +316,7 @@ impl Work {
                 on_complete(Ended::Cancelled)
             }
             Work::Layers { on_complete, .. } => on_complete(Ended::Cancelled),
+            Work::Transcribe { on_complete, .. } => on_complete(Ended::Cancelled),
         }
     }
 }
@@ -460,6 +484,23 @@ impl Engine {
             ));
         }
         Ok(self.submit(Work::Layers {
+            request,
+            on_progress,
+            on_complete,
+        }))
+    }
+
+    /// Writes down what is said in a recording, with a model that does that loaded.
+    pub fn transcribe(
+        &self,
+        request: TranscribeRequest,
+        on_progress: OnProgress,
+        on_complete: OnComplete<Transcript>,
+    ) -> Result<JobId, String> {
+        if request.recording.samples.is_empty() {
+            return Err("there is nothing to write down: the recording is empty".to_string());
+        }
+        Ok(self.submit(Work::Transcribe {
             request,
             on_progress,
             on_complete,
@@ -638,6 +679,8 @@ enum Loaded {
     CosyVoice(CosyVoice3),
     /// What takes a picture apart into layers.
     Layers(Box<SeeThrough>),
+    /// What writes down what a recording says.
+    Transcriber(Box<dyn Transcriber>),
 }
 
 /// What the thread keeps between jobs.
@@ -755,6 +798,12 @@ impl Reporter<'_> {
                 ),
                 SeeThroughProgress::Assembling => (Stage::Decoding, 0, 0),
             },
+            Doing::Transcribing(transcribing) => match transcribing.progress {
+                TranscriptionProgress::Listening { .. } => (Stage::Listening, 0, 0),
+                TranscriptionProgress::Writing { done, expected } => {
+                    (Stage::Writing, done.max(0) as u64, expected.max(0) as u64)
+                }
+            },
         };
 
         (self.on_progress)(&Progress {
@@ -823,6 +872,15 @@ impl Worker {
                 crate::flint::release_memory();
                 on_complete(ended);
             }
+            Work::Transcribe {
+                request,
+                mut on_progress,
+                on_complete,
+            } => {
+                let ended = guarded(|| self.transcribe(&request, &mut on_progress, &stop));
+                crate::flint::release_memory();
+                on_complete(ended);
+            }
         }
     }
 
@@ -867,6 +925,14 @@ impl Worker {
                         &manifest,
                     )?)),
                 });
+            }
+            if let Some(TranscriberKind::Qwen3Asr) = transcriber_kind(&path) {
+                let manifest = Manifest::open(&path)?;
+                return Ok(Loaded::Transcriber(Box::new(Qwen3Asr::from_manifest(
+                    device,
+                    device_weight_bytes,
+                    &manifest,
+                )?)));
             }
             if is_see_through(&path) {
                 let manifest = Manifest::open(&path)?;
@@ -1181,6 +1247,75 @@ impl Worker {
         })
     }
 
+    fn transcribe(
+        &mut self,
+        request: &TranscribeRequest,
+        on_progress: &mut OnProgress,
+        stop: &dyn Fn() -> bool,
+    ) -> Ended<Transcript> {
+        let Loaded::Transcriber(model) = &self.loaded else {
+            return Ended::failed(
+                Failure::NotLoaded,
+                "no model that writes down a recording is loaded",
+            );
+        };
+
+        let options = TranscriptionOptions {
+            language: request
+                .language
+                .as_ref()
+                .map(|language| language.trim().to_string())
+                .filter(|language| !language.is_empty()),
+            context: request.context.clone(),
+        };
+        let seconds = request.recording.samples.len() as f64 / request.recording.rate as f64;
+        info(&format!(
+            "writing down {seconds:.1}s of recording{}",
+            match &options.language {
+                Some(language) => format!(" in {language}"),
+                None => String::new(),
+            }
+        ));
+
+        let started = Instant::now();
+        let mut reporter = Reporter {
+            on_progress,
+            started,
+        };
+        let mut transcribing = Transcribing {
+            progress: TranscriptionProgress::Listening { done: 0, total: 1 },
+        };
+        reporter.tell(&Doing::Transcribing(transcribing.clone()));
+        let mut report = |progress| {
+            transcribing.progress = progress;
+            reporter.tell(&Doing::Transcribing(transcribing.clone()));
+            match stop() {
+                true => ControlFlow::Break(()),
+                false => ControlFlow::Continue(()),
+            }
+        };
+
+        match model.transcribe(&request.recording, &options, &mut report) {
+            Ok(Some(transcript)) => {
+                info(&format!(
+                    "written down in {:.1}s: {} characters{}",
+                    started.elapsed().as_secs_f64(),
+                    transcript.text.chars().count(),
+                    match transcript.language.is_empty() {
+                        true => String::new(),
+                        false => format!(", {}", transcript.language),
+                    }
+                ));
+                Ended::Done(transcript)
+            }
+            Ok(None) => {
+                info("stopped before the recording was written down");
+                Ended::Cancelled
+            }
+            Err(error) => Ended::failed(Failure::Model, error.to_string()),
+        }
+    }
+
     fn voice(&self) -> Option<&dyn Voice> {
         match &self.loaded {
             Loaded::Voice(voice) => Some(voice.as_ref()),
@@ -1371,6 +1506,20 @@ fn described(asked: &str) -> serde_json::Value {
             "name": asked,
             "full_name": describe::shown_name(asked),
             "on_disk": describe::on_disk(asked).is_some(),
+        });
+    }
+
+    // Writes down a recording: what a request for it may name is a language from its list.
+    if describe::is_a_transcriber(asked) {
+        let transcriber = describe::look_at_transcriber(asked);
+        return serde_json::json!({
+            "kind": "transcription",
+            "kinds": ["transcription"],
+            "name": transcriber.name,
+            "full_name": transcriber.full_name,
+            "on_disk": transcriber.on_disk,
+            "rate": transcriber.rate,
+            "languages": transcriber.languages,
         });
     }
 
@@ -1810,6 +1959,36 @@ pub(crate) mod tests {
         assert!(reports.iter().all(|report| !report.words.is_empty()));
     }
 
+    #[test]
+    fn a_transcription_is_refused_at_the_call_or_run_by_a_transcriber() {
+        let engine = an_engine();
+        let request = |samples: Vec<f32>| TranscribeRequest {
+            recording: Sound::new(samples, 16000),
+            language: None,
+            context: String::new(),
+        };
+
+        // Nothing to write down is refused before it is queued.
+        let (progress, complete, _) = listen::<Transcript>();
+        assert!(engine
+            .transcribe(request(Vec::new()), progress, complete)
+            .unwrap_err()
+            .contains("empty"));
+
+        // A recording with no transcriber loaded -- here, a voice -- fails, saying so.
+        let (progress, complete, loaded) = listen::<()>();
+        engine.load(TONES, progress, complete);
+        assert_eq!(loaded.recv_timeout(WAIT).unwrap(), Ended::Done(()));
+        let (progress, complete, written) = listen::<Transcript>();
+        engine
+            .transcribe(request(vec![0.0; 16000]), progress, complete)
+            .unwrap();
+        match written.recv_timeout(WAIT).unwrap() {
+            Ended::Failed(Failure::NotLoaded, why) => assert!(why.contains("recording"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// A manifest of `kind` in a directory of its own, naming one weights file that is not there:
     /// what a manifest fetched on its own, or bundled with an app, looks like.
     pub(crate) fn a_manifest(stem: &str, kind: &str) -> String {
@@ -1825,6 +2004,22 @@ pub(crate) mod tests {
 
     #[test]
     fn what_a_model_is_comes_back_as_json() {
+        let manifest = a_manifest("qwen3-asr", Qwen3Asr::MODEL_TYPE);
+        std::fs::write(
+            &manifest,
+            "weights:\n  - qwen3-asr.safetensors\nconfig:\n  model:\n    type: qwen3_asr\n  \
+             qwen3_asr:\n    sample_rate: 16000\n    languages: Chinese,English\n",
+        )
+        .unwrap();
+        let asr = describe_json(&manifest).unwrap();
+        assert_eq!(asr["kind"], "transcription");
+        assert_eq!(asr["kinds"], serde_json::json!(["transcription"]));
+        assert_eq!(asr["full_name"], Qwen3Asr::NAME);
+        assert_eq!(asr["on_disk"], false);
+        assert_eq!(asr["bytes"], serde_json::Value::Null);
+        assert_eq!(asr["rate"], 16000);
+        assert_eq!(asr["languages"], serde_json::json!(["Chinese", "English"]));
+
         let sdxl = describe_json(&a_manifest("sdxl-base", "sdxl")).unwrap();
         assert_eq!(sdxl["kind"], "image");
         assert_eq!(sdxl["prompt_images"], 0);

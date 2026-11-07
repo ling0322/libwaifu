@@ -41,7 +41,7 @@ pub use support::{
 
 use crate::engine::{
     self, DrawRequest, Ended, Engine, EngineOptions, Failure, LayersRequest, RgbaImage,
-    SpeakRequest, Stage, VoiceConversionRequest,
+    SpeakRequest, Stage, TranscribeRequest, VoiceConversionRequest,
 };
 use crate::runtime::{self, DeviceOption};
 use crate::wav::Sound;
@@ -135,6 +135,7 @@ fn stage_out(stage: Stage) -> WaifuStage {
         Stage::Listening => WaifuStage::WAIFU_STAGE_LISTENING,
         Stage::Saying => WaifuStage::WAIFU_STAGE_SAYING,
         Stage::Sounding => WaifuStage::WAIFU_STAGE_SOUNDING,
+        Stage::Writing => WaifuStage::WAIFU_STAGE_WRITING,
     }
 }
 
@@ -430,6 +431,35 @@ pub struct WaifuLayersCompletionEvent {
 
 pub type WaifuLayersCompleteCallback =
     Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuLayersCompletionEvent)>;
+
+#[repr(C)]
+pub struct WaifuTranscribeRequest {
+    /// sizeof(WaifuTranscribeRequest), as the caller was compiled with.
+    pub struct_size: u32,
+    /// The recording: any rate, any length; resampled and cut into pieces by the engine.
+    pub audio: *const WaifuAudio,
+    /// The language it is in, by a name in the model's description's `languages` -- "English",
+    /// "chinese" -- or NULL or "" for the model to tell.
+    pub language: *const c_char,
+    /// Words that help it hear the recording -- names, terms, what it is about -- or NULL or "".
+    pub context: *const c_char,
+}
+
+#[repr(C)]
+pub struct WaifuTranscriptCompletionEvent {
+    pub status: WaifuStatus,
+    /// What was said, UTF-8; NULL unless status.code is WAIFU_OK, and "" for a recording with
+    /// nothing said in it.
+    pub text: *const c_char,
+    /// The language it was said in, as the model names it -- "Chinese" -- or several, comma
+    /// separated, for a long recording that changes; "" where none was heard. NULL unless
+    /// status.code is WAIFU_OK.
+    pub language: *const c_char,
+}
+
+pub type WaifuTranscriptCompleteCallback = Option<
+    unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuTranscriptCompletionEvent),
+>;
 
 /// How an engine is started. Zeroed, apart from struct_size, it is waifu_engine_new on
 /// WAIFU_DEVICE_AUTO.
@@ -987,6 +1017,67 @@ pub unsafe extern "C" fn waifu_engine_layers_async(
             })
         };
         engine.engine.layers(
+            request,
+            progress_to(&gate, user_data, on_progress),
+            on_complete,
+        )
+    })
+}
+
+// -- transcription ---------------------------------------------------------------------------
+
+/// Writes down what is said in a recording, with a model that does that loaded.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_engine_transcribe_async(
+    engine: *mut WaifuEngine,
+    request: *const WaifuTranscribeRequest,
+    user_data: *mut c_void,
+    on_progress: WaifuProgressCallback,
+    on_complete: WaifuTranscriptCompleteCallback,
+) -> WaifuJob {
+    let gate = Gate::default();
+    submitted(&gate, || {
+        let engine = engine.as_ref().ok_or("the engine is NULL")?;
+        let size = request.as_ref().map_or(0, |request| request.struct_size);
+        let request = request_in(request, size, "WaifuTranscribeRequest")?;
+        let request = TranscribeRequest {
+            recording: audio_in(request.audio, "audio")?,
+            language: string_in(request.language, "language")?,
+            context: string_in(request.context, "context")?.unwrap_or_default(),
+        };
+
+        let user_data = UserData(user_data);
+        let on_complete = {
+            let gate = gate.clone();
+            Box::new(move |ended: Ended<crate::Transcript>| {
+                let Some(callback) = on_complete else {
+                    return;
+                };
+                gate.wait();
+                let (code, message) = status_of(&ended);
+                // Kept here until the callback returns, NUL terminated.
+                let text =
+                    |words: &str| CString::new(words.replace('\0', "")).expect("NULs are removed");
+                let strings = match &ended {
+                    Ended::Done(transcript) => {
+                        Some((text(&transcript.text), text(&transcript.language)))
+                    }
+                    _ => None,
+                };
+                let event = WaifuTranscriptCompletionEvent {
+                    status: status(code, &message),
+                    text: strings
+                        .as_ref()
+                        .map_or(ptr::null(), |(words, _)| words.as_ptr()),
+                    language: strings
+                        .as_ref()
+                        .map_or(ptr::null(), |(_, language)| language.as_ptr()),
+                };
+                let user_data = user_data;
+                unsafe { callback(user_data.0, &event) };
+            })
+        };
+        engine.engine.transcribe(
             request,
             progress_to(&gate, user_data, on_progress),
             on_complete,

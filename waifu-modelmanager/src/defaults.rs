@@ -154,7 +154,8 @@ fn suggestions(top: &BTreeMap<String, Node>) -> Suggestions {
 ///   and `avoid`;
 /// - a voice: `speed` and `temperature`, and a `conversion` holding `steps` for one that also
 ///   converts;
-/// - a model that takes a picture apart: `steps`, `depth_steps` and `resolution`.
+/// - a model that takes a picture apart: `steps`, `depth_steps` and `resolution`;
+/// - a model that writes down a recording: `language`, "" for the model to tell, and `context`.
 ///
 /// None for anything that is not a manifest on the disk.
 pub fn defaults_json(asked: &str) -> Option<Value> {
@@ -176,6 +177,8 @@ pub fn defaults_json(asked: &str) -> Option<Value> {
                 "conversion": { "steps": 10 },
             }))
         }
+        // Upstream's own: no language, for the model to tell, and no context.
+        "qwen3_asr" => return Some(json!({ "language": "", "context": "" })),
         // What the package was exported to run at, where it says, and upstream's numbers where
         // it does not.
         "see_through" => {
@@ -276,6 +279,12 @@ mod tests {
 
         let krea2 = defaults_json(&a_manifest("krea2", "krea2", "")).unwrap();
         assert_eq!(krea2["takes_guidance"], false);
+    }
+
+    #[test]
+    fn a_transcriber_starts_with_no_language_and_no_context() {
+        let asr = defaults_json(&a_manifest("qwen3-asr", "qwen3_asr", "")).unwrap();
+        assert_eq!(asr, json!({ "language": "", "context": "" }));
     }
 
     #[test]
