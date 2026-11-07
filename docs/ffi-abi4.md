@@ -141,7 +141,7 @@ typedef enum {
   WAIFU_DEVICE_MEMORY_BUDGET = 1,     // the most it may hold there: the memory limit, or the device's memory
   WAIFU_DEVICE_MEMORY_HELD = 2,       // what its allocator holds now, what it keeps for reuse included
   WAIFU_DEVICE_MEMORY_AVAILABLE = 3,  // BUDGET - HELD, never below 0
-  WAIFU_DEVICE_MEMORY_LIMIT = 4,      // what waifu_set_memory_limit set; absent where nothing did
+  WAIFU_DEVICE_MEMORY_LIMIT = 4,      // what waifu_device_set_memory_limit set; absent where nothing did
 } WaifuDeviceProperty;
 
 typedef enum {
@@ -180,7 +180,7 @@ bool waifu_device_get_int_property(WaifuDevice device, WaifuDeviceProperty prope
 
 // For the whole process, one per device, shared by every pipeline on it: set it before a model is
 // loaded. 0 for no limit but the device's. The processor has none, and is refused.
-bool waifu_set_memory_limit(WaifuDevice device, uint64_t bytes);
+bool waifu_device_set_memory_limit(WaifuDevice device, uint64_t bytes);
 
 /* -- models -------------------------------------------------------------------------------- */
 
@@ -206,8 +206,8 @@ typedef struct WaifuPipeline WaifuPipeline;
 WaifuPipeline *waifu_pipeline_new(WaifuPipelineType type, WaifuDevice device);
 // Stops what runs, cancels what waits, drops the model and joins the thread.
 void waifu_pipeline_free(WaifuPipeline *pipeline);
-WaifuPipelineType waifu_pipeline_type(const WaifuPipeline *pipeline);
-WaifuDevice waifu_pipeline_device(const WaifuPipeline *pipeline);   // never AUTO
+WaifuPipelineType waifu_pipeline_get_type(const WaifuPipeline *pipeline);
+WaifuDevice waifu_pipeline_get_device(const WaifuPipeline *pipeline);   // never AUTO
 
 /* -- jobs ---------------------------------------------------------------------------------- */
 
@@ -388,7 +388,7 @@ WaifuJob waifu_pipeline_run_layer_decomposition_async(WaifuPipeline *pipeline,
 |---|---|
 | `WaifuEngine`, `waifu_engine_new`, `waifu_engine_new_with_options`, `WaifuEngineOptions` | `WaifuPipeline`, `waifu_pipeline_new(type, device)` |
 | `waifu_engine_free`, `_cancel`, `_cancel_all` | `waifu_pipeline_free`, `_cancel`, `_cancel_all` |
-| `waifu_engine_device` returns `char *` | `waifu_pipeline_device` returns `WaifuDevice`; `waifu_pipeline_type` |
+| `waifu_engine_device` returns `char *` | `waifu_pipeline_get_device` returns `WaifuDevice`; `waifu_pipeline_get_type` |
 | `waifu_engine_load_async(engine, "path")`, `_unload_async` | `waifu_pipeline_load_model_async(pipeline, model)`, `_unload_model_async` |
 | `waifu_engine_draw_async`, `WaifuDrawRequest` | `waifu_pipeline_run_image_generation_async`, `WaifuImageGenerationRequest` |
 | `waifu_engine_speak_async`, `WaifuSpeakRequest` | `waifu_pipeline_run_text_to_speech_async`, `WaifuTextToSpeechRequest` |
@@ -398,6 +398,7 @@ WaifuJob waifu_pipeline_run_layer_decomposition_async(WaifuPipeline *pipeline,
 | `WaifuProgressEvent`, `WaifuLogEvent` | `WaifuProgress`, `WaifuLog` |
 | `waifu_describe_json` | `waifu_model_open`, `waifu_model_get_int_property`, `waifu_model_get_string_property`, `waifu_model_free` |
 | `waifu_devices_json` | `waifu_device_is_available`, `waifu_device_get_int_property` |
+| `waifu_set_memory_limit` | `waifu_device_set_memory_limit` |
 | `waifu_version_json` | `waifu_version`, `waifu_revision` |
 | `waifu_string_free` | gone: nothing returns a string to free |
 | images under the keys `"start_from"` and `"control"` | `start_image`, `control_image`; `WaifuImageInput` is `WaifuPromptImage` |
