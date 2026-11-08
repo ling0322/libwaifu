@@ -291,20 +291,24 @@ void arangeLong(int64_t begin, int64_t step, const TensorView &out) {
   getContext(out)->dispatch("arange_i64", {getArg(out)}, &params, sizeof(params), params.numel);
 }
 
-void causalMask(const TensorView &out) {
+namespace {
+
+// The square mask `out` of the keys [first(y), last(y)] each row y sees: zero there, minus
+// infinity elsewhere. Built on the host and copied in: it is small, asked for rarely, and a kernel
+// that wrote it would be one more thing to keep in step with the CPU's.
+template<typename Seen>
+void writeMask(const TensorView &out, const char *name, Seen seen) {
   if (out.getDim() != 2 || out.getShape(0) != out.getShape(1)) {
-    throw lut::InvalidArgError("causalMask writes a square matrix");
+    throw lut::InvalidArgError(lut::sprintf("%s writes a square matrix", name));
   }
-  checkFloat(out.getDType(), "causalMask");
-  checkOutput(out, out.getShape(), out.getDType(), "causalMask");
+  checkFloat(out.getDType(), name);
+  checkOutput(out, out.getShape(), out.getDType(), name);
   int length = out.getShape(0);
 
-  // Built on the host and copied in: it is small, asked for rarely, and a kernel that wrote it
-  // would be one more thing to keep in step with the CPU's.
   std::vector<float> mask(static_cast<size_t>(length) * length);
   for (int y = 0; y < length; ++y) {
     for (int x = 0; x < length; ++x) {
-      mask[static_cast<size_t>(y) * length + x] = x > y ? -INFINITY : 0.0f;
+      mask[static_cast<size_t>(y) * length + x] = seen(y, x) ? 0.0f : -INFINITY;
     }
   }
 
@@ -321,6 +325,26 @@ void causalMask(const TensorView &out) {
       getByteOffset(target),
       static_cast<int64_t>(mask.size() * sizeof(float)));
   if (!wide.empty()) copy(wide, out);
+}
+
+}  // namespace
+
+void causalMask(const TensorView &out) {
+  writeMask(out, "causalMask", [](int y, int x) { return x <= y; });
+}
+
+void blockMask(MaskType maskType, int blockSize, const TensorView &out) {
+  if (maskType != MaskType::kBlockCausal && maskType != MaskType::kBlockDiagonal) {
+    throw lut::InvalidArgError("blockMask writes a block causal or block diagonal mask");
+  }
+  if (blockSize <= 0) {
+    throw lut::InvalidArgError(lut::sprintf("blockMask: a block of %d keys", blockSize));
+  }
+  writeMask(out, "blockMask", [maskType, blockSize](int y, int x) {
+    int block = y / blockSize;
+    int first = maskType == MaskType::kBlockDiagonal ? block * blockSize : 0;
+    return x >= first && x < block * blockSize + blockSize;
+  });
 }
 
 }  // namespace metal_native

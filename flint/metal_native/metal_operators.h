@@ -148,6 +148,7 @@ class MetalOperators : public Operators {
   void cast(TensorView input, TensorView out) override;
   void transfer(TensorView src, TensorView dest) override;
   void causalMask(TensorView out) override;
+  void blockMask(MaskType maskType, int blockSize, TensorView out) override;
   void print(TensorView tensor) override;
   float elem(TensorView tensor) override;
   bool elemBool(TensorView tensor) override;

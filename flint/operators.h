@@ -350,6 +350,12 @@ class Operators {
   /// infinity above it.
   virtual void causalMask(TensorView out);
 
+  /// Write the mask of `out` <default float>(n, n) under a block mask, `maskType` kBlockCausal or
+  /// kBlockDiagonal, in blocks of `blockSize`: zero where the query at row y may see key x, minus
+  /// infinity where it may not, as MaskType has it with as many keys as queries. What the
+  /// composed attention takes a block mask with; a device without it has none there.
+  virtual void blockMask(MaskType maskType, int blockSize, TensorView out);
+
   /// Copy the elements of `src` into `dest`, both on this device and of one shape; either may
   /// have any strides.
   virtual void copy(TensorView src, TensorView dest);

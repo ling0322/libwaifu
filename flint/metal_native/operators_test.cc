@@ -920,7 +920,7 @@ CATCH_TEST_CASE("test Metal attention (block-causal mask)", "[op][metal]") {
   }
 
   // In float, at the widths the kernel has in float.
-  for (int headDim : {32, 64}) {
+  for (int headDim : {32, 64, 128}) {
     for (int keyLength : {49, 50, 51, 130, 300}) {
       CATCH_INFO("float, headDim = " << headDim << ", S = " << keyLength);
       CATCH_REQUIRE(runBlockCase(
@@ -1062,6 +1062,9 @@ CATCH_TEST_CASE("test Metal attention on the neural accelerators answers here", 
   // A GPU the tests run on that has the accelerators is one the kernel was written for: were its
   // layout another, attention would quietly run the other kernel, and every test above would pass
   // without asking the one on the accelerators anything.
+  // The same of the kernel every Metal GPU runs, which reads its simdgroup matrices' elements in
+  // the layout Apple's GPUs give them.
+  CATCH_REQUIRE(op::metal_native::plainAttentionAnswers());
   if (!op::metal_native::Context::get()->hasNax()) CATCH_SKIP("no neural accelerators here");
   CATCH_REQUIRE(op::metal_native::naxAttentionAnswers());
 }
@@ -1089,10 +1092,48 @@ CATCH_TEST_CASE("test Metal attention refuses the masks it does not define", "[o
   Tensor kf = toMetal(randn({2, 2, 37, 32}));
   CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qf, kf, kf, MaskType::kCausal, 1));
 
-  // A head the kernel was not built for goes to the composition, which has no block mask.
+  // A head the kernel was not built for goes to the composition, which on Metal makes a block
+  // mask too: see "block masks through the composition".
   Tensor q80 = toMetal(randn({1, 2, 16, 80}), DType::kFloat16);
   CATCH_REQUIRE_NOTHROW(fl::test::attention(mtl(), q80, q80, q80, MaskType::kCausal));
-  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), q80, q80, q80, MaskType::kBlockCausal, 4));
+  CATCH_REQUIRE_NOTHROW(fl::test::attention(mtl(), q80, q80, q80, MaskType::kBlockCausal, 4));
+}
+
+CATCH_TEST_CASE("test Metal attention (block masks through the composition)", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // What runs where a probe disagrees -- every attention the composition's, block masks with it --
+  // and what a head no kernel was built for runs anyway. Half and float, heads of 64 and of 80,
+  // which has no kernel; as many queries as keys, and fewer; blocks of one, of a few, and of
+  // CosyVoice3's 50.
+  struct Off {
+    Off() { op::metal_native::setFusedAttentionEnabled(false); }
+    ~Off() { op::metal_native::setFusedAttentionEnabled(true); }
+  } off;
+  for (DType dtype : {DType(DType::kFloat16), DType(DType::kFloat)}) {
+    for (int headDim : {64, 80}) {
+      for (int blockSize : {1, 7, 50}) {
+        for (int queryLength : {17, 130}) {
+          for (MaskType mask : {MaskType::kBlockCausal, MaskType::kBlockDiagonal}) {
+            int keyLength = mask == MaskType::kBlockDiagonal ? queryLength : queryLength + 37;
+            CATCH_INFO(
+                "dtype = " << dtype.toString() << ", headDim = " << headDim << ", block = "
+                           << blockSize << ", L = " << queryLength << ", S = " << keyLength
+                           << ", mask = " << static_cast<int>(mask));
+            auto drawn = [dtype](std::initializer_list<int> shape) {
+              return toMetal(fl::test::rand(Device::getCpu(), shape, DType::kFloat), dtype);
+            };
+            Tensor q = drawn({2, 4, queryLength, headDim});
+            Tensor k = drawn({2, 2, keyLength, headDim});
+            Tensor v = drawn({2, 2, keyLength, headDim});
+            Tensor reference = maskReference(toCpu(q), toCpu(k), toCpu(v), mask, blockSize);
+            float tol = dtype == DType::kFloat ? 1e-4f : 5e-3f;
+            CATCH_REQUIRE(close(fl::test::attention(mtl(), q, k, v, mask, blockSize), reference, tol, tol));
+          }
+        }
+      }
+    }
+  }
 }
 
 namespace {

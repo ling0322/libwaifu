@@ -230,9 +230,8 @@ void MetalOperators::attention(
   // Checked before the kernel, which would otherwise run a mask it does not know as no mask.
   checkAttentionMask(q, k, maskType, blockSize);
 
-  // The kernel where it takes these, and the composition where it does not. The composition has
-  // no block mask: one the kernel does not take -- a head it was not built for, bfloat16 -- is
-  // NotImplemented there.
+  // The kernel where it takes these, and the composition where it does not, block masks included:
+  // the composition makes one with blockMask.
   if (metal_native::attention(q, k, v, maskType, blockSize, out)) return;
   Operators::attention(q, k, v, maskType, blockSize, out);
 }
@@ -388,6 +387,10 @@ void MetalOperators::transfer(TensorView src, TensorView dest) {
 
 void MetalOperators::causalMask(TensorView out) {
   metal_native::causalMask(out);
+}
+
+void MetalOperators::blockMask(MaskType maskType, int blockSize, TensorView out) {
+  metal_native::blockMask(maskType, blockSize, out);
 }
 
 void MetalOperators::print(TensorView tensor) {

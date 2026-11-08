@@ -71,6 +71,9 @@ void copy(const TensorView &src, const TensorView &dest);
 void cast(const TensorView &input, const TensorView &out);
 void arangeLong(int64_t begin, int64_t step, const TensorView &out);
 void causalMask(const TensorView &out);
+/// The mask of a square `out` under a block causal or block diagonal mask; see
+/// Operators::blockMask.
+void blockMask(MaskType maskType, int blockSize, const TensorView &out);
 
 // reduce.cc
 enum class ReduceOp {
@@ -131,9 +134,8 @@ void fp8Matmul(
 /// Scaled dot product attention in one kernel, as Operators::attention has it, under `maskType`
 /// in blocks of `blockSize` keys (see MaskType), where the kernel takes these: a head of 32, 64
 /// or 128 in half precision or of 32 or 64 in float, every last dimension contiguous, and `out`
-/// contiguous. On the neural accelerators that is every length; elsewhere, a head of 128 in half
-/// with no mask or the causal one is the composition's past a few hundred keys, where it is the
-/// faster. Returns false, having done nothing, when not.
+/// contiguous -- on the neural accelerators, half alone -- at every length. Returns false, having
+/// done nothing, when not.
 bool attention(
     const TensorView &q,
     const TensorView &k,
@@ -149,6 +151,15 @@ bool attention(
 /// it only where it agrees; elsewhere kernels/attention.metal runs, with a warning in the log.
 /// Only to be asked on a GPU that has the accelerators.
 bool naxAttentionAnswers();
+
+/// The same of kernels/attention.metal, which holds its scores in simdgroup matrices and works on
+/// their elements in the layout an Apple GPU gives them: where it disagrees, attention() leaves
+/// the attention to the composition.
+bool plainAttentionAnswers();
+
+/// For tests: whether attention() runs a kernel at all, or leaves every attention to the
+/// composition, as it does where a probe disagrees.
+void setFusedAttentionEnabled(bool enabled);
 void conv2d(
     const TensorView &input,
     const TensorView &weight,

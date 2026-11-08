@@ -58,11 +58,13 @@ work goes to the GPU in batches without anyone waiting.
   `C (K, P*Q) = W (K, C*R*S) unfold(x)` -- with the unfolded input gathered a chunk at a time into
   threadgroup memory, the next chunk read into registers while the accelerators work on this one.
 - **Attention**: a fused kernel (online softmax in float, nothing written but the output) under
-  every mask: `nax_attention` on the neural accelerators, in half, heads of 32, 64 and 128, at every
-  length; elsewhere, and in float, a simdgroup-matrix kernel at every length but for a head of 128
-  in half past 256 keys, where the composition (matmul, softmax, matmul) is the faster. The
-  composition, which also takes every head the kernels were not built for -- a VAE's single one of
-  512 or 1152 -- keeps half's scores in float, since a model's can be past what half holds.
+  every mask, for heads of 32, 64 and 128: `nax_attention` on the neural
+  accelerators, in half; elsewhere, and in float, a simdgroup-matrix kernel whose softmax works on
+  the matrices' elements in registers, after MLX's steel_attention. Both are faster than the
+  composition (matmul, softmax, matmul) but over few queries and many keys -- a decode step --
+  which the composition takes. It takes every head the kernels were not built for too -- a VAE's
+  single one of 512 or 1152 -- under every mask, the block masks included, and keeps half's
+  scores in float, since a model's can be past what half holds.
 
 ## Weights on the disk
 
