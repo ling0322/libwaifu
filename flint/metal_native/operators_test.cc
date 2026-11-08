@@ -1116,6 +1116,7 @@ void checkFp8Matmul() {
   };
   std::vector<Case> cases = {
       {{37, 48}, 72},       // nothing a whole tile, nothing four wide
+      {{9, 16}, 40},        // a reduction shorter than a chunk: only the short kernel's last
       {{37, 50}, 72},       // k not a multiple of four: one element at a time
       {{128, 256}, 128},    // whole tiles, read four at a time
       {{2, 5, 64}, 96},     // a batch
@@ -1156,21 +1157,28 @@ void checkFp8Matmul() {
 
     std::vector<int> outShape = c.shapeA;
     outShape.back() = c.rows;
-    Tensor out = F::empty(Device::getMetal(), outShape, DType::kFloat16);
-    op::metal_native::fp8Matmul(
-        a,
-        fl::test::toDevice(mtl(), codes, Device::getMetal()),
-        fl::test::toDevice(mtl(), scales, Device::getMetal()),
-        out);
-    std::vector<float> got = values(out);
+    // And again with NaNs after the activation in its buffer: a kernel that reads past the end of
+    // the reduction has them in its last row.
+    for (bool nanAfter : {false, true}) {
+      CATCH_INFO("NaN after the activation: " << nanAfter);
+      Tensor input = nanAfter ? toMetalWithNaNAfter(a, DType::kFloat16) : a;
+      Tensor out = F::empty(Device::getMetal(), outShape, DType::kFloat16);
+      op::metal_native::fp8Matmul(
+          input,
+          fl::test::toDevice(mtl(), codes, Device::getMetal()),
+          fl::test::toDevice(mtl(), scales, Device::getMetal()),
+          out);
+      std::vector<float> got = values(out);
 
-    // Against the float product: what is left is the one rounding to half of the answer.
-    double err = 0, ref = 0;
-    for (size_t i = 0; i < got.size(); ++i) {
-      err += (double(got[i]) - reference[i]) * (double(got[i]) - reference[i]);
-      ref += double(reference[i]) * reference[i];
+      // Against the float product: what is left is the one rounding to half of the answer. NaN is
+      // never under the bound.
+      double err = 0, ref = 0;
+      for (size_t i = 0; i < got.size(); ++i) {
+        err += (double(got[i]) - reference[i]) * (double(got[i]) - reference[i]);
+        ref += double(reference[i]) * reference[i];
+      }
+      CATCH_CHECK(sqrt(err / ref) < 1e-3);
     }
-    CATCH_CHECK(sqrt(err / ref) < 1e-3);
   }
 }
 

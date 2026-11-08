@@ -42,9 +42,10 @@ constexpr int64_t kTile = 64;
 constexpr uint32_t kGemmThreads = 128;
 
 // And of kernels/nax/fp8.metal, whose threadgroups are as many threads: activation rows by weight
-// rows.
+// rows, and the columns of the reduction it reads at a time.
 constexpr int64_t kNaxTileM = 64;
 constexpr int64_t kNaxTileN = 128;
+constexpr int64_t kNaxTileK = 32;
 
 uint32_t ceilDiv(int64_t a, int64_t b) {
   return static_cast<uint32_t>((a + b - 1) / b);
@@ -84,10 +85,11 @@ void fp8Matmul(
   params.vecA = fours(k) && fours(a.getInternalOffset());
   params.vecB = fours(k) && fours(data.getInternalOffset());
 
-  // On the neural accelerators where there are any, with the same parameters.
+  // On the neural accelerators where there are any, with the same parameters: a reduction that is
+  // not whole chunks by the short kernel, which reads no further than it.
   if (getContext(a)->hasNax()) {
     getContext(a)->dispatchGroups(
-        "nax_fp8_matmul",
+        k % kNaxTileK == 0 ? "nax_fp8_matmul" : "nax_fp8_matmul_short",
         {getArg(out), getArg(a), getArg(data), getArg(scale)},
         &params,
         sizeof(params),
