@@ -154,6 +154,7 @@ class CPUOperators : public Operators {
   void manualSeed(uint64_t seed) override;
 
   DType getDefaultFloatType() override;
+  bool matmulWidensHalf() override;
 
   MemorySnapshot captureMemorySnapshot() override;
   void resetPeakMemoryStats() override;

@@ -90,6 +90,23 @@ void gemmHalfWeightFloat(
     Mode mode,
     CpuMathBackend backendType = CpuMathBackend::DEFAULT);
 
+/// @brief C(fp32) = A(fp16) x B(fp16), computed in fp32: the sum as it was before half would round
+///        it. Both operands are converted to fp32 inside the packing loop.
+void gemmHalfIntoFloat(
+    bool transA,
+    bool transB,
+    int M,
+    int N,
+    int K,
+    const Float16 *A,
+    int lda,
+    const Float16 *B,
+    int ldb,
+    float *C,
+    int ldc,
+    Mode mode,
+    CpuMathBackend backendType = CpuMathBackend::DEFAULT);
+
 void convertHalfToFloat(
     int n,
     const Float16 *x,

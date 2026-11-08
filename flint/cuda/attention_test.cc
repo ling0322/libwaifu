@@ -415,6 +415,49 @@ CATCH_TEST_CASE("test CUDA attention (scores past half's range)", "[op][cuda]") 
   CATCH_REQUIRE(cpuOps()->allClose(x, expected, 1e-3f));
 }
 
+CATCH_TEST_CASE("test CUDA attention (the composition's scores past half's range)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  // CosyVoice3's DiT: a channel or two every query and key carry large, so that every score is
+  // past what half holds -- 97,000 there -- while the softmax, which a constant added to a row does
+  // not move, is decided by the rest. Here the last two channels are 300 in the queries and 1500 in
+  // the keys, both exact in half: scores of 112,500 with a head of 64. This asks the composition
+  // itself -- what a card before Ampere runs, and every head no kernel takes, a VAE's 512 among
+  // them, whose keys carry 4500 for scores past half there as well. Its scores held in half were
+  // infinities and their softmax NaN. The reference is the composition on the host in float, on
+  // the operands rounded to half.
+  auto sunk = [](int length, int headDim, float big) {
+    Tensor x = fl::test::rand(Device::getCpu(), {1, 2, length, headDim}, DType::kFloat);
+    float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+    for (int row = 0; row < 2 * length; ++row) {
+      data[row * headDim + headDim - 1] = big;
+      data[row * headDim + headDim - 2] = big;
+    }
+    return toCuda(x);
+  };
+  for (int headDim : {64, 512}) {
+    float big = headDim == 512 ? 4500.0f : 1500.0f;
+    for (int length : {100, 600}) {
+      for (MaskType mask : {MaskType::kNone, MaskType::kCausal}) {
+        CATCH_INFO(
+            "headDim = " << headDim << ", length = " << length
+                         << ", mask = " << static_cast<int>(mask));
+        Tensor q = sunk(length, headDim, 300.0f);
+        Tensor k = sunk(length, headDim, big);
+        Tensor v = toCuda(fl::test::rand(Device::getCpu(), {1, 2, length, headDim}, DType::kFloat));
+        Tensor x = F::empty(Device::getCuda(), q.getShape(), DType::kFloat16);
+        cudaOps()->Operators::attention(q, k, v, mask, 0, x);
+        Tensor got = toCpu(x);
+        const float *data = got.getInternalData()->getData<float>(got.getInternalOffset());
+        CATCH_REQUIRE(std::all_of(
+            data, data + got.getNumEl(), [](float y) { return std::isfinite(y); }));
+        Tensor reference = fl::test::attention(cpuOps(), toCpu(q), toCpu(k), toCpu(v), mask);
+        CATCH_REQUIRE(cpuOps()->allClose(got, reference, 1e-2f, 1e-2f));
+      }
+    }
+  }
+}
+
 namespace {
 
 /// Attention under `maskType`, written out on the host in float with nothing shared with any

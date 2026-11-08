@@ -248,10 +248,65 @@ void wgemm(const GemmArgs<T, TW, T> &args) {
   }
 }
 
+/// @brief GEMM with A and B in TS and C in T, computed in T: both operands are widened while
+///        packing, as wgemm widens its weight, and the sum is accumulated into C as it is. This is
+///        a half product kept in float -- what the composed attention takes its scores as, since
+///        they can be past what half holds.
+template<
+    int MC,
+    int KC,
+    int NC,
+    int MR,
+    int NR,
+    typename T,
+    typename TS,
+    CpuMathBackend TYPE,
+    Mode MODE>
+void widenedGemm(const GemmArgs<TS, TS, T> &args) {
+  if (args.M == 0 || args.N == 0) return;
+
+  if (args.M == 1 || args.N == 1) {
+    // A GEMV: the matrix stays in TS and goes to the TS-weight kernels wgemm's GEMV uses; only
+    // the vector, which is one row of A or one column of B, is widened.
+    bool rowA = args.M == 1;
+    int incX = rowA ? (args.transA ? args.lda : 1) : (args.transB ? 1 : args.ldb);
+    const TS *x = rowA ? args.A : args.B;
+    lut::c_ptr<T> packedX = alignedAlloc<T>(args.K);
+    for (int k = 0; k < args.K; ++k) {
+      packedX.get()[k] = cvtf<T>(x[int64_t(k) * incX]);
+    }
+
+    if (rowA) {
+      gemv<TS, T, T, TYPE, MODE>(GemvArgs<TS, T, T>{
+          !args.transB,
+          args.transB ? args.N : args.K,
+          args.transB ? args.K : args.N,
+          args.B,
+          args.ldb,
+          packedX.get(),
+          1,
+          args.C,
+          1});
+    } else {
+      gemv<TS, T, T, TYPE, MODE>(GemvArgs<TS, T, T>{
+          args.transA,
+          args.transA ? args.K : args.M,
+          args.transA ? args.M : args.K,
+          args.A,
+          args.lda,
+          packedX.get(),
+          1,
+          args.C,
+          args.ldc});
+    }
+  } else {
+    Gemm<MC, KC, NC, MR, NR, T, TYPE, MODE, TS, TS>().apply(args);
+  }
+}
+
 /// @brief GEMM with A, B and C all in TS, computed in T: for a backend with no arithmetic in TS,
-///        which is a half GEMM on x64. Both operands are widened while packing, as wgemm widens
-///        its weight, and C is accumulated in a T copy of itself so that the sum over K is rounded
-///        to TS once rather than once per KC panel.
+///        which is a half GEMM on x64. It is widenedGemm into a T copy of C, so that the sum over
+///        K is rounded to TS once rather than once per KC panel.
 template<
     int MC,
     int KC,
@@ -277,55 +332,18 @@ void xgemm(const GemmArgs<TS, TS, TS> &args) {
     }
   }
 
-  if (args.M == 1 || args.N == 1) {
-    // A GEMV: the matrix stays in TS and goes to the TS-weight kernels wgemm's GEMV uses; only
-    // the vector, which is one row of A or one column of B, is widened.
-    bool rowA = args.M == 1;
-    int incX = rowA ? (args.transA ? args.lda : 1) : (args.transB ? 1 : args.ldb);
-    const TS *x = rowA ? args.A : args.B;
-    lut::c_ptr<T> packedX = alignedAlloc<T>(args.K);
-    for (int k = 0; k < args.K; ++k) {
-      packedX.get()[k] = cvtf<T>(x[int64_t(k) * incX]);
-    }
-
-    if (rowA) {
-      gemv<TS, T, T, TYPE, MODE>(GemvArgs<TS, T, T>{
-          !args.transB,
-          args.transB ? args.N : args.K,
-          args.transB ? args.K : args.N,
-          args.B,
-          args.ldb,
-          packedX.get(),
-          1,
-          pc,
-          1});
-    } else {
-      gemv<TS, T, T, TYPE, MODE>(GemvArgs<TS, T, T>{
-          args.transA,
-          args.transA ? args.K : args.M,
-          args.transA ? args.M : args.K,
-          args.A,
-          args.lda,
-          packedX.get(),
-          1,
-          pc,
-          1});
-    }
-  } else {
-    GemmArgs<TS, TS, T> cArgs{
-        args.transA,
-        args.transB,
-        args.M,
-        args.N,
-        args.K,
-        args.A,
-        args.lda,
-        args.B,
-        args.ldb,
-        pc,
-        args.N};
-    Gemm<MC, KC, NC, MR, NR, T, TYPE, MODE, TS, TS>().apply(cArgs);
-  }
+  widenedGemm<MC, KC, NC, MR, NR, T, TS, TYPE, MODE>(GemmArgs<TS, TS, T>{
+      args.transA,
+      args.transB,
+      args.M,
+      args.N,
+      args.K,
+      args.A,
+      args.lda,
+      args.B,
+      args.ldb,
+      pc,
+      args.N});
 
   if (args.ldc == args.N) {
     cvt<T, TS, TYPE, MODE>(numC, pc, 0, args.C, 0);

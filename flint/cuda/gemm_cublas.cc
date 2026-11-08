@@ -238,6 +238,44 @@ void CublasGemm::hgemm(
       CUBLAS_GEMM_DEFAULT));
 }
 
+/// The same call with the result in float, which is what CUBLAS_COMPUTE_32F accumulated anyway:
+/// only the rounding of the sum to half is left out.
+void CublasGemm::hgemmIntoFloat(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const __half *A,
+    int lda,
+    const __half *B,
+    int ldb,
+    float beta,
+    float *C,
+    int ldc) {
+  LL_CHECK_CUBLAS_STATUS(_impl->_cublasGemmEx(
+      _impl->_handle,
+      transB ? CUBLAS_OP_T : CUBLAS_OP_N,
+      transA ? CUBLAS_OP_T : CUBLAS_OP_N,
+      n,
+      m,
+      k,
+      &alpha,
+      B,
+      CUDA_R_16F,
+      ldb,
+      A,
+      CUDA_R_16F,
+      lda,
+      &beta,
+      C,
+      CUDA_R_32F,
+      ldc,
+      CUBLAS_COMPUTE_32F,
+      CUBLAS_GEMM_DEFAULT));
+}
+
 /// The same call with both operands and the result in float. The compute type stays
 /// CUBLAS_COMPUTE_32F rather than its TF32 variant: a float GEMM is asked for where half has run
 /// out of range, and TF32 carries fewer mantissa bits than half does.
@@ -312,6 +350,44 @@ void CublasGemm::hgemmArray(
       &betaFp32,
       reinterpret_cast<void *const *>(arrayC),
       CUDA_R_16F,
+      ldc,
+      batchSize,
+      CUBLAS_COMPUTE_32F,
+      CUBLAS_GEMM_DEFAULT));
+}
+
+void CublasGemm::hgemmIntoFloatArray(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const __half *const *arrayA,
+    int lda,
+    const __half *const *arrayB,
+    int ldb,
+    float beta,
+    float *const *arrayC,
+    int ldc,
+    int batchSize) {
+  LL_CHECK_CUBLAS_STATUS(_impl->_cublasGemmBatchedEx(
+      _impl->_handle,
+      transB ? CUBLAS_OP_T : CUBLAS_OP_N,
+      transA ? CUBLAS_OP_T : CUBLAS_OP_N,
+      n,
+      m,
+      k,
+      &alpha,
+      reinterpret_cast<const void *const *>(arrayB),
+      CUDA_R_16F,
+      ldb,
+      reinterpret_cast<const void *const *>(arrayA),
+      CUDA_R_16F,
+      lda,
+      &beta,
+      reinterpret_cast<void *const *>(arrayC),
+      CUDA_R_32F,
       ldc,
       batchSize,
       CUBLAS_COMPUTE_32F,

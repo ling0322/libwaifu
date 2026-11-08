@@ -65,9 +65,10 @@ types within one model, or that holds anything else in half:
 | `cosyvoice3.hift` | | all: its source integrates the pitch to a phase of 131 176 rad on this reading, past half's 65 504, and a quarter of `source_resblocks`' weights are below half's smallest normal |
 | speech tokenizer, CAMPPlus | | all; they run once a voice |
 
-What makes half safe in the DiT and the language model is in flint rather than here: the CUDA
-attention keeps its scores, their softmax and its accumulator in float, and the norms sum in
-float. The DiT's `gelu_new` and Mish overflow in half on their way to the right answer (x³ reaches
+What makes half safe in the DiT and the language model is in flint rather than here: attention
+keeps its scores, their softmax and its accumulator in float -- the fused kernels, and the
+composition (matmul, softmax, matmul) behind them on the CPU, CUDA and Metal alike -- and the
+norms sum in float. The DiT's `gelu_new` and Mish overflow in half on their way to the right answer (x³ reaches
 1.2e7; `tanh(±inf)` and `rsqrt(inf)` bring both back). Half needs a GPU: x64's processor has no
 kernel taking a half weight against a float activation, so it keeps the float32 package.
 

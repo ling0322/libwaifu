@@ -704,6 +704,10 @@ DType CudaOperators::getDefaultFloatType() {
   return DType::kFloat16;
 }
 
+bool CudaOperators::matmulWidensHalf() {
+  return true;
+}
+
 void CudaOperators::randNormal(TensorView out) {
   CHECK(out.getDevice().getType() == Device::kCuda);
   _rand->randNormal(out);

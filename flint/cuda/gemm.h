@@ -69,6 +69,25 @@ class Gemm {
     NOT_IMPL();
   }
 
+  /// Half operands into a float C, accumulated in float: the sum as it was before half would round
+  /// it. See Operators::matmulWidensHalf.
+  virtual void hgemmIntoFloat(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const __half *A,
+      int lda,
+      const __half *B,
+      int ldb,
+      float beta,
+      float *C,
+      int ldc) {
+    NOT_IMPL();
+  }
+
   virtual void hgemmArray(
       bool transA,
       bool transB,
@@ -82,6 +101,24 @@ class Gemm {
       int ldb,
       __half beta,
       __half *const *arrayC,
+      int ldc,
+      int batchSize) {
+    NOT_IMPL();
+  }
+
+  virtual void hgemmIntoFloatArray(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const __half *const *arrayA,
+      int lda,
+      const __half *const *arrayB,
+      int ldb,
+      float beta,
+      float *const *arrayC,
       int ldc,
       int batchSize) {
     NOT_IMPL();

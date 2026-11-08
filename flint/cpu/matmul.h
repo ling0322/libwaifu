@@ -44,7 +44,8 @@ std::vector<int> getBmmOutputShape(const TensorView &A, const TensorView &B);
 // greater than 2 (for BMM). throw exception if shape mismatch.
 GEMMArgs generateGemmArgs(const TensorView &A, const TensorView &B, const TensorView &C);
 
-/// C = A @ B. C is A's batch, A's rows and B's columns, of A's type, contiguous.
+/// C = A @ B. C is A's batch, A's rows and B's columns, of A's type, contiguous -- or float where
+/// A and B are both half, the sum as it was before half would round it.
 void matmul(const TensorView &A, const TensorView &B, const TensorView &C);
 
 }  // namespace cpu

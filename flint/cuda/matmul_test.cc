@@ -20,10 +20,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <algorithm>
+#include <cmath>
+#include <memory>
 #include <vector>
 
 #include "catch2/catch_amalgamated.hpp"
 #include "flint/test_functional.h"
+#include "flint/cuda/matmul.h"
 #include "flint/device.h"
 #include "flint/operators.h"
 
@@ -234,6 +238,86 @@ CATCH_TEST_CASE("test CUDA matmul (float carries what half cannot)", "[op][cuda]
 
   Tensor asHalf = toCpu(fl::test::matmul(cudaOps(), toCuda(a), toCuda(b)));
   CATCH_REQUIRE(!cpuOps()->allClose(asHalf, fl::test::matmul(cpuOps(), a, b), 1e-4f));
+}
+
+namespace {
+
+/// `shape` at random, with every element in row 0 (`column` false) or column 0 (`column` true) of
+/// each matrix set to `big`.
+Tensor loud(std::vector<int> shape, bool column, float big) {
+  Tensor x = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
+  int rows = shape[shape.size() - 2], cols = shape.back();
+  int64_t matrices = x.getNumEl() / (static_cast<int64_t>(rows) * cols);
+  float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+  for (int64_t m = 0; m < matrices; ++m) {
+    for (int r = 0; r < rows; ++r) {
+      for (int c = 0; c < cols; ++c) {
+        if ((column ? c : r) == 0) data[(m * rows + r) * cols + c] = big;
+      }
+    }
+  }
+  return x;
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test CUDA matmul (half kept in float)", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  CATCH_REQUIRE(cudaOps()->matmulWidensHalf());
+
+  // Half times half into float, as the composed attention takes its scores: the sum as it was,
+  // past what half holds. A's first column is 300 and B's first row 1500, so every product is
+  // 450,000 and more; the rest is random. B as it is, and along K -- the transpose of an (N, K),
+  // as the keys are -- each as one matrix and as a batch of (2, 3) the way attention hands them
+  // over. The K and N are the rungs of CUTLASS's ladder for one matrix: C read 16 bytes at a time
+  // (N of 40), 8 (34) and 4 (33), and a K of 75 that no rung reads, which is copied into padding.
+  std::vector<std::shared_ptr<op::cuda::MatMul>> backends = {op::cuda::MatMul::createCutlass()};
+  try {
+    backends.push_back(op::cuda::MatMul::createCublas());
+  } catch (const lut::Error &e) {
+    CATCH_WARN("cuBLAS is not usable, so only CUTLASS is asked: " << e.what());
+  }
+
+  struct Case {
+    int k;
+    int n;
+  };
+  for (size_t backend = 0; backend < backends.size(); ++backend) {
+    for (Case c : {Case{64, 40}, Case{64, 34}, Case{64, 33}, Case{75, 33}}) {
+      for (bool batched : {false, true}) {
+        for (bool alongK : {false, true}) {
+          CATCH_INFO(
+              "backend " << (backend == 0 ? "CUTLASS" : "cuBLAS") << ", K = " << c.k << ", N = "
+                         << c.n << ", batched = " << batched << ", B along K = " << alongK);
+          std::vector<int> batch = batched ? std::vector<int>{2, 3} : std::vector<int>{};
+          std::vector<int> shapeA = batch, shapeB = batch;
+          shapeA.insert(shapeA.end(), {70, c.k});
+          if (alongK) {
+            shapeB.insert(shapeB.end(), {c.n, c.k});
+          } else {
+            shapeB.insert(shapeB.end(), {c.k, c.n});
+          }
+          Tensor a = toCuda(loud(shapeA, true, 300.0f));
+          Tensor b = toCuda(loud(shapeB, alongK, 1500.0f));
+          if (alongK) b = b.transpose(-2, -1);
+
+          // The same operands, rounded to half, multiplied on the host in float.
+          Tensor reference =
+              fl::test::matmul(cpuOps(), toCpu(a), toCpu(fl::test::contiguous(cudaOps(), b)));
+
+          std::vector<int> shape = a.getShape();
+          shape.back() = b.getShape(-1);
+          Tensor x = F::empty(Device::getCuda(), shape, DType::kFloat);
+          backends[backend]->apply(a, b, x);
+          Tensor got = fl::test::toDevice(cudaOps(), x, Device::getCpu());
+          const float *data = got.getInternalData()->getData<float>(got.getInternalOffset());
+          CATCH_REQUIRE(std::all_of(
+              data, data + got.getNumEl(), [](float y) { return std::isfinite(y); }));
+          CATCH_REQUIRE(cpuOps()->allClose(got, reference, 1e-4f, 1e-4f));
+        }
+      }
+    }
+  }
 }
 
 }  // namespace fl
