@@ -145,15 +145,10 @@ struct SettingsColumn: View {
                     .environment(\.groupFillsHeight, true)
                     .fixedSize(horizontal: false, vertical: true)
 
-                    if voice.notAVoiceBecause != nil || voice.noLikenessBecause != nil {
+                    if voice.noLikenessBecause != nil {
                         HStack(alignment: .top, spacing: 12) {
-                            Group {
-                                if let why = voice.notAVoiceBecause {
-                                    Label(why + ".", systemImage: "exclamationmark.triangle.fill")
-                                        .font(.caption).foregroundStyle(.orange)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            // Under what to say: nothing, so that the footnote is under its box.
+                            Color.clear.frame(maxWidth: .infinity, maxHeight: 0)
                             Group {
                                 if let why = voice.noLikenessBecause {
                                     Footnote("This voice cannot be handed a recording: \(why).")
@@ -748,7 +743,7 @@ struct SeedRow: View {
     }
 }
 
-/// The list of styles a voice was taught, which writes into the instruction box below it.
+/// The examples of a style the voice follows, which write into the instruction box below it.
 struct StylePicker: View {
     var styles: [Voice.Style]
     @Binding var style: String

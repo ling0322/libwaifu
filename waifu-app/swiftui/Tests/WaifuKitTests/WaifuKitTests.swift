@@ -39,11 +39,12 @@ final class WaifuKitTests: XCTestCase {
         }
     }
 
-    func testAnEngineSaysWhatItRunsOnWithAutoSettled() throws {
-        XCTAssertEqual(try Engine(device: .cpu).device, "cpu")
-        let auto = try Engine(device: .auto).device
+    func testAPipelineSaysWhatItRunsOnWithAutoSettled() throws {
+        XCTAssertEqual(try Pipeline(.textToSpeech, device: .cpu).device, "cpu")
+        let auto = try Pipeline(.textToSpeech, device: .auto).device
         XCTAssertFalse(auto.isEmpty)
         XCTAssertNotEqual(auto, "auto")
+        XCTAssertTrue(Device.cpu.isAvailable)
     }
 
     func testAPublishedNameHasItsVersion() {
@@ -52,15 +53,15 @@ final class WaifuKitTests: XCTestCase {
     }
 
     func testAVoiceIsLoadedAndSpeaks() async throws {
-        let engine = try Engine(device: .cpu)
-        try await engine.load("tones")
+        let pipeline = try Pipeline(.textToSpeech, device: .cpu)
+        try await pipeline.load("tones")
 
         final class Heard: @unchecked Sendable {
             var progress: [JobProgress] = []
             let lock = NSLock()
         }
         let heard = Heard()
-        let clip = try await engine.speak(
+        let clip = try await pipeline.speak(
             SpeakRequest(text: "hello there", speed: 1, temperature: 0.8, seed: 7)
         ) { progress in
             heard.lock.lock()
@@ -72,59 +73,74 @@ final class WaifuKitTests: XCTestCase {
         XCTAssertFalse(spoken.samples.isEmpty)
         XCTAssertGreaterThan(spoken.rate, 0)
         XCTAssertFalse(heard.progress.isEmpty)
-        XCTAssertFalse(heard.progress[0].words.isEmpty)
+        // A stage of a reading, which the library says as a number and no words.
+        let reading: [Stage] = [
+            .textToSpeechReadingText, .textToSpeechGeneratingTokens, .textToSpeechSynthesizingAudio,
+        ]
+        XCTAssertTrue(heard.progress.allSatisfy { reading.contains($0.stage) }, "\(heard.progress.map(\.stage))")
+        XCTAssertNil(heard.progress[0].words)
     }
 
     func testMetalReadsAModelUnderAMemoryLimit() async throws {
         // A machine without Metal -- a CI VM -- has nothing to limit.
-        guard (try? Engine(device: .metal)) != nil else {
+        guard Device.metal.isAvailable else {
             throw XCTSkip("no Metal device")
         }
-        try Engine.setMemoryLimit(1 << 30, on: .metal)
+        try Device.metal.setMemoryLimit(1 << 30)
         // Lifted again however the test ends, so that no other test runs under it.
-        defer { try? Engine.setMemoryLimit(0, on: .metal) }
-        let engine = try Engine(device: .metal)
-        try await engine.load("tones")
-        let clip = try await engine.speak(SpeakRequest(text: "hello", speed: 1, temperature: 0.8, seed: 7)) { _ in }
+        defer { try? Device.metal.setMemoryLimit(0) }
+        let pipeline = try Pipeline(.textToSpeech, device: .metal)
+        try await pipeline.load("tones")
+        let clip = try await pipeline.speak(SpeakRequest(text: "hello", speed: 1, temperature: 0.8, seed: 7)) { _ in }
         XCTAssertFalse(try XCTUnwrap(clip).samples.isEmpty)
     }
 
     func testAMemoryLimitIsForMetal() throws {
-        XCTAssertThrowsError(try Engine.setMemoryLimit(1 << 30, on: .cpu))
-        guard (try? Engine(device: .metal)) != nil else {
+        XCTAssertThrowsError(try Device.cpu.setMemoryLimit(1 << 30))
+        guard Device.metal.isAvailable else {
             throw XCTSkip("no Metal device")
         }
-        try Engine.setMemoryLimit(1 << 40, on: .metal)
+        try Device.metal.setMemoryLimit(1 << 40)
         // Lifted again, so that no other test runs under it.
-        try Engine.setMemoryLimit(0, on: .metal)
+        try Device.metal.setMemoryLimit(0)
     }
 
     func testARequestNoModelCouldRunIsRefusedAtTheCall() async throws {
-        let engine = try Engine(device: .cpu)
+        let pipeline = try Pipeline(.imageGeneration, device: .cpu)
         var request = DrawRequest(prompt: "the girl in <|girl|>", width: 64, height: 64, steps: 1, guidance: 5, seed: 7)
         request.negative = ""
         do {
-            _ = try await engine.draw(request)
+            _ = try await pipeline.draw(request)
             XCTFail("drew a prompt naming an image it was not given")
         } catch WaifuError.refused(let said) {
             XCTAssertTrue(said.contains("<|girl|>"), said)
         }
     }
 
-    func testAnImageAskedOfAVoiceIsTheWrongKind() async throws {
-        let engine = try Engine(device: .cpu)
-        try await engine.load("tones")
+    func testAVoiceIsNotLoadedIntoAPipelineThatDraws() async throws {
+        let pipeline = try Pipeline(.imageGeneration, device: .cpu)
         do {
-            _ = try await engine.draw(DrawRequest(prompt: "a cat", width: 64, height: 64, steps: 1, guidance: 5, seed: 7))
+            try await pipeline.load("tones")
+            XCTFail("a voice was loaded to draw")
+        } catch WaifuError.refused(let said) {
+            XCTAssertFalse(said.isEmpty)
+        }
+    }
+
+    func testARunOfAnotherTaskIsRefusedAtTheCall() async throws {
+        let pipeline = try Pipeline(.textToSpeech, device: .cpu)
+        try await pipeline.load("tones")
+        do {
+            _ = try await pipeline.draw(DrawRequest(prompt: "a cat", width: 64, height: 64, steps: 1, guidance: 5, seed: 7))
             XCTFail("a voice drew")
-        } catch WaifuError.notLoaded {
+        } catch WaifuError.refused {
         }
     }
 
     func testAModelNobodyPublishedIsUnknown() async throws {
-        let engine = try Engine(device: .cpu)
+        let pipeline = try Pipeline(.imageGeneration, device: .cpu)
         do {
-            try await engine.load("no-such-model:v9")
+            try await pipeline.load("no-such-model:v9")
             XCTFail("loaded a model that does not exist")
         } catch WaifuError.unknownModel(let said) {
             XCTAssertTrue(said.contains("no-such-model:v9"), said)
@@ -132,11 +148,11 @@ final class WaifuKitTests: XCTestCase {
     }
 
     func testCancellingTheTaskEndsTheJobAsCancelled() async throws {
-        let engine = try Engine(device: .cpu)
-        try await engine.load("tones")
+        let pipeline = try Pipeline(.textToSpeech, device: .cpu)
+        try await pipeline.load("tones")
         // Cancelled before it can start: a task cancelled at once still gets its job's end.
         let task = Task {
-            try await engine.speak(SpeakRequest(text: String(repeating: "hello there ", count: 200), speed: 1, temperature: 0.8, seed: 7))
+            try await pipeline.speak(SpeakRequest(text: String(repeating: "hello there ", count: 200), speed: 1, temperature: 0.8, seed: 7))
         }
         task.cancel()
         let clip = try await task.value
@@ -144,7 +160,7 @@ final class WaifuKitTests: XCTestCase {
         _ = clip
     }
 
-    func testWhatIsPublishedIsJSON() throws {
+    func testWhatIsPublishedIsJSONAndWhatAModelIsIsAsked() throws {
         let catalog = try JSONSerialization.jsonObject(with: ModelManager.catalogJSON()) as? [String: Any]
         let models = try XCTUnwrap(catalog?["models"] as? [[String: Any]])
         XCTAssertTrue(models.contains { $0["name"] as? String == "sdxl:base" })
@@ -157,13 +173,43 @@ final class WaifuKitTests: XCTestCase {
         try "weights:\n  - w.safetensors\nconfig:\n  model:\n    type: sdxl\n"
             .write(to: manifest, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: manifest) }
-        let described = try JSONSerialization.jsonObject(with: ModelManager.describeJSON(manifest.path)) as? [String: Any]
-        XCTAssertEqual(described?["kind"] as? String, "image")
-        // What the boxes start at is the model manager's half of it, laid in.
-        XCTAssertEqual(described?["steps"] as? Int, 30)
-        XCTAssertEqual(described?["takes_guidance"] as? Bool, true)
+        let model = try ModelManager.open(manifest.path)
+        XCTAssertEqual(model.supports(.imageGeneration), .yes)
+        if case .no(let why)? = model.supports(.textToSpeech) {
+            XCTAssertFalse(why.isEmpty)
+        } else {
+            XCTFail("a picture model says it speaks")
+        }
+        XCTAssertEqual(model.widthHeightMultipleOf, 32)
+        XCTAssertNil(model.sizeOnDisk, "its weights are not here")
+        // What the boxes start at is the model manager's.
+        let defaults = try JSONSerialization.jsonObject(with: ModelManager.defaultsJSON(of: model)) as? [String: Any]
+        XCTAssertEqual(defaults?["steps"] as? Int, 30)
+        XCTAssertEqual(defaults?["takes_guidance"] as? Bool, true)
 
-        XCTAssertThrowsError(try ModelManager.describeJSON("no-such-model:v9"))
+        XCTAssertThrowsError(try ModelManager.open("no-such-model:v9"))
+    }
+
+    func testTheStratifiedStackIsByDepthFarHalvesUnderNearOnes() {
+        // A face, and a top cut into a near half at the top's depth and a far half behind the face.
+        // Each part and half has a depth layer after them, which names it and is in neither stack,
+        // and does not make what it names a split part. Ids are not places.
+        let layers: [(id: Int, type: LayerType, depth: Float, derivedFromID: Int?)] = [
+            (id: 7, type: .part, depth: 0.9, derivedFromID: nil),  // back hair
+            (id: 3, type: .part, depth: 0.5, derivedFromID: nil),  // topwear, which is split
+            (id: 5, type: .part, depth: 0.4, derivedFromID: nil),  // face
+            (id: 1, type: .near, depth: 0.5, derivedFromID: 3),
+            (id: 2, type: .far, depth: 0.5, derivedFromID: 3),
+            (id: 4, type: .depth, depth: 0.9, derivedFromID: 7),
+            (id: 6, type: .depth, depth: 0.5, derivedFromID: 3),
+            (id: 8, type: .depth, depth: 0.4, derivedFromID: 5),
+            (id: 9, type: .depth, depth: 0.5, derivedFromID: 1),
+            (id: 10, type: .depth, depth: 0.5, derivedFromID: 2),
+        ]
+        // The split part is not in it; at one depth the far half is under the near one.
+        XCTAssertEqual(Layers.stratifiedStack(layers), [0, 4, 3, 2])
+        // Without its halves the top is a part like any other.
+        XCTAssertEqual(Layers.stratifiedStack(layers.filter { !$0.type.isHalf }), [0, 1, 2])
     }
 
     func testTheLogHandlerHearsTheLibrary() async throws {
@@ -179,9 +225,9 @@ final class WaifuKitTests: XCTestCase {
         }
         defer { Log.setHandler(nil) }
 
-        let engine = try Engine(device: .cpu)
+        let pipeline = try Pipeline(.imageGeneration, device: .cpu)
         do {
-            try await engine.load("no-such-model:v9")
+            try await pipeline.load("no-such-model:v9")
         } catch {}
         // Nothing has to have been written by this; that it can be set and unset without a crash,
         // with the library running, is what is being checked.

@@ -4,8 +4,9 @@ The same screen as `waifu-app/swiftui/`, in WPF. Laid out from the design spec
 (`libwaifu-gui-design.pdf`, sections 2 to 13) and from the screenshots in it: one window, three
 columns, a fixed dark grey that follows neither the system theme nor the wallpaper.
 
-It draws: the window calls `waifu.dll` through the C API in `docs/ffi.md`, in the app's own
-process, and a model that is on the disk is read onto the card by the first job that needs it.
+It draws: the window calls `waifu.dll` through the C API in `docs/ffi-abi4.md` (ABI 4), in the
+app's own process, and a model that is on the disk is read onto the card by the first job that
+needs it.
 With no library beside it the same window runs on a stand-in engine instead, says so in its
 title, and draws nothing.
 
@@ -81,26 +82,39 @@ the device, `-output <folder>` changes where results are written for that run on
 
 ## The library behind it
 
-`Engine/IEngine.cs` is the seam: `Begin(JobRequest)`, `Cancel()`, a `Progress` event carrying the
-library's own phases, and a `Finished` event. Two things implement it -- `NativeEngine` over the C
-API, and `MockEngine`, which waits out a fetch, a read and a count of steps and then writes a
-picture made from the seed. The window is given whichever one `Library.Available` found, and
-nothing above that line knows which it got.
+`Engine/IEngine.cs` is the seam: `Begin(JobRequest)`, `Cancel()`, a `Progress` event carrying a
+phase and the line under the bar, and a `Finished` event. Two things implement it -- `NativeEngine`
+over the C API, and `MockEngine`, which waits out a fetch, a read and a count of steps and then
+writes a picture made from the seed. The window is given whichever one `Library.Available` found,
+and nothing above that line knows which it got.
+
+`NativeEngine` runs each task on a `WaifuPipeline` made for it (`waifu_pipeline_new`): image
+generation, text to speech and voice conversion each have their own, all on the chosen device.
+A load opens the model's manifest with `waifu_model_open`, checks `WAIFU_MODEL_SUPPORTS_<task>`
+-- saying the model's own reason where it is 0 -- and hands it to
+`waifu_pipeline_load_model_async`. One model is on the card at a time, as before: reading one
+frees the pipelines that hold another. A model that does two tasks (CosyVoice3 reads and
+converts) is read into a pipeline for each. The library reports a fine-grained `WaifuStage` with
+counts; the words under the bar ("step 3 of 20", "token 40 of about 120") are this program's.
 
 Around the engine, everything the library can answer comes from it: `Engine/NativeModels.cs`
-reads `waifu_modelmanager_catalog_json` and `_directory` from `waifu_modelmanager.dll`, and
-`waifu_describe_json` from `waifu.dll`, and runs downloads through
-`waifu_modelmanager_fetch_async`. `Engine/Models.cs` is the one door
-the view models knock on, and it is what decides between the library and the stand-in.
+reads `waifu_modelmanager_catalog_json`, `_defaults_json` and `_directory` from
+`waifu_modelmanager.dll`, asks `waifu.dll` what a model can do one property at a time
+(`waifu_model_get_int_property` / `_get_string_property`), and runs downloads through
+`waifu_modelmanager_fetch_async`. `Engine/Models.cs` is the one door the view models knock on,
+and it is what decides between the library and the stand-in. The style picker offers
+CosyVoice3's own example instructions, which the app carries (`StyleExamples` in
+`Engine/Catalog.cs`), to a model that says it follows one
+(`WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE`), and anything typed.
 
 Three rules shape the interop, and they are the library's rather than this program's:
 
 - **Every callback arrives on a thread of the library's.** Nothing touches the screen from one: a
   callback copies what it was handed -- strings, pixels, samples, all valid only until it returns
   -- and hands the copy to the dispatcher.
-- **A callback must not call back into the library** (cancel and the free functions aside), so the
-  next step of a job is always taken on the UI thread after the hand-off, never inside the
-  completion that asked for it.
+- **A callback must not call back into the library** (`waifu_pipeline_cancel` aside), so the next
+  step of a job is always taken on the UI thread after the hand-off, never inside the completion
+  that asked for it.
 - **A delegate the library holds has to outlive the call.** Every one of them is a field; a
   collected delegate is a crash in somebody else's stack frame.
 

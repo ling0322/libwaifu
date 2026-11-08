@@ -26,7 +26,9 @@ using System.Windows.Threading;
 namespace Libwaifu.Gui.Engine
 {
     /// <summary>
-    /// What the library says about models, read out of the JSON documents it answers with.
+    /// What the libraries say about models: the model manager's catalogue and defaults, read out
+    /// of the JSON documents it answers with, and what waifu.dll says a model can do, asked of a
+    /// <c>WaifuModel</c> one property at a time.
     /// </summary>
     public static class NativeModels
     {
@@ -116,82 +118,127 @@ namespace Libwaifu.Gui.Engine
                 return null;
             }
 
-            var text = Utf8.Take(Native.waifu_describe_json(Utf8.Bytes(manifest)));
-            if (text == null)
+            // Refused -- no manifest there, or one that cannot be read -- with the reason in
+            // waifu_last_error, which is where Models.Describe looks for it.
+            var handle = Native.waifu_model_open(Utf8.Bytes(manifest));
+            if (handle == IntPtr.Zero)
             {
                 return null;
             }
 
-            var node = Json.Parse(text);
-            WithDefaults(node, manifest);
-            var kind = Json.Text(node, "kind");
-            var description = new ModelDescription
+            try
             {
-                Name = model,
-                // waifu.dll calls a model by its manifest's file name; one asked for by its published
-                // name is called what the catalogue calls it.
-                FullName = PublishedFullName(model) ?? Json.Text(node, "full_name") ?? model,
-                Category = CategoryNamed(kind),
-                OnDisk = Json.Flag(node, "on_disk"),
-                InMemory = Json.Flag(node, "in_memory"),
-            };
+                // What the boxes start at is the model manager's; what the model can be asked
+                // for is waifu.dll's. The two halves of one description.
+                var defaults = Defaults(manifest);
+                var description = new ModelDescription
+                {
+                    Name = model,
+                    // One asked for by its published name is called what the catalogue calls it,
+                    // and anything else by its manifest's file name.
+                    FullName = PublishedFullName(model) ?? Path.GetFileName(manifest) ?? model,
+                    Category = CategoryOf(handle),
+                    OnDisk = Has(handle, Native.ModelProperty.SizeOnDisk),
+                    InMemory = false,
+                };
 
-            switch (description.Category)
-            {
-                case Category.Image:
-                    ReadPicture(node, description);
-                    break;
-                case Category.Speech:
-                    ReadVoice(node, description);
-                    break;
-                default:
-                    ReadConverter(node, description);
-                    break;
+                // A model that does more than one thing -- CosyVoice3 reads and converts -- is
+                // described for each, so whichever page it is chosen on has what it needs. One
+                // that is neither a voice nor a converter is described as a picture model, as it
+                // always was; a picture it cannot draw is refused when the job loads it.
+                if (description.Category == Category.Image)
+                {
+                    ReadPicture(handle, defaults, description);
+                }
+
+                if (Supports(handle, Native.ModelProperty.SupportsTextToSpeech))
+                {
+                    ReadVoice(handle, defaults, description);
+                }
+
+                if (Supports(handle, Native.ModelProperty.SupportsVoiceConversion))
+                {
+                    ReadConverter(handle, defaults, description);
+                }
+
+                return description;
             }
-
-            return description;
+            finally
+            {
+                Native.waifu_model_free(handle);
+            }
         }
 
-        /// <summary>
-        /// Lays what waifu_modelmanager.dll says a model's boxes start at into what waifu.dll says
-        /// it can be asked for: the two halves of one description. A "conversion" is in both, and
-        /// its defaults go inside it.
-        /// </summary>
-        private static void WithDefaults(object node, string manifest)
+        /// <summary>What waifu_modelmanager.dll says a model's boxes start at; empty where it cannot say.</summary>
+        private static object Defaults(string manifest)
         {
             var text = Utf8.TakeFromModelManager(
                 Native.waifu_modelmanager_defaults_json(Utf8.Bytes(manifest)));
             if (text == null)
             {
                 Log.Write("warn", "models", manifest + ": " + Library.ModelManagerLastError());
-                return;
+                return new Dictionary<string, object>();
             }
 
-            var whole = Json.Map(node);
-            foreach (var field in Json.Map(Json.Parse(text)))
-            {
-                var inner = whole.ContainsKey(field.Key) ? whole[field.Key] as Dictionary<string, object> : null;
-                var more = field.Value as Dictionary<string, object>;
-                if (inner != null && more != null)
-                {
-                    foreach (var each in more)
-                    {
-                        inner[each.Key] = each.Value;
-                    }
-                }
-                else
-                {
-                    whole[field.Key] = field.Value;
-                }
-            }
+            return Json.Parse(text);
         }
 
-        private static void ReadPicture(object node, ModelDescription description)
+        /// <summary>
+        /// Which page a model is for, which is what the first thing it does says: a voice, then a
+        /// converter, and a picture model otherwise.
+        /// </summary>
+        private static Category CategoryOf(IntPtr model)
+        {
+            if (Supports(model, Native.ModelProperty.SupportsTextToSpeech))
+            {
+                return Category.Speech;
+            }
+
+            if (Supports(model, Native.ModelProperty.SupportsVoiceConversion))
+            {
+                return Category.Conversion;
+            }
+
+            return Category.Image;
+        }
+
+        // -- asking a WaifuModel -----------------------------------------------------------------
+
+        /// <summary>Whether a SUPPORTS_ property is 1. Absent -- a library that does not know it -- is not.</summary>
+        public static bool Supports(IntPtr model, Native.ModelProperty property)
+        {
+            long value;
+            return Native.waifu_model_get_int_property(model, property, out value) && value == 1;
+        }
+
+        /// <summary>Why a SUPPORTS_ property is 0, in words to show; null where nothing says.</summary>
+        public static string WhyNot(IntPtr model, Native.ModelProperty property)
+        {
+            return Utf8.Read(Native.waifu_model_get_string_property(model, property));
+        }
+
+        private static bool Has(IntPtr model, Native.ModelProperty property)
+        {
+            long value;
+            return Native.waifu_model_get_int_property(model, property, out value);
+        }
+
+        private static int Integer(IntPtr model, Native.ModelProperty property, int fallback)
+        {
+            long value;
+            return Native.waifu_model_get_int_property(model, property, out value) &&
+                   value > 0 && value <= int.MaxValue
+                ? (int)value
+                : fallback;
+        }
+
+        private static void ReadPicture(IntPtr model, object node, ModelDescription description)
         {
             description.Steps = Json.Count(node, "steps", 20);
             description.Guidance = Json.Number(node, "guidance", 5.0);
             description.TakesGuidance = Json.Flag(node, "takes_guidance", true);
-            description.Alignment = Json.Count(node, "alignment", 16);
+            description.Alignment = Integer(
+                model, Native.ModelProperty.ImageGenerationWidthHeightMultipleOf, 16);
             description.Prompt = Json.Text(node, "prompt");
             description.Avoid = Json.Text(node, "avoid");
 
@@ -217,34 +264,40 @@ namespace Libwaifu.Gui.Engine
 
             // What it can be given an image for is said here rather than found out from a job
             // that fails, so the box is shown only where it does something.
-            var keys = Json.Items(node, "image_keys").OfType<string>().ToList();
-            description.CanStartFromPicture = keys.Contains("start_from");
-            description.WhyNotFromPicture = Json.Text(Json.Field(node, "why_not"), "start_from");
+            description.CanStartFromPicture = Supports(
+                model, Native.ModelProperty.SupportsImageGenerationFromStartImage);
+            description.WhyNotFromPicture = description.CanStartFromPicture
+                ? null
+                : WhyNot(model, Native.ModelProperty.SupportsImageGenerationFromStartImage);
         }
 
-        private static void ReadVoice(object node, ModelDescription description)
+        private static void ReadVoice(IntPtr model, object node, ModelDescription description)
         {
             description.Speed = Json.Number(node, "speed", 1.0);
             description.Temperature = Json.Number(node, "temperature", 1.0);
-            description.Rate = Json.Count(node, "rate", 24000);
-            description.TakesARecording = Json.Flag(node, "takes_a_recording", true);
-            description.WhyNotARecording = Json.Text(node, "no_likeness_because");
-            description.NotAVoiceBecause = Json.Text(node, "not_a_voice_because");
+            description.Rate = Integer(model, Native.ModelProperty.SampleRate, 24000);
+            description.TakesARecording = Supports(
+                model, Native.ModelProperty.SupportsTextToSpeechLikeReference);
+            description.WhyNotARecording = description.TakesARecording
+                ? null
+                : WhyNot(model, Native.ModelProperty.SupportsTextToSpeechLikeReference);
 
-            foreach (var style in Json.Items(node, "styles"))
-            {
-                description.Styles.Add(new KeyValuePair<string, string>(
-                    Json.Text(style, "label") ?? string.Empty,
-                    Json.Text(style, "instruction") ?? string.Empty));
-            }
+            // Whether it follows an instruction at all; what is offered is the app's own list.
+            description.FollowsStyle = Supports(
+                model, Native.ModelProperty.SupportsTextToSpeechWithStyle);
         }
 
-        private static void ReadConverter(object node, ModelDescription description)
+        private static void ReadConverter(IntPtr model, object node, ModelDescription description)
         {
-            description.Steps = Json.Count(node, "steps", 30);
-            description.Rate = Json.Count(node, "rate", 24000);
-            description.ConvertsStyle = Json.Flag(node, "converts_style");
-            description.WhyNotStyle = Json.Text(node, "no_style_because");
+            // A model that is a voice as well keeps its converter's defaults under "conversion".
+            description.Steps = Json.Count(
+                Json.Field(node, "conversion"), "steps", Json.Count(node, "steps", 30));
+            description.Rate = Integer(model, Native.ModelProperty.SampleRate, 24000);
+            description.ConvertsStyle = Supports(
+                model, Native.ModelProperty.SupportsVoiceConversionOfStyle);
+            description.WhyNotStyle = description.ConvertsStyle
+                ? null
+                : WhyNot(model, Native.ModelProperty.SupportsVoiceConversionOfStyle);
         }
 
         public static Category CategoryNamed(string kind)

@@ -18,8 +18,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //! What the C API is made of besides its functions: the types every part of it takes and hands
-//! back -- status, the log, progress and completion -- and the helpers that convert to and from
+//! back -- status, the log, progress and results -- and the helpers that convert to and from
 //! them. Written into waifu.h with the functions.
+//!
+//! Every enum of the header is an `int32_t` and a `#define` for each value, not a C enum: a number
+//! a caller hands in that this library does not know is an integer to refuse, not a value Rust
+//! must never see.
 
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
@@ -34,72 +38,109 @@ use crate::log::{Level, Sink};
 
 // -- status ----------------------------------------------------------------------------------
 
-/// What a call or a job came to.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WaifuStatusCode {
-    WAIFU_OK = 0,
-    WAIFU_CANCELLED = 1,
-    /// A NULL, a string that is not UTF-8, a size out of range, a request that names an image
-    /// it does not give.
-    WAIFU_ERR_INVALID_ARGUMENT = 2,
-    /// Neither a published name nor a manifest that exists.
-    WAIFU_ERR_UNKNOWN_MODEL = 3,
-    /// The download failed.
-    WAIFU_ERR_FETCH = 4,
-    /// The model could not be read, or cannot do what was asked.
-    WAIFU_ERR_MODEL = 5,
-    /// A job with no model loaded, or a model of the wrong kind.
-    WAIFU_ERR_NOT_LOADED = 6,
-    /// A panic in the library: a bug.
-    WAIFU_ERR_INTERNAL = 7,
-}
+/// What a refused call or a job came to.
+pub type WaifuStatusCode = i32;
+pub const WAIFU_OK: WaifuStatusCode = 0;
+pub const WAIFU_CANCELLED: WaifuStatusCode = 1;
+/// What a request cannot be run with. Most of it is refused at the call instead -- a NULL, a
+/// string that is not UTF-8, a size out of range, a model the pipeline's task is not supported by,
+/// another task's run -- which a job never sees.
+pub const WAIFU_ERR_INVALID_ARGUMENT: WaifuStatusCode = 2;
+/// No manifest at the path.
+pub const WAIFU_ERR_UNKNOWN_MODEL: WaifuStatusCode = 3;
+// 4 was FETCH, which libwaifu never said once downloads were libwaifu_modelmanager's: not reused.
+/// The model could not be read, or cannot do what was asked.
+pub const WAIFU_ERR_MODEL: WaifuStatusCode = 5;
+/// A run on a pipeline with no model loaded.
+pub const WAIFU_ERR_NOT_LOADED: WaifuStatusCode = 6;
+/// A panic in the library: a bug.
+pub const WAIFU_ERR_INTERNAL: WaifuStatusCode = 7;
+/// A pipeline asked for on a device this build or machine cannot use.
+pub const WAIFU_ERR_DEVICE_UNAVAILABLE: WaifuStatusCode = 8;
 
-/// How a job ended, as on_complete is told it.
 #[repr(C)]
 pub struct WaifuStatus {
     pub code: WaifuStatusCode,
-    /// Why, when code is not WAIFU_OK; NULL when it is.
+    /// Why, or NULL for WAIFU_OK.
     pub message: *const c_char,
 }
 
-thread_local! {
-    static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
+/// Why a call was refused: what `waifu_last_error` and `waifu_last_error_code` are set to.
+#[derive(Debug)]
+pub struct Refused {
+    pub code: WaifuStatusCode,
+    pub message: String,
 }
 
-/// Says why this thread's last call failed, for its `_last_error` to hand back.
-pub fn set_last_error(message: &str) {
-    let message = c_string(message);
-    LAST_ERROR.with(|last| *last.borrow_mut() = message);
-}
-
-/// This thread's last message; valid until this thread's next call.
-pub fn last_error() -> *const c_char {
-    LAST_ERROR.with(|last| last.borrow().as_ptr())
-}
-
-/// Frees a string [`string_out`] made. NULL is fine.
-pub unsafe fn free_string(s: *mut c_char) {
-    if !s.is_null() {
-        drop(CString::from_raw(s));
-    }
-}
-
-/// Runs a synchronous entry point, turning a panic into its message in the last error and
-/// `otherwise` as what the call returns.
-pub fn caught<T>(otherwise: T, body: impl FnOnce() -> T) -> T {
-    match panic::catch_unwind(AssertUnwindSafe(body)) {
-        Ok(value) => value,
-        Err(cause) => {
-            let said = cause
-                .downcast_ref::<&str>()
-                .map(|said| said.to_string())
-                .or_else(|| cause.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "it panicked".to_string());
-            set_last_error(&format!("a bug in the library: {said}"));
-            otherwise
+impl Refused {
+    pub fn new(code: WaifuStatusCode, message: impl Into<String>) -> Refused {
+        Refused {
+            code,
+            message: message.into(),
         }
     }
+}
+
+/// A sentence alone is a request that cannot be run: most of what is refused.
+impl From<String> for Refused {
+    fn from(message: String) -> Refused {
+        Refused::new(WAIFU_ERR_INVALID_ARGUMENT, message)
+    }
+}
+
+impl From<&str> for Refused {
+    fn from(message: &str) -> Refused {
+        Refused::new(WAIFU_ERR_INVALID_ARGUMENT, message)
+    }
+}
+
+thread_local! {
+    static LAST_ERROR: RefCell<(CString, WaifuStatusCode)> =
+        RefCell::new((CString::default(), WAIFU_OK));
+}
+
+/// Says why this thread's last refused call was refused. Only a refused call sets it.
+pub fn refuse(refused: &Refused) {
+    let message = c_string(&refused.message);
+    LAST_ERROR.with(|last| *last.borrow_mut() = (message, refused.code));
+}
+
+/// This thread's last refusal; valid until its next one.
+pub fn last_error() -> *const c_char {
+    LAST_ERROR.with(|last| last.borrow().0.as_ptr())
+}
+
+pub fn last_error_code() -> WaifuStatusCode {
+    LAST_ERROR.with(|last| last.borrow().1)
+}
+
+/// What a panic said.
+fn said(cause: Box<dyn std::any::Any + Send>) -> String {
+    cause
+        .downcast_ref::<&str>()
+        .map(|said| said.to_string())
+        .or_else(|| cause.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "it panicked".to_string())
+}
+
+/// Runs an entry point that is never refused, with `otherwise` as what it returns where it panics.
+pub fn caught<T>(otherwise: T, body: impl FnOnce() -> T) -> T {
+    panic::catch_unwind(AssertUnwindSafe(body)).unwrap_or(otherwise)
+}
+
+/// Runs an entry point that can be refused: its value, or `otherwise` with the refusal -- a panic
+/// as WAIFU_ERR_INTERNAL -- set as this thread's last error.
+pub fn refusable<T>(otherwise: T, body: impl FnOnce() -> Result<T, Refused>) -> T {
+    let refused = match panic::catch_unwind(AssertUnwindSafe(body)) {
+        Ok(Ok(value)) => return value,
+        Ok(Err(refused)) => refused,
+        Err(cause) => Refused::new(
+            WAIFU_ERR_INTERNAL,
+            format!("a bug in the library: {}", said(cause)),
+        ),
+    };
+    refuse(&refused);
+    otherwise
 }
 
 /// A string handed in, or the reason it cannot be read. NULL is the caller's to decide.
@@ -118,11 +159,6 @@ pub unsafe fn required(pointer: *const c_char, what: &str) -> Result<String, Str
     string_in(pointer, what)?.ok_or_else(|| format!("{what} is NULL"))
 }
 
-/// A string for the caller to free with the library's `_string_free`.
-pub fn string_out(text: &str) -> *mut c_char {
-    c_string(text).into_raw()
-}
-
 /// `text` as C can read it: a NUL inside it would end it early, so it is a space instead.
 pub fn c_string(text: &str) -> CString {
     CString::new(text.replace('\0', " ")).unwrap_or_default()
@@ -130,34 +166,29 @@ pub fn c_string(text: &str) -> CString {
 
 // -- logging ---------------------------------------------------------------------------------
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WaifuLogLevel {
-    WAIFU_LOG_DEBUG = 0,
-    WAIFU_LOG_INFO = 1,
-    WAIFU_LOG_WARNING = 2,
-    WAIFU_LOG_ERROR = 3,
-    /// The last line: the process aborts when the callback returns.
-    WAIFU_LOG_FATAL = 4,
-}
+pub type WaifuLogLevel = i32;
+pub const WAIFU_LOG_DEBUG: WaifuLogLevel = 0;
+pub const WAIFU_LOG_INFO: WaifuLogLevel = 1;
+pub const WAIFU_LOG_WARNING: WaifuLogLevel = 2;
+pub const WAIFU_LOG_ERROR: WaifuLogLevel = 3;
+/// The process aborts when the callback returns.
+pub const WAIFU_LOG_FATAL: WaifuLogLevel = 4;
 
 #[repr(C)]
-pub struct WaifuLogEvent {
+pub struct WaifuLog {
     pub level: WaifuLogLevel,
-    /// Where it was written, as a file and a line: "interface.cc:84" for flint, "engine.rs:712" for
-    /// Rust.
+    /// Where it was written, as a file and a line: "interface.cc:84", "engine.rs:712".
     pub source: *const c_char,
     /// The line alone, with no level or time in front of it.
     pub message: *const c_char,
-    /// When it was written, in UTC: "2026-10-23T18:50:41Z". Last, so that a caller built against a
-    /// header without it reads the rest where it always did.
+    /// When it was written, in UTC: "2026-10-23T18:50:41Z".
     pub time: *const c_char,
 }
 
-/// Called on whichever thread wrote the line, which can be the caller's own. It must be safe to
-/// call from any thread, and must not call into the library.
+/// Called on whichever thread wrote the line, which can be the caller's own, possibly from several
+/// threads at once. Must not call into the library.
 pub type WaifuLogCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuLogEvent)>;
+    Option<unsafe extern "C" fn(user_data: *mut c_void, log: *const WaifuLog)>;
 
 /// A caller's pointer, handed back as it was given, on whichever thread a callback runs.
 #[derive(Clone, Copy)]
@@ -173,121 +204,113 @@ pub fn log_sink(user_data: *mut c_void, callback: WaifuLogCallback) -> Option<Si
         let time = c_string(time);
         let source = c_string(source);
         let message = c_string(message);
-        let event = WaifuLogEvent {
+        let log = WaifuLog {
             level: match level {
-                Level::Debug => WaifuLogLevel::WAIFU_LOG_DEBUG,
-                Level::Info => WaifuLogLevel::WAIFU_LOG_INFO,
-                Level::Warning => WaifuLogLevel::WAIFU_LOG_WARNING,
-                Level::Error => WaifuLogLevel::WAIFU_LOG_ERROR,
-                Level::Fatal => WaifuLogLevel::WAIFU_LOG_FATAL,
+                Level::Debug => WAIFU_LOG_DEBUG,
+                Level::Info => WAIFU_LOG_INFO,
+                Level::Warning => WAIFU_LOG_WARNING,
+                Level::Error => WAIFU_LOG_ERROR,
+                Level::Fatal => WAIFU_LOG_FATAL,
             },
             source: source.as_ptr(),
             message: message.as_ptr(),
             time: time.as_ptr(),
         };
         let user_data = user_data;
-        unsafe { callback(user_data.0, &event) };
+        unsafe { callback(user_data.0, &log) };
     }))
 }
 
-pub fn log_level(level: WaifuLogLevel) -> Level {
+/// The level a caller named, or None for a number this library does not know.
+pub fn log_level(level: WaifuLogLevel) -> Option<Level> {
     match level {
-        WaifuLogLevel::WAIFU_LOG_DEBUG => Level::Debug,
-        WaifuLogLevel::WAIFU_LOG_INFO => Level::Info,
-        WaifuLogLevel::WAIFU_LOG_WARNING => Level::Warning,
-        WaifuLogLevel::WAIFU_LOG_ERROR => Level::Error,
-        WaifuLogLevel::WAIFU_LOG_FATAL => Level::Fatal,
+        WAIFU_LOG_DEBUG => Some(Level::Debug),
+        WAIFU_LOG_INFO => Some(Level::Info),
+        WAIFU_LOG_WARNING => Some(Level::Warning),
+        WAIFU_LOG_ERROR => Some(Level::Error),
+        WAIFU_LOG_FATAL => Some(Level::Fatal),
+        _ => None,
     }
 }
 
 // -- progress --------------------------------------------------------------------------------
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WaifuStage {
-    /// Reading weights onto the device: no fraction. 0 was fetching, which is
-    /// libwaifu_modelmanager's now; the others keep their numbers.
-    WAIFU_STAGE_READING = 1,
-    /// The prompt, or the picture img2img starts from.
-    WAIFU_STAGE_ENCODING = 2,
-    /// done/total in steps.
-    WAIFU_STAGE_DRAWING = 3,
-    WAIFU_STAGE_DECODING = 4,
-    /// A conversion reading its recordings.
-    WAIFU_STAGE_LISTENING = 5,
-    /// done/total in tokens; total is an estimate and can be passed.
-    WAIFU_STAGE_SAYING = 6,
-    /// The vocoder.
-    WAIFU_STAGE_SOUNDING = 7,
-    /// Writing down what a recording says: done/total in tokens; total is an estimate and can be
-    /// passed. A transcription's hearing of the recording is WAIFU_STAGE_LISTENING.
-    WAIFU_STAGE_WRITING = 8,
-}
+/// What a job is doing. Ranges by task; done/total count what the comment says, 0, 0 otherwise.
+pub type WaifuStage = i32;
+pub const WAIFU_STAGE_LOADING_WEIGHTS: WaifuStage = 1;
+
+pub const WAIFU_STAGE_IMAGE_GENERATION_ENCODING_PROMPT: WaifuStage = 100;
+/// Steps.
+pub const WAIFU_STAGE_IMAGE_GENERATION_DENOISING: WaifuStage = 101;
+pub const WAIFU_STAGE_IMAGE_GENERATION_DECODING_IMAGE: WaifuStage = 102;
+
+pub const WAIFU_STAGE_TEXT_TO_SPEECH_READING_TEXT: WaifuStage = 200;
+/// Tokens; total is an estimate, and can be passed.
+pub const WAIFU_STAGE_TEXT_TO_SPEECH_GENERATING_TOKENS: WaifuStage = 201;
+pub const WAIFU_STAGE_TEXT_TO_SPEECH_SYNTHESIZING_AUDIO: WaifuStage = 202;
+
+pub const WAIFU_STAGE_VOICE_CONVERSION_READING_RECORDINGS: WaifuStage = 300;
+/// Tokens; total is an estimate.
+pub const WAIFU_STAGE_VOICE_CONVERSION_GENERATING_TOKENS: WaifuStage = 301;
+/// Steps.
+pub const WAIFU_STAGE_VOICE_CONVERSION_DENOISING: WaifuStage = 302;
+/// Vocoder windows.
+pub const WAIFU_STAGE_VOICE_CONVERSION_SYNTHESIZING_AUDIO: WaifuStage = 303;
+
+/// The whole picture, then the head, then the depth model that orders the layers.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_ENCODING_IMAGE: WaifuStage = 400;
+/// Steps.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_DENOISING_LAYERS: WaifuStage = 401;
+/// Layers.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_DECODING_LAYERS: WaifuStage = 402;
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_ENCODING_HEAD: WaifuStage = 403;
+/// Steps.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_DENOISING_HEAD_LAYERS: WaifuStage = 404;
+/// Layers.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_DECODING_HEAD_LAYERS: WaifuStage = 405;
+/// Layers.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_ENCODING_FOR_DEPTH: WaifuStage = 406;
+/// Steps.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_DENOISING_DEPTH: WaifuStage = 407;
+/// Layers.
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_DECODING_DEPTH: WaifuStage = 408;
+pub const WAIFU_STAGE_LAYER_DECOMPOSITION_CUTTING_INTO_PARTS: WaifuStage = 409;
+
+/// Pieces the recording is cut into.
+pub const WAIFU_STAGE_SPEECH_TO_TEXT_READING_RECORDING: WaifuStage = 500;
+/// Tokens; total is an estimate, and can be passed.
+pub const WAIFU_STAGE_SPEECH_TO_TEXT_GENERATING_TOKENS: WaifuStage = 501;
+
+/// Saying and sounding take turns, a hop of tokens at a time.
+pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_READING_TEXT: WaifuStage = 600;
+/// Tokens; total is an estimate.
+pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_GENERATING_TOKENS: WaifuStage = 601;
+/// Parts handed over.
+pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_SYNTHESIZING_AUDIO: WaifuStage = 602;
 
 #[repr(C)]
-pub struct WaifuProgressEvent {
+pub struct WaifuProgress {
     pub stage: WaifuStage,
     /// 0..1 of the whole job, or -1 where nothing can say.
     pub fraction: f64,
-    /// What the stage counts; 0, 0 where it counts nothing.
+    /// Of the stage, done already.
     pub done: u64,
     pub total: u64,
-    /// Reserved: 0, 0 and NULL. They said which file of a download, which is
-    /// libwaifu_modelmanager's now, and are kept so the event keeps its layout.
-    pub part: u32,
-    pub parts: u32,
-    pub file: *const c_char,
-    /// "step 3 of 8", for a status line.
-    pub words: *const c_char,
     /// Since the job started.
     pub seconds: f64,
 }
 
 pub type WaifuProgressCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuProgressEvent)>;
+    Option<unsafe extern "C" fn(user_data: *mut c_void, progress: *const WaifuProgress)>;
 
-/// How a job that makes nothing ended: a fetch, a load, an unload.
+/// Every pointer in a result is valid until the callback returns.
 #[repr(C)]
-pub struct WaifuCompletionEvent {
+pub struct WaifuResult {
     pub status: WaifuStatus,
 }
 
-pub type WaifuCompleteCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, event: *const WaifuCompletionEvent)>;
-
-/// A progress report, before it is made into C.
-pub struct Progress<'a> {
-    pub stage: WaifuStage,
-    pub fraction: Option<f64>,
-    pub done: u64,
-    pub total: u64,
-    pub part: u32,
-    pub parts: u32,
-    pub file: Option<&'a str>,
-    pub words: &'a str,
-    pub seconds: f64,
-}
-
-/// Calls `callback`, if there is one, with `progress`.
-pub fn tell_progress(callback: WaifuProgressCallback, user_data: UserData, progress: &Progress) {
-    let Some(callback) = callback else {
-        return;
-    };
-    let file = progress.file.map(c_string);
-    let words = c_string(progress.words);
-    let event = WaifuProgressEvent {
-        stage: progress.stage,
-        fraction: progress.fraction.unwrap_or(-1.0),
-        done: progress.done,
-        total: progress.total,
-        part: progress.part,
-        parts: progress.parts,
-        file: file.as_ref().map_or(ptr::null(), |file| file.as_ptr()),
-        words: words.as_ptr(),
-        seconds: progress.seconds,
-    };
-    unsafe { callback(user_data.0, &event) };
-}
+pub type WaifuCallback =
+    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuResult)>;
 
 /// A status whose message lives as long as `message` does.
 pub fn status(code: WaifuStatusCode, message: &Option<CString>) -> WaifuStatus {
@@ -301,9 +324,10 @@ pub fn status(code: WaifuStatusCode, message: &Option<CString>) -> WaifuStatus {
 
 // -- keeping the promises about when a callback can arrive ---------------------------------------
 
-/// Shut until the `_async` call that made it has returned: a callback that arrives before then
-/// waits. A job's thread can finish before the call that started it is done handing back its
-/// handle, and a caller whose continuation is set up from that handle would miss the end.
+/// Shut until the `_async` call that made it has its job's id, which is when it opens: a callback
+/// that arrives before then waits, so that no callback runs for a call that may yet be refused.
+/// It does not hold callbacks back until the call has returned -- nothing can know when the caller
+/// has the id -- which is why a job's state is its `user_data` (docs/ffi-abi4.md).
 #[derive(Clone, Default)]
 pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
 

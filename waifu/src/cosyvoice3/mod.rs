@@ -516,7 +516,7 @@ impl CosyVoice3 {
     /// Whether the DiT's attention in blocks runs here, tried on a block of nothing at the type
     /// the DiT runs at. CUDA's kernel takes blocks at half on Ampere or later, and Metal's at half
     /// or float; the processor has none.
-    fn streams(&self) -> Result<()> {
+    pub(crate) fn streams(&self) -> Result<()> {
         let config = self.flow.config();
         let dtype = self.precision.flow;
         let probe = || -> Result<Tensor> {

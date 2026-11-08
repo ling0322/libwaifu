@@ -119,10 +119,10 @@ struct ModelCard: View {
         if let why = session.notDescribed[kind] {
             Text(why).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
         } else if let model = session.model {
-            if launcher.has(model.name, on: session.placement) {
+            if launcher.has(model.name, for: Launcher.pipelineType(for: kind), on: session.placement) {
                 Footnote("Loaded on \(session.device)\(onGPU(session.placement)).")
             } else if let loaded = launcher.loaded, loaded.model == model.name,
-                loaded.placement.device == session.device
+                loaded.type == Launcher.pipelineType(for: kind), loaded.placement.device == session.device
             {
                 // Only the slider moved: what stays on the GPU is decided as the model is read.
                 Footnote(

@@ -4,7 +4,8 @@ A native SwiftUI app on libwaifu. It needs macOS 14.
 
 The app does none of the drawing itself, and runs no `waifu` program: it calls the library in
 process, through `libwaifu.dylib` and `libwaifu_modelmanager.dylib` and their C APIs
-(`docs/ffi.md`), wrapped for Swift in `WaifuKit` (`Sources/WaifuKit`).
+(`docs/ffi-abi4.md` and `docs/ffi.md`), wrapped for Swift in `WaifuKit` (`Sources/WaifuKit`): a
+pipeline for each kind of job, and a model asked what it can do before it is read.
 
 ## Build
 
@@ -71,17 +72,19 @@ the strip, after asking; what is still being made is left alone.
 **img2layers** takes a picture apart with See-through (`see-through`, docs/see_through.md): drop
 an illustration on it and **Split into Layers**. What comes back is a Photoshop document, kept as
 `<id>.psd` -- with each layer's depth in a hidden group `depth`, at the top of the layer panel --
-and beside it in `<id>.layers/` the depth document, the layers put back together, and every layer
-as a PNG. The middle shows them stacked on their canvas, and beside that their list,
+and beside it in `<id>.layers/` the depth document, the layers put back together, every layer as a
+PNG, and the halves Split by depth lays among them. The library hands over each layer's pixels and
+its depth pixel by pixel, and the app writes the documents itself. The middle shows them stacked on their canvas, and beside that their list,
 nearest first: the eye hides one, a click shows it alone. Its pencil opens a small window to change
 its name and depth (0 nearest, 1 farthest) in; on Save the list takes the new order, and both
-documents, the picture put back together and the record are written again -- through
-`waifu_psd_write`, every pixel as it was. **Reset** puts back what the model gave. **Save PSD…**
+documents, the picture put back together and the record are written again, every pixel as it
+was. **Reset** puts back what the model gave. **Save PSD…**
 and **Save Depth PSD…** save the two documents; **Open in waifu2d** makes them move. With **Split by
 depth** on, the layers shown and saved have hair, hands, top and bottom each cut into a near and a
 far layer by their own depth, as the See-through paper does -- the back of a collar behind the neck,
-its flaps in front (docs/see_through.md); names and depths are changed with it off. The document
-kept, and what waifu2d opens, stay as the model made them.
+its flaps in front (docs/see_through.md); names and depths are changed with it off, and the halves
+follow them. The document kept, and what waifu2d opens, stay as the model made them. A picture taken
+apart before the halves were kept has none to split by: take it apart again.
 
 **waifu2d** makes a drawing in layers move, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
 does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedParts.swift` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers

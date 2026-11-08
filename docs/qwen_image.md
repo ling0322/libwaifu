@@ -220,7 +220,7 @@ The model edits a picture, or draws from up to ten of them, by reading them as p
 rows the encoder reads in the picture's slots, and by the autoencoder's encoder, whose latent the
 denoiser reads where those slots were -- and the picture drawn comes after all of it. The runtime's
 door is `QwenImage::generate_with_pictures`; the C API's is a `<|name|>` in the prompt (see
-`docs/ffi.md`), which the engine numbers `<image1>`, `<image2>` in the order the prompt names them.
+`docs/ffi-abi4.md`), which the engine numbers `<image1>`, `<image2>` in the order the prompt names them.
 
 **The template.** The user's turn opens with the pictures, then the prompt:
 

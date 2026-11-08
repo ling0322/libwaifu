@@ -66,7 +66,7 @@ pub use psd::{
     Document as PsdDocument, HiddenGroup as PsdHiddenGroup, Layer as PsdLayer, Mode as PsdMode,
 };
 pub use sampler::{DdimVelocity, DpmSolverSde, ScheduleConfig};
-pub use stratify::{stratify, DepthLayer, STRATIFIED};
+pub use stratify::{split, stratify, DepthLayer, STRATIFIED};
 pub use unet::{Unet, UnetCondition, UnetConfig};
 
 use compose::{Drawn, LAYER_ALPHA};

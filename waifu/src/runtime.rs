@@ -122,6 +122,13 @@ pub fn set_memory_limit(device: DeviceOption, bytes: u64) -> Result<(), String> 
     let device = device.resolve().device();
     MemorySnapshot::set_limit(device, bytes.min(i64::MAX as u64) as i64)
         .map_err(|error| format!("{} takes no memory limit: {error}", device.name()))?;
+    {
+        let mut limits = LIMITS.lock().unwrap_or_else(|held| held.into_inner());
+        limits.retain(|(limited, _)| *limited != device);
+        if bytes > 0 {
+            limits.push((device, bytes));
+        }
+    }
     crate::log::write(
         crate::log::Level::Info,
         &match bytes {
@@ -134,6 +141,18 @@ pub fn set_memory_limit(device: DeviceOption, bytes: u64) -> Result<(), String> 
         },
     );
     Ok(())
+}
+
+/// The limits [`set_memory_limit`] has set, by device; a device set to 0 is not here.
+static LIMITS: std::sync::Mutex<Vec<(Device, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// What [`set_memory_limit`] last set on `device`, or None where nothing did or it set 0.
+pub fn memory_limit(device: Device) -> Option<u64> {
+    let limits = LIMITS.lock().unwrap_or_else(|held| held.into_inner());
+    limits
+        .iter()
+        .find(|(limited, _)| *limited == device)
+        .map(|(_, bytes)| *bytes)
 }
 
 /// What the allocator of `device` may still take, where this build and this machine can run there

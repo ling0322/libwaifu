@@ -195,7 +195,7 @@ namespace Libwaifu.Gui.Engine
             Native.waifu_modelmanager_set_log_level(Native.LogLevel.Info);
         }
 
-        private static void OnLine(IntPtr user, ref Native.LogEvent e)
+        private static void OnLine(IntPtr user, ref Native.Log e)
         {
             // Called on any thread, including this one, and must not call back into the library.
             // Everything it is given is valid only until it returns, so both strings are copied.
@@ -250,7 +250,11 @@ namespace Libwaifu.Gui.Engine
             }
         }
 
-        /// <summary>This thread's last message, which is where a failed call says why.</summary>
+        /// <summary>
+        /// This thread's last refused call, which is where a refused call says why: a NULL from
+        /// a constructor, job 0 from an _async call. Only a refused call sets it, so it is read
+        /// straight after one.
+        /// </summary>
         public static string LastError()
         {
             try

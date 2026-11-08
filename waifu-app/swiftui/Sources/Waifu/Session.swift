@@ -20,8 +20,8 @@
 // One window's worth of working with the loaded model: what is in the boxes, the jobs asked for
 // and what they made.
 //
-// A job is a call on the engine, awaited in a task of its own: its progress arrives as it goes, and
-// cancelling the task cancels the job. What a job makes is this app's to keep -- the engine keeps
+// A job is a call on a pipeline, awaited in a task of its own: its progress arrives as it goes, and
+// cancelling the task cancels the job. What a job makes is this app's to keep -- the library keeps
 // nothing -- so each one is written to the output folder as it finishes, a PNG or a WAV beside a
 // JSON of what made it, and read back from there when a window opens on a model of the same kind.
 
@@ -114,7 +114,7 @@ struct BarState {
 
 @MainActor @Observable
 final class Session {
-    /// The engine, and what is loaded into it.
+    /// The pipeline, and what is loaded into it.
     let launcher = Launcher()
     /// The model chosen for each kind of job -- "image", "speech", "conversion", "layers" -- as it is asked
     /// for: a published name or a manifest's path. Kept from one run of the app to the next.
@@ -340,13 +340,15 @@ final class Session {
     }
 
     /// What a picture taken apart keeps beside its document: the picture put back together, the
-    /// depth document, and each layer in a PNG of its own.
+    /// depth document, each layer in a PNG of its own, and the document of its halves.
     func besideFolder(_ id: String) -> URL {
         folder.appendingPathComponent("\(id).layers")
     }
 
     nonisolated static let composite = "composite.png"
     nonisolated static let depthDocument = "depth.psd"
+    /// The halves of the parts Split by depth cuts, in the order the record lists them.
+    nonisolated static let halvesDocument = "halves.psd"
 
     private func recordFile(_ id: String) -> URL {
         folder.appendingPathComponent("\(id).json")
@@ -465,8 +467,8 @@ final class Session {
 
     // MARK: - what the screen reads
 
-    /// Every job of this window's still going, whichever tab asked for it: one at a time, on the
-    /// one engine.
+    /// Every job of this window's still going, whichever tab asked for it: one at a time, and one
+    /// model on the card at a time.
     var going: [Job] { jobs.filter(\.isGoing) }
     var running: Job? { jobs.first { $0.status == .running } }
     var waiting: [Job] { jobs.filter { $0.status == .queued } }
@@ -512,7 +514,7 @@ final class Session {
         if let running, let progress, progress.job == running.id {
             bar.fraction = progress.said.fraction
             bar.seconds = progress.said.seconds
-            bar.doing = progress.said.words
+            bar.doing = progress.said.line()
             bar.stopping = stopping.contains(running.id)
         } else if running != nil {
             bar.doing = "starting"
@@ -587,13 +589,14 @@ final class Session {
     /// ends: what `run` hands back is the file, what made it, and what is kept beside the file.
     private func start(
         kind: String, model: String,
-        _ run: @escaping (Engine, @escaping ProgressHandler) async throws -> (Data, Made, [String: Data])?
+        _ run: @escaping (Pipeline, @escaping ProgressHandler) async throws -> (Data, Made, [String: Data])?
     ) {
         complaint = nil
         let id = UUID().uuidString.lowercased()
         jobs.insert(Job(id: id, kind: kind, status: .queued, created: Date().timeIntervalSince1970 * 1000), at: 0)
 
         let placement = placement
+        let type = Launcher.pipelineType(for: kind)
         let previous = last
         let task = Task { [weak self] in
             await previous?.value
@@ -609,12 +612,12 @@ final class Session {
                 Task { @MainActor in self.heard(said, of: id) }
             }
             do {
-                let wasLoaded = launcher.has(model, on: placement)
-                let engine = try await launcher.ensure(model, on: placement)
+                let wasLoaded = launcher.has(model, for: type, on: placement)
+                let pipeline = try await launcher.ensure(model, for: type, on: placement)
                 if !wasLoaded { refresh(model) }
-                // Cancelled once the engine was done -- while a picture taken apart was turned into
-                // files -- is cancelled all the same: nothing is kept.
-                if let (bytes, made, beside) = try await run(engine, report), !Task.isCancelled {
+                // Cancelled once the pipeline was done -- while a picture taken apart was turned
+                // into files -- is cancelled all the same: nothing is kept.
+                if let (bytes, made, beside) = try await run(pipeline, report), !Task.isCancelled {
                     await keep(id, bytes: bytes, made: made, beside: beside)
                 } else {
                     ended(id, as: .cancelled)
@@ -661,14 +664,14 @@ final class Session {
         // As the engine draws with it.
         let strength = min(max(form.strength, 0), 1)
         if fromAPicture, let rgb = picture?.rgb {
-            request.images = [(key: "start_from", image: rgb)]
+            request.startImage = rgb
             request.strength = strength
         }
         // The pictures the prompt names, under their names: the engine writes them the way the
         // model reads them and scales each to the size it reads one at.
         let naming = tab == .text2img && chosen.readsPictures && !named.isEmpty
         if naming {
-            request.images = named.compactMap { picture in picture.held.rgb.map { (key: picture.name, image: $0) } }
+            request.promptImages = named.compactMap { picture in picture.held.rgb.map { (key: picture.name, image: $0) } }
         }
 
         // What the record calls the model: its published name with the version, or the path of
@@ -682,19 +685,19 @@ final class Session {
         if naming { asked.promptPictures = namedPaths() }
         let made = asked
 
-        start(kind: "image", model: modelName) { engine, report in
+        start(kind: "image", model: modelName) { pipeline, report in
             let started = Date()
-            guard let image = try await engine.draw(request, progress: report) else { return nil }
+            guard let image = try await pipeline.draw(request, progress: report) else { return nil }
             let seconds = Date().timeIntervalSince(started)
             guard let png = Media.png(image) else { return nil }
             // What it was drawn at and on, which the boxes need not have said: "auto" is settled
-            // by the engine.
+            // by the library.
             var drawn = Made.picture(
                 seed: made.seed, model: made.model, prompt: made.prompt ?? "", negative: made.negative ?? "",
                 width: image.width, height: image.height, steps: made.steps ?? 0,
                 guidance: made.guidance ?? 0, strength: made.strength)
             drawn.seconds = seconds
-            drawn.device = engine.device.replacingOccurrences(of: "_", with: "-")
+            drawn.device = pipeline.device.replacingOccurrences(of: "_", with: "-")
             drawn.startFrom = made.startFrom
             drawn.promptPictures = made.promptPictures
             return (png, drawn, [:])
@@ -737,9 +740,9 @@ final class Session {
     private func speak() {
         guard let voice = model?.voice, let modelName = model?.name else { return }
         let seed = seed
-        let style = (voice.styles ?? []).isEmpty || form.style.isBlank ? nil : form.style.trimmingCharacters(in: .whitespaces)
+        let style = !voice.followsStyle || form.style.isBlank ? nil : form.style.trimmingCharacters(in: .whitespaces)
         let request = SpeakRequest(
-            text: form.text, like: recording?.clip, speed: form.speed, temperature: form.temperature,
+            text: form.text, reference: recording?.clip, speed: form.speed, temperature: form.temperature,
             style: style, seed: seed)
 
         // As a picture's record names its model: the published name with its version, or the
@@ -753,9 +756,9 @@ final class Session {
             text: form.text, speed: form.speed, temperature: form.temperature, style: style,
             fromARecording: recording != nil)
 
-        start(kind: "speech", model: modelName) { engine, report in
+        start(kind: "speech", model: modelName) { pipeline, report in
             let started = Date()
-            guard let clip = try await engine.speak(request, progress: report) else { return nil }
+            guard let clip = try await pipeline.speak(request, progress: report) else { return nil }
             var made = made
             made.seconds = Date().timeIntervalSince(started)
             made.length = clip.seconds
@@ -777,9 +780,9 @@ final class Session {
             parameters: "Steps: \(form.conversionSteps), Style: \(style ? "yes" : "no"), Seed: \(seed), Rate: \(converter.rate) Hz, Converter: \(modelName)",
             steps: form.conversionSteps, convertStyle: style)
 
-        start(kind: "conversion", model: modelName) { engine, report in
+        start(kind: "conversion", model: modelName) { pipeline, report in
             let started = Date()
-            guard let clip = try await engine.voiceConversion(request, progress: report) else { return nil }
+            guard let clip = try await pipeline.voiceConversion(request, progress: report) else { return nil }
             var made = made
             made.seconds = Date().timeIntervalSince(started)
             made.length = clip.seconds
@@ -789,7 +792,8 @@ final class Session {
     }
 
     /// Takes the held picture apart into its layers: the document is what is kept, and beside it
-    /// the depth document, the picture put back together, and each layer as a PNG.
+    /// the depth document, the picture put back together, each layer as a PNG, and the halves
+    /// Split by depth lays among them.
     private func takeApart() {
         guard model?.layerer != nil, let modelName = model?.name, let rgba = picture?.rgba else { return }
         let seed = seed
@@ -798,6 +802,9 @@ final class Session {
         request.steps = form.layerSteps
         request.depthSteps = form.depthSteps
         request.splitPairs = form.splitPairs
+        // Whatever Split by depth says now, which only says what is shown and saved and can be
+        // turned on for this job later: the halves are the library's to cut, as it takes it apart.
+        request.stratifyLayers = true
 
         let named = ModelManager.versionedName(modelName) ?? modelName
         var asked = Made(
@@ -808,50 +815,108 @@ final class Session {
         asked.startFrom = startFrom()?.path
         let made = asked
 
-        start(kind: "layers", model: modelName) { engine, report in
+        start(kind: "layers", model: modelName) { pipeline, report in
             let started = Date()
-            guard let taken = try await engine.layers(request, progress: report) else { return nil }
+            guard let taken = try await pipeline.layers(request, progress: report) else { return nil }
             var made = made
             made.seconds = Date().timeIntervalSince(started)
-            made.device = engine.device.replacingOccurrences(of: "_", with: "-")
-            // What it was drawn at, which the engine settled: the canvas is that square.
+            made.device = pipeline.device.replacingOccurrences(of: "_", with: "-")
+            // What it was drawn at, which the library settled: the canvas is that square.
             made.canvas = taken.canvas
             made.resolution = taken.canvas
             made.parameters =
                 "Steps: \(made.steps ?? 0), Depth steps: \(made.depthSteps ?? 0), Resolution: \(taken.canvas), "
                 + "Split pairs: \(made.splitPairs == true ? "yes" : "no"), Seed: \(seed), Model: \(named)"
             // Off the main thread, and stopped where it is by a Cancel: the job is not kept then.
-            let export = Task.detached { Self.files(of: taken) }
-            let (kept, beside) = await withTaskCancellationHandler {
-                await export.value
+            let export = Task.detached { try Self.files(of: taken) }
+            let kept = try await withTaskCancellationHandler {
+                try await export.value
             } onCancel: {
                 export.cancel()
             }
-            made.layers = kept
-            return (taken.psd, made, beside)
+            made.layers = kept.layers
+            made.halves = kept.halves
+            return (kept.document, made, kept.beside)
         }
     }
 
-    /// What a picture taken apart keeps beside its document, by file name, and the list of its
-    /// layers that names them: made off the main thread, since it is two dozen PNGs.
-    nonisolated static func files(of taken: Layers) -> ([KeptLayer], [String: Data]) {
-        var beside: [String: Data] = [depthDocument: taken.depthPSD]
-        if let composite = Media.composite(taken.layers, canvas: taken.canvas) {
+    /// What a picture taken apart is kept as -- its document of the parts, each one's depth in its
+    /// hidden group, and by file name what is kept beside it -- with the lists of its parts and its
+    /// halves that name them: made off the main thread, since it is two dozen PNGs and three
+    /// documents.
+    nonisolated static func files(of taken: Layers) throws
+        -> (document: Data, layers: [KeptLayer], halves: [KeptHalf], beside: [String: Data])
+    {
+        let canvas = taken.canvas
+        // The parts, bottom first, and the halves, near before far: each with its depth layer,
+        // pixel by pixel, which the library hands over beside them.
+        let parts = taken.layers.filter { $0.type == .part }
+        let cut = taken.layers.filter { $0.type.isHalf }
+        let file = { (index: Int) in String(format: "%02d.png", index) }
+        let picture = { (layer: Layer) in PSD.Layer(name: layer.name, left: layer.left, top: layer.top, image: layer.image) }
+        let depth = { (layer: Layer) in
+            PSD.Layer(name: layer.name, left: layer.left, top: layer.top, image: depthImage(of: layer, in: taken))
+        }
+        let hidden = { (layer: PSD.Layer) in
+            PSD.Layer(name: PSD.depthName(of: layer.name), left: layer.left, top: layer.top, image: layer.image)
+        }
+        let grays = parts.map(depth)
+        let document = try PSD.write(parts.map(picture), width: canvas, height: canvas, depths: grays.map(hidden))
+        let depthPSD = try PSD.write(grays, width: canvas, height: canvas, grayscale: true)
+        var beside: [String: Data] = [depthDocument: depthPSD]
+
+        // The halves, in the library's order, in a document of their own with their depth in its
+        // hidden group: their pixels as they are, for Split by depth to lay among the parts.
+        if !cut.isEmpty {
+            beside[halvesDocument] = try PSD.write(
+                cut.map(picture), width: canvas, height: canvas, depths: cut.map(depth).map(hidden))
+        }
+        // Each naming its part by the library's id for it, which neither a name nor a depth changes.
+        let halves = cut.map { half in
+            KeptHalf(
+                name: half.name, left: half.left, top: half.top, width: half.image.width, height: half.image.height,
+                depth: half.depth, near: half.type == .near, id: half.id, of: half.derivedFromID ?? 0)
+        }
+
+        if let composite = Media.composite(parts, canvas: canvas) {
             beside[Self.composite] = composite
         }
         var kept: [KeptLayer] = []
-        for (index, layer) in taken.layers.enumerated() {
+        for (index, layer) in parts.enumerated() {
             // Half of it is no use to anybody: a Cancel stops here, and the job is not kept.
             if Task.isCancelled { break }
             guard let png = Media.png(layer.image) else { continue }
-            let file = String(format: "%02d.png", index)
-            beside[file] = png
+            beside[file(index)] = png
             kept.append(
                 KeptLayer(
                     name: layer.name, left: layer.left, top: layer.top, width: layer.image.width,
-                    height: layer.image.height, depth: layer.depth, file: file))
+                    height: layer.image.height, depth: layer.depth, file: file(index), id: layer.id))
         }
-        return (kept, beside)
+        return (document, kept, halves, beside)
+    }
+
+    /// `layer`'s depth, pixel by pixel, as the library hands it over: gray, 0 near to 255 far,
+    /// under the layer's alpha. Where there is none the size of it, the gray of its one depth.
+    nonisolated static func depthImage(of layer: Layer, in taken: Layers) -> RGBAImage {
+        if let given = taken.depth(of: layer)?.image, given.width == layer.image.width,
+            given.height == layer.image.height, given.rgba.count == layer.image.rgba.count
+        {
+            return given
+        }
+        return gray(layer.image, depth: layer.depth)
+    }
+
+    /// `image` with every pixel the gray of `depth` -- 0 near to 255 far -- under its own alpha: a
+    /// layer's depth, as img2layers keeps it.
+    nonisolated static func gray(_ image: RGBAImage, depth: Float) -> RGBAImage {
+        let level = UInt8((min(max(depth, 0), 1) * 255).rounded())
+        var rgba = image.rgba
+        for p in stride(from: 0, to: rgba.count / 4 * 4, by: 4) {
+            rgba[p] = level
+            rgba[p + 1] = level
+            rgba[p + 2] = level
+        }
+        return RGBAImage(width: image.width, height: image.height, rgba: rgba)
     }
 
     /// Stops the tab on show's running job after the step it is on, or takes its waiting one out
@@ -959,7 +1024,7 @@ final class Session {
         guard var bytes = outputs[job.id] else { return }
         if job.kind == "layers", form.splitByDepth {
             do {
-                bytes = try Self.splitByDepth(bytes, besides: depthDocument(of: job)).document
+                bytes = try stratified(job).document
             } catch {
                 complaint = "could not split it by depth: \(error.localizedDescription)"
                 return
@@ -968,74 +1033,138 @@ final class Session {
         Media.save(bytes, suggesting: Media.fileName(created: job.finished ?? job.created, kind: job.kind))
     }
 
-    /// The depth document img2layers keeps beside a picture taken apart, where it still is.
-    private func depthDocument(of job: Job) -> Data? {
-        try? Data(contentsOf: besideFolder(job.id).appendingPathComponent(Self.depthDocument))
+    /// The document of the halves img2layers keeps beside a picture taken apart, where it still is.
+    private func halvesDocument(of job: Job) -> Data? {
+        try? Data(contentsOf: besideFolder(job.id).appendingPathComponent(Self.halvesDocument))
+    }
+
+    /// A picture taken apart as Split by depth saves it, with its names and depths as they are
+    /// now: the document, and the depth document of it.
+    private func stratified(_ job: Job) throws -> (document: Data, depth: Data) {
+        guard let psd = outputs[job.id], let made = jobs.first(where: { $0.id == job.id })?.made else {
+            throw PSDError(message: "it has not been read yet")
+        }
+        return try Self.splitByDepth(psd, halves: halvesDocument(of: job), parts: made.layers ?? [], cut: made.halves)
     }
 
     /// A picture taken apart's layers with hair, hands, top and bottom each cut into a near (-0)
     /// and a far (-1) layer by their own depth, as the See-through paper does -- the back of a
-    /// collar behind the neck, its flaps in front -- bottom first, each with its depth. The depth is
-    /// the document's own, in its hidden group, or else -- in one written before img2layers kept it
-    /// there -- `besides`, the depth document beside it, its layers in order.
-    nonisolated static func split(_ psd: Data, besides: Data? = nil) throws -> (width: Int, height: Int, layers: [Stratify.Layer]) {
-        let document = try PSDDocument.read(psd)
-        let (layers, depths) = document.splitDepth()
-        var byName = Dictionary(depths.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        if depths.isEmpty, let besides, let beside = try? PSDDocument.read(besides), beside.layers.count == layers.count {
-            byName = Dictionary(
-                zip(layers.map { PSD.depthName(of: $0.name) }, beside.layers), uniquingKeysWith: { first, _ in first })
+    /// collar behind the neck, its flaps in front -- bottom first, each with its depth: the
+    /// stratified stack (docs/ffi-abi4.md, "Stratification"). The parts are `psd`'s, under the
+    /// names and at the depths `parts`, its record, gives them now; the halves are `halves`', in
+    /// the order `cut` lists them, each named after its part as it is now, and a near one at its
+    /// depth, which keeps it in its part's place.
+    nonisolated static func split(
+        _ psd: Data, halves: Data?, parts: [KeptLayer], cut: [KeptHalf]?
+    ) throws -> (width: Int, height: Int, layers: [(layer: Layer, depth: RGBAImage)]) {
+        guard let cut else {
+            throw PSDError(message: "it was taken apart before its halves were kept: take it apart again to split it")
         }
-        let cut = try Stratify.layers(
-            layers.map { layer in
-                guard let depth = byName[PSD.depthName(of: layer.name)] else {
-                    throw PSDError(message: "\(layer.name) has no depth, in its document or beside it")
-                }
-                return Stratify.Layer(name: layer.name, left: layer.left, top: layer.top, image: layer.image, depth: depth.image)
-            })
-        return (document.width, document.height, cut)
+        let document = try PSDDocument.read(psd)
+        let (shown, shownDepths) = document.splitDepth()
+        guard shown.count == parts.count, zip(shown, parts).allSatisfy({ $0.name == $1.name }) else {
+            throw PSDError(message: "its document and its record do not list the same layers")
+        }
+        var pieces: [PSDLayer] = []
+        var pieceDepths: [PSDLayer] = []
+        if !cut.isEmpty {
+            guard let halves else { throw PSDError(message: "its halves are no longer beside it") }
+            (pieces, pieceDepths) = try PSDDocument.read(halves).splitDepth()
+            guard pieces.count == cut.count else {
+                throw PSDError(message: "its halves' document has \(pieces.count) layers and its record \(cut.count)")
+            }
+        }
+        // Each one's depth, pixel by pixel, where its document keeps one for every layer in order,
+        // and the gray of its one depth where it does not.
+        let depthOf = { (layers: [PSDLayer], depths: [PSDLayer], index: Int, depth: Float) -> RGBAImage in
+            let image = layers[index].image
+            if depths.count == layers.count, depths[index].image.rgba.count == image.rgba.count {
+                return depths[index].image
+            }
+            return gray(image, depth: depth)
+        }
+
+        // Every part, then every half, as the library listed them: what the stack's order is of.
+        // A half names its part by the library's id for it, which renaming or moving it keeps.
+        var byID: [Int: Int] = [:]
+        for (index, part) in parts.enumerated() {
+            if let id = part.id, byID[id] == nil { byID[id] = index }
+        }
+        var listed: [(id: Int, type: LayerType, depth: Float, derivedFromID: Int?)] = parts.map {
+            (id: $0.id ?? 0, type: LayerType.part, depth: $0.depth, derivedFromID: nil)
+        }
+        var partOf: [Int] = []
+        for half in cut {
+            guard let part = byID[half.of] else {
+                throw PSDError(message: "\(half.name) is half of a layer its record does not have")
+            }
+            partOf.append(part)
+            listed.append(
+                (id: half.id, type: half.near ? LayerType.near : LayerType.far,
+                 depth: half.near ? parts[part].depth : half.depth, derivedFromID: half.of))
+        }
+        let layers = Layers.stratifiedStack(listed).map { index -> (layer: Layer, depth: RGBAImage) in
+            if index < parts.count {
+                let layer = shown[index]
+                return (
+                    Layer(
+                        id: listed[index].id, name: parts[index].name, left: layer.left, top: layer.top,
+                        image: layer.image, depth: listed[index].depth),
+                    depthOf(shown, shownDepths, index, listed[index].depth))
+            }
+            let at = index - parts.count
+            let (half, piece, part) = (cut[at], pieces[at], parts[partOf[at]])
+            // A half goes where its part went: the part's place in the document now, less where
+            // the record says it was when it was taken apart, is how far it has been moved since.
+            let moved = (left: shown[partOf[at]].left - part.left, top: shown[partOf[at]].top - part.top)
+            return (
+                Layer(
+                    type: listed[index].type, id: half.id, name: "\(part.name)-\(half.near ? 0 : 1)",
+                    left: piece.left + moved.left, top: piece.top + moved.top, image: piece.image,
+                    depth: listed[index].depth, derivedFromID: half.of),
+                depthOf(pieces, pieceDepths, at, half.depth))
+        }
+        return (document.width, document.height, layers)
     }
 
     /// `split`, as the documents saved: the layers with their depth in its hidden group, and the
     /// depth document of them.
-    nonisolated static func splitByDepth(_ psd: Data, besides: Data? = nil) throws -> (document: Data, depth: Data) {
-        let (width, height, cut) = try split(psd, besides: besides)
-        let shown = cut.map { PSD.Layer(name: $0.name, left: $0.left, top: $0.top, image: $0.image) }
-        let gray = cut.map { PSD.Layer(name: $0.name, left: $0.left, top: $0.top, image: $0.depth) }
+    nonisolated static func splitByDepth(
+        _ psd: Data, halves: Data?, parts: [KeptLayer], cut: [KeptHalf]?
+    ) throws -> (document: Data, depth: Data) {
+        let (width, height, layers) = try split(psd, halves: halves, parts: parts, cut: cut)
+        let shown = layers.map { PSD.Layer(name: $0.layer.name, left: $0.layer.left, top: $0.layer.top, image: $0.layer.image) }
+        let grays = layers.map { PSD.Layer(name: $0.layer.name, left: $0.layer.left, top: $0.layer.top, image: $0.depth) }
         return (
             try PSD.write(
                 shown, width: width, height: height,
-                depths: gray.map { PSD.Layer(name: PSD.depthName(of: $0.name), left: $0.left, top: $0.top, image: $0.image) }),
-            try PSD.write(gray, width: width, height: height, grayscale: true)
+                depths: grays.map { PSD.Layer(name: PSD.depthName(of: $0.name), left: $0.left, top: $0.top, image: $0.image) }),
+            try PSD.write(grays, width: width, height: height, grayscale: true)
         )
     }
 
     /// A picture taken apart's layers as Split by depth saves them, to show in place of its own:
-    /// each with its pictures by a file name of its own, `split/<n>`, and its depth the mean of
-    /// what is drawn of it, 0 near to 1 far. Nil, and a complaint, where it cannot be split.
+    /// each with its pictures by a file name of its own, `split/<n>`, and its depth. Nil, and a
+    /// complaint, where it cannot be split.
     func splitLayers(_ job: Job) async -> (layers: [KeptLayer], images: [String: NSImage])? {
-        guard let psd = outputs[job.id] else { return nil }
-        let besides = depthDocument(of: job)
-        let made = await Task.detached { Result { try Self.split(psd, besides: besides).layers } }.value
-        switch made {
+        // After whatever is being written: the document is read as its record lists it now.
+        await rewriting?.value
+        guard let psd = outputs[job.id], let made = jobs.first(where: { $0.id == job.id })?.made else { return nil }
+        let (halves, parts, cut) = (halvesDocument(of: job), made.layers ?? [], made.halves)
+        let result = await Task.detached { Result { try Self.split(psd, halves: halves, parts: parts, cut: cut).layers.map { $0.layer } } }.value
+        switch result {
         case .failure(let error):
             complaint = "could not split it by depth: \(error.localizedDescription)"
             return nil
-        case .success(let cut):
+        case .success(let stack):
             var layers: [KeptLayer] = []
             var images: [String: NSImage] = [:]
-            for (i, layer) in cut.enumerated() {
+            for (i, layer) in stack.enumerated() {
                 let file = "split/\(i)"
-                var (sum, count) = (0.0, 0.0)
-                for p in stride(from: 0, to: min(layer.image.rgba.count, layer.depth.rgba.count), by: 4)
-                where layer.image.rgba[p + 3] > 16 {
-                    sum += Double(layer.depth.rgba[p])
-                    count += 1
-                }
                 layers.append(
                     KeptLayer(
                         name: layer.name, left: layer.left, top: layer.top, width: layer.image.width,
-                        height: layer.image.height, depth: Float(count > 0 ? sum / count / 255 : 1), file: file))
+                        height: layer.image.height, depth: layer.depth, file: file))
                 if let image = Pixels.cgImage(layer.image) {
                     images[file] = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
                 }
@@ -1175,9 +1304,8 @@ final class Session {
         let bytes: Data
         if form.splitByDepth {
             // Of the layers the document is saved as, cut by their depth.
-            guard let psd = outputs[job.id] else { return }
             do {
-                bytes = try Self.splitByDepth(psd, besides: try? Data(contentsOf: url)).depth
+                bytes = try stratified(job).depth
             } catch {
                 complaint = "could not split it by depth: \(error.localizedDescription)"
                 return

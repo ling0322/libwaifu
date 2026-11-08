@@ -2,7 +2,7 @@
 
 > **The page is gone.** The web page this was written around was removed on 2026-10-13, when
 > drawing went back to the terminal. Speech now runs through [`waifu::engine`](../waifu/src/engine.rs)
-> and the C API over it ([ffi.md](ffi.md)), which the macOS app speaks with; `waifu` in the
+> and the C API over it ([ffi-abi4.md](ffi-abi4.md)), which the macOS app speaks with; `waifu` in the
 > terminal draws only, and waifu-tools' `speak` says a sentence from a checkout. What follows about
 > the [`Voice`](../waifu/src/speech.rs) trait, the models and the WAV reader still holds; what it
 > says about the page, its tab and `-m` for a voice is history.
@@ -119,8 +119,9 @@ Two things the prediction did not cover:
 - **A voice can refuse to speak without a recording.** IndexTTS-2.5 has no voice of its own; upstream
   takes the speaker's audio as a required argument. Asked to speak with none, it says so on the
   bar, in a sentence, rather than guessing at a voice. CosyVoice3 is the same. Both say it before
-  a run as well: `needs_a_recording()` is true for them, and `waifu_describe_json` carries it as
-  `needs_a_recording`, so the macOS app holds Speak until a recording is dropped rather than
+  a run as well: `needs_a_recording()` is true for them, and the C API's
+  `WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE` is 0 for them with that sentence as its
+  reason, so the macOS app holds Speak until a recording is dropped rather than
   reading five gigabytes only to be refused.
 
 ### Styles

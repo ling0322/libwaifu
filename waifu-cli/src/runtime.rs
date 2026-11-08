@@ -19,7 +19,7 @@
 
 //! Where a run goes: which device, and where the weights wait.
 //!
-//! What this machine can run on is libwaifu's to say, through `waifu_devices_json`; which of them
+//! What this machine can run on is libwaifu's to say, through `waifu_device_is_available`; which of them
 //! `auto` means is this tool's, and it is here.
 
 /// A device a run can be sent to, as libwaifu names them.
@@ -121,18 +121,11 @@ impl Runtime {
     /// The device libwaifu's engine is started on for this.
     pub fn waifu_device(self) -> WaifuDevice {
         match self.device {
-            Device::Cpu => WaifuDevice::WAIFU_DEVICE_CPU,
-            Device::Cuda => WaifuDevice::WAIFU_DEVICE_CUDA,
-            Device::Metal => WaifuDevice::WAIFU_DEVICE_METAL,
-            Device::Vulkan => WaifuDevice::WAIFU_DEVICE_VULKAN,
+            Device::Cpu => c::WAIFU_DEVICE_CPU,
+            Device::Cuda => c::WAIFU_DEVICE_CUDA,
+            Device::Metal => c::WAIFU_DEVICE_METAL,
+            Device::Vulkan => c::WAIFU_DEVICE_VULKAN,
         }
-    }
-
-    /// The one called `name`, as `waifu_devices_json` and the -device flag name them.
-    pub fn named(name: &str) -> Option<Runtime> {
-        Runtime::ALL
-            .into_iter()
-            .find(|runtime| runtime.name() == name)
     }
 }
 
@@ -142,15 +135,9 @@ impl Runtime {
 /// and the tensor library says what hardware it found: so this is asked once, before any screen
 /// is up.
 pub fn measure() -> Vec<Runtime> {
-    let Some(said) = c::waifu_json(c::waifu_devices_json()) else {
-        return vec![Runtime::on(Device::Cpu)];
-    };
-    // Every device listed is one a run can go to.
-    let mut available: Vec<Runtime> = said["devices"]
-        .as_array()
+    let mut available: Vec<Runtime> = Runtime::ALL
         .into_iter()
-        .flatten()
-        .filter_map(|row| row["name"].as_str().and_then(Runtime::named))
+        .filter(|runtime| c::waifu_device_is_available(runtime.waifu_device()))
         .collect();
     if available.is_empty() {
         available.push(Runtime::on(Device::Cpu));

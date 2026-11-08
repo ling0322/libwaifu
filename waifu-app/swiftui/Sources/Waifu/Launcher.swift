@@ -17,14 +17,15 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// The engine, and getting a model into it: done by a job, before it runs, when the model it is of
-// is not the one loaded.
+// The pipeline, and getting a model into it: done by a job, before it runs, when the model it is
+// of is not the one loaded for its task.
 //
-// One engine for as long as the app runs, on the device the Model card chose -- a new one only when
-// the device changes, or the most of the GPU's memory the model may hold, which is filled as a model
-// is read. Its progress -- the download, then the read -- is the job's bar until the
-// job has steps of its own. What the library writes to its log is kept here too, for when that
-// line is not enough.
+// One pipeline at a time, made for the task of the job that runs, on the device the Model card
+// chose -- a new one only when the task changes, or the device, or the most of the GPU's memory the
+// model may hold, which is filled as a model is read. A pipeline does one task, so CosyVoice3, which
+// reads and converts, is read again for a conversion after a reading: two models are never on one
+// card. Its progress -- the download, then the read -- is the job's bar until the job has steps of
+// its own. What the library writes to its log is kept here too, for when that line is not enough.
 
 import Foundation
 import Observation
@@ -45,8 +46,8 @@ final class Launcher {
         case idle
         /// Fetching or reading `model`. `line` is how far along; `fraction` where it can say.
         case loading(model: String, line: String, fraction: Double?)
-        /// `model` is on `placement`.
-        case ready(model: String, placement: Placement)
+        /// `model` is on `placement`, in a pipeline for `type`.
+        case ready(model: String, type: PipelineType, placement: Placement)
         case failed(String)
     }
 
@@ -55,8 +56,8 @@ final class Launcher {
     /// What the library has written, newest last, cut to the last few hundred lines.
     private(set) var log: [String] = []
 
-    private var engine: Engine?
-    private var enginePlacement: Placement?
+    private var pipeline: Pipeline?
+    private var pipelinePlacement: Placement?
 
     init() {
         // Before anything else asks the library anything: the first device query writes what
@@ -86,41 +87,53 @@ final class Launcher {
         if case .loading = state { true } else { false }
     }
 
-    /// Whether `model` on `placement` is what is loaded now.
-    func has(_ model: String, on placement: Placement) -> Bool {
-        if case .ready(model, placement) = state { true } else { false }
+    /// What a pipeline for a job of `kind` -- "image", "speech", "conversion", "layers" -- is made
+    /// for.
+    static func pipelineType(for kind: String) -> PipelineType {
+        switch kind {
+        case "speech": .textToSpeech
+        case "conversion": .voiceConversion
+        case "layers": .layerDecomposition
+        default: .imageGeneration
+        }
     }
 
-    /// What is loaded now, and where.
-    var loaded: (model: String, placement: Placement)? {
-        if case .ready(let model, let placement) = state { (model, placement) } else { nil }
+    /// Whether `model` on `placement`, for `type`, is what is loaded now.
+    func has(_ model: String, for type: PipelineType, on placement: Placement) -> Bool {
+        if case .ready(model, type, placement) = state { true } else { false }
     }
 
-    /// The engine with `model` on `placement`: the one there is where it is already loaded, and
-    /// otherwise the one it has just been fetched and read into.
-    func ensure(_ model: String, on placement: Placement) async throws -> Engine {
-        if has(model, on: placement), let engine { return engine }
+    /// What is loaded now, for what, and where.
+    var loaded: (model: String, type: PipelineType, placement: Placement)? {
+        if case .ready(let model, let type, let placement) = state { (model, type, placement) } else { nil }
+    }
+
+    /// The pipeline with `model` on `placement`, for `type`: the one there is where it is already
+    /// loaded, and otherwise the one it has just been fetched and read into.
+    func ensure(_ model: String, for type: PipelineType, on placement: Placement) async throws -> Pipeline {
+        if has(model, for: type, on: placement), let pipeline { return pipeline }
         // The one there goes before the next is read, and says so: two models are never on one
-        // card, and memory the old one still holds is memory the new one is read into.
-        if case .ready(let old, placement) = state, let engine {
+        // card, and memory the old one still holds is memory the new one is read into. A pipeline
+        // for another task, or another placement, is freed instead, which drops its model.
+        if case .ready(let old, type, placement) = state, let pipeline {
             state = .loading(model: model, line: "unloading \(old)", fraction: nil)
             do {
-                try await engine.unload()
+                try await pipeline.unload()
             } catch {
                 state = .failed(error.localizedDescription)
                 throw error
             }
             state = .idle
         }
-        return try await load(model, on: placement)
+        return try await load(model, for: type, on: placement)
     }
 
-    /// Loads `model` onto `placement`, and hands back the engine it is on. Cancelling the task
-    /// that awaits this stops the download between files; the read cannot be stopped.
-    func load(_ model: String, on placement: Placement) async throws -> Engine {
-        let engine: Engine
+    /// Loads `model` onto `placement` for `type`, and hands back the pipeline it is in. Cancelling
+    /// the task that awaits this stops the download between files; the read cannot be stopped.
+    func load(_ model: String, for type: PipelineType, on placement: Placement) async throws -> Pipeline {
+        let pipeline: Pipeline
         do {
-            engine = try self.engine(on: placement)
+            pipeline = try self.pipeline(for: type, on: placement)
         } catch {
             state = .failed(error.localizedDescription)
             throw error
@@ -128,14 +141,14 @@ final class Launcher {
 
         state = .loading(model: model, line: "starting \(model)", fraction: nil)
         do {
-            try await engine.load(model) { progress in
+            try await pipeline.load(model) { progress in
                 Task { @MainActor in
                     guard case .loading(let model, _, _) = self.state else { return }
-                    self.state = .loading(model: model, line: progress.words, fraction: progress.fraction)
+                    self.state = .loading(model: model, line: progress.line(reading: model), fraction: progress.fraction)
                 }
             }
-            state = .ready(model: model, placement: placement)
-            return engine
+            state = .ready(model: model, type: type, placement: placement)
+            return pipeline
         } catch is CancellationError {
             state = .idle
             throw CancellationError()
@@ -145,22 +158,25 @@ final class Launcher {
         }
     }
 
-    /// An engine for `placement`: the one there is where it was made for it, and a new one
-    /// otherwise -- which reads the model again, since what stays on the GPU is decided as it is.
-    private func engine(on placement: Placement) throws -> Engine {
-        if let engine, enginePlacement == placement { return engine }
-        // Freed first: two engines would be two models on one card.
-        engine = nil
+    /// A pipeline for `type` on `placement`: the one there is where it was made for both, and a
+    /// new one otherwise -- which reads the model again, since what stays on the GPU is decided as
+    /// it is.
+    private func pipeline(for type: PipelineType, on placement: Placement) throws -> Pipeline {
+        if let pipeline, pipeline.type == type, pipelinePlacement == placement { return pipeline }
+        // Freed first, and its model with it: two pipelines would be two models on one card.
+        pipeline = nil
+        pipelinePlacement = nil
+        state = .idle
 
-        // The limit before the engine, which fills what it leaves with weights as it reads the
-        // model. The process's rather than the engine's, so lifted again for any other device --
+        // The limit before the pipeline, which fills what it leaves with weights as it reads the
+        // model. The process's rather than the pipeline's, so lifted again for any other device --
         // where there is Metal to lift it on.
         // Not thrown on, since auto may be a Mac without Metal.
-        try? Engine.setMemoryLimit(placement.memoryLimitBytes, on: .metal)
+        try? Device.metal.setMemoryLimit(placement.memoryLimitBytes)
 
-        let made = try Engine(device: Launcher.device(placement.device))
-        engine = made
-        enginePlacement = placement
+        let made = try Pipeline(type, device: Launcher.device(placement.device))
+        pipeline = made
+        pipelinePlacement = placement
         return made
     }
 

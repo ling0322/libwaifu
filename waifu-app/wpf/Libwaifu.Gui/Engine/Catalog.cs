@@ -55,9 +55,10 @@ namespace Libwaifu.Gui.Engine
     /// What a model says about itself: the numbers to start from and the things it cannot do.
     /// </summary>
     /// <remarks>
-    /// This is what the real screen gets back from <c>waifu_describe_json</c>, and
-    /// choosing a model asks for it and nothing else -- reading the description is not loading
-    /// the model, and no job runs until the Generate button is pressed.
+    /// This is what the real screen asks of <c>waifu_model_open</c> and the model's properties,
+    /// with the model manager's defaults beside them, and choosing a model asks for it and nothing
+    /// else -- reading the description is not loading the model, and no job runs until the
+    /// Generate button is pressed.
     /// </remarks>
     public class ModelDescription
     {
@@ -85,8 +86,13 @@ namespace Libwaifu.Gui.Engine
         // Voices.
         public bool TakesARecording { get; set; }
         public string WhyNotARecording { get; set; }
-        public string NotAVoiceBecause { get; set; }
-        public List<KeyValuePair<string, string>> Styles { get; set; }
+
+        /// <summary>
+        /// Whether it follows an instruction such as "speak happily". What the picker offers is
+        /// <see cref="StyleExamples.All"/> and anything typed.
+        /// </summary>
+        public bool FollowsStyle { get; set; }
+
         public double Speed { get; set; }
         public double Temperature { get; set; }
 
@@ -101,7 +107,6 @@ namespace Libwaifu.Gui.Engine
         public ModelDescription()
         {
             Sizes = new List<KeyValuePair<int, int>>();
-            Styles = new List<KeyValuePair<string, string>>();
             Alignment = 16;
             Steps = 10;
             Speed = 1.0;
@@ -243,14 +248,51 @@ namespace Libwaifu.Gui.Engine
             description.Speed = 1.0;
             description.Temperature = 1.0;
             description.TakesARecording = true;
-            description.Styles = entry.Name == "cosyvoice"
-                ? new List<KeyValuePair<string, string>>
-                {
-                    new KeyValuePair<string, string>("Cheerful", "Say it brightly, as if sharing good news."),
-                    new KeyValuePair<string, string>("Calm", "Say it slowly and evenly, with long pauses."),
-                    new KeyValuePair<string, string>("Whisper", "Whisper it."),
-                }
-                : new List<KeyValuePair<string, string>>();
+            description.FollowsStyle = entry.Name == "cosyvoice";
         }
+    }
+
+    /// <summary>
+    /// The instructions the style picker offers, beside whatever is typed: CosyVoice3's own
+    /// examples.
+    /// </summary>
+    /// <remarks>
+    /// A copy of <c>CosyVoice3::STYLES</c> in waifu/src/cosyvoice3/mod.rs, which is upstream's
+    /// <c>instruct_list</c> (<c>cosyvoice/utils/common.py</c>) word for word: examples of what it
+    /// was taught, not the set of what it takes. The library says only whether a model follows a
+    /// style at all (<c>WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE</c>); the list is the
+    /// app's.
+    /// </remarks>
+    public static class StyleExamples
+    {
+        public static readonly KeyValuePair<string, string>[] All =
+        {
+            new KeyValuePair<string, string>("Happy", "请非常开心地说一句话。"),
+            new KeyValuePair<string, string>("Sad", "请非常伤心地说一句话。"),
+            new KeyValuePair<string, string>("Angry", "请非常生气地说一句话。"),
+            new KeyValuePair<string, string>("Fast", "请用尽可能快地语速说一句话。"),
+            new KeyValuePair<string, string>("Slow", "请用尽可能慢地语速说一句话。"),
+            new KeyValuePair<string, string>("Loud", "Please say a sentence as loudly as possible."),
+            new KeyValuePair<string, string>("Soft", "Please say a sentence in a very soft voice."),
+            new KeyValuePair<string, string>("Peppa Pig", "我想体验一下小猪佩奇风格，可以吗？"),
+            new KeyValuePair<string, string>("Robot", "你可以尝试用机器人的方式解答吗？"),
+            new KeyValuePair<string, string>("Cantonese", "请用广东话表达。"),
+            new KeyValuePair<string, string>("Northeastern", "请用东北话表达。"),
+            new KeyValuePair<string, string>("Gansu", "请用甘肃话表达。"),
+            new KeyValuePair<string, string>("Guizhou", "请用贵州话表达。"),
+            new KeyValuePair<string, string>("Henan", "请用河南话表达。"),
+            new KeyValuePair<string, string>("Hubei", "请用湖北话表达。"),
+            new KeyValuePair<string, string>("Hunan", "请用湖南话表达。"),
+            new KeyValuePair<string, string>("Jiangxi", "请用江西话表达。"),
+            new KeyValuePair<string, string>("Minnan", "请用闽南话表达。"),
+            new KeyValuePair<string, string>("Ningxia", "请用宁夏话表达。"),
+            new KeyValuePair<string, string>("Shanxi", "请用山西话表达。"),
+            new KeyValuePair<string, string>("Shaanxi", "请用陕西话表达。"),
+            new KeyValuePair<string, string>("Shandong", "请用山东话表达。"),
+            new KeyValuePair<string, string>("Shanghainese", "请用上海话表达。"),
+            new KeyValuePair<string, string>("Sichuan", "请用四川话表达。"),
+            new KeyValuePair<string, string>("Tianjin", "请用天津话表达。"),
+            new KeyValuePair<string, string>("Yunnan", "请用云南话表达。"),
+        };
     }
 }

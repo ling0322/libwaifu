@@ -73,6 +73,7 @@ mod layers;
 pub mod log;
 mod manifest;
 mod mapping;
+pub mod model_info;
 pub mod progress;
 pub mod qwen3_asr;
 pub mod qwen_image;

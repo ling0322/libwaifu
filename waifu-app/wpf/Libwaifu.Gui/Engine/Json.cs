@@ -25,14 +25,14 @@ using System.Text;
 namespace Libwaifu.Gui.Engine
 {
     /// <summary>
-    /// Reads the JSON the library answers with.
+    /// Reads the JSON the model manager answers with. waifu.dll answers with none: what a model
+    /// can do is asked of it one property at a time.
     /// </summary>
     /// <remarks>
-    /// Small on purpose. The documents are the library's own and the shapes are in docs/ffi.md;
-    /// what is needed of them is "give me this field if it is there", which is a dictionary and
-    /// not a set of generated classes. .NET Framework's own reader would do most of it, but it
-    /// turns a JSON object into an array of key-value pairs rather than a map, and `why_not` is
-    /// a map whose keys are the model's to choose.
+    /// Small on purpose. The documents are waifu_modelmanager.dll's own -- its catalogue and its
+    /// defaults -- and what is needed of them is "give me this field if it is there", which is a
+    /// dictionary and not a set of generated classes. .NET Framework's own reader would do most
+    /// of it, but it turns a JSON object into an array of key-value pairs rather than a map.
     /// </remarks>
     public static class Json
     {

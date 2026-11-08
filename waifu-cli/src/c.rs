@@ -50,23 +50,11 @@ pub fn manager_error() -> String {
     unsafe { text(waifu_modelmanager_last_error()) }.unwrap_or_default()
 }
 
-/// A string libwaifu returned, read and freed.
-pub fn waifu_string(said: *mut c_char) -> Option<String> {
-    let read = unsafe { text(said) };
-    unsafe { waifu_string_free(said) };
-    read
-}
-
 /// A string libwaifu_modelmanager returned, read and freed.
 pub fn manager_string(said: *mut c_char) -> Option<String> {
     let read = unsafe { text(said) };
     unsafe { waifu_modelmanager_string_free(said) };
     read
-}
-
-/// JSON libwaifu returned, read and freed.
-pub fn waifu_json(said: *mut c_char) -> Option<serde_json::Value> {
-    waifu_string(said).and_then(|said| serde_json::from_str(&said).ok())
 }
 
 /// JSON libwaifu_modelmanager returned, read and freed.

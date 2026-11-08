@@ -17,8 +17,9 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// What the library says about models, as the JSON WaifuKit hands over, and what
-// this app keeps of the jobs it ran.
+// What the library says about models -- what each can do, asked of libwaifu one property at a
+// time, and what its boxes start at, as libwaifu_modelmanager's JSON has it -- and what this app
+// keeps of the jobs it ran.
 
 import Foundation
 import WaifuKit
@@ -31,8 +32,8 @@ private let decoder: JSONDecoder = {
 
 // MARK: - a model
 
-/// A model that draws, as `waifu_describe_json` says it.
-struct Chosen: Decodable {
+/// A model that draws.
+struct Chosen {
     var name: String
     var fullName: String?
     var onDisk: Bool
@@ -51,18 +52,16 @@ struct Chosen: Decodable {
     var promptImages: Int?
     /// Whether its prompt reads pictures, named in it as <|name|>.
     var readsPictures: Bool { (promptImages ?? 0) > 0 }
-    /// The kept keys it takes images under: "start_from", "control".
-    var imageKeys: [String]?
-    /// For what it cannot take, the sentence to show in its place.
-    var whyNot: [String: String]?
+    /// Whether it starts from a picture: img2img.
+    var drawsFromAPicture: Bool
+    /// Where it does not, the sentence to show in its place.
+    var noPictureBecause: String?
 
     var guided: Bool { takesGuidance ?? true }
-    var drawsFromAPicture: Bool { imageKeys?.contains("start_from") ?? false }
-    var noPictureBecause: String? { drawsFromAPicture ? nil : whyNot?["start_from"] }
 }
 
-struct Voice: Decodable {
-    struct Style: Decodable, Hashable {
+struct Voice {
+    struct Style: Hashable {
         var label: String
         var instruction: String
     }
@@ -77,11 +76,46 @@ struct Voice: Decodable {
     var noLikenessBecause: String?
     /// Whether it has no voice of its own and says nothing without a recording to sound like.
     var needsARecording: Bool?
-    var styles: [Style]?
-    var notAVoiceBecause: String?
+    /// Whether it follows an instruction for how to say it.
+    var followsStyle: Bool
+    /// What the style picker offers, above a box for any instruction: CosyVoice3's examples, for a
+    /// voice that follows a style.
+    var styles: [Style]? { followsStyle ? Voice.examples : nil }
+
+    /// CosyVoice3's own examples of an instruction -- upstream's `instruct_list`
+    /// (`cosyvoice/utils/common.py`), word for word, as `CosyVoice3::STYLES` keeps them: the manner
+    /// first, the dialects after. Examples, not the set: any instruction may be written instead.
+    static let examples: [Style] = [
+        Style(label: "Happy", instruction: "请非常开心地说一句话。"),
+        Style(label: "Sad", instruction: "请非常伤心地说一句话。"),
+        Style(label: "Angry", instruction: "请非常生气地说一句话。"),
+        Style(label: "Fast", instruction: "请用尽可能快地语速说一句话。"),
+        Style(label: "Slow", instruction: "请用尽可能慢地语速说一句话。"),
+        Style(label: "Loud", instruction: "Please say a sentence as loudly as possible."),
+        Style(label: "Soft", instruction: "Please say a sentence in a very soft voice."),
+        Style(label: "Peppa Pig", instruction: "我想体验一下小猪佩奇风格，可以吗？"),
+        Style(label: "Robot", instruction: "你可以尝试用机器人的方式解答吗？"),
+        Style(label: "Cantonese", instruction: "请用广东话表达。"),
+        Style(label: "Northeastern", instruction: "请用东北话表达。"),
+        Style(label: "Gansu", instruction: "请用甘肃话表达。"),
+        Style(label: "Guizhou", instruction: "请用贵州话表达。"),
+        Style(label: "Henan", instruction: "请用河南话表达。"),
+        Style(label: "Hubei", instruction: "请用湖北话表达。"),
+        Style(label: "Hunan", instruction: "请用湖南话表达。"),
+        Style(label: "Jiangxi", instruction: "请用江西话表达。"),
+        Style(label: "Minnan", instruction: "请用闽南话表达。"),
+        Style(label: "Ningxia", instruction: "请用宁夏话表达。"),
+        Style(label: "Shanxi", instruction: "请用山西话表达。"),
+        Style(label: "Shaanxi", instruction: "请用陕西话表达。"),
+        Style(label: "Shandong", instruction: "请用山东话表达。"),
+        Style(label: "Shanghainese", instruction: "请用上海话表达。"),
+        Style(label: "Sichuan", instruction: "请用四川话表达。"),
+        Style(label: "Tianjin", instruction: "请用天津话表达。"),
+        Style(label: "Yunnan", instruction: "请用云南话表达。"),
+    ]
 }
 
-struct Converter: Decodable {
+struct Converter {
     var name: String
     var fullName: String?
     var onDisk: Bool
@@ -92,7 +126,7 @@ struct Converter: Decodable {
 }
 
 /// A model that takes a picture apart into layers: See-through.
-struct Layerer: Decodable {
+struct Layerer {
     var name: String
     var fullName: String?
     var onDisk: Bool
@@ -100,6 +134,27 @@ struct Layerer: Decodable {
     var depthSteps: Int
     /// The side of the square it draws the layers at.
     var resolution: Int
+}
+
+/// What libwaifu_modelmanager says a model's boxes start at: whichever of these its kind has.
+private struct Defaults: Decodable {
+    struct Conversion: Decodable {
+        var steps: Int?
+    }
+
+    var width: Int?
+    var height: Int?
+    var steps: Int?
+    var guidance: Double?
+    var takesGuidance: Bool?
+    var sizes: [[Int]]?
+    var prompt: String?
+    var avoid: String?
+    var speed: Double?
+    var temperature: Double?
+    var conversion: Conversion?
+    var depthSteps: Int?
+    var resolution: Int?
 }
 
 /// The model that is loaded, and what it can be asked for.
@@ -119,31 +174,58 @@ struct ModelInfo {
     var converter: Converter?
     var layerer: Layerer?
 
-    /// What the library says of `name`, for a model about to be, or just, loaded.
+    /// What the library says of `name`, for a model about to be, or just, loaded: what it can do,
+    /// asked of its manifest, and what its boxes start at.
     static func describe(_ name: String, device: String) throws -> ModelInfo {
-        let data = try ModelManager.describeJSON(name)
-        struct Kinds: Decodable {
-            var kind: String
-            var kinds: [String]?
-            var bytes: UInt64?
+        let opened = try ModelManager.open(name)
+        let defaults = try decoder.decode(Defaults.self, from: ModelManager.defaultsJSON(of: opened))
+        // What the catalogue calls a published model; a manifest of one's own, its file's name.
+        let fullName = ModelManager.fullName(name) ?? (name as NSString).lastPathComponent
+        let bytes = opened.sizeOnDisk
+        let onDisk = bytes != nil
+
+        // What it is first, as the tabs are kinds: CosyVoice3 reads, and converts as well.
+        var kinds: [String] = []
+        if opened.does(.layerDecomposition) { kinds.append("layers") }
+        if opened.does(.speechToText) { kinds.append("transcription") }
+        if opened.does(.textToSpeech) { kinds.append("speech") }
+        if opened.does(.voiceConversion) { kinds.append("conversion") }
+        if opened.does(.imageGeneration) { kinds.append("image") }
+        guard let kind = kinds.first else {
+            throw WaifuError.refused("\(fullName) does nothing this app asks of a model")
         }
-        struct Both: Decodable {
-            var conversion: Converter?
-        }
-        let kinds = try decoder.decode(Kinds.self, from: data)
-        var info = ModelInfo(
-            name: name, kind: kinds.kind, kinds: kinds.kinds ?? [kinds.kind], device: device,
-            bytes: kinds.bytes)
-        switch kinds.kind {
+        var info = ModelInfo(name: name, kind: kind, kinds: kinds, device: device, bytes: bytes)
+        let rate = opened.sampleRate ?? 0
+        let converter = Converter(
+            name: name, fullName: fullName, onDisk: onDisk,
+            steps: defaults.conversion?.steps ?? defaults.steps ?? 10, rate: rate,
+            convertsStyle: opened.supports(.voiceConversionOfStyle).map { $0 == .yes },
+            noStyleBecause: opened.whyNot(.voiceConversionOfStyle))
+        switch kind {
         case "image":
-            info.model = try decoder.decode(Chosen.self, from: data)
+            info.model = Chosen(
+                name: name, fullName: fullName, onDisk: onDisk, width: defaults.width ?? 1024,
+                height: defaults.height ?? 1024, steps: defaults.steps ?? 20, guidance: defaults.guidance ?? 7,
+                takesGuidance: defaults.takesGuidance, sampler: opened.sampler, sizes: defaults.sizes,
+                alignment: opened.widthHeightMultipleOf, prompt: defaults.prompt, avoid: defaults.avoid,
+                promptImages: opened.does(.imageGenerationWithPromptImages) ? opened.maxPromptImages ?? 0 : 0,
+                drawsFromAPicture: opened.does(.imageGenerationFromStartImage),
+                noPictureBecause: opened.whyNot(.imageGenerationFromStartImage))
         case "layers":
-            info.layerer = try decoder.decode(Layerer.self, from: data)
+            info.layerer = Layerer(
+                name: name, fullName: fullName, onDisk: onDisk, steps: defaults.steps ?? 30,
+                depthSteps: defaults.depthSteps ?? 4, resolution: defaults.resolution ?? 1280)
         case "speech":
-            info.voice = try decoder.decode(Voice.self, from: data)
-            info.converter = try decoder.decode(Both.self, from: data).conversion
+            info.voice = Voice(
+                name: name, fullName: fullName, onDisk: onDisk, speed: defaults.speed ?? 1,
+                temperature: defaults.temperature ?? 0.8, rate: rate,
+                takesARecording: opened.supports(.textToSpeechLikeReference).map { $0 == .yes },
+                noLikenessBecause: opened.whyNot(.textToSpeechLikeReference),
+                needsARecording: opened.supports(.textToSpeechWithoutReference).map { $0 != .yes },
+                followsStyle: opened.does(.textToSpeechWithStyle))
+            if kinds.contains("conversion") { info.converter = converter }
         default:
-            info.converter = try decoder.decode(Converter.self, from: data)
+            info.converter = converter
         }
         return info
     }
@@ -231,6 +313,11 @@ struct Made: Codable {
     var canvas: Int?
     /// Bottom first, each in a PNG of its own in the job's folder.
     var layers: [KeptLayer]?
+    /// Hair, hands, top and bottom each cut into a near and a far half by their own depth, in the
+    /// order the library gave them, their pixels in a document of their own in the job's folder:
+    /// what Split by depth lays among the layers. Nil for a picture taken apart before they were
+    /// kept.
+    var halves: [KeptHalf]?
 
     /// A picture's settings, with the lines that are copied and shown under it.
     static func picture(
@@ -263,9 +350,31 @@ struct KeptLayer: Codable, Hashable {
     /// changed: what Reset puts back. Nil while they are the model's.
     var modelName: String?
     var modelDepth: Float?
+    /// The library's id for it, which its halves name it by; nil in a record from before ids.
+    var id: Int?
 
     /// Whether its name or depth is somebody's rather than the model's.
     var edited: Bool { modelName != nil || modelDepth != nil }
+}
+
+/// A half of a layer of a picture taken apart, as it is kept: where on the canvas, how far away,
+/// and the layer it was cut from. Its pixels are in the job's document of halves, in the order the
+/// record lists them.
+struct KeptHalf: Codable, Hashable {
+    /// As the library named it: "topwear-0", "topwear-1".
+    var name: String
+    var left: Int
+    var top: Int
+    var width: Int
+    var height: Int
+    /// Its own depth, for a far half; a near one is at its layer's, whatever that is now.
+    var depth: Float
+    /// Whether it is the near half (-0) rather than the far (-1).
+    var near: Bool
+    /// The library's id for it.
+    var id: Int
+    /// The id of the layer it was cut from, which neither a name nor a depth changes.
+    var of: Int
 }
 
 /// A job this window asked for, or one read back out of the output folder.

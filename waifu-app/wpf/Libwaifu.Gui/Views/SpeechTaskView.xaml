@@ -25,8 +25,7 @@
       </Grid.RowDefinitions>
 
       <StackPanel Grid.Row="0" Margin="16">
-        <c:FormGroup Title="What to say" RowPadding="{StaticResource CenterRowPadding}"
-                     Footnote="{Binding NotAVoiceBecause}">
+        <c:FormGroup Title="What to say" RowPadding="{StaticResource CenterRowPadding}">
           <TextBox Style="{StaticResource PromptBox}" MinLines="5" MaxLines="14"
                    Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}"
                    Tag="The text to read out. Punctuation is where it pauses" />

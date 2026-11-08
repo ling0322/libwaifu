@@ -24,8 +24,8 @@
 // layer is a rectangle of pixels with a name, an opacity and whether it is shown; channel data
 // raw or PackBits. Groups are read through: a layer in a hidden group is hidden, and the group's
 // own records are not layers. Masks, effects and blend modes are left out. The layout is Adobe's
-// "Photoshop File Formats Specification", big-endian throughout; waifu/src/see_through/psd.rs
-// writes the same format, which img2layers hands out.
+// "Photoshop File Formats Specification", big-endian throughout; PSDWriter.swift writes the
+// same format, which img2layers keeps.
 
 import Foundation
 import WaifuKit

@@ -18,15 +18,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Threading;
 
 namespace Libwaifu.Gui.Engine
 {
     /// <summary>
-    /// The screen on the library: one engine, one job at a time, and the model read onto the
-    /// device by the job that needs it.
+    /// The screen on the library: a pipeline for each task it has run, one job at a time, and the
+    /// model read onto the device by the job that needs it.
     /// </summary>
     /// <remarks>
     /// Three rules shape all of this, and they are the library's rather than this program's.
@@ -34,29 +37,38 @@ namespace Libwaifu.Gui.Engine
     /// * **Every callback arrives on a thread of the library's.** Nothing here touches the screen
     ///   from one: a callback copies what it was handed -- the strings, the pixels, the samples,
     ///   all of which stop being valid when it returns -- and hands the copy to the dispatcher.
-    /// * **A callback must not call back into the library** (cancel and the free functions
-    ///   aside). So the next step of a job is always taken on the UI thread, after the hand-off,
-    ///   and never inside the completion that asked for it.
+    /// * **A callback must not call back into the library** (bar <c>waifu_pipeline_cancel</c>).
+    ///   So the next step of a job is always taken on the UI thread, after the hand-off, and
+    ///   never inside the completion that asked for it.
     /// * **A delegate the library holds has to outlive the call**, which is why the four of them
     ///   are fields and not lambdas written at the call site.
     ///
-    /// One engine at a time, for one device: two engines are two models on one card. Changing
-    /// the device frees the engine and makes another.
+    /// A pipeline is made for one task, so a picture, a reading and a conversion each run on a
+    /// pipeline of their own, all on one device. One model is on the device at a time, as it was
+    /// when one engine ran every task: reading a model frees every pipeline that holds another.
+    /// A model that does two tasks -- CosyVoice3 reads and converts -- is read into a pipeline
+    /// for each, and is on the device twice while both are kept. Changing the device frees every
+    /// pipeline, and the next job makes the one it needs on the new one.
     /// </remarks>
     public sealed class NativeEngine : IEngine
     {
         private readonly Dispatcher ui;
         private readonly Native.ProgressCallback onProgress;
-        private readonly Native.CompleteCallback onLoaded;
-        private readonly Native.ImageCompleteCallback onDrawn;
-        private readonly Native.AudioCompleteCallback onSounded;
+        private readonly Native.ResultCallback onLoaded;
+        private readonly Native.ImageGenerationCallback onDrawn;
+        private readonly Native.AudioCallback onSounded;
         private readonly Stopwatch clock = new Stopwatch();
 
-        private IntPtr engine;
+        /// <summary>The pipelines made so far, one per task, every one of them on <see cref="device"/>.</summary>
+        private readonly Dictionary<Native.PipelineType, Pipeline> pipelines =
+            new Dictionary<Native.PipelineType, Pipeline>();
+
         private string device;
+        private Pipeline running;
         private ulong job;
         private Fetch fetching;
         private JobRequest current;
+        private string reading;
         private long seed;
         private double started;
 
@@ -77,6 +89,14 @@ namespace Libwaifu.Gui.Engine
 
         public event Action<JobOutcome> Finished;
 
+        /// <summary>One task's pipeline, and the model read into it, if any.</summary>
+        private sealed class Pipeline
+        {
+            public Native.PipelineType Type;
+            public IntPtr Handle;
+            public string Model;
+        }
+
         public void Begin(JobRequest request)
         {
             current = request;
@@ -84,13 +104,14 @@ namespace Libwaifu.Gui.Engine
             clock.Restart();
             started = ResultRecord.Now();
 
-            if (!Ready(request.Device))
+            running = Ready(request.Device, PipelineFor(request.Kind));
+            if (running == null)
             {
                 End(new JobOutcome { Ending = Ending.Failed, Error = Library.LastError() });
                 return;
             }
 
-            if (LoadedModel == request.Model && LoadedDevice == request.Device)
+            if (running.Model == request.Model)
             {
                 Work();
                 return;
@@ -114,9 +135,9 @@ namespace Libwaifu.Gui.Engine
                 fetching.Cancel();
             }
 
-            if (engine != IntPtr.Zero && job != 0)
+            if (running != null && running.Handle != IntPtr.Zero && job != 0)
             {
-                Native.waifu_engine_cancel(engine, job);
+                Native.waifu_pipeline_cancel(running.Handle, job);
             }
         }
 
@@ -151,11 +172,18 @@ namespace Libwaifu.Gui.Engine
         }
 
         /// <summary>
-        /// Reads the model onto the device, dropping whatever was loaded before it, so there is
-        /// nothing to unload first.
+        /// Reads the model into the pipeline for the job's task, which drops whatever that
+        /// pipeline held before it, so there is nothing to unload first.
         /// </summary>
         private void Load(JobRequest request)
         {
+            // Freed while a download ran, which only closing the engine does.
+            if (running == null || running.Handle == IntPtr.Zero)
+            {
+                End(new JobOutcome { Ending = Ending.Failed, Error = "the engine was closed while the model was fetched" });
+                return;
+            }
+
             var manifest = NativeModels.ManifestPath(request.Model);
             if (manifest == null)
             {
@@ -163,13 +191,48 @@ namespace Libwaifu.Gui.Engine
                 return;
             }
 
-            Say(Stage.Reading, null, "reading " + request.Model);
-            job = Native.waifu_engine_load_async(
-                engine, Utf8.Bytes(manifest), IntPtr.Zero, onProgress, onLoaded);
-
-            if (job == 0)
+            var model = Native.waifu_model_open(Utf8.Bytes(manifest));
+            if (model == IntPtr.Zero)
             {
                 End(new JobOutcome { Ending = Ending.Failed, Error = Library.LastError() });
+                return;
+            }
+
+            try
+            {
+                // Asked before the load, which would refuse it at the call: the model says why
+                // in words to show. SUPPORTS_<task> has the number of the task's pipeline type.
+                var supports = (Native.ModelProperty)(int)running.Type;
+                if (!NativeModels.Supports(model, supports))
+                {
+                    End(new JobOutcome
+                    {
+                        Ending = Ending.Failed,
+                        Error = NativeModels.WhyNot(model, supports) ??
+                                request.Model + " cannot be used for " + Tasks.Name(request.Kind),
+                    });
+                    return;
+                }
+
+                // One model on the device at a time: pipelines that hold another let it go first.
+                Settle(running, request.Model);
+
+                // The load drops what the pipeline held before it reads anything.
+                running.Model = null;
+                reading = request.Model;
+                Say(Stage.Reading, null, "reading " + request.Model);
+                job = Native.waifu_pipeline_load_model_async(
+                    running.Handle, model, IntPtr.Zero, onProgress, onLoaded);
+
+                if (job == 0)
+                {
+                    End(new JobOutcome { Ending = Ending.Failed, Error = Library.LastError() });
+                }
+            }
+            finally
+            {
+                // The load copied the manifest; the weights are read from the files.
+                Native.waifu_model_free(model);
             }
         }
 
@@ -179,45 +242,103 @@ namespace Libwaifu.Gui.Engine
         }
 
         /// <summary>
-        /// The engine for a device, made the first time one is asked for and again whenever the
-        /// device changes.
+        /// The pipeline for a task on a device, made the first time one is asked for. A change of
+        /// device frees every pipeline first. Null where the library refused, with the reason in
+        /// <see cref="Library.LastError"/>.
         /// </summary>
-        private bool Ready(string wanted)
+        private Pipeline Ready(string wanted, Native.PipelineType type)
         {
-            if (engine != IntPtr.Zero && device == wanted)
+            if (device != wanted)
             {
-                return true;
+                Drop();
+                device = wanted;
             }
 
-            Drop();
-            engine = Native.waifu_engine_new(Library.DeviceNamed(wanted));
-            if (engine == IntPtr.Zero)
+            Pipeline pipeline;
+            if (pipelines.TryGetValue(type, out pipeline))
+            {
+                return pipeline;
+            }
+
+            var handle = Native.waifu_pipeline_new(type, Library.DeviceNamed(wanted));
+            if (handle == IntPtr.Zero)
             {
                 Log.Write("error", "engine", wanted + ": " + Library.LastError());
-                return false;
+                return null;
             }
 
-            device = wanted;
-            Log.Write("info", "engine", "engine on " + wanted);
-            return true;
+            pipeline = new Pipeline { Type = type, Handle = handle };
+            pipelines[type] = pipeline;
+            Log.Write("info", "engine", Named(type) + " on " + wanted);
+            return pipeline;
+        }
+
+        /// <summary>Frees every pipeline but <paramref name="keep"/> that holds a model other than <paramref name="model"/>.</summary>
+        private void Settle(Pipeline keep, string model)
+        {
+            foreach (var other in pipelines.Values.ToList())
+            {
+                if (other != keep && other.Model != null && other.Model != model)
+                {
+                    pipelines.Remove(other.Type);
+                    Free(other);
+                }
+            }
         }
 
         private void Drop()
         {
-            if (engine == IntPtr.Zero)
+            var going = pipelines.Values.ToList();
+            pipelines.Clear();
+            device = null;
+            running = null;
+            LoadedModel = null;
+            LoadedDevice = null;
+
+            foreach (var pipeline in going)
+            {
+                Free(pipeline);
+            }
+        }
+
+        private static void Free(Pipeline pipeline)
+        {
+            if (pipeline.Handle == IntPtr.Zero)
             {
                 return;
             }
 
             // Freeing stops what is running and joins the thread, which can take until the end of
             // the step it is on.
-            var going = engine;
-            engine = IntPtr.Zero;
-            device = null;
-            LoadedModel = null;
-            LoadedDevice = null;
-            Native.waifu_engine_cancel_all(going);
-            Native.waifu_engine_free(going);
+            var handle = pipeline.Handle;
+            pipeline.Handle = IntPtr.Zero;
+            pipeline.Model = null;
+            Native.waifu_pipeline_cancel_all(handle);
+            Native.waifu_pipeline_free(handle);
+        }
+
+        private static Native.PipelineType PipelineFor(TaskKind kind)
+        {
+            switch (Tasks.CategoryOf(kind))
+            {
+                case Category.Image:
+                    return Native.PipelineType.ImageGeneration;
+                case Category.Speech:
+                    return Native.PipelineType.TextToSpeech;
+                default:
+                    return Native.PipelineType.VoiceConversion;
+            }
+        }
+
+        private static string Named(Native.PipelineType type)
+        {
+            switch (type)
+            {
+                case Native.PipelineType.ImageGeneration: return "image generation";
+                case Native.PipelineType.TextToSpeech: return "text to speech";
+                case Native.PipelineType.VoiceConversion: return "voice conversion";
+                default: return "pipeline " + ((int)type).ToString(CultureInfo.InvariantCulture);
+            }
         }
 
         // -- the job itself ----------------------------------------------------------------------
@@ -247,20 +368,17 @@ namespace Libwaifu.Gui.Engine
         {
             var prompt = Utf8.Bytes(current.Prompt ?? string.Empty);
             var negative = Utf8.Bytes(current.Negative ?? string.Empty);
-            var key = Utf8.Bytes("start_from");
 
             var pinnedPrompt = GCHandle.Alloc(prompt, GCHandleType.Pinned);
             var pinnedNegative = GCHandle.Alloc(negative, GCHandleType.Pinned);
-            var pinnedKey = GCHandle.Alloc(key, GCHandleType.Pinned);
             var pinnedPixels = default(GCHandle);
-            var images = IntPtr.Zero;
             var picture = IntPtr.Zero;
 
             try
             {
-                var request = new Native.DrawRequest
+                var request = new Native.ImageGenerationRequest
                 {
-                    StructSize = (uint)Marshal.SizeOf(typeof(Native.DrawRequest)),
+                    StructSize = (uint)Marshal.SizeOf(typeof(Native.ImageGenerationRequest)),
                     Prompt = pinnedPrompt.AddrOfPinnedObject(),
                     Negative = pinnedNegative.AddrOfPinnedObject(),
                     Width = (uint)current.Width,
@@ -268,11 +386,15 @@ namespace Libwaifu.Gui.Engine
                     Steps = (uint)current.Steps,
                     Guidance = (float)(current.Guidance ?? 1.0),
                     Seed = (ulong)seed,
-                    Strength = (float)(current.Strength ?? 0.8),
-                    ControlScale = 1.0f,
+                    StartImage = IntPtr.Zero,
+                    StartImageStrength = (float)(current.Strength ?? 0.8),
+                    ControlImage = IntPtr.Zero,
+                    ControlImageScale = 1.0f,
+                    PromptImages = IntPtr.Zero,
+                    PromptImageCount = UIntPtr.Zero,
                 };
 
-                // The picture img2img starts from, under the key the engine keeps for it.
+                // The picture img2img starts from.
                 if (current.SourceRgb != null)
                 {
                     pinnedPixels = GCHandle.Alloc(current.SourceRgb, GCHandleType.Pinned);
@@ -286,32 +408,16 @@ namespace Libwaifu.Gui.Engine
 
                     picture = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Native.Image)));
                     Marshal.StructureToPtr(image, picture, false);
-
-                    var input = new Native.ImageInput
-                    {
-                        Key = pinnedKey.AddrOfPinnedObject(),
-                        Image = picture,
-                    };
-
-                    images = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Native.ImageInput)));
-                    Marshal.StructureToPtr(input, images, false);
-
-                    request.Images = images;
-                    request.ImageCount = (UIntPtr)1;
+                    request.StartImage = picture;
                 }
 
-                job = Native.waifu_engine_draw_async(
-                    engine, ref request, IntPtr.Zero, onProgress, onDrawn);
+                job = Native.waifu_pipeline_run_image_generation_async(
+                    running.Handle, ref request, IntPtr.Zero, onProgress, onDrawn);
             }
             finally
             {
                 // Everything above is borrowed only for the length of the call: by the time it
                 // has returned the library has copied what it keeps.
-                if (images != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(images);
-                }
-
                 if (picture != IntPtr.Zero)
                 {
                     Marshal.FreeHGlobal(picture);
@@ -322,7 +428,6 @@ namespace Libwaifu.Gui.Engine
                     pinnedPixels.Free();
                 }
 
-                pinnedKey.Free();
                 pinnedNegative.Free();
                 pinnedPrompt.Free();
             }
@@ -334,27 +439,27 @@ namespace Libwaifu.Gui.Engine
             var style = Utf8.Bytes(current.Style ?? string.Empty);
             var pinnedText = GCHandle.Alloc(text, GCHandleType.Pinned);
             var pinnedStyle = GCHandle.Alloc(style, GCHandleType.Pinned);
-            var like = Hold(current.Reference);
+            var reference = Hold(current.Reference);
 
             try
             {
-                var request = new Native.SpeakRequest
+                var request = new Native.TextToSpeechRequest
                 {
-                    StructSize = (uint)Marshal.SizeOf(typeof(Native.SpeakRequest)),
+                    StructSize = (uint)Marshal.SizeOf(typeof(Native.TextToSpeechRequest)),
                     Text = pinnedText.AddrOfPinnedObject(),
-                    Like = like.Pointer,
+                    Reference = reference.Pointer,
                     Speed = (float)(current.Speed ?? 1.0),
                     Temperature = (float)(current.Temperature ?? 1.0),
                     Style = pinnedStyle.AddrOfPinnedObject(),
                     Seed = (ulong)seed,
                 };
 
-                job = Native.waifu_engine_speak_async(
-                    engine, ref request, IntPtr.Zero, onProgress, onSounded);
+                job = Native.waifu_pipeline_run_text_to_speech_async(
+                    running.Handle, ref request, IntPtr.Zero, onProgress, onSounded);
             }
             finally
             {
-                like.Free();
+                reference.Free();
                 pinnedStyle.Free();
                 pinnedText.Free();
             }
@@ -377,8 +482,8 @@ namespace Libwaifu.Gui.Engine
                     Seed = (ulong)seed,
                 };
 
-                job = Native.waifu_engine_voice_conversion_async(
-                    engine, ref request, IntPtr.Zero, onProgress, onSounded);
+                job = Native.waifu_pipeline_run_voice_conversion_async(
+                    running.Handle, ref request, IntPtr.Zero, onProgress, onSounded);
             }
             finally
             {
@@ -423,7 +528,7 @@ namespace Libwaifu.Gui.Engine
             {
                 Samples = held.Pinned.AddrOfPinnedObject(),
                 Count = (UIntPtr)(uint)recording.Samples.Length,
-                Rate = (uint)recording.Rate,
+                SampleRate = (uint)recording.Rate,
             };
 
             held.Pointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Native.Audio)));
@@ -433,20 +538,22 @@ namespace Libwaifu.Gui.Engine
 
         // -- what comes back ----------------------------------------------------------------------
 
-        private void Advanced(IntPtr user, ref Native.ProgressEvent e)
+        private void Advanced(IntPtr user, ref Native.ProgressInfo e)
         {
             // On a thread of the library's. Everything is copied before it returns.
-            var stage = (Stage)e.Stage;
+            var stage = e.Stage;
             var fraction = e.Fraction >= 0 ? (double?)e.Fraction : null;
+            var done = e.Done;
+            var total = e.Total;
             var seconds = e.Seconds;
-            var words = Utf8.Read(e.Words);
-            var file = Utf8.Read(e.File);
-            var line = words ?? file ?? Words(stage);
 
-            ui.BeginInvoke((Action)delegate { Say(stage, fraction, line, seconds); });
+            ui.BeginInvoke((Action)delegate
+            {
+                Say(Gathered(stage), fraction, Words(stage, done, total, reading), seconds);
+            });
         }
 
-        private void Loaded(IntPtr user, ref Native.CompletionEvent e)
+        private void Loaded(IntPtr user, ref Native.Result e)
         {
             var code = e.Status.Code;
             var message = Utf8.Read(e.Status.Message);
@@ -461,6 +568,11 @@ namespace Libwaifu.Gui.Engine
                     return;
                 }
 
+                if (running != null)
+                {
+                    running.Model = model;
+                }
+
                 LoadedModel = model;
                 LoadedDevice = on;
 
@@ -470,7 +582,7 @@ namespace Libwaifu.Gui.Engine
             });
         }
 
-        private void Drawn(IntPtr user, ref Native.ImageCompletionEvent e)
+        private void Drawn(IntPtr user, ref Native.ImageGenerationResult e)
         {
             var code = e.Status.Code;
             var message = Utf8.Read(e.Status.Message);
@@ -510,7 +622,7 @@ namespace Libwaifu.Gui.Engine
             });
         }
 
-        private void Sounded(IntPtr user, ref Native.AudioCompletionEvent e)
+        private void Sounded(IntPtr user, ref Native.AudioResult e)
         {
             var code = e.Status.Code;
             var message = Utf8.Read(e.Status.Message);
@@ -520,7 +632,7 @@ namespace Libwaifu.Gui.Engine
             if (code == Native.Status.Ok && e.Audio != IntPtr.Zero)
             {
                 var audio = (Native.Audio)Marshal.PtrToStructure(e.Audio, typeof(Native.Audio));
-                rate = (int)audio.Rate;
+                rate = (int)audio.SampleRate;
                 samples = new float[(int)audio.Count];
                 Marshal.Copy(audio.Samples, samples, 0, samples.Length);
             }
@@ -586,20 +698,92 @@ namespace Libwaifu.Gui.Engine
             }
         }
 
-        /// <summary>What to say for a stage that sent no words of its own.</summary>
-        private static string Words(Stage stage)
+        /// <summary>
+        /// Which of this program's few phases a stage of the library's is. A stage it has no name
+        /// for -- a newer library's -- is Working.
+        /// </summary>
+        private static Stage Gathered(int stage)
         {
             switch (stage)
             {
-                case Stage.Fetching: return "fetching";
-                case Stage.Reading: return "reading";
-                case Stage.Encoding: return "encoding";
-                case Stage.Drawing: return "drawing";
-                case Stage.Decoding: return "decoding";
-                case Stage.Listening: return "listening";
-                case Stage.Saying: return "saying";
-                default: return "sounding";
+                case Native.ProgressStage.LoadingWeights:
+                    return Stage.Reading;
+                case Native.ProgressStage.ImageGenerationEncodingPrompt:
+                case Native.ProgressStage.TextToSpeechReadingText:
+                    return Stage.Encoding;
+                case Native.ProgressStage.ImageGenerationDenoising:
+                case Native.ProgressStage.VoiceConversionDenoising:
+                    return Stage.Drawing;
+                case Native.ProgressStage.ImageGenerationDecodingImage:
+                    return Stage.Decoding;
+                case Native.ProgressStage.VoiceConversionReadingRecordings:
+                    return Stage.Listening;
+                case Native.ProgressStage.TextToSpeechGeneratingTokens:
+                case Native.ProgressStage.VoiceConversionGeneratingTokens:
+                    return Stage.Saying;
+                case Native.ProgressStage.TextToSpeechSynthesizingAudio:
+                case Native.ProgressStage.VoiceConversionSynthesizingAudio:
+                    return Stage.Sounding;
+                default:
+                    return Stage.Working;
             }
+        }
+
+        /// <summary>
+        /// The line under the bar for a stage: the library hands over a stage and its counts, and
+        /// the words are this program's. One for each stage the three pipelines here can send,
+        /// and a plain one for any other.
+        /// </summary>
+        private static string Words(int stage, ulong done, ulong total, string model)
+        {
+            switch (stage)
+            {
+                case Native.ProgressStage.LoadingWeights:
+                    return string.IsNullOrEmpty(model) ? "reading" : "reading " + model;
+
+                case Native.ProgressStage.ImageGenerationEncodingPrompt:
+                    return "reading the prompt";
+                case Native.ProgressStage.ImageGenerationDenoising:
+                    return total > 0 ? "step " + Of(done, total) : "drawing";
+                case Native.ProgressStage.ImageGenerationDecodingImage:
+                    return "making the picture";
+
+                case Native.ProgressStage.TextToSpeechReadingText:
+                    return "reading the text";
+                // "of about": the total is worked out from the length of the text, and can be
+                // passed. A bar that said "of" and then went past it would have been lying.
+                case Native.ProgressStage.TextToSpeechGeneratingTokens:
+                    return total > 0 ? "token " + OfAbout(done, total) : "saying";
+                case Native.ProgressStage.TextToSpeechSynthesizingAudio:
+                    return "making the sound";
+
+                case Native.ProgressStage.VoiceConversionReadingRecordings:
+                    return "listening to the recordings";
+                case Native.ProgressStage.VoiceConversionGeneratingTokens:
+                    return total > 0 ? "token " + OfAbout(done, total) : "saying";
+                case Native.ProgressStage.VoiceConversionDenoising:
+                    return total > 0 ? "step " + Of(done, total) : "drawing";
+                // The window being sounded is the one after those already done.
+                case Native.ProgressStage.VoiceConversionSynthesizingAudio:
+                    return total > 1
+                        ? "making the sound, " + Of(Math.Min(done + 1, total), total)
+                        : "making the sound";
+
+                default:
+                    return "working";
+            }
+        }
+
+        private static string Of(ulong done, ulong total)
+        {
+            return done.ToString(CultureInfo.InvariantCulture) + " of " +
+                   total.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string OfAbout(ulong done, ulong total)
+        {
+            return done.ToString(CultureInfo.InvariantCulture) + " of about " +
+                   total.ToString(CultureInfo.InvariantCulture);
         }
     }
 }

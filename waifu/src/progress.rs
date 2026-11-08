@@ -84,6 +84,8 @@ pub struct Say {
     pub streaming: bool,
     /// The most tokens it has said, which a streaming reading's bar is drawn from.
     pub said: i32,
+    /// How many parts a streaming reading has handed over so far.
+    pub parts: u32,
 }
 
 impl Say {
@@ -97,6 +99,7 @@ impl Say {
             ratio,
             streaming,
             said: 0,
+            parts: 0,
         }
     }
 

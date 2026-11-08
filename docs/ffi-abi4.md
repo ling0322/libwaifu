@@ -1,8 +1,12 @@
 # libwaifu's C API, ABI 4
 
-Status: designed, not implemented. `docs/ffi.md` and `waifu/include/waifu.h` describe ABI 3, which
-is what the library speaks today. This is what it is to speak next, agreed point by point; what
+Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs`, is ABI 4; what
 is still open is under [Not decided](#not-decided).
+
+In the header every enum is an `int32_t` and a `#define` for each value -- `typedef int32_t
+WaifuStage;` and `#define WAIFU_STAGE_LOADING_WEIGHTS 1` -- rather than the `typedef enum` the
+listing below shows: a number the library or a caller does not know is then a plain integer,
+and not a value a Rust or C++ enum must never hold. The numbers and names are the listing's.
 
 ABI 4 takes every JSON document out of libwaifu and asks about models and devices through an enum
 and a getter instead; replaces the engine that ran every kind of job with a pipeline made for one
@@ -26,10 +30,13 @@ needed. A caller built against it has two things to free and nothing to parse.
 - **Freeing waits.** `waifu_pipeline_free` cancels what waits, stops what runs after its step, and
   returns only once every job of the pipeline has had its `on_complete`; after it returns, nothing
   of the pipeline calls back again. It must not be called from one of its own callbacks.
-- **Callbacks come after the call.** No callback of a job is called before the `_async` call
-  that started it has returned, so a caller can file the job's id before its first progress
-  arrives. A job given an id gets `on_progress` any number of times and then `on_complete` exactly
-  once; a call that returned 0 gets neither.
+- **A job's state is its `user_data`.** Its callbacks run on the pipeline's thread and may start
+  before the `_async` call that started it has returned -- a job can be over by then -- so a
+  caller keeps what a job needs where `user_data` points, set up before the call, and not in a
+  table keyed by the id the call returns, as IOCP's `OVERLAPPED` and gRPC's tags are. (libuv
+  can promise otherwise because its callbacks run on the caller's own thread; these run on the
+  pipeline's.) A job given an id gets `on_progress` any number of times and then `on_complete`
+  exactly once; a call that returned 0 gets neither.
 - **Two ways to fail.** A call that is *refused* says so at once -- a NULL from a constructor, job
   0 from an `_async` call, `false` from `waifu_device_set_memory_limit` -- and sets this thread's
   `waifu_last_error` (a sentence) and `waifu_last_error_code` (a `WaifuStatusCode`) together. A
@@ -184,6 +191,7 @@ typedef enum {
   WAIFU_LAYER_PART = 0,             // a part as the model drew it
   WAIFU_LAYER_STRATIFIED_NEAR = 1,  // stratify_layers: the near half of a part
   WAIFU_LAYER_STRATIFIED_FAR = 2,   // stratify_layers: the far half of a part
+  WAIFU_LAYER_DEPTH = 3,            // the depth of the layer derived_from_id names, pixel by pixel
 } WaifuLayerType;
 
 /* -- the library --------------------------------------------------------------------------- */
@@ -254,9 +262,10 @@ WaifuDevice waifu_pipeline_get_device(const WaifuPipeline *pipeline);   // never
 /* -- jobs ---------------------------------------------------------------------------------- */
 
 // 0: refused at the call, with waifu_last_error and _code, and no callback is ever called.
-// Any other id: on_progress any number of times, then on_complete exactly once, none of them
-// before the _async call has returned. Callbacks run on the pipeline's thread, must return
-// quickly, and may call nothing but waifu_pipeline_cancel.
+// Any other id: on_progress any number of times, then on_complete exactly once. Callbacks run on
+// the pipeline's thread and may start before the _async call has returned: keep a job's state in
+// user_data, not under its id. They must return quickly, and may call nothing but
+// waifu_pipeline_cancel.
 typedef uint64_t WaifuJob;
 
 void waifu_pipeline_cancel(WaifuPipeline *pipeline, WaifuJob job);  // after the step it is on, or before it starts
@@ -428,22 +437,28 @@ typedef struct {
 
 typedef struct {
   WaifuLayerType type;
-  const char *name;                   // "topwear"; its halves "topwear-0" and "topwear-1"
+  uint32_t id;                        // unique within the result, from 1; it means nothing else
+  const char *name;                   // "topwear"; its halves "topwear-0", "topwear-1"; its depth "topwear_depth"
   int32_t left;                       // where its top left corner is on the canvas
   int32_t top;
-  WaifuRgbaImage image;               // only as large as what is drawn
+  // Only as large as what is drawn. A depth layer: its layer's size and place, R, G and B the
+  // depth, 0 nearest to 255 farthest, under its layer's alpha.
+  WaifuRgbaImage image;
   // How far away it is: 0 nearest, 1 farthest. A near half has its part's depth, not its pixels':
-  // that is what keeps it in its part's place in the stratified stack (see the result).
+  // that is what keeps it in its part's place in the stratified stack (see the result). A depth
+  // layer has its layer's.
   float depth;
-  int32_t stratified_from;            // a half: the index in `layers` of its part; a part: -1
+  uint32_t derived_from_id;           // a half: its part's id; a depth layer: its layer's; a part: 0
 } WaifuLayer;
 
-// `layers` is in one order, which the library never changes and every index refers to: each part,
-// bottom first -- which is the stack, unstratified -- and then, with stratify_layers, each part's
-// halves, near before far. A part a half names in stratified_from is a split part.
+// `layers` is in one order, which the library never changes: each part, bottom first -- which is
+// the stack, unstratified -- then, with stratify_layers, each part's halves, near before far; then
+// a depth layer for each of those, in their order. A part a half names in derived_from_id is a
+// split part. Links are by id, not by place, so a caller's copy may be reordered or cut.
 //
 // The stratified stack is every part that was not split and every half, bottom first: from the
-// largest depth to the smallest; at one depth, a far half under a near one; then by index.
+// largest depth to the smallest; at one depth, a far half under a near one; then by their order in
+// `layers`. No depth layer is in either stack.
 typedef struct {
   WaifuStatus status;
   uint32_t canvas;                    // the side of the square canvas; 0 unless WAIFU_OK
@@ -510,7 +525,7 @@ WaifuJob waifu_pipeline_run_speech_to_text_async(WaifuPipeline *pipeline,
 | `WaifuSpeakRequest.like`, `WaifuAudio.rate` | `reference`, `sample_rate` |
 | `WaifuProgressEvent.words`, `part`, `parts`, `file` | gone: one `WaifuStage` for each thing a job does |
 | eight `WaifuStage`s | twenty-six, by task |
-| `waifu_psd_write`, `waifu_bytes_free`, PSDs in the layers' result | gone: a PSD is the app's to write |
+| `waifu_psd_write`, `waifu_bytes_free`, PSDs in the layers' result | gone: a PSD is the app's to write; each layer's depth map is a `WAIFU_LAYER_DEPTH` layer |
 | `waifu_stratify`, `waifu_depth_layers_free` | `stratify_layers` in the request |
 | `WAIFU_DEVICE_CUDA_CPU_OFFLOAD`, `_METAL_DISK_OFFLOAD`, `WAIFU_ERR_FETCH` | gone; their numbers are not reused |
 | a voice's `styles`, `not_a_voice_because` | gone |
@@ -591,8 +606,14 @@ of indices. Now:
   half lower than a near one; then the smaller index in `layers` lower.
 
 `layers` itself is never reordered: every part, bottom first, then the halves, near before far,
-and `stratified_from` is an index into that array. A caller builds the stack as a list of indices
-sorted by that comparison. The unstratified stack is the parts in the order they come.
+then a depth layer for each, and a half's `derived_from_id` is its part's `id`. A caller builds
+the stack as a list of indices sorted by that comparison. The unstratified stack is the parts in
+the order they come.
+
+The depth model draws a depth map for each layer, not one for the picture -- upstream's Marigold
+takes every layer as a frame and saves each map as `<tag>_depth.png` -- and each part and each half
+has its own, the same size as it is. Each comes back as a layer of its own, `WAIFU_LAYER_DEPTH`,
+named `<name>_depth`, whose `derived_from_id` is the id of the layer it is the depth of.
 
 On `waifu-output/waifu-0015.png` the two rules differ in one layer -- the near half of the back hair is under the back of the top rather than over it --
 and in 255 of the 1280 x 1280 pixels drawn, thin lines along the shoulders.

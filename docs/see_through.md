@@ -128,21 +128,29 @@ by k-means (k = 2), and the near and far clusters become layers of their own. It
 this to hair, hands, tops and bottoms. Upstream ships it only as a step to run by hand
 (`heuristic_partseg.py seg_wdepth`, `cluster_inpaint_part` in `common/utils/torchcv.py`).
 
-Here it is done to a document after img2layers wrote it, as upstream's `seg_wdepth` is, and not
-as part of taking a picture apart: what img2layers writes is the model's, and what the layers are
-cut into is for what they are used for. `see_through::stratify` (`waifu_stratify` in the C API;
-**Split by depth** in the app's img2layers, on what it saves) takes a document's layers with their depth and does it
-to `front hair`, `back hair`, `handwear` and its `-l`/`-r`, `topwear` and `bottomwear`
-(`waifu/src/see_through/stratify.rs`):
+It is done two ways, to `front hair`, `back hair`, `handwear` and its `-l`/`-r`, `topwear` and
+`bottomwear`, by the same cut (`see_through::split`, `waifu/src/see_through/stratify.rs`):
 
 - `<tag>-0`, the near cluster: the part's colour, its alpha under the cluster's mask feathered by
-  a 3 x 3 Gaussian. It takes the part's place in the document.
+  a 3 x 3 Gaussian.
 - `<tag>-1`, the far one: the whole part, its outline the part's own, with the near cluster's
   place, grown by a 7 x 7 ellipse, filled in with colour from around it, and its depth there the
-  median of the rest. It lies under `-0`, which covers most of it, and goes down from the part's
-  place past every layer right under it that is nearer than its own median depth.
-- The rest of the document's order is kept, where upstream sorts every part by depth again: a
-  document may have been put in order by hand.
+  median of the rest. It lies under `-0`, which covers most of it.
+
+**In a decomposition**, with `stratify_layers` in the C API's request (docs/ffi-abi4.md,
+"Stratification"): the halves are appended to the layers after every part, each with a depth
+layer of its own as every part has, and the near half's
+depth is its part's, the far half's its own median. The stratified stack is the parts that were
+not split and every half, sorted by depth, a far half under a near one at the same depth -- one
+comparison any caller can make.
+
+**On a document** after img2layers wrote it, as upstream's `seg_wdepth` is: `see_through::stratify`,
+which `see_through_stratify` below runs. There the near half takes the part's place, the far half
+goes down from it past every layer right under it that is nearer than its own median depth, and
+the rest of the document's order is kept, where upstream sorts every part by depth again: a
+document may have been put in order by hand. On `waifu-output/waifu-0015.png` the two orders
+differ in one layer -- the near half of the back hair is under the back of the top rather than
+over it -- and in 255 of the 1280 x 1280 pixels drawn.
 
 Where upstream fills the far layer with LaMa, a model of its own that is not here, this takes
 upstream's other branch, which fills with `cv2.inpaint`, and fills by Lvmin's pyramid (`pad_rgb`)

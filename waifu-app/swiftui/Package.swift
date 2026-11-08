@@ -1,8 +1,8 @@
 // swift-tools-version: 5.10
 
 // The macOS app: native controls over libwaifu and libwaifu_modelmanager, which it links. WaifuKit
-// is the Swift face of the C APIs in waifu and waifu-modelmanager (docs/ffi.md); CWaifu is their
-// headers, as a module Swift can import.
+// is the Swift face of the C APIs in waifu (docs/ffi-abi4.md) and waifu-modelmanager (docs/ffi.md);
+// CWaifu is their headers, as a module Swift can import.
 //
 // Both dylibs are CMake's to build, into build/ at the top of the repository: this links them from
 // there, and finds them there at run time while the app runs unbundled. Inside libwaifu-gui.app
