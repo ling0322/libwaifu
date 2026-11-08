@@ -249,6 +249,8 @@ final class LayersTests: XCTestCase {
         var parts = [kept("face", 0.47, "00.png"), kept("topwear", 0.3, "01.png")]
         parts[0].id = 2
         parts[1].id = 1
+        // Where the top was when it was taken apart, as the record keeps it.
+        (parts[1].left, parts[1].top) = (10, 5)
         let cut = [
             KeptHalf(name: "topwear-0", left: 10, top: 5, width: 10, height: 10, depth: 0.3, near: true, id: 3, of: 1),
             KeptHalf(name: "topwear-1", left: 20, top: 5, width: 10, height: 10, depth: 0.8, near: false, id: 4, of: 1),
@@ -271,6 +273,20 @@ final class LayersTests: XCTestCase {
         XCTAssertEqual(depthDocument.layers[0].image, farDepth)
         // What it was split from is as it was.
         XCTAssertEqual(try PSDDocument.read(psd).splitDepth().layers.map(\.name), ["face", "topwear"])
+
+        // The top moved in the document since: both halves, and their depth, go with it.
+        let moved = try PSD.write(
+            [PSD.Layer(name: "face", left: 0, top: 0, image: face), PSD.Layer(name: "topwear", left: 12, top: 8, image: top)],
+            width: 40, height: 20)
+        let (shifted, shiftedDepth) = try Session.splitByDepth(moved, halves: halves, parts: parts, cut: cut)
+        let after = try PSDDocument.read(shifted).splitDepth()
+        XCTAssertEqual(after.layers.map(\.name), names)
+        XCTAssertEqual([after.layers[0].left, after.layers[0].top], [22, 8])
+        XCTAssertEqual([after.layers[2].left, after.layers[2].top], [12, 8])
+        XCTAssertEqual([after.layers[1].left, after.layers[1].top], [0, 0])
+        XCTAssertEqual([after.depths[0].left, after.depths[0].top], [22, 8])
+        let shiftedDocument = try PSDDocument.read(shiftedDepth)
+        XCTAssertEqual([shiftedDocument.layers[0].left, shiftedDocument.layers[0].top], [22, 8])
 
         // A part renamed and moved is what its halves are called after, found by its id and not
         // its place; a near half goes where its part goes.

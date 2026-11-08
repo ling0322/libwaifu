@@ -1114,11 +1114,14 @@ final class Session {
             }
             let at = index - parts.count
             let (half, piece, part) = (cut[at], pieces[at], parts[partOf[at]])
+            // A half goes where its part went: the part's place in the document now, less where
+            // the record says it was when it was taken apart, is how far it has been moved since.
+            let moved = (left: shown[partOf[at]].left - part.left, top: shown[partOf[at]].top - part.top)
             return (
                 Layer(
                     type: listed[index].type, id: half.id, name: "\(part.name)-\(half.near ? 0 : 1)",
-                    left: piece.left, top: piece.top, image: piece.image, depth: listed[index].depth,
-                    derivedFromID: half.of),
+                    left: piece.left + moved.left, top: piece.top + moved.top, image: piece.image,
+                    depth: listed[index].depth, derivedFromID: half.of),
                 depthOf(pieces, pieceDepths, at, half.depth))
         }
         return (document.width, document.height, layers)
