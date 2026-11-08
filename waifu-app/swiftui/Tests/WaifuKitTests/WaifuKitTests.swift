@@ -192,15 +192,24 @@ final class WaifuKitTests: XCTestCase {
 
     func testTheStratifiedStackIsByDepthFarHalvesUnderNearOnes() {
         // A face, and a top cut into a near half at the top's depth and a far half behind the face.
-        let layers: [(type: LayerType, depth: Float, stratifiedFrom: Int?)] = [
-            (type: .part, depth: 0.9, stratifiedFrom: nil),  // back hair
-            (type: .part, depth: 0.5, stratifiedFrom: nil),  // topwear, which is split
-            (type: .part, depth: 0.4, stratifiedFrom: nil),  // face
-            (type: .near, depth: 0.5, stratifiedFrom: 1),
-            (type: .far, depth: 0.5, stratifiedFrom: 1),
+        // Each part and half has a depth layer after them, which names it and is in neither stack,
+        // and does not make what it names a split part. Ids are not places.
+        let layers: [(id: Int, type: LayerType, depth: Float, derivedFromID: Int?)] = [
+            (id: 7, type: .part, depth: 0.9, derivedFromID: nil),  // back hair
+            (id: 3, type: .part, depth: 0.5, derivedFromID: nil),  // topwear, which is split
+            (id: 5, type: .part, depth: 0.4, derivedFromID: nil),  // face
+            (id: 1, type: .near, depth: 0.5, derivedFromID: 3),
+            (id: 2, type: .far, depth: 0.5, derivedFromID: 3),
+            (id: 4, type: .depth, depth: 0.9, derivedFromID: 7),
+            (id: 6, type: .depth, depth: 0.5, derivedFromID: 3),
+            (id: 8, type: .depth, depth: 0.4, derivedFromID: 5),
+            (id: 9, type: .depth, depth: 0.5, derivedFromID: 1),
+            (id: 10, type: .depth, depth: 0.5, derivedFromID: 2),
         ]
         // The split part is not in it; at one depth the far half is under the near one.
         XCTAssertEqual(Layers.stratifiedStack(layers), [0, 4, 3, 2])
+        // Without its halves the top is a part like any other.
+        XCTAssertEqual(Layers.stratifiedStack(layers.filter { !$0.type.isHalf }), [0, 1, 2])
     }
 
     func testTheLogHandlerHearsTheLibrary() async throws {

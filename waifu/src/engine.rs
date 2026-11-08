@@ -165,27 +165,36 @@ pub enum LayerKind {
     StratifiedNear,
     /// The far half of a stratified part.
     StratifiedFar,
+    /// The depth of the layer `derived_from_id` names, pixel by pixel.
+    Depth,
 }
 
 /// One layer of a picture taken apart.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerOut {
     pub kind: LayerKind,
+    /// Unique within the result, from 1; it means nothing else.
+    pub id: u32,
+    /// A depth layer's is its layer's with `_depth` after it: `topwear_depth`.
     pub name: String,
     /// Where its top left corner is on the canvas.
     pub left: i32,
     pub top: i32,
+    /// A depth layer's: R, G and B the depth, 0 near to 255 far, under its layer's alpha.
     pub image: RgbaImage,
     /// How far away it is, 0 near to 1 far. A near half has its part's depth, not its own pixels':
-    /// that is what keeps it in its part's place in the stratified stack.
+    /// that is what keeps it in its part's place in the stratified stack. A depth layer has its
+    /// layer's.
     pub depth: f32,
-    /// A half: the index in [`Layers::layers`] of the part it was cut from.
-    pub stratified_from: Option<usize>,
+    /// A half: the id of the part it was cut from; a depth layer: of the layer it is the depth
+    /// of; a part: None.
+    pub derived_from_id: Option<u32>,
 }
 
 /// A picture taken apart. `layers` is in one order, never changed: every part, bottom first --
 /// the stack, unstratified -- then, where stratification was asked for, each split part's halves,
-/// near before far. See [`Layers::stratified_stack`] for the other stack.
+/// near before far; then a depth layer for each of those, in their order. See
+/// [`Layers::stratified_stack`] for the other stack.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layers {
     /// The side of the square canvas the layers are on.
@@ -195,16 +204,25 @@ pub struct Layers {
 
 impl Layers {
     /// The stratified stack, bottom first, as indices into `layers`: every part that was not split
-    /// and every half, ordered by depth from the largest; at one depth, a far half under a near
-    /// one; then by index. docs/ffi-abi4.md, "Stratification".
+    /// and every half -- no depth layer -- ordered by depth from the largest; at one depth, a far
+    /// half under a near one; then by index. docs/ffi-abi4.md, "Stratification".
     pub fn stratified_stack(&self) -> Vec<usize> {
-        let split: HashSet<usize> = self
+        let split: HashSet<u32> = self
             .layers
             .iter()
-            .filter_map(|layer| layer.stratified_from)
+            .filter(|layer| {
+                matches!(
+                    layer.kind,
+                    LayerKind::StratifiedNear | LayerKind::StratifiedFar
+                )
+            })
+            .filter_map(|layer| layer.derived_from_id)
             .collect();
         let mut stack: Vec<usize> = (0..self.layers.len())
-            .filter(|index| !split.contains(index))
+            .filter(|&index| {
+                let layer = &self.layers[index];
+                layer.kind != LayerKind::Depth && !split.contains(&layer.id)
+            })
             .collect();
         let lower = |kind: LayerKind| match kind {
             LayerKind::StratifiedFar => 0,
@@ -1396,50 +1414,83 @@ impl Worker {
             started.elapsed().as_secs_f64()
         ));
 
-        let layer = |kind: LayerKind,
-                     part: &crate::see_through::Part,
-                     depth: f32,
-                     stratified_from: Option<usize>| LayerOut {
-            kind,
-            name: part.tag.clone(),
-            left: part.left as i32,
-            top: part.top as i32,
-            image: RgbaImage {
-                width: part.pixels.width as u32,
-                height: part.pixels.height as u32,
-                rgba: part.pixels.data.clone(),
-            },
-            depth,
-            stratified_from,
-        };
-        let mut layers: Vec<LayerOut> = decomposition
+        // Each layer with what its depth layer is drawn from: the parts first, then their halves,
+        // near before far. The near half takes its part's depth, so that sorting by depth keeps it
+        // in its part's place; the far half keeps its own.
+        let mut drawn: Vec<(LayerKind, crate::see_through::Part, f32, Option<u32>)> = decomposition
             .parts
             .iter()
-            .map(|part| layer(LayerKind::Part, part, part.depth_median, None))
+            .map(|part| (LayerKind::Part, part.clone(), part.depth_median, None))
             .collect();
-
-        // The halves after every part, near before far. The near half takes its part's depth, so
-        // that sorting by depth keeps it in its part's place; the far half keeps its own.
         if request.stratify {
             for (index, part) in decomposition.parts.iter().enumerate() {
                 if !crate::see_through::STRATIFIED.contains(&part.tag.as_str()) {
                     continue;
                 }
                 if let Some((near, far)) = crate::see_through::split(part) {
-                    layers.push(layer(
-                        LayerKind::StratifiedNear,
-                        &near,
-                        part.depth_median,
-                        Some(index),
-                    ));
-                    layers.push(layer(
-                        LayerKind::StratifiedFar,
-                        &far,
-                        far.depth_median,
-                        Some(index),
-                    ));
+                    let id = Some(index as u32 + 1);
+                    drawn.push((LayerKind::StratifiedNear, near, part.depth_median, id));
+                    let far_depth = far.depth_median;
+                    drawn.push((LayerKind::StratifiedFar, far, far_depth, id));
                 }
             }
+        }
+
+        let place = |kind: LayerKind,
+                     id: usize,
+                     name: String,
+                     part: &crate::see_through::Part,
+                     rgba: Vec<u8>,
+                     depth: f32,
+                     derived_from_id: Option<u32>| LayerOut {
+            kind,
+            id: id as u32,
+            name,
+            left: part.left as i32,
+            top: part.top as i32,
+            image: RgbaImage {
+                width: part.pixels.width as u32,
+                height: part.pixels.height as u32,
+                rgba,
+            },
+            depth,
+            derived_from_id,
+        };
+        let mut layers: Vec<LayerOut> = drawn
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, part, depth, from))| {
+                place(
+                    *kind,
+                    index + 1,
+                    part.tag.clone(),
+                    part,
+                    part.pixels.data.clone(),
+                    *depth,
+                    *from,
+                )
+            })
+            .collect();
+        // Then each one's depth, in the same order: the depth in R, G and B, under its alpha.
+        let count = drawn.len();
+        for (index, (_, part, depth, _)) in drawn.iter().enumerate() {
+            let alpha = part.pixels.data.chunks(4).map(|pixel| pixel[3]);
+            let rgba: Vec<u8> = part
+                .depth
+                .data
+                .iter()
+                .zip(alpha)
+                .flat_map(|(&d, a)| [d, d, d, a])
+                .collect();
+            layers.push(place(
+                LayerKind::Depth,
+                count + index + 1,
+                format!("{}_depth", part.tag),
+                part,
+                rgba,
+                *depth,
+                Some(index as u32 + 1),
+            ));
         }
         Ended::Done(Layers {
             canvas: decomposition.canvas as u32,
@@ -1985,6 +2036,40 @@ pub(crate) mod tests {
         for heard in ends {
             assert!(heard.recv_timeout(WAIT).is_ok());
         }
+    }
+
+    #[test]
+    fn the_stratified_stack_leaves_out_split_parts_and_every_depth_layer() {
+        let layer = |kind, id, depth, derived_from_id| LayerOut {
+            kind,
+            id,
+            name: String::new(),
+            left: 0,
+            top: 0,
+            image: RgbaImage {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+            },
+            depth,
+            derived_from_id,
+        };
+        // Back hair split in two, a top that was not; then a depth layer for each.
+        let layers = Layers {
+            canvas: 64,
+            layers: vec![
+                layer(LayerKind::Part, 1, 0.95, None),
+                layer(LayerKind::Part, 2, 0.6, None),
+                layer(LayerKind::StratifiedNear, 3, 0.95, Some(1)),
+                layer(LayerKind::StratifiedFar, 4, 0.95, Some(1)),
+                layer(LayerKind::Depth, 5, 0.95, Some(1)),
+                layer(LayerKind::Depth, 6, 0.6, Some(2)),
+                layer(LayerKind::Depth, 7, 0.95, Some(3)),
+                layer(LayerKind::Depth, 8, 0.95, Some(4)),
+            ],
+        };
+        // The top has a depth layer naming it, and is not split by it.
+        assert_eq!(layers.stratified_stack(), [3, 2, 1]);
     }
 
     #[test]

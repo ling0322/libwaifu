@@ -223,27 +223,33 @@ typedef int32_t WaifuLayerType;
 
 typedef struct {
   WaifuLayerType type;
-  // "topwear"; its halves "topwear-0" and "topwear-1".
+  // Unique within the result, from 1; it means nothing else.
+  uint32_t id;
+  // "topwear"; its halves "topwear-0" and "topwear-1"; its depth "topwear_depth".
   const char *name;
   // Where its top left corner is on the canvas.
   int32_t left;
   int32_t top;
-  // Only as large as what is drawn.
+  // Only as large as what is drawn. A depth layer: the same size and place as its layer, R, G
+  // and B the depth, 0 nearest to 255 farthest, under its layer's alpha.
   WaifuRgbaImage image;
   // How far away it is: 0 nearest, 1 farthest. A near half has its part's depth, not its
   // pixels': that is what keeps it in its part's place in the stratified stack (see the
-  // result).
+  // result). A depth layer has its layer's.
   float depth;
-  // A half: the index in `layers` of its part; a part: -1.
-  int32_t stratified_from;
+  // The id of the layer this one is made from: a half's part, a depth layer's layer; 0 for a
+  // part.
+  uint32_t derived_from_id;
 } WaifuLayer;
 
-// `layers` is in one order, which the library never changes and every index refers to: each
-// part, bottom first -- which is the stack, unstratified -- and then, with stratify_layers, each
-// part's halves, near before far. A part a half names in stratified_from is a split part.
+// `layers` is in one order, which the library never changes: each part, bottom first -- which is
+// the stack, unstratified -- then, with stratify_layers, each part's halves, near before far;
+// then a depth layer for each of those, in their order. A part a half names in derived_from_id
+// is a split part.
 //
 // The stratified stack is every part that was not split and every half, bottom first: from the
-// largest depth to the smallest; at one depth, a far half under a near one; then by index.
+// largest depth to the smallest; at one depth, a far half under a near one; then by their order
+// in `layers`. No depth layer is in either stack.
 typedef struct {
   WaifuStatus status;
   // The side of the square canvas; 0 unless WAIFU_OK.
@@ -374,6 +380,9 @@ typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTe
 
 // stratify_layers: the far half of a part.
 #define WAIFU_LAYER_STRATIFIED_FAR 2
+
+// The depth of the layer derived_from_id names, pixel by pixel.
+#define WAIFU_LAYER_DEPTH 3
 
 #define WAIFU_OK 0
 

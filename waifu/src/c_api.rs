@@ -159,6 +159,8 @@ pub const WAIFU_LAYER_PART: WaifuLayerType = 0;
 pub const WAIFU_LAYER_STRATIFIED_NEAR: WaifuLayerType = 1;
 /// stratify_layers: the far half of a part.
 pub const WAIFU_LAYER_STRATIFIED_FAR: WaifuLayerType = 2;
+/// The depth of the layer derived_from_id names, pixel by pixel.
+pub const WAIFU_LAYER_DEPTH: WaifuLayerType = 3;
 
 // -- the library -----------------------------------------------------------------------------
 
@@ -1276,27 +1278,33 @@ pub struct WaifuLayerDecompositionRequest {
 #[repr(C)]
 pub struct WaifuLayer {
     pub r#type: WaifuLayerType,
-    /// "topwear"; its halves "topwear-0" and "topwear-1".
+    /// Unique within the result, from 1; it means nothing else.
+    pub id: u32,
+    /// "topwear"; its halves "topwear-0" and "topwear-1"; its depth "topwear_depth".
     pub name: *const c_char,
     /// Where its top left corner is on the canvas.
     pub left: i32,
     pub top: i32,
-    /// Only as large as what is drawn.
+    /// Only as large as what is drawn. A depth layer: the same size and place as its layer, R, G
+    /// and B the depth, 0 nearest to 255 farthest, under its layer's alpha.
     pub image: WaifuRgbaImage,
     /// How far away it is: 0 nearest, 1 farthest. A near half has its part's depth, not its
     /// pixels': that is what keeps it in its part's place in the stratified stack (see the
-    /// result).
+    /// result). A depth layer has its layer's.
     pub depth: f32,
-    /// A half: the index in `layers` of its part; a part: -1.
-    pub stratified_from: i32,
+    /// The id of the layer this one is made from: a half's part, a depth layer's layer; 0 for a
+    /// part.
+    pub derived_from_id: u32,
 }
 
-/// `layers` is in one order, which the library never changes and every index refers to: each
-/// part, bottom first -- which is the stack, unstratified -- and then, with stratify_layers, each
-/// part's halves, near before far. A part a half names in stratified_from is a split part.
+/// `layers` is in one order, which the library never changes: each part, bottom first -- which is
+/// the stack, unstratified -- then, with stratify_layers, each part's halves, near before far;
+/// then a depth layer for each of those, in their order. A part a half names in derived_from_id
+/// is a split part.
 ///
 /// The stratified stack is every part that was not split and every half, bottom first: from the
-/// largest depth to the smallest; at one depth, a far half under a near one; then by index.
+/// largest depth to the smallest; at one depth, a far half under a near one; then by their order
+/// in `layers`. No depth layer is in either stack.
 #[repr(C)]
 pub struct WaifuLayerDecompositionResult {
     pub status: WaifuStatus,
@@ -1376,7 +1384,9 @@ pub unsafe extern "C" fn waifu_pipeline_run_layer_decomposition_async(
                             LayerKind::Part => WAIFU_LAYER_PART,
                             LayerKind::StratifiedNear => WAIFU_LAYER_STRATIFIED_NEAR,
                             LayerKind::StratifiedFar => WAIFU_LAYER_STRATIFIED_FAR,
+                            LayerKind::Depth => WAIFU_LAYER_DEPTH,
                         },
+                        id: layer.id,
                         name: name.as_ptr(),
                         left: layer.left,
                         top: layer.top,
@@ -1387,7 +1397,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_layer_decomposition_async(
                             len: layer.image.rgba.len(),
                         },
                         depth: layer.depth,
-                        stratified_from: layer.stratified_from.map_or(-1, |part| part as i32),
+                        derived_from_id: layer.derived_from_id.unwrap_or(0),
                     })
                     .collect();
                 let result = WaifuLayerDecompositionResult {

@@ -73,8 +73,8 @@ the strip, after asking; what is still being made is left alone.
 an illustration on it and **Split into Layers**. What comes back is a Photoshop document, kept as
 `<id>.psd` -- with each layer's depth in a hidden group `depth`, at the top of the layer panel --
 and beside it in `<id>.layers/` the depth document, the layers put back together, every layer as a
-PNG, and the halves Split by depth lays among them. The library hands over pixels and depths, one
-depth a layer, and the app writes the documents itself. The middle shows them stacked on their canvas, and beside that their list,
+PNG, and the halves Split by depth lays among them. The library hands over each layer's pixels and
+its depth pixel by pixel, and the app writes the documents itself. The middle shows them stacked on their canvas, and beside that their list,
 nearest first: the eye hides one, a click shows it alone. Its pencil opens a small window to change
 its name and depth (0 nearest, 1 farthest) in; on Save the list takes the new order, and both
 documents, the picture put back together and the record are written again, every pixel as it

@@ -86,33 +86,46 @@ final class LayersTests: XCTestCase {
 
     func testWhatIsKeptOfTheLayersNamesAFileForEach() throws {
         let one = RGBAImage(width: 1, height: 1, rgba: [1, 2, 3, 255])
+        // Each layer's depth, pixel by pixel, as the library hands it over: not the gray of its
+        // one depth.
+        let deep = { (level: UInt8) in RGBAImage(width: 1, height: 1, rgba: [level, level, level, 255]) }
         let taken = Layers(
             canvas: 8,
             layers: [
-                Layer(name: "back hair", left: 0, top: 0, image: one, depth: 0.9),
-                Layer(name: "face", left: 3, top: 2, image: one, depth: 0.4),
-                Layer(type: .near, name: "back hair-0", left: 0, top: 0, image: one, depth: 0.9, stratifiedFrom: 0),
-                Layer(type: .far, name: "back hair-1", left: 1, top: 1, image: one, depth: 0.95, stratifiedFrom: 0),
+                Layer(id: 1, name: "back hair", left: 0, top: 0, image: one, depth: 0.9),
+                Layer(id: 2, name: "face", left: 3, top: 2, image: one, depth: 0.4),
+                Layer(type: .near, id: 3, name: "back hair-0", left: 0, top: 0, image: one, depth: 0.9, derivedFromID: 1),
+                Layer(type: .far, id: 4, name: "back hair-1", left: 1, top: 1, image: one, depth: 0.95, derivedFromID: 1),
+                Layer(type: .depth, id: 5, name: "back hair_depth", left: 0, top: 0, image: deep(230), depth: 0.9, derivedFromID: 1),
+                Layer(type: .depth, id: 6, name: "face_depth", left: 3, top: 2, image: deep(40), depth: 0.4, derivedFromID: 2),
+                Layer(type: .depth, id: 7, name: "back hair-0_depth", left: 0, top: 0, image: deep(200), depth: 0.9, derivedFromID: 3),
+                Layer(type: .depth, id: 8, name: "back hair-1_depth", left: 1, top: 1, image: deep(250), depth: 0.95, derivedFromID: 4),
             ])
         let (document, kept, halves, beside) = try Session.files(of: taken)
         XCTAssertEqual(kept.map(\.name), ["back hair", "face"])
+        XCTAssertEqual(kept.map(\.id), [1, 2])
         XCTAssertEqual(kept[1].left, 3)
         XCTAssertEqual(kept[1].top, 2)
         for layer in kept { XCTAssertNotNil(beside[layer.file], layer.file) }
         XCTAssertNotNil(beside[Session.composite])
         // The document is of the parts, each one's depth in its hidden group, and so is the depth
-        // document beside it: gray, 0 near to 255 far.
+        // document beside it: the library's depth layers, gray, 0 near to 255 far.
         let (shown, depths) = try PSDDocument.read(document).splitDepth()
         XCTAssertEqual(shown.map(\.name), ["back hair", "face"])
         XCTAssertEqual(depths.map(\.name), ["depth/back hair", "depth/face"])
-        XCTAssertEqual(depths[1].image.rgba, [102, 102, 102, 255])
+        XCTAssertEqual(depths[0].image, deep(230))
+        XCTAssertEqual(depths[1].image, deep(40))
         let depth = try PSDDocument.read(XCTUnwrap(beside[Session.depthDocument]))
         XCTAssertEqual(depth.layers.map(\.name), ["back hair", "face"])
-        // The halves, in a document of their own, each naming its part by its file.
+        XCTAssertEqual(depth.layers[1].image, deep(40))
+        // The halves, in a document of their own with their depth, each naming its part by its id.
         XCTAssertEqual(halves.map(\.name), ["back hair-0", "back hair-1"])
         XCTAssertEqual(halves.map(\.near), [true, false])
-        XCTAssertEqual(halves.map(\.of), [kept[0].file, kept[0].file])
-        XCTAssertEqual(try PSDDocument.read(XCTUnwrap(beside[Session.halvesDocument])).layers.count, 2)
+        XCTAssertEqual(halves.map(\.id), [3, 4])
+        XCTAssertEqual(halves.map(\.of), [1, 1])
+        let cut = try PSDDocument.read(XCTUnwrap(beside[Session.halvesDocument])).splitDepth()
+        XCTAssertEqual(cut.layers.count, 2)
+        XCTAssertEqual(cut.depths.map(\.image), [deep(200), deep(250)])
 
         // And read back as a record, the way the strip lists it.
         var made = Made(seed: 7, seconds: 1, model: "see-through:v0.0.2", parameters: "")
@@ -223,13 +236,22 @@ final class LayersTests: XCTestCase {
             ])
         let near = fill(10, 10, [90, 90, 90, 255])
         let far = fill(10, 10, [80, 80, 80, 255])
+        // The far half's depth pixel by pixel, which is not one gray: its left column nearer.
+        let farDepth = RGBAImage(
+            width: 10, height: 10, rgba: (0..<100).flatMap { $0 % 10 == 0 ? [150, 150, 150, 255] : [204, 204, 204, 255] as [UInt8] })
         let halves = try PSD.write(
             [PSD.Layer(name: "topwear-0", left: 10, top: 5, image: near), PSD.Layer(name: "topwear-1", left: 20, top: 5, image: far)],
-            width: 40, height: 20)
+            width: 40, height: 20,
+            depths: [
+                PSD.Layer(name: PSD.depthName(of: "topwear-0"), left: 10, top: 5, image: Session.gray(near, depth: 0.3)),
+                PSD.Layer(name: PSD.depthName(of: "topwear-1"), left: 20, top: 5, image: farDepth),
+            ])
         var parts = [kept("face", 0.47, "00.png"), kept("topwear", 0.3, "01.png")]
+        parts[0].id = 2
+        parts[1].id = 1
         let cut = [
-            KeptHalf(name: "topwear-0", left: 10, top: 5, width: 10, height: 10, depth: 0.3, near: true, of: "01.png"),
-            KeptHalf(name: "topwear-1", left: 20, top: 5, width: 10, height: 10, depth: 0.8, near: false, of: "01.png"),
+            KeptHalf(name: "topwear-0", left: 10, top: 5, width: 10, height: 10, depth: 0.3, near: true, id: 3, of: 1),
+            KeptHalf(name: "topwear-1", left: 20, top: 5, width: 10, height: 10, depth: 0.8, near: false, id: 4, of: 1),
         ]
 
         // The top's far half under the face, its near half where the top was; the depth after them
@@ -241,15 +263,22 @@ final class LayersTests: XCTestCase {
         XCTAssertEqual(split.depths.map(\.name), names.map { PSD.depthName(of: $0) })
         XCTAssertEqual(split.layers[0].image, far)
         XCTAssertEqual([split.layers[0].left, split.layers[0].top], [20, 5])
-        XCTAssertEqual(try PSDDocument.read(depth).layers.map(\.name), names)
+        // Each one's depth pixel by pixel, the halves' their own.
+        XCTAssertEqual(split.depths[0].image, farDepth)
+        XCTAssertEqual(split.depths[1].image, Session.gray(face, depth: 0.47))
+        let depthDocument = try PSDDocument.read(depth)
+        XCTAssertEqual(depthDocument.layers.map(\.name), names)
+        XCTAssertEqual(depthDocument.layers[0].image, farDepth)
         // What it was split from is as it was.
         XCTAssertEqual(try PSDDocument.read(psd).splitDepth().layers.map(\.name), ["face", "topwear"])
 
-        // A part renamed is what its halves are called after; a near half goes where its part goes.
+        // A part renamed and moved is what its halves are called after, found by its id and not
+        // its place; a near half goes where its part goes.
         parts[1].name = "shirt"
         parts[1].depth = 0.9
+        parts.reverse()
         let renamed = try PSD.write(
-            [PSD.Layer(name: "face", left: 0, top: 0, image: face), PSD.Layer(name: "shirt", left: 10, top: 5, image: top)],
+            [PSD.Layer(name: "shirt", left: 10, top: 5, image: top), PSD.Layer(name: "face", left: 0, top: 0, image: face)],
             width: 40, height: 20)
         let (again, _) = try Session.splitByDepth(renamed, halves: halves, parts: parts, cut: cut)
         XCTAssertEqual(try PSDDocument.read(again).splitDepth().layers.map(\.name), ["shirt-0", "shirt-1", "face"])

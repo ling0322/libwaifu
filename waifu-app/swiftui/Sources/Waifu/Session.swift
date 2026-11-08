@@ -848,51 +848,62 @@ final class Session {
         -> (document: Data, layers: [KeptLayer], halves: [KeptHalf], beside: [String: Data])
     {
         let canvas = taken.canvas
-        let all = taken.layers
-        // The parts, bottom first, each kept under the index the library gave it, which its
-        // halves name.
-        let parts = all.indices.filter { all[$0].type == .part }
+        // The parts, bottom first, and the halves, near before far: each with its depth layer,
+        // pixel by pixel, which the library hands over beside them.
+        let parts = taken.layers.filter { $0.type == .part }
+        let cut = taken.layers.filter { $0.type.isHalf }
         let file = { (index: Int) in String(format: "%02d.png", index) }
         let picture = { (layer: Layer) in PSD.Layer(name: layer.name, left: layer.left, top: layer.top, image: layer.image) }
         let depth = { (layer: Layer) in
-            PSD.Layer(name: layer.name, left: layer.left, top: layer.top, image: gray(layer.image, depth: layer.depth))
+            PSD.Layer(name: layer.name, left: layer.left, top: layer.top, image: depthImage(of: layer, in: taken))
         }
-        let grays = parts.map { depth(all[$0]) }
-        let document = try PSD.write(
-            parts.map { picture(all[$0]) }, width: canvas, height: canvas,
-            depths: grays.map { PSD.Layer(name: PSD.depthName(of: $0.name), left: $0.left, top: $0.top, image: $0.image) })
+        let hidden = { (layer: PSD.Layer) in
+            PSD.Layer(name: PSD.depthName(of: layer.name), left: layer.left, top: layer.top, image: layer.image)
+        }
+        let grays = parts.map(depth)
+        let document = try PSD.write(parts.map(picture), width: canvas, height: canvas, depths: grays.map(hidden))
         let depthPSD = try PSD.write(grays, width: canvas, height: canvas, grayscale: true)
         var beside: [String: Data] = [depthDocument: depthPSD]
 
-        // The halves, in the library's order, in a document of their own: their pixels as they
-        // are, for Split by depth to lay among the parts.
-        let cut = all.indices.filter { all[$0].type != .part && all[$0].stratifiedFrom != nil }
+        // The halves, in the library's order, in a document of their own with their depth in its
+        // hidden group: their pixels as they are, for Split by depth to lay among the parts.
         if !cut.isEmpty {
-            beside[halvesDocument] = try PSD.write(cut.map { picture(all[$0]) }, width: canvas, height: canvas)
+            beside[halvesDocument] = try PSD.write(
+                cut.map(picture), width: canvas, height: canvas, depths: cut.map(depth).map(hidden))
         }
-        let halves = cut.map { index in
-            let half = all[index]
-            return KeptHalf(
+        // Each naming its part by the library's id for it, which neither a name nor a depth changes.
+        let halves = cut.map { half in
+            KeptHalf(
                 name: half.name, left: half.left, top: half.top, width: half.image.width, height: half.image.height,
-                depth: half.depth, near: half.type == .near, of: file(half.stratifiedFrom ?? 0))
+                depth: half.depth, near: half.type == .near, id: half.id, of: half.derivedFromID ?? 0)
         }
 
-        if let composite = Media.composite(parts.map { all[$0] }, canvas: canvas) {
+        if let composite = Media.composite(parts, canvas: canvas) {
             beside[Self.composite] = composite
         }
         var kept: [KeptLayer] = []
-        for index in parts {
+        for (index, layer) in parts.enumerated() {
             // Half of it is no use to anybody: a Cancel stops here, and the job is not kept.
             if Task.isCancelled { break }
-            let layer = all[index]
             guard let png = Media.png(layer.image) else { continue }
             beside[file(index)] = png
             kept.append(
                 KeptLayer(
                     name: layer.name, left: layer.left, top: layer.top, width: layer.image.width,
-                    height: layer.image.height, depth: layer.depth, file: file(index)))
+                    height: layer.image.height, depth: layer.depth, file: file(index), id: layer.id))
         }
         return (document, kept, halves, beside)
+    }
+
+    /// `layer`'s depth, pixel by pixel, as the library hands it over: gray, 0 near to 255 far,
+    /// under the layer's alpha. Where there is none the size of it, the gray of its one depth.
+    nonisolated static func depthImage(of layer: Layer, in taken: Layers) -> RGBAImage {
+        if let given = taken.depth(of: layer)?.image, given.width == layer.image.width,
+            given.height == layer.image.height, given.rgba.count == layer.image.rgba.count
+        {
+            return given
+        }
+        return gray(layer.image, depth: layer.depth)
     }
 
     /// `image` with every pixel the gray of `depth` -- 0 near to 255 far -- under its own alpha: a
@@ -1045,46 +1056,70 @@ final class Session {
     /// depth, which keeps it in its part's place.
     nonisolated static func split(
         _ psd: Data, halves: Data?, parts: [KeptLayer], cut: [KeptHalf]?
-    ) throws -> (width: Int, height: Int, layers: [Layer]) {
+    ) throws -> (width: Int, height: Int, layers: [(layer: Layer, depth: RGBAImage)]) {
         guard let cut else {
             throw PSDError(message: "it was taken apart before its halves were kept: take it apart again to split it")
         }
         let document = try PSDDocument.read(psd)
-        let shown = document.splitDepth().layers
+        let (shown, shownDepths) = document.splitDepth()
         guard shown.count == parts.count, zip(shown, parts).allSatisfy({ $0.name == $1.name }) else {
             throw PSDError(message: "its document and its record do not list the same layers")
         }
         var pieces: [PSDLayer] = []
+        var pieceDepths: [PSDLayer] = []
         if !cut.isEmpty {
             guard let halves else { throw PSDError(message: "its halves are no longer beside it") }
-            pieces = try PSDDocument.read(halves).layers
+            (pieces, pieceDepths) = try PSDDocument.read(halves).splitDepth()
             guard pieces.count == cut.count else {
                 throw PSDError(message: "its halves' document has \(pieces.count) layers and its record \(cut.count)")
             }
         }
+        // Each one's depth, pixel by pixel, where its document keeps one for every layer in order,
+        // and the gray of its one depth where it does not.
+        let depthOf = { (layers: [PSDLayer], depths: [PSDLayer], index: Int, depth: Float) -> RGBAImage in
+            let image = layers[index].image
+            if depths.count == layers.count, depths[index].image.rgba.count == image.rgba.count {
+                return depths[index].image
+            }
+            return gray(image, depth: depth)
+        }
 
         // Every part, then every half, as the library listed them: what the stack's order is of.
-        let byFile = Dictionary(parts.enumerated().map { ($1.file, $0) }, uniquingKeysWith: { first, _ in first })
-        var listed: [(type: LayerType, depth: Float, stratifiedFrom: Int?)] = parts.map {
-            (type: LayerType.part, depth: $0.depth, stratifiedFrom: nil)
+        // A half names its part by the library's id for it, which renaming or moving it keeps.
+        var byID: [Int: Int] = [:]
+        for (index, part) in parts.enumerated() {
+            if let id = part.id, byID[id] == nil { byID[id] = index }
         }
+        var listed: [(id: Int, type: LayerType, depth: Float, derivedFromID: Int?)] = parts.map {
+            (id: $0.id ?? 0, type: LayerType.part, depth: $0.depth, derivedFromID: nil)
+        }
+        var partOf: [Int] = []
         for half in cut {
-            guard let part = byFile[half.of] else {
+            guard let part = byID[half.of] else {
                 throw PSDError(message: "\(half.name) is half of a layer its record does not have")
             }
-            listed.append((type: half.near ? LayerType.near : LayerType.far, depth: half.near ? parts[part].depth : half.depth, stratifiedFrom: part))
+            partOf.append(part)
+            listed.append(
+                (id: half.id, type: half.near ? LayerType.near : LayerType.far,
+                 depth: half.near ? parts[part].depth : half.depth, derivedFromID: half.of))
         }
-        let layers = Layers.stratifiedStack(listed).map { index -> Layer in
+        let layers = Layers.stratifiedStack(listed).map { index -> (layer: Layer, depth: RGBAImage) in
             if index < parts.count {
                 let layer = shown[index]
-                return Layer(
-                    name: parts[index].name, left: layer.left, top: layer.top, image: layer.image, depth: listed[index].depth)
+                return (
+                    Layer(
+                        id: listed[index].id, name: parts[index].name, left: layer.left, top: layer.top,
+                        image: layer.image, depth: listed[index].depth),
+                    depthOf(shown, shownDepths, index, listed[index].depth))
             }
-            let (half, piece) = (cut[index - parts.count], pieces[index - parts.count])
-            let part = parts[listed[index].stratifiedFrom ?? 0]
-            return Layer(
-                type: listed[index].type, name: "\(part.name)-\(half.near ? 0 : 1)", left: piece.left, top: piece.top,
-                image: piece.image, depth: listed[index].depth, stratifiedFrom: listed[index].stratifiedFrom)
+            let at = index - parts.count
+            let (half, piece, part) = (cut[at], pieces[at], parts[partOf[at]])
+            return (
+                Layer(
+                    type: listed[index].type, id: half.id, name: "\(part.name)-\(half.near ? 0 : 1)",
+                    left: piece.left, top: piece.top, image: piece.image, depth: listed[index].depth,
+                    derivedFromID: half.of),
+                depthOf(pieces, pieceDepths, at, half.depth))
         }
         return (document.width, document.height, layers)
     }
@@ -1095,10 +1130,8 @@ final class Session {
         _ psd: Data, halves: Data?, parts: [KeptLayer], cut: [KeptHalf]?
     ) throws -> (document: Data, depth: Data) {
         let (width, height, layers) = try split(psd, halves: halves, parts: parts, cut: cut)
-        let shown = layers.map { PSD.Layer(name: $0.name, left: $0.left, top: $0.top, image: $0.image) }
-        let grays = layers.map {
-            PSD.Layer(name: $0.name, left: $0.left, top: $0.top, image: gray($0.image, depth: $0.depth))
-        }
+        let shown = layers.map { PSD.Layer(name: $0.layer.name, left: $0.layer.left, top: $0.layer.top, image: $0.layer.image) }
+        let grays = layers.map { PSD.Layer(name: $0.layer.name, left: $0.layer.left, top: $0.layer.top, image: $0.depth) }
         return (
             try PSD.write(
                 shown, width: width, height: height,
@@ -1115,7 +1148,7 @@ final class Session {
         await rewriting?.value
         guard let psd = outputs[job.id], let made = jobs.first(where: { $0.id == job.id })?.made else { return nil }
         let (halves, parts, cut) = (halvesDocument(of: job), made.layers ?? [], made.halves)
-        let result = await Task.detached { Result { try Self.split(psd, halves: halves, parts: parts, cut: cut).layers } }.value
+        let result = await Task.detached { Result { try Self.split(psd, halves: halves, parts: parts, cut: cut).layers.map { $0.layer } } }.value
         switch result {
         case .failure(let error):
             complaint = "could not split it by depth: \(error.localizedDescription)"

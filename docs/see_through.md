@@ -138,7 +138,8 @@ It is done two ways, to `front hair`, `back hair`, `handwear` and its `-l`/`-r`,
   median of the rest. It lies under `-0`, which covers most of it.
 
 **In a decomposition**, with `stratify_layers` in the C API's request (docs/ffi-abi4.md,
-"Stratification"): the halves are appended to the layers after every part, and the near half's
+"Stratification"): the halves are appended to the layers after every part, each with a depth
+layer of its own as every part has, and the near half's
 depth is its part's, the far half's its own median. The stratified stack is the parts that were
 not split and every half, sorted by depth, a far half under a near one at the same depth -- one
 comparison any caller can make.

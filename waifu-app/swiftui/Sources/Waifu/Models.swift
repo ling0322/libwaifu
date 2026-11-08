@@ -350,6 +350,8 @@ struct KeptLayer: Codable, Hashable {
     /// changed: what Reset puts back. Nil while they are the model's.
     var modelName: String?
     var modelDepth: Float?
+    /// The library's id for it, which its halves name it by; nil in a record from before ids.
+    var id: Int?
 
     /// Whether its name or depth is somebody's rather than the model's.
     var edited: Bool { modelName != nil || modelDepth != nil }
@@ -369,8 +371,10 @@ struct KeptHalf: Codable, Hashable {
     var depth: Float
     /// Whether it is the near half (-0) rather than the far (-1).
     var near: Bool
-    /// The file of the layer it was cut from, which neither a name nor a depth changes.
-    var of: String
+    /// The library's id for it.
+    var id: Int
+    /// The id of the layer it was cut from, which neither a name nor a depth changes.
+    var of: Int
 }
 
 /// A job this window asked for, or one read back out of the output folder.

@@ -188,6 +188,7 @@ typedef enum {
   WAIFU_LAYER_PART = 0,             // a part as the model drew it
   WAIFU_LAYER_STRATIFIED_NEAR = 1,  // stratify_layers: the near half of a part
   WAIFU_LAYER_STRATIFIED_FAR = 2,   // stratify_layers: the far half of a part
+  WAIFU_LAYER_DEPTH = 3,            // the depth of the layer derived_from_id names, pixel by pixel
 } WaifuLayerType;
 
 /* -- the library --------------------------------------------------------------------------- */
@@ -432,22 +433,28 @@ typedef struct {
 
 typedef struct {
   WaifuLayerType type;
-  const char *name;                   // "topwear"; its halves "topwear-0" and "topwear-1"
+  uint32_t id;                        // unique within the result, from 1; it means nothing else
+  const char *name;                   // "topwear"; its halves "topwear-0", "topwear-1"; its depth "topwear_depth"
   int32_t left;                       // where its top left corner is on the canvas
   int32_t top;
-  WaifuRgbaImage image;               // only as large as what is drawn
+  // Only as large as what is drawn. A depth layer: its layer's size and place, R, G and B the
+  // depth, 0 nearest to 255 farthest, under its layer's alpha.
+  WaifuRgbaImage image;
   // How far away it is: 0 nearest, 1 farthest. A near half has its part's depth, not its pixels':
-  // that is what keeps it in its part's place in the stratified stack (see the result).
+  // that is what keeps it in its part's place in the stratified stack (see the result). A depth
+  // layer has its layer's.
   float depth;
-  int32_t stratified_from;            // a half: the index in `layers` of its part; a part: -1
+  uint32_t derived_from_id;           // a half: its part's id; a depth layer: its layer's; a part: 0
 } WaifuLayer;
 
-// `layers` is in one order, which the library never changes and every index refers to: each part,
-// bottom first -- which is the stack, unstratified -- and then, with stratify_layers, each part's
-// halves, near before far. A part a half names in stratified_from is a split part.
+// `layers` is in one order, which the library never changes: each part, bottom first -- which is
+// the stack, unstratified -- then, with stratify_layers, each part's halves, near before far; then
+// a depth layer for each of those, in their order. A part a half names in derived_from_id is a
+// split part. Links are by id, not by place, so a caller's copy may be reordered or cut.
 //
 // The stratified stack is every part that was not split and every half, bottom first: from the
-// largest depth to the smallest; at one depth, a far half under a near one; then by index.
+// largest depth to the smallest; at one depth, a far half under a near one; then by their order in
+// `layers`. No depth layer is in either stack.
 typedef struct {
   WaifuStatus status;
   uint32_t canvas;                    // the side of the square canvas; 0 unless WAIFU_OK
@@ -514,7 +521,7 @@ WaifuJob waifu_pipeline_run_speech_to_text_async(WaifuPipeline *pipeline,
 | `WaifuSpeakRequest.like`, `WaifuAudio.rate` | `reference`, `sample_rate` |
 | `WaifuProgressEvent.words`, `part`, `parts`, `file` | gone: one `WaifuStage` for each thing a job does |
 | eight `WaifuStage`s | twenty-six, by task |
-| `waifu_psd_write`, `waifu_bytes_free`, PSDs in the layers' result | gone: a PSD is the app's to write |
+| `waifu_psd_write`, `waifu_bytes_free`, PSDs in the layers' result | gone: a PSD is the app's to write; each layer's depth map is a `WAIFU_LAYER_DEPTH` layer |
 | `waifu_stratify`, `waifu_depth_layers_free` | `stratify_layers` in the request |
 | `WAIFU_DEVICE_CUDA_CPU_OFFLOAD`, `_METAL_DISK_OFFLOAD`, `WAIFU_ERR_FETCH` | gone; their numbers are not reused |
 | a voice's `styles`, `not_a_voice_because` | gone |
@@ -595,8 +602,14 @@ of indices. Now:
   half lower than a near one; then the smaller index in `layers` lower.
 
 `layers` itself is never reordered: every part, bottom first, then the halves, near before far,
-and `stratified_from` is an index into that array. A caller builds the stack as a list of indices
-sorted by that comparison. The unstratified stack is the parts in the order they come.
+then a depth layer for each, and a half's `derived_from_id` is its part's `id`. A caller builds
+the stack as a list of indices sorted by that comparison. The unstratified stack is the parts in
+the order they come.
+
+The depth model draws a depth map for each layer, not one for the picture -- upstream's Marigold
+takes every layer as a frame and saves each map as `<tag>_depth.png` -- and each part and each half
+has its own, the same size as it is. Each comes back as a layer of its own, `WAIFU_LAYER_DEPTH`,
+named `<name>_depth`, whose `derived_from_id` is the id of the layer it is the depth of.
 
 On `waifu-output/waifu-0015.png` the two rules differ in one layer -- the near half of the back hair is under the back of the top rather than over it --
 and in 255 of the 1280 x 1280 pixels drawn, thin lines along the shoulders.

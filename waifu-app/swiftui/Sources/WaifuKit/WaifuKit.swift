@@ -333,49 +333,64 @@ public enum LayerType: Sendable, Equatable {
     case near
     /// The far half of a stratified part.
     case far
+    /// The depth of another layer, pixel by pixel: the same size and place, red, green and blue
+    /// the depth -- 0 nearest, 255 farthest -- under that layer's alpha.
+    case depth
+    /// A kind a newer library sends that this one does not know: in neither stack.
+    case other(Int32)
 
     init(_ type: WaifuLayerType) {
         switch type {
+        case WAIFU_LAYER_PART: self = .part
         case WAIFU_LAYER_STRATIFIED_NEAR: self = .near
         case WAIFU_LAYER_STRATIFIED_FAR: self = .far
-        // A part -- and anything a newer library sends that this does not know, which stands alone.
-        default: self = .part
+        case WAIFU_LAYER_DEPTH: self = .depth
+        default: self = .other(type)
         }
     }
+
+    /// A near or a far half.
+    public var isHalf: Bool { self == .near || self == .far }
 }
 
 /// One layer of a picture taken apart.
 public struct Layer: Sendable, Equatable {
     public var type: LayerType
-    /// What it is: "front hair", "irides", "topwear"; a half is "topwear-0" or "topwear-1".
+    /// Unique among the layers of one picture taken apart, from 1; it means nothing else.
+    public var id: Int
+    /// What it is: "front hair", "irides", "topwear"; a half is "topwear-0" or "topwear-1", and a
+    /// depth layer "topwear_depth".
     public var name: String
     /// Where its top left corner is on the canvas.
     public var left: Int
     public var top: Int
     /// Only as large as what is drawn.
     public var image: RGBAImage
-    /// 0 near to 1 far. A near half has its part's.
+    /// 0 near to 1 far. A near half has its part's, and a depth layer its layer's.
     public var depth: Float
-    /// A half: the index in `Layers.layers` of the part it was cut from.
-    public var stratifiedFrom: Int?
+    /// The id of the layer this one is made from: a half's part, a depth layer's layer; nil for a
+    /// part.
+    public var derivedFromID: Int?
 
     public init(
-        type: LayerType = .part, name: String, left: Int, top: Int, image: RGBAImage, depth: Float,
-        stratifiedFrom: Int? = nil
+        type: LayerType = .part, id: Int = 0, name: String, left: Int, top: Int, image: RGBAImage,
+        depth: Float, derivedFromID: Int? = nil
     ) {
         self.type = type
+        self.id = id
         self.name = name
         self.left = left
         self.top = top
         self.image = image
         self.depth = depth
-        self.stratifiedFrom = stratifiedFrom
+        self.derivedFromID = derivedFromID
     }
 }
 
 /// A picture taken apart: its layers on a square canvas, in the one order the library gives them
 /// -- every part, bottom first, which is the stack unstratified; then, where they were asked for,
-/// each split part's halves, near before far.
+/// each split part's halves, near before far; then a depth layer for each of those, in the same
+/// order. A layer names another by its id, never by where it is.
 public struct Layers: Sendable, Equatable {
     public var canvas: Int
     public var layers: [Layer]
@@ -388,19 +403,35 @@ public struct Layers: Sendable, Equatable {
     /// The parts, bottom first: the stack unstratified.
     public var parts: [Layer] { layers.filter { $0.type == .part } }
 
+    /// The layer whose id is `id`.
+    public func layer(id: Int) -> Layer? { layers.first { $0.id == id } }
+
+    /// The depth of `layer`, pixel by pixel, where the library gave one.
+    public func depth(of layer: Layer) -> Layer? {
+        layers.first { $0.type == .depth && $0.derivedFromID == layer.id }
+    }
+
     /// The stratified stack, bottom first, as indices into `layers`.
     public var stratifiedStack: [Int] {
-        Layers.stratifiedStack(layers.map { (type: $0.type, depth: $0.depth, stratifiedFrom: $0.stratifiedFrom) })
+        Layers.stratifiedStack(
+            layers.map { (id: $0.id, type: $0.type, depth: $0.depth, derivedFromID: $0.derivedFromID) })
     }
 
     /// The stratified stack of `layers` -- in the library's order -- bottom first, as indices into
     /// it: every part that was not split and every half, from the largest depth to the smallest;
-    /// at one depth, a far half under a near one; then by index (docs/ffi-abi4.md,
-    /// "Stratification").
-    public static func stratifiedStack(_ layers: [(type: LayerType, depth: Float, stratifiedFrom: Int?)]) -> [Int] {
-        let split = Set(layers.compactMap { $0.stratifiedFrom })
+    /// at one depth, a far half under a near one; then by place in `layers` (docs/ffi-abi4.md,
+    /// "Stratification"). A split part is one a half names by its id; depth layers are in neither
+    /// stack.
+    public static func stratifiedStack(
+        _ layers: [(id: Int, type: LayerType, depth: Float, derivedFromID: Int?)]
+    ) -> [Int] {
+        let split = Set(layers.filter { $0.type.isHalf }.compactMap { $0.derivedFromID })
         let lower = { (type: LayerType) -> Int in type == .far ? 0 : 1 }
-        return layers.indices.filter { !split.contains($0) }.sorted { a, b in
+        let stacked = layers.indices.filter { index in
+            let layer = layers[index]
+            return layer.type.isHalf || (layer.type == .part && !split.contains(layer.id))
+        }
+        return stacked.sorted { a, b in
             let (x, y) = (layers[a], layers[b])
             if x.depth != y.depth { return x.depth > y.depth }
             if lower(x.type) != lower(y.type) { return lower(x.type) < lower(y.type) }
@@ -670,9 +701,10 @@ private let onLayers: WaifuLayerDecompositionCallback = { userData, result in
             canvas: Int(said.canvas),
             layers: all.map { layer in
                 Layer(
-                    type: LayerType(layer.type), name: layer.name.map { String(cString: $0) } ?? "",
-                    left: Int(layer.left), top: Int(layer.top), image: rgba(layer.image), depth: layer.depth,
-                    stratifiedFrom: layer.stratified_from < 0 ? nil : Int(layer.stratified_from))
+                    type: LayerType(layer.type), id: Int(layer.id),
+                    name: layer.name.map { String(cString: $0) } ?? "", left: Int(layer.left),
+                    top: Int(layer.top), image: rgba(layer.image), depth: layer.depth,
+                    derivedFromID: layer.derived_from_id == 0 ? nil : Int(layer.derived_from_id))
             })
     }
     pending.finish(Outcome(said.status, layers))
