@@ -28,6 +28,14 @@
 // stride one and no padding, which leaves the input as it is, read where it is too -- and matmul2d
 // multiplies the two into a sum the threadgroup holds in float. The bias is added to that sum as
 // it is written out.
+//
+// matmul2d reads as far into K as the extents of what it is given. The gathered tile is kTileK
+// rows, so where C * R * S is not a multiple of kTileK, a last chunk multiplied with it whole
+// would read the weight past the end of its rows -- for the last output channel, past the end of
+// the weight -- and the zeros in the tile would not make up for what is read there: NaN times
+// zero is NaN. The short kernel takes that chunk after the loop, with the tile cut to its rows.
+// It is a kernel of its own because the loop of the other is a few percent slower, and its f32
+// much more, with that chunk anywhere near it.
 
 #include <metal_stdlib>
 #include <metal_tensor>
@@ -59,7 +67,7 @@ struct ConvParams {
   uint vecInput;
 };
 
-// In step with kNaxConvTileM and kNaxConvTileN in matmul.cc.
+// In step with kNaxConvTileM, kNaxConvTileN and kNaxConvTileK in matmul.cc.
 constant constexpr int kTileM = 64;   // output channels
 constant constexpr int kTileN = 128;  // output pixels
 constant constexpr int kTileK = 32;
@@ -142,7 +150,7 @@ inline void writeOut(
   }
 }
 
-template <typename T, bool kPointwise>
+template <typename T, bool kPointwise, bool kShort>
 kernel void nax_conv2d(
     device T *c [[buffer(0)]],
     device T *input [[buffer(1)]],
@@ -217,7 +225,8 @@ kernel void nax_conv2d(
   Column<T> column(x, &p, K, N, n0 + tid);
   T values[kTileK];
   column.next(values);
-  for (uint k0 = 0; k0 < K; k0 += kTileK) {
+  uint k0 = 0;
+  for (; kShort ? k0 + kTileK <= K : k0 < K; k0 += kTileK) {
     for (uint kk = 0; kk < uint(kTileK); ++kk) tileB[kk * kTileN + tid] = values[kk];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -227,13 +236,26 @@ kernel void nax_conv2d(
     // The tile is written again for the next rows; every simdgroup has to be done reading it.
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
+  if (kShort) {
+    for (uint kk = 0; kk < uint(kTileK); ++kk) tileB[kk * kTileN + tid] = values[kk];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    tensor<threadgroup T, Extents, tensor_inline> last(
+        tileB,
+        Extents(kTileN, int32_t(K - k0)),
+        array<int32_t, 2>{1, kTileN});
+    auto tileA = A.slice(k0, m0);
+    op.run(tileA, last, sum);
+  }
   writeOut(sum, out, b, p.hasBias != 0, M, N, m0, n0);
 }
 
 #define FLINT_NAX_CONV2D(T, S)                                                                  \
-  template [[host_name("nax_conv2d_" S)]] kernel void nax_conv2d<T, false>(                     \
+  template [[host_name("nax_conv2d_" S)]] kernel void nax_conv2d<T, false, false>(              \
       device T *, device T *, device T *, device T *, constant ConvParams &, uint3, uint);       \
-  template [[host_name("nax_conv2d_pointwise_" S)]] kernel void nax_conv2d<T, true>(            \
+  template [[host_name("nax_conv2d_short_" S)]] kernel void nax_conv2d<T, false, true>(         \
+      device T *, device T *, device T *, device T *, constant ConvParams &, uint3, uint);       \
+  template [[host_name("nax_conv2d_pointwise_" S)]] kernel void nax_conv2d<T, true, false>(     \
       device T *, device T *, device T *, device T *, constant ConvParams &, uint3, uint);
 
 FLINT_NAX_CONV2D(half, "f16")
