@@ -71,6 +71,9 @@ void copy(const TensorView &src, const TensorView &dest);
 void cast(const TensorView &input, const TensorView &out);
 void arangeLong(int64_t begin, int64_t step, const TensorView &out);
 void causalMask(const TensorView &out);
+/// The mask of a square `out` under a block causal or block diagonal mask; see
+/// Operators::blockMask.
+void blockMask(MaskType maskType, int blockSize, const TensorView &out);
 
 // reduce.cc
 enum class ReduceOp {
@@ -153,6 +156,10 @@ bool naxAttentionAnswers();
 /// their elements in the layout an Apple GPU gives them: where it disagrees, attention() leaves
 /// the attention to the composition.
 bool plainAttentionAnswers();
+
+/// For tests: whether attention() runs a kernel at all, or leaves every attention to the
+/// composition, as it does where a probe disagrees.
+void setFusedAttentionEnabled(bool enabled);
 void conv2d(
     const TensorView &input,
     const TensorView &weight,

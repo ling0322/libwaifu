@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -131,24 +132,27 @@ float probeValue(int64_t i, uint32_t salt) {
   return static_cast<float>(x & 0xffff) / 32768.0f - 1.0f;
 }
 
-// `values` on the device in half, and the floats they are there: what the kernel reads.
-Tensor uploadHalf(std::vector<float> &values, std::initializer_list<int> shape) {
+// `values` on the device in `dtype`, and the floats they are there: what the kernel reads.
+Tensor upload(std::vector<float> &values, std::initializer_list<int> shape, DType dtype) {
   Tensor wide = F::empty(Device::getCpu(), shape, DType::kFloat);
   float *data = wide.getInternalData()->getData<float>(wide.getInternalOffset());
   for (size_t i = 0; i < values.size(); ++i) data[i] = values[i];
-  Tensor narrow = F::empty(Device::getCpu(), shape, DType::kFloat16);
-  getOperators(Device::kCpu)->cast(wide, narrow);
-  getOperators(Device::kCpu)->cast(narrow, wide);
-  for (size_t i = 0; i < values.size(); ++i) values[i] = data[i];
-  Tensor device = F::empty(Device::getMetal(), shape, DType::kFloat16);
-  transfer(narrow, device);
+  Tensor typed = wide;
+  if (dtype != DType::kFloat) {
+    typed = F::empty(Device::getCpu(), shape, dtype);
+    getOperators(Device::kCpu)->cast(wide, typed);
+    getOperators(Device::kCpu)->cast(typed, wide);
+    for (size_t i = 0; i < values.size(); ++i) values[i] = data[i];
+  }
+  Tensor device = F::empty(Device::getMetal(), shape, dtype);
+  transfer(typed, device);
   return device;
 }
 
 // Whether a kernel -- nax_attention, or kernels/attention.metal -- answers one attention of a head
 // this wide as it was written to: one head of 40 queries over 40 keys -- simdgroups past the last
 // query, and a block of keys and part of one -- against the answer worked out here in float.
-bool answersAt(int headDim, bool nax) {
+bool answersAt(int headDim, bool nax, DType dtype) {
   constexpr int kLength = 40;
   std::vector<float> q(kLength * headDim), k(q.size()), v(q.size());
   for (size_t i = 0; i < q.size(); ++i) {
@@ -156,15 +160,18 @@ bool answersAt(int headDim, bool nax) {
     k[i] = probeValue(i, 2);
     v[i] = probeValue(i, 3);
   }
-  Tensor dq = uploadHalf(q, {1, 1, kLength, headDim});
-  Tensor dk = uploadHalf(k, {1, 1, kLength, headDim});
-  Tensor dv = uploadHalf(v, {1, 1, kLength, headDim});
-  Tensor out = F::empty(Device::getMetal(), {1, 1, kLength, headDim}, DType::kFloat16);
+  Tensor dq = upload(q, {1, 1, kLength, headDim}, dtype);
+  Tensor dk = upload(k, {1, 1, kLength, headDim}, dtype);
+  Tensor dv = upload(v, {1, 1, kLength, headDim}, dtype);
+  Tensor out = F::empty(Device::getMetal(), {1, 1, kLength, headDim}, dtype);
   dispatchAttention(dq, dk, dv, MaskType::kNone, 0, out, nax);
 
-  Tensor narrow = toCpu(out);
-  Tensor got = F::empty(Device::getCpu(), {1, 1, kLength, headDim}, DType::kFloat);
-  getOperators(Device::kCpu)->cast(narrow, got);
+  Tensor got = toCpu(out);
+  if (dtype != DType::kFloat) {
+    Tensor narrow = got;
+    got = F::empty(Device::getCpu(), {1, 1, kLength, headDim}, DType::kFloat);
+    getOperators(Device::kCpu)->cast(narrow, got);
+  }
   const float *answer = got.getInternalData()->getData<float>(got.getInternalOffset());
 
   float scale = 1.0f / sqrtf(static_cast<float>(headDim));
@@ -196,7 +203,8 @@ bool naxAttentionAnswers() {
   static std::once_flag once;
   static bool answers = false;
   std::call_once(once, [] {
-    answers = answersAt(32, true) && answersAt(64, true) && answersAt(128, true);
+    answers = answersAt(32, true, DType::kFloat16) && answersAt(64, true, DType::kFloat16) &&
+              answersAt(128, true, DType::kFloat16);
     if (!answers) {
       LOG(WARN) << "attention on the neural accelerators reads its operands in the register "
                    "layout an M5 GPU has, and this GPU answered otherwise: attention runs "
@@ -210,7 +218,12 @@ bool plainAttentionAnswers() {
   static std::once_flag once;
   static bool answers = false;
   std::call_once(once, [] {
-    answers = answersAt(32, false) && answersAt(64, false) && answersAt(128, false);
+    // Each width in each type: half and float are kernels of their own, and take the keys a
+    // different number at a time.
+    answers = true;
+    for (DType dtype : {DType(DType::kFloat16), DType(DType::kFloat)}) {
+      for (int headDim : {32, 64, 128}) answers = answers && answersAt(headDim, false, dtype);
+    }
     if (!answers) {
       LOG(WARN) << "kernels/attention.metal reads its scores in the register layout of an Apple "
                    "GPU's simdgroup matrices, and this GPU answered otherwise: attention runs the "
@@ -220,6 +233,32 @@ bool plainAttentionAnswers() {
   return answers;
 }
 
+namespace {
+
+std::atomic<bool> gFusedAttention{true};
+
+// The fewest query rows -- queries times heads times sequences -- a kernel is the faster than the
+// composition for over more than 256 keys, in half: below them, a decode step's few rows leave
+// most of its threadgroups idle while each walks every key, and the composition's products are
+// the better. On an M5 Pro, sixteen heads, 1 to 256 queries over 1024 and 4096 keys: on the
+// neural accelerators a head of 64 was the faster with a single query, one of 128 from 32 queries
+// on (0.90 to 1.04 there, 1.14 to 1.43 below); the other kernel, with heads of 64, from 128
+// queries on (0.85 to 0.97, 1.24 to 1.85 below), with heads of 128 from 256 (0.80 to 0.98, 1.14
+// to 2.92 below), with heads of 32 always, and in float always.
+int64_t fewestRows(DType dtype, int headDim, bool nax) {
+  if (dtype != DType::kFloat16) return 0;
+  if (nax) return headDim == 128 ? 32 * 16 : 0;
+  if (headDim == 64) return 128 * 16;
+  if (headDim == 128) return 256 * 16;
+  return 0;
+}
+
+}  // namespace
+
+void setFusedAttentionEnabled(bool enabled) {
+  gFusedAttention = enabled;
+}
+
 bool attention(
     const TensorView &q,
     const TensorView &k,
@@ -227,6 +266,7 @@ bool attention(
     MaskType maskType,
     int blockSize,
     const TensorView &out) {
+  if (!gFusedAttention) return false;
   if (q.getDim() != 4 || k.getDim() != 4 || v.getDim() != 4) return false;
   DType dtype = q.getDType();
   int batch = q.getShape(0);
@@ -257,12 +297,15 @@ bool attention(
   if (maskType != MaskType::kNone && keyLength < queryLength) return false;
   if (maskType == MaskType::kBlockDiagonal && keyLength != queryLength) return false;
 
-  // Either kernel at every length: each is the faster than the composition at every one measured.
-  // kernels/attention.metal, on an M5 Pro with its accelerators off, sixteen heads, from 256 keys
-  // to 4096 -- its time over the composition's, which holds its scores in float: half, heads of 32,
-  // 0.28 to 0.52; of 64, 0.53 to 0.62; of 128, 0.71 to 0.94. Float, which the composition
-  // multiplies in float, 0.09 to 0.33. A block mask has no composition, and the kernels skip the
-  // blocks of keys a threadgroup's queries do not see.
+  // Either kernel at every length but a decode step's: as many queries as keys, each is the faster
+  // than the composition at every length measured. kernels/attention.metal, on an M5 Pro with its
+  // accelerators off, sixteen heads, from 256 keys to 4096 -- its time over the composition's,
+  // which holds its scores in float: half, heads of 32, 0.28 to 0.52; of 64, 0.53 to 0.62; of 128,
+  // 0.71 to 0.94. Float, which the composition multiplies in float, 0.09 to 0.33. Few queries over
+  // many keys are the composition's: see fewestRows. A block mask is a kernel's at every length,
+  // which skips the blocks of keys a threadgroup's queries do not see.
+  int64_t rows = static_cast<int64_t>(queryLength) * numHeads * batch;
+  if (!blockMask && keyLength > 256 && rows < fewestRows(dtype, headDim, nax)) return false;
 
   dispatchAttention(q, k, v, maskType, blockSize, out, nax);
   return true;

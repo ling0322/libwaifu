@@ -213,9 +213,9 @@ pub enum Unary {
 /// | `BlockCausal(n)` | 0 | `min(S - 1, p / n * n + n - 1)` |
 /// | `BlockDiagonal(n)` | `p / n * n` | `min(S - 1, p / n * n + n - 1)` |
 ///
-/// The block masks have no composition: where no kernel takes one it fails. Today that is CUDA's
-/// fused kernel, in half, on Ampere and after, and Metal's, in half or float, at the heads it was
-/// built for (32, 64 and 128 in half, 32 and 64 in float).
+/// The block masks run where a kernel takes them -- CUDA's fused kernel, in half, on Ampere and
+/// after, and Metal's, in half or float, heads of 32, 64 and 128 -- and on Metal through the
+/// composition otherwise; anywhere else, such as the processor, they fail.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MaskType {
     /// Every key.

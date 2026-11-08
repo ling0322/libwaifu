@@ -149,7 +149,8 @@ void composedAttention(
     TensorView q,
     TensorView k,
     TensorView v,
-    bool causal,
+    MaskType maskType,
+    int maskBlock,
     TensorView out) {
   int numHeads = q.getShape(1);
   int numKeyValueHeads = k.getShape(1);
@@ -197,14 +198,20 @@ void composedAttention(
     while (blockSize * 2 <= budget) blockSize *= 2;
   }
 
-  // A single query attends to the whole history, so it needs no mask. Several are masked by the
-  // rows of one causal mask over every key, made once for every block of queries: made a block at
-  // a time, it was the most of what a long causal attention cost -- 433 ms of 8192 keys and
-  // sixteen heads of 128 where no mask took 163, with the blocks that float scores halve.
+  // A single query attends to the whole history -- under a block causal mask too, its block being
+  // the last -- so it needs no mask. Several are masked by the rows of one mask over every key,
+  // made once for every block of queries: made a block at a time, it was the most of what a long
+  // causal attention cost -- 433 ms of 8192 keys and sixteen heads of 128 where no mask took 163,
+  // with the blocks that float scores halve. A block mask is the device's to make, and a device
+  // without it has no block mask here.
   Tensor fullMask;
-  if (causal && queryLength > 1) {
+  if (maskType != MaskType::kNone && queryLength > 1) {
     fullMask = empty(q.getDevice(), {keyValueLength, keyValueLength}, op->getDefaultFloatType());
-    op->causalMask(fullMask);
+    if (maskType == MaskType::kCausal) {
+      op->causalMask(fullMask);
+    } else {
+      op->blockMask(maskType, maskBlock, fullMask);
+    }
   }
 
   // The probabilities of one block of queries, against every key.
@@ -432,15 +439,7 @@ void Operators::attention(
     int blockSize,
     TensorView out) {
   checkMask(q, k, maskType, blockSize);
-  if (maskType == MaskType::kBlockCausal || maskType == MaskType::kBlockDiagonal) {
-    THROW(
-        NotImplemented,
-        lut::sprintf(
-            "attention with a block %s mask has no kernel on this device for these operands, "
-            "and no composition",
-            maskType == MaskType::kBlockCausal ? "causal" : "diagonal"));
-  }
-  composedAttention(this, q, k, v, maskType == MaskType::kCausal, out);
+  composedAttention(this, q, k, v, maskType, blockSize, out);
 }
 
 void Operators::pagedAttention(
@@ -602,6 +601,15 @@ void Operators::print(TensorView tensor) {
 
 void Operators::causalMask(TensorView out) {
   NO_KERNEL();
+}
+
+void Operators::blockMask(MaskType maskType, int blockSize, TensorView out) {
+  THROW(
+      NotImplemented,
+      lut::sprintf(
+          "attention with a block %s mask has no kernel on this device for these operands, "
+          "and no composition: the device makes no block mask",
+          maskType == MaskType::kBlockCausal ? "causal" : "diagonal"));
 }
 
 void Operators::copy(TensorView src, TensorView dest) {
