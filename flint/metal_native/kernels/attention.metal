@@ -19,13 +19,17 @@
 
 // Scaled dot product attention in one pass over the keys, the score matrix never written out: the
 // online softmax of FlashAttention. A threadgroup takes kBlockQ queries of one head of one batch
-// -- the grid is (query blocks, heads, batch) -- and walks the keys kBlockK at a time: every
+// -- the grid is (query blocks, heads, batch) -- and walks the keys a block at a time: every
 // simdgroup has eight of the queries, and for each block of keys works out their scores S = Q K^T,
 // the softmax of the scores so far, and O = O * rescale + P V, all in float.
 //
-// Everything a simdgroup does to rows -- the maximum and sum of each row of S, and scaling the rows
-// of O -- goes through threadgroup memory or a diagonal matrix, never the layout of a simdgroup
-// matrix's elements across its lanes, which is Metal's to choose.
+// The way of it is MLX's steel_attention (MIT, Copyright 2023-2025 Apple Inc.): the queries staged
+// once, the keys staged transposed and the values after them in the same threadgroup memory, and
+// the scores and O held in simdgroup matrices whose elements the softmax works on where they are.
+// A lane holds two elements of an 8 x 8 matrix: row r, columns c and c + 1, where (c, r) is
+// fragmentCoord(); the four lanes of a row differ in bits 0 and 3. That layout is Metal's to
+// choose, so attention.cc tries the kernel against an answer worked out on the host before it uses
+// it, and a GPU that lays the matrices out otherwise runs the composition instead.
 
 #include <metal_simdgroup_matrix>
 
@@ -76,10 +80,61 @@ inline uint lastKeyOf(constant AttentionParams &p, uint position) {
   return min(p.keyLength - 1, (position / p.blockSize) * p.blockSize + p.blockSize - 1);
 }
 
+// In step with kBlockQ and kThreads in attention.cc.
 constant constexpr uint kBlockQ = 32;
-constant constexpr uint kBlockK = 32;
 constant constexpr uint kSimdgroups = 4;
 constant constexpr uint kThreads = kSimdgroups * 32;
+
+#define FLINT_UNROLL _Pragma("clang loop unroll(full)")
+
+typedef simdgroup_matrix<float, 8, 8> Matrix;
+
+/// Where this lane's elements of an 8 x 8 matrix are: (column, row) of the first of them.
+inline short2 fragmentCoord(ushort lane) {
+  short quad = lane / 4;
+  short row = (quad & 4) + ((lane / 2) % 4);
+  short column = (quad & 2) * 2 + (lane % 2) * 2;
+  return short2(column, row);
+}
+
+/// The 8 x 8 matrix at `src` in threadgroup memory, its rows `ld` apart, in float.
+template <typename T>
+inline Matrix loadMatrix(threadgroup const T *src, uint ld, short2 at) {
+  Matrix m;
+  threadgroup const T *element = src + at.y * ld + at.x;
+  m.thread_elements()[0] = float(element[0]);
+  m.thread_elements()[1] = float(element[1]);
+  return m;
+}
+
+/// The largest, or the sum, of a row over the four lanes that hold it.
+inline float rowMax(float x) {
+  x = max(x, simd_shuffle_xor(x, ushort(1)));
+  return max(x, simd_shuffle_xor(x, ushort(8)));
+}
+
+inline float rowSum(float x) {
+  x += simd_shuffle_xor(x, ushort(1));
+  return x + simd_shuffle_xor(x, ushort(8));
+}
+
+/// `rows` rows of D from `src`, `ld` apart, into threadgroup memory: row r, column d at
+/// dst[r * rowStride + d * columnStride]. Rows from `valid` on are zeros, and not read.
+template <typename T, uint D, uint kRows, bool kChecked>
+inline void stage(
+    threadgroup T *dst,
+    uint rowStride,
+    uint columnStride,
+    device const T *src,
+    uint ld,
+    uint valid,
+    uint tid) {
+  for (uint i = tid; i < kRows * D; i += kThreads) {
+    uint r = i / D;
+    uint d = i - r * D;
+    dst[r * rowStride + d * columnStride] = !kChecked || r < valid ? src[r * ld + d] : T(0);
+  }
+}
 
 template <typename T, uint D>
 kernel void attention(
@@ -90,19 +145,25 @@ kernel void attention(
     constant AttentionParams &p [[buffer(4)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]) {
-  // Rows unpadded. Padding them to spread a column of 8 x 8 blocks over the banks, as on CUDA,
-  // made this kernel 16 to 29% slower on an M5 Pro -- but only with the keys and the values
-  // padded alike, to a stride not a power of two: D + 4, D + 8 and D + 16 all were, D + 8 for the
-  // keys beside D + 4 for the values was not. Whatever that is, it is the compiler's or the GPU's,
-  // not the banks', and unpadded is the fastest measured.
-  constexpr uint kStride = D;
-  threadgroup T keys[kBlockK * kStride];    // and the queries, before the first block
-  threadgroup T values[kBlockK * kStride];
-  threadgroup float scores[kSimdgroups * 8 * kBlockK];
-  threadgroup T probabilities[kSimdgroups * 8 * kBlockK];
-  threadgroup float diagonal[kSimdgroups * 64];
+    ushort sg [[simdgroup_index_in_threadgroup]],
+    ushort lane [[thread_index_in_simdgroup]]) {
+  // Keys a step: sixteen where a row is 256 bytes or more -- half heads of 128, float ones of 64
+  // and 128 -- and thirty-two below. On an M5 Pro with its accelerators off: sixteen took a half
+  // head of 128 from 44.5 ms to 35.6 and a float one of 64 from 23.6 to 19.8 over 4096 keys, and
+  // cost the narrower rows a few percent; sixty-four was slower everywhere. Padding the staged
+  // rows, which MLX does, was slower too -- by a fifth to a third for those 256-byte rows -- and
+  // holding the queries in registers rather than reading them again each step, by 4 to 8%.
+  constexpr uint kBlockK = D * sizeof(T) >= 256 ? 16 : 32;
+  constexpr uint kD = D / 8;
+  constexpr uint kK = kBlockK / 8;
+  // The staged tiles: the queries (kBlockQ, D); the keys transposed, (D, kBlockK); the values
+  // (kBlockK, D), in the same memory as the keys once the scores are taken.
+  constexpr uint kStrideQ = D;
+  constexpr uint kStrideK = kBlockK;
+  constexpr uint kStrideV = D;
+  constexpr uint kKeyValues = D * kStrideK > kBlockK * kStrideV ? D * kStrideK : kBlockK * kStrideV;
+  threadgroup T queries[kBlockQ * kStrideQ];
+  threadgroup T keyValues[kKeyValues];
 
   uint batch = group.z;
   uint head = group.y;
@@ -112,151 +173,145 @@ kernel void attention(
   device const T *kBase = k + batch * p.kStrideB + kvHead * p.kStrideH;
   device const T *vBase = v + batch * p.vStrideB + kvHead * p.vStrideH;
 
-  threadgroup float *myScores = scores + sg * 8 * kBlockK;
-  threadgroup T *myProbabilities = probabilities + sg * 8 * kBlockK;
-  threadgroup float *myDiagonal = diagonal + sg * 64;
-
-  // The queries, through the keys' tile, into registers: eight rows a simdgroup.
-  for (uint i = tid; i < kBlockQ * D; i += kThreads) {
-    uint row = i / D;
-    uint d = i - row * D;
-    keys[row * kStride + d] = q0 + row < p.queryLength ? qBase[(q0 + row) * p.qStrideL + d] : T(0);
+  // The queries, once: rows past the last are zeros.
+  uint queriesLeft = p.queryLength - q0;
+  if (queriesLeft < kBlockQ) {
+    stage<T, D, kBlockQ, true>(queries, kStrideQ, 1, qBase + q0 * p.qStrideL, p.qStrideL, queriesLeft, tid);
+  } else {
+    stage<T, D, kBlockQ, false>(queries, kStrideQ, 1, qBase + q0 * p.qStrideL, p.qStrideL, kBlockQ, tid);
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  simdgroup_matrix<T, 8, 8> query[D / 8];
-  for (uint d = 0; d < D / 8; ++d) simdgroup_load(query[d], keys + sg * 8 * kStride + d * 8, kStride);
 
-  simdgroup_matrix<float, 8, 8> o[D / 8];
-  for (uint d = 0; d < D / 8; ++d) o[d] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
-
-  // The softmax runs a row to four lanes, eight scores to a lane; each lane keeps its row's
-  // running maximum and sum.
-  uint row = lane / 4;
-  uint quarter = lane % 4;
-  uint queryIndex = q0 + sg * 8 + row;
-  float rowMax = -INFINITY;
-  float rowSum = 0.0f;
-  // The keys this query may see. A row past the last query sees what the last one does; it is
-  // never written.
+  // This lane's row, and the keys it may see; a row past the last query sees what the last one
+  // does, and is never written. Wraps where there are fewer keys than queries, which only no mask
+  // allows, and which no mask does not read.
+  short2 at = fragmentCoord(lane);
   uint offset = p.keyLength - p.queryLength;
-  uint position = min(queryIndex, p.queryLength - 1) + offset;
+  uint last = p.queryLength - 1;
+  uint position = min(q0 + sg * 8 + uint(at.y), last) + offset;
   uint firstKey = firstKeyOf(p, position);
   uint lastKey = lastKeyOf(p, position);
 
-  // The keys any row of this threadgroup may see: the rows are queries in order, so the first
-  // row's first key and the last row's last key bound them all. Blocks of keys before the one
-  // and after the other have nothing to add. The same for every thread of the group, so that each
-  // reaches every barrier in the loop.
-  uint keyBegin = (firstKeyOf(p, q0 + offset) / kBlockK) * kBlockK;
-  uint keyEnd = lastKeyOf(p, min(q0 + kBlockQ, p.queryLength) - 1 + offset) + 1;
+  // The keys any row of this threadgroup sees, and those every row does, where a block needs no
+  // mask. The same for every thread of the group, so that each reaches every barrier in the loop.
+  uint firstRow = q0 + offset, lastRow = min(q0 + kBlockQ - 1, last) + offset;
+  uint keyBegin = (firstKeyOf(p, firstRow) / kBlockK) * kBlockK;
+  uint keyEnd = lastKeyOf(p, lastRow) + 1;
+  uint seenFrom = firstKeyOf(p, lastRow), seenTo = lastKeyOf(p, firstRow);
+
+  // The scores go into exp2, so the scale carries log2(e).
+  float scale = p.scale * 1.4426950408889634f;
+  Matrix o[kD];
+  FLINT_UNROLL
+  for (uint d = 0; d < kD; ++d) o[d] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+  float rowMaxSoFar = -INFINITY;
+  float rowSumSoFar = 0.0f;
+  threadgroup const T *myQueries = queries + sg * 8 * kStrideQ;
 
   for (uint k0 = keyBegin; k0 < keyEnd; k0 += kBlockK) {
+    uint keysLeft = p.keyLength - k0;
+    bool lastKeys = keysLeft < kBlockK;
+
+    // The keys, transposed: key j, dimension d at keyValues[d * kStrideK + j].
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = tid; i < kBlockK * D; i += kThreads) {
-      uint key = i / D;
-      uint d = i - key * D;
-      bool in = k0 + key < p.keyLength;
-      keys[key * kStride + d] = in ? kBase[(k0 + key) * p.kStrideL + d] : T(0);
-      values[key * kStride + d] = in ? vBase[(k0 + key) * p.vStrideL + d] : T(0);
+    if (lastKeys) {
+      stage<T, D, kBlockK, true>(keyValues, 1, kStrideK, kBase + k0 * p.kStrideL, p.kStrideL, keysLeft, tid);
+    } else {
+      stage<T, D, kBlockK, false>(keyValues, 1, kStrideK, kBase + k0 * p.kStrideL, p.kStrideL, kBlockK, tid);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // S = Q K^T, eight keys at a time.
-    for (uint j = 0; j < kBlockK / 8; ++j) {
-      simdgroup_matrix<float, 8, 8> s = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
-      for (uint d = 0; d < D / 8; ++d) {
-        simdgroup_matrix<T, 8, 8> keyT;
-        simdgroup_load(keyT, keys + j * 8 * kStride + d * 8, kStride, ulong2(0, 0), true);
-        simdgroup_multiply_accumulate(s, query[d], keyT, s);
+    // S = Q K^T, eight dimensions at a time.
+    Matrix s[kK];
+    FLINT_UNROLL
+    for (uint t = 0; t < kK; ++t) s[t] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    FLINT_UNROLL
+    for (uint d = 0; d < kD; ++d) {
+      Matrix query = loadMatrix(myQueries + d * 8, kStrideQ, at);
+      FLINT_UNROLL
+      for (uint t = 0; t < kK; ++t) {
+        Matrix keyT = loadMatrix(keyValues + d * 8 * kStrideK + t * 8, kStrideK, at);
+        simdgroup_multiply_accumulate(s[t], query, keyT, s[t]);
       }
-      simdgroup_store(s, myScores + j * 8, kBlockK);
     }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
 
-    // The online softmax of this lane's eight scores.
-    float x[8];
+    // The mask where a row misses any of the block, the scale, and the row's largest score.
     float blockMax = -INFINITY;
-    for (uint c = 0; c < 8; ++c) {
-      uint column = quarter * 8 + c;
-      uint key = k0 + column;
-      bool seen = key >= firstKey && key <= lastKey;
-      x[c] = seen ? myScores[row * kBlockK + column] * p.scale : -INFINITY;
-      blockMax = max(blockMax, x[c]);
+    bool whole = k0 >= seenFrom && k0 + kBlockK - 1 <= seenTo;
+    FLINT_UNROLL
+    for (uint t = 0; t < kK; ++t) {
+      FLINT_UNROLL
+      for (short j = 0; j < 2; ++j) {
+        uint key = k0 + t * 8 + at.x + j;
+        float x = s[t].thread_elements()[j] * scale;
+        x = whole || (key >= firstKey && key <= lastKey) ? x : -INFINITY;
+        s[t].thread_elements()[j] = x;
+        blockMax = max(blockMax, x);
+      }
     }
-    blockMax = max(blockMax, simd_shuffle_xor(blockMax, 1));
-    blockMax = max(blockMax, simd_shuffle_xor(blockMax, 2));
+    float newMax = max(rowMaxSoFar, rowMax(blockMax));
 
-    float newMax = max(rowMax, blockMax);
-    // A row that has seen no key yet keeps nothing, and adds nothing.
-    float rescale = newMax == -INFINITY ? 1.0f : exp(rowMax - newMax);
+    // A row that has seen no key yet keeps nothing, and adds nothing: a block diagonal mask leaves
+    // a row of a later block nothing in the first keys its threadgroup walks.
+    float rescale = newMax == -INFINITY ? 1.0f : exp2(rowMaxSoFar - newMax);
     float blockSum = 0.0f;
-    for (uint c = 0; c < 8; ++c) {
-      float e = newMax == -INFINITY ? 0.0f : exp(x[c] - newMax);
-      blockSum += e;
-      myProbabilities[row * kBlockK + quarter * 8 + c] = T(e);
+    FLINT_UNROLL
+    for (uint t = 0; t < kK; ++t) {
+      FLINT_UNROLL
+      for (short j = 0; j < 2; ++j) {
+        float e = newMax == -INFINITY ? 0.0f : exp2(s[t].thread_elements()[j] - newMax);
+        s[t].thread_elements()[j] = e;
+        blockSum += e;
+      }
     }
-    blockSum += simd_shuffle_xor(blockSum, 1);
-    blockSum += simd_shuffle_xor(blockSum, 2);
-    rowSum = rowSum * rescale + blockSum;
-    rowMax = newMax;
-
-    // diag(rescale), to scale the rows of O by.
-    myDiagonal[lane] = 0.0f;
-    myDiagonal[lane + 32] = 0.0f;
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-    if (quarter == 0) myDiagonal[row * 8 + row] = rescale;
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-
-    simdgroup_matrix<float, 8, 8> scale;
-    simdgroup_load(scale, myDiagonal, 8);
-    simdgroup_matrix<T, 8, 8> probability[kBlockK / 8];
-    for (uint j = 0; j < kBlockK / 8; ++j) {
-      simdgroup_load(probability[j], myProbabilities + j * 8, kBlockK);
+    rowSumSoFar = rowSumSoFar * rescale + rowSum(blockSum);
+    rowMaxSoFar = newMax;
+    FLINT_UNROLL
+    for (uint d = 0; d < kD; ++d) {
+      o[d].thread_elements()[0] *= rescale;
+      o[d].thread_elements()[1] *= rescale;
     }
 
-    // O = diag(rescale) O + P V.
-    for (uint d = 0; d < D / 8; ++d) {
-      simdgroup_multiply(o[d], scale, o[d]);
-      for (uint j = 0; j < kBlockK / 8; ++j) {
-        simdgroup_matrix<T, 8, 8> value;
-        simdgroup_load(value, values + j * 8 * kStride + d * 8, kStride);
-        simdgroup_multiply_accumulate(o[d], probability[j], value, o[d]);
+    // The values, where the keys were: key j, dimension d at keyValues[j * kStrideV + d].
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lastKeys) {
+      stage<T, D, kBlockK, true>(keyValues, kStrideV, 1, vBase + k0 * p.vStrideL, p.vStrideL, keysLeft, tid);
+    } else {
+      stage<T, D, kBlockK, false>(keyValues, kStrideV, 1, vBase + k0 * p.vStrideL, p.vStrideL, kBlockK, tid);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // O += P V. Keys past the last are zeros, under P's zeros.
+    FLINT_UNROLL
+    for (uint d = 0; d < kD; ++d) {
+      FLINT_UNROLL
+      for (uint t = 0; t < kK; ++t) {
+        Matrix value = loadMatrix(keyValues + t * 8 * kStrideV + d * 8, kStrideV, at);
+        simdgroup_multiply_accumulate(o[d], s[t], value, o[d]);
       }
     }
   }
 
-  // O / the sum of each row, written out through the scores' tile, the rows that are queries.
-  simdgroup_barrier(mem_flags::mem_threadgroup);
-  myDiagonal[lane] = 0.0f;
-  myDiagonal[lane + 32] = 0.0f;
-  simdgroup_barrier(mem_flags::mem_threadgroup);
-  if (quarter == 0) myDiagonal[row * 8 + row] = rowSum > 0.0f ? 1.0f / rowSum : 0.0f;
-  simdgroup_barrier(mem_flags::mem_threadgroup);
-  simdgroup_matrix<float, 8, 8> normalize;
-  simdgroup_load(normalize, myDiagonal, 8);
-
-  uint outRow = p.numHeads * p.queryLength;  // the output is (B, H, Lq, D), contiguous
-  device T *outBase = out + (batch * outRow + head * p.queryLength) * D;
-  for (uint d = 0; d < D / 8; ++d) {
-    simdgroup_multiply(o[d], normalize, o[d]);
-    simdgroup_store(o[d], myScores, 8);
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint e = lane; e < 64; e += 32) {
-      uint r = e / 8;
-      uint index = q0 + sg * 8 + r;
-      if (index < p.queryLength) outBase[index * D + d * 8 + e % 8] = T(myScores[e]);
+  // O / the sum of the row, the rows that are queries. The output is (B, H, Lq, D), contiguous.
+  float inverse = rowSumSoFar > 0.0f ? 1.0f / rowSumSoFar : 0.0f;
+  uint row = q0 + sg * 8 + uint(at.y);
+  if (row < p.queryLength) {
+    device T *outRow = out + ((batch * p.numHeads + head) * p.queryLength + row) * D;
+    FLINT_UNROLL
+    for (uint d = 0; d < kD; ++d) {
+      outRow[d * 8 + at.x] = T(o[d].thread_elements()[0] * inverse);
+      outRow[d * 8 + at.x + 1] = T(o[d].thread_elements()[1] * inverse);
     }
-    simdgroup_barrier(mem_flags::mem_threadgroup);
   }
 }
 
 #define FLINT_ATTENTION(T, S, D)                                                                \
   template [[host_name("attention_" #D "_" S)]] kernel void attention<T, D>(                    \
       device T *, device const T *, device const T *, device const T *,                         \
-      constant AttentionParams &, uint3, uint, uint, uint);
+      constant AttentionParams &, uint3, uint, ushort, ushort);
 
 FLINT_ATTENTION(half, "f16", 32)
 FLINT_ATTENTION(half, "f16", 64)
 FLINT_ATTENTION(half, "f16", 128)
 FLINT_ATTENTION(float, "f32", 32)
 FLINT_ATTENTION(float, "f32", 64)
+FLINT_ATTENTION(float, "f32", 128)

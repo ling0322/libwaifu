@@ -61,15 +61,10 @@ struct AttentionParams {
 constexpr int kBlockQ = 32;
 constexpr uint32_t kThreads = 128;
 
-// The most keys this kernel is used for with a head of 128 in half. See attention().
-constexpr int kMaxFusedKeys = 256;
-
-// Whether the kernel was built for a head this wide in this type: half to 128, float to 64,
-// which is what fits its threadgroup memory.
+// Whether the kernel was built for a head this wide in this type: 32, 64 or 128, half or float.
 bool hasKernelFor(DType dtype, int headDim) {
-  if (dtype == DType::kFloat16) return headDim == 32 || headDim == 64 || headDim == 128;
-  if (dtype == DType::kFloat) return headDim == 32 || headDim == 64;
-  return false;
+  if (dtype != DType::kFloat16 && dtype != DType::kFloat) return false;
+  return headDim == 32 || headDim == 64 || headDim == 128;
 }
 
 // The queries each threadgroup of kernels/nax/attention.metal takes: sixteen to each of its four
@@ -150,10 +145,10 @@ Tensor uploadHalf(std::vector<float> &values, std::initializer_list<int> shape) 
   return device;
 }
 
-// Whether nax_attention answers one attention of a head this wide as it was written to: one head
-// of 40 queries over 40 keys -- three simdgroups, the last short, and a block of keys and part of
-// one -- against the answer worked out here in float.
-bool naxAnswersAt(int headDim) {
+// Whether a kernel -- nax_attention, or kernels/attention.metal -- answers one attention of a head
+// this wide as it was written to: one head of 40 queries over 40 keys -- simdgroups past the last
+// query, and a block of keys and part of one -- against the answer worked out here in float.
+bool answersAt(int headDim, bool nax) {
   constexpr int kLength = 40;
   std::vector<float> q(kLength * headDim), k(q.size()), v(q.size());
   for (size_t i = 0; i < q.size(); ++i) {
@@ -165,7 +160,7 @@ bool naxAnswersAt(int headDim) {
   Tensor dk = uploadHalf(k, {1, 1, kLength, headDim});
   Tensor dv = uploadHalf(v, {1, 1, kLength, headDim});
   Tensor out = F::empty(Device::getMetal(), {1, 1, kLength, headDim}, DType::kFloat16);
-  dispatchAttention(dq, dk, dv, MaskType::kNone, 0, out, true);
+  dispatchAttention(dq, dk, dv, MaskType::kNone, 0, out, nax);
 
   Tensor narrow = toCpu(out);
   Tensor got = F::empty(Device::getCpu(), {1, 1, kLength, headDim}, DType::kFloat);
@@ -201,11 +196,25 @@ bool naxAttentionAnswers() {
   static std::once_flag once;
   static bool answers = false;
   std::call_once(once, [] {
-    answers = naxAnswersAt(32) && naxAnswersAt(64) && naxAnswersAt(128);
+    answers = answersAt(32, true) && answersAt(64, true) && answersAt(128, true);
     if (!answers) {
       LOG(WARN) << "attention on the neural accelerators reads its operands in the register "
                    "layout an M5 GPU has, and this GPU answered otherwise: attention runs "
                    "kernels/attention.metal here instead";
+    }
+  });
+  return answers;
+}
+
+bool plainAttentionAnswers() {
+  static std::once_flag once;
+  static bool answers = false;
+  std::call_once(once, [] {
+    answers = answersAt(32, false) && answersAt(64, false) && answersAt(128, false);
+    if (!answers) {
+      LOG(WARN) << "kernels/attention.metal reads its scores in the register layout of an Apple "
+                   "GPU's simdgroup matrices, and this GPU answered otherwise: attention runs the "
+                   "composition here instead";
     }
   });
   return answers;
@@ -231,6 +240,7 @@ bool attention(
   // neural accelerators where it answers as it was written to: see naxAttentionAnswers.
   bool nax = getContext(q)->hasNax() && hasNaxKernelFor(dtype, headDim) && naxAttentionAnswers();
   if (!nax && !hasKernelFor(dtype, headDim)) return false;
+  if (!nax && !plainAttentionAnswers()) return false;
   if (k.getDType() != dtype || v.getDType() != dtype || out.getDType() != dtype) return false;
   if (k.getShape() != v.getShape() || k.getShape(0) != batch || k.getShape(3) != headDim) {
     return false;
@@ -247,17 +257,12 @@ bool attention(
   if (maskType != MaskType::kNone && keyLength < queryLength) return false;
   if (maskType == MaskType::kBlockDiagonal && keyLength != queryLength) return false;
 
-  // This kernel at every length, but for a head of 128 in half over many keys, where the
-  // composition is the faster: its products are the GEMM kernels at their best, and this kernel
-  // reads every key again for each kBlockQ queries, which a head that wide makes dear. Measured on
-  // an M5 Pro with its accelerators off, sixteen heads, from 256 keys to 4096 -- this kernel's
-  // time over the composition's, which holds its scores in float: half, a head of 32, 0.33 to
-  // 0.50; of 64, 0.56 to 0.64; of 128, 1.0 at 256 keys and 1.4 to 1.7 past it. Float, which the
-  // composition multiplies in float, 0.11 to 0.35. A block mask has no composition, so it is this
-  // kernel at every length -- which also skips the blocks of keys a threadgroup's queries do not
-  // see.
-  bool composedIsFaster = dtype == DType::kFloat16 && headDim == 128;
-  if (!nax && !blockMask && composedIsFaster && keyLength > kMaxFusedKeys) return false;
+  // Either kernel at every length: each is the faster than the composition at every one measured.
+  // kernels/attention.metal, on an M5 Pro with its accelerators off, sixteen heads, from 256 keys
+  // to 4096 -- its time over the composition's, which holds its scores in float: half, heads of 32,
+  // 0.28 to 0.52; of 64, 0.53 to 0.62; of 128, 0.71 to 0.94. Float, which the composition
+  // multiplies in float, 0.09 to 0.33. A block mask has no composition, and the kernels skip the
+  // blocks of keys a threadgroup's queries do not see.
 
   dispatchAttention(q, k, v, maskType, blockSize, out, nax);
   return true;

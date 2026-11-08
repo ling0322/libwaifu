@@ -920,7 +920,7 @@ CATCH_TEST_CASE("test Metal attention (block-causal mask)", "[op][metal]") {
   }
 
   // In float, at the widths the kernel has in float.
-  for (int headDim : {32, 64}) {
+  for (int headDim : {32, 64, 128}) {
     for (int keyLength : {49, 50, 51, 130, 300}) {
       CATCH_INFO("float, headDim = " << headDim << ", S = " << keyLength);
       CATCH_REQUIRE(runBlockCase(
@@ -1062,6 +1062,9 @@ CATCH_TEST_CASE("test Metal attention on the neural accelerators answers here", 
   // A GPU the tests run on that has the accelerators is one the kernel was written for: were its
   // layout another, attention would quietly run the other kernel, and every test above would pass
   // without asking the one on the accelerators anything.
+  // The same of the kernel every Metal GPU runs, which reads its simdgroup matrices' elements in
+  // the layout Apple's GPUs give them.
+  CATCH_REQUIRE(op::metal_native::plainAttentionAnswers());
   if (!op::metal_native::Context::get()->hasNax()) CATCH_SKIP("no neural accelerators here");
   CATCH_REQUIRE(op::metal_native::naxAttentionAnswers());
 }
