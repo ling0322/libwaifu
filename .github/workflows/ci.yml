@@ -27,6 +27,16 @@ jobs:
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
 
+      # A workspace of its own, which the root's cargo commands do not reach: it loads the library
+      # the build made, through this platform's loader.
+      - name: Test (Rust binding)
+        working-directory: bindings/rust
+        run: cargo test
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+          LIBWAIFU_PATH: ${{ github.workspace }}/build/libwaifu.so
+
       - name: Test (model manager)
         run: cargo test -p waifu-modelmanager
 
@@ -65,6 +75,16 @@ jobs:
         run: cargo test --manifest-path waifu/Cargo.toml
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+      # A workspace of its own, which the root's cargo commands do not reach: it loads the library
+      # the build made, through this platform's loader.
+      - name: Test (Rust binding)
+        working-directory: bindings/rust
+        run: cargo test
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+          LIBWAIFU_PATH: ${{ github.workspace }}/build/libwaifu.dylib
 
       - name: Test (model manager)
         run: cargo test -p waifu-modelmanager
@@ -147,6 +167,16 @@ jobs:
         run: cargo test --manifest-path waifu/Cargo.toml
         env:
           LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+
+      # A workspace of its own, which the root's cargo commands do not reach: it loads the library
+      # the build made, through this platform's loader.
+      - name: Test (Rust binding)
+        working-directory: bindings/rust
+        run: cargo test
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          LIBWAIFU_LIB_DIR: ${{ github.workspace }}/build
+          LIBWAIFU_PATH: ${{ github.workspace }}/build/waifu.dll
 
       - name: Test (model manager)
         run: cargo test -p waifu-modelmanager
