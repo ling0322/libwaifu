@@ -84,6 +84,25 @@ std::vector<float> values(const Tensor &a) {
 #define SKIP_WITHOUT_METAL() \
   if (!isOperatorsAvailable(Device::kMetal)) CATCH_SKIP("metal device not available")
 
+/// Runs `body(nax)` with the kernels on the neural accelerators, where this GPU has them, and then
+/// without, so that a test checks both the kernel and the one it stands in for. They are on again
+/// afterwards, however it ends.
+template<typename Fn>
+void eachKernel(Fn &&body) {
+  std::shared_ptr<op::metal_native::Context> context = op::metal_native::Context::get();
+  struct On {
+    std::shared_ptr<op::metal_native::Context> context;
+    ~On() { context->setNaxEnabled(true); }
+  } on{context};
+  context->setNaxEnabled(true);
+  bool hasNax = context->hasNax();
+  for (bool nax : {true, false}) {
+    if (nax && !hasNax) continue;
+    context->setNaxEnabled(nax);
+    body(nax);
+  }
+}
+
 }  // namespace
 
 CATCH_TEST_CASE("test Metal toDevice", "[op][metal]") {
@@ -675,8 +694,9 @@ CATCH_TEST_CASE("test Metal attention", "[op][metal]") {
   Tensor q = randn({2, 4, 37, 32});
   Tensor k = randn({2, 2, 37, 32});
   Tensor v = randn({2, 2, 37, 32});
+  eachKernel([&](bool nax) {
   for (bool causal : {false, true}) {
-    CATCH_INFO("causal = " << causal);
+    CATCH_INFO("nax = " << nax << ", causal = " << causal);
     Tensor reference = fl::test::attention(cpu(), q, k, v, fl::test::causalIf(causal));
     CATCH_REQUIRE(close(
         fl::test::attention(mtl(), toMetal(q), toMetal(k), toMetal(v), fl::test::causalIf(causal)),
@@ -693,6 +713,7 @@ CATCH_TEST_CASE("test Metal attention", "[op][metal]") {
         3e-2f,
         3e-2f));
   }
+  });
 }
 
 CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]") {
@@ -708,8 +729,9 @@ CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]
       {2, 2, 40, 40, 128, false},
       {2, 2, 45, 45, 80, false},   // no kernel for 80: the composition
   };
+  eachKernel([&](bool nax) {
   for (const Case &c : cases) {
-    CATCH_INFO("heads = " << c.heads << "/" << c.keyValueHeads << ", lengths = " << c.queryLength
+    CATCH_INFO("nax = " << nax << ", heads = " << c.heads << "/" << c.keyValueHeads << ", lengths = " << c.queryLength
                           << "/" << c.keyLength << ", headDim = " << c.headDim
                           << ", causal = " << c.causal);
     // The queries as a model hands them in: (B, L, H, D), viewed as (B, H, L, D).
@@ -727,6 +749,259 @@ CATCH_TEST_CASE("test Metal attention of other widths and lengths", "[op][metal]
         fl::test::causalIf(c.causal));
     CATCH_REQUIRE(close(got, reference, 3e-2f, 3e-2f));
   }
+  });
+}
+
+namespace {
+
+/// Attention under `maskType` in blocks of `blockSize`, written out one query at a time on the
+/// host: the reference the kernel's block masks are checked against, since the composition has
+/// none. q is (N, H, L, D), k and v (N, KVH, S, D), float; the answer (N, H, L, D).
+Tensor maskReference(
+    const Tensor &q,
+    const Tensor &k,
+    const Tensor &v,
+    MaskType maskType,
+    int blockSize) {
+  int batch = q.getShape(0), numHeads = q.getShape(1), queryLength = q.getShape(2);
+  int headDim = q.getShape(3), numKeyValueHeads = k.getShape(1), keyLength = k.getShape(2);
+  int group = numHeads / numKeyValueHeads;
+  std::vector<float> pq = values(q), pk = values(k), pv = values(v);
+  Tensor out = fl::test::zeros(Device::getCpu(), {batch, numHeads, queryLength, headDim}, DType::kFloat);
+  float *po = out.getInternalData()->getData<float>(out.getInternalOffset());
+
+  float scale = 1.0f / sqrtf(static_cast<float>(headDim));
+  std::vector<float> scores(keyLength);
+  for (int n = 0; n < batch; ++n) {
+    for (int h = 0; h < numHeads; ++h) {
+      int kvh = h / group;
+      const float *kh = pk.data() + static_cast<size_t>(n * numKeyValueHeads + kvh) * keyLength * headDim;
+      const float *vh = pv.data() + static_cast<size_t>(n * numKeyValueHeads + kvh) * keyLength * headDim;
+      for (int i = 0; i < queryLength; ++i) {
+        int position = i + keyLength - queryLength;
+        int firstKey = 0;
+        int lastKey = keyLength - 1;
+        if (maskType == MaskType::kCausal) lastKey = position;
+        if (maskType == MaskType::kBlockCausal || maskType == MaskType::kBlockDiagonal) {
+          int block = position / blockSize;
+          lastKey = std::min(keyLength - 1, block * blockSize + blockSize - 1);
+          if (maskType == MaskType::kBlockDiagonal) firstKey = block * blockSize;
+        }
+        const float *qi = pq.data() + (static_cast<size_t>(n * numHeads + h) * queryLength + i) * headDim;
+        float largest = -INFINITY;
+        for (int j = firstKey; j <= lastKey; ++j) {
+          float dot = 0.0f;
+          for (int d = 0; d < headDim; ++d) dot += qi[d] * kh[j * headDim + d];
+          scores[j] = dot * scale;
+          largest = std::max(largest, scores[j]);
+        }
+        float sum = 0.0f;
+        for (int j = firstKey; j <= lastKey; ++j) {
+          scores[j] = expf(scores[j] - largest);
+          sum += scores[j];
+        }
+        float *oi = po + (static_cast<size_t>(n * numHeads + h) * queryLength + i) * headDim;
+        for (int j = firstKey; j <= lastKey; ++j) {
+          for (int d = 0; d < headDim; ++d) oi[d] += scores[j] / sum * vh[j * headDim + d];
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/// The kernel itself under `maskType` in blocks of `blockSize`, in `dtype`, against the reference
+/// on the same operands rounded as the kernel reads them. False where the kernel did not take it.
+bool runBlockCase(
+    int numHeads,
+    int numKeyValueHeads,
+    int queryLength,
+    int keyLength,
+    int headDim,
+    MaskType maskType,
+    int blockSize,
+    DType dtype = DType::kFloat16) {
+  // In [0, 1), as the CUDA test draws them: a softmax that is not all on one key.
+  auto drawn = [dtype](std::initializer_list<int> shape) {
+    return toMetal(fl::test::rand(Device::getCpu(), shape, DType::kFloat), dtype);
+  };
+  Tensor q = drawn({2, numHeads, queryLength, headDim});
+  Tensor k = drawn({2, numKeyValueHeads, keyLength, headDim});
+  Tensor v = drawn({2, numKeyValueHeads, keyLength, headDim});
+  Tensor reference = maskReference(toCpu(q), toCpu(k), toCpu(v), maskType, blockSize);
+  float tol = dtype == DType::kFloat ? 1e-4f : 5e-3f;
+  bool good = true;
+  eachKernel([&](bool nax) {
+    Tensor x = F::empty(Device::getMetal(), {2, numHeads, queryLength, headDim}, dtype);
+    bool ran = op::metal_native::attention(q, k, v, maskType, blockSize, x);
+    if (!ran || !close(x, reference, tol, tol)) {
+      CATCH_UNSCOPED_INFO("failed with nax = " << nax);
+      good = false;
+    }
+  });
+  return good;
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test Metal attention (block-causal mask)", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // Blocks of one -- the causal mask, against a reference that is not the composition -- of a few
+  // keys, of the 50 frames CosyVoice3's flow streams in, of exactly two of the kernel's blocks of
+  // 32 keys, and larger than every key there is. Query lengths that are a decode step, a short
+  // run, a threadgroup's worth and past it; key lengths equal to them, past them by a little, and
+  // past the most keys the kernel takes without a block mask.
+  for (int blockSize : {1, 2, 7, 50, 64, 1000}) {
+    for (int headDim : {32, 64, 128}) {
+      for (int queryLength : {1, 17, 32, 130}) {
+        for (int keyLength : {queryLength, queryLength + 37, 300}) {
+          if (keyLength < queryLength) continue;
+          CATCH_INFO(
+              "block = " << blockSize << ", headDim = " << headDim << ", L = " << queryLength
+                         << ", S = " << keyLength);
+          CATCH_REQUIRE(runBlockCase(
+              4, 2, queryLength, keyLength, headDim, MaskType::kBlockCausal, blockSize));
+        }
+      }
+    }
+  }
+
+  // In float, at the widths the kernel has in float.
+  for (int headDim : {32, 64}) {
+    for (int keyLength : {49, 50, 51, 130, 300}) {
+      CATCH_INFO("float, headDim = " << headDim << ", S = " << keyLength);
+      CATCH_REQUIRE(runBlockCase(
+          4, 2, keyLength, keyLength, headDim, MaskType::kBlockCausal, 50, DType::kFloat));
+      CATCH_REQUIRE(runBlockCase(
+          4, 2, 17, keyLength, headDim, MaskType::kBlockCausal, 50, DType::kFloat));
+    }
+  }
+
+  // CosyVoice3's DiT: sixteen heads of 64 in blocks of 50, over a prompt and a sentence of about
+  // fourteen seconds of frames.
+  CATCH_REQUIRE(runBlockCase(16, 16, 700, 700, 64, MaskType::kBlockCausal, 50));
+}
+
+CATCH_TEST_CASE("test Metal attention (block-diagonal mask)", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // Self-attention in windows: blocks of one -- every query its own key alone -- of a few keys,
+  // of exactly the kernel's 32 and past it, of Qwen3-ASR's 104, and larger than every key there
+  // is, which is no mask. Lengths a single query, a block of keys and one past it, a short last
+  // window and a long run.
+  for (int blockSize : {1, 7, 32, 50, 104, 1000}) {
+    for (int headDim : {32, 64, 128}) {
+      for (int length : {1, 17, 32, 33, 130, 179, 300}) {
+        CATCH_INFO("block = " << blockSize << ", headDim = " << headDim << ", L = S = " << length);
+        CATCH_REQUIRE(
+            runBlockCase(4, 2, length, length, headDim, MaskType::kBlockDiagonal, blockSize));
+      }
+    }
+  }
+  for (int length : {45, 104, 179, 300}) {
+    CATCH_INFO("float, L = S = " << length);
+    CATCH_REQUIRE(
+        runBlockCase(4, 2, length, length, 64, MaskType::kBlockDiagonal, 104, DType::kFloat));
+  }
+
+  // Through MetalOperators::attention, which takes it to the kernel: the queries as a model hands
+  // them in, (B, L, H, D) viewed as (B, H, L, D).
+  Tensor q = fl::test::rand(Device::getCpu(), {1, 179, 14, 64}, DType::kFloat);
+  Tensor k = fl::test::rand(Device::getCpu(), {1, 14, 179, 64}, DType::kFloat);
+  Tensor v = fl::test::rand(Device::getCpu(), {1, 14, 179, 64}, DType::kFloat);
+  Tensor x = fl::test::attention(
+      mtl(),
+      toMetal(q, DType::kFloat16).transpose(1, 2),
+      toMetal(k, DType::kFloat16),
+      toMetal(v, DType::kFloat16),
+      MaskType::kBlockDiagonal,
+      104);
+  Tensor qc = fl::test::contiguous(cpu(), q.transpose(1, 2));
+  CATCH_REQUIRE(close(x, maskReference(qc, k, v, MaskType::kBlockDiagonal, 104), 5e-3f, 5e-3f));
+}
+
+CATCH_TEST_CASE("test Metal attention (a block past every key is no mask)", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // With as many queries as keys and a block at least as long as the keys, every query sees
+  // every key under either block mask: the same work as no mask at all, to the bit.
+  auto drawn = [](std::initializer_list<int> shape) {
+    return toMetal(fl::test::rand(Device::getCpu(), shape, DType::kFloat), DType::kFloat16);
+  };
+  Tensor q = drawn({2, 8, 200, 64});
+  Tensor k = drawn({2, 8, 200, 64});
+  Tensor v = drawn({2, 8, 200, 64});
+  eachKernel([&](bool nax) {
+    CATCH_INFO("nax = " << nax);
+    Tensor unmasked = F::empty(Device::getMetal(), {2, 8, 200, 64}, DType::kFloat16);
+    Tensor blocked = F::empty(Device::getMetal(), {2, 8, 200, 64}, DType::kFloat16);
+    Tensor windowed = F::empty(Device::getMetal(), {2, 8, 200, 64}, DType::kFloat16);
+    CATCH_REQUIRE(op::metal_native::attention(q, k, v, MaskType::kNone, 0, unmasked));
+    CATCH_REQUIRE(op::metal_native::attention(q, k, v, MaskType::kBlockCausal, 200, blocked));
+    CATCH_REQUIRE(op::metal_native::attention(q, k, v, MaskType::kBlockDiagonal, 200, windowed));
+    // allClose's bounds are strict, so "to the bit" is a difference below the smallest float.
+    CATCH_REQUIRE(cpu()->allClose(toCpu(unmasked), toCpu(blocked), 0.0f, 1e-38f));
+    CATCH_REQUIRE(cpu()->allClose(toCpu(unmasked), toCpu(windowed), 0.0f, 1e-38f));
+  });
+}
+
+CATCH_TEST_CASE("test Metal attention (scores past half's range)", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // CosyVoice3's DiT: a channel or two every query and key carry large, so that every score is
+  // past what half holds -- 97,000 there -- while the softmax, which a constant added to a row does
+  // not move, is decided by the rest. Here the last two channels are 300 in the queries and 1500 in
+  // the keys, both exact in half: scores of 112,500 with a head of 64, 79,500 with 128. In float
+  // that is an ordinary attention; scores held in half are infinities, and their softmax NaN.
+  auto sunk = [](int length, int headDim, float big) {
+    Tensor x = randn({1, 2, length, headDim});
+    float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+    for (int row = 0; row < 2 * length; ++row) {
+      data[row * headDim + headDim - 1] = big;
+      data[row * headDim + headDim - 2] = big;
+    }
+    return x;
+  };
+  struct Case {
+    MaskType mask;
+    int block;
+  };
+  const Case masks[] = {{MaskType::kNone, 0}, {MaskType::kCausal, 0}, {MaskType::kBlockCausal, 50}};
+  for (int headDim : {64, 128}) {
+    // A length the kernels have always taken, and one past the 256 keys the composition took
+    // without a block mask, which only a kernel on the neural accelerators takes now.
+    for (int length : {100, 600}) {
+      Tensor q = toMetal(sunk(length, headDim, 300.0f), DType::kFloat16);
+      Tensor k = toMetal(sunk(length, headDim, 1500.0f), DType::kFloat16);
+      Tensor v = toMetal(randn({1, 2, length, headDim}), DType::kFloat16);
+      for (const Case &c : masks) {
+        Tensor reference = maskReference(toCpu(q), toCpu(k), toCpu(v), c.mask, c.block);
+        eachKernel([&](bool nax) {
+          // The composition still holds its scores in half, so where it is what runs -- no mask
+          // or the causal one, past 256 keys, without the accelerators -- this is not asked of it.
+          bool composition = !nax && length > 256 && c.mask != MaskType::kBlockCausal;
+          if (composition) return;
+          CATCH_INFO(
+              "nax = " << nax << ", headDim = " << headDim << ", length = " << length
+                       << ", mask = " << static_cast<int>(c.mask));
+          Tensor x = fl::test::attention(mtl(), q, k, v, c.mask, c.block);
+          std::vector<float> got = values(x);
+          CATCH_REQUIRE(std::all_of(got.begin(), got.end(), [](float y) { return std::isfinite(y); }));
+          CATCH_REQUIRE(close(x, reference, 2e-2f, 2e-2f));
+        });
+      }
+    }
+  }
+}
+
+CATCH_TEST_CASE("test Metal attention on the neural accelerators answers here", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  // A GPU the tests run on that has the accelerators is one the kernel was written for: were its
+  // layout another, attention would quietly run the other kernel, and every test above would pass
+  // without asking the one on the accelerators anything.
+  if (!op::metal_native::Context::get()->hasNax()) CATCH_SKIP("no neural accelerators here");
+  CATCH_REQUIRE(op::metal_native::naxAttentionAnswers());
 }
 
 CATCH_TEST_CASE("test Metal attention refuses the masks it does not define", "[op][metal]") {
@@ -734,20 +1009,28 @@ CATCH_TEST_CASE("test Metal attention refuses the masks it does not define", "[o
 
   // Shapes the kernel takes -- half and float, heads of 64 and 32, a few dozen keys -- so that a
   // mask that is not one reaches the kernel's dispatch rather than the composition's, where a
-  // block size was once run as no mask at all. A block mask has no kernel here and no
-  // composition.
-  Tensor q = randn({1, 2, 16, 64});
-  Tensor k = randn({1, 2, 16, 64});
-  Tensor qh = toMetal(q, DType::kFloat16);
-  Tensor kh = toMetal(k, DType::kFloat16);
+  // block size was once run as no mask at all.
+  Tensor qh = toMetal(randn({1, 2, 16, 64}), DType::kFloat16);
+  Tensor kh = toMetal(randn({1, 2, 16, 64}), DType::kFloat16);
+  Tensor shorter = toMetal(randn({1, 2, 8, 64}), DType::kFloat16);
+  Tensor longer = toMetal(randn({1, 2, 24, 64}), DType::kFloat16);
   CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, MaskType::kNone, 4));
   CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, static_cast<MaskType>(7)));
-  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, MaskType::kBlockCausal, 4));
-  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, MaskType::kBlockDiagonal, 4));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, kh, kh, MaskType::kBlockCausal, 0));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, shorter, shorter, MaskType::kBlockCausal, 4));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qh, longer, longer, MaskType::kBlockDiagonal, 4));
+  // Both block masks are the kernel's, here.
+  CATCH_REQUIRE_NOTHROW(fl::test::attention(mtl(), qh, kh, kh, MaskType::kBlockCausal, 4));
+  CATCH_REQUIRE_NOTHROW(fl::test::attention(mtl(), qh, kh, kh, MaskType::kBlockDiagonal, 4));
 
   Tensor qf = toMetal(randn({2, 4, 37, 32}));
   Tensor kf = toMetal(randn({2, 2, 37, 32}));
   CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), qf, kf, kf, MaskType::kCausal, 1));
+
+  // A head the kernel was not built for goes to the composition, which has no block mask.
+  Tensor q80 = toMetal(randn({1, 2, 16, 80}), DType::kFloat16);
+  CATCH_REQUIRE_NOTHROW(fl::test::attention(mtl(), q80, q80, q80, MaskType::kCausal));
+  CATCH_REQUIRE_THROWS(fl::test::attention(mtl(), q80, q80, q80, MaskType::kBlockCausal, 4));
 }
 
 namespace {
