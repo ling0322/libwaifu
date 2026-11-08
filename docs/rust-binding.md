@@ -1,7 +1,6 @@
 # The Rust binding: `waifu`
 
-Status: designed, not implemented. It is written against the C API's ABI 4
-([ffi-abi4.md](ffi-abi4.md)), and lands after it.
+Status: implemented, in `bindings/rust`, against the C API's ABI 4 ([ffi-abi4.md](ffi-abi4.md)).
 
 `bindings/rust` is a Rust crate over libwaifu that compiles none of it: it opens a built
 `libwaifu.so` (`libwaifu.dylib`, `waifu.dll`) when asked to, finds the functions `waifu.h`
