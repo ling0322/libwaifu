@@ -17,7 +17,12 @@ LIBWAIFU_LIB_DIR="$PWD/build" cargo test --manifest-path waifu/Cargo.toml
 cargo test -p waifu-modelmanager
 LIBWAIFU_LIB_DIR="$PWD/build" cargo test -p waifu-cli
 LIBWAIFU_LIB_DIR="$PWD/build" cargo build -p waifu-tools
+(cd bindings/rust && CARGO_TARGET_DIR="$PWD/../../target" LIBWAIFU_LIB_DIR="$PWD/../../build" \
+    LIBWAIFU_PATH="$PWD/../../build/libwaifu.so" cargo test)
 ```
+
+`bindings/rust` is a workspace of its own, which the root's commands do not reach. On macOS its
+`LIBWAIFU_PATH` is `build/libwaifu.dylib`.
 
 `LIBWAIFU_LIB_DIR` must be absolute because the build scripts run from their crates' directories.
 
@@ -28,6 +33,7 @@ the result with it:
 
 ```bash
 cargo fmt --all
+(cd bindings/rust && cargo fmt)
 ```
 
 ## Licence
@@ -114,6 +120,20 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 ## Apps
 
 Do not change the behavior of `waifu-app/swiftui` or `waifu-app/wpf` unless the user asks.
+
+## C API and bindings
+
+The C API and the language bindings are fixed: `waifu/src/c_api.rs` and the `waifu/include/waifu.h`
+written from it, `bindings/`, and the documents that are their contract -- `docs/ffi-abi4.md` and
+`docs/rust-binding.md`. **Do not change them without a human's explicit approval in the current
+conversation.**
+
+- That covers any function, type, field, enum value or name added, removed or renamed, and any
+  behavior the documents promise -- a change that looks compatible, and a bug fix, included.
+- Propose the change, say why, and wait for the answer. Work that needs it stops there; do not
+  build around it in the meantime.
+- Implementing what the documents already say is not a change. Where the code and the documents
+  disagree, ask which is right rather than fixing either.
 
 ## Git
 

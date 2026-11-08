@@ -5,4 +5,6 @@ members = [
     "waifu-modelmanager",
     "waifu-tools",
 ]
+# The Rust binding is a workspace of its own: it compiles none of the engine.
+exclude = ["bindings/rust"]
 resolver = "2"
