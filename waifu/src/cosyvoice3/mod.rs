@@ -491,7 +491,7 @@ impl CosyVoice3 {
     ///
     /// Refused before anything is said where it cannot be done: at a speed, which upstream does
     /// not stream either, or where the DiT's attention in blocks has no kernel -- anywhere but
-    /// CUDA at half on Ampere or later.
+    /// CUDA at half on Ampere or later, and Metal.
     pub fn say_streaming(
         &self,
         text: &str,
@@ -514,7 +514,8 @@ impl CosyVoice3 {
     }
 
     /// Whether the DiT's attention in blocks runs here, tried on a block of nothing at the type
-    /// the DiT runs at. Only CUDA's kernel takes blocks, and only at half on Ampere or later.
+    /// the DiT runs at. CUDA's kernel takes blocks at half on Ampere or later, and Metal's at half
+    /// or float; the processor has none.
     pub(crate) fn streams(&self) -> Result<()> {
         let config = self.flow.config();
         let dtype = self.precision.flow;
@@ -531,7 +532,8 @@ impl CosyVoice3 {
             Ok(_) => Ok(()),
             Err(error) => Err(Error::model(format!(
                 "a streaming reading draws with the DiT's attention in blocks, which nothing \
-                 runs on {:?} at {dtype:?}: only CUDA does, at half, on Ampere or later ({error})",
+                 runs on {:?} at {dtype:?}: CUDA does, at half, on Ampere or later, and Metal \
+                 ({error})",
                 self.device
             ))),
         }

@@ -57,9 +57,12 @@ work goes to the GPU in batches without anyone waiting.
   on the neural accelerators where there are any. Convolution is an implicit GEMM on either --
   `C (K, P*Q) = W (K, C*R*S) unfold(x)` -- with the unfolded input gathered a chunk at a time into
   threadgroup memory, the next chunk read into registers while the accelerators work on this one.
-- **Attention**: a fused kernel (online softmax, nothing written but the output) for up to 256 keys
-  -- a prompt's 77 tokens, attended to from every pixel. Past that, the composition (matmul,
-  softmax, matmul), whose products are the GEMMs above, is the faster.
+- **Attention**: a fused kernel (online softmax in float, nothing written but the output) under
+  every mask: `nax_attention` on the neural accelerators, in half, heads of 32, 64 and 128, at every
+  length; elsewhere, and in float, a simdgroup-matrix kernel at every length but for a head of 128
+  in half past 256 keys, where the composition (matmul, softmax, matmul) is the faster. The
+  composition, which also takes every head the kernels were not built for -- a VAE's single one of
+  512 or 1152 -- keeps half's scores in float, since a model's can be past what half holds.
 
 ## Weights on the disk
 

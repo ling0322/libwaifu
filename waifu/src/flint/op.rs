@@ -214,7 +214,8 @@ pub enum Unary {
 /// | `BlockDiagonal(n)` | `p / n * n` | `min(S - 1, p / n * n + n - 1)` |
 ///
 /// The block masks have no composition: where no kernel takes one it fails. Today that is CUDA's
-/// fused kernel alone, in half, on Ampere and after.
+/// fused kernel, in half, on Ampere and after, and Metal's, in half or float, at the heads it was
+/// built for (32, 64 and 128 in half, 32 and 64 in float).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MaskType {
     /// Every key.

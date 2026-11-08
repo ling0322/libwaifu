@@ -496,7 +496,8 @@ impl Engine {
     }
 
     /// As [`load`](Engine::load), for a voice that is to stream: one that cannot on this device --
-    /// CosyVoice3 anywhere but CUDA at half on Ampere or later -- is let go of again, and the load
+    /// CosyVoice3 on the processor, or on CUDA other than at half on Ampere or later -- is let go
+    /// of again, and the load
     /// fails with [`Failure::Model`] saying why.
     pub fn load_for_streaming(
         &self,

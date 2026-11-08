@@ -54,9 +54,10 @@ constant constexpr int kTileN = 128;
 
 using Extents = dextents<int32_t, 2>;
 
-template <typename T, bool kTransposeB>
+// C in `C`: T's own, or float for a product of half kept as the sum was.
+template <typename T, typename C, bool kTransposeB>
 kernel void nax_matmul(
-    device T *c [[buffer(0)]],
+    device C *c [[buffer(0)]],
     device T *a [[buffer(1)]],
     device T *b [[buffer(2)]],
     constant NaxGemmParams &p [[buffer(3)]],
@@ -74,7 +75,7 @@ kernel void nax_matmul(
       b + b0 * p.strideB0 + b1 * p.strideB1,
       kTransposeB ? Extents(p.K, p.N) : Extents(p.N, p.K),
       array<int32_t, 2>{1, int32_t(p.ldb)});
-  tensor<device T, Extents, tensor_inline> C(
+  tensor<device C, Extents, tensor_inline> product(
       c + batch * p.M * p.N,
       Extents(p.N, p.M),
       array<int32_t, 2>{1, int32_t(p.N)});
@@ -87,15 +88,16 @@ kernel void nax_matmul(
   int n0 = group.x * kTileN;
   auto tileA = A.slice(0, m0);
   auto tileB = kTransposeB ? B.slice(0, n0) : B.slice(n0, 0);
-  auto tileC = C.slice(n0, m0);
+  auto tileC = product.slice(n0, m0);
   op.run(tileA, tileB, tileC);
 }
 
-#define FLINT_NAX_MATMUL(T, S)                                                                  \
-  template [[host_name("nax_matmul_nn_" S)]] kernel void nax_matmul<T, false>(                  \
-      device T *, device T *, device T *, constant NaxGemmParams &, uint3);                     \
-  template [[host_name("nax_matmul_nt_" S)]] kernel void nax_matmul<T, true>(                   \
-      device T *, device T *, device T *, constant NaxGemmParams &, uint3);
+#define FLINT_NAX_MATMUL(T, C, S)                                                               \
+  template [[host_name("nax_matmul_nn_" S)]] kernel void nax_matmul<T, C, false>(               \
+      device C *, device T *, device T *, constant NaxGemmParams &, uint3);                     \
+  template [[host_name("nax_matmul_nt_" S)]] kernel void nax_matmul<T, C, true>(                \
+      device C *, device T *, device T *, constant NaxGemmParams &, uint3);
 
-FLINT_NAX_MATMUL(half, "f16")
-FLINT_NAX_MATMUL(float, "f32")
+FLINT_NAX_MATMUL(half, half, "f16")
+FLINT_NAX_MATMUL(float, float, "f32")
+FLINT_NAX_MATMUL(half, float, "f16_f32")

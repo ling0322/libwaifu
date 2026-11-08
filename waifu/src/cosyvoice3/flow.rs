@@ -736,7 +736,8 @@ impl Flow {
     /// condition's [`prefix`](Condition::prefix) that ends on a block are drawn the same in it as
     /// in the whole -- which is what lets a streaming reading draw a hop at a time.
     ///
-    /// Only an attention kernel that takes blocks runs it: CUDA's, at half, on Ampere or later.
+    /// Only an attention kernel that takes blocks runs it: CUDA's, at half, on Ampere or later, and
+    /// Metal's, at half or float.
     pub fn draw_in_blocks(
         &self,
         condition: &Condition,

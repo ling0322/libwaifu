@@ -159,11 +159,14 @@ and a sentence of about 20, so a hop takes at most about a second -- and the lan
 while it does. On the RTX 5060 Ti, with the 9.1 s recording and 23 s of Chinese, the first 1.76 s
 are handed over 0.59 s in, and every later part before the one ahead of it has finished playing;
 the reading takes 8.8 s, where `say` takes 5.0. `say` takes 3.3 s to its first sentence, which a reading a sentence
-at a time used to start with.
+at a time used to start with. On an M5 Pro, the half package, with a 5.0 s recording and 9.2 s of
+Chinese: the first 0.88 s are handed over 0.75 s in, the second 0.2 s after the first has played,
+and every later part before the one ahead of it has finished; the reading takes 5.3 s, where `say`
+takes 3.4.
 
 Streaming is refused before anything is said where it cannot be done: at a speed other than one,
 which upstream refuses too, or where no attention kernel takes blocks -- anywhere but CUDA at half,
-on Ampere or later. It is not a reading a sentence at a time instead.
+on Ampere or later, and Metal. It is not a reading a sentence at a time instead.
 
 ## Voice conversion
 
@@ -267,7 +270,7 @@ float32 takes 861.
 
 ## Not here
 
-Streaming anywhere but CUDA: Metal's attention kernel does not take blocks yet. A DiT that draws
+Streaming on the processor, whose attention has no block mask. A DiT that draws
 only each new hop, keeping what it computed of the frames before, rather than all of them again.
 A place on the page to type the recording's transcript.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids

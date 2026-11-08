@@ -48,8 +48,33 @@ struct AttentionParams {
   uint vStrideH;
   uint vStrideL;
   float scale;
-  uint causal;  // the last query sees every key, the first keyLength - queryLength + 1
+  // The mask, as Operators::attention has it: a MaskType -- 0 none, 1 causal, 2 block causal, 3
+  // block diagonal -- and for the block masks how many keys a block is, counted from key 0. Under
+  // the causal mask the last query sees every key and the first keyLength - queryLength + 1; under
+  // a block diagonal one a query sees its own block only.
+  uint maskType;
+  uint blockSize;
 };
+
+constant constexpr uint kMaskNone = 0;
+constant constexpr uint kMaskCausal = 1;
+constant constexpr uint kMaskBlockDiagonal = 3;
+
+/// The first key a query at `position` -- its index plus keyLength - queryLength -- may see: the
+/// first of its own block under a block diagonal mask, and key 0 under every other.
+inline uint firstKeyOf(constant AttentionParams &p, uint position) {
+  if (p.maskType != kMaskBlockDiagonal) return 0;
+  return (position / p.blockSize) * p.blockSize;
+}
+
+/// The last key a query at `position` may see: every key with no mask, the position itself under
+/// the causal one, and the last of its block, or of the keys, whichever comes first, under either
+/// block mask.
+inline uint lastKeyOf(constant AttentionParams &p, uint position) {
+  if (p.maskType == kMaskNone) return p.keyLength - 1;
+  if (p.maskType == kMaskCausal) return position;
+  return min(p.keyLength - 1, (position / p.blockSize) * p.blockSize + p.blockSize - 1);
+}
 
 constant constexpr uint kBlockQ = 32;
 constant constexpr uint kBlockK = 32;
@@ -67,8 +92,12 @@ kernel void attention(
     uint tid [[thread_index_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  // Rows padded so that the loads of one column of 8 x 8 blocks spread over the banks.
-  constexpr uint kStride = D + 8;
+  // Rows unpadded. Padding them to spread a column of 8 x 8 blocks over the banks, as on CUDA,
+  // made this kernel 16 to 29% slower on an M5 Pro -- but only with the keys and the values
+  // padded alike, to a stride not a power of two: D + 4, D + 8 and D + 16 all were, D + 8 for the
+  // keys beside D + 4 for the values was not. Whatever that is, it is the compiler's or the GPU's,
+  // not the banks', and unpadded is the fastest measured.
+  constexpr uint kStride = D;
   threadgroup T keys[kBlockK * kStride];    // and the queries, before the first block
   threadgroup T values[kBlockK * kStride];
   threadgroup float scores[kSimdgroups * 8 * kBlockK];
@@ -107,13 +136,21 @@ kernel void attention(
   uint queryIndex = q0 + sg * 8 + row;
   float rowMax = -INFINITY;
   float rowSum = 0.0f;
-  // The last key this query may see, for a causal mask.
-  uint lastKey = p.causal ? queryIndex + (p.keyLength - p.queryLength) : p.keyLength - 1;
+  // The keys this query may see. A row past the last query sees what the last one does; it is
+  // never written.
+  uint offset = p.keyLength - p.queryLength;
+  uint position = min(queryIndex, p.queryLength - 1) + offset;
+  uint firstKey = firstKeyOf(p, position);
+  uint lastKey = lastKeyOf(p, position);
 
-  for (uint k0 = 0; k0 < p.keyLength; k0 += kBlockK) {
-    // A causal block every query of this threadgroup is before has nothing to add.
-    if (p.causal && k0 > q0 + kBlockQ - 1 + (p.keyLength - p.queryLength)) break;
+  // The keys any row of this threadgroup may see: the rows are queries in order, so the first
+  // row's first key and the last row's last key bound them all. Blocks of keys before the one
+  // and after the other have nothing to add. The same for every thread of the group, so that each
+  // reaches every barrier in the loop.
+  uint keyBegin = (firstKeyOf(p, q0 + offset) / kBlockK) * kBlockK;
+  uint keyEnd = lastKeyOf(p, min(q0 + kBlockQ, p.queryLength) - 1 + offset) + 1;
 
+  for (uint k0 = keyBegin; k0 < keyEnd; k0 += kBlockK) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint i = tid; i < kBlockK * D; i += kThreads) {
       uint key = i / D;
@@ -142,7 +179,7 @@ kernel void attention(
     for (uint c = 0; c < 8; ++c) {
       uint column = quarter * 8 + c;
       uint key = k0 + column;
-      bool seen = key < p.keyLength && key <= lastKey;
+      bool seen = key >= firstKey && key <= lastKey;
       x[c] = seen ? myScores[row * kBlockK + column] * p.scale : -INFINITY;
       blockMax = max(blockMax, x[c]);
     }
