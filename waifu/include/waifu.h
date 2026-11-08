@@ -54,6 +54,9 @@ typedef enum {
   WAIFU_STAGE_SAYING = 6,
   // The vocoder.
   WAIFU_STAGE_SOUNDING = 7,
+  // Writing down what a recording says: done/total in tokens; total is an estimate and can be
+  // passed. A transcription's hearing of the recording is WAIFU_STAGE_LISTENING.
+  WAIFU_STAGE_WRITING = 8,
 } WaifuStage;
 
 // What a call or a job came to.
@@ -303,6 +306,32 @@ typedef struct {
 
 typedef void (*WaifuLayersCompleteCallback)(void *user_data, const WaifuLayersCompletionEvent *event);
 
+typedef struct {
+  // sizeof(WaifuTranscribeRequest), as the caller was compiled with.
+  uint32_t struct_size;
+  // The recording: any rate, any length; resampled and cut into pieces by the engine.
+  const WaifuAudio *audio;
+  // The language it is in, by a name in the model's description's `languages` -- "English",
+  // "chinese" -- or NULL or "" for the model to tell.
+  const char *language;
+  // Words that help it hear the recording -- names, terms, what it is about -- or NULL or "".
+  const char *context;
+} WaifuTranscribeRequest;
+
+typedef struct {
+  WaifuStatus status;
+  // What was said, UTF-8; NULL unless status.code is WAIFU_OK, and "" for a recording with
+  // nothing said in it.
+  const char *text;
+  // The language it was said in, as the model names it -- "Chinese" -- or several, comma
+  // separated, for a long recording that changes; "" where none was heard. NULL unless
+  // status.code is WAIFU_OK.
+  const char *language;
+} WaifuTranscriptCompletionEvent;
+
+typedef void (*WaifuTranscriptCompleteCallback)(void *user_data,
+                                                const WaifuTranscriptCompletionEvent *event);
+
 // One layer of a document to write.
 typedef struct {
   const char *name;
@@ -451,6 +480,13 @@ WaifuJob waifu_engine_layers_async(WaifuEngine *engine,
                                    void *user_data,
                                    WaifuProgressCallback on_progress,
                                    WaifuLayersCompleteCallback on_complete);
+
+// Writes down what is said in a recording, with a model that does that loaded.
+WaifuJob waifu_engine_transcribe_async(WaifuEngine *engine,
+                                       const WaifuTranscribeRequest *request,
+                                       void *user_data,
+                                       WaifuProgressCallback on_progress,
+                                       WaifuTranscriptCompleteCallback on_complete);
 
 // A Photoshop document of `layers`, bottom first, `width` by `height`: what img2layers writes,
 // for a caller that has changed its layers -- renamed them, put them in another order -- to

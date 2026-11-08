@@ -117,11 +117,11 @@ std::vector<float> referenceConv2d(
 }
 
 Tensor toCuda(const Tensor &x, DType dtype) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), x, Device::getCuda()), dtype);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), x, Device::getCuda()), dtype);
 }
 
 Tensor toCpuFloat(const Tensor &x) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), x, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), x, DType::kFloat), Device::getCpu());
 }
 
 bool skipUnavailable() {
@@ -329,8 +329,8 @@ CATCH_TEST_CASE("test conv2d (float)", "[fl][op][cuda][conv2d]") {
 CATCH_TEST_CASE("test conv2d (a shape it cannot take)", "[fl][op][cuda][conv2d]") {
   if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
-  Tensor x = toCuda(F::rand(Device::getCpu(), {1, 4, 8, 8}, DType::kFloat), DType::kFloat16);
-  Tensor w = toCuda(F::rand(Device::getCpu(), {4, 4, 3, 3}, DType::kFloat), DType::kFloat16);
+  Tensor x = toCuda(fl::test::rand(Device::getCpu(), {1, 4, 8, 8}, DType::kFloat), DType::kFloat16);
+  Tensor w = toCuda(fl::test::rand(Device::getCpu(), {4, 4, 3, 3}, DType::kFloat), DType::kFloat16);
   Tensor noBias;
 
   // Wrong rank, channels that do not match the weight, and a kernel larger than what it is given
@@ -338,12 +338,12 @@ CATCH_TEST_CASE("test conv2d (a shape it cannot take)", "[fl][op][cuda][conv2d]"
   CATCH_REQUIRE_THROWS(convolveDirect(x.view({1, 4, 64}), w, noBias, {1, 1, 1, 1}));
   CATCH_REQUIRE_THROWS(
       convolveDirect(
-          toCuda(F::rand(Device::getCpu(), {1, 5, 8, 8}, DType::kFloat), DType::kFloat16),
+          toCuda(fl::test::rand(Device::getCpu(), {1, 5, 8, 8}, DType::kFloat), DType::kFloat16),
           w,
           noBias,
           {1, 1, 1, 1}));
   CATCH_REQUIRE_THROWS(convolveDirect(
-      toCuda(F::rand(Device::getCpu(), {1, 4, 2, 2}, DType::kFloat), DType::kFloat16),
+      toCuda(fl::test::rand(Device::getCpu(), {1, 4, 2, 2}, DType::kFloat), DType::kFloat16),
       w,
       noBias,
       {1, 0, 1, 1}));
@@ -357,11 +357,11 @@ CATCH_TEST_CASE("test conv2d (through the operator interface)", "[fl][op][cuda][
   if (skipUnavailable()) CATCH_SKIP("conv2d not available");
 
   // The same convolution reached the way a layer would reach it.
-  Tensor x = toCuda(F::rand(Device::getCpu(), {2, 4, 8, 8}, DType::kFloat), DType::kFloat16);
-  Tensor w = toCuda(F::rand(Device::getCpu(), {8, 4, 3, 3}, DType::kFloat), DType::kFloat16);
-  Tensor b = toCuda(F::rand(Device::getCpu(), {8}, DType::kFloat), DType::kFloat16);
+  Tensor x = toCuda(fl::test::rand(Device::getCpu(), {2, 4, 8, 8}, DType::kFloat), DType::kFloat16);
+  Tensor w = toCuda(fl::test::rand(Device::getCpu(), {8, 4, 3, 3}, DType::kFloat), DType::kFloat16);
+  Tensor b = toCuda(fl::test::rand(Device::getCpu(), {8}, DType::kFloat), DType::kFloat16);
 
-  Tensor viaOperators = F::conv2d(cudaOps(), x, w, b, 1, 1, 1, 1);
+  Tensor viaOperators = fl::test::conv2d(cudaOps(), x, w, b, 1, 1, 1, 1);
   Tensor direct = convolveDirect(x, w, b, {1, 1, 1, 1});
 
   CATCH_REQUIRE(viaOperators.getShape() == std::vector<int>{2, 8, 8, 8});
@@ -371,10 +371,10 @@ CATCH_TEST_CASE("test conv2d (through the operator interface)", "[fl][op][cuda][
   // What it gets is checked against a written-out reference in cpu/conv2d_test.cc; here it is
   // enough that the two devices agree, since each has been checked against that definition
   // separately.
-  Tensor cpuX = F::toDevice(cudaOps(), F::cast(cudaOps(), x, DType::kFloat), Device::getCpu());
-  Tensor cpuW = F::toDevice(cudaOps(), F::cast(cudaOps(), w, DType::kFloat), Device::getCpu());
-  Tensor cpuB = F::toDevice(cudaOps(), F::cast(cudaOps(), b, DType::kFloat), Device::getCpu());
-  Tensor onHost = F::conv2d(cpuOps(), cpuX, cpuW, cpuB, 1, 1, 1, 1);
+  Tensor cpuX = fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), x, DType::kFloat), Device::getCpu());
+  Tensor cpuW = fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), w, DType::kFloat), Device::getCpu());
+  Tensor cpuB = fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), b, DType::kFloat), Device::getCpu());
+  Tensor onHost = fl::test::conv2d(cpuOps(), cpuX, cpuW, cpuB, 1, 1, 1, 1);
   CATCH_REQUIRE(onHost.getShape() == std::vector<int>{2, 8, 8, 8});
   CATCH_REQUIRE(cpuOps()->allClose(onHost, toCpuFloat(direct), 2e-2f));
 }
@@ -421,11 +421,11 @@ CATCH_TEST_CASE("test conv2d (cutlass refuses what it cannot do)", "[fl][op][cud
 
   // A grouped convolution needs another instantiation and nothing here asks for one, so it is
   // refused rather than answered wrongly. Nothing else about the operator is narrower than cuDNN.
-  Tensor x = F::cast(cudaOps(), 
-      F::toDevice(cudaOps(), F::rand(Device::getCpu(), {2, 8, 6, 6}, DType::kFloat), Device::getCuda()),
+  Tensor x = fl::test::cast(cudaOps(), 
+      fl::test::toDevice(cudaOps(), fl::test::rand(Device::getCpu(), {2, 8, 6, 6}, DType::kFloat), Device::getCuda()),
       DType::kFloat16);
-  Tensor w = F::cast(cudaOps(), 
-      F::toDevice(cudaOps(), F::rand(Device::getCpu(), {8, 4, 3, 3}, DType::kFloat), Device::getCuda()),
+  Tensor w = fl::test::cast(cudaOps(), 
+      fl::test::toDevice(cudaOps(), fl::test::rand(Device::getCpu(), {8, 4, 3, 3}, DType::kFloat), Device::getCuda()),
       DType::kFloat16);
   CATCH_REQUIRE_THROWS(convolveDirect(x, w, Tensor(), {1, 1, 1, 2}, op::cuda::conv2dCutlass));
 }

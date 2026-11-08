@@ -219,6 +219,9 @@ pub enum WaifuStage {
     WAIFU_STAGE_SAYING = 6,
     /// The vocoder.
     WAIFU_STAGE_SOUNDING = 7,
+    /// Writing down what a recording says: done/total in tokens; total is an estimate and can be
+    /// passed. A transcription's hearing of the recording is WAIFU_STAGE_LISTENING.
+    WAIFU_STAGE_WRITING = 8,
 }
 
 #[repr(C)]

@@ -75,6 +75,11 @@ cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
 cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
     --test cosyvoice3 -- --ignored --test-threads=1
 
+# waifu/src/qwen3_asr/, waifu/src/transcription.rs, tools/qwen3_asr_*
+# needs models/qwen3-asr.yaml and models/qwen3-asr_test.safetensors; docs/qwen3_asr.md says how
+cargo test --release --manifest-path waifu/Cargo.toml --no-fail-fast \
+    --test qwen3_asr -- --ignored --test-threads=1
+
 # waifu/src/indextts/, waifu/src/text_normalizer/, tools/indextts_*
 # (campplus.rs, features.rs and text_normalizer/: run cosyvoice3's too)
 # needs models/indextts25.yaml and the two recordings tools/indextts_reference_voices.py writes

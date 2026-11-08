@@ -49,7 +49,7 @@ Tensor RefMatMulFp32(const Tensor &A, const Tensor &B) {
   CATCH_REQUIRE(A.getShape(1) == B.getShape(0));
   CATCH_REQUIRE(A.getDType() == DType::kFloat);
 
-  Tensor C = F::zeros(Device::getCpu(), {A.getShape(0), B.getShape(1)}, DType::kFloat);
+  Tensor C = fl::test::zeros(Device::getCpu(), {A.getShape(0), B.getShape(1)}, DType::kFloat);
   float *dataC = getDataPtrCpu<float>(C);
   const float *dataA = getDataPtrCpu<float>(A), *dataB = getDataPtrCpu<float>(B);
   int stride0A = A.getStride(0);
@@ -72,25 +72,25 @@ Tensor RefMatMulFp32(const Tensor &A, const Tensor &B) {
 }
 
 void testGEMM(int m, int k, int n, bool transa, bool transb) {
-  Tensor A = transa ? F::rand(Device::getCpu(), {k, m}, DType::kFloat) : F::rand(Device::getCpu(), {m, k}, DType::kFloat);
-  Tensor B = transb ? F::rand(Device::getCpu(), {n, k}, DType::kFloat) : F::rand(Device::getCpu(), {k, n}, DType::kFloat);
+  Tensor A = transa ? fl::test::rand(Device::getCpu(), {k, m}, DType::kFloat) : fl::test::rand(Device::getCpu(), {m, k}, DType::kFloat);
+  Tensor B = transb ? fl::test::rand(Device::getCpu(), {n, k}, DType::kFloat) : fl::test::rand(Device::getCpu(), {k, n}, DType::kFloat);
 
   if (transa) A = A.transpose(0, 1);
   if (transb) B = B.transpose(0, 1);
 
-  Tensor C = F::matmul(cpuOps(), A, B);
+  Tensor C = fl::test::matmul(cpuOps(), A, B);
   Tensor C_ref = RefMatMulFp32(A, B);
 
   CATCH_REQUIRE(cpuOps()->allClose(C, C_ref));
 }
 
 void testGEMV(int M, int N, bool TransA) {
-  Tensor A = TransA ? F::rand(Device::getCpu(), {N, M}, DType::kFloat) : F::rand(Device::getCpu(), {M, N}, DType::kFloat);
-  Tensor x = F::rand(Device::getCpu(), {N, 1}, DType::kFloat);
+  Tensor A = TransA ? fl::test::rand(Device::getCpu(), {N, M}, DType::kFloat) : fl::test::rand(Device::getCpu(), {M, N}, DType::kFloat);
+  Tensor x = fl::test::rand(Device::getCpu(), {N, 1}, DType::kFloat);
 
   if (TransA) A = A.transpose(0, 1);
 
-  Tensor C = F::matmul(cpuOps(), A, x);
+  Tensor C = fl::test::matmul(cpuOps(), A, x);
   Tensor C_ref = RefMatMulFp32(A, x);
 
   CATCH_REQUIRE(cpuOps()->allClose(C, C_ref));
@@ -164,19 +164,19 @@ CATCH_TEST_CASE("float16 matmul agrees with float32", "[core][nn][gemm]") {
     }
 
     // cast asks for a contiguous tensor, so B is transposed once it has been cast.
-    Tensor hA = F::rand(Device::getCpu(), shapeA, DType::kFloat);
-    Tensor hB = F::rand(Device::getCpu(), shapeB, DType::kFloat);
-    hA = F::cast(cpuOps(), hA, DType::kFloat16);
-    hB = F::cast(cpuOps(), hB, DType::kFloat16);
-    Tensor A = F::cast(cpuOps(), hA, DType::kFloat);
-    Tensor B = F::cast(cpuOps(), hB, DType::kFloat);
+    Tensor hA = fl::test::rand(Device::getCpu(), shapeA, DType::kFloat);
+    Tensor hB = fl::test::rand(Device::getCpu(), shapeB, DType::kFloat);
+    hA = fl::test::cast(cpuOps(), hA, DType::kFloat16);
+    hB = fl::test::cast(cpuOps(), hB, DType::kFloat16);
+    Tensor A = fl::test::cast(cpuOps(), hA, DType::kFloat);
+    Tensor B = fl::test::cast(cpuOps(), hB, DType::kFloat);
     if (transB) {
       hB = hB.transpose(-1, -2);
       B = B.transpose(-1, -2);
     }
 
-    Tensor C = F::cast(cpuOps(), F::matmul(cpuOps(), hA, hB), DType::kFloat);
-    Tensor C_ref = F::matmul(cpuOps(), A, B);
+    Tensor C = fl::test::cast(cpuOps(), fl::test::matmul(cpuOps(), hA, hB), DType::kFloat);
+    Tensor C_ref = fl::test::matmul(cpuOps(), A, B);
 
     CATCH_REQUIRE(cpuOps()->allClose(C, C_ref, 1e-2, 1e-2));
   };

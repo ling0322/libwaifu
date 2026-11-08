@@ -24,6 +24,9 @@
 //! two markers the sequence is built with; `llm_decoder` scores the next speech token. Qwen's own
 //! text head is never used, and is not in the package.
 //!
+//! A similar implementation -- a Qwen3, with the same prefill and step graphs and rotary table --
+//! lives in `qwen3_asr::decoder`; a fix to the shared parts of one likely belongs in the other too.
+//!
 //! # What the sequence is made of
 //!
 //! ```text

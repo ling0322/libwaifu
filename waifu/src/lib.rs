@@ -74,6 +74,7 @@ pub mod log;
 mod manifest;
 mod mapping;
 pub mod progress;
+pub mod qwen3_asr;
 pub mod qwen_image;
 mod qwen_vae;
 mod reader;
@@ -89,6 +90,7 @@ mod tensor_file;
 /// normalizer IndexTTS-2.5 and CosyVoice3 both read their text through.
 pub mod text_normalizer;
 mod tokenizer;
+pub mod transcription;
 /// Reading and writing WAV, which is the one audio format this crate handles itself: a header, a
 /// format chunk and the samples, and no codec to depend on.
 pub mod wav;
@@ -106,6 +108,7 @@ pub use krea2::Krea2;
 pub use layers::{Conv1d, Conv2d, ConvTranspose1d, Embedding, GroupNorm, LayerNorm, Linear};
 pub use manifest::Manifest;
 pub use mapping::Mapping;
+pub use qwen3_asr::Qwen3Asr;
 pub use qwen_image::QwenImage;
 pub use reader::BinaryRead;
 pub use sdxl::{
@@ -119,6 +122,7 @@ pub use speech::{
 };
 pub use tensor_file::read_safetensors;
 pub use tokenizer::Tokenizer;
+pub use transcription::{Transcriber, Transcript, TranscriptionOptions, TranscriptionProgress};
 pub use wav::Sound;
 
 /// The suffix a model's manifest carries, after the model's id: `sdxl-base.yaml`.

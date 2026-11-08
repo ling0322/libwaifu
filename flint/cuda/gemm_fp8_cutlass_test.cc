@@ -48,11 +48,11 @@ Operators *cpuOps() {
 }
 
 Tensor toCudaHalf(const Tensor &a) {
-  return F::cast(cudaOps(), F::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
+  return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), a, Device::getCuda()), DType::kFloat16);
 }
 
 Tensor toCpuFloat(const Tensor &a) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 /// allClose compares magnitudes, and a NaN is not larger than anything, so it slips through the
@@ -111,7 +111,7 @@ Fp8Weight makeWeight(int n, int k, const std::vector<uint8_t> &bytes) {
     code[i].v = bytes[i];
     value[i] = decodeE4M3(bytes[i]);
   }
-  return {F::toDevice(cudaOps(), codes, Device::getCuda()), values};
+  return {fl::test::toDevice(cudaOps(), codes, Device::getCuda()), values};
 }
 
 /// Codes from all of E4M3 but its two NaNs, which a package never holds.
@@ -127,7 +127,7 @@ Fp8Weight randomWeight(int n, int k) {
 
 /// <float>(1) on the device.
 Tensor cudaScale(float value) {
-  return F::toDevice(cudaOps(), Tensor::create<float>({1}, {value}), Device::getCuda());
+  return fl::test::toDevice(cudaOps(), Tensor::create<float>({1}, {value}), Device::getCuda());
 }
 
 /// What `A` (..., k) times a weight of `rows` rows is written into.
@@ -145,7 +145,7 @@ Tensor gemm(const Tensor &A, const Fp8Weight &weight, const Tensor &scale) {
 
 /// The weight as a half GEMM sees it: the codes' values times the scale, transposed.
 Tensor dequantized(const Fp8Weight &weight, float scale) {
-  return toCudaHalf(F::mul(cpuOps(), weight.values, scale)).transpose(0, 1);
+  return toCudaHalf(fl::test::mul(cpuOps(), weight.values, scale)).transpose(0, 1);
 }
 
 bool skipUnavailable() {
@@ -159,10 +159,10 @@ constexpr float kScale = 0.0137f;
 /// The reference multiplies in half by the weight the codes stand for, so what is compared is the
 /// mainloop and the epilogue.
 bool gemmMatchesReference(int m, int n, int k) {
-  Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {m, k}));
+  Tensor a = toCudaHalf(fl::test::randNormal(Device::getCpu(), {m, k}));
   Fp8Weight w = randomWeight(n, k);
 
-  Tensor expected = F::matmul(cudaOps(), a, dequantized(w, kScale));
+  Tensor expected = fl::test::matmul(cudaOps(), a, dequantized(w, kScale));
   Tensor actual = gemm(a, w, cudaScale(kScale));
 
   if (actual.getShape() != std::vector<int>{m, n}) return false;
@@ -211,7 +211,7 @@ CATCH_TEST_CASE("test gemmFp8 (batch axes)", "[fl][op][cuda][cutlass][fp8]") {
   Fp8Weight w = randomWeight(64, 128);
   Tensor scale = cudaScale(0.5f);
 
-  Tensor a3 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 128}));
+  Tensor a3 = toCudaHalf(fl::test::randNormal(Device::getCpu(), {2, 3, 128}));
   Tensor out3 = gemm(a3, w, scale);
   CATCH_REQUIRE(out3.getShape() == std::vector<int>{2, 3, 64});
   CATCH_REQUIRE(cpuOps()->allClose(
@@ -220,7 +220,7 @@ CATCH_TEST_CASE("test gemmFp8 (batch axes)", "[fl][op][cuda][cutlass][fp8]") {
       1e-6f,
       1e-6f));
 
-  Tensor a4 = toCudaHalf(F::randNormal(Device::getCpu(), {2, 3, 5, 128}));
+  Tensor a4 = toCudaHalf(fl::test::randNormal(Device::getCpu(), {2, 3, 5, 128}));
   CATCH_REQUIRE(gemm(a4, w, scale).getShape() == std::vector<int>{2, 3, 5, 64});
 }
 
@@ -235,8 +235,8 @@ CATCH_TEST_CASE("test gemmFp8 (reused weight)", "[fl][op][cuda][cutlass][fp8]") 
 
   for (int m : {1, 7, 64}) {
     CATCH_INFO("m = " << m);
-    Tensor a = toCudaHalf(F::randNormal(Device::getCpu(), {m, 256}));
-    CATCH_REQUIRE(relativeRmse(gemm(a, w, scale), F::matmul(cudaOps(), a, reference)) < 5e-3);
+    Tensor a = toCudaHalf(fl::test::randNormal(Device::getCpu(), {m, 256}));
+    CATCH_REQUIRE(relativeRmse(gemm(a, w, scale), fl::test::matmul(cudaOps(), a, reference)) < 5e-3);
   }
 }
 

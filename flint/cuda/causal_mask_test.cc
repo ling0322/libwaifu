@@ -43,7 +43,7 @@ Operators *cpuOps() {
 }
 
 Tensor toCpu(const Tensor &a) {
-  return F::toDevice(cudaOps(), F::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
+  return fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), a, DType::kFloat), Device::getCpu());
 }
 
 }  // namespace
@@ -54,9 +54,9 @@ CATCH_TEST_CASE("test CUDA causalMask", "[op][cuda]") {
   // The CPU's default float type is half, and toCpu() hands back float: the reference is made in
   // float so that the two compare. The mask is 0 and -inf only, which half holds exactly.
   constexpr int Dim = 129;
-  Tensor mask = F::cast(cpuOps(), F::causalMask(Device::getCpu(), Dim), DType::kFloat);
-  Tensor xr = F::softmax(cpuOps(), mask);
-  Tensor x = F::softmax(cudaOps(), F::causalMask(Device::getCuda(), Dim));
+  Tensor mask = fl::test::cast(cpuOps(), fl::test::causalMask(Device::getCpu(), Dim), DType::kFloat);
+  Tensor xr = fl::test::softmax(cpuOps(), mask);
+  Tensor x = fl::test::softmax(cudaOps(), fl::test::causalMask(Device::getCuda(), Dim));
 
   CATCH_REQUIRE(cpuOps()->allClose(toCpu(x), xr, 1e-3, 1e-4));
 }
@@ -67,7 +67,7 @@ CATCH_TEST_CASE("test CUDA causalMask (structure)", "[op][cuda]") {
   // Comparing through softmax hides which side of the diagonal is masked, so check the raw mask:
   // zero on and below the diagonal, -inf strictly above it.
   constexpr int Dim = 5;
-  Tensor mask = toCpu(F::causalMask(Device::getCuda(), Dim));
+  Tensor mask = toCpu(fl::test::causalMask(Device::getCuda(), Dim));
   CATCH_REQUIRE(mask.getShape() == std::vector<int>{Dim, Dim});
 
   const float *data = mask.getInternalData()->getData<float>(mask.getInternalOffset());
@@ -90,7 +90,7 @@ CATCH_TEST_CASE("test CUDA causalMask (sizes)", "[op][cuda]") {
   // Rows are filled by a grid 256 threads wide, so sizes either side of that boundary decide
   // whether the far end of a row is written at all. Size 1 is the single unmasked element.
   for (int size : {1, 2, 255, 256, 257}) {
-    Tensor mask = toCpu(F::causalMask(Device::getCuda(), size));
+    Tensor mask = toCpu(fl::test::causalMask(Device::getCuda(), size));
     CATCH_INFO("size = " << size);
     CATCH_REQUIRE(mask.getShape() == std::vector<int>{size, size});
 

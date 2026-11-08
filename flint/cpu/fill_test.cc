@@ -40,7 +40,7 @@ namespace op {
 namespace cpu {
 
 CATCH_TEST_CASE("test CPU tensor creation", "[core][nn][operators]") {
-  Tensor zeros = F::zeros(Device::getCpu(), {2, 3}, DType::kFloat);
+  Tensor zeros = fl::test::zeros(Device::getCpu(), {2, 3}, DType::kFloat);
   CATCH_REQUIRE(cpuOps()->allClose(zeros, Tensor::create<float>({2, 3}, {0, 0, 0, 0, 0, 0})));
 
   Tensor filled = F::empty(Device::getCpu(), {2, 3}, DType::kFloat);

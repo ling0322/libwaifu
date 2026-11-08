@@ -22,7 +22,7 @@
 use std::time::Instant;
 
 use crate::see_through::SeeThroughProgress;
-use crate::{ConversionProgress, GenerationProgress, SpeechProgress};
+use crate::{ConversionProgress, GenerationProgress, SpeechProgress, TranscriptionProgress};
 
 /// How much of a run the parts that are not steps are worth, when a bar is drawn from them.
 ///
@@ -164,6 +164,12 @@ impl Convert {
     }
 }
 
+/// A transcription in flight: what it last said, and the last count of tokens it gave.
+#[derive(Clone)]
+pub struct Transcribing {
+    pub progress: TranscriptionProgress,
+}
+
 /// What the worker is busy with, which is the only thing on the screen that moves on its own.
 #[derive(Clone)]
 pub enum Doing {
@@ -182,6 +188,7 @@ pub enum Doing {
         steps: i32,
         depth_steps: i32,
     },
+    Transcribing(Transcribing),
 }
 
 impl Doing {
@@ -205,6 +212,7 @@ impl Doing {
                 steps,
                 depth_steps,
             } => Some(layered(*progress, *steps, *depth_steps)),
+            Doing::Transcribing(transcribing) => Some(transcribed(transcribing.progress)),
         }
     }
 
@@ -272,6 +280,32 @@ impl Doing {
                     SeeThroughProgress::Assembling => "cutting the layers into parts".to_string(),
                 }
             }
+            Doing::Transcribing(transcribing) => match transcribing.progress {
+                TranscriptionProgress::Listening { total: 1, .. } => {
+                    "listening to the recording".to_string()
+                }
+                TranscriptionProgress::Listening { done, total } => {
+                    format!("listening to piece {} of {total}", (done + 1).min(total))
+                }
+                // "of about", as a reading's: how many tokens is the model's to find out.
+                TranscriptionProgress::Writing { done, expected } => {
+                    format!("token {done} of about {expected}")
+                }
+            },
+        }
+    }
+}
+
+/// How far along writing down a recording is: the tokens written against the estimate, which a
+/// recording hears before it writes. Held short of the end, which it reaches when there are words.
+fn transcribed(progress: TranscriptionProgress) -> f64 {
+    match progress {
+        TranscriptionProgress::Listening { done, total } => {
+            0.05 * f64::from(done.max(0)) / f64::from(total.max(1))
+        }
+        TranscriptionProgress::Writing { done, expected } => {
+            let share = f64::from(done.max(0)) / f64::from(expected.max(1));
+            (0.05 + 0.95 * share).min(HELD)
         }
     }
 }

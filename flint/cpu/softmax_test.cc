@@ -44,12 +44,12 @@ namespace cpu {
 CATCH_TEST_CASE("test softmax", "[core][nn][operators]") {
   Tensor input = Tensor::create<float>({3}, {0.1f, 0.2f, 0.3f});
   Tensor output = Tensor::create<float>({3}, {0.3006f, 0.3322f, 0.3672f});
-  CATCH_REQUIRE(cpuOps()->allClose(F::softmax(cpuOps(), input), output));
+  CATCH_REQUIRE(cpuOps()->allClose(fl::test::softmax(cpuOps(), input), output));
 
   constexpr float inf = std::numeric_limits<float>::infinity();
   input = Tensor::create<float>({3}, {0.1f, 0.2f, -inf});
   output = Tensor::create<float>({3}, {0.4750f, 0.5250f, 0.0f});
-  CATCH_REQUIRE(cpuOps()->allClose(F::softmax(cpuOps(), input), output));
+  CATCH_REQUIRE(cpuOps()->allClose(fl::test::softmax(cpuOps(), input), output));
 }
 
 }  // namespace cpu

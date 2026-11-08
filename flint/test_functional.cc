@@ -28,7 +28,7 @@
 #include "flint/operators.h"
 
 namespace fl {
-namespace F {
+namespace test {
 
 namespace {
 
@@ -81,7 +81,7 @@ TensorView broadcastTo(TensorView other, TensorView input, const char *name) {
 
 /// A result of `input`'s shape and type, the way every elementwise operator makes one.
 Tensor likeInput(TensorView input) {
-  return emptyLike(input);
+  return F::emptyLike(input);
 }
 
 /// The length a convolution leaves, refused below one.
@@ -104,19 +104,19 @@ void checkConvolution(int stride, int padding, int dilation, int groups, const c
 }  // namespace
 
 Tensor zeros(Device device, lut::Span<const int> shape, DType dtype) {
-  Tensor tensor = empty(device, shape, dtype);
+  Tensor tensor = F::empty(device, shape, dtype);
   getOperators(device.getType())->fill(tensor, 0.0f);
   return tensor;
 }
 
 Tensor rand(Device device, lut::Span<const int> shape, DType dtype) {
-  Tensor tensor = empty(device, shape, dtype);
+  Tensor tensor = F::empty(device, shape, dtype);
   getOperators(device.getType())->rand(tensor);
   return tensor;
 }
 
 Tensor randNormal(Device device, lut::Span<const int> shape) {
-  Tensor tensor = empty(device, shape, DType::kFloat);
+  Tensor tensor = F::empty(device, shape, DType::kFloat);
   getOperators(device.getType())->randNormal(tensor);
   return tensor;
 }
@@ -130,7 +130,7 @@ Tensor arangeLong(Device device, LongType begin, LongType end, LongType step) {
         lut::sprintf("arange: %d elements from %d to %d by %d", numel, begin, end, step));
   }
 
-  Tensor tensor = empty(device, {static_cast<int>(numel)}, DType::kLong);
+  Tensor tensor = F::empty(device, {static_cast<int>(numel)}, DType::kLong);
   if (numel > 0) getOperators(device.getType())->arangeLong(begin, step, tensor);
   return tensor;
 }
@@ -138,7 +138,7 @@ Tensor arangeLong(Device device, LongType begin, LongType end, LongType step) {
 Tensor causalMask(Device device, int n) {
   if (n < 1) THROW(InvalidArg, lut::sprintf("causalMask: a mask of %d positions", n));
   Operators *op = getOperators(device.getType());
-  Tensor mask = empty(device, {n, n}, op->getDefaultFloatType());
+  Tensor mask = F::empty(device, {n, n}, op->getDefaultFloatType());
   op->causalMask(mask);
   return mask;
 }
@@ -158,7 +158,7 @@ Tensor toDevice(Operators *op, const Tensor &input, Device device) {
     source = contiguous(getOperators(side), source);
   }
 
-  Tensor dest = empty(device, source.getShape(), source.getDType());
+  Tensor dest = F::empty(device, source.getShape(), source.getDType());
   op->transfer(source, dest);
   return dest;
 }
@@ -166,7 +166,7 @@ Tensor toDevice(Operators *op, const Tensor &input, Device device) {
 Tensor cast(Operators *op, const Tensor &input, DType dtype) {
   if (input.getDType() == dtype) return input;
 
-  Tensor out = empty(input.getDevice(), input.getShape(), dtype);
+  Tensor out = F::empty(input.getDevice(), input.getShape(), dtype);
   op->cast(input, out);
   return out;
 }
@@ -174,7 +174,7 @@ Tensor cast(Operators *op, const Tensor &input, DType dtype) {
 Tensor contiguous(Operators *op, const Tensor &input) {
   if (input.isContiguous()) return input;
 
-  Tensor out = emptyLike(input);
+  Tensor out = F::emptyLike(input);
   op->copy(input, out);
   return out;
 }
@@ -200,7 +200,7 @@ Tensor cat(Operators *op, TensorView A, TensorView B, int dim) {
   int dB = B.getShape(dim);
   shape[dim] = dA + dB;
 
-  Tensor C = empty(A.getDevice(), shape, A.getDType());
+  Tensor C = F::empty(A.getDevice(), shape, A.getDType());
   op->copy(A, C.slice(dim, {0, dA}));
   op->copy(B, C.slice(dim, {dA, dA + dB}));
   return C;
@@ -230,7 +230,7 @@ Tensor eq(Operators *op, TensorView input, TensorView other) {
   if (input.getDType() != other.getDType()) THROW(InvalidArg, "eq: the two operands differ in type");
   other.throwIfInvalidShape(input.getShape(), "eq");
 
-  Tensor out = empty(input.getDevice(), input.getShape(), DType::kBool);
+  Tensor out = F::empty(input.getDevice(), input.getShape(), DType::kBool);
   op->eq(input, other, out);
   return out;
 }
@@ -291,7 +291,7 @@ Tensor gatedHalf(TensorView input, const char *name) {
   }
   std::vector<int> shape = input.getShape();
   shape.back() /= 2;
-  return empty(input.getDevice(), shape, input.getDType());
+  return F::empty(input.getDevice(), shape, input.getDType());
 }
 
 }  // namespace
@@ -317,7 +317,7 @@ Tensor snake(Operators *op, TensorView input, TensorView alpha, TensorView beta,
 Tensor pad1d(Operators *op, TensorView input, int left, int right, PadMode mode) {
   std::vector<int> shape = input.getShape();
   shape.back() += left + right;
-  Tensor out = empty(input.getDevice(), shape, input.getDType());
+  Tensor out = F::empty(input.getDevice(), shape, input.getDType());
   op->pad1d(input, left, right, mode, out);
   return out;
 }
@@ -332,7 +332,7 @@ Tensor clamp(Operators *op, TensorView input, float lo, float hi) {
 
 Tensor sum(Operators *op, TensorView input, int dim) {
   dim = realDim(input, dim, "sum");
-  Tensor out = empty(input.getDevice(), withoutDim(input, dim), input.getDType());
+  Tensor out = F::empty(input.getDevice(), withoutDim(input, dim), input.getDType());
   op->sum(input, dim, out);
   return out;
 }
@@ -345,13 +345,13 @@ Tensor cumsum(Operators *op, TensorView input, int dim) {
 }
 
 Tensor max(Operators *op, TensorView input) {
-  Tensor out = empty(input.getDevice(), withoutDim(input, input.getDim() - 1), input.getDType());
+  Tensor out = F::empty(input.getDevice(), withoutDim(input, input.getDim() - 1), input.getDType());
   op->max(input, out);
   return out;
 }
 
 Tensor min(Operators *op, TensorView input) {
-  Tensor out = empty(input.getDevice(), withoutDim(input, input.getDim() - 1), input.getDType());
+  Tensor out = F::empty(input.getDevice(), withoutDim(input, input.getDim() - 1), input.getDType());
   op->min(input, out);
   return out;
 }
@@ -392,7 +392,7 @@ Tensor upsampleNearest2d(Operators *op, TensorView input, int scale) {
   if (input.getDim() != 4) THROW(InvalidArg, "upsampleNearest2d: the input is not 4-D");
   if (scale < 1) THROW(InvalidArg, "upsampleNearest2d: the scale must be at least 1");
 
-  Tensor out = empty(
+  Tensor out = F::empty(
       input.getDevice(),
       {input.getShape(0), input.getShape(1), input.getShape(2) * scale, input.getShape(3) * scale},
       input.getDType());
@@ -406,7 +406,7 @@ Tensor upsampleNearest1d(Operators *op, TensorView input, int size) {
 
   std::vector<int> shape = input.getShape();
   shape.back() = size;
-  Tensor out = empty(input.getDevice(), shape, input.getDType());
+  Tensor out = F::empty(input.getDevice(), shape, input.getDType());
   op->upsampleNearest1d(input, out);
   return out;
 }
@@ -441,7 +441,7 @@ Tensor matmul(Operators *op, TensorView A, TensorView B) {
 
   std::vector<int> shape = A.getShape();
   shape.back() = B.getShape(-1);
-  Tensor out = empty(A.getDevice(), shape, A.getDType());
+  Tensor out = F::empty(A.getDevice(), shape, A.getDType());
   op->matmul(A, B, out);
   return out;
 }
@@ -464,7 +464,7 @@ Tensor conv2d(
                              "conv2d");
   int outW = convolvedLength(input.getShape(3), weight.getShape(3), stride, padding, dilation,
                              "conv2d");
-  Tensor out = empty(
+  Tensor out = F::empty(
       input.getDevice(),
       {input.getShape(0), weight.getShape(0), outH, outW},
       input.getDType());
@@ -489,7 +489,7 @@ Tensor conv1d(
   int length = convolvedLength(input.getShape(2), weight.getShape(2), stride, padding, dilation,
                                "conv1d");
   Tensor out =
-      empty(input.getDevice(), {input.getShape(0), weight.getShape(0), length}, input.getDType());
+      F::empty(input.getDevice(), {input.getShape(0), weight.getShape(0), length}, input.getDType());
   op->conv1d(input, weight, bias, stride, padding, dilation, groups, out);
   return out;
 }
@@ -512,7 +512,7 @@ Tensor convTranspose1d(
   if (length < 1) {
     THROW(InvalidArg, lut::sprintf("convTranspose1d: the output would be %d long", length));
   }
-  Tensor out = empty(
+  Tensor out = F::empty(
       input.getDevice(),
       {input.getShape(0), weight.getShape(1) * groups, length},
       input.getDType());
@@ -527,7 +527,7 @@ Tensor stft(Operators *op, TensorView input, TensorView window, int nFft, int ho
   int length = input.getShape(2) + (centered ? 2 * (nFft / 2) : 0);
   if (length < nFft) THROW(InvalidArg, "stft: the input is shorter than one window");
   int frames = (length - nFft) / hop + 1;
-  Tensor out = empty(
+  Tensor out = F::empty(
       input.getDevice(),
       {input.getShape(0), 2 * (nFft / 2 + 1), frames},
       input.getDType());
@@ -547,7 +547,7 @@ Tensor istft(
 
   int length = nFft + hop * (spectrum.getShape(2) - 1) - (centered ? 2 * (nFft / 2) : 0);
   if (length < 1) THROW(InvalidArg, "istft: the spectrum is too short to invert");
-  Tensor out = empty(spectrum.getDevice(), {spectrum.getShape(0), 1, length}, spectrum.getDType());
+  Tensor out = F::empty(spectrum.getDevice(), {spectrum.getShape(0), 1, length}, spectrum.getDType());
   op->istft(spectrum, window, nFft, hop, centered, out);
   return out;
 }
@@ -557,7 +557,7 @@ Tensor lookup(Operators *op, TensorView table, TensorView indices) {
 
   std::vector<int> shape = indices.getShape();
   shape.push_back(table.getShape(1));
-  Tensor out = empty(table.getDevice(), shape, table.getDType());
+  Tensor out = F::empty(table.getDevice(), shape, table.getDType());
   op->lookup(table, indices, out);
   return out;
 }
@@ -578,7 +578,7 @@ Tensor attention(
     THROW(InvalidArg, "attention: the query heads are not a multiple of the key-value heads");
   }
 
-  Tensor out = empty(
+  Tensor out = F::empty(
       q.getDevice(),
       {q.getShape(0), q.getShape(1), q.getShape(2), v.getShape(3)},
       q.getDType());
@@ -599,7 +599,7 @@ Tensor pagedAttention(
     bool causal) {
   if (q.getDim() != 3) THROW(InvalidArg, "pagedAttention: q must be (tokens, heads, headDim)");
 
-  Tensor out = emptyLike(q);
+  Tensor out = F::emptyLike(q);
   op->pagedAttention(
       q,
       keyCache,
@@ -628,7 +628,7 @@ Tensor gatedDeltaNetPrefill(
     THROW(InvalidArg, "gatedDeltaNetPrefill: q and v must be (tokens, heads, headDim)");
   }
 
-  Tensor out = empty(v.getDevice(), {q.getShape(0), v.getShape(1), v.getShape(2)}, v.getDType());
+  Tensor out = F::empty(v.getDevice(), {q.getShape(0), v.getShape(1), v.getShape(2)}, v.getDType());
   op->gatedDeltaNetPrefill(q, k, v, g, beta, cuSeqlens, stateSlots, state, out);
   return out;
 }
@@ -641,10 +641,10 @@ Tensor sample(
     TensorView topPs) {
   if (logits.getDim() != 2) THROW(InvalidArg, "sample: the logits must be (rows, vocabulary)");
 
-  Tensor out = empty(logits.getDevice(), {logits.getShape(0)}, DType::kLong);
+  Tensor out = F::empty(logits.getDevice(), {logits.getShape(0)}, DType::kLong);
   op->sample(logits, temperatures, topKs, topPs, out);
   return out;
 }
 
-}  // namespace F
+}  // namespace test
 }  // namespace fl
