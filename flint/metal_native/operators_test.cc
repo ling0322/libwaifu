@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -437,6 +438,19 @@ CATCH_TEST_CASE("test Metal matmul without the neural accelerators", "[op][metal
 
 namespace {
 
+// `a` on the Metal device in `dtype`, with NaNs after it in its buffer: a kernel that reads past
+// its end has them in what it writes.
+Tensor toMetalWithNaNAfter(const Tensor &a, DType dtype) {
+  std::vector<float> data = values(a);
+  int n = static_cast<int>(data.size());
+  Tensor padded = fl::test::zeros(Device::getCpu(), {n + 64}, DType::kFloat);
+  float *raw = padded.getInternalData()->getData<float>(padded.getInternalOffset());
+  std::copy(data.begin(), data.end(), raw);
+  std::fill(raw + n, raw + n + 64, std::numeric_limits<float>::quiet_NaN());
+  std::vector<int> shape = a.getShape();
+  return toMetal(padded, dtype).slice({0, n}).view(shape);
+}
+
 // The convolutions against the CPU's, on whichever kernels the Metal device has chosen.
 void checkConvolutions() {
   struct Case {
@@ -449,6 +463,11 @@ void checkConvolutions() {
       {1, 8, 10, 10, 8, 3, 1, 2, 2, 1},
       {2, 8, 7, 7, 12, 3, 1, 1, 1, 4},
       {1, 3, 20, 20, 5, 5, 3, 0, 1, 1},
+      // One by one, with fewer channels than a chunk of the reduction and with a chunk and a bit:
+      // the pointwise kernel's, and then, with a stride, the gathering kernel's short one.
+      {2, 4, 9, 9, 8, 1, 1, 0, 1, 1},
+      {2, 36, 6, 6, 8, 1, 1, 0, 1, 1},
+      {2, 36, 9, 9, 8, 1, 2, 0, 1, 1},
   };
 
   for (const Case &c : cases) {
@@ -478,6 +497,18 @@ void checkConvolutions() {
           noBias,
           tol,
           tol));
+
+      // Nothing past the end of the weight or the input is read, so NaNs there do not get in.
+      Tensor poisoned = fl::test::conv2d(
+          mtl(),
+          toMetalWithNaNAfter(input, dtype),
+          toMetalWithNaNAfter(weight, dtype),
+          toMetal(bias, dtype),
+          c.stride,
+          c.padding,
+          c.dilation,
+          c.groups);
+      CATCH_REQUIRE(close(poisoned, reference, tol, tol));
     }
   }
 
@@ -1193,6 +1224,11 @@ CATCH_TEST_CASE("benchmark Metal matmul and conv2d", "[.][metal-benchmark]") {
       {"conv 3x3 2x320x128 f16", 2, 320, 128, 320, DType::kFloat16},
       {"conv 3x3 2x640x64 f16", 2, 640, 64, 640, DType::kFloat16},
       {"conv 3x3 1x256x512 f32", 1, 256, 512, 256, DType::kFloat},
+      // C * 9 not a multiple of the reduction's chunk: a VAE's convolutions in from the latent or
+      // the picture.
+      {"conv 3x3 1x4x128 f16", 1, 4, 128, 512, DType::kFloat16},
+      {"conv 3x3 1x16x128 f16", 1, 16, 128, 512, DType::kFloat16},
+      {"conv 3x3 1x3x1024 f16", 1, 3, 1024, 128, DType::kFloat16},
   };
   for (const ConvCase &c : convs) {
     Tensor x = fl::test::cast(mtl(), fl::test::rand(Device(Device::kMetal), {c.N, c.C, c.H, c.H}, DType::kFloat), c.dtype);

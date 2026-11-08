@@ -61,9 +61,11 @@ constexpr int kNaxTileM = 64;
 constexpr int kNaxTileN = 128;
 constexpr uint32_t kNaxThreads = 128;
 
-// And of kernels/nax/conv2d.metal: output channels by output pixels.
+// And of kernels/nax/conv2d.metal: output channels by output pixels, and the rows of the
+// reduction it gathers at a time.
 constexpr int kNaxConvTileM = 64;
 constexpr int kNaxConvTileN = 128;
+constexpr int kNaxConvTileK = 32;
 
 // In step with NaxGemmParams in kernels/nax/matmul.metal.
 struct NaxGemmParams {
@@ -320,9 +322,15 @@ void conv(
 
   // On the neural accelerators where there are any, with the same parameters.
   if (getContext(x)->hasNax()) {
-    std::string kernel = kernelName(
-        params.pointwise ? "nax_conv2d_pointwise" : "nax_conv2d",
-        x.getDType());
+    // A gathered reduction that is not whole chunks has a kernel of its own, which ends on a
+    // short one.
+    const char *variant = "nax_conv2d";
+    if (params.pointwise) {
+      variant = "nax_conv2d_pointwise";
+    } else if (reduction % kNaxConvTileK != 0) {
+      variant = "nax_conv2d_short";
+    }
+    std::string kernel = kernelName(variant, x.getDType());
     getContext(x)->dispatchGroups(
         kernel.c_str(),
         {getArg(output), getArg(x), getArg(w), b.empty() ? getArg(x) : getArg(b)},
