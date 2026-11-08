@@ -285,14 +285,6 @@ namespace Libwaifu.Gui.ViewModels
             }
         }
 
-        /// <summary>
-        /// A model that is not a voice says so here, in the footnote under what would be read.
-        /// </summary>
-        public string NotAVoiceBecause
-        {
-            get { return Description == null ? null : Description.NotAVoiceBecause; }
-        }
-
         public bool TakesARecording
         {
             get { return Description != null && Description.TakesARecording; }
@@ -431,7 +423,6 @@ namespace Libwaifu.Gui.ViewModels
             foreach (var name in new[]
             {
                 "Speed", "Temperature", "HasStyles", "TakesARecording", "WhyNotARecording",
-                "NotAVoiceBecause",
             })
             {
                 Raise(name);
@@ -468,9 +459,10 @@ namespace Libwaifu.Gui.ViewModels
             Styles.Add(new StyleChoice { Label = "The voice's own way", Instruction = string.Empty });
             Styles.Add(new StyleChoice { Label = "As written below", Written = true });
 
-            if (Description != null && Description.Styles != null)
+            // The examples are the app's own; the model says only whether it follows a style.
+            if (Description != null && Description.FollowsStyle)
             {
-                foreach (var named in Description.Styles)
+                foreach (var named in StyleExamples.All)
                 {
                     Styles.Add(new StyleChoice { Label = named.Key, Instruction = named.Value });
                 }

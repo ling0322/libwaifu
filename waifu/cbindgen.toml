@@ -1,4 +1,4 @@
-# How waifu.h is written from src/c_api.rs. See docs/ffi.md for the contract it keeps.
+# How waifu.h is written from src/c_api.rs. See docs/ffi-abi4.md for the contract it keeps.
 #
 # Everything the header declares is this library's own: it includes nothing but the C library's,
 # and shares no type with libwaifu_modelmanager's.
@@ -23,22 +23,34 @@ rename_variants = "None"
 prefix_with_name = false
 
 [export]
-# Every type of the engine's, whether or not a function names it directly.
+# Every type of the library's, whether or not a function names it directly. Each enum is an
+# int32_t and a #define for each value, not a C enum.
 include = [
     "WaifuStatusCode",
     "WaifuStatus",
     "WaifuLogLevel",
-    "WaifuLogEvent",
+    "WaifuLog",
     "WaifuStage",
-    "WaifuProgressEvent",
-    "WaifuCompletionEvent",
+    "WaifuProgress",
+    "WaifuResult",
     "WaifuDevice",
+    "WaifuPipelineType",
+    "WaifuModelProperty",
+    "WaifuDeviceProperty",
+    "WaifuLayerType",
     "WaifuImage",
-    "WaifuImageInput",
-    "WaifuDrawRequest",
-    "WaifuImageCompletionEvent",
+    "WaifuPromptImage",
+    "WaifuImageGenerationRequest",
+    "WaifuImageGenerationResult",
     "WaifuAudio",
-    "WaifuSpeakRequest",
+    "WaifuTextToSpeechRequest",
+    "WaifuStreamingTextToSpeechRequest",
     "WaifuVoiceConversionRequest",
-    "WaifuAudioCompletionEvent",
+    "WaifuAudioResult",
+    "WaifuRgbaImage",
+    "WaifuLayerDecompositionRequest",
+    "WaifuLayer",
+    "WaifuLayerDecompositionResult",
+    "WaifuSpeechToTextRequest",
+    "WaifuSpeechToTextResult",
 ]

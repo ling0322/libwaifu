@@ -43,7 +43,10 @@ namespace Libwaifu.Gui.Engine
         Conversion,
     }
 
-    /// <summary>Where a run has got to. The names are the library's own progress phases.</summary>
+    /// <summary>
+    /// Where a run has got to, in this program's own few phases: the library's finer stages are
+    /// gathered into these by <c>NativeEngine</c>, and a stage it has no name for is Working.
+    /// </summary>
     public enum Stage
     {
         Fetching,
@@ -54,6 +57,7 @@ namespace Libwaifu.Gui.Engine
         Listening,
         Saying,
         Sounding,
+        Working,
     }
 
     public static class Tasks
@@ -259,7 +263,7 @@ namespace Libwaifu.Gui.Engine
 
     /// <summary>
     /// What the screen drives. One implementation simulates a run; the real one calls
-    /// <c>waifu_engine_*</c> through the C API and marshals every callback onto the UI thread.
+    /// <c>waifu_pipeline_*</c> through the C API and marshals every callback onto the UI thread.
     /// </summary>
     public interface IEngine : IDisposable
     {

@@ -1,8 +1,12 @@
 # libwaifu's C API, ABI 4
 
-Status: designed, not implemented. `docs/ffi.md` and `waifu/include/waifu.h` describe ABI 3, which
-is what the library speaks today. This is what it is to speak next, agreed point by point; what
+Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs`, is ABI 4; what
 is still open is under [Not decided](#not-decided).
+
+In the header every enum is an `int32_t` and a `#define` for each value -- `typedef int32_t
+WaifuStage;` and `#define WAIFU_STAGE_LOADING_WEIGHTS 1` -- rather than the `typedef enum` the
+listing below shows: a number the library or a caller does not know is then a plain integer,
+and not a value a Rust or C++ enum must never hold. The numbers and names are the listing's.
 
 ABI 4 takes every JSON document out of libwaifu and asks about models and devices through an enum
 and a getter instead; replaces the engine that ran every kind of job with a pipeline made for one

@@ -1,12 +1,11 @@
 # A C API for libwaifu
 
-Status: implemented. The headers -- `waifu/include/waifu.h` and
-`waifu-modelmanager/include/waifu_modelmanager.h` -- are generated from the code and are the last
-word; the listing below is the design, kept for its comments, and libwaifu_modelmanager's half of
-it is written with the names libwaifu's has rather than its own (see below).
-
-ABI 4, which replaces libwaifu's half of this, is designed in [ffi-abi4.md](ffi-abi4.md) and not
-implemented yet.
+Status: libwaifu's half of this is ABI 3, which is gone: libwaifu speaks ABI 4, whose contract is
+[ffi-abi4.md](ffi-abi4.md). What is here still holds for libwaifu_modelmanager, whose ABI is its
+own and unchanged, and for how the libraries are built and shaped; the header listing and the
+JSON documents are libwaifu's as they were, kept for the record. The headers --
+`waifu/include/waifu.h` and `waifu-modelmanager/include/waifu_modelmanager.h` -- are generated
+from the code and are the last word.
 
 The macOS app talks to `waifu webui` over HTTP: it starts the program as a child, waits for it to
 print its address, and polls it twice a second. This replaces that with a library the app links:

@@ -17,8 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! libwaifu, as the drawing screen asks it: what a model is, and an engine on a device that reads
-//! it and draws with it.
+//! libwaifu, as the drawing screen asks it: what a model is, and an image generation pipeline on
+//! a device that reads it and draws with it.
 //!
 //! The types are the screen's own -- the boxes it fills in, the progress it draws a bar from --
 //! and what they are filled from is what libwaifu says through its C API.
@@ -29,8 +29,8 @@ use std::ptr;
 use std::sync::mpsc::{channel, Sender};
 
 use crate::c::{
-    self, WaifuCompletionEvent, WaifuDrawRequest, WaifuEngine, WaifuImageCompletionEvent, WaifuJob,
-    WaifuProgressEvent, WaifuStage, WaifuStatusCode,
+    self, WaifuImageGenerationRequest, WaifuImageGenerationResult, WaifuJob, WaifuModel,
+    WaifuModelProperty, WaifuPipeline, WaifuProgress, WaifuResult, WaifuStatusCode,
 };
 use crate::runtime::Runtime;
 
@@ -131,34 +131,51 @@ impl Default for Chosen {
     }
 }
 
-/// What libwaifu says of the manifest at `manifest`, or why it says nothing.
-/// What libwaifu says the model can be asked for, and what libwaifu_modelmanager says its boxes
-/// start at, as one.
-pub fn look_at(manifest: &Path) -> Result<Chosen, String> {
-    let asked = c::c_string(&manifest.to_string_lossy());
-    let mut said = c::waifu_json(unsafe { c::waifu_describe_json(asked.as_ptr()) })
-        .ok_or_else(c::waifu_error)?;
-    let defaults = c::manager_json(unsafe { c::waifu_modelmanager_defaults_json(asked.as_ptr()) })
-        .ok_or_else(c::manager_error)?;
-    // The two halves of one description. A `conversion` is in both, and its defaults go inside.
-    if let (Some(said), Some(defaults)) = (said.as_object_mut(), defaults.as_object()) {
-        for (key, value) in defaults {
-            match (said.get_mut(key), value) {
-                (Some(serde_json::Value::Object(inner)), serde_json::Value::Object(more)) => {
-                    inner.extend(more.clone())
-                }
-                _ => {
-                    said.insert(key.clone(), value.clone());
-                }
-            }
+/// A model libwaifu has opened: its manifest, read, and what can be asked of it.
+struct Model(*mut WaifuModel);
+
+impl Model {
+    /// The manifest at `manifest`, or why libwaifu cannot read it.
+    fn open(manifest: &Path) -> Result<Model, String> {
+        let asked = c::c_string(&manifest.to_string_lossy());
+        let model = unsafe { c::waifu_model_open(asked.as_ptr()) };
+        match model.is_null() {
+            true => Err(c::waifu_error()),
+            false => Ok(Model(model)),
         }
     }
-    Ok(chosen_from(&said))
+
+    fn int(&self, property: WaifuModelProperty) -> Option<i64> {
+        let mut value = 0;
+        unsafe { c::waifu_model_get_int_property(self.0, property, &mut value) }.then_some(value)
+    }
 }
 
-/// A description, as `waifu_describe_json` and `waifu_modelmanager_defaults_json` write one
-/// between them.
-pub fn chosen_from(said: &serde_json::Value) -> Chosen {
+impl Drop for Model {
+    fn drop(&mut self) {
+        unsafe { c::waifu_model_free(self.0) };
+    }
+}
+
+/// What libwaifu says the model at `manifest` can be asked for, and what libwaifu_modelmanager
+/// says its boxes start at, as one -- or why either says nothing.
+pub fn look_at(manifest: &Path) -> Result<Chosen, String> {
+    let model = Model::open(manifest)?;
+    let asked = c::c_string(&manifest.to_string_lossy());
+    let defaults = c::manager_json(unsafe { c::waifu_modelmanager_defaults_json(asked.as_ptr()) })
+        .ok_or_else(c::manager_error)?;
+    Ok(chosen_from(
+        &defaults,
+        model.int(c::WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION) == Some(1),
+        model
+            .int(c::WAIFU_MODEL_SIZE_ON_DISK)
+            .map(|bytes| bytes.max(0) as u64),
+    ))
+}
+
+/// A model's description: libwaifu_modelmanager's defaults, as `waifu_modelmanager_defaults_json`
+/// writes them, with whether libwaifu says it draws and how large its files are.
+pub fn chosen_from(said: &serde_json::Value, draws: bool, bytes: Option<u64>) -> Chosen {
     let defaults = GenerationDefaults::default();
     let sizes: Vec<(i32, i32)> = said["sizes"]
         .as_array()
@@ -167,7 +184,7 @@ pub fn chosen_from(said: &serde_json::Value) -> Chosen {
         .filter_map(|size| Some((size[0].as_i64()? as i32, size[1].as_i64()? as i32)))
         .collect();
     Chosen {
-        draws: said["kind"] == "image",
+        draws,
         defaults: GenerationDefaults {
             width: said["width"]
                 .as_i64()
@@ -189,7 +206,7 @@ pub fn chosen_from(said: &serde_json::Value) -> Chosen {
         takes_guidance: said["takes_guidance"].as_bool().unwrap_or(true),
         suggested_prompt: said["prompt"].as_str().map(str::to_string),
         suggested_avoid: said["avoid"].as_str().map(str::to_string),
-        bytes: said["bytes"].as_u64(),
+        bytes,
     }
 }
 
@@ -209,18 +226,20 @@ pub enum Heard {
     Drawn(Ended<(u32, u32, Vec<u8>)>),
 }
 
-/// libwaifu's engine on one device: a thread of its own in the library, holding at most one model.
+/// libwaifu's image generation pipeline on one device: a thread of its own in the library,
+/// holding at most one model.
 pub struct Engine {
-    handle: *mut WaifuEngine,
+    handle: *mut WaifuPipeline,
 }
 
-// The library's engine is called from any thread; what it holds stays on its own.
+// The library's pipeline is called from any thread; what it holds stays on its own.
 unsafe impl Send for Engine {}
 
 impl Engine {
-    /// Starts an engine on `runtime`, or says why it cannot.
+    /// Starts a pipeline on `runtime`, or says why it cannot.
     pub fn new(runtime: Runtime) -> Result<Engine, String> {
-        let handle = c::waifu_engine_new(runtime.waifu_device());
+        let handle =
+            c::waifu_pipeline_new(c::WAIFU_PIPELINE_IMAGE_GENERATION, runtime.waifu_device());
         match handle.is_null() {
             true => Err(c::waifu_error()),
             false => Ok(Engine { handle }),
@@ -229,13 +248,17 @@ impl Engine {
 
     /// Reads the model whose manifest is at `manifest`, and waits for the end: how it went.
     pub fn load(&self, manifest: &Path) -> Ended<()> {
+        let model = match Model::open(manifest) {
+            Ok(model) => model,
+            Err(error) => return Ended::Failed(error),
+        };
         let (sender, heard) = channel();
         let sender = Box::new(sender);
-        let model = c::c_string(&manifest.to_string_lossy());
+        // The call copies what it needs: the model may go as soon as it returns.
         let job = unsafe {
-            c::waifu_engine_load_async(
+            c::waifu_pipeline_load_model_async(
                 self.handle,
-                model.as_ptr(),
+                model.0,
                 &*sender as *const Sender<Heard> as *mut c_void,
                 None,
                 Some(on_loaded),
@@ -264,25 +287,27 @@ impl Engine {
     ) -> Result<WaifuJob, String> {
         let prompt = c::c_string(prompt);
         let negative = c::c_string(&options.negative_prompt);
-        let request = WaifuDrawRequest {
-            struct_size: std::mem::size_of::<WaifuDrawRequest>() as u32,
+        let request = WaifuImageGenerationRequest {
+            struct_size: std::mem::size_of::<WaifuImageGenerationRequest>() as u32,
             prompt: prompt.as_ptr(),
             negative: negative.as_ptr(),
-            // The terminal hands a run no pictures: what it draws is drawn from a prompt.
-            images: ptr::null(),
-            image_count: 0,
             width: options.width.max(0) as u32,
             height: options.height.max(0) as u32,
             steps: options.num_steps.max(0) as u32,
             guidance: options.guidance_scale,
             seed: options.seed.unwrap_or_default(),
-            // Both are read only beside a picture -- "start_from" and "control" -- and there is
-            // none, so they are the values a caller with nothing to say about them passes.
-            strength: 0.8,
-            control_scale: 1.0,
+            // The terminal hands a run no pictures: what it draws is drawn from a prompt. The
+            // strength and the scale are read only beside one, so they are the values a caller
+            // with nothing to say about them passes.
+            start_image: ptr::null(),
+            start_image_strength: 0.8,
+            control_image: ptr::null(),
+            control_image_scale: 1.0,
+            prompt_images: ptr::null(),
+            prompt_image_count: 0,
         };
         let job = unsafe {
-            c::waifu_engine_draw_async(
+            c::waifu_pipeline_run_image_generation_async(
                 self.handle,
                 &request,
                 sender as *const Sender<Heard> as *mut c_void,
@@ -298,27 +323,27 @@ impl Engine {
 
     /// Stops a job after the step it is on.
     pub fn cancel(&self, job: WaifuJob) {
-        unsafe { c::waifu_engine_cancel(self.handle, job) };
+        unsafe { c::waifu_pipeline_cancel(self.handle, job) };
     }
 }
 
 impl Drop for Engine {
     /// Stops what runs, ends what waits, drops the model and joins the library's thread: no
-    /// callback of this engine's runs after this.
+    /// callback of this pipeline's runs after this.
     fn drop(&mut self) {
-        unsafe { c::waifu_engine_free(self.handle) };
+        unsafe { c::waifu_pipeline_free(self.handle) };
     }
 }
 
 fn status_of(code: WaifuStatusCode, message: Option<String>) -> Ended<()> {
     match code {
-        WaifuStatusCode::WAIFU_OK => Ended::Done(()),
-        WaifuStatusCode::WAIFU_CANCELLED => Ended::Cancelled,
+        c::WAIFU_OK => Ended::Done(()),
+        c::WAIFU_CANCELLED => Ended::Cancelled,
         _ => Ended::Failed(message.unwrap_or_else(|| "it failed".to_string())),
     }
 }
 
-unsafe extern "C" fn on_loaded(user_data: *mut c_void, event: *const WaifuCompletionEvent) {
+unsafe extern "C" fn on_loaded(user_data: *mut c_void, event: *const WaifuResult) {
     let (sender, status) = (&*(user_data as *const Sender<Heard>), &(*event).status);
     let _ = sender.send(Heard::Loaded(status_of(
         status.code,
@@ -326,21 +351,22 @@ unsafe extern "C" fn on_loaded(user_data: *mut c_void, event: *const WaifuComple
     )));
 }
 
-unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuProgressEvent) {
+unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuProgress) {
     let (sender, event) = (&*(user_data as *const Sender<Heard>), &*event);
     let progress = match event.stage {
-        WaifuStage::WAIFU_STAGE_ENCODING => GenerationProgress::Encoding,
-        WaifuStage::WAIFU_STAGE_DRAWING => GenerationProgress::Step {
+        c::WAIFU_STAGE_IMAGE_GENERATION_ENCODING_PROMPT => GenerationProgress::Encoding,
+        c::WAIFU_STAGE_IMAGE_GENERATION_DENOISING => GenerationProgress::Step {
             done: event.done as i32,
             total: event.total as i32,
         },
-        WaifuStage::WAIFU_STAGE_DECODING => GenerationProgress::Decoding,
+        c::WAIFU_STAGE_IMAGE_GENERATION_DECODING_IMAGE => GenerationProgress::Decoding,
+        // Loading, and a stage a newer library has that this tool does not know.
         _ => return,
     };
     let _ = sender.send(Heard::Progress(progress));
 }
 
-unsafe extern "C" fn on_drawn(user_data: *mut c_void, event: *const WaifuImageCompletionEvent) {
+unsafe extern "C" fn on_drawn(user_data: *mut c_void, event: *const WaifuImageGenerationResult) {
     let (sender, event) = (&*(user_data as *const Sender<Heard>), &*event);
     let ended = match (
         status_of(event.status.code, c::text(event.status.message)),
@@ -364,12 +390,11 @@ mod tests {
     #[test]
     fn a_description_fills_the_boxes_and_falls_back_where_it_says_nothing() {
         let said = serde_json::json!({
-            "kind": "image", "width": 832, "height": 1216, "steps": 8, "guidance": 1.0,
+            "width": 832, "height": 1216, "steps": 8, "guidance": 1.0,
             "takes_guidance": false, "sizes": [[832, 1216], [1024, 1024], [1216, 832]],
             "prompt": "masterpiece", "avoid": null,
-            "bytes": 6938000000u64,
         });
-        let chosen = chosen_from(&said);
+        let chosen = chosen_from(&said, true, Some(6_938_000_000));
         assert!(chosen.draws);
         assert_eq!(chosen.defaults.num_steps, 8);
         assert_eq!(chosen.sizes.len(), 3);
@@ -377,7 +402,7 @@ mod tests {
         assert_eq!(chosen.suggested_prompt.as_deref(), Some("masterpiece"));
         assert_eq!(chosen.bytes, Some(6_938_000_000));
 
-        let voice = chosen_from(&serde_json::json!({ "kind": "speech" }));
+        let voice = chosen_from(&serde_json::json!({}), false, None);
         assert!(!voice.draws);
         assert_eq!(voice.sizes, SIZES.to_vec());
     }

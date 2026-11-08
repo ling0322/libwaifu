@@ -42,18 +42,22 @@ final class VoiceTests: XCTestCase {
         XCTAssertEqual(tones.kind, "speech")
         let voice = try XCTUnwrap(tones.voice)
         XCTAssertEqual(voice.needsARecording, false)
-        XCTAssertNotNil(voice.notAVoiceBecause)
+        // It follows no instruction, so the picker offers none.
+        XCTAssertFalse(voice.followsStyle)
+        XCTAssertNil(voice.styles)
     }
 
     func testARealVoiceAsksForARecordingFirst() throws {
         let indextts = try ModelInfo.describe(manifest("indextts25", type: "indextts2"), device: "cpu")
         XCTAssertEqual(try XCTUnwrap(indextts.voice).needsARecording, true)
-        XCTAssertNil(indextts.voice?.notAVoiceBecause)
+        XCTAssertEqual(indextts.voice?.followsStyle, false)
 
         let cosyvoice = try ModelInfo.describe(manifest("cosyvoice3", type: "cosyvoice3"), device: "cpu")
         let voice = try XCTUnwrap(cosyvoice.voice)
         XCTAssertEqual(voice.needsARecording, true)
-        XCTAssertFalse((voice.styles ?? []).isEmpty)
+        // It follows a style, and the picker offers upstream's examples of one.
+        XCTAssertTrue(voice.followsStyle)
+        XCTAssertEqual(voice.styles?.count, 26)
         // It converts as well, with the same model.
         XCTAssertNotNil(cosyvoice.converter)
     }

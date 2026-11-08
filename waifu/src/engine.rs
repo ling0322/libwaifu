@@ -150,45 +150,131 @@ pub struct LayersRequest {
     pub resolution: u32,
     /// Split what comes in pairs -- hands, eyes, ears -- into a left and a right layer.
     pub split_pairs: bool,
+    /// Cut hair, hands, top and bottom into a near and a far half by their own depth, and append
+    /// the halves: see [`Layers`].
+    pub stratify: bool,
     pub seed: u64,
+}
+
+/// What a layer of a picture taken apart is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerKind {
+    /// A part as the model drew it.
+    Part,
+    /// The near half of a stratified part.
+    StratifiedNear,
+    /// The far half of a stratified part.
+    StratifiedFar,
 }
 
 /// One layer of a picture taken apart.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerOut {
+    pub kind: LayerKind,
     pub name: String,
     /// Where its top left corner is on the canvas.
     pub left: i32,
     pub top: i32,
     pub image: RgbaImage,
-    /// How far away it is, 0 near to 1 far: the order the layers are in.
+    /// How far away it is, 0 near to 1 far. A near half has its part's depth, not its own pixels':
+    /// that is what keeps it in its part's place in the stratified stack.
     pub depth: f32,
+    /// A half: the index in [`Layers::layers`] of the part it was cut from.
+    pub stratified_from: Option<usize>,
 }
 
-/// A picture taken apart: its layers bottom first, and the documents made of them.
+/// A picture taken apart. `layers` is in one order, never changed: every part, bottom first --
+/// the stack, unstratified -- then, where stratification was asked for, each split part's halves,
+/// near before far. See [`Layers::stratified_stack`] for the other stack.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layers {
     /// The side of the square canvas the layers are on.
     pub canvas: u32,
     pub layers: Vec<LayerOut>,
-    /// A Photoshop document of the layers.
-    pub psd: Vec<u8>,
-    /// The same document with each layer's depth in place of its colour.
-    pub depth_psd: Vec<u8>,
 }
 
-/// Which part of a job a progress report is about.
+impl Layers {
+    /// The stratified stack, bottom first, as indices into `layers`: every part that was not split
+    /// and every half, ordered by depth from the largest; at one depth, a far half under a near
+    /// one; then by index. docs/ffi-abi4.md, "Stratification".
+    pub fn stratified_stack(&self) -> Vec<usize> {
+        let split: HashSet<usize> = self
+            .layers
+            .iter()
+            .filter_map(|layer| layer.stratified_from)
+            .collect();
+        let mut stack: Vec<usize> = (0..self.layers.len())
+            .filter(|index| !split.contains(index))
+            .collect();
+        let lower = |kind: LayerKind| match kind {
+            LayerKind::StratifiedFar => 0,
+            _ => 1,
+        };
+        stack.sort_by(|&a, &b| {
+            let (a_layer, b_layer) = (&self.layers[a], &self.layers[b]);
+            b_layer
+                .depth
+                .total_cmp(&a_layer.depth)
+                .then(lower(a_layer.kind).cmp(&lower(b_layer.kind)))
+                .then(a.cmp(&b))
+        });
+        stack
+    }
+}
+
+/// Which part of a job a progress report is about: one for each thing a job does, by task, as the
+/// C API's `WaifuStage` numbers them (docs/ffi-abi4.md). `done` and `total` count what each says,
+/// and are 0 and 0 for the rest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
-    Reading,
-    Encoding,
-    Drawing,
-    Decoding,
-    Listening,
-    Saying,
-    Sounding,
-    /// Writing down what a recording says: done/total in tokens, total an estimate.
-    Writing,
+    LoadingWeights,
+
+    ImageGenerationEncodingPrompt,
+    /// Steps.
+    ImageGenerationDenoising,
+    ImageGenerationDecodingImage,
+
+    TextToSpeechReadingText,
+    /// Tokens; the total is an estimate, and can be passed.
+    TextToSpeechGeneratingTokens,
+    TextToSpeechSynthesizingAudio,
+
+    VoiceConversionReadingRecordings,
+    /// Tokens; the total is an estimate.
+    VoiceConversionGeneratingTokens,
+    /// Steps.
+    VoiceConversionDenoising,
+    /// The vocoder's windows.
+    VoiceConversionSynthesizingAudio,
+
+    LayerDecompositionEncodingImage,
+    /// Steps.
+    LayerDecompositionDenoisingLayers,
+    /// Layers.
+    LayerDecompositionDecodingLayers,
+    LayerDecompositionEncodingHead,
+    /// Steps.
+    LayerDecompositionDenoisingHeadLayers,
+    /// Layers.
+    LayerDecompositionDecodingHeadLayers,
+    /// Layers.
+    LayerDecompositionEncodingForDepth,
+    /// Steps.
+    LayerDecompositionDenoisingDepth,
+    /// Layers.
+    LayerDecompositionDecodingDepth,
+    LayerDecompositionCuttingIntoParts,
+
+    /// Pieces the recording is cut into.
+    SpeechToTextReadingRecording,
+    /// Tokens; the total is an estimate, and can be passed.
+    SpeechToTextGeneratingTokens,
+
+    StreamingTextToSpeechReadingText,
+    /// Tokens; the total is an estimate.
+    StreamingTextToSpeechGeneratingTokens,
+    /// Parts handed over.
+    StreamingTextToSpeechSynthesizingAudio,
 }
 
 /// How far along a job is: what `on_progress` is told.
@@ -269,6 +355,9 @@ enum Command {
 enum Work {
     Load {
         model: String,
+        /// For readings handed over a part at a time: a voice that cannot stream on this device
+        /// is let go of again, and the load fails.
+        streaming: bool,
         on_progress: OnProgress,
         on_complete: OnComplete<()>,
     },
@@ -382,6 +471,24 @@ impl Engine {
     pub fn load(&self, model: &str, on_progress: OnProgress, on_complete: OnComplete<()>) -> JobId {
         self.submit(Work::Load {
             model: model.to_string(),
+            streaming: false,
+            on_progress,
+            on_complete,
+        })
+    }
+
+    /// As [`load`](Engine::load), for a voice that is to stream: one that cannot on this device --
+    /// CosyVoice3 anywhere but CUDA at half on Ampere or later -- is let go of again, and the load
+    /// fails with [`Failure::Model`] saying why.
+    pub fn load_for_streaming(
+        &self,
+        model: &str,
+        on_progress: OnProgress,
+        on_complete: OnComplete<()>,
+    ) -> JobId {
+        self.submit(Work::Load {
+            model: model.to_string(),
+            streaming: true,
             on_progress,
             on_complete,
         })
@@ -748,61 +855,118 @@ struct Reporter<'a> {
 
 impl Reporter<'_> {
     fn tell(&mut self, doing: &Doing) {
+        let count = |n: i32| n.max(0) as u64;
         let (stage, done, total) = match doing {
             Doing::Nothing => return,
-            Doing::Reading { .. } => (Stage::Reading, 0, 0),
+            Doing::Reading { .. } => (Stage::LoadingWeights, 0, 0),
             Doing::Drawing(run) => match run.progress {
-                GenerationProgress::Encoding => (Stage::Encoding, 0, 0),
+                GenerationProgress::Encoding => (Stage::ImageGenerationEncodingPrompt, 0, 0),
                 GenerationProgress::Step { done, total } => {
-                    (Stage::Drawing, done as u64, total as u64)
+                    (Stage::ImageGenerationDenoising, count(done), count(total))
                 }
-                GenerationProgress::Decoding => (Stage::Decoding, 0, 0),
+                GenerationProgress::Decoding => (Stage::ImageGenerationDecodingImage, 0, 0),
             },
-            Doing::Speaking(say) => match say.progress {
-                SpeechProgress::Reading => (Stage::Encoding, 0, 0),
-                SpeechProgress::Saying { done, expected } => {
-                    (Stage::Saying, done.max(0) as u64, expected.max(0) as u64)
-                }
-                SpeechProgress::Sounding => (Stage::Sounding, 0, 0),
+            // A streaming reading is a task of its own, with stages of its own.
+            Doing::Speaking(say) => match (say.streaming, say.progress) {
+                (false, SpeechProgress::Reading) => (Stage::TextToSpeechReadingText, 0, 0),
+                (false, SpeechProgress::Saying { done, expected }) => (
+                    Stage::TextToSpeechGeneratingTokens,
+                    count(done),
+                    count(expected),
+                ),
+                (false, SpeechProgress::Sounding) => (Stage::TextToSpeechSynthesizingAudio, 0, 0),
+                (true, SpeechProgress::Reading) => (Stage::StreamingTextToSpeechReadingText, 0, 0),
+                (true, SpeechProgress::Saying { done, expected }) => (
+                    Stage::StreamingTextToSpeechGeneratingTokens,
+                    count(done),
+                    count(expected),
+                ),
+                (true, SpeechProgress::Sounding) => (
+                    Stage::StreamingTextToSpeechSynthesizingAudio,
+                    say.parts as u64,
+                    0,
+                ),
             },
             Doing::Converting(convert) => match convert.progress {
-                ConversionProgress::Listening => (Stage::Listening, 0, 0),
-                ConversionProgress::Saying { done, expected } => {
-                    (Stage::Saying, done.max(0) as u64, expected.max(0) as u64)
-                }
+                ConversionProgress::Listening => (Stage::VoiceConversionReadingRecordings, 0, 0),
+                ConversionProgress::Saying { done, expected } => (
+                    Stage::VoiceConversionGeneratingTokens,
+                    count(done),
+                    count(expected),
+                ),
                 ConversionProgress::Drawing { done, total } => {
-                    (Stage::Drawing, done.max(0) as u64, total.max(0) as u64)
+                    (Stage::VoiceConversionDenoising, count(done), count(total))
                 }
-                ConversionProgress::Sounding { done, total } => {
-                    (Stage::Sounding, done.max(0) as u64, total.max(0) as u64)
-                }
+                ConversionProgress::Sounding { done, total } => (
+                    Stage::VoiceConversionSynthesizingAudio,
+                    count(done),
+                    count(total),
+                ),
             },
-            Doing::Layering { progress, .. } => match progress {
-                SeeThroughProgress::Encoding { .. } => (Stage::Encoding, 0, 0),
+            // Pass 0 is the whole picture and pass 1 the head.
+            Doing::Layering { progress, .. } => match *progress {
+                SeeThroughProgress::Encoding { pass: 0 } => {
+                    (Stage::LayerDecompositionEncodingImage, 0, 0)
+                }
+                SeeThroughProgress::Encoding { .. } => {
+                    (Stage::LayerDecompositionEncodingHead, 0, 0)
+                }
+                SeeThroughProgress::Layers {
+                    pass: 0,
+                    done,
+                    total,
+                } => (
+                    Stage::LayerDecompositionDenoisingLayers,
+                    count(done),
+                    count(total),
+                ),
+                SeeThroughProgress::Layers { done, total, .. } => (
+                    Stage::LayerDecompositionDenoisingHeadLayers,
+                    count(done),
+                    count(total),
+                ),
+                SeeThroughProgress::Decoding {
+                    pass: 0,
+                    done,
+                    total,
+                } => (
+                    Stage::LayerDecompositionDecodingLayers,
+                    count(done),
+                    count(total),
+                ),
+                SeeThroughProgress::Decoding { done, total, .. } => (
+                    Stage::LayerDecompositionDecodingHeadLayers,
+                    count(done),
+                    count(total),
+                ),
                 SeeThroughProgress::DepthEncoding { done, total } => (
-                    Stage::Encoding,
-                    (*done).max(0) as u64,
-                    (*total).max(0) as u64,
+                    Stage::LayerDecompositionEncodingForDepth,
+                    count(done),
+                    count(total),
                 ),
-                SeeThroughProgress::Layers { done, total, .. }
-                | SeeThroughProgress::Depth { done, total } => (
-                    Stage::Drawing,
-                    (*done).max(0) as u64,
-                    (*total).max(0) as u64,
+                SeeThroughProgress::Depth { done, total } => (
+                    Stage::LayerDecompositionDenoisingDepth,
+                    count(done),
+                    count(total),
                 ),
-                SeeThroughProgress::Decoding { done, total, .. }
-                | SeeThroughProgress::DepthDecoding { done, total } => (
-                    Stage::Decoding,
-                    (*done).max(0) as u64,
-                    (*total).max(0) as u64,
+                SeeThroughProgress::DepthDecoding { done, total } => (
+                    Stage::LayerDecompositionDecodingDepth,
+                    count(done),
+                    count(total),
                 ),
-                SeeThroughProgress::Assembling => (Stage::Decoding, 0, 0),
+                SeeThroughProgress::Assembling => (Stage::LayerDecompositionCuttingIntoParts, 0, 0),
             },
             Doing::Transcribing(transcribing) => match transcribing.progress {
-                TranscriptionProgress::Listening { .. } => (Stage::Listening, 0, 0),
-                TranscriptionProgress::Writing { done, expected } => {
-                    (Stage::Writing, done.max(0) as u64, expected.max(0) as u64)
-                }
+                TranscriptionProgress::Listening { done, total } => (
+                    Stage::SpeechToTextReadingRecording,
+                    count(done),
+                    count(total),
+                ),
+                TranscriptionProgress::Writing { done, expected } => (
+                    Stage::SpeechToTextGeneratingTokens,
+                    count(done),
+                    count(expected),
+                ),
             },
         };
 
@@ -823,10 +987,11 @@ impl Worker {
         match work {
             Work::Load {
                 model,
+                streaming,
                 mut on_progress,
                 on_complete,
             } => {
-                let ended = guarded(|| self.load(&model, &mut on_progress));
+                let ended = guarded(|| self.load(&model, streaming, &mut on_progress));
                 on_complete(ended);
             }
             Work::Unload { on_complete } => {
@@ -884,7 +1049,7 @@ impl Worker {
         }
     }
 
-    fn load(&mut self, asked: &str, on_progress: &mut OnProgress) -> Ended<()> {
+    fn load(&mut self, asked: &str, streaming: bool, on_progress: &mut OnProgress) -> Ended<()> {
         let mut reporter = Reporter {
             on_progress,
             started: Instant::now(),
@@ -956,6 +1121,13 @@ impl Worker {
             chosen.on_disk = true;
             chosen.in_memory = true;
             Ok(Loaded::Image { model, chosen })
+        };
+        let read = || -> crate::Result<Loaded> {
+            let loaded = read()?;
+            if let (true, Loaded::CosyVoice(voice)) = (streaming, &loaded) {
+                voice.streams()?;
+            }
+            Ok(loaded)
         };
         match read() {
             Ok(loaded) => {
@@ -1224,26 +1396,54 @@ impl Worker {
             started.elapsed().as_secs_f64()
         ));
 
-        let layers = decomposition
+        let layer = |kind: LayerKind,
+                     part: &crate::see_through::Part,
+                     depth: f32,
+                     stratified_from: Option<usize>| LayerOut {
+            kind,
+            name: part.tag.clone(),
+            left: part.left as i32,
+            top: part.top as i32,
+            image: RgbaImage {
+                width: part.pixels.width as u32,
+                height: part.pixels.height as u32,
+                rgba: part.pixels.data.clone(),
+            },
+            depth,
+            stratified_from,
+        };
+        let mut layers: Vec<LayerOut> = decomposition
             .parts
             .iter()
-            .map(|part| LayerOut {
-                name: part.tag.clone(),
-                left: part.left as i32,
-                top: part.top as i32,
-                image: RgbaImage {
-                    width: part.pixels.width as u32,
-                    height: part.pixels.height as u32,
-                    rgba: part.pixels.data.clone(),
-                },
-                depth: part.depth_median,
-            })
+            .map(|part| layer(LayerKind::Part, part, part.depth_median, None))
             .collect();
+
+        // The halves after every part, near before far. The near half takes its part's depth, so
+        // that sorting by depth keeps it in its part's place; the far half keeps its own.
+        if request.stratify {
+            for (index, part) in decomposition.parts.iter().enumerate() {
+                if !crate::see_through::STRATIFIED.contains(&part.tag.as_str()) {
+                    continue;
+                }
+                if let Some((near, far)) = crate::see_through::split(part) {
+                    layers.push(layer(
+                        LayerKind::StratifiedNear,
+                        &near,
+                        part.depth_median,
+                        Some(index),
+                    ));
+                    layers.push(layer(
+                        LayerKind::StratifiedFar,
+                        &far,
+                        far.depth_median,
+                        Some(index),
+                    ));
+                }
+            }
+        }
         Ended::Done(Layers {
             canvas: decomposition.canvas as u32,
             layers,
-            psd: decomposition.to_psd(),
-            depth_psd: decomposition.to_depth_psd(),
         })
     }
 
@@ -1370,8 +1570,12 @@ impl Worker {
             ..Say::new(0, ratio, streaming)
         };
         reporter.tell(&Doing::Speaking(say.clone()));
+        // Parts handed over so far, for a streaming reading's stage: counted where they are
+        // handed over and read where progress is told.
+        let parts = std::cell::Cell::new(0u32);
         let mut report = |progress| {
             say.told(progress);
+            say.parts = parts.get();
             reporter.tell(&Doing::Speaking(say.clone()));
             match stop() {
                 true => ControlFlow::Break(()),
@@ -1385,6 +1589,7 @@ impl Worker {
             Some(on_audio) => {
                 let mut heard = |part: &Sound| {
                     on_audio(part);
+                    parts.set(parts.get() + 1);
                     match stop() {
                         true => ControlFlow::Break(()),
                         false => ControlFlow::Continue(()),
@@ -1479,159 +1684,6 @@ fn scaled(image: &Image, width: u32, height: u32) -> Vec<u8> {
         image::imageops::FilterType::Lanczos3,
     )
     .into_raw()
-}
-
-// -- what is there, as JSON ------------------------------------------------------------------
-
-/// What a model is, without reading it: `waifu_describe_json` -- what a request for it may hold,
-/// and not what to start a screen's boxes at, which is the model manager's. None for anything but
-/// the stand-in and the path of a manifest. `bytes` is how much its files are, where they are all
-/// here: null where the manifest came without them.
-pub fn describe_json(asked: &str) -> Option<serde_json::Value> {
-    if asked != TONES && !Path::new(asked).is_file() {
-        return None;
-    }
-    let mut described = described(asked);
-    described["bytes"] = describe::bytes_on_disk(asked).into();
-    Some(described)
-}
-
-fn described(asked: &str) -> serde_json::Value {
-    // Takes a picture apart: no prompt, no size, nothing of a picture model's to say. What its
-    // boxes start at is the model manager's.
-    if is_see_through(Path::new(asked)) {
-        return serde_json::json!({
-            "kind": "layers",
-            "kinds": ["layers"],
-            "name": asked,
-            "full_name": describe::shown_name(asked),
-            "on_disk": describe::on_disk(asked).is_some(),
-        });
-    }
-
-    // Writes down a recording: what a request for it may name is a language from its list.
-    if describe::is_a_transcriber(asked) {
-        let transcriber = describe::look_at_transcriber(asked);
-        return serde_json::json!({
-            "kind": "transcription",
-            "kinds": ["transcription"],
-            "name": transcriber.name,
-            "full_name": transcriber.full_name,
-            "on_disk": transcriber.on_disk,
-            "rate": transcriber.rate,
-            "languages": transcriber.languages,
-        });
-    }
-
-    let mut kinds = Vec::new();
-    if describe::is_a_voice(asked) {
-        kinds.push("speech");
-    }
-    if describe::is_a_converter(asked) {
-        kinds.push("conversion");
-    }
-
-    // What a converter is described as, alone or beside the voice of a model that is both.
-    let conversion = || {
-        let converter = describe::look_at_converter(asked);
-        serde_json::json!({
-            "name": converter.name,
-            "full_name": converter.full_name,
-            "on_disk": converter.on_disk,
-            "rate": converter.rate,
-            "converts_style": converter.no_style_because.is_none(),
-            "no_style_because": converter.no_style_because,
-        })
-    };
-
-    if kinds.first() == Some(&"speech") {
-        let voice = describe::look_at_voice(asked);
-        let mut described = serde_json::json!({
-            "kind": "speech",
-            "kinds": kinds,
-            "name": voice.name,
-            "full_name": voice.full_name,
-            "on_disk": voice.on_disk,
-            "rate": voice.rate,
-            "takes_a_recording": voice.no_likeness_because.is_none(),
-            "no_likeness_because": voice.no_likeness_because,
-            "needs_a_recording": voice.needs_a_recording,
-            "styles": voice.styles.iter().map(|style| serde_json::json!({
-                "label": style.label,
-                "instruction": style.instruction,
-            })).collect::<Vec<_>>(),
-            "not_a_voice_because": voice.not_a_voice_because,
-        });
-        // CosyVoice3 reads and converts, with one model: what a window offers for the second.
-        if kinds.contains(&"conversion") {
-            described["conversion"] = conversion();
-        }
-        return described;
-    }
-    if kinds.first() == Some(&"conversion") {
-        let converter = describe::look_at_converter(asked);
-        return serde_json::json!({
-            "kind": "conversion",
-            "kinds": kinds,
-            "name": converter.name,
-            "full_name": converter.full_name,
-            "on_disk": converter.on_disk,
-            "rate": converter.rate,
-            "converts_style": converter.no_style_because.is_none(),
-            "no_style_because": converter.no_style_because,
-        });
-    }
-
-    let chosen = describe::look_at(asked);
-    let mut image_keys = Vec::new();
-    let mut why_not = serde_json::Map::new();
-    match &chosen.no_picture_because {
-        None => image_keys.push(START_FROM),
-        Some(why) => {
-            why_not.insert(START_FROM.to_string(), why.clone().into());
-        }
-    }
-    why_not.insert(
-        CONTROL.to_string(),
-        format!("{} has no ControlNet here", chosen.full_name).into(),
-    );
-    if chosen.prompt_pictures == 0 {
-        why_not.insert(
-            "prompt_images".to_string(),
-            format!("{} reads words only", chosen.full_name).into(),
-        );
-    }
-    serde_json::json!({
-        "kind": "image",
-        "kinds": ["image"],
-        "name": chosen.name,
-        "full_name": chosen.full_name,
-        "on_disk": chosen.on_disk,
-        "sampler": chosen.sampler,
-        "alignment": chosen.alignment,
-        "prompt_images": chosen.prompt_pictures,
-        "image_keys": image_keys,
-        "why_not": why_not,
-    })
-}
-
-/// Where a run can go: `waifu_devices_json`. Every device this build and this machine can take a
-/// run to, and -- for a device with memory of its own -- what its allocator may still take, in
-/// bytes: the memory limit or the device's memory, less what this process holds there. See
-/// [`crate::runtime::remaining`].
-pub fn devices_json() -> serde_json::Value {
-    let available = Runtime::available();
-    let devices: Vec<serde_json::Value> = available
-        .iter()
-        .map(|runtime| {
-            let free = crate::runtime::remaining(runtime.device(), &available);
-            serde_json::json!({
-                "name": runtime.name(),
-                "free": free,
-            })
-        })
-        .collect();
-    serde_json::json!({ "devices": devices })
 }
 
 /// Which device a name means, as the C API numbers them.
@@ -1955,8 +2007,15 @@ pub(crate) mod tests {
 
         let reports: Vec<Progress> = heard_progress.try_iter().collect();
         assert!(!reports.is_empty());
-        assert_eq!(reports[0].stage, Stage::Encoding);
+        assert_eq!(reports[0].stage, Stage::TextToSpeechReadingText);
         assert!(reports.iter().all(|report| !report.words.is_empty()));
+        // A reading said all at once has none of a streaming reading's stages.
+        assert!(reports.iter().all(|report| !matches!(
+            report.stage,
+            Stage::StreamingTextToSpeechReadingText
+                | Stage::StreamingTextToSpeechGeneratingTokens
+                | Stage::StreamingTextToSpeechSynthesizingAudio
+        )));
     }
 
     #[test]
@@ -2000,101 +2059,5 @@ pub(crate) mod tests {
             format!("weights:\n  - {stem}.safetensors\nconfig:\n  model:\n    type: {kind}\n");
         std::fs::write(&path, text).unwrap();
         path.to_str().unwrap().to_string()
-    }
-
-    #[test]
-    fn what_a_model_is_comes_back_as_json() {
-        let manifest = a_manifest("qwen3-asr", Qwen3Asr::MODEL_TYPE);
-        std::fs::write(
-            &manifest,
-            "weights:\n  - qwen3-asr.safetensors\nconfig:\n  model:\n    type: qwen3_asr\n  \
-             qwen3_asr:\n    sample_rate: 16000\n    languages: Chinese,English\n",
-        )
-        .unwrap();
-        let asr = describe_json(&manifest).unwrap();
-        assert_eq!(asr["kind"], "transcription");
-        assert_eq!(asr["kinds"], serde_json::json!(["transcription"]));
-        assert_eq!(asr["full_name"], Qwen3Asr::NAME);
-        assert_eq!(asr["on_disk"], false);
-        assert_eq!(asr["bytes"], serde_json::Value::Null);
-        assert_eq!(asr["rate"], 16000);
-        assert_eq!(asr["languages"], serde_json::json!(["Chinese", "English"]));
-
-        let sdxl = describe_json(&a_manifest("sdxl-base", "sdxl")).unwrap();
-        assert_eq!(sdxl["kind"], "image");
-        assert_eq!(sdxl["prompt_images"], 0);
-        // What to start the boxes at is the model manager's, not what a request may hold.
-        for default in ["steps", "guidance", "takes_guidance", "sizes", "prompt"] {
-            assert!(sdxl.get(default).is_none(), "{default} in {sdxl}");
-        }
-        assert_eq!(sdxl["image_keys"], serde_json::json!(["start_from"]));
-
-        // Qwen-Image 2.1 reads pictures in its prompt where its package carries the vision tower,
-        // which is what the manifest's `vision_depth` says; one exported before it reads words.
-        let words = describe_json(&a_manifest("qwen-words", crate::QwenImage::MODEL_TYPE)).unwrap();
-        assert_eq!(words["prompt_images"], 0);
-        assert!(words["why_not"]["prompt_images"].is_string());
-        let pictures = a_manifest("qwen-pictures", crate::QwenImage::MODEL_TYPE);
-        let text = std::fs::read_to_string(&pictures).unwrap();
-        std::fs::write(
-            &pictures,
-            format!("{text}  qwen_image:\n    vision_depth: 27\n"),
-        )
-        .unwrap();
-        let pictures = describe_json(&pictures).unwrap();
-        assert_eq!(pictures["prompt_images"], 10);
-        assert!(
-            pictures["why_not"].get("prompt_images").is_none(),
-            "{pictures}"
-        );
-        assert!(pictures["why_not"]["start_from"]
-            .as_str()
-            .unwrap()
-            .contains("<|name|>"));
-
-        let anima = describe_json(&a_manifest("anima-turbo", crate::Anima::MODEL_TYPE)).unwrap();
-        assert_eq!(anima["image_keys"], serde_json::json!([]));
-        assert!(anima["why_not"]["start_from"]
-            .as_str()
-            .unwrap()
-            .contains("Anima"));
-        assert_eq!(sdxl["alignment"], 32);
-        assert_eq!(anima["alignment"], 16);
-        // Its sides are whole 2 x 2s of latent pixels: what `QwenImage::check_size` refuses.
-        assert_eq!(pictures["alignment"], 32);
-
-        let tones = describe_json(TONES).unwrap();
-        assert_eq!(tones["kind"], "speech");
-        // The stand-in takes a pitch from a recording where it has one, and hums without.
-        assert_eq!(tones["needs_a_recording"], false);
-
-        let cosyvoice = describe_json(&a_manifest("cosyvoice3", CosyVoice3::MODEL_TYPE)).unwrap();
-        assert_eq!(
-            cosyvoice["kinds"],
-            serde_json::json!(["speech", "conversion"])
-        );
-        // Neither real voice has one of its own: a page asks for a recording before a run.
-        assert_eq!(cosyvoice["needs_a_recording"], true);
-        let indextts = describe_json(&a_manifest("indextts25", IndexTts::MODEL_TYPE)).unwrap();
-        assert_eq!(indextts["needs_a_recording"], true);
-
-        // See-through draws nothing from a prompt: a kind of its own, and none of a picture's keys.
-        let layers = describe_json(&a_manifest("see-through", SeeThrough::MODEL_TYPE)).unwrap();
-        assert_eq!(layers["kind"], "layers");
-        assert_eq!(layers["kinds"], serde_json::json!(["layers"]));
-        assert!(layers.get("image_keys").is_none(), "{layers}");
-        assert_eq!(layers["on_disk"], false);
-        assert!(
-            cosyvoice["conversion"]["rate"].as_u64().unwrap() > 0,
-            "{cosyvoice}"
-        );
-
-        // Its weights are not beside it, which is a manifest that says what it is all the same.
-        assert_eq!(sdxl["on_disk"], false);
-        assert_eq!(sdxl["bytes"], serde_json::Value::Null);
-
-        // A published name is the model manager's to turn into a path.
-        assert!(describe_json("sdxl:base").is_none());
-        assert!(describe_json("no-such-model:v9").is_none());
     }
 }

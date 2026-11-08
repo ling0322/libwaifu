@@ -32,7 +32,7 @@ const WAIT: Duration = Duration::from_secs(20);
 /// What a test hears of one job, sent from the callbacks.
 #[derive(Debug, PartialEq)]
 enum Heard {
-    Progress(WaifuStage, String),
+    Progress(WaifuStage),
     Complete(WaifuStatusCode, Option<String>),
     Audio(WaifuStatusCode, usize, u32),
     /// A part of a streaming reading: its samples and its rate.
@@ -48,41 +48,52 @@ unsafe fn sender<'a>(user_data: *mut c_void) -> &'a Sender<Heard> {
     &*(user_data as *const Sender<Heard>)
 }
 
-unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuProgressEvent) {
-    let event = &*event;
-    let _ = sender(user_data).send(Heard::Progress(
-        event.stage,
-        text(event.words).unwrap_or_default(),
-    ));
+unsafe extern "C" fn on_progress(user_data: *mut c_void, progress: *const WaifuProgress) {
+    let _ = sender(user_data).send(Heard::Progress((*progress).stage));
 }
 
-unsafe extern "C" fn on_complete(user_data: *mut c_void, event: *const WaifuCompletionEvent) {
-    let status = &(*event).status;
+unsafe extern "C" fn on_complete(user_data: *mut c_void, result: *const WaifuResult) {
+    let status = &(*result).status;
     let _ = sender(user_data).send(Heard::Complete(status.code, text(status.message)));
 }
 
-unsafe extern "C" fn on_audio(user_data: *mut c_void, event: *const WaifuAudioCompletionEvent) {
-    let event = &*event;
-    let (count, rate) = event
+unsafe extern "C" fn on_audio(user_data: *mut c_void, result: *const WaifuAudioResult) {
+    let result = &*result;
+    let (count, rate) = result
         .audio
         .as_ref()
-        .map_or((0, 0), |audio| (audio.count, audio.rate));
-    let _ = sender(user_data).send(Heard::Audio(event.status.code, count, rate));
+        .map_or((0, 0), |audio| (audio.count, audio.sample_rate));
+    let _ = sender(user_data).send(Heard::Audio(result.status.code, count, rate));
 }
 
-unsafe extern "C" fn on_part(user_data: *mut c_void, audio: *const WaifuAudio) {
-    let audio = &*audio;
-    let samples = std::slice::from_raw_parts(audio.samples, audio.count).to_vec();
-    let _ = sender(user_data).send(Heard::Part(samples, audio.rate));
+unsafe extern "C" fn on_part(user_data: *mut c_void, part: *const WaifuAudio) {
+    let part = &*part;
+    let samples = std::slice::from_raw_parts(part.samples, part.count).to_vec();
+    let _ = sender(user_data).send(Heard::Part(samples, part.sample_rate));
 }
 
-unsafe extern "C" fn on_image(user_data: *mut c_void, event: *const WaifuImageCompletionEvent) {
-    let event = &*event;
-    let image = event
+unsafe extern "C" fn on_image(user_data: *mut c_void, result: *const WaifuImageGenerationResult) {
+    let result = &*result;
+    let image = result
         .image
         .as_ref()
         .map(|image| (image.width, image.height, image.len));
-    let _ = sender(user_data).send(Heard::Image(event.status.code, image));
+    let _ = sender(user_data).send(Heard::Image(result.status.code, image));
+}
+
+unsafe extern "C" fn on_layers(
+    user_data: *mut c_void,
+    result: *const WaifuLayerDecompositionResult,
+) {
+    let status = &(*result).status;
+    let _ = sender(user_data).send(Heard::Complete(status.code, text(status.message)));
+}
+
+unsafe extern "C" fn on_transcript(user_data: *mut c_void, result: *const WaifuSpeechToTextResult) {
+    let result = &*result;
+    // Text and language are both there or both NULL.
+    assert_eq!(result.text.is_null(), result.language.is_null());
+    let _ = sender(user_data).send(Heard::Complete(result.status.code, text(result.text)));
 }
 
 /// A channel whose sending end lives as long as the test, behind the pointer the callbacks get.
@@ -109,11 +120,16 @@ fn last_error() -> String {
     unsafe { text(waifu_last_error()) }.unwrap_or_default()
 }
 
-fn a_speak_request(text: &CStr) -> WaifuSpeakRequest {
-    WaifuSpeakRequest {
-        struct_size: std::mem::size_of::<WaifuSpeakRequest>() as u32,
+/// The last refusal, as its code and its sentence.
+fn refused() -> (WaifuStatusCode, String) {
+    (waifu_last_error_code(), last_error())
+}
+
+fn a_speech_request(text: &CStr) -> WaifuTextToSpeechRequest {
+    WaifuTextToSpeechRequest {
+        struct_size: std::mem::size_of::<WaifuTextToSpeechRequest>() as u32,
         text: text.as_ptr(),
-        like: ptr::null(),
+        reference: ptr::null(),
         speed: 1.0,
         temperature: 0.8,
         style: ptr::null(),
@@ -121,62 +137,266 @@ fn a_speak_request(text: &CStr) -> WaifuSpeakRequest {
     }
 }
 
-#[test]
-fn the_abi_is_the_header_s() {
-    assert_eq!(waifu_abi_version(), WAIFU_ABI_VERSION);
+fn an_image_request(prompt: &CStr) -> WaifuImageGenerationRequest {
+    WaifuImageGenerationRequest {
+        struct_size: std::mem::size_of::<WaifuImageGenerationRequest>() as u32,
+        prompt: prompt.as_ptr(),
+        negative: ptr::null(),
+        width: 64,
+        height: 64,
+        steps: 1,
+        guidance: 5.0,
+        seed: 7,
+        start_image: ptr::null(),
+        start_image_strength: 0.8,
+        control_image: ptr::null(),
+        control_image_scale: 1.0,
+        prompt_images: ptr::null(),
+        prompt_image_count: 0,
+    }
+}
+
+/// A pipeline for `task` on the processor.
+fn a_pipeline(task: WaifuPipelineType) -> *mut WaifuPipeline {
+    let pipeline = waifu_pipeline_new(task, WAIFU_DEVICE_CPU);
+    assert!(!pipeline.is_null(), "{}", last_error());
+    pipeline
+}
+
+fn a_model(path: &str) -> *mut WaifuModel {
+    let path = CString::new(path).unwrap();
+    let model = unsafe { waifu_model_open(path.as_ptr()) };
+    assert!(!model.is_null(), "{}", last_error());
+    model
+}
+
+/// `pipeline` with the stand-in voice loaded.
+unsafe fn with_tones(pipeline: *mut WaifuPipeline) {
+    let tones = a_model("tones");
+    let (send, heard) = a_channel();
+    let job =
+        waifu_pipeline_load_model_async(pipeline, tones, user_data(&send), None, Some(on_complete));
+    // The model is the caller's to free as soon as the call returns.
+    waifu_model_free(tones);
+    assert_ne!(job, 0, "{}", last_error());
+    assert_eq!(the_end(&heard), Heard::Complete(WAIFU_OK, None));
+}
+
+unsafe fn int_property(model: *const WaifuModel, property: WaifuModelProperty) -> Option<i64> {
+    let mut value = -7;
+    waifu_model_get_int_property(model, property, &mut value).then_some(value)
+}
+
+unsafe fn string_property(
+    model: *const WaifuModel,
+    property: WaifuModelProperty,
+) -> Option<String> {
+    text(waifu_model_get_string_property(model, property))
 }
 
 #[test]
-fn what_a_model_is_and_the_devices_are_json_and_freed_by_the_caller() {
+fn the_library_says_what_it_is() {
+    assert_eq!(waifu_abi_version(), 4);
+    assert_eq!(waifu_abi_version(), WAIFU_ABI_VERSION);
+    let version = unsafe { text(waifu_version()) }.unwrap();
+    assert_eq!(version, env!("CARGO_PKG_VERSION"));
+    // The same pointer every time: static.
+    assert_eq!(waifu_version(), waifu_version());
+    assert_eq!(waifu_revision(), waifu_revision());
+}
+
+#[test]
+fn the_last_error_is_empty_until_a_call_is_refused_and_only_a_refusal_sets_it() {
+    // On a thread of its own, which no other test has refused anything on.
+    std::thread::spawn(|| unsafe {
+        assert_eq!(refused(), (WAIFU_OK, String::new()));
+
+        assert!(waifu_model_open(c"no-such-model:v9".as_ptr()).is_null());
+        let (code, message) = refused();
+        assert_eq!(code, WAIFU_ERR_UNKNOWN_MODEL);
+        assert!(message.contains("no-such-model:v9"), "{message}");
+
+        // A query that finds nothing is not refused, and leaves the last error as it was.
+        let mut value = 0;
+        assert!(!waifu_model_get_int_property(ptr::null(), 1, &mut value));
+        assert!(!waifu_device_get_int_property(
+            WAIFU_DEVICE_CPU,
+            WAIFU_DEVICE_MEMORY_BUDGET,
+            &mut value
+        ));
+        assert!(!waifu_device_is_available(99));
+        assert_eq!(refused(), (code, message));
+
+        assert!(waifu_model_open(ptr::null()).is_null());
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn a_model_is_asked_about_one_property_at_a_time() {
     unsafe {
-        let manifest =
-            std::ffi::CString::new(crate::engine::tests::a_manifest("c-api-sdxl", "sdxl")).unwrap();
-        let described = waifu_describe_json(manifest.as_ptr());
-        assert!(text(described).unwrap().contains("\"image_keys\""));
-        waifu_string_free(described);
-
-        assert!(waifu_describe_json(c"no-such-model:v9".as_ptr()).is_null());
-        assert!(
-            last_error().contains("no-such-model:v9"),
-            "{}",
-            last_error()
+        let sdxl = a_model(&crate::engine::tests::a_manifest("c-api-sdxl", "sdxl"));
+        assert_eq!(
+            int_property(sdxl, WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION),
+            Some(1)
         );
+        assert_eq!(
+            string_property(sdxl, WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION),
+            None
+        );
+        assert_eq!(
+            int_property(sdxl, WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF),
+            Some(32)
+        );
+        assert!(string_property(sdxl, WAIFU_MODEL_IMAGE_GENERATION_SAMPLER).is_some());
+        assert_eq!(
+            int_property(sdxl, WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_FROM_START_IMAGE),
+            Some(1)
+        );
+        // The weights the manifest names are not there.
+        assert_eq!(int_property(sdxl, WAIFU_MODEL_SIZE_ON_DISK), None);
+        assert_eq!(int_property(sdxl, WAIFU_MODEL_SAMPLE_RATE), None);
 
-        // Only what can be used is listed, and the processor always can.
-        let devices = waifu_devices_json();
-        let listed: serde_json::Value = serde_json::from_str(&text(devices).unwrap()).unwrap();
-        waifu_string_free(devices);
-        let rows = listed["devices"].as_array().unwrap();
-        assert_eq!(rows[0]["name"], "cpu");
-        assert!(rows[0]["free"].is_null());
-        assert!(rows.iter().all(|row| row.get("available").is_none()));
+        // Every SUPPORTS_ it does not have is 0, with a reason, never NULL -- a task's details too.
+        for property in [
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH,
+            WAIFU_MODEL_SUPPORTS_STREAMING_TEXT_TO_SPEECH,
+            WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION,
+            WAIFU_MODEL_SUPPORTS_LAYER_DECOMPOSITION,
+            WAIFU_MODEL_SUPPORTS_SPEECH_TO_TEXT,
+            WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_CONTROL_IMAGE,
+            WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_PROMPT_IMAGES,
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE,
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE,
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE,
+            WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE,
+        ] {
+            assert_eq!(int_property(sdxl, property), Some(0), "{property}");
+            let why = string_property(sdxl, property).expect("a reason");
+            assert!(!why.is_empty(), "{property}");
+        }
+        // Another task's constraints are not there at all.
+        assert_eq!(
+            int_property(sdxl, WAIFU_MODEL_LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF),
+            None
+        );
+        // A number this library does not know is not there, and *value is left alone.
+        let mut value = 42;
+        assert!(!waifu_model_get_int_property(sdxl, 777, &mut value));
+        assert_eq!(value, 42);
+        assert!(waifu_model_get_string_property(sdxl, 777).is_null());
+        waifu_model_free(sdxl);
+
+        let tones = a_model("tones");
+        assert_eq!(
+            int_property(tones, WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH),
+            Some(1)
+        );
+        assert_eq!(
+            int_property(tones, WAIFU_MODEL_SUPPORTS_STREAMING_TEXT_TO_SPEECH),
+            Some(1)
+        );
+        assert!(int_property(tones, WAIFU_MODEL_SAMPLE_RATE).unwrap() > 0);
+        assert_eq!(
+            int_property(tones, WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION),
+            Some(0)
+        );
+        waifu_model_free(tones);
+        waifu_model_free(ptr::null_mut());
     }
 }
 
 #[test]
-fn a_call_refused_at_the_door_returns_0_and_calls_nothing() {
+fn a_pipeline_is_made_for_one_task_on_one_device() {
     unsafe {
-        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
-        assert!(!engine.is_null(), "{}", last_error());
+        let pipeline = a_pipeline(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        assert_eq!(
+            waifu_pipeline_get_type(pipeline),
+            WAIFU_PIPELINE_TEXT_TO_SPEECH
+        );
+        assert_eq!(waifu_pipeline_get_device(pipeline), WAIFU_DEVICE_CPU);
+        waifu_pipeline_free(pipeline);
+        waifu_pipeline_free(ptr::null_mut());
+
+        // A type or a device this library does not know is refused.
+        assert!(waifu_pipeline_new(0, WAIFU_DEVICE_CPU).is_null());
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+        assert!(waifu_pipeline_new(WAIFU_PIPELINE_TEXT_TO_SPEECH, 4).is_null());
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+
+        // A device this build or machine cannot use.
+        for device in [WAIFU_DEVICE_METAL, WAIFU_DEVICE_CUDA, WAIFU_DEVICE_VULKAN] {
+            if !waifu_device_is_available(device) {
+                assert!(waifu_pipeline_new(WAIFU_PIPELINE_TEXT_TO_SPEECH, device).is_null());
+                assert_eq!(waifu_last_error_code(), WAIFU_ERR_DEVICE_UNAVAILABLE);
+            }
+        }
+        assert!(waifu_device_is_available(WAIFU_DEVICE_CPU));
+    }
+}
+
+#[test]
+fn a_model_another_task_s_and_another_task_s_run_are_refused_at_the_call() {
+    unsafe {
+        let pipeline = a_pipeline(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        let (send, heard) = a_channel();
+
+        let sdxl = a_model(&crate::engine::tests::a_manifest("c-api-sdxl-tts", "sdxl"));
+        let job = waifu_pipeline_load_model_async(
+            pipeline,
+            sdxl,
+            user_data(&send),
+            None,
+            Some(on_complete),
+        );
+        waifu_model_free(sdxl);
+        assert_eq!(job, 0);
+        let (code, message) = refused();
+        assert_eq!(code, WAIFU_ERR_INVALID_ARGUMENT);
+        assert!(message.contains("text to speech"), "{message}");
+
+        let request = an_image_request(c"a cat");
+        let job = waifu_pipeline_run_image_generation_async(
+            pipeline,
+            &request,
+            user_data(&send),
+            None,
+            Some(on_image),
+        );
+        assert_eq!(job, 0);
+        let (code, message) = refused();
+        assert_eq!(code, WAIFU_ERR_INVALID_ARGUMENT);
+        assert!(message.contains("image generation"), "{message}");
+
+        assert_eq!(
+            waifu_pipeline_load_model_async(
+                pipeline,
+                ptr::null(),
+                user_data(&send),
+                None,
+                Some(on_complete)
+            ),
+            0
+        );
+
+        waifu_pipeline_free(pipeline);
+        // Nothing was ever called for any of them.
+        assert!(heard.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+}
+
+#[test]
+fn an_image_request_that_cannot_be_run_is_refused_at_the_call() {
+    unsafe {
+        let pipeline = a_pipeline(WAIFU_PIPELINE_IMAGE_GENERATION);
         let (send, heard) = a_channel();
 
         // A placeholder no image answers.
-        let request = WaifuDrawRequest {
-            struct_size: std::mem::size_of::<WaifuDrawRequest>() as u32,
-            prompt: c"the girl in <|girl|>".as_ptr(),
-            negative: ptr::null(),
-            images: ptr::null(),
-            image_count: 0,
-            width: 64,
-            height: 64,
-            steps: 1,
-            guidance: 5.0,
-            seed: 7,
-            strength: 0.8,
-            control_scale: 1.0,
-        };
-        let job = waifu_engine_draw_async(
-            engine,
+        let request = an_image_request(c"the girl in <|girl|>");
+        let job = waifu_pipeline_run_image_generation_async(
+            pipeline,
             &request,
             user_data(&send),
             Some(on_progress),
@@ -186,59 +406,80 @@ fn a_call_refused_at_the_door_returns_0_and_calls_nothing() {
         assert!(last_error().contains("<|girl|>"), "{}", last_error());
 
         // A struct the caller says is smaller than this library's: compiled against another header.
-        let short = WaifuDrawRequest {
+        let short = WaifuImageGenerationRequest {
             struct_size: 8,
-            prompt: c"a cat".as_ptr(),
-            ..request
+            ..an_image_request(c"a cat")
         };
         assert_eq!(
-            waifu_engine_draw_async(engine, &short, user_data(&send), None, Some(on_image)),
+            waifu_pipeline_run_image_generation_async(
+                pipeline,
+                &short,
+                user_data(&send),
+                None,
+                Some(on_image)
+            ),
             0
         );
         assert!(last_error().contains("struct_size"), "{}", last_error());
 
-        // A NULL where a string has to be.
+        // A prompt image under the key the engine keeps for the start image.
+        let pixels = [0u8; 4 * 4 * 3];
+        let image = WaifuImage {
+            width: 4,
+            height: 4,
+            rgb: pixels.as_ptr(),
+            len: pixels.len(),
+        };
+        let prompt_image = WaifuPromptImage {
+            key: c"start_from".as_ptr(),
+            image: &image,
+        };
+        let keyed = WaifuImageGenerationRequest {
+            prompt_images: &prompt_image,
+            prompt_image_count: 1,
+            ..an_image_request(c"a cat")
+        };
         assert_eq!(
-            waifu_engine_load_async(
-                engine,
-                ptr::null(),
+            waifu_pipeline_run_image_generation_async(
+                pipeline,
+                &keyed,
                 user_data(&send),
                 None,
-                Some(on_complete)
+                Some(on_image)
             ),
             0
         );
+        assert!(last_error().contains("start_image"), "{}", last_error());
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
 
-        waifu_engine_free(engine);
-        // Nothing was ever called for any of them.
-        assert!(heard.recv_timeout(Duration::from_millis(100)).is_err());
+        // A run with nothing loaded ends as not loaded, and not at the call.
+        let request = an_image_request(c"a cat");
+        assert_ne!(
+            waifu_pipeline_run_image_generation_async(
+                pipeline,
+                &request,
+                user_data(&send),
+                None,
+                Some(on_image)
+            ),
+            0
+        );
+        assert_eq!(the_end(&heard), Heard::Image(WAIFU_ERR_NOT_LOADED, None));
+
+        waifu_pipeline_free(pipeline);
     }
 }
 
 #[test]
 fn a_voice_is_loaded_and_speaks_through_the_c_api() {
     unsafe {
-        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
-        assert!(!engine.is_null(), "{}", last_error());
+        let pipeline = a_pipeline(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        with_tones(pipeline);
 
         let (send, heard) = a_channel();
-        let job = waifu_engine_load_async(
-            engine,
-            c"tones".as_ptr(),
-            user_data(&send),
-            Some(on_progress),
-            Some(on_complete),
-        );
-        assert_ne!(job, 0);
-        assert_eq!(
-            the_end(&heard),
-            Heard::Complete(WaifuStatusCode::WAIFU_OK, None)
-        );
-
-        let (send, heard) = a_channel();
-        let request = a_speak_request(c"hello there");
-        let job = waifu_engine_speak_async(
-            engine,
+        let request = a_speech_request(c"hello there");
+        let job = waifu_pipeline_run_text_to_speech_async(
+            pipeline,
             &request,
             user_data(&send),
             Some(on_progress),
@@ -246,166 +487,89 @@ fn a_voice_is_loaded_and_speaks_through_the_c_api() {
         );
         assert_ne!(job, 0);
 
-        // Progress before the end, with words for a status line, and the end with the samples.
+        // Progress before the end, in text to speech's stages, and the end with the samples.
         let first = heard.recv_timeout(WAIT).unwrap();
-        assert!(
-            matches!(first, Heard::Progress(WaifuStage::WAIFU_STAGE_ENCODING, ref words) if !words.is_empty()),
-            "{first:?}"
+        assert_eq!(
+            first,
+            Heard::Progress(WAIFU_STAGE_TEXT_TO_SPEECH_READING_TEXT)
         );
-        match the_end(&heard) {
-            Heard::Audio(WaifuStatusCode::WAIFU_OK, count, rate) => {
+        let mut stages = Vec::new();
+        let end = loop {
+            match heard.recv_timeout(WAIT).expect("an end") {
+                Heard::Progress(stage) => stages.push(stage),
+                end => break end,
+            }
+        };
+        assert!(
+            stages.iter().all(|stage| (200..300).contains(stage)),
+            "{stages:?}"
+        );
+        match end {
+            Heard::Audio(WAIFU_OK, count, rate) => {
                 assert!(count > 0);
                 assert!(rate > 0);
             }
             other => panic!("{other:?}"),
         }
 
-        // An image asked of a voice is the wrong kind, said at the end and not at the call.
-        let (send, heard) = a_channel();
-        let request = WaifuDrawRequest {
-            struct_size: std::mem::size_of::<WaifuDrawRequest>() as u32,
-            prompt: c"a cat".as_ptr(),
-            negative: c"".as_ptr(),
-            images: ptr::null(),
-            image_count: 0,
-            width: 64,
-            height: 64,
-            steps: 1,
-            guidance: 5.0,
-            seed: 7,
-            strength: 0.8,
-            control_scale: 1.0,
-        };
-        assert_ne!(
-            waifu_engine_draw_async(engine, &request, user_data(&send), None, Some(on_image)),
-            0
-        );
+        // An empty text is refused at the call.
+        let empty = a_speech_request(c" ");
         assert_eq!(
-            the_end(&heard),
-            Heard::Image(WaifuStatusCode::WAIFU_ERR_NOT_LOADED, None)
-        );
-
-        waifu_engine_free(engine);
-    }
-}
-
-unsafe extern "C" fn on_transcript(
-    user_data: *mut c_void,
-    event: *const WaifuTranscriptCompletionEvent,
-) {
-    let event = &*event;
-    // Text and language are both there or both NULL.
-    assert_eq!(event.text.is_null(), event.language.is_null());
-    let _ = sender(user_data).send(Heard::Complete(event.status.code, text(event.text)));
-}
-
-#[test]
-fn a_transcription_is_refused_at_the_door_or_by_what_is_loaded() {
-    unsafe {
-        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
-        assert!(!engine.is_null(), "{}", last_error());
-        let (send, heard) = a_channel();
-
-        // No samples: refused at the call.
-        let empty = WaifuAudio {
-            samples: ptr::null(),
-            count: 0,
-            rate: 16000,
-        };
-        let request = WaifuTranscribeRequest {
-            struct_size: std::mem::size_of::<WaifuTranscribeRequest>() as u32,
-            audio: &empty,
-            language: ptr::null(),
-            context: ptr::null(),
-        };
-        let job = waifu_engine_transcribe_async(
-            engine,
-            &request,
-            user_data(&send),
-            Some(on_progress),
-            Some(on_transcript),
-        );
-        assert_eq!(job, 0);
-        assert!(last_error().contains("empty"), "{}", last_error());
-
-        // No recording at all.
-        let null = WaifuTranscribeRequest {
-            audio: ptr::null(),
-            ..request
-        };
-        assert_eq!(
-            waifu_engine_transcribe_async(engine, &null, user_data(&send), None, None),
-            0
-        );
-        assert!(last_error().contains("audio"), "{}", last_error());
-        assert!(heard.recv_timeout(Duration::from_millis(100)).is_err());
-
-        // A voice cannot write a recording down: said at the end, with no text.
-        let (send, heard) = a_channel();
-        let job = waifu_engine_load_async(
-            engine,
-            c"tones".as_ptr(),
-            user_data(&send),
-            None,
-            Some(on_complete),
-        );
-        assert_ne!(job, 0);
-        assert_eq!(
-            the_end(&heard),
-            Heard::Complete(WaifuStatusCode::WAIFU_OK, None)
-        );
-
-        let second = vec![0.0f32; 16000];
-        let audio = WaifuAudio {
-            samples: second.as_ptr(),
-            count: second.len(),
-            rate: 16000,
-        };
-        let request = WaifuTranscribeRequest {
-            audio: &audio,
-            language: c"English".as_ptr(),
-            context: c"".as_ptr(),
-            ..request
-        };
-        let (send, heard) = a_channel();
-        assert_ne!(
-            waifu_engine_transcribe_async(
-                engine,
-                &request,
+            waifu_pipeline_run_text_to_speech_async(
+                pipeline,
+                &empty,
                 user_data(&send),
                 None,
-                Some(on_transcript)
+                Some(on_audio)
             ),
             0
         );
-        assert_eq!(
-            the_end(&heard),
-            Heard::Complete(WaifuStatusCode::WAIFU_ERR_NOT_LOADED, None)
-        );
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
 
-        waifu_engine_free(engine);
+        // Unloaded, a run is not loaded at the end.
+        let (send, heard) = a_channel();
+        assert_ne!(
+            waifu_pipeline_unload_model_async(pipeline, user_data(&send), Some(on_complete)),
+            0
+        );
+        assert_eq!(the_end(&heard), Heard::Complete(WAIFU_OK, None));
+        assert_ne!(
+            waifu_pipeline_run_text_to_speech_async(
+                pipeline,
+                &request,
+                user_data(&send),
+                None,
+                Some(on_audio)
+            ),
+            0
+        );
+        assert_eq!(the_end(&heard), Heard::Audio(WAIFU_ERR_NOT_LOADED, 0, 0));
+
+        waifu_pipeline_free(pipeline);
     }
 }
 
 #[test]
-fn freeing_the_engine_ends_every_job_it_had() {
+fn freeing_a_pipeline_ends_every_job_it_had() {
     unsafe {
-        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
+        let pipeline = a_pipeline(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        let tones = a_model("tones");
         let (send, heard) = a_channel();
-        waifu_engine_load_async(
-            engine,
-            c"tones".as_ptr(),
-            user_data(&send),
-            None,
-            Some(on_complete),
-        );
-        let request = a_speak_request(c"hello there");
+        waifu_pipeline_load_model_async(pipeline, tones, user_data(&send), None, Some(on_complete));
+        waifu_model_free(tones);
+        let request = a_speech_request(c"hello there");
         for _ in 0..3 {
-            waifu_engine_speak_async(engine, &request, user_data(&send), None, Some(on_audio));
+            waifu_pipeline_run_text_to_speech_async(
+                pipeline,
+                &request,
+                user_data(&send),
+                None,
+                Some(on_audio),
+            );
         }
-        waifu_engine_free(engine);
+        waifu_pipeline_free(pipeline);
 
-        // Four jobs, four ends, whatever each came to.
+        // Four jobs, four ends, whatever each came to, all before the free returned.
         let ends = heard
             .try_iter()
             .filter(|heard| !matches!(heard, Heard::Progress(..)))
@@ -417,26 +581,21 @@ fn freeing_the_engine_ends_every_job_it_had() {
 #[test]
 fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
     unsafe {
-        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
-        assert!(!engine.is_null(), "{}", last_error());
-        let (send, heard) = a_channel();
-        waifu_engine_load_async(
-            engine,
-            c"tones".as_ptr(),
-            user_data(&send),
-            None,
-            Some(on_complete),
-        );
-        assert_eq!(
-            the_end(&heard),
-            Heard::Complete(WaifuStatusCode::WAIFU_OK, None)
-        );
+        let pipeline = a_pipeline(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH);
+        with_tones(pipeline);
 
         // Every part before the end, and the end the parts end to end.
         let (send, heard) = a_channel();
-        let request = a_speak_request(c"hello there");
-        let job = waifu_engine_speak_stream_async(
-            engine,
+        let request = WaifuStreamingTextToSpeechRequest {
+            struct_size: std::mem::size_of::<WaifuStreamingTextToSpeechRequest>() as u32,
+            text: c"hello there".as_ptr(),
+            reference: ptr::null(),
+            temperature: 0.8,
+            style: ptr::null(),
+            seed: 7,
+        };
+        let job = waifu_pipeline_run_streaming_text_to_speech_async(
+            pipeline,
             &request,
             user_data(&send),
             Some(on_progress),
@@ -445,17 +604,22 @@ fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
         );
         assert_ne!(job, 0);
         let mut parts = Vec::new();
+        let mut stages = Vec::new();
         let end = loop {
             match heard.recv_timeout(WAIT).expect("an end") {
-                Heard::Progress(..) => continue,
+                Heard::Progress(stage) => stages.push(stage),
                 Heard::Part(samples, rate) => parts.push((samples, rate)),
                 end => break end,
             }
         };
         assert!(!parts.is_empty());
+        assert!(
+            stages.iter().all(|stage| (600..700).contains(stage)),
+            "{stages:?}"
+        );
         let count: usize = parts.iter().map(|(samples, _)| samples.len()).sum();
         match end {
-            Heard::Audio(WaifuStatusCode::WAIFU_OK, whole, rate) => {
+            Heard::Audio(WAIFU_OK, whole, rate) => {
                 assert_eq!(whole, count);
                 assert!(parts.iter().all(|(_, part_rate)| *part_rate == rate));
             }
@@ -464,8 +628,8 @@ fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
 
         // No part callback is no parts, and still the whole at the end.
         let (send, heard) = a_channel();
-        waifu_engine_speak_stream_async(
-            engine,
+        waifu_pipeline_run_streaming_text_to_speech_async(
+            pipeline,
             &request,
             user_data(&send),
             None,
@@ -474,13 +638,13 @@ fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
         );
         assert!(matches!(
             the_end(&heard),
-            Heard::Audio(WaifuStatusCode::WAIFU_OK, count, _) if count > 0
+            Heard::Audio(WAIFU_OK, count, _) if count > 0
         ));
 
-        // A request that is not one is refused at the call, as speaking refuses it.
+        // A request that is not one is refused at the call.
         assert_eq!(
-            waifu_engine_speak_stream_async(
-                engine,
+            waifu_pipeline_run_streaming_text_to_speech_async(
+                pipeline,
                 ptr::null(),
                 user_data(&send),
                 None,
@@ -489,42 +653,164 @@ fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
             ),
             0
         );
-        waifu_engine_free(engine);
+        // Text to speech's run is another task's.
+        assert_eq!(
+            waifu_pipeline_run_text_to_speech_async(
+                pipeline,
+                &a_speech_request(c"hello"),
+                user_data(&send),
+                None,
+                Some(on_audio)
+            ),
+            0
+        );
+        waifu_pipeline_free(pipeline);
     }
 }
 
 #[test]
-fn a_name_that_is_no_manifest_is_unknown_at_the_end() {
+fn a_transcription_is_refused_at_the_call_or_ends_not_loaded() {
     unsafe {
-        let engine = waifu_engine_new(WaifuDevice::WAIFU_DEVICE_CPU);
+        let pipeline = a_pipeline(WAIFU_PIPELINE_SPEECH_TO_TEXT);
         let (send, heard) = a_channel();
+
+        // No samples: refused at the call.
+        let empty = WaifuAudio {
+            samples: ptr::null(),
+            count: 0,
+            sample_rate: 16000,
+        };
+        let request = WaifuSpeechToTextRequest {
+            struct_size: std::mem::size_of::<WaifuSpeechToTextRequest>() as u32,
+            audio: &empty,
+            language: ptr::null(),
+            context: ptr::null(),
+        };
+        let job = waifu_pipeline_run_speech_to_text_async(
+            pipeline,
+            &request,
+            user_data(&send),
+            Some(on_progress),
+            Some(on_transcript),
+        );
+        assert_eq!(job, 0);
+        assert!(last_error().contains("empty"), "{}", last_error());
+
+        // No recording at all.
+        let null = WaifuSpeechToTextRequest {
+            audio: ptr::null(),
+            ..request
+        };
+        assert_eq!(
+            waifu_pipeline_run_speech_to_text_async(pipeline, &null, user_data(&send), None, None),
+            0
+        );
+        assert!(last_error().contains("audio"), "{}", last_error());
+        assert!(heard.recv_timeout(Duration::from_millis(100)).is_err());
+
+        // The stand-in voice is not a transcriber.
+        let tones = a_model("tones");
+        assert_eq!(
+            waifu_pipeline_load_model_async(pipeline, tones, user_data(&send), None, None),
+            0
+        );
+        waifu_model_free(tones);
+
+        // Nothing loaded: said at the end, with no text.
+        let second = vec![0.0f32; 16000];
+        let audio = WaifuAudio {
+            samples: second.as_ptr(),
+            count: second.len(),
+            sample_rate: 16000,
+        };
+        let request = WaifuSpeechToTextRequest {
+            audio: &audio,
+            language: c"English".as_ptr(),
+            context: c"".as_ptr(),
+            ..request
+        };
         assert_ne!(
-            waifu_engine_load_async(
-                engine,
-                c"no-such-model:v9".as_ptr(),
+            waifu_pipeline_run_speech_to_text_async(
+                pipeline,
+                &request,
                 user_data(&send),
                 None,
-                Some(on_complete)
+                Some(on_transcript)
             ),
             0
         );
-        match the_end(&heard) {
-            Heard::Complete(WaifuStatusCode::WAIFU_ERR_UNKNOWN_MODEL, Some(message)) => {
-                assert!(message.contains("no-such-model:v9"))
-            }
-            other => panic!("{other:?}"),
-        }
-        waifu_engine_free(engine);
+        assert_eq!(the_end(&heard), Heard::Complete(WAIFU_ERR_NOT_LOADED, None));
+
+        waifu_pipeline_free(pipeline);
     }
 }
 
-unsafe extern "C" fn on_log(user_data: *mut c_void, event: *const WaifuLogEvent) {
+#[test]
+fn a_layer_decomposition_is_refused_at_the_call_or_ends_not_loaded() {
+    unsafe {
+        let pipeline = a_pipeline(WAIFU_PIPELINE_LAYER_DECOMPOSITION);
+        let (send, heard) = a_channel();
+
+        // Pixels that are not the picture's size.
+        let pixels = [0u8; 4 * 4 * 4];
+        let short = WaifuRgbaImage {
+            width: 5,
+            height: 4,
+            rgba: pixels.as_ptr(),
+            len: pixels.len(),
+        };
+        let request = WaifuLayerDecompositionRequest {
+            struct_size: std::mem::size_of::<WaifuLayerDecompositionRequest>() as u32,
+            image: &short,
+            steps: 0,
+            depth_steps: 0,
+            resolution: 0,
+            split_pairs: false,
+            stratify_layers: true,
+            seed: 7,
+        };
+        assert_eq!(
+            waifu_pipeline_run_layer_decomposition_async(
+                pipeline,
+                &request,
+                user_data(&send),
+                None,
+                Some(on_layers)
+            ),
+            0
+        );
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+
+        let image = WaifuRgbaImage { width: 4, ..short };
+        let request = WaifuLayerDecompositionRequest {
+            image: &image,
+            ..request
+        };
+        assert_ne!(
+            waifu_pipeline_run_layer_decomposition_async(
+                pipeline,
+                &request,
+                user_data(&send),
+                None,
+                Some(on_layers)
+            ),
+            0
+        );
+        assert!(matches!(
+            the_end(&heard),
+            Heard::Complete(WAIFU_ERR_NOT_LOADED, Some(_))
+        ));
+        waifu_pipeline_free(pipeline);
+    }
+}
+
+unsafe extern "C" fn on_log(user_data: *mut c_void, log: *const WaifuLog) {
     let lines = &*(user_data as *const Mutex<Vec<(WaifuLogLevel, String)>>);
-    let event = &*event;
+    let log = &*log;
     lines
         .lock()
         .unwrap()
-        .push((event.level, text(event.message).unwrap_or_default()));
+        .push((log.level, text(log.message).unwrap_or_default()));
 }
 
 #[test]
@@ -538,202 +824,57 @@ fn a_log_callback_hears_the_library_s_lines() {
     assert!(
         lines
             .iter()
-            .any(|(level, line)| *level == WaifuLogLevel::WAIFU_LOG_WARNING
-                && line == "a line for the app"),
+            .any(|(level, line)| *level == WAIFU_LOG_WARNING && line == "a line for the app"),
         "{lines:?}"
     );
-}
-
-#[test]
-fn engine_options_compiled_against_another_header_are_refused() {
-    unsafe {
-        let engine = waifu_engine_new_with_options(ptr::null());
-        assert!(engine.is_null());
-        assert!(last_error().contains("NULL"), "{}", last_error());
-
-        let short = WaifuEngineOptions {
-            struct_size: 4,
-            device: WaifuDevice::WAIFU_DEVICE_CPU,
-        };
-        let engine = waifu_engine_new_with_options(&short);
-        assert!(engine.is_null());
-        assert!(last_error().contains("struct_size"), "{}", last_error());
-    }
+    // A level this library does not know changes nothing.
+    waifu_set_log_level(99);
 }
 
 #[test]
 fn a_memory_limit_is_for_a_device_that_has_one() {
     // The processor's allocator holds nothing back, so there is nothing for a limit to limit.
-    assert!(!waifu_set_memory_limit(
-        WaifuDevice::WAIFU_DEVICE_CPU,
-        1 << 30
-    ));
-    assert!(last_error().contains("cpu"), "{}", last_error());
+    assert!(!waifu_device_set_memory_limit(WAIFU_DEVICE_CPU, 1 << 30));
+    assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+    assert!(!waifu_device_set_memory_limit(77, 1 << 30));
+    assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
 
-    // Every device with memory of its own has one, where the device is here: set, and lifted again
-    // so that no other test runs under it.
-    for (device, waifu_device) in [
-        (crate::flint::Device::Metal, WaifuDevice::WAIFU_DEVICE_METAL),
-        (crate::flint::Device::Cuda, WaifuDevice::WAIFU_DEVICE_CUDA),
-        (
-            crate::flint::Device::Vulkan,
-            WaifuDevice::WAIFU_DEVICE_VULKAN,
-        ),
-    ] {
-        if device.is_available() {
-            assert!(waifu_set_memory_limit(waifu_device, 1 << 40));
-            assert!(waifu_set_memory_limit(waifu_device, 0));
+    // Every device with memory of its own has one, where the device is here: set, read back, and
+    // lifted again so that no other test runs under it.
+    for device in [WAIFU_DEVICE_METAL, WAIFU_DEVICE_CUDA, WAIFU_DEVICE_VULKAN] {
+        let mut value = 0;
+        if !waifu_device_is_available(device) {
+            assert!(!waifu_device_set_memory_limit(device, 1 << 40));
+            assert_eq!(waifu_last_error_code(), WAIFU_ERR_DEVICE_UNAVAILABLE);
+            assert!(unsafe {
+                !waifu_device_get_int_property(device, WAIFU_DEVICE_MEMORY_BUDGET, &mut value)
+            });
+            continue;
         }
-    }
-}
-
-#[test]
-fn a_document_is_written_from_layers_and_freed_by_the_caller() {
-    let name = CString::new("front hair").unwrap();
-    let pixels = [10u8, 20, 30, 255, 40, 50, 60, 128];
-    let layer = WaifuPsdLayer {
-        name: name.as_ptr(),
-        left: 3,
-        top: 4,
-        image: WaifuRgbaImage {
-            width: 2,
-            height: 1,
-            rgba: pixels.as_ptr(),
-            len: pixels.len(),
-        },
-    };
-    for mode in [
-        WaifuPsdMode::WAIFU_PSD_RGB,
-        WaifuPsdMode::WAIFU_PSD_GRAYSCALE,
-    ] {
-        let mut len = 0;
-        let written = unsafe { waifu_psd_write(&layer, 1, ptr::null(), 0, 8, 8, mode, &mut len) };
-        assert!(!written.is_null(), "{}", last_error());
-        let bytes = unsafe { std::slice::from_raw_parts(written, len) };
-        assert_eq!(&bytes[..4], b"8BPS");
-        // The colour mode the header names: RGB is 3, grayscale 1.
-        let colour = u16::from_be_bytes([bytes[24], bytes[25]]);
-        assert_eq!(
-            colour,
-            if mode == WaifuPsdMode::WAIFU_PSD_RGB {
-                3
-            } else {
-                1
-            }
-        );
-        unsafe { waifu_bytes_free(written, len) };
-    }
-
-    // Pixels that are not the layer's size are refused, and say so.
-    let short = WaifuPsdLayer {
-        image: WaifuRgbaImage {
-            width: 3,
-            ..layer.image
-        },
-        ..layer
-    };
-    let mut len = 0;
-    let refused = unsafe {
-        waifu_psd_write(
-            &short,
-            1,
-            ptr::null(),
-            0,
-            8,
-            8,
-            WaifuPsdMode::WAIFU_PSD_RGB,
-            &mut len,
-        )
-    };
-    assert!(refused.is_null());
-    assert!(last_error().contains("front hair"), "{}", last_error());
-    unsafe { waifu_bytes_free(ptr::null_mut(), 0) };
-
-    // With its depth, kept after it in the hidden group, and read back in that order.
-    let depth_name = CString::new("depth/front hair").unwrap();
-    let whole = |name: &CString| WaifuPsdLayer {
-        name: name.as_ptr(),
-        left: 3,
-        top: 4,
-        image: WaifuRgbaImage {
-            width: 2,
-            height: 1,
-            rgba: pixels.as_ptr(),
-            len: pixels.len(),
-        },
-    };
-    let depth = whole(&depth_name);
-    let written = unsafe {
-        waifu_psd_write(
-            &whole(&name),
-            1,
-            &depth,
-            1,
-            8,
-            8,
-            WaifuPsdMode::WAIFU_PSD_RGB,
-            &mut len,
-        )
-    };
-    assert!(!written.is_null(), "{}", last_error());
-    let document =
-        crate::see_through::read_psd(unsafe { std::slice::from_raw_parts(written, len) }).unwrap();
-    let names: Vec<&str> = document.layers.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, ["front hair", "depth/front hair"]);
-    unsafe { waifu_bytes_free(written, len) };
-}
-
-#[test]
-fn a_top_of_two_depths_is_stratified_and_freed_by_the_caller() {
-    // A top 20 by 10, its left half near and its right half far.
-    let (w, h) = (20usize, 10usize);
-    let pixels: Vec<u8> = (0..w * h).flat_map(|_| [90, 90, 90, 255]).collect();
-    let depth: Vec<u8> = (0..w * h)
-        .flat_map(|p| {
-            let d = if p % w < 10 { 40 } else { 200 };
-            [d, d, d, 255]
-        })
-        .collect();
-    let name = CString::new("topwear").unwrap();
-    let image = |data: &Vec<u8>| WaifuRgbaImage {
-        width: w as u32,
-        height: h as u32,
-        rgba: data.as_ptr(),
-        len: data.len(),
-    };
-    let layer = WaifuDepthLayer {
-        name: name.as_ptr(),
-        left: 5,
-        top: 6,
-        image: image(&pixels),
-        depth: image(&depth),
-    };
-    unsafe {
-        let out = waifu_stratify(&layer, 1);
-        assert!(!out.is_null(), "{}", last_error());
-        let layers = std::slice::from_raw_parts((*out).layers, (*out).count);
-        let names: Vec<String> = layers
-            .iter()
-            .map(|l| CStr::from_ptr(l.name).to_string_lossy().into_owned())
-            .collect();
-        // The back under the front, both where the top was.
-        assert_eq!(names, ["topwear-1", "topwear-0"]);
-        assert_eq!((layers[1].left, layers[1].top), (5, 6));
-        let back = &layers[0];
-        assert_eq!((back.image.width, back.depth.width), (20, 20));
-        assert_eq!(*back.depth.rgba.add(4 * 19), 200, "its depth, red");
-        waifu_depth_layers_free(out);
-
-        // A depth that is not the layer's size is refused.
-        let short = WaifuDepthLayer {
-            depth: WaifuRgbaImage {
-                width: 3,
-                ..image(&depth)
-            },
-            ..layer
-        };
-        assert!(waifu_stratify(&short, 1).is_null());
-        assert!(last_error().contains("topwear"), "{}", last_error());
-        waifu_depth_layers_free(ptr::null_mut());
+        assert!(waifu_device_set_memory_limit(device, 1 << 40));
+        unsafe {
+            assert!(waifu_device_get_int_property(
+                device,
+                WAIFU_DEVICE_MEMORY_LIMIT,
+                &mut value
+            ));
+            assert_eq!(value, 1 << 40);
+            assert!(waifu_device_get_int_property(
+                device,
+                WAIFU_DEVICE_MEMORY_BUDGET,
+                &mut value
+            ));
+            let budget = value;
+            assert!(waifu_device_get_int_property(
+                device,
+                WAIFU_DEVICE_MEMORY_AVAILABLE,
+                &mut value
+            ));
+            assert!((0..=budget).contains(&value));
+        }
+        assert!(waifu_device_set_memory_limit(device, 0));
+        assert!(unsafe {
+            !waifu_device_get_int_property(device, WAIFU_DEVICE_MEMORY_LIMIT, &mut value)
+        });
     }
 }

@@ -326,10 +326,16 @@ fn the_engine_writes_down_a_recording() {
         other => panic!("{other:?}"),
     }
 
-    // It listens, then writes, and the bar only moves forward.
+    // It reads the recording, then generates tokens, and the bar only moves forward.
     let reports: Vec<Progress> = progress.try_iter().collect();
-    assert_eq!(reports.first().map(|r| r.stage), Some(Stage::Listening));
-    assert_eq!(reports.last().map(|r| r.stage), Some(Stage::Writing));
+    assert_eq!(
+        reports.first().map(|r| r.stage),
+        Some(Stage::SpeechToTextReadingRecording)
+    );
+    assert_eq!(
+        reports.last().map(|r| r.stage),
+        Some(Stage::SpeechToTextGeneratingTokens)
+    );
     let fractions: Vec<f64> = reports.iter().filter_map(|r| r.fraction).collect();
     assert!(
         fractions.windows(2).all(|pair| pair[0] <= pair[1]),

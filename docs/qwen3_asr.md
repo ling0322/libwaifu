@@ -5,7 +5,7 @@ left to find out.
 [`Qwen/Qwen3-ASR-0.6B`](https://huggingface.co/Qwen/Qwen3-ASR-0.6B), under Apache 2.0. It is the
 first model of the `speech2text` task: [`Transcriber`](../waifu/src/transcription.rs) is the seam,
 [`Qwen3Asr`](../waifu/src/qwen3_asr/mod.rs) implements it, and the engine and the C API's
-`waifu_engine_transcribe_async` ([ffi.md](ffi.md)) run it.
+`waifu_pipeline_run_speech_to_text_async` ([ffi-abi4.md](ffi-abi4.md)) run it.
 
 ```bash
 cargo run --release -p waifu-tools --bin transcribe -- models/qwen3-asr.yaml speech.wav

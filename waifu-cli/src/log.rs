@@ -28,9 +28,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::RwLock;
 
-use crate::c::{
-    self, WaifuLogEvent, WaifuLogLevel, WaifuModelManagerLogEvent, WaifuModelManagerLogLevel,
-};
+use crate::c::{self, WaifuLog, WaifuModelManagerLogEvent, WaifuModelManagerLogLevel};
 
 /// How much a line matters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -87,14 +85,15 @@ fn hand_over(level: Level, time: &str, source: &str, message: &str) {
     }
 }
 
-unsafe extern "C" fn from_waifu(_: *mut c_void, event: *const WaifuLogEvent) {
+unsafe extern "C" fn from_waifu(_: *mut c_void, event: *const WaifuLog) {
     let event = &*event;
     let level = match event.level {
-        WaifuLogLevel::WAIFU_LOG_DEBUG => Level::Debug,
-        WaifuLogLevel::WAIFU_LOG_INFO => Level::Info,
-        WaifuLogLevel::WAIFU_LOG_WARNING => Level::Warning,
-        WaifuLogLevel::WAIFU_LOG_ERROR => Level::Error,
-        WaifuLogLevel::WAIFU_LOG_FATAL => Level::Fatal,
+        c::WAIFU_LOG_DEBUG => Level::Debug,
+        c::WAIFU_LOG_WARNING => Level::Warning,
+        c::WAIFU_LOG_ERROR => Level::Error,
+        c::WAIFU_LOG_FATAL => Level::Fatal,
+        // INFO, and a level a newer library has that this tool does not know.
+        _ => Level::Info,
     };
     let source = c::text(event.source).unwrap_or_default();
     let time = c::text(event.time).unwrap_or_default();
