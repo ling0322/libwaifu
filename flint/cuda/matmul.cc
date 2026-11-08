@@ -96,7 +96,7 @@ void MatMul::apply(const TensorView &A, const TensorView &B, const TensorView &C
   CHECK(A.getDevice().getType() == Device::kCuda);
   CHECK(B.getDevice().getType() == Device::kCuda);
   CHECK(C.getDevice().getType() == Device::kCuda);
-  CHECK(C.getDType() == A.getDType() && C.isContiguous());
+  CHECK(C.isContiguous());
   CHECK(A.getDim() >= 2 && B.getDim() >= 2);
   std::vector<int> shapeC = A.getShape();
   shapeC.back() = B.getShape(-1);
@@ -104,17 +104,21 @@ void MatMul::apply(const TensorView &A, const TensorView &B, const TensorView &C
   if (C.getNumEl() == 0) return;
 
   if (A.getDType() == DType::kFloat16 && B.getDType() == DType::kFloat16) {
+    // A float C keeps the sum as it was -- see Operators::matmulWidensHalf.
+    if (C.getDType() == DType::kFloat) return matmulFloat<half, float>(A, B, C);
+    CHECK(C.getDType() == DType::kFloat16);
     matmulFloat<half>(A, B, C);
   } else if (A.getDType() == DType::kFloat && B.getDType() == DType::kFloat) {
+    CHECK(C.getDType() == DType::kFloat);
     matmulFloat<float>(A, B, C);
   } else {
     NOT_IMPL();
   }
 }
 
-/// A GEMM call in `T`. The interface names its two arms after the BLAS letters rather than
-/// taking a type, so this is where the letter is chosen.
-template<typename T>
+/// A GEMM call of two `T` into a `TC`. The interface names its arms after the BLAS letters rather
+/// than taking a type, so this is where the letter is chosen.
+template<typename T, typename TC = T>
 void callGemm(
     Gemm *gemm,
     bool transA,
@@ -128,11 +132,11 @@ void callGemm(
     const T *B,
     int ldb,
     float beta,
-    T *C,
+    TC *C,
     int ldc);
 
 template<>
-void callGemm<half>(
+void callGemm<half, half>(
     Gemm *gemm,
     bool transA,
     bool transB,
@@ -151,7 +155,26 @@ void callGemm<half>(
 }
 
 template<>
-void callGemm<float>(
+void callGemm<half, float>(
+    Gemm *gemm,
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const half *A,
+    int lda,
+    const half *B,
+    int ldb,
+    float beta,
+    float *C,
+    int ldc) {
+  gemm->hgemmIntoFloat(transA, transB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+template<>
+void callGemm<float, float>(
     Gemm *gemm,
     bool transA,
     bool transB,
@@ -169,7 +192,7 @@ void callGemm<float>(
   gemm->sgemm(transA, transB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
-template<typename T>
+template<typename T, typename TC = T>
 void callGemmArray(
     Gemm *gemm,
     bool transA,
@@ -183,12 +206,12 @@ void callGemmArray(
     const T *const *arrayB,
     int ldb,
     float beta,
-    T *const *arrayC,
+    TC *const *arrayC,
     int ldc,
     int batchSize);
 
 template<>
-void callGemmArray<half>(
+void callGemmArray<half, half>(
     Gemm *gemm,
     bool transA,
     bool transB,
@@ -209,7 +232,28 @@ void callGemmArray<half>(
 }
 
 template<>
-void callGemmArray<float>(
+void callGemmArray<half, float>(
+    Gemm *gemm,
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const half *const *arrayA,
+    int lda,
+    const half *const *arrayB,
+    int ldb,
+    float beta,
+    float *const *arrayC,
+    int ldc,
+    int batchSize) {
+  gemm->hgemmIntoFloatArray(
+      transA, transB, m, n, k, alpha, arrayA, lda, arrayB, ldb, beta, arrayC, ldc, batchSize);
+}
+
+template<>
+void callGemmArray<float, float>(
     Gemm *gemm,
     bool transA,
     bool transB,
@@ -229,26 +273,27 @@ void callGemmArray<float>(
       transA, transB, m, n, k, alpha, arrayA, lda, arrayB, ldb, beta, arrayC, ldc, batchSize);
 }
 
-template<typename T>
+template<typename T, typename TC>
 void MatMul::matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDType() == B.getDType() && A.getDType() == DType::getType<T>());
+  CHECK(C.getDType() == DType::getType<TC>());
   if (A.getDim() == 2 && B.getDim() == 2) {
     // A single row against a transposed weight is the decode-step shape, and the vector kernel
     // is faster for it. Every condition gemvHalf asserts has to be checked here, not just the
     // transposed layout: a contiguous B with one column also has getStride(0) == 1, and the
     // kernel loads eight halves at a time. Anything it cannot take falls through to the GEMM.
     // There is no float kernel behind it, so a float matmul is always the GEMM.
-    if constexpr (std::is_same<T, half>::value) {
+    if constexpr (std::is_same<T, half>::value && std::is_same<TC, half>::value) {
       if (A.getShape(0) == 1 && A.getStride(1) == 1 && B.getStride(0) == 1 &&
           B.getStride(1) == B.getShape(0) && B.getShape(0) % 8 == 0) {
         return gemvHalf(A.subtensor(0), B, C);
       }
     }
-    return gemm<T>(A, B, C);
+    return gemm<T, TC>(A, B, C);
   } else if (A.getDim() > 2 && B.getDim() == 2 && A.isContiguous()) {
-    return bmmToGemm<T>(A, B, C);
+    return bmmToGemm<T, TC>(A, B, C);
   } else if (A.getDim() >= 2 && B.getDim() >= 2 && A.getDim() >= B.getDim()) {
-    return bmm<T>(A, B, C);
+    return bmm<T, TC>(A, B, C);
   } else {
     NOT_IMPL();
   }
@@ -289,14 +334,14 @@ std::vector<const T *> MatMul::getBatch(const TensorView &A, int nBatchDim) {
   NOT_IMPL();
 }
 
-template<typename T>
+template<typename T, typename TC>
 void MatMul::bmmToGemm(const TensorView &A, const TensorView &B, const TensorView &C) {
   TensorView xA = A.view({-1, A.getShape(-1)});
   TensorView xC = C.view({-1, C.getShape(-1)});
-  gemm<T>(xA, B, xC);
+  gemm<T, TC>(xA, B, xC);
 }
 
-template<typename T>
+template<typename T, typename TC>
 void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
   TensorView xB = B;
   if (A.getDim() != B.getDim()) xB = op::cpu::expandBatchDims(B, A.getShape());
@@ -309,20 +354,20 @@ void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) 
   op::cpu::GEMMArgs gemmArgs = op::cpu::generateGemmArgs(A, xB, C);
   std::vector<const T *> batchA = getBatch<T>(A, nBatchDim);
   std::vector<const T *> batchB = getBatch<T>(xB, nBatchDim);
-  std::vector<const T *> batchC = getBatch<T>(C, nBatchDim);
+  std::vector<const TC *> batchC = getBatch<TC>(C, nBatchDim);
   CHECK(batchA.size() == batchB.size() && batchA.size() == batchC.size());
 
   int64_t nb = batchA.size();
   lut::c_ptr<const T *> arrayA = llynCudaAlloc<const T *>(nb);
   lut::c_ptr<const T *> arrayB = llynCudaAlloc<const T *>(nb);
-  lut::c_ptr<T *> arrayC = llynCudaAlloc<T *>(nb);
+  lut::c_ptr<TC *> arrayC = llynCudaAlloc<TC *>(nb);
 
   int64_t nc = sizeof(void *) * nb;
   LL_CHECK_CUDA_STATUS(cudaMemcpy(arrayA.get(), batchA.data(), nc, cudaMemcpyHostToDevice));
   LL_CHECK_CUDA_STATUS(cudaMemcpy(arrayB.get(), batchB.data(), nc, cudaMemcpyHostToDevice));
   LL_CHECK_CUDA_STATUS(cudaMemcpy(arrayC.get(), batchC.data(), nc, cudaMemcpyHostToDevice));
 
-  callGemmArray<T>(
+  callGemmArray<T, TC>(
       _gemm.get(),
       gemmArgs.transA,
       gemmArgs.transB,
@@ -342,13 +387,13 @@ void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) 
   LL_CUDA_SYNCHRONIZE();
 }
 
-template<typename T>
+template<typename T, typename TC>
 void MatMul::gemm(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDim() == B.getDim() && A.getDim() == 2);
   C.throwIfInvalidShape({A.getShape(0), B.getShape(1)}, "gemm");
 
   op::cpu::GEMMArgs gemmArgs = op::cpu::generateGemmArgs(A, B, C);
-  callGemm<T>(
+  callGemm<T, TC>(
       _gemm.get(),
       gemmArgs.transA,
       gemmArgs.transB,
@@ -361,7 +406,7 @@ void MatMul::gemm(const TensorView &A, const TensorView &B, const TensorView &C)
       getDataPtrCuda<T>(B),
       gemmArgs.ldb,
       0.0f,
-      getDataPtrCuda<T>(C),
+      getDataPtrCuda<TC>(C),
       gemmArgs.ldc);
   LL_CUDA_SYNCHRONIZE();
 }

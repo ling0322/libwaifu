@@ -39,23 +39,24 @@ class MatMul {
   static std::shared_ptr<MatMul> createCutlass();
   static std::shared_ptr<MatMul> createCublas();
 
-  /// C = A @ B, written into `C`: contiguous, A's batch and rows by B's columns, of A's type.
+  /// C = A @ B, written into `C`: contiguous, A's batch and rows by B's columns, of A's type -- or
+  /// float where A and B are both half, the sum as it was before half would round it.
   void apply(const TensorView &A, const TensorView &B, const TensorView &C);
 
  protected:
   std::shared_ptr<Gemm> _gemm;
 
-  // The float paths, in `T`, which is <half> or <float>. The two differ only in which cuBLAS
-  // call they end at and in the vector kernel, which exists for half alone; everything about the
-  // shapes is the same, so they are one body rather than two. Defined in matmul.cc and used only
-  // there.
-  template<typename T>
+  // The float paths, in `T`, which is <half> or <float>, into a `TC` that is `T` or, for <half>,
+  // <float>. They differ only in which cuBLAS call they end at and in the vector kernel, which
+  // exists for half alone; everything about the shapes is the same, so they are one body rather
+  // than three. Defined in matmul.cc and used only there.
+  template<typename T, typename TC = T>
   void gemm(const TensorView &A, const TensorView &B, const TensorView &C);
-  template<typename T>
+  template<typename T, typename TC = T>
   void bmm(const TensorView &A, const TensorView &B, const TensorView &C);
-  template<typename T>
+  template<typename T, typename TC = T>
   void matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C);
-  template<typename T>
+  template<typename T, typename TC = T>
   void bmmToGemm(const TensorView &A, const TensorView &B, const TensorView &C);
   template<typename T>
   std::vector<const T *> getBatch(const TensorView &A, int nBatchDim);

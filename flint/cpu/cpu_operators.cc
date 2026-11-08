@@ -597,6 +597,10 @@ DType CPUOperators::getDefaultFloatType() {
   return DType::getType<cpu::DefaultFloatType>();
 }
 
+bool CPUOperators::matmulWidensHalf() {
+  return true;
+}
+
 // the CPU backend allocates through the system allocator and tracks nothing.
 MemorySnapshot CPUOperators::captureMemorySnapshot() {
   return MemorySnapshot(0, 0, 0, 0);

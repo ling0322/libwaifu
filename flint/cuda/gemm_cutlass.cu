@@ -102,14 +102,20 @@ using cutlass::layout::RowMajor;
 /// `can_implement` in `hgemmT` -- and what comes back from the device is a misaligned access,
 /// reported at whichever unrelated CUDA call next happens to ask for a status. Anima's patch
 /// embedder is a K of 68, which is how this was found; `hgemm` below is what picks.
-template<class LayoutA, class LayoutB, int ALIGNMENT>
+///
+/// `ElementC` is half, or float for a product kept as it was summed -- the composed attention's
+/// scores, which can be past what half holds. C is then accessed the same bytes at a time as A and
+/// B, so half as many elements.
+template<class LayoutA, class LayoutB, int ALIGNMENT, class ElementC = cutlass::half_t>
 struct Sm80Gemm {
+  static constexpr int kAlignmentC = ALIGNMENT * sizeof(cutlass::half_t) / sizeof(ElementC);
+
   using Gemm = cutlass::gemm::device::Gemm<
       cutlass::half_t,
       LayoutA,
       cutlass::half_t,
       LayoutB,
-      cutlass::half_t,
+      ElementC,
       cutlass::layout::RowMajor,
       float,
       cutlass::arch::OpClassTensorOp,
@@ -117,7 +123,7 @@ struct Sm80Gemm {
       cutlass::gemm::GemmShape<128, 128, 32>,
       cutlass::gemm::GemmShape<64, 64, 32>,
       cutlass::gemm::GemmShape<16, 8, 16>,
-      cutlass::epilogue::thread::LinearCombination<cutlass::half_t, ALIGNMENT, float, float>,
+      cutlass::epilogue::thread::LinearCombination<ElementC, kAlignmentC, float, float>,
       cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
       3,
       ALIGNMENT,
@@ -136,15 +142,17 @@ struct Sm80Gemm {
 /// that is on it before anything runs. See `hgemm` below.
 constexpr int kAlignments[] = {8, 4, 2};
 
-/// Whether `data` and `ld` can be read `alignment` halves at a time.
+/// Whether `data` and `ld`, in elements of `T`, can be read the bytes of `alignment` halves at a
+/// time -- see `Sm80Gemm`, whose C may be float.
 ///
 /// Both ends are asked. The leading dimension is where this goes wrong in practice -- a
 /// device allocation is 256-byte aligned, so the base of a whole tensor always qualifies -- but a
 /// GEMM may also be handed the middle of one, and a row that starts off the boundary reads as
 /// misaligned whatever the stride says.
-bool isAlignedTo(int alignment, const void *data, int ld) {
+template<class T>
+bool isAlignedTo(int alignment, const T *data, int ld) {
   size_t bytes = static_cast<size_t>(alignment) * sizeof(cutlass::half_t);
-  return reinterpret_cast<uintptr_t>(data) % bytes == 0 && ld % alignment == 0;
+  return reinterpret_cast<uintptr_t>(data) % bytes == 0 && (ld * sizeof(T)) % bytes == 0;
 }
 
 constexpr int kTileM = 128;
@@ -215,20 +223,20 @@ int splitKSlices(int m, int n, int k) {
   return slices;
 }
 
-template<class LayoutA, class LayoutB, class ArchTag, int ALIGNMENT>
+template<class LayoutA, class LayoutB, class ArchTag, int ALIGNMENT, class ElementC>
 void hgemmT(
     int m,
     int n,
     int k,
-    cutlass::half_t alpha,
+    float alpha,
     const cutlass::half_t *A,
     int lda,
     const cutlass::half_t *B,
     int ldb,
-    cutlass::half_t beta,
-    cutlass::half_t *C,
+    float beta,
+    ElementC *C,
     int ldc) {
-  using Gemm = typename Sm80Gemm<LayoutA, LayoutB, ALIGNMENT>::Gemm;
+  using Gemm = typename Sm80Gemm<LayoutA, LayoutB, ALIGNMENT, ElementC>::Gemm;
   Gemm gemmOperator;
 
   // The epilogue computes in float now, so the scalars go in as float.
@@ -238,7 +246,7 @@ void hgemmT(
       {B, ldb},
       {C, ldc},
       {C, ldc},
-      {float(alpha), float(beta)},
+      {alpha, beta},
       splitKSlices(m, n, k)};
 
   // Asked rather than assumed. `initialize` does not call this -- it builds the params and
@@ -265,9 +273,10 @@ void hgemmT(
 /// zero row of the answer, a zero column of B a zero column, and a zero tail on K contributes
 /// nothing to any sum. What comes back in the corner is the product that was asked for, to the
 /// bit. A fresh allocation is 256-byte aligned, so the base needs nothing done to it.
+template<class T>
 struct PaddedOperand {
-  lut::c_ptr<cutlass::half_t> buffer;
-  cutlass::half_t *data = nullptr;
+  lut::c_ptr<T> buffer;
+  T *data = nullptr;
   int ld = 0;
 };
 
@@ -276,24 +285,25 @@ constexpr int roundUpToAlignment(int n) {
   return (n + kAlignments[0] - 1) / kAlignments[0] * kAlignments[0];
 }
 
-/// `srcRows` rows of `srcCols` halves, stepping `srcLd`, in the corner of a zeroed `dstRows` by
+/// `srcRows` rows of `srcCols` elements, stepping `srcLd`, in the corner of a zeroed `dstRows` by
 /// `dstCols` buffer that steps `dstCols`.
 ///
 /// `copyIn` false leaves the buffer untouched, which is what an output wants: the kernel defines
 /// every element of it, and nothing is going to read it back into a sum first.
-PaddedOperand padOperand(
-    const cutlass::half_t *src,
+template<class T>
+PaddedOperand<T> padOperand(
+    const T *src,
     int srcRows,
     int srcCols,
     int srcLd,
     int dstRows,
     int dstCols,
     bool copyIn = true) {
-  constexpr size_t kHalf = sizeof(cutlass::half_t);
+  constexpr size_t kHalf = sizeof(T);
 
-  PaddedOperand out;
+  PaddedOperand<T> out;
   out.ld = dstCols;
-  out.buffer = llynCudaAlloc<cutlass::half_t>(int64_t(dstRows) * dstCols);
+  out.buffer = llynCudaAlloc<T>(int64_t(dstRows) * dstCols);
   out.data = out.buffer.get();
 
   // An output is left as it is found. The kernel writes every element of it -- the extents it is
@@ -344,18 +354,18 @@ void operandExtent(int r, int c, int *rows, int *cols) {
 }
 
 /// The same call at the widest alignment the three operands can actually be read at.
-template<class LayoutA, class LayoutB, class ArchTag>
+template<class LayoutA, class LayoutB, class ArchTag, class ElementC>
 void hgemm(
     int m,
     int n,
     int k,
-    cutlass::half_t alpha,
+    float alpha,
     const cutlass::half_t *A,
     int lda,
     const cutlass::half_t *B,
     int ldb,
-    cutlass::half_t beta,
-    cutlass::half_t *C,
+    float beta,
+    ElementC *C,
     int ldc) {
   auto fits = [&](int alignment) {
     return isAlignedTo(alignment, A, lda) && isAlignedTo(alignment, B, ldb) &&
@@ -363,16 +373,16 @@ void hgemm(
   };
 
   if (fits(kAlignments[0])) {
-    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[0]>(
+    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[0], ElementC>(
         m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   }
   if (fits(kAlignments[1])) {
-    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[1]>(
+    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[1], ElementC>(
         m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   }
 
   if (fits(kAlignments[2])) {
-    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[2]>(
+    return hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[2], ElementC>(
         m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
   }
 
@@ -415,15 +425,16 @@ void hgemm(
   operandExtent<LayoutB>(k, n, &bRows, &bCols);
   operandExtent<LayoutB>(paddedK, paddedN, &bPaddedRows, &bPaddedCols);
 
-  PaddedOperand paddedA = padOperand(A, aRows, aCols, lda, aPaddedRows, aPaddedCols);
-  PaddedOperand paddedB = padOperand(B, bRows, bCols, ldb, bPaddedRows, bPaddedCols);
+  PaddedOperand<cutlass::half_t> paddedA =
+      padOperand(A, aRows, aCols, lda, aPaddedRows, aPaddedCols);
+  PaddedOperand<cutlass::half_t> paddedB =
+      padOperand(B, bRows, bCols, ldb, bPaddedRows, bPaddedCols);
 
   // The output is row-major whatever the operands are. A non-zero beta reads it, so it is copied
   // in as well as out.
-  PaddedOperand paddedC =
-      padOperand(C, m, n, ldc, paddedM, paddedN, beta != cutlass::half_t(0.0f));
+  PaddedOperand<ElementC> paddedC = padOperand(C, m, n, ldc, paddedM, paddedN, beta != 0.0f);
 
-  hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[0]>(
+  hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[0], ElementC>(
       paddedM,
       paddedN,
       paddedK,
@@ -438,28 +449,29 @@ void hgemm(
 
   LL_CHECK_CUDA_STATUS(cudaMemcpy2D(
       C,
-      size_t(ldc) * sizeof(cutlass::half_t),
+      size_t(ldc) * sizeof(ElementC),
       paddedC.data,
-      size_t(paddedC.ld) * sizeof(cutlass::half_t),
-      size_t(n) * sizeof(cutlass::half_t),
+      size_t(paddedC.ld) * sizeof(ElementC),
+      size_t(n) * sizeof(ElementC),
       size_t(m),
       cudaMemcpyDeviceToDevice));
 }
 
-template<class ArchTag>
+/// Half operands into a C of half or float -- see `Sm80Gemm`.
+template<class ArchTag, class ElementC>
 void cutlassHgemmArch(
     bool transA,
     bool transB,
     int m,
     int n,
     int k,
-    cutlass::half_t alpha,
+    float alpha,
     const cutlass::half_t *A,
     int lda,
     const cutlass::half_t *B,
     int ldb,
-    cutlass::half_t beta,
-    cutlass::half_t *C,
+    float beta,
+    ElementC *C,
     int ldc) {
   if (transA == false && transB == false) {
     return hgemm<RowMajor, RowMajor, ArchTag>(m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
@@ -474,36 +486,38 @@ void cutlassHgemmArch(
   }
 }
 
+template<class ElementC>
 void cutlassHgemm(
     bool transA,
     bool transB,
     int m,
     int n,
     int k,
-    cutlass::half_t alpha,
+    float alpha,
     const cutlass::half_t *A,
     int lda,
     const cutlass::half_t *B,
     int ldb,
-    cutlass::half_t beta,
-    cutlass::half_t *C,
+    float beta,
+    ElementC *C,
     int ldc) {
   cutlassHgemmArch<
       cutlass::arch::Sm90>(transA, transB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
-template<class LayoutA, class layoutB>
+/// Half operands into a C of half or float, a batch of them, accumulated in float.
+template<class LayoutA, class layoutB, class ElementC>
 void hgemmArrayT(
     int m,
     int n,
     int k,
-    cutlass::half_t alpha,
+    float alpha,
     const cutlass::half_t *const *A,
     int lda,
     const cutlass::half_t *const *B,
     int ldb,
-    cutlass::half_t beta,
-    cutlass::half_t *const *C,
+    float beta,
+    ElementC *const *C,
     int ldc,
     int batchSize) {
   using Gemm = cutlass::gemm::device::GemmArray<
@@ -511,7 +525,7 @@ void hgemmArrayT(
       LayoutA,
       cutlass::half_t,
       layoutB,
-      cutlass::half_t,
+      ElementC,
       RowMajor,
       float>;
   Gemm gemmOperator;
@@ -521,19 +535,20 @@ void hgemmArrayT(
   CUTLASS_CHECK(gemmOperator(args));
 }
 
+template<class ElementC>
 void cutlassHgemmArray(
     bool transA,
     bool transB,
     int m,
     int n,
     int k,
-    cutlass::half_t alpha,
+    float alpha,
     const cutlass::half_t *const *A,
     int lda,
     const cutlass::half_t *const *B,
     int ldb,
-    cutlass::half_t beta,
-    cutlass::half_t *const *C,
+    float beta,
+    ElementC *const *C,
     int ldc,
     int batchSize) {
   int bs = batchSize;
@@ -708,21 +723,49 @@ void CutlassGemm::hgemm(
     __half beta,
     __half *C,
     int ldc) {
-  cutlass::half_t alphaH = *reinterpret_cast<cutlass::half_t *>(&alpha);
-  cutlass::half_t betaH = *reinterpret_cast<cutlass::half_t *>(&beta);
   cutlassHgemm(
       transA,
       transB,
       m,
       n,
       k,
-      alphaH,
+      __half2float(alpha),
       reinterpret_cast<const cutlass::half_t *>(A),
       lda,
       reinterpret_cast<const cutlass::half_t *>(B),
       ldb,
-      betaH,
+      __half2float(beta),
       reinterpret_cast<cutlass::half_t *>(C),
+      ldc);
+}
+
+void CutlassGemm::hgemmIntoFloat(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const __half *A,
+    int lda,
+    const __half *B,
+    int ldb,
+    float beta,
+    float *C,
+    int ldc) {
+  cutlassHgemm(
+      transA,
+      transB,
+      m,
+      n,
+      k,
+      alpha,
+      reinterpret_cast<const cutlass::half_t *>(A),
+      lda,
+      reinterpret_cast<const cutlass::half_t *>(B),
+      ldb,
+      beta,
+      C,
       ldc);
 }
 
@@ -741,21 +784,51 @@ void CutlassGemm::hgemmArray(
     __half *const *arrayC,
     int ldc,
     int batchSize) {
-  cutlass::half_t alphaH = *reinterpret_cast<cutlass::half_t *>(&alpha);
-  cutlass::half_t betaH = *reinterpret_cast<cutlass::half_t *>(&beta);
   cutlassHgemmArray(
       transA,
       transB,
       m,
       n,
       k,
-      alphaH,
+      __half2float(alpha),
       reinterpret_cast<const cutlass::half_t *const *>(arrayA),
       lda,
       reinterpret_cast<const cutlass::half_t *const *>(arrayB),
       ldb,
-      betaH,
+      __half2float(beta),
       reinterpret_cast<cutlass::half_t *const *>(arrayC),
+      ldc,
+      batchSize);
+}
+
+void CutlassGemm::hgemmIntoFloatArray(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const __half *const *arrayA,
+    int lda,
+    const __half *const *arrayB,
+    int ldb,
+    float beta,
+    float *const *arrayC,
+    int ldc,
+    int batchSize) {
+  cutlassHgemmArray(
+      transA,
+      transB,
+      m,
+      n,
+      k,
+      alpha,
+      reinterpret_cast<const cutlass::half_t *const *>(arrayA),
+      lda,
+      reinterpret_cast<const cutlass::half_t *const *>(arrayB),
+      ldb,
+      beta,
+      arrayC,
       ldc,
       batchSize);
 }

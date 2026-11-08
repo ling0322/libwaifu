@@ -45,6 +45,21 @@ class CutlassGemm : public Gemm {
       __half *C,
       int ldc) override;
 
+  void hgemmIntoFloat(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const __half *A,
+      int lda,
+      const __half *B,
+      int ldb,
+      float beta,
+      float *C,
+      int ldc) override;
+
   void hgemmArray(
       bool transA,
       bool transB,
@@ -75,6 +90,22 @@ class CutlassGemm : public Gemm {
       float beta,
       float *C,
       int ldc) override;
+
+  void hgemmIntoFloatArray(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const __half *const *arrayA,
+      int lda,
+      const __half *const *arrayB,
+      int ldb,
+      float beta,
+      float *const *arrayC,
+      int ldc,
+      int batchSize) override;
 
   void sgemmArray(
       bool transA,

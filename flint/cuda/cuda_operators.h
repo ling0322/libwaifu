@@ -196,6 +196,7 @@ class CudaOperators : public Operators {
   MemoryBudget getMemoryBudget() override;
 
   DType getDefaultFloatType() override;
+  bool matmulWidensHalf() override;
 
  private:
   std::shared_ptr<MatMul> _matmul;

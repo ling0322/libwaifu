@@ -100,7 +100,8 @@ GEMMArgs generateGemmArgs(const TensorView &A, const TensorView &B, const Tensor
   return gemmArgs;
 }
 
-template<typename T>
+/// A GEMM of two `T` into a `TC`.
+template<typename T, typename TC = T>
 void callGemm(
     bool transA,
     bool transB,
@@ -111,12 +112,12 @@ void callGemm(
     int lda,
     const T *B,
     int ldb,
-    T *C,
+    TC *C,
     int ldc,
     kernel::Mode mode);
 
 template<>
-inline void callGemm<float>(
+inline void callGemm<float, float>(
     bool transA,
     bool transB,
     int M,
@@ -133,7 +134,7 @@ inline void callGemm<float>(
 }
 
 template<>
-inline void callGemm<Float16>(
+inline void callGemm<Float16, Float16>(
     bool transA,
     bool transB,
     int M,
@@ -152,7 +153,27 @@ inline void callGemm<Float16>(
   return kernel::gemmHalf(transA, transB, M, N, K, xA, lda, xB, ldb, xC, ldc, mode);
 }
 
-template<typename T>
+/// Half into float: the scores of the composed attention, which can be past what half holds.
+template<>
+inline void callGemm<Float16, float>(
+    bool transA,
+    bool transB,
+    int M,
+    int N,
+    int K,
+    const Float16 *A,
+    int lda,
+    const Float16 *B,
+    int ldb,
+    float *C,
+    int ldc,
+    kernel::Mode mode) {
+  const kernel::Float16 *xA = reinterpret_cast<const kernel::Float16 *>(A);
+  const kernel::Float16 *xB = reinterpret_cast<const kernel::Float16 *>(B);
+  return kernel::gemmHalfIntoFloat(transA, transB, M, N, K, xA, lda, xB, ldb, C, ldc, mode);
+}
+
+template<typename T, typename TC = T>
 void gemm(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(A.getDim() == B.getDim() && A.getDim() == 2);
   C.throwIfInvalidShape({A.getShape(0), B.getShape(1)}, "gemm");
@@ -161,7 +182,7 @@ void gemm(const TensorView &A, const TensorView &B, const TensorView &C) {
   fill(C, 0.0f);
 
   GEMMArgs gemmArgs = generateGemmArgs(A, B, C);
-  callGemm<T>(
+  callGemm<T, TC>(
       gemmArgs.transA,
       gemmArgs.transB,
       gemmArgs.M,
@@ -171,7 +192,7 @@ void gemm(const TensorView &A, const TensorView &B, const TensorView &C) {
       gemmArgs.lda,
       getDataPtrCpu<T>(B),
       gemmArgs.ldb,
-      getDataPtrCpu<T>(C),
+      getDataPtrCpu<TC>(C),
       gemmArgs.ldc,
       kernel::Mode::OMP);
 }
@@ -221,13 +242,13 @@ void matmulHalfWeight(const TensorView &A, const TensorView &B, const TensorView
   NOT_IMPL();
 }
 
-template<typename T>
+template<typename T, typename TC = T>
 void bmmNx2(const TensorView &A, const TensorView &B, const TensorView &C) {
   CHECK(C.isContiguous());
-  gemm<T>(A.view({-1, A.getShape(-1)}), B, C.view({-1, B.getShape(1)}));
+  gemm<T, TC>(A.view({-1, A.getShape(-1)}), B, C.view({-1, B.getShape(1)}));
 }
 
-template<typename T>
+template<typename T, typename TC = T>
 void bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
   TensorView xB = B;
   if (A.getDim() != B.getDim()) xB = expandBatchDims(B, A.getShape());
@@ -238,7 +259,7 @@ void bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
 
   TensorList<const T, 2> mA = TensorList<const T, 2>::fromTensor(A);
   TensorList<const T, 2> mB = TensorList<const T, 2>::fromTensor(xB);
-  TensorList<T, 2> mC = TensorList<T, 2>::fromTensor(C);
+  TensorList<TC, 2> mC = TensorList<TC, 2>::fromTensor(C);
 
   GEMMArgs gemmArgs = generateGemmArgs(A, xB, C);
 
@@ -248,12 +269,12 @@ void bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
 
   const T *const *mAp = mA.getDataPtrList().data();
   const T *const *mBp = mB.getDataPtrList().data();
-  T *const *mCp = mC.getDataPtrList().data();
+  TC *const *mCp = mC.getDataPtrList().data();
 
   int numMatrices = mA.getLength();
 #pragma omp parallel for schedule(dynamic, 1)
   for (int i = 0; i < numMatrices; ++i) {
-    callGemm<T>(
+    callGemm<T, TC>(
         gemmArgs.transA,
         gemmArgs.transB,
         gemmArgs.M,
@@ -269,14 +290,14 @@ void bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
   }
 }
 
-template<typename T>
+template<typename T, typename TC = T>
 void matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C) {
   if (A.getDim() == 2 && B.getDim() == 2) {
-    gemm<T>(A, B, C);
+    gemm<T, TC>(A, B, C);
   } else if (A.getDim() > 2 && A.isContiguous() && B.getDim() == 2 && C.isContiguous()) {
-    bmmNx2<T>(A, B, C);
+    bmmNx2<T, TC>(A, B, C);
   } else if (A.getDim() >= 2 && B.getDim() >= 2) {
-    bmm<T>(A, B, C);
+    bmm<T, TC>(A, B, C);
   } else {
     NOT_IMPL();
   }
@@ -289,9 +310,13 @@ void matmul(const TensorView &A, const TensorView &B, const TensorView &C) {
   if (typeA == DType::kFloat && typeB == DType::kFloat) return matmulFloat<float>(A, B, C);
   if (typeA == DType::kFloat && typeB == DType::kFloat16) return matmulHalfWeight(A, B, C);
 
-  // On x64 this is computed in float32 and rounded to half once, at the end; aarch64 has the
-  // half arithmetic to do it in half.
-  if (typeA == DType::kFloat16 && typeB == DType::kFloat16) return matmulFloat<Float16>(A, B, C);
+  // Two halves into a float C are computed in float32 and never rounded to half -- see
+  // Operators::matmulWidensHalf. Into a half C, on x64 this is computed in float32 and rounded to
+  // half once, at the end; aarch64 has the half arithmetic to do it in half.
+  if (typeA == DType::kFloat16 && typeB == DType::kFloat16) {
+    if (C.getDType() == DType::kFloat) return matmulFloat<Float16, float>(A, B, C);
+    return matmulFloat<Float16>(A, B, C);
+  }
 
   NOT_IMPL();
 }
