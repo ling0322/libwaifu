@@ -24,6 +24,13 @@
 // while matmul2d works on this one. The sum is in float, and the scale is applied on the way out.
 //
 // Metal 4.1 has a format for E4M3 that matmul2d reads directly; this is Metal 4.0, which does not.
+//
+// matmul2d reads as far into K as the extents of what it is given. The tile is kTileK columns, so
+// where K is not a multiple of kTileK, a last chunk multiplied with it whole would read the
+// activation past the end of its rows -- for its last row, past the end of the activation -- and
+// the zeros in the tile would not make up for what is read there: NaN times zero is NaN. The short
+// kernel takes that chunk after the loop, with the tile cut to its columns, as kernels/nax/
+// conv2d.metal's does; a kernel of its own, so that the loop of the other is as it was.
 
 #include <metal_stdlib>
 #include <metal_tensor>
@@ -41,7 +48,7 @@ struct Fp8MatmulParams {
   uint vecB;  // the weight's rows start on a multiple of four bytes
 };
 
-// In step with kNaxFp8TileM and kNaxFp8TileN in fp8.cc.
+// In step with kNaxTileM, kNaxTileN and kNaxTileK in fp8.cc.
 constant constexpr int kTileM = 64;   // activation rows
 constant constexpr int kTileN = 128;  // weight rows
 constant constexpr int kTileK = 32;
@@ -96,6 +103,7 @@ inline void writeChunk(thread const Chunk &chunk, threadgroup half *tile, uint t
   }
 }
 
+template <bool kShort>
 kernel void nax_fp8_matmul(
     device half *c [[buffer(0)]],
     device half *a [[buffer(1)]],
@@ -134,7 +142,8 @@ kernel void nax_fp8_matmul(
 
   Chunk chunk;
   readChunk(chunk, w, p, n0, 0, tid);
-  for (uint k0 = 0; k0 < p.K; k0 += kTileK) {
+  uint k0 = 0;
+  for (; kShort ? k0 + kTileK <= p.K : k0 < p.K; k0 += kTileK) {
     writeChunk(chunk, tile, tid);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -143,6 +152,15 @@ kernel void nax_fp8_matmul(
     op.run(tileA, B, sum);
     // The tile is written again for the next chunk; every simdgroup has to be done reading it.
     threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  if (kShort) {
+    writeChunk(chunk, tile, tid);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    tensor<threadgroup half, Extents, tensor_inline> last(
+        tile, Extents(int32_t(p.K - k0), kTileN), array<int32_t, 2>{1, kTileK});
+    auto tileA = A.slice(k0, m0);
+    op.run(tileA, last, sum);
   }
 
   for (uint16_t i = 0; i < sum.get_capacity(); ++i) {
@@ -154,3 +172,10 @@ kernel void nax_fp8_matmul(
     c[m * p.N + n] = half(sum[i] * scale[0]);
   }
 }
+
+template [[host_name("nax_fp8_matmul")]] kernel void nax_fp8_matmul<false>(
+    device half *, device half *, device const uchar *, device const float *,
+    constant Fp8MatmulParams &, uint3, uint);
+template [[host_name("nax_fp8_matmul_short")]] kernel void nax_fp8_matmul<true>(
+    device half *, device half *, device const uchar *, device const float *,
+    constant Fp8MatmulParams &, uint3, uint);
