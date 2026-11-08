@@ -20,7 +20,6 @@
 //! The binding over a built libwaifu, the one LIBWAIFU_PATH names, on the processor and the
 //! stand-in voice: nothing to download.
 
-use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 
 use waifu::{
@@ -37,7 +36,7 @@ fn a_voice() -> Pipeline<TextToSpeech> {
     ready();
     let pipeline = Pipeline::<TextToSpeech>::new(Device::Cpu).unwrap();
     let tones = Model::open("tones").unwrap();
-    waifu::block_on(pipeline.load_model(&tones).unwrap().into_future()).unwrap();
+    waifu::block_on(pipeline.load_model(&tones).unwrap()).unwrap();
     pipeline
 }
 
@@ -95,7 +94,7 @@ fn a_voice_speaks_awaited_or_walked() {
     };
 
     // Awaited: the end alone.
-    let audio = waifu::block_on(pipeline.run(&request).unwrap().into_future()).unwrap();
+    let audio = waifu::block_on(pipeline.run(&request).unwrap()).unwrap();
     assert!(!audio.samples.is_empty());
     assert!(audio.sample_rate > 0);
 
@@ -134,7 +133,7 @@ fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
     ready();
     let pipeline = Pipeline::<StreamingTextToSpeech>::new(Device::Cpu).unwrap();
     let tones = Model::open("tones").unwrap();
-    waifu::block_on(pipeline.load_model(&tones).unwrap().into_future()).unwrap();
+    waifu::block_on(pipeline.load_model(&tones).unwrap()).unwrap();
     drop(tones);
 
     let mut job = pipeline
@@ -174,8 +173,8 @@ fn a_job_dropped_or_cancelled_is_cancelled_and_the_pipeline_still_works() {
     drop(pipeline.run(&request).unwrap());
     let third = pipeline.run(&request).unwrap();
     third.cancel();
-    assert!(waifu::block_on(first.into_future()).is_ok());
-    match waifu::block_on(third.into_future()) {
+    assert!(waifu::block_on(first).is_ok());
+    match waifu::block_on(third) {
         Err(error) => assert_eq!(error.code, ErrorCode::Cancelled),
         // It may have finished before the cancel reached it.
         Ok(audio) => assert!(!audio.samples.is_empty()),
@@ -186,7 +185,7 @@ fn a_job_dropped_or_cancelled_is_cancelled_and_the_pipeline_still_works() {
     let waiting = clone.run(&request).unwrap();
     drop(pipeline);
     drop(clone);
-    assert!(waifu::block_on(waiting.into_future()).is_ok());
+    assert!(waifu::block_on(waiting).is_ok());
 }
 
 #[test]
@@ -221,7 +220,7 @@ fn a_log_callback_hears_the_library() {
     assert_eq!(model.supports(Capability::ImageGeneration), Support::Yes);
     assert_eq!(model.size_on_disk(), None);
     let pipeline = Pipeline::<ImageGeneration>::new(Device::Cpu).unwrap();
-    let failed = waifu::block_on(pipeline.load_model(&model).unwrap().into_future()).unwrap_err();
+    let failed = waifu::block_on(pipeline.load_model(&model).unwrap()).unwrap_err();
     assert_eq!(failed.code, ErrorCode::Model);
 
     waifu::log::clear_callback().unwrap();

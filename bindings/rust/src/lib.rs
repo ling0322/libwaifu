@@ -42,7 +42,7 @@
 
 use std::ffi::{c_char, CStr};
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
@@ -441,10 +441,10 @@ impl Wake for Unpark {
     }
 }
 
-/// Runs `future` to its end on this thread, for a program with no async runtime. Never inside
-/// async code: it blocks the thread it is called on.
-pub fn block_on<F: Future>(future: F) -> F::Output {
-    let mut future = pin!(future);
+/// Runs `future` to its end on this thread, for a program with no async runtime: a future, or a
+/// [`Job`] as it is. Never inside async code: it blocks the thread it is called on.
+pub fn block_on<F: IntoFuture>(future: F) -> F::Output {
+    let mut future = pin!(future.into_future());
     let waker = Arc::new(Unpark(std::thread::current())).into();
     let mut context = Context::from_waker(&waker);
     loop {

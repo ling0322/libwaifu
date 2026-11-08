@@ -243,7 +243,7 @@ pub struct Progress {
     pub seconds: f64,
 }
 
-pub fn block_on<F: Future>(future: F) -> F::Output;   // for a program with no runtime; never inside async code
+pub fn block_on<F: IntoFuture>(future: F) -> F::Output;   // a Job as it is; for a program with no runtime; never inside async code
 
 // -- errors --------------------------------------------------------------------------------
 pub struct Error { pub code: ErrorCode, pub message: String }
