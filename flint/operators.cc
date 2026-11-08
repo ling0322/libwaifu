@@ -197,6 +197,16 @@ void composedAttention(
     while (blockSize * 2 <= budget) blockSize *= 2;
   }
 
+  // A single query attends to the whole history, so it needs no mask. Several are masked by the
+  // rows of one causal mask over every key, made once for every block of queries: made a block at
+  // a time, it was the most of what a long causal attention cost -- 433 ms of 8192 keys and
+  // sixteen heads of 128 where no mask took 163, with the blocks that float scores halve.
+  Tensor fullMask;
+  if (causal && queryLength > 1) {
+    fullMask = empty(q.getDevice(), {keyValueLength, keyValueLength}, op->getDefaultFloatType());
+    op->causalMask(fullMask);
+  }
+
   // The probabilities of one block of queries, against every key.
   auto probabilities = [&](TensorView blockQ, int begin, int end) {
     Tensor scores;
@@ -208,12 +218,8 @@ void composedAttention(
     } else {
       scores = product(op, scaled(op, blockQ, scale), scaledK);
     }
-    // A single query attends to the whole history, so it needs no mask. A block of them is masked
-    // against where it sits, not where the whole query is.
-    if (causal && queryLength > 1) {
-      Tensor fullMask = empty(
-          q.getDevice(), {keyValueLength, keyValueLength}, op->getDefaultFloatType());
-      op->causalMask(fullMask);
+    // A block of queries is masked against where it sits, not where the whole query is.
+    if (!fullMask.empty()) {
       TensorView mask = TensorView(fullMask).slice(
           0, {keyValueLength - queryLength + begin, keyValueLength - queryLength + end});
 
