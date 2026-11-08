@@ -18,15 +18,28 @@ needed. A caller built against it has two things to free and nothing to parse.
   A library asked about a number it does not know answers as for a property the model does not
   have: `false`. A caller handed a stage it does not know shows a generic line.
 - **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end.
-- **Any thread may call.** Every function may be called from any thread; a pipeline's work stays
-  on its own thread, and callbacks come from there (a log line, from whichever thread wrote it).
-- **Two ways to fail.** A call that is refused says so at once: a NULL, a `false` or job 0, with
-  the reason in `waifu_last_error`. A job that fails later ends with a `WaifuStatus` in its result,
-  whose `code` is a `WaifuStatusCode`.
+- **Threads.** Every function may be called from any thread, and calls on one pipeline or one
+  model may run at the same time -- loads, runs, cancels and getters -- except that **freeing a
+  handle must not race with any other call on it**: that is the caller's to order, as with any C
+  handle. A pipeline's work runs on its own thread, and its callbacks come from there; a log line
+  comes from whichever thread wrote it.
+- **Freeing waits.** `waifu_pipeline_free` cancels what waits, stops what runs after its step, and
+  returns only once every job of the pipeline has had its `on_complete`; after it returns, nothing
+  of the pipeline calls back again. It must not be called from one of its own callbacks.
+- **Callbacks come after the call.** No callback of a job is called before the `_async` call
+  that started it has returned, so a caller can file the job's id before its first progress
+  arrives. A job given an id gets `on_progress` any number of times and then `on_complete` exactly
+  once; a call that returned 0 gets neither.
+- **Two ways to fail.** A call that is *refused* says so at once -- a NULL from a constructor, job
+  0 from an `_async` call, `false` from `waifu_device_set_memory_limit` -- and sets this thread's
+  `waifu_last_error` (a sentence) and `waifu_last_error_code` (a `WaifuStatusCode`) together. A
+  *query* is never refused: a getter's `false` or NULL means the value is not there, and sets
+  nothing, so the last error may be an old one. A job that fails once running ends with a
+  `WaifuStatus` in its result instead.
 - **Two things to free**: a pipeline (`waifu_pipeline_free`) and a model (`waifu_model_free`).
   Everything else is the library's: a model's strings live until the model is freed, the version
-  strings forever, `waifu_last_error` until the thread's next call, and everything a callback is
-  handed until it returns. A caller that keeps a result copies it.
+  strings forever, the last error until this thread's next refused call, and everything a callback
+  is handed until it returns. A caller that keeps a result copies it.
 - **Requests are copied at the call.** Nothing a caller passes in has to outlive the call that took
   it -- not a request, not an image in one, not the `WaifuModel` a load is given.
 - **One name per task, a noun phrase**, the field's or the upstream project's own:
@@ -87,6 +100,7 @@ typedef enum {
   WAIFU_ERR_MODEL = 5,             // the model could not be read, or cannot do what was asked
   WAIFU_ERR_NOT_LOADED = 6,        // a run on a pipeline with no model loaded
   WAIFU_ERR_INTERNAL = 7,          // a panic in the library: a bug
+  WAIFU_ERR_DEVICE_UNAVAILABLE = 8,  // a pipeline asked for on a device this build or machine cannot use
 } WaifuStatusCode;
 
 // What a job is doing. Ranges by task; done/total count what the comment says, 0, 0 otherwise.
@@ -128,8 +142,9 @@ typedef enum {
 } WaifuStage;
 
 // What can be asked of a model. SUPPORTS_ properties are integers, 1 or 0; where 0, the string
-// property of the same number is why, in words to show. The rest are an integer or a string, as
-// marked. SUPPORTS_<task> has the number of WAIFU_PIPELINE_<task>.
+// property of the same number is why, in words to show, and is never NULL. A SUPPORTS_ property
+// this library does not know is absent, which is neither 1 nor 0. The rest are an integer or a
+// string, as marked. SUPPORTS_<task> has the number of WAIFU_PIPELINE_<task>.
 typedef enum {
   WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION = 1,
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH = 2,
@@ -174,7 +189,11 @@ typedef enum {
 /* -- the library --------------------------------------------------------------------------- */
 
 uint32_t waifu_abi_version(void);
-const char *waifu_last_error(void);   // this thread's; valid until its next call into the library
+// This thread's last refused call, as a sentence and as a code; both are set together by a refused
+// call and left alone by every other, and reading one does not change the other. The string is
+// valid until this thread's next refused call. "" and WAIFU_OK before any.
+const char *waifu_last_error(void);
+WaifuStatusCode waifu_last_error_code(void);
 const char *waifu_version(void);      // "0.1.0"; static
 const char *waifu_revision(void);     // the full commit, or NULL for a build made without git; static
 
@@ -185,10 +204,12 @@ typedef struct {
   const char *time;                   // "2026-10-23T18:50:41Z"
 } WaifuLog;
 
-// Called on whichever thread wrote the line, which can be the caller's own. Must not call into the
-// library.
+// Called on whichever thread wrote the line, which can be the caller's own, possibly from several
+// threads at once. Must not call into the library.
 typedef void (*WaifuLogCallback)(void *user_data, const WaifuLog *log);
-void waifu_set_log_callback(void *user_data, WaifuLogCallback callback);  // NULL: the console again
+// NULL: the console again. Waits for a line being handed to the callback before to finish: once it
+// returns, the callback and user_data before are never called again, and may be let go of.
+void waifu_set_log_callback(void *user_data, WaifuLogCallback callback);
 void waifu_set_log_level(WaifuLogLevel level);                            // INFO unless set
 
 /* -- devices ------------------------------------------------------------------------------- */
@@ -207,8 +228,8 @@ bool waifu_device_set_memory_limit(WaifuDevice device, uint64_t bytes);
 
 typedef struct WaifuModel WaifuModel;
 
-// Reads the manifest at `manifest_path` -- a few kilobytes, and none of the weights. NULL, with
-// waifu_last_error, where there is none or it cannot be read.
+// Reads the manifest at `manifest_path` -- a few kilobytes, and none of the weights. Refused --
+// NULL -- with WAIFU_ERR_UNKNOWN_MODEL where there is none, WAIFU_ERR_MODEL where it cannot be read.
 WaifuModel *waifu_model_open(const char *manifest_path);
 void waifu_model_free(WaifuModel *model);
 
@@ -222,8 +243,8 @@ const char *waifu_model_get_string_property(const WaifuModel *model, WaifuModelP
 // One task, one thread, at most one model: jobs run on it one at a time, in the order asked.
 typedef struct WaifuPipeline WaifuPipeline;
 
-// Starts the pipeline's thread, with no model. NULL, with waifu_last_error, if the device is not
-// available.
+// Starts the pipeline's thread, with no model. Refused -- NULL, WAIFU_ERR_DEVICE_UNAVAILABLE --
+// where the device is not available.
 WaifuPipeline *waifu_pipeline_new(WaifuPipelineType type, WaifuDevice device);
 // Stops what runs, cancels what waits, drops the model and joins the thread.
 void waifu_pipeline_free(WaifuPipeline *pipeline);
@@ -232,9 +253,10 @@ WaifuDevice waifu_pipeline_get_device(const WaifuPipeline *pipeline);   // never
 
 /* -- jobs ---------------------------------------------------------------------------------- */
 
-// 0: refused at the call, with the reason in waifu_last_error, and no callback is ever called.
-// Any other id: on_progress any number of times, then on_complete exactly once. Callbacks run on
-// the pipeline's thread, must return quickly, and may call nothing but waifu_pipeline_cancel.
+// 0: refused at the call, with waifu_last_error and _code, and no callback is ever called.
+// Any other id: on_progress any number of times, then on_complete exactly once, none of them
+// before the _async call has returned. Callbacks run on the pipeline's thread, must return
+// quickly, and may call nothing but waifu_pipeline_cancel.
 typedef uint64_t WaifuJob;
 
 void waifu_pipeline_cancel(WaifuPipeline *pipeline, WaifuJob job);  // after the step it is on, or before it starts
@@ -410,17 +432,22 @@ typedef struct {
   int32_t left;                       // where its top left corner is on the canvas
   int32_t top;
   WaifuRgbaImage image;               // only as large as what is drawn
-  // How far away it is: 0 nearest, 1 farthest. Sorted from the largest, stably, the layers are the
-  // stack from the bottom up. A near half has its part's depth, so it stays in its part's place;
-  // at one depth a far half is under a near one, and the rest keep their order in `layers`.
+  // How far away it is: 0 nearest, 1 farthest. A near half has its part's depth, not its pixels':
+  // that is what keeps it in its part's place in the stratified stack (see the result).
   float depth;
   int32_t stratified_from;            // a half: the index in `layers` of its part; a part: -1
 } WaifuLayer;
 
+// `layers` is in one order, which the library never changes and every index refers to: each part,
+// bottom first -- which is the stack, unstratified -- and then, with stratify_layers, each part's
+// halves, near before far. A part a half names in stratified_from is a split part.
+//
+// The stratified stack is every part that was not split and every half, bottom first: from the
+// largest depth to the smallest; at one depth, a far half under a near one; then by index.
 typedef struct {
   WaifuStatus status;
   uint32_t canvas;                    // the side of the square canvas; 0 unless WAIFU_OK
-  const WaifuLayer *layers;           // every part, bottom first; then, with stratify_layers, the halves
+  const WaifuLayer *layers;
   size_t layer_count;
 } WaifuLayerDecompositionResult;
 typedef void (*WaifuLayerDecompositionCallback)(void *user_data, const WaifuLayerDecompositionResult *result);
@@ -478,6 +505,7 @@ WaifuJob waifu_pipeline_run_speech_to_text_async(WaifuPipeline *pipeline,
 | `waifu_set_memory_limit` | `waifu_device_set_memory_limit` |
 | `waifu_version_json` | `waifu_version`, `waifu_revision` |
 | `waifu_string_free` | gone: nothing returns a string to free |
+| `waifu_last_error` alone | with `waifu_last_error_code`, set by a refused call only; `WAIFU_ERR_DEVICE_UNAVAILABLE` |
 | images under the keys `"start_from"` and `"control"` | `start_image`, `control_image`; `WaifuImageInput` is `WaifuPromptImage` |
 | `WaifuSpeakRequest.like`, `WaifuAudio.rate` | `reference`, `sample_rate` |
 | `WaifuProgressEvent.words`, `part`, `parts`, `file` | gone: one `WaifuStage` for each thing a job does |
@@ -558,11 +586,15 @@ of indices. Now:
 
 - the near half's `depth` is its part's;
 - the far half's is the median of its own pixels, as before;
-- the stack is a stable sort of every layer by `depth`, farthest first, a far half under a near one
-  at the same depth.
+- the stratified stack is the parts that were not split and every half -- a split part is not in
+  it, its halves are -- sorted with one comparison: the larger `depth` lower; at one depth, a far
+  half lower than a near one; then the smaller index in `layers` lower.
 
-A caller sorts by `depth` and has the stack. On `waifu-output/waifu-0015.png` the two rules differ
-in one layer -- the near half of the back hair is under the back of the top rather than over it --
+`layers` itself is never reordered: every part, bottom first, then the halves, near before far,
+and `stratified_from` is an index into that array. A caller builds the stack as a list of indices
+sorted by that comparison. The unstratified stack is the parts in the order they come.
+
+On `waifu-output/waifu-0015.png` the two rules differ in one layer -- the near half of the back hair is under the back of the top rather than over it --
 and in 255 of the 1280 x 1280 pixels drawn, thin lines along the shoulders.
 
 A near half's `depth` is therefore its part's and not its own: the strands of back hair that fall
@@ -591,10 +623,6 @@ the header.
 
 ## Not decided
 
-- **Why a call was refused, as a code.** A refusal at the call leaves only a sentence in
-  `waifu_last_error`: no caller can tell "no manifest at this path" from "a manifest that cannot
-  be read" or from "the device is not available" without reading words. A
-  `WaifuStatusCode waifu_last_error_code(void)` beside it would give a binding a code for each.
 - **`get_` on the library's own getters.** The pipeline's are `waifu_pipeline_get_type` and
   `_get_device`; the library's are still `waifu_abi_version`, `waifu_version`, `waifu_revision`
-  and `waifu_last_error`, with no `get_`.
+  and `waifu_last_error` / `_code`, with no `get_`.
