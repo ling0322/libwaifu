@@ -85,6 +85,17 @@ fn places() -> Vec<PathBuf> {
     places
 }
 
+/// Where `file_name` would be in each directory `path` names, in order -- a PATH-style list -- for
+/// the directories that are absolute only: a relative one ("plugins", "..\\shared", "C:foo", ".",
+/// "") is found from the current directory, which is never searched.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn on_path(path: &std::ffi::OsStr, file_name: &str) -> Vec<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(file_name))
+        .collect()
+}
+
 pub fn init() -> Result<()> {
     let _loading = LOADING.lock().unwrap_or_else(|held| held.into_inner());
     if LOADED.get().is_some() {
@@ -266,8 +277,12 @@ mod platform {
 
     pub type Handle = *mut c_void;
 
-    /// The DLL's own directory is searched for what it needs, rather than the program's.
-    const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x8;
+    /// What the DLL needs is looked for in its own directory, the program's and System32 -- and
+    /// not in the current directory, nor on PATH. libwaifu links cudart statically, and asks the
+    /// loader for nothing a machine keeps anywhere else: the CUDA driver, Vulkan's loader and the
+    /// C runtime are in System32.
+    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x100;
+    const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: u32 = 0x1000;
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -288,7 +303,7 @@ mod platform {
             LoadLibraryExW(
                 wide(&path).as_ptr(),
                 std::ptr::null_mut(),
-                LOAD_WITH_ALTERED_SEARCH_PATH,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
             )
         };
         match handle.is_null() {
@@ -299,15 +314,11 @@ mod platform {
         }
     }
 
-    /// Each directory on PATH, in order, for `file_name`: the loader's search, without the current
-    /// directory it would otherwise look in.
+    /// Each absolute directory on PATH, in order, for `file_name`: the loader's search, without
+    /// the current directory it would otherwise look in, nor any directory found from it.
     pub fn search(file_name: &str) -> Result<(Handle, Option<PathBuf>), String> {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        for directory in std::env::split_paths(&path) {
-            if directory.as_os_str().is_empty() || directory == Path::new(".") {
-                continue;
-            }
-            let candidate = directory.join(file_name);
+        for candidate in super::on_path(&path, file_name) {
             if candidate.is_file() {
                 if let Ok(handle) = open(&candidate) {
                     return Ok((handle, Some(candidate)));
@@ -326,5 +337,24 @@ mod platform {
     /// The search says where it found the file, so nothing has to be asked.
     pub fn path_of(_address: *const c_void) -> Option<PathBuf> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_directory_on_path_is_never_searched() {
+        let root = std::env::temp_dir();
+        let path = std::env::join_paths([
+            Path::new("plugins"),
+            Path::new("../shared"),
+            Path::new("."),
+            root.as_path(),
+        ])
+        .unwrap();
+        assert_eq!(on_path(&path, FILE_NAME), [root.join(FILE_NAME)]);
+        assert!(on_path(std::ffi::OsStr::new(""), FILE_NAME).is_empty());
     }
 }

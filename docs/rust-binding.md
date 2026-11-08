@@ -119,8 +119,19 @@ let image = waifu::block_on(pipeline.run(&request)?)?;
 3. the platform loader's own search, handed the file's name alone (`libwaifu.so`,
    `libwaifu.dylib`, `waifu.dll`): what is installed, `LD_LIBRARY_PATH`, `PATH`.
 
-It never looks in the current directory, which on Windows is how a planted DLL gets loaded. Where
-it finds nothing, its error names every place it tried. `waifu::init_from_path(library_path)`
+It never looks in the current directory, which on Windows is how a planted DLL gets loaded:
+
+- On Windows the third step walks `PATH` itself, and takes only its absolute directories -- a
+  relative one (`plugins`, `..\shared`, `C:foo`) is found from the current directory. The
+  library is loaded with `LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS`, so
+  what it links is looked for beside it, beside the program and in System32, and neither in the
+  current directory nor on `PATH`. libwaifu links cudart statically and needs nothing else from
+  anywhere but System32.
+- On Linux and macOS the third step is `dlopen`'s own search, which the binding does not walk: an
+  empty or relative entry in `LD_LIBRARY_PATH` (or `DYLD_LIBRARY_PATH`) is the loader's to find
+  from the current directory, as it is for every program the environment starts.
+
+Where it finds nothing, its error names every place it tried. `waifu::init_from_path(library_path)`
 loads the file it is given and looks nowhere else.
 
 Either may be called again: with the library already loaded, again or by another path to the same
