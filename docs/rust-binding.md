@@ -56,7 +56,9 @@ Built and tested on its own:
 ```bash
 cd bindings/rust
 cargo build
-LIBWAIFU_LIB_DIR="$PWD/../../build" cargo test   # layout.rs needs the engine; library.rs opens libwaifu.so there
+# layout.rs builds against the engine (LIBWAIFU_LIB_DIR, as the engine's own tests);
+# library.rs loads the library it is pointed at (LIBWAIFU_PATH).
+LIBWAIFU_LIB_DIR="$PWD/../../build" LIBWAIFU_PATH="$PWD/../../build/libwaifu.so" cargo test
 cargo fmt
 ```
 
@@ -69,7 +71,7 @@ keeps its tests from building the engine a second time.
 ```rust
 use waifu::{Capability, Device, Event, ImageGeneration, ImageGenerationRequest, Model, Pipeline, Support};
 
-waifu::open("/opt/waifu/libwaifu.so")?;
+waifu::init()?;   // finds libwaifu: see "Finding the library"
 
 let model = Model::open("noob.yaml")?;
 match model.supports(Capability::ImageGeneration) {
@@ -108,12 +110,43 @@ A program with no async runtime waits with `waifu::block_on`:
 let image = waifu::block_on(pipeline.run(&request)?)?;
 ```
 
+## Finding the library
+
+`waifu::init()` loads the first of these that exists:
+
+1. the file `LIBWAIFU_PATH` names, for a test, a developer, or a place the others would not find;
+2. beside the running executable -- and on macOS also in `../Frameworks`, an app bundle's place
+   -- which is where an app or a tool that ships the library puts it;
+3. the platform loader's own search, handed the file's name alone (`libwaifu.so`,
+   `libwaifu.dylib`, `waifu.dll`): what is installed, `LD_LIBRARY_PATH`, `PATH`.
+
+It never looks in the current directory, which on Windows is how a planted DLL gets loaded. Where
+it finds nothing, its error names every place it tried. `waifu::init_from_path(library_path)`
+loads the file it is given and looks nowhere else.
+
+Either may be called again: with the library already loaded, again or by another path to the same
+file, it is `Ok` and does nothing; asked for a different file, it is `Err(ErrorCode::Library)`,
+since one process has one libwaifu. So code that is not sure whether anything has initialized it
+calls `init` rather than checking first -- checking and then initializing would race with
+another thread doing the same, where `init` is one call behind a lock.
+
+`waifu::is_initialized()` says whether a library is loaded, and `waifu::library_path()` which file
+it is: the one `init` loaded, its full path, found where the loader had it (`dladdr`,
+`GetModuleFileNameW`) when the loader did the searching. Neither reaches the library, so neither
+returns a `Result`.
+
+`LIBWAIFU_PATH` is a file at run time; `LIBWAIFU_LIB_DIR` stays what it is, the directory the
+engine's build reads CMake's output from.
+
 ## The API
 
 ```rust
 // -- the library ---------------------------------------------------------------------------
-// Every function that reaches the library returns a Result: before `open`, Err(ErrorCode::Library).
-pub fn open(path: impl AsRef<Path>) -> Result<()>;   // once a process
+// Every function that reaches the library returns a Result: before `init`, Err(ErrorCode::Library).
+pub fn init() -> Result<()>;                                           // finds libwaifu and loads it
+pub fn init_from_path(library_path: impl AsRef<Path>) -> Result<()>;  // loads this file, and looks nowhere else
+pub fn is_initialized() -> bool;                                       // whether init has loaded a library
+pub fn library_path() -> Option<&'static Path>;                        // the file loaded; None before init
 pub const ABI_VERSION: u32 = 4;
 pub fn version() -> Result<&'static str>;
 pub fn revision() -> Result<Option<&'static str>>;
@@ -216,7 +249,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output;   // for a program with no r
 // -- errors --------------------------------------------------------------------------------
 pub struct Error { pub code: ErrorCode, pub message: String }
 pub enum ErrorCode {
-    Library,                          // not opened, cannot be opened, another ABI, a function missing
+    Library,                          // not initialized, not found, another ABI, a function missing
     Cancelled, InvalidArgument, UnknownModel, Model, NotLoaded, Internal, DeviceUnavailable,
     Other(i32),                       // a refused call's waifu_last_error_code or a job's status code alike
 }
@@ -282,9 +315,10 @@ A callback never blocks on a slow reader.
 Metal, before anything else builds. Opened at run time, the binding builds anywhere, and a program
 using it runs on whichever build of libwaifu the machine has.
 
-**Opened once.** The library keeps threads, thread-locals and device contexts that are not built
-to be unloaded, so it never is: `waifu::open` is once a process, and nothing else takes a library
-handle to carry around. What reaches the library before it is an `Err(ErrorCode::Library)` --
+**Initialized once.** The library keeps threads, thread-locals and device contexts that are not
+built to be unloaded, so it never is: it is loaded once a process, by `init`, and nothing else
+takes a library handle to carry around. It is `init`, not `open`: nothing is closed after it, and
+`Model::open` opens a file. What reaches the library before it is an `Err(ErrorCode::Library)` --
 every such function returns a `Result` -- and never a panic, nor a `None` that would look like an
 answer.
 
