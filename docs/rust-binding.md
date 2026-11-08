@@ -222,6 +222,13 @@ Option<ControlImage>` and `prompt_images: Vec<PromptImage>`), `TextToSpeechReque
 `RgbaImage`, `Audio`, `Transcript { text, language }`, `DecomposedImage { canvas, layers }`, each
 `Layer` with its `LayerType`, `depth` and `stratified_from: Option<usize>`.
 
+The C API's other enums come across as Rust enums with an `Other(i32)` for a number a newer
+library has and this crate does not: `PipelineType`, `Stage`, `LayerType`, `LogLevel`.
+`LogEvent<'a>` borrows its strings for the length of the callback.
+
+`Pipeline<T>` is `Send` and `Sync`, and a `Job` is `Send`, so either can be handed to another
+thread or spawned on a runtime's.
+
 `waifu::sys` keeps the `#[repr(C)]` mirror of `waifu.h` and the table of its functions, for
 whatever the crate does not wrap.
 
@@ -251,3 +258,11 @@ never matches.
 
 - Whether the task marker types also get aliases, `type ImageGenerationPipeline =
   Pipeline<ImageGeneration>`.
+- What a query does before `waifu::open`. `Device::memory_budget()` and its kind return an
+  `Option`, and `None` there cannot say "not opened" apart from "the processor has none".
+  Proposed: they panic, as forgetting `open` is a bug and not a state to handle; the alternative
+  is `Result<Option<u64>>` on each.
+- The `ErrorCode` of a refused call. A refusal at the call (`Model::open`, `Pipeline::new`,
+  `run`) reaches the binding as a sentence only, so it is `InvalidArgument` whatever it was, until
+  the C API gives a code with it (`waifu_last_error_code`, under "Not decided" in
+  [ffi-abi4.md](ffi-abi4.md)).
