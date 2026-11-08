@@ -230,10 +230,10 @@ void MetalOperators::attention(
   // Checked before the kernel, which would otherwise run a mask it does not know as no mask.
   checkAttentionMask(q, k, maskType, blockSize);
 
-  // The kernel where it takes these, and the composition where it does not. The kernel has no
-  // block mask, and neither has the composition: one of those is NotImplemented there.
-  bool plain = maskType == MaskType::kNone || maskType == MaskType::kCausal;
-  if (plain && metal_native::attention(q, k, v, maskType == MaskType::kCausal, out)) return;
+  // The kernel where it takes these, and the composition where it does not. The composition has
+  // no block mask: one the kernel does not take -- a head it was not built for, bfloat16 -- is
+  // NotImplemented there.
+  if (metal_native::attention(q, k, v, maskType, blockSize, out)) return;
   Operators::attention(q, k, v, maskType, blockSize, out);
 }
 

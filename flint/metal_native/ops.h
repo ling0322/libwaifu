@@ -128,15 +128,17 @@ void fp8Matmul(
     const TensorView &scale,
     const TensorView &out);
 
-/// Scaled dot product attention in one kernel, as Operators::attention has it, where the kernel
-/// takes these and is the faster: a head of 32, 64 or 128 in half precision or of 32 or 64 in
-/// float, every last dimension contiguous, `out` contiguous, and no more than a few hundred keys.
-/// Returns false, having done nothing, when not.
+/// Scaled dot product attention in one kernel, as Operators::attention has it, under `maskType`
+/// in blocks of `blockSize` keys (see MaskType), where the kernel takes these: a head of 32, 64
+/// or 128 in half precision or of 32 or 64 in float, every last dimension contiguous, and `out`
+/// contiguous -- and, with no mask or the causal one, where it is the faster: no more than a few
+/// hundred keys. Returns false, having done nothing, when not.
 bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
-    bool causal,
+    MaskType maskType,
+    int blockSize,
     const TensorView &out);
 void conv2d(
     const TensorView &input,

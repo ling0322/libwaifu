@@ -47,7 +47,8 @@ struct AttentionParams {
   uint32_t vStrideH;
   uint32_t vStrideL;
   float scale;
-  uint32_t causal;
+  uint32_t maskType;
+  uint32_t blockSize;
 };
 
 // The queries each threadgroup of kernels/attention.metal takes, and its threads.
@@ -65,13 +66,25 @@ bool hasKernelFor(DType dtype, int headDim) {
   return false;
 }
 
+// The queries each threadgroup of kernels/nax/attention.metal takes: sixteen to each of its four
+// simdgroups. In step with kBlockQ there.
+constexpr int kNaxBlockQ = 64;
+
+// Whether the kernel on the neural accelerators was built for a head this wide in this type: half
+// alone, since its products take float at about half's precision. See kernels/nax/attention.metal.
+bool hasNaxKernelFor(DType dtype, int headDim) {
+  if (dtype != DType::kFloat16) return false;
+  return headDim == 32 || headDim == 64 || headDim == 128;
+}
+
 }  // namespace
 
 bool attention(
     const TensorView &q,
     const TensorView &k,
     const TensorView &v,
-    bool causal,
+    MaskType maskType,
+    int blockSize,
     const TensorView &out) {
   if (q.getDim() != 4 || k.getDim() != 4 || v.getDim() != 4) return false;
   DType dtype = q.getDType();
@@ -83,7 +96,8 @@ bool attention(
   int keyLength = k.getShape(2);
 
   // What the kernel does not take goes to the composition, which takes everything.
-  if (!hasKernelFor(dtype, headDim)) return false;
+  bool nax = getContext(q)->hasNax() && hasNaxKernelFor(dtype, headDim);
+  if (!nax && !hasKernelFor(dtype, headDim)) return false;
   if (k.getDType() != dtype || v.getDType() != dtype || out.getDType() != dtype) return false;
   if (k.getShape() != v.getShape() || k.getShape(0) != batch || k.getShape(3) != headDim) {
     return false;
@@ -91,14 +105,22 @@ bool attention(
   if (numKeyValueHeads == 0 || numHeads % numKeyValueHeads != 0) return false;
   if (q.getStride(3) != 1 || k.getStride(3) != 1 || v.getStride(3) != 1) return false;
   if (!out.isContiguous() || out.getShape() != q.getShape()) return false;
-  if (causal && keyLength < queryLength) return false;
   if (queryLength == 0 || keyLength == 0) return false;
+  // The mask is the caller's to have checked; what is left is what this kernel was not built
+  // for. A causal mask over fewer keys than queries leaves rows that see nothing, which the
+  // composition has always been the one to answer.
+  bool blockMask = maskType == MaskType::kBlockCausal || maskType == MaskType::kBlockDiagonal;
+  if (blockMask && blockSize <= 0) return false;
+  if (maskType != MaskType::kNone && keyLength < queryLength) return false;
+  if (maskType == MaskType::kBlockDiagonal && keyLength != queryLength) return false;
 
   // Over many keys the composition is the faster: its products are the GEMM kernels at their
   // best, and this kernel reads every key again for each kBlockQ queries. Over few -- a prompt's
   // 77 tokens, attended to from every pixel -- this saves the score matrix's trip through memory
-  // and is the faster by twice. Measured on an M5 Pro over SDXL's attentions.
-  if (keyLength > kMaxFusedKeys) return false;
+  // and is the faster by twice. Measured on an M5 Pro over SDXL's attentions. A block mask has no
+  // composition to be faster, so it is this kernel at every length -- which also skips the blocks
+  // of keys a threadgroup's queries do not see.
+  if (!nax && !blockMask && keyLength > kMaxFusedKeys) return false;
 
   AttentionParams params{};
   params.numHeads = static_cast<uint32_t>(numHeads);
@@ -115,15 +137,18 @@ bool attention(
   params.vStrideH = static_cast<uint32_t>(v.getStride(1));
   params.vStrideL = static_cast<uint32_t>(v.getStride(2));
   params.scale = 1.0f / sqrtf(static_cast<float>(headDim));
-  params.causal = causal ? 1 : 0;
+  params.maskType = static_cast<uint32_t>(maskType);
+  params.blockSize = static_cast<uint32_t>(blockMask ? blockSize : 0);
 
-  std::string kernel = kernelName(lut::sprintf("attention_%d", headDim).c_str(), dtype);
+  int blockQ = nax ? kNaxBlockQ : kBlockQ;
+  std::string kernel =
+      kernelName(lut::sprintf(nax ? "nax_attention_%d" : "attention_%d", headDim).c_str(), dtype);
   getContext(q)->dispatchGroups(
       kernel.c_str(),
       {getArg(out), getArg(q), getArg(k), getArg(v)},
       &params,
       sizeof(params),
-      static_cast<uint32_t>((queryLength + kBlockQ - 1) / kBlockQ),
+      static_cast<uint32_t>((queryLength + blockQ - 1) / blockQ),
       static_cast<uint32_t>(numHeads),
       static_cast<uint32_t>(batch),
       kThreads);

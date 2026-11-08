@@ -482,7 +482,7 @@ typedef void (*WaifuAudioPartCallback)(void *user_data, const WaifuAudio *audio)
 // made, while the rest is still being said -- CosyVoice3's a hop of tokens at a time, as
 // upstream's stream=True -- and the whole of it, the parts end to end, still to on_complete. It is
 // a reading of its own, not the samples speak_async makes of the same request. A voice that cannot
-// stream, or a reading it cannot -- CosyVoice3 off CUDA, or at a speed -- is refused, and
+// stream, or a reading it cannot -- CosyVoice3 off CUDA and Metal, or at a speed -- is refused, and
 // on_complete hears why. Cancelling stops it after the part it is on: the parts already handed
 // over are all there will be, and on_complete hears WAIFU_CANCELLED.
 WaifuJob waifu_engine_speak_stream_async(WaifuEngine *engine, const WaifuSpeakRequest *request,
