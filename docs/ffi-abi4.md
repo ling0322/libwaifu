@@ -30,10 +30,13 @@ needed. A caller built against it has two things to free and nothing to parse.
 - **Freeing waits.** `waifu_pipeline_free` cancels what waits, stops what runs after its step, and
   returns only once every job of the pipeline has had its `on_complete`; after it returns, nothing
   of the pipeline calls back again. It must not be called from one of its own callbacks.
-- **Callbacks come after the call.** No callback of a job is called before the `_async` call
-  that started it has returned, so a caller can file the job's id before its first progress
-  arrives. A job given an id gets `on_progress` any number of times and then `on_complete` exactly
-  once; a call that returned 0 gets neither.
+- **A job's state is its `user_data`.** Its callbacks run on the pipeline's thread and may start
+  before the `_async` call that started it has returned -- a job can be over by then -- so a
+  caller keeps what a job needs where `user_data` points, set up before the call, and not in a
+  table keyed by the id the call returns, as IOCP's `OVERLAPPED` and gRPC's tags are. (libuv
+  can promise otherwise because its callbacks run on the caller's own thread; these run on the
+  pipeline's.) A job given an id gets `on_progress` any number of times and then `on_complete`
+  exactly once; a call that returned 0 gets neither.
 - **Two ways to fail.** A call that is *refused* says so at once -- a NULL from a constructor, job
   0 from an `_async` call, `false` from `waifu_device_set_memory_limit` -- and sets this thread's
   `waifu_last_error` (a sentence) and `waifu_last_error_code` (a `WaifuStatusCode`) together. A
@@ -259,9 +262,10 @@ WaifuDevice waifu_pipeline_get_device(const WaifuPipeline *pipeline);   // never
 /* -- jobs ---------------------------------------------------------------------------------- */
 
 // 0: refused at the call, with waifu_last_error and _code, and no callback is ever called.
-// Any other id: on_progress any number of times, then on_complete exactly once, none of them
-// before the _async call has returned. Callbacks run on the pipeline's thread, must return
-// quickly, and may call nothing but waifu_pipeline_cancel.
+// Any other id: on_progress any number of times, then on_complete exactly once. Callbacks run on
+// the pipeline's thread and may start before the _async call has returned: keep a job's state in
+// user_data, not under its id. They must return quickly, and may call nothing but
+// waifu_pipeline_cancel.
 typedef uint64_t WaifuJob;
 
 void waifu_pipeline_cancel(WaifuPipeline *pipeline, WaifuJob job);  // after the step it is on, or before it starts

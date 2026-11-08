@@ -324,9 +324,10 @@ pub fn status(code: WaifuStatusCode, message: &Option<CString>) -> WaifuStatus {
 
 // -- keeping the promises about when a callback can arrive ---------------------------------------
 
-/// Shut until the `_async` call that made it has returned: a callback that arrives before then
-/// waits. A job's thread can finish before the call that started it is done handing back its
-/// handle, and a caller whose continuation is set up from that handle would miss the end.
+/// Shut until the `_async` call that made it has its job's id, which is when it opens: a callback
+/// that arrives before then waits, so that no callback runs for a call that may yet be refused.
+/// It does not hold callbacks back until the call has returned -- nothing can know when the caller
+/// has the id -- which is why a job's state is its `user_data` (docs/ffi-abi4.md).
 #[derive(Clone, Default)]
 pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
 

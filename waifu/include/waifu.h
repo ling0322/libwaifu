@@ -56,9 +56,10 @@ typedef int32_t WaifuModelProperty;
 typedef int32_t WaifuPipelineType;
 
 // 0: refused at the call, with waifu_last_error and _code, and no callback is ever called. Any
-// other id: on_progress any number of times, then on_complete exactly once, none of them before
-// the _async call has returned. Callbacks run on the pipeline's thread, must return quickly, and
-// may call nothing but waifu_pipeline_cancel.
+// other id: on_progress any number of times, then on_complete exactly once. Callbacks run on the
+// pipeline's thread and may start before the _async call has returned: keep a job's state in
+// user_data, not under its id. They must return quickly, and may call nothing but
+// waifu_pipeline_cancel.
 typedef uint64_t WaifuJob;
 
 // What a job is doing. Ranges by task; done/total count what the comment says, 0, 0 otherwise.
