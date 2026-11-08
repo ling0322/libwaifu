@@ -131,8 +131,9 @@ void fp8Matmul(
 /// Scaled dot product attention in one kernel, as Operators::attention has it, under `maskType`
 /// in blocks of `blockSize` keys (see MaskType), where the kernel takes these: a head of 32, 64
 /// or 128 in half precision or of 32 or 64 in float, every last dimension contiguous, and `out`
-/// contiguous -- and, with no mask or the causal one, where it is the faster: no more than a few
-/// hundred keys. Returns false, having done nothing, when not.
+/// contiguous. On the neural accelerators that is every length; elsewhere, a head of 128 in half
+/// with no mask or the causal one is the composition's past a few hundred keys, where it is the
+/// faster. Returns false, having done nothing, when not.
 bool attention(
     const TensorView &q,
     const TensorView &k,

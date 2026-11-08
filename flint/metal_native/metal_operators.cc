@@ -447,6 +447,10 @@ DType MetalOperators::getDefaultFloatType() {
   return DType::kFloat16;
 }
 
+bool MetalOperators::matmulWidensHalf() {
+  return true;
+}
+
 void MetalOperators::synchronize() {
   _context->synchronize();
 }

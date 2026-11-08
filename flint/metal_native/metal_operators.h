@@ -163,6 +163,7 @@ class MetalOperators : public Operators {
   MemoryBudget getMemoryBudget() override;
 
   DType getDefaultFloatType() override;
+  bool matmulWidensHalf() override;
   void synchronize() override;
 
  private:

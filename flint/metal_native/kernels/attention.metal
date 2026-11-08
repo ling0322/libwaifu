@@ -92,8 +92,12 @@ kernel void attention(
     uint tid [[thread_index_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
-  // Rows padded so that the loads of one column of 8 x 8 blocks spread over the banks.
-  constexpr uint kStride = D + 8;
+  // Rows unpadded. Padding them to spread a column of 8 x 8 blocks over the banks, as on CUDA,
+  // made this kernel 16 to 29% slower on an M5 Pro -- but only with the keys and the values
+  // padded alike, to a stride not a power of two: D + 4, D + 8 and D + 16 all were, D + 8 for the
+  // keys beside D + 4 for the values was not. Whatever that is, it is the compiler's or the GPU's,
+  // not the banks', and unpadded is the fastest measured.
+  constexpr uint kStride = D;
   threadgroup T keys[kBlockK * kStride];    // and the queries, before the first block
   threadgroup T values[kBlockK * kStride];
   threadgroup float scores[kSimdgroups * 8 * kBlockK];

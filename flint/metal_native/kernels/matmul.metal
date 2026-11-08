@@ -70,9 +70,9 @@ struct ConvParams {
 
 // For every batch (b0, b1), C[b0, b1] = A[b0, b1] B[b0, b1], A and B with any strides -- a batch
 // stride of zero broadcasts -- and C contiguous. The batch is the grid's z, b0 * batch1 + b1.
-template <typename T>
+template <typename T, typename C = T>
 struct MatmulProblem {
-  device T *c;
+  device C *c;
   device const T *a;
   device const T *b;
   constant GemmParams *p;
@@ -173,17 +173,18 @@ struct MatmulProblem {
   }
 
   bool storeBlock(simdgroup_matrix<float, 8, 8> block, uint m, uint n) const {
-    simdgroup_store(convertBlock<T>(block), c + m * p->N + n, p->N);
+    simdgroup_store(convertBlock<C>(block), c + m * p->N + n, p->N);
     return true;
   }
   void storeC(uint m, uint n, float value) const {
-    Elem<T>::store(c, m * p->N + n, value);
+    Elem<C>::store(c, m * p->N + n, value);
   }
 };
 
-template <typename T>
+// C = A B, with C in `C`: T's own, or float for a product of half kept as the sum was.
+template <typename T, typename C = T>
 kernel void matmul(
-    device T *c [[buffer(0)]],
+    device C *c [[buffer(0)]],
     device const T *a [[buffer(1)]],
     device const T *b [[buffer(2)]],
     constant GemmParams &p [[buffer(3)]],
@@ -197,7 +198,7 @@ kernel void matmul(
   uint b0 = batch / p.batch1;
   uint b1 = batch - b0 * p.batch1;
 
-  MatmulProblem<T> problem;
+  MatmulProblem<T, C> problem;
   problem.c = c + batch * p.M * p.N;
   problem.a = a + b0 * p.strideA0 + b1 * p.strideA1;
   problem.b = b + b0 * p.strideB0 + b1 * p.strideB1;
@@ -375,3 +376,7 @@ kernel void conv2d(
 
 FLINT_GEMM_KERNELS(float, "f32")
 FLINT_GEMM_KERNELS(half, "f16")
+
+template [[host_name("matmul_f16_f32")]] kernel void matmul<half, float>(
+    device float *, device const half *, device const half *, constant GemmParams &, uint3, uint,
+    uint, uint);

@@ -396,6 +396,11 @@ class Operators {
 
   virtual DType getDefaultFloatType();
 
+  /// Whether matmul takes two half operands into a float output, the sum as it was before half
+  /// would round it. The composed attention keeps its scores so where it can, since a model's
+  /// scores may be past what half holds. False unless a device says otherwise.
+  virtual bool matmulWidensHalf();
+
   /// Wait until all previously submitted work on this device has finished. A no-op on the CPU,
   /// where every call already blocks until completion.
   virtual void synchronize();

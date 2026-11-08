@@ -129,6 +129,12 @@ uint32_t vectorLayout(
   return 0;
 }
 
+// What a kernel's name gains for its output: nothing where it is the operands' type, "_f32" where
+// a product of half is kept in float.
+std::string outputSuffix(const TensorView &a, const TensorView &output) {
+  return output.getDType() == a.getDType() ? "" : "_f32";
+}
+
 // The product on the neural accelerators, where there are any and the operands are laid out for
 // them: A along K, B along N or along K. Returns false, having done nothing, when not.
 bool naxGemm(
@@ -155,7 +161,8 @@ bool naxGemm(
   params.strideB0 = gemm.strideB0;
   params.strideB1 = gemm.strideB1;
 
-  std::string kernel = kernelName(alongN ? "nax_matmul_nn" : "nax_matmul_nt", a.getDType());
+  std::string kernel =
+      kernelName(alongN ? "nax_matmul_nn" : "nax_matmul_nt", a.getDType()) + outputSuffix(a, output);
   getContext(a)->dispatchGroups(
       kernel.c_str(),
       {getArg(output), getArg(a), getArg(b)},
@@ -215,7 +222,7 @@ void gemm(
   if (naxGemm(a, b, params, numBatches, output)) return;
 
   getContext(a)->dispatchGroups(
-      kernelName("matmul", a.getDType()).c_str(),
+      (kernelName("matmul", a.getDType()) + outputSuffix(a, output)).c_str(),
       {getArg(output), getArg(a), getArg(b)},
       &params,
       sizeof(params),
@@ -380,7 +387,9 @@ void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
 
   std::vector<int> shape = a.getShape();
   shape.back() = b.getShape(-1);
-  checkOutput(out, shape, a.getDType(), "matmul");
+  // Half times half may be kept in float, as the sum was: what a product half cannot hold needs.
+  bool wide = a.getDType() == DType::kFloat16 && out.getDType() == DType::kFloat;
+  checkOutput(out, shape, wide ? DType(DType::kFloat) : a.getDType(), "matmul");
 
   // A stack of rows times one matrix is one taller product, when the rows stack evenly.
   if (b.getDim() == 2 && a.getDim() > 2 && a.isContiguous()) {
