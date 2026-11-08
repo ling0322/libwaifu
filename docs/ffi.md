@@ -5,6 +5,9 @@ Status: implemented. The headers -- `waifu/include/waifu.h` and
 word; the listing below is the design, kept for its comments, and libwaifu_modelmanager's half of
 it is written with the names libwaifu's has rather than its own (see below).
 
+ABI 4, which replaces libwaifu's half of this, is designed in [ffi-abi4.md](ffi-abi4.md) and not
+implemented yet.
+
 The macOS app talks to `waifu webui` over HTTP: it starts the program as a child, waits for it to
 print its address, and polls it twice a second. This replaces that with a library the app links:
 a C ABI over the Rust crate, which Swift imports directly and .NET calls through P/Invoke. The
