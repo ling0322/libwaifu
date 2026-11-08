@@ -165,9 +165,14 @@ void composedAttention(
     v = expandedV;
   }
 
-  // Scaling both q and k keeps the scores in range for half precision.
+  // Scaling both q and k, by the fourth root each, keeps them in range for half. The scores need
+  // not be: CosyVoice3's DiT has scores of 97,000, past half's 65,504, which the softmax turns
+  // from infinities into NaN. So in half they are kept in float -- the matmul's sum as it was,
+  // before half would round it -- wherever the device's matmul can, and the softmax is taken in
+  // float; only the probabilities, in [0, 1], go back to half for the second product.
   float scale = sqrtf(1.0f / sqrtf(1.0f * headDim));
   Tensor scaledK = scaled(op, k, scale).transpose(-2, -1);
+  bool wide = q.getDType() == DType::kFloat16 && op->matmulWidensHalf();
 
   // The score matrix is the whole cost of doing it this way: a VAE decoding a 1024 by 1024 image
   // attends over 16384 positions, and holding all of that at once is half a gigabyte before the
@@ -176,8 +181,9 @@ void composedAttention(
   // same to the bit -- no running maximum is needed, because a block still sees every key.
   //
   // What a row of queries costs is a row of scores in every head of every sequence, so that is
-  // what the budget is divided by.
+  // what the budget is divided by. Scores kept in float take twice the bytes, so half as many.
   int64_t scoresPerQuery = static_cast<int64_t>(q.getShape(0)) * numHeads * keyValueLength;
+  int64_t scoreLimit = wide ? kAttentionScoreLimit / 2 : kAttentionScoreLimit;
 
   // What the budget affords is rounded down to a power of two rather than taken where the
   // division landed. The second matmul takes its kernel from the number of query rows handed to
@@ -185,15 +191,23 @@ void composedAttention(
   // measured 837us where 512 measured 219, for a quarter more work. The powers of two were
   // uniformly among the good ones.
   int blockSize = queryLength;
-  if (scoresPerQuery * queryLength > kAttentionScoreLimit) {
-    int64_t budget = kAttentionScoreLimit / scoresPerQuery;
+  if (scoresPerQuery * queryLength > scoreLimit) {
+    int64_t budget = scoreLimit / scoresPerQuery;
     blockSize = 1;
     while (blockSize * 2 <= budget) blockSize *= 2;
   }
 
   // The probabilities of one block of queries, against every key.
   auto probabilities = [&](TensorView blockQ, int begin, int end) {
-    Tensor scores = product(op, scaled(op, blockQ, scale), scaledK);
+    Tensor scores;
+    if (wide) {
+      std::vector<int> shape = blockQ.getShape();
+      shape.back() = scaledK.getShape(-1);
+      scores = empty(q.getDevice(), shape, DType::kFloat);
+      op->matmul(scaled(op, blockQ, scale), scaledK, scores);
+    } else {
+      scores = product(op, scaled(op, blockQ, scale), scaledK);
+    }
     // A single query attends to the whole history, so it needs no mask. A block of them is masked
     // against where it sits, not where the whole query is.
     if (causal && queryLength > 1) {
@@ -222,6 +236,11 @@ void composedAttention(
     }
     Tensor probabilities = emptyLike(scores);
     op->softmax(scores, probabilities);
+    if (wide) {
+      Tensor narrow = empty(q.getDevice(), probabilities.getShape(), DType::kFloat16);
+      op->cast(probabilities, narrow);
+      return narrow;
+    }
     return probabilities;
   };
 
@@ -642,6 +661,10 @@ MemoryBudget Operators::getMemoryBudget() {
 
 DType Operators::getDefaultFloatType() {
   NO_KERNEL();
+}
+
+bool Operators::matmulWidensHalf() {
+  return false;
 }
 
 void Operators::synchronize() {

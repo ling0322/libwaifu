@@ -551,6 +551,58 @@ void checkConvolutions() {
 
 }  // namespace
 
+CATCH_TEST_CASE("test Metal matmul (half kept in float)", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  CATCH_REQUIRE(mtl()->matmulWidensHalf());
+
+  // Half times half into float, as the composed attention takes its scores: the sum as it was,
+  // past what half holds. A's first column is 300 and B's first row 1500, so every product is
+  // 450,000 and more; the rest is random. K is 75, not a whole number of any kernel's steps. B as
+  // it is, and along K -- the transpose of an (N, K), as the keys are -- each as one matrix and as
+  // a batch of (2, 3) the way attention hands them over.
+  auto loud = [](std::initializer_list<int> shape, bool column, float big) {
+    Tensor x = randn(shape);
+    std::vector<int> dims = x.getShape();
+    int rows = dims[dims.size() - 2], cols = dims.back();
+    int64_t matrices = x.getNumEl() / (static_cast<int64_t>(rows) * cols);
+    float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+    for (int64_t m = 0; m < matrices; ++m) {
+      for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+          if ((column ? c : r) == 0) data[(m * rows + r) * cols + c] = big;
+        }
+      }
+    }
+    return x;
+  };
+  for (bool batched : {false, true}) {
+    for (bool alongK : {false, true}) {
+      Tensor a = batched ? loud({2, 3, 70, 75}, true, 300.0f) : loud({70, 75}, true, 300.0f);
+      Tensor b;
+      if (alongK) {
+        // (N, K) with its first column big, viewed as (K, N).
+        Tensor nk = batched ? loud({2, 3, 33, 75}, true, 1500.0f) : loud({33, 75}, true, 1500.0f);
+        b = toMetal(nk, DType::kFloat16).transpose(-2, -1);
+      } else {
+        Tensor kn = batched ? loud({2, 3, 75, 33}, false, 1500.0f) : loud({75, 33}, false, 1500.0f);
+        b = toMetal(kn, DType::kFloat16);
+      }
+      Tensor ah = toMetal(a, DType::kFloat16);
+      Tensor reference = fl::test::matmul(cpu(), toCpu(ah), fl::test::contiguous(cpu(), toCpu(b)));
+      eachKernel([&](bool nax) {
+        CATCH_INFO("nax = " << nax << ", batched = " << batched << ", B along K = " << alongK);
+        std::vector<int> shape = ah.getShape();
+        shape.back() = b.getShape(-1);
+        Tensor x = F::empty(Device::getMetal(), shape, DType::kFloat);
+        mtl()->matmul(ah, b, x);
+        std::vector<float> got = values(x);
+        CATCH_REQUIRE(std::all_of(got.begin(), got.end(), [](float y) { return std::isfinite(y); }));
+        CATCH_REQUIRE(close(x, reference, 1e-3f, 1e-2f));
+      });
+    }
+  }
+}
+
 CATCH_TEST_CASE("test Metal convolutions", "[op][metal]") {
   SKIP_WITHOUT_METAL();
   checkConvolutions();
@@ -953,7 +1005,8 @@ CATCH_TEST_CASE("test Metal attention (scores past half's range)", "[op][metal]"
   // past what half holds -- 97,000 there -- while the softmax, which a constant added to a row does
   // not move, is decided by the rest. Here the last two channels are 300 in the queries and 1500 in
   // the keys, both exact in half: scores of 112,500 with a head of 64, 79,500 with 128. In float
-  // that is an ordinary attention; scores held in half are infinities, and their softmax NaN.
+  // that is an ordinary attention; scores held in half are infinities, and their softmax NaN --
+  // which is what the composition did before it kept them in float.
   auto sunk = [](int length, int headDim, float big) {
     Tensor x = randn({1, 2, length, headDim});
     float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
@@ -968,27 +1021,36 @@ CATCH_TEST_CASE("test Metal attention (scores past half's range)", "[op][metal]"
     int block;
   };
   const Case masks[] = {{MaskType::kNone, 0}, {MaskType::kCausal, 0}, {MaskType::kBlockCausal, 50}};
-  for (int headDim : {64, 128}) {
+  // Heads the kernels take, and one as wide as a VAE's, which only the composition does; its keys
+  // carry 4500 -- exact in half too -- for scores past half there as well.
+  for (int headDim : {64, 128, 512}) {
+    float big = headDim == 512 ? 4500.0f : 1500.0f;
     // A length the kernels have always taken, and one past the 256 keys the composition took
     // without a block mask, which only a kernel on the neural accelerators takes now.
     for (int length : {100, 600}) {
       Tensor q = toMetal(sunk(length, headDim, 300.0f), DType::kFloat16);
-      Tensor k = toMetal(sunk(length, headDim, 1500.0f), DType::kFloat16);
+      Tensor k = toMetal(sunk(length, headDim, big), DType::kFloat16);
       Tensor v = toMetal(randn({1, 2, length, headDim}), DType::kFloat16);
       for (const Case &c : masks) {
+        // The composition has no block mask, and a head of 512 has no kernel.
+        if (headDim == 512 && c.mask == MaskType::kBlockCausal) continue;
         Tensor reference = maskReference(toCpu(q), toCpu(k), toCpu(v), c.mask, c.block);
-        eachKernel([&](bool nax) {
-          // The composition still holds its scores in half, so where it is what runs -- no mask
-          // or the causal one, past 256 keys, without the accelerators -- this is not asked of it.
-          bool composition = !nax && length > 256 && c.mask != MaskType::kBlockCausal;
-          if (composition) return;
-          CATCH_INFO(
-              "nax = " << nax << ", headDim = " << headDim << ", length = " << length
-                       << ", mask = " << static_cast<int>(c.mask));
-          Tensor x = fl::test::attention(mtl(), q, k, v, c.mask, c.block);
+        auto check = [&](const Tensor &x) {
           std::vector<float> got = values(x);
           CATCH_REQUIRE(std::all_of(got.begin(), got.end(), [](float y) { return std::isfinite(y); }));
           CATCH_REQUIRE(close(x, reference, 2e-2f, 2e-2f));
+        };
+        eachKernel([&](bool nax) {
+          CATCH_INFO(
+              "nax = " << nax << ", headDim = " << headDim << ", length = " << length
+                       << ", mask = " << static_cast<int>(c.mask));
+          check(fl::test::attention(mtl(), q, k, v, c.mask, c.block));
+          // And the composition itself, which keeps its scores in float in half.
+          if (c.mask != MaskType::kBlockCausal) {
+            Tensor x = F::empty(Device::getMetal(), q.getShape(), DType::kFloat16);
+            mtl()->Operators::attention(q, k, v, c.mask, c.block, x);
+            check(x);
+          }
         });
       }
     }

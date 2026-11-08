@@ -61,7 +61,7 @@ struct AttentionParams {
 constexpr int kBlockQ = 32;
 constexpr uint32_t kThreads = 128;
 
-// The most keys this kernel is used for. See attention().
+// The most keys this kernel is used for with a head of 128 in half. See attention().
 constexpr int kMaxFusedKeys = 256;
 
 // Whether the kernel was built for a head this wide in this type: half to 128, float to 64,
@@ -247,13 +247,17 @@ bool attention(
   if (maskType != MaskType::kNone && keyLength < queryLength) return false;
   if (maskType == MaskType::kBlockDiagonal && keyLength != queryLength) return false;
 
-  // Over many keys the composition is the faster: its products are the GEMM kernels at their
-  // best, and this kernel reads every key again for each kBlockQ queries. Over few -- a prompt's
-  // 77 tokens, attended to from every pixel -- this saves the score matrix's trip through memory
-  // and is the faster by twice. Measured on an M5 Pro over SDXL's attentions. A block mask has no
-  // composition to be faster, so it is this kernel at every length -- which also skips the blocks
-  // of keys a threadgroup's queries do not see.
-  if (!nax && !blockMask && keyLength > kMaxFusedKeys) return false;
+  // This kernel at every length, but for a head of 128 in half over many keys, where the
+  // composition is the faster: its products are the GEMM kernels at their best, and this kernel
+  // reads every key again for each kBlockQ queries, which a head that wide makes dear. Measured on
+  // an M5 Pro with its accelerators off, sixteen heads, from 256 keys to 4096 -- this kernel's
+  // time over the composition's, which holds its scores in float: half, a head of 32, 0.33 to
+  // 0.50; of 64, 0.56 to 0.64; of 128, 1.0 at 256 keys and 1.4 to 1.7 past it. Float, which the
+  // composition multiplies in float, 0.11 to 0.35. A block mask has no composition, so it is this
+  // kernel at every length -- which also skips the blocks of keys a threadgroup's queries do not
+  // see.
+  bool composedIsFaster = dtype == DType::kFloat16 && headDim == 128;
+  if (!nax && !blockMask && composedIsFaster && keyLength > kMaxFusedKeys) return false;
 
   dispatchAttention(q, k, v, maskType, blockSize, out, nax);
   return true;
