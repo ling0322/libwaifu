@@ -75,6 +75,31 @@ final class WaifuKitTests: XCTestCase {
         XCTAssertFalse(heard.progress[0].words.isEmpty)
     }
 
+    func testAStreamingReadingHandsOverItsPartsAndThenTheWhole() async throws {
+        let engine = try Engine(device: .cpu)
+        try await engine.load("tones")
+
+        final class Parts: @unchecked Sendable {
+            var parts: [AudioClip] = []
+            let lock = NSLock()
+        }
+        let heard = Parts()
+        let request = SpeakRequest(text: "hello there", speed: 1, temperature: 0.8, seed: 7)
+        let clip = try await engine.speakStreaming(request) { part in
+            heard.lock.lock()
+            heard.parts.append(part)
+            heard.lock.unlock()
+        }
+
+        // The stand-in streams a note at a time, and its parts are the reading it makes whole.
+        let whole = try XCTUnwrap(clip)
+        XCTAssertGreaterThan(heard.parts.count, 1)
+        XCTAssertEqual(heard.parts.flatMap(\.samples), whole.samples)
+        XCTAssertTrue(heard.parts.allSatisfy { $0.rate == whole.rate })
+        let said = try await engine.speak(request)
+        XCTAssertEqual(said, whole)
+    }
+
     func testMetalReadsAModelUnderAMemoryLimit() async throws {
         // A machine without Metal -- a CI VM -- has nothing to limit.
         guard (try? Engine(device: .metal)) != nil else {

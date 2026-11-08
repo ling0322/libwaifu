@@ -218,6 +218,8 @@ struct Made: Codable {
     var temperature: Double?
     var style: String?
     var fromARecording: Bool?
+    /// Whether it was played as it was said, a part at a time: a reading of its own.
+    var streamed: Bool?
     // A conversion.
     var convertStyle: Bool?
     // A sound.

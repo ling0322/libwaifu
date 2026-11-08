@@ -343,15 +343,24 @@ public struct JobProgress: Sendable {
 
 public typealias ProgressHandler = @Sendable (JobProgress) -> Void
 
+/// A part of a streaming reading, in order, on the engine's thread as soon as it is made.
+public typealias AudioPartHandler = @Sendable (AudioClip) -> Void
+
 // MARK: - the plumbing every async call shares
 
-/// What a callback needs when it arrives: the progress closure, and how to end the call.
+/// What a callback needs when it arrives: the progress closure, where a streaming reading's
+/// parts go, and how to end the call.
 final class Pending: @unchecked Sendable {
     let progress: ProgressHandler?
+    let heard: AudioPartHandler?
     let finish: (WaifuStatusCode, String?, Any?) -> Void
 
-    init(progress: ProgressHandler?, finish: @escaping (WaifuStatusCode, String?, Any?) -> Void) {
+    init(
+        progress: ProgressHandler?, heard: AudioPartHandler? = nil,
+        finish: @escaping (WaifuStatusCode, String?, Any?) -> Void
+    ) {
         self.progress = progress
+        self.heard = heard
         self.finish = finish
     }
 }
@@ -432,15 +441,23 @@ private let onImage: WaifuImageCompleteCallback = { userData, event in
     pending.finish(event.pointee.status.code, message(event.pointee.status), image)
 }
 
+/// Copied now: the samples are the library's only until the callback returns.
+private func clip(_ sound: WaifuAudio) -> AudioClip {
+    let samples = sound.samples.map { Array(UnsafeBufferPointer(start: $0, count: Int(sound.count))) } ?? []
+    return AudioClip(samples: samples, rate: Int(sound.rate))
+}
+
 private let onAudio: WaifuAudioCompleteCallback = { userData, event in
     guard let userData, let event else { return }
     let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
-    let clip = event.pointee.audio.map { audio -> AudioClip in
-        let sound = audio.pointee
-        let samples = sound.samples.map { Array(UnsafeBufferPointer(start: $0, count: Int(sound.count))) } ?? []
-        return AudioClip(samples: samples, rate: Int(sound.rate))
-    }
-    pending.finish(event.pointee.status.code, message(event.pointee.status), clip)
+    pending.finish(event.pointee.status.code, message(event.pointee.status), event.pointee.audio.map { clip($0.pointee) })
+}
+
+/// A part of a streaming reading: the call goes on, so the retain stays for on_complete.
+private let onAudioPart: WaifuAudioPartCallback = { userData, audio in
+    guard let userData, let audio else { return }
+    let pending = Unmanaged<Pending>.fromOpaque(userData).takeUnretainedValue()
+    pending.heard?(clip(audio.pointee))
 }
 
 private func rgba(_ image: WaifuRgbaImage) -> RGBAImage {
@@ -522,6 +539,7 @@ final class Scratch {
 /// it failed of. `submit` makes the C call with the `user_data` it is handed and returns its job.
 func call<T>(
     progress: ProgressHandler?,
+    heard: AudioPartHandler? = nil,
     cancel: @escaping (WaifuJob) -> Void,
     refusal: () -> String = lastError,
     submit: (UnsafeMutableRawPointer) -> WaifuJob
@@ -529,7 +547,7 @@ func call<T>(
     let ticket = Ticket()
     return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T?, Error>) in
-            let pending = Pending(progress: progress) { code, message, value in
+            let pending = Pending(progress: progress, heard: heard) { code, message, value in
                 switch code {
                 case WAIFU_OK: continuation.resume(returning: value as? T)
                 case WAIFU_CANCELLED: continuation.resume(returning: nil)
@@ -645,20 +663,45 @@ public final class Engine: @unchecked Sendable {
     /// The reading, or nil where it was cancelled.
     public func speak(_ request: SpeakRequest, progress: ProgressHandler? = nil) async throws -> AudioClip? {
         try await call(progress: progress, cancel: cancel) { userData in
-            let scratch = Scratch()
-            var c = WaifuSpeakRequest(
-                struct_size: UInt32(MemoryLayout<WaifuSpeakRequest>.size),
-                text: scratch.string(request.text),
-                like: request.like.map(scratch.audio),
-                speed: Float(request.speed),
-                temperature: Float(request.temperature),
-                style: scratch.optionalString(request.style),
-                seed: request.seed
-            )
-            return withExtendedLifetime(scratch) {
-                waifu_engine_speak_async(handle, &c, userData, onProgress, onAudio)
+            Self.withSpeakRequest(request) { c in
+                waifu_engine_speak_async(handle, c, userData, onProgress, onAudio)
             }
         }
+    }
+
+    /// The reading, with each part of it handed to `heard` as soon as it is made -- CosyVoice3's
+    /// a hop of tokens at a time -- while the rest is still being said, and the whole of it, the
+    /// parts end to end, at the end; nil where it was cancelled, after the part it was on.
+    ///
+    /// It is a reading of its own, not the samples `speak` makes of the same request. A voice
+    /// that cannot stream, or a reading it cannot -- CosyVoice3 at a speed other than 1, or on a
+    /// device whose attention takes no blocks -- throws `WaifuError.model` before any part is
+    /// heard.
+    public func speakStreaming(
+        _ request: SpeakRequest, progress: ProgressHandler? = nil, heard: @escaping AudioPartHandler
+    ) async throws -> AudioClip? {
+        try await call(progress: progress, heard: heard, cancel: cancel) { userData in
+            Self.withSpeakRequest(request) { c in
+                waifu_engine_speak_stream_async(handle, c, userData, onProgress, onAudioPart, onAudio)
+            }
+        }
+    }
+
+    /// `request` as the C API takes it, for the length of `body`.
+    private static func withSpeakRequest(
+        _ request: SpeakRequest, _ body: (UnsafePointer<WaifuSpeakRequest>) -> WaifuJob
+    ) -> WaifuJob {
+        let scratch = Scratch()
+        var c = WaifuSpeakRequest(
+            struct_size: UInt32(MemoryLayout<WaifuSpeakRequest>.size),
+            text: scratch.string(request.text),
+            like: request.like.map(scratch.audio),
+            speed: Float(request.speed),
+            temperature: Float(request.temperature),
+            style: scratch.optionalString(request.style),
+            seed: request.seed
+        )
+        return withExtendedLifetime(scratch) { body(&c) }
     }
 
     /// The source said again in the reference's voice, or nil where it was cancelled.

@@ -292,6 +292,14 @@ struct SettingsColumn: View {
             FormGroup {
                 SliderRow(label: "Speed", value: $session.form.speed, range: 0.25...4, step: 0.05, decimals: 2)
                 SliderRow(label: "Temperature", value: $session.form.temperature, range: 0...2, step: 0.05, decimals: 2)
+                LabeledContent("Play as it is said") {
+                    Toggle("Play as it is said", isOn: $session.form.stream)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                .help(
+                    "On, the reading starts playing as soon as its first part is made, while the rest is still "
+                        + "being said. CosyVoice3 streams at speed 1 only; a voice that cannot is read whole.")
                 SeedRow(seed: $session.form.seed)
             } header: {
                 Header("Reading")

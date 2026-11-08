@@ -83,6 +83,15 @@ far layer by their own depth, as the See-through paper does -- the back of a col
 its flaps in front (docs/see_through.md); names and depths are changed with it off. The document
 kept, and what waifu2d opens, stay as the model made them.
 
+**text2speech** reads the text in the box in the chosen voice, from a recording dropped on it
+where the voice needs one. With **Play as it is said** on, a CosyVoice3 reading starts playing as
+soon as its first part is made -- a hop of tokens at a time, as upstream's `stream=True` -- while
+the rest is still being said, and **Stop** silences it at once. The whole of it is kept when it
+ends, its record marked as streamed: a streamed reading is a reading of its own, not the one a
+whole reading of the same seed makes, and **Reuse** makes it the same way again. A reading that
+cannot stream -- a voice that does not, a speed other than 1, a device whose attention has no
+block mask -- is read whole, and the note over the output says why.
+
 **waifu2d** makes a drawing in layers move, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
 does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedParts.swift` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers
 writes. Layers are known by See-through's names and Anime2.5DRig's English and Japanese ones

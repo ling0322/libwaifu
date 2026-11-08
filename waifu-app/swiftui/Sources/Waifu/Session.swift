@@ -70,6 +70,8 @@ struct JobForm {
     var text = ""
     var speed = 1.0
     var temperature = 0.8
+    /// Whether a reading plays as it is said, a part at a time, rather than once it is all made.
+    var stream = true
     var conversionSteps = 30
     var convertStyle = false
     var style = ""
@@ -152,6 +154,9 @@ final class Session {
     private(set) var jobs: [Job] = []
     /// What went wrong with the last thing that was clicked.
     var complaint: String?
+    /// What the last job did otherwise than asked, which is not wrong: a reading asked to stream
+    /// that was read whole.
+    var notice: String?
 
     var tab: Tab = .text2img
     /// Whether the Model Manager page is on show rather than a task.
@@ -178,6 +183,8 @@ final class Session {
 
     /// The running job's last report.
     private var progress: (job: String, said: JobProgress)?
+    /// The streaming reading playing now, which a Stop silences.
+    @ObservationIgnored private var streaming: StreamPlayer?
     /// Each job's task, for cancelling it.
     private var tasks: [String: Task<Void, Never>] = [:]
     private var stopping: Set<String> = []
@@ -526,6 +533,7 @@ final class Session {
     /// for while another tab's job runs, or what this tab's last job came to.
     var note: (said: String, bad: Bool)? {
         if let complaint { return (complaint, true) }
+        if let notice { return (notice, false) }
         if goingHere.isEmpty, let elsewhere = busyElsewhere {
             return ("\(elsewhere.rawValue) is running: this waits until it is done, or is stopped there", false)
         }
@@ -590,6 +598,7 @@ final class Session {
         _ run: @escaping (Engine, @escaping ProgressHandler) async throws -> (Data, Made, [String: Data])?
     ) {
         complaint = nil
+        notice = nil
         let id = UUID().uuidString.lowercased()
         jobs.insert(Job(id: id, kind: kind, status: .queued, created: Date().timeIntervalSince1970 * 1000), at: 0)
 
@@ -752,14 +761,49 @@ final class Session {
             seed: seed, seconds: 0, model: named, parameters: "\(form.text)\n\(settings)",
             text: form.text, speed: form.speed, temperature: form.temperature, style: style,
             fromARecording: recording != nil)
+        let streams = form.stream
 
-        start(kind: "speech", model: modelName) { engine, report in
+        // A new reading silences the one before, if that is still playing.
+        streaming?.stop()
+        let player = StreamPlayer()
+        if streams { streaming = player }
+
+        start(kind: "speech", model: modelName) { [weak self] engine, report in
+            // However the reading ends, what is queued plays out and the audio hardware is let go.
+            defer { player.finish() }
             let started = Date()
-            guard let clip = try await engine.speak(request, progress: report) else { return nil }
+            var streamed = streams
+            let said: AudioClip?
+            if streams {
+                do {
+                    said = try await withTaskCancellationHandler {
+                        try await engine.speakStreaming(request, progress: report) { player.play($0) }
+                    } onCancel: {
+                        player.stop()
+                    }
+                } catch WaifuError.model(let why) where player.heard == 0 && why.contains("stream") {
+                    // Refused before anything was said -- a voice that does not stream, a speed
+                    // CosyVoice3 does not stream at, a device with no attention in blocks -- so it
+                    // is read whole instead, and why is said over the output: not as a fault, for
+                    // the reading is not one.
+                    await MainActor.run { self?.notice = "read whole, not streamed: \(why)" }
+                    streamed = false
+                    said = try await engine.speak(request, progress: report)
+                }
+            } else {
+                said = try await engine.speak(request, progress: report)
+            }
+            guard let clip = said else { return nil }
             var made = made
             made.seconds = Date().timeIntervalSince(started)
             made.length = clip.seconds
             made.rate = clip.rate
+            // A streaming reading is a reading of its own, not the samples a whole one makes of the
+            // same seed: the record says which, so that Reuse makes it again.
+            if streamed {
+                made.streamed = true
+                made.parameters += ", Streamed: yes"
+            }
             return (Media.wav(clip.samples, rate: clip.rate), made, [:])
         }
     }
@@ -859,6 +903,8 @@ final class Session {
     func stop() {
         let here = goingHere
         guard let job = here.first(where: { $0.status == .running }) ?? here.first else { return }
+        // Silent at once, not after the part the engine is on.
+        if job.status == .running, job.kind == "speech" { streaming?.stop() }
         stopping.insert(job.id)
         tasks[job.id]?.cancel()
         // One that has not had its turn is out of line at once, not when the one before it ends.
@@ -936,6 +982,7 @@ final class Session {
             form.speed = made.speed ?? form.speed
             form.temperature = made.temperature ?? form.temperature
             form.style = made.style ?? ""
+            form.stream = made.streamed ?? false
         case "layers":
             form.layerSteps = made.steps ?? form.layerSteps
             form.depthSteps = made.depthSteps ?? form.depthSteps
