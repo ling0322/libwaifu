@@ -1,7 +1,8 @@
 # libwaifu's C API, ABI 4
 
 Status: designed, not implemented. `docs/ffi.md` and `waifu/include/waifu.h` describe ABI 3, which
-is what the library speaks today. This is what it is to speak next, agreed point by point.
+is what the library speaks today. This is what it is to speak next, agreed point by point; what
+is still open is under [Not decided](#not-decided).
 
 ABI 4 takes every JSON document out of libwaifu and asks about models and devices through an enum
 and a getter instead; replaces the engine that ran every kind of job with a pipeline made for one
@@ -17,6 +18,11 @@ needed. A caller built against it has two things to free and nothing to parse.
   A library asked about a number it does not know answers as for a property the model does not
   have: `false`. A caller handed a stage it does not know shows a generic line.
 - **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end.
+- **Any thread may call.** Every function may be called from any thread; a pipeline's work stays
+  on its own thread, and callbacks come from there (a log line, from whichever thread wrote it).
+- **Two ways to fail.** A call that is refused says so at once: a NULL, a `false` or job 0, with
+  the reason in `waifu_last_error`. A job that fails later ends with a `WaifuStatus` in its result,
+  whose `code` is a `WaifuStatusCode`.
 - **Two things to free**: a pipeline (`waifu_pipeline_free`) and a model (`waifu_model_free`).
   Everything else is the library's: a model's strings live until the model is freed, the version
   strings forever, `waifu_last_error` until the thread's next call, and everything a callback is
@@ -72,8 +78,9 @@ typedef enum {
 typedef enum {
   WAIFU_OK = 0,
   WAIFU_CANCELLED = 1,
-  // A NULL, a string that is not UTF-8, a size out of range; a model the pipeline's task is not
-  // supported by; another task's run.
+  // What a request cannot be run with. Most of it is refused at the call instead -- a NULL, a
+  // string that is not UTF-8, a size out of range, a model the pipeline's task is not supported
+  // by, another task's run -- which a job never sees.
   WAIFU_ERR_INVALID_ARGUMENT = 2,
   WAIFU_ERR_UNKNOWN_MODEL = 3,     // no manifest at the path
   // 4 was FETCH, which libwaifu never said once downloads were libwaifu_modelmanager's: not reused
@@ -492,9 +499,10 @@ needs. It is created empty and loaded on its own queue, as the engine was, so a 
 be asked for back to back, and a new model is only read once the old one is dropped.
 
 CosyVoice3 does three tasks -- text to speech, streaming text to speech and voice conversion; used
-for more than one, it is loaded into a pipeline for each and is on the device as many times. A call that lets a second pipeline share the first's weights can be added later
-without changing anything here. Pipelines on one device run side by side, as two engines did, and
-share its memory limit.
+for more than one, it is loaded into a pipeline for each and is on the device as many times. A
+call that lets a second pipeline share the first's weights can be added later without changing
+anything here. Pipelines on one device run side by side, as two engines did, and share its memory
+limit.
 
 **Streaming text to speech is a pipeline of its own.** It reads with the same voice, and is
 nonetheless another task: its flow draws in blocks and redraws each sentence a hop at a time, its
@@ -580,3 +588,13 @@ the header.
 
 - libwaifu_modelmanager's API -- its catalogue, defaults and directory JSON, and the words in its
   download progress -- has the same faults and its own ABI; it is a design of its own.
+
+## Not decided
+
+- **Why a call was refused, as a code.** A refusal at the call leaves only a sentence in
+  `waifu_last_error`: no caller can tell "no manifest at this path" from "a manifest that cannot
+  be read" or from "the device is not available" without reading words. A
+  `WaifuStatusCode waifu_last_error_code(void)` beside it would give a binding a code for each.
+- **`get_` on the library's own getters.** The pipeline's are `waifu_pipeline_get_type` and
+  `_get_device`; the library's are still `waifu_abi_version`, `waifu_version`, `waifu_revision`
+  and `waifu_last_error`, with no `get_`.
