@@ -443,7 +443,7 @@ namespace {
 Tensor toMetalWithNaNAfter(const Tensor &a, DType dtype) {
   std::vector<float> data = values(a);
   int n = static_cast<int>(data.size());
-  Tensor padded = F::zeros(Device::getCpu(), {n + 64}, DType::kFloat);
+  Tensor padded = fl::test::zeros(Device::getCpu(), {n + 64}, DType::kFloat);
   float *raw = padded.getInternalData()->getData<float>(padded.getInternalOffset());
   std::copy(data.begin(), data.end(), raw);
   std::fill(raw + n, raw + n + 64, std::numeric_limits<float>::quiet_NaN());
@@ -463,9 +463,11 @@ void checkConvolutions() {
       {1, 8, 10, 10, 8, 3, 1, 2, 2, 1},
       {2, 8, 7, 7, 12, 3, 1, 1, 1, 4},
       {1, 3, 20, 20, 5, 5, 3, 0, 1, 1},
-      // One by one, with fewer channels than a chunk of the reduction and with a chunk and a bit.
+      // One by one, with fewer channels than a chunk of the reduction and with a chunk and a bit:
+      // the pointwise kernel's, and then, with a stride, the gathering kernel's short one.
       {2, 4, 9, 9, 8, 1, 1, 0, 1, 1},
       {2, 36, 6, 6, 8, 1, 1, 0, 1, 1},
+      {2, 36, 9, 9, 8, 1, 2, 0, 1, 1},
   };
 
   for (const Case &c : cases) {
@@ -497,7 +499,7 @@ void checkConvolutions() {
           tol));
 
       // Nothing past the end of the weight or the input is read, so NaNs there do not get in.
-      Tensor poisoned = F::conv2d(
+      Tensor poisoned = fl::test::conv2d(
           mtl(),
           toMetalWithNaNAfter(input, dtype),
           toMetalWithNaNAfter(weight, dtype),
