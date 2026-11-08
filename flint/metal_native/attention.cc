@@ -18,12 +18,18 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include <math.h>
+#include <stdint.h>
 
+#include <mutex>
 #include <string>
+#include <vector>
 
+#include "lutil/log.h"
 #include "lutil/strings.h"
+#include "flint/functional.h"
 #include "flint/metal_native/common.h"
 #include "flint/metal_native/ops.h"
+#include "flint/metal_native/to_device.h"
 
 namespace fl {
 namespace op {
@@ -77,7 +83,133 @@ bool hasNaxKernelFor(DType dtype, int headDim) {
   return headDim == 32 || headDim == 64 || headDim == 128;
 }
 
+// The kernel, with what attention() has checked it takes.
+void dispatchAttention(
+    const TensorView &q,
+    const TensorView &k,
+    const TensorView &v,
+    MaskType maskType,
+    int blockSize,
+    const TensorView &out,
+    bool nax) {
+  int headDim = q.getShape(3);
+  bool blockMask = maskType == MaskType::kBlockCausal || maskType == MaskType::kBlockDiagonal;
+
+  AttentionParams params{};
+  params.numHeads = static_cast<uint32_t>(q.getShape(1));
+  params.headsPerKeyValueHead = static_cast<uint32_t>(q.getShape(1) / k.getShape(1));
+  params.queryLength = static_cast<uint32_t>(q.getShape(2));
+  params.keyLength = static_cast<uint32_t>(k.getShape(2));
+  params.qStrideB = static_cast<uint32_t>(q.getStride(0));
+  params.qStrideH = static_cast<uint32_t>(q.getStride(1));
+  params.qStrideL = static_cast<uint32_t>(q.getStride(2));
+  params.kStrideB = static_cast<uint32_t>(k.getStride(0));
+  params.kStrideH = static_cast<uint32_t>(k.getStride(1));
+  params.kStrideL = static_cast<uint32_t>(k.getStride(2));
+  params.vStrideB = static_cast<uint32_t>(v.getStride(0));
+  params.vStrideH = static_cast<uint32_t>(v.getStride(1));
+  params.vStrideL = static_cast<uint32_t>(v.getStride(2));
+  params.scale = 1.0f / sqrtf(static_cast<float>(headDim));
+  params.maskType = static_cast<uint32_t>(maskType);
+  params.blockSize = static_cast<uint32_t>(blockMask ? blockSize : 0);
+
+  int blockQ = nax ? kNaxBlockQ : kBlockQ;
+  std::string kernel =
+      kernelName(lut::sprintf(nax ? "nax_attention_%d" : "attention_%d", headDim).c_str(), q.getDType());
+  getContext(q)->dispatchGroups(
+      kernel.c_str(),
+      {getArg(out), getArg(q), getArg(k), getArg(v)},
+      &params,
+      sizeof(params),
+      static_cast<uint32_t>((q.getShape(2) + blockQ - 1) / blockQ),
+      static_cast<uint32_t>(q.getShape(1)),
+      static_cast<uint32_t>(q.getShape(0)),
+      kThreads);
+}
+
+// A value in [-1, 1) for each index, the same everywhere: the probe's operands.
+float probeValue(int64_t i, uint32_t salt) {
+  uint32_t x = static_cast<uint32_t>(i) * 2654435761u + salt * 40503u;
+  x ^= x >> 15;
+  x *= 2246822519u;
+  x ^= x >> 13;
+  return static_cast<float>(x & 0xffff) / 32768.0f - 1.0f;
+}
+
+// `values` on the device in half, and the floats they are there: what the kernel reads.
+Tensor uploadHalf(std::vector<float> &values, std::initializer_list<int> shape) {
+  Tensor wide = F::empty(Device::getCpu(), shape, DType::kFloat);
+  float *data = wide.getInternalData()->getData<float>(wide.getInternalOffset());
+  for (size_t i = 0; i < values.size(); ++i) data[i] = values[i];
+  Tensor narrow = F::empty(Device::getCpu(), shape, DType::kFloat16);
+  getOperators(Device::kCpu)->cast(wide, narrow);
+  getOperators(Device::kCpu)->cast(narrow, wide);
+  for (size_t i = 0; i < values.size(); ++i) values[i] = data[i];
+  Tensor device = F::empty(Device::getMetal(), shape, DType::kFloat16);
+  transfer(narrow, device);
+  return device;
+}
+
+// Whether nax_attention answers one attention of a head this wide as it was written to: one head
+// of 40 queries over 40 keys -- three simdgroups, the last short, and a block of keys and part of
+// one -- against the answer worked out here in float.
+bool naxAnswersAt(int headDim) {
+  constexpr int kLength = 40;
+  std::vector<float> q(kLength * headDim), k(q.size()), v(q.size());
+  for (size_t i = 0; i < q.size(); ++i) {
+    q[i] = probeValue(i, 1);
+    k[i] = probeValue(i, 2);
+    v[i] = probeValue(i, 3);
+  }
+  Tensor dq = uploadHalf(q, {1, 1, kLength, headDim});
+  Tensor dk = uploadHalf(k, {1, 1, kLength, headDim});
+  Tensor dv = uploadHalf(v, {1, 1, kLength, headDim});
+  Tensor out = F::empty(Device::getMetal(), {1, 1, kLength, headDim}, DType::kFloat16);
+  dispatchAttention(dq, dk, dv, MaskType::kNone, 0, out, true);
+
+  Tensor narrow = toCpu(out);
+  Tensor got = F::empty(Device::getCpu(), {1, 1, kLength, headDim}, DType::kFloat);
+  getOperators(Device::kCpu)->cast(narrow, got);
+  const float *answer = got.getInternalData()->getData<float>(got.getInternalOffset());
+
+  float scale = 1.0f / sqrtf(static_cast<float>(headDim));
+  std::vector<float> scores(kLength);
+  for (int i = 0; i < kLength; ++i) {
+    float largest = -INFINITY;
+    for (int j = 0; j < kLength; ++j) {
+      float dot = 0.0f;
+      for (int d = 0; d < headDim; ++d) dot += q[i * headDim + d] * k[j * headDim + d];
+      scores[j] = dot * scale;
+      largest = fmaxf(largest, scores[j]);
+    }
+    float sum = 0.0f;
+    for (int j = 0; j < kLength; ++j) sum += scores[j] = expf(scores[j] - largest);
+    for (int d = 0; d < headDim; ++d) {
+      float want = 0.0f;
+      for (int j = 0; j < kLength; ++j) want += scores[j] / sum * v[j * headDim + d];
+      // A layout read wrongly is off by the size of the values, not by half's rounding of them.
+      float said = answer[i * headDim + d];
+      if (!(fabsf(said - want) <= 1e-2f)) return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
+
+bool naxAttentionAnswers() {
+  static std::once_flag once;
+  static bool answers = false;
+  std::call_once(once, [] {
+    answers = naxAnswersAt(32) && naxAnswersAt(64) && naxAnswersAt(128);
+    if (!answers) {
+      LOG(WARN) << "attention on the neural accelerators reads its operands in the register "
+                   "layout an M5 GPU has, and this GPU answered otherwise: attention runs "
+                   "kernels/attention.metal here instead";
+    }
+  });
+  return answers;
+}
 
 bool attention(
     const TensorView &q,
@@ -95,8 +227,9 @@ bool attention(
   int numKeyValueHeads = k.getShape(1);
   int keyLength = k.getShape(2);
 
-  // What the kernel does not take goes to the composition, which takes everything.
-  bool nax = getContext(q)->hasNax() && hasNaxKernelFor(dtype, headDim);
+  // What the kernel does not take goes to the composition, which takes everything. The one on the
+  // neural accelerators where it answers as it was written to: see naxAttentionAnswers.
+  bool nax = getContext(q)->hasNax() && hasNaxKernelFor(dtype, headDim) && naxAttentionAnswers();
   if (!nax && !hasKernelFor(dtype, headDim)) return false;
   if (k.getDType() != dtype || v.getDType() != dtype || out.getDType() != dtype) return false;
   if (k.getShape() != v.getShape() || k.getShape(0) != batch || k.getShape(3) != headDim) {
@@ -122,36 +255,7 @@ bool attention(
   // of keys a threadgroup's queries do not see.
   if (!nax && !blockMask && keyLength > kMaxFusedKeys) return false;
 
-  AttentionParams params{};
-  params.numHeads = static_cast<uint32_t>(numHeads);
-  params.headsPerKeyValueHead = static_cast<uint32_t>(numHeads / numKeyValueHeads);
-  params.queryLength = static_cast<uint32_t>(queryLength);
-  params.keyLength = static_cast<uint32_t>(keyLength);
-  params.qStrideB = static_cast<uint32_t>(q.getStride(0));
-  params.qStrideH = static_cast<uint32_t>(q.getStride(1));
-  params.qStrideL = static_cast<uint32_t>(q.getStride(2));
-  params.kStrideB = static_cast<uint32_t>(k.getStride(0));
-  params.kStrideH = static_cast<uint32_t>(k.getStride(1));
-  params.kStrideL = static_cast<uint32_t>(k.getStride(2));
-  params.vStrideB = static_cast<uint32_t>(v.getStride(0));
-  params.vStrideH = static_cast<uint32_t>(v.getStride(1));
-  params.vStrideL = static_cast<uint32_t>(v.getStride(2));
-  params.scale = 1.0f / sqrtf(static_cast<float>(headDim));
-  params.maskType = static_cast<uint32_t>(maskType);
-  params.blockSize = static_cast<uint32_t>(blockMask ? blockSize : 0);
-
-  int blockQ = nax ? kNaxBlockQ : kBlockQ;
-  std::string kernel =
-      kernelName(lut::sprintf(nax ? "nax_attention_%d" : "attention_%d", headDim).c_str(), dtype);
-  getContext(q)->dispatchGroups(
-      kernel.c_str(),
-      {getArg(out), getArg(q), getArg(k), getArg(v)},
-      &params,
-      sizeof(params),
-      static_cast<uint32_t>((queryLength + blockQ - 1) / blockQ),
-      static_cast<uint32_t>(numHeads),
-      static_cast<uint32_t>(batch),
-      kThreads);
+  dispatchAttention(q, k, v, maskType, blockSize, out, nax);
   return true;
 }
 

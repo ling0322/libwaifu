@@ -916,6 +916,64 @@ CATCH_TEST_CASE("test Metal attention (a block past every key is no mask)", "[op
   });
 }
 
+CATCH_TEST_CASE("test Metal attention (scores past half's range)", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // CosyVoice3's DiT: a channel or two every query and key carry large, so that every score is
+  // past what half holds -- 97,000 there -- while the softmax, which a constant added to a row does
+  // not move, is decided by the rest. Here the last two channels are 300 in the queries and 1500 in
+  // the keys, both exact in half: scores of 112,500 with a head of 64, 79,500 with 128. In float
+  // that is an ordinary attention; scores held in half are infinities, and their softmax NaN.
+  auto sunk = [](int length, int headDim, float big) {
+    Tensor x = randn({1, 2, length, headDim});
+    float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+    for (int row = 0; row < 2 * length; ++row) {
+      data[row * headDim + headDim - 1] = big;
+      data[row * headDim + headDim - 2] = big;
+    }
+    return x;
+  };
+  struct Case {
+    MaskType mask;
+    int block;
+  };
+  const Case masks[] = {{MaskType::kNone, 0}, {MaskType::kCausal, 0}, {MaskType::kBlockCausal, 50}};
+  for (int headDim : {64, 128}) {
+    // A length the kernels have always taken, and one past the 256 keys the composition took
+    // without a block mask, which only a kernel on the neural accelerators takes now.
+    for (int length : {100, 600}) {
+      Tensor q = toMetal(sunk(length, headDim, 300.0f), DType::kFloat16);
+      Tensor k = toMetal(sunk(length, headDim, 1500.0f), DType::kFloat16);
+      Tensor v = toMetal(randn({1, 2, length, headDim}), DType::kFloat16);
+      for (const Case &c : masks) {
+        Tensor reference = maskReference(toCpu(q), toCpu(k), toCpu(v), c.mask, c.block);
+        eachKernel([&](bool nax) {
+          // The composition still holds its scores in half, so where it is what runs -- no mask
+          // or the causal one, past 256 keys, without the accelerators -- this is not asked of it.
+          bool composition = !nax && length > 256 && c.mask != MaskType::kBlockCausal;
+          if (composition) return;
+          CATCH_INFO(
+              "nax = " << nax << ", headDim = " << headDim << ", length = " << length
+                       << ", mask = " << static_cast<int>(c.mask));
+          Tensor x = fl::test::attention(mtl(), q, k, v, c.mask, c.block);
+          std::vector<float> got = values(x);
+          CATCH_REQUIRE(std::all_of(got.begin(), got.end(), [](float y) { return std::isfinite(y); }));
+          CATCH_REQUIRE(close(x, reference, 2e-2f, 2e-2f));
+        });
+      }
+    }
+  }
+}
+
+CATCH_TEST_CASE("test Metal attention on the neural accelerators answers here", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+  // A GPU the tests run on that has the accelerators is one the kernel was written for: were its
+  // layout another, attention would quietly run the other kernel, and every test above would pass
+  // without asking the one on the accelerators anything.
+  if (!op::metal_native::Context::get()->hasNax()) CATCH_SKIP("no neural accelerators here");
+  CATCH_REQUIRE(op::metal_native::naxAttentionAnswers());
+}
+
 CATCH_TEST_CASE("test Metal attention refuses the masks it does not define", "[op][metal]") {
   SKIP_WITHOUT_METAL();
 

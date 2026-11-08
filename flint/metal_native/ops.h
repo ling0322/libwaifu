@@ -140,6 +140,14 @@ bool attention(
     MaskType maskType,
     int blockSize,
     const TensorView &out);
+
+/// Whether attention on the neural accelerators answers here as it was written to. It reads its
+/// operands in the register layout of Metal 4's cooperative tensors, which Metal calls the
+/// implementation's: an M5 GPU's. So the first time it would be used, it is tried on a small
+/// attention of each head width against an answer worked out on the host, and attention() takes
+/// it only where it agrees; elsewhere kernels/attention.metal runs, with a warning in the log.
+/// Only to be asked on a GPU that has the accelerators.
+bool naxAttentionAnswers();
 void conv2d(
     const TensorView &input,
     const TensorView &weight,
