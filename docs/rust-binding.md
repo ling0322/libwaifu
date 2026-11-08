@@ -267,9 +267,10 @@ the caller's to read, not the request's to guess.
 
 Results are owned too, copied out of the callback: `Image`, `RgbaImage`, `Audio`,
 `Transcript { text, language }`, `DecomposedImage { canvas, layers }`. Each `Layer` has its
-`LayerType`, `depth` and `stratified_from: Option<usize>`, and `DecomposedImage::stack()` and
-`stratified_stack()` give the two stacks as indices into `layers`, by the C API's rule
-([ffi-abi4.md](ffi-abi4.md#stratification)), so no caller writes the comparison.
+`LayerType` (`Depth` among them), `id`, `depth` and `derived_from_id: Option<u32>`;
+`DecomposedImage::stack()` and `stratified_stack()` give the two stacks as indices into `layers`,
+by the C API's rule ([ffi-abi4.md](ffi-abi4.md#stratification)), so no caller writes the
+comparison.
 
 The C API's other enums come across as Rust enums with an `Other(i32)` for a number a newer
 library has and this crate does not: `PipelineType`, `Stage`, `LayerType`, `LogLevel`.

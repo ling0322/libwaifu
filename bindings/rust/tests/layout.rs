@@ -138,12 +138,13 @@ fn every_struct_is_the_header_s() {
     });
     same_layout!(WaifuLayer {
         r#type,
+        id,
         name,
         left,
         top,
         image,
         depth,
-        stratified_from,
+        derived_from_id,
     });
     same_layout!(WaifuLayerDecompositionResult {
         status,
@@ -245,5 +246,6 @@ fn every_number_is_the_header_s() {
         WAIFU_LAYER_PART,
         WAIFU_LAYER_STRATIFIED_NEAR,
         WAIFU_LAYER_STRATIFIED_FAR,
+        WAIFU_LAYER_DEPTH,
     );
 }

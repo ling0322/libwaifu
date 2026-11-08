@@ -232,9 +232,10 @@ fn a_log_callback_hears_the_library() {
     );
 }
 
-fn a_layer(layer_type: LayerType, depth: f32, stratified_from: Option<usize>) -> Layer {
+fn a_layer(layer_type: LayerType, id: u32, depth: f32, derived_from_id: Option<u32>) -> Layer {
     Layer {
         layer_type,
+        id,
         name: String::new(),
         left: 0,
         top: 0,
@@ -244,23 +245,29 @@ fn a_layer(layer_type: LayerType, depth: f32, stratified_from: Option<usize>) ->
             rgba: Vec::new(),
         },
         depth,
-        stratified_from,
+        derived_from_id,
     }
 }
 
 #[test]
 fn the_two_stacks_are_the_c_api_s() {
-    // Back hair, a top, and the back hair's halves: the near one at the part's depth.
+    // Back hair, a top, the back hair's halves -- the near one at the part's depth -- and a depth
+    // layer for each.
     let decomposed = DecomposedImage {
         canvas: 64,
         layers: vec![
-            a_layer(LayerType::Part, 0.95, None),
-            a_layer(LayerType::Part, 0.6, None),
-            a_layer(LayerType::StratifiedNear, 0.95, Some(0)),
-            a_layer(LayerType::StratifiedFar, 0.95, Some(0)),
+            a_layer(LayerType::Part, 1, 0.95, None),
+            a_layer(LayerType::Part, 2, 0.6, None),
+            a_layer(LayerType::StratifiedNear, 3, 0.95, Some(1)),
+            a_layer(LayerType::StratifiedFar, 4, 0.95, Some(1)),
+            a_layer(LayerType::Depth, 5, 0.95, Some(1)),
+            a_layer(LayerType::Depth, 6, 0.6, Some(2)),
+            a_layer(LayerType::Depth, 7, 0.95, Some(3)),
+            a_layer(LayerType::Depth, 8, 0.95, Some(4)),
         ],
     };
     assert_eq!(decomposed.stack(), [0, 1]);
-    // The split part is not in it; at one depth, the far half under the near one.
+    // The split part is not in it, nor any depth layer -- the top's names it and does not split
+    // it; at one depth, the far half under the near one.
     assert_eq!(decomposed.stratified_stack(), [3, 2, 1]);
 }

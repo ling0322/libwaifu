@@ -197,6 +197,8 @@ pub enum LayerType {
     StratifiedNear,
     /// `stratify_layers`: the far half of a part.
     StratifiedFar,
+    /// The depth of the layer `derived_from_id` names, pixel by pixel.
+    Depth,
     /// A type a newer library has and this crate does not know.
     Other(i32),
 }
@@ -207,6 +209,7 @@ impl From<sys::WaifuLayerType> for LayerType {
             sys::WAIFU_LAYER_PART => LayerType::Part,
             sys::WAIFU_LAYER_STRATIFIED_NEAR => LayerType::StratifiedNear,
             sys::WAIFU_LAYER_STRATIFIED_FAR => LayerType::StratifiedFar,
+            sys::WAIFU_LAYER_DEPTH => LayerType::Depth,
             other => LayerType::Other(other),
         }
     }
@@ -250,21 +253,26 @@ pub struct Transcript {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
     pub layer_type: LayerType,
-    /// "topwear"; its halves "topwear-0" and "topwear-1".
+    /// Unique within the result, from 1; it means nothing else.
+    pub id: u32,
+    /// "topwear"; its halves "topwear-0" and "topwear-1"; its depth "topwear_depth".
     pub name: String,
     /// Where its top left corner is on the canvas.
     pub left: i32,
     pub top: i32,
-    /// Only as large as what is drawn.
+    /// Only as large as what is drawn. A depth layer: its layer's size and place, R, G and B the
+    /// depth, 0 nearest to 255 farthest, under its layer's alpha.
     pub image: RgbaImage,
-    /// 0 nearest, 1 farthest. A near half has its part's depth, not its pixels'.
+    /// 0 nearest, 1 farthest. A near half has its part's depth, not its pixels'; a depth layer
+    /// has its layer's.
     pub depth: f32,
-    /// A half: the index in `layers` of its part; a part: None.
-    pub stratified_from: Option<usize>,
+    /// The id of the layer this one is made from: a half's part, a depth layer's layer; None for
+    /// a part.
+    pub derived_from_id: Option<u32>,
 }
 
 /// An image taken apart. `layers` is in the library's one order: each part, bottom first, then,
-/// with `stratify_layers`, each part's halves, near before far.
+/// with `stratify_layers`, each part's halves, near before far; then a depth layer for each.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecomposedImage {
     /// The side of the square canvas.
@@ -276,21 +284,34 @@ impl DecomposedImage {
     /// The stack unstratified, bottom first: every part, as indices into `layers`.
     pub fn stack(&self) -> Vec<usize> {
         (0..self.layers.len())
-            .filter(|&index| self.layers[index].stratified_from.is_none())
+            .filter(|&index| self.layers[index].layer_type == LayerType::Part)
             .collect()
     }
 
     /// The stratified stack, bottom first, as indices into `layers`: every part that was not split
     /// and every half -- from the largest depth to the smallest; at one depth, a far half under a
-    /// near one; then by index.
+    /// near one; then by their order in `layers`. No depth layer is in it.
     pub fn stratified_stack(&self) -> Vec<usize> {
-        let split: HashSet<usize> = self
+        let is_half = |layer: &Layer| {
+            matches!(
+                layer.layer_type,
+                LayerType::StratifiedNear | LayerType::StratifiedFar
+            )
+        };
+        let split: HashSet<u32> = self
             .layers
             .iter()
-            .filter_map(|layer| layer.stratified_from)
+            .filter(|layer| is_half(layer))
+            .filter_map(|layer| layer.derived_from_id)
             .collect();
         let mut stack: Vec<usize> = (0..self.layers.len())
-            .filter(|index| !split.contains(index))
+            .filter(|&index| {
+                let layer = &self.layers[index];
+                match layer.layer_type {
+                    LayerType::Part => !split.contains(&layer.id),
+                    _ => is_half(layer),
+                }
+            })
             .collect();
         let lower = |layer_type: LayerType| match layer_type {
             LayerType::StratifiedFar => 0,
@@ -687,12 +708,13 @@ unsafe extern "C" fn on_layers_complete(
                 .iter()
                 .map(|layer| Layer {
                     layer_type: LayerType::from(layer.r#type),
+                    id: layer.id,
                     name: text(layer.name).unwrap_or_default(),
                     left: layer.left,
                     top: layer.top,
                     image: rgba_out(&layer.image),
                     depth: layer.depth,
-                    stratified_from: usize::try_from(layer.stratified_from).ok(),
+                    derived_from_id: (layer.derived_from_id != 0).then_some(layer.derived_from_id),
                 })
                 .collect(),
         }

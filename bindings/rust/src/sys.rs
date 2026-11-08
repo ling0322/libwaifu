@@ -124,6 +124,7 @@ pub type WaifuLayerType = c_int;
 pub const WAIFU_LAYER_PART: WaifuLayerType = 0;
 pub const WAIFU_LAYER_STRATIFIED_NEAR: WaifuLayerType = 1;
 pub const WAIFU_LAYER_STRATIFIED_FAR: WaifuLayerType = 2;
+pub const WAIFU_LAYER_DEPTH: WaifuLayerType = 3;
 
 // -- the library -----------------------------------------------------------------------------
 
@@ -298,12 +299,13 @@ pub struct WaifuLayerDecompositionRequest {
 #[repr(C)]
 pub struct WaifuLayer {
     pub r#type: WaifuLayerType,
+    pub id: u32,
     pub name: *const c_char,
     pub left: i32,
     pub top: i32,
     pub image: WaifuRgbaImage,
     pub depth: f32,
-    pub stratified_from: i32,
+    pub derived_from_id: u32,
 }
 
 #[repr(C)]
