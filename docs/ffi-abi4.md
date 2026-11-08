@@ -573,7 +573,8 @@ the header.
 - The SwiftUI app: the same; a PSD writer of its own; the style picker offers CosyVoice3's examples
   and free text.
 - The WPF app: the same, without the PSD.
-- `bindings/rust` is written against ABI 4 afterwards, in a pull request of its own.
+- `bindings/rust` is written against ABI 4 afterwards, in a pull request of its own: the crate
+  `waifu` (package `libwaifu`), designed in [rust-binding.md](rust-binding.md).
 
 ## Not in ABI 4
 
