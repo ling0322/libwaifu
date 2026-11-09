@@ -174,7 +174,9 @@ void gemm(
   if (output.getNumEl() == 0) return;
   if (K == 0) {
     if (!bias.empty()) {
-      copy(bias.view({1, N}).expand(output.getShape()), output);
+      // To the output's rank first: in a batch it has more dimensions than the bias's one.
+      std::vector<int> shape = output.getShape();
+      copy(op::cpu::expandBatchDims(bias, shape).expand(shape), output);
     } else if (!accumulate) {
       fill(output, 0.0f);
     }

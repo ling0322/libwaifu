@@ -628,6 +628,7 @@ CATCH_TEST_CASE("test Vulkan matmul with an addend", "[op][vulkan]") {
       {{3, 40, 64}, {3, 64, 72}, false},
       {{2, 5, 40, 64}, {2, 5, 64, 72}, false},
       {{4, 0}, {0, 24}, false},
+      {{2, 3, 0}, {2, 0, 24}, false},  // an empty K in a batch: the bias alone, at the output's rank
   };
   for (const Case &c : cases) {
     Tensor a = fl::test::rand(Device::getCpu(), c.shapeA, DType::kFloat);

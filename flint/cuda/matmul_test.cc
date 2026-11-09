@@ -370,6 +370,7 @@ bool allAre(const Tensor &x, float value) {
 // the product's float sum and rounded once, as torch's addmm does, the answer is 2050; rounded
 // after the product and again after the bias, it is 2048.
 CATCH_TEST_CASE("test CUDA matmul with a bias rounds once", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
   constexpr int K = 16, N = 136;
   float *ones;
   Tensor host = zerosOnCpu({N}, &ones);
@@ -409,6 +410,7 @@ CATCH_TEST_CASE("test CUDA matmul with a bias rounds once", "[op][cuda]") {
 }
 
 CATCH_TEST_CASE("test CUDA matmul with an addend agrees with float", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
   // 40 columns are read as they stand, and a bias goes to the GEMM as a source; 41 are not, and it
   // goes into C first.
   for (int N : {40, 41}) {
@@ -437,6 +439,7 @@ CATCH_TEST_CASE("test CUDA matmul with an addend agrees with float", "[op][cuda]
 // What the addend costs a linear layer: the product alone, the product and then add (what a biased
 // linear was before matmulAdd), and matmulAdd. Half, the weight (n, k) read transposed.
 CATCH_TEST_CASE("benchmark CUDA matmul with an addend", "[.][cuda-benchmark]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
   auto time = [](auto &&run) {
     // CudaOperators::synchronize() is the default, which waits for nothing.
     for (int i = 0; i < 3; ++i) run();
