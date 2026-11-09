@@ -163,6 +163,10 @@ enum Kind {
     /// any other, but in neither list -- it draws nothing from a prompt and reads no sentence, so
     /// either picker offering it would offer a name that fails once chosen.
     Layers,
+    /// Writes down what is said in a recording: speech2text. Fetched by name and in no list, as
+    /// [`Kind::Layers`] is, and for the same reason; nor is it in the catalogue a screen reads,
+    /// which has no kind for it yet.
+    Transcription,
 }
 
 /// A model that has a name, and where it is published.
@@ -303,6 +307,16 @@ const CATALOG: &[Published] = &[
         explicit: false,
         kind: Kind::Layers,
     },
+    // Named `<family>:<size>`: Qwen3-ASR has no version past the family's own, and what tells
+    // its two releases apart is how big they are -- 0.6B here, and a 1.7B beside it upstream.
+    Published {
+        name: "qwen3-asr:0.6b",
+        full_name: "Qwen3-ASR 0.6B",
+        repo: "ling0322/libwaifu-qwen3-asr-0.6b",
+        manifest: "qwen3-asr.yaml",
+        explicit: false,
+        kind: Kind::Transcription,
+    },
 ];
 
 /// Where a package is fetched from.
@@ -437,6 +451,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("indextts", "indextts:v2.5"),
     ("cosyvoice", "cosyvoice:v3"),
     ("see-through", "see-through:v0.0.2"),
+    ("qwen3-asr", "qwen3-asr:0.6b"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1920,6 +1935,28 @@ mod tests {
     }
 
     #[test]
+    fn a_transcriber_is_fetched_by_name_and_offered_in_no_list() {
+        // Qwen3-ASR resolves by name, but it draws nothing and reads no sentence: no picker
+        // offers it, and nor does the catalogue the apps read, which would show it as a picture.
+        let model = published("qwen3-asr").expect("an alias resolves");
+        assert_eq!(model.name, "qwen3-asr:0.6b");
+        assert_eq!(model.repo, "ling0322/libwaifu-qwen3-asr-0.6b");
+        assert_eq!(model.manifest, "qwen3-asr.yaml");
+        assert_eq!(full_name("qwen3-asr"), Some("Qwen3-ASR 0.6B"));
+        assert!(names().contains(&"qwen3-asr"));
+        assert!(!is_voice("qwen3-asr") && !is_conversion("qwen3-asr"));
+
+        let offered = listed()
+            .into_iter()
+            .chain(listed_voices())
+            .chain(listed_conversions())
+            .chain(listed_layers());
+        assert!(!offered.into_iter().any(|one| one.name == "qwen3-asr"));
+        let catalogue = crate::fetch::catalog_json().to_string();
+        assert!(!catalogue.contains("qwen3-asr"), "{catalogue}");
+    }
+
+    #[test]
     fn the_name_a_model_used_to_have_still_finds_it() {
         // `sdxl:noob:v11` went out in the README and is in scripts by now. It has to keep meaning
         // NoobAI-XL v1.1, whatever the catalogue calls that today.
@@ -1963,7 +2000,7 @@ mod tests {
         // all: a name is what someone types before they have the model, so it should say what
         // they are about to fetch. Add to this list when the runtime learns another -- of a
         // picture model or, as `indextts` and `cosyvoice` did, of a voice.
-        const FAMILIES: [&str; 7] = [
+        const FAMILIES: [&str; 8] = [
             "sdxl",
             "anima",
             "krea2",
@@ -1971,13 +2008,14 @@ mod tests {
             "indextts",
             "cosyvoice",
             "see-through",
+            "qwen3-asr",
         ];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
             let expected = match model.kind {
                 Kind::Picture => 3,
-                Kind::Voice | Kind::Layers => 2,
+                Kind::Voice | Kind::Layers | Kind::Transcription => 2,
             };
             assert_eq!(
                 fields.len(),

@@ -45,8 +45,8 @@ API's voice conversion. It changes whose voice it is and keeps the words, timing
 **Qwen3-ASR** writes down what is said in a recording -- thirty languages, told or found out, at
 any rate and of any length -- with a sentence of context to help it hear names: the `speech2text`
 task, in the library and through the C API's `waifu_pipeline_run_speech_to_text_async` (see
-[docs/qwen3_asr.md](docs/qwen3_asr.md)). Not published yet: build the package and choose it by
-path.
+[docs/qwen3_asr.md](docs/qwen3_asr.md)). Published as `qwen3-asr`, which the model manager
+fetches by name; no picker in the terminal offers it yet.
 
 ```bash
 cargo run --release -p waifu-tools --bin transcribe -- models/qwen3-asr.yaml speech.wav
@@ -54,7 +54,7 @@ cargo run --release -p waifu-tools --bin transcribe -- models/qwen3-asr.yaml spe
 
 | name | model | published as |
 |---|---|---|
-| -- | Qwen3-ASR 0.6B | not yet; `tools/qwen3_asr_exporter.py` builds it |
+| `qwen3-asr` | Qwen3-ASR 0.6B | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-qwen3-asr-0.6b)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-qwen3-asr-0.6b)\] |
 
 ## Layer decomposition
 
@@ -117,6 +117,8 @@ model_dir = 'D:\models'
 
 ## Recent updates
 
+- [2026-11-08] Qwen3-ASR 0.6B is published as `qwen3-asr`, and its reference tensors beside the
+  other models' in `ling0322/libwaifu_test_data`.
 - [2026-10-28] See-through (`img2layers`): a picture taken apart into a layered, depth-sorted
   PSD, in the library and through the C API. Published as `see-through`; every reference check
   holds it as close to float32 as upstream's own bfloat16 run is, or closer.

@@ -96,6 +96,27 @@ fn relative_error(got: &[f32], want: &[f32]) -> f32 {
     worst / scale
 }
 
+/// The error over the whole of a tensor: the RMS of the difference against the RMS of the reference.
+fn relative_rmse(got: &[f32], want: &[f32]) -> f32 {
+    assert_eq!(got.len(), want.len());
+    let error: f64 = got
+        .iter()
+        .zip(want)
+        .map(|(g, w)| ((g - w) as f64).powi(2))
+        .sum();
+    let energy: f64 = want.iter().map(|w| (*w as f64).powi(2)).sum();
+    (error / energy.max(1e-30)).sqrt() as f32
+}
+
+/// How far a stage may be from float32: half again as far as torch's half on CUDA is, on the same
+/// inputs (`tools/qwen3_asr_reference.py` measures it into the fixture). The room is for the
+/// arithmetic being another's -- which kernel rounds where -- and not for a mistake: a measure of
+/// the whole moves by a few tens of percent between two good implementations of half, and by
+/// twice where one rounds a sum it should not have: a linear's bias added after the product was
+/// rounded put the encoder at 1.3 times torch's half before #176, and a split K handing its partial
+/// sums on in half put the decoder's final hidden state at 1.37 times before #178.
+const ROOM: f32 = 1.5;
+
 fn log_softmax(scores: &[f32]) -> Vec<f32> {
     let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
     let total: f64 = scores.iter().map(|s| (*s as f64 - max).exp()).sum();
@@ -106,14 +127,15 @@ fn log_softmax(scores: &[f32]) -> Vec<f32> {
         .collect()
 }
 
-/// The largest difference between two rows of log probabilities over the tokens the reference
-/// gives any real chance to.
-fn logp_error(got: &[f32], want: &[f32]) -> f32 {
+/// The differences between two rows of log probabilities over the tokens the reference gives any
+/// real chance to: their sum and how many there are, to be pooled over every position.
+fn logp_differences(got: &[f32], want: &[f32]) -> (f64, usize) {
     got.iter()
         .zip(want)
         .filter(|(_, w)| **w > -10.0)
-        .map(|(g, w)| (g - w).abs())
-        .fold(0.0, f32::max)
+        .fold((0.0, 0), |(sum, count), (g, w)| {
+            (sum + (g - w).abs() as f64, count + 1)
+        })
 }
 
 #[test]
@@ -135,30 +157,32 @@ fn hears_the_recordings_as_the_reference_does() {
         println!("{name}: mel {:?}, relative error {error:.2e}", mel.shape());
         assert!(error < 1e-3, "{name}: the mel is {error} off");
 
-        // The encoder, on the reference's mel so that only the encoder is measured.
+        // The encoder, on the reference's mel so that only the encoder is measured, both ways
+        // of keeping attention in its windows: the block diagonal mask CUDA's kernel takes, and
+        // the windows split into batches every device runs. Each is held to torch's half.
         let reference_mel = want_mel.unsqueeze(0).unwrap().to_device(DEVICE).unwrap();
         let audio = model.encode(&reference_mel).unwrap();
         let want_audio = &cases[&format!("{name}.audio")];
         assert_eq!(audio.shape(), want_audio.shape(), "{name}: encoder shape");
-        let error = relative_error(&floats(&audio), &floats(want_audio));
-        println!(
-            "{name}: encoder {:?}, relative error {error:.2e}",
-            audio.shape()
-        );
-        assert!(error < 2e-2, "{name}: the encoder is {error} off");
-
-        // Both ways of keeping attention in its windows: the block diagonal mask CUDA's kernel
-        // takes, and the windows split into batches every device runs. Each is the reference's,
-        // and they are each other's to within what half precision leaves.
+        let floor = floats(&cases[&format!("{name}.audio_f16_rmse")])[0];
+        let want = floats(want_audio);
         let masked = floats(&model.encode_with(&reference_mel, Windows::Masked).unwrap());
         let split = floats(&model.encode_with(&reference_mel, Windows::Split).unwrap());
-        let (masked_error, split_error) = (
-            relative_error(&masked, &floats(want_audio)),
-            relative_error(&split, &floats(want_audio)),
-        );
+        for (windows, got) in [("masked", &masked), ("split", &split)] {
+            let error = relative_rmse(got, &want);
+            println!(
+                "{name}: encoder {:?} {windows}, relative RMSE {error:.2e}; torch's half is \
+                 {floor:.2e} ({:.2}x)",
+                audio.shape(),
+                error / floor
+            );
+            assert!(
+                error <= ROOM * floor,
+                "{name}: the {windows} encoder is {error:.2e} from float32, more than {ROOM} \
+                 times torch's half at {floor:.2e}"
+            );
+        }
         let apart = relative_error(&masked, &split);
-        println!("{name}: masked {masked_error:.2e}, split {split_error:.2e}, apart {apart:.2e}");
-        assert!(masked_error < 2e-2 && split_error < 2e-2, "{name}");
         assert!(apart < 1e-2, "{name}: masked and split are {apart} apart");
 
         // The prompt is the reference's, around as many placeholders as there are rows.
@@ -176,11 +200,13 @@ fn hears_the_recordings_as_the_reference_does() {
         let reference_audio = want_audio.to_device(DEVICE).unwrap();
         let decoder = model.decoder();
         let mut reading = decoder.prefill(&head, &reference_audio, &tail).unwrap();
-        let mut worst = 0f32;
+        let (mut sum, mut count) = (0f64, 0usize);
         for (index, token) in said.iter().enumerate() {
             let scores = reading.scores().unwrap();
             let want = &want_logp[index * vocab..(index + 1) * vocab];
-            worst = worst.max(logp_error(&log_softmax(&scores), want));
+            let (row_sum, row_count) = logp_differences(&log_softmax(&scores), want);
+            sum += row_sum;
+            count += row_count;
             assert_eq!(
                 argmax(&scores) as i32,
                 *token,
@@ -191,10 +217,33 @@ fn hears_the_recordings_as_the_reference_does() {
             }
         }
         println!(
-            "{name}: decoder over {} tokens, log probability error {worst:.3}",
-            said.len()
+            "{name}: decoder over {} tokens, the same as the reference's; mean log probability \
+             error {:.2e}",
+            said.len(),
+            sum / count as f64
         );
-        assert!(worst < 0.5, "{name}: the log probabilities are {worst} off");
+
+        // And held to torch's half on its final hidden state, at every position of the whole
+        // teacher-forced sequence -- a hundred thousand values, where the log probabilities of
+        // the tokens said are a few dozen, each decided by where its logit rounded to half. Two
+        // equally good halves disagree on those by a quarter, and torch's own by twice from one
+        // version to the next; they are printed above and not held to anything.
+        let mut sequence = tail.clone();
+        sequence.extend(&said[..said.len() - 1]);
+        let hidden = floats(&decoder.hidden(&head, &reference_audio, &sequence).unwrap());
+        let want_hidden = floats(&cases[&format!("{name}.hidden")]);
+        let error = relative_rmse(&hidden, &want_hidden);
+        let floor = floats(&cases[&format!("{name}.hidden_f16_rmse")])[0];
+        println!(
+            "{name}: decoder's final hidden state, relative RMSE {error:.2e}; torch's half is \
+             {floor:.2e} ({:.2}x)",
+            error / floor
+        );
+        assert!(
+            error <= ROOM * floor,
+            "{name}: the decoder's final hidden state is {error:.2e} from float32, more than \
+             {ROOM} times torch's half at {floor:.2e}"
+        );
 
         // The whole of it, from the recording: the same tokens and the same words.
         let heard = model
