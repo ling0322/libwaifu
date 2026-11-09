@@ -17,7 +17,9 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#define CUTLASS_DEBUG_TRACE_LEVEL 2
+// No host tracing: GemmUniversal, which Stream-K is, traces every call to stdout at any level
+// above zero. A failure still comes back as a status, which CUTLASS_CHECK below names.
+#define CUTLASS_DEBUG_TRACE_LEVEL 0
 
 #include <cuda_fp16.h>
 
@@ -27,6 +29,8 @@
 #include <cutlass/cutlass.h>
 #include <cutlass/gemm/device/gemm.h>
 #include <cutlass/gemm/device/gemm_array.h>
+#include <cutlass/gemm/device/gemm_universal.h>
+#include <cutlass/gemm/threadblock/threadblock_swizzle_streamk.h>
 
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/epilogue/thread/linear_combination.h"
@@ -129,6 +133,30 @@ struct Sm80Gemm {
       ALIGNMENT,
       ALIGNMENT,
       true>;
+
+  // The same tile and mainloop under Stream-K, for what would otherwise split K: the CTAs share
+  // the K iterations of the tiles between them, and the ones that do not finish a tile leave
+  // their partial sums in float in the workspace for the one that does. So a tile's sum is put
+  // together in float and rounded into C once, which the serial split above cannot do for a half
+  // C -- it hands each slice's sum to the next through C itself.
+  using GemmStreamK = cutlass::gemm::device::GemmUniversal<
+      cutlass::half_t,
+      LayoutA,
+      cutlass::half_t,
+      LayoutB,
+      ElementC,
+      cutlass::layout::RowMajor,
+      float,
+      cutlass::arch::OpClassTensorOp,
+      cutlass::arch::Sm80,
+      cutlass::gemm::GemmShape<128, 128, 32>,
+      cutlass::gemm::GemmShape<64, 64, 32>,
+      cutlass::gemm::GemmShape<16, 8, 16>,
+      cutlass::epilogue::thread::LinearCombination<ElementC, kAlignmentC, float, float>,
+      cutlass::gemm::threadblock::ThreadblockSwizzleStreamK,
+      3,
+      ALIGNMENT,
+      ALIGNMENT>;
 };
 
 /// The alignments the tensor-core kernel has an instantiation for, widest first.
@@ -238,6 +266,66 @@ void hgemmT(
     int ldc,
     const ElementC *source = nullptr,
     int ldSource = 0) {
+  int slices = splitKSlices(m, n, k);
+
+  // A split K hands its partial sums from one slice to the next through the output, so into a half
+  // C every slice's sum is rounded to half before the next is added to it -- up to seven roundings
+  // the product never asked for. On Qwen3-ASR's decoder, whose prompts are a few hundred rows,
+  // that put the log probabilities at twice torch's half's distance from float32. So where a
+  // half product would split, it goes through Stream-K instead, which shares K out among the
+  // CTAs in the same way but keeps what is unfinished in float and rounds each tile into C once.
+  //
+  // Two ways of sharing it. Left to itself, Stream-K balances the K iterations of every tile over
+  // all the CTAs the card holds at once; asked for `slices` with one SM's worth of balancing, it
+  // cuts each tile's K into `slices` as the serial split did. Measured on an RTX 5060 Ti (36 SMs),
+  // in microseconds -- left to itself / cut as before / the serial split it replaces:
+  //
+  //     tiles  shape
+  //       5    77 x 640 x 2048       23.0 / 26.0 / 26.8
+  //       8    73 x 1024 x 3072      43.2 / 33.0 / 31.8
+  //      10    77 x 1280 x 2048      39.1 / 29.6 / 29.2
+  //      14    179 x 896 x 896       18.7 / 20.3 / 18.6
+  //      16    73 x 2048 x 1024      19.7 / 24.8 / 24.2
+  //      24    73 x 3072 x 1024      24.6 / 30.8 / 26.5
+  //     128    1024 x 2048 x 2048   176.4 / 201.2 / 200.4
+  //
+  // Left to itself it is as fast or faster from about a third as many tiles as SMs up, and up to
+  // a third slower below that, where a handful of tiles spread over every CTA spends more on
+  // putting their sums back together than it saves; cut as before, it is the serial split's speed
+  // within a few percent everywhere. So below that line it is cut as before.
+  if constexpr (std::is_same<ElementC, cutlass::half_t>::value) {
+    if (slices > 1) {
+      int tiles = ((m + kTileM - 1) / kTileM) * ((n + kTileN - 1) / kTileN);
+      bool cut = tiles * 3 <= getCudaDeviceAttribute(cudaDevAttrMultiProcessorCount);
+
+      using StreamK = typename Sm80Gemm<LayoutA, LayoutB, ALIGNMENT, ElementC>::GemmStreamK;
+      typename StreamK::Arguments args(
+          cutlass::gemm::GemmUniversalMode::kGemm,
+          {m, n, k},
+          cut ? slices : 1,
+          {alpha, beta},
+          A,
+          B,
+          source ? source : C,
+          C,
+          0,
+          0,
+          0,
+          0,
+          lda,
+          ldb,
+          source ? ldSource : ldc,
+          ldc,
+          cut ? 1 : -1);
+      CUTLASS_CHECK(StreamK::can_implement(args));
+      StreamK gemmOperator;
+      size_t workspaceSize = StreamK::get_workspace_size(args);
+      CUTLASS_CHECK(gemmOperator.initialize(args, splitKWorkspace(workspaceSize)));
+      CUTLASS_CHECK(gemmOperator());
+      return;
+    }
+  }
+
   using Gemm = typename Sm80Gemm<LayoutA, LayoutB, ALIGNMENT, ElementC>::Gemm;
   Gemm gemmOperator;
 
@@ -252,7 +340,7 @@ void hgemmT(
       {source ? source : C, source ? ldSource : ldc},
       {C, ldc},
       {alpha, beta},
-      splitKSlices(m, n, k)};
+      slices};
 
   // Asked rather than assumed. `initialize` does not call this -- it builds the params and
   // returns success -- so an operand no instantiation can read is otherwise launched anyway, and

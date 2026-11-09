@@ -460,7 +460,19 @@ CATCH_TEST_CASE("benchmark CUDA matmul with an addend", "[.][cuda-benchmark]") {
       {"decode 1x3072x1024", 1, 3072, 1024},
       {"encoder 179x896x896", 179, 896, 896},
       {"encoder 179x3584x896", 179, 3584, 896},
+      // Qwen3-ASR's decoder over a prompt of 73 rows: q, o, gate and down.
+      {"decoder 73x2048x1024", 73, 2048, 1024},
+      {"decoder 73x1024x2048", 73, 1024, 2048},
+      {"decoder 73x3072x1024", 73, 3072, 1024},
+      {"decoder 73x1024x3072", 73, 1024, 3072},
       {"prefill 1024x2048x2048", 1024, 2048, 2048},
+      // SDXL's that split K: its cross attention over 77 tokens, and the mid-sized projections.
+      {"sdxl 77x640x2048", 77, 640, 2048},
+      {"sdxl 77x1280x2048", 77, 1280, 2048},
+      {"sdxl 77x1920x2048", 77, 1920, 2048},
+      {"sdxl 77x2560x2048", 77, 2560, 2048},
+      {"sdxl 1024x1280x1280", 1024, 1280, 1280},
+      {"sdxl 4096x1920x640", 4096, 1920, 640},
       {"linear 8192x640x640", 8192, 640, 640},
       {"linear 8192x5120x640", 8192, 5120, 640},
   };
