@@ -197,7 +197,7 @@ unsafe fn string_property(
 
 #[test]
 fn the_library_says_what_it_is() {
-    assert_eq!(waifu_abi_version(), 4);
+    assert_eq!(waifu_abi_version(), 5);
     assert_eq!(waifu_abi_version(), WAIFU_ABI_VERSION);
     let version = unsafe { text(waifu_version()) }.unwrap();
     assert_eq!(version, env!("CARGO_PKG_VERSION"));
@@ -579,13 +579,25 @@ fn freeing_a_pipeline_ends_every_job_it_had() {
     }
 }
 
+/// WaifuTextToSpeechRequest as ABI 4 wrote it, before reference_transcript: what a caller built
+/// against that header hands over, and all it hands over.
+#[repr(C)]
+struct Abi4TextToSpeechRequest {
+    struct_size: u32,
+    text: *const c_char,
+    reference: *const WaifuAudio,
+    speed: f32,
+    temperature: f32,
+    style: *const c_char,
+    seed: u64,
+}
+
 #[test]
-fn a_speech_request_from_before_the_reference_transcript_is_read_without_one() {
+fn a_speech_request_reads_its_reference_transcript_and_refuses_an_older_size() {
     unsafe {
         let pipeline = a_pipeline(WAIFU_PIPELINE_TEXT_TO_SPEECH);
         with_tones(pipeline);
-        let before = std::mem::offset_of!(WaifuTextToSpeechRequest, reference_transcript) as u32;
-        let run = |request: &WaifuTextToSpeechRequest| -> WaifuJob {
+        let run = |request: *const WaifuTextToSpeechRequest| -> WaifuJob {
             let (send, _) = a_channel();
             waifu_pipeline_run_text_to_speech_async(
                 pipeline,
@@ -596,8 +608,7 @@ fn a_speech_request_from_before_the_reference_transcript_is_read_without_one() {
             )
         };
 
-        // Bytes that are not UTF-8 where the transcript would be. At today's size they are read,
-        // and refused at the call...
+        // Bytes that are not UTF-8 in the field: it is read, and refused at the call.
         let request = WaifuTextToSpeechRequest {
             reference_transcript: c"\xff".as_ptr(),
             ..a_speech_request(c"hello there")
@@ -605,33 +616,31 @@ fn a_speech_request_from_before_the_reference_transcript_is_read_without_one() {
         assert_eq!(run(&request), 0);
         assert!(last_error().contains("UTF-8"), "{}", last_error());
 
-        // ...and at the size before the field, which a caller built against the older header
-        // says, they are not: the reading goes ahead, to the end.
-        let (send, heard) = a_channel();
-        let older = WaifuTextToSpeechRequest {
-            struct_size: before,
-            ..request
+        // ABI 4's struct, smaller than this one, is refused at the call -- on its struct_size
+        // alone, without reading past what the caller handed over.
+        let older = Abi4TextToSpeechRequest {
+            struct_size: std::mem::size_of::<Abi4TextToSpeechRequest>() as u32,
+            text: c"hello there".as_ptr(),
+            reference: ptr::null(),
+            speed: 1.0,
+            temperature: 0.8,
+            style: ptr::null(),
+            seed: 7,
         };
-        let job = waifu_pipeline_run_text_to_speech_async(
-            pipeline,
-            &older,
-            user_data(&send),
-            None,
-            Some(on_audio),
+        assert!(
+            std::mem::size_of::<Abi4TextToSpeechRequest>()
+                < std::mem::size_of::<WaifuTextToSpeechRequest>()
         );
-        assert_ne!(job, 0, "{}", last_error());
-        match heard.recv_timeout(WAIT).expect("an end") {
-            Heard::Audio(code, _, _) => assert_eq!(code, WAIFU_OK),
-            other => panic!("{other:?}"),
-        }
-
-        // Short of even the older header's, it is refused at the call.
-        let short = WaifuTextToSpeechRequest {
-            struct_size: before - 1,
-            ..a_speech_request(c"hello there")
-        };
-        assert_eq!(run(&short), 0);
+        let older = Box::new(older);
+        assert_eq!(
+            run(&*older as *const _ as *const WaifuTextToSpeechRequest),
+            0
+        );
         assert!(last_error().contains("struct_size"), "{}", last_error());
+
+        // A NULL request is refused too, before anything is read.
+        assert_eq!(run(ptr::null()), 0);
+        assert!(last_error().contains("NULL"), "{}", last_error());
         waifu_pipeline_free(pipeline);
     }
 }

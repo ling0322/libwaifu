@@ -98,11 +98,11 @@ fn every_struct_is_the_header_s() {
         struct_size,
         text,
         reference,
+        reference_transcript,
         speed,
         temperature,
         style,
         seed,
-        reference_transcript,
     });
     same_layout!(WaifuVoiceConversionRequest {
         struct_size,
@@ -117,10 +117,10 @@ fn every_struct_is_the_header_s() {
         struct_size,
         text,
         reference,
+        reference_transcript,
         temperature,
         style,
         seed,
-        reference_transcript,
     });
     same_layout!(WaifuRgbaImage {
         width,

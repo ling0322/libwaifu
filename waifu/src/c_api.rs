@@ -17,8 +17,8 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The C API, ABI 4: pipelines, models, devices and the log, as `extern "C"`. Everything outside
-//! this crate goes through these. docs/ffi-abi4.md is the contract; it changes only with a human's
+//! The C API, ABI 5: pipelines, models, devices and the log, as `extern "C"`. Everything outside
+//! this crate goes through these. docs/ffi-abi5.md is the contract; it changes only with a human's
 //! approval, and so does this.
 //!
 //! Nothing with any logic in it lives here. This converts -- C strings to `&str`, structs to the
@@ -78,7 +78,8 @@ use crate::Device;
 /// way an older caller would misread.
 ///
 /// 4: pipelines made for one task, models and devices asked about by property, no JSON.
-pub const WAIFU_ABI_VERSION: u32 = 4;
+/// 5: the text-to-speech requests' reference_transcript, after reference.
+pub const WAIFU_ABI_VERSION: u32 = 5;
 
 // -- enums -----------------------------------------------------------------------------------
 
@@ -819,43 +820,22 @@ pub unsafe extern "C" fn waifu_pipeline_unload_model_async(
 }
 
 /// A request struct, read only if it is at least as large as the one this library knows.
-unsafe fn request_in<'a, T>(request: *const T, size: u32, what: &str) -> Result<&'a T, String> {
-    let request = request
-        .as_ref()
-        .ok_or_else(|| format!("the {what} is NULL"))?;
+///
+/// Every request starts with its `uint32_t struct_size`, and that is all that is read before the
+/// size is known: a caller built against another header may have handed fewer bytes than `T`, and
+/// a reference to a `T` would claim them all.
+unsafe fn request_in<'a, T>(request: *const T, what: &str) -> Result<&'a T, String> {
+    if request.is_null() {
+        return Err(format!("the {what} is NULL"));
+    }
+    let size = (request as *const u32).read();
     if (size as usize) < std::mem::size_of::<T>() {
         return Err(format!(
             "the {what} says it is {size} bytes, and this library reads {}: set struct_size to sizeof",
             std::mem::size_of::<T>()
         ));
     }
-    Ok(request)
-}
-
-/// A request struct that has grown at its end since `least` bytes of it were all there was: read
-/// if it is at least that large, with every field past what the caller's `size` holds zero -- the
-/// NULL a caller built against the older header never set.
-///
-/// `T` must be one for which all-zero bytes are a value: numbers and pointers.
-unsafe fn grown_request_in<T>(
-    request: *const T,
-    size: u32,
-    least: usize,
-    what: &str,
-) -> Result<T, String> {
-    if request.is_null() {
-        return Err(format!("the {what} is NULL"));
-    }
-    if (size as usize) < least {
-        return Err(format!(
-            "the {what} says it is {size} bytes, and this library reads {}: set struct_size to sizeof",
-            std::mem::size_of::<T>()
-        ));
-    }
-    let mut out = std::mem::MaybeUninit::<T>::zeroed();
-    let held = (size as usize).min(std::mem::size_of::<T>());
-    ptr::copy_nonoverlapping(request as *const u8, out.as_mut_ptr() as *mut u8, held);
-    Ok(out.assume_init())
+    Ok(&*request)
 }
 
 /// A pointer to `values`, or NULL for none.
@@ -984,8 +964,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_image_generation_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_IMAGE_GENERATION)?;
-        let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let request = request_in(request, size, "WaifuImageGenerationRequest")?;
+        let request = request_in(request, "WaifuImageGenerationRequest")?;
         let request = DrawRequest {
             prompt: required(request.prompt, "prompt")?,
             negative: string_in(request.negative, "negative")?.unwrap_or_default(),
@@ -1051,16 +1030,16 @@ pub struct WaifuTextToSpeechRequest {
     pub text: *const c_char,
     /// A recording to sound like, or NULL.
     pub reference: *const WaifuAudio,
+    /// What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
+    /// from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
+    /// reads none ignores it.
+    pub reference_transcript: *const c_char,
     pub speed: f32,
     pub temperature: f32,
     /// Any instruction; NULL or "" for the voice's own way. CosyVoice3 takes a style or a
     /// reference_transcript, not both: upstream's instruct2 reads no transcript.
     pub style: *const c_char,
     pub seed: u64,
-    /// What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
-    /// from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
-    /// reads none ignores it. Last, and read only where struct_size holds it.
-    pub reference_transcript: *const c_char,
 }
 
 #[repr(C)]
@@ -1156,9 +1135,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_text_to_speech_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_TEXT_TO_SPEECH)?;
-        let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let least = std::mem::offset_of!(WaifuTextToSpeechRequest, reference_transcript);
-        let request = grown_request_in(request, size, least, "WaifuTextToSpeechRequest")?;
+        let request = request_in(request, "WaifuTextToSpeechRequest")?;
         let request = SpeakRequest {
             text: required(request.text, "text")?,
             like: reference_in(request.reference)?,
@@ -1188,8 +1165,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_voice_conversion_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_VOICE_CONVERSION)?;
-        let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let request = request_in(request, size, "WaifuVoiceConversionRequest")?;
+        let request = request_in(request, "WaifuVoiceConversionRequest")?;
         let request = VoiceConversionRequest {
             source: audio_in(request.source, "source")?,
             reference: audio_in(request.reference, "reference")?,
@@ -1218,13 +1194,13 @@ pub struct WaifuStreamingTextToSpeechRequest {
     pub text: *const c_char,
     /// A recording to sound like, or NULL.
     pub reference: *const WaifuAudio,
+    /// As WaifuTextToSpeechRequest's.
+    pub reference_transcript: *const c_char,
     pub temperature: f32,
     /// As WaifuTextToSpeechRequest's.
     pub style: *const c_char,
     /// No speed: a streaming reading is at the speed it is said, as upstream's is.
     pub seed: u64,
-    /// As WaifuTextToSpeechRequest's.
-    pub reference_transcript: *const c_char,
 }
 
 /// A part of the reading's audio, in order; the samples are valid until it returns.
@@ -1262,9 +1238,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_streaming_text_to_speech_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH)?;
-        let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let least = std::mem::offset_of!(WaifuStreamingTextToSpeechRequest, reference_transcript);
-        let request = grown_request_in(request, size, least, "WaifuStreamingTextToSpeechRequest")?;
+        let request = request_in(request, "WaifuStreamingTextToSpeechRequest")?;
         let request = SpeakRequest {
             text: required(request.text, "text")?,
             like: reference_in(request.reference)?,
@@ -1383,8 +1357,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_layer_decomposition_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_LAYER_DECOMPOSITION)?;
-        let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let request = request_in(request, size, "WaifuLayerDecompositionRequest")?;
+        let request = request_in(request, "WaifuLayerDecompositionRequest")?;
         let request = LayersRequest {
             image: rgba_in(request.image, "image")?,
             steps: request.steps,
@@ -1494,8 +1467,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_speech_to_text_async(
     let gate = Gate::default();
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_SPEECH_TO_TEXT)?;
-        let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let request = request_in(request, size, "WaifuSpeechToTextRequest")?;
+        let request = request_in(request, "WaifuSpeechToTextRequest")?;
         let request = TranscribeRequest {
             recording: audio_in(request.audio, "audio")?,
             language: string_in(request.language, "language")?.filter(|l| !l.is_empty()),

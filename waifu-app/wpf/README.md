@@ -4,7 +4,7 @@ The same screen as `waifu-app/swiftui/`, in WPF. Laid out from the design spec
 (`libwaifu-gui-design.pdf`, sections 2 to 13) and from the screenshots in it: one window, three
 columns, a fixed dark grey that follows neither the system theme nor the wallpaper.
 
-It draws: the window calls `waifu.dll` through the C API in `docs/ffi-abi4.md` (ABI 4), in the
+It draws: the window calls `waifu.dll` through the C API in `docs/ffi-abi5.md` (ABI 5), in the
 app's own process, and a model that is on the disk is read onto the card by the first job that
 needs it.
 With no library beside it the same window runs on a stand-in engine instead, says so in its

@@ -1,6 +1,6 @@
 # The Rust binding: `waifu`
 
-Status: implemented, in `bindings/rust`, against the C API's ABI 4 ([ffi-abi4.md](ffi-abi4.md)).
+Status: implemented, in `bindings/rust`, against the C API's ABI 5 ([ffi-abi5.md](ffi-abi5.md)).
 
 `bindings/rust` is a Rust crate over libwaifu that compiles none of it: it opens a built
 `libwaifu.so` (`libwaifu.dylib`, `waifu.dll`) when asked to, finds the functions `waifu.h`
@@ -157,7 +157,7 @@ pub fn init() -> Result<()>;                                           // finds 
 pub fn init_from_path(library_path: impl AsRef<Path>) -> Result<()>;  // loads this file, and looks nowhere else
 pub fn is_initialized() -> bool;                                       // whether init has loaded a library
 pub fn library_path() -> Option<&'static Path>;                        // the file loaded; None before init
-pub const ABI_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 5;
 pub fn version() -> Result<&'static str>;
 pub fn revision() -> Result<Option<&'static str>>;
 
@@ -280,7 +280,7 @@ Results are owned too, copied out of the callback: `Image`, `RgbaImage`, `Audio`
 `Transcript { text, language }`, `DecomposedImage { canvas, layers }`. Each `Layer` has its
 `LayerType` (`Depth` among them), `id`, `depth` and `derived_from_id: Option<u32>`;
 `DecomposedImage::stack()` and `stratified_stack()` give the two stacks as indices into `layers`,
-by the C API's rule ([ffi-abi4.md](ffi-abi4.md#stratification)), so no caller writes the
+by the C API's rule ([ffi-abi5.md](ffi-abi5.md#stratification)), so no caller writes the
 comparison.
 
 The C API's other enums come across as Rust enums with an `Other(i32)` for a number a newer

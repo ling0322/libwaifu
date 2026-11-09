@@ -13,7 +13,8 @@
 // way an older caller would misread.
 //
 // 4: pipelines made for one task, models and devices asked about by property, no JSON.
-#define WAIFU_ABI_VERSION 4
+// 5: the text-to-speech requests' reference_transcript, after reference.
+#define WAIFU_ABI_VERSION 5
 
 // A model's manifest, read, and what can be asked of it, answered once when it is opened.
 typedef struct WaifuModel WaifuModel;
@@ -149,16 +150,16 @@ typedef struct {
   const char *text;
   // A recording to sound like, or NULL.
   const WaifuAudio *reference;
+  // What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
+  // from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
+  // reads none ignores it.
+  const char *reference_transcript;
   float speed;
   float temperature;
   // Any instruction; NULL or "" for the voice's own way. CosyVoice3 takes a style or a
   // reference_transcript, not both: upstream's instruct2 reads no transcript.
   const char *style;
   uint64_t seed;
-  // What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
-  // from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
-  // reads none ignores it. Last, and read only where struct_size holds it.
-  const char *reference_transcript;
 } WaifuTextToSpeechRequest;
 
 // Both speech tasks make audio.
@@ -190,13 +191,13 @@ typedef struct {
   const char *text;
   // A recording to sound like, or NULL.
   const WaifuAudio *reference;
+  // As WaifuTextToSpeechRequest's.
+  const char *reference_transcript;
   float temperature;
   // As WaifuTextToSpeechRequest's.
   const char *style;
   // No speed: a streaming reading is at the speed it is said, as upstream's is.
   uint64_t seed;
-  // As WaifuTextToSpeechRequest's.
-  const char *reference_transcript;
 } WaifuStreamingTextToSpeechRequest;
 
 // A part of the reading's audio, in order; the samples are valid until it returns.

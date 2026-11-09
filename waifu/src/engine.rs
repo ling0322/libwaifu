@@ -208,7 +208,7 @@ pub struct Layers {
 impl Layers {
     /// The stratified stack, bottom first, as indices into `layers`: every part that was not split
     /// and every half -- no depth layer -- ordered by depth from the largest; at one depth, a far
-    /// half under a near one; then by index. docs/ffi-abi4.md, "Stratification".
+    /// half under a near one; then by index. docs/ffi-abi5.md, "Stratification".
     pub fn stratified_stack(&self) -> Vec<usize> {
         let split: HashSet<u32> = self
             .layers
@@ -244,7 +244,7 @@ impl Layers {
 }
 
 /// Which part of a job a progress report is about: one for each thing a job does, by task, as the
-/// C API's `WaifuStage` numbers them (docs/ffi-abi4.md). `done` and `total` count what each says,
+/// C API's `WaifuStage` numbers them (docs/ffi-abi5.md). `done` and `total` count what each says,
 /// and are 0 and 0 for the rest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {

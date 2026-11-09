@@ -392,15 +392,15 @@ pub struct TextToSpeechRequest {
     pub text: String,
     /// A recording to sound like.
     pub reference: Option<Audio>,
+    /// What `reference` says, word for word; None where it is not known. CosyVoice3 reads on
+    /// from it, as upstream's zero-shot does; a model that reads none ignores it.
+    pub reference_transcript: Option<String>,
     pub speed: f32,
     pub temperature: f32,
     /// Any instruction; None for the voice's own way. CosyVoice3 takes a style or a
     /// reference_transcript, not both.
     pub style: Option<String>,
     pub seed: u64,
-    /// What `reference` says, word for word; None where it is not known. CosyVoice3 reads on
-    /// from it, as upstream's zero-shot does; a model that reads none ignores it.
-    pub reference_transcript: Option<String>,
 }
 
 impl TextToSpeechRequest {
@@ -409,11 +409,11 @@ impl TextToSpeechRequest {
         TextToSpeechRequest {
             text: text.into(),
             reference: None,
+            reference_transcript: None,
             speed: 1.0,
             temperature: 1.0,
             style: None,
             seed: 0,
-            reference_transcript: None,
         }
     }
 }
@@ -423,11 +423,11 @@ impl TextToSpeechRequest {
 pub struct StreamingTextToSpeechRequest {
     pub text: String,
     pub reference: Option<Audio>,
+    /// As TextToSpeechRequest's.
+    pub reference_transcript: Option<String>,
     pub temperature: f32,
     pub style: Option<String>,
     pub seed: u64,
-    /// As TextToSpeechRequest's.
-    pub reference_transcript: Option<String>,
 }
 
 impl StreamingTextToSpeechRequest {
@@ -436,10 +436,10 @@ impl StreamingTextToSpeechRequest {
         StreamingTextToSpeechRequest {
             text: text.into(),
             reference: None,
+            reference_transcript: None,
             temperature: 1.0,
             style: None,
             seed: 0,
-            reference_transcript: None,
         }
     }
 }

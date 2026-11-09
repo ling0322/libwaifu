@@ -1,7 +1,9 @@
-# libwaifu's C API, ABI 4
+# libwaifu's C API, ABI 5
 
-Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs`, is ABI 4; what
-is still open is under [Not decided](#not-decided).
+Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs`, is ABI 5: ABI 4
+with the one change under [What changes from ABI 4](#what-changes-from-abi-4). The rest of this
+document was written for ABI 4, and holds for ABI 5. What is still open is under
+[Not decided](#not-decided).
 
 In the header every enum is an `int32_t` and a `#define` for each value -- `typedef int32_t
 WaifuStage;` and `#define WAIFU_STAGE_LOADING_WEIGHTS 1` -- rather than the `typedef enum` the
@@ -21,10 +23,11 @@ needed. A caller built against it has two things to free and nothing to parse.
   property, stage or capability is a new number at the end of its range, and is not an ABI change.
   A library asked about a number it does not know answers as for a property the model does not
   have: `false`. A caller handed a stage it does not know shows a generic line.
-- **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end. A
-  request at the size it had before is read with the new fields zero -- NULL, 0, false -- so a
-  caller built against the older header goes on working. The text-to-speech requests'
-  `reference_transcript` is the first field added so.
+- **Requests carry `struct_size`**, as in ABI 3. A library reads the part of a request it knows,
+  so a caller built against a newer header, with more fields, is still read. A request smaller
+  than the library's is refused at the call, and nothing past its `struct_size` is read. So a
+  field that a request gains is an ABI change: ABI 5 is the text-to-speech requests'
+  `reference_transcript`.
 - **Threads.** Every function may be called from any thread, and calls on one pipeline or one
   model may run at the same time -- loads, runs, cancels and getters -- except that **freeing a
   handle must not race with any other call on it**: that is the caller's to order, as with any C
@@ -67,7 +70,7 @@ needed. A caller built against it has two things to free and nothing to parse.
 ## The header
 
 ```c
-#define WAIFU_ABI_VERSION 4
+#define WAIFU_ABI_VERSION 5
 
 /* -- enums --------------------------------------------------------------------------------- */
 
@@ -359,11 +362,11 @@ typedef struct {
   uint32_t struct_size;
   const char *text;
   const WaifuAudio *reference;        // a recording to sound like, or NULL
+  const char *reference_transcript;   // what reference says; NULL or "" where it is not known
   float speed;
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
   uint64_t seed;
-  const char *reference_transcript;   // what reference says; NULL or "" where it is not known
 } WaifuTextToSpeechRequest;
 
 typedef struct {
@@ -403,10 +406,10 @@ typedef struct {
   uint32_t struct_size;
   const char *text;
   const WaifuAudio *reference;        // a recording to sound like, or NULL
+  const char *reference_transcript;   // as WaifuTextToSpeechRequest's
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
   uint64_t seed;
-  const char *reference_transcript;   // as WaifuTextToSpeechRequest's
   // No speed: a streaming reading is at the speed it is said, as upstream's is.
 } WaifuStreamingTextToSpeechRequest;
 
@@ -502,6 +505,18 @@ WaifuJob waifu_pipeline_run_speech_to_text_async(WaifuPipeline *pipeline,
                                                  void *user_data, WaifuProgressCallback on_progress,
                                                  WaifuSpeechToTextCallback on_complete);
 ```
+
+## What changes from ABI 4
+
+| ABI 4 | ABI 5 |
+|---|---|
+| `WaifuTextToSpeechRequest`, `WaifuStreamingTextToSpeechRequest`: `text`, `reference`, ... | `const char *reference_transcript` after `reference`: the words of the recording, which CosyVoice3 reads zero-shot (see "A reference transcript" under [Why](#why)) |
+
+That is all. A field added at the end could have been read at the older size, as NULL, and no
+ABI change; it was not done that way, because that reads a request through a pointer to a struct
+larger than the one the caller handed over, and takes on a rule for every size in between. The
+field sits beside the recording it is the words of, and a caller built against ABI 4 is turned
+away by `waifu_abi_version` before it gets as far as a request.
 
 ## What changes from ABI 3
 
@@ -658,7 +673,7 @@ the header.
 - `bindings/rust` is written against ABI 4 afterwards, in a pull request of its own: the crate
   `waifu` (package `libwaifu`), designed in [rust-binding.md](rust-binding.md).
 
-## Not in ABI 4
+## Not in ABI 5
 
 - libwaifu_modelmanager's API -- its catalogue, defaults and directory JSON, and the words in its
   download progress -- has the same faults and its own ABI; it is a design of its own.

@@ -1,4 +1,4 @@
-# How waifu.h is written from src/c_api.rs. See docs/ffi-abi4.md for the contract it keeps.
+# How waifu.h is written from src/c_api.rs. See docs/ffi-abi5.md for the contract it keeps.
 #
 # Everything the header declares is this library's own: it includes nothing but the C library's,
 # and shares no type with libwaifu_modelmanager's.

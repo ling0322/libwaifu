@@ -124,7 +124,7 @@ Do not change the behavior of `waifu-app/swiftui` or `waifu-app/wpf` unless the 
 ## C API and bindings
 
 The C API and the language bindings are fixed: `waifu/src/c_api.rs` and the `waifu/include/waifu.h`
-written from it, `bindings/`, and the documents that are their contract -- `docs/ffi-abi4.md` and
+written from it, `bindings/`, and the documents that are their contract -- `docs/ffi-abi5.md` and
 `docs/rust-binding.md`. **Do not change them without a human's explicit approval in the current
 conversation.**
 

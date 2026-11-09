@@ -327,7 +327,7 @@ pub fn status(code: WaifuStatusCode, message: &Option<CString>) -> WaifuStatus {
 /// Shut until the `_async` call that made it has its job's id, which is when it opens: a callback
 /// that arrives before then waits, so that no callback runs for a call that may yet be refused.
 /// It does not hold callbacks back until the call has returned -- nothing can know when the caller
-/// has the id -- which is why a job's state is its `user_data` (docs/ffi-abi4.md).
+/// has the id -- which is why a job's state is its `user_data` (docs/ffi-abi5.md).
 #[derive(Clone, Default)]
 pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
 
