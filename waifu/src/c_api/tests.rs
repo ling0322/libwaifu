@@ -96,10 +96,14 @@ unsafe extern "C" fn on_transcript(user_data: *mut c_void, result: *const WaifuS
     let _ = sender(user_data).send(Heard::Complete(result.status.code, text(result.text)));
 }
 
-/// A channel whose sending end lives as long as the test, behind the pointer the callbacks get.
-fn a_channel() -> (Box<Sender<Heard>>, Receiver<Heard>) {
+/// A channel whose sending end is never dropped, behind the pointer the callbacks get. The
+/// engine's thread is still inside `Sender::send` when a test hears the end -- the message is
+/// readable before `send` has notified the receiver -- so a test that returns there would free
+/// the sender, and with it the channel, under a thread that is still writing to it. The next
+/// channel is handed the same block, and the half-finished send lands on its waker instead.
+fn a_channel() -> (&'static Sender<Heard>, Receiver<Heard>) {
     let (send, receive) = mpsc::channel();
-    (Box::new(send), receive)
+    (Box::leak(Box::new(send)), receive)
 }
 
 fn user_data(sender: &Sender<Heard>) -> *mut c_void {
