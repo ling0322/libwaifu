@@ -37,16 +37,17 @@
 //! | [`flow`] | the prompt's and the sentence's tokens, the prompt's mel, the speaker | the mel |
 //! | [`hift`] | the mel | 24 kHz audio |
 //!
-//! # Three ways to read, and which ones [`Voice`] uses
+//! # Three ways to read
 //!
 //! Upstream's **zero-shot** reading is handed the transcript of the recording: the language model
 //! reads the transcript and the sentence as one text and continues the recording's own speech
 //! tokens, so it carries on in the recording's voice, pace and manner. [`CosyVoice3::say_after`]
-//! is that.
+//! is that, and so is [`Voice::speak`] handed a [`SpeechOptions::reference_transcript`]. A recording over
+//! thirty seconds is cut there, so its transcript should be of the thirty seconds kept.
 //!
-//! [`Voice::speak`] is handed a recording and no transcript, which is upstream's **cross-lingual**
-//! reading: the language model sees only the sentence, and the voice comes from the flow, which
-//! still continues the recording's tokens and mel with its speaker. [`CosyVoice3::say`] is that.
+//! Handed a recording and no transcript, it is upstream's **cross-lingual** reading: the language
+//! model sees only the sentence, and the voice comes from the flow, which still continues the
+//! recording's tokens and mel with its speaker. [`CosyVoice3::say`] is that.
 //!
 //! Handed a [`SpeechOptions::style`] as well, it is upstream's **instruct2** reading: the
 //! instruction goes inside the system prompt -- `You are a helpful assistant. 请非常开心地说一句话。
@@ -573,19 +574,10 @@ impl CosyVoice3 {
         // in front of each piece, and not counted in its length. A style is not normalized,
         // because upstream's `inference_instruct2` hands it over as it was given.
         let system = &self.settings.system_prompt;
-        let style = options
-            .style
-            .as_deref()
-            .map(str::trim)
-            .filter(|style| !style.is_empty());
+        let style = style_of(options);
+        check_prompt(transcript, style)?;
         let prefix: Option<Vec<i32>> = match (transcript, style) {
-            (Some(_), Some(_)) => {
-                return Err(Error::model(
-                    "a reading continues its recording or follows a style, not both: \
-                     upstream's instruct2 takes no transcript",
-                ))
-            }
-            (Some(words), None) => {
+            (Some(words), _) => {
                 Some(self.encode(&format!("{system}{}", frontend::transcript(words)))?)
             }
             (None, Some(style)) => Some(self.encode(&instructed(system, style)?)?),
@@ -1015,12 +1007,18 @@ impl Voice for CosyVoice3 {
         let Some(like) = like else {
             return Err(Error::model(Self::NEEDS_A_RECORDING));
         };
+        // Before the recording is listened to: a request that cannot be read is told so at once.
+        let words = transcript_of(options);
+        check_prompt(words, style_of(options))?;
         if report(SpeechProgress::Reading).is_break() {
             return Ok(None);
         }
 
         let reference = self.hear(like)?;
-        self.say(text, &reference, options, report)
+        match words {
+            Some(words) => self.say_after(text, words, &reference, options, report),
+            None => self.say(text, &reference, options, report),
+        }
     }
 
     /// A hop of tokens at a time: see [`CosyVoice3::say_streaming`].
@@ -1035,12 +1033,14 @@ impl Voice for CosyVoice3 {
         let Some(like) = like else {
             return Err(Error::model(Self::NEEDS_A_RECORDING));
         };
+        let words = transcript_of(options);
+        check_prompt(words, style_of(options))?;
         if report(SpeechProgress::Reading).is_break() {
             return Ok(None);
         }
 
         let reference = self.hear(like)?;
-        self.say_streaming(text, None, &reference, options, report, heard)
+        self.say_streaming(text, words, &reference, options, report, heard)
     }
 
     fn rate(&self) -> u32 {
@@ -1062,6 +1062,54 @@ impl Voice for CosyVoice3 {
     fn styles(&self) -> &'static [Style] {
         Self::STYLES
     }
+}
+
+/// The reference transcript a reading is handed, where it holds anything: `None` reads
+/// cross-lingual, or instruct2 with a style.
+fn transcript_of(options: &SpeechOptions) -> Option<&str> {
+    options
+        .reference_transcript
+        .as_deref()
+        .map(str::trim)
+        .filter(|words| !words.is_empty())
+}
+
+/// The style a reading is handed, where it holds anything.
+fn style_of(options: &SpeechOptions) -> Option<&str> {
+    options
+        .style
+        .as_deref()
+        .map(str::trim)
+        .filter(|style| !style.is_empty())
+}
+
+/// Whether a reading can be given `transcript` and `style`, said before anything is listened to.
+///
+/// Upstream's `prompt_text` holds one or the other: zero-shot puts the transcript there and keeps
+/// the recording's speech tokens for the language model, which the transcript is the words of;
+/// instruct2 puts the instruction there and drops those tokens, leaving a transcript nothing to
+/// be the words of. And neither can hold a marker: upstream's examples write the system prompt
+/// into `prompt_text` themselves, where here it is put in front for the caller, so a marker in
+/// either would be a second.
+fn check_prompt(transcript: Option<&str>, style: Option<&str>) -> Result<()> {
+    if transcript.is_some() && style.is_some() {
+        return Err(Error::model(
+            "a reading continues its recording or follows a style, not both: upstream's \
+             instruct2 reads no transcript of the recording",
+        ));
+    }
+    if transcript.is_some_and(|words| words.contains("<|")) {
+        return Err(Error::model(
+            "a reference transcript is the words of the recording, and cannot hold a marker such \
+             as <|endofprompt|>: the system prompt is put in front of it here",
+        ));
+    }
+    if style.is_some_and(|style| style.contains("<|")) {
+        return Err(Error::model(
+            "a style is words to follow, and cannot hold a marker such as <|endofprompt|>",
+        ));
+    }
+    Ok(())
 }
 
 impl CosyVoice3 {
@@ -1423,6 +1471,40 @@ mod tests {
         assert!(instructed(system, "开心<|endofprompt|>地说").is_err());
         // And a manifest whose prompt has no marker has nowhere to put one.
         assert!(instructed("You are a helpful assistant.", "请用广东话表达。").is_err());
+    }
+
+    #[test]
+    fn a_reading_takes_a_transcript_or_a_style_and_neither_with_a_marker() {
+        let words = Some("希望你以后能够做的比我还好呦。");
+        let style = Some("请用广东话表达。");
+        assert!(check_prompt(None, None).is_ok());
+        assert!(check_prompt(words, None).is_ok());
+        assert!(check_prompt(None, style).is_ok());
+
+        let why = check_prompt(words, style).unwrap_err().to_string();
+        assert!(why.contains("not both"), "{why}");
+        let why = check_prompt(Some("<|endofprompt|>希望你"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("transcript"), "{why}");
+        assert!(check_prompt(None, Some("开心<|endofprompt|>地说")).is_err());
+    }
+
+    #[test]
+    fn a_blank_transcript_or_style_is_none() {
+        let options = SpeechOptions {
+            reference_transcript: Some("  ".to_string()),
+            style: Some("\n".to_string()),
+            ..SpeechOptions::default()
+        };
+        assert_eq!(transcript_of(&options), None);
+        assert_eq!(style_of(&options), None);
+        // So a blank one beside a real one is not both.
+        let options = SpeechOptions {
+            style: Some("请用广东话表达。".to_string()),
+            ..options
+        };
+        assert!(check_prompt(transcript_of(&options), style_of(&options)).is_ok());
     }
 
     #[test]

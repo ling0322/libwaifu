@@ -101,12 +101,23 @@ see [`frontend.rs`](../waifu/src/cosyvoice3/frontend.rs) -- and each piece goes 
 
 ### With a transcript, without, and with a style
 
-The page hands a voice a recording and no transcript, so [`Voice::speak`](../waifu/src/speech.rs)
-reads the way upstream's `inference_cross_lingual` does: the language model sees the system prompt
-and the sentence, and nothing of the recording; the voice comes from the flow. Given the words of
-the recording, `say_after` reads the way `inference_zero_shot` does: transcript and sentence as one
-text, continuing the recording's own tokens. Both sound like the recording; zero-shot also carries
-on its pace and manner.
+Given the words of the recording -- `SpeechOptions::reference_transcript`, a text-to-speech
+request's `reference_transcript` over the C API, or `say_after` -- [`Voice::speak`](../waifu/src/speech.rs)
+reads the way `inference_zero_shot` does: transcript and sentence as one text, continuing the
+recording's own tokens. Handed a recording and no transcript, it reads the way
+`inference_cross_lingual` does: the language model sees the system prompt and the sentence, and
+nothing of the recording; the voice comes from the flow. Both sound like the recording; zero-shot
+also carries on its pace and manner. Streaming reads either way.
+
+Zero-shot is upstream's own way of cloning a voice in the same language. Its web UI will not read
+"3s极速复刻" without the transcript, and it keeps "跨语种复刻", cross-lingual, for a sentence in
+another language than the recording, which is what that reading is for. A page that offers a
+recording should offer the box for its words beside it.
+
+The transcript is the system prompt's to follow, as upstream's `prompt_text` is in its examples,
+except that here the system prompt is put in front of it: a transcript holding a `<|...|>` marker
+is refused rather than read with two. A recording over thirty seconds is cut there, and its
+transcript should be of what is kept.
 
 Given a style -- `SpeechOptions::style`, the Style card on the page -- it reads the way
 `inference_instruct2` does. Upstream builds that as a zero-shot reading with the instruction where
@@ -122,13 +133,15 @@ the flow still continues the recording, so the voice is the recording's and the 
 instruction's. [`CosyVoice3::STYLES`](../waifu/src/cosyvoice3/mod.rs) is upstream's `instruct_list`
 word for word: happy, sad and angry, fast and slow, loud and soft, Peppa Pig, a robot, and
 seventeen dialects. Those are what the model was taught; other wording is taken and is a guess. A
-style and a transcript are refused together, because upstream never combines them.
+style and a transcript are refused together, before the recording is listened to: instruct2 drops
+the recording's tokens from the language model, which leaves a transcript nothing to be the words
+of, and upstream never combines them.
 
 ### Streaming
 
 [`CosyVoice3::say_streaming`](../waifu/src/cosyvoice3/mod.rs) -- under it `Voice::speak_streaming`,
 `Engine::speak_streaming` and a `WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH` pipeline's
-`waifu_pipeline_run_streaming_text_to_speech_async` ([ffi-abi4.md](ffi-abi4.md)) -- is
+`waifu_pipeline_run_streaming_text_to_speech_async` ([ffi-abi5.md](ffi-abi5.md)) -- is
 upstream's `stream=True`: the audio is handed over a hop of tokens at a time while the language
 model goes on saying the rest, and the whole reading at the end.
 [`stream`](../waifu/src/cosyvoice3/stream.rs) says when:
@@ -176,7 +189,7 @@ does: the source's speech tokens are what is said, and the flow draws them conti
 reference -- its tokens, its mel, its speaker -- so the words and their timing are the source's and
 the voice is the reference's. The language model is not run. It is `impl Converter for
 CosyVoice3`, which the engine runs for `waifu_pipeline_run_voice_conversion_async` in the C API
-([ffi-abi4.md](ffi-abi4.md)). The terminal's `waifu` draws only; the speech2speech page that ran this was
+([ffi-abi5.md](ffi-abi5.md)). The terminal's `waifu` draws only; the speech2speech page that ran this was
 removed with the rest of the web page.
 
 Upstream refuses a source over thirty seconds, which is as far as the speech tokenizer reads. A
@@ -273,6 +286,7 @@ float32 takes 861.
 
 Streaming on the processor, whose attention has no block mask. A DiT that draws
 only each new hop, keeping what it computed of the frames before, rather than all of them again.
-A place on the page to type the recording's transcript.
+A place in the apps to type the recording's transcript: the C API takes one, and neither app
+sends it yet. Nor one that fills it in by itself, from Qwen3-ASR's transcription of the recording.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
 are the zero-shot path's with a different prefix.

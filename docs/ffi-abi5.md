@@ -1,7 +1,9 @@
-# libwaifu's C API, ABI 4
+# libwaifu's C API, ABI 5
 
-Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs`, is ABI 4; what
-is still open is under [Not decided](#not-decided).
+Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs`, is ABI 5: ABI 4
+with the one change under [What changes from ABI 4](#what-changes-from-abi-4). The rest of this
+document was written for ABI 4, and holds for ABI 5. What is still open is under
+[Not decided](#not-decided).
 
 In the header every enum is an `int32_t` and a `#define` for each value -- `typedef int32_t
 WaifuStage;` and `#define WAIFU_STAGE_LOADING_WEIGHTS 1` -- rather than the `typedef enum` the
@@ -21,7 +23,11 @@ needed. A caller built against it has two things to free and nothing to parse.
   property, stage or capability is a new number at the end of its range, and is not an ABI change.
   A library asked about a number it does not know answers as for a property the model does not
   have: `false`. A caller handed a stage it does not know shows a generic line.
-- **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end.
+- **Requests carry `struct_size`**, as in ABI 3. A library reads the part of a request it knows,
+  so a caller built against a newer header, with more fields, is still read. A request smaller
+  than the library's is refused at the call, and nothing past its `struct_size` is read. So a
+  field that a request gains is an ABI change: ABI 5 is the text-to-speech requests'
+  `reference_transcript`.
 - **Threads.** Every function may be called from any thread, and calls on one pipeline or one
   model may run at the same time -- loads, runs, cancels and getters -- except that **freeing a
   handle must not race with any other call on it**: that is the caller's to order, as with any C
@@ -64,7 +70,7 @@ needed. A caller built against it has two things to free and nothing to parse.
 ## The header
 
 ```c
-#define WAIFU_ABI_VERSION 4
+#define WAIFU_ABI_VERSION 5
 
 /* -- enums --------------------------------------------------------------------------------- */
 
@@ -356,6 +362,7 @@ typedef struct {
   uint32_t struct_size;
   const char *text;
   const WaifuAudio *reference;        // a recording to sound like, or NULL
+  const char *reference_transcript;   // what reference says; NULL or "" where it is not known
   float speed;
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
@@ -399,6 +406,7 @@ typedef struct {
   uint32_t struct_size;
   const char *text;
   const WaifuAudio *reference;        // a recording to sound like, or NULL
+  const char *reference_transcript;   // as WaifuTextToSpeechRequest's
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
   uint64_t seed;
@@ -498,6 +506,18 @@ WaifuJob waifu_pipeline_run_speech_to_text_async(WaifuPipeline *pipeline,
                                                  WaifuSpeechToTextCallback on_complete);
 ```
 
+## What changes from ABI 4
+
+| ABI 4 | ABI 5 |
+|---|---|
+| `WaifuTextToSpeechRequest`, `WaifuStreamingTextToSpeechRequest`: `text`, `reference`, ... | `const char *reference_transcript` after `reference`: the words of the recording, which CosyVoice3 reads zero-shot (see "A reference transcript" under [Why](#why)) |
+
+That is all. A field added at the end could have been read at the older size, as NULL, and no
+ABI change; it was not done that way, because that reads a request through a pointer to a struct
+larger than the one the caller handed over, and takes on a rule for every size in between. The
+field sits beside the recording it is the words of, and a caller built against ABI 4 is turned
+away by `waifu_abi_version` before it gets as far as a request.
+
 ## What changes from ABI 3
 
 | ABI 3 | ABI 4 |
@@ -585,6 +605,22 @@ language.
 the set. `style` is any instruction, and `SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE` says whether one is
 followed; the examples are the app's to offer.
 
+**A reference transcript, and no property for it.** `reference_transcript` is the words of
+`reference`. CosyVoice3 then reads zero-shot, as upstream's `inference_zero_shot` does with its
+`prompt_text`: it goes on from the recording's own speech tokens rather than only borrowing its
+voice. That is upstream's own way of cloning a voice in the same language. Without a transcript it
+reads cross-lingual, which upstream keeps for a sentence in another language than the recording.
+A model that reads no transcript ignores one, so an app offers the box wherever it offers a
+recording, and no property says whether a model reads it. What would be worth a property is the
+other way round, a model that cannot read without a transcript, and none here is one; it would be
+`SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT`, as `WITHOUT_REFERENCE` is for a recording.
+
+A transcript with no reference ends with `WAIFU_ERR_MODEL`. So, on CosyVoice3, does one given with
+a style: upstream's instruct2 puts the instruction where zero-shot puts the transcript and drops
+the recording's tokens that the transcript is the words of, and never takes both. So does one
+holding a `<|...|>` marker, because the system prompt is put in front of it here. CosyVoice3 says
+so before it listens to the recording.
+
 **No PSD.** A Photoshop document is a file format, and files are the app's. The layers' pixels,
 places and depths are all in the result.
 
@@ -637,7 +673,7 @@ the header.
 - `bindings/rust` is written against ABI 4 afterwards, in a pull request of its own: the crate
   `waifu` (package `libwaifu`), designed in [rust-binding.md](rust-binding.md).
 
-## Not in ABI 4
+## Not in ABI 5
 
 - libwaifu_modelmanager's API -- its catalogue, defaults and directory JSON, and the words in its
   download progress -- has the same faults and its own ABI; it is a design of its own.

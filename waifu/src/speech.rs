@@ -66,6 +66,12 @@ pub struct SpeechOptions {
     /// [`styles`](Voice::styles)' `instruction`, or something written in the same manner. `None`
     /// is the voice's own way of reading. A voice that offers no styles ignores it.
     pub style: Option<String>,
+    /// What the recording handed to [`speak`](Voice::speak) says, word for word, or `None` where
+    /// that is not known. A voice that reads one goes on from the recording rather than only
+    /// borrowing its voice, and carries its pace and manner as well -- CosyVoice3's zero-shot
+    /// reading, which takes it or a [`style`](SpeechOptions::style) and not both. A voice that
+    /// reads none ignores it.
+    pub reference_transcript: Option<String>,
 }
 
 impl Default for SpeechOptions {
@@ -102,6 +108,7 @@ impl SpeechDefaults {
             temperature: self.temperature,
             seed: None,
             style: None,
+            reference_transcript: None,
         }
     }
 }

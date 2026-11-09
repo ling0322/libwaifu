@@ -107,6 +107,9 @@ pub struct SpeakRequest {
     pub speed: f32,
     pub temperature: f32,
     pub style: Option<String>,
+    /// What `like` says, word for word; `None` where it is not known. A voice that reads none
+    /// ignores it.
+    pub reference_transcript: Option<String>,
     pub seed: u64,
 }
 
@@ -205,7 +208,7 @@ pub struct Layers {
 impl Layers {
     /// The stratified stack, bottom first, as indices into `layers`: every part that was not split
     /// and every half -- no depth layer -- ordered by depth from the largest; at one depth, a far
-    /// half under a near one; then by index. docs/ffi-abi4.md, "Stratification".
+    /// half under a near one; then by index. docs/ffi-abi5.md, "Stratification".
     pub fn stratified_stack(&self) -> Vec<usize> {
         let split: HashSet<u32> = self
             .layers
@@ -241,7 +244,7 @@ impl Layers {
 }
 
 /// Which part of a job a progress report is about: one for each thing a job does, by task, as the
-/// C API's `WaifuStage` numbers them (docs/ffi-abi4.md). `done` and `total` count what each says,
+/// C API's `WaifuStage` numbers them (docs/ffi-abi5.md). `done` and `total` count what each says,
 /// and are 0 and 0 for the rest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
@@ -1600,12 +1603,24 @@ impl Worker {
         if style.is_some() && voice.styles().is_empty() {
             return Ended::failed(Failure::Model, format!("{} takes no style", voice.name()));
         }
+        let reference_transcript = request
+            .reference_transcript
+            .as_ref()
+            .map(|words| words.trim().to_string())
+            .filter(|words| !words.is_empty());
+        if reference_transcript.is_some() && request.like.is_none() {
+            return Ended::failed(
+                Failure::Model,
+                "a reference transcript is the words of the reference recording, and there is none",
+            );
+        }
 
         let options = SpeechOptions {
             speed: request.speed.clamp(0.25, 4.0),
             temperature: request.temperature.clamp(0.0, 2.0),
             seed: Some(request.seed),
             style,
+            reference_transcript,
         };
 
         let started = Instant::now();
@@ -1882,6 +1897,7 @@ pub(crate) mod tests {
             speed: 1.0,
             temperature: 0.8,
             style: None,
+            reference_transcript: None,
             seed: 7,
         }
     }
@@ -1983,6 +1999,51 @@ pub(crate) mod tests {
         assert!(engine
             .speak_streaming(empty, progress, Box::new(|_| {}), complete)
             .is_err());
+    }
+
+    #[test]
+    fn a_reference_transcript_needs_a_recording_and_a_voice_that_reads_none_ignores_it() {
+        let engine = an_engine();
+        let (progress, complete, loaded) = listen::<()>();
+        engine.load(TONES, progress, complete);
+        assert_eq!(loaded.recv_timeout(WAIT).unwrap(), Ended::Done(()));
+
+        let ended = |request: SpeakRequest| -> Ended<Sound> {
+            let (progress, complete, heard) = listen::<Sound>();
+            engine.speak(request, progress, complete).unwrap();
+            heard.recv_timeout(WAIT).unwrap()
+        };
+        let words = Some("the words of the recording".to_string());
+        let recording = Some(Sound::new(vec![0.0; 1600], 16000));
+
+        // The words of a recording that is not there.
+        match ended(SpeakRequest {
+            reference_transcript: words.clone(),
+            ..a_speaking()
+        }) {
+            Ended::Failed(Failure::Model, why) => assert!(why.contains("there is none"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+
+        // The stand-in hears a recording's pitch and not its words: it reads as it would without.
+        let without = ended(SpeakRequest {
+            like: recording.clone(),
+            ..a_speaking()
+        });
+        let with = ended(SpeakRequest {
+            like: recording,
+            reference_transcript: words,
+            ..a_speaking()
+        });
+        assert!(matches!(without, Ended::Done(_)));
+        assert_eq!(with, without);
+
+        // A blank one is none at all.
+        let blank = ended(SpeakRequest {
+            reference_transcript: Some("  ".to_string()),
+            ..a_speaking()
+        });
+        assert!(matches!(blank, Ended::Done(_)));
     }
 
     #[test]

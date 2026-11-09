@@ -17,7 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The mirror of `waifu.h`, ABI 4, and the table of its functions, for whatever the crate does not
+//! The mirror of `waifu.h`, ABI 5, and the table of its functions, for whatever the crate does not
 //! wrap.
 //!
 //! Every C enum here is a `c_int`, never a Rust `enum`: a number a newer library returns that a
@@ -28,7 +28,7 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-pub const WAIFU_ABI_VERSION: u32 = 4;
+pub const WAIFU_ABI_VERSION: u32 = 5;
 
 // -- enums -----------------------------------------------------------------------------------
 
@@ -236,6 +236,7 @@ pub struct WaifuTextToSpeechRequest {
     pub struct_size: u32,
     pub text: *const c_char,
     pub reference: *const WaifuAudio,
+    pub reference_transcript: *const c_char,
     pub speed: f32,
     pub temperature: f32,
     pub style: *const c_char,
@@ -266,6 +267,7 @@ pub struct WaifuStreamingTextToSpeechRequest {
     pub struct_size: u32,
     pub text: *const c_char,
     pub reference: *const WaifuAudio,
+    pub reference_transcript: *const c_char,
     pub temperature: f32,
     pub style: *const c_char,
     pub seed: u64,

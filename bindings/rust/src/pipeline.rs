@@ -392,9 +392,13 @@ pub struct TextToSpeechRequest {
     pub text: String,
     /// A recording to sound like.
     pub reference: Option<Audio>,
+    /// What `reference` says, word for word; None where it is not known. CosyVoice3 reads on
+    /// from it, as upstream's zero-shot does; a model that reads none ignores it.
+    pub reference_transcript: Option<String>,
     pub speed: f32,
     pub temperature: f32,
-    /// Any instruction; None for the voice's own way.
+    /// Any instruction; None for the voice's own way. CosyVoice3 takes a style or a
+    /// reference_transcript, not both.
     pub style: Option<String>,
     pub seed: u64,
 }
@@ -405,6 +409,7 @@ impl TextToSpeechRequest {
         TextToSpeechRequest {
             text: text.into(),
             reference: None,
+            reference_transcript: None,
             speed: 1.0,
             temperature: 1.0,
             style: None,
@@ -418,6 +423,8 @@ impl TextToSpeechRequest {
 pub struct StreamingTextToSpeechRequest {
     pub text: String,
     pub reference: Option<Audio>,
+    /// As TextToSpeechRequest's.
+    pub reference_transcript: Option<String>,
     pub temperature: f32,
     pub style: Option<String>,
     pub seed: u64,
@@ -429,6 +436,7 @@ impl StreamingTextToSpeechRequest {
         StreamingTextToSpeechRequest {
             text: text.into(),
             reference: None,
+            reference_transcript: None,
             temperature: 1.0,
             style: None,
             seed: 0,
@@ -1078,6 +1086,7 @@ impl sealed::Sealed for TextToSpeech {
     ) -> Result<sys::WaifuJob> {
         let said = c_text(&request.text, "the text")?;
         let style = c_optional(&request.style, "the style")?;
+        let words = c_optional(&request.reference_transcript, "the reference transcript")?;
         let reference = request.reference.as_ref().map(audio_in);
         let raw = sys::WaifuTextToSpeechRequest {
             struct_size: struct_size::<sys::WaifuTextToSpeechRequest>(),
@@ -1087,6 +1096,7 @@ impl sealed::Sealed for TextToSpeech {
             temperature: request.temperature,
             style: c_pointer(&style),
             seed: request.seed,
+            reference_transcript: c_pointer(&words),
         };
         Ok((f.waifu_pipeline_run_text_to_speech_async)(
             pipeline,
@@ -1107,6 +1117,7 @@ impl sealed::Sealed for StreamingTextToSpeech {
     ) -> Result<sys::WaifuJob> {
         let said = c_text(&request.text, "the text")?;
         let style = c_optional(&request.style, "the style")?;
+        let words = c_optional(&request.reference_transcript, "the reference transcript")?;
         let reference = request.reference.as_ref().map(audio_in);
         let raw = sys::WaifuStreamingTextToSpeechRequest {
             struct_size: struct_size::<sys::WaifuStreamingTextToSpeechRequest>(),
@@ -1115,6 +1126,7 @@ impl sealed::Sealed for StreamingTextToSpeech {
             temperature: request.temperature,
             style: c_pointer(&style),
             seed: request.seed,
+            reference_transcript: c_pointer(&words),
         };
         Ok((f.waifu_pipeline_run_streaming_text_to_speech_async)(
             pipeline,

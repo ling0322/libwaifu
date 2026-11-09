@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //! What a model can do, from its manifest alone: what the C API's `WaifuModel` answers, one
-//! property at a time (docs/ffi-abi4.md).
+//! property at a time (docs/ffi-abi5.md).
 //!
 //! A task the model does not do is an `Err` with the reason, in words to show; what a task's
 //! request may hold is in its own struct, there only for a model that does the task.

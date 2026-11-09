@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 // libwaifu's C API, as Swift: async functions where it has `_async` ones, errors that throw, and
-// Swift's own types for what goes in and comes out. See docs/ffi-abi4.md for what libwaifu
+// Swift's own types for what goes in and comes out. See docs/ffi-abi5.md for what libwaifu
 // promises, and docs/ffi.md for libwaifu_modelmanager.
 //
 // Each `_async` call is a continuation. What it needs when a callback arrives -- the continuation,
@@ -419,7 +419,7 @@ public struct Layers: Sendable, Equatable {
 
     /// The stratified stack of `layers` -- in the library's order -- bottom first, as indices into
     /// it: every part that was not split and every half, from the largest depth to the smallest;
-    /// at one depth, a far half under a near one; then by place in `layers` (docs/ffi-abi4.md,
+    /// at one depth, a far half under a near one; then by place in `layers` (docs/ffi-abi5.md,
     /// "Stratification"). A split part is one a half names by its id; depth layers are in neither
     /// stack.
     public static func stratifiedStack(
@@ -1010,6 +1010,7 @@ public final class Pipeline: @unchecked Sendable {
                 struct_size: UInt32(MemoryLayout<WaifuTextToSpeechRequest>.size),
                 text: scratch.string(request.text),
                 reference: reference,
+                reference_transcript: nil,
                 speed: Float(request.speed),
                 temperature: Float(request.temperature),
                 style: scratch.optionalString(request.style),
@@ -1037,6 +1038,7 @@ public final class Pipeline: @unchecked Sendable {
                 struct_size: UInt32(MemoryLayout<WaifuStreamingTextToSpeechRequest>.size),
                 text: scratch.string(request.text),
                 reference: reference,
+                reference_transcript: nil,
                 temperature: Float(request.temperature),
                 style: scratch.optionalString(request.style),
                 seed: request.seed

@@ -19,7 +19,7 @@
 
 //! libwaifu from Rust, opened at run time rather than linked: this crate compiles none of the
 //! engine. [`init`] finds a built `libwaifu.so` (`libwaifu.dylib`, `waifu.dll`) and loads it; the
-//! rest calls the functions `waifu.h` declares, ABI 4. docs/rust-binding.md is the design.
+//! rest calls the functions `waifu.h` declares, ABI 5. docs/rust-binding.md is the design.
 //!
 //! ```no_run
 //! # async fn draw() -> waifu::Result<()> {

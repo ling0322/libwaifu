@@ -1123,7 +1123,7 @@ final class Session {
     /// A picture taken apart's layers with hair, hands, top and bottom each cut into a near (-0)
     /// and a far (-1) layer by their own depth, as the See-through paper does -- the back of a
     /// collar behind the neck, its flaps in front -- bottom first, each with its depth: the
-    /// stratified stack (docs/ffi-abi4.md, "Stratification"). The parts are `psd`'s, under the
+    /// stratified stack (docs/ffi-abi5.md, "Stratification"). The parts are `psd`'s, under the
     /// names and at the depths `parts`, its record, gives them now; the halves are `halves`', in
     /// the order `cut` lists them, each named after its part as it is now, and a near one at its
     /// depth, which keeps it in its part's place.

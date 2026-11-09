@@ -4,7 +4,7 @@ A native SwiftUI app on libwaifu. It needs macOS 14.
 
 The app does none of the drawing itself, and runs no `waifu` program: it calls the library in
 process, through `libwaifu.dylib` and `libwaifu_modelmanager.dylib` and their C APIs
-(`docs/ffi-abi4.md` and `docs/ffi.md`), wrapped for Swift in `WaifuKit` (`Sources/WaifuKit`): a
+(`docs/ffi-abi5.md` and `docs/ffi.md`), wrapped for Swift in `WaifuKit` (`Sources/WaifuKit`): a
 pipeline for each kind of job, and a model asked what it can do before it is read.
 
 ## Build

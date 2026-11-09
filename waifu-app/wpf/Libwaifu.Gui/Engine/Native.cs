@@ -24,11 +24,11 @@ using System.Text;
 namespace Libwaifu.Gui.Engine
 {
     /// <summary>
-    /// The C API, declared as it is in <c>waifu.h</c>: ABI 4, pipelines made for one task.
+    /// The C API, declared as it is in <c>waifu.h</c>: ABI 5, pipelines made for one task.
     /// </summary>
     /// <remarks>
     /// Nothing here does anything of its own: the layouts are the header's, field for field, and
-    /// the rules that come with them are in docs/ffi-abi4.md. Only what this program calls is
+    /// the rules that come with them are in docs/ffi-abi5.md. Only what this program calls is
     /// declared. The two rules that matter most, and that the callers above have to keep:
     ///
     /// * **A callback runs on a thread of the library's.** It has to return quickly, must not
@@ -57,7 +57,7 @@ namespace Libwaifu.Gui.Engine
         public const string ModelManagerLibrary = "waifu_modelmanager.dll";
 
         /// <summary>What a caller compiled against this header expects, from waifu.h.</summary>
-        public const uint AbiVersion = 4;
+        public const uint AbiVersion = 5;
 
         /// <summary>The same, from waifu_modelmanager.h.</summary>
         public const uint ModelManagerAbiVersion = 1;
@@ -325,6 +325,9 @@ namespace Libwaifu.Gui.Engine
 
             /// <summary>A WaifuAudio* to sound like, or zero.</summary>
             public IntPtr Reference;
+
+            /// <summary>What Reference says, as a UTF-8 char*, or zero where it is not known.</summary>
+            public IntPtr ReferenceTranscript;
 
             public float Speed;
             public float Temperature;

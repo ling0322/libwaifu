@@ -95,6 +95,7 @@ fn options(seed: u64) -> SpeechOptions {
         temperature: 0.8,
         seed: Some(seed),
         style: None,
+        reference_transcript: None,
     }
 }
 

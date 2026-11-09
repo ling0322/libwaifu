@@ -1,7 +1,7 @@
 # A C API for libwaifu
 
-Status: libwaifu's half of this is ABI 3, which is gone: libwaifu speaks ABI 4, whose contract is
-[ffi-abi4.md](ffi-abi4.md). What is here still holds for libwaifu_modelmanager, whose ABI is its
+Status: libwaifu's half of this is ABI 3, which is gone: libwaifu speaks ABI 5, whose contract is
+[ffi-abi5.md](ffi-abi5.md). What is here still holds for libwaifu_modelmanager, whose ABI is its
 own and unchanged, and for how the libraries are built and shaped; the header listing and the
 JSON documents are libwaifu's as they were, kept for the record. The headers --
 `waifu/include/waifu.h` and `waifu-modelmanager/include/waifu_modelmanager.h` -- are generated
