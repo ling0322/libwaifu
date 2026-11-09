@@ -116,7 +116,7 @@ half on the processor keeps more of its arithmetic in float, and is not what run
 
 The test holds each stage to that floor on a measure of the whole of it, the relative RMSE: the
 encoder's rows, and the decoder's final hidden state at every position of the sequence it was
-teacher-forced over. Each may be half again as far from float32 as torch's half is. The decoder
+teacher-forced over. Each may be 1.2 times as far from float32 as torch's half is. The decoder
 is not held on the log probabilities of the tokens said: there are a few dozen with any real
 chance (34 on `en`), each decided by where its logit, 20 to 40, happened to round to half, so
 two equally good halves disagree on their mean by a quarter -- and torch's own by twice from 2.8

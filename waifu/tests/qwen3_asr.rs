@@ -108,14 +108,14 @@ fn relative_rmse(got: &[f32], want: &[f32]) -> f32 {
     (error / energy.max(1e-30)).sqrt() as f32
 }
 
-/// How far a stage may be from float32: half again as far as torch's half on CUDA is, on the same
-/// inputs (`tools/qwen3_asr_reference.py` measures it into the fixture). The room is for the
-/// arithmetic being another's -- which kernel rounds where -- and not for a mistake: a measure of
-/// the whole moves by a few tens of percent between two good implementations of half, and by
-/// twice where one rounds a sum it should not have: a linear's bias added after the product was
-/// rounded put the encoder at 1.3 times torch's half before #176, and a split K handing its partial
-/// sums on in half put the decoder's final hidden state at 1.37 times before #178.
-const ROOM: f32 = 1.5;
+/// How far a stage may be from float32: a fifth again as far as torch's half on CUDA is, on the
+/// same inputs (`tools/qwen3_asr_reference.py` measures it into the fixture). The room is for the
+/// arithmetic being another's -- which kernel rounds where -- and not for a mistake. Each of the
+/// two found so far was past it: a linear's bias added after the product was rounded put the
+/// encoder at 1.3 times torch's half before #176, and a split K handing its partial sums on in
+/// half put the decoder's final hidden state at 1.13 to 1.37 times before #178. Without them the
+/// encoder is 0.76 to 0.89 times and the decoder 0.88 to 0.94.
+const ROOM: f32 = 1.2;
 
 fn log_softmax(scores: &[f32]) -> Vec<f32> {
     let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
