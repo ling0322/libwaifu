@@ -1,15 +1,17 @@
 # What `qwen3_asr_exporter.py` and `qwen3_asr_reference.py` need, in a venv of their own:
 #
 #     uv venv .venv-qwen3-asr --python 3.12
-#     uv pip install --python .venv-qwen3-asr/bin/python torch --index-url https://download.pytorch.org/whl/cpu
+#     uv pip install --python .venv-qwen3-asr/bin/python "torch==2.8.0+cu128" \
+#         --index-url https://download.pytorch.org/whl/cu128
 #     uv pip install --python .venv-qwen3-asr/bin/python -r tools/requirements-qwen3-asr.txt
 #
 # transformers is the version the release's config.json was written with, and the one upstream's
 # qwen-asr pins: the reference's features are its WhisperFeatureExtractor and its decoder is its
 # Qwen3ForCausalLM, so a different transformers is a different reference. Far newer than the
 # 4.46.3 tools/requirements.txt pins for the SDXL reference, hence a venv of its own. librosa is
-# what upstream resamples a recording to 16 kHz with. torch is unpinned, as in the other files;
-# the reference tensors were made with 2.8.0 on the processor.
+# what upstream resamples a recording to 16 kHz with. torch is a CUDA build: the reference is
+# float32 on the processor, and its floor -- the same reference in half -- is torch's half on
+# CUDA, which is what the runtime is held to. The reference tensors were made with 2.8.0+cu128.
 transformers==4.57.6
 tokenizers==0.22.2
 huggingface-hub==0.36.2

@@ -171,16 +171,15 @@ fn layer(
     (g.add(x, down), kept)
 }
 
-/// The stack over `(1, L, D)` embeddings, and the scores of the token after the last of them,
-/// `(1, vocab)`. `g` is the package's namespace: `model.*` and `lm_head`.
-fn stack(
+/// The layers over `(1, L, D)` embeddings: what the last of them leaves, `(1, L, D)`, and what
+/// each kept. `g` is the package's namespace.
+fn body(
     g: &Graph,
     x: Value,
     past: Option<&[Kept]>,
     cos: Value,
     sin: Value,
     config: &TextConfig,
-    tied: bool,
 ) -> (Value, Vec<Kept>) {
     let model = g.subgraph("model");
     let mut running = x;
@@ -197,15 +196,34 @@ fn stack(
         running = out;
         kept.push(one);
     }
+    (running, kept)
+}
 
-    let last = g.slice(running, 1, -1, Extent::End);
-    let normed = g.rms_norm(
-        last,
-        model
+/// The final norm over `(1, L, D)`.
+fn final_norm(g: &Graph, x: Value, config: &TextConfig) -> Value {
+    g.rms_norm(
+        x,
+        g.subgraph("model")
             .subgraph("norm")
             .load(Linear::WEIGHT, &[config.hidden_size]),
         config.norm_eps,
-    );
+    )
+}
+
+/// The stack over `(1, L, D)` embeddings, and the scores of the token after the last of them,
+/// `(1, vocab)`. `g` is the package's namespace: `model.*` and `lm_head`.
+fn stack(
+    g: &Graph,
+    x: Value,
+    past: Option<&[Kept]>,
+    cos: Value,
+    sin: Value,
+    config: &TextConfig,
+    tied: bool,
+) -> (Value, Vec<Kept>) {
+    let model = g.subgraph("model");
+    let (running, kept) = body(g, x, past, cos, sin, config);
+    let normed = final_norm(g, g.slice(running, 1, -1, Extent::End), config);
     let head = match tied {
         true => model.subgraph("embed_tokens"),
         false => g.subgraph("lm_head"),
@@ -310,6 +328,7 @@ pub struct Decoder {
     config: TextConfig,
     prefill: Ir,
     step: Ir,
+    hidden: Ir,
     past_names: Vec<(String, String)>,
     kept_names: Vec<(String, String)>,
     weights: Rc<Weights>,
@@ -360,6 +379,20 @@ impl Decoder {
         }
         check_parameters(&prefill, weights.as_ref())?;
 
+        // The prompt again, its final normalized state at every position rather than the scores
+        // after the last.
+        let hidden = Graph::new();
+        {
+            let g = hidden.subgraph(name);
+            let head = rows(&g, g.input("head"), &config, dtype);
+            let audio = g.unsqueeze(g.cast(g.input("audio"), dtype), 0);
+            let tail = rows(&g, g.input("tail"), &config, dtype);
+            let x = g.cat(g.cat(head, audio, 1), tail, 1);
+            let (running, _) = body(&g, x, None, g.input("cos"), g.input("sin"), &config);
+            g.output("hidden", final_norm(&g, running, &config));
+        }
+        check_parameters(&hidden, weights.as_ref())?;
+
         // One token against what was kept.
         let step = Graph::new();
         {
@@ -398,6 +431,7 @@ impl Decoder {
             config,
             prefill: Ir::compile(&prefill),
             step: Ir::compile(&step),
+            hidden: Ir::compile(&hidden),
             past_names,
             kept_names,
             weights: Rc::clone(weights),
@@ -459,6 +493,35 @@ impl Decoder {
             .input("sin", &sin);
 
         self.take(self.prefill.run(&run)?, length)
+    }
+
+    /// The final normalized state of every position of the prompt [`prefill`](Decoder::prefill)
+    /// would read, `(L, hidden)`: what the scores are read from, at every position rather than
+    /// the last. For holding the decoder to a reference over the whole of a sequence -- the
+    /// scores of the tokens said sample it too thinly, a handful of uncertain tokens and a
+    /// rounding of each logit deciding them.
+    pub fn hidden(&self, head: &[i32], audio: &Tensor, tail: &[i32]) -> Result<Tensor> {
+        if head.is_empty() || tail.is_empty() {
+            return Err(Error::model(
+                "the decoder was handed a prompt with nothing around the recording",
+            ));
+        }
+        let length = head.len() as i32 + audio.shape_at(0)? + tail.len() as i32;
+        let (cos, sin) = self.rotary(0, length)?;
+        let head = self.ids(head)?;
+        let tail = self.ids(tail)?;
+        let run = RunContext::new(self.weights.as_ref())
+            .input("head", &head)
+            .input("audio", audio)
+            .input("tail", &tail)
+            .input("cos", &cos)
+            .input("sin", &sin);
+        let outputs = self.hidden.run(&run)?;
+        let (_, state) = outputs
+            .into_iter()
+            .find(|(name, _)| name == "hidden")
+            .ok_or_else(|| Error::model("the decoder produced no hidden state"))?;
+        Ok(state.squeeze(0)?)
     }
 
     /// Read one more token and score the one after it.

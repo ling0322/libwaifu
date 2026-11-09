@@ -143,7 +143,8 @@ def audio_tower(state, config, mel):
         x = F.gelu(F.conv2d(x, t(name + ".weight"), t(name + ".bias"), stride=2, padding=1))
     b, c, f, w = x.shape
     x = F.linear(x.permute(0, 3, 1, 2).reshape(b, w, c * f), t("conv_out.weight"))
-    x = x + sinusoids(config["max_source_positions"], config["d_model"])[:w].unsqueeze(0)
+    table = sinusoids(config["max_source_positions"], config["d_model"])[:w]
+    x = x + table.unsqueeze(0).to(x.device, x.dtype)
 
     keep = [output_lengths(length) for length in lengths]
     x = torch.cat([x[index, :length] for index, length in enumerate(keep)], dim=0)
@@ -231,6 +232,15 @@ def main():
     features = WhisperFeatureExtractor.from_pretrained(source)
     tokenizer = AutoTokenizer.from_pretrained(source)
     model = decoder(state, config)
+    # The same reference again in half on CUDA, on the same inputs: how far half alone moves each
+    # stage from float32 is the floor the runtime, which runs in half on the card, is held to.
+    # Torch's half on the processor is not that floor -- its kernels keep more in float -- so a
+    # build of torch without CUDA is refused rather than measured.
+    if not torch.cuda.is_available():
+        raise SystemExit("the floor is torch's half on CUDA: install a CUDA build of torch")
+    cuda = torch.device("cuda")
+    half_state = {key: tensor.to(cuda, torch.float16) for key, tensor in state.items()}
+    half_model = decoder(state, config).to(cuda, torch.float16)
     audio_pad = tokenizer.convert_tokens_to_ids(AUDIO_PAD)
     if audio_pad != config["audio_token_id"]:
         raise SystemExit(f"{AUDIO_PAD} is {audio_pad}, not {config['audio_token_id']}")
@@ -269,21 +279,51 @@ def main():
             # Every row the said tokens were chosen from, in one pass over the whole sequence.
             whole = torch.cat([embeds, model.get_input_embeddings()(torch.tensor([said[:-1]]))],
                               dim=1)
-            logits = model(inputs_embeds=whole).logits[0, len(ids) - 1:]
+            out = model(inputs_embeds=whole)
+            logits = out.logits[0, len(ids) - 1:]
+            # The final normalized state of every position, which the logits are read from:
+            # transformers' last hidden state is after the model's norm.
+            hidden = model.model(inputs_embeds=whole).last_hidden_state[0]
             logp = torch.log_softmax(logits.float(), dim=-1)
             assert logp.shape[0] == len(said)
             assert [int(i) for i in logp.argmax(-1)] == said, "the teacher-forced pass disagrees"
 
+            # Half, stage by stage on float32's inputs, measured as the test measures: by the
+            # relative RMSE of the encoder's rows, and of the decoder's final hidden state at every
+            # position. Measures of the whole: not the worst element, which one value in a hundred
+            # thousand decides, and not the log probabilities of the tokens said, which a handful
+            # of uncertain tokens decide -- each by where its logit happened to round to half, so
+            # that two equally good halves (torch 2.8 against 2.11) disagree on them by twice.
+            def rmse(got, want):
+                return float(((got - want) ** 2).sum().sqrt() / (want ** 2).sum().sqrt())
+
+            half_audio = audio_tower(half_state, audio_config, mel.to(cuda, torch.float16))
+            audio_f16_rmse = rmse(half_audio.float().cpu(), audio)
+            half_out = half_model(inputs_embeds=whole.to(cuda, torch.float16))
+            half_hidden = half_model.model(inputs_embeds=whole.to(cuda, torch.float16))
+            hidden_f16_rmse = rmse(half_hidden.last_hidden_state[0].float().cpu(), hidden)
+            half_logp = torch.log_softmax(half_out.logits[0, len(ids) - 1:].float(), dim=-1).cpu()
+            agree = sum(int(a) == b for a, b in zip(half_logp.argmax(-1), said))
+
         text = tokenizer.decode(said, skip_special_tokens=True)
         print(f"{name}: {len(wave) / SAMPLE_RATE:.2f}s, {frames} frames, {audio.shape[0]} audio "
               f"tokens, said {len(said)}: {text!r}")
+        print(f"{name}: torch's half on CUDA against float32: encoder {audio_f16_rmse:.2e}, "
+              f"decoder {hidden_f16_rmse:.2e}, likeliest token the same in {agree} of {len(said)}")
 
         bag.write_tensor(Name(f"{name}.wave"), torch.from_numpy(wave), preserve_dtype=True)
         bag.write_tensor(Name(f"{name}.mel"), mel.contiguous(), preserve_dtype=True)
         bag.write_tensor(Name(f"{name}.audio"), audio.contiguous(), preserve_dtype=True)
         bag.write_tensor(Name(f"{name}.prompt"), torch.tensor(ids, dtype=torch.int64))
         bag.write_tensor(Name(f"{name}.said"), torch.tensor(said, dtype=torch.int64))
-        bag.write_tensor(Name(f"{name}.logp"), logp.to(torch.float16).contiguous())
+        # Float32: rounded to half, the stored answer would itself be up to 4e-3 off, which the
+        # runtime's error would carry and half's floor would not.
+        bag.write_tensor(Name(f"{name}.logp"), logp.contiguous(), preserve_dtype=True)
+        bag.write_tensor(Name(f"{name}.audio_f16_rmse"), torch.tensor([audio_f16_rmse]),
+                         preserve_dtype=True)
+        bag.write_tensor(Name(f"{name}.hidden"), hidden.contiguous(), preserve_dtype=True)
+        bag.write_tensor(Name(f"{name}.hidden_f16_rmse"), torch.tensor([hidden_f16_rmse]),
+                         preserve_dtype=True)
 
     os.makedirs(path.dirname(path.abspath(arguments.output)), exist_ok=True)
     bag.save(arguments.output)
