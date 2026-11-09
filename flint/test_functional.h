@@ -125,6 +125,8 @@ Tensor upsampleNearest1d(Operators *op, TensorView input, int size);
 // --- Products and convolutions --------------------------------------------------------------
 
 Tensor matmul(Operators *op, TensorView A, TensorView B);
+/// `A B + addend`, through Operators::matmulAdd.
+Tensor matmulAdd(Operators *op, TensorView A, TensorView B, TensorView addend);
 Tensor conv2d(
     Operators *op,
     TensorView input,

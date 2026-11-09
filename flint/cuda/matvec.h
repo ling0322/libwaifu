@@ -31,6 +31,14 @@ namespace cuda {
 
 /// C = x^T B into `C` <half>, contiguous, of d elements (any shape), where B is a transposed
 /// weight (its buffer holds d rows of n elements).
+/// C = x^T B, B a transposed weight: plus `bias` (d) where it is not empty, and plus what C held
+/// with `accumulate` -- added to the float sum, and the whole rounded into C once.
+void gemvHalf(
+    const TensorView &x,
+    const TensorView &B,
+    const TensorView &bias,
+    bool accumulate,
+    const TensorView &C);
 void gemvHalf(const TensorView &x, const TensorView &B, const TensorView &C);
 
 }  // namespace cuda

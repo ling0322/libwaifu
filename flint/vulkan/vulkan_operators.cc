@@ -147,6 +147,10 @@ void VulkanOperators::matmul(TensorView A, TensorView B, TensorView out) {
   vulkan::matmul(A, B, out);
 }
 
+void VulkanOperators::matmulAdd(TensorView A, TensorView B, TensorView addend, TensorView out) {
+  vulkan::matmul(A, B, addend, out);
+}
+
 void VulkanOperators::conv2d(
     TensorView input,
     TensorView weight,

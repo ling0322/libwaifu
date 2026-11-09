@@ -45,6 +45,23 @@ class CutlassGemm : public Gemm {
       __half *C,
       int ldc) override;
 
+  bool hgemmFrom(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const __half *A,
+      int lda,
+      const __half *B,
+      int ldb,
+      float beta,
+      const __half *S,
+      int lds,
+      __half *C,
+      int ldc) override;
+
   void hgemmIntoFloat(
       bool transA,
       bool transB,

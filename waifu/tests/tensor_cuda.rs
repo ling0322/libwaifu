@@ -397,6 +397,22 @@ fn multiplies_by_an_fp8_weight() {
         .to_device(Device::Cuda)
         .unwrap();
     assert!(F::fp8_matmul(&a, &codes, &per_row).is_err());
+
+    // A bias, and a residual of the product's shape, are what the product and add give, to within
+    // the half the product is written in.
+    let bias: Vec<f32> = (0..8).map(|n| n as f32 - 3.5).collect();
+    let residual: Vec<f32> = (0..16).map(|i| i as f32 * 0.25).collect();
+    for addend in [cuda_f32(&[8], &bias), cuda_f32(&[2, 8], &residual)] {
+        let fused = to_host_f32(&F::fp8_matmul_add(&a, &codes, &scale, &addend).unwrap());
+        let after = to_host_f32(&F::add(&out, &addend).unwrap());
+        for (f, w) in fused.iter().zip(&after) {
+            assert!(
+                (f - w).abs() <= w.abs() * 2e-3 + 1e-2,
+                "gave {f}, wanted {w}"
+            );
+        }
+    }
+    assert!(F::fp8_matmul_add(&a, &codes, &scale, &cuda_f32(&[3], &[0.0; 3])).is_err());
 }
 
 #[test]

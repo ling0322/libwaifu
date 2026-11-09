@@ -60,6 +60,52 @@ fn multiplies_matrices() {
 }
 
 #[test]
+fn multiplies_matrices_and_adds_to_the_product() {
+    let a = cpu_f32(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let b = cpu_f32(&[3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    let bias = cpu_f32(&[2], &[0.5, -1.0]);
+
+    // A bias, added to every row, whether it says it is one row or not.
+    let c = F::matmul_add(&a, &b, &bias).unwrap();
+    assert_eq!(c.shape(), vec![2, 2]);
+    assert_eq!(c.to_vec_f32().unwrap(), vec![4.5, 4.0, 10.5, 10.0]);
+    let row = cpu_f32(&[1, 2], &[0.5, -1.0]);
+    assert_eq!(
+        F::matmul_add(&a, &b, &row).unwrap().to_vec_f32().unwrap(),
+        vec![4.5, 4.0, 10.5, 10.0]
+    );
+
+    // A residual of the product's own shape.
+    let residual = cpu_f32(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        F::matmul_add(&a, &b, &residual)
+            .unwrap()
+            .to_vec_f32()
+            .unwrap(),
+        vec![5.0, 7.0, 13.0, 15.0]
+    );
+
+    // What does not broadcast to the product is refused.
+    assert!(F::matmul_add(&a, &b, &cpu_f32(&[3], &[0.0; 3])).is_err());
+    assert!(F::matmul_add(&a, &b, &cpu_f32(&[2, 3], &[0.0; 6])).is_err());
+
+    // And in a graph, where a linear layer puts it.
+    let g = Graph::new();
+    let (x, w, v) = (g.input("x"), g.input("w"), g.input("bias"));
+    g.output("y", g.matmul_add(x, w, v));
+    let weights = Weights::from_tensors(HashMap::new(), Device::Cpu).unwrap();
+    let out = Ir::compile(&g)
+        .run(
+            &RunContext::new(&weights)
+                .input("x", &a)
+                .input("w", &b)
+                .input("bias", &bias),
+        )
+        .unwrap();
+    assert_eq!(out[0].1.to_vec_f32().unwrap(), vec![4.5, 4.0, 10.5, 10.0]);
+}
+
+#[test]
 fn reduces_over_the_last_dimension() {
     let x = cpu_f32(&[2, 3], &[1.0, 2.0, 3.0, 40.0, 50.0, 60.0]);
 

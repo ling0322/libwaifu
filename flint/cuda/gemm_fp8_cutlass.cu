@@ -41,7 +41,9 @@
 #include "cutlass/gemm/kernel/default_gemm_universal_with_visitor.h"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "lutil/error.h"
+#include "flint/cpu/common.h"
 #include "flint/cuda/common.h"
+#include "flint/cuda/copy.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
 
 #define CUTLASS_CHECK(x)                                                                     \
@@ -148,6 +150,50 @@ struct Fp8Gemm {
       kEpilogueStages>::GemmKernel;
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
+  // D = accumulator * scale + aux, the three in float and the sum rounded once into D: a linear
+  // layer's bias or a residual added the way torch's addmm adds one. The addend is read through
+  // its own strides, so a row stride of zero reads one row of n down every row, which is a bias.
+  using Aux = cutlass::epilogue::threadblock::
+      VisitorAuxLoad<OutputTileThreadMap, ElementOutput, Stride<int64_t, _1, int64_t>>;
+
+  using ApplyScaleAdd = cutlass::epilogue::threadblock::VisitorCompute<
+      cutlass::homogeneous_multiply_add,
+      ElementOutput,
+      ElementCompute,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+
+  using EvtScaleAdd = cutlass::epilogue::threadblock::Sm80EVT<ApplyScaleAdd, Accumulator, Scale, Aux>;
+
+  using EvtDAdd = cutlass::epilogue::threadblock::Sm80EVT<StoreD, EvtScaleAdd>;
+
+  using GemmKernelAdd = typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
+      ElementA,
+      LayoutA,
+      cutlass::ComplexTransform::kNone,
+      kAlignmentA,
+      ElementB,
+      LayoutB,
+      cutlass::ComplexTransform::kNone,
+      kAlignmentB,
+      ElementOutput,
+      LayoutC,
+      kAlignmentC,
+      ElementAccumulator,
+      ElementCompute,
+      cutlass::arch::OpClassTensorOp,
+      cutlass::arch::Sm80,
+      ThreadblockShape,
+      WarpShape,
+      cutlass::gemm::GemmShape<16, 8, 16>,
+      EvtDAdd,
+      cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
+      Stages,
+      cutlass::arch::OpMultiplyAddMixedInputUpcast,
+      kEpilogueStages>::GemmKernel;
+
+
+  using GemmAdd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelAdd>;
 };
 
 /// The tile for a small row count, and what decides that there are two of these.
@@ -183,20 +229,49 @@ using SquareTile =
 constexpr int kFlatTileMaxRow = 512;
 
 /// @param scale the weight's one scale, <float>(1), on the device.
+/// The epilogue's arguments: D = accumulator * scale, or with `addend` -- read `addendRowStride`
+/// apart, 0 for a bias -- D = accumulator * scale + addend.
 template<class Config>
-void runFp8Gemm(int m, int n, int k, const half *A, const Fp8E4M3 *B, const float *scale, half *D) {
-  using Gemm = typename Config::Gemm;
-
+typename Config::EvtD::Arguments epilogueArguments(
+    int m, int n, const float *scale, const half *, int64_t, half *D) {
   typename Config::Scale::Arguments scaleArgs;
   scaleArgs.scalar_ptrs[0] = scale;
-
-  typename Config::EvtD::Arguments callbackArgs{
+  return {
       {
           {},         // accumulator
           scaleArgs,  // scale
           {}          // multiply
       },
       {reinterpret_cast<ElementOutput *>(D), {int64_t(n), _1{}, int64_t(m) * n}}};
+}
+
+template<class Config>
+typename Config::EvtDAdd::Arguments epilogueAddArguments(
+    int m, int n, const float *scale, const half *addend, int64_t addendRowStride, half *D) {
+  typename Config::Scale::Arguments scaleArgs;
+  scaleArgs.scalar_ptrs[0] = scale;
+  typename Config::Aux::Arguments auxArgs{
+      reinterpret_cast<ElementOutput *>(const_cast<half *>(addend)),
+      ElementOutput(0),
+      {addendRowStride, _1{}, int64_t(0)}};
+  return {
+      {
+          {},         // accumulator
+          scaleArgs,  // scale
+          auxArgs,    // addend
+          {}          // multiply and add
+      },
+      {reinterpret_cast<ElementOutput *>(D), {int64_t(n), _1{}, int64_t(m) * n}}};
+}
+
+template<class Config, class Gemm, class CallbackArgs>
+void runFp8Gemm(
+    int m,
+    int n,
+    int k,
+    const half *A,
+    const Fp8E4M3 *B,
+    CallbackArgs callbackArgs) {
 
   // Batch count one: the SM80 EVT epilogue asserts against a split K, so unlike the half GEMM
   // beside it this one cannot fill the machine by splitting a small output. The flat tile is what
@@ -242,7 +317,15 @@ namespace {
 
 /// A (..., k) times the transpose of B (n, k), times `scale`, once gemmFp8 has checked B and the
 /// scale.
-void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
+/// `addend` is null, or what D starts from, `addendRowStride` apart: n for one of D's shape, 0 for a
+/// bias of n.
+void gemmFp8Impl(
+    TensorView A,
+    TensorView B,
+    TensorView scale,
+    const half *addend,
+    int64_t addendRowStride,
+    TensorView D) {
   CHECK(A.getDevice().getType() == Device::kCuda);
   CHECK(A.getDType() == DType::kFloat16);
   CHECK(A.isContiguous());
@@ -255,7 +338,13 @@ void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
   CHECK(D.isContiguous() && D.getShape() == shapeD);
 
   if (A.getDim() > 2) {
-    gemmFp8Impl(A.view({-1, A.getShape(-1)}), B, scale, D.view({-1, B.getShape(0)}));
+    gemmFp8Impl(
+        A.view({-1, A.getShape(-1)}),
+        B,
+        scale,
+        addend,
+        addendRowStride,
+        D.view({-1, B.getShape(0)}));
     return;
   }
 
@@ -277,10 +366,21 @@ void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
   const float *ptrScale = getDataPtrCuda<float>(scale);
   half *ptrD = getDataPtrCuda<half>(D);
 
+  auto run = [&](auto config) {
+    using Config = decltype(config);
+    if (addend) {
+      runFp8Gemm<Config, typename Config::GemmAdd>(
+          m, n, k, ptrA, ptrB,
+          epilogueAddArguments<Config>(m, n, ptrScale, addend, addendRowStride, ptrD));
+    } else {
+      runFp8Gemm<Config, typename Config::Gemm>(
+          m, n, k, ptrA, ptrB, epilogueArguments<Config>(m, n, ptrScale, nullptr, 0, ptrD));
+    }
+  };
   if (m <= kFlatTileMaxRow) {
-    runFp8Gemm<FlatTile>(m, n, k, ptrA, ptrB, ptrScale, ptrD);
+    run(FlatTile{});
   } else {
-    runFp8Gemm<SquareTile>(m, n, k, ptrA, ptrB, ptrScale, ptrD);
+    run(SquareTile{});
   }
 
   LL_CUDA_SYNCHRONIZE();
@@ -290,6 +390,10 @@ void gemmFp8Impl(TensorView A, TensorView B, TensorView scale, TensorView D) {
 }  // namespace
 
 void gemmFp8(TensorView A, TensorView B, TensorView scale, TensorView D) {
+  gemmFp8(A, B, scale, TensorView(), D);
+}
+
+void gemmFp8(TensorView A, TensorView B, TensorView scale, TensorView addend, TensorView D) {
   CHECK(B.getDevice().getType() == Device::kCuda);
   CHECK(B.getDType() == DType::kFp8E4M3);
   CHECK(B.getDim() == 2);
@@ -302,7 +406,24 @@ void gemmFp8(TensorView A, TensorView B, TensorView scale, TensorView D) {
   CHECK(scale.getDType() == DType::kFloat);
   CHECK(scale.getNumEl() == 1);
 
-  gemmFp8Impl(A, B, scale, D);
+  if (addend.empty()) return gemmFp8Impl(A, B, scale, nullptr, 0, D);
+
+  // A bias of n is read down every row; an addend of D's shape row by row; anything else -- a
+  // broadcast over some of D's leading dimensions -- is made into one of D's shape first.
+  CHECK(addend.getDevice().getType() == Device::kCuda && addend.getDType() == DType::kFloat16);
+  int n = B.getShape(0);
+  if (addend.getShape(-1) == n && addend.getNumEl() == n && addend.isContiguous()) {
+    return gemmFp8Impl(A, B, scale, getDataPtrCuda<half>(addend), 0, D);
+  }
+  std::vector<int> shape = D.getShape();
+  CHECK(addend.getDim() <= D.getDim());
+  TensorView expanded = op::cpu::expandBatchDims(addend, shape).expand(shape);
+  if (expanded.isContiguous()) {
+    return gemmFp8Impl(A, B, scale, getDataPtrCuda<half>(expanded), n, D);
+  }
+  Tensor whole = createCudaTensor<half>(shape);
+  copy(expanded, whole);
+  gemmFp8Impl(A, B, scale, getDataPtrCuda<half>(whole), n, D);
 }
 
 }  // namespace cuda

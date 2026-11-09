@@ -637,8 +637,28 @@ fn execute(op: &Op, slots: &[Option<Tensor>], context: &RunContext<'_>) -> Resul
             *eps,
         )?,
 
-        Op::Matmul { lhs, rhs } => F::matmul(get(lhs), get(rhs))?,
-        Op::Fp8Matmul { lhs, weight, scale } => F::fp8_matmul(get(lhs), get(weight), get(scale))?,
+        Op::Matmul {
+            lhs,
+            rhs,
+            addend: None,
+        } => F::matmul(get(lhs), get(rhs))?,
+        Op::Matmul {
+            lhs,
+            rhs,
+            addend: Some(addend),
+        } => F::matmul_add(get(lhs), get(rhs), get(addend))?,
+        Op::Fp8Matmul {
+            lhs,
+            weight,
+            scale,
+            addend: None,
+        } => F::fp8_matmul(get(lhs), get(weight), get(scale))?,
+        Op::Fp8Matmul {
+            lhs,
+            weight,
+            scale,
+            addend: Some(addend),
+        } => F::fp8_matmul_add(get(lhs), get(weight), get(scale), get(addend))?,
         Op::Lookup { table, indices } => F::lookup(get(table), get(indices))?,
         Op::Conv2d {
             input,

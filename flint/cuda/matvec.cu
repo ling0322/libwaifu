@@ -62,6 +62,8 @@ __global__ void mat_vec_kernel(
     half *y,
     const half *__restrict__ x,
     const half *__restrict__ A,
+    const half *__restrict__ bias,
+    bool accumulate,
     int n,
     int d,
     int lda) {
@@ -83,11 +85,20 @@ __global__ void mat_vec_kernel(
   }
 
   sum = wrapReduceSum(sum);
-  if (threadIdx.x == 0) y[row] = (half)sum;
+  if (threadIdx.x == 0) {
+    if (bias) sum += float(bias[row]);
+    if (accumulate) sum += float(y[row]);
+    y[row] = (half)sum;
+  }
 }
 
 // computes C = x^T B, where B is a transposed weight (its buffer holds d rows of n elements).
-void gemvHalf(const TensorView &x, const TensorView &B, const TensorView &C) {
+void gemvHalf(
+    const TensorView &x,
+    const TensorView &B,
+    const TensorView &bias,
+    bool accumulate,
+    const TensorView &C) {
   CHECK(1 == x.getDim() && 1 == x.getStride(0));
 
   int n = x.getShape(0);
@@ -98,6 +109,8 @@ void gemvHalf(const TensorView &x, const TensorView &B, const TensorView &C) {
   CHECK(n % 8 == 0);
 
   CHECK(C.getDType() == DType::kFloat16 && C.isContiguous() && C.getNumEl() == d);
+  CHECK(bias.empty() || (bias.getDType() == DType::kFloat16 && bias.getNumEl() == d &&
+                         bias.getStride(-1) == 1));
 
   dim3 block_dim(32, 4);
   dim3 grid_dim(divUp(d, 4), 1);
@@ -106,11 +119,17 @@ void gemvHalf(const TensorView &x, const TensorView &B, const TensorView &C) {
       getDataPtrCuda<half>(C),
       getDataPtrCuda<half>(x),
       getDataPtrCuda<half>(B),
+      bias.empty() ? nullptr : getDataPtrCuda<half>(bias),
+      accumulate,
       n,
       d,
       n);
   LL_CUDA_SYNCHRONIZE();
   LL_CHECK_CUDA_STATUS(cudaGetLastError());
+}
+
+void gemvHalf(const TensorView &x, const TensorView &B, const TensorView &C) {
+  gemvHalf(x, B, TensorView(), false, C);
 }
 
 }  // namespace cuda

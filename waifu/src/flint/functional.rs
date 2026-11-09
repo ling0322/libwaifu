@@ -594,6 +594,35 @@ pub fn upsample_nearest1d(input: &Tensor, size: i32) -> Result<Tensor> {
 /// Matrix multiplication, batched over the leading dimensions. `b` may have fewer dimensions than
 /// `a`, and is then seen at `a`'s batch.
 pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let shape = matmul_shape(a, b)?;
+    let operators = operators_of(a)?;
+    let out = beside(a, &shape, a.dtype())?;
+    check(unsafe { ffi::fl_matmul(operators, a.raw(), b.raw(), out.raw()) })?;
+    Ok(out)
+}
+
+/// `a b + addend`, `addend` of `a`'s type broadcast over the product's leading dimensions as
+/// [`add`] broadcasts: a linear layer's bias `(n)`, or a residual of the product's own shape.
+///
+/// On CUDA and Vulkan the addend is added to the product's float sum and the two rounded into the
+/// output once, as torch's `addmm` does. Elsewhere it is [`matmul`] and then [`add`], which in
+/// half rounds the product first and the sum again.
+pub fn matmul_add(a: &Tensor, b: &Tensor, addend: &Tensor) -> Result<Tensor> {
+    let shape = matmul_shape(a, b)?;
+    if addend.dtype() != a.dtype() {
+        return Err(Error::invalid(
+            "matmul_add: the addend and the operands differ in type",
+        ));
+    }
+    let operators = operators_of(a)?;
+    let out = beside(a, &shape, a.dtype())?;
+    let addend = broadcast_to(addend, &out, "matmul_add")?;
+    check(unsafe { ffi::fl_matmul_add(operators, a.raw(), b.raw(), addend.raw(), out.raw()) })?;
+    Ok(out)
+}
+
+/// What [`matmul`] of `a` by `b` writes, or why the two do not multiply.
+fn matmul_shape(a: &Tensor, b: &Tensor) -> Result<Vec<i32>> {
     let (sa, sb) = (a.shape(), b.shape());
     let refuse = || Error::invalid(format!("matmul: {sa:?} by {sb:?}"));
     if sa.len() < 2 || sb.len() < 2 {
@@ -618,10 +647,7 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 
     let mut shape = sa.clone();
     *shape.last_mut().expect("two dimensions") = sb[sb.len() - 1];
-    let operators = operators_of(a)?;
-    let out = beside(a, &shape, a.dtype())?;
-    check(unsafe { ffi::fl_matmul(operators, a.raw(), b.raw(), out.raw()) })?;
-    Ok(out)
+    Ok(shape)
 }
 
 /// What an FP8 product of `a` `(..., k)` by a weight of `(rows, k)` writes: `<float16>(..., rows)`
@@ -650,6 +676,29 @@ fn fp8_result(a: &Tensor, weight: &Tensor) -> Result<Tensor> {
 pub fn fp8_matmul(a: &Tensor, weight: &Tensor, scale: &Tensor) -> Result<Tensor> {
     let out = fp8_result(a, weight)?;
     check(unsafe { ffi::fl_fp8_matmul(a.raw(), weight.raw(), scale.raw(), out.raw()) })?;
+    Ok(out)
+}
+
+/// [`fp8_matmul`] plus `addend` `<float16>`, broadcast over the product's leading dimensions as
+/// [`add`] broadcasts: a linear layer's bias, or a residual of the product's shape. On CUDA it is
+/// added to the float sum in the GEMM's epilogue and the whole rounded once, as [`matmul_add`]
+/// does; on Metal it is added after.
+pub fn fp8_matmul_add(
+    a: &Tensor,
+    weight: &Tensor,
+    scale: &Tensor,
+    addend: &Tensor,
+) -> Result<Tensor> {
+    let out = fp8_result(a, weight)?;
+    if addend.dtype() != out.dtype() {
+        return Err(Error::invalid(
+            "fp8_matmul_add: the addend is not of the product's type",
+        ));
+    }
+    let addend = broadcast_to(addend, &out, "fp8_matmul_add")?;
+    check(unsafe {
+        ffi::fl_fp8_matmul_add(a.raw(), weight.raw(), scale.raw(), addend.raw(), out.raw())
+    })?;
     Ok(out)
 }
 

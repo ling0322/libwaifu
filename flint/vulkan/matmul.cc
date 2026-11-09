@@ -23,6 +23,7 @@
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
+#include "flint/cpu/common.h"
 #include "flint/vulkan/common.h"
 #include "flint/vulkan/ops.h"
 
@@ -40,6 +41,7 @@ struct GemmPush {
   uint64_t c;
   uint64_t a;
   uint64_t b;
+  uint64_t bias;  // (N) added to every row, or 0
   uint32_t M;
   uint32_t N;
   uint32_t K;
@@ -52,12 +54,14 @@ struct GemmPush {
   uint32_t strideA1;
   uint32_t strideB0;
   uint32_t strideB1;
+  uint32_t accumulate;  // add the product to what C holds rather than overwrite it
 };
 
 struct CoopmatGemmPush {
   uint64_t c;
   uint64_t a;
   uint64_t b;
+  uint64_t bias;  // (N) added to every row, or 0
   uint32_t M;
   uint32_t N;
   uint32_t K;
@@ -69,6 +73,7 @@ struct CoopmatGemmPush {
   uint32_t strideA1;
   uint32_t strideB0;
   uint32_t strideB1;
+  uint32_t accumulate;  // add the product to what C holds rather than overwrite it
 };
 
 struct ConvPush {
@@ -127,6 +132,8 @@ bool coopmatGemm(
   push.c = gemm.c;
   push.a = gemm.a;
   push.b = gemm.b;
+  push.bias = gemm.bias;
+  push.accumulate = gemm.accumulate;
   push.M = gemm.M;
   push.N = gemm.N;
   push.K = gemm.K;
@@ -151,9 +158,13 @@ bool coopmatGemm(
 
 // Batched GEMM over batch dimensions that have already been collapsed to at most two.
 // `output` is contiguous, each batch's (M, N) after the one before.
+/// The product is added, in float, to `bias` (N) -- contiguous, or empty -- or with `accumulate` to
+/// what `output` already holds, and the two rounded into it together.
 void gemm(
     const TensorView &a,
     const TensorView &b,
+    const TensorView &bias,
+    bool accumulate,
     const Layout &batch,
     const TensorView &output) {
   int M = a.getShape(-2);
@@ -162,7 +173,11 @@ void gemm(
 
   if (output.getNumEl() == 0) return;
   if (K == 0) {
-    fill(output, 0.0f);
+    if (!bias.empty()) {
+      copy(bias.view({1, N}).expand(output.getShape()), output);
+    } else if (!accumulate) {
+      fill(output, 0.0f);
+    }
     return;
   }
 
@@ -170,6 +185,8 @@ void gemm(
   push.c = getAddress(output);
   push.a = getAddress(a);
   push.b = getAddress(b);
+  push.bias = bias.empty() ? 0 : getAddress(bias);
+  push.accumulate = accumulate ? 1 : 0;
   push.M = static_cast<uint32_t>(M);
   push.N = static_cast<uint32_t>(N);
   push.K = static_cast<uint32_t>(K);
@@ -322,40 +339,21 @@ void conv(
       static_cast<uint32_t>(N * groups));
 }
 
-}  // namespace
-
-void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
-  checkFloat(a.getDType(), "matmul");
-  if (a.getDType() != b.getDType()) {
-    throw lut::InvalidArgError(lut::sprintf(
-        "matmul on the Vulkan device takes two of one dtype, not %s and %s",
-        a.getDType().toString(),
-        b.getDType().toString()));
-  }
-  if (a.getDim() < 2 || b.getDim() < 2 || a.getDim() < b.getDim()) {
-    throw lut::InvalidArgError(lut::sprintf(
-        "matmul: unable to multiply %s by %s",
-        a.getShapeString(),
-        b.getShapeString()));
-  }
-  if (a.getShape(-1) != b.getShape(-2)) {
-    throw lut::InvalidArgError(lut::sprintf(
-        "matmul: %s and %s do not agree on the inner dimension",
-        a.getShapeString(),
-        b.getShapeString()));
-  }
-
-  std::vector<int> shape = a.getShape();
-  shape.back() = b.getShape(-1);
-  checkOutput(out, shape, a.getDType(), "matmul");
-
+/// The product of `a` and `b`, checked, into `out`: added to `bias` (N), contiguous, where there is
+/// one, or with `accumulate` to what `out` holds.
+void product(
+    const TensorView &a,
+    const TensorView &b,
+    const TensorView &bias,
+    bool accumulate,
+    const TensorView &out) {
   // A stack of rows times one matrix is one taller product, when the rows stack evenly.
   if (b.getDim() == 2 && a.getDim() > 2 && a.isContiguous()) {
     TensorView flat = a.view({-1, a.getShape(-1)});
     Layout single{};
     single.ndim = 1;
     single.shape[0] = 1;
-    gemm(flat, b, single, out.view({flat.getShape(0), b.getShape(-1)}));
+    gemm(flat, b, bias, accumulate, single, out.view({flat.getShape(0), b.getShape(-1)}));
     return;
   }
 
@@ -380,12 +378,68 @@ void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
     // More batch dimensions than the kernel walks, which do not merge: one leading slice at a
     // time into the rows of the answer.
     for (int i = 0; i < a.getShape(0); ++i) {
-      matmul(a.subtensor(i), expanded.subtensor(i), out.subtensor(i));
+      product(a.subtensor(i), expanded.subtensor(i), bias, accumulate, out.subtensor(i));
     }
     return;
   }
 
-  gemm(a, expanded, batch, out);
+  gemm(a, expanded, bias, accumulate, batch, out);
+}
+
+}  // namespace
+
+void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
+  matmul(a, b, TensorView(), out);
+}
+
+void matmul(
+    const TensorView &a,
+    const TensorView &b,
+    const TensorView &addend,
+    const TensorView &out) {
+  checkFloat(a.getDType(), "matmul");
+  if (a.getDType() != b.getDType()) {
+    throw lut::InvalidArgError(lut::sprintf(
+        "matmul on the Vulkan device takes two of one dtype, not %s and %s",
+        a.getDType().toString(),
+        b.getDType().toString()));
+  }
+  if (a.getDim() < 2 || b.getDim() < 2 || a.getDim() < b.getDim()) {
+    throw lut::InvalidArgError(lut::sprintf(
+        "matmul: unable to multiply %s by %s",
+        a.getShapeString(),
+        b.getShapeString()));
+  }
+  if (a.getShape(-1) != b.getShape(-2)) {
+    throw lut::InvalidArgError(lut::sprintf(
+        "matmul: %s and %s do not agree on the inner dimension",
+        a.getShapeString(),
+        b.getShapeString()));
+  }
+
+  std::vector<int> shape = a.getShape();
+  shape.back() = b.getShape(-1);
+  checkOutput(out, shape, a.getDType(), "matmul");
+
+  if (addend.empty()) return product(a, b, TensorView(), false, out);
+  if (addend.getDType() != a.getDType() || addend.getDim() > out.getDim()) {
+    throw lut::InvalidArgError(lut::sprintf(
+        "matmul: an addend of %s does not fit an output of %s",
+        addend.getShapeString(),
+        out.getShapeString()));
+  }
+  TensorView expanded = op::cpu::expandBatchDims(addend, shape).expand(shape);
+
+  // One value for each column, however many dimensions it is written in, is a bias: the kernels
+  // read it where they need it. Anything else goes into the output first, for them to add to.
+  int N = shape.back();
+  if (addend.getShape(-1) == N && addend.getNumEl() == N) {
+    Contiguous bias(addend);
+    product(a, b, bias.view({N}), false, out);
+  } else {
+    copy(expanded, out);
+    product(a, b, TensorView(), true, out);
+  }
 }
 
 void conv2d(

@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "flint/cpu/common.h"
 #include "flint/cpu/external_tensor_data.h"
 #include "flint/functional.h"
 #include "flint/memory.h"
@@ -932,6 +933,25 @@ int32_t fl_matmul(
   });
 }
 
+int32_t fl_matmul_add(
+    fl_operators_t operators,
+    fl_tensor_view_t a,
+    fl_tensor_view_t b,
+    fl_tensor_view_t addend,
+    fl_tensor_view_t out) {
+  return guard([&]() {
+    checkNotEmpty(deref(a), "the left operand");
+    checkNotEmpty(deref(b), "the right operand");
+    checkNotEmpty(deref(addend), "the addend");
+    checkOnDevice(deref(a), operators, "the left operand");
+    checkOnDevice(deref(b), operators, "the right operand");
+    checkOnDevice(deref(addend), operators, "the addend");
+    checkOnDevice(deref(out), operators, "out");
+    deref(operators)->matmulAdd(deref(a), deref(b), deref(addend), deref(out));
+    return clearError();
+  });
+}
+
 // --- FP8 --------------------------------------------------------------------------------------
 
 namespace {
@@ -1029,9 +1049,19 @@ int32_t fl_fp8_matmul(
     fl_tensor_view_t data,
     fl_tensor_view_t scale,
     fl_tensor_view_t out) {
+  return fl_fp8_matmul_add(a, data, scale, nullptr, out);
+}
+
+int32_t fl_fp8_matmul_add(
+    fl_tensor_view_t a,
+    fl_tensor_view_t data,
+    fl_tensor_view_t scale,
+    fl_tensor_view_t addend,
+    fl_tensor_view_t out) {
   // The return type is written down because a build without CUDA has nothing but the throw left
   // in here, and a lambda that only throws deduces void.
   return guard([&]() -> int32_t {
+    fl::TensorView more = addend ? deref(addend) : fl::TensorView();
     const fl::TensorView &weight = deref(data);
     checkFp8Weight(weight, deref(scale));
     fl::Device::Type device = weight.getDevice().getType();
@@ -1041,17 +1071,29 @@ int32_t fl_fp8_matmul(
     checkFp8Activation(deref(a), device, "the left operand");
     if (deref(a).getShape(-1) != k) throw lut::InvalidArgError("the two operands disagree about k");
     checkFp8Result(deref(out), deref(a), rows, device);
+    if (!more.empty()) {
+      if (more.getDevice().getType() != device || more.getDType() != fl::DType::kFloat16 ||
+          more.getDim() > deref(out).getDim()) {
+        throw lut::InvalidArgError("the addend is not <float16> on the weight's device, of out's shape");
+      }
+    }
 
 #ifdef LIBWAIFU_CUDA_ENABLED
     if (device == fl::Device::kCuda) {
       checkFp8Tiles(rows, k);
-      fl::op::cuda::gemmFp8(deref(a), weight, deref(scale), deref(out));
+      fl::op::cuda::gemmFp8(deref(a), weight, deref(scale), more, deref(out));
       return clearError();
     }
 #endif
 #ifdef LIBWAIFU_METAL_ENABLED
     if (device == fl::Device::kMetal) {
+      // No fused epilogue here: the product is rounded, and the addend added after.
       fl::op::metal_native::fp8Matmul(deref(a), weight, deref(scale), deref(out));
+      if (!more.empty()) {
+        std::vector<int> shape = deref(out).getShape();
+        fl::getOperators(device)->add(
+            deref(out), fl::op::cpu::expandBatchDims(more, shape).expand(shape), deref(out));
+      }
       return clearError();
     }
 #endif

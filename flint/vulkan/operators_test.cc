@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -608,6 +609,99 @@ CATCH_TEST_CASE("test Vulkan matmul", "[op][vulkan]") {
       1e-4f));
 }
 
+CATCH_TEST_CASE("test Vulkan matmul with an addend", "[op][vulkan]") {
+  SKIP_WITHOUT_VULKAN();
+
+  // A weight (n, k) read transposed, as a linear layer reads it: in half, K a multiple of 8 is the
+  // cooperative matrix kernel and anything else the plain one; a stack of rows is one taller
+  // product, a batch of right operands the batched one, and an empty K is the bias alone.
+  struct Case {
+    std::vector<int> shapeA;
+    std::vector<int> shapeB;
+    bool transposeB;
+  };
+  std::vector<Case> cases = {
+      {{1, 64}, {40, 64}, true},
+      {{17, 33}, {5, 33}, true},
+      {{300, 256}, {136, 256}, true},
+      {{2, 77, 768}, {320, 768}, true},
+      {{3, 40, 64}, {3, 64, 72}, false},
+      {{2, 5, 40, 64}, {2, 5, 64, 72}, false},
+      {{4, 0}, {0, 24}, false},
+  };
+  for (const Case &c : cases) {
+    Tensor a = fl::test::rand(Device::getCpu(), c.shapeA, DType::kFloat);
+    Tensor b = fl::test::rand(Device::getCpu(), c.shapeB, DType::kFloat);
+    Tensor bt = c.transposeB ? b.transpose(-1, -2) : b;
+    std::vector<int> out = a.getShape();
+    out.back() = bt.getShape(-1);
+    // A bias, and a residual of the output's own shape.
+    for (std::vector<int> addendShape : {std::vector<int>{out.back()}, out}) {
+      Tensor addend = fl::test::rand(Device::getCpu(), addendShape, DType::kFloat);
+      Tensor reference = fl::test::add(cpu(), fl::test::matmul(cpu(), a, bt), addend);
+
+      for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+        CATCH_INFO("A = " << a.getShapeString() << ", B = " << bt.getShapeString()
+                          << ", addend = " << addend.getShapeString()
+                          << ", dtype = " << dtype.toString());
+        Tensor y = toVulkan(b, dtype);
+        if (c.transposeB) y = y.transpose(-1, -2);
+        float tol = dtype == DType::kFloat ? 1e-4f : 2e-2f;
+        Tensor got = fl::test::matmulAdd(vk(), toVulkan(a, dtype), y, toVulkan(addend, dtype));
+        CATCH_REQUIRE(close(got, reference, tol, tol));
+      }
+    }
+  }
+}
+
+// A product of 2049, which half cannot hold -- it lies halfway between 2048 and 2050 and rounds to
+// 2048 -- and a bias of 1, which makes it 2050, which half holds exactly. Added to the float sum
+// and rounded once, as torch's addmm does, the answer is 2050; the product rounded and then the
+// bias added and rounded again, it is 2048.
+CATCH_TEST_CASE("test Vulkan matmul with a bias rounds once", "[op][vulkan]") {
+  SKIP_WITHOUT_VULKAN();
+
+  constexpr int N = 136;
+  auto filled = [](std::vector<int> shape) {
+    return fl::test::zeros(Device::getCpu(), shape, DType::kFloat);
+  };
+  auto data = [](Tensor &x) { return x.getInternalData()->getData<float>(x.getInternalOffset()); };
+  auto allAre = [](const Tensor &vulkan, float value) {
+    Tensor host = toCpu(vulkan);
+    const float *p = host.getInternalData()->getData<float>(host.getInternalOffset());
+    return std::all_of(p, p + host.getNumEl(), [value](float y) { return y == value; });
+  };
+
+  Tensor bias = filled({N});
+  std::fill(data(bias), data(bias) + N, 1.0f);
+  Tensor vkBias = toVulkan(bias, DType::kFloat16);
+
+  // K of 16 is the cooperative matrix kernel, which starts its accumulators from the bias; 17 the
+  // plain one, which adds it to the sum it stores.
+  for (int K : {16, 17}) {
+    for (int M : {1, 3, 130}) {
+      CATCH_INFO("M = " << M << ", K = " << K);
+      Tensor a = filled({M, K});
+      for (int m = 0; m < M; ++m) data(a)[m * K] = data(a)[m * K + 1] = 1.0f;
+      Tensor w = filled({N, K});  // the weight as a layer holds it, (n, k)
+      for (int n = 0; n < N; ++n) {
+        data(w)[n * K] = 2048.0f;
+        data(w)[n * K + 1] = 1.0f;
+      }
+      Tensor x = toVulkan(a, DType::kFloat16);
+      Tensor y = toVulkan(w, DType::kFloat16).transpose(0, 1);
+      CATCH_REQUIRE(allAre(fl::test::matmulAdd(vk(), x, y, vkBias), 2050.0f));
+      Tensor twice = fl::test::add(vk(), fl::test::matmul(vk(), x, y), vkBias);
+      CATCH_REQUIRE(allAre(twice, 2048.0f));
+      // And a residual of the output's own shape, every element of which starts the sum.
+      Tensor residual = filled({M, N});
+      std::fill(data(residual), data(residual) + M * N, 1.0f);
+      CATCH_REQUIRE(allAre(
+          fl::test::matmulAdd(vk(), x, y, toVulkan(residual, DType::kFloat16)), 2050.0f));
+    }
+  }
+}
+
 CATCH_TEST_CASE("test Vulkan convolutions", "[op][vulkan]") {
   SKIP_WITHOUT_VULKAN();
 
@@ -984,6 +1078,54 @@ CATCH_TEST_CASE("benchmark Vulkan matmul and conv2d", "[.][vulkan-benchmark]") {
     double seconds = time([&]() { fl::test::conv2d(vk(), x, w, Tensor(), 1, 1, 1, 1); });
     double flops = 2.0 * c.N * c.H * c.H * c.K * c.C * 9;
     printf("%-28s %8.3f ms %7.1f TFLOPS\n", c.name, seconds * 1e3, flops / seconds / 1e12);
+  }
+}
+
+// What the addend costs a linear layer: the product alone, the product and then add (what a biased
+// linear was before matmulAdd), and matmulAdd. Half, the weight (n, k) read transposed.
+CATCH_TEST_CASE("benchmark Vulkan matmul with an addend", "[.][vulkan-benchmark]") {
+  SKIP_WITHOUT_VULKAN();
+
+  auto time = [](auto &&run) {
+    for (int i = 0; i < 3; ++i) run();
+    vk()->synchronize();
+    int repeat = 50;
+    double t0 = lut::now();
+    for (int i = 0; i < repeat; ++i) run();
+    vk()->synchronize();
+    return (lut::now() - t0) / repeat;
+  };
+
+  struct Case {
+    const char *name;
+    int M, N, K;
+  };
+  std::vector<Case> cases = {
+      {"decode 1x1024x1024", 1, 1024, 1024},
+      {"decode 1x3072x1024", 1, 3072, 1024},
+      {"encoder 179x896x896", 179, 896, 896},
+      {"encoder 179x3584x896", 179, 3584, 896},
+      {"prefill 1024x2048x2048", 1024, 2048, 2048},
+      {"linear 8192x640x640", 8192, 640, 640},
+      {"linear 8192x5120x640", 8192, 5120, 640},
+  };
+  printf("%-26s %10s %12s %12s\n", "", "matmul", "matmul+add", "matmulAdd");
+  for (const Case &c : cases) {
+    Tensor x = toVulkan(fl::test::rand(Device::getCpu(), {c.M, c.K}, DType::kFloat), DType::kFloat16);
+    Tensor w = toVulkan(fl::test::rand(Device::getCpu(), {c.N, c.K}, DType::kFloat), DType::kFloat16);
+    Tensor bias = toVulkan(fl::test::rand(Device::getCpu(), {c.N}, DType::kFloat), DType::kFloat16);
+    Tensor wT = w.transpose(0, 1);
+    Tensor out = F::empty(Device::getVulkan(), {c.M, c.N}, DType::kFloat16);
+    TensorView rows = bias.view({1, c.N}).expand({c.M, c.N});  // as the graph broadcast it
+
+    double alone = time([&]() { vk()->matmul(x, wT, out); });
+    double twice = time([&]() {
+      vk()->matmul(x, wT, out);
+      vk()->add(out, rows, out);
+    });
+    double fused = time([&]() { vk()->matmulAdd(x, wT, bias, out); });
+    printf(
+        "%-26s %8.1f us %10.1f us %10.1f us\n", c.name, alone * 1e6, twice * 1e6, fused * 1e6);
   }
 }
 

@@ -28,6 +28,7 @@
 #include "flint/cpu/common.h"
 #include "flint/cpu/matmul.h"
 #include "flint/cuda/common.h"
+#include "flint/cuda/copy.h"
 #include "flint/cuda/fill.h"
 #include "flint/cuda/gemm_cublas.h"
 #include "flint/cuda/gemm_cutlass.h"
@@ -93,6 +94,14 @@ std::shared_ptr<MatMul> MatMul::createCutlass() {
 }
 
 void MatMul::apply(const TensorView &A, const TensorView &B, const TensorView &C) {
+  apply(A, B, TensorView(), C);
+}
+
+void MatMul::apply(
+    const TensorView &A,
+    const TensorView &B,
+    const TensorView &addend,
+    const TensorView &C) {
   CHECK(A.getDevice().getType() == Device::kCuda);
   CHECK(B.getDevice().getType() == Device::kCuda);
   CHECK(C.getDevice().getType() == Device::kCuda);
@@ -101,16 +110,36 @@ void MatMul::apply(const TensorView &A, const TensorView &B, const TensorView &C
   std::vector<int> shapeC = A.getShape();
   shapeC.back() = B.getShape(-1);
   C.throwIfInvalidShape(shapeC, "matmul");
+  // One value for each column, however many dimensions it is written in, is a bias: the paths
+  // below read it where they can, and put it into C first where they cannot. Anything else goes
+  // into C here, for beta = 1 to add the product to.
+  TensorView bias;
+  float beta = 0.0f;
+  if (!addend.empty()) {
+    if (addend.getDType() != C.getDType() || addend.getDevice().getType() != Device::kCuda ||
+        addend.getDim() > C.getDim()) {
+      THROW(InvalidArg, "matmul: the addend must be of the output's type and fit its shape");
+    }
+    int N = C.getShape(-1);
+    std::vector<int> shape = C.getShape();
+    TensorView expanded = op::cpu::expandBatchDims(addend, shape).expand(shape);
+    if (addend.getShape(-1) == N && addend.getNumEl() == N && addend.isContiguous()) {
+      bias = addend.view({N});
+    } else {
+      copy(expanded, C);
+      beta = 1.0f;
+    }
+  }
   if (C.getNumEl() == 0) return;
 
   if (A.getDType() == DType::kFloat16 && B.getDType() == DType::kFloat16) {
     // A float C keeps the sum as it was -- see Operators::matmulWidensHalf.
-    if (C.getDType() == DType::kFloat) return matmulFloat<half, float>(A, B, C);
+    if (C.getDType() == DType::kFloat) return matmulFloat<half, float>(A, B, bias, beta, C);
     CHECK(C.getDType() == DType::kFloat16);
-    matmulFloat<half>(A, B, C);
+    matmulFloat<half>(A, B, bias, beta, C);
   } else if (A.getDType() == DType::kFloat && B.getDType() == DType::kFloat) {
     CHECK(C.getDType() == DType::kFloat);
-    matmulFloat<float>(A, B, C);
+    matmulFloat<float>(A, B, bias, beta, C);
   } else {
     NOT_IMPL();
   }
@@ -273,8 +302,22 @@ void callGemmArray<float, float>(
       transA, transB, m, n, k, alpha, arrayA, lda, arrayB, ldb, beta, arrayC, ldc, batchSize);
 }
 
+/// The bias in every row of C, for a GEMM with beta = 1 to add the product to: what a path does with
+/// a bias it cannot read where it is.
+float startFromBias(const TensorView &bias, const TensorView &C) {
+  int N = C.getShape(-1);
+  std::vector<int> shape = C.getShape();
+  copy(op::cpu::expandBatchDims(bias.view({N}), shape).expand(shape), C);
+  return 1.0f;
+}
+
 template<typename T, typename TC>
-void MatMul::matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C) {
+void MatMul::matmulFloat(
+    const TensorView &A,
+    const TensorView &B,
+    const TensorView &bias,
+    float beta,
+    const TensorView &C) {
   CHECK(A.getDType() == B.getDType() && A.getDType() == DType::getType<T>());
   CHECK(C.getDType() == DType::getType<TC>());
   if (A.getDim() == 2 && B.getDim() == 2) {
@@ -286,14 +329,14 @@ void MatMul::matmulFloat(const TensorView &A, const TensorView &B, const TensorV
     if constexpr (std::is_same<T, half>::value && std::is_same<TC, half>::value) {
       if (A.getShape(0) == 1 && A.getStride(1) == 1 && B.getStride(0) == 1 &&
           B.getStride(1) == B.getShape(0) && B.getShape(0) % 8 == 0) {
-        return gemvHalf(A.subtensor(0), B, C);
+        return gemvHalf(A.subtensor(0), B, bias, beta != 0.0f, C);
       }
     }
-    return gemm<T, TC>(A, B, C);
+    return gemm<T, TC>(A, B, bias, beta, C);
   } else if (A.getDim() > 2 && B.getDim() == 2 && A.isContiguous()) {
-    return bmmToGemm<T, TC>(A, B, C);
+    return bmmToGemm<T, TC>(A, B, bias, beta, C);
   } else if (A.getDim() >= 2 && B.getDim() >= 2 && A.getDim() >= B.getDim()) {
-    return bmm<T, TC>(A, B, C);
+    return bmm<T, TC>(A, B, bias, beta, C);
   } else {
     NOT_IMPL();
   }
@@ -335,14 +378,24 @@ std::vector<const T *> MatMul::getBatch(const TensorView &A, int nBatchDim) {
 }
 
 template<typename T, typename TC>
-void MatMul::bmmToGemm(const TensorView &A, const TensorView &B, const TensorView &C) {
+void MatMul::bmmToGemm(
+    const TensorView &A,
+    const TensorView &B,
+    const TensorView &bias,
+    float beta,
+    const TensorView &C) {
   TensorView xA = A.view({-1, A.getShape(-1)});
   TensorView xC = C.view({-1, C.getShape(-1)});
-  gemm<T, TC>(xA, B, xC);
+  gemm<T, TC>(xA, B, bias, beta, xC);
 }
 
 template<typename T, typename TC>
-void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) {
+void MatMul::bmm(
+    const TensorView &A,
+    const TensorView &B,
+    const TensorView &bias,
+    float beta,
+    const TensorView &C) {
   TensorView xB = B;
   if (A.getDim() != B.getDim()) xB = op::cpu::expandBatchDims(B, A.getShape());
 
@@ -366,6 +419,7 @@ void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) 
   LL_CHECK_CUDA_STATUS(cudaMemcpy(arrayA.get(), batchA.data(), nc, cudaMemcpyHostToDevice));
   LL_CHECK_CUDA_STATUS(cudaMemcpy(arrayB.get(), batchB.data(), nc, cudaMemcpyHostToDevice));
   LL_CHECK_CUDA_STATUS(cudaMemcpy(arrayC.get(), batchC.data(), nc, cudaMemcpyHostToDevice));
+  if (!bias.empty()) beta = startFromBias(bias, C);
 
   callGemmArray<T, TC>(
       _gemm.get(),
@@ -379,7 +433,7 @@ void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) 
       gemmArgs.lda,
       arrayB.get(),
       gemmArgs.ldb,
-      0.0f,
+      beta,
       arrayC.get(),
       gemmArgs.ldc,
       nb);
@@ -388,11 +442,41 @@ void MatMul::bmm(const TensorView &A, const TensorView &B, const TensorView &C) 
 }
 
 template<typename T, typename TC>
-void MatMul::gemm(const TensorView &A, const TensorView &B, const TensorView &C) {
+void MatMul::gemm(
+    const TensorView &A,
+    const TensorView &B,
+    const TensorView &bias,
+    float beta,
+    const TensorView &C) {
   CHECK(A.getDim() == B.getDim() && A.getDim() == 2);
   C.throwIfInvalidShape({A.getShape(0), B.getShape(1)}, "gemm");
 
   op::cpu::GEMMArgs gemmArgs = op::cpu::generateGemmArgs(A, B, C);
+  if (!bias.empty()) {
+    // The bias read by the epilogue as a source of one row, where the backend can.
+    if constexpr (std::is_same<T, half>::value && std::is_same<TC, half>::value) {
+      if (_gemm->hgemmFrom(
+              gemmArgs.transA,
+              gemmArgs.transB,
+              gemmArgs.M,
+              gemmArgs.N,
+              gemmArgs.K,
+              1.0f,
+              getDataPtrCuda<T>(A),
+              gemmArgs.lda,
+              getDataPtrCuda<T>(B),
+              gemmArgs.ldb,
+              1.0f,
+              getDataPtrCuda<half>(bias),
+              0,
+              getDataPtrCuda<half>(C),
+              gemmArgs.ldc)) {
+        LL_CUDA_SYNCHRONIZE();
+        return;
+      }
+    }
+    beta = startFromBias(bias, C);
+  }
   callGemm<T, TC>(
       _gemm.get(),
       gemmArgs.transA,
@@ -405,7 +489,7 @@ void MatMul::gemm(const TensorView &A, const TensorView &B, const TensorView &C)
       gemmArgs.lda,
       getDataPtrCuda<T>(B),
       gemmArgs.ldb,
-      0.0f,
+      beta,
       getDataPtrCuda<TC>(C),
       gemmArgs.ldc);
   LL_CUDA_SYNCHRONIZE();

@@ -446,6 +446,14 @@ Tensor matmul(Operators *op, TensorView A, TensorView B) {
   return out;
 }
 
+Tensor matmulAdd(Operators *op, TensorView A, TensorView B, TensorView addend) {
+  std::vector<int> shape = A.getShape();
+  shape.back() = B.getShape(-1);
+  Tensor out = F::empty(A.getDevice(), shape, A.getDType());
+  op->matmulAdd(A, B, addend, out);
+  return out;
+}
+
 Tensor conv2d(
     Operators *op,
     TensorView input,

@@ -43,6 +43,16 @@ class MatMul {
   /// float where A and B are both half, the sum as it was before half would round it.
   void apply(const TensorView &A, const TensorView &B, const TensorView &C);
 
+  /// C = A @ B + addend, `addend` of C's type broadcast over C's leading dimensions -- a bias (N),
+  /// or a residual of C's shape. It is written into C first and the GEMM adds the product to it
+  /// (beta = 1) -- the vector kernel to its float sum -- so the two are rounded once, as torch's
+  /// addmm rounds them. An empty `addend` is apply() above.
+  void apply(
+      const TensorView &A,
+      const TensorView &B,
+      const TensorView &addend,
+      const TensorView &C);
+
  protected:
   std::shared_ptr<Gemm> _gemm;
 
@@ -50,14 +60,36 @@ class MatMul {
   // <float>. They differ only in which cuBLAS call they end at and in the vector kernel, which
   // exists for half alone; everything about the shapes is the same, so they are one body rather
   // than three. Defined in matmul.cc and used only there.
+  // `bias` is empty, or (N) of TC, contiguous, to add to every row; `beta` is 0, or 1 to add the
+  // product to what C already holds -- see apply().
   template<typename T, typename TC = T>
-  void gemm(const TensorView &A, const TensorView &B, const TensorView &C);
+  void gemm(
+      const TensorView &A,
+      const TensorView &B,
+      const TensorView &bias,
+      float beta,
+      const TensorView &C);
   template<typename T, typename TC = T>
-  void bmm(const TensorView &A, const TensorView &B, const TensorView &C);
+  void bmm(
+      const TensorView &A,
+      const TensorView &B,
+      const TensorView &bias,
+      float beta,
+      const TensorView &C);
   template<typename T, typename TC = T>
-  void matmulFloat(const TensorView &A, const TensorView &B, const TensorView &C);
+  void matmulFloat(
+      const TensorView &A,
+      const TensorView &B,
+      const TensorView &bias,
+      float beta,
+      const TensorView &C);
   template<typename T, typename TC = T>
-  void bmmToGemm(const TensorView &A, const TensorView &B, const TensorView &C);
+  void bmmToGemm(
+      const TensorView &A,
+      const TensorView &B,
+      const TensorView &bias,
+      float beta,
+      const TensorView &C);
   template<typename T>
   std::vector<const T *> getBatch(const TensorView &A, int nBatchDim);
 };
