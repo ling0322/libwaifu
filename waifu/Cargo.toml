@@ -3,6 +3,9 @@ name = "waifu"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+# It links the libflint.a CMake builds, with CUDA, Vulkan and Metal behind it: it goes as binaries,
+# and bindings/rust goes to crates.io.
+publish = false
 description = "Your local AI waifu: diffusion image generation on top of the flint tensor library"
 # Declares that this crate links libflint.a, so Cargo runs build.rs and keeps the native library
 # to a single owner in the dependency graph.

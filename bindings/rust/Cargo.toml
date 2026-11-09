@@ -1,0 +1,23 @@
+[package]
+name = "libwaifu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust binding for libwaifu, which it loads at run time: draw, speak, hear and take pictures apart on CUDA, Metal, Vulkan or the CPU"
+# tests/layout.rs holds every struct against the engine's crate, a path dependency that `cargo
+# publish` drops; it stays in the repository and its CI, and out of the package, where it would
+# not compile.
+exclude = ["tests/layout.rs"]
+
+# What code writes: `use waifu::...`. The engine's crate is `waifu` too; the two never meet, the
+# root workspace excluding this one.
+[lib]
+name = "waifu"
+
+# A workspace of its own, apart from the engine's: this builds wherever Rust does.
+[workspace]
+
+[dev-dependencies]
+# For tests/layout.rs alone, which holds every struct against the engine's. Named apart, the
+# engine's crate being `waifu` too. `cargo publish` drops it, having a path and no version.
+waifu_engine = { package = "waifu", path = "../../waifu" }
