@@ -1087,13 +1087,8 @@ int32_t fl_fp8_matmul_add(
 #endif
 #ifdef LIBWAIFU_METAL_ENABLED
     if (device == fl::Device::kMetal) {
-      // No fused epilogue here: the product is rounded, and the addend added after.
-      fl::op::metal_native::fp8Matmul(deref(a), weight, deref(scale), deref(out));
-      if (!more.empty()) {
-        std::vector<int> shape = deref(out).getShape();
-        fl::getOperators(device)->add(
-            deref(out), fl::op::cpu::expandBatchDims(more, shape).expand(shape), deref(out));
-      }
+      // The addend is added after the scale, to the float sum, which is rounded to half once.
+      fl::op::metal_native::fp8Matmul(deref(a), weight, deref(scale), deref(out), more);
       return clearError();
     }
 #endif

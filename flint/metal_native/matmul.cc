@@ -23,6 +23,7 @@
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
+#include "flint/cpu/common.h"
 #include "flint/metal_native/common.h"
 #include "flint/metal_native/ops.h"
 
@@ -53,6 +54,7 @@ struct GemmParams {
   uint32_t strideB1;
   uint32_t vecA;
   uint32_t vecB;
+  uint32_t addKind;
 };
 
 // The tile of the output each threadgroup of kernels/nax/matmul.metal takes, and its threads:
@@ -79,11 +81,31 @@ struct NaxGemmParams {
   uint32_t strideA1;
   uint32_t strideB0;
   uint32_t strideB1;
+  uint32_t addKind;
 };
 
 // In step with kVecAlongK and kVecAlongMN in kernels/matmul.metal.
 constexpr uint32_t kVecAlongK = 1;
 constexpr uint32_t kVecAlongMN = 2;
+
+// In step with kAddNone, kAddColumns and kAddWhole in kernels/matmul.metal: what the kernels add to
+// the product's float sum before they round it -- nothing, a value per column, or a contiguous
+// tensor of the output's shape.
+constexpr uint32_t kAddNone = 0;
+constexpr uint32_t kAddColumns = 1;
+constexpr uint32_t kAddWhole = 2;
+
+// What is added to a product, as the kernels read it: `values` (N) for kAddColumns, and for
+// kAddWhole, contiguous and of the output's shape.
+struct Addend {
+  TensorView values;
+  uint32_t kind = kAddNone;
+
+  // This addend for the leading slice `i` of the output.
+  Addend subtensor(int i) const {
+    return kind == kAddWhole ? Addend{values.subtensor(i), kind} : *this;
+  }
+};
 
 struct ConvParams {
   uint32_t channels;
@@ -142,6 +164,7 @@ bool naxGemm(
     const TensorView &b,
     const GemmParams &gemm,
     uint32_t numBatches,
+    const Addend &addend,
     const TensorView &output) {
   if (!getContext(a)->hasNax() || gemm.strideAk != 1) return false;
 
@@ -160,18 +183,37 @@ bool naxGemm(
   params.strideA1 = gemm.strideA1;
   params.strideB0 = gemm.strideB0;
   params.strideB1 = gemm.strideB1;
+  params.addKind = addend.kind;
 
-  std::string kernel =
-      kernelName(alongN ? "nax_matmul_nn" : "nax_matmul_nt", a.getDType()) + outputSuffix(a, output);
-  getContext(a)->dispatchGroups(
-      kernel.c_str(),
-      {getArg(output), getArg(a), getArg(b)},
-      &params,
-      sizeof(params),
-      ceilDiv(gemm.N, kNaxTileN),
-      ceilDiv(gemm.M, kNaxTileM),
-      numBatches,
-      kNaxThreads);
+  // With an addend, the kernels that hold the sum to add it before they round it; without, the ones
+  // that have matmul2d write the product itself.
+  bool adds = addend.kind != kAddNone;
+  const char *variant = adds ? (alongN ? "nax_matmul_add_nn" : "nax_matmul_add_nt")
+                             : (alongN ? "nax_matmul_nn" : "nax_matmul_nt");
+  std::string kernel = kernelName(variant, a.getDType()) + outputSuffix(a, output);
+  uint32_t groupsX = ceilDiv(gemm.N, kNaxTileN);
+  uint32_t groupsY = ceilDiv(gemm.M, kNaxTileM);
+  if (adds) {
+    getContext(a)->dispatchGroups(
+        kernel.c_str(),
+        {getArg(output), getArg(a), getArg(b), getArg(addend.values)},
+        &params,
+        sizeof(params),
+        groupsX,
+        groupsY,
+        numBatches,
+        kNaxThreads);
+  } else {
+    getContext(a)->dispatchGroups(
+        kernel.c_str(),
+        {getArg(output), getArg(a), getArg(b)},
+        &params,
+        sizeof(params),
+        groupsX,
+        groupsY,
+        numBatches,
+        kNaxThreads);
+  }
   return true;
 }
 
@@ -181,6 +223,7 @@ void gemm(
     const TensorView &a,
     const TensorView &b,
     const Layout &batch,
+    const Addend &addend,
     const TensorView &output) {
   int M = a.getShape(-2);
   int K = a.getShape(-1);
@@ -188,7 +231,13 @@ void gemm(
 
   if (output.getNumEl() == 0) return;
   if (K == 0) {
-    fill(output, 0.0f);
+    // A product over nothing is zero, and what is added to it is the answer.
+    if (addend.kind == kAddNone) {
+      fill(output, 0.0f);
+    } else {
+      std::vector<int> shape = output.getShape();
+      copy(op::cpu::expandBatchDims(addend.values, shape).expand(shape), output);
+    }
     return;
   }
 
@@ -218,12 +267,15 @@ void gemm(
   }
   params.vecA = vectorLayout(a, params.strideAk, params.strideAm, params.strideA0, params.strideA1);
   params.vecB = vectorLayout(b, params.strideBk, params.strideBn, params.strideB0, params.strideB1);
+  params.addKind = addend.kind;
 
-  if (naxGemm(a, b, params, numBatches, output)) return;
+  if (naxGemm(a, b, params, numBatches, addend, output)) return;
 
+  // The output stands in for an addend that is not there; the kernel is told not to read it.
+  const TensorView &added = addend.kind == kAddNone ? output : addend.values;
   getContext(a)->dispatchGroups(
       (kernelName("matmul", a.getDType()) + outputSuffix(a, output)).c_str(),
-      {getArg(output), getArg(a), getArg(b)},
+      {getArg(output), getArg(a), getArg(b), getArg(added)},
       &params,
       sizeof(params),
       ceilDiv(N, kTile),
@@ -362,9 +414,68 @@ void conv(
       kGemmThreads);
 }
 
+// The product, with `addend` added to it before it is rounded, into `out`, which matmul checked.
+void product(
+    const TensorView &a,
+    const TensorView &b,
+    const Addend &addend,
+    const TensorView &out) {
+  // A stack of rows times one matrix is one taller product, when the rows stack evenly.
+  if (b.getDim() == 2 && a.getDim() > 2 && a.isContiguous()) {
+    // The rows counted rather than inferred: a view cannot infer them from a K of zero.
+    int rows = 1;
+    for (int d = 0; d < a.getDim() - 1; ++d) rows *= a.getShape(d);
+    int N = b.getShape(-1);
+    TensorView flat = a.view({rows, a.getShape(-1)});
+    Layout single{};
+    single.ndim = 1;
+    single.shape[0] = 1;
+    Addend flatAddend = addend;
+    if (addend.kind == kAddWhole) flatAddend.values = addend.values.view({rows, N});
+    gemm(flat, b, single, flatAddend, out.view({rows, N}));
+    return;
+  }
+
+  TensorView expanded = expandBatch(b, a);
+  std::vector<int> batchShape;
+  std::vector<int> stridesA;
+  std::vector<int> stridesB;
+  for (int d = 0; d < a.getDim() - 2; ++d) {
+    if (expanded.getShape(d) != a.getShape(d)) {
+      throw lut::InvalidArgError(lut::sprintf(
+          "matmul: the batch of %s does not match %s",
+          b.getShapeString(),
+          a.getShapeString()));
+    }
+    batchShape.push_back(a.getShape(d));
+    stridesA.push_back(a.getStride(d));
+    stridesB.push_back(expanded.getStride(d));
+  }
+
+  Layout batch;
+  if (!collapse(batchShape, {stridesA, stridesB}, &batch) || batch.ndim > 2) {
+    // More batch dimensions than the kernel walks, which do not merge: one leading slice at a
+    // time into the rows of the answer.
+    for (int i = 0; i < a.getShape(0); ++i) {
+      product(a.subtensor(i), expanded.subtensor(i), addend.subtensor(i), out.subtensor(i));
+    }
+    return;
+  }
+
+  gemm(a, expanded, batch, addend, out);
+}
+
 }  // namespace
 
 void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
+  matmulAdd(a, b, TensorView(), out);
+}
+
+void matmulAdd(
+    const TensorView &a,
+    const TensorView &b,
+    const TensorView &addend,
+    const TensorView &out) {
   checkFloat(a.getDType(), "matmul");
   if (a.getDType() != b.getDType()) {
     throw lut::InvalidArgError(lut::sprintf(
@@ -391,43 +502,27 @@ void matmul(const TensorView &a, const TensorView &b, const TensorView &out) {
   bool wide = a.getDType() == DType::kFloat16 && out.getDType() == DType::kFloat;
   checkOutput(out, shape, wide ? DType(DType::kFloat) : a.getDType(), "matmul");
 
-  // A stack of rows times one matrix is one taller product, when the rows stack evenly.
-  if (b.getDim() == 2 && a.getDim() > 2 && a.isContiguous()) {
-    TensorView flat = a.view({-1, a.getShape(-1)});
-    Layout single{};
-    single.ndim = 1;
-    single.shape[0] = 1;
-    gemm(flat, b, single, out.view({flat.getShape(0), b.getShape(-1)}));
-    return;
+  if (addend.empty()) return product(a, b, Addend{}, out);
+  if (addend.getDType() != out.getDType() || addend.getDim() > out.getDim()) {
+    throw lut::InvalidArgError(lut::sprintf(
+        "matmul: an addend of %s %s does not fit an output of %s %s",
+        addend.getDType().toString(),
+        addend.getShapeString(),
+        out.getDType().toString(),
+        out.getShapeString()));
   }
 
-  TensorView expanded = expandBatch(b, a);
-  std::vector<int> batchShape;
-  std::vector<int> stridesA;
-  std::vector<int> stridesB;
-  for (int d = 0; d < a.getDim() - 2; ++d) {
-    if (expanded.getShape(d) != a.getShape(d)) {
-      throw lut::InvalidArgError(lut::sprintf(
-          "matmul: the batch of %s does not match %s",
-          b.getShapeString(),
-          a.getShapeString()));
-    }
-    batchShape.push_back(a.getShape(d));
-    stridesA.push_back(a.getStride(d));
-    stridesB.push_back(expanded.getStride(d));
+  // One value for each column, however many dimensions it is written in, is a bias, which the
+  // kernels read by column. Anything else is read element by element, as the output is laid out:
+  // a residual of its shape where it is, and anything broadcast, copied out to that first.
+  int N = shape.back();
+  if (addend.getShape(-1) == N && addend.getNumEl() == N) {
+    Contiguous bias(addend);
+    product(a, b, Addend{bias.view({N}), kAddColumns}, out);
+  } else {
+    Contiguous whole(op::cpu::expandBatchDims(addend, shape).expand(shape));
+    product(a, b, Addend{whole, kAddWhole}, out);
   }
-
-  Layout batch;
-  if (!collapse(batchShape, {stridesA, stridesB}, &batch) || batch.ndim > 2) {
-    // More batch dimensions than the kernel walks, which do not merge: one leading slice at a
-    // time into the rows of the answer.
-    for (int i = 0; i < a.getShape(0); ++i) {
-      matmul(a.subtensor(i), expanded.subtensor(i), out.subtensor(i));
-    }
-    return;
-  }
-
-  gemm(a, expanded, batch, out);
 }
 
 void conv2d(

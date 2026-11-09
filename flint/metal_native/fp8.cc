@@ -19,6 +19,7 @@
 
 #include "lutil/error.h"
 #include "lutil/log.h"
+#include "flint/cpu/common.h"
 #include "flint/metal_native/common.h"
 #include "flint/metal_native/ops.h"
 
@@ -35,7 +36,13 @@ struct Fp8MatmulParams {
   uint32_t K;
   uint32_t vecA;
   uint32_t vecB;
+  uint32_t addKind;
 };
+
+// In step with kAddColumns and kAddWhole in kernels/fp8.metal.
+constexpr uint32_t kAddNone = 0;
+constexpr uint32_t kAddColumns = 1;
+constexpr uint32_t kAddWhole = 2;
 
 // The tile of the output each threadgroup takes, and its threads: kernels/gemm.h's.
 constexpr int64_t kTile = 64;
@@ -57,7 +64,8 @@ void fp8Matmul(
     const TensorView &a,
     const TensorView &data,
     const TensorView &scale,
-    const TensorView &out) {
+    const TensorView &out,
+    const TensorView &addend) {
   // The C API has checked the operands: a <float16>(..., k) and out <float16>(..., rows), both
   // contiguous, the weight <fp8e4m3>(rows, k) and the scale <float>, contiguous too.
   CHECK(a.getDType() == DType::kFloat16 && out.getDType() == DType::kFloat16);
@@ -69,8 +77,31 @@ void fp8Matmul(
   // division by k, from `out`, which has every row.
   int64_t k = data.getShape(1);
   int64_t rows = data.getShape(0);
+
+  // A bias of a value per row of the weight is read by column; anything else element by element,
+  // broadcast to the output and copied out to it first where it is not already laid out as it is.
+  uint32_t addKind = kAddNone;
+  Contiguous more;
+  if (!addend.empty()) {
+    CHECK(addend.getDType() == DType::kFloat16);
+    std::vector<int> shape = out.getShape();
+    if (addend.getShape(-1) == rows && addend.getNumEl() == rows) {
+      more = Contiguous(addend);
+      addKind = kAddColumns;
+    } else {
+      more = Contiguous(op::cpu::expandBatchDims(addend, shape).expand(shape));
+      addKind = kAddWhole;
+    }
+  }
+
   if (k == 0) {
-    if (out.getNumEl() > 0) fill(out, 0.0f);
+    if (out.getNumEl() == 0) return;
+    if (addKind == kAddNone) {
+      fill(out, 0.0f);
+    } else {
+      std::vector<int> shape = out.getShape();
+      copy(op::cpu::expandBatchDims(addend, shape).expand(shape), out);
+    }
     return;
   }
   int64_t m = a.getNumEl() / k;
@@ -84,13 +115,16 @@ void fp8Matmul(
   params.K = static_cast<uint32_t>(k);
   params.vecA = fours(k) && fours(a.getInternalOffset());
   params.vecB = fours(k) && fours(data.getInternalOffset());
+  params.addKind = addKind;
+  // The output stands in for an addend that is not there; the kernels are told not to read it.
+  CommandStream::Arg added = addKind == kAddNone ? getArg(out) : getArg(more);
 
   // On the neural accelerators where there are any, with the same parameters: a reduction that is
   // not whole chunks by the short kernel, which reads no further than it.
   if (getContext(a)->hasNax()) {
     getContext(a)->dispatchGroups(
         k % kNaxTileK == 0 ? "nax_fp8_matmul" : "nax_fp8_matmul_short",
-        {getArg(out), getArg(a), getArg(data), getArg(scale)},
+        {getArg(out), getArg(a), getArg(data), getArg(scale), added},
         &params,
         sizeof(params),
         ceilDiv(rows, kNaxTileN),
@@ -102,7 +136,7 @@ void fp8Matmul(
 
   getContext(a)->dispatchGroups(
       "fp8_matmul",
-      {getArg(out), getArg(a), getArg(data), getArg(scale)},
+      {getArg(out), getArg(a), getArg(data), getArg(scale), added},
       &params,
       sizeof(params),
       ceilDiv(rows, kTile),

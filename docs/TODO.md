@@ -149,31 +149,6 @@ So the CPU test catches a fault five times smaller, which is the ratio the basel
 implied: the CUDA one starts 2.1e-2 from its reference and a fault has to grow past that before
 it shows, while the CPU one starts at 9.1e-5 and has nothing to hide behind.
 
-## Metal adds to a product after rounding it
-
-`Operators::matmulAdd` is `A B + addend`: a linear layer's bias, or a residual of the product's
-shape. CUDA and Vulkan add the addend to the product's float sum and round the two once, as
-torch's `addmm` does; Metal has no override, so it gets the default, `matmul` and then `add`: in
-half the product is rounded, then the sum rounded again. On Qwen3-ASR's audio encoder, whose every
-projection has a bias, that second rounding was the whole of the distance from torch's half on
-CUDA -- worst element 1.83e-3, 4.70e-3 and 2.44e-3 of float32 on its three test recordings,
-1.03e-3, 2.87e-3 and 2.01e-3 once fused, against torch's 1.22e-3, 2.79e-3 and 2.21e-3. A Metal
-model with biased linears is that far behind torch still, and pays for a second pass over the
-output besides.
-
-What it needs: `MetalOperators::matmulAdd`, with the GEMM kernels starting their accumulators from
-a bias they read by column, or from what the output already holds where the addend is anything
-else -- `flint/vulkan/shaders/gemm_coopmat_core.glsl` (`startKind`, `biasOf`, `loadTile`) is the
-pattern, and `gemm.comp` (`storeC`) and `flint/cuda/matvec.cu` add it to the sum they store. On
-Vulkan this made a biased linear cost what the product alone does (8192 x 5120 x 640: 2.08 ms,
-against 2.69 ms for matmul and add). "test Vulkan matmul with a bias rounds once" is the test to
-copy: a product of 2049 and an addend of 1 is 2050 rounded once and 2048 rounded twice.
-
-The FP8 product (`fl_fp8_matmul_add`) is the same: CUDA's epilogue adds the bias, to the float
-sum after the scale, and Metal's `fp8Matmul` is followed by an `add`. In FP8 the second rounding
-is small beside the weight's own (three bits of mantissa against ten), so what the fused version
-buys there is the pass over the output -- 3% to 9% on CUDA -- rather than precision.
-
 ## Operators worth adding next
 
 The element-wise set, `div(a, b)` and `min` are in. Still missing from `Operators`, roughly in

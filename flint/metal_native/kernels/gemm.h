@@ -33,6 +33,12 @@
 //   void stageRowBias(threadgroup float *table, uint m0, uint tid)
 //       whether C starts from a value per row rather than zero, and if it does, that value for
 //       rows m0 : m0 + kTileM written into `table`, (kTileM, 8), each row's value eight times
+//   bool hasColumnBias()
+//   void stageColumnBias(threadgroup float *table, uint n0, uint tid)
+//       whether a value per column is added to the float sum before it is stored -- a linear
+//       layer's bias, which is then rounded with the product once -- and if it is, that value for
+//       columns n0 : n0 + kTileN written into `table`, (8, kTileN), the same row eight times, zero
+//       past N
 //   void stageA(threadgroup T *tile, uint m0, uint k0, uint tid)
 //       A[m0 : m0 + kTileM, k0 : k0 + TileK<T>] into `tile`, (kTileM, kStrideA<T>), m by k, with
 //       zeros where it runs past A
@@ -42,6 +48,9 @@
 //       writes the 8 x 8 block of C at (m, n) by itself, if it can; false leaves it to
 //   void storeC(uint m, uint n, float value)
 //       which writes one element, already known to be in range
+//
+// Both stores are handed the sum in float, the column bias already in it: rounding it to C is
+// theirs, after anything else they add.
 //
 // and the threadgroup memory, which only a kernel can declare: FLINT_GEMM_SHARED(T) declares it.
 
@@ -69,7 +78,12 @@ struct StrideA {
 };
 constant constexpr uint kStrideB = kTileN + 8;
 
+// The column bias table, (8, kTileN) floats, fits where B is staged, in either operand type.
+static_assert(8 * kTileN * sizeof(float) <= TileK<float>::value * kStrideB * sizeof(float), "");
+static_assert(8 * kTileN * sizeof(float) <= TileK<half>::value * kStrideB * sizeof(half), "");
+
 // The scratch holds the row bias table at the start, and an 8 x 8 for each simdgroup at the end.
+// The column bias table is put where B was staged, once the product is done with it.
 #define FLINT_GEMM_SHARED(T)                                   \
   threadgroup T tileA[kTileM * StrideA<T>::value];             \
   threadgroup T tileB[TileK<T>::value * kStrideB];             \
@@ -129,6 +143,14 @@ inline void gemm(
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
+  // Every simdgroup is past the barrier at the end of the last step, done reading tileB.
+  bool columnBias = problem.hasColumnBias();
+  threadgroup float *columns = reinterpret_cast<threadgroup float *>(tileB);
+  if (columnBias) {
+    problem.stageColumnBias(columns, n0, tid);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
   // A block the problem cannot write by itself goes out through an 8 x 8 of threadgroup memory
   // the simdgroup has to itself, which leaves where in a simdgroup matrix each element is to
   // Metal.
@@ -138,9 +160,18 @@ inline void gemm(
       uint m = m0 + sgM + 8 * i;
       uint n = n0 + sgN + 8 * j;
       if (m >= M || n >= N) continue;
-      if (m + 8 <= M && n + 8 <= N && problem.storeBlock(acc[i][j], m, n)) continue;
+      simdgroup_matrix<float, 8, 8> sum = acc[i][j];
+      if (columnBias) {
+        // Eight copies of the bias of these columns, in the layout the sum is in: an element of
+        // one is added to the element of the other that holds the same place.
+        simdgroup_matrix<float, 8, 8> bias;
+        simdgroup_load(bias, columns + sgN + 8 * j, kTileN);
+        sum.thread_elements()[0] += bias.thread_elements()[0];
+        sum.thread_elements()[1] += bias.thread_elements()[1];
+      }
+      if (m + 8 <= M && n + 8 <= N && problem.storeBlock(sum, m, n)) continue;
 
-      simdgroup_store(acc[i][j], block, 8);
+      simdgroup_store(sum, block, 8);
       simdgroup_barrier(mem_flags::mem_threadgroup);
       for (uint e = lane; e < 64; e += 32) {
         uint mm = m + e / 8;

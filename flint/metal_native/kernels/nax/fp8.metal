@@ -21,7 +21,8 @@
 // C (M, N) = A (M, K) W^T, W (N, K) with one scale for all of it. The activation is
 // read where it is. The weight is read kTileK columns at a time, widened to half -- exactly -- into
 // threadgroup memory, a row of W to a row of the tile, and the next chunk read into registers
-// while matmul2d works on this one. The sum is in float, and the scale is applied on the way out.
+// while matmul2d works on this one. The sum is in float, and the scale is applied on the way out,
+// the addend added after it, if there is one: sum * scale + addend, rounded to half once.
 //
 // Metal 4.1 has a format for E4M3 that matmul2d reads directly; this is Metal 4.0, which does not.
 //
@@ -46,7 +47,11 @@ struct Fp8MatmulParams {
   uint K;
   uint vecA;
   uint vecB;  // the weight's rows start on a multiple of four bytes
+  uint addKind;
 };
+
+constant constexpr uint kAddColumns = 1;
+constant constexpr uint kAddWhole = 2;
 
 // In step with kNaxTileM, kNaxTileN and kNaxTileK in fp8.cc.
 constant constexpr int kTileM = 64;   // activation rows
@@ -109,7 +114,8 @@ kernel void nax_fp8_matmul(
     device half *a [[buffer(1)]],
     device const uchar *w [[buffer(2)]],
     device const float *scale [[buffer(3)]],
-    constant Fp8MatmulParams &p [[buffer(4)]],
+    device const half *add [[buffer(4)]],
+    constant Fp8MatmulParams &p [[buffer(5)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]]) {
   threadgroup half tile[kTileN * kTileK];
@@ -169,13 +175,16 @@ kernel void nax_fp8_matmul(
     uint n = n0 + uint(at[0]);
     uint m = m0 + uint(at[1]);
     if (m >= p.M || n >= p.N) continue;
-    c[m * p.N + n] = half(sum[i] * scale[0]);
+    float value = sum[i] * scale[0];
+    if (p.addKind == kAddColumns) value += float(add[n]);
+    if (p.addKind == kAddWhole) value += float(add[m * p.N + n]);
+    c[m * p.N + n] = half(value);
   }
 }
 
 template [[host_name("nax_fp8_matmul")]] kernel void nax_fp8_matmul<false>(
-    device half *, device half *, device const uchar *, device const float *,
+    device half *, device half *, device const uchar *, device const float *, device const half *,
     constant Fp8MatmulParams &, uint3, uint);
 template [[host_name("nax_fp8_matmul_short")]] kernel void nax_fp8_matmul<true>(
-    device half *, device half *, device const uchar *, device const float *,
+    device half *, device half *, device const uchar *, device const float *, device const half *,
     constant Fp8MatmulParams &, uint3, uint);

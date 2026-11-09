@@ -71,6 +71,10 @@ Tensor randn(std::initializer_list<int> shape) {
   return plus(fl::test::mul(cpu(), fl::test::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), -2.0f);
 }
 
+Tensor randn(const std::vector<int> &shape) {
+  return plus(fl::test::mul(cpu(), fl::test::rand(Device::getCpu(), shape, DType::kFloat), 4.0f), -2.0f);
+}
+
 bool close(const Tensor &metal, const Tensor &reference, float rtol, float atol) {
   return cpu()->allClose(toCpu(metal), reference, rtol, atol);
 }
@@ -601,6 +605,203 @@ CATCH_TEST_CASE("test Metal matmul (half kept in float)", "[op][metal]") {
       });
     }
   }
+}
+
+namespace {
+
+// A tensor on the CPU of `shape`, every element `value`.
+Tensor filledWith(std::vector<int> shape, float value) {
+  Tensor x = fl::test::zeros(Device::getCpu(), shape, DType::kFloat);
+  float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+  std::fill(data, data + x.getNumEl(), value);
+  return x;
+}
+
+bool allAre(const Tensor &metal, float value) {
+  std::vector<float> got = values(metal);
+  return std::all_of(got.begin(), got.end(), [value](float y) { return y == value; });
+}
+
+}  // namespace
+
+CATCH_TEST_CASE("test Metal matmul with an addend rounds once", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // Every row of A is (1, 1, 0, ...) and every column of B (2048, 1, 0, ...)^T, so every element of
+  // the product is 2049, which half does not hold: rounded, it is 2048. Plus an addend of 1 it is
+  // 2050 rounded once, and 2048 rounded twice. N of 136 is two whole tiles of the simdgroup kernel
+  // and a part of one, one whole of the accelerators' and a part; K of 75 is not a whole number of
+  // steps of either.
+  constexpr int N = 136;
+  auto ones = [](int rows, int K) {
+    Tensor a = fl::test::zeros(Device::getCpu(), {rows, K}, DType::kFloat);
+    float *data = a.getInternalData()->getData<float>(0);
+    for (int m = 0; m < rows; ++m) data[m * K] = data[m * K + 1] = 1.0f;
+    return a;
+  };
+  auto weight = [](int K) {
+    Tensor w = fl::test::zeros(Device::getCpu(), {N, K}, DType::kFloat);  // (n, k), as a layer's
+    float *data = w.getInternalData()->getData<float>(0);
+    for (int n = 0; n < N; ++n) {
+      data[n * K] = 2048.0f;
+      data[n * K + 1] = 1.0f;
+    }
+    return w;
+  };
+  Tensor bias = toMetal(filledWith({N}, 1.0f), DType::kFloat16);
+
+  eachKernel([&](bool nax) {
+    for (int K : {16, 75}) {
+      for (int M : {1, 3, 130}) {
+        CATCH_INFO("nax = " << nax << ", M = " << M << ", K = " << K);
+        Tensor x = toMetal(ones(M, K), DType::kFloat16);
+        Tensor w = toMetal(weight(K), DType::kFloat16);
+        // B along K, a linear layer's weight transposed, and along N, as it is laid out.
+        for (bool alongK : {true, false}) {
+          CATCH_INFO("B along K = " << alongK);
+          Tensor y = alongK ? w.transpose(0, 1) : fl::test::contiguous(mtl(), w.transpose(0, 1));
+          CATCH_REQUIRE(allAre(fl::test::matmulAdd(mtl(), x, y, bias), 2050.0f));
+          // The test is one that rounding twice fails.
+          CATCH_REQUIRE(allAre(fl::test::add(mtl(), fl::test::matmul(mtl(), x, y), bias), 2048.0f));
+
+          // A bias written in more dimensions is a bias all the same.
+          CATCH_REQUIRE(allAre(fl::test::matmulAdd(mtl(), x, y, bias.view({1, N})), 2050.0f));
+          // A residual of the output's shape, every element of which is added to its own.
+          Tensor residual = toMetal(filledWith({M, N}, 1.0f), DType::kFloat16);
+          CATCH_REQUIRE(allAre(fl::test::matmulAdd(mtl(), x, y, residual), 2050.0f));
+          // And in place, the output its own addend, as a residual stream is added to.
+          Tensor inPlace = toMetal(filledWith({M, N}, 1.0f), DType::kFloat16);
+          mtl()->matmulAdd(x, y, inPlace, inPlace);
+          CATCH_REQUIRE(allAre(inPlace, 2050.0f));
+          // A value per row, which is neither, broadcast across the columns.
+          CATCH_REQUIRE(allAre(
+              fl::test::matmulAdd(mtl(), x, y, toMetal(filledWith({M, 1}, 1.0f), DType::kFloat16)),
+              2050.0f));
+        }
+
+        // A stack of rows times one matrix, which is one taller product, and a batch of matrices
+        // times a batch of weights, with the residual broadcast over it.
+        Tensor stacked = toMetal(ones(2 * 3 * M, K), DType::kFloat16).view({2, 3, M, K});
+        Tensor y = w.transpose(0, 1);
+        CATCH_REQUIRE(allAre(fl::test::matmulAdd(mtl(), stacked, y, bias), 2050.0f));
+        Tensor batchY = fl::test::contiguous(mtl(), y.unsqueeze(0).expand({4, K, N}));
+        Tensor batchX = toMetal(ones(4 * M, K), DType::kFloat16).view({4, M, K});
+        Tensor residual = toMetal(filledWith({M, N}, 1.0f), DType::kFloat16);
+        CATCH_REQUIRE(allAre(fl::test::matmulAdd(mtl(), batchX, batchY, residual), 2050.0f));
+        CATCH_REQUIRE(allAre(fl::test::matmulAdd(mtl(), batchX, batchY, bias), 2050.0f));
+      }
+    }
+  });
+}
+
+CATCH_TEST_CASE("test Metal matmul with an addend against the CPU", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // The product and the addend in float on the CPU, which the half product approximates; in float
+  // the two agree to float's rounding. Every kind of addend, on every path the product takes.
+  struct Case {
+    std::vector<int> a;
+    std::vector<int> b;
+    std::vector<int> addend;
+    bool transposeB;
+  };
+  std::vector<Case> cases = {
+      {{37, 75}, {75, 70}, {70}, false},           // a bias, nothing a whole tile
+      {{130, 64}, {136, 64}, {136}, true},         // a linear layer: a bias, B along K
+      {{1, 256}, {200, 256}, {200}, true},         // one token
+      {{130, 64}, {136, 64}, {130, 136}, true},    // a residual
+      {{2, 3, 33, 40}, {40, 72}, {72}, false},     // a stack of rows, one taller product
+      {{2, 3, 33, 40}, {40, 72}, {33, 72}, false}, // and a residual broadcast over it
+      {{4, 33, 40}, {4, 40, 72}, {4, 33, 72}, false},  // a batch, each with its own
+      {{4, 33, 40}, {4, 72, 40}, {1, 72}, true},       // and a bias
+  };
+  for (const Case &c : cases) {
+    Tensor a = randn(c.a);
+    Tensor bLaid = randn(c.b);
+    Tensor b = c.transposeB ? bLaid.transpose(-1, -2) : bLaid;
+    Tensor addend = randn(c.addend);
+    for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+      Tensor ma = toMetal(a, dtype);
+      Tensor mb = toMetal(bLaid, dtype);
+      if (c.transposeB) mb = mb.transpose(-1, -2);
+      Tensor madd = toMetal(addend, dtype);
+      // The reference from the operands as Metal has them: in half, after their rounding.
+      Tensor reference = fl::test::add(
+          cpu(),
+          fl::test::matmul(cpu(), toCpu(ma), fl::test::contiguous(cpu(), toCpu(mb))),
+          toCpu(madd));
+      float tol = dtype == DType::kFloat ? 1e-4f : 1e-2f;
+      eachKernel([&](bool nax) {
+        CATCH_INFO("a = " << a.getShapeString() << ", b = " << b.getShapeString() << ", addend = "
+                          << addend.getShapeString() << ", dtype = " << dtype.toString()
+                          << ", nax = " << nax);
+        CATCH_REQUIRE(close(fl::test::matmulAdd(mtl(), ma, mb, madd), reference, tol, tol));
+      });
+    }
+  }
+
+  // Batches that do not merge -- B's middle one broadcast -- which are taken a slice at a time,
+  // with a value per row broadcast to all of it.
+  {
+    Tensor a = randn({2, 2, 2, 9, 17});
+    Tensor b = randn({2, 1, 2, 17, 11});
+    Tensor addend = randn({9, 1});
+    for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+      Tensor ma = toMetal(a, dtype);
+      Tensor mb = toMetal(b, dtype).expand({2, 2, 2, 17, 11});
+      Tensor madd = toMetal(addend, dtype);
+      // On the CPU as eight matrices, which its matmul takes.
+      Tensor product = fl::test::matmul(
+          cpu(),
+          fl::test::contiguous(cpu(), toCpu(ma)).view({8, 9, 17}),
+          fl::test::contiguous(cpu(), toCpu(mb)).view({8, 17, 11}));
+      Tensor reference = fl::test::add(
+          cpu(),
+          product.view({2, 2, 2, 9, 11}),
+          fl::test::contiguous(cpu(), toCpu(madd).view({1, 1, 1, 9, 1}).expand({2, 2, 2, 9, 11})));
+      float tol = dtype == DType::kFloat ? 1e-4f : 1e-2f;
+      eachKernel([&](bool nax) {
+        CATCH_INFO("batches that do not merge, dtype = " << dtype.toString() << ", nax = " << nax);
+        CATCH_REQUIRE(close(fl::test::matmulAdd(mtl(), ma, mb, madd), reference, tol, tol));
+      });
+    }
+  }
+
+  // A product over nothing is zero, and plus its addend is the addend: a stack of rows times one
+  // matrix, which is flattened into one taller product, and a batch.
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    Tensor bias = randn({24});
+    Tensor residual = randn({2, 3, 24});
+    Tensor stack = F::empty(Device::getMetal(), {2, 3, 0}, dtype);
+    Tensor weight = F::empty(Device::getMetal(), {0, 24}, dtype);
+    Tensor weights = F::empty(Device::getMetal(), {2, 0, 24}, dtype);
+    // Exactly the addend, as Metal holds it: nothing is added to it.
+    Tensor mbias = toMetal(bias, dtype);
+    Tensor mresidual = toMetal(residual, dtype);
+    std::vector<float> spread = values(toCpu(mbias).view({1, 1, 24}).expand({2, 3, 24}));
+    eachKernel([&](bool nax) {
+      CATCH_INFO("K = 0, dtype = " << dtype.toString() << ", nax = " << nax);
+      CATCH_REQUIRE(values(fl::test::matmulAdd(mtl(), stack, weight, mbias)) == spread);
+      CATCH_REQUIRE(values(fl::test::matmulAdd(mtl(), stack, weights, mbias)) == spread);
+      CATCH_REQUIRE(values(fl::test::matmulAdd(mtl(), stack, weight, mresidual)) == values(mresidual));
+      CATCH_REQUIRE(allAre(fl::test::matmul(mtl(), stack, weight), 0.0f));
+    });
+  }
+
+  // Half times half kept in float, plus a float addend.
+  Tensor a = randn({70, 75});
+  Tensor b = randn({75, 33});
+  Tensor bias = randn({33});
+  Tensor ah = toMetal(a, DType::kFloat16);
+  Tensor bh = toMetal(b, DType::kFloat16);
+  Tensor reference =
+      fl::test::add(cpu(), fl::test::matmul(cpu(), toCpu(ah), toCpu(bh)), bias);
+  eachKernel([&](bool nax) {
+    CATCH_INFO("nax = " << nax);
+    Tensor x = F::empty(Device::getMetal(), {70, 33}, DType::kFloat);
+    mtl()->matmulAdd(ah, bh, toMetal(bias), x);
+    CATCH_REQUIRE(close(x, reference, 1e-4f, 1e-4f));
+  });
 }
 
 CATCH_TEST_CASE("test Metal convolutions", "[op][metal]") {
@@ -1236,6 +1437,50 @@ CATCH_TEST_CASE("test Metal fp8 matmul without the neural accelerators", "[op][m
   checkFp8Matmul();
 }
 
+CATCH_TEST_CASE("test Metal fp8 matmul with an addend rounds once", "[op][metal]") {
+  SKIP_WITHOUT_METAL();
+
+  // Rows of the activation (1, 1, 0, ...) and of the weight (256, 0.125, 0, ...) -- E4M3 0x78 and
+  // 0x20 -- scaled by 8: every element is 2049, which rounds to 2048 in half. Plus 1, after the
+  // scale, it is 2050 rounded once and 2048 rounded twice. K of 32 is the accelerators' whole
+  // kernel and 40 their short one.
+  constexpr int rows = 136;
+  Tensor scale = fl::test::toDevice(mtl(), Tensor::create<float>({1}, {8.0f}), Device::getMetal());
+  Tensor bias = toMetal(filledWith({rows}, 1.0f), DType::kFloat16);
+  eachKernel([&](bool nax) {
+    for (int k : {32, 40}) {
+      Tensor codes = F::empty(Device::getCpu(), {rows, k}, DType::kFp8E4M3);
+      Fp8E4M3 *code = codes.getInternalData()->getData<Fp8E4M3>(0);
+      for (int i = 0; i < rows * k; ++i) code[i].v = 0;
+      for (int n = 0; n < rows; ++n) {
+        code[n * k].v = 0x78;
+        code[n * k + 1].v = 0x20;
+      }
+      Tensor weight = fl::test::toDevice(mtl(), codes, Device::getMetal());
+      for (int m : {1, 3, 130}) {
+        CATCH_INFO("nax = " << nax << ", m = " << m << ", k = " << k);
+        Tensor a = fl::test::zeros(Device::getCpu(), {m, k}, DType::kFloat);
+        float *data = a.getInternalData()->getData<float>(0);
+        for (int i = 0; i < m; ++i) data[i * k] = data[i * k + 1] = 1.0f;
+        Tensor x = toMetal(a, DType::kFloat16);
+
+        Tensor out = F::empty(Device::getMetal(), {m, rows}, DType::kFloat16);
+        op::metal_native::fp8Matmul(x, weight, scale, out, bias);
+        CATCH_REQUIRE(allAre(out, 2050.0f));
+        op::metal_native::fp8Matmul(x, weight, scale, out);
+        CATCH_REQUIRE(allAre(fl::test::add(mtl(), out, bias), 2048.0f));
+
+        Tensor residual = toMetal(filledWith({m, rows}, 1.0f), DType::kFloat16);
+        op::metal_native::fp8Matmul(x, weight, scale, out, residual);
+        CATCH_REQUIRE(allAre(out, 2050.0f));
+        // In place, as a residual stream is added to.
+        op::metal_native::fp8Matmul(x, weight, scale, residual, residual);
+        CATCH_REQUIRE(allAre(residual, 2050.0f));
+      }
+    }
+  });
+}
+
 CATCH_TEST_CASE("test Metal shape operators", "[op][metal]") {
   SKIP_WITHOUT_METAL();
 
@@ -1630,6 +1875,121 @@ CATCH_TEST_CASE("benchmark Metal matmul and conv2d", "[.][metal-benchmark]") {
     double seconds = time([&]() { fl::test::conv2d(mtl(), x, w, Tensor(), 1, 1, 1, 1); });
     double flops = 2.0 * c.N * c.H * c.H * c.K * c.C * 9;
     printf("%-28s %8.3f ms %7.1f TFLOPS\n", c.name, seconds * 1e3, flops / seconds / 1e12);
+  }
+}
+
+// Not a test: what a linear layer's bias costs, and how far from the exact answer it lands, added
+// as a pass of its own after the product -- matmul, then add -- and in the product's epilogue,
+// with and without the neural accelerators. The error is the largest of any element against the product
+// and bias in double, of operands in half from [0, 1): the bias in [-1, 1). ./build/unittest
+// "benchmark Metal matmul with an addend".
+CATCH_TEST_CASE("benchmark Metal matmul with an addend", "[.][metal-benchmark]") {
+  SKIP_WITHOUT_METAL();
+
+  // The best of five rounds of twenty, after a warm-up: the GPU's clock rises and falls under it.
+  auto time = [](auto &&run) {
+    for (int i = 0; i < 5; ++i) run();
+    mtl()->synchronize();
+    double best = 1e9;
+    for (int round = 0; round < 5; ++round) {
+      int repeat = 20;
+      double t0 = lut::now();
+      for (int i = 0; i < repeat; ++i) run();
+      mtl()->synchronize();
+      best = std::min(best, (lut::now() - t0) / repeat);
+    }
+    return best;
+  };
+
+  struct Case {
+    const char *name;
+    int m, n, k;
+  };
+  std::vector<Case> cases = {
+      {"linear 8192x5120x640", 8192, 5120, 640},
+      {"linear 8192x640x640", 8192, 640, 640},
+      {"linear 2048x1280x1280", 2048, 1280, 1280},
+      {"asr encoder 1500x896x896", 1500, 896, 896},
+      {"decode 1x1024x1024", 1, 1024, 1024},
+      {"decode 1x3072x1024", 1, 3072, 1024},
+  };
+  printf("%-26s %-6s %10s %10s %10s %11s %11s\n", "", "", "matmul", "+add", "matmulAdd",
+         "err +add", "err fused");
+  for (const Case &c : cases) {
+    Tensor a = toMetal(fl::test::rand(Device::getCpu(), {c.m, c.k}, DType::kFloat), DType::kFloat16);
+    Tensor w = toMetal(fl::test::rand(Device::getCpu(), {c.n, c.k}, DType::kFloat), DType::kFloat16);
+    Tensor bias = toMetal(randn({c.n}), DType::kFloat16);
+    bias = fl::test::cast(mtl(), fl::test::mul(mtl(), bias, 0.5f), DType::kFloat16);
+    Tensor wt = w.transpose(0, 1);
+    Tensor out = F::empty(Device::getMetal(), {c.m, c.n}, DType::kFloat16);
+    Tensor twice = F::empty(Device::getMetal(), {c.m, c.n}, DType::kFloat16);
+
+    // The exact answer, in double, from the operands as they are in half: on a few rows of a long
+    // product, which are as like to have the worst element as any.
+    std::vector<float> va = values(a), vw = values(w), vb = values(bias);
+    auto worst = [&](const Tensor &got) {
+      std::vector<float> y = values(got);
+      double most = 0;
+      int step = std::max(1, c.m / 64);
+      for (int i = 0; i < c.m; i += step) {
+        for (int j = 0; j < c.n; ++j) {
+          double sum = vb[j];
+          for (int l = 0; l < c.k; ++l) sum += double(va[i * c.k + l]) * vw[j * c.k + l];
+          most = std::max(most, std::abs(double(y[i * c.n + j]) - sum));
+        }
+      }
+      return most;
+    };
+
+    eachKernel([&](bool nax) {
+      double plain = time([&]() { mtl()->matmul(a, wt, out); });
+      Tensor spread = bias.view({1, c.n}).expand({c.m, c.n});
+      double separate = time([&]() {
+        mtl()->matmul(a, wt, twice);
+        mtl()->add(twice, spread, twice);
+      });
+      double fused = time([&]() { mtl()->matmulAdd(a, wt, bias, out); });
+      printf("%-26s %-6s %8.3fms %8.3fms %8.3fms %11.3e %11.3e\n", c.name, nax ? "nax" : "simd",
+             plain * 1e3, separate * 1e3, fused * 1e3, worst(twice), worst(out));
+    });
+  }
+
+  // The fp8 product, its bias added after the scale: the weight's own rounding is the larger, so
+  // what the epilogue saves is mostly the pass.
+  struct Fp8Case {
+    const char *name;
+    int m, k, rows;
+  };
+  std::vector<Fp8Case> fp8 = {
+      {"fp8 4096x12288x3072", 4096, 3072, 12288},
+      {"fp8 4096x3072x3072", 4096, 3072, 3072},
+      {"fp8 decode 1x3072x3072", 1, 3072, 3072},
+  };
+  std::mt19937 rng(7);
+  for (const Fp8Case &c : fp8) {
+    Tensor codes = F::empty(Device::getCpu(), {c.rows, c.k}, DType::kFp8E4M3);
+    Fp8E4M3 *code = codes.getInternalData()->getData<Fp8E4M3>(0);
+    for (int64_t i = 0; i < static_cast<int64_t>(c.rows) * c.k; ++i) {
+      uint8_t x = static_cast<uint8_t>(rng() % 256);
+      code[i].v = (x & 0x7f) == 0x7f ? 0x3c : x;
+    }
+    Tensor weight = fl::test::toDevice(mtl(), codes, Device::getMetal());
+    Tensor scales = F::empty(Device::getMetal(), {1}, DType::kFloat);
+    mtl()->fill(scales, 0.01f);
+    Tensor a = toMetal(fl::test::rand(Device::getCpu(), {c.m, c.k}, DType::kFloat), DType::kFloat16);
+    Tensor bias = toMetal(randn({c.rows}), DType::kFloat16);
+    Tensor out = F::empty(Device::getMetal(), {c.m, c.rows}, DType::kFloat16);
+    eachKernel([&](bool nax) {
+      double plain = time([&]() { op::metal_native::fp8Matmul(a, weight, scales, out); });
+      Tensor spread = bias.view({1, c.rows}).expand({c.m, c.rows});
+      double separate = time([&]() {
+        op::metal_native::fp8Matmul(a, weight, scales, out);
+        mtl()->add(out, spread, out);
+      });
+      double fused = time([&]() { op::metal_native::fp8Matmul(a, weight, scales, out, bias); });
+      printf("%-26s %-6s %8.3fms %8.3fms %8.3fms\n", c.name, nax ? "nax" : "simd", plain * 1e3,
+             separate * 1e3, fused * 1e3);
+    });
   }
 }
 

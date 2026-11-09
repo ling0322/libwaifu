@@ -21,7 +21,8 @@
 // the weight W (N, K) in E4M3 with one scale for the whole of it. The weight is read a byte an
 // element and widened to half as it is staged, which is exact: every E4M3 value is a half. The
 // scale is applied to the sum on the way out, where it is one multiply an element rather than one
-// a term.
+// a term, and the addend, if there is one, added after it, in float: sum * scale + addend, rounded
+// to half once.
 
 #include "gemm.h"
 
@@ -32,7 +33,11 @@ struct Fp8MatmulParams {
   uint K;
   uint vecA;    // the activation's rows start on a multiple of four elements
   uint vecB;    // and the weight's
+  uint addKind; // as kernels/matmul.metal's: none, a value per column, or one per element of C
 };
+
+constant constexpr uint kAddColumns = 1;
+constant constexpr uint kAddWhole = 2;
 
 /// An E4M3 code as a half. Sign, exponent and mantissa moved into a half's places make that half
 /// 2^-8 of the value -- the two exponents' biases are 7 and 15 -- subnormals included, so a
@@ -48,6 +53,7 @@ struct Fp8MatmulProblem {
   device const half *a;
   device const uchar *w;
   device const float *scale;
+  device const half *add;
   constant Fp8MatmulParams *p;
 
   static constexpr constant uint kTileK = TileK<half>::value;
@@ -59,6 +65,11 @@ struct Fp8MatmulProblem {
     return false;
   }
   void stageRowBias(threadgroup float *, uint, uint) const {}
+  // The bias is added after the scale, which gemm.h's column bias would be scaled by.
+  bool hasColumnBias() const {
+    return false;
+  }
+  void stageColumnBias(threadgroup float *, uint, uint) const {}
 
   void stageA(threadgroup half *tile, uint m0, uint k0, uint tid) const {
     if (p->vecA && m0 + kTileM <= p->M && k0 + kTileK <= p->K) {
@@ -104,7 +115,10 @@ struct Fp8MatmulProblem {
     return false;
   }
   void storeC(uint m, uint n, float value) const {
-    c[m * p->N + n] = half(value * scale[0]);
+    value *= scale[0];
+    if (p->addKind == kAddColumns) value += float(add[n]);
+    if (p->addKind == kAddWhole) value += float(add[m * p->N + n]);
+    c[m * p->N + n] = half(value);
   }
 };
 
@@ -113,7 +127,8 @@ kernel void fp8_matmul(
     device const half *a [[buffer(1)]],
     device const uchar *w [[buffer(2)]],
     device const float *scale [[buffer(3)]],
-    constant Fp8MatmulParams &p [[buffer(4)]],
+    device const half *add [[buffer(4)]],
+    constant Fp8MatmulParams &p [[buffer(5)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
@@ -125,6 +140,7 @@ kernel void fp8_matmul(
   problem.a = a;
   problem.w = w;
   problem.scale = scale;
+  problem.add = add;
   problem.p = &p;
   gemm<half>(problem, p.M, p.N, p.K, group.xy, tid, sg, lane, tileA, tileB, scratch);
 }

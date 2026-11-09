@@ -66,6 +66,7 @@ class MetalOperators : public Operators {
   void geglu(TensorView input, TensorView out) override;
   void swiglu(TensorView input, TensorView out) override;
   void matmul(TensorView A, TensorView B, TensorView out) override;
+  void matmulAdd(TensorView A, TensorView B, TensorView addend, TensorView out) override;
   void conv2d(
       TensorView input,
       TensorView weight,
