@@ -21,7 +21,10 @@ needed. A caller built against it has two things to free and nothing to parse.
   property, stage or capability is a new number at the end of its range, and is not an ABI change.
   A library asked about a number it does not know answers as for a property the model does not
   have: `false`. A caller handed a stage it does not know shows a generic line.
-- **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end.
+- **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end. A
+  request at the size it had before is read with the new fields zero -- NULL, 0, false -- so a
+  caller built against the older header goes on working. The text-to-speech requests' `transcript`
+  is the first field added so.
 - **Threads.** Every function may be called from any thread, and calls on one pipeline or one
   model may run at the same time -- loads, runs, cancels and getters -- except that **freeing a
   handle must not race with any other call on it**: that is the caller's to order, as with any C
@@ -167,6 +170,7 @@ typedef enum {
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE = 200,      // in the voice of a recording
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE = 201,   // CosyVoice3 does not
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE = 202,          // follows an instruction such as "speak happily"
+  WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT = 203,     // reads on from the reference's words
 
   WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE = 300,          // the manner as well as the voice
 
@@ -360,6 +364,7 @@ typedef struct {
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
   uint64_t seed;
+  const char *transcript;             // what reference says; NULL or "" where it is not known
 } WaifuTextToSpeechRequest;
 
 typedef struct {
@@ -402,6 +407,7 @@ typedef struct {
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
   uint64_t seed;
+  const char *transcript;             // as WaifuTextToSpeechRequest's
   // No speed: a streaming reading is at the speed it is said, as upstream's is.
 } WaifuStreamingTextToSpeechRequest;
 
@@ -584,6 +590,13 @@ language.
 (`cosyvoice/utils/common.py`), which its README calls instructions "such as" these: examples, not
 the set. `style` is any instruction, and `SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE` says whether one is
 followed; the examples are the app's to offer.
+
+**A transcript.** `transcript` is the words of `reference`, which
+`SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT` says a model reads: CosyVoice3 then reads zero-shot, as
+upstream's `inference_zero_shot` with its `prompt_text`, going on from the recording's own speech
+tokens rather than only borrowing its voice. A transcript with no reference, or for a model that
+takes none, ends with `WAIFU_ERR_MODEL`; so does one with a style, which upstream never combines,
+and one holding a `<|...|>` marker, because the system prompt is put in front of it here.
 
 **No PSD.** A Photoshop document is a file format, and files are the app's. The layers' pixels,
 places and depths are all in the result.

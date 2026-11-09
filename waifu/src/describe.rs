@@ -93,6 +93,8 @@ pub struct Spoken {
     /// The ways of saying something it was taught, for the page to list. Empty where it takes no
     /// style, which is where the page offers none.
     pub styles: &'static [Style],
+    /// Whether it reads the words of its recording, for the page to offer a box for them.
+    pub takes_a_transcript: bool,
     /// Why what comes out is not speech, for as long as that is true.
     ///
     /// The one sentence this whole tab is built around saying. It comes out of the voice itself
@@ -168,9 +170,11 @@ pub fn look_at_voice(asked: &str) -> Spoken {
     }
 
     let kind = manifest_of(asked).as_deref().and_then(voice_kind);
-    let (kind_name, rate, styles) = match kind {
-        Some(VoiceKind::CosyVoice3) => (CosyVoice3::NAME, cosyvoice3::RATE, CosyVoice3::STYLES),
-        _ => (IndexTts::NAME, indextts::RATE, &[][..]),
+    let (kind_name, rate, styles, takes_a_transcript) = match kind {
+        Some(VoiceKind::CosyVoice3) => {
+            (CosyVoice3::NAME, cosyvoice3::RATE, CosyVoice3::STYLES, true)
+        }
+        _ => (IndexTts::NAME, indextts::RATE, &[][..], false),
     };
 
     Spoken {
@@ -184,6 +188,7 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         // Neither kind of package has a voice of its own: both speak in a recording's.
         needs_a_recording: true,
         styles,
+        takes_a_transcript,
         not_a_voice_because: None,
     }
 }
@@ -224,6 +229,7 @@ pub fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken 
         no_likeness_because: voice.no_likeness_because().map(str::to_string),
         needs_a_recording: voice.needs_a_recording(),
         styles: voice.styles(),
+        takes_a_transcript: voice.takes_a_transcript(),
         not_a_voice_because: voice.not_a_voice_because().map(str::to_string),
     }
 }

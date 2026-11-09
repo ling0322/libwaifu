@@ -64,6 +64,8 @@ pub struct TextToSpeech {
     pub like_reference: Support,
     pub without_reference: Support,
     pub with_style: Support,
+    /// Reads the words of its reference recording, and goes on from them.
+    pub with_transcript: Support,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -245,6 +247,13 @@ fn text_to_speech(voice: &describe::Spoken) -> TextToSpeech {
             )),
             false => Ok(()),
         },
+        with_transcript: match voice.takes_a_transcript {
+            false => Err(format!(
+                "{} hears a recording's voice and not its words: it takes no transcript",
+                voice.full_name
+            )),
+            true => Ok(()),
+        },
     }
 }
 
@@ -277,6 +286,7 @@ mod tests {
         let tones = model_info(TONES).unwrap();
         let speech = tones.text_to_speech.unwrap();
         assert_eq!(speech.without_reference, Ok(()));
+        assert!(speech.with_transcript.is_err());
         assert_eq!(tones.streaming_text_to_speech, Ok(()));
         assert!(tones.image_generation.is_err());
         assert_eq!(tones.size_on_disk, Some(0));
@@ -289,6 +299,7 @@ mod tests {
         let speech = voice.text_to_speech.unwrap();
         assert!(speech.without_reference.is_err());
         assert_eq!(speech.with_style, Ok(()));
+        assert_eq!(speech.with_transcript, Ok(()));
         assert_eq!(voice.streaming_text_to_speech, Ok(()));
         assert!(voice.voice_conversion.is_ok());
         assert!(voice.image_generation.is_err());

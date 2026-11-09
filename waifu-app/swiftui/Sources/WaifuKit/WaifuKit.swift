@@ -998,7 +998,8 @@ public final class Pipeline: @unchecked Sendable {
                 speed: Float(request.speed),
                 temperature: Float(request.temperature),
                 style: scratch.optionalString(request.style),
-                seed: request.seed
+                seed: request.seed,
+                transcript: nil
             )
             return withExtendedLifetime(scratch) {
                 waifu_pipeline_run_text_to_speech_async(handle, &c, userData, onProgress, onAudio)

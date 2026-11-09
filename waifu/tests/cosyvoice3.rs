@@ -40,7 +40,8 @@ use waifu::indextts::features::resample;
 use waifu::cosyvoice3::stream::Hops;
 use waifu::cosyvoice3::{CosyVoice3, Precision, Reference, Streaming};
 use waifu::{
-    read_safetensors, wav, DType, Device, Manifest, Sound, SpeechOptions, SpeechProgress, Weights,
+    read_safetensors, wav, DType, Device, Manifest, Sound, SpeechOptions, SpeechProgress, Voice,
+    Weights,
 };
 
 /// What `tools/cosyvoice3_reference.py` read, and the transcript of its recording.
@@ -499,6 +500,7 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
         temperature: 1.0,
         seed: Some(7),
         style: None,
+        transcript: None,
     };
     let mut carry_on = |_: SpeechProgress| ControlFlow::Continue(());
 
@@ -539,6 +541,22 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
         .unwrap()
         .unwrap();
     assert_eq!(again.samples, first.samples);
+
+    // Handed the transcript in its options, the text-to-speech task reads zero-shot: the same
+    // reading `say_after` makes at the same seed.
+    let after = tts
+        .say_after(TEXT, PROMPT_TEXT, &heard, &options, &mut carry_on)
+        .unwrap()
+        .unwrap();
+    let with_words = SpeechOptions {
+        transcript: Some(PROMPT_TEXT.to_string()),
+        ..options.clone()
+    };
+    let spoken = tts
+        .speak(TEXT, Some(&recording), &with_words, &mut carry_on)
+        .unwrap()
+        .unwrap();
+    assert_eq!(spoken.samples, after.samples);
 }
 
 /// Upstream's `stream=True` on the tokens its language model said, against [`Streaming`] on the
@@ -658,6 +676,7 @@ fn a_reading_streamed_a_hop_at_a_time_is_upstreams() {
         temperature: 1.0,
         seed: Some(7),
         style: None,
+        transcript: None,
     };
     let mut carry_on = |_: SpeechProgress| ControlFlow::Continue(());
     let mut parts: Vec<Sound> = Vec::new();

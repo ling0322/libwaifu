@@ -123,6 +123,8 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE: WaifuModelProperty
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelProperty = 201;
 /// Follows an instruction such as "speak happily".
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelProperty = 202;
+/// Reads the words of the reference recording -- a request's transcript -- and goes on from it.
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT: WaifuModelProperty = 203;
 /// The manner as well as the voice.
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelProperty = 300;
 /// Integer, bytes; absent until every file is here.
@@ -389,6 +391,10 @@ impl WaifuModel {
         model.supports(
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE,
             &detail(speaking.map(|s| &s.with_style), &speech),
+        );
+        model.supports(
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT,
+            &detail(speaking.map(|s| &s.with_transcript), &speech),
         );
 
         model.supports(
@@ -832,6 +838,32 @@ unsafe fn request_in<'a, T>(request: *const T, size: u32, what: &str) -> Result<
     Ok(request)
 }
 
+/// A request struct that has grown at its end since `least` bytes of it were all there was: read
+/// if it is at least that large, with every field past what the caller's `size` holds zero -- the
+/// NULL a caller built against the older header never set.
+///
+/// `T` must be one for which all-zero bytes are a value: numbers and pointers.
+unsafe fn grown_request_in<T>(
+    request: *const T,
+    size: u32,
+    least: usize,
+    what: &str,
+) -> Result<T, String> {
+    if request.is_null() {
+        return Err(format!("the {what} is NULL"));
+    }
+    if (size as usize) < least {
+        return Err(format!(
+            "the {what} says it is {size} bytes, and this library reads {}: set struct_size to sizeof",
+            std::mem::size_of::<T>()
+        ));
+    }
+    let mut out = std::mem::MaybeUninit::<T>::zeroed();
+    let held = (size as usize).min(std::mem::size_of::<T>());
+    ptr::copy_nonoverlapping(request as *const u8, out.as_mut_ptr() as *mut u8, held);
+    Ok(out.assume_init())
+}
+
 /// A pointer to `values`, or NULL for none.
 fn first<T>(values: &[T]) -> *const T {
     match values.is_empty() {
@@ -1030,6 +1062,9 @@ pub struct WaifuTextToSpeechRequest {
     /// Any instruction; NULL or "" for the voice's own way.
     pub style: *const c_char,
     pub seed: u64,
+    /// What the reference says, word for word, for a model that SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT;
+    /// NULL or "" where it is not known. Last, and read only where struct_size holds it.
+    pub transcript: *const c_char,
 }
 
 #[repr(C)]
@@ -1126,13 +1161,15 @@ pub unsafe extern "C" fn waifu_pipeline_run_text_to_speech_async(
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_TEXT_TO_SPEECH)?;
         let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let request = request_in(request, size, "WaifuTextToSpeechRequest")?;
+        let least = std::mem::offset_of!(WaifuTextToSpeechRequest, transcript);
+        let request = grown_request_in(request, size, least, "WaifuTextToSpeechRequest")?;
         let request = SpeakRequest {
             text: required(request.text, "text")?,
             like: reference_in(request.reference)?,
             speed: request.speed,
             temperature: request.temperature,
             style: string_in(request.style, "style")?,
+            transcript: string_in(request.transcript, "transcript")?,
             seed: request.seed,
         };
         let user_data = UserData(user_data);
@@ -1190,6 +1227,8 @@ pub struct WaifuStreamingTextToSpeechRequest {
     pub style: *const c_char,
     /// No speed: a streaming reading is at the speed it is said, as upstream's is.
     pub seed: u64,
+    /// As WaifuTextToSpeechRequest's.
+    pub transcript: *const c_char,
 }
 
 /// A part of the reading's audio, in order; the samples are valid until it returns.
@@ -1228,13 +1267,15 @@ pub unsafe extern "C" fn waifu_pipeline_run_streaming_text_to_speech_async(
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH)?;
         let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let request = request_in(request, size, "WaifuStreamingTextToSpeechRequest")?;
+        let least = std::mem::offset_of!(WaifuStreamingTextToSpeechRequest, transcript);
+        let request = grown_request_in(request, size, least, "WaifuStreamingTextToSpeechRequest")?;
         let request = SpeakRequest {
             text: required(request.text, "text")?,
             like: reference_in(request.reference)?,
             speed: 1.0,
             temperature: request.temperature,
             style: string_in(request.style, "style")?,
+            transcript: string_in(request.transcript, "transcript")?,
             seed: request.seed,
         };
         let user_data = UserData(user_data);

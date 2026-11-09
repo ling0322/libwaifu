@@ -140,6 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 temperature: tts.settings().temperature,
                 seed,
                 style: None,
+                transcript: None,
             };
             tts.say(text, &reference, &options, &mut report)?
         }

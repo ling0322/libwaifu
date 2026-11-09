@@ -154,6 +154,9 @@ typedef struct {
   // Any instruction; NULL or "" for the voice's own way.
   const char *style;
   uint64_t seed;
+  // What the reference says, word for word, for a model that SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT;
+  // NULL or "" where it is not known. Last, and read only where struct_size holds it.
+  const char *transcript;
 } WaifuTextToSpeechRequest;
 
 // Both speech tasks make audio.
@@ -190,6 +193,8 @@ typedef struct {
   const char *style;
   // No speed: a streaming reading is at the speed it is said, as upstream's is.
   uint64_t seed;
+  // As WaifuTextToSpeechRequest's.
+  const char *transcript;
 } WaifuStreamingTextToSpeechRequest;
 
 // A part of the reading's audio, in order; the samples are valid until it returns.
@@ -336,6 +341,9 @@ typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTe
 
 // Follows an instruction such as "speak happily".
 #define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE 202
+
+// Reads the words of the reference recording -- a request's transcript -- and goes on from it.
+#define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT 203
 
 // The manner as well as the voice.
 #define WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE 300

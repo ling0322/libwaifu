@@ -134,6 +134,7 @@ fn a_speech_request(text: &CStr) -> WaifuTextToSpeechRequest {
         temperature: 0.8,
         style: ptr::null(),
         seed: 7,
+        transcript: ptr::null(),
     }
 }
 
@@ -271,6 +272,7 @@ fn a_model_is_asked_about_one_property_at_a_time() {
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE,
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE,
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE,
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT,
             WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE,
         ] {
             assert_eq!(int_property(sdxl, property), Some(0), "{property}");
@@ -299,6 +301,11 @@ fn a_model_is_asked_about_one_property_at_a_time() {
             Some(1)
         );
         assert!(int_property(tones, WAIFU_MODEL_SAMPLE_RATE).unwrap() > 0);
+        // It hears a recording's pitch, not its words.
+        assert_eq!(
+            int_property(tones, WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT),
+            Some(0)
+        );
         assert_eq!(
             int_property(tones, WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION),
             Some(0)
@@ -578,6 +585,70 @@ fn freeing_a_pipeline_ends_every_job_it_had() {
     }
 }
 
+/// How a speech job ends: its code, where it ran to the end.
+unsafe fn spoken(
+    pipeline: *mut WaifuPipeline,
+    request: &WaifuTextToSpeechRequest,
+) -> WaifuStatusCode {
+    let (send, heard) = a_channel();
+    let job = waifu_pipeline_run_text_to_speech_async(
+        pipeline,
+        request,
+        user_data(&send),
+        None,
+        Some(on_audio),
+    );
+    assert_ne!(job, 0, "{}", last_error());
+    match heard.recv_timeout(WAIT).expect("an end") {
+        Heard::Audio(code, _, _) => code,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_speech_request_from_before_the_transcript_is_read_without_one() {
+    unsafe {
+        let pipeline = a_pipeline(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        with_tones(pipeline);
+        let before = std::mem::offset_of!(WaifuTextToSpeechRequest, transcript) as u32;
+
+        // Bytes that are not UTF-8 where the transcript would be: a caller built against the
+        // older header never wrote that field, so it is not read, and the reading goes ahead.
+        let request = WaifuTextToSpeechRequest {
+            struct_size: before,
+            transcript: c"\xff".as_ptr(),
+            ..a_speech_request(c"hello there")
+        };
+        assert_eq!(spoken(pipeline, &request), WAIFU_OK);
+
+        // At today's size it is read, and the stand-in, which takes none, refuses it.
+        let request = WaifuTextToSpeechRequest {
+            transcript: c"the words of the recording".as_ptr(),
+            ..a_speech_request(c"hello there")
+        };
+        assert_eq!(spoken(pipeline, &request), WAIFU_ERR_MODEL);
+
+        // Short of even the older header's, it is refused at the call.
+        let (send, _) = a_channel();
+        let short = WaifuTextToSpeechRequest {
+            struct_size: before - 1,
+            ..a_speech_request(c"hello there")
+        };
+        assert_eq!(
+            waifu_pipeline_run_text_to_speech_async(
+                pipeline,
+                &short,
+                user_data(&send),
+                None,
+                Some(on_audio)
+            ),
+            0
+        );
+        assert!(last_error().contains("struct_size"), "{}", last_error());
+        waifu_pipeline_free(pipeline);
+    }
+}
+
 #[test]
 fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
     unsafe {
@@ -593,6 +664,7 @@ fn a_streaming_reading_hands_over_its_parts_before_the_whole() {
             temperature: 0.8,
             style: ptr::null(),
             seed: 7,
+            transcript: ptr::null(),
         };
         let job = waifu_pipeline_run_streaming_text_to_speech_async(
             pipeline,

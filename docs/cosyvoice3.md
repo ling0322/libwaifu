@@ -101,12 +101,18 @@ see [`frontend.rs`](../waifu/src/cosyvoice3/frontend.rs) -- and each piece goes 
 
 ### With a transcript, without, and with a style
 
-The page hands a voice a recording and no transcript, so [`Voice::speak`](../waifu/src/speech.rs)
-reads the way upstream's `inference_cross_lingual` does: the language model sees the system prompt
-and the sentence, and nothing of the recording; the voice comes from the flow. Given the words of
-the recording, `say_after` reads the way `inference_zero_shot` does: transcript and sentence as one
+Handed a recording and no transcript, [`Voice::speak`](../waifu/src/speech.rs) reads the way
+upstream's `inference_cross_lingual` does: the language model sees the system prompt and the
+sentence, and nothing of the recording; the voice comes from the flow. Given the words of the
+recording -- `SpeechOptions::transcript`, a text-to-speech request's `transcript` over the C API,
+or `say_after` -- it reads the way `inference_zero_shot` does: transcript and sentence as one
 text, continuing the recording's own tokens. Both sound like the recording; zero-shot also carries
-on its pace and manner.
+on its pace and manner. Streaming reads either way.
+
+The transcript is the system prompt's to follow, as upstream's `prompt_text` is in its examples,
+except that here the system prompt is put in front of it: a transcript holding a `<|...|>` marker
+is refused rather than read with two. A recording over thirty seconds is cut there, and its
+transcript should be of what is kept.
 
 Given a style -- `SpeechOptions::style`, the Style card on the page -- it reads the way
 `inference_instruct2` does. Upstream builds that as a zero-shot reading with the instruction where
@@ -273,6 +279,7 @@ float32 takes 861.
 
 Streaming on the processor, whose attention has no block mask. A DiT that draws
 only each new hop, keeping what it computed of the frames before, rather than all of them again.
-A place on the page to type the recording's transcript.
+A place in the apps to type the recording's transcript: the C API takes one, and neither app
+sends it yet.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
 are the zero-shot path's with a different prefix.

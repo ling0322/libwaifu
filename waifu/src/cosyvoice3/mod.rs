@@ -37,16 +37,17 @@
 //! | [`flow`] | the prompt's and the sentence's tokens, the prompt's mel, the speaker | the mel |
 //! | [`hift`] | the mel | 24 kHz audio |
 //!
-//! # Three ways to read, and which ones [`Voice`] uses
+//! # Three ways to read
 //!
 //! Upstream's **zero-shot** reading is handed the transcript of the recording: the language model
 //! reads the transcript and the sentence as one text and continues the recording's own speech
 //! tokens, so it carries on in the recording's voice, pace and manner. [`CosyVoice3::say_after`]
-//! is that.
+//! is that, and so is [`Voice::speak`] handed a [`SpeechOptions::transcript`]. A recording over
+//! thirty seconds is cut there, so its transcript should be of the thirty seconds kept.
 //!
-//! [`Voice::speak`] is handed a recording and no transcript, which is upstream's **cross-lingual**
-//! reading: the language model sees only the sentence, and the voice comes from the flow, which
-//! still continues the recording's tokens and mel with its speaker. [`CosyVoice3::say`] is that.
+//! Handed a recording and no transcript, it is upstream's **cross-lingual** reading: the language
+//! model sees only the sentence, and the voice comes from the flow, which still continues the
+//! recording's tokens and mel with its speaker. [`CosyVoice3::say`] is that.
 //!
 //! Handed a [`SpeechOptions::style`] as well, it is upstream's **instruct2** reading: the
 //! instruction goes inside the system prompt -- `You are a helpful assistant. 请非常开心地说一句话。
@@ -586,6 +587,14 @@ impl CosyVoice3 {
                 ))
             }
             (Some(words), None) => {
+                // Upstream's examples write the system prompt into `prompt_text` themselves; here
+                // it is put in front for the caller, so a marker in the words would be a second.
+                if words.contains("<|") {
+                    return Err(Error::model(
+                        "a transcript is the words of the recording, and cannot hold a marker \
+                         such as <|endofprompt|>: the system prompt is put in front of it here",
+                    ));
+                }
                 Some(self.encode(&format!("{system}{}", frontend::transcript(words)))?)
             }
             (None, Some(style)) => Some(self.encode(&instructed(system, style)?)?),
@@ -1020,7 +1029,10 @@ impl Voice for CosyVoice3 {
         }
 
         let reference = self.hear(like)?;
-        self.say(text, &reference, options, report)
+        match transcript_of(options) {
+            Some(words) => self.say_after(text, words, &reference, options, report),
+            None => self.say(text, &reference, options, report),
+        }
     }
 
     /// A hop of tokens at a time: see [`CosyVoice3::say_streaming`].
@@ -1040,7 +1052,8 @@ impl Voice for CosyVoice3 {
         }
 
         let reference = self.hear(like)?;
-        self.say_streaming(text, None, &reference, options, report, heard)
+        let words = transcript_of(options);
+        self.say_streaming(text, words, &reference, options, report, heard)
     }
 
     fn rate(&self) -> u32 {
@@ -1062,6 +1075,20 @@ impl Voice for CosyVoice3 {
     fn styles(&self) -> &'static [Style] {
         Self::STYLES
     }
+
+    /// The zero-shot reading: see the module note.
+    fn takes_a_transcript(&self) -> bool {
+        true
+    }
+}
+
+/// The transcript a reading is handed, where it holds anything: `None` reads cross-lingual.
+fn transcript_of(options: &SpeechOptions) -> Option<&str> {
+    options
+        .transcript
+        .as_deref()
+        .map(str::trim)
+        .filter(|words| !words.is_empty())
 }
 
 impl CosyVoice3 {

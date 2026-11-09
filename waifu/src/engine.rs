@@ -107,6 +107,8 @@ pub struct SpeakRequest {
     pub speed: f32,
     pub temperature: f32,
     pub style: Option<String>,
+    /// What `like` says, word for word, for a voice that takes it; `None` where it is not known.
+    pub transcript: Option<String>,
     pub seed: u64,
 }
 
@@ -1600,12 +1602,32 @@ impl Worker {
         if style.is_some() && voice.styles().is_empty() {
             return Ended::failed(Failure::Model, format!("{} takes no style", voice.name()));
         }
+        let transcript = request
+            .transcript
+            .as_ref()
+            .map(|words| words.trim().to_string())
+            .filter(|words| !words.is_empty());
+        if transcript.is_some() {
+            if request.like.is_none() {
+                return Ended::failed(
+                    Failure::Model,
+                    "a transcript is the words of the reference recording, and there is none",
+                );
+            }
+            if !voice.takes_a_transcript() {
+                return Ended::failed(
+                    Failure::Model,
+                    format!("{} takes no transcript", voice.name()),
+                );
+            }
+        }
 
         let options = SpeechOptions {
             speed: request.speed.clamp(0.25, 4.0),
             temperature: request.temperature.clamp(0.0, 2.0),
             seed: Some(request.seed),
             style,
+            transcript,
         };
 
         let started = Instant::now();
@@ -1882,6 +1904,7 @@ pub(crate) mod tests {
             speed: 1.0,
             temperature: 0.8,
             style: None,
+            transcript: None,
             seed: 7,
         }
     }
@@ -1983,6 +2006,48 @@ pub(crate) mod tests {
         assert!(engine
             .speak_streaming(empty, progress, Box::new(|_| {}), complete)
             .is_err());
+    }
+
+    #[test]
+    fn a_transcript_needs_a_recording_and_a_voice_that_reads_one() {
+        let engine = an_engine();
+        let (progress, complete, loaded) = listen::<()>();
+        engine.load(TONES, progress, complete);
+        assert_eq!(loaded.recv_timeout(WAIT).unwrap(), Ended::Done(()));
+
+        let refused = |request: SpeakRequest| -> String {
+            let (progress, complete, heard) = listen::<Sound>();
+            engine.speak(request, progress, complete).unwrap();
+            match heard.recv_timeout(WAIT).unwrap() {
+                Ended::Failed(Failure::Model, why) => why,
+                other => panic!("{other:?}"),
+            }
+        };
+        let words = Some("the words of the recording".to_string());
+
+        // Words of a recording that is not there.
+        let why = refused(SpeakRequest {
+            transcript: words.clone(),
+            ..a_speaking()
+        });
+        assert!(why.contains("there is none"), "{why}");
+
+        // And of one handed to a voice that hears only its voice.
+        let why = refused(SpeakRequest {
+            transcript: words,
+            like: Some(Sound::new(vec![0.0; 1600], 16000)),
+            ..a_speaking()
+        });
+        assert!(why.contains("takes no transcript"), "{why}");
+
+        // A blank one is none at all.
+        let (progress, complete, heard) = listen::<Sound>();
+        let blank = SpeakRequest {
+            transcript: Some("  ".to_string()),
+            ..a_speaking()
+        };
+        engine.speak(blank, progress, complete).unwrap();
+        assert!(matches!(heard.recv_timeout(WAIT).unwrap(), Ended::Done(_)));
     }
 
     #[test]
