@@ -66,11 +66,12 @@ pub struct SpeechOptions {
     /// [`styles`](Voice::styles)' `instruction`, or something written in the same manner. `None`
     /// is the voice's own way of reading. A voice that offers no styles ignores it.
     pub style: Option<String>,
-    /// What the recording handed to [`speak`](Voice::speak) says, word for word, for a voice that
-    /// [takes one](Voice::takes_a_transcript): the model then reads on from the recording rather
-    /// than only borrowing its voice, and carries its pace and manner as well. `None` is a
-    /// recording whose words are not known. A voice that takes no transcript ignores it.
-    pub transcript: Option<String>,
+    /// What the recording handed to [`speak`](Voice::speak) says, word for word, or `None` where
+    /// that is not known. A voice that reads one goes on from the recording rather than only
+    /// borrowing its voice, and carries its pace and manner as well -- CosyVoice3's zero-shot
+    /// reading, which takes it or a [`style`](SpeechOptions::style) and not both. A voice that
+    /// reads none ignores it.
+    pub reference_transcript: Option<String>,
 }
 
 impl Default for SpeechOptions {
@@ -107,7 +108,7 @@ impl SpeechDefaults {
             temperature: self.temperature,
             seed: None,
             style: None,
-            transcript: None,
+            reference_transcript: None,
         }
     }
 }
@@ -229,13 +230,6 @@ pub trait Voice {
     /// takes no [`SpeechOptions::style`], which is most voices.
     fn styles(&self) -> &'static [Style] {
         &[]
-    }
-
-    /// Whether it reads [`SpeechOptions::transcript`] -- the words of the recording it is handed
-    /// -- for a page to offer a box for them. False for most voices, which hear a recording's
-    /// voice and not what it says.
-    fn takes_a_transcript(&self) -> bool {
-        false
     }
 
     /// Why what comes out is not a voice, for the implementation where it is not.

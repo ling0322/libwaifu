@@ -23,8 +23,8 @@ needed. A caller built against it has two things to free and nothing to parse.
   have: `false`. A caller handed a stage it does not know shows a generic line.
 - **Requests carry `struct_size`**, as in ABI 3, so a field can be added to one at the end. A
   request at the size it had before is read with the new fields zero -- NULL, 0, false -- so a
-  caller built against the older header goes on working. The text-to-speech requests' `transcript`
-  is the first field added so.
+  caller built against the older header goes on working. The text-to-speech requests'
+  `reference_transcript` is the first field added so.
 - **Threads.** Every function may be called from any thread, and calls on one pipeline or one
   model may run at the same time -- loads, runs, cancels and getters -- except that **freeing a
   handle must not race with any other call on it**: that is the caller's to order, as with any C
@@ -170,7 +170,6 @@ typedef enum {
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE = 200,      // in the voice of a recording
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE = 201,   // CosyVoice3 does not
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE = 202,          // follows an instruction such as "speak happily"
-  WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT = 203,     // reads on from the reference's words
 
   WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE = 300,          // the manner as well as the voice
 
@@ -364,7 +363,7 @@ typedef struct {
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
   uint64_t seed;
-  const char *transcript;             // what reference says; NULL or "" where it is not known
+  const char *reference_transcript;   // what reference says; NULL or "" where it is not known
 } WaifuTextToSpeechRequest;
 
 typedef struct {
@@ -407,7 +406,7 @@ typedef struct {
   float temperature;
   const char *style;                  // any instruction; NULL or "" for the voice's own way
   uint64_t seed;
-  const char *transcript;             // as WaifuTextToSpeechRequest's
+  const char *reference_transcript;   // as WaifuTextToSpeechRequest's
   // No speed: a streaming reading is at the speed it is said, as upstream's is.
 } WaifuStreamingTextToSpeechRequest;
 
@@ -591,12 +590,21 @@ language.
 the set. `style` is any instruction, and `SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE` says whether one is
 followed; the examples are the app's to offer.
 
-**A transcript.** `transcript` is the words of `reference`, which
-`SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT` says a model reads: CosyVoice3 then reads zero-shot, as
-upstream's `inference_zero_shot` with its `prompt_text`, going on from the recording's own speech
-tokens rather than only borrowing its voice. A transcript with no reference, or for a model that
-takes none, ends with `WAIFU_ERR_MODEL`; so does one with a style, which upstream never combines,
-and one holding a `<|...|>` marker, because the system prompt is put in front of it here.
+**A reference transcript, and no property for it.** `reference_transcript` is the words of
+`reference`. CosyVoice3 then reads zero-shot, as upstream's `inference_zero_shot` does with its
+`prompt_text`: it goes on from the recording's own speech tokens rather than only borrowing its
+voice. That is upstream's own way of cloning a voice in the same language. Without a transcript it
+reads cross-lingual, which upstream keeps for a sentence in another language than the recording.
+A model that reads no transcript ignores one, so an app offers the box wherever it offers a
+recording, and no property says whether a model reads it. What would be worth a property is the
+other way round, a model that cannot read without a transcript, and none here is one; it would be
+`SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT`, as `WITHOUT_REFERENCE` is for a recording.
+
+A transcript with no reference ends with `WAIFU_ERR_MODEL`. So, on CosyVoice3, does one given with
+a style: upstream's instruct2 puts the instruction where zero-shot puts the transcript and drops
+the recording's tokens that the transcript is the words of, and never takes both. So does one
+holding a `<|...|>` marker, because the system prompt is put in front of it here. CosyVoice3 says
+so before it listens to the recording.
 
 **No PSD.** A Photoshop document is a file format, and files are the app's. The layers' pixels,
 places and depths are all in the result.

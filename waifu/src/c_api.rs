@@ -123,8 +123,6 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE: WaifuModelProperty
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelProperty = 201;
 /// Follows an instruction such as "speak happily".
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelProperty = 202;
-/// Reads the words of the reference recording -- a request's transcript -- and goes on from it.
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT: WaifuModelProperty = 203;
 /// The manner as well as the voice.
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelProperty = 300;
 /// Integer, bytes; absent until every file is here.
@@ -391,10 +389,6 @@ impl WaifuModel {
         model.supports(
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE,
             &detail(speaking.map(|s| &s.with_style), &speech),
-        );
-        model.supports(
-            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT,
-            &detail(speaking.map(|s| &s.with_transcript), &speech),
         );
 
         model.supports(
@@ -1059,12 +1053,14 @@ pub struct WaifuTextToSpeechRequest {
     pub reference: *const WaifuAudio,
     pub speed: f32,
     pub temperature: f32,
-    /// Any instruction; NULL or "" for the voice's own way.
+    /// Any instruction; NULL or "" for the voice's own way. CosyVoice3 takes a style or a
+    /// reference_transcript, not both: upstream's instruct2 reads no transcript.
     pub style: *const c_char,
     pub seed: u64,
-    /// What the reference says, word for word, for a model that SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT;
-    /// NULL or "" where it is not known. Last, and read only where struct_size holds it.
-    pub transcript: *const c_char,
+    /// What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
+    /// from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
+    /// reads none ignores it. Last, and read only where struct_size holds it.
+    pub reference_transcript: *const c_char,
 }
 
 #[repr(C)]
@@ -1161,7 +1157,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_text_to_speech_async(
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_TEXT_TO_SPEECH)?;
         let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let least = std::mem::offset_of!(WaifuTextToSpeechRequest, transcript);
+        let least = std::mem::offset_of!(WaifuTextToSpeechRequest, reference_transcript);
         let request = grown_request_in(request, size, least, "WaifuTextToSpeechRequest")?;
         let request = SpeakRequest {
             text: required(request.text, "text")?,
@@ -1169,7 +1165,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_text_to_speech_async(
             speed: request.speed,
             temperature: request.temperature,
             style: string_in(request.style, "style")?,
-            transcript: string_in(request.transcript, "transcript")?,
+            reference_transcript: string_in(request.reference_transcript, "reference_transcript")?,
             seed: request.seed,
         };
         let user_data = UserData(user_data);
@@ -1223,12 +1219,12 @@ pub struct WaifuStreamingTextToSpeechRequest {
     /// A recording to sound like, or NULL.
     pub reference: *const WaifuAudio,
     pub temperature: f32,
-    /// Any instruction; NULL or "" for the voice's own way.
+    /// As WaifuTextToSpeechRequest's.
     pub style: *const c_char,
     /// No speed: a streaming reading is at the speed it is said, as upstream's is.
     pub seed: u64,
     /// As WaifuTextToSpeechRequest's.
-    pub transcript: *const c_char,
+    pub reference_transcript: *const c_char,
 }
 
 /// A part of the reading's audio, in order; the samples are valid until it returns.
@@ -1267,7 +1263,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_streaming_text_to_speech_async(
     submitted(&gate, || {
         let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH)?;
         let size = request.as_ref().map_or(0, |request| request.struct_size);
-        let least = std::mem::offset_of!(WaifuStreamingTextToSpeechRequest, transcript);
+        let least = std::mem::offset_of!(WaifuStreamingTextToSpeechRequest, reference_transcript);
         let request = grown_request_in(request, size, least, "WaifuStreamingTextToSpeechRequest")?;
         let request = SpeakRequest {
             text: required(request.text, "text")?,
@@ -1275,7 +1271,7 @@ pub unsafe extern "C" fn waifu_pipeline_run_streaming_text_to_speech_async(
             speed: 1.0,
             temperature: request.temperature,
             style: string_in(request.style, "style")?,
-            transcript: string_in(request.transcript, "transcript")?,
+            reference_transcript: string_in(request.reference_transcript, "reference_transcript")?,
             seed: request.seed,
         };
         let user_data = UserData(user_data);

@@ -500,7 +500,7 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
         temperature: 1.0,
         seed: Some(7),
         style: None,
-        transcript: None,
+        reference_transcript: None,
     };
     let mut carry_on = |_: SpeechProgress| ControlFlow::Continue(());
 
@@ -549,7 +549,7 @@ fn says_the_sentence_in_the_voice_of_the_recording() {
         .unwrap()
         .unwrap();
     let with_words = SpeechOptions {
-        transcript: Some(PROMPT_TEXT.to_string()),
+        reference_transcript: Some(PROMPT_TEXT.to_string()),
         ..options.clone()
     };
     let spoken = tts
@@ -676,7 +676,7 @@ fn a_reading_streamed_a_hop_at_a_time_is_upstreams() {
         temperature: 1.0,
         seed: Some(7),
         style: None,
-        transcript: None,
+        reference_transcript: None,
     };
     let mut carry_on = |_: SpeechProgress| ControlFlow::Continue(());
     let mut parts: Vec<Sound> = Vec::new();

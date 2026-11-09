@@ -240,6 +240,7 @@ pub struct WaifuTextToSpeechRequest {
     pub temperature: f32,
     pub style: *const c_char,
     pub seed: u64,
+    pub reference_transcript: *const c_char,
 }
 
 #[repr(C)]
@@ -269,6 +270,7 @@ pub struct WaifuStreamingTextToSpeechRequest {
     pub temperature: f32,
     pub style: *const c_char,
     pub seed: u64,
+    pub reference_transcript: *const c_char,
 }
 
 pub type WaifuAudioPartCallback =

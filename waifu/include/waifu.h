@@ -151,12 +151,14 @@ typedef struct {
   const WaifuAudio *reference;
   float speed;
   float temperature;
-  // Any instruction; NULL or "" for the voice's own way.
+  // Any instruction; NULL or "" for the voice's own way. CosyVoice3 takes a style or a
+  // reference_transcript, not both: upstream's instruct2 reads no transcript.
   const char *style;
   uint64_t seed;
-  // What the reference says, word for word, for a model that SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT;
-  // NULL or "" where it is not known. Last, and read only where struct_size holds it.
-  const char *transcript;
+  // What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
+  // from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
+  // reads none ignores it. Last, and read only where struct_size holds it.
+  const char *reference_transcript;
 } WaifuTextToSpeechRequest;
 
 // Both speech tasks make audio.
@@ -189,12 +191,12 @@ typedef struct {
   // A recording to sound like, or NULL.
   const WaifuAudio *reference;
   float temperature;
-  // Any instruction; NULL or "" for the voice's own way.
+  // As WaifuTextToSpeechRequest's.
   const char *style;
   // No speed: a streaming reading is at the speed it is said, as upstream's is.
   uint64_t seed;
   // As WaifuTextToSpeechRequest's.
-  const char *transcript;
+  const char *reference_transcript;
 } WaifuStreamingTextToSpeechRequest;
 
 // A part of the reading's audio, in order; the samples are valid until it returns.
@@ -341,9 +343,6 @@ typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTe
 
 // Follows an instruction such as "speak happily".
 #define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE 202
-
-// Reads the words of the reference recording -- a request's transcript -- and goes on from it.
-#define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_TRANSCRIPT 203
 
 // The manner as well as the voice.
 #define WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE 300

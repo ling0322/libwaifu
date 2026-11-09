@@ -101,13 +101,18 @@ see [`frontend.rs`](../waifu/src/cosyvoice3/frontend.rs) -- and each piece goes 
 
 ### With a transcript, without, and with a style
 
-Handed a recording and no transcript, [`Voice::speak`](../waifu/src/speech.rs) reads the way
-upstream's `inference_cross_lingual` does: the language model sees the system prompt and the
-sentence, and nothing of the recording; the voice comes from the flow. Given the words of the
-recording -- `SpeechOptions::transcript`, a text-to-speech request's `transcript` over the C API,
-or `say_after` -- it reads the way `inference_zero_shot` does: transcript and sentence as one
-text, continuing the recording's own tokens. Both sound like the recording; zero-shot also carries
-on its pace and manner. Streaming reads either way.
+Given the words of the recording -- `SpeechOptions::reference_transcript`, a text-to-speech
+request's `reference_transcript` over the C API, or `say_after` -- [`Voice::speak`](../waifu/src/speech.rs)
+reads the way `inference_zero_shot` does: transcript and sentence as one text, continuing the
+recording's own tokens. Handed a recording and no transcript, it reads the way
+`inference_cross_lingual` does: the language model sees the system prompt and the sentence, and
+nothing of the recording; the voice comes from the flow. Both sound like the recording; zero-shot
+also carries on its pace and manner. Streaming reads either way.
+
+Zero-shot is upstream's own way of cloning a voice in the same language. Its web UI will not read
+"3s极速复刻" without the transcript, and it keeps "跨语种复刻", cross-lingual, for a sentence in
+another language than the recording, which is what that reading is for. A page that offers a
+recording should offer the box for its words beside it.
 
 The transcript is the system prompt's to follow, as upstream's `prompt_text` is in its examples,
 except that here the system prompt is put in front of it: a transcript holding a `<|...|>` marker
@@ -128,7 +133,9 @@ the flow still continues the recording, so the voice is the recording's and the 
 instruction's. [`CosyVoice3::STYLES`](../waifu/src/cosyvoice3/mod.rs) is upstream's `instruct_list`
 word for word: happy, sad and angry, fast and slow, loud and soft, Peppa Pig, a robot, and
 seventeen dialects. Those are what the model was taught; other wording is taken and is a guess. A
-style and a transcript are refused together, because upstream never combines them.
+style and a transcript are refused together, before the recording is listened to: instruct2 drops
+the recording's tokens from the language model, which leaves a transcript nothing to be the words
+of, and upstream never combines them.
 
 ### Streaming
 
@@ -280,6 +287,6 @@ float32 takes 861.
 Streaming on the processor, whose attention has no block mask. A DiT that draws
 only each new hop, keeping what it computed of the frames before, rather than all of them again.
 A place in the apps to type the recording's transcript: the C API takes one, and neither app
-sends it yet.
+sends it yet. Nor one that fills it in by itself, from Qwen3-ASR's transcription of the recording.
 The instruct2 reading has no reference test beside the zero-shot and cross-lingual ones; its ids
 are the zero-shot path's with a different prefix.
