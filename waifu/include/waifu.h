@@ -182,7 +182,7 @@ typedef struct {
 // Text to speech with the audio handed over while the rest is said -- CosyVoice3's a hop of
 // tokens at a time, as upstream's stream=True -- for a caller that plays the start at once. A
 // load is refused at the call for a model that does not stream, and ends with WAIFU_ERR_MODEL
-// where the device cannot: anywhere but CUDA at half, on Ampere or later.
+// where the device cannot: anywhere but CUDA at half, on Ampere or later, and Metal.
 typedef struct {
   uint32_t struct_size;
   const char *text;

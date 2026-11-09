@@ -398,7 +398,7 @@ WaifuJob waifu_pipeline_run_voice_conversion_async(WaifuPipeline *pipeline,
 // tokens at a time, as upstream's stream=True -- for a caller that plays the start at once. Its
 // audio is another reading of the same tokens, not text to speech's samples, and it takes longer
 // in all. A load is refused at the call for a model that does not stream, and ends with
-// WAIFU_ERR_MODEL where the device cannot: anywhere but CUDA at half, on Ampere or later.
+// WAIFU_ERR_MODEL where the device cannot: anywhere but CUDA at half, on Ampere or later, and Metal.
 
 typedef struct {
   uint32_t struct_size;
