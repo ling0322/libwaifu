@@ -593,13 +593,19 @@ enum Outcome {
     }
 }
 
-/// What a callback needs when it arrives: the progress closure, and how to end the call.
+/// A part of a streaming reading, in order, on the library's thread as soon as it is made.
+public typealias AudioPartHandler = @Sendable (AudioClip) -> Void
+
+/// What a callback needs when it arrives: the progress closure, where a streaming reading's parts
+/// go, and how to end the call.
 final class Pending: @unchecked Sendable {
     let progress: ProgressHandler?
+    let heard: AudioPartHandler?
     let finish: (Outcome) -> Void
 
-    init(progress: ProgressHandler?, finish: @escaping (Outcome) -> Void) {
+    init(progress: ProgressHandler?, heard: AudioPartHandler? = nil, finish: @escaping (Outcome) -> Void) {
         self.progress = progress
+        self.heard = heard
         self.finish = finish
     }
 }
@@ -673,15 +679,23 @@ private let onImage: WaifuImageGenerationCallback = { userData, result in
     pending.finish(Outcome(result.pointee.status, image))
 }
 
+/// Copied now: the samples are the library's only until the callback returns.
+private func clip(_ sound: WaifuAudio) -> AudioClip {
+    let samples = sound.samples.map { Array(UnsafeBufferPointer(start: $0, count: sound.count)) } ?? []
+    return AudioClip(samples: samples, rate: Int(sound.sample_rate))
+}
+
 private let onAudio: WaifuAudioCallback = { userData, result in
     guard let userData, let result else { return }
     let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
-    let clip = result.pointee.audio.map { audio -> AudioClip in
-        let sound = audio.pointee
-        let samples = sound.samples.map { Array(UnsafeBufferPointer(start: $0, count: sound.count)) } ?? []
-        return AudioClip(samples: samples, rate: Int(sound.sample_rate))
-    }
-    pending.finish(Outcome(result.pointee.status, clip))
+    pending.finish(Outcome(result.pointee.status, result.pointee.audio.map { clip($0.pointee) }))
+}
+
+/// A part of a streaming reading: the call goes on, so the retain stays for on_complete.
+private let onAudioPart: WaifuAudioPartCallback = { userData, part in
+    guard let userData, let part else { return }
+    let pending = Unmanaged<Pending>.fromOpaque(userData).takeUnretainedValue()
+    pending.heard?(clip(part.pointee))
 }
 
 private func rgba(_ image: WaifuRgbaImage) -> RGBAImage {
@@ -760,6 +774,7 @@ final class Scratch {
 /// `refused` says why a job of 0 was.
 func call<T>(
     progress: ProgressHandler?,
+    heard: AudioPartHandler? = nil,
     cancel: @escaping (WaifuJob) -> Void,
     refused: () -> WaifuError = libraryRefusal,
     submit: (UnsafeMutableRawPointer) -> WaifuJob
@@ -767,7 +782,7 @@ func call<T>(
     let ticket = Ticket()
     return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T?, Error>) in
-            let pending = Pending(progress: progress) { outcome in
+            let pending = Pending(progress: progress, heard: heard) { outcome in
                 switch outcome {
                 case .done(let value): continuation.resume(returning: value as? T)
                 case .cancelled: continuation.resume(returning: nil)
@@ -1002,6 +1017,33 @@ public final class Pipeline: @unchecked Sendable {
             )
             return withExtendedLifetime(scratch) {
                 waifu_pipeline_run_text_to_speech_async(handle, &c, userData, onProgress, onAudio)
+            }
+        }
+    }
+
+    /// The reading, with each part of it handed to `heard` as soon as it is made -- CosyVoice3's a
+    /// hop of tokens at a time -- while the rest is still being said, and the whole of it, the parts
+    /// end to end, at the end; nil where it was cancelled, after the part it was on. For a pipeline
+    /// made for `.streamingTextToSpeech`. A streaming reading is at the speed it is said, so the
+    /// request's speed is not read; it is a reading of its own, not the samples `speak` makes of the
+    /// same request.
+    public func speakStreaming(
+        _ request: SpeakRequest, progress: ProgressHandler? = nil, heard: @escaping AudioPartHandler
+    ) async throws -> AudioClip? {
+        try await call(progress: progress, heard: heard, cancel: cancel) { userData in
+            let scratch = Scratch()
+            let reference: UnsafePointer<WaifuAudio>? = request.reference.map { scratch.audio($0) }
+            var c = WaifuStreamingTextToSpeechRequest(
+                struct_size: UInt32(MemoryLayout<WaifuStreamingTextToSpeechRequest>.size),
+                text: scratch.string(request.text),
+                reference: reference,
+                temperature: Float(request.temperature),
+                style: scratch.optionalString(request.style),
+                seed: request.seed
+            )
+            return withExtendedLifetime(scratch) {
+                waifu_pipeline_run_streaming_text_to_speech_async(
+                    handle, &c, userData, onProgress, onAudioPart, onAudio)
             }
         }
     }

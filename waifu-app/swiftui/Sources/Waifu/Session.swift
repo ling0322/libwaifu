@@ -70,6 +70,8 @@ struct JobForm {
     var text = ""
     var speed = 1.0
     var temperature = 0.8
+    /// Whether a reading plays as it is said, a part at a time, rather than once it is all made.
+    var stream = true
     var conversionSteps = 30
     var convertStyle = false
     var style = ""
@@ -152,6 +154,9 @@ final class Session {
     private(set) var jobs: [Job] = []
     /// What went wrong with the last thing that was clicked.
     var complaint: String?
+    /// What the last job did otherwise than asked, which is not wrong: a reading asked to stream
+    /// that was read whole.
+    var notice: String?
 
     var tab: Tab = .text2img
     /// Whether the Model Manager page is on show rather than a task.
@@ -528,6 +533,7 @@ final class Session {
     /// for while another tab's job runs, or what this tab's last job came to.
     var note: (said: String, bad: Bool)? {
         if let complaint { return (complaint, true) }
+        if let notice { return (notice, false) }
         if goingHere.isEmpty, let elsewhere = busyElsewhere {
             return ("\(elsewhere.rawValue) is running: this waits until it is done, or is stopped there", false)
         }
@@ -588,15 +594,16 @@ final class Session {
     /// fetching and reading the model first where it is not the one loaded -- and kept when it
     /// ends: what `run` hands back is the file, what made it, and what is kept beside the file.
     private func start(
-        kind: String, model: String,
+        kind: String, model: String, type asked: PipelineType? = nil,
         _ run: @escaping (Pipeline, @escaping ProgressHandler) async throws -> (Data, Made, [String: Data])?
     ) {
         complaint = nil
+        notice = nil
         let id = UUID().uuidString.lowercased()
         jobs.insert(Job(id: id, kind: kind, status: .queued, created: Date().timeIntervalSince1970 * 1000), at: 0)
 
         let placement = placement
-        let type = Launcher.pipelineType(for: kind)
+        let type = asked ?? Launcher.pipelineType(for: kind)
         let previous = last
         let task = Task { [weak self] in
             await previous?.value
@@ -613,7 +620,17 @@ final class Session {
             }
             do {
                 let wasLoaded = launcher.has(model, for: type, on: placement)
-                let pipeline = try await launcher.ensure(model, for: type, on: placement)
+                let pipeline: Pipeline
+                do {
+                    pipeline = try await launcher.ensure(model, for: type, on: placement)
+                } catch let error as WaifuError where type == .streamingTextToSpeech {
+                    // A device the voice cannot stream on refuses the load -- the processor, whose
+                    // attention has no block mask -- so it is read whole instead, and why is said
+                    // over the output: not as a fault, for the reading is not one.
+                    guard case .model(let why) = error else { throw error }
+                    notice = "read whole, not streamed: \(why)"
+                    pipeline = try await launcher.ensure(model, for: Launcher.pipelineType(for: kind), on: placement)
+                }
                 if !wasLoaded { refresh(model) }
                 // Cancelled once the pipeline was done -- while a picture taken apart was turned
                 // into files -- is cancelled all the same: nothing is kept.
@@ -756,14 +773,58 @@ final class Session {
             text: form.text, speed: form.speed, temperature: form.temperature, style: style,
             fromARecording: recording != nil)
 
-        start(kind: "speech", model: modelName) { pipeline, report in
+        // Played as it is said where the voice streams and it is asked to, at the speed it is said:
+        // a streaming reading has no other. Asked at another, it is read whole, and says why.
+        let asked = form.stream && voice.streams
+        let streams = asked && form.speed == 1
+
+        start(kind: "speech", model: modelName, type: streams ? .streamingTextToSpeech : nil) { pipeline, report in
             let started = Date()
-            guard let clip = try await pipeline.speak(request, progress: report) else { return nil }
+            // The pipeline the load gave: a streaming one, or, where the device refused it, one
+            // that reads whole.
+            let streamed = pipeline.type == .streamingTextToSpeech
+            let said: AudioClip?
+            let took: TimeInterval
+            if streamed {
+                // The job lasts until the reading has been heard: a Stop silences it until the last
+                // of it, and the next reading, which waits for this job, does not play over it.
+                let player = StreamPlayer()
+                (said, took) = try await withTaskCancellationHandler {
+                    let said: AudioClip?
+                    do {
+                        said = try await pipeline.speakStreaming(request, progress: report) { player.play($0) }
+                    } catch {
+                        player.stop()
+                        throw error
+                    }
+                    // How long it took to make, not to hear: what a reading read whole is timed by.
+                    let took = Date().timeIntervalSince(started)
+                    player.finish()
+                    await player.playedOut()
+                    return (said, took)
+                } onCancel: {
+                    player.stop()
+                }
+            } else {
+                said = try await pipeline.speak(request, progress: report)
+                took = Date().timeIntervalSince(started)
+            }
+            guard let clip = said else { return nil }
             var made = made
-            made.seconds = Date().timeIntervalSince(started)
+            made.seconds = took
             made.length = clip.seconds
             made.rate = clip.rate
+            // A streaming reading is a reading of its own, not the samples a whole one makes of the
+            // same seed: the record says which, so that Reuse makes it again.
+            if streamed {
+                made.streamed = true
+                made.parameters += ", Streamed: yes"
+            }
             return (Media.wav(clip.samples, rate: clip.rate), made, [:])
+        }
+        // After start, which clears the note of the job before.
+        if asked && !streams {
+            notice = "read whole, not streamed: a reading is played as it is said at speed 1 only"
         }
     }
 
@@ -1001,6 +1062,7 @@ final class Session {
             form.speed = made.speed ?? form.speed
             form.temperature = made.temperature ?? form.temperature
             form.style = made.style ?? ""
+            form.stream = made.streamed ?? false
         case "layers":
             form.layerSteps = made.steps ?? form.layerSteps
             form.depthSteps = made.depthSteps ?? form.depthSteps
