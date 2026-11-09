@@ -86,6 +86,15 @@ its flaps in front (docs/see_through.md); names and depths are changed with it o
 follow them. The document kept, and what waifu2d opens, stay as the model made them. A picture taken
 apart before the halves were kept has none to split by: take it apart again.
 
+**text2speech** reads the text aloud, in the voice of a recording dropped on it if there is one.
+With a voice that streams (CosyVoice3) and **Play as it is said** on, the reading starts playing as
+soon as its first part is made -- under a second in, on an M5 Pro -- while the rest is still being
+said; the parts are held a quarter of a second before the first plays, so that a late one is waited
+for rather than heard as a click, and Stop silences it at once. A streaming reading is said at
+speed 1; at another, or on a device that cannot stream it, it is read whole, and the note over the
+output says why. What is kept is the whole reading either way, and its record says whether it was
+streamed, which Reuse turns the switch back to.
+
 **waifu2d** makes a drawing in layers move, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
 does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedParts.swift` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers
 writes. Layers are known by See-through's names and Anime2.5DRig's English and Japanese ones

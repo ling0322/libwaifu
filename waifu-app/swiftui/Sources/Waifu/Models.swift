@@ -78,6 +78,9 @@ struct Voice {
     var needsARecording: Bool?
     /// Whether it follows an instruction for how to say it.
     var followsStyle: Bool
+    /// Whether it can be played as it is said, a part at a time: a model that streams, on a device
+    /// the load then checks.
+    var streams: Bool = false
     /// What the style picker offers, above a box for any instruction: CosyVoice3's examples, for a
     /// voice that follows a style.
     var styles: [Style]? { followsStyle ? Voice.examples : nil }
@@ -222,7 +225,8 @@ struct ModelInfo {
                 takesARecording: opened.supports(.textToSpeechLikeReference).map { $0 == .yes },
                 noLikenessBecause: opened.whyNot(.textToSpeechLikeReference),
                 needsARecording: opened.supports(.textToSpeechWithoutReference).map { $0 != .yes },
-                followsStyle: opened.does(.textToSpeechWithStyle))
+                followsStyle: opened.does(.textToSpeechWithStyle),
+                streams: opened.does(.streamingTextToSpeech))
             if kinds.contains("conversion") { info.converter = converter }
         default:
             info.converter = converter
@@ -300,6 +304,8 @@ struct Made: Codable {
     var temperature: Double?
     var style: String?
     var fromARecording: Bool?
+    /// Whether it was played as it was said, a part at a time: a reading of its own.
+    var streamed: Bool?
     // A conversion.
     var convertStyle: Bool?
     // A sound.
