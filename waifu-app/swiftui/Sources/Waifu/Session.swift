@@ -154,9 +154,10 @@ final class Session {
     private(set) var jobs: [Job] = []
     /// What went wrong with the last thing that was clicked.
     var complaint: String?
-    /// What the last job did otherwise than asked, which is not wrong: a reading asked to stream
-    /// that was read whole.
-    var notice: String?
+    /// What a job did otherwise than asked, which is not wrong -- a reading asked to stream that was
+    /// read whole, or not heard as it was said -- shown while that job is its tab's last and has not
+    /// failed: a failure says what went wrong instead.
+    private var notice: (job: String, said: String)?
 
     var tab: Tab = .text2img
     /// Whether the Model Manager page is on show rather than a task.
@@ -533,7 +534,6 @@ final class Session {
     /// for while another tab's job runs, or what this tab's last job came to.
     var note: (said: String, bad: Bool)? {
         if let complaint { return (complaint, true) }
-        if let notice { return (notice, false) }
         if goingHere.isEmpty, let elsewhere = busyElsewhere {
             return ("\(elsewhere.rawValue) is running: this waits until it is done, or is stopped there", false)
         }
@@ -541,7 +541,9 @@ final class Session {
         switch last?.status {
         case .failed: return (last?.error ?? "it failed", true)
         case .cancelled: return ("stopped where it was", false)
-        default: return nil
+        default:
+            if let notice, notice.job == last?.id { return (notice.said, false) }
+            return nil
         }
     }
 
@@ -594,12 +596,12 @@ final class Session {
     /// fetching and reading the model first where it is not the one loaded -- and kept when it
     /// ends: what `run` hands back is the file, what made it, and what is kept beside the file.
     private func start(
-        kind: String, model: String, type asked: PipelineType? = nil,
+        kind: String, model: String, type asked: PipelineType? = nil, notice said: String? = nil,
         _ run: @escaping (Pipeline, @escaping ProgressHandler) async throws -> (Data, Made, [String: Data])?
     ) {
         complaint = nil
-        notice = nil
         let id = UUID().uuidString.lowercased()
+        notice = said.map { (id, $0) }
         jobs.insert(Job(id: id, kind: kind, status: .queued, created: Date().timeIntervalSince1970 * 1000), at: 0)
 
         let placement = placement
@@ -628,7 +630,7 @@ final class Session {
                     // attention has no block mask -- so it is read whole instead, and why is said
                     // over the output: not as a fault, for the reading is not one.
                     guard case .model(let why) = error else { throw error }
-                    notice = "read whole, not streamed: \(why)"
+                    notice = (id, "read whole, not streamed: \(why)")
                     pipeline = try await launcher.ensure(model, for: Launcher.pipelineType(for: kind), on: placement)
                 }
                 if !wasLoaded { refresh(model) }
@@ -778,7 +780,10 @@ final class Session {
         let asked = form.stream && voice.streams
         let streams = asked && form.speed == 1
 
-        start(kind: "speech", model: modelName, type: streams ? .streamingTextToSpeech : nil) { pipeline, report in
+        start(
+            kind: "speech", model: modelName, type: streams ? .streamingTextToSpeech : nil,
+            notice: asked && !streams ? "read whole, not streamed: a reading is played as it is said at speed 1 only" : nil
+        ) { [weak self] pipeline, report in
             let started = Date()
             // The pipeline the load gave: a streaming one, or, where the device refused it, one
             // that reads whole.
@@ -805,6 +810,10 @@ final class Session {
                 } onCancel: {
                     player.stop()
                 }
+                // Made but not heard: kept all the same, to be played from the output.
+                if let why = player.couldNotPlay, said != nil {
+                    self?.noteRunning("not heard as it was said -- \(why) -- but kept: play it below")
+                }
             } else {
                 said = try await pipeline.speak(request, progress: report)
                 took = Date().timeIntervalSince(started)
@@ -822,10 +831,12 @@ final class Session {
             }
             return (Media.wav(clip.samples, rate: clip.rate), made, [:])
         }
-        // After start, which clears the note of the job before.
-        if asked && !streams {
-            notice = "read whole, not streamed: a reading is played as it is said at speed 1 only"
-        }
+    }
+
+    /// A notice about the job running now, of which there is one at a time.
+    private func noteRunning(_ said: String) {
+        guard let job = jobs.first(where: { $0.status == .running }) else { return }
+        notice = (job.id, said)
     }
 
     private func convert() {

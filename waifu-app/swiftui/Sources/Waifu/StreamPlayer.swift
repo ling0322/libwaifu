@@ -58,6 +58,9 @@ final class StreamPlayer: @unchecked Sendable {
     private var ranDry = 0
     /// Who is waiting for it to have played out.
     private var waiting: [CheckedContinuation<Void, Never>] = []
+    /// Why the audio engine would not start, once it has not: no part after is tried, so that a
+    /// reading is heard from its start or not at all.
+    private var trouble: String?
 
     /// How many parts have been added: none means nothing of the reading was heard.
     var heard: Int {
@@ -76,13 +79,22 @@ final class StreamPlayer: @unchecked Sendable {
         queue.sync { shared.withLock { $0?.buffer.underruns } ?? ranDry }
     }
 
+    /// Why nothing more of the reading could be played -- the audio engine would not start -- or nil
+    /// where every part handed over was.
+    var couldNotPlay: String? {
+        queue.sync { trouble }
+    }
+
     /// Adds `part` after the ones before it, starting the audio engine with the first.
     func play(_ part: AudioClip) {
         queue.sync {
-            guard !stopped, !finished, !part.samples.isEmpty, part.rate > 0 else { return }
+            guard !stopped, !finished, trouble == nil, !part.samples.isEmpty, part.rate > 0 else { return }
             // Every part of a reading is at its voice's rate; one at another starts afresh.
             if engine == nil || part.rate != rate {
-                guard start(rate: part.rate) else { return }
+                if let why = start(rate: part.rate) {
+                    trouble = why
+                    return
+                }
             }
             shared.withLock { $0?.buffer.push(part.samples) }
             parts += 1
@@ -119,10 +131,11 @@ final class StreamPlayer: @unchecked Sendable {
         }
     }
 
-    private func start(rate: Int) -> Bool {
+    /// Starts an audio engine at `rate`, and says why where it cannot.
+    private func start(rate: Int) -> String? {
         tearDown()
         guard let format = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1) else {
-            return false
+            return "no audio format at \(rate) Hz"
         }
         shared.withLock {
             $0 = Shared(
@@ -157,11 +170,11 @@ final class StreamPlayer: @unchecked Sendable {
             try engine.start()
         } catch {
             shared.withLock { $0 = nil }
-            return false
+            return "the audio output would not start: \(error.localizedDescription)"
         }
         self.engine = engine
         self.rate = rate
-        return true
+        return nil
     }
 
     /// The audio thread has played everything there is of the engine `which` names.
