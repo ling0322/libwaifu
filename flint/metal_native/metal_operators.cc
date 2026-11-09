@@ -101,6 +101,10 @@ void MetalOperators::matmul(TensorView A, TensorView B, TensorView out) {
   metal_native::matmul(A, B, out);
 }
 
+void MetalOperators::matmulAdd(TensorView A, TensorView B, TensorView addend, TensorView out) {
+  metal_native::matmulAdd(A, B, addend, out);
+}
+
 void MetalOperators::conv2d(
     TensorView input,
     TensorView weight,

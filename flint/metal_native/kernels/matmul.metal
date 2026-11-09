@@ -29,6 +29,12 @@
 constant constexpr uint kVecAlongK = 1;
 constant constexpr uint kVecAlongMN = 2;
 
+// What is added to the product's float sum before it is rounded to C, which matmul.cc works out:
+// nothing (0); a value per column (N), a linear layer's bias; or an addend laid out as C is,
+// contiguous, batch after batch -- a residual.
+constant constexpr uint kAddColumns = 1;
+constant constexpr uint kAddWhole = 2;
+
 struct GemmParams {
   uint M;
   uint N;
@@ -44,6 +50,7 @@ struct GemmParams {
   uint strideB1;
   uint vecA;
   uint vecB;
+  uint addKind;
 };
 
 struct ConvParams {
@@ -68,13 +75,16 @@ struct ConvParams {
   uint vecInput;   // pointwise, and the input rows may be read four at a time
 };
 
-// For every batch (b0, b1), C[b0, b1] = A[b0, b1] B[b0, b1], A and B with any strides -- a batch
-// stride of zero broadcasts -- and C contiguous. The batch is the grid's z, b0 * batch1 + b1.
+// For every batch (b0, b1), C[b0, b1] = A[b0, b1] B[b0, b1] (+ the addend), A and B with any
+// strides -- a batch stride of zero broadcasts -- and C contiguous. The batch is the grid's z,
+// b0 * batch1 + b1. The addend, in C's type, is added to the sum in float, and the two rounded to
+// C once.
 template <typename T, typename C = T>
 struct MatmulProblem {
   device C *c;
   device const T *a;
   device const T *b;
+  device const C *add;  // this batch's, for kAddWhole
   constant GemmParams *p;
 
   static constexpr constant uint kTileK = TileK<T>::value;
@@ -97,6 +107,15 @@ struct MatmulProblem {
     return false;
   }
   void stageRowBias(threadgroup float *, uint, uint) const {}
+  bool hasColumnBias() const {
+    return p->addKind == kAddColumns;
+  }
+  void stageColumnBias(threadgroup float *table, uint n0, uint tid) const {
+    for (uint i = tid; i < 8 * kTileN; i += kGemmThreads) {
+      uint n = n0 + i % kTileN;
+      table[i] = n < p->N ? Elem<C>::load(add, n) : 0.0f;
+    }
+  }
   vec<T, 4> loadB4(uint k, uint n) const {
     return *reinterpret_cast<device const vec<T, 4> *>(b + k * p->strideBk + n * p->strideBn);
   }
@@ -173,21 +192,31 @@ struct MatmulProblem {
   }
 
   bool storeBlock(simdgroup_matrix<float, 8, 8> block, uint m, uint n) const {
+    if (p->addKind == kAddWhole) {
+      // The addend's block, in the same layout as the sum's: element by element, in float.
+      simdgroup_matrix<C, 8, 8> more;
+      simdgroup_load(more, add + m * p->N + n, p->N);
+      block.thread_elements()[0] += float(more.thread_elements()[0]);
+      block.thread_elements()[1] += float(more.thread_elements()[1]);
+    }
     simdgroup_store(convertBlock<C>(block), c + m * p->N + n, p->N);
     return true;
   }
   void storeC(uint m, uint n, float value) const {
+    if (p->addKind == kAddWhole) value += Elem<C>::load(add, m * p->N + n);
     Elem<C>::store(c, m * p->N + n, value);
   }
 };
 
-// C = A B, with C in `C`: T's own, or float for a product of half kept as the sum was.
+// C = A B (+ the addend), with C in `C`: T's own, or float for a product of half kept as the sum
+// was. Where there is no addend, `add` is any buffer, never read.
 template <typename T, typename C = T>
 kernel void matmul(
     device C *c [[buffer(0)]],
     device const T *a [[buffer(1)]],
     device const T *b [[buffer(2)]],
-    constant GemmParams &p [[buffer(3)]],
+    device const C *add [[buffer(3)]],
+    constant GemmParams &p [[buffer(4)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
@@ -202,6 +231,7 @@ kernel void matmul(
   problem.c = c + batch * p.M * p.N;
   problem.a = a + b0 * p.strideA0 + b1 * p.strideA1;
   problem.b = b + b0 * p.strideB0 + b1 * p.strideB1;
+  problem.add = add + (p.addKind == kAddWhole ? batch * p.M * p.N : 0);
   problem.p = &p;
   gemm<T>(problem, p.M, p.N, p.K, group.xy, tid, sg, lane, tileA, tileB, scratch);
 }
@@ -240,6 +270,10 @@ struct ConvProblem {
       table[i] = m < M ? Elem<T>::load(bias, m) : 0.0f;
     }
   }
+  bool hasColumnBias() const {
+    return false;
+  }
+  void stageColumnBias(threadgroup float *, uint, uint) const {}
 
   // The weight, (M, K) and contiguous.
   void stageA(threadgroup T *tile, uint m0, uint k0, uint tid) const {
@@ -368,8 +402,8 @@ kernel void conv2d(
 
 #define FLINT_GEMM_KERNELS(T, S)                                                                \
   template [[host_name("matmul_" S)]] kernel void matmul<T>(                                    \
-      device T *, device const T *, device const T *, constant GemmParams &, uint3, uint, uint,  \
-      uint);                                                                                    \
+      device T *, device const T *, device const T *, device const T *, constant GemmParams &,   \
+      uint3, uint, uint, uint);                                                                 \
   template [[host_name("conv2d_" S)]] kernel void conv2d<T>(                                    \
       device T *, device const T *, device const T *, device const T *, constant ConvParams &,  \
       uint3, uint, uint, uint);
@@ -378,5 +412,5 @@ FLINT_GEMM_KERNELS(float, "f32")
 FLINT_GEMM_KERNELS(half, "f16")
 
 template [[host_name("matmul_f16_f32")]] kernel void matmul<half, float>(
-    device float *, device const half *, device const half *, constant GemmParams &, uint3, uint,
-    uint, uint);
+    device float *, device const half *, device const half *, device const float *,
+    constant GemmParams &, uint3, uint, uint, uint);

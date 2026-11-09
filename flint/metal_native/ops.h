@@ -122,14 +122,26 @@ void rotaryEmbedding(
 // matmul.cc
 void matmul(const TensorView &a, const TensorView &b, const TensorView &out);
 
+/// `a b + addend`, the addend broadcast over the output's leading dimensions -- a bias (N), or a
+/// residual of the output's shape -- added to the product's float sum and the two rounded once.
+/// The addend is of the output's dtype.
+void matmulAdd(
+    const TensorView &a,
+    const TensorView &b,
+    const TensorView &addend,
+    const TensorView &out);
+
 /// `a` <float16>(..., k) times the transpose of the E4M3 weight `data` (rows, k), scaled by
 /// `scale` <float>(1), one for all of it, into
 /// `out` <float16>(..., rows). Every operand contiguous: the C API's fl_fp8_matmul checks them.
+/// `addend` <float16>, if not empty, is added after the scale, before the sum is rounded to half: a
+/// bias (rows), or anything that broadcasts to `out`.
 void fp8Matmul(
     const TensorView &a,
     const TensorView &data,
     const TensorView &scale,
-    const TensorView &out);
+    const TensorView &out,
+    const TensorView &addend = TensorView());
 
 /// Scaled dot product attention in one kernel, as Operators::attention has it, under `maskType`
 /// in blocks of `blockSize` keys (see MaskType), where the kernel takes these: a head of 32, 64

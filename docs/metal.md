@@ -57,6 +57,13 @@ work goes to the GPU in batches without anyone waiting.
   on the neural accelerators where there are any. Convolution is an implicit GEMM on either --
   `C (K, P*Q) = W (K, C*R*S) unfold(x)` -- with the unfolded input gathered a chunk at a time into
   threadgroup memory, the next chunk read into registers while the accelerators work on this one.
+- **A product and its addend** (`matmulAdd`, a linear layer's bias or a residual; and
+  `fl_fp8_matmul_add`): every product kernel adds it to its float sum -- after the scale, in FP8
+  -- and rounds the two to half once, as torch's `addmm` does. A bias is read by column: into
+  threadgroup memory where B was staged, added to the simdgroup matrices before they are stored,
+  or on the accelerators into a cooperative tensor laid out as the sum is. A biased linear costs
+  what the product alone does, and its worst element is half as far from the exact answer as
+  `matmul` then `add`, which rounds twice (`benchmark Metal matmul with an addend`).
 - **Attention**: a fused kernel (online softmax in float, nothing written but the output) under
   every mask, for heads of 32, 64 and 128: `nax_attention` on the neural
   accelerators, in half; elsewhere, and in float, a simdgroup-matrix kernel whose softmax works on
