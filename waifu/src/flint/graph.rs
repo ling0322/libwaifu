@@ -695,14 +695,46 @@ impl Graph {
 
     #[track_caller]
     pub fn matmul(&self, lhs: Value, rhs: Value) -> Value {
-        self.push(Op::Matmul { lhs, rhs })
+        self.push(Op::Matmul {
+            lhs,
+            rhs,
+            addend: None,
+        })
+    }
+
+    /// `lhs rhs + addend`, the addend broadcast over the product's leading dimensions -- a linear
+    /// layer's bias, or a residual -- rounded once where the device can. See [`Op::Matmul`].
+    #[track_caller]
+    pub fn matmul_add(&self, lhs: Value, rhs: Value, addend: Value) -> Value {
+        self.push(Op::Matmul {
+            lhs,
+            rhs,
+            addend: Some(addend),
+        })
     }
 
     /// `lhs` times the transpose of an FP8 weight, which is the two values it is stored as: the
     /// `<fp8e4m3>(rows, k)` elements and a single `<float>` scale. See [`Op::Fp8Matmul`].
     #[track_caller]
     pub fn fp8_matmul(&self, lhs: Value, weight: Value, scale: Value) -> Value {
-        self.push(Op::Fp8Matmul { lhs, weight, scale })
+        self.push(Op::Fp8Matmul {
+            lhs,
+            weight,
+            scale,
+            addend: None,
+        })
+    }
+
+    /// [`fp8_matmul`](Graph::fp8_matmul) plus `addend`, broadcast over the product's leading
+    /// dimensions -- a linear layer's bias, or a residual -- rounded once where the device can.
+    #[track_caller]
+    pub fn fp8_matmul_add(&self, lhs: Value, weight: Value, scale: Value, addend: Value) -> Value {
+        self.push(Op::Fp8Matmul {
+            lhs,
+            weight,
+            scale,
+            addend: Some(addend),
+        })
     }
 
     #[track_caller]

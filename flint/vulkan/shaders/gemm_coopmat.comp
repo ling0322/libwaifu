@@ -30,6 +30,7 @@ layout(push_constant) uniform Push {
   uint64_t c;
   uint64_t a;
   uint64_t b;
+  uint64_t bias;  // (N) of C's type added to every row, or 0 for none
   uint M;
   uint N;
   uint K;
@@ -41,6 +42,7 @@ layout(push_constant) uniform Push {
   uint strideA1;
   uint strideB0;
   uint strideB1;
+  uint accumulate;  // add the product to what C holds, in float, and round the two once
 } pc;
 
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer Vec8Buffer {
@@ -70,11 +72,26 @@ bool bAlongN() {
   return pc.alongN != 0;
 }
 
+uint startKind() {
+  return pc.accumulate != 0 ? 2 : (pc.bias != 0 ? 1 : 0);
+}
+
 float biasOf(uint n) {
-  return 0.0;
+  return LOAD_A(pc.bias, n);
+}
+
+float startOf(uint m, uint n) {
+  return float(BufferC(pc.c).v[offsetC + m * pc.N + n]);
 }
 
 #define Tile coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+
+Tile loadTile(uint m, uint n) {
+  Tile tile;
+  coopMatLoad(tile, BufferC(pc.c).v, offsetC + m * pc.N + n, pc.N,
+              gl_CooperativeMatrixLayoutRowMajor);
+  return tile;
+}
 
 void storeTile(Tile tile, uint m, uint n) {
   coopMatStore(tile, BufferC(pc.c).v, offsetC + m * pc.N + n, pc.N,

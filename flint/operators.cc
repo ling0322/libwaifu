@@ -34,6 +34,7 @@
 #include "lutil/error.h"
 #include "lutil/log.h"
 #include "lutil/strings.h"
+#include "flint/cpu/common.h"
 #include "flint/cpu/cpu_operators.h"
 #include "flint/cpu/kernel/interface.h"
 #ifdef LIBWAIFU_CUDA_ENABLED
@@ -334,6 +335,14 @@ void Operators::geglu(TensorView input, TensorView out) {
 
 void Operators::matmul(TensorView A, TensorView B, TensorView out) {
   NO_KERNEL();
+}
+
+void Operators::matmulAdd(TensorView A, TensorView B, TensorView addend, TensorView out) {
+  // In place: add reads each element of `out` before it writes it. The addend is broadcast here,
+  // since not every device's add broadcasts on its own.
+  matmul(A, B, out);
+  std::vector<int> shape = out.getShape();
+  add(out, op::cpu::expandBatchDims(addend, shape).expand(shape), out);
 }
 
 void Operators::conv2d(

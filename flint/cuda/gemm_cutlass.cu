@@ -235,16 +235,21 @@ void hgemmT(
     int ldb,
     float beta,
     ElementC *C,
-    int ldc) {
+    int ldc,
+    const ElementC *source = nullptr,
+    int ldSource = 0) {
   using Gemm = typename Sm80Gemm<LayoutA, LayoutB, ALIGNMENT, ElementC>::Gemm;
   Gemm gemmOperator;
 
-  // The epilogue computes in float now, so the scalars go in as float.
+  // The epilogue computes in float now, so the scalars go in as float. What beta scales is C
+  // itself unless a source is given, which is read through its own leading dimension: a leading
+  // dimension of zero reads one row down every row of C, which is how a bias is added without
+  // being written out first (as CUTLASS's own example 12, gemm_bias_relu, adds one).
   typename Gemm::Arguments args{
       {m, n, k},
       {A, lda},
       {B, ldb},
-      {C, ldc},
+      {source ? source : C, source ? ldSource : ldc},
       {C, ldc},
       {alpha, beta},
       splitKSlices(m, n, k)};
@@ -455,6 +460,47 @@ void hgemm(
       size_t(n) * sizeof(ElementC),
       size_t(m),
       cudaMemcpyDeviceToDevice));
+}
+
+/// C = alpha A B + beta S, S read through `lds` -- 0 for a bias. Only at an alignment the four can be
+/// read at as they stand: false, with nothing done, where the product would have to be padded,
+/// since the padded path copies C in and out and would read S as though it were C.
+template<class LayoutA, class LayoutB, class ArchTag>
+bool hgemmFromT(
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const cutlass::half_t *A,
+    int lda,
+    const cutlass::half_t *B,
+    int ldb,
+    float beta,
+    const cutlass::half_t *S,
+    int lds,
+    cutlass::half_t *C,
+    int ldc) {
+  using Half = cutlass::half_t;
+  auto fits = [&](int alignment) {
+    return isAlignedTo(alignment, A, lda) && isAlignedTo(alignment, B, ldb) &&
+           isAlignedTo(alignment, C, ldc) && isAlignedTo(alignment, S, lds);
+  };
+  if (fits(kAlignments[0])) {
+    hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[0], Half>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, S, lds);
+    return true;
+  }
+  if (fits(kAlignments[1])) {
+    hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[1], Half>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, S, lds);
+    return true;
+  }
+  if (fits(kAlignments[2])) {
+    hgemmT<LayoutA, LayoutB, ArchTag, kAlignments[2], Half>(
+        m, n, k, alpha, A, lda, B, ldb, beta, C, ldc, S, lds);
+    return true;
+  }
+  return false;
 }
 
 /// Half operands into a C of half or float -- see `Sm80Gemm`.
@@ -737,6 +783,42 @@ void CutlassGemm::hgemm(
       __half2float(beta),
       reinterpret_cast<cutlass::half_t *>(C),
       ldc);
+}
+
+bool CutlassGemm::hgemmFrom(
+    bool transA,
+    bool transB,
+    int m,
+    int n,
+    int k,
+    float alpha,
+    const __half *A,
+    int lda,
+    const __half *B,
+    int ldb,
+    float beta,
+    const __half *S,
+    int lds,
+    __half *C,
+    int ldc) {
+  using Arch = cutlass::arch::Sm90;
+  using Half = cutlass::half_t;
+  auto a = reinterpret_cast<const Half *>(A);
+  auto b = reinterpret_cast<const Half *>(B);
+  auto s = reinterpret_cast<const Half *>(S);
+  auto c = reinterpret_cast<Half *>(C);
+  if (!transA && !transB) {
+    return hgemmFromT<RowMajor, RowMajor, Arch>(m, n, k, alpha, a, lda, b, ldb, beta, s, lds, c, ldc);
+  } else if (transA && !transB) {
+    return hgemmFromT<ColumnMajor, RowMajor, Arch>(
+        m, n, k, alpha, a, lda, b, ldb, beta, s, lds, c, ldc);
+  } else if (!transA && transB) {
+    return hgemmFromT<RowMajor, ColumnMajor, Arch>(
+        m, n, k, alpha, a, lda, b, ldb, beta, s, lds, c, ldc);
+  } else {
+    return hgemmFromT<ColumnMajor, ColumnMajor, Arch>(
+        m, n, k, alpha, a, lda, b, ldb, beta, s, lds, c, ldc);
+  }
 }
 
 void CutlassGemm::hgemmIntoFloat(

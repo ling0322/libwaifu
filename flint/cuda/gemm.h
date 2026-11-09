@@ -52,6 +52,29 @@ class Gemm {
     NOT_IMPL();
   }
 
+  /// C = alpha A B + beta S: the GEMM above with a source read through its own leading dimension
+  /// rather than C's -- 0 for one row read down every row of C, which is a bias. Returns false,
+  /// with nothing done, where the backend cannot read the operands that way; the caller then puts
+  /// the source into C and calls hgemm() with beta.
+  virtual bool hgemmFrom(
+      bool transA,
+      bool transB,
+      int m,
+      int n,
+      int k,
+      float alpha,
+      const __half *A,
+      int lda,
+      const __half *B,
+      int ldb,
+      float beta,
+      const __half *S,
+      int lds,
+      __half *C,
+      int ldc) {
+    return false;
+  }
+
   virtual void sgemm(
       bool transA,
       bool transB,

@@ -93,11 +93,24 @@ bool bAlongN() {
   return false;
 }
 
+uint startKind() {
+  return pc.bias != 0 ? 1 : 0;
+}
+
 float biasOf(uint n) {
-  return pc.bias != 0 ? LOAD_A(pc.bias, outChannelBase + n) : 0.0;
+  return LOAD_A(pc.bias, outChannelBase + n);
 }
 
 #define Tile coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+
+// A convolution never starts from what its output holds.
+Tile loadTile(uint m, uint n) {
+  return Tile(0.0);
+}
+
+float startOf(uint m, uint n) {
+  return 0.0;
+}
 
 // A tile is sixteen pixels of sixteen channels, and a channel's pixels are adjacent: column major,
 // a column apart by the whole of one channel's image.

@@ -25,7 +25,10 @@
 #include <memory>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 #include "catch2/catch_amalgamated.hpp"
+#include "lutil/time.h"
 #include "flint/test_functional.h"
 #include "flint/cuda/matmul.h"
 #include "flint/device.h"
@@ -317,6 +320,167 @@ CATCH_TEST_CASE("test CUDA matmul (half kept in float)", "[op][cuda]") {
         }
       }
     }
+  }
+}
+
+namespace {
+
+/// `shape` of zeros on the CPU, and a pointer to write it through.
+Tensor zerosOnCpu(std::vector<int> shape, float **data) {
+  Tensor x = fl::test::zeros(Device::getCpu(), shape, DType::kFloat);
+  *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+  return x;
+}
+
+/// Rows of 1 at columns 0 and 1 and 0 elsewhere -- the left operand of a product of 2049. See
+/// "test CUDA matmul with a bias rounds once".
+Tensor ones01(std::vector<int> shape) {
+  float *data;
+  Tensor x = zerosOnCpu(shape, &data);
+  int cols = shape.back();
+  for (int64_t r = 0; r < x.getNumEl() / cols; ++r) data[r * cols] = data[r * cols + 1] = 1.0f;
+  return x;
+}
+
+/// Matrices whose row 0 is 2048 and row 1 is 1 -- the right operand of a product of 2049.
+Tensor rows2048(std::vector<int> shape) {
+  float *data;
+  Tensor x = zerosOnCpu(shape, &data);
+  int rows = shape[shape.size() - 2], cols = shape.back();
+  for (int64_t m = 0; m < x.getNumEl() / (static_cast<int64_t>(rows) * cols); ++m) {
+    for (int c = 0; c < cols; ++c) {
+      data[(m * rows + 0) * cols + c] = 2048.0f;
+      data[(m * rows + 1) * cols + c] = 1.0f;
+    }
+  }
+  return x;
+}
+
+/// Whether every element of `x`, a half tensor on the device, is `value`.
+bool allAre(const Tensor &x, float value) {
+  Tensor host = toCpu(x);
+  const float *data = host.getInternalData()->getData<float>(host.getInternalOffset());
+  return std::all_of(data, data + host.getNumEl(), [value](float y) { return y == value; });
+}
+
+}  // namespace
+
+// A product of 2049 in every element, which half cannot hold: it lies halfway between 2048 and
+// 2050 and rounds to 2048. With a bias of 1 the sum is 2050, which half holds exactly. Added to
+// the product's float sum and rounded once, as torch's addmm does, the answer is 2050; rounded
+// after the product and again after the bias, it is 2048.
+CATCH_TEST_CASE("test CUDA matmul with a bias rounds once", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  constexpr int K = 16, N = 136;
+  float *ones;
+  Tensor host = zerosOnCpu({N}, &ones);
+  std::fill(ones, ones + N, 1.0f);
+  Tensor bias = toCuda(host);
+
+  // A weight held (n, k) and read transposed, as a linear layer reads it: one row goes to the
+  // vector kernel, more to the GEMM, and a stack of them is flattened into one GEMM.
+  Tensor weight = toCuda(fl::test::contiguous(cpuOps(), rows2048({K, N}).transpose(0, 1)));
+  Tensor weightT = weight.transpose(0, 1);
+  for (std::vector<int> shape : {std::vector<int>{1, K}, {3, K}, {130, K}, {2, 5, K}}) {
+    CATCH_INFO("A = " << ones01(shape).getShapeString());
+    Tensor x = toCuda(ones01(shape));
+    CATCH_REQUIRE(allAre(fl::test::matmulAdd(cudaOps(), x, weightT, bias), 2050.0f));
+    // What it is without the fusing: the product rounded, then the bias added and rounded again.
+    Tensor twice = fl::test::add(cudaOps(), fl::test::matmul(cudaOps(), x, weightT), bias);
+    CATCH_REQUIRE(allAre(twice, 2048.0f));
+
+    // A residual of the output's own shape, and one of its last two dimensions -- which a stack
+    // of rows flattened into one GEMM has to see in the shape it was handed, not the flat one.
+    std::vector<int> out = shape;
+    out.back() = N;
+    std::vector<std::vector<int>> addends = {out};
+    if (out.size() > 2) addends.push_back(std::vector<int>(out.end() - 2, out.end()));
+    for (const std::vector<int> &addendShape : addends) {
+      float *data;
+      Tensor ones = zerosOnCpu(addendShape, &data);
+      std::fill(data, data + ones.getNumEl(), 1.0f);
+      CATCH_REQUIRE(allAre(fl::test::matmulAdd(cudaOps(), x, weightT, toCuda(ones)), 2050.0f));
+    }
+  }
+
+  // A batch of right operands, which is the batched GEMM.
+  Tensor x = toCuda(ones01({2, 3, K}));
+  Tensor batched = toCuda(rows2048({2, K, N}));
+  CATCH_REQUIRE(allAre(fl::test::matmulAdd(cudaOps(), x, batched, bias), 2050.0f));
+}
+
+CATCH_TEST_CASE("test CUDA matmul with an addend agrees with float", "[op][cuda]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  // 40 columns are read as they stand, and a bias goes to the GEMM as a source; 41 are not, and it
+  // goes into C first.
+  for (int N : {40, 41}) {
+    for (std::vector<int> shape : {std::vector<int>{1, 64}, {7, 64}, {200, 64}, {3, 9, 64}}) {
+      std::vector<int> out = shape;
+      out.back() = N;
+      // A bias, a residual of the output's shape, and one broadcast over its leading dimension.
+      std::vector<std::vector<int>> addends = {{N}, out};
+      if (out.size() > 2) addends.push_back({1, out[1], N});
+      for (const std::vector<int> &addendShape : addends) {
+        Tensor a = fl::test::rand(Device::getCpu(), shape, DType::kFloat);
+        Tensor w = fl::test::rand(Device::getCpu(), {N, 64}, DType::kFloat);
+        Tensor c = fl::test::rand(Device::getCpu(), addendShape, DType::kFloat);
+        Tensor want =
+            fl::test::add(cpuOps(), fl::test::matmul(cpuOps(), a, w.transpose(0, 1)), c);
+
+        CATCH_INFO("A = " << a.getShapeString() << ", addend = " << c.getShapeString());
+        Tensor got =
+            fl::test::matmulAdd(cudaOps(), toCuda(a), toCuda(w).transpose(0, 1), toCuda(c));
+        CATCH_REQUIRE(cpuOps()->allClose(toCpu(got), want, 5e-2));
+      }
+    }
+  }
+}
+
+// What the addend costs a linear layer: the product alone, the product and then add (what a biased
+// linear was before matmulAdd), and matmulAdd. Half, the weight (n, k) read transposed.
+CATCH_TEST_CASE("benchmark CUDA matmul with an addend", "[.][cuda-benchmark]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+  auto time = [](auto &&run) {
+    // CudaOperators::synchronize() is the default, which waits for nothing.
+    for (int i = 0; i < 3; ++i) run();
+    cudaDeviceSynchronize();
+    int repeat = 50;
+    double t0 = lut::now();
+    for (int i = 0; i < repeat; ++i) run();
+    cudaDeviceSynchronize();
+    return (lut::now() - t0) / repeat;
+  };
+
+  struct Case {
+    const char *name;
+    int M, N, K;
+  };
+  std::vector<Case> cases = {
+      {"decode 1x1024x1024", 1, 1024, 1024},
+      {"decode 1x3072x1024", 1, 3072, 1024},
+      {"encoder 179x896x896", 179, 896, 896},
+      {"encoder 179x3584x896", 179, 3584, 896},
+      {"prefill 1024x2048x2048", 1024, 2048, 2048},
+      {"linear 8192x640x640", 8192, 640, 640},
+      {"linear 8192x5120x640", 8192, 5120, 640},
+  };
+  printf("%-26s %10s %12s %12s\n", "", "matmul", "matmul+add", "matmulAdd");
+  for (const Case &c : cases) {
+    Tensor x = toCuda(fl::test::rand(Device::getCpu(), {c.M, c.K}, DType::kFloat));
+    Tensor w = toCuda(fl::test::rand(Device::getCpu(), {c.N, c.K}, DType::kFloat));
+    Tensor bias = toCuda(fl::test::rand(Device::getCpu(), {c.N}, DType::kFloat));
+    Tensor wT = w.transpose(0, 1);
+    Tensor out = F::empty(Device::getCuda(), {c.M, c.N}, DType::kFloat16);
+    TensorView rows = bias.view({1, c.N}).expand({c.M, c.N});  // as the graph broadcast it
+
+    double alone = time([&]() { cudaOps()->matmul(x, wT, out); });
+    double twice = time([&]() {
+      cudaOps()->matmul(x, wT, out);
+      cudaOps()->add(out, rows, out);
+    });
+    double fused = time([&]() { cudaOps()->matmulAdd(x, wT, bias, out); });
+    printf(
+        "%-26s %8.1f us %10.1f us %10.1f us\n", c.name, alone * 1e6, twice * 1e6, fused * 1e6);
   }
 }
 

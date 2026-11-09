@@ -20,14 +20,19 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <algorithm>
 #include <cmath>
 #include <random>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 #include "catch2/catch_amalgamated.hpp"
 #include "lutil/error.h"
 #include "lutil/span.h"
+#include "lutil/time.h"
 #include "flint/test_functional.h"
+#include "flint/cpu/common.h"
 #include "flint/cuda/gemm_fp8_cutlass.h"
 #include "flint/device.h"
 #include "flint/operators.h"
@@ -274,6 +279,129 @@ CATCH_TEST_CASE("test gemmFp8 (scale applied)", "[fl][op][cuda][cutlass][fp8]") 
       CATCH_INFO("element " << i << ": " << got[i] << " against " << expected);
       CATCH_REQUIRE(std::fabs(got[i] - expected) <= std::fabs(expected) * 1e-3f);
     }
+  }
+}
+
+namespace {
+
+/// `A` times the fp8 weight plus `addend`, through the epilogue that adds it.
+Tensor gemmAdd(const Tensor &A, const Fp8Weight &weight, const Tensor &scale, const Tensor &addend) {
+  Tensor D = gemmResult(A, weight.codes.getShape(0));
+  op::cuda::gemmFp8(A, weight.codes, scale, addend, D);
+  return D;
+}
+
+/// `shape` of `value` on the device, in half.
+Tensor filledHalf(std::vector<int> shape, float value) {
+  Tensor x = F::empty(Device::getCpu(), shape, DType::kFloat);
+  float *data = x.getInternalData()->getData<float>(x.getInternalOffset());
+  std::fill(data, data + x.getNumEl(), value);
+  return toCudaHalf(x);
+}
+
+}  // namespace
+
+// A row of the activation is 2048 and 1 and zeros, every code of the weight is 1 and the scale is
+// 1, so the product is 2049 -- halfway between the 2048 and 2050 half holds, and rounded to 2048.
+// With an addend of 1 the sum is 2050: rounded once, as the epilogue does, it is 2050; the product
+// rounded and the addend added after, 2048. Both tiles, a bias and an addend of the result's shape.
+CATCH_TEST_CASE("test gemmFp8 with an addend rounds once", "[fl][op][cuda][cutlass][fp8]") {
+  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
+
+  constexpr int N = 136, K = 32;
+  Fp8Weight w = makeWeight(N, K, std::vector<uint8_t>(N * K, 0x38));  // 1.0
+  Tensor scale = cudaScale(1.0f);
+  for (int M : {3, 600}) {  // the flat tile, and the square one past 512 rows
+    std::vector<float> rows(M * K, 0.0f);
+    for (int m = 0; m < M; ++m) {
+      rows[m * K] = 2048.0f;
+      rows[m * K + 1] = 1.0f;
+    }
+    Tensor a = toCudaHalf(Tensor::create<float>({M, K}, lut::makeConstSpan(rows)));
+
+    for (std::vector<int> addendShape : {std::vector<int>{N}, {M, N}}) {
+      CATCH_INFO("M = " << M << ", addend of " << addendShape.size() << " dimensions");
+      Tensor out = toCpuFloat(gemmAdd(a, w, scale, filledHalf(addendShape, 1.0f)));
+      const float *got = out.getInternalData()->getData<float>(out.getInternalOffset());
+      CATCH_REQUIRE(std::all_of(got, got + M * N, [](float y) { return y == 2050.0f; }));
+    }
+    Tensor twice = toCpuFloat(fl::test::add(cudaOps(), gemm(a, w, scale), filledHalf({N}, 1.0f)));
+    const float *got = twice.getInternalData()->getData<float>(twice.getInternalOffset());
+    CATCH_REQUIRE(std::all_of(got, got + M * N, [](float y) { return y == 2048.0f; }));
+  }
+}
+
+CATCH_TEST_CASE("test gemmFp8 with an addend agrees with the product and add", "[fl][op][cuda][cutlass][fp8]") {
+  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
+
+  for (std::vector<int> shapeA : {std::vector<int>{7, 64}, {600, 64}, {3, 5, 64}}) {
+    constexpr int N = 40;
+    Fp8Weight w = randomWeight(N, 64);
+    Tensor a = toCudaHalf(fl::test::randNormal(Device::getCpu(), shapeA));
+    std::vector<int> out = shapeA;
+    out.back() = N;
+
+    // A bias, a residual of the result's shape, and one broadcast over its leading dimension,
+    // which the epilogue cannot read as it stands.
+    std::vector<std::vector<int>> addends = {{N}, out};
+    if (out.size() > 2) addends.push_back({1, out[1], N});
+    for (const std::vector<int> &addendShape : addends) {
+      CATCH_INFO("A = " << a.getShapeString() << ", addend of " << addendShape.size() << " dims");
+      Tensor addend = toCudaHalf(fl::test::randNormal(Device::getCpu(), addendShape));
+      std::vector<int> shape = out;
+      Tensor expected = fl::test::add(
+          cudaOps(),
+          gemm(a, w, cudaScale(kScale)),
+          op::cpu::expandBatchDims(addend, shape).expand(shape));
+      Tensor actual = gemmAdd(a, w, cudaScale(kScale), addend);
+      CATCH_REQUIRE(allFinite(actual));
+      CATCH_REQUIRE(relativeRmse(actual, expected) < 2e-3);
+    }
+  }
+}
+
+// What a bias costs an fp8 linear layer: the product alone, the product and then add (what a
+// biased fp8 linear was before the epilogue took it), and the epilogue adding it.
+CATCH_TEST_CASE("benchmark gemmFp8 with an addend", "[.][cuda-benchmark]") {
+  if (skipUnavailable()) CATCH_SKIP("no cuda device available");
+
+  auto time = [](auto &&run) {
+    for (int i = 0; i < 3; ++i) run();
+    cudaDeviceSynchronize();
+    int repeat = 50;
+    double t0 = lut::now();
+    for (int i = 0; i < repeat; ++i) run();
+    cudaDeviceSynchronize();
+    return (lut::now() - t0) / repeat;
+  };
+
+  struct Case {
+    const char *name;
+    int M, N, K;
+  };
+  std::vector<Case> cases = {
+      {"decode 1x3072x1024", 1, 3072, 1024},
+      {"tokens 256x3072x3072", 256, 3072, 3072},
+      {"dit 4096x3072x3072", 4096, 3072, 3072},
+      {"dit 4096x12288x3072", 4096, 12288, 3072},
+  };
+  printf("%-26s %10s %12s %12s\n", "", "fp8", "fp8+add", "fp8 fused");
+  for (const Case &c : cases) {
+    Tensor a = toCudaHalf(fl::test::randNormal(Device::getCpu(), {c.M, c.K}));
+    Fp8Weight w = randomWeight(c.N, c.K);
+    Tensor scale = cudaScale(kScale);
+    Tensor bias = toCudaHalf(fl::test::randNormal(Device::getCpu(), {c.N}));
+    Tensor out = gemmResult(a, c.N);
+    TensorView rows = bias.view({1, c.N}).expand({c.M, c.N});  // as the graph broadcast it
+
+    double alone = time([&]() { op::cuda::gemmFp8(a, w.codes, scale, out); });
+    double twice = time([&]() {
+      op::cuda::gemmFp8(a, w.codes, scale, out);
+      cudaOps()->add(out, rows, out);
+    });
+    double fused = time([&]() { op::cuda::gemmFp8(a, w.codes, scale, bias, out); });
+    printf(
+        "%-26s %8.1f us %10.1f us %10.1f us\n", c.name, alone * 1e6, twice * 1e6, fused * 1e6);
   }
 }
 

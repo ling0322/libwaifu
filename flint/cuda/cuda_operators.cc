@@ -328,6 +328,10 @@ void CudaOperators::matmul(TensorView A, TensorView B, TensorView out) {
   _matmul->apply(A, B, out);
 }
 
+void CudaOperators::matmulAdd(TensorView A, TensorView B, TensorView addend, TensorView out) {
+  _matmul->apply(A, B, addend, out);
+}
+
 void CudaOperators::layerNorm(
     TensorView input,
     TensorView weight,

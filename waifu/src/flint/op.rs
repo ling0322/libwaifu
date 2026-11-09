@@ -484,10 +484,14 @@ pub enum Op {
         eps: f32,
     },
 
-    /// Matrix multiplication, batched over the leading dimensions.
+    /// Matrix multiplication, batched over the leading dimensions, and with an `addend` added to
+    /// the product where there is one -- a bias `(n)`, or a residual of the product's shape -- in
+    /// the one rounding torch's `addmm` makes on CUDA and Vulkan; see
+    /// [`F::matmul_add`](super::functional::matmul_add).
     Matmul {
         lhs: Value,
         rhs: Value,
+        addend: Option<Value>,
     },
     /// `lhs` times the transpose of a weight held in FP8, which is two values rather than one:
     /// `weight` is `<fp8e4m3>(rows, k)` and `scale` a single `<float>`, the weight meaning
@@ -502,10 +506,14 @@ pub enum Op {
     ///
     /// No transpose comes before this the way one comes before a [`Matmul`](Op::Matmul): this
     /// reads the weight in the `(out, in)` a package stores it in.
+    ///
+    /// With an `addend` -- a bias, or a residual -- it is added to the product as
+    /// [`Matmul`](Op::Matmul)'s is: in the one rounding, on CUDA.
     Fp8Matmul {
         lhs: Value,
         weight: Value,
         scale: Value,
+        addend: Option<Value>,
     },
     /// The rows of `table` named by `indices`.
     Lookup {
@@ -756,11 +764,21 @@ impl Op {
             | Op::Cast { input, .. }
             | Op::ToDevice { input, .. } => vec![*input],
 
-            Op::Binary { lhs, rhs, .. } | Op::Matmul { lhs, rhs } | Op::Cat { lhs, rhs, .. } => {
-                vec![*lhs, *rhs]
-            }
+            Op::Binary { lhs, rhs, .. } | Op::Cat { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::Matmul { lhs, rhs, addend } => [Some(*lhs), Some(*rhs), *addend]
+                .into_iter()
+                .flatten()
+                .collect(),
             Op::Lookup { table, indices } => vec![*table, *indices],
-            Op::Fp8Matmul { lhs, weight, scale } => vec![*lhs, *weight, *scale],
+            Op::Fp8Matmul {
+                lhs,
+                weight,
+                scale,
+                addend,
+            } => [Some(*lhs), Some(*weight), Some(*scale), *addend]
+                .into_iter()
+                .flatten()
+                .collect(),
             Op::RmsNorm { input, weight, .. } => vec![*input, *weight],
 
             Op::LayerNorm {

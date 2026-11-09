@@ -20,13 +20,15 @@
 #extension GL_GOOGLE_include_directive : require
 // A batched matrix multiply of strided operands: for every batch (b0, b1), C[b0, b1] =
 // A[b0, b1] B[b0, b1], A and B of type A_T with any strides -- a batch stride of zero broadcasts
-// -- and C of type C_T, contiguous. The batch is gl_WorkGroupID.z, b0 * batch1 + b1.
+// -- and C of type C_T, contiguous. The batch is gl_WorkGroupID.z, b0 * batch1 + b1. With a bias,
+// bias[n] is added to the float sum before it is rounded into C; with accumulate, what C held.
 #include "common.glsl"
 
 layout(push_constant) uniform Push {
   uint64_t c;
   uint64_t a;
   uint64_t b;
+  uint64_t bias;  // (N) of C's type added to every row, or 0 for none
   uint M;
   uint N;
   uint K;
@@ -39,6 +41,7 @@ layout(push_constant) uniform Push {
   uint strideA1;
   uint strideB0;
   uint strideB1;
+  uint accumulate;  // add the product to what C holds, in float, and round the two once
 } pc;
 
 uint offsetA;
@@ -54,7 +57,13 @@ float loadB(uint k, uint n) {
 }
 
 void storeC(uint m, uint n, float value) {
-  STORE_C(pc.c, offsetC + m * pc.N + n, value);
+  uint at = offsetC + m * pc.N + n;
+  if (pc.accumulate != 0) {
+    value += float(BufferC(pc.c).v[at]);
+  } else if (pc.bias != 0) {
+    value += LOAD_A(pc.bias, n);
+  }
+  STORE_C(pc.c, at, value);
 }
 
 bool aAlongM() {

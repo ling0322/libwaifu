@@ -44,6 +44,11 @@ bool isFp8GemmAvailable();
 ///          epilogue writes, and k a multiple of 16, which is how wide the mainloop reads B.
 void gemmFp8(TensorView A, TensorView B, TensorView scale, TensorView D);
 
+/// @brief D = A * transpose(B) * scale + addend, the addend <half> broadcast over D's leading
+///        dimensions -- a bias (n), or a residual of D's shape -- and added to the float sum in the
+///        epilogue, so that the whole is rounded into D once. An empty addend is the call above.
+void gemmFp8(TensorView A, TensorView B, TensorView scale, TensorView addend, TensorView D);
+
 }  // namespace cuda
 }  // namespace op
 }  // namespace fl

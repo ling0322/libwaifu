@@ -17,7 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// A half precision product, C (M, N) = A (M, K) B (K, N) + bias (N) accumulated in float, through
+// A half precision product, C (M, N) = start (M, N) + A (M, K) B (K, N) accumulated in float, through
 // cooperative matrices: 16 x 16 x 16 tiles multiplied by a subgroup together, which is what drives
 // the tensor cores on the cards that have them.
 //
@@ -30,7 +30,11 @@
 //   uvec4 loadB8K(uint n, uint k)   B[k .. k + 8, n], when B is laid out along K
 //   uvec4 loadB8N(uint k, uint n)   B[k, n .. n + 8), when it is laid out along N
 //   bool bAlongN()                  which of the two
-//   float biasOf(uint n)            what column n starts from: its bias, or zero
+//   uint startKind()                what C starts from, the same for the whole dispatch: 0 for
+//                                   zero, 1 for a bias of each column, 2 for what C already holds
+//   float biasOf(uint n)            column n's bias, read where startKind() is 1
+//   Tile loadTile(uint m, uint n)   the 16 x 16 tile of C at (m, n), read where startKind() is 2
+//   float startOf(uint m, uint n)   element (m, n) of C, the same, for the tiles on its edges
 //   void storeTile(tile, m, n)      a whole 16 x 16 tile of C whose corner is (m, n)
 //   void storeC(uint m, uint n, float value)
 //                                   one element, for the tiles on the edges of C
@@ -86,19 +90,48 @@ void gemm(uint M, uint N, uint K) {
   uint base = subgroup * 256;
   bool alongN = bAlongN();
 
-  // The accumulators start from the bias, a column of it at a time through the subgroup's tile
-  // of scratch, so that nothing has to add it on the way out.
+  // The accumulators start from what C is to be added to, so that nothing has to be added on the
+  // way out and the sum is rounded once: zero; a bias, a column of it at a time through the
+  // subgroup's tile of scratch; or what C holds, a tile of it at a time -- through scratch for the
+  // tiles on its edges, whose loads would read past it.
   Accumulator acc[2][4];
-  [[unroll]] for (uint j = 0; j < 4; ++j) {
-    [[unroll]] for (uint e = 0; e < 256; e += 32) {
-      uint n = n0 + subN + 16 * j + (e + lane) % 16;
-      scratch[base + e + lane] = n < N ? biasOf(n) : 0.0;
+  uint kind = startKind();
+  if (kind == 0) {
+    [[unroll]] for (uint i = 0; i < 2; ++i) {
+      [[unroll]] for (uint j = 0; j < 4; ++j) acc[i][j] = Accumulator(0.0);
     }
-    subgroupMemoryBarrierShared();
-    subgroupBarrier();
-    coopMatLoad(acc[0][j], scratch, base, 16, gl_CooperativeMatrixLayoutRowMajor);
-    acc[1][j] = acc[0][j];
-    subgroupBarrier();
+  } else if (kind == 1) {
+    [[unroll]] for (uint j = 0; j < 4; ++j) {
+      [[unroll]] for (uint e = 0; e < 256; e += 32) {
+        uint n = n0 + subN + 16 * j + (e + lane) % 16;
+        scratch[base + e + lane] = n < N ? biasOf(n) : 0.0;
+      }
+      subgroupMemoryBarrierShared();
+      subgroupBarrier();
+      coopMatLoad(acc[0][j], scratch, base, 16, gl_CooperativeMatrixLayoutRowMajor);
+      acc[1][j] = acc[0][j];
+      subgroupBarrier();
+    }
+  } else {
+    [[unroll]] for (uint i = 0; i < 2; ++i) {
+      [[unroll]] for (uint j = 0; j < 4; ++j) {
+        uint mTile = m0 + subM + 16 * i;
+        uint nTile = n0 + subN + 16 * j;
+        if (mTile + 16 <= M && nTile + 16 <= N) {
+          acc[i][j] = Accumulator(loadTile(mTile, nTile));
+          continue;
+        }
+        [[unroll]] for (uint e = 0; e < 256; e += 32) {
+          uint m = mTile + (e + lane) / 16;
+          uint n = nTile + (e + lane) % 16;
+          scratch[base + e + lane] = m < M && n < N ? startOf(m, n) : 0.0;
+        }
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+        coopMatLoad(acc[i][j], scratch, base, 16, gl_CooperativeMatrixLayoutRowMajor);
+        subgroupBarrier();
+      }
+    }
   }
 
   // Each operand's tile is LOADS uvec4 for each thread. For A and for B along K a thread takes

@@ -64,6 +64,7 @@ class CudaOperators : public Operators {
       TensorView key,
       TensorView rotaryCache) override;
   void matmul(TensorView A, TensorView B, TensorView out) override;
+  void matmulAdd(TensorView A, TensorView B, TensorView addend, TensorView out) override;
   void layerNorm(
       TensorView input,
       TensorView weight,

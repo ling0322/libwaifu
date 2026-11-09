@@ -174,9 +174,11 @@ extern "C" {
     pub fn fl_upsample_nearest2d(operators: Ops, input: V, scale: i32, out: V) -> i32;
     pub fn fl_upsample_nearest1d(operators: Ops, input: V, out: V) -> i32;
     pub fn fl_matmul(operators: Ops, a: V, b: V, out: V) -> i32;
+    pub fn fl_matmul_add(operators: Ops, a: V, b: V, addend: V, out: V) -> i32;
 
     pub fn fl_fp8_available(device: FlDeviceType, out: *mut i32) -> i32;
     pub fn fl_fp8_matmul(a: V, data: V, scale: V, out: V) -> i32;
+    pub fn fl_fp8_matmul_add(a: V, data: V, scale: V, addend: V, out: V) -> i32;
 
     pub fn fl_add(operators: Ops, a: V, b: V, out: V) -> i32;
     pub fn fl_sub(operators: Ops, a: V, b: V, out: V) -> i32;

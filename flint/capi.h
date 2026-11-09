@@ -444,6 +444,17 @@ FLAPI int32_t fl_matmul(
     fl_tensor_view_t b,
     fl_tensor_view_t out);
 
+/// `a b + addend`, `addend` of `out`'s type broadcast over `out`'s leading dimensions as fl_add
+/// broadcasts: a linear layer's bias (N), or a residual of `out`'s shape. CUDA and Vulkan add it to
+/// the product's float sum and round once, as torch's addmm does; elsewhere it is fl_matmul then
+/// fl_add.
+FLAPI int32_t fl_matmul_add(
+    fl_operators_t operators,
+    fl_tensor_view_t a,
+    fl_tensor_view_t b,
+    fl_tensor_view_t addend,
+    fl_tensor_view_t out);
+
 /// Whether `device` can run the FP8 matrix multiplication, which today means CUDA on sm_80 or
 /// newer. Every other device is reported as zero rather than as an error.
 FLAPI int32_t fl_fp8_available(fl_device_type_t device, int32_t *out);
@@ -454,6 +465,16 @@ FLAPI int32_t fl_fp8_matmul(
     fl_tensor_view_t a,
     fl_tensor_view_t data,
     fl_tensor_view_t scale,
+    fl_tensor_view_t out);
+
+/// fl_fp8_matmul() plus `addend` <float16> broadcast over `out`'s leading dimensions: a linear
+/// layer's bias, or a residual of `out`'s shape. On CUDA it is added in the epilogue, to the float
+/// sum, and the whole rounded once into `out`; elsewhere it is added after.
+FLAPI int32_t fl_fp8_matmul_add(
+    fl_tensor_view_t a,
+    fl_tensor_view_t data,
+    fl_tensor_view_t scale,
+    fl_tensor_view_t addend,
     fl_tensor_view_t out);
 
 /// Element-wise binary operations. `b` has `a`'s shape -- a caller broadcasting a smaller operand

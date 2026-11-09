@@ -138,6 +138,13 @@ void rotaryEmbedding(
 
 // matmul.cc
 void matmul(const TensorView &a, const TensorView &b, const TensorView &out);
+/// `a b + addend`, the addend broadcast over the output's leading dimensions and added to the
+/// product's float sum before the two are rounded.
+void matmul(
+    const TensorView &a,
+    const TensorView &b,
+    const TensorView &addend,
+    const TensorView &out);
 void conv2d(
     const TensorView &input,
     const TensorView &weight,

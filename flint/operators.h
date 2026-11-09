@@ -123,6 +123,13 @@ class Operators {
 
   virtual void matmul(TensorView A, TensorView B, TensorView out);
 
+  /// `A B + addend`, `addend` of `out`'s type broadcast over `out`'s leading dimensions as `add`
+  /// broadcasts: a linear layer's bias (N), or a residual of the output's own shape. A device that
+  /// overrides this adds it to the product while that is still the sum it was accumulated as, and
+  /// rounds once into `out`'s type, as torch's `addmm` does; the default here is `matmul` and then
+  /// `add`, which rounds the product to `out`'s type first and the sum again.
+  virtual void matmulAdd(TensorView A, TensorView B, TensorView addend, TensorView out);
+
   /// 2-D convolution of `input` <float16|float>(N, C, H, W) by `weight` (K, C / groups, R, S),
   /// with an optional per-channel `bias` (K). Square stride, padding and dilation throughout.
   virtual void conv2d(

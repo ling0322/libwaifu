@@ -226,16 +226,24 @@ impl Linear {
     pub fn graph(g: &Graph, input: Value, in_dim: i32, out_dim: i32, has_bias: bool) -> Value {
         let weight = g.load(Self::WEIGHT, &[out_dim, in_dim]);
 
-        let x = match g.weight_format() {
-            WeightFormat::Fp8TensorScale => {
-                g.fp8_matmul(input, weight, g.load(Self::WEIGHT_SCALE, &[1]))
+        match g.weight_format() {
+            // The bias goes into the product, as torch's addmm adds it: rounded once with the sum
+            // rather than after it, which in half is half the error.
+            WeightFormat::Float => {
+                let weight = g.transpose(weight, 0, 1);
+                match has_bias {
+                    true => g.matmul_add(input, weight, g.load(Self::BIAS, &[out_dim])),
+                    false => g.matmul(input, weight),
+                }
             }
-            WeightFormat::Float => g.matmul(input, g.transpose(weight, 0, 1)),
-        };
-
-        match has_bias {
-            true => g.add(x, g.load(Self::BIAS, &[out_dim])),
-            false => x,
+            // The same for an FP8 weight, whose scale the epilogue applies on the way.
+            WeightFormat::Fp8TensorScale => {
+                let scale = g.load(Self::WEIGHT_SCALE, &[1]);
+                match has_bias {
+                    true => g.fp8_matmul_add(input, weight, scale, g.load(Self::BIAS, &[out_dim])),
+                    false => g.fp8_matmul(input, weight, scale),
+                }
+            }
         }
     }
 }
