@@ -767,6 +767,27 @@ CATCH_TEST_CASE("test Metal matmul with an addend against the CPU", "[op][metal]
     }
   }
 
+  // A product over nothing is zero, and plus its addend is the addend: a stack of rows times one
+  // matrix, which is flattened into one taller product, and a batch.
+  for (DType dtype : {DType(DType::kFloat), DType(DType::kFloat16)}) {
+    Tensor bias = randn({24});
+    Tensor residual = randn({2, 3, 24});
+    Tensor stack = F::empty(Device::getMetal(), {2, 3, 0}, dtype);
+    Tensor weight = F::empty(Device::getMetal(), {0, 24}, dtype);
+    Tensor weights = F::empty(Device::getMetal(), {2, 0, 24}, dtype);
+    // Exactly the addend, as Metal holds it: nothing is added to it.
+    Tensor mbias = toMetal(bias, dtype);
+    Tensor mresidual = toMetal(residual, dtype);
+    std::vector<float> spread = values(toCpu(mbias).view({1, 1, 24}).expand({2, 3, 24}));
+    eachKernel([&](bool nax) {
+      CATCH_INFO("K = 0, dtype = " << dtype.toString() << ", nax = " << nax);
+      CATCH_REQUIRE(values(fl::test::matmulAdd(mtl(), stack, weight, mbias)) == spread);
+      CATCH_REQUIRE(values(fl::test::matmulAdd(mtl(), stack, weights, mbias)) == spread);
+      CATCH_REQUIRE(values(fl::test::matmulAdd(mtl(), stack, weight, mresidual)) == values(mresidual));
+      CATCH_REQUIRE(allAre(fl::test::matmul(mtl(), stack, weight), 0.0f));
+    });
+  }
+
   // Half times half kept in float, plus a float addend.
   Tensor a = randn({70, 75});
   Tensor b = randn({75, 33});

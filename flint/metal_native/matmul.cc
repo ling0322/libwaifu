@@ -422,14 +422,17 @@ void product(
     const TensorView &out) {
   // A stack of rows times one matrix is one taller product, when the rows stack evenly.
   if (b.getDim() == 2 && a.getDim() > 2 && a.isContiguous()) {
-    TensorView flat = a.view({-1, a.getShape(-1)});
+    // The rows counted rather than inferred: a view cannot infer them from a K of zero.
+    int rows = 1;
+    for (int d = 0; d < a.getDim() - 1; ++d) rows *= a.getShape(d);
+    int N = b.getShape(-1);
+    TensorView flat = a.view({rows, a.getShape(-1)});
     Layout single{};
     single.ndim = 1;
     single.shape[0] = 1;
-    int N = b.getShape(-1);
     Addend flatAddend = addend;
-    if (addend.kind == kAddWhole) flatAddend.values = addend.values.view({flat.getShape(0), N});
-    gemm(flat, b, single, flatAddend, out.view({flat.getShape(0), N}));
+    if (addend.kind == kAddWhole) flatAddend.values = addend.values.view({rows, N});
+    gemm(flat, b, single, flatAddend, out.view({rows, N}));
     return;
   }
 
