@@ -20,6 +20,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 
 #include "catch2/catch_amalgamated.hpp"
@@ -198,6 +200,67 @@ CATCH_TEST_CASE("test matmul gemm (cutlass, odd leading dimension)", "[fl][op][c
 
   // Every extent odd at once, and each past a threadblock tile so there is more than one of them.
   CATCH_REQUIRE(runCase(129, 33, 131));
+}
+
+// Products with too few tiles to fill the card over a K of 4096, which is what splits K: the
+// product is cut into slices of K, and each slice's sum is handed to the next. Summed
+// in float and rounded into half once, nearly every element is the float sum rounded to half --
+// all but the few a different order of summation puts on the other side of a rounding boundary,
+// and those one step of half away. Handed from slice to slice in half, the running sum is rounded
+// at every slice, and some tenths of the elements come out a step or two away. With a bias, which
+// the epilogue adds, the same: the float sum and the bias, rounded once.
+CATCH_TEST_CASE("test matmul gemm (cutlass, split K sums in float)", "[fl][op][cuda][cutlass]") {
+  if (!isOperatorsAvailable(Device::kCuda)) CATCH_SKIP("cuda device not available");
+
+  constexpr int kK = 4096;
+  std::shared_ptr<op::cuda::MatMul> mm = op::cuda::MatMul::createCutlass();
+
+  // Operands as half holds them, on both sides, so that only the summation is compared.
+  auto asHalf = [](const Tensor &x) {
+    return fl::test::cast(cpuOps(), fl::test::cast(cpuOps(), x, DType::kFloat16), DType::kFloat);
+  };
+  auto toCuda = [](const Tensor &x) {
+    return fl::test::cast(cudaOps(), fl::test::toDevice(cudaOps(), x, Device::getCuda()), DType::kFloat16);
+  };
+
+  // How many of `got`'s elements are `sum` rounded to half, and the largest distance in steps of
+  // half at that magnitude.
+  auto agreement = [&](const Tensor &got, const Tensor &sum) {
+    Tensor once = asHalf(sum);
+    Tensor host = fl::test::toDevice(cudaOps(), fl::test::cast(cudaOps(), got, DType::kFloat), Device::getCpu());
+    const float *g = host.getInternalData()->getData<float>(host.getInternalOffset());
+    const float *w = once.getInternalData()->getData<float>(once.getInternalOffset());
+    int64_t same = 0;
+    float steps = 0.0f;
+    for (int64_t i = 0; i < host.getNumEl(); ++i) {
+      if (g[i] == w[i]) ++same;
+      float ulp = std::ldexp(1.0f, std::ilogb(w[i]) - 10);
+      steps = std::max(steps, std::fabs(g[i] - w[i]) / ulp);
+    }
+    return std::make_pair(double(same) / host.getNumEl(), steps);
+  };
+
+  // One tile, which is cut into slices of K as the serial split cut it, and sixteen, which
+  // Stream-K shares out over the card on its own -- the two ways a half product that splits is run.
+  for (auto [m, n] : {std::pair<int, int>{16, 128}, {128, 2048}}) {
+    CATCH_INFO(m << " x " << n << " x " << kK);
+    Tensor a = asHalf(fl::test::rand(Device::getCpu(), {m, kK}, DType::kFloat));
+    Tensor b = asHalf(fl::test::rand(Device::getCpu(), {kK, n}, DType::kFloat));
+    Tensor bias = asHalf(fl::test::rand(Device::getCpu(), {n}, DType::kFloat));
+
+    Tensor sum = fl::test::matmul(cpuOps(), a, b);
+    auto [same, steps] = agreement(apply(mm.get(), toCuda(a), toCuda(b)), sum);
+    CATCH_INFO("without a bias: " << same * 100 << "% the float sum rounded once, at most " << steps << " steps away");
+    CATCH_REQUIRE(same >= 0.95);
+    CATCH_REQUIRE(steps <= 1.0f);
+
+    Tensor c = F::empty(Device::getCuda(), {m, n}, DType::kFloat16);
+    mm->apply(toCuda(a), toCuda(b), toCuda(bias), c);
+    auto [sameBias, stepsBias] = agreement(c, fl::test::add(cpuOps(), sum, bias));
+    CATCH_INFO("with a bias: " << sameBias * 100 << "% the float sum rounded once, at most " << stepsBias << " steps away");
+    CATCH_REQUIRE(sameBias >= 0.95);
+    CATCH_REQUIRE(stepsBias <= 1.0f);
+  }
 }
 
 }  // namespace fl
