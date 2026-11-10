@@ -1059,6 +1059,12 @@ impl Voice for CosyVoice3 {
         true
     }
 
+    /// Zero-shot is upstream's way of cloning a voice: without the transcript it reads
+    /// cross-lingual, which upstream keeps for a sentence in another language than the recording.
+    fn needs_a_reference_transcript(&self) -> bool {
+        true
+    }
+
     fn styles(&self) -> &'static [Style] {
         Self::STYLES
     }

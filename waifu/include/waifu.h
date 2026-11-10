@@ -345,6 +345,9 @@ typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTe
 // Follows an instruction such as "speak happily".
 #define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE 202
 
+// A reference without its reference_transcript: CosyVoice3 does not, unless a style is given.
+#define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT 203
+
 // The manner as well as the voice.
 #define WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE 300
 

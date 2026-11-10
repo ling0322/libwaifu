@@ -90,6 +90,9 @@ pub struct Spoken {
     pub no_likeness_because: Option<String>,
     /// Whether it says nothing without a recording to sound like, so the page asks for one first.
     pub needs_a_recording: bool,
+    /// Whether a recording has to come with its words, unless a style is given: CosyVoice3's, so
+    /// the page asks for them with the recording.
+    pub needs_a_reference_transcript: bool,
     /// The ways of saying something it was taught, for the page to list. Empty where it takes no
     /// style, which is where the page offers none.
     pub styles: &'static [Style],
@@ -183,6 +186,8 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         no_likeness_because: None,
         // Neither kind of package has a voice of its own: both speak in a recording's.
         needs_a_recording: true,
+        // CosyVoice3 reads on from the recording's words; IndexTTS reads none.
+        needs_a_reference_transcript: kind == Some(VoiceKind::CosyVoice3),
         styles,
         not_a_voice_because: None,
     }
@@ -223,6 +228,7 @@ pub fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken 
         rate: voice.rate(),
         no_likeness_because: voice.no_likeness_because().map(str::to_string),
         needs_a_recording: voice.needs_a_recording(),
+        needs_a_reference_transcript: voice.needs_a_reference_transcript(),
         styles: voice.styles(),
         not_a_voice_because: voice.not_a_voice_because().map(str::to_string),
     }

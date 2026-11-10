@@ -63,6 +63,8 @@ pub struct ImageGeneration {
 pub struct TextToSpeech {
     pub like_reference: Support,
     pub without_reference: Support,
+    /// A recording without its words: CosyVoice3 does not, unless a style is given.
+    pub without_reference_transcript: Support,
     pub with_style: Support,
 }
 
@@ -238,6 +240,14 @@ fn text_to_speech(voice: &describe::Spoken) -> TextToSpeech {
                 voice.full_name
             )),
         },
+        without_reference_transcript: match voice.needs_a_reference_transcript {
+            false => Ok(()),
+            true => Err(format!(
+                "{} reads on from what the recording says: give its transcript with it, \
+                 unless a style is given",
+                voice.full_name
+            )),
+        },
         with_style: match voice.styles.is_empty() {
             true => Err(format!(
                 "{} follows no instruction for how to speak",
@@ -277,6 +287,7 @@ mod tests {
         let tones = model_info(TONES).unwrap();
         let speech = tones.text_to_speech.unwrap();
         assert_eq!(speech.without_reference, Ok(()));
+        assert_eq!(speech.without_reference_transcript, Ok(()));
         assert_eq!(tones.streaming_text_to_speech, Ok(()));
         assert!(tones.image_generation.is_err());
         assert_eq!(tones.size_on_disk, Some(0));
@@ -288,6 +299,7 @@ mod tests {
         let voice = model_info(&a_manifest("info-cosyvoice3", CosyVoice3::MODEL_TYPE)).unwrap();
         let speech = voice.text_to_speech.unwrap();
         assert!(speech.without_reference.is_err());
+        assert!(speech.without_reference_transcript.is_err());
         assert_eq!(speech.with_style, Ok(()));
         assert_eq!(voice.streaming_text_to_speech, Ok(()));
         assert!(voice.voice_conversion.is_ok());

@@ -226,6 +226,14 @@ pub trait Voice {
         false
     }
 
+    /// Whether a recording to sound like has to come with its
+    /// [`reference_transcript`](SpeechOptions::reference_transcript) -- unless a
+    /// [`style`](SpeechOptions::style) is given, which reads none -- so the page asks for one with
+    /// the recording. A voice that reads no transcript does not.
+    fn needs_a_reference_transcript(&self) -> bool {
+        false
+    }
+
     /// The ways of saying something it was taught to follow, for a page to offer. Empty where it
     /// takes no [`SpeechOptions::style`], which is most voices.
     fn styles(&self) -> &'static [Style] {

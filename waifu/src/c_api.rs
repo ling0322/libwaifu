@@ -124,6 +124,9 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE: WaifuModelProperty
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelProperty = 201;
 /// Follows an instruction such as "speak happily".
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelProperty = 202;
+/// A reference without its reference_transcript: CosyVoice3 does not, unless a style is given.
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelProperty =
+    203;
 /// The manner as well as the voice.
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelProperty = 300;
 /// Integer, bytes; absent until every file is here.
@@ -386,6 +389,10 @@ impl WaifuModel {
         model.supports(
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE,
             &detail(speaking.map(|s| &s.without_reference), &speech),
+        );
+        model.supports(
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT,
+            &detail(speaking.map(|s| &s.without_reference_transcript), &speech),
         );
         model.supports(
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE,
