@@ -392,7 +392,8 @@ final class Session {
                     id: url.deletingPathExtension().lastPathComponent, kind: "image", status: .done,
                     created: finished, finished: finished, made: made)
             }
-            guard let record = try? decoder.decode(Record.self, from: data) else { return nil }
+            guard let record = try? decoder.decode(Record.self, from: data), record.kind != "transcription"
+            else { return nil }
             return Job(
                 id: record.id, kind: record.kind, status: .done, created: record.created,
                 finished: record.finished, made: record.made)
@@ -444,6 +445,19 @@ final class Session {
         guard let job = jobs.first(where: { $0.id == id }) else { return }
         let finished = Date().timeIntervalSince1970 * 1000
         let kind = job.kind
+        // A transcription is never written to the disk -- not its words, and not the recording,
+        // which was never anywhere but in memory -- and only the last is held, to be copied. The
+        // ones before it are let go.
+        if kind == "transcription" {
+            for old in jobs where old.kind == kind && old.id != id && !old.isGoing { outputs[old.id] = nil }
+            jobs.removeAll { $0.kind == kind && $0.id != id && !$0.isGoing }
+            guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
+            jobs[index].status = .done
+            jobs[index].finished = finished
+            jobs[index].made = made
+            outputs[id] = bytes
+            return
+        }
         let output = file(id, kind: kind)
         let (folder, besides, recordFile) = (folder, besideFolder(id), recordFile(id))
         let record: Data?
@@ -878,9 +892,9 @@ final class Session {
         }
     }
 
-    /// Writes down what is said in the held recording: the words are what is kept, as text, and the
-    /// recording beside the other inputs, which its record names, so that it can be heard again
-    /// and Reuse can hand it back.
+    /// Writes down what is said in the held recording, into memory and nowhere else: the words are
+    /// shown to be copied, until the next are, and neither they nor the recording are written to
+    /// the disk.
     private func transcribe() {
         guard model?.transcriber != nil, let modelName = model?.name, let clip = heard?.clip else { return }
         let language = form.language.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -888,10 +902,7 @@ final class Session {
 
         let named = ModelManager.versionedName(modelName) ?? modelName
         var asked = Made(seed: 0, seconds: 0, model: named, parameters: "")
-        asked.language = language
         asked.length = clip.seconds
-        asked.rate = clip.rate
-        asked.startFrom = keptRecording()?.path
         let made = asked
 
         start(kind: "transcription", model: modelName) { pipeline, report in
@@ -899,31 +910,10 @@ final class Session {
             guard let transcript = try await pipeline.transcribe(request, progress: report) else { return nil }
             var made = made
             made.seconds = Date().timeIntervalSince(started)
-            made.device = pipeline.device.replacingOccurrences(of: "_", with: "-")
             made.text = transcript.text
             made.heardLanguage = transcript.language
-            var settings = "Language: \(language.isEmpty ? "detected" : language)"
-            if !transcript.language.isEmpty { settings += ", Heard: \(transcript.language)" }
-            settings += ", Length: \(clock(made.length ?? 0)), Model: \(named)"
-            made.parameters = "\(transcript.text)\n\(settings)"
             return (Data(transcript.text.utf8), made, [:])
         }
-    }
-
-    /// The file the recording to write down is in, for a record to name: a WAV of it kept beside
-    /// the other inputs the first time a job is run on it.
-    private func keptRecording() -> URL? {
-        guard let held = heard else { return nil }
-        if let url = held.url { return url }
-        let copy = inputs.appendingPathComponent("\(UUID().uuidString.lowercased()).wav")
-        do {
-            try FileManager.default.createDirectory(at: inputs, withIntermediateDirectories: true)
-            try held.bytes.write(to: copy)
-        } catch {
-            return nil
-        }
-        heard?.url = copy
-        return copy
     }
 
     /// Takes the held picture apart into its layers: the document is what is kept, and beside it
@@ -1074,7 +1064,7 @@ final class Session {
         outputs[job.id] = nil
         images[job.id] = nil
         // The copies of pasted pictures it was drawn from, once nothing else names them.
-        let held = Set(([picture?.url, heard?.url] + named.map(\.held.url)).compactMap { $0?.path })
+        let held = Set(([picture?.url] + named.map(\.held.url)).compactMap { $0?.path })
         for input in Self.inputPaths(of: job.made) where input.hasPrefix(inputs.path + "/") {
             if !held.contains(input), !jobs.contains(where: { Self.inputPaths(of: $0.made).contains(input) }) {
                 try? FileManager.default.removeItem(atPath: input)
@@ -1096,8 +1086,7 @@ final class Session {
     /// Puts what a job was made with back in the boxes, which is how one is made again.
     func reuse(_ job: Job) {
         guard let made = job.made else { return }
-        // A transcription has no seed: it is not drawn but heard.
-        if job.kind != "transcription" { form.seed = String(made.seed) }
+        form.seed = String(made.seed)
         // What it was drawn on, where the record says and the card offers it -- a record spells
         // it with hyphens -- and not while a job is going, when the card cannot change it either.
         if let device = made.device?.replacingOccurrences(of: "-", with: "_"),
@@ -1149,17 +1138,6 @@ final class Session {
                     holdPicture(at: url)
                 } else {
                     complaint = "\(url.lastPathComponent), which it took apart, is no longer there"
-                }
-            }
-        case "transcription":
-            form.language = made.language ?? ""
-            // The recording it wrote down, where it still is.
-            if let path = made.startFrom {
-                let url = URL(fileURLWithPath: path)
-                if FileManager.default.fileExists(atPath: path) {
-                    Task { await holdAudio(.heard, at: url, keeping: url) }
-                } else {
-                    complaint = "\(url.lastPathComponent), which it wrote down, is no longer there"
                 }
             }
         default:
@@ -1607,24 +1585,30 @@ final class Session {
     }
 
     /// Holds a recording -- to sound like, to convert, or to write down -- decoded into the samples
-    /// the engine takes, and a WAV of them for the player. `keeping` is the file a record may name
-    /// for it as it is: one this app wrote, which Reuse reads back.
-    func holdAudio(_ which: Which, at url: URL, keeping: URL? = nil) async {
+    /// the engine takes, and a WAV of them for the player. In memory only: a recording to write
+    /// down is never written to the disk.
+    func holdAudio(_ which: Which, at url: URL) async {
         let seconds =
             switch which {
             case .source: Media.sourceSeconds
             case .heard: Media.heardSeconds
             default: Media.recordingSeconds
             }
-        let clip: AudioClip
+        // Decoded, and written out as the WAV the player takes, off the main actor: twenty minutes
+        // at 48 kHz is 57.6 million samples, and a WAV of them over a hundred megabytes.
+        let whole = which == .heard
+        let read: (clip: AudioClip, wav: Data)
         do {
-            clip = try await Task.detached { try Media.clip(from: url, seconds: seconds) }.value
+            read = try await Task.detached {
+                let clip = try Media.clip(from: url, seconds: seconds, whole: whole)
+                return (clip, Media.wav(clip.samples, rate: clip.rate))
+            }.value
         } catch {
             complaint = error.localizedDescription
             return
         }
         complaint = nil
-        let kept = Held(bytes: Media.wav(clip.samples, rate: clip.rate), url: keeping, clip: clip)
+        let kept = Held(bytes: read.wav, clip: read.clip)
         switch which {
         case .source: source = kept
         case .heard: heard = kept

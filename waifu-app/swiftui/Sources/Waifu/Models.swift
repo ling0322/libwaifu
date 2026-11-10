@@ -328,9 +328,8 @@ struct Made: Codable {
     var streamed: Bool?
     // A conversion.
     var convertStyle: Bool?
-    // A transcription: the language it was asked to hear it in, and the one it said it heard. The
-    // words are `text`; the recording, kept in the output folder's inputs, is `startFrom`.
-    var language: String?
+    // A transcription, which is held in memory and never kept: the language it heard. The words are
+    // `text`.
     var heardLanguage: String?
     // A sound.
     var length: Double?

@@ -38,7 +38,8 @@ enum Media {
     static let recordingSeconds = 30.0
     /// And of a recording to convert, which is the whole of what is said again.
     static let sourceSeconds = 300.0
-    /// And of a recording to write down: twenty minutes, the most Qwen3-ASR hears in one piece.
+    /// And the most of a recording to write down that is taken: twenty minutes. A longer one is
+    /// refused rather than cut short -- every word of it is what was asked for.
     static let heardSeconds = 1200.0
 
     /// A picture's bytes as they are kept: PNG and JPEG as they are, anything else NSImage can
@@ -175,7 +176,9 @@ enum Media {
     }
 
     /// Any recording AVFoundation can play, as mono samples of at most `seconds` of it.
-    static func clip(from url: URL, seconds: Double) throws -> AudioClip {
+    /// The first `seconds` of the recording at `url`, as mono samples at its own rate -- or, with
+    /// `whole`, all of it, refusing one longer than that rather than keeping a part of it.
+    static func clip(from url: URL, seconds: Double, whole: Bool = false) throws -> AudioClip {
         let file: AVAudioFile
         do {
             file = try AVAudioFile(forReading: url)
@@ -187,6 +190,12 @@ enum Media {
 
         let format = file.processingFormat
         let rate = format.sampleRate
+        let duration = rate > 0 ? Double(file.length) / rate : 0
+        if whole, duration > seconds {
+            throw MediaError(
+                message: "\(url.lastPathComponent) is \(clock(duration)) long: speech2text takes up to "
+                    + "\(clock(seconds)) of a recording. Cut it into parts of that length.")
+        }
         let frames = AVAudioFrameCount(min(Double(file.length), rate * seconds))
         guard frames > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)
         else {
@@ -255,7 +264,6 @@ enum Media {
         switch kind {
         case "image": "png"
         case "layers": "psd"
-        case "transcription": "txt"
         default: "wav"
         }
     }
@@ -267,9 +275,7 @@ enum Media {
     static func save(_ bytes: Data, suggesting name: String) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
-        panel.allowedContentTypes = [
-            name.hasSuffix(".png") ? .png : name.hasSuffix(".psd") ? psd : name.hasSuffix(".txt") ? .plainText : .wav
-        ]
+        panel.allowedContentTypes = [name.hasSuffix(".png") ? .png : name.hasSuffix(".psd") ? psd : .wav]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

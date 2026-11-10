@@ -30,11 +30,9 @@ struct OutputPane: View {
 
     private var pictures: Bool { session.showsPictures }
     private var layers: Bool { session.tab.kind == "layers" }
+    /// Whether what is on show is a transcription: the last one's words alone, to be copied, and
+    /// nothing kept to save, reuse or delete.
     private var transcripts: Bool { session.tab.kind == "transcription" }
-    /// What one of what is on show is called, and more than one.
-    private var thing: (one: String, many: String) {
-        pictures ? ("picture", "pictures") : transcripts ? ("transcript", "transcripts") : ("clip", "clips")
-    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -53,7 +51,7 @@ struct OutputPane: View {
                     } else if pictures {
                         PictureFrame(session: session, job: job)
                     } else if transcripts {
-                        TranscriptFrame(session: session, job: job)
+                        TranscriptFrame(job: job).id(job.id)
                     } else {
                         ClipFrame(session: session, job: job)
                     }
@@ -63,12 +61,14 @@ struct OutputPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let job = session.shown { actions(job) }
-            strip
+            if !transcripts {
+                if let job = session.shown { actions(job) }
+                strip
+            }
         }
         .padding(12)
         .confirmationDialog(
-            "Delete this \(thing.one)?", isPresented: .constant(deleting != nil),
+            "Delete this \(pictures ? "picture" : "clip")?", isPresented: .constant(deleting != nil),
             presenting: deleting
         ) { job in
             Button("Delete", role: .destructive) {
@@ -96,12 +96,6 @@ struct OutputPane: View {
             Button(layers ? "Save PSD…" : "Save…") { session.save(job) }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(session.outputs[job.id] == nil)
-            if transcripts {
-                Button("Copy Text") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(job.made?.text ?? "", forType: .string)
-                }
-            }
             if layers {
                 Button("Save Depth PSD…") { session.saveDepth(job) }
                     .help("The same document with each layer's depth in place of its colour")
@@ -114,7 +108,7 @@ struct OutputPane: View {
             Button("Delete", role: .destructive) { deleting = job }
             Button("Delete All…", role: .destructive) { deletingAll = true }
                 .confirmationDialog(
-                    "Delete all \(session.done.count) \(thing.many)?",
+                    "Delete all \(session.done.count) \(pictures ? "pictures" : "clips")?",
                     isPresented: $deletingAll
                 ) {
                     Button("Delete All", role: .destructive) { session.forgetAll() }
@@ -706,37 +700,55 @@ struct ClipFrame: View {
     }
 }
 
-/// What a recording was heard to say, with the recording to hear again over it where it is still
-/// kept, and in which language it was heard under it.
+/// What the last recording was heard to say, to be copied: the words, and under them the language
+/// they were heard in and how long the recording was. Nothing else of it is held.
 struct TranscriptFrame: View {
-    var session: Session
     var job: Job
 
-    @State private var recording: Data?
+    /// Whether the words were just copied, which the button says for a moment.
+    @State private var copied = false
+
+    private var words: String { job.made?.text ?? "" }
 
     var body: some View {
         VStack(spacing: 12) {
-            if let recording { Player(bytes: recording).id(job.id) }
             ScrollView {
                 Text(said(job))
                     .font(.title3)
-                    .foregroundStyle(job.made?.text?.isBlank == false ? .primary : .secondary)
+                    .foregroundStyle(words.isBlank ? .secondary : .primary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(12)
             }
             .background(Theme.field, in: RoundedRectangle(cornerRadius: 8))
-            // The settings line, under the words it follows in the record.
-            if let parameters = job.made?.parameters.split(separator: "\n").last {
-                Text(parameters).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+
+            HStack {
+                Text(heard).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(words, forType: .string)
+                    copied = true
+                } label: {
+                    Label(copied ? "Copied" : "Copy Text", systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .disabled(words.isBlank)
+                .help("Copy the words to the clipboard")
             }
         }
         .frame(maxWidth: 720)
-        .task(id: job.id) {
-            await session.load(job)
-            let path = job.made?.startFrom
-            recording = await Task.detached { path.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) } }.value
+        .task(id: copied) {
+            guard copied else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            copied = false
         }
+    }
+
+    /// "English, 0:05": the language heard, where one was, and the length of the recording.
+    private var heard: String {
+        let language = job.made?.heardLanguage ?? ""
+        let length = clock(job.made?.length ?? 0)
+        return language.isEmpty ? length : "\(language), \(length)"
     }
 }
 

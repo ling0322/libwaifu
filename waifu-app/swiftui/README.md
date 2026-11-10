@@ -97,10 +97,11 @@ output says why. What is kept is the whole reading either way, and its record sa
 streamed, which Reuse turns the switch back to.
 
 **speech2text** writes down what is said in a recording dropped on it, up to twenty minutes of
-anything this Mac can play, with Qwen3-ASR (docs/qwen3_asr.md). **Language** tells it which of the
-model's languages it is in, or leaves it to detect the language, and then the language it heard is
-said under the words. What is kept is the words, as `<id>.txt`, and the recording, as a WAV among
-the inputs, which the output plays again and Reuse hands back.
+anything this Mac can play, with Qwen3-ASR (docs/qwen3_asr.md); a longer one is refused rather than
+cut short. **Language** tells it which of the model's languages it is in, or leaves it to detect the
+language, and then the language it heard is said under the words. **Copy Text** copies them.
+Nothing of it is kept: the recording is only ever in memory, the words are shown until the next
+ones are, and neither is written to the output folder.
 
 **waifu2d** makes a drawing in layers move, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
 does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedParts.swift` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers
