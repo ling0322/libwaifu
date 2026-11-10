@@ -235,14 +235,16 @@ extension View {
 }
 
 extension Tab {
+    /// Two families: the picture tasks run blue to purple, the voice tasks green to teal, and
+    /// waifu2d's pink stands apart from both.
     var color: Color {
         switch self {
         case .text2img: .blue
-        case .img2img: .purple
-        case .img2layers: .teal
+        case .img2img: .indigo
+        case .img2layers: .purple
         case .text2speech: .green
-        case .speech2speech: .orange
-        case .speech2text: .indigo
+        case .speech2speech: .mint
+        case .speech2text: .teal
         }
     }
 }
