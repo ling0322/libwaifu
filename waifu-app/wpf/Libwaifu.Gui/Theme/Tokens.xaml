@@ -60,11 +60,11 @@
 
   <!-- The sidebar's 20x20 task squares. One colour per task, as on the mac. -->
   <SolidColorBrush x:Key="TaskImageBrush" Color="#0A84FF" />
-  <SolidColorBrush x:Key="TaskImage2Brush" Color="#BF5AF2" />
-  <SolidColorBrush x:Key="TaskSpeechBrush" Color="#FF375F" />
-  <SolidColorBrush x:Key="TaskConversionBrush" Color="#FF9F0A" />
+  <SolidColorBrush x:Key="TaskImage2Brush" Color="#5E5CE6" />
+  <SolidColorBrush x:Key="TaskSpeechBrush" Color="#30D158" />
+  <SolidColorBrush x:Key="TaskConversionBrush" Color="#00C7BE" />
   <SolidColorBrush x:Key="TaskModelsBrush" Color="#8E8E93" />
-  <SolidColorBrush x:Key="TaskWaifuBrush" Color="#30D158" />
+  <SolidColorBrush x:Key="TaskWaifuBrush" Color="#FF375F" />
 
   <!-- — type ============================================================================== -->
 

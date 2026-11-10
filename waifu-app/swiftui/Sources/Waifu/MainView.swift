@@ -201,7 +201,7 @@ struct Sidebar: View {
                 Label {
                     Text("waifu2d")
                 } icon: {
-                    SettingsIcon(symbol: "eye", color: .green)
+                    Waifu2dIcon()
                 }
                 .tag(Page.waifu2d)
             }
@@ -235,14 +235,16 @@ extension View {
 }
 
 extension Tab {
+    /// Two families: the picture tasks run blue to purple, the voice tasks green to teal, and
+    /// waifu2d's pink stands apart from both.
     var color: Color {
         switch self {
         case .text2img: .blue
-        case .img2img: .purple
-        case .img2layers: .teal
-        case .text2speech: .pink
-        case .speech2speech: .orange
-        case .speech2text: .indigo
+        case .img2img: .indigo
+        case .img2layers: .purple
+        case .text2speech: .green
+        case .speech2speech: .mint
+        case .speech2text: .teal
         }
     }
 }
@@ -258,6 +260,68 @@ struct SettingsIcon: View {
             .foregroundStyle(.white)
             .frame(width: 20, height: 20)
             .background(color.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+}
+
+/// waifu2d's square: a girl drawn here, because SF Symbols has nobody like her.
+struct Waifu2dIcon: View {
+    var body: some View {
+        WaifuGlyph()
+            .fill(.white)
+            .frame(width: 16, height: 16)
+            .frame(width: 20, height: 20)
+            .background(Color.pink.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+}
+
+/// A chibi girl, her twin tails tied high and hanging to her feet, big eyes and a smile, filled: at
+/// this size her features close up in outline. The path is the Windows app's (Theme/Icons.xaml, IconWaifu) in its 24x24 box, scaled to
+/// fit whatever frame it is given.
+struct WaifuGlyph: Shape {
+    static let data =
+        "M3.4,21.6 C1.4,18.8 0.4,15 0.6,11.4 C0.8,7.8 1.8,5 3.6,3.6 C3.8,2.4 4.6,1.4 5.7,1.4 C6.6,1.4 7.2,2 7.3,2.8 C8.6,0.9 10.2,0.3 12,0.3 C13.8,0.3 15.4,0.9 16.7,2.8 C16.8,2 17.4,1.4 18.3,1.4 C19.4,1.4 20.2,2.4 20.4,3.6 C22.2,5 23.2,7.8 23.4,11.4 C23.6,15 22.6,18.8 20.6,21.6 C20.6,19 20.4,16 19.8,13.4 C19.4,11.6 18.8,10.2 18,9.4 C18.4,11.6 18.2,13.8 17.4,15.6 C17,15.2 16.6,14.9 16.2,14.8 C16.4,13 16.4,11.4 16.2,9.8 C14.2,9.6 12.8,8.4 12,6.8 C11.2,8.4 9.8,9.6 7.8,9.8 C7.6,11.4 7.6,13 7.8,14.8 C7.4,14.9 7,15.2 6.6,15.6 C5.8,13.8 5.6,11.6 6,9.4 C5.2,10.2 4.6,11.6 4.2,13.4 C3.6,16 3.4,19 3.4,21.6 Z " +
+        "M9.8,11.05 C10.41,11.05 10.9,11.79 10.9,12.7 C10.9,13.61 10.41,14.35 9.8,14.35 C9.19,14.35 8.7,13.61 8.7,12.7 C8.7,11.79 9.19,11.05 9.8,11.05 Z " +
+        "M14.2,11.05 C14.81,11.05 15.3,11.79 15.3,12.7 C15.3,13.61 14.81,14.35 14.2,14.35 C13.59,14.35 13.1,13.61 13.1,12.7 C13.1,11.79 13.59,11.05 14.2,11.05 Z " +
+        "M10.4,15.3 C11.2,16.1 12.8,16.1 13.6,15.3 C13.2,16.8 12.6,17.2 12,17.2 C11.4,17.2 10.8,16.8 10.4,15.3 Z"
+
+    /// The path in its 24x24 box. It has only absolute moves, cubics and closes.
+    static let drawing: Path = {
+        var path = Path()
+        var command: Character = "M"
+        var numbers: [CGFloat] = []
+        for token in data.split(whereSeparator: { $0 == " " || $0 == "," }) {
+            var number = token
+            if let first = token.first, first.isLetter {
+                command = first
+                number = token.dropFirst()
+                if command == "Z" {
+                    path.closeSubpath()
+                }
+            }
+            if let value = Double(number) {
+                numbers.append(CGFloat(value))
+            }
+            if command == "M", numbers.count == 2 {
+                path.move(to: CGPoint(x: numbers[0], y: numbers[1]))
+                numbers.removeAll()
+            } else if command == "C", numbers.count == 6 {
+                path.addCurve(
+                    to: CGPoint(x: numbers[4], y: numbers[5]),
+                    control1: CGPoint(x: numbers[0], y: numbers[1]),
+                    control2: CGPoint(x: numbers[2], y: numbers[3]))
+                numbers.removeAll()
+            }
+        }
+        return path
+    }()
+
+    func path(in rect: CGRect) -> Path {
+        let bounds = Self.drawing.boundingRect
+        let scale = min(rect.width / bounds.width, rect.height / bounds.height)
+        let fit = CGAffineTransform(translationX: rect.midX, y: rect.midY)
+            .scaledBy(x: scale, y: scale)
+            .translatedBy(x: -bounds.midX, y: -bounds.midY)
+        return Self.drawing.applying(fit)
     }
 }
 

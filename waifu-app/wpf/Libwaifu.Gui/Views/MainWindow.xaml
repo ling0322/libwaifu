@@ -131,8 +131,20 @@
           <TextBlock Text="Play" Style="{StaticResource CaptionText}" Margin="8,14,0,4" />
           <ListBox Style="{StaticResource SidebarList}"
                    ItemsSource="{Binding Waifu2dPages}"
-                   SelectedItem="{Binding SelectedWaifu2d}"
-                   ItemTemplate="{StaticResource SidebarTaskTemplate}" />
+                   SelectedItem="{Binding SelectedWaifu2d}">
+            <!-- As a task's row, but its drawing is filled rather than stroked. -->
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <StackPanel Orientation="Horizontal">
+                  <Border Width="20" Height="20" CornerRadius="5" Background="{Binding IconBrush}">
+                    <Path Data="{Binding Icon}" Fill="White" Stretch="Uniform" Width="16" Height="16" />
+                  </Border>
+                  <TextBlock Text="{Binding Name}" Margin="8,0,0,0" VerticalAlignment="Center"
+                             FontWeight="SemiBold" />
+                </StackPanel>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
         </StackPanel>
       </DockPanel>
     </Border>
