@@ -123,8 +123,9 @@ struct MainView: View {
         guard let model = session.model else { return "no model chosen" }
         let name =
             model.model?.fullName ?? model.voice?.fullName ?? model.converter?.fullName
-            ?? model.layerer?.fullName ?? model.model?.name ?? model.voice?.name
-            ?? model.converter?.name ?? model.layerer?.name ?? ""
+            ?? model.layerer?.fullName ?? model.transcriber?.fullName ?? model.model?.name
+            ?? model.voice?.name ?? model.converter?.name ?? model.layerer?.name
+            ?? model.transcriber?.name ?? ""
         return [name, session.device].compactMap { $0 }.filter { !$0.isEmpty }
             .joined(separator: " on ")
     }
@@ -241,6 +242,7 @@ extension Tab {
         case .img2layers: .teal
         case .text2speech: .pink
         case .speech2speech: .orange
+        case .speech2text: .indigo
         }
     }
 }
@@ -312,6 +314,7 @@ struct GoBar: View {
         case .img2layers: "Split into Layers"
         case .text2speech: "Speak"
         case .speech2speech: "Convert"
+        case .speech2text: "Transcribe"
         }
     }
 }

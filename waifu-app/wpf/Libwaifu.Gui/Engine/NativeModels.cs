@@ -46,6 +46,13 @@ namespace Libwaifu.Gui.Engine
             foreach (var row in Json.Items(Json.Parse(text), "models"))
             {
                 var kind = Json.Text(row, "kind");
+                // A transcriber is for a task this app does not have; read as any other kind it
+                // does not know, it would be offered as a picture model.
+                if (kind == "transcription")
+                {
+                    continue;
+                }
+
                 found.Add(new ModelEntry
                 {
                     Name = Json.Text(row, "name"),

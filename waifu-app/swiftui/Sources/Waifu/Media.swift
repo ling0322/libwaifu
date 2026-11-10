@@ -38,6 +38,8 @@ enum Media {
     static let recordingSeconds = 30.0
     /// And of a recording to convert, which is the whole of what is said again.
     static let sourceSeconds = 300.0
+    /// And of a recording to write down: twenty minutes, the most Qwen3-ASR hears in one piece.
+    static let heardSeconds = 1200.0
 
     /// A picture's bytes as they are kept: PNG and JPEG as they are, anything else NSImage can
     /// read as a PNG.
@@ -253,6 +255,7 @@ enum Media {
         switch kind {
         case "image": "png"
         case "layers": "psd"
+        case "transcription": "txt"
         default: "wav"
         }
     }
@@ -264,7 +267,9 @@ enum Media {
     static func save(_ bytes: Data, suggesting name: String) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
-        panel.allowedContentTypes = [name.hasSuffix(".png") ? .png : name.hasSuffix(".psd") ? psd : .wav]
+        panel.allowedContentTypes = [
+            name.hasSuffix(".png") ? .png : name.hasSuffix(".psd") ? psd : name.hasSuffix(".txt") ? .plainText : .wav
+        ]
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {

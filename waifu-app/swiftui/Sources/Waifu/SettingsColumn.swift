@@ -56,6 +56,7 @@ struct SettingsColumn: View {
                                 case .img2layers: layersSettings
                                 case .text2speech: speechSettings
                                 case .speech2speech: conversionSettings
+                                case .speech2text: transcriptionSettings
                                 }
                             }
                             // Held while a job runs: what it was asked with is what it is
@@ -176,6 +177,16 @@ struct SettingsColumn: View {
             } header: {
                 Header("Recording to convert")
             }
+        case .speech2text:
+            FormGroup {
+                RecordingDrop(session: session, which: .heard, height: PromptField.height)
+            } header: {
+                Header("Recording to write down")
+            } footer: {
+                Footnote("Anything this Mac can play, up to twenty minutes of it.")
+            }
+            // Held while a job runs, as the settings are: the words are of this recording.
+            .disabled(session.canStop)
         }
     }
 
@@ -300,6 +311,25 @@ struct SettingsColumn: View {
                 SeedRow(seed: $session.form.seed)
             } header: {
                 Header("Reading")
+            }
+        }
+    }
+
+    // MARK: - a transcription
+
+    @ViewBuilder private var transcriptionSettings: some View {
+        if let transcriber = session.model?.transcriber {
+            FormGroup {
+                if !transcriber.languages.isEmpty {
+                    LanguagePicker(languages: transcriber.languages, language: $session.form.language)
+                }
+            } header: {
+                Header("Transcription")
+            } footer: {
+                Footnote(
+                    transcriber.languages.isEmpty
+                        ? "It finds out which language is spoken for itself."
+                        : "Left to detect the language, it says which one it heard. Told one, it writes it down in that one.")
             }
         }
     }
@@ -753,6 +783,27 @@ struct SeedRow: View {
     }
 }
 
+/// The languages a transcriber can be told a recording is in, and Detect language, which is none:
+/// the language heard from the recording.
+struct LanguagePicker: View {
+    var languages: [String]
+    @Binding var language: String
+
+    var body: some View {
+        LabeledContent("Language") {
+            Picker("Language", selection: $language) {
+                Text("Detect language").tag("")
+                // One a record or the package named that this model does not list, as it is.
+                if !language.isEmpty, !languages.contains(language) { Text(language).tag(language) }
+                Divider()
+                ForEach(languages, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+            .fillsRow()
+        }
+    }
+}
+
 /// The examples of a style the voice follows, which write into the instruction box below it.
 struct StylePicker: View {
     var styles: [Voice.Style]
@@ -935,7 +986,13 @@ struct RecordingDrop: View {
     @State private var over = false
     @State private var reading = false
 
-    private var held: Held? { which == .source ? session.source : session.recording }
+    private var held: Held? {
+        switch which {
+        case .source: session.source
+        case .heard: session.heard
+        default: session.recording
+        }
+    }
 
     var body: some View {
         DropBox(over: over, height: height) {

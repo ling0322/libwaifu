@@ -139,6 +139,18 @@ struct Layerer {
     var resolution: Int
 }
 
+/// A model that writes down what is said in a recording: Qwen3-ASR.
+struct Transcriber {
+    var name: String
+    var fullName: String?
+    var onDisk: Bool
+    /// The languages a recording may be said to be in, as the model names them; empty where it
+    /// cannot be told one, and then it always finds out for itself.
+    var languages: [String]
+    /// What the box starts at: no language, which the model tells.
+    var language: String
+}
+
 /// What libwaifu_modelmanager says a model's boxes start at: whichever of these its kind has.
 private struct Defaults: Decodable {
     struct Conversion: Decodable {
@@ -158,13 +170,14 @@ private struct Defaults: Decodable {
     var conversion: Conversion?
     var depthSteps: Int?
     var resolution: Int?
+    var language: String?
 }
 
 /// The model that is loaded, and what it can be asked for.
 struct ModelInfo {
     /// What it was loaded as: a published name, or a manifest's path.
     var name: String
-    /// "image", "speech", "conversion" or "layers": what it is first.
+    /// "image", "speech", "conversion", "layers" or "transcription": what it is first.
     var kind: String
     /// Everything it does: CosyVoice3 reads and converts.
     var kinds: [String]
@@ -176,6 +189,7 @@ struct ModelInfo {
     var voice: Voice?
     var converter: Converter?
     var layerer: Layerer?
+    var transcriber: Transcriber?
 
     /// What the library says of `name`, for a model about to be, or just, loaded: what it can do,
     /// asked of its manifest, and what its boxes start at.
@@ -214,6 +228,10 @@ struct ModelInfo {
                 promptImages: opened.does(.imageGenerationWithPromptImages) ? opened.maxPromptImages ?? 0 : 0,
                 drawsFromAPicture: opened.does(.imageGenerationFromStartImage),
                 noPictureBecause: opened.whyNot(.imageGenerationFromStartImage))
+        case "transcription":
+            info.transcriber = Transcriber(
+                name: name, fullName: fullName, onDisk: onDisk, languages: opened.speechToTextLanguages ?? [],
+                language: defaults.language ?? "")
         case "layers":
             info.layerer = Layerer(
                 name: name, fullName: fullName, onDisk: onDisk, steps: defaults.steps ?? 30,
@@ -235,12 +253,14 @@ struct ModelInfo {
     }
 
     var fullName: String {
-        model?.fullName ?? voice?.fullName ?? converter?.fullName ?? layerer?.fullName ?? name
+        model?.fullName ?? voice?.fullName ?? converter?.fullName ?? layerer?.fullName
+            ?? transcriber?.fullName ?? name
     }
 
     /// Whether it is already fetched: one that is not is fetched by the first job that needs it.
     var onDisk: Bool {
-        model?.onDisk ?? voice?.onDisk ?? converter?.onDisk ?? layerer?.onDisk ?? false
+        model?.onDisk ?? voice?.onDisk ?? converter?.onDisk ?? layerer?.onDisk ?? transcriber?.onDisk
+            ?? false
     }
 }
 
@@ -308,6 +328,10 @@ struct Made: Codable {
     var streamed: Bool?
     // A conversion.
     var convertStyle: Bool?
+    // A transcription: the language it was asked to hear it in, and the one it said it heard. The
+    // words are `text`; the recording, kept in the output folder's inputs, is `startFrom`.
+    var language: String?
+    var heardLanguage: String?
     // A sound.
     var length: Double?
     var rate: Int?
@@ -388,7 +412,7 @@ struct Job: Identifiable {
     enum Status { case queued, running, done, failed, cancelled }
 
     var id: String
-    /// "image", "speech", "conversion" or "layers".
+    /// "image", "speech", "conversion", "layers" or "transcription".
     var kind: String
     var status: Status
     /// Milliseconds since 1970, as file names are made from.

@@ -221,6 +221,11 @@ pub fn catalog_json() -> serde_json::Value {
                 .into_iter()
                 .map(|listed| entry(listed, "layers")),
         )
+        .chain(
+            hub::listed_transcriptions()
+                .into_iter()
+                .map(|listed| entry(listed, "transcription")),
+        )
         .collect();
     serde_json::json!({ "models": models })
 }
@@ -273,6 +278,9 @@ mod tests {
         assert!(models
             .iter()
             .any(|model| model["name"] == "see-through" && model["kind"] == "layers"));
+        assert!(models
+            .iter()
+            .any(|model| model["name"] == "qwen3-asr" && model["kind"] == "transcription"));
     }
 
     #[test]

@@ -30,6 +30,11 @@ struct OutputPane: View {
 
     private var pictures: Bool { session.showsPictures }
     private var layers: Bool { session.tab.kind == "layers" }
+    private var transcripts: Bool { session.tab.kind == "transcription" }
+    /// What one of what is on show is called, and more than one.
+    private var thing: (one: String, many: String) {
+        pictures ? ("picture", "pictures") : transcripts ? ("transcript", "transcripts") : ("clip", "clips")
+    }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -47,6 +52,8 @@ struct OutputPane: View {
                         LayersFrame(session: session, job: job).id(job.id)
                     } else if pictures {
                         PictureFrame(session: session, job: job)
+                    } else if transcripts {
+                        TranscriptFrame(session: session, job: job)
                     } else {
                         ClipFrame(session: session, job: job)
                     }
@@ -61,7 +68,7 @@ struct OutputPane: View {
         }
         .padding(12)
         .confirmationDialog(
-            "Delete this \(pictures ? "picture" : "clip")?", isPresented: .constant(deleting != nil),
+            "Delete this \(thing.one)?", isPresented: .constant(deleting != nil),
             presenting: deleting
         ) { job in
             Button("Delete", role: .destructive) {
@@ -79,6 +86,7 @@ struct OutputPane: View {
         case "speech": "Nothing said yet."
         case "conversion": "Nothing converted yet."
         case "layers": "Nothing split into layers yet."
+        case "transcription": "Nothing written down yet."
         default: "Nothing drawn yet."
         }
     }
@@ -88,6 +96,12 @@ struct OutputPane: View {
             Button(layers ? "Save PSD…" : "Save…") { session.save(job) }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(session.outputs[job.id] == nil)
+            if transcripts {
+                Button("Copy Text") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(job.made?.text ?? "", forType: .string)
+                }
+            }
             if layers {
                 Button("Save Depth PSD…") { session.saveDepth(job) }
                     .help("The same document with each layer's depth in place of its colour")
@@ -100,7 +114,7 @@ struct OutputPane: View {
             Button("Delete", role: .destructive) { deleting = job }
             Button("Delete All…", role: .destructive) { deletingAll = true }
                 .confirmationDialog(
-                    "Delete all \(session.done.count) \(pictures ? "pictures" : "clips")?",
+                    "Delete all \(session.done.count) \(thing.many)?",
                     isPresented: $deletingAll
                 ) {
                     Button("Delete All", role: .destructive) { session.forgetAll() }
@@ -692,12 +706,47 @@ struct ClipFrame: View {
     }
 }
 
+/// What a recording was heard to say, with the recording to hear again over it where it is still
+/// kept, and in which language it was heard under it.
+struct TranscriptFrame: View {
+    var session: Session
+    var job: Job
+
+    @State private var recording: Data?
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if let recording { Player(bytes: recording).id(job.id) }
+            ScrollView {
+                Text(said(job))
+                    .font(.title3)
+                    .foregroundStyle(job.made?.text?.isBlank == false ? .primary : .secondary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(12)
+            }
+            .background(Theme.field, in: RoundedRectangle(cornerRadius: 8))
+            // The settings line, under the words it follows in the record.
+            if let parameters = job.made?.parameters.split(separator: "\n").last {
+                Text(parameters).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: 720)
+        .task(id: job.id) {
+            await session.load(job)
+            let path = job.made?.startFrom
+            recording = await Task.detached { path.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) } }.value
+        }
+    }
+}
+
 /// What a clip is called in the strip: its first words, or for a conversion, how it was made.
 func said(_ job: Job) -> String {
     let made = job.made
     if job.kind == "conversion" {
         return "\(made?.convertStyle == true ? "Voice and style" : "Voice only"), \(made?.steps ?? 0) steps"
     }
+    if job.kind == "transcription", made?.text?.isBlank != false { return "Nothing was said." }
     return made?.text ?? ""
 }
 

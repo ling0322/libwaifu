@@ -101,7 +101,7 @@ struct ModelManagerView: View {
 
     private static let kinds: [(kind: String, title: String)] = [
         ("image", "Pictures"), ("speech", "Voices"), ("conversion", "Voice conversion"),
-        ("layers", "Layers"),
+        ("layers", "Layers"), ("transcription", "Transcription"),
     ]
 
     var body: some View {

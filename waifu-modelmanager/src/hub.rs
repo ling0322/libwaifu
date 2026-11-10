@@ -163,9 +163,9 @@ enum Kind {
     /// any other, but in neither list -- it draws nothing from a prompt and reads no sentence, so
     /// either picker offering it would offer a name that fails once chosen.
     Layers,
-    /// Writes down what is said in a recording: speech2text. Fetched by name and in no list, as
-    /// [`Kind::Layers`] is, and for the same reason; nor is it in the catalogue a screen reads,
-    /// which has no kind for it yet.
+    /// Writes down what is said in a recording: speech2text. Fetched by name and in no list of the
+    /// terminal's, as [`Kind::Layers`] is, and for the same reason; the catalogue a screen reads
+    /// has it, under a kind of its own, `transcription`.
     Transcription,
 }
 
@@ -872,6 +872,12 @@ pub fn listed_conversions() -> Vec<Listed> {
 /// these; the catalogue a screen reads does, under a kind of their own.
 pub fn listed_layers() -> Vec<Listed> {
     listed_of(Kind::Layers)
+}
+
+/// And what writes down what is said in a recording: `qwen3-asr`. In the catalogue a screen reads,
+/// under a kind of its own, and in no picker of the terminal's.
+pub fn listed_transcriptions() -> Vec<Listed> {
+    listed_of(Kind::Transcription)
 }
 
 /// Every unversioned name of one kind, which is every alias: each published model has one, and
@@ -1935,9 +1941,9 @@ mod tests {
     }
 
     #[test]
-    fn a_transcriber_is_fetched_by_name_and_offered_in_no_list() {
+    fn a_transcriber_is_fetched_by_name_and_listed_under_its_own_kind() {
         // Qwen3-ASR resolves by name, but it draws nothing and reads no sentence: no picker
-        // offers it, and nor does the catalogue the apps read, which would show it as a picture.
+        // offers it. The catalogue the apps read lists it, as a transcription.
         let model = published("qwen3-asr").expect("an alias resolves");
         assert_eq!(model.name, "qwen3-asr:0.6b");
         assert_eq!(model.repo, "ling0322/libwaifu-qwen3-asr-0.6b");
@@ -1952,8 +1958,22 @@ mod tests {
             .chain(listed_conversions())
             .chain(listed_layers());
         assert!(!offered.into_iter().any(|one| one.name == "qwen3-asr"));
-        let catalogue = crate::fetch::catalog_json().to_string();
-        assert!(!catalogue.contains("qwen3-asr"), "{catalogue}");
+        let transcribers: Vec<_> = listed_transcriptions()
+            .into_iter()
+            .map(|one| one.name)
+            .collect();
+        assert_eq!(transcribers, vec!["qwen3-asr"]);
+
+        let catalogue = crate::fetch::catalog_json();
+        let rows: Vec<_> = catalogue["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|model| model["name"] == "qwen3-asr")
+            .collect();
+        assert_eq!(rows.len(), 1, "{catalogue}");
+        assert_eq!(rows[0]["kind"], "transcription");
+        assert_eq!(rows[0]["versioned_name"], "qwen3-asr:0.6b");
     }
 
     #[test]

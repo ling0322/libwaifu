@@ -65,6 +65,10 @@ extension JobProgress {
         case .layerDecompositionDecodingDepth: return counted ? "decoding the depth, \(at)" : "decoding the depth"
         case .layerDecompositionCuttingIntoParts: return "cutting the layers into parts"
 
+        case .speechToTextReadingRecording: return total > 1 ? "listening, piece \(at)" : "listening"
+        // "about": how many words were said is the model's to find out.
+        case .speechToTextGeneratingTokens: return counted ? "token \(done) of about \(total)" : "writing it down"
+
         // Nothing here asks for these yet, or a newer library says something this does not know.
         default: return "working"
         }

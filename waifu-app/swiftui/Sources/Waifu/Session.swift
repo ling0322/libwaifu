@@ -32,7 +32,7 @@ import WaifuKit
 
 /// The tabs, which what the model does decides.
 enum Tab: String, CaseIterable, Identifiable {
-    case text2img, img2img, img2layers, text2speech, speech2speech
+    case text2img, img2img, img2layers, text2speech, speech2speech, speech2text
 
     var id: String { rawValue }
 
@@ -43,6 +43,7 @@ enum Tab: String, CaseIterable, Identifiable {
         case .img2layers: "square.3.layers.3d"
         case .text2speech: "waveform"
         case .speech2speech: "person.wave.2"
+        case .speech2text: "captions.bubble"
         }
     }
 
@@ -53,6 +54,7 @@ enum Tab: String, CaseIterable, Identifiable {
         case .img2layers: "layers"
         case .text2speech: "speech"
         case .speech2speech: "conversion"
+        case .speech2text: "transcription"
         }
     }
 }
@@ -81,6 +83,9 @@ struct JobForm {
     /// Whether a picture taken apart is saved with hair, hands, top and bottom cut by their depth.
     /// Only what is saved: the job's own document stays as the model made it.
     var splitByDepth = false
+    /// What a recording to write down is said to be in, as the model names it; blank for the model
+    /// to tell.
+    var language = ""
 }
 
 /// A picture or a recording this window is holding to start from: as the engine takes it, and as
@@ -118,7 +123,8 @@ struct BarState {
 final class Session {
     /// The pipeline, and what is loaded into it.
     let launcher = Launcher()
-    /// The model chosen for each kind of job -- "image", "speech", "conversion", "layers" -- as it is asked
+    /// The model chosen for each kind of job -- "image", "speech", "conversion", "layers",
+    /// "transcription" -- as it is asked
     /// for: a published name or a manifest's path. Kept from one run of the app to the next.
     private(set) var chosen: [String: String] = [:]
     /// What each chosen model is, as the library says without reading it -- which is all the
@@ -177,6 +183,8 @@ final class Session {
     private(set) var named: [NamedPicture] = []
     private(set) var recording: Held?
     private(set) var source: Held?
+    /// The recording to write down.
+    private(set) var heard: Held?
 
     /// What finished jobs made, read once each.
     private(set) var outputs: [String: Data] = [:]
@@ -195,7 +203,7 @@ final class Session {
     /// for the job that needs it and not out from under the one before.
     private var last: Task<Void, Never>?
 
-    static let kinds = ["image", "speech", "conversion", "layers"]
+    static let kinds = ["image", "speech", "conversion", "layers", "transcription"]
 
     /// What each kind of job runs on until somebody chooses otherwise: a task opens ready to run,
     /// not asking which model. Not kept as a choice, so a Mac that never chose follows this list
@@ -205,6 +213,7 @@ final class Session {
         "speech": "cosyvoice",
         "conversion": "cosyvoice",
         "layers": "see-through",
+        "transcription": "qwen3-asr",
     ]
 
     /// What the Model card offers to run on, as the library names them.
@@ -336,6 +345,9 @@ final class Session {
         if let layerer = model.layerer {
             form.layerSteps = layerer.steps
             form.depthSteps = layerer.depthSteps
+        }
+        if let transcriber = model.transcriber {
+            form.language = transcriber.language
         }
     }
 
@@ -491,9 +503,9 @@ final class Session {
     /// What is on show in the strip: the current tab's kind only.
     var done: [Job] { jobs.filter { $0.isDone && $0.kind == tab.kind } }
 
-    /// The tasks the sidebar offers: drawing from words, taking a picture apart, and reading words
-    /// out. The others are written and come back by being listed here.
-    var tabs: [Tab] { [.text2img, .img2layers, .text2speech] }
+    /// The tasks the sidebar offers: drawing from words, taking a picture apart, reading words out,
+    /// and writing down what is said. The others are written and come back by being listed here.
+    var tabs: [Tab] { [.text2img, .img2layers, .text2speech, .speech2text] }
 
     /// Whether what this tab makes is looked at rather than listened to.
     var showsPictures: Bool { tab.kind == "image" || tab.kind == "layers" }
@@ -564,6 +576,8 @@ final class Session {
             return model.voice != nil && !form.text.isBlank && !wantsARecording
         case .speech2speech:
             return model.converter != nil && source != nil && recording != nil
+        case .speech2text:
+            return model.transcriber != nil && heard != nil
         }
     }
 
@@ -582,6 +596,7 @@ final class Session {
         case .img2layers: takeApart()
         case .text2speech: speak()
         case .speech2speech: convert()
+        case .speech2text: transcribe()
         }
     }
 
@@ -863,6 +878,54 @@ final class Session {
         }
     }
 
+    /// Writes down what is said in the held recording: the words are what is kept, as text, and the
+    /// recording beside the other inputs, which its record names, so that it can be heard again
+    /// and Reuse can hand it back.
+    private func transcribe() {
+        guard model?.transcriber != nil, let modelName = model?.name, let clip = heard?.clip else { return }
+        let language = form.language.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = TranscribeRequest(recording: clip, language: language.isEmpty ? nil : language)
+
+        let named = ModelManager.versionedName(modelName) ?? modelName
+        var asked = Made(seed: 0, seconds: 0, model: named, parameters: "")
+        asked.language = language
+        asked.length = clip.seconds
+        asked.rate = clip.rate
+        asked.startFrom = keptRecording()?.path
+        let made = asked
+
+        start(kind: "transcription", model: modelName) { pipeline, report in
+            let started = Date()
+            guard let transcript = try await pipeline.transcribe(request, progress: report) else { return nil }
+            var made = made
+            made.seconds = Date().timeIntervalSince(started)
+            made.device = pipeline.device.replacingOccurrences(of: "_", with: "-")
+            made.text = transcript.text
+            made.heardLanguage = transcript.language
+            var settings = "Language: \(language.isEmpty ? "detected" : language)"
+            if !transcript.language.isEmpty { settings += ", Heard: \(transcript.language)" }
+            settings += ", Length: \(clock(made.length ?? 0)), Model: \(named)"
+            made.parameters = "\(transcript.text)\n\(settings)"
+            return (Data(transcript.text.utf8), made, [:])
+        }
+    }
+
+    /// The file the recording to write down is in, for a record to name: a WAV of it kept beside
+    /// the other inputs the first time a job is run on it.
+    private func keptRecording() -> URL? {
+        guard let held = heard else { return nil }
+        if let url = held.url { return url }
+        let copy = inputs.appendingPathComponent("\(UUID().uuidString.lowercased()).wav")
+        do {
+            try FileManager.default.createDirectory(at: inputs, withIntermediateDirectories: true)
+            try held.bytes.write(to: copy)
+        } catch {
+            return nil
+        }
+        heard?.url = copy
+        return copy
+    }
+
     /// Takes the held picture apart into its layers: the document is what is kept, and beside it
     /// the depth document, the picture put back together, each layer as a PNG, and the halves
     /// Split by depth lays among them.
@@ -1011,7 +1074,7 @@ final class Session {
         outputs[job.id] = nil
         images[job.id] = nil
         // The copies of pasted pictures it was drawn from, once nothing else names them.
-        let held = Set(([picture?.url] + named.map(\.held.url)).compactMap { $0?.path })
+        let held = Set(([picture?.url, heard?.url] + named.map(\.held.url)).compactMap { $0?.path })
         for input in Self.inputPaths(of: job.made) where input.hasPrefix(inputs.path + "/") {
             if !held.contains(input), !jobs.contains(where: { Self.inputPaths(of: $0.made).contains(input) }) {
                 try? FileManager.default.removeItem(atPath: input)
@@ -1033,7 +1096,8 @@ final class Session {
     /// Puts what a job was made with back in the boxes, which is how one is made again.
     func reuse(_ job: Job) {
         guard let made = job.made else { return }
-        form.seed = String(made.seed)
+        // A transcription has no seed: it is not drawn but heard.
+        if job.kind != "transcription" { form.seed = String(made.seed) }
         // What it was drawn on, where the record says and the card offers it -- a record spells
         // it with hyphens -- and not while a job is going, when the card cannot change it either.
         if let device = made.device?.replacingOccurrences(of: "-", with: "_"),
@@ -1085,6 +1149,17 @@ final class Session {
                     holdPicture(at: url)
                 } else {
                     complaint = "\(url.lastPathComponent), which it took apart, is no longer there"
+                }
+            }
+        case "transcription":
+            form.language = made.language ?? ""
+            // The recording it wrote down, where it still is.
+            if let path = made.startFrom {
+                let url = URL(fileURLWithPath: path)
+                if FileManager.default.fileExists(atPath: path) {
+                    Task { await holdAudio(.heard, at: url, keeping: url) }
+                } else {
+                    complaint = "\(url.lastPathComponent), which it wrote down, is no longer there"
                 }
             }
         default:
@@ -1408,7 +1483,7 @@ final class Session {
 
     // MARK: - what is held
 
-    enum Which { case picture, recording, source }
+    enum Which { case picture, recording, source, heard }
 
     func holdPicture(at url: URL) {
         do {
@@ -1531,10 +1606,16 @@ final class Session {
         return (snap(wide), snap(wide / ratio))
     }
 
-    /// Holds a recording -- to sound like, or to convert -- decoded into the samples the engine
-    /// takes, and a WAV of them for the player.
-    func holdAudio(_ which: Which, at url: URL) async {
-        let seconds = which == .source ? Media.sourceSeconds : Media.recordingSeconds
+    /// Holds a recording -- to sound like, to convert, or to write down -- decoded into the samples
+    /// the engine takes, and a WAV of them for the player. `keeping` is the file a record may name
+    /// for it as it is: one this app wrote, which Reuse reads back.
+    func holdAudio(_ which: Which, at url: URL, keeping: URL? = nil) async {
+        let seconds =
+            switch which {
+            case .source: Media.sourceSeconds
+            case .heard: Media.heardSeconds
+            default: Media.recordingSeconds
+            }
         let clip: AudioClip
         do {
             clip = try await Task.detached { try Media.clip(from: url, seconds: seconds) }.value
@@ -1543,8 +1624,12 @@ final class Session {
             return
         }
         complaint = nil
-        let kept = Held(bytes: Media.wav(clip.samples, rate: clip.rate), clip: clip)
-        if which == .source { source = kept } else { recording = kept }
+        let kept = Held(bytes: Media.wav(clip.samples, rate: clip.rate), url: keeping, clip: clip)
+        switch which {
+        case .source: source = kept
+        case .heard: heard = kept
+        default: recording = kept
+        }
     }
 
     func letGo(_ which: Which) {
@@ -1552,6 +1637,7 @@ final class Session {
         case .picture: picture = nil
         case .recording: recording = nil
         case .source: source = nil
+        case .heard: heard = nil
         }
     }
 }

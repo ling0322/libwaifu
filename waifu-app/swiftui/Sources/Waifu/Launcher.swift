@@ -87,13 +87,15 @@ final class Launcher {
         if case .loading = state { true } else { false }
     }
 
-    /// What a pipeline for a job of `kind` -- "image", "speech", "conversion", "layers" -- is made
+    /// What a pipeline for a job of `kind` -- "image", "speech", "conversion", "layers",
+    /// "transcription" -- is made
     /// for.
     static func pipelineType(for kind: String) -> PipelineType {
         switch kind {
         case "speech": .textToSpeech
         case "conversion": .voiceConversion
         case "layers": .layerDecomposition
+        case "transcription": .speechToText
         default: .imageGeneration
         }
     }
