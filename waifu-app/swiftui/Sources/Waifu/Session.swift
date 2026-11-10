@@ -76,7 +76,11 @@ struct JobForm {
     var stream = true
     var conversionSteps = 30
     var convertStyle = false
-    var style = ""
+    /// Whether a speech-to-text model writes down what the reference audio says, for a voice that
+    /// reads on from it (CosyVoice3), rather than it being typed into `referenceTranscript`.
+    var transcribeReference = true
+    /// What the reference audio says, word for word, as typed: "" where it is not.
+    var referenceTranscript = ""
     var layerSteps = 30
     var depthSteps = 4
     var splitPairs = false
@@ -86,6 +90,21 @@ struct JobForm {
     /// What a recording to write down is said to be in, as the model names it; blank for the model
     /// to tell.
     var language = ""
+}
+
+/// What a reading's reference audio says, as a job comes to know it: typed, heard before, or
+/// written down in the job before the voice is read. A box, so that the step that writes it down
+/// and the reading after it see the same words.
+@MainActor
+final class Words {
+    var text: String?
+
+    init(_ text: String?) { self.text = text }
+}
+
+/// Why a reading's reference audio could not be written down: nothing was heard said in it.
+struct HeardNothing: LocalizedError {
+    var errorDescription: String?
 }
 
 /// A picture or a recording this window is holding to start from: as the engine takes it, and as
@@ -204,6 +223,9 @@ final class Session {
     private var last: Task<Void, Never>?
 
     static let kinds = ["image", "speech", "conversion", "layers", "transcription"]
+    /// The kind a speech-to-text model is chosen for: speech2text's, and what writes a reading's
+    /// reference audio down.
+    static let transcriptionKind = "transcription"
 
     /// What each kind of job runs on until somebody chooses otherwise: a task opens ready to run,
     /// not asking which model. Not kept as a choice, so a Mac that never chose follows this list
@@ -587,7 +609,7 @@ final class Session {
         case .img2layers:
             return model.layerer != nil && picture?.rgba != nil
         case .text2speech:
-            return model.voice != nil && !form.text.isBlank && !wantsARecording
+            return model.voice != nil && !form.text.isBlank && !wantsARecording && !wantsATranscript
         case .speech2speech:
             return model.converter != nil && source != nil && recording != nil
         case .speech2text:
@@ -599,6 +621,15 @@ final class Session {
     /// before the run, which would otherwise read the whole model only to be refused.
     var wantsARecording: Bool {
         tab == .text2speech && model?.voice?.needsARecording == true && recording == nil
+    }
+
+    /// Whether the voice reads on from its recording's words, a recording is held, and they are
+    /// not typed.
+    var wantsATranscript: Bool {
+        guard tab == .text2speech, model?.voice?.needsATranscript == true, recording != nil else { return false }
+        // Written down: by a speech-to-text model there is.
+        if form.transcribeReference { return transcriber == nil }
+        return form.referenceTranscript.isBlank
     }
 
     // MARK: - doing
@@ -624,8 +655,11 @@ final class Session {
     /// Starts a job of `kind` on `model`: listed at once, run when the one before it has ended --
     /// fetching and reading the model first where it is not the one loaded -- and kept when it
     /// ends: what `run` hands back is the file, what made it, and what is kept beside the file.
+    /// `before`, where there is one, is run when the job's turn comes and before its model is read:
+    /// a reading's reference audio written down by a speech-to-text model, which has the card first.
     private func start(
         kind: String, model: String, type asked: PipelineType? = nil, notice said: String? = nil,
+        before: ((Placement, @escaping ProgressHandler) async throws -> Void)? = nil,
         _ run: @escaping (Pipeline, @escaping ProgressHandler) async throws -> (Data, Made, [String: Data])?
     ) {
         complaint = nil
@@ -650,6 +684,10 @@ final class Session {
                 Task { @MainActor in self.heard(said, of: id) }
             }
             do {
+                if let before {
+                    try await before(placement, report)
+                    try Task.checkCancellation()
+                }
                 let wasLoaded = launcher.has(model, for: type, on: placement)
                 let pipeline: Pipeline
                 do {
@@ -785,24 +823,95 @@ final class Session {
         return copy
     }
 
+    /// The transcript a reading is handed: what is typed for the recording, for a voice that reads
+    /// one, where there is a recording; nil otherwise.
+    var referenceTranscript: String? {
+        guard model?.voice?.needsATranscript == true, recording != nil, !form.transcribeReference,
+            !form.referenceTranscript.isBlank
+        else { return nil }
+        return form.referenceTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Whether this reading's reference audio is written down by a speech-to-text model.
+    var transcribesReference: Bool {
+        model?.voice?.needsATranscript == true && recording != nil && form.transcribeReference
+    }
+
+    /// The speech-to-text model a reference audio is written down by: speech2text's choice, as it
+    /// is asked for.
+    var transcriber: String? { chosen[Session.transcriptionKind] }
+
+    /// What a speech-to-text model heard in a reference audio: the recording it heard it in, as the
+    /// held bytes, and the model, so that a reading of the same recording does not write it down
+    /// again -- and does not read the model off the card to do it.
+    private var heardReference: (recording: Data, model: String, text: String)?
+
+    /// What the chosen speech-to-text model heard in the held reference audio, where it already has.
+    var heardHere: String? {
+        guard let heard = heardReference, let recording, heard.recording == recording.bytes,
+            heard.model == transcriber
+        else { return nil }
+        return heard.text
+    }
+
+    /// Writes down what the reference audio says, for a reading: in the reading's job, before the
+    /// voice is read, which takes the speech-to-text model off the card again. What it heard is
+    /// kept for the next reading of the same recording.
+    private func writeDown(
+        _ clip: AudioClip, held bytes: Data, with name: String, on placement: Placement,
+        report: @escaping ProgressHandler
+    ) async throws -> String {
+        let wasLoaded = launcher.has(name, for: .speechToText, on: placement)
+        let pipeline = try await launcher.ensure(name, for: .speechToText, on: placement)
+        if !wasLoaded { refresh(name) }
+        guard let heard = try await pipeline.transcribe(TranscribeRequest(recording: clip), progress: report) else {
+            throw CancellationError()
+        }
+        let text = heard.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            throw HeardNothing(
+                errorDescription: "\(name) heard nothing said in the reference audio: drop a recording of "
+                    + "somebody speaking, or type what it says")
+        }
+        heardReference = (bytes, name, text)
+        return text
+    }
+
     private func speak() {
         guard let voice = model?.voice, let modelName = model?.name else { return }
         let seed = seed
-        let style = !voice.followsStyle || form.style.isBlank ? nil : form.style.trimmingCharacters(in: .whitespaces)
+        // What the reference audio says: typed, or written down by a speech-to-text model -- now,
+        // in this job before the voice is read, unless it already was for this recording.
+        let words = Words(referenceTranscript)
+        let transcribing = transcribesReference
+        let asr = transcriber
+        if transcribing { words.text = heardHere }
+        let writing = transcribing && words.text == nil ? recording : nil
+        // No style: the page offers none, and a reading is in the reference's own manner.
         let request = SpeakRequest(
-            text: form.text, reference: recording?.clip, speed: form.speed, temperature: form.temperature,
-            style: style, seed: seed)
+            text: form.text, reference: recording?.clip, speed: form.speed, temperature: form.temperature, seed: seed)
 
         // As a picture's record names its model: the published name with its version, or the
         // path of the manifest it was asked for by.
         let named = ModelManager.versionedName(modelName) ?? modelName
         var settings = "Speed: \(form.speed), Temperature: \(form.temperature), Seed: \(seed), Rate: \(voice.rate) Hz, Voice: \(named)"
         if recording != nil { settings += ", From a recording: yes" }
-        if let style { settings += ", Style: \(style)" }
-        let made = Made(
+        var record = Made(
             seed: seed, seconds: 0, model: named, parameters: "\(form.text)\n\(settings)",
-            text: form.text, speed: form.speed, temperature: form.temperature, style: style,
-            fromARecording: recording != nil)
+            text: form.text, speed: form.speed, temperature: form.temperature, fromARecording: recording != nil)
+        if transcribing, let asr {
+            record.transcribedBy = ModelManager.versionedName(asr) ?? asr
+        }
+        let made = record
+
+        let before: ((Placement, @escaping ProgressHandler) async throws -> Void)? =
+            if let writing, let clip = writing.clip, let asr {
+                { [weak self] placement, report in
+                    guard let self else { return }
+                    words.text = try await writeDown(
+                        clip, held: writing.bytes, with: asr, on: placement, report: report)
+                }
+            } else { nil }
 
         // Played as it is said where the voice streams and it is asked to, at the speed it is said:
         // a streaming reading has no other. Asked at another, it is read whole, and says why.
@@ -811,8 +920,12 @@ final class Session {
 
         start(
             kind: "speech", model: modelName, type: streams ? .streamingTextToSpeech : nil,
-            notice: asked && !streams ? "read whole, not streamed: a reading is played as it is said at speed 1 only" : nil
+            notice: asked && !streams ? "read whole, not streamed: a reading is played as it is said at speed 1 only" : nil,
+            before: before
         ) { [weak self] pipeline, report in
+            // The reference's words, as they are by now: typed, heard before, or just written down.
+            var request = request
+            request.referenceTranscript = words.text
             let started = Date()
             // The pipeline the load gave: a streaming one, or, where the device refused it, one
             // that reads whole.
@@ -852,6 +965,11 @@ final class Session {
             made.seconds = took
             made.length = clip.seconds
             made.rate = clip.rate
+            if let transcript = words.text {
+                made.referenceTranscript = transcript
+                made.parameters += ", Transcript: \(transcript)"
+                if let by = made.transcribedBy { made.parameters += ", Transcribed by: \(by)" }
+            }
             // A streaming reading is a reading of its own, not the samples a whole one makes of the
             // same seed: the record says which, so that Reuse makes it again.
             if streamed {
@@ -1125,7 +1243,14 @@ final class Session {
             form.text = made.text ?? form.text
             form.speed = made.speed ?? form.speed
             form.temperature = made.temperature ?? form.temperature
-            form.style = made.style ?? ""
+            // Written down by a speech-to-text model, it is again, of the recording dropped now;
+            // typed, it is typed back.
+            if made.transcribedBy != nil {
+                form.transcribeReference = true
+            } else if let typed = made.referenceTranscript {
+                form.transcribeReference = false
+                form.referenceTranscript = typed
+            }
             form.stream = made.streamed ?? false
         case "layers":
             form.layerSteps = made.steps ?? form.layerSteps

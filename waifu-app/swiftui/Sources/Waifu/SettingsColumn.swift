@@ -133,7 +133,7 @@ struct SettingsColumn: View {
                             }
                         } header: {
                             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                                Header("Recording to sound like")
+                                Header("Reference audio")
                                 // Speak waits for one: this voice has none of its own.
                                 if voice.needsARecording == true {
                                     Text("(Required)").font(.caption).foregroundStyle(.secondary)
@@ -280,21 +280,6 @@ struct SettingsColumn: View {
 
     @ViewBuilder private var speechSettings: some View {
         if let voice = session.model?.voice {
-            if let styles = voice.styles, !styles.isEmpty {
-                FormGroup {
-                    StylePicker(styles: styles, style: $session.form.style)
-                    LabeledContent("Instruction") {
-                        TextField("Instruction", text: $session.form.style, prompt: Text("none"))
-                            .labelsHidden()
-                            .multilineTextAlignment(.trailing)
-                            .frame(maxWidth: .infinity)
-                            .fieldBox()
-                    }
-                } header: {
-                    Header("Style")
-                }
-            }
-
             FormGroup {
                 SliderRow(label: "Speed", value: $session.form.speed, range: 0.25...4, step: 0.05, decimals: 2)
                 SliderRow(label: "Temperature", value: $session.form.temperature, range: 0...2, step: 0.05, decimals: 2)
@@ -311,6 +296,45 @@ struct SettingsColumn: View {
                 SeedRow(seed: $session.form.seed)
             } header: {
                 Header("Reading")
+            }
+
+            // What the reference audio says, which CosyVoice3 reads on from (upstream's zero-shot):
+            // written down by a speech-to-text model, or typed. IndexTTS-2.5 reads none.
+            if voice.needsATranscript, voice.noLikenessBecause == nil {
+                FormGroup {
+                    LabeledContent("Transcribe with STT") {
+                        Toggle("Transcribe with STT", isOn: $session.form.transcribeReference)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                    .help(
+                        "On, a speech-to-text model writes down what the reference audio says before the reading -- "
+                            + "once for each recording. Off, type it below.")
+                    if session.form.transcribeReference {
+                        LabeledContent("STT model") {
+                            ModelPicker(session: session, kind: Session.transcriptionKind)
+                        }
+                    } else {
+                        PromptField(
+                            text: $session.form.referenceTranscript,
+                            placeholder: "What the reference audio says, word for word", lines: 4)
+                    }
+                } header: {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Header("Reference transcript")
+                        Text("(Required)").font(.caption).foregroundStyle(.secondary)
+                    }
+                } footer: {
+                    if session.form.transcribeReference {
+                        if let why = session.notDescribed[Session.transcriptionKind] {
+                            Text(why).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                        } else if let heard = session.heardHere {
+                            Footnote("Heard: \(heard)")
+                        } else {
+                            Footnote("Written down before the reading, once for each recording.")
+                        }
+                    }
+                }
             }
         }
     }
@@ -797,31 +821,6 @@ struct LanguagePicker: View {
                 if !language.isEmpty, !languages.contains(language) { Text(language).tag(language) }
                 Divider()
                 ForEach(languages, id: \.self) { Text($0).tag($0) }
-            }
-            .labelsHidden()
-            .fillsRow()
-        }
-    }
-}
-
-/// The examples of a style the voice follows, which write into the instruction box below it.
-struct StylePicker: View {
-    var styles: [Voice.Style]
-    @Binding var style: String
-
-    var body: some View {
-        let typed = style.trimmingCharacters(in: .whitespaces)
-        let chosen = styles.first { $0.instruction == typed }
-        LabeledContent("Say it") {
-            Picker(
-                "Say it",
-                selection: Binding(
-                    get: { typed.isEmpty ? "" : chosen?.instruction ?? "custom" },
-                    set: { if $0 != "custom" { style = $0 } })
-            ) {
-                Text("The voice's own way").tag("")
-                if !typed.isEmpty && chosen == nil { Text("As written below").tag("custom") }
-                ForEach(styles, id: \.self) { one in Text(one.label).tag(one.instruction) }
             }
             .labelsHidden()
             .fillsRow()

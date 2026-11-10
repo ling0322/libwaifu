@@ -87,7 +87,17 @@ its flaps in front (docs/see_through.md); names and depths are changed with it o
 follow them. The document kept, and what waifu2d opens, stay as the model made them. A picture taken
 apart before the halves were kept has none to split by: take it apart again.
 
-**text2speech** reads the text aloud, in the voice of a recording dropped on it if there is one.
+**text2speech** reads the text aloud, in the voice of a recording dropped on it, under **Reference
+audio**, if there is one. CosyVoice3 also needs what the recording says, word for word: it carries
+on from the recording, in its pace and manner as well as its voice (upstream's zero-shot). The
+**Reference transcript** group at the bottom of the right column says where the words come from.
+With **Transcribe with STT** on, the speech-to-text model under it -- speech2text's choice,
+`qwen3-asr` until another is -- writes them down in the reading's job, before the voice is read:
+once for each recording, after which the footnote says what it heard and the next reading of that
+recording goes straight to the voice. Off, they are typed in the box there, and Generate waits for
+them. IndexTTS-2.5 reads no transcript and has no group for one. The page offers no style: a
+reading is in the reference's own manner. The record keeps the transcript, and which model wrote
+it down, for Reuse.
 With a voice that streams (CosyVoice3) and **Play as it is said** on, the reading starts playing as
 soon as its first part is made -- under a second in, on an M5 Pro -- while the rest is still being
 said; the parts are held a quarter of a second before the first plays, so that a late one is waited

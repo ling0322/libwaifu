@@ -42,22 +42,21 @@ final class VoiceTests: XCTestCase {
         XCTAssertEqual(tones.kind, "speech")
         let voice = try XCTUnwrap(tones.voice)
         XCTAssertEqual(voice.needsARecording, false)
-        // It follows no instruction, so the picker offers none.
-        XCTAssertFalse(voice.followsStyle)
-        XCTAssertNil(voice.styles)
+        // It reads no transcript, so the page offers no box for one.
+        XCTAssertFalse(voice.needsATranscript)
     }
 
     func testARealVoiceAsksForARecordingFirst() throws {
         let indextts = try ModelInfo.describe(manifest("indextts25", type: "indextts2"), device: "cpu")
         XCTAssertEqual(try XCTUnwrap(indextts.voice).needsARecording, true)
-        XCTAssertEqual(indextts.voice?.followsStyle, false)
+        // IndexTTS-2.5 reads no transcript: no box for one.
+        XCTAssertEqual(indextts.voice?.needsATranscript, false)
 
         let cosyvoice = try ModelInfo.describe(manifest("cosyvoice3", type: "cosyvoice3"), device: "cpu")
         let voice = try XCTUnwrap(cosyvoice.voice)
         XCTAssertEqual(voice.needsARecording, true)
-        // It follows a style, and the picker offers upstream's examples of one.
-        XCTAssertTrue(voice.followsStyle)
-        XCTAssertEqual(voice.styles?.count, 26)
+        // CosyVoice3 reads on from the recording's words: the page asks for them with it.
+        XCTAssertTrue(voice.needsATranscript)
         // It converts as well, with the same model.
         XCTAssertNotNil(cosyvoice.converter)
     }

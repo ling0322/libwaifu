@@ -26,61 +26,15 @@ import SwiftUI
 struct ModelCard: View {
     @Bindable var session: Session
 
-    @State private var published: [CatalogEntry] = []
     @State private var showLog = false
 
     private var kind: String { session.tab.kind }
     private var launcher: Launcher { session.launcher }
 
-    /// The tag of the last item, which opens a panel rather than being chosen.
-    private static let manifest = "\u{0}manifest"
-
-    /// What is chosen for this tab's kind, as it is asked for.
-    private var current: String { session.chosen[kind] ?? "" }
-
-    /// The published models of this tab's kind.
-    private var listed: [CatalogEntry] { published.filter { $0.kind == kind } }
-
-    private var selection: Binding<String> {
-        Binding(
-            get: { current },
-            set: { picked in
-                if picked == ModelCard.manifest {
-                    if let url = Media.choose([.yaml]) { session.choose(url.path, for: kind) }
-                } else if !picked.isEmpty {
-                    session.choose(picked, for: kind)
-                }
-            })
-    }
-
     var body: some View {
         FormGroup {
             LabeledContent("Model") {
-                // A pop-up like Device's: the published models of this tab's kind, what is
-                // downloaded first, and a manifest of one's own at the end.
-                Picker("Model", selection: selection) {
-                    if current.isEmpty { Text("None").tag("") }
-                    if !current.isEmpty, !listed.contains(where: { $0.name == current }) {
-                        Text((current as NSString).lastPathComponent).tag(current)
-                    }
-                    let downloaded = listed.filter(\.cached)
-                    if !downloaded.isEmpty {
-                        Section("Downloaded") {
-                            ForEach(downloaded) { Text($0.name).tag($0.name) }
-                        }
-                    }
-                    let rest = listed.filter { !$0.cached }
-                    if !rest.isEmpty {
-                        Section("Not downloaded") {
-                            ForEach(rest) { Text($0.name).tag($0.name) }
-                        }
-                    }
-                    Divider()
-                    Text("Choose a Manifest…").tag(ModelCard.manifest)
-                }
-                .labelsHidden()
-                .fillsRow()
-                .help(current)
+                ModelPicker(session: session, kind: kind)
             }
             // Held while a job runs, like the settings under the card: the job is of this model,
             // on this device, kept in this folder.
@@ -99,9 +53,6 @@ struct ModelCard: View {
             }
         } footer: {
             footnote
-        }
-        .task {
-            published = await Task.detached { CatalogEntry.all() }.value
         }
         .sheet(isPresented: $showLog) {
             LogView(lines: launcher.log).frame(width: 760, height: 480)
@@ -157,5 +108,67 @@ struct LogView: View {
             Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
         }
         .padding()
+    }
+}
+
+/// A pop-up of the models of one kind, like Device's: what is downloaded first, the rest of what is
+/// published after it, and a manifest of one's own at the end. The Model card's, for the task on
+/// show, and the STT model a reading writes its reference audio down with -- which is
+/// speech2text's choice too, so the two pop-ups are one choice.
+struct ModelPicker: View {
+    var session: Session
+    /// "image", "speech", "transcription" and so on: what is chosen, and what is listed.
+    var kind: String
+
+    @State private var published: [CatalogEntry] = []
+
+    /// The tag of the last item, which opens a panel rather than being chosen.
+    private static let manifest = "\u{0}manifest"
+
+    /// What is chosen for the kind, as it is asked for.
+    private var current: String { session.chosen[kind] ?? "" }
+
+    /// The published models of the kind.
+    private var listed: [CatalogEntry] { published.filter { $0.kind == kind } }
+
+    private var selection: Binding<String> {
+        Binding(
+            get: { current },
+            set: { picked in
+                if picked == ModelPicker.manifest {
+                    if let url = Media.choose([.yaml]) { session.choose(url.path, for: kind) }
+                } else if !picked.isEmpty {
+                    session.choose(picked, for: kind)
+                }
+            })
+    }
+
+    var body: some View {
+        Picker("Model", selection: selection) {
+            if current.isEmpty { Text("None").tag("") }
+            if !current.isEmpty, !listed.contains(where: { $0.name == current }) {
+                Text((current as NSString).lastPathComponent).tag(current)
+            }
+            let downloaded = listed.filter(\.cached)
+            if !downloaded.isEmpty {
+                Section("Downloaded") {
+                    ForEach(downloaded) { Text($0.name).tag($0.name) }
+                }
+            }
+            let rest = listed.filter { !$0.cached }
+            if !rest.isEmpty {
+                Section("Not downloaded") {
+                    ForEach(rest) { Text($0.name).tag($0.name) }
+                }
+            }
+            Divider()
+            Text("Choose a Manifest…").tag(ModelPicker.manifest)
+        }
+        .labelsHidden()
+        .fillsRow()
+        .help(current)
+        .task {
+            published = await Task.detached { CatalogEntry.all() }.value
+        }
     }
 }
