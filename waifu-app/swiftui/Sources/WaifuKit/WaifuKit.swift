@@ -269,6 +269,10 @@ public struct SpeakRequest: Sendable {
     public var text: String
     /// A recording to sound like.
     public var reference: AudioClip?
+    /// What `reference` says, word for word; nil or "" where it is not known. CosyVoice3 reads on
+    /// from it, as upstream's zero-shot does, and takes it or a style, not both; a voice that
+    /// reads none ignores it.
+    public var referenceTranscript: String?
     public var speed: Double
     public var temperature: Double
     /// Any instruction; nil or "" for the voice's own way.
@@ -276,11 +280,12 @@ public struct SpeakRequest: Sendable {
     public var seed: UInt64
 
     public init(
-        text: String, reference: AudioClip? = nil, speed: Double, temperature: Double, style: String? = nil,
-        seed: UInt64
+        text: String, reference: AudioClip? = nil, referenceTranscript: String? = nil, speed: Double,
+        temperature: Double, style: String? = nil, seed: UInt64
     ) {
         self.text = text
         self.reference = reference
+        self.referenceTranscript = referenceTranscript
         self.speed = speed
         self.temperature = temperature
         self.style = style
@@ -866,6 +871,8 @@ public enum Capability: Sendable {
     case textToSpeechLikeReference
     /// With no recording at all: CosyVoice3 does not.
     case textToSpeechWithoutReference
+    /// A recording without its transcript: CosyVoice3 does not, unless a style is given.
+    case textToSpeechWithoutReferenceTranscript
     /// Following an instruction such as "speak happily".
     case textToSpeechWithStyle
     /// The manner as well as the voice.
@@ -884,6 +891,8 @@ public enum Capability: Sendable {
         case .imageGenerationWithPromptImages: WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_PROMPT_IMAGES
         case .textToSpeechLikeReference: WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE
         case .textToSpeechWithoutReference: WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE
+        case .textToSpeechWithoutReferenceTranscript:
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT
         case .textToSpeechWithStyle: WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE
         case .voiceConversionOfStyle: WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE
         }
@@ -1054,7 +1063,7 @@ public final class Pipeline: @unchecked Sendable {
                 struct_size: UInt32(MemoryLayout<WaifuTextToSpeechRequest>.size),
                 text: scratch.string(request.text),
                 reference: reference,
-                reference_transcript: nil,
+                reference_transcript: scratch.optionalString(request.referenceTranscript),
                 speed: Float(request.speed),
                 temperature: Float(request.temperature),
                 style: scratch.optionalString(request.style),
@@ -1082,7 +1091,7 @@ public final class Pipeline: @unchecked Sendable {
                 struct_size: UInt32(MemoryLayout<WaifuStreamingTextToSpeechRequest>.size),
                 text: scratch.string(request.text),
                 reference: reference,
-                reference_transcript: nil,
+                reference_transcript: scratch.optionalString(request.referenceTranscript),
                 temperature: Float(request.temperature),
                 style: scratch.optionalString(request.style),
                 seed: request.seed

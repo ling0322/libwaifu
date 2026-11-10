@@ -61,11 +61,6 @@ struct Chosen {
 }
 
 struct Voice {
-    struct Style: Hashable {
-        var label: String
-        var instruction: String
-    }
-
     var name: String
     var fullName: String?
     var onDisk: Bool
@@ -76,46 +71,12 @@ struct Voice {
     var noLikenessBecause: String?
     /// Whether it has no voice of its own and says nothing without a recording to sound like.
     var needsARecording: Bool?
-    /// Whether it follows an instruction for how to say it.
-    var followsStyle: Bool
+    /// Whether a recording has to come with its transcript: CosyVoice3. Where it does not --
+    /// IndexTTS-2.5 reads none -- the page offers no box for one.
+    var needsATranscript: Bool = false
     /// Whether it can be played as it is said, a part at a time: a model that streams, on a device
     /// the load then checks.
     var streams: Bool = false
-    /// What the style picker offers, above a box for any instruction: CosyVoice3's examples, for a
-    /// voice that follows a style.
-    var styles: [Style]? { followsStyle ? Voice.examples : nil }
-
-    /// CosyVoice3's own examples of an instruction -- upstream's `instruct_list`
-    /// (`cosyvoice/utils/common.py`), word for word, as `CosyVoice3::STYLES` keeps them: the manner
-    /// first, the dialects after. Examples, not the set: any instruction may be written instead.
-    static let examples: [Style] = [
-        Style(label: "Happy", instruction: "请非常开心地说一句话。"),
-        Style(label: "Sad", instruction: "请非常伤心地说一句话。"),
-        Style(label: "Angry", instruction: "请非常生气地说一句话。"),
-        Style(label: "Fast", instruction: "请用尽可能快地语速说一句话。"),
-        Style(label: "Slow", instruction: "请用尽可能慢地语速说一句话。"),
-        Style(label: "Loud", instruction: "Please say a sentence as loudly as possible."),
-        Style(label: "Soft", instruction: "Please say a sentence in a very soft voice."),
-        Style(label: "Peppa Pig", instruction: "我想体验一下小猪佩奇风格，可以吗？"),
-        Style(label: "Robot", instruction: "你可以尝试用机器人的方式解答吗？"),
-        Style(label: "Cantonese", instruction: "请用广东话表达。"),
-        Style(label: "Northeastern", instruction: "请用东北话表达。"),
-        Style(label: "Gansu", instruction: "请用甘肃话表达。"),
-        Style(label: "Guizhou", instruction: "请用贵州话表达。"),
-        Style(label: "Henan", instruction: "请用河南话表达。"),
-        Style(label: "Hubei", instruction: "请用湖北话表达。"),
-        Style(label: "Hunan", instruction: "请用湖南话表达。"),
-        Style(label: "Jiangxi", instruction: "请用江西话表达。"),
-        Style(label: "Minnan", instruction: "请用闽南话表达。"),
-        Style(label: "Ningxia", instruction: "请用宁夏话表达。"),
-        Style(label: "Shanxi", instruction: "请用山西话表达。"),
-        Style(label: "Shaanxi", instruction: "请用陕西话表达。"),
-        Style(label: "Shandong", instruction: "请用山东话表达。"),
-        Style(label: "Shanghainese", instruction: "请用上海话表达。"),
-        Style(label: "Sichuan", instruction: "请用四川话表达。"),
-        Style(label: "Tianjin", instruction: "请用天津话表达。"),
-        Style(label: "Yunnan", instruction: "请用云南话表达。"),
-    ]
 }
 
 struct Converter {
@@ -243,7 +204,7 @@ struct ModelInfo {
                 takesARecording: opened.supports(.textToSpeechLikeReference).map { $0 == .yes },
                 noLikenessBecause: opened.whyNot(.textToSpeechLikeReference),
                 needsARecording: opened.supports(.textToSpeechWithoutReference).map { $0 != .yes },
-                followsStyle: opened.does(.textToSpeechWithStyle),
+                needsATranscript: opened.supports(.textToSpeechWithoutReferenceTranscript).map { $0 != .yes } ?? false,
                 streams: opened.does(.streamingTextToSpeech))
             if kinds.contains("conversion") { info.converter = converter }
         default:
@@ -322,7 +283,12 @@ struct Made: Codable {
     var text: String?
     var speed: Double?
     var temperature: Double?
-    var style: String?
+    /// What the recording it sounded like says, as typed or as a speech-to-text model heard it:
+    /// nil where it was handed none.
+    var referenceTranscript: String?
+    /// The speech-to-text model that wrote `referenceTranscript` down, with its version: nil where
+    /// it was typed.
+    var transcribedBy: String?
     var fromARecording: Bool?
     /// Whether it was played as it was said, a part at a time: a reading of its own.
     var streamed: Bool?

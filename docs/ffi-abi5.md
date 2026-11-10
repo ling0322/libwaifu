@@ -173,6 +173,7 @@ typedef enum {
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE = 200,      // in the voice of a recording
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE = 201,   // CosyVoice3 does not
   WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE = 202,          // follows an instruction such as "speak happily"
+  WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT = 203,  // CosyVoice3 does not, unless a style is given
 
   WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE = 300,          // the manner as well as the voice
 
@@ -605,15 +606,17 @@ language.
 the set. `style` is any instruction, and `SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE` says whether one is
 followed; the examples are the app's to offer.
 
-**A reference transcript, and no property for it.** `reference_transcript` is the words of
-`reference`. CosyVoice3 then reads zero-shot, as upstream's `inference_zero_shot` does with its
-`prompt_text`: it goes on from the recording's own speech tokens rather than only borrowing its
-voice. That is upstream's own way of cloning a voice in the same language. Without a transcript it
-reads cross-lingual, which upstream keeps for a sentence in another language than the recording.
-A model that reads no transcript ignores one, so an app offers the box wherever it offers a
-recording, and no property says whether a model reads it. What would be worth a property is the
-other way round, a model that cannot read without a transcript, and none here is one; it would be
-`SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT`, as `WITHOUT_REFERENCE` is for a recording.
+**A reference transcript.** `reference_transcript` is the words of `reference`. CosyVoice3 then
+reads zero-shot, as upstream's `inference_zero_shot` does with its `prompt_text`: it goes on from
+the recording's own speech tokens rather than only borrowing its voice. That is upstream's own way
+of cloning a voice. Without a transcript it reads cross-lingual, which upstream keeps for a sentence
+in another language than the recording, and is no clone of the voice in its own.
+`SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT` says so, as `WITHOUT_REFERENCE` does for a
+recording: CosyVoice3 does not, unless a style is given -- instruct2 reads none -- so an app asks for
+the transcript with the recording. A model that reads no transcript, IndexTTS-2.5, does, and
+ignores one; an app offers no box for it. The library still reads CosyVoice3 cross-lingual when
+it is handed none, for a caller that wants it. Added after ABI 5 went out, as a property an older
+caller never asks about, so the version is not bumped.
 
 A transcript with no reference ends with `WAIFU_ERR_MODEL`. So, on CosyVoice3, does one given with
 a style: upstream's instruct2 puts the instruction where zero-shot puts the transcript and drops

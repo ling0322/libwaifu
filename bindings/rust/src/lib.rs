@@ -273,6 +273,8 @@ pub enum Capability {
     ImageGenerationWithPromptImages,
     TextToSpeechLikeReference,
     TextToSpeechWithoutReference,
+    /// A reference without its transcript: CosyVoice3 does not, unless a style is given.
+    TextToSpeechWithoutReferenceTranscript,
     TextToSpeechWithStyle,
     VoiceConversionOfStyle,
 }
@@ -300,6 +302,9 @@ impl Capability {
             }
             Capability::TextToSpeechWithoutReference => {
                 sys::WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE
+            }
+            Capability::TextToSpeechWithoutReferenceTranscript => {
+                sys::WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT
             }
             Capability::TextToSpeechWithStyle => {
                 sys::WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE
