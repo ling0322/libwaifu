@@ -137,6 +137,27 @@ final class WaifuKitTests: XCTestCase {
         }
     }
 
+    func testATranscriptionWithNoTranscriberLoadedIsRefused() async throws {
+        let pipeline = try Pipeline(.speechToText, device: .cpu)
+        let second = AudioClip(samples: [Float](repeating: 0, count: 16000), rate: 16000)
+        do {
+            _ = try await pipeline.transcribe(TranscribeRequest(recording: second, language: "English"))
+            XCTFail("wrote down a recording with no model loaded")
+        } catch let error as WaifuError {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+    }
+
+    func testAVoiceIsNotLoadedIntoAPipelineThatTranscribes() async throws {
+        let pipeline = try Pipeline(.speechToText, device: .cpu)
+        do {
+            try await pipeline.load("tones")
+            XCTFail("a voice was loaded to write a recording down")
+        } catch WaifuError.refused(let said) {
+            XCTAssertFalse(said.isEmpty)
+        }
+    }
+
     func testAModelNobodyPublishedIsUnknown() async throws {
         let pipeline = try Pipeline(.imageGeneration, device: .cpu)
         do {

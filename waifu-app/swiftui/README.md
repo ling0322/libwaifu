@@ -55,11 +55,12 @@ The icon is `Resources/AppIcon.icon`, the Icon Composer format, which `build-app
 
 ## Use
 
-The sidebar lists the tasks -- text2img, img2layers, text2speech and waifu2d -- and the Model Manager.
+The sidebar lists the tasks -- text2img, img2layers, text2speech, speech2text and waifu2d -- and the
+Model Manager.
 
 Each task opens on a model of its own -- `anima:turbo` for text2img, `see-through` for
-img2layers, `cosyvoice` for text2speech -- until another is chosen. On a task, the Model card at
-the top of the right column chooses the model and the device. Nothing
+img2layers, `cosyvoice` for text2speech, `qwen3-asr` for speech2text -- until another is chosen.
+On a task, the Model card at the top of the right column chooses the model and the device. Nothing
 is loaded from there: **Generate** fetches the model if it has to and reads it onto the device,
 unloading the one before, with the download and the read on the bar. The settings are held while a
 job runs.
@@ -94,6 +95,13 @@ for rather than heard as a click, and Stop silences it at once. A streaming read
 speed 1; at another, or on a device that cannot stream it, it is read whole, and the note over the
 output says why. What is kept is the whole reading either way, and its record says whether it was
 streamed, which Reuse turns the switch back to.
+
+**speech2text** writes down what is said in a recording dropped on it, up to twenty minutes of
+anything this Mac can play, with Qwen3-ASR (docs/qwen3_asr.md); a longer one is refused rather than
+cut short. **Language** tells it which of the model's languages it is in, or leaves it to detect the
+language, and then the language it heard is said under the words. **Copy Text** copies them.
+Nothing of it is kept: the recording is only ever in memory, the words are shown until the next
+ones are, and neither is written to the output folder.
 
 **waifu2d** makes a drawing in layers move, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
 does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedParts.swift` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers

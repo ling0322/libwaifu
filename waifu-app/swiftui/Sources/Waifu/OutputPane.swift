@@ -30,6 +30,9 @@ struct OutputPane: View {
 
     private var pictures: Bool { session.showsPictures }
     private var layers: Bool { session.tab.kind == "layers" }
+    /// Whether what is on show is a transcription: the last one's words alone, to be copied, and
+    /// nothing kept to save, reuse or delete.
+    private var transcripts: Bool { session.tab.kind == "transcription" }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -47,6 +50,8 @@ struct OutputPane: View {
                         LayersFrame(session: session, job: job).id(job.id)
                     } else if pictures {
                         PictureFrame(session: session, job: job)
+                    } else if transcripts {
+                        TranscriptFrame(job: job).id(job.id)
                     } else {
                         ClipFrame(session: session, job: job)
                     }
@@ -56,8 +61,10 @@ struct OutputPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let job = session.shown { actions(job) }
-            strip
+            if !transcripts {
+                if let job = session.shown { actions(job) }
+                strip
+            }
         }
         .padding(12)
         .confirmationDialog(
@@ -79,6 +86,7 @@ struct OutputPane: View {
         case "speech": "Nothing said yet."
         case "conversion": "Nothing converted yet."
         case "layers": "Nothing split into layers yet."
+        case "transcription": "Nothing written down yet."
         default: "Nothing drawn yet."
         }
     }
@@ -692,12 +700,65 @@ struct ClipFrame: View {
     }
 }
 
+/// What the last recording was heard to say, to be copied: the words, and under them the language
+/// they were heard in and how long the recording was. Nothing else of it is held.
+struct TranscriptFrame: View {
+    var job: Job
+
+    /// Whether the words were just copied, which the button says for a moment.
+    @State private var copied = false
+
+    private var words: String { job.made?.text ?? "" }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ScrollView {
+                Text(said(job))
+                    .font(.title3)
+                    .foregroundStyle(words.isBlank ? .secondary : .primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(12)
+            }
+            .background(Theme.field, in: RoundedRectangle(cornerRadius: 8))
+
+            HStack {
+                Text(heard).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(words, forType: .string)
+                    copied = true
+                } label: {
+                    Label(copied ? "Copied" : "Copy Text", systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .disabled(words.isBlank)
+                .help("Copy the words to the clipboard")
+            }
+        }
+        .frame(maxWidth: 720)
+        .task(id: copied) {
+            guard copied else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            copied = false
+        }
+    }
+
+    /// "English, 0:05": the language heard, where one was, and the length of the recording.
+    private var heard: String {
+        let language = job.made?.heardLanguage ?? ""
+        let length = clock(job.made?.length ?? 0)
+        return language.isEmpty ? length : "\(language), \(length)"
+    }
+}
+
 /// What a clip is called in the strip: its first words, or for a conversion, how it was made.
 func said(_ job: Job) -> String {
     let made = job.made
     if job.kind == "conversion" {
         return "\(made?.convertStyle == true ? "Voice and style" : "Voice only"), \(made?.steps ?? 0) steps"
     }
+    if job.kind == "transcription", made?.text?.isBlank != false { return "Nothing was said." }
     return made?.text ?? ""
 }
 

@@ -304,6 +304,37 @@ public struct VoiceConversionRequest: Sendable {
     }
 }
 
+/// A recording to write down: speech2text.
+public struct TranscribeRequest: Sendable {
+    /// Any rate, any length: the library resamples it and cuts it into pieces.
+    public var recording: AudioClip
+    /// One of the model's `speechToTextLanguages` -- "English", "Chinese" -- or nil for the model
+    /// to tell.
+    public var language: String?
+    /// Words that help it hear: names, terms, the subject. Nil for none.
+    public var context: String?
+
+    public init(recording: AudioClip, language: String? = nil, context: String? = nil) {
+        self.recording = recording
+        self.language = language
+        self.context = context
+    }
+}
+
+/// What was said in a recording, and in which language.
+public struct Transcript: Sendable, Equatable {
+    /// "" for nothing said.
+    public var text: String
+    /// As the model names it -- "Chinese" -- or several, comma separated, for a recording that
+    /// changes; "" where none was heard.
+    public var language: String
+
+    public init(text: String, language: String) {
+        self.text = text
+        self.language = language
+    }
+}
+
 public struct LayersRequest: Sendable {
     /// The illustration: any size, transparent where it likes.
     public var image: RGBAImage
@@ -724,6 +755,19 @@ private let onLayers: WaifuLayerDecompositionCallback = { userData, result in
     pending.finish(Outcome(said.status, layers))
 }
 
+private let onTranscript: WaifuSpeechToTextCallback = { userData, result in
+    guard let userData, let result else { return }
+    let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
+    let said = result.pointee
+    // Copied now: the strings are the library's only until this returns.
+    let transcript = said.status.code == WAIFU_OK
+        ? Transcript(
+            text: said.text.map { String(cString: $0) } ?? "",
+            language: said.language.map { String(cString: $0) } ?? "")
+        : nil
+    pending.finish(Outcome(said.status, transcript))
+}
+
 /// Memory for one call's strings and buffers, freed when the call has returned: the library
 /// copies what it keeps.
 final class Scratch {
@@ -1064,6 +1108,28 @@ public final class Pipeline: @unchecked Sendable {
             )
             return withExtendedLifetime(scratch) {
                 waifu_pipeline_run_voice_conversion_async(handle, &c, userData, onProgress, onAudio)
+            }
+        }
+    }
+
+    /// What was said in the recording, with a transcriber loaded -- Qwen3-ASR -- or nil where it
+    /// was cancelled.
+    public func transcribe(_ request: TranscribeRequest, progress: ProgressHandler? = nil) async throws -> Transcript? {
+        try await call(progress: progress, cancel: cancel) { userData in
+            let scratch = Scratch()
+            // Blank is none: the model tells the language, and hears with no help.
+            let given = { (text: String?) -> String? in
+                guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+                return text
+            }
+            var c = WaifuSpeechToTextRequest(
+                struct_size: UInt32(MemoryLayout<WaifuSpeechToTextRequest>.size),
+                audio: scratch.audio(request.recording),
+                language: scratch.optionalString(given(request.language)),
+                context: scratch.optionalString(given(request.context))
+            )
+            return withExtendedLifetime(scratch) {
+                waifu_pipeline_run_speech_to_text_async(handle, &c, userData, onProgress, onTranscript)
             }
         }
     }
