@@ -240,7 +240,7 @@ extension Tab {
         case .text2img: .blue
         case .img2img: .purple
         case .img2layers: .teal
-        case .text2speech: .pink
+        case .text2speech: .green
         case .speech2speech: .orange
         case .speech2text: .indigo
         }
@@ -268,9 +268,7 @@ struct Waifu2dIcon: View {
             .fill(.white)
             .frame(width: 16, height: 16)
             .frame(width: 20, height: 20)
-            .background(
-                Color(red: 0xF2 / 255, green: 0x8A / 255, blue: 0xB0 / 255).gradient,
-                in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .background(Color.pink.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }
 
