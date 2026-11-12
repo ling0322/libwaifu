@@ -44,7 +44,7 @@ API's voice conversion. It changes whose voice it is and keeps the words, timing
 
 **Qwen3-ASR** writes down what is said in a recording -- thirty languages, told or found out, at
 any rate and of any length -- with a sentence of context to help it hear names: the `speech2text`
-task, in the library and through the C API's `waifu_pipeline_run_speech_to_text_async` (see
+task, in the library and through the C API's speech-to-text pipeline (see
 [docs/qwen3_asr.md](docs/qwen3_asr.md)). Published as `qwen3-asr`, which the model manager
 fetches by name; no picker in the terminal offers it yet.
 
@@ -61,7 +61,7 @@ cargo run --release -p waifu-tools --bin transcribe -- models/qwen3-asr.yaml spe
 **See-through** takes an anime illustration apart into the layers it was drawn in -- hair, face,
 eyes, clothing, up to twenty-four of them, with what each hides drawn in -- and stacks them by
 depth into a Photoshop document: the `img2layers` task, in the library and through the C API's
-`waifu_pipeline_run_layer_decomposition_async` (see [docs/see_through.md](docs/see_through.md)).
+layer decomposition pipeline (see [docs/see_through.md](docs/see_through.md)).
 
 | name | model | published as |
 |---|---|---|

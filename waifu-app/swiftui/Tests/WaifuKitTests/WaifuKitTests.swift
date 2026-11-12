@@ -25,7 +25,9 @@ import XCTest
 
 final class WaifuKitTests: XCTestCase {
     func testTheLibraryIsTheOneTheHeaderDescribes() {
-        XCTAssertEqual(ABI.library, ABI.header)
+        // libwaifu's is (major << 16) | minor: the same major, and a minor no older.
+        XCTAssertEqual(ABI.header >> 16, 6)
+        XCTAssertTrue(ABI.libraryIsCompatible, "library \(ABI.library), header \(ABI.header)")
         XCTAssertEqual(ABI.modelManagerLibrary, ABI.modelManagerHeader)
     }
 
@@ -79,6 +81,33 @@ final class WaifuKitTests: XCTestCase {
         ]
         XCTAssertTrue(heard.progress.allSatisfy { reading.contains($0.stage) }, "\(heard.progress.map(\.stage))")
         XCTAssertNil(heard.progress[0].words)
+    }
+
+    func testAStreamingReadingHandsOverItsPartsInOrderBeforeItEnds() async throws {
+        let pipeline = try Pipeline(.streamingTextToSpeech, device: .cpu)
+        try await pipeline.load("tones")
+
+        final class Heard: @unchecked Sendable {
+            var samples: [Float] = []
+            var parts = 0
+            let lock = NSLock()
+        }
+        let heard = Heard()
+        let clip = try await pipeline.speakStreaming(
+            SpeakRequest(text: "hello there, how are you", speed: 1, temperature: 0.8, seed: 7)
+        ) { part in
+            heard.lock.lock()
+            heard.samples += part.samples
+            heard.parts += 1
+            heard.lock.unlock()
+        }
+
+        let whole = try XCTUnwrap(clip)
+        heard.lock.lock()
+        defer { heard.lock.unlock() }
+        XCTAssertGreaterThan(heard.parts, 0)
+        // The whole is the parts end to end, so they came in order, and every one before the end.
+        XCTAssertEqual(heard.samples, whole.samples)
     }
 
     func testMetalReadsAModelUnderAMemoryLimit() async throws {

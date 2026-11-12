@@ -4,7 +4,7 @@ The same screen as `waifu-app/swiftui/`, in WPF. Laid out from the design spec
 (`libwaifu-gui-design.pdf`, sections 2 to 13) and from the screenshots in it: one window, three
 columns, a fixed dark grey that follows neither the system theme nor the wallpaper.
 
-It draws: the window calls `waifu.dll` through the C API in `docs/ffi-abi5.md` (ABI 5), in the
+It draws: the window calls `waifu.dll` through the C API in `docs/ffi-abi6.md` (ABI 6), in the
 app's own process, and a model that is on the disk is read onto the card by the first job that
 needs it.
 With no library beside it the same window runs on a stand-in engine instead, says so in its
@@ -91,16 +91,16 @@ and nothing above that line knows which it got.
 `NativeEngine` runs each task on a `WaifuPipeline` made for it (`waifu_pipeline_new`): image
 generation, text to speech and voice conversion each have their own, all on the chosen device.
 A load opens the model's manifest with `waifu_model_open`, checks `WAIFU_MODEL_SUPPORTS_<task>`
--- saying the model's own reason where it is 0 -- and hands it to
-`waifu_pipeline_load_model_async`. One model is on the card at a time, as before: reading one
+-- saying the model's own reason where it is 0 -- and hands it to `waifu_pipeline_load_model`. A
+run is a `WaifuRequest` set an attribute at a time and handed to `waifu_pipeline_run`. One model is on the card at a time, as before: reading one
 frees the pipelines that hold another. A model that does two tasks (CosyVoice3 reads and
 converts) is read into a pipeline for each. The library reports a fine-grained `WaifuStage` with
 counts; the words under the bar ("step 3 of 20", "token 40 of about 120") are this program's.
 
 Around the engine, everything the library can answer comes from it: `Engine/NativeModels.cs`
 reads `waifu_modelmanager_catalog_json`, `_defaults_json` and `_directory` from
-`waifu_modelmanager.dll`, asks `waifu.dll` what a model can do one property at a time
-(`waifu_model_get_int_property` / `_get_string_property`), and runs downloads through
+`waifu_modelmanager.dll`, asks `waifu.dll` what a model can do one attribute at a time
+(`waifu_model_get_int_attribute` / `_get_string_attribute`), and runs downloads through
 `waifu_modelmanager_fetch_async`. `Engine/Models.cs` is the one door the view models knock on,
 and it is what decides between the library and the stand-in. The style picker offers
 CosyVoice3's own example instructions, which the app carries (`StyleExamples` in
@@ -109,13 +109,14 @@ CosyVoice3's own example instructions, which the app carries (`StyleExamples` in
 
 Three rules shape the interop, and they are the library's rather than this program's:
 
-- **Every callback arrives on a thread of the library's.** Nothing touches the screen from one: a
-  callback copies what it was handed -- strings, pixels, samples, all valid only until it returns
-  -- and hands the copy to the dispatcher.
-- **A callback must not call back into the library** (`waifu_pipeline_cancel` aside), so the next
-  step of a job is always taken on the UI thread after the hand-off, never inside the completion
-  that asked for it.
-- **A delegate the library holds has to outlive the call.** Every one of them is a field; a
+- **A task is read on a thread of its own.** Every load and run hands back a `WaifuTask`, and a
+  background thread blocks in `waifu_task_next_event` until it ends. Nothing touches the screen
+  from there: it copies what the task says -- progress, pixels, samples -- and hands the copy to
+  the dispatcher.
+- **A task is freed once, and never while another call is on it.** The reader copies the result
+  out and frees the task after `END`, under the same lock `waifu_task_cancel` is called with. The
+  next step of a job is always taken on the UI thread after the hand-off, never on the reader's.
+- **A delegate the library holds has to outlive the call.** The log callback is a field; a
   collected delegate is a crash in somebody else's stack frame.
 
 `Engine/Output.cs` writes what a job made. The engine hands over pixels and samples and keeps

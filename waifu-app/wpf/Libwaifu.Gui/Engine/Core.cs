@@ -263,7 +263,7 @@ namespace Libwaifu.Gui.Engine
 
     /// <summary>
     /// What the screen drives. One implementation simulates a run; the real one calls
-    /// <c>waifu_pipeline_*</c> through the C API and marshals every callback onto the UI thread.
+    /// <c>waifu_pipeline_*</c> through the C API and marshals every event onto the UI thread.
     /// </summary>
     public interface IEngine : IDisposable
     {

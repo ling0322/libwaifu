@@ -638,13 +638,13 @@ impl Engine {
 
     /// Stops `job`: after the step it is on where it is running, before it starts where it waits.
     pub fn cancel(&self, job: JobId) {
-        if !lock(&self.shared.open).contains(&job) {
-            return;
-        }
-        lock(&self.shared.cancelled).insert(job);
-        if *lock(&self.shared.running) == Some(job) {
-            self.shared.stop.store(true, Ordering::Relaxed);
-        }
+        self.canceller().cancel(job)
+    }
+
+    /// What stops this engine's jobs, without holding the engine: a job's handle in the C API
+    /// outlives its pipeline, and must not keep the thread alive.
+    pub fn canceller(&self) -> Canceller {
+        Canceller(Arc::clone(&self.shared))
     }
 
     pub fn cancel_all(&self) {
@@ -652,6 +652,24 @@ impl Engine {
         lock(&self.shared.cancelled).extend(open);
         if lock(&self.shared.running).is_some() {
             self.shared.stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Stops one of an engine's jobs, as [`Engine::cancel`] does. Once the engine is gone it has no job
+/// left to stop, and does nothing.
+#[derive(Clone)]
+pub struct Canceller(Arc<Shared>);
+
+impl Canceller {
+    pub fn cancel(&self, job: JobId) {
+        let shared = &self.0;
+        if !lock(&shared.open).contains(&job) {
+            return;
+        }
+        lock(&shared.cancelled).insert(job);
+        if *lock(&shared.running) == Some(job) {
+            shared.stop.store(true, Ordering::Relaxed);
         }
     }
 }

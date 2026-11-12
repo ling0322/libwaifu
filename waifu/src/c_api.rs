@@ -17,13 +17,13 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The C API, ABI 5: pipelines, models, devices and the log, as `extern "C"`. Everything outside
-//! this crate goes through these. docs/ffi-abi5.md is the contract; it changes only with a human's
-//! approval, and so does this.
+//! The C API, ABI 6: pipelines, requests, tasks, models, devices and the log, as `extern "C"`.
+//! Everything outside this crate goes through these. docs/ffi-abi6.md is the contract; it changes
+//! only with a human's approval, and so does this.
 //!
-//! Nothing with any logic in it lives here. This converts -- C strings to `&str`, structs to the
-//! engine's requests, what comes back to borrowed C views, panics to status codes -- and keeps
-//! the promises the contract makes about when a callback can arrive.
+//! Nothing with any logic in it lives here. This converts -- C strings to `&str`, a request's
+//! attributes to the engine's requests, what comes back to views a task keeps, panics to status
+//! codes. Nothing of a caller's runs on a pipeline's thread: the log's callback is the only one.
 
 #![allow(non_camel_case_types)]
 #![allow(clippy::missing_safety_doc)]
@@ -32,15 +32,17 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CString};
 use std::ptr;
 
+mod request;
 mod support;
+mod task;
 
-use support::{caught, refusable, required, status, string_in, Gate, Refused, UserData};
+pub use request::*;
+use support::{caught, refusable, required, Refused};
 pub use support::{
-    WaifuCallback, WaifuLog, WaifuLogCallback, WaifuLogLevel, WaifuProgress, WaifuProgressCallback,
-    WaifuResult, WaifuStage, WaifuStatus, WaifuStatusCode, WAIFU_CANCELLED,
+    WaifuLog, WaifuLogCallback, WaifuLogLevel, WaifuStage, WaifuStatusCode, WAIFU_CANCELLED,
     WAIFU_ERR_DEVICE_UNAVAILABLE, WAIFU_ERR_INTERNAL, WAIFU_ERR_INVALID_ARGUMENT, WAIFU_ERR_MODEL,
-    WAIFU_ERR_NOT_LOADED, WAIFU_ERR_UNKNOWN_MODEL, WAIFU_LOG_DEBUG, WAIFU_LOG_ERROR,
-    WAIFU_LOG_FATAL, WAIFU_LOG_INFO, WAIFU_LOG_WARNING, WAIFU_OK,
+    WAIFU_ERR_NOT_LOADED, WAIFU_ERR_UNKNOWN_ATTRIBUTE, WAIFU_ERR_UNKNOWN_MODEL, WAIFU_LOG_DEBUG,
+    WAIFU_LOG_ERROR, WAIFU_LOG_FATAL, WAIFU_LOG_INFO, WAIFU_LOG_WARNING, WAIFU_OK,
     WAIFU_STAGE_IMAGE_GENERATION_DECODING_IMAGE, WAIFU_STAGE_IMAGE_GENERATION_DENOISING,
     WAIFU_STAGE_IMAGE_GENERATION_ENCODING_PROMPT,
     WAIFU_STAGE_LAYER_DECOMPOSITION_CUTTING_INTO_PARTS,
@@ -64,22 +66,27 @@ pub use support::{
     WAIFU_STAGE_VOICE_CONVERSION_SYNTHESIZING_AUDIO,
 };
 
-use crate::engine::{
-    self, DrawRequest, Ended, Engine, EngineOptions, Failure, LayerKind, LayersRequest, RgbaImage,
-    SpeakRequest, Stage, TranscribeRequest, VoiceConversionRequest,
-};
+pub use task::*;
+
+use crate::engine::{self, Engine, EngineOptions, Failure, RgbaImage, Stage};
 use crate::flint::MemoryBudget;
 use crate::model_info::{self, ModelInfo, Support};
 use crate::runtime::{self, DeviceOption, Runtime};
 use crate::wav::Sound;
 use crate::Device;
 
-/// What a caller compiled against this header expects. Bumped when anything in it changes in a
-/// way an older caller would misread.
+/// The major version: bumped for whatever an older caller would misread -- a number that means
+/// something else, a function or a type that changed or went, an attribute's default.
 ///
-/// 4: pipelines made for one task, models and devices asked about by property, no JSON.
+/// 4: pipelines made for one pipeline type, models and devices asked about by attribute, no JSON.
 /// 5: the text-to-speech requests' reference_transcript, after reference.
-pub const WAIFU_ABI_VERSION: u32 = 5;
+/// 6: requests set an attribute at a time, tasks read rather than callbacks, a minor version.
+pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
+/// The minor version: bumped for what an older caller never uses -- an attribute, a stage, an event
+/// a request has to ask for, a function. Back to 0 with each major.
+pub const WAIFU_ABI_VERSION_MINOR: u32 = 0;
+/// (major << 16) | minor, as waifu_abi_version says it.
+pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
 
 // -- enums -----------------------------------------------------------------------------------
 
@@ -100,61 +107,61 @@ pub const WAIFU_PIPELINE_LAYER_DECOMPOSITION: WaifuPipelineType = 4;
 pub const WAIFU_PIPELINE_SPEECH_TO_TEXT: WaifuPipelineType = 5;
 pub const WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH: WaifuPipelineType = 6;
 
-/// What can be asked of a model. SUPPORTS_ properties are integers, 1 or 0; where 0, the string
-/// property of the same number is why, in words to show, and is never NULL. A SUPPORTS_ property
+/// What can be asked of a model. SUPPORTS_ attributes are integers, 1 or 0; where 0, the string
+/// attribute of the same number is why, in words to show, and is never NULL. A SUPPORTS_ attribute
 /// this library does not know is absent, which is neither 1 nor 0. The rest are an integer or a
-/// string, as marked. SUPPORTS_<task> has the number of WAIFU_PIPELINE_<task>.
-pub type WaifuModelProperty = i32;
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION: WaifuModelProperty = 1;
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH: WaifuModelProperty = 2;
-pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION: WaifuModelProperty = 3;
-pub const WAIFU_MODEL_SUPPORTS_LAYER_DECOMPOSITION: WaifuModelProperty = 4;
-pub const WAIFU_MODEL_SUPPORTS_SPEECH_TO_TEXT: WaifuModelProperty = 5;
+/// string, as marked. SUPPORTS_<type> has the number of WAIFU_PIPELINE_<type>.
+pub type WaifuModelAttribute = i32;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION: WaifuModelAttribute = 1;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH: WaifuModelAttribute = 2;
+pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION: WaifuModelAttribute = 3;
+pub const WAIFU_MODEL_SUPPORTS_LAYER_DECOMPOSITION: WaifuModelAttribute = 4;
+pub const WAIFU_MODEL_SUPPORTS_SPEECH_TO_TEXT: WaifuModelAttribute = 5;
 /// The model streams; the device is checked at load.
-pub const WAIFU_MODEL_SUPPORTS_STREAMING_TEXT_TO_SPEECH: WaifuModelProperty = 6;
+pub const WAIFU_MODEL_SUPPORTS_STREAMING_TEXT_TO_SPEECH: WaifuModelAttribute = 6;
 /// img2img.
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_FROM_START_IMAGE: WaifuModelProperty = 100;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_FROM_START_IMAGE: WaifuModelAttribute = 100;
 /// A ControlNet.
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_CONTROL_IMAGE: WaifuModelProperty = 101;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_CONTROL_IMAGE: WaifuModelAttribute = 101;
 /// Images the prompt names as <|key|>.
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_PROMPT_IMAGES: WaifuModelProperty = 102;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_PROMPT_IMAGES: WaifuModelAttribute = 102;
 /// In the voice of a recording.
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE: WaifuModelProperty = 200;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE: WaifuModelAttribute = 200;
 /// CosyVoice3 does not.
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelProperty = 201;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelAttribute = 201;
 /// Follows an instruction such as "speak happily".
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelProperty = 202;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelAttribute = 202;
 /// A reference without its reference_transcript: CosyVoice3 does not, unless a style is given.
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelProperty =
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelAttribute =
     203;
 /// The manner as well as the voice.
-pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelProperty = 300;
+pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 300;
 /// Integer, bytes; absent until every file is here.
-pub const WAIFU_MODEL_SIZE_ON_DISK: WaifuModelProperty = 1000;
+pub const WAIFU_MODEL_SIZE_ON_DISK: WaifuModelAttribute = 1000;
 /// Integer, of what it says or converts.
-pub const WAIFU_MODEL_SAMPLE_RATE: WaifuModelProperty = 1001;
+pub const WAIFU_MODEL_SAMPLE_RATE: WaifuModelAttribute = 1001;
 /// Integer: 16, or 32 for SDXL and Qwen-Image.
-pub const WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF: WaifuModelProperty = 1100;
+pub const WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF: WaifuModelAttribute = 1100;
 /// String: "Euler".
-pub const WAIFU_MODEL_IMAGE_GENERATION_SAMPLER: WaifuModelProperty = 1101;
+pub const WAIFU_MODEL_IMAGE_GENERATION_SAMPLER: WaifuModelAttribute = 1101;
 /// Integer.
-pub const WAIFU_MODEL_IMAGE_GENERATION_MAX_PROMPT_IMAGES: WaifuModelProperty = 1102;
+pub const WAIFU_MODEL_IMAGE_GENERATION_MAX_PROMPT_IMAGES: WaifuModelAttribute = 1102;
 /// Integer: 64.
-pub const WAIFU_MODEL_LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF: WaifuModelProperty = 1400;
+pub const WAIFU_MODEL_LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF: WaifuModelAttribute = 1400;
 /// String: "Chinese,English,...", comma separated.
-pub const WAIFU_MODEL_SPEECH_TO_TEXT_LANGUAGES: WaifuModelProperty = 1500;
+pub const WAIFU_MODEL_SPEECH_TO_TEXT_LANGUAGES: WaifuModelAttribute = 1500;
 
 /// What can be asked of a device. All of it is this process's, not the card as other programs see
 /// it.
-pub type WaifuDeviceProperty = i32;
+pub type WaifuDeviceAttribute = i32;
 /// The most it may hold there: the memory limit, or the device's memory.
-pub const WAIFU_DEVICE_MEMORY_BUDGET: WaifuDeviceProperty = 1;
+pub const WAIFU_DEVICE_MEMORY_BUDGET: WaifuDeviceAttribute = 1;
 /// What its allocator holds now, what it keeps for reuse included.
-pub const WAIFU_DEVICE_MEMORY_HELD: WaifuDeviceProperty = 2;
+pub const WAIFU_DEVICE_MEMORY_HELD: WaifuDeviceAttribute = 2;
 /// BUDGET - HELD, never below 0.
-pub const WAIFU_DEVICE_MEMORY_AVAILABLE: WaifuDeviceProperty = 3;
+pub const WAIFU_DEVICE_MEMORY_AVAILABLE: WaifuDeviceAttribute = 3;
 /// What waifu_device_set_memory_limit set; absent where nothing did.
-pub const WAIFU_DEVICE_MEMORY_LIMIT: WaifuDeviceProperty = 4;
+pub const WAIFU_DEVICE_MEMORY_LIMIT: WaifuDeviceAttribute = 4;
 
 pub type WaifuLayerType = i32;
 /// A part as the model drew it.
@@ -168,6 +175,7 @@ pub const WAIFU_LAYER_DEPTH: WaifuLayerType = 3;
 
 // -- the library -----------------------------------------------------------------------------
 
+/// (major << 16) | minor. A caller built against 6.m runs on any 6.n with n >= m.
 #[no_mangle]
 pub extern "C" fn waifu_abi_version() -> u32 {
     WAIFU_ABI_VERSION
@@ -257,12 +265,12 @@ pub extern "C" fn waifu_device_is_available(device: WaifuDevice) -> bool {
     caught(false, || available(device).is_some())
 }
 
-/// false for the processor, a device that cannot be used, or a property this library does not
+/// false for the processor, a device that cannot be used, or an attribute this library does not
 /// know. Asking CUDA builds a context on the card, a few hundred megabytes of it.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_device_get_int_property(
+pub unsafe extern "C" fn waifu_device_get_int_attribute(
     device: WaifuDevice,
-    property: WaifuDeviceProperty,
+    attribute: WaifuDeviceAttribute,
     value: *mut i64,
 ) -> bool {
     caught(false, || {
@@ -277,7 +285,7 @@ pub unsafe extern "C" fn waifu_device_get_int_property(
                 .ok()
                 .filter(|b| b.capacity > 0)
         };
-        let answer = match property {
+        let answer = match attribute {
             WAIFU_DEVICE_MEMORY_BUDGET => measured().map(|budget| budget.capacity),
             WAIFU_DEVICE_MEMORY_HELD => measured().map(|budget| budget.held),
             WAIFU_DEVICE_MEMORY_AVAILABLE => {
@@ -326,9 +334,9 @@ pub extern "C" fn waifu_device_set_memory_limit(device: WaifuDevice, bytes: u64)
 pub struct WaifuModel {
     /// What a load reads the weights from.
     path: String,
-    ints: BTreeMap<WaifuModelProperty, i64>,
+    ints: BTreeMap<WaifuModelAttribute, i64>,
     /// Each lives until the model is freed.
-    strings: BTreeMap<WaifuModelProperty, CString>,
+    strings: BTreeMap<WaifuModelAttribute, CString>,
 }
 
 impl WaifuModel {
@@ -439,26 +447,26 @@ impl WaifuModel {
         model
     }
 
-    fn int(&mut self, property: WaifuModelProperty, value: i64) {
-        self.ints.insert(property, value);
+    fn int(&mut self, attribute: WaifuModelAttribute, value: i64) {
+        self.ints.insert(attribute, value);
     }
 
-    fn string(&mut self, property: WaifuModelProperty, value: &str) {
-        self.strings.insert(property, support::c_string(value));
+    fn string(&mut self, attribute: WaifuModelAttribute, value: &str) {
+        self.strings.insert(attribute, support::c_string(value));
     }
 
     /// 1, or 0 and why.
-    fn supports(&mut self, property: WaifuModelProperty, support: &Support) {
+    fn supports(&mut self, attribute: WaifuModelAttribute, support: &Support) {
         match support {
-            Ok(()) => self.int(property, 1),
+            Ok(()) => self.int(attribute, 1),
             Err(why) => {
-                self.int(property, 0);
-                self.string(property, why);
+                self.int(attribute, 0);
+                self.string(attribute, why);
             }
         }
     }
 
-    /// Why the model cannot be loaded for `task`, where it cannot.
+    /// Why the model cannot be loaded for a pipeline of type `task`, where it cannot.
     fn unsupported(&self, task: WaifuPipelineType) -> Option<String> {
         match self.ints.get(&task) {
             Some(1) => None,
@@ -472,7 +480,7 @@ impl WaifuModel {
     }
 }
 
-/// Whether a model does a task, and why not.
+/// Whether a model does what a pipeline type is made for, and why not.
 fn task<T>(done: &Result<T, String>) -> Support {
     match done {
         Ok(_) => Ok(()),
@@ -501,18 +509,18 @@ pub unsafe extern "C" fn waifu_model_free(model: *mut WaifuModel) {
     }
 }
 
-/// false where the model has no such property or this library does not know it; *value untouched.
+/// false where the model has no such attribute or this library does not know it; *value untouched.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_model_get_int_property(
+pub unsafe extern "C" fn waifu_model_get_int_attribute(
     model: *const WaifuModel,
-    property: WaifuModelProperty,
+    attribute: WaifuModelAttribute,
     value: *mut i64,
 ) -> bool {
     caught(false, || {
         let (Some(model), false) = (model.as_ref(), value.is_null()) else {
             return false;
         };
-        match model.ints.get(&property) {
+        match model.ints.get(&attribute) {
             Some(answer) => {
                 *value = *answer;
                 true
@@ -524,28 +532,29 @@ pub unsafe extern "C" fn waifu_model_get_int_property(
 
 /// NULL where there is none; valid until waifu_model_free.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_model_get_string_property(
+pub unsafe extern "C" fn waifu_model_get_string_attribute(
     model: *const WaifuModel,
-    property: WaifuModelProperty,
+    attribute: WaifuModelAttribute,
 ) -> *const c_char {
     caught(ptr::null(), || {
         model
             .as_ref()
-            .and_then(|model| model.strings.get(&property))
+            .and_then(|model| model.strings.get(&attribute))
             .map_or(ptr::null(), |answer| answer.as_ptr())
     })
 }
 
 // -- pipelines -------------------------------------------------------------------------------
 
-/// One task, one thread, at most one model: jobs run on it one at a time, in the order asked.
+/// One pipeline type, one thread, at most one model: its tasks run one at a time, in the order
+/// asked.
 pub struct WaifuPipeline {
     engine: Engine,
     task: WaifuPipelineType,
 }
 
-/// A task as a sentence names it.
-fn task_name(task: WaifuPipelineType) -> &'static str {
+/// A pipeline type as a sentence names it.
+pub(crate) fn task_name(task: WaifuPipelineType) -> &'static str {
     match task {
         WAIFU_PIPELINE_IMAGE_GENERATION => "image generation",
         WAIFU_PIPELINE_TEXT_TO_SPEECH => "text to speech",
@@ -587,7 +596,8 @@ pub extern "C" fn waifu_pipeline_new(
 }
 
 /// Stops what runs, cancels what waits, drops the model and joins the thread. Returns once every
-/// job has had its on_complete. Must not be called from one of its own callbacks. NULL is fine.
+/// task of the pipeline has ended -- WAIFU_CANCELLED for what had not -- and the tasks are still
+/// the caller's to free. NULL is fine.
 #[no_mangle]
 pub unsafe extern "C" fn waifu_pipeline_free(pipeline: *mut WaifuPipeline) {
     if !pipeline.is_null() {
@@ -611,23 +621,7 @@ pub unsafe extern "C" fn waifu_pipeline_get_device(pipeline: *const WaifuPipelin
     })
 }
 
-// -- jobs ------------------------------------------------------------------------------------
-
-/// 0: refused at the call, with waifu_last_error and _code, and no callback is ever called. Any
-/// other id: on_progress any number of times, then on_complete exactly once. Callbacks run on the
-/// pipeline's thread and may start before the _async call has returned: keep a job's state in
-/// user_data, not under its id. They must return quickly, and may call nothing but
-/// waifu_pipeline_cancel.
-pub type WaifuJob = u64;
-
-/// After the step it is on, or before it starts.
-#[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_cancel(pipeline: *mut WaifuPipeline, job: WaifuJob) {
-    if let Some(pipeline) = pipeline.as_ref() {
-        caught((), || pipeline.engine.cancel(job));
-    }
-}
-
+/// Every task of the pipeline, waiting or running, is cancelled.
 #[no_mangle]
 pub unsafe extern "C" fn waifu_pipeline_cancel_all(pipeline: *mut WaifuPipeline) {
     if let Some(pipeline) = pipeline.as_ref() {
@@ -635,7 +629,7 @@ pub unsafe extern "C" fn waifu_pipeline_cancel_all(pipeline: *mut WaifuPipeline)
     }
 }
 
-fn stage_out(stage: Stage) -> WaifuStage {
+pub(crate) fn stage_out(stage: Stage) -> WaifuStage {
     match stage {
         Stage::LoadingWeights => WAIFU_STAGE_LOADING_WEIGHTS,
         Stage::ImageGenerationEncodingPrompt => WAIFU_STAGE_IMAGE_GENERATION_ENCODING_PROMPT,
@@ -682,31 +676,7 @@ fn stage_out(stage: Stage) -> WaifuStage {
     }
 }
 
-/// The engine's progress callback, calling the caller's.
-fn progress_to(
-    gate: &Gate,
-    user_data: UserData,
-    callback: WaifuProgressCallback,
-) -> engine::OnProgress {
-    let gate = gate.clone();
-    Box::new(move |progress| {
-        let Some(callback) = callback else {
-            return;
-        };
-        gate.wait();
-        let out = WaifuProgress {
-            stage: stage_out(progress.stage),
-            fraction: progress.fraction.unwrap_or(-1.0),
-            done: progress.done,
-            total: progress.total,
-            seconds: progress.seconds,
-        };
-        let user_data = user_data;
-        unsafe { callback(user_data.0, &out) };
-    })
-}
-
-fn code_of(failure: Failure) -> WaifuStatusCode {
+pub(crate) fn code_of(failure: Failure) -> WaifuStatusCode {
     match failure {
         Failure::UnknownModel => WAIFU_ERR_UNKNOWN_MODEL,
         Failure::Model => WAIFU_ERR_MODEL,
@@ -715,79 +685,18 @@ fn code_of(failure: Failure) -> WaifuStatusCode {
     }
 }
 
-/// What an ending is called, and its message, as a WaifuStatus needs them -- with the CString kept
-/// alive by the caller for as long as the status is.
-fn status_of<T>(ended: &Ended<T>) -> (WaifuStatusCode, Option<CString>) {
-    match ended {
-        Ended::Done(_) => (WAIFU_OK, None),
-        Ended::Cancelled => (WAIFU_CANCELLED, None),
-        Ended::Failed(failure, message) => (code_of(*failure), Some(support::c_string(message))),
-    }
-}
-
-fn completion_to(
-    gate: &Gate,
-    user_data: UserData,
-    callback: WaifuCallback,
-) -> engine::OnComplete<()> {
-    let gate = gate.clone();
-    Box::new(move |ended: Ended<()>| {
-        let Some(callback) = callback else {
-            return;
-        };
-        gate.wait();
-        let (code, message) = status_of(&ended);
-        let result = WaifuResult {
-            status: status(code, &message),
-        };
-        let user_data = user_data;
-        unsafe { callback(user_data.0, &result) };
-    })
-}
-
-/// Runs an `_async` entry point: its id, or 0 with the refusal. The gate opens once the id is
-/// ready to be handed back, which is when the job's callbacks may run.
-fn submitted(gate: &Gate, submit: impl FnOnce() -> Result<WaifuJob, Refused>) -> WaifuJob {
-    let job = refusable(0, submit);
-    if job != 0 {
-        gate.open();
-    }
-    job
-}
-
-/// The pipeline, where it is one made for `task`.
-unsafe fn pipeline_for<'a>(
-    pipeline: *mut WaifuPipeline,
-    task: WaifuPipelineType,
-) -> Result<&'a WaifuPipeline, Refused> {
-    let pipeline = pipeline.as_ref().ok_or("the pipeline is NULL")?;
-    if pipeline.task != task {
-        return Err(format!(
-            "this pipeline is made for {}, and {} is another task's",
-            task_name(pipeline.task),
-            task_name(task)
-        )
-        .into());
-    }
-    Ok(pipeline)
-}
-
 /// Reads the model's weights onto the pipeline's device, dropping the model before first, so two
-/// are never on it at once. Refused at the call for a model the pipeline's task is not supported
-/// by (WAIFU_MODEL_SUPPORTS_<task>). The call copies the manifest, not the weights, which the
+/// are never on it at once. Refused -- NULL -- for a model the pipeline's type is not supported by
+/// (WAIFU_MODEL_SUPPORTS_<type>). The call copies the manifest, not the weights, which the
 /// pipeline's thread reads from the files: `model` may be freed as soon as it returns. A run may
 /// be asked for straight after; it waits its turn. "tones", the stand-in voice the tests use,
 /// opens as a model too.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_load_model_async(
+pub unsafe extern "C" fn waifu_pipeline_load_model(
     pipeline: *mut WaifuPipeline,
     model: *const WaifuModel,
-    user_data: *mut c_void,
-    on_progress: WaifuProgressCallback,
-    on_complete: WaifuCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
+) -> *mut WaifuTask {
+    refusable(ptr::null_mut(), || {
         let pipeline = pipeline.as_ref().ok_or("the pipeline is NULL")?;
         let model = model.as_ref().ok_or("the model is NULL")?;
         if let Some(why) = model.unsupported(pipeline.task) {
@@ -797,63 +706,89 @@ pub unsafe extern "C" fn waifu_pipeline_load_model_async(
             )
             .into());
         }
-        let user_data = UserData(user_data);
-        let on_progress = progress_to(&gate, user_data, on_progress);
-        let on_complete = completion_to(&gate, user_data, on_complete);
-        Ok(match pipeline.task {
+        let started = task::Started::new();
+        let (on_progress, on_complete) = (started.on_progress(), started.on_loaded());
+        let id = match pipeline.task {
             WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH => {
                 pipeline
                     .engine
                     .load_for_streaming(&model.path, on_progress, on_complete)
             }
             _ => pipeline.engine.load(&model.path, on_progress, on_complete),
-        })
+        };
+        Ok(started.task(id, pipeline.engine.canceller(), None))
     })
 }
 
+/// Drops the model; the pipeline then has none.
 #[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_unload_model_async(
+pub unsafe extern "C" fn waifu_pipeline_unload_model(
     pipeline: *mut WaifuPipeline,
-    user_data: *mut c_void,
-    on_complete: WaifuCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
+) -> *mut WaifuTask {
+    refusable(ptr::null_mut(), || {
         let pipeline = pipeline.as_ref().ok_or("the pipeline is NULL")?;
-        Ok(pipeline
-            .engine
-            .unload(completion_to(&gate, UserData(user_data), on_complete)))
+        let started = task::Started::new();
+        let id = pipeline.engine.unload(started.on_loaded());
+        Ok(started.task(id, pipeline.engine.canceller(), None))
     })
 }
 
-/// A request struct, read only if it is at least as large as the one this library knows.
-///
-/// Every request starts with its `uint32_t struct_size`, and that is all that is read before the
-/// size is known: a caller built against another header may have handed fewer bytes than `T`, and
-/// a reference to a `T` would claim them all.
-unsafe fn request_in<'a, T>(request: *const T, what: &str) -> Result<&'a T, String> {
-    if request.is_null() {
-        return Err(format!("the {what} is NULL"));
-    }
-    let size = (request as *const u32).read();
-    if (size as usize) < std::mem::size_of::<T>() {
-        return Err(format!(
-            "the {what} says it is {size} bytes, and this library reads {}: set struct_size to sizeof",
-            std::mem::size_of::<T>()
-        ));
-    }
-    Ok(&*request)
+/// Runs the request on the pipeline's thread, in its turn, and returns at once. Refused -- NULL,
+/// with the last error and its code -- for a request of another pipeline type, a required attribute
+/// unset, or an attribute that contradicts another; a run with no model loaded is not refused, and
+/// ends with WAIFU_ERR_NOT_LOADED.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_pipeline_run(
+    pipeline: *mut WaifuPipeline,
+    request: *const WaifuRequest,
+) -> *mut WaifuTask {
+    refusable(ptr::null_mut(), || {
+        let pipeline = pipeline.as_ref().ok_or("the pipeline is NULL")?;
+        let request = request.as_ref().ok_or("the request is NULL")?;
+        if request.task() != pipeline.task {
+            return Err(format!(
+                "this pipeline is made for {}, and the request is for {}",
+                task_name(pipeline.task),
+                task_name(request.task())
+            )
+            .into());
+        }
+        let engine = &pipeline.engine;
+        let started = task::Started::new();
+        let progress = started.on_progress();
+        let id = match pipeline.task {
+            WAIFU_PIPELINE_IMAGE_GENERATION => {
+                engine.draw(request.draw()?, progress, started.on_image())?
+            }
+            WAIFU_PIPELINE_TEXT_TO_SPEECH => {
+                engine.speak(request.speak()?, progress, started.on_audio())?
+            }
+            WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH => engine.speak_streaming(
+                request.speak_streaming()?,
+                progress,
+                started.on_part(),
+                started.on_audio(),
+            )?,
+            WAIFU_PIPELINE_VOICE_CONVERSION => engine.voice_conversion(
+                request.voice_conversion()?,
+                progress,
+                started.on_audio(),
+            )?,
+            WAIFU_PIPELINE_LAYER_DECOMPOSITION => {
+                engine.layers(request.layers()?, progress, started.on_layers())?
+            }
+            WAIFU_PIPELINE_SPEECH_TO_TEXT => {
+                engine.transcribe(request.transcribe()?, progress, started.on_transcript())?
+            }
+            _ => return Err("the pipeline is of a type this library does not know".into()),
+        };
+        Ok(started.task(id, engine.canceller(), Some(pipeline.task)))
+    })
 }
 
-/// A pointer to `values`, or NULL for none.
-fn first<T>(values: &[T]) -> *const T {
-    match values.is_empty() {
-        true => ptr::null(),
-        false => values.as_ptr(),
-    }
-}
+// -- the four structs ------------------------------------------------------------------------
 
-// -- image generation ------------------------------------------------------------------------
+// Frozen: a change to any of these is a major version. WaifuLog is in support.rs.
 
 #[repr(C)]
 pub struct WaifuImage {
@@ -865,47 +800,26 @@ pub struct WaifuImage {
 }
 
 #[repr(C)]
-pub struct WaifuPromptImage {
-    /// The <|key|> the prompt names it by: letters, digits and _.
-    pub key: *const c_char,
-    pub image: *const WaifuImage,
-}
-
-#[repr(C)]
-pub struct WaifuImageGenerationRequest {
-    pub struct_size: u32,
-    pub prompt: *const c_char,
-    /// NULL or "" for none.
-    pub negative: *const c_char,
-    /// 64..2048, a multiple of IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF.
+pub struct WaifuRgbaImage {
     pub width: u32,
     pub height: u32,
-    pub steps: u32,
-    pub guidance: f32,
-    pub seed: u64,
-    /// img2img; NULL for none.
-    pub start_image: *const WaifuImage,
-    /// How far it walks away from it, 0..1.
-    pub start_image_strength: f32,
-    /// A ControlNet's condition; NULL for none.
-    pub control_image: *const WaifuImage,
-    /// How hard it holds to it.
-    pub control_image_scale: f32,
-    pub prompt_images: *const WaifuPromptImage,
-    pub prompt_image_count: usize,
+    /// width * height * 4, not premultiplied.
+    pub rgba: *const u8,
+    pub len: usize,
 }
 
 #[repr(C)]
-pub struct WaifuImageGenerationResult {
-    pub status: WaifuStatus,
-    /// NULL unless WAIFU_OK.
-    pub image: *const WaifuImage,
+pub struct WaifuAudio {
+    /// Mono, -1..1.
+    pub samples: *const f32,
+    pub count: usize,
+    pub sample_rate: u32,
 }
 
-pub type WaifuImageGenerationCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuImageGenerationResult)>;
-
-unsafe fn image_in(image: *const WaifuImage, what: &str) -> Result<engine::Image, String> {
+pub(crate) unsafe fn image_in(
+    image: *const WaifuImage,
+    what: &str,
+) -> Result<engine::Image, String> {
     let image = image.as_ref().ok_or_else(|| format!("{what} is NULL"))?;
     if image.rgb.is_null() && image.len > 0 {
         return Err(format!("{what} has no pixels"));
@@ -921,423 +835,10 @@ unsafe fn image_in(image: *const WaifuImage, what: &str) -> Result<engine::Image
     })
 }
 
-/// The images a request holds, as the engine keys them: the start and control images under the
-/// engine's own keys, which a prompt image may not take.
-unsafe fn images_in(
-    request: &WaifuImageGenerationRequest,
-) -> Result<Vec<(String, engine::Image)>, String> {
-    let mut images = Vec::with_capacity(request.prompt_image_count + 2);
-    if !request.start_image.is_null() {
-        images.push((
-            engine::START_FROM.to_string(),
-            image_in(request.start_image, "start_image")?,
-        ));
-    }
-    if !request.control_image.is_null() {
-        images.push((
-            engine::CONTROL.to_string(),
-            image_in(request.control_image, "control_image")?,
-        ));
-    }
-    if request.prompt_image_count > 0 {
-        if request.prompt_images.is_null() {
-            return Err("prompt_image_count is not 0 and prompt_images is NULL".to_string());
-        }
-        let given = std::slice::from_raw_parts(request.prompt_images, request.prompt_image_count);
-        for input in given {
-            let key = required(input.key, "a prompt image's key")?;
-            if key == engine::START_FROM || key == engine::CONTROL {
-                return Err(format!(
-                    "\"{key}\" is not a key a prompt image can have here: give the image as \
-                     start_image or control_image, or call it something else"
-                ));
-            }
-            let image = image_in(input.image, &format!("the prompt image \"{key}\""))?;
-            images.push((key, image));
-        }
-    }
-    Ok(images)
-}
-
-/// Each run function is refused at the call on a pipeline made for another task.
-#[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_run_image_generation_async(
-    pipeline: *mut WaifuPipeline,
-    request: *const WaifuImageGenerationRequest,
-    user_data: *mut c_void,
-    on_progress: WaifuProgressCallback,
-    on_complete: WaifuImageGenerationCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
-        let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_IMAGE_GENERATION)?;
-        let request = request_in(request, "WaifuImageGenerationRequest")?;
-        let request = DrawRequest {
-            prompt: required(request.prompt, "prompt")?,
-            negative: string_in(request.negative, "negative")?.unwrap_or_default(),
-            images: images_in(request)?,
-            width: request.width,
-            height: request.height,
-            steps: request.steps,
-            guidance: request.guidance,
-            seed: request.seed,
-            strength: request.start_image_strength,
-            control_scale: request.control_image_scale,
-        };
-
-        let user_data = UserData(user_data);
-        let on_complete = {
-            let gate = gate.clone();
-            Box::new(move |ended: Ended<engine::Image>| {
-                let Some(callback) = on_complete else {
-                    return;
-                };
-                gate.wait();
-                let (code, message) = status_of(&ended);
-                let image = match &ended {
-                    Ended::Done(image) => Some(WaifuImage {
-                        width: image.width,
-                        height: image.height,
-                        rgb: image.rgb.as_ptr(),
-                        len: image.rgb.len(),
-                    }),
-                    _ => None,
-                };
-                let result = WaifuImageGenerationResult {
-                    status: status(code, &message),
-                    image: image
-                        .as_ref()
-                        .map_or(ptr::null(), |image| image as *const _),
-                };
-                let user_data = user_data;
-                unsafe { callback(user_data.0, &result) };
-            })
-        };
-        Ok(pipeline.engine.draw(
-            request,
-            progress_to(&gate, user_data, on_progress),
-            on_complete,
-        )?)
-    })
-}
-
-// -- text to speech and voice conversion -----------------------------------------------------
-
-#[repr(C)]
-pub struct WaifuAudio {
-    /// Mono, -1..1.
-    pub samples: *const f32,
-    pub count: usize,
-    pub sample_rate: u32,
-}
-
-#[repr(C)]
-pub struct WaifuTextToSpeechRequest {
-    pub struct_size: u32,
-    pub text: *const c_char,
-    /// A recording to sound like, or NULL.
-    pub reference: *const WaifuAudio,
-    /// What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
-    /// from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
-    /// reads none ignores it.
-    pub reference_transcript: *const c_char,
-    pub speed: f32,
-    pub temperature: f32,
-    /// Any instruction; NULL or "" for the voice's own way. CosyVoice3 takes a style or a
-    /// reference_transcript, not both: upstream's instruct2 reads no transcript.
-    pub style: *const c_char,
-    pub seed: u64,
-}
-
-#[repr(C)]
-pub struct WaifuVoiceConversionRequest {
-    pub struct_size: u32,
-    /// What is said, and how.
-    pub source: *const WaifuAudio,
-    /// Whose voice to say it in.
-    pub reference: *const WaifuAudio,
-    pub steps: u32,
-    pub convert_style: bool,
-    pub seed: u64,
-}
-
-/// Both speech tasks make audio.
-#[repr(C)]
-pub struct WaifuAudioResult {
-    pub status: WaifuStatus,
-    /// NULL unless WAIFU_OK.
-    pub audio: *const WaifuAudio,
-}
-
-pub type WaifuAudioCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuAudioResult)>;
-
-unsafe fn audio_in(audio: *const WaifuAudio, what: &str) -> Result<Sound, String> {
-    let audio = audio.as_ref().ok_or_else(|| format!("{what} is NULL"))?;
-    if audio.samples.is_null() && audio.count > 0 {
-        return Err(format!("{what} has no samples"));
-    }
-    if audio.sample_rate == 0 {
-        return Err(format!("{what} has a sample rate of 0"));
-    }
-    let samples = match audio.count {
-        0 => Vec::new(),
-        count => std::slice::from_raw_parts(audio.samples, count).to_vec(),
-    };
-    Ok(Sound::new(samples, audio.sample_rate))
-}
-
-/// A reference recording, where there is one.
-unsafe fn reference_in(audio: *const WaifuAudio) -> Result<Option<Sound>, String> {
-    match audio.is_null() {
-        true => Ok(None),
-        false => Ok(Some(audio_in(audio, "reference")?)),
-    }
-}
-
-/// `sound` as C reads it, for as long as `sound` is.
-fn audio_out(sound: &Sound) -> WaifuAudio {
-    WaifuAudio {
-        samples: sound.samples.as_ptr(),
-        count: sound.samples.len(),
-        sample_rate: sound.rate,
-    }
-}
-
-fn audio_completion_to(
-    gate: &Gate,
-    user_data: UserData,
-    callback: WaifuAudioCallback,
-) -> engine::OnComplete<Sound> {
-    let gate = gate.clone();
-    Box::new(move |ended: Ended<Sound>| {
-        let Some(callback) = callback else {
-            return;
-        };
-        gate.wait();
-        let (code, message) = status_of(&ended);
-        let audio = match &ended {
-            Ended::Done(sound) => Some(audio_out(sound)),
-            _ => None,
-        };
-        let result = WaifuAudioResult {
-            status: status(code, &message),
-            audio: audio
-                .as_ref()
-                .map_or(ptr::null(), |audio| audio as *const _),
-        };
-        let user_data = user_data;
-        unsafe { callback(user_data.0, &result) };
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_run_text_to_speech_async(
-    pipeline: *mut WaifuPipeline,
-    request: *const WaifuTextToSpeechRequest,
-    user_data: *mut c_void,
-    on_progress: WaifuProgressCallback,
-    on_complete: WaifuAudioCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
-        let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_TEXT_TO_SPEECH)?;
-        let request = request_in(request, "WaifuTextToSpeechRequest")?;
-        let request = SpeakRequest {
-            text: required(request.text, "text")?,
-            like: reference_in(request.reference)?,
-            speed: request.speed,
-            temperature: request.temperature,
-            style: string_in(request.style, "style")?,
-            reference_transcript: string_in(request.reference_transcript, "reference_transcript")?,
-            seed: request.seed,
-        };
-        let user_data = UserData(user_data);
-        Ok(pipeline.engine.speak(
-            request,
-            progress_to(&gate, user_data, on_progress),
-            audio_completion_to(&gate, user_data, on_complete),
-        )?)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_run_voice_conversion_async(
-    pipeline: *mut WaifuPipeline,
-    request: *const WaifuVoiceConversionRequest,
-    user_data: *mut c_void,
-    on_progress: WaifuProgressCallback,
-    on_complete: WaifuAudioCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
-        let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_VOICE_CONVERSION)?;
-        let request = request_in(request, "WaifuVoiceConversionRequest")?;
-        let request = VoiceConversionRequest {
-            source: audio_in(request.source, "source")?,
-            reference: audio_in(request.reference, "reference")?,
-            steps: request.steps,
-            convert_style: request.convert_style,
-            seed: request.seed,
-        };
-        let user_data = UserData(user_data);
-        Ok(pipeline.engine.voice_conversion(
-            request,
-            progress_to(&gate, user_data, on_progress),
-            audio_completion_to(&gate, user_data, on_complete),
-        )?)
-    })
-}
-
-// -- streaming text to speech ----------------------------------------------------------------
-
-/// Text to speech with the audio handed over while the rest is said -- CosyVoice3's a hop of
-/// tokens at a time, as upstream's stream=True -- for a caller that plays the start at once. A
-/// load is refused at the call for a model that does not stream, and ends with WAIFU_ERR_MODEL
-/// where the device cannot: anywhere but CUDA at half, on Ampere or later, and Metal.
-#[repr(C)]
-pub struct WaifuStreamingTextToSpeechRequest {
-    pub struct_size: u32,
-    pub text: *const c_char,
-    /// A recording to sound like, or NULL.
-    pub reference: *const WaifuAudio,
-    /// As WaifuTextToSpeechRequest's.
-    pub reference_transcript: *const c_char,
-    pub temperature: f32,
-    /// As WaifuTextToSpeechRequest's.
-    pub style: *const c_char,
-    /// No speed: a streaming reading is at the speed it is said, as upstream's is.
-    pub seed: u64,
-}
-
-/// A part of the reading's audio, in order; the samples are valid until it returns.
-pub type WaifuAudioPartCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, part: *const WaifuAudio)>;
-
-/// The engine's part callback, calling the caller's.
-fn audio_parts_to(
-    gate: &Gate,
-    user_data: UserData,
-    callback: WaifuAudioPartCallback,
-) -> engine::OnAudio {
-    let gate = gate.clone();
-    Box::new(move |part: &Sound| {
-        let Some(callback) = callback else {
-            return;
-        };
-        gate.wait();
-        let audio = audio_out(part);
-        let user_data = user_data;
-        unsafe { callback(user_data.0, &audio) };
-    })
-}
-
-/// on_part for each part as it is made; on_complete with the whole of it, the parts end to end.
-#[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_run_streaming_text_to_speech_async(
-    pipeline: *mut WaifuPipeline,
-    request: *const WaifuStreamingTextToSpeechRequest,
-    user_data: *mut c_void,
-    on_progress: WaifuProgressCallback,
-    on_part: WaifuAudioPartCallback,
-    on_complete: WaifuAudioCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
-        let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH)?;
-        let request = request_in(request, "WaifuStreamingTextToSpeechRequest")?;
-        let request = SpeakRequest {
-            text: required(request.text, "text")?,
-            like: reference_in(request.reference)?,
-            speed: 1.0,
-            temperature: request.temperature,
-            style: string_in(request.style, "style")?,
-            reference_transcript: string_in(request.reference_transcript, "reference_transcript")?,
-            seed: request.seed,
-        };
-        let user_data = UserData(user_data);
-        Ok(pipeline.engine.speak_streaming(
-            request,
-            progress_to(&gate, user_data, on_progress),
-            audio_parts_to(&gate, user_data, on_part),
-            audio_completion_to(&gate, user_data, on_complete),
-        )?)
-    })
-}
-
-// -- layer decomposition ---------------------------------------------------------------------
-
-#[repr(C)]
-pub struct WaifuRgbaImage {
-    pub width: u32,
-    pub height: u32,
-    /// width * height * 4, not premultiplied.
-    pub rgba: *const u8,
-    pub len: usize,
-}
-
-#[repr(C)]
-pub struct WaifuLayerDecompositionRequest {
-    pub struct_size: u32,
-    /// Any size, centred and scaled by the engine; transparent is fine.
-    pub image: *const WaifuRgbaImage,
-    /// 0 for the model's own.
-    pub steps: u32,
-    /// 0 for the model's own.
-    pub depth_steps: u32,
-    /// A multiple of LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF; 0 for 1280.
-    pub resolution: u32,
-    /// Hands, eyes, eyebrows, ears into a -l and a -r layer.
-    pub split_pairs: bool,
-    /// Hair, hands, top and bottom also cut into a near and a far half.
-    pub stratify_layers: bool,
-    pub seed: u64,
-}
-
-#[repr(C)]
-pub struct WaifuLayer {
-    pub r#type: WaifuLayerType,
-    /// Unique within the result, from 1; it means nothing else.
-    pub id: u32,
-    /// "topwear"; its halves "topwear-0" and "topwear-1"; its depth "topwear_depth".
-    pub name: *const c_char,
-    /// Where its top left corner is on the canvas.
-    pub left: i32,
-    pub top: i32,
-    /// Only as large as what is drawn. A depth layer: the same size and place as its layer, R, G
-    /// and B the depth, 0 nearest to 255 farthest, under its layer's alpha.
-    pub image: WaifuRgbaImage,
-    /// How far away it is: 0 nearest, 1 farthest. A near half has its part's depth, not its
-    /// pixels': that is what keeps it in its part's place in the stratified stack (see the
-    /// result). A depth layer has its layer's.
-    pub depth: f32,
-    /// The id of the layer this one is made from: a half's part, a depth layer's layer; 0 for a
-    /// part.
-    pub derived_from_id: u32,
-}
-
-/// `layers` is in one order, which the library never changes: each part, bottom first -- which is
-/// the stack, unstratified -- then, with stratify_layers, each part's halves, near before far;
-/// then a depth layer for each of those, in their order. A part a half names in derived_from_id
-/// is a split part.
-///
-/// The stratified stack is every part that was not split and every half, bottom first: from the
-/// largest depth to the smallest; at one depth, a far half under a near one; then by their order
-/// in `layers`. No depth layer is in either stack.
-#[repr(C)]
-pub struct WaifuLayerDecompositionResult {
-    pub status: WaifuStatus,
-    /// The side of the square canvas; 0 unless WAIFU_OK.
-    pub canvas: u32,
-    pub layers: *const WaifuLayer,
-    pub layer_count: usize,
-}
-
-pub type WaifuLayerDecompositionCallback = Option<
-    unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuLayerDecompositionResult),
->;
-
-unsafe fn rgba_in(image: *const WaifuRgbaImage, what: &str) -> Result<RgbaImage, String> {
+pub(crate) unsafe fn rgba_in(
+    image: *const WaifuRgbaImage,
+    what: &str,
+) -> Result<RgbaImage, String> {
     let image = image.as_ref().ok_or_else(|| format!("{what} is NULL"))?;
     if image.rgba.is_null() && image.len > 0 {
         return Err(format!("{what} has no pixels"));
@@ -1353,170 +854,19 @@ unsafe fn rgba_in(image: *const WaifuRgbaImage, what: &str) -> Result<RgbaImage,
     })
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_run_layer_decomposition_async(
-    pipeline: *mut WaifuPipeline,
-    request: *const WaifuLayerDecompositionRequest,
-    user_data: *mut c_void,
-    on_progress: WaifuProgressCallback,
-    on_complete: WaifuLayerDecompositionCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
-        let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_LAYER_DECOMPOSITION)?;
-        let request = request_in(request, "WaifuLayerDecompositionRequest")?;
-        let request = LayersRequest {
-            image: rgba_in(request.image, "image")?,
-            steps: request.steps,
-            depth_steps: request.depth_steps,
-            resolution: request.resolution,
-            split_pairs: request.split_pairs,
-            stratify: request.stratify_layers,
-            seed: request.seed,
-        };
-
-        let user_data = UserData(user_data);
-        let on_complete = {
-            let gate = gate.clone();
-            Box::new(move |ended: Ended<engine::Layers>| {
-                let Some(callback) = on_complete else {
-                    return;
-                };
-                gate.wait();
-                let (code, message) = status_of(&ended);
-                let (canvas, layers) = match &ended {
-                    Ended::Done(done) => (done.canvas, &done.layers[..]),
-                    _ => (0, &[][..]),
-                };
-                // The names have to outlive the result, and be NUL terminated: kept here until the
-                // callback returns.
-                let names: Vec<CString> = layers
-                    .iter()
-                    .map(|layer| support::c_string(&layer.name))
-                    .collect();
-                let out: Vec<WaifuLayer> = names
-                    .iter()
-                    .zip(layers)
-                    .map(|(name, layer)| WaifuLayer {
-                        r#type: match layer.kind {
-                            LayerKind::Part => WAIFU_LAYER_PART,
-                            LayerKind::StratifiedNear => WAIFU_LAYER_STRATIFIED_NEAR,
-                            LayerKind::StratifiedFar => WAIFU_LAYER_STRATIFIED_FAR,
-                            LayerKind::Depth => WAIFU_LAYER_DEPTH,
-                        },
-                        id: layer.id,
-                        name: name.as_ptr(),
-                        left: layer.left,
-                        top: layer.top,
-                        image: WaifuRgbaImage {
-                            width: layer.image.width,
-                            height: layer.image.height,
-                            rgba: layer.image.rgba.as_ptr(),
-                            len: layer.image.rgba.len(),
-                        },
-                        depth: layer.depth,
-                        derived_from_id: layer.derived_from_id.unwrap_or(0),
-                    })
-                    .collect();
-                let result = WaifuLayerDecompositionResult {
-                    status: status(code, &message),
-                    canvas,
-                    layers: first(&out),
-                    layer_count: out.len(),
-                };
-                let user_data = user_data;
-                unsafe { callback(user_data.0, &result) };
-            })
-        };
-        Ok(pipeline.engine.layers(
-            request,
-            progress_to(&gate, user_data, on_progress),
-            on_complete,
-        )?)
-    })
-}
-
-// -- speech to text --------------------------------------------------------------------------
-
-#[repr(C)]
-pub struct WaifuSpeechToTextRequest {
-    pub struct_size: u32,
-    /// Any rate, any length; resampled and cut into pieces by the engine.
-    pub audio: *const WaifuAudio,
-    /// The language it is in, one of SPEECH_TO_TEXT_LANGUAGES -- "English", "chinese" -- or NULL
-    /// or "" for the model to tell.
-    pub language: *const c_char,
-    /// Words that help it hear: names, terms, the subject; NULL or "".
-    pub context: *const c_char,
-}
-
-#[repr(C)]
-pub struct WaifuSpeechToTextResult {
-    pub status: WaifuStatus,
-    /// What was said; "" for nothing said; NULL unless WAIFU_OK.
-    pub text: *const c_char,
-    /// The language it was said in, as the model names it -- "Chinese" -- or several, comma
-    /// separated, for a recording that changes; "" where none was heard. NULL unless WAIFU_OK.
-    pub language: *const c_char,
-}
-
-pub type WaifuSpeechToTextCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuSpeechToTextResult)>;
-
-#[no_mangle]
-pub unsafe extern "C" fn waifu_pipeline_run_speech_to_text_async(
-    pipeline: *mut WaifuPipeline,
-    request: *const WaifuSpeechToTextRequest,
-    user_data: *mut c_void,
-    on_progress: WaifuProgressCallback,
-    on_complete: WaifuSpeechToTextCallback,
-) -> WaifuJob {
-    let gate = Gate::default();
-    submitted(&gate, || {
-        let pipeline = pipeline_for(pipeline, WAIFU_PIPELINE_SPEECH_TO_TEXT)?;
-        let request = request_in(request, "WaifuSpeechToTextRequest")?;
-        let request = TranscribeRequest {
-            recording: audio_in(request.audio, "audio")?,
-            language: string_in(request.language, "language")?.filter(|l| !l.is_empty()),
-            context: string_in(request.context, "context")?.unwrap_or_default(),
-        };
-
-        let user_data = UserData(user_data);
-        let on_complete = {
-            let gate = gate.clone();
-            Box::new(move |ended: Ended<crate::Transcript>| {
-                let Some(callback) = on_complete else {
-                    return;
-                };
-                gate.wait();
-                let (code, message) = status_of(&ended);
-                // Kept here until the callback returns, NUL terminated.
-                let strings = match &ended {
-                    Ended::Done(transcript) => Some((
-                        support::c_string(&transcript.text),
-                        support::c_string(&transcript.language),
-                    )),
-                    _ => None,
-                };
-                let result = WaifuSpeechToTextResult {
-                    status: status(code, &message),
-                    text: strings
-                        .as_ref()
-                        .map_or(ptr::null(), |(text, _)| text.as_ptr()),
-                    language: strings
-                        .as_ref()
-                        .map_or(ptr::null(), |(_, language)| language.as_ptr()),
-                };
-                let user_data = user_data;
-                unsafe { callback(user_data.0, &result) };
-            })
-        };
-        Ok(pipeline.engine.transcribe(
-            request,
-            progress_to(&gate, user_data, on_progress),
-            on_complete,
-        )?)
-    })
+pub(crate) unsafe fn audio_in(audio: *const WaifuAudio, what: &str) -> Result<Sound, String> {
+    let audio = audio.as_ref().ok_or_else(|| format!("{what} is NULL"))?;
+    if audio.samples.is_null() && audio.count > 0 {
+        return Err(format!("{what} has no samples"));
+    }
+    if audio.sample_rate == 0 {
+        return Err(format!("{what} has a sample rate of 0"));
+    }
+    let samples = match audio.count {
+        0 => Vec::new(),
+        count => std::slice::from_raw_parts(audio.samples, count).to_vec(),
+    };
+    Ok(Sound::new(samples, audio.sample_rate))
 }
 
 #[cfg(test)]

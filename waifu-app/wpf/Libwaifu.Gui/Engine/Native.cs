@@ -24,19 +24,22 @@ using System.Text;
 namespace Libwaifu.Gui.Engine
 {
     /// <summary>
-    /// The C API, declared as it is in <c>waifu.h</c>: ABI 5, pipelines made for one task.
+    /// The C API, declared as it is in <c>waifu.h</c>: ABI 6, requests set an attribute at a
+    /// time and tasks read rather than called back.
     /// </summary>
     /// <remarks>
     /// Nothing here does anything of its own: the layouts are the header's, field for field, and
-    /// the rules that come with them are in docs/ffi-abi5.md. Only what this program calls is
-    /// declared. The two rules that matter most, and that the callers above have to keep:
+    /// the rules that come with them are in docs/ffi-abi6.md. Only what this program calls is
+    /// declared. The rules that matter most, and that the callers above have to keep:
     ///
-    /// * **A callback runs on a thread of the library's.** It has to return quickly, must not
-    ///   call back in (bar `waifu_pipeline_cancel`), and everything it is handed is valid only
-    ///   until it returns -- so anything kept is copied inside the call.
-    /// * **A delegate handed over has to outlive the call.** The library keeps the pointer, and a
-    ///   collected delegate is a crash with no stack worth reading; every one of them is held in
-    ///   a field for as long as the library can reach it.
+    /// * **A request is copied.** Every setter copies what it is handed, and
+    ///   <c>waifu_pipeline_run</c> copies the request, which may be freed as soon as it returns.
+    /// * **A task is read, and freed once.** <c>waifu_task_next_event</c> is asked by one thread
+    ///   at a time; everything a task hands out is valid until <c>waifu_task_free</c>, which must
+    ///   not race with any other call on the same task.
+    /// * **A delegate handed over has to outlive the call.** The library keeps the log
+    ///   callback's pointer, and a collected delegate is a crash with no stack worth reading; it
+    ///   is held in a field for as long as the library can reach it.
     ///
     /// Every enum of the header is an <c>int32_t</c> and a list of numbers that only grows: a
     /// newer library can hand over one this program has no name for, so whatever switches on one
@@ -56,11 +59,20 @@ namespace Libwaifu.Gui.Engine
         /// </summary>
         public const string ModelManagerLibrary = "waifu_modelmanager.dll";
 
-        /// <summary>What a caller compiled against this header expects, from waifu.h.</summary>
-        public const uint AbiVersion = 5;
+        /// <summary>
+        /// What a caller compiled against this header expects, from waifu.h: a library of the
+        /// same major version whose minor is at least this one's. waifu_abi_version says
+        /// (major &lt;&lt; 16) | minor.
+        /// </summary>
+        public const uint AbiVersionMajor = 6;
+
+        public const uint AbiVersionMinor = 0;
 
         /// <summary>The same, from waifu_modelmanager.h.</summary>
         public const uint ModelManagerAbiVersion = 1;
+
+        /// <summary>waifu_task_next_event and waifu_task_wait: no timeout.</summary>
+        public const uint WaitForever = uint.MaxValue;
 
         public enum LogLevel
         {
@@ -82,6 +94,7 @@ namespace Libwaifu.Gui.Engine
             NotLoaded = 6,
             Internal = 7,
             DeviceUnavailable = 8,
+            UnknownAttribute = 9,
         }
 
         public enum Device
@@ -106,11 +119,11 @@ namespace Libwaifu.Gui.Engine
         }
 
         /// <summary>
-        /// What can be asked of a model. A SUPPORTS_ property is 1 or 0, and where it is 0 the
-        /// string property of the same number says why, in words to show; SUPPORTS_&lt;task&gt;
+        /// What can be asked of a model. A SUPPORTS_ attribute is 1 or 0, and where it is 0 the
+        /// string attribute of the same number says why, in words to show; SUPPORTS_&lt;task&gt;
         /// has the number of the pipeline type for that task.
         /// </summary>
-        public enum ModelProperty
+        public enum ModelAttribute
         {
             SupportsImageGeneration = 1,
             SupportsTextToSpeech = 2,
@@ -168,6 +181,77 @@ namespace Libwaifu.Gui.Engine
             public const int VoiceConversionSynthesizingAudio = 303;  // vocoder windows
         }
 
+        /// <summary>
+        /// A request's attributes, of the tasks this program runs: <c>WaifuRequestAttribute</c>.
+        /// The setter each takes is after it; one left unset takes the library's default.
+        /// </summary>
+        public enum RequestAttribute
+        {
+            ImageGenerationPrompt = 100,              // string, required
+            ImageGenerationNegative = 101,            // string
+            ImageGenerationWidth = 102,               // int, 64..2048
+            ImageGenerationHeight = 103,              // int, as width
+            ImageGenerationSteps = 104,               // int, 1..
+            ImageGenerationGuidance = 105,            // float, 0..
+            ImageGenerationSeed = 106,                // int, read as uint64
+            ImageGenerationStartImage = 107,          // image (img2img)
+            ImageGenerationStartImageStrength = 108,  // float, 0..1
+
+            TextToSpeechText = 200,                   // string, required
+            TextToSpeechReference = 201,              // audio
+            TextToSpeechReferenceTranscript = 202,    // string
+            TextToSpeechSpeed = 203,                  // float, above 0
+            TextToSpeechTemperature = 204,            // float, 0..
+            TextToSpeechStyle = 205,                  // string
+            TextToSpeechSeed = 206,                   // int, read as uint64
+
+            VoiceConversionSource = 300,              // audio, required
+            VoiceConversionReference = 301,           // audio, required
+            VoiceConversionSteps = 302,               // int, 1..
+            VoiceConversionConvertStyle = 303,        // int, 0 or 1
+            VoiceConversionSeed = 304,                // int, read as uint64
+        }
+
+        /// <summary>What waifu_task_next_event says happened: <c>WaifuEventType</c>.</summary>
+        public enum EventType
+        {
+            /// <summary>Nothing before the timeout.</summary>
+            None = 0,
+
+            /// <summary>The PROGRESS_ attributes say where the task is now.</summary>
+            Progress = 1,
+
+            /// <summary>Streaming text to speech only, which this program does not run.</summary>
+            AudioPart = 2,
+
+            /// <summary>STATUS is there, and the result for WAIFU_OK. END for every call after.</summary>
+            End = 3,
+        }
+
+        /// <summary>
+        /// What a task can be asked, of the tasks this program runs: <c>WaifuTaskAttribute</c>.
+        /// </summary>
+        public enum TaskAttribute
+        {
+            /// <summary>Int, a <see cref="Native.Status"/>; absent until the task has ended.</summary>
+            Status = 1,
+
+            /// <summary>String, why; absent for WAIFU_OK and WAIFU_CANCELLED.</summary>
+            StatusMessage = 2,
+
+            /// <summary>Int, a stage: the last PROGRESS event's; absent before one.</summary>
+            ProgressStage = 10,
+
+            ProgressDone = 11,                        // int
+            ProgressTotal = 12,                       // int
+            ProgressFraction = 13,                    // float, 0..1; absent where nothing can say
+            ProgressSeconds = 14,                     // float, since the task started
+
+            ImageGenerationImage = 100,               // image
+            TextToSpeechAudio = 200,                  // audio
+            VoiceConversionAudio = 300,               // audio
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         public struct Log
         {
@@ -175,29 +259,6 @@ namespace Libwaifu.Gui.Engine
             public IntPtr Source;
             public IntPtr Message;
             public IntPtr Time;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct ProgressInfo
-        {
-            public int Stage;
-            public double Fraction;
-            public ulong Done;
-            public ulong Total;
-            public double Seconds;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct StatusInfo
-        {
-            public Status Code;
-            public IntPtr Message;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct Result
-        {
-            public StatusInfo Status;
         }
 
         // -- waifu_modelmanager.dll's own types, which share nothing with the above ----------
@@ -266,49 +327,6 @@ namespace Libwaifu.Gui.Engine
             public UIntPtr Length;
         }
 
-        /// <summary>A WaifuPromptImage: an image the prompt names as &lt;|key|&gt;.</summary>
-        [StructLayout(LayoutKind.Sequential)]
-        public struct PromptImage
-        {
-            public IntPtr Key;
-            public IntPtr Image;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct ImageGenerationRequest
-        {
-            public uint StructSize;
-            public IntPtr Prompt;
-            public IntPtr Negative;
-            public uint Width;
-            public uint Height;
-            public uint Steps;
-            public float Guidance;
-            public ulong Seed;
-
-            /// <summary>A WaifuImage* to start from (img2img), or zero for none.</summary>
-            public IntPtr StartImage;
-
-            public float StartImageStrength;
-
-            /// <summary>A ControlNet's condition, a WaifuImage*, or zero for none.</summary>
-            public IntPtr ControlImage;
-
-            public float ControlImageScale;
-
-            /// <summary>A WaifuPromptImage array, or zero.</summary>
-            public IntPtr PromptImages;
-
-            public UIntPtr PromptImageCount;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct ImageGenerationResult
-        {
-            public StatusInfo Status;
-            public IntPtr Image;
-        }
-
         [StructLayout(LayoutKind.Sequential)]
         public struct Audio
         {
@@ -317,63 +335,10 @@ namespace Libwaifu.Gui.Engine
             public uint SampleRate;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        public struct TextToSpeechRequest
-        {
-            public uint StructSize;
-            public IntPtr Text;
-
-            /// <summary>A WaifuAudio* to sound like, or zero.</summary>
-            public IntPtr Reference;
-
-            /// <summary>What Reference says, as a UTF-8 char*, or zero where it is not known.</summary>
-            public IntPtr ReferenceTranscript;
-
-            public float Speed;
-            public float Temperature;
-            public IntPtr Style;
-            public ulong Seed;
-        }
-
-        /// <summary>What both speech tasks end with.</summary>
-        [StructLayout(LayoutKind.Sequential)]
-        public struct AudioResult
-        {
-            public StatusInfo Status;
-            public IntPtr Audio;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct VoiceConversionRequest
-        {
-            public uint StructSize;
-            public IntPtr Source;
-            public IntPtr Reference;
-            public uint Steps;
-
-            // One byte in C, where .NET would otherwise send four.
-            [MarshalAs(UnmanagedType.U1)]
-            public bool ConvertStyle;
-
-            public ulong Seed;
-        }
-
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         public delegate void LogCallback(IntPtr user, ref Log e);
 
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        public delegate void ProgressCallback(IntPtr user, ref ProgressInfo e);
-
-        /// <summary>A WaifuCallback: the end of a load or an unload.</summary>
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        public delegate void ResultCallback(IntPtr user, ref Result e);
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        public delegate void ImageGenerationCallback(IntPtr user, ref ImageGenerationResult e);
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        public delegate void AudioCallback(IntPtr user, ref AudioResult e);
-
+        /// <summary>(major &lt;&lt; 16) | minor.</summary>
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint waifu_abi_version();
 
@@ -401,15 +366,15 @@ namespace Libwaifu.Gui.Engine
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
         public static extern void waifu_model_free(IntPtr model);
 
-        /// <summary>False where the model has no such property; the value is then untouched.</summary>
+        /// <summary>False where the model has no such attribute; the value is then untouched.</summary>
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
         [return: MarshalAs(UnmanagedType.U1)]
-        public static extern bool waifu_model_get_int_property(
-            IntPtr model, ModelProperty property, out long value);
+        public static extern bool waifu_model_get_int_attribute(
+            IntPtr model, ModelAttribute attribute, out long value);
 
         /// <summary>Zero where there is none; valid until waifu_model_free.</summary>
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        public static extern IntPtr waifu_model_get_string_property(IntPtr model, ModelProperty property);
+        public static extern IntPtr waifu_model_get_string_attribute(IntPtr model, ModelAttribute attribute);
 
         [DllImport(ModelManagerLibrary, CallingConvention = CallingConvention.Cdecl)]
         public static extern uint waifu_modelmanager_abi_version();
@@ -469,53 +434,124 @@ namespace Libwaifu.Gui.Engine
         public static extern IntPtr waifu_pipeline_new(PipelineType type, Device device);
 
         /// <summary>
-        /// Stops what runs, cancels what waits, drops the model and joins the thread; returns once
-        /// every job has had its on_complete. Never from one of its own callbacks.
+        /// Stops what runs, cancels what waits, drops the model and joins the thread. Returns once
+        /// every task of the pipeline has ended -- WAIFU_CANCELLED for what had not -- and the
+        /// tasks are still the caller's to free.
         /// </summary>
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
         public static extern void waifu_pipeline_free(IntPtr pipeline);
 
-        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        public static extern void waifu_pipeline_cancel(IntPtr pipeline, ulong job);
-
+        /// <summary>Every task of the pipeline, waiting or running, is cancelled.</summary>
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
         public static extern void waifu_pipeline_cancel_all(IntPtr pipeline);
 
         /// <summary>
-        /// Refused -- job 0 -- for a model the pipeline's task is not supported by. The model may
-        /// be freed as soon as this returns.
+        /// A WaifuTask*, or zero where it is refused -- for a model the pipeline's task is not
+        /// supported by -- with the reason in waifu_last_error. The model may be freed as soon as
+        /// this returns.
         /// </summary>
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong waifu_pipeline_load_model_async(
-            IntPtr pipeline,
-            IntPtr model,
-            IntPtr user,
-            ProgressCallback onProgress,
-            ResultCallback onComplete);
+        public static extern IntPtr waifu_pipeline_load_model(IntPtr pipeline, IntPtr model);
+
+        /// <summary>
+        /// A WaifuTask*, or zero where it is refused -- a request of another task, a required
+        /// attribute unset, one that contradicts another -- with the reason in waifu_last_error.
+        /// The request is copied, and may be freed as soon as this returns.
+        /// </summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr waifu_pipeline_run(IntPtr pipeline, IntPtr request);
+
+        // -- requests ----------------------------------------------------------------------------
+
+        /// <summary>
+        /// A WaifuRequest* with every attribute unset; zero for a type the library does not know.
+        /// Freed with waifu_request_free.
+        /// </summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr waifu_request_new(PipelineType type);
 
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong waifu_pipeline_run_image_generation_async(
-            IntPtr pipeline,
-            ref ImageGenerationRequest request,
-            IntPtr user,
-            ProgressCallback onProgress,
-            ImageGenerationCallback onComplete);
+        public static extern void waifu_request_free(IntPtr request);
+
+        /// <summary>
+        /// Each setter copies what it is handed. False, with the reason in waifu_last_error, for a
+        /// attribute that is not this task's, a value of another type or one out of range; the
+        /// attribute is then as it was.
+        /// </summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_request_set_int_attribute(
+            IntPtr request, RequestAttribute attribute, long value);
 
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong waifu_pipeline_run_text_to_speech_async(
-            IntPtr pipeline,
-            ref TextToSpeechRequest request,
-            IntPtr user,
-            ProgressCallback onProgress,
-            AudioCallback onComplete);
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_request_set_float_attribute(
+            IntPtr request, RequestAttribute attribute, double value);
+
+        /// <summary>A NUL-terminated UTF-8 string, from <see cref="Utf8.Bytes"/>.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_request_set_string_attribute(
+            IntPtr request, RequestAttribute attribute, byte[] value);
+
+        /// <summary>The pixels <c>value.Rgb</c> points at are pinned for the call, and copied.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_request_set_image_attribute(
+            IntPtr request, RequestAttribute attribute, ref Image value);
+
+        /// <summary>The samples <c>value.Samples</c> points at are pinned for the call, and copied.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_request_set_audio_attribute(
+            IntPtr request, RequestAttribute attribute, ref Audio value);
+
+        // -- tasks -------------------------------------------------------------------------------
+
+        /// <summary>
+        /// The next thing that happened to the task, waiting up to <paramref name="timeoutMs"/>
+        /// for it. END once it has ended, and END for every call after. One thread at a time.
+        /// </summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        public static extern EventType waifu_task_next_event(IntPtr task, uint timeoutMs);
+
+        /// <summary>After the step it is on; it then ends with WAIFU_CANCELLED. Nothing once it has ended.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void waifu_task_cancel(IntPtr task);
+
+        /// <summary>
+        /// Cancels a task that has not ended; every pointer it handed out is then gone. Must not
+        /// race with any other call on the same task.
+        /// </summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void waifu_task_free(IntPtr task);
+
+        /// <summary>False where the attribute is not there; the value is then untouched.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_task_get_int_attribute(
+            IntPtr task, TaskAttribute attribute, out long value);
 
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-        public static extern ulong waifu_pipeline_run_voice_conversion_async(
-            IntPtr pipeline,
-            ref VoiceConversionRequest request,
-            IntPtr user,
-            ProgressCallback onProgress,
-            AudioCallback onComplete);
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_task_get_float_attribute(
+            IntPtr task, TaskAttribute attribute, out double value);
+
+        /// <summary>Zero where it is not there; valid until waifu_task_free.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr waifu_task_get_string_attribute(IntPtr task, TaskAttribute attribute);
+
+        /// <summary>The pixels are the task's, valid until waifu_task_free.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_task_get_image_attribute(
+            IntPtr task, TaskAttribute attribute, out Image value);
+
+        /// <summary>The samples are the task's, valid until waifu_task_free.</summary>
+        [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.U1)]
+        public static extern bool waifu_task_get_audio_attribute(
+            IntPtr task, TaskAttribute attribute, out Audio value);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -545,7 +581,10 @@ namespace Libwaifu.Gui.Engine
             return zeroed;
         }
 
-        /// <summary>A string the library handed over, copied before the callback returns.</summary>
+        /// <summary>
+        /// A string the library handed over, copied while it is valid: before a callback returns,
+        /// or before the task or model it came from is freed.
+        /// </summary>
         public static string Read(IntPtr pointer)
         {
             if (pointer == IntPtr.Zero)

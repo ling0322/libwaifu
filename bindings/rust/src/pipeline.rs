@@ -19,13 +19,13 @@
 
 //! Pipelines, jobs, and what they are asked for and hand back.
 //!
-//! A job's state outlives its [`Job`]: each run hands the library an `Arc` of it, which the
-//! library's callbacks only copy into -- no caller code runs on a pipeline's thread -- and which
-//! `on_complete`, called exactly once for every job given an id, takes back.
+//! A job is the library's task, read to its end by a thread of this crate's: the library calls
+//! nothing of a caller's, so that thread is what wakes a `Job` waiting for its next event. It
+//! frees the task once it has read its end.
 
 use std::collections::{HashSet, VecDeque};
 use std::convert::Infallible;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::CString;
 use std::future::{Future, IntoFuture};
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -546,7 +546,7 @@ pub enum Event<O, P = Infallible> {
     Done(Result<O>),
 }
 
-/// What a job's callbacks have handed over and its `Job` has not read yet.
+/// What a job's reader has handed over and its `Job` has not read yet.
 struct State<O, P> {
     events: VecDeque<Event<O, P>>,
     waker: Option<Waker>,
@@ -554,7 +554,7 @@ struct State<O, P> {
     walked: bool,
 }
 
-/// What the library's callbacks write into: one `Arc` of it is the library's until `on_complete`.
+/// What a job's reader writes into and its `Job` reads.
 struct Shared<O, P> {
     state: Mutex<State<O, P>>,
 }
@@ -596,153 +596,200 @@ impl<O, P> Shared<O, P> {
     }
 }
 
-/// The user data a job's callbacks are handed: its `Shared`, the library's reference to it.
-fn user_data<O, P>(shared: &Arc<Shared<O, P>>) -> *mut c_void {
-    Arc::into_raw(Arc::clone(shared)) as *mut c_void
+/// The library's task, until its reader has read it to the end and freed it. Cancelling and
+/// freeing are both done holding the lock: a task must not be freed while another call is on it.
+struct TaskHandle {
+    task: Mutex<Option<TaskPointer>>,
+    functions: &'static sys::Functions,
 }
 
-/// Takes back the library's reference: for `on_complete`, and for a call that was refused.
-unsafe fn taken_back<O, P>(user_data: *mut c_void) -> Arc<Shared<O, P>> {
-    Arc::from_raw(user_data as *const Shared<O, P>)
-}
+#[derive(Clone, Copy)]
+struct TaskPointer(*mut sys::WaifuTask);
 
-unsafe fn shared<'a, O, P>(user_data: *mut c_void) -> &'a Shared<O, P> {
-    &*(user_data as *const Shared<O, P>)
-}
+// The library's task may be read, waited on and cancelled from any thread.
+unsafe impl Send for TaskPointer {}
 
-unsafe extern "C" fn on_progress<O, P>(
-    user_data: *mut c_void,
-    progress: *const sys::WaifuProgress,
-) {
-    let progress = &*progress;
-    shared::<O, P>(user_data).hand_over(Event::Progress(Progress {
-        stage: Stage::from(progress.stage),
-        fraction: (progress.fraction >= 0.0).then_some(progress.fraction),
-        done: progress.done,
-        total: progress.total,
-        seconds: progress.seconds,
-    }));
-}
-
-unsafe fn audio_out(audio: &sys::WaifuAudio) -> Audio {
-    Audio {
-        samples: match audio.count {
-            0 => Vec::new(),
-            count => std::slice::from_raw_parts(audio.samples, count).to_vec(),
-        },
-        sample_rate: audio.sample_rate,
+impl TaskPointer {
+    /// The pointer, taken by a method so that a closure moves the whole `TaskPointer` -- which is
+    /// `Send` -- and not the field alone, which is not.
+    fn get(self) -> *mut sys::WaifuTask {
+        self.0
     }
 }
 
-unsafe fn rgba_out(image: &sys::WaifuRgbaImage) -> RgbaImage {
-    RgbaImage {
-        width: image.width,
-        height: image.height,
-        rgba: match image.len {
-            0 => Vec::new(),
-            len => std::slice::from_raw_parts(image.rgba, len).to_vec(),
-        },
+impl TaskHandle {
+    fn cancel(&self) {
+        let task = self.task.lock().unwrap_or_else(|held| held.into_inner());
+        if let Some(TaskPointer(task)) = *task {
+            unsafe { (self.functions.waifu_task_cancel)(task) };
+        }
+    }
+
+    fn free(&self) {
+        let mut task = self.task.lock().unwrap_or_else(|held| held.into_inner());
+        if let Some(TaskPointer(task)) = task.take() {
+            unsafe { (self.functions.waifu_task_free)(task) };
+        }
     }
 }
 
-unsafe extern "C" fn on_part(user_data: *mut c_void, part: *const sys::WaifuAudio) {
-    shared::<Audio, Audio>(user_data).hand_over(Event::Part(audio_out(&*part)));
-}
+/// What a task's attributes say, read once it has ended or as each event comes.
+mod read {
+    use super::*;
 
-/// What a status says: `Ok` for WAIFU_OK, the error otherwise.
-unsafe fn status_of(status: &sys::WaifuStatus) -> Result<()> {
-    match status.code {
-        sys::WAIFU_OK => Ok(()),
-        code => Err(Error {
-            code: ErrorCode::from_status(code),
-            message: text(status.message).unwrap_or_default(),
-        }),
+    pub unsafe fn int(
+        f: &sys::Functions,
+        task: *mut sys::WaifuTask,
+        attribute: i32,
+    ) -> Option<i64> {
+        let mut value = 0;
+        (f.waifu_task_get_int_attribute)(task, attribute, &mut value).then_some(value)
     }
-}
 
-/// Ends the job with `done`, giving back the library's reference.
-unsafe fn finish<O, P>(user_data: *mut c_void, done: Result<O>) {
-    taken_back::<O, P>(user_data).hand_over(Event::Done(done));
-}
+    pub unsafe fn float(
+        f: &sys::Functions,
+        task: *mut sys::WaifuTask,
+        attribute: i32,
+    ) -> Option<f64> {
+        let mut value = 0.0;
+        (f.waifu_task_get_float_attribute)(task, attribute, &mut value).then_some(value)
+    }
 
-unsafe extern "C" fn on_unit_complete(user_data: *mut c_void, result: *const sys::WaifuResult) {
-    finish::<(), Infallible>(user_data, status_of(&(*result).status));
-}
+    pub unsafe fn string(
+        f: &sys::Functions,
+        task: *mut sys::WaifuTask,
+        attribute: i32,
+    ) -> Option<String> {
+        text((f.waifu_task_get_string_attribute)(task, attribute))
+    }
 
-unsafe extern "C" fn on_image_complete(
-    user_data: *mut c_void,
-    result: *const sys::WaifuImageGenerationResult,
-) {
-    let result = &*result;
-    let done = status_of(&result.status).and_then(|()| match result.image.as_ref() {
-        Some(image) => Ok(Image {
+    pub unsafe fn audio(
+        f: &sys::Functions,
+        task: *mut sys::WaifuTask,
+        attribute: i32,
+    ) -> Option<Audio> {
+        let mut audio = sys::WaifuAudio {
+            samples: ptr::null(),
+            count: 0,
+            sample_rate: 0,
+        };
+        (f.waifu_task_get_audio_attribute)(task, attribute, &mut audio).then(|| Audio {
+            samples: match audio.count {
+                0 => Vec::new(),
+                count => std::slice::from_raw_parts(audio.samples, count).to_vec(),
+            },
+            sample_rate: audio.sample_rate,
+        })
+    }
+
+    pub unsafe fn image(
+        f: &sys::Functions,
+        task: *mut sys::WaifuTask,
+        attribute: i32,
+    ) -> Option<Image> {
+        let mut image = sys::WaifuImage {
+            width: 0,
+            height: 0,
+            rgb: ptr::null(),
+            len: 0,
+        };
+        (f.waifu_task_get_image_attribute)(task, attribute, &mut image).then(|| Image {
             width: image.width,
             height: image.height,
             rgb: match image.len {
                 0 => Vec::new(),
                 len => std::slice::from_raw_parts(image.rgb, len).to_vec(),
             },
-        }),
-        None => Err(missing("an image")),
-    });
-    finish::<Image, Infallible>(user_data, done);
-}
+        })
+    }
 
-unsafe extern "C" fn on_audio_complete<P>(
-    user_data: *mut c_void,
-    result: *const sys::WaifuAudioResult,
-) {
-    let result = &*result;
-    let done = status_of(&result.status).and_then(|()| match result.audio.as_ref() {
-        Some(audio) => Ok(audio_out(audio)),
-        None => Err(missing("audio")),
-    });
-    finish::<Audio, P>(user_data, done);
-}
+    pub unsafe fn int_at(
+        f: &sys::Functions,
+        task: *mut sys::WaifuTask,
+        attribute: i32,
+        index: usize,
+    ) -> Option<i64> {
+        let mut value = 0;
+        (f.waifu_task_get_int_attribute_at)(task, attribute, index, &mut value).then_some(value)
+    }
 
-unsafe extern "C" fn on_layers_complete(
-    user_data: *mut c_void,
-    result: *const sys::WaifuLayerDecompositionResult,
-) {
-    let result = &*result;
-    let done = status_of(&result.status).map(|()| {
-        let layers = match result.layer_count {
-            0 => &[][..],
-            count => std::slice::from_raw_parts(result.layers, count),
+    pub unsafe fn layer(
+        f: &sys::Functions,
+        task: *mut sys::WaifuTask,
+        index: usize,
+    ) -> Option<Layer> {
+        let int = |attribute| int_at(f, task, attribute, index);
+        let mut depth = 0.0;
+        let mut image = sys::WaifuRgbaImage {
+            width: 0,
+            height: 0,
+            rgba: ptr::null(),
+            len: 0,
         };
-        DecomposedImage {
-            canvas: result.canvas,
-            layers: layers
-                .iter()
-                .map(|layer| Layer {
-                    layer_type: LayerType::from(layer.r#type),
-                    id: layer.id,
-                    name: text(layer.name).unwrap_or_default(),
-                    left: layer.left,
-                    top: layer.top,
-                    image: rgba_out(&layer.image),
-                    depth: layer.depth,
-                    derived_from_id: (layer.derived_from_id != 0).then_some(layer.derived_from_id),
-                })
-                .collect(),
+        let found = (f.waifu_task_get_float_attribute_at)(
+            task,
+            sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DEPTH,
+            index,
+            &mut depth,
+        ) && (f.waifu_task_get_rgba_image_attribute_at)(
+            task,
+            sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_IMAGE,
+            index,
+            &mut image,
+        );
+        if !found {
+            return None;
         }
-    });
-    finish::<DecomposedImage, Infallible>(user_data, done);
-}
+        let derived_from_id = int(sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DERIVED_FROM_ID)?;
+        Some(Layer {
+            layer_type: LayerType::from(int(sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TYPE)? as i32),
+            id: int(sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_ID)? as u32,
+            name: text((f.waifu_task_get_string_attribute_at)(
+                task,
+                sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_NAME,
+                index,
+            ))
+            .unwrap_or_default(),
+            left: int(sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_LEFT)? as i32,
+            top: int(sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TOP)? as i32,
+            image: RgbaImage {
+                width: image.width,
+                height: image.height,
+                rgba: match image.len {
+                    0 => Vec::new(),
+                    len => std::slice::from_raw_parts(image.rgba, len).to_vec(),
+                },
+            },
+            depth: depth as f32,
+            derived_from_id: (derived_from_id != 0).then_some(derived_from_id as u32),
+        })
+    }
 
-unsafe extern "C" fn on_transcript_complete(
-    user_data: *mut c_void,
-    result: *const sys::WaifuSpeechToTextResult,
-) {
-    let result = &*result;
-    let done = status_of(&result.status).and_then(|()| match text(result.text) {
-        Some(said) => Ok(Transcript {
-            text: said,
-            language: text(result.language).unwrap_or_default(),
-        }),
-        None => Err(missing("a transcript")),
-    });
-    finish::<Transcript, Infallible>(user_data, done);
+    /// The progress the last PROGRESS event said.
+    pub unsafe fn progress(f: &sys::Functions, task: *mut sys::WaifuTask) -> Option<Progress> {
+        Some(Progress {
+            stage: Stage::from(int(f, task, sys::WAIFU_TASK_PROGRESS_STAGE)? as i32),
+            fraction: float(f, task, sys::WAIFU_TASK_PROGRESS_FRACTION),
+            done: int(f, task, sys::WAIFU_TASK_PROGRESS_DONE)? as u64,
+            total: int(f, task, sys::WAIFU_TASK_PROGRESS_TOTAL)? as u64,
+            seconds: float(f, task, sys::WAIFU_TASK_PROGRESS_SECONDS).unwrap_or(0.0),
+        })
+    }
+
+    /// How an ended task ended: `Ok` for WAIFU_OK, the error otherwise.
+    pub unsafe fn status(f: &sys::Functions, task: *mut sys::WaifuTask) -> Result<()> {
+        match int(f, task, sys::WAIFU_TASK_STATUS) {
+            Some(code) if code as i32 == sys::WAIFU_OK => Ok(()),
+            Some(code) => Err(Error {
+                code: ErrorCode::from_status(code as i32),
+                message: string(f, task, sys::WAIFU_TASK_STATUS_MESSAGE).unwrap_or_default(),
+            }),
+            None => Err(Error {
+                code: ErrorCode::Internal,
+                message: "the library said the job had ended, and had no status for it".into(),
+            }),
+        }
+    }
 }
 
 fn missing(what: &str) -> Error {
@@ -752,13 +799,80 @@ fn missing(what: &str) -> Error {
     }
 }
 
+/// How a job's reader reads its output and its parts.
+struct Reading<O, P> {
+    output: unsafe fn(&sys::Functions, *mut sys::WaifuTask) -> Result<O>,
+    part: unsafe fn(&sys::Functions, *mut sys::WaifuTask) -> Option<P>,
+}
+
+unsafe fn no_part(_: &sys::Functions, _: *mut sys::WaifuTask) -> Option<Infallible> {
+    None
+}
+
+unsafe fn nothing(_: &sys::Functions, _: *mut sys::WaifuTask) -> Result<()> {
+    Ok(())
+}
+
+/// Reads `task` to its end on a thread of its own, handing each event to `shared`, then frees it:
+/// the library calls nothing of ours, so something has to wait on it for a `Job`'s waker.
+fn read_to_the_end<O: Send + 'static, P: Send + 'static>(
+    handle: Arc<TaskHandle>,
+    task: TaskPointer,
+    shared: Arc<Shared<O, P>>,
+    reading: Reading<O, P>,
+) {
+    let f = handle.functions;
+    let (told, kept) = (Arc::clone(&shared), Arc::clone(&handle));
+    let read = move || {
+        let task = task.get();
+        loop {
+            match unsafe { (f.waifu_task_next_event)(task, sys::WAIFU_WAIT_FOREVER) } {
+                sys::WAIFU_EVENT_PROGRESS => {
+                    if let Some(progress) = unsafe { read::progress(f, task) } {
+                        shared.hand_over(Event::Progress(progress));
+                    }
+                }
+                sys::WAIFU_EVENT_AUDIO_PART => {
+                    if let Some(part) = unsafe { (reading.part)(f, task) } {
+                        shared.hand_over(Event::Part(part));
+                    }
+                }
+                sys::WAIFU_EVENT_END => {
+                    let done =
+                        unsafe { read::status(f, task).and_then(|()| (reading.output)(f, task)) };
+                    handle.free();
+                    shared.hand_over(Event::Done(done));
+                    return;
+                }
+                // NONE never comes without a timeout; anything else is a type this crate did not
+                // ask for, and is let go of.
+                _ => {}
+            }
+        }
+    };
+    if let Err(error) = std::thread::Builder::new()
+        .name("waifu-job".to_string())
+        .spawn(read)
+    {
+        // Without a reader the job would never be told its end: it is told now, and the task
+        // let go of.
+        kept.cancel();
+        kept.free();
+        told.hand_over(Event::Done(Err(Error {
+            code: ErrorCode::Internal,
+            message: format!("could not start a thread to wait on the job: {error}"),
+        })));
+    }
+}
+
 /// A job a pipeline was asked for. Dropped before its end, it is cancelled.
 ///
 /// Walk it with [`next`](Job::next) for its progress -- and a streaming reading's parts -- as they
 /// come, or `.await` it for its end alone.
 pub struct Job<O, P = Infallible> {
-    pipeline: Arc<Inner>,
-    id: sys::WaifuJob,
+    /// Kept so that the pipeline outlives every job of it.
+    _pipeline: Arc<Inner>,
+    handle: Arc<TaskHandle>,
     shared: Arc<Shared<O, P>>,
     /// Whether `Done` has been read.
     ended: bool,
@@ -791,7 +905,7 @@ impl<O, P> Job<O, P> {
 
     /// Stops it: after the step it is on where it runs, before it starts where it waits.
     pub fn cancel(&self) {
-        unsafe { (self.pipeline.functions.waifu_pipeline_cancel)(self.pipeline.handle, self.id) };
+        self.handle.cancel();
     }
 }
 
@@ -806,7 +920,7 @@ impl<O, P> Drop for Job<O, P> {
 impl<O, P> std::fmt::Debug for Job<O, P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Job")
-            .field("id", &self.id)
+            .field("ended", &self.ended)
             .finish_non_exhaustive()
     }
 }
@@ -875,27 +989,170 @@ unsafe impl Sync for Inner {}
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        // Returns once every job has had its on_complete, which runs nothing of the caller's.
+        // Returns once every task has ended; each job's reader then reads its end and frees it.
         unsafe { (self.functions.waifu_pipeline_free)(self.handle) };
     }
 }
 
+/// What a request is made of on its way to the library. Public in a private module: a sealed
+/// trait names it, and nothing outside the crate can.
+mod raw {
+    use super::*;
+
+    /// A request of the library's, set an attribute at a time and freed when this is dropped.
+    pub struct RawRequest {
+        pub(super) handle: *mut sys::WaifuRequest,
+        f: &'static sys::Functions,
+    }
+
+    impl Drop for RawRequest {
+        fn drop(&mut self) {
+            unsafe { (self.f.waifu_request_free)(self.handle) };
+        }
+    }
+
+    impl RawRequest {
+        pub(super) fn new(f: &'static sys::Functions, r#type: PipelineType) -> Result<RawRequest> {
+            let handle = unsafe { (f.waifu_request_new)(r#type.raw()) };
+            match handle.is_null() {
+                true => Err(Error::refused(f)),
+                false => Ok(RawRequest { handle, f }),
+            }
+        }
+
+        pub(super) fn checked(&self, set: bool) -> Result<()> {
+            match set {
+                true => Ok(()),
+                false => Err(Error::refused(self.f)),
+            }
+        }
+
+        pub(super) fn int(&self, attribute: sys::WaifuRequestAttribute, value: i64) -> Result<()> {
+            self.checked(unsafe {
+                (self.f.waifu_request_set_int_attribute)(self.handle, attribute, value)
+            })
+        }
+
+        pub(super) fn uint(&self, attribute: sys::WaifuRequestAttribute, value: u32) -> Result<()> {
+            self.int(attribute, value as i64)
+        }
+
+        pub(super) fn seed(&self, attribute: sys::WaifuRequestAttribute, value: u64) -> Result<()> {
+            self.int(attribute, value as i64)
+        }
+
+        pub(super) fn flag(
+            &self,
+            attribute: sys::WaifuRequestAttribute,
+            value: bool,
+        ) -> Result<()> {
+            self.int(attribute, value as i64)
+        }
+
+        pub(super) fn float(
+            &self,
+            attribute: sys::WaifuRequestAttribute,
+            value: f32,
+        ) -> Result<()> {
+            self.checked(unsafe {
+                (self.f.waifu_request_set_float_attribute)(self.handle, attribute, value as f64)
+            })
+        }
+
+        pub(super) fn string(
+            &self,
+            attribute: sys::WaifuRequestAttribute,
+            value: &str,
+            what: &str,
+        ) -> Result<()> {
+            let value = c_text(value, what)?;
+            self.checked(unsafe {
+                (self.f.waifu_request_set_string_attribute)(self.handle, attribute, value.as_ptr())
+            })
+        }
+
+        pub(super) fn optional_string(
+            &self,
+            attribute: sys::WaifuRequestAttribute,
+            value: &Option<String>,
+            what: &str,
+        ) -> Result<()> {
+            match value {
+                Some(value) => self.string(attribute, value, what),
+                None => Ok(()),
+            }
+        }
+
+        pub(super) fn image(
+            &self,
+            attribute: sys::WaifuRequestAttribute,
+            image: &Image,
+        ) -> Result<()> {
+            let raw = image_in(image);
+            self.checked(unsafe {
+                (self.f.waifu_request_set_image_attribute)(self.handle, attribute, &raw)
+            })
+        }
+
+        pub(super) fn audio(
+            &self,
+            attribute: sys::WaifuRequestAttribute,
+            audio: &Audio,
+        ) -> Result<()> {
+            let raw = audio_in(audio);
+            self.checked(unsafe {
+                (self.f.waifu_request_set_audio_attribute)(self.handle, attribute, &raw)
+            })
+        }
+
+        pub(super) fn optional_audio(
+            &self,
+            attribute: sys::WaifuRequestAttribute,
+            audio: &Option<Audio>,
+        ) -> Result<()> {
+            match audio {
+                Some(audio) => self.audio(attribute, audio),
+                None => Ok(()),
+            }
+        }
+    }
+}
+
+use raw::RawRequest;
+
 mod sealed {
     use super::*;
 
-    /// How a task's run is asked of the library. Not nameable outside this crate, so the six tasks
-    /// below are all there are.
+    /// How a task's run is asked of the library and read back. Not nameable outside this crate,
+    /// so the six tasks below are all there are.
     pub trait Sealed {
-        /// Asks for the run, with `user_data` for its callbacks: the job's id, 0 where refused.
+        /// The library's request for `request`, every attribute set.
+        fn request(
+            f: &'static sys::Functions,
+            request: &<Self as Task>::Request,
+        ) -> Result<RawRequest>
+        where
+            Self: Task;
+
+        /// The output of a task that ended well.
         ///
         /// # Safety
-        /// `user_data` is a `Shared<Self::Output, Self::Part>` the library's callbacks may take.
-        unsafe fn start(
-            functions: &sys::Functions,
-            pipeline: *mut sys::WaifuPipeline,
-            request: &<Self as Task>::Request,
-            user_data: *mut c_void,
-        ) -> Result<sys::WaifuJob>
+        /// `task` is a live task of this task's run that has ended.
+        unsafe fn output(
+            f: &sys::Functions,
+            task: *mut sys::WaifuTask,
+        ) -> Result<<Self as Task>::Output>
+        where
+            Self: Task;
+
+        /// The part the last AUDIO_PART event said, for a task that has parts.
+        ///
+        /// # Safety
+        /// `task` is a live task of this task's run.
+        unsafe fn part(
+            f: &sys::Functions,
+            task: *mut sys::WaifuTask,
+        ) -> Option<<Self as Task>::Part>
         where
             Self: Task;
     }
@@ -907,9 +1164,9 @@ pub trait Task: sealed::Sealed + 'static {
     /// `WAIFU_PIPELINE_*`.
     const TYPE: PipelineType;
     type Request;
-    type Output;
+    type Output: Send + 'static;
     /// What a streaming task hands over; `Infallible` for the rest.
-    type Part;
+    type Part: Send + 'static;
 }
 
 /// `ImageGenerationRequest` -> `Image`.
@@ -978,14 +1235,6 @@ fn c_text(text: &str, what: &str) -> Result<CString> {
     CString::new(text).map_err(|_| Error::invalid(format!("{what} has a NUL in it")))
 }
 
-fn c_optional(text: &Option<String>, what: &str) -> Result<Option<CString>> {
-    text.as_deref().map(|text| c_text(text, what)).transpose()
-}
-
-fn c_pointer(text: &Option<CString>) -> *const c_char {
-    text.as_ref().map_or(ptr::null(), |text| text.as_ptr())
-}
-
 fn image_in(image: &Image) -> sys::WaifuImage {
     sys::WaifuImage {
         width: image.width,
@@ -1003,224 +1252,285 @@ fn audio_in(audio: &Audio) -> sys::WaifuAudio {
     }
 }
 
-fn optional<T>(value: &Option<T>) -> *const T {
-    value
-        .as_ref()
-        .map_or(ptr::null(), |value| value as *const T)
-}
-
-fn struct_size<T>() -> u32 {
-    std::mem::size_of::<T>() as u32
+unsafe fn audio_output(
+    f: &sys::Functions,
+    task: *mut sys::WaifuTask,
+    attribute: sys::WaifuTaskAttribute,
+) -> Result<Audio> {
+    read::audio(f, task, attribute).ok_or_else(|| missing("audio"))
 }
 
 impl sealed::Sealed for ImageGeneration {
-    unsafe fn start(
-        f: &sys::Functions,
-        pipeline: *mut sys::WaifuPipeline,
-        request: &ImageGenerationRequest,
-        user_data: *mut c_void,
-    ) -> Result<sys::WaifuJob> {
-        let prompt = c_text(&request.prompt, "the prompt")?;
-        let negative = c_text(&request.negative, "the negative prompt")?;
-        let start = request
-            .start_image
-            .as_ref()
-            .map(|start| image_in(&start.image));
-        let control = request
-            .control_image
-            .as_ref()
-            .map(|control| image_in(&control.image));
-        let keys = request
-            .prompt_images
-            .iter()
-            .map(|prompt_image| c_text(&prompt_image.key, "a prompt image's key"))
-            .collect::<Result<Vec<_>>>()?;
-        let images: Vec<sys::WaifuImage> = request
-            .prompt_images
-            .iter()
-            .map(|prompt_image| image_in(&prompt_image.image))
-            .collect();
-        let prompt_images: Vec<sys::WaifuPromptImage> = keys
-            .iter()
-            .zip(&images)
-            .map(|(key, image)| sys::WaifuPromptImage {
-                key: key.as_ptr(),
-                image,
-            })
-            .collect();
-        let raw = sys::WaifuImageGenerationRequest {
-            struct_size: struct_size::<sys::WaifuImageGenerationRequest>(),
-            prompt: prompt.as_ptr(),
-            negative: negative.as_ptr(),
-            width: request.width,
-            height: request.height,
-            steps: request.steps,
-            guidance: request.guidance,
-            seed: request.seed,
-            start_image: optional(&start),
-            start_image_strength: request.start_image.as_ref().map_or(0.0, |s| s.strength),
-            control_image: optional(&control),
-            control_image_scale: request.control_image.as_ref().map_or(0.0, |c| c.scale),
-            prompt_images: match prompt_images.is_empty() {
-                true => ptr::null(),
-                false => prompt_images.as_ptr(),
-            },
-            prompt_image_count: prompt_images.len(),
-        };
-        Ok((f.waifu_pipeline_run_image_generation_async)(
-            pipeline,
-            &raw,
-            user_data,
-            Some(on_progress::<Image, Infallible>),
-            Some(on_image_complete),
-        ))
+    fn request(f: &'static sys::Functions, request: &ImageGenerationRequest) -> Result<RawRequest> {
+        let raw = RawRequest::new(f, Self::TYPE)?;
+        raw.string(
+            sys::WAIFU_REQUEST_IMAGE_GENERATION_PROMPT,
+            &request.prompt,
+            "the prompt",
+        )?;
+        if !request.negative.is_empty() {
+            raw.string(
+                sys::WAIFU_REQUEST_IMAGE_GENERATION_NEGATIVE,
+                &request.negative,
+                "the negative prompt",
+            )?;
+        }
+        raw.uint(sys::WAIFU_REQUEST_IMAGE_GENERATION_WIDTH, request.width)?;
+        raw.uint(sys::WAIFU_REQUEST_IMAGE_GENERATION_HEIGHT, request.height)?;
+        raw.uint(sys::WAIFU_REQUEST_IMAGE_GENERATION_STEPS, request.steps)?;
+        raw.float(
+            sys::WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE,
+            request.guidance,
+        )?;
+        raw.seed(sys::WAIFU_REQUEST_IMAGE_GENERATION_SEED, request.seed)?;
+        if let Some(start) = &request.start_image {
+            raw.image(
+                sys::WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE,
+                &start.image,
+            )?;
+            raw.float(
+                sys::WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE_STRENGTH,
+                start.strength,
+            )?;
+        }
+        if let Some(control) = &request.control_image {
+            raw.image(
+                sys::WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE,
+                &control.image,
+            )?;
+            raw.float(
+                sys::WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE_SCALE,
+                control.scale,
+            )?;
+        }
+        for prompt_image in &request.prompt_images {
+            let key = c_text(&prompt_image.key, "a prompt image's key")?;
+            let image = image_in(&prompt_image.image);
+            raw.checked(unsafe {
+                (f.waifu_request_add_prompt_image)(raw.handle, key.as_ptr(), &image)
+            })?;
+        }
+        Ok(raw)
+    }
+
+    unsafe fn output(f: &sys::Functions, task: *mut sys::WaifuTask) -> Result<Image> {
+        read::image(f, task, sys::WAIFU_TASK_IMAGE_GENERATION_IMAGE).ok_or_else(|| missing("image"))
+    }
+
+    unsafe fn part(_: &sys::Functions, _: *mut sys::WaifuTask) -> Option<Infallible> {
+        None
     }
 }
 
 impl sealed::Sealed for TextToSpeech {
-    unsafe fn start(
-        f: &sys::Functions,
-        pipeline: *mut sys::WaifuPipeline,
-        request: &TextToSpeechRequest,
-        user_data: *mut c_void,
-    ) -> Result<sys::WaifuJob> {
-        let said = c_text(&request.text, "the text")?;
-        let style = c_optional(&request.style, "the style")?;
-        let words = c_optional(&request.reference_transcript, "the reference transcript")?;
-        let reference = request.reference.as_ref().map(audio_in);
-        let raw = sys::WaifuTextToSpeechRequest {
-            struct_size: struct_size::<sys::WaifuTextToSpeechRequest>(),
-            text: said.as_ptr(),
-            reference: optional(&reference),
-            speed: request.speed,
-            temperature: request.temperature,
-            style: c_pointer(&style),
-            seed: request.seed,
-            reference_transcript: c_pointer(&words),
-        };
-        Ok((f.waifu_pipeline_run_text_to_speech_async)(
-            pipeline,
-            &raw,
-            user_data,
-            Some(on_progress::<Audio, Infallible>),
-            Some(on_audio_complete::<Infallible>),
-        ))
+    fn request(f: &'static sys::Functions, request: &TextToSpeechRequest) -> Result<RawRequest> {
+        let raw = RawRequest::new(f, Self::TYPE)?;
+        raw.string(
+            sys::WAIFU_REQUEST_TEXT_TO_SPEECH_TEXT,
+            &request.text,
+            "the text",
+        )?;
+        raw.optional_audio(
+            sys::WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE,
+            &request.reference,
+        )?;
+        raw.optional_string(
+            sys::WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT,
+            &request.reference_transcript,
+            "the reference transcript",
+        )?;
+        raw.float(sys::WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED, request.speed)?;
+        raw.float(
+            sys::WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE,
+            request.temperature,
+        )?;
+        raw.optional_string(
+            sys::WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE,
+            &request.style,
+            "the style",
+        )?;
+        raw.seed(sys::WAIFU_REQUEST_TEXT_TO_SPEECH_SEED, request.seed)?;
+        Ok(raw)
+    }
+
+    unsafe fn output(f: &sys::Functions, task: *mut sys::WaifuTask) -> Result<Audio> {
+        audio_output(f, task, sys::WAIFU_TASK_TEXT_TO_SPEECH_AUDIO)
+    }
+
+    unsafe fn part(_: &sys::Functions, _: *mut sys::WaifuTask) -> Option<Infallible> {
+        None
     }
 }
 
 impl sealed::Sealed for StreamingTextToSpeech {
-    unsafe fn start(
-        f: &sys::Functions,
-        pipeline: *mut sys::WaifuPipeline,
+    fn request(
+        f: &'static sys::Functions,
         request: &StreamingTextToSpeechRequest,
-        user_data: *mut c_void,
-    ) -> Result<sys::WaifuJob> {
-        let said = c_text(&request.text, "the text")?;
-        let style = c_optional(&request.style, "the style")?;
-        let words = c_optional(&request.reference_transcript, "the reference transcript")?;
-        let reference = request.reference.as_ref().map(audio_in);
-        let raw = sys::WaifuStreamingTextToSpeechRequest {
-            struct_size: struct_size::<sys::WaifuStreamingTextToSpeechRequest>(),
-            text: said.as_ptr(),
-            reference: optional(&reference),
-            temperature: request.temperature,
-            style: c_pointer(&style),
-            seed: request.seed,
-            reference_transcript: c_pointer(&words),
-        };
-        Ok((f.waifu_pipeline_run_streaming_text_to_speech_async)(
-            pipeline,
-            &raw,
-            user_data,
-            Some(on_progress::<Audio, Audio>),
-            Some(on_part),
-            Some(on_audio_complete::<Audio>),
-        ))
+    ) -> Result<RawRequest> {
+        let raw = RawRequest::new(f, Self::TYPE)?;
+        raw.string(
+            sys::WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEXT,
+            &request.text,
+            "the text",
+        )?;
+        raw.optional_audio(
+            sys::WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE,
+            &request.reference,
+        )?;
+        raw.optional_string(
+            sys::WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT,
+            &request.reference_transcript,
+            "the reference transcript",
+        )?;
+        raw.float(
+            sys::WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE,
+            request.temperature,
+        )?;
+        raw.optional_string(
+            sys::WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE,
+            &request.style,
+            "the style",
+        )?;
+        raw.seed(
+            sys::WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED,
+            request.seed,
+        )?;
+        Ok(raw)
+    }
+
+    unsafe fn output(f: &sys::Functions, task: *mut sys::WaifuTask) -> Result<Audio> {
+        audio_output(f, task, sys::WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO)
+    }
+
+    unsafe fn part(f: &sys::Functions, task: *mut sys::WaifuTask) -> Option<Audio> {
+        read::audio(f, task, sys::WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART)
     }
 }
 
 impl sealed::Sealed for SpeechToText {
-    unsafe fn start(
-        f: &sys::Functions,
-        pipeline: *mut sys::WaifuPipeline,
-        request: &SpeechToTextRequest,
-        user_data: *mut c_void,
-    ) -> Result<sys::WaifuJob> {
-        let audio = audio_in(&request.audio);
-        let language = c_optional(&request.language, "the language")?;
-        let context = c_text(&request.context, "the context")?;
-        let raw = sys::WaifuSpeechToTextRequest {
-            struct_size: struct_size::<sys::WaifuSpeechToTextRequest>(),
-            audio: &audio,
-            language: c_pointer(&language),
-            context: context.as_ptr(),
-        };
-        Ok((f.waifu_pipeline_run_speech_to_text_async)(
-            pipeline,
-            &raw,
-            user_data,
-            Some(on_progress::<Transcript, Infallible>),
-            Some(on_transcript_complete),
-        ))
+    fn request(f: &'static sys::Functions, request: &SpeechToTextRequest) -> Result<RawRequest> {
+        let raw = RawRequest::new(f, Self::TYPE)?;
+        raw.audio(sys::WAIFU_REQUEST_SPEECH_TO_TEXT_AUDIO, &request.audio)?;
+        raw.optional_string(
+            sys::WAIFU_REQUEST_SPEECH_TO_TEXT_LANGUAGE,
+            &request.language,
+            "the language",
+        )?;
+        if !request.context.is_empty() {
+            raw.string(
+                sys::WAIFU_REQUEST_SPEECH_TO_TEXT_CONTEXT,
+                &request.context,
+                "the context",
+            )?;
+        }
+        Ok(raw)
+    }
+
+    unsafe fn output(f: &sys::Functions, task: *mut sys::WaifuTask) -> Result<Transcript> {
+        match read::string(f, task, sys::WAIFU_TASK_SPEECH_TO_TEXT_TEXT) {
+            Some(said) => Ok(Transcript {
+                text: said,
+                language: read::string(f, task, sys::WAIFU_TASK_SPEECH_TO_TEXT_LANGUAGE)
+                    .unwrap_or_default(),
+            }),
+            None => Err(missing("transcript")),
+        }
+    }
+
+    unsafe fn part(_: &sys::Functions, _: *mut sys::WaifuTask) -> Option<Infallible> {
+        None
     }
 }
 
 impl sealed::Sealed for VoiceConversion {
-    unsafe fn start(
-        f: &sys::Functions,
-        pipeline: *mut sys::WaifuPipeline,
-        request: &VoiceConversionRequest,
-        user_data: *mut c_void,
-    ) -> Result<sys::WaifuJob> {
-        let (source, reference) = (audio_in(&request.source), audio_in(&request.reference));
-        let raw = sys::WaifuVoiceConversionRequest {
-            struct_size: struct_size::<sys::WaifuVoiceConversionRequest>(),
-            source: &source,
-            reference: &reference,
-            steps: request.steps,
-            convert_style: request.convert_style,
-            seed: request.seed,
-        };
-        Ok((f.waifu_pipeline_run_voice_conversion_async)(
-            pipeline,
-            &raw,
-            user_data,
-            Some(on_progress::<Audio, Infallible>),
-            Some(on_audio_complete::<Infallible>),
-        ))
+    fn request(f: &'static sys::Functions, request: &VoiceConversionRequest) -> Result<RawRequest> {
+        let raw = RawRequest::new(f, Self::TYPE)?;
+        raw.audio(sys::WAIFU_REQUEST_VOICE_CONVERSION_SOURCE, &request.source)?;
+        raw.audio(
+            sys::WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE,
+            &request.reference,
+        )?;
+        raw.uint(sys::WAIFU_REQUEST_VOICE_CONVERSION_STEPS, request.steps)?;
+        raw.flag(
+            sys::WAIFU_REQUEST_VOICE_CONVERSION_CONVERT_STYLE,
+            request.convert_style,
+        )?;
+        raw.seed(sys::WAIFU_REQUEST_VOICE_CONVERSION_SEED, request.seed)?;
+        Ok(raw)
+    }
+
+    unsafe fn output(f: &sys::Functions, task: *mut sys::WaifuTask) -> Result<Audio> {
+        audio_output(f, task, sys::WAIFU_TASK_VOICE_CONVERSION_AUDIO)
+    }
+
+    unsafe fn part(_: &sys::Functions, _: *mut sys::WaifuTask) -> Option<Infallible> {
+        None
     }
 }
 
 impl sealed::Sealed for LayerDecomposition {
-    unsafe fn start(
-        f: &sys::Functions,
-        pipeline: *mut sys::WaifuPipeline,
+    fn request(
+        f: &'static sys::Functions,
         request: &LayerDecompositionRequest,
-        user_data: *mut c_void,
-    ) -> Result<sys::WaifuJob> {
+    ) -> Result<RawRequest> {
+        let raw = RawRequest::new(f, Self::TYPE)?;
         let image = sys::WaifuRgbaImage {
             width: request.image.width,
             height: request.image.height,
             rgba: request.image.rgba.as_ptr(),
             len: request.image.rgba.len(),
         };
-        let raw = sys::WaifuLayerDecompositionRequest {
-            struct_size: struct_size::<sys::WaifuLayerDecompositionRequest>(),
-            image: &image,
-            steps: request.steps,
-            depth_steps: request.depth_steps,
-            resolution: request.resolution,
-            split_pairs: request.split_pairs,
-            stratify_layers: request.stratify_layers,
-            seed: request.seed,
-        };
-        Ok((f.waifu_pipeline_run_layer_decomposition_async)(
-            pipeline,
-            &raw,
-            user_data,
-            Some(on_progress::<DecomposedImage, Infallible>),
-            Some(on_layers_complete),
-        ))
+        raw.checked(unsafe {
+            (f.waifu_request_set_rgba_image_attribute)(
+                raw.handle,
+                sys::WAIFU_REQUEST_LAYER_DECOMPOSITION_IMAGE,
+                &image,
+            )
+        })?;
+        // 0 is this crate's "the model's own", which an unset attribute is.
+        for (attribute, value) in [
+            (sys::WAIFU_REQUEST_LAYER_DECOMPOSITION_STEPS, request.steps),
+            (
+                sys::WAIFU_REQUEST_LAYER_DECOMPOSITION_DEPTH_STEPS,
+                request.depth_steps,
+            ),
+            (
+                sys::WAIFU_REQUEST_LAYER_DECOMPOSITION_RESOLUTION,
+                request.resolution,
+            ),
+        ] {
+            if value != 0 {
+                raw.uint(attribute, value)?;
+            }
+        }
+        raw.flag(
+            sys::WAIFU_REQUEST_LAYER_DECOMPOSITION_SPLIT_PAIRS,
+            request.split_pairs,
+        )?;
+        raw.flag(
+            sys::WAIFU_REQUEST_LAYER_DECOMPOSITION_STRATIFY_LAYERS,
+            request.stratify_layers,
+        )?;
+        raw.seed(sys::WAIFU_REQUEST_LAYER_DECOMPOSITION_SEED, request.seed)?;
+        Ok(raw)
+    }
+
+    unsafe fn output(f: &sys::Functions, task: *mut sys::WaifuTask) -> Result<DecomposedImage> {
+        let canvas = read::int(f, task, sys::WAIFU_TASK_LAYER_DECOMPOSITION_CANVAS)
+            .ok_or_else(|| missing("canvas"))?;
+        let count = read::int(f, task, sys::WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_COUNT)
+            .ok_or_else(|| missing("layer count"))?;
+        let layers = (0..count as usize)
+            .map(|index| read::layer(f, task, index).ok_or_else(|| missing("layer")))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(DecomposedImage {
+            canvas: canvas as u32,
+            layers,
+        })
+    }
+
+    unsafe fn part(_: &sys::Functions, _: *mut sys::WaifuTask) -> Option<Infallible> {
+        None
     }
 }
 
@@ -1273,28 +1583,31 @@ impl<T: Task> Pipeline<T> {
         Device::from_raw(raw)
     }
 
-    /// Asks the library with a fresh job state, keeping it as a `Job` where the call was taken.
-    fn job<O, P>(
+    /// The task the library started, kept as a `Job` with a reader of its own; refused where the
+    /// library returned none.
+    fn job<O: Send + 'static, P: Send + 'static>(
         &self,
-        start: impl FnOnce(*mut c_void) -> Result<sys::WaifuJob>,
+        task: *mut sys::WaifuTask,
+        reading: Reading<O, P>,
     ) -> Result<Job<O, P>> {
-        let shared = Shared::<O, P>::new();
-        let data = user_data(&shared);
-        let id = match start(data) {
-            Ok(id) => id,
-            Err(error) => {
-                drop(unsafe { taken_back::<O, P>(data) });
-                return Err(error);
-            }
-        };
-        if id == 0 {
-            // Refused: no callback is ever called, and the reference is ours again.
-            drop(unsafe { taken_back::<O, P>(data) });
-            return Err(Error::refused(self.inner.functions));
+        let f = self.inner.functions;
+        if task.is_null() {
+            return Err(Error::refused(f));
         }
+        let handle = Arc::new(TaskHandle {
+            task: Mutex::new(Some(TaskPointer(task))),
+            functions: f,
+        });
+        let shared = Shared::<O, P>::new();
+        read_to_the_end(
+            Arc::clone(&handle),
+            TaskPointer(task),
+            Arc::clone(&shared),
+            reading,
+        );
         Ok(Job {
-            pipeline: Arc::clone(&self.inner),
-            id,
+            _pipeline: Arc::clone(&self.inner),
+            handle,
             shared,
             ended: false,
         })
@@ -1305,33 +1618,41 @@ impl<T: Task> Pipeline<T> {
     /// returns.
     pub fn load_model(&self, model: &Model) -> Result<Job<()>> {
         let (f, handle) = (self.inner.functions, self.inner.handle);
-        self.job(|data| {
-            Ok(unsafe {
-                (f.waifu_pipeline_load_model_async)(
-                    handle,
-                    model.raw(),
-                    data,
-                    Some(on_progress::<(), Infallible>),
-                    Some(on_unit_complete),
-                )
-            })
-        })
+        let task = unsafe { (f.waifu_pipeline_load_model)(handle, model.raw()) };
+        self.job(
+            task,
+            Reading {
+                output: nothing,
+                part: no_part,
+            },
+        )
     }
 
     pub fn unload_model(&self) -> Result<Job<()>> {
         let (f, handle) = (self.inner.functions, self.inner.handle);
-        self.job(|data| {
-            Ok(unsafe {
-                (f.waifu_pipeline_unload_model_async)(handle, data, Some(on_unit_complete))
-            })
-        })
+        let task = unsafe { (f.waifu_pipeline_unload_model)(handle) };
+        self.job(
+            task,
+            Reading {
+                output: nothing,
+                part: no_part,
+            },
+        )
     }
 
     /// Runs the task. Refused at the call for a request that cannot be run; the request is copied,
     /// and may be dropped as soon as this returns.
     pub fn run(&self, request: &T::Request) -> Result<Job<T::Output, T::Part>> {
         let (f, handle) = (self.inner.functions, self.inner.handle);
-        self.job(|data| unsafe { T::start(f, handle, request, data) })
+        let raw = T::request(f, request)?;
+        let task = unsafe { (f.waifu_pipeline_run)(handle, raw.handle) };
+        self.job(
+            task,
+            Reading {
+                output: T::output,
+                part: T::part,
+            },
+        )
     }
 
     /// Stops what runs after its step and cancels what waits.

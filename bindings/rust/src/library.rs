@@ -24,7 +24,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::sys::{Functions, WAIFU_ABI_VERSION};
+use crate::sys::{Functions, WAIFU_ABI_VERSION_MAJOR, WAIFU_ABI_VERSION_MINOR};
 use crate::{Error, ErrorCode, Result};
 
 /// The file the platform's loader knows libwaifu by.
@@ -171,15 +171,18 @@ fn search() -> std::result::Result<Loaded, String> {
 
 fn found(handle: platform::Handle, path: PathBuf) -> std::result::Result<Loaded, String> {
     let functions = Functions::find(|name| platform::symbol(handle, name))
-        .map_err(|missing| format!("it has no {missing}: it is not libwaifu, or not ABI 5"))?;
+        .map_err(|missing| format!("it has no {missing}: it is not libwaifu, or not ABI 6"))?;
     checked(functions, path)
 }
 
 fn checked(functions: Functions, path: PathBuf) -> std::result::Result<Loaded, String> {
+    // A newer minor only adds what this crate never asks for; an older one may lack what it does.
     let abi = unsafe { (functions.waifu_abi_version)() };
-    if abi != WAIFU_ABI_VERSION {
+    let (major, minor) = (abi >> 16, abi & 0xffff);
+    if major != WAIFU_ABI_VERSION_MAJOR || minor < WAIFU_ABI_VERSION_MINOR {
         return Err(format!(
-            "it speaks ABI {abi}, and this crate speaks {WAIFU_ABI_VERSION}"
+            "it speaks ABI {major}.{minor}, and this crate speaks \
+             {WAIFU_ABI_VERSION_MAJOR}.{WAIFU_ABI_VERSION_MINOR} or a later minor of it"
         ));
     }
     Ok(Loaded { path, functions })

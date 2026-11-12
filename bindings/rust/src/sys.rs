@@ -17,7 +17,7 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! The mirror of `waifu.h`, ABI 5, and the table of its functions, for whatever the crate does not
+//! The mirror of `waifu.h`, ABI 6, and the table of its functions, for whatever the crate does not
 //! wrap.
 //!
 //! Every C enum here is a `c_int`, never a Rust `enum`: a number a newer library returns that a
@@ -28,7 +28,11 @@
 
 use std::ffi::{c_char, c_int, c_void};
 
-pub const WAIFU_ABI_VERSION: u32 = 5;
+/// The major version this crate speaks: a library of another major is refused.
+pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
+/// The minor version this crate was written against: a library of an older minor is refused.
+pub const WAIFU_ABI_VERSION_MINOR: u32 = 0;
+pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
 
 // -- enums -----------------------------------------------------------------------------------
 
@@ -63,6 +67,7 @@ pub const WAIFU_ERR_MODEL: WaifuStatusCode = 5;
 pub const WAIFU_ERR_NOT_LOADED: WaifuStatusCode = 6;
 pub const WAIFU_ERR_INTERNAL: WaifuStatusCode = 7;
 pub const WAIFU_ERR_DEVICE_UNAVAILABLE: WaifuStatusCode = 8;
+pub const WAIFU_ERR_UNKNOWN_ATTRIBUTE: WaifuStatusCode = 9;
 
 pub type WaifuStage = c_int;
 pub const WAIFU_STAGE_LOADING_WEIGHTS: WaifuStage = 1;
@@ -92,35 +97,35 @@ pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_READING_TEXT: WaifuStage = 600;
 pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_GENERATING_TOKENS: WaifuStage = 601;
 pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_SYNTHESIZING_AUDIO: WaifuStage = 602;
 
-pub type WaifuModelProperty = c_int;
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION: WaifuModelProperty = 1;
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH: WaifuModelProperty = 2;
-pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION: WaifuModelProperty = 3;
-pub const WAIFU_MODEL_SUPPORTS_LAYER_DECOMPOSITION: WaifuModelProperty = 4;
-pub const WAIFU_MODEL_SUPPORTS_SPEECH_TO_TEXT: WaifuModelProperty = 5;
-pub const WAIFU_MODEL_SUPPORTS_STREAMING_TEXT_TO_SPEECH: WaifuModelProperty = 6;
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_FROM_START_IMAGE: WaifuModelProperty = 100;
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_CONTROL_IMAGE: WaifuModelProperty = 101;
-pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_PROMPT_IMAGES: WaifuModelProperty = 102;
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE: WaifuModelProperty = 200;
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelProperty = 201;
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelProperty = 202;
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelProperty =
+pub type WaifuModelAttribute = c_int;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION: WaifuModelAttribute = 1;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH: WaifuModelAttribute = 2;
+pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION: WaifuModelAttribute = 3;
+pub const WAIFU_MODEL_SUPPORTS_LAYER_DECOMPOSITION: WaifuModelAttribute = 4;
+pub const WAIFU_MODEL_SUPPORTS_SPEECH_TO_TEXT: WaifuModelAttribute = 5;
+pub const WAIFU_MODEL_SUPPORTS_STREAMING_TEXT_TO_SPEECH: WaifuModelAttribute = 6;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_FROM_START_IMAGE: WaifuModelAttribute = 100;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_CONTROL_IMAGE: WaifuModelAttribute = 101;
+pub const WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_PROMPT_IMAGES: WaifuModelAttribute = 102;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE: WaifuModelAttribute = 200;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelAttribute = 201;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelAttribute = 202;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelAttribute =
     203;
-pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelProperty = 300;
-pub const WAIFU_MODEL_SIZE_ON_DISK: WaifuModelProperty = 1000;
-pub const WAIFU_MODEL_SAMPLE_RATE: WaifuModelProperty = 1001;
-pub const WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF: WaifuModelProperty = 1100;
-pub const WAIFU_MODEL_IMAGE_GENERATION_SAMPLER: WaifuModelProperty = 1101;
-pub const WAIFU_MODEL_IMAGE_GENERATION_MAX_PROMPT_IMAGES: WaifuModelProperty = 1102;
-pub const WAIFU_MODEL_LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF: WaifuModelProperty = 1400;
-pub const WAIFU_MODEL_SPEECH_TO_TEXT_LANGUAGES: WaifuModelProperty = 1500;
+pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 300;
+pub const WAIFU_MODEL_SIZE_ON_DISK: WaifuModelAttribute = 1000;
+pub const WAIFU_MODEL_SAMPLE_RATE: WaifuModelAttribute = 1001;
+pub const WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF: WaifuModelAttribute = 1100;
+pub const WAIFU_MODEL_IMAGE_GENERATION_SAMPLER: WaifuModelAttribute = 1101;
+pub const WAIFU_MODEL_IMAGE_GENERATION_MAX_PROMPT_IMAGES: WaifuModelAttribute = 1102;
+pub const WAIFU_MODEL_LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF: WaifuModelAttribute = 1400;
+pub const WAIFU_MODEL_SPEECH_TO_TEXT_LANGUAGES: WaifuModelAttribute = 1500;
 
-pub type WaifuDeviceProperty = c_int;
-pub const WAIFU_DEVICE_MEMORY_BUDGET: WaifuDeviceProperty = 1;
-pub const WAIFU_DEVICE_MEMORY_HELD: WaifuDeviceProperty = 2;
-pub const WAIFU_DEVICE_MEMORY_AVAILABLE: WaifuDeviceProperty = 3;
-pub const WAIFU_DEVICE_MEMORY_LIMIT: WaifuDeviceProperty = 4;
+pub type WaifuDeviceAttribute = c_int;
+pub const WAIFU_DEVICE_MEMORY_BUDGET: WaifuDeviceAttribute = 1;
+pub const WAIFU_DEVICE_MEMORY_HELD: WaifuDeviceAttribute = 2;
+pub const WAIFU_DEVICE_MEMORY_AVAILABLE: WaifuDeviceAttribute = 3;
+pub const WAIFU_DEVICE_MEMORY_LIMIT: WaifuDeviceAttribute = 4;
 
 pub type WaifuLayerType = c_int;
 pub const WAIFU_LAYER_PART: WaifuLayerType = 0;
@@ -128,7 +133,83 @@ pub const WAIFU_LAYER_STRATIFIED_NEAR: WaifuLayerType = 1;
 pub const WAIFU_LAYER_STRATIFIED_FAR: WaifuLayerType = 2;
 pub const WAIFU_LAYER_DEPTH: WaifuLayerType = 3;
 
-// -- the library -----------------------------------------------------------------------------
+pub type WaifuEventType = c_int;
+pub const WAIFU_EVENT_NONE: WaifuEventType = 0;
+pub const WAIFU_EVENT_PROGRESS: WaifuEventType = 1;
+pub const WAIFU_EVENT_AUDIO_PART: WaifuEventType = 2;
+pub const WAIFU_EVENT_END: WaifuEventType = 3;
+
+pub const WAIFU_WAIT_FOREVER: u32 = u32::MAX;
+
+pub type WaifuRequestAttribute = c_int;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_PROMPT: WaifuRequestAttribute = 100;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_NEGATIVE: WaifuRequestAttribute = 101;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_WIDTH: WaifuRequestAttribute = 102;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_HEIGHT: WaifuRequestAttribute = 103;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_STEPS: WaifuRequestAttribute = 104;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE: WaifuRequestAttribute = 105;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_SEED: WaifuRequestAttribute = 106;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE: WaifuRequestAttribute = 107;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE_STRENGTH: WaifuRequestAttribute = 108;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE: WaifuRequestAttribute = 109;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE_SCALE: WaifuRequestAttribute = 110;
+pub const WAIFU_REQUEST_IMAGE_GENERATION_PROMPT_IMAGES: WaifuRequestAttribute = 111;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_TEXT: WaifuRequestAttribute = 200;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE: WaifuRequestAttribute = 201;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT: WaifuRequestAttribute = 202;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED: WaifuRequestAttribute = 203;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttribute = 204;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 205;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 206;
+pub const WAIFU_REQUEST_VOICE_CONVERSION_SOURCE: WaifuRequestAttribute = 300;
+pub const WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE: WaifuRequestAttribute = 301;
+pub const WAIFU_REQUEST_VOICE_CONVERSION_STEPS: WaifuRequestAttribute = 302;
+pub const WAIFU_REQUEST_VOICE_CONVERSION_CONVERT_STYLE: WaifuRequestAttribute = 303;
+pub const WAIFU_REQUEST_VOICE_CONVERSION_SEED: WaifuRequestAttribute = 304;
+pub const WAIFU_REQUEST_LAYER_DECOMPOSITION_IMAGE: WaifuRequestAttribute = 400;
+pub const WAIFU_REQUEST_LAYER_DECOMPOSITION_STEPS: WaifuRequestAttribute = 401;
+pub const WAIFU_REQUEST_LAYER_DECOMPOSITION_DEPTH_STEPS: WaifuRequestAttribute = 402;
+pub const WAIFU_REQUEST_LAYER_DECOMPOSITION_RESOLUTION: WaifuRequestAttribute = 403;
+pub const WAIFU_REQUEST_LAYER_DECOMPOSITION_SPLIT_PAIRS: WaifuRequestAttribute = 404;
+pub const WAIFU_REQUEST_LAYER_DECOMPOSITION_STRATIFY_LAYERS: WaifuRequestAttribute = 405;
+pub const WAIFU_REQUEST_LAYER_DECOMPOSITION_SEED: WaifuRequestAttribute = 406;
+pub const WAIFU_REQUEST_SPEECH_TO_TEXT_AUDIO: WaifuRequestAttribute = 500;
+pub const WAIFU_REQUEST_SPEECH_TO_TEXT_LANGUAGE: WaifuRequestAttribute = 501;
+pub const WAIFU_REQUEST_SPEECH_TO_TEXT_CONTEXT: WaifuRequestAttribute = 502;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEXT: WaifuRequestAttribute = 600;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE: WaifuRequestAttribute = 601;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT: WaifuRequestAttribute = 602;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttribute = 603;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 604;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 605;
+
+pub type WaifuTaskAttribute = c_int;
+pub const WAIFU_TASK_STATUS: WaifuTaskAttribute = 1;
+pub const WAIFU_TASK_STATUS_MESSAGE: WaifuTaskAttribute = 2;
+pub const WAIFU_TASK_PROGRESS_STAGE: WaifuTaskAttribute = 10;
+pub const WAIFU_TASK_PROGRESS_DONE: WaifuTaskAttribute = 11;
+pub const WAIFU_TASK_PROGRESS_TOTAL: WaifuTaskAttribute = 12;
+pub const WAIFU_TASK_PROGRESS_FRACTION: WaifuTaskAttribute = 13;
+pub const WAIFU_TASK_PROGRESS_SECONDS: WaifuTaskAttribute = 14;
+pub const WAIFU_TASK_IMAGE_GENERATION_IMAGE: WaifuTaskAttribute = 100;
+pub const WAIFU_TASK_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 200;
+pub const WAIFU_TASK_VOICE_CONVERSION_AUDIO: WaifuTaskAttribute = 300;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_CANVAS: WaifuTaskAttribute = 400;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_COUNT: WaifuTaskAttribute = 401;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TYPE: WaifuTaskAttribute = 402;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_ID: WaifuTaskAttribute = 403;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_NAME: WaifuTaskAttribute = 404;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_LEFT: WaifuTaskAttribute = 405;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TOP: WaifuTaskAttribute = 406;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_IMAGE: WaifuTaskAttribute = 407;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DEPTH: WaifuTaskAttribute = 408;
+pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DERIVED_FROM_ID: WaifuTaskAttribute = 409;
+pub const WAIFU_TASK_SPEECH_TO_TEXT_TEXT: WaifuTaskAttribute = 500;
+pub const WAIFU_TASK_SPEECH_TO_TEXT_LANGUAGE: WaifuTaskAttribute = 501;
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART: WaifuTaskAttribute = 600;
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 601;
+
+// -- the four structs ------------------------------------------------------------------------
 
 #[repr(C)]
 pub struct WaifuLog {
@@ -141,7 +222,30 @@ pub struct WaifuLog {
 pub type WaifuLogCallback =
     Option<unsafe extern "C" fn(user_data: *mut c_void, log: *const WaifuLog)>;
 
-// -- models and pipelines --------------------------------------------------------------------
+#[repr(C)]
+pub struct WaifuImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+pub struct WaifuRgbaImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+pub struct WaifuAudio {
+    pub samples: *const f32,
+    pub count: usize,
+    pub sample_rate: u32,
+}
+
+// -- the handles -----------------------------------------------------------------------------
 
 #[repr(C)]
 pub struct WaifuModel {
@@ -153,196 +257,15 @@ pub struct WaifuPipeline {
     _opaque: [u8; 0],
 }
 
-pub type WaifuJob = u64;
-
 #[repr(C)]
-pub struct WaifuProgress {
-    pub stage: WaifuStage,
-    pub fraction: f64,
-    pub done: u64,
-    pub total: u64,
-    pub seconds: f64,
-}
-
-pub type WaifuProgressCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, progress: *const WaifuProgress)>;
-
-#[repr(C)]
-pub struct WaifuStatus {
-    pub code: WaifuStatusCode,
-    pub message: *const c_char,
+pub struct WaifuRequest {
+    _opaque: [u8; 0],
 }
 
 #[repr(C)]
-pub struct WaifuResult {
-    pub status: WaifuStatus,
+pub struct WaifuTask {
+    _opaque: [u8; 0],
 }
-
-pub type WaifuCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuResult)>;
-
-// -- image generation ------------------------------------------------------------------------
-
-#[repr(C)]
-pub struct WaifuImage {
-    pub width: u32,
-    pub height: u32,
-    pub rgb: *const u8,
-    pub len: usize,
-}
-
-#[repr(C)]
-pub struct WaifuPromptImage {
-    pub key: *const c_char,
-    pub image: *const WaifuImage,
-}
-
-#[repr(C)]
-pub struct WaifuImageGenerationRequest {
-    pub struct_size: u32,
-    pub prompt: *const c_char,
-    pub negative: *const c_char,
-    pub width: u32,
-    pub height: u32,
-    pub steps: u32,
-    pub guidance: f32,
-    pub seed: u64,
-    pub start_image: *const WaifuImage,
-    pub start_image_strength: f32,
-    pub control_image: *const WaifuImage,
-    pub control_image_scale: f32,
-    pub prompt_images: *const WaifuPromptImage,
-    pub prompt_image_count: usize,
-}
-
-#[repr(C)]
-pub struct WaifuImageGenerationResult {
-    pub status: WaifuStatus,
-    pub image: *const WaifuImage,
-}
-
-pub type WaifuImageGenerationCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuImageGenerationResult)>;
-
-// -- text to speech and voice conversion -----------------------------------------------------
-
-#[repr(C)]
-pub struct WaifuAudio {
-    pub samples: *const f32,
-    pub count: usize,
-    pub sample_rate: u32,
-}
-
-#[repr(C)]
-pub struct WaifuTextToSpeechRequest {
-    pub struct_size: u32,
-    pub text: *const c_char,
-    pub reference: *const WaifuAudio,
-    pub reference_transcript: *const c_char,
-    pub speed: f32,
-    pub temperature: f32,
-    pub style: *const c_char,
-    pub seed: u64,
-}
-
-#[repr(C)]
-pub struct WaifuVoiceConversionRequest {
-    pub struct_size: u32,
-    pub source: *const WaifuAudio,
-    pub reference: *const WaifuAudio,
-    pub steps: u32,
-    pub convert_style: bool,
-    pub seed: u64,
-}
-
-#[repr(C)]
-pub struct WaifuAudioResult {
-    pub status: WaifuStatus,
-    pub audio: *const WaifuAudio,
-}
-
-pub type WaifuAudioCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuAudioResult)>;
-
-#[repr(C)]
-pub struct WaifuStreamingTextToSpeechRequest {
-    pub struct_size: u32,
-    pub text: *const c_char,
-    pub reference: *const WaifuAudio,
-    pub reference_transcript: *const c_char,
-    pub temperature: f32,
-    pub style: *const c_char,
-    pub seed: u64,
-}
-
-pub type WaifuAudioPartCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, part: *const WaifuAudio)>;
-
-// -- layer decomposition ---------------------------------------------------------------------
-
-#[repr(C)]
-pub struct WaifuRgbaImage {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: *const u8,
-    pub len: usize,
-}
-
-#[repr(C)]
-pub struct WaifuLayerDecompositionRequest {
-    pub struct_size: u32,
-    pub image: *const WaifuRgbaImage,
-    pub steps: u32,
-    pub depth_steps: u32,
-    pub resolution: u32,
-    pub split_pairs: bool,
-    pub stratify_layers: bool,
-    pub seed: u64,
-}
-
-#[repr(C)]
-pub struct WaifuLayer {
-    pub r#type: WaifuLayerType,
-    pub id: u32,
-    pub name: *const c_char,
-    pub left: i32,
-    pub top: i32,
-    pub image: WaifuRgbaImage,
-    pub depth: f32,
-    pub derived_from_id: u32,
-}
-
-#[repr(C)]
-pub struct WaifuLayerDecompositionResult {
-    pub status: WaifuStatus,
-    pub canvas: u32,
-    pub layers: *const WaifuLayer,
-    pub layer_count: usize,
-}
-
-pub type WaifuLayerDecompositionCallback = Option<
-    unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuLayerDecompositionResult),
->;
-
-// -- speech to text --------------------------------------------------------------------------
-
-#[repr(C)]
-pub struct WaifuSpeechToTextRequest {
-    pub struct_size: u32,
-    pub audio: *const WaifuAudio,
-    pub language: *const c_char,
-    pub context: *const c_char,
-}
-
-#[repr(C)]
-pub struct WaifuSpeechToTextResult {
-    pub status: WaifuStatus,
-    pub text: *const c_char,
-    pub language: *const c_char,
-}
-
-pub type WaifuSpeechToTextCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuSpeechToTextResult)>;
 
 // -- the functions ---------------------------------------------------------------------------
 
@@ -386,71 +309,79 @@ functions! {
     waifu_set_log_level: fn(WaifuLogLevel);
 
     waifu_device_is_available: fn(WaifuDevice) -> bool;
-    waifu_device_get_int_property: fn(WaifuDevice, WaifuDeviceProperty, *mut i64) -> bool;
+    waifu_device_get_int_attribute: fn(WaifuDevice, WaifuDeviceAttribute, *mut i64) -> bool;
     waifu_device_set_memory_limit: fn(WaifuDevice, u64) -> bool;
 
     waifu_model_open: fn(*const c_char) -> *mut WaifuModel;
     waifu_model_free: fn(*mut WaifuModel);
-    waifu_model_get_int_property: fn(*const WaifuModel, WaifuModelProperty, *mut i64) -> bool;
-    waifu_model_get_string_property: fn(*const WaifuModel, WaifuModelProperty) -> *const c_char;
+    waifu_model_get_int_attribute: fn(*const WaifuModel, WaifuModelAttribute, *mut i64) -> bool;
+    waifu_model_get_string_attribute: fn(*const WaifuModel, WaifuModelAttribute) -> *const c_char;
 
     waifu_pipeline_new: fn(WaifuPipelineType, WaifuDevice) -> *mut WaifuPipeline;
     waifu_pipeline_free: fn(*mut WaifuPipeline);
     waifu_pipeline_get_type: fn(*const WaifuPipeline) -> WaifuPipelineType;
     waifu_pipeline_get_device: fn(*const WaifuPipeline) -> WaifuDevice;
-    waifu_pipeline_cancel: fn(*mut WaifuPipeline, WaifuJob);
     waifu_pipeline_cancel_all: fn(*mut WaifuPipeline);
-    waifu_pipeline_load_model_async: fn(
-        *mut WaifuPipeline,
-        *const WaifuModel,
-        *mut c_void,
-        WaifuProgressCallback,
-        WaifuCallback
-    ) -> WaifuJob;
-    waifu_pipeline_unload_model_async: fn(*mut WaifuPipeline, *mut c_void, WaifuCallback) -> WaifuJob;
-    waifu_pipeline_run_image_generation_async: fn(
-        *mut WaifuPipeline,
-        *const WaifuImageGenerationRequest,
-        *mut c_void,
-        WaifuProgressCallback,
-        WaifuImageGenerationCallback
-    ) -> WaifuJob;
-    waifu_pipeline_run_text_to_speech_async: fn(
-        *mut WaifuPipeline,
-        *const WaifuTextToSpeechRequest,
-        *mut c_void,
-        WaifuProgressCallback,
-        WaifuAudioCallback
-    ) -> WaifuJob;
-    waifu_pipeline_run_voice_conversion_async: fn(
-        *mut WaifuPipeline,
-        *const WaifuVoiceConversionRequest,
-        *mut c_void,
-        WaifuProgressCallback,
-        WaifuAudioCallback
-    ) -> WaifuJob;
-    waifu_pipeline_run_streaming_text_to_speech_async: fn(
-        *mut WaifuPipeline,
-        *const WaifuStreamingTextToSpeechRequest,
-        *mut c_void,
-        WaifuProgressCallback,
-        WaifuAudioPartCallback,
-        WaifuAudioCallback
-    ) -> WaifuJob;
-    waifu_pipeline_run_layer_decomposition_async: fn(
-        *mut WaifuPipeline,
-        *const WaifuLayerDecompositionRequest,
-        *mut c_void,
-        WaifuProgressCallback,
-        WaifuLayerDecompositionCallback
-    ) -> WaifuJob;
-    waifu_pipeline_run_speech_to_text_async: fn(
-        *mut WaifuPipeline,
-        *const WaifuSpeechToTextRequest,
-        *mut c_void,
-        WaifuProgressCallback,
-        WaifuSpeechToTextCallback
-    ) -> WaifuJob;
+    waifu_pipeline_load_model: fn(*mut WaifuPipeline, *const WaifuModel) -> *mut WaifuTask;
+    waifu_pipeline_unload_model: fn(*mut WaifuPipeline) -> *mut WaifuTask;
+    waifu_pipeline_run: fn(*mut WaifuPipeline, *const WaifuRequest) -> *mut WaifuTask;
+
+    waifu_request_new: fn(WaifuPipelineType) -> *mut WaifuRequest;
+    waifu_request_free: fn(*mut WaifuRequest);
+    waifu_request_get_type: fn(*const WaifuRequest) -> WaifuPipelineType;
+    waifu_request_set_int_attribute: fn(*mut WaifuRequest, WaifuRequestAttribute, i64) -> bool;
+    waifu_request_set_float_attribute: fn(*mut WaifuRequest, WaifuRequestAttribute, f64) -> bool;
+    waifu_request_set_string_attribute: fn(
+        *mut WaifuRequest,
+        WaifuRequestAttribute,
+        *const c_char
+    ) -> bool;
+    waifu_request_set_image_attribute: fn(
+        *mut WaifuRequest,
+        WaifuRequestAttribute,
+        *const WaifuImage
+    ) -> bool;
+    waifu_request_set_rgba_image_attribute: fn(
+        *mut WaifuRequest,
+        WaifuRequestAttribute,
+        *const WaifuRgbaImage
+    ) -> bool;
+    waifu_request_set_audio_attribute: fn(
+        *mut WaifuRequest,
+        WaifuRequestAttribute,
+        *const WaifuAudio
+    ) -> bool;
+    waifu_request_add_prompt_image: fn(*mut WaifuRequest, *const c_char, *const WaifuImage) -> bool;
+    waifu_request_unset_attribute: fn(*mut WaifuRequest, WaifuRequestAttribute) -> bool;
+
+    waifu_task_next_event: fn(*mut WaifuTask, u32) -> WaifuEventType;
+    waifu_task_wait: fn(*mut WaifuTask, u32) -> bool;
+    waifu_task_cancel: fn(*mut WaifuTask);
+    waifu_task_free: fn(*mut WaifuTask);
+    waifu_task_get_int_attribute: fn(*const WaifuTask, WaifuTaskAttribute, *mut i64) -> bool;
+    waifu_task_get_float_attribute: fn(*const WaifuTask, WaifuTaskAttribute, *mut f64) -> bool;
+    waifu_task_get_string_attribute: fn(*const WaifuTask, WaifuTaskAttribute) -> *const c_char;
+    waifu_task_get_image_attribute: fn(*const WaifuTask, WaifuTaskAttribute, *mut WaifuImage) -> bool;
+    waifu_task_get_rgba_image_attribute: fn(
+        *const WaifuTask,
+        WaifuTaskAttribute,
+        *mut WaifuRgbaImage
+    ) -> bool;
+    waifu_task_get_audio_attribute: fn(*const WaifuTask, WaifuTaskAttribute, *mut WaifuAudio) -> bool;
+    waifu_task_get_int_attribute_at: fn(*const WaifuTask, WaifuTaskAttribute, usize, *mut i64) -> bool;
+    waifu_task_get_float_attribute_at: fn(
+        *const WaifuTask,
+        WaifuTaskAttribute,
+        usize,
+        *mut f64
+    ) -> bool;
+    waifu_task_get_string_attribute_at: fn(*const WaifuTask, WaifuTaskAttribute, usize) -> *const c_char;
+    waifu_task_get_rgba_image_attribute_at: fn(
+        *const WaifuTask,
+        WaifuTaskAttribute,
+        usize,
+        *mut WaifuRgbaImage
+    ) -> bool;
 }
 
 /// The functions of the library [`crate::init`] loaded, or why there are none.

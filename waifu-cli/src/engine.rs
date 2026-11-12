@@ -23,14 +23,12 @@
 //! The types are the screen's own -- the boxes it fills in, the progress it draws a bar from --
 //! and what they are filled from is what libwaifu says through its C API.
 
-use std::ffi::c_void;
 use std::path::Path;
 use std::ptr;
-use std::sync::mpsc::{channel, Sender};
 
 use crate::c::{
-    self, WaifuImageGenerationRequest, WaifuImageGenerationResult, WaifuJob, WaifuModel,
-    WaifuModelProperty, WaifuPipeline, WaifuProgress, WaifuResult, WaifuStatusCode,
+    self, WaifuImage, WaifuModel, WaifuModelAttribute, WaifuPipeline, WaifuRequest,
+    WaifuRequestAttribute, WaifuStatusCode, WaifuTask, WaifuTaskAttribute,
 };
 use crate::runtime::Runtime;
 
@@ -145,9 +143,9 @@ impl Model {
         }
     }
 
-    fn int(&self, property: WaifuModelProperty) -> Option<i64> {
+    fn int(&self, attribute: WaifuModelAttribute) -> Option<i64> {
         let mut value = 0;
-        unsafe { c::waifu_model_get_int_property(self.0, property, &mut value) }.then_some(value)
+        unsafe { c::waifu_model_get_int_attribute(self.0, attribute, &mut value) }.then_some(value)
     }
 }
 
@@ -210,7 +208,7 @@ pub fn chosen_from(said: &serde_json::Value, draws: bool, bytes: Option<u64>) ->
     }
 }
 
-/// What an engine's job ends with: a picture as rows of RGB, or nothing.
+/// What a task ends with: a picture as rows of RGB, or nothing.
 #[derive(Debug, PartialEq)]
 pub enum Ended<T> {
     Done(T),
@@ -218,12 +216,166 @@ pub enum Ended<T> {
     Failed(String),
 }
 
-/// What a job's callbacks say, down the channel the job was started with.
+/// What a drawing says, read from its task.
 #[derive(Debug, PartialEq)]
 pub enum Heard {
     Progress(GenerationProgress),
-    Loaded(Ended<()>),
     Drawn(Ended<(u32, u32, Vec<u8>)>),
+}
+
+/// A task of libwaifu's, freed when this is dropped -- which, before it has ended, cancels it.
+struct Task(*mut WaifuTask);
+
+// A task may be read, waited on and cancelled from any thread; this is used from one at a time.
+unsafe impl Send for Task {}
+
+impl Task {
+    /// The task a call returned, or what the refusal said.
+    fn started(task: *mut WaifuTask) -> Result<Task, String> {
+        match task.is_null() {
+            true => Err(c::waifu_error()),
+            false => Ok(Task(task)),
+        }
+    }
+
+    fn int(&self, attribute: WaifuTaskAttribute) -> Option<i64> {
+        let mut value = 0;
+        unsafe { c::waifu_task_get_int_attribute(self.0, attribute, &mut value) }.then_some(value)
+    }
+
+    /// How it ended, once it has.
+    fn ended(&self) -> Ended<()> {
+        let message = || {
+            unsafe {
+                c::text(c::waifu_task_get_string_attribute(
+                    self.0,
+                    c::WAIFU_TASK_STATUS_MESSAGE,
+                ))
+            }
+            .unwrap_or_else(|| "it failed".to_string())
+        };
+        match self
+            .int(c::WAIFU_TASK_STATUS)
+            .map(|code| code as WaifuStatusCode)
+        {
+            Some(c::WAIFU_OK) => Ended::Done(()),
+            Some(c::WAIFU_CANCELLED) => Ended::Cancelled,
+            Some(_) => Ended::Failed(message()),
+            None => Ended::Failed("the task has not ended".to_string()),
+        }
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        unsafe { c::waifu_task_free(self.0) };
+    }
+}
+
+/// A picture being drawn: read what it says with [`next`](Drawing::next), the last of it
+/// [`Heard::Drawn`]. Dropped before then, it is stopped.
+pub struct Drawing(Task);
+
+impl Drawing {
+    /// The next thing it says, waiting up to `timeout_ms` for it; None where nothing came.
+    pub fn next(&self, timeout_ms: u32) -> Option<Heard> {
+        let task = &self.0;
+        loop {
+            match unsafe { c::waifu_task_next_event(task.0, timeout_ms) } {
+                c::WAIFU_EVENT_PROGRESS => {
+                    let progress = match task.int(c::WAIFU_TASK_PROGRESS_STAGE)? as i32 {
+                        c::WAIFU_STAGE_IMAGE_GENERATION_ENCODING_PROMPT => {
+                            GenerationProgress::Encoding
+                        }
+                        c::WAIFU_STAGE_IMAGE_GENERATION_DENOISING => GenerationProgress::Step {
+                            done: task.int(c::WAIFU_TASK_PROGRESS_DONE).unwrap_or(0) as i32,
+                            total: task.int(c::WAIFU_TASK_PROGRESS_TOTAL).unwrap_or(0) as i32,
+                        },
+                        c::WAIFU_STAGE_IMAGE_GENERATION_DECODING_IMAGE => {
+                            GenerationProgress::Decoding
+                        }
+                        // Loading, and a stage a newer library has that this tool does not know.
+                        _ => continue,
+                    };
+                    return Some(Heard::Progress(progress));
+                }
+                c::WAIFU_EVENT_END => return Some(Heard::Drawn(self.picture())),
+                // Nothing in time.
+                c::WAIFU_EVENT_NONE => return None,
+                // A type this tool never asks for.
+                _ => continue,
+            }
+        }
+    }
+
+    fn picture(&self) -> Ended<(u32, u32, Vec<u8>)> {
+        let task = &self.0;
+        match task.ended() {
+            Ended::Done(()) => {}
+            Ended::Cancelled => return Ended::Cancelled,
+            Ended::Failed(message) => return Ended::Failed(message),
+        }
+        let mut image = WaifuImage {
+            width: 0,
+            height: 0,
+            rgb: ptr::null(),
+            len: 0,
+        };
+        let found = unsafe {
+            c::waifu_task_get_image_attribute(
+                task.0,
+                c::WAIFU_TASK_IMAGE_GENERATION_IMAGE,
+                &mut image,
+            )
+        };
+        match found {
+            true => {
+                let rgb = unsafe { std::slice::from_raw_parts(image.rgb, image.len) }.to_vec();
+                Ended::Done((image.width, image.height, rgb))
+            }
+            false => Ended::Failed("the run ended with no picture".to_string()),
+        }
+    }
+
+    /// Stops it after the step it is on.
+    pub fn cancel(&self) {
+        unsafe { c::waifu_task_cancel(self.0 .0) };
+    }
+}
+
+/// A request of libwaifu's, freed when this is dropped.
+struct Request(*mut WaifuRequest);
+
+impl Drop for Request {
+    fn drop(&mut self) {
+        unsafe { c::waifu_request_free(self.0) };
+    }
+}
+
+impl Request {
+    fn checked(&self, set: bool) -> Result<(), String> {
+        match set {
+            true => Ok(()),
+            false => Err(c::waifu_error()),
+        }
+    }
+
+    fn int(&self, attribute: WaifuRequestAttribute, value: i64) -> Result<(), String> {
+        self.checked(unsafe { c::waifu_request_set_int_attribute(self.0, attribute, value) })
+    }
+
+    fn float(&self, attribute: WaifuRequestAttribute, value: f32) -> Result<(), String> {
+        self.checked(unsafe {
+            c::waifu_request_set_float_attribute(self.0, attribute, value as f64)
+        })
+    }
+
+    fn string(&self, attribute: WaifuRequestAttribute, value: &str) -> Result<(), String> {
+        let value = c::c_string(value);
+        self.checked(unsafe {
+            c::waifu_request_set_string_attribute(self.0, attribute, value.as_ptr())
+        })
+    }
 }
 
 /// libwaifu's image generation pipeline on one device: a thread of its own in the library,
@@ -252,135 +404,60 @@ impl Engine {
             Ok(model) => model,
             Err(error) => return Ended::Failed(error),
         };
-        let (sender, heard) = channel();
-        let sender = Box::new(sender);
         // The call copies what it needs: the model may go as soon as it returns.
-        let job = unsafe {
-            c::waifu_pipeline_load_model_async(
-                self.handle,
-                model.0,
-                &*sender as *const Sender<Heard> as *mut c_void,
-                None,
-                Some(on_loaded),
-            )
-        };
-        if job == 0 {
-            return Ended::Failed(c::waifu_error());
-        }
-        // Exactly one end comes for a job with an id; the sender lives until it has.
-        loop {
-            match heard.recv() {
-                Ok(Heard::Loaded(ended)) => return ended,
-                Ok(_) => continue,
-                Err(_) => return Ended::Failed("the engine went away".to_string()),
-            }
-        }
+        let task =
+            match Task::started(unsafe { c::waifu_pipeline_load_model(self.handle, model.0) }) {
+                Ok(task) => task,
+                Err(error) => return Ended::Failed(error),
+            };
+        unsafe { c::waifu_task_wait(task.0, c::WAIFU_WAIT_FOREVER) };
+        task.ended()
     }
 
-    /// Starts drawing from noise; what it says comes down `sender`, ending with [`Heard::Drawn`].
-    /// The job, to cancel it by.
-    pub fn draw(
-        &self,
-        prompt: &str,
-        options: &GenerationOptions,
-        sender: &Sender<Heard>,
-    ) -> Result<WaifuJob, String> {
-        let prompt = c::c_string(prompt);
-        let negative = c::c_string(&options.negative_prompt);
-        let request = WaifuImageGenerationRequest {
-            struct_size: std::mem::size_of::<WaifuImageGenerationRequest>() as u32,
-            prompt: prompt.as_ptr(),
-            negative: negative.as_ptr(),
-            width: options.width.max(0) as u32,
-            height: options.height.max(0) as u32,
-            steps: options.num_steps.max(0) as u32,
-            guidance: options.guidance_scale,
-            seed: options.seed.unwrap_or_default(),
-            // The terminal hands a run no pictures: what it draws is drawn from a prompt. The
-            // strength and the scale are read only beside one, so they are the values a caller
-            // with nothing to say about them passes.
-            start_image: ptr::null(),
-            start_image_strength: 0.8,
-            control_image: ptr::null(),
-            control_image_scale: 1.0,
-            prompt_images: ptr::null(),
-            prompt_image_count: 0,
-        };
-        let job = unsafe {
-            c::waifu_pipeline_run_image_generation_async(
-                self.handle,
-                &request,
-                sender as *const Sender<Heard> as *mut c_void,
-                Some(on_progress),
-                Some(on_drawn),
-            )
-        };
-        match job {
-            0 => Err(c::waifu_error()),
-            job => Ok(job),
+    /// Starts drawing from noise.
+    pub fn draw(&self, prompt: &str, options: &GenerationOptions) -> Result<Drawing, String> {
+        let request = Request(c::waifu_request_new(c::WAIFU_PIPELINE_IMAGE_GENERATION));
+        if request.0.is_null() {
+            return Err(c::waifu_error());
         }
-    }
-
-    /// Stops a job after the step it is on.
-    pub fn cancel(&self, job: WaifuJob) {
-        unsafe { c::waifu_pipeline_cancel(self.handle, job) };
+        // The terminal hands a run no pictures: what it draws is drawn from a prompt.
+        request.string(c::WAIFU_REQUEST_IMAGE_GENERATION_PROMPT, prompt)?;
+        if !options.negative_prompt.is_empty() {
+            request.string(
+                c::WAIFU_REQUEST_IMAGE_GENERATION_NEGATIVE,
+                &options.negative_prompt,
+            )?;
+        }
+        request.int(
+            c::WAIFU_REQUEST_IMAGE_GENERATION_WIDTH,
+            options.width as i64,
+        )?;
+        request.int(
+            c::WAIFU_REQUEST_IMAGE_GENERATION_HEIGHT,
+            options.height as i64,
+        )?;
+        request.int(
+            c::WAIFU_REQUEST_IMAGE_GENERATION_STEPS,
+            options.num_steps as i64,
+        )?;
+        request.float(
+            c::WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE,
+            options.guidance_scale,
+        )?;
+        request.int(
+            c::WAIFU_REQUEST_IMAGE_GENERATION_SEED,
+            options.seed.unwrap_or_default() as i64,
+        )?;
+        let task = unsafe { c::waifu_pipeline_run(self.handle, request.0) };
+        Ok(Drawing(Task::started(task)?))
     }
 }
 
 impl Drop for Engine {
-    /// Stops what runs, ends what waits, drops the model and joins the library's thread: no
-    /// callback of this pipeline's runs after this.
+    /// Stops what runs, ends what waits, drops the model and joins the library's thread.
     fn drop(&mut self) {
         unsafe { c::waifu_pipeline_free(self.handle) };
     }
-}
-
-fn status_of(code: WaifuStatusCode, message: Option<String>) -> Ended<()> {
-    match code {
-        c::WAIFU_OK => Ended::Done(()),
-        c::WAIFU_CANCELLED => Ended::Cancelled,
-        _ => Ended::Failed(message.unwrap_or_else(|| "it failed".to_string())),
-    }
-}
-
-unsafe extern "C" fn on_loaded(user_data: *mut c_void, event: *const WaifuResult) {
-    let (sender, status) = (&*(user_data as *const Sender<Heard>), &(*event).status);
-    let _ = sender.send(Heard::Loaded(status_of(
-        status.code,
-        c::text(status.message),
-    )));
-}
-
-unsafe extern "C" fn on_progress(user_data: *mut c_void, event: *const WaifuProgress) {
-    let (sender, event) = (&*(user_data as *const Sender<Heard>), &*event);
-    let progress = match event.stage {
-        c::WAIFU_STAGE_IMAGE_GENERATION_ENCODING_PROMPT => GenerationProgress::Encoding,
-        c::WAIFU_STAGE_IMAGE_GENERATION_DENOISING => GenerationProgress::Step {
-            done: event.done as i32,
-            total: event.total as i32,
-        },
-        c::WAIFU_STAGE_IMAGE_GENERATION_DECODING_IMAGE => GenerationProgress::Decoding,
-        // Loading, and a stage a newer library has that this tool does not know.
-        _ => return,
-    };
-    let _ = sender.send(Heard::Progress(progress));
-}
-
-unsafe extern "C" fn on_drawn(user_data: *mut c_void, event: *const WaifuImageGenerationResult) {
-    let (sender, event) = (&*(user_data as *const Sender<Heard>), &*event);
-    let ended = match (
-        status_of(event.status.code, c::text(event.status.message)),
-        event.image.as_ref(),
-    ) {
-        (Ended::Done(()), Some(image)) => {
-            let rgb = std::slice::from_raw_parts(image.rgb, image.len).to_vec();
-            Ended::Done((image.width, image.height, rgb))
-        }
-        (Ended::Done(()), None) => Ended::Failed("the run ended with no picture".to_string()),
-        (Ended::Cancelled, _) => Ended::Cancelled,
-        (Ended::Failed(message), _) => Ended::Failed(message),
-    };
-    let _ = sender.send(Heard::Drawn(ended));
 }
 
 #[cfg(test)]

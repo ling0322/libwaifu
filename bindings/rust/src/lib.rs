@@ -19,7 +19,7 @@
 
 //! libwaifu from Rust, opened at run time rather than linked: this crate compiles none of the
 //! engine. [`init`] finds a built `libwaifu.so` (`libwaifu.dylib`, `waifu.dll`) and loads it; the
-//! rest calls the functions `waifu.h` declares, ABI 5. docs/rust-binding.md is the design.
+//! rest calls the functions `waifu.h` declares, ABI 6. docs/rust-binding.md is the design.
 //!
 //! ```no_run
 //! # async fn draw() -> waifu::Result<()> {
@@ -59,7 +59,8 @@ pub use pipeline::*;
 
 // -- the library -----------------------------------------------------------------------------
 
-/// The ABI this crate speaks; a library that speaks another is not loaded.
+/// The ABI this crate speaks, `major << 16 | minor`: a library of another major, or of an older
+/// minor, is not loaded.
 pub const ABI_VERSION: u32 = sys::WAIFU_ABI_VERSION;
 
 /// Finds libwaifu and loads it: the file `LIBWAIFU_PATH` names; beside the running executable --
@@ -118,6 +119,8 @@ pub enum ErrorCode {
     NotLoaded,
     Internal,
     DeviceUnavailable,
+    /// A request attribute the library does not know: it is older than this crate expects.
+    UnknownAttribute,
     /// A refused call's `waifu_last_error_code` or a job's status code this crate does not know.
     Other(i32),
 }
@@ -133,6 +136,7 @@ impl ErrorCode {
             sys::WAIFU_ERR_NOT_LOADED => ErrorCode::NotLoaded,
             sys::WAIFU_ERR_INTERNAL => ErrorCode::Internal,
             sys::WAIFU_ERR_DEVICE_UNAVAILABLE => ErrorCode::DeviceUnavailable,
+            sys::WAIFU_ERR_UNKNOWN_ATTRIBUTE => ErrorCode::UnknownAttribute,
             other => ErrorCode::Other(other),
         }
     }
@@ -208,10 +212,11 @@ impl Device {
         Ok(unsafe { (f.waifu_device_is_available)(self.raw()) })
     }
 
-    fn memory(self, property: sys::WaifuDeviceProperty) -> Result<Option<u64>> {
+    fn memory(self, attribute: sys::WaifuDeviceAttribute) -> Result<Option<u64>> {
         let f = sys::functions()?;
         let mut value = 0i64;
-        let there = unsafe { (f.waifu_device_get_int_property)(self.raw(), property, &mut value) };
+        let there =
+            unsafe { (f.waifu_device_get_int_attribute)(self.raw(), attribute, &mut value) };
         Ok(there.then(|| value.max(0) as u64))
     }
 
@@ -280,7 +285,7 @@ pub enum Capability {
 }
 
 impl Capability {
-    fn raw(self) -> sys::WaifuModelProperty {
+    fn raw(self) -> sys::WaifuModelAttribute {
         match self {
             Capability::ImageGeneration => sys::WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION,
             Capability::TextToSpeech => sys::WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH,
@@ -320,7 +325,7 @@ impl Capability {
 pub enum Support {
     /// The C API's 1.
     Yes,
-    /// 0, and the string property of the same number: why.
+    /// 0, and the string attribute of the same number: why.
     No(String),
     /// Absent: a capability the library is too old to know.
     Unknown,
@@ -351,17 +356,19 @@ impl Model {
         self.handle
     }
 
-    fn int(&self, property: sys::WaifuModelProperty) -> Option<i64> {
+    fn int(&self, attribute: sys::WaifuModelAttribute) -> Option<i64> {
         let mut value = 0;
-        unsafe { (self.functions.waifu_model_get_int_property)(self.handle, property, &mut value) }
-            .then_some(value)
+        unsafe {
+            (self.functions.waifu_model_get_int_attribute)(self.handle, attribute, &mut value)
+        }
+        .then_some(value)
     }
 
-    fn string(&self, property: sys::WaifuModelProperty) -> Option<String> {
+    fn string(&self, attribute: sys::WaifuModelAttribute) -> Option<String> {
         unsafe {
-            text((self.functions.waifu_model_get_string_property)(
+            text((self.functions.waifu_model_get_string_attribute)(
                 self.handle,
-                property,
+                attribute,
             ))
         }
     }

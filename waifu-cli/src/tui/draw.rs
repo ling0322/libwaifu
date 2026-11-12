@@ -49,7 +49,8 @@ use ratatui::{DefaultTerminal, Frame};
 
 use crate::args::Runtime;
 use crate::engine::{
-    Chosen, Ended, Engine, GenerationDefaults, GenerationOptions, GenerationProgress, Heard as News,
+    Chosen, Drawing, Ended, Engine, GenerationDefaults, GenerationOptions, GenerationProgress,
+    Heard as News,
 };
 use crate::log::Level;
 use crate::task::{Launch, Task};
@@ -322,9 +323,8 @@ fn paint(
         cancel.store(false, Ordering::Relaxed);
         let started = Instant::now();
 
-        let (say, news) = channel::<News>();
-        let drawn = match engine.draw(&job.prompt, &job.options, &say) {
-            Ok(id) => wait_for_the_picture(engine, id, &news, updates, cancel),
+        let drawn = match engine.draw(&job.prompt, &job.options) {
+            Ok(drawing) => wait_for_the_picture(&drawing, updates, cancel),
             Err(error) => Ended::Failed(error),
         };
 
@@ -356,30 +356,23 @@ fn paint(
 }
 
 /// Passes a run's progress on to the screen until it ends, stopping it once when `cancel` is set,
-/// and hands back how it ended. `say`, the sending end of `news`, lives in the caller until then:
-/// the engine's callbacks send down it, and exactly one end comes for a job that was started.
+/// and hands back how it ended.
 fn wait_for_the_picture(
-    engine: &Engine,
-    job: u64,
-    news: &Receiver<News>,
+    drawing: &Drawing,
     updates: &Sender<Update>,
     cancel: &AtomicBool,
 ) -> Ended<(u32, u32, Vec<u8>)> {
     let mut asked_to_stop = false;
     loop {
-        match news.recv_timeout(Duration::from_millis(100)) {
-            Ok(News::Progress(progress)) => {
+        match drawing.next(100) {
+            Some(News::Progress(progress)) => {
                 let _ = updates.send(Update::Progress(progress));
             }
-            Ok(News::Drawn(ended)) => return ended,
-            Ok(News::Loaded(_)) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Ended::Failed("the engine went away".to_string());
-            }
+            Some(News::Drawn(ended)) => return ended,
+            None => {}
         }
         if !asked_to_stop && cancel.load(Ordering::Relaxed) {
-            engine.cancel(job);
+            drawing.cancel();
             asked_to_stop = true;
         }
     }

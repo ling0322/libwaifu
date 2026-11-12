@@ -17,14 +17,20 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// libwaifu's C API, as Swift: async functions where it has `_async` ones, errors that throw, and
-// Swift's own types for what goes in and comes out. See docs/ffi-abi5.md for what libwaifu
-// promises, and docs/ffi.md for libwaifu_modelmanager.
+// libwaifu's C API, as Swift: async functions for what it runs, errors that throw, and Swift's own
+// types for what goes in and comes out. See docs/ffi-abi6.md for what libwaifu promises, and
+// docs/ffi.md for libwaifu_modelmanager.
 //
-// Each `_async` call is a continuation. What it needs when a callback arrives -- the continuation,
-// and the progress closure -- is a `Pending`, passed to C as `user_data` with one retain that
-// `on_complete` takes back. A call refused at the door calls nothing, so it takes it back itself.
-// Cancelling the task cancels the job.
+// libwaifu calls nothing of ours: a load, an unload or a run hands back a WaifuTask, which is read.
+// Each is a continuation, and a `Thread` of its own that blocks in waifu_task_next_event, hands
+// each event -- progress, a streaming reading's parts -- to its closure in order, copies the
+// result out at the end, frees the task, and resumes the continuation. Cancelling the Swift task
+// cancels the library's, under the lock the reader frees it under (`TaskHandle`).
+//
+// libwaifu_modelmanager still calls back: each of its `_async` calls is a continuation too, and
+// what it needs when a callback arrives -- the continuation, and the progress closure -- is a
+// `Pending`, passed to C as `user_data` with one retain that `on_complete` takes back. A call
+// refused at the door calls nothing, so it takes it back itself.
 //
 // Every enum of waifu.h is an int32_t and a list of #defines, which a newer library may add to:
 // each is a Swift enum here, with a way out for a number this does not know.
@@ -60,6 +66,8 @@ public enum WaifuError: Error, LocalizedError, Equatable {
     init(code: WaifuStatusCode, message: String) {
         switch code {
         case WAIFU_ERR_INVALID_ARGUMENT: self = .refused(message)
+        // A request attribute the library does not know, or another task's: refused at the call.
+        case WAIFU_ERR_UNKNOWN_ATTRIBUTE: self = .refused(message)
         case WAIFU_ERR_UNKNOWN_MODEL: self = .unknownModel(message)
         case WAIFU_ERR_MODEL: self = .model(message)
         case WAIFU_ERR_NOT_LOADED: self = .notLoaded(message)
@@ -102,8 +110,18 @@ func modelManagerLastError() -> String {
 /// The libraries' ABIs, and the ones this was compiled against: a mismatch is a library from
 /// another build than its header.
 public enum ABI {
+    /// libwaifu's, as (major << 16) | minor.
     public static var library: UInt32 { waifu_abi_version() }
-    public static var header: UInt32 { UInt32(WAIFU_ABI_VERSION) }
+    /// The same, from the header's two parts: WAIFU_ABI_VERSION is an expression of them, which
+    /// Swift may not import as a constant.
+    public static var header: UInt32 {
+        (UInt32(WAIFU_ABI_VERSION_MAJOR) << 16) | UInt32(WAIFU_ABI_VERSION_MINOR)
+    }
+    /// Whether the loaded libwaifu runs what this was built against: the same major, and a minor
+    /// no older.
+    public static var libraryIsCompatible: Bool {
+        library >> 16 == header >> 16 && library & 0xffff >= header & 0xffff
+    }
     public static var modelManagerLibrary: UInt32 { waifu_modelmanager_abi_version() }
     public static var modelManagerHeader: UInt32 { UInt32(WAIFU_MODELMANAGER_ABI_VERSION) }
 }
@@ -587,12 +605,19 @@ public struct JobProgress: Sendable {
     /// Hugging Face -- ... (1 of 3)". Nil for libwaifu's stages, which have no words of their own.
     public var words: String?
 
-    init(_ progress: WaifuProgress) {
-        stage = Stage(progress.stage)
-        fraction = progress.fraction < 0 ? nil : progress.fraction
-        done = progress.done
-        total = progress.total
-        seconds = progress.seconds
+    /// The progress the task's last PROGRESS event said; nil where it has none.
+    init?(task: OpaquePointer) {
+        guard let stage = TaskRead.int(task, WAIFU_TASK_PROGRESS_STAGE),
+            let done = TaskRead.int(task, WAIFU_TASK_PROGRESS_DONE),
+            let total = TaskRead.int(task, WAIFU_TASK_PROGRESS_TOTAL)
+        else { return nil }
+        self.stage = Stage(WaifuStage(truncatingIfNeeded: stage))
+        // Absent where nothing can say.
+        let fraction = TaskRead.float(task, WAIFU_TASK_PROGRESS_FRACTION)
+        self.fraction = fraction.flatMap { $0 < 0 ? nil : $0 }
+        self.done = UInt64(clamping: done)
+        self.total = UInt64(clamping: total)
+        seconds = TaskRead.float(task, WAIFU_TASK_PROGRESS_SECONDS) ?? 0
     }
 
     /// A download's progress, as libwaifu_modelmanager says it.
@@ -613,75 +638,345 @@ public typealias ProgressHandler = @Sendable (JobProgress) -> Void
 
 // MARK: - the plumbing every async call shares
 
-/// How a job ended: with what it made, cancelled, or failed.
-enum Outcome {
-    case done(Any?)
-    case cancelled
-    case failed(WaifuError)
+/// A part of a streaming reading, in order, on the task's reader thread as soon as it is made.
+public typealias AudioPartHandler = @Sendable (AudioClip) -> Void
 
-    init(_ status: WaifuStatus, _ value: Any?) {
-        switch status.code {
-        case WAIFU_OK: self = .done(value)
-        case WAIFU_CANCELLED: self = .cancelled
-        default:
-            self = .failed(WaifuError(code: status.code, message: status.message.map { String(cString: $0) } ?? ""))
+/// A pointer the library handed over, moved to the thread that reads it: a task may be read,
+/// waited on and cancelled from any thread.
+struct TaskPointer: @unchecked Sendable {
+    let raw: OpaquePointer
+}
+
+/// The library's task, until its reader has read it to its end and freed it. Cancelling and
+/// freeing are both done holding the lock: a task must not be freed while another call is on it.
+/// A cancel that comes before the task does is kept, and done when it comes.
+final class TaskHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: OpaquePointer?
+    private var cancelled = false
+
+    func hold(_ task: OpaquePointer) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.task = task
+        if cancelled { waifu_task_cancel(task) }
+    }
+
+    func cancel() {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelled = true
+        if let task { waifu_task_cancel(task) }
+    }
+
+    /// Once, after its end has been read: every pointer it handed out is then gone.
+    func free() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let task { waifu_task_free(task) }
+        task = nil
+    }
+}
+
+/// What a task's attributes say, copied out: everything a task hands out is the library's only
+/// until it is freed.
+enum TaskRead {
+    static func int(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> Int64? {
+        var value: Int64 = 0
+        return waifu_task_get_int_attribute(task, attribute, &value) ? value : nil
+    }
+
+    static func float(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> Double? {
+        var value: Double = 0
+        return waifu_task_get_float_attribute(task, attribute, &value) ? value : nil
+    }
+
+    static func string(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> String? {
+        let said: UnsafePointer<CChar>? = waifu_task_get_string_attribute(task, attribute)
+        return said.map { String(cString: $0) }
+    }
+
+    static func image(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> RGBImage? {
+        var image = WaifuImage()
+        guard waifu_task_get_image_attribute(task, attribute, &image) else { return nil }
+        let rgb = image.rgb.map { Array(UnsafeBufferPointer(start: $0, count: image.len)) } ?? []
+        return RGBImage(width: Int(image.width), height: Int(image.height), rgb: rgb)
+    }
+
+    static func audio(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> AudioClip? {
+        var sound = WaifuAudio()
+        guard waifu_task_get_audio_attribute(task, attribute, &sound) else { return nil }
+        return clip(sound)
+    }
+
+    static func clip(_ sound: WaifuAudio) -> AudioClip {
+        let samples = sound.samples.map { Array(UnsafeBufferPointer(start: $0, count: sound.count)) } ?? []
+        return AudioClip(samples: samples, rate: Int(sound.sample_rate))
+    }
+
+    static func rgba(_ image: WaifuRgbaImage) -> RGBAImage {
+        let pixels = image.rgba.map { Array(UnsafeBufferPointer(start: $0, count: image.len)) } ?? []
+        return RGBAImage(width: Int(image.width), height: Int(image.height), rgba: pixels)
+    }
+
+    /// Layer `index` of a layer decomposition; nil past the count, or where an attribute is not there.
+    static func layer(_ task: OpaquePointer, at index: Int) -> Layer? {
+        func indexed(_ attribute: WaifuTaskAttribute) -> Int64? {
+            var value: Int64 = 0
+            return waifu_task_get_int_attribute_at(task, attribute, index, &value) ? value : nil
+        }
+        var depth: Double = 0
+        var image = WaifuRgbaImage()
+        guard waifu_task_get_float_attribute_at(task, WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DEPTH, index, &depth),
+            waifu_task_get_rgba_image_attribute_at(task, WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_IMAGE, index, &image),
+            let type = indexed(WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TYPE),
+            let id = indexed(WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_ID),
+            let left = indexed(WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_LEFT),
+            let top = indexed(WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TOP),
+            let derived = indexed(WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DERIVED_FROM_ID)
+        else { return nil }
+        let name: UnsafePointer<CChar>? =
+            waifu_task_get_string_attribute_at(task, WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_NAME, index)
+        return Layer(
+            type: LayerType(WaifuLayerType(truncatingIfNeeded: type)), id: Int(id),
+            name: name.map { String(cString: $0) } ?? "", left: Int(left), top: Int(top),
+            image: rgba(image), depth: Float(depth), derivedFromID: derived == 0 ? nil : Int(derived))
+    }
+
+    static func layers(_ task: OpaquePointer) throws -> Layers {
+        guard let canvas = int(task, WAIFU_TASK_LAYER_DECOMPOSITION_CANVAS),
+            let count = int(task, WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_COUNT)
+        else { throw missing("layers") }
+        var layers: [Layer] = []
+        layers.reserveCapacity(Int(max(0, count)))
+        for index in 0..<Int(max(0, count)) {
+            guard let found = layer(task, at: index) else { throw missing("layer") }
+            layers.append(found)
+        }
+        return Layers(canvas: Int(canvas), layers: layers)
+    }
+
+    static func transcript(_ task: OpaquePointer) throws -> Transcript {
+        guard let text = string(task, WAIFU_TASK_SPEECH_TO_TEXT_TEXT) else { throw missing("transcript") }
+        return Transcript(text: text, language: string(task, WAIFU_TASK_SPEECH_TO_TEXT_LANGUAGE) ?? "")
+    }
+
+    static func missing(_ what: String) -> WaifuError {
+        .internalError("the library said the job was done, and handed over no \(what)")
+    }
+
+    /// How an ended task ended: what `output` copies out of it for WAIFU_OK, nil where it was
+    /// cancelled, or the error it failed of.
+    static func ending<T>(_ task: OpaquePointer, _ output: (OpaquePointer) throws -> T) throws -> T? {
+        guard let code = int(task, WAIFU_TASK_STATUS) else {
+            throw WaifuError.internalError("the library said the job had ended, and had no status for it")
+        }
+        switch WaifuStatusCode(truncatingIfNeeded: code) {
+        case WAIFU_OK: return try output(task)
+        case WAIFU_CANCELLED: return nil
+        case let failed: throw WaifuError(code: failed, message: string(task, WAIFU_TASK_STATUS_MESSAGE) ?? "")
         }
     }
 }
 
-/// A part of a streaming reading, in order, on the library's thread as soon as it is made.
-public typealias AudioPartHandler = @Sendable (AudioClip) -> Void
+/// Reads `task` to its end, on the thread that calls it: each progress and part handed over in
+/// the order they happened, then the result copied out and the task freed.
+private func readToTheEnd<T>(
+    _ task: OpaquePointer,
+    handle: TaskHandle,
+    progress: ProgressHandler?,
+    heard: AudioPartHandler?,
+    output: (OpaquePointer) throws -> T
+) -> Result<T?, Error> {
+    while true {
+        switch waifu_task_next_event(task, UInt32.max) {
+        case WAIFU_EVENT_PROGRESS:
+            if let progress, let said = JobProgress(task: task) { progress(said) }
+        case WAIFU_EVENT_AUDIO_PART:
+            if let heard, let part = TaskRead.audio(task, WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART) {
+                heard(part)
+            }
+        case WAIFU_EVENT_END:
+            // Copied out before it is freed, which takes every pointer it handed out with it.
+            let ended: Result<T?, Error>
+            do {
+                ended = .success(try TaskRead.ending(task, output))
+            } catch {
+                ended = .failure(error)
+            }
+            handle.free()
+            return ended
+        default:
+            // NONE never comes without a timeout; anything else is a type this did not ask for.
+            continue
+        }
+    }
+}
 
-/// What a callback needs when it arrives: the progress closure, where a streaming reading's parts
-/// go, and how to end the call.
+/// Runs one load, unload or run as an async function: its result, nil where it was cancelled, or
+/// what it failed of. `start` makes the C call -- on this thread, so that a refusal's last error is
+/// this thread's -- and returns its task, or throws why there was none. `output` copies the result
+/// out of a task that ended well, on the task's reader thread.
+func runTask<T: Sendable>(
+    progress: ProgressHandler?,
+    heard: AudioPartHandler? = nil,
+    output: @escaping @Sendable (OpaquePointer) throws -> T,
+    start: () throws -> OpaquePointer
+) async throws -> T? {
+    let handle = TaskHandle()
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T?, Error>) in
+            let task: OpaquePointer
+            do {
+                task = try start()
+            } catch {
+                continuation.resume(throwing: error)
+                return
+            }
+            handle.hold(task)
+            let pointer = TaskPointer(raw: task)
+            // A thread of its own, blocked in the library until the task ends: not one of the
+            // cooperative pool's.
+            let reader = Thread {
+                continuation.resume(
+                    with: readToTheEnd(
+                        pointer.raw, handle: handle, progress: progress, heard: heard, output: output))
+            }
+            reader.name = "waifu-task"
+            reader.start()
+        }
+    } onCancel: {
+        handle.cancel()
+    }
+}
+
+/// A request of libwaifu's, set an attribute at a time and freed when this goes. Each setter copies
+/// what it is handed, and throws why where the library refuses it.
+final class RawRequest {
+    let handle: OpaquePointer
+
+    init(_ type: PipelineType) throws {
+        guard let handle = waifu_request_new(type.c) else { throw libraryRefusal() }
+        self.handle = handle
+    }
+
+    deinit {
+        waifu_request_free(handle)
+    }
+
+    private func checked(_ set: Bool) throws {
+        if !set { throw libraryRefusal() }
+    }
+
+    func set(_ attribute: WaifuRequestAttribute, int value: Int64) throws {
+        try checked(waifu_request_set_int_attribute(handle, attribute, value))
+    }
+
+    /// A count or a size, as the ABI 5 structs' uint32_t had it.
+    func set(_ attribute: WaifuRequestAttribute, count value: Int) throws {
+        try set(attribute, int: Int64(UInt32(clamping: value)))
+    }
+
+    /// Read as a uint64 by the library.
+    func set(_ attribute: WaifuRequestAttribute, seed value: UInt64) throws {
+        try set(attribute, int: Int64(bitPattern: value))
+    }
+
+    func set(_ attribute: WaifuRequestAttribute, flag value: Bool) throws {
+        try set(attribute, int: value ? 1 : 0)
+    }
+
+    func set(_ attribute: WaifuRequestAttribute, float value: Double) throws {
+        try checked(waifu_request_set_float_attribute(handle, attribute, value))
+    }
+
+    func set(_ attribute: WaifuRequestAttribute, string value: String) throws {
+        try checked(value.withCString { waifu_request_set_string_attribute(handle, attribute, $0) })
+    }
+
+    func set(_ attribute: WaifuRequestAttribute, image: RGBImage) throws {
+        try checked(
+            image.rgb.withUnsafeBufferPointer { pixels in
+                var c = WaifuImage(
+                    width: UInt32(image.width), height: UInt32(image.height), rgb: pixels.baseAddress,
+                    len: pixels.count)
+                return waifu_request_set_image_attribute(handle, attribute, &c)
+            })
+    }
+
+    func set(_ attribute: WaifuRequestAttribute, rgba image: RGBAImage) throws {
+        try checked(
+            image.rgba.withUnsafeBufferPointer { pixels in
+                var c = WaifuRgbaImage(
+                    width: UInt32(image.width), height: UInt32(image.height), rgba: pixels.baseAddress,
+                    len: pixels.count)
+                return waifu_request_set_rgba_image_attribute(handle, attribute, &c)
+            })
+    }
+
+    func set(_ attribute: WaifuRequestAttribute, audio clip: AudioClip) throws {
+        try checked(
+            clip.samples.withUnsafeBufferPointer { samples in
+                var c = WaifuAudio(samples: samples.baseAddress, count: samples.count, sample_rate: UInt32(clip.rate))
+                return waifu_request_set_audio_attribute(handle, attribute, &c)
+            })
+    }
+
+    /// IMAGE_GENERATION_PROMPT_IMAGES: one more image the prompt names as <|key|>.
+    func addPromptImage(key: String, image: RGBImage) throws {
+        try checked(
+            key.withCString { key in
+                image.rgb.withUnsafeBufferPointer { pixels in
+                    var c = WaifuImage(
+                        width: UInt32(image.width), height: UInt32(image.height), rgb: pixels.baseAddress,
+                        len: pixels.count)
+                    return waifu_request_add_prompt_image(handle, key, &c)
+                }
+            })
+    }
+}
+
+// libwaifu_modelmanager's calls, which still call back.
+
+/// How a fetch ended: done, cancelled, or failed.
+enum Outcome {
+    case done(Any?)
+    case cancelled
+    case failed(WaifuError)
+}
+
+/// What a callback needs when it arrives: the progress closure, and how to end the call.
 final class Pending: @unchecked Sendable {
     let progress: ProgressHandler?
-    let heard: AudioPartHandler?
     let finish: (Outcome) -> Void
 
-    init(progress: ProgressHandler?, heard: AudioPartHandler? = nil, finish: @escaping (Outcome) -> Void) {
+    init(progress: ProgressHandler?, finish: @escaping (Outcome) -> Void) {
         self.progress = progress
-        self.heard = heard
         self.finish = finish
     }
 }
 
-/// The job a call was given, for a cancel that may arrive before it was.
+/// How to cancel a call, for a cancel that may arrive before the call was made.
 final class Ticket: @unchecked Sendable {
     private let lock = NSLock()
-    private var job: WaifuJob = 0
     private var cancelled = false
-    private var cancel: ((WaifuJob) -> Void)?
+    private var cancel: (() -> Void)?
 
-    func given(_ job: WaifuJob, cancel: @escaping (WaifuJob) -> Void) {
+    func given(cancel: @escaping () -> Void) {
         lock.lock()
-        self.job = job
         self.cancel = cancel
         let already = cancelled
         lock.unlock()
-        if already { cancel(job) }
+        if already { cancel() }
     }
 
     func cancelNow() {
         lock.lock()
         cancelled = true
-        let job = job
         let cancel = cancel
         lock.unlock()
-        if job != 0 { cancel?(job) }
+        cancel?()
     }
-}
-
-private let onProgress: WaifuProgressCallback = { userData, progress in
-    guard let userData, let progress else { return }
-    let pending = Unmanaged<Pending>.fromOpaque(userData).takeUnretainedValue()
-    pending.progress?(JobProgress(progress.pointee))
-}
-
-private let onComplete: WaifuCallback = { userData, result in
-    guard let userData, let result else { return }
-    let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
-    pending.finish(Outcome(result.pointee.status, ()))
 }
 
 /// libwaifu_modelmanager's progress and ending, which are its own types, ended as a call is.
@@ -703,135 +998,19 @@ private let onFetchComplete: WaifuModelManagerCompleteCallback = { userData, eve
     }
 }
 
-private let onImage: WaifuImageGenerationCallback = { userData, result in
-    guard let userData, let result else { return }
-    let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
-    // Copied now: the pixels are the library's only until this returns.
-    let image = result.pointee.image.map { image -> RGBImage in
-        let pixels = image.pointee
-        let rgb = pixels.rgb.map { Array(UnsafeBufferPointer(start: $0, count: pixels.len)) } ?? []
-        return RGBImage(width: Int(pixels.width), height: Int(pixels.height), rgb: rgb)
-    }
-    pending.finish(Outcome(result.pointee.status, image))
-}
-
-/// Copied now: the samples are the library's only until the callback returns.
-private func clip(_ sound: WaifuAudio) -> AudioClip {
-    let samples = sound.samples.map { Array(UnsafeBufferPointer(start: $0, count: sound.count)) } ?? []
-    return AudioClip(samples: samples, rate: Int(sound.sample_rate))
-}
-
-private let onAudio: WaifuAudioCallback = { userData, result in
-    guard let userData, let result else { return }
-    let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
-    pending.finish(Outcome(result.pointee.status, result.pointee.audio.map { clip($0.pointee) }))
-}
-
-/// A part of a streaming reading: the call goes on, so the retain stays for on_complete.
-private let onAudioPart: WaifuAudioPartCallback = { userData, part in
-    guard let userData, let part else { return }
-    let pending = Unmanaged<Pending>.fromOpaque(userData).takeUnretainedValue()
-    pending.heard?(clip(part.pointee))
-}
-
-private func rgba(_ image: WaifuRgbaImage) -> RGBAImage {
-    let pixels = image.rgba.map { Array(UnsafeBufferPointer(start: $0, count: image.len)) } ?? []
-    return RGBAImage(width: Int(image.width), height: Int(image.height), rgba: pixels)
-}
-
-private let onLayers: WaifuLayerDecompositionCallback = { userData, result in
-    guard let userData, let result else { return }
-    let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
-    let said = result.pointee
-    // Copied now, every layer: they are the library's only until this returns.
-    var layers: Layers?
-    if said.status.code == WAIFU_OK {
-        let all = said.layers.map { Array(UnsafeBufferPointer(start: $0, count: said.layer_count)) } ?? []
-        layers = Layers(
-            canvas: Int(said.canvas),
-            layers: all.map { layer in
-                Layer(
-                    type: LayerType(layer.type), id: Int(layer.id),
-                    name: layer.name.map { String(cString: $0) } ?? "", left: Int(layer.left),
-                    top: Int(layer.top), image: rgba(layer.image), depth: layer.depth,
-                    derivedFromID: layer.derived_from_id == 0 ? nil : Int(layer.derived_from_id))
-            })
-    }
-    pending.finish(Outcome(said.status, layers))
-}
-
-private let onTranscript: WaifuSpeechToTextCallback = { userData, result in
-    guard let userData, let result else { return }
-    let pending = Unmanaged<Pending>.fromOpaque(userData).takeRetainedValue()
-    let said = result.pointee
-    // Copied now: the strings are the library's only until this returns.
-    let transcript = said.status.code == WAIFU_OK
-        ? Transcript(
-            text: said.text.map { String(cString: $0) } ?? "",
-            language: said.language.map { String(cString: $0) } ?? "")
-        : nil
-    pending.finish(Outcome(said.status, transcript))
-}
-
-/// Memory for one call's strings and buffers, freed when the call has returned: the library
-/// copies what it keeps.
-final class Scratch {
-    private var frees: [() -> Void] = []
-
-    deinit { frees.forEach { $0() } }
-
-    func string(_ text: String) -> UnsafePointer<CChar> {
-        let copy = strdup(text)!
-        frees.append { free(copy) }
-        return UnsafePointer(copy)
-    }
-
-    func optionalString(_ text: String?) -> UnsafePointer<CChar>? {
-        text.map(string)
-    }
-
-    func array<T>(_ values: [T]) -> UnsafePointer<T>? {
-        guard !values.isEmpty else { return nil }
-        let copy = UnsafeMutablePointer<T>.allocate(capacity: values.count)
-        copy.initialize(from: values, count: values.count)
-        frees.append {
-            copy.deinitialize(count: values.count)
-            copy.deallocate()
-        }
-        return UnsafePointer(copy)
-    }
-
-    func one<T>(_ value: T) -> UnsafePointer<T> {
-        array([value])!
-    }
-
-    func image(_ image: RGBImage) -> UnsafePointer<WaifuImage> {
-        one(WaifuImage(width: UInt32(image.width), height: UInt32(image.height), rgb: array(image.rgb), len: image.rgb.count))
-    }
-
-    func image(_ image: RGBAImage) -> UnsafePointer<WaifuRgbaImage> {
-        one(WaifuRgbaImage(width: UInt32(image.width), height: UInt32(image.height), rgba: array(image.rgba), len: image.rgba.count))
-    }
-
-    func audio(_ clip: AudioClip) -> UnsafePointer<WaifuAudio> {
-        one(WaifuAudio(samples: array(clip.samples), count: clip.samples.count, sample_rate: UInt32(clip.rate)))
-    }
-}
-
-/// Runs one `_async` call as an async function: its result, nil where it was cancelled, or what
-/// it failed of. `submit` makes the C call with the `user_data` it is handed and returns its job;
-/// `refused` says why a job of 0 was.
+/// Runs one of libwaifu_modelmanager's `_async` calls as an async function: its result, nil where
+/// it was cancelled, or what it failed of. `submit` makes the C call with the `user_data` it is
+/// handed and says whether it was made; `refused` says why it was not.
 func call<T>(
     progress: ProgressHandler?,
-    heard: AudioPartHandler? = nil,
-    cancel: @escaping (WaifuJob) -> Void,
-    refused: () -> WaifuError = libraryRefusal,
-    submit: (UnsafeMutableRawPointer) -> WaifuJob
+    cancel: @escaping () -> Void,
+    refused: () -> WaifuError,
+    submit: (UnsafeMutableRawPointer) -> Bool
 ) async throws -> T? {
     let ticket = Ticket()
     return try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T?, Error>) in
-            let pending = Pending(progress: progress, heard: heard) { outcome in
+            let pending = Pending(progress: progress) { outcome in
                 switch outcome {
                 case .done(let value): continuation.resume(returning: value as? T)
                 case .cancelled: continuation.resume(returning: nil)
@@ -839,15 +1018,14 @@ func call<T>(
                 }
             }
             let userData = Unmanaged.passRetained(pending).toOpaque()
-            let job = submit(userData)
-            if job == 0 {
+            if !submit(userData) {
                 // Refused at the door: nothing will ever be called, so the retain is this side's
                 // to take back.
                 Unmanaged<Pending>.fromOpaque(userData).release()
                 continuation.resume(throwing: refused())
                 return
             }
-            ticket.given(job, cancel: cancel)
+            ticket.given(cancel: cancel)
         }
     } onCancel: {
         ticket.cancelNow()
@@ -878,7 +1056,7 @@ public enum Capability: Sendable {
     /// The manner as well as the voice.
     case voiceConversionOfStyle
 
-    var c: WaifuModelProperty {
+    var c: WaifuModelAttribute {
         switch self {
         case .imageGeneration: WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION
         case .textToSpeech: WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH
@@ -924,13 +1102,13 @@ public final class Model: @unchecked Sendable {
         waifu_model_free(handle)
     }
 
-    private func int(_ property: WaifuModelProperty) -> Int64? {
+    private func int(_ attribute: WaifuModelAttribute) -> Int64? {
         var value: Int64 = 0
-        return waifu_model_get_int_property(handle, property, &value) ? value : nil
+        return waifu_model_get_int_attribute(handle, attribute, &value) ? value : nil
     }
 
-    private func string(_ property: WaifuModelProperty) -> String? {
-        let said: UnsafePointer<CChar>? = waifu_model_get_string_property(handle, property)
+    private func string(_ attribute: WaifuModelAttribute) -> String? {
+        let said: UnsafePointer<CChar>? = waifu_model_get_string_attribute(handle, attribute)
         return said.map { String(cString: $0) }
     }
 
@@ -996,8 +1174,24 @@ public final class Pipeline: @unchecked Sendable {
     /// pipeline starts.
     public var device: String { Device.name(waifu_pipeline_get_device(handle)) }
 
-    private var cancel: (WaifuJob) -> Void {
-        { [handle] job in waifu_pipeline_cancel(handle, job) }
+    /// The task a load, an unload or a run returned, or why there was none, as this thread's last
+    /// error says it: read straight after the call, on its thread.
+    private func started(_ task: OpaquePointer?) throws -> OpaquePointer {
+        guard let task else { throw libraryRefusal() }
+        return task
+    }
+
+    /// Runs `request` -- built here, and freed as soon as the run has copied it -- to its end.
+    private func run<T: Sendable>(
+        progress: ProgressHandler?,
+        heard: AudioPartHandler? = nil,
+        output: @escaping @Sendable (OpaquePointer) throws -> T,
+        request: () throws -> RawRequest
+    ) async throws -> T? {
+        try await runTask(progress: progress, heard: heard, output: output) {
+            let raw = try request()
+            return try withExtendedLifetime(raw) { try started(waifu_pipeline_run(handle, raw.handle)) }
+        }
     }
 
     /// Fetches `model` if it has to -- a published name, through libwaifu_modelmanager -- then
@@ -1008,70 +1202,80 @@ public final class Pipeline: @unchecked Sendable {
         let manifest = try await ModelManager.fetchedManifest(model, progress: progress)
         let opened = try Model(manifest: manifest)
         if case .no(let why)? = opened.supports(type.capability) { throw WaifuError.refused(why) }
-        let loaded: Void? = try await call(progress: progress, cancel: cancel) { userData in
+        let loaded: Void? = try await runTask(progress: progress, output: { _ in () }) {
             // The call copies the manifest: the model may go as soon as it has returned.
-            withExtendedLifetime(opened) {
-                waifu_pipeline_load_model_async(handle, opened.handle, userData, onProgress, onComplete)
-            }
+            try withExtendedLifetime(opened) { try started(waifu_pipeline_load_model(handle, opened.handle)) }
         }
         if loaded == nil { throw CancellationError() }
     }
 
     public func unload() async throws {
-        let _: Void? = try await call(progress: nil, cancel: cancel) { userData in
-            waifu_pipeline_unload_model_async(handle, userData, onComplete)
+        let _: Void? = try await runTask(progress: nil, output: { _ in () }) {
+            try started(waifu_pipeline_unload_model(handle))
         }
     }
 
     /// The image, or nil where it was cancelled.
     public func draw(_ request: DrawRequest, progress: ProgressHandler? = nil) async throws -> RGBImage? {
-        try await call(progress: progress, cancel: cancel) { userData in
-            let scratch = Scratch()
-            let named = request.promptImages.map { input in
-                WaifuPromptImage(key: scratch.string(input.key), image: scratch.image(input.image))
+        try await run(
+            progress: progress,
+            output: { task in
+                guard let image = TaskRead.image(task, WAIFU_TASK_IMAGE_GENERATION_IMAGE) else {
+                    throw TaskRead.missing("image")
+                }
+                return image
             }
-            let start: UnsafePointer<WaifuImage>? = request.startImage.map { scratch.image($0) }
-            let control: UnsafePointer<WaifuImage>? = request.controlImage.map { scratch.image($0) }
-            var c = WaifuImageGenerationRequest(
-                struct_size: UInt32(MemoryLayout<WaifuImageGenerationRequest>.size),
-                prompt: scratch.string(request.prompt),
-                negative: scratch.string(request.negative),
-                width: UInt32(clamping: request.width),
-                height: UInt32(clamping: request.height),
-                steps: UInt32(clamping: request.steps),
-                guidance: Float(request.guidance),
-                seed: request.seed,
-                start_image: start,
-                start_image_strength: Float(request.strength),
-                control_image: control,
-                control_image_scale: Float(request.controlScale),
-                prompt_images: scratch.array(named),
-                prompt_image_count: named.count
-            )
-            return withExtendedLifetime(scratch) {
-                waifu_pipeline_run_image_generation_async(handle, &c, userData, onProgress, onImage)
+        ) {
+            let c = try RawRequest(.imageGeneration)
+            try c.set(WAIFU_REQUEST_IMAGE_GENERATION_PROMPT, string: request.prompt)
+            try c.set(WAIFU_REQUEST_IMAGE_GENERATION_NEGATIVE, string: request.negative)
+            try c.set(WAIFU_REQUEST_IMAGE_GENERATION_WIDTH, count: request.width)
+            try c.set(WAIFU_REQUEST_IMAGE_GENERATION_HEIGHT, count: request.height)
+            try c.set(WAIFU_REQUEST_IMAGE_GENERATION_STEPS, count: request.steps)
+            try c.set(WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE, float: request.guidance)
+            try c.set(WAIFU_REQUEST_IMAGE_GENERATION_SEED, seed: request.seed)
+            // A strength or a scale means something only with its image.
+            if let start = request.startImage {
+                try c.set(WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE, image: start)
+                try c.set(WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE_STRENGTH, float: request.strength)
             }
+            if let control = request.controlImage {
+                try c.set(WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE, image: control)
+                try c.set(WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE_SCALE, float: request.controlScale)
+            }
+            for named in request.promptImages {
+                try c.addPromptImage(key: named.key, image: named.image)
+            }
+            return c
         }
     }
 
     /// The reading, or nil where it was cancelled.
     public func speak(_ request: SpeakRequest, progress: ProgressHandler? = nil) async throws -> AudioClip? {
-        try await call(progress: progress, cancel: cancel) { userData in
-            let scratch = Scratch()
-            let reference: UnsafePointer<WaifuAudio>? = request.reference.map { scratch.audio($0) }
-            var c = WaifuTextToSpeechRequest(
-                struct_size: UInt32(MemoryLayout<WaifuTextToSpeechRequest>.size),
-                text: scratch.string(request.text),
-                reference: reference,
-                reference_transcript: scratch.optionalString(request.referenceTranscript),
-                speed: Float(request.speed),
-                temperature: Float(request.temperature),
-                style: scratch.optionalString(request.style),
-                seed: request.seed
-            )
-            return withExtendedLifetime(scratch) {
-                waifu_pipeline_run_text_to_speech_async(handle, &c, userData, onProgress, onAudio)
+        try await run(
+            progress: progress,
+            output: { task in
+                guard let audio = TaskRead.audio(task, WAIFU_TASK_TEXT_TO_SPEECH_AUDIO) else {
+                    throw TaskRead.missing("audio")
+                }
+                return audio
             }
+        ) {
+            let c = try RawRequest(.textToSpeech)
+            try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_TEXT, string: request.text)
+            if let reference = request.reference {
+                try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE, audio: reference)
+            }
+            if let transcript = request.referenceTranscript {
+                try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT, string: transcript)
+            }
+            try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED, float: request.speed)
+            try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE, float: request.temperature)
+            if let style = request.style {
+                try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE, string: style)
+            }
+            try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_SEED, seed: request.seed)
+            return c
         }
     }
 
@@ -1080,87 +1284,97 @@ public final class Pipeline: @unchecked Sendable {
     /// end to end, at the end; nil where it was cancelled, after the part it was on. For a pipeline
     /// made for `.streamingTextToSpeech`. A streaming reading is at the speed it is said, so the
     /// request's speed is not read; it is a reading of its own, not the samples `speak` makes of the
-    /// same request.
+    /// same request. The parts come in order, on one thread, and all of them before this returns.
     public func speakStreaming(
         _ request: SpeakRequest, progress: ProgressHandler? = nil, heard: @escaping AudioPartHandler
     ) async throws -> AudioClip? {
-        try await call(progress: progress, heard: heard, cancel: cancel) { userData in
-            let scratch = Scratch()
-            let reference: UnsafePointer<WaifuAudio>? = request.reference.map { scratch.audio($0) }
-            var c = WaifuStreamingTextToSpeechRequest(
-                struct_size: UInt32(MemoryLayout<WaifuStreamingTextToSpeechRequest>.size),
-                text: scratch.string(request.text),
-                reference: reference,
-                reference_transcript: scratch.optionalString(request.referenceTranscript),
-                temperature: Float(request.temperature),
-                style: scratch.optionalString(request.style),
-                seed: request.seed
-            )
-            return withExtendedLifetime(scratch) {
-                waifu_pipeline_run_streaming_text_to_speech_async(
-                    handle, &c, userData, onProgress, onAudioPart, onAudio)
+        try await run(
+            progress: progress,
+            heard: heard,
+            output: { task in
+                guard let audio = TaskRead.audio(task, WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO) else {
+                    throw TaskRead.missing("audio")
+                }
+                return audio
             }
+        ) {
+            let c = try RawRequest(.streamingTextToSpeech)
+            try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEXT, string: request.text)
+            if let reference = request.reference {
+                try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE, audio: reference)
+            }
+            if let transcript = request.referenceTranscript {
+                try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT, string: transcript)
+            }
+            try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE, float: request.temperature)
+            if let style = request.style {
+                try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE, string: style)
+            }
+            try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED, seed: request.seed)
+            return c
         }
     }
 
     /// The source said again in the reference's voice, or nil where it was cancelled.
     public func voiceConversion(_ request: VoiceConversionRequest, progress: ProgressHandler? = nil) async throws -> AudioClip? {
-        try await call(progress: progress, cancel: cancel) { userData in
-            let scratch = Scratch()
-            var c = WaifuVoiceConversionRequest(
-                struct_size: UInt32(MemoryLayout<WaifuVoiceConversionRequest>.size),
-                source: scratch.audio(request.source),
-                reference: scratch.audio(request.reference),
-                steps: UInt32(clamping: request.steps),
-                convert_style: request.convertStyle,
-                seed: request.seed
-            )
-            return withExtendedLifetime(scratch) {
-                waifu_pipeline_run_voice_conversion_async(handle, &c, userData, onProgress, onAudio)
+        try await run(
+            progress: progress,
+            output: { task in
+                guard let audio = TaskRead.audio(task, WAIFU_TASK_VOICE_CONVERSION_AUDIO) else {
+                    throw TaskRead.missing("audio")
+                }
+                return audio
             }
+        ) {
+            let c = try RawRequest(.voiceConversion)
+            try c.set(WAIFU_REQUEST_VOICE_CONVERSION_SOURCE, audio: request.source)
+            try c.set(WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE, audio: request.reference)
+            try c.set(WAIFU_REQUEST_VOICE_CONVERSION_STEPS, count: request.steps)
+            try c.set(WAIFU_REQUEST_VOICE_CONVERSION_CONVERT_STYLE, flag: request.convertStyle)
+            try c.set(WAIFU_REQUEST_VOICE_CONVERSION_SEED, seed: request.seed)
+            return c
         }
     }
 
     /// What was said in the recording, with a transcriber loaded -- Qwen3-ASR -- or nil where it
     /// was cancelled.
     public func transcribe(_ request: TranscribeRequest, progress: ProgressHandler? = nil) async throws -> Transcript? {
-        try await call(progress: progress, cancel: cancel) { userData in
-            let scratch = Scratch()
+        try await run(progress: progress, output: { task in try TaskRead.transcript(task) }) {
+            let c = try RawRequest(.speechToText)
+            try c.set(WAIFU_REQUEST_SPEECH_TO_TEXT_AUDIO, audio: request.recording)
             // Blank is none: the model tells the language, and hears with no help.
             let given = { (text: String?) -> String? in
                 guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
                 return text
             }
-            var c = WaifuSpeechToTextRequest(
-                struct_size: UInt32(MemoryLayout<WaifuSpeechToTextRequest>.size),
-                audio: scratch.audio(request.recording),
-                language: scratch.optionalString(given(request.language)),
-                context: scratch.optionalString(given(request.context))
-            )
-            return withExtendedLifetime(scratch) {
-                waifu_pipeline_run_speech_to_text_async(handle, &c, userData, onProgress, onTranscript)
+            if let language = given(request.language) {
+                try c.set(WAIFU_REQUEST_SPEECH_TO_TEXT_LANGUAGE, string: language)
             }
+            if let context = given(request.context) {
+                try c.set(WAIFU_REQUEST_SPEECH_TO_TEXT_CONTEXT, string: context)
+            }
+            return c
         }
     }
 
     /// The illustration taken apart into its layers, with See-through loaded, or nil where it was
     /// cancelled.
     public func layers(_ request: LayersRequest, progress: ProgressHandler? = nil) async throws -> Layers? {
-        try await call(progress: progress, cancel: cancel) { userData in
-            let scratch = Scratch()
-            var c = WaifuLayerDecompositionRequest(
-                struct_size: UInt32(MemoryLayout<WaifuLayerDecompositionRequest>.size),
-                image: scratch.image(request.image),
-                steps: UInt32(clamping: request.steps),
-                depth_steps: UInt32(clamping: request.depthSteps),
-                resolution: UInt32(clamping: request.resolution),
-                split_pairs: request.splitPairs,
-                stratify_layers: request.stratifyLayers,
-                seed: request.seed
-            )
-            return withExtendedLifetime(scratch) {
-                waifu_pipeline_run_layer_decomposition_async(handle, &c, userData, onProgress, onLayers)
+        try await run(progress: progress, output: { task in try TaskRead.layers(task) }) {
+            let c = try RawRequest(.layerDecomposition)
+            try c.set(WAIFU_REQUEST_LAYER_DECOMPOSITION_IMAGE, rgba: request.image)
+            // 0 is the model's own, which an unset attribute is: the library refuses a 0.
+            if request.steps > 0 { try c.set(WAIFU_REQUEST_LAYER_DECOMPOSITION_STEPS, count: request.steps) }
+            if request.depthSteps > 0 {
+                try c.set(WAIFU_REQUEST_LAYER_DECOMPOSITION_DEPTH_STEPS, count: request.depthSteps)
             }
+            if request.resolution > 0 {
+                try c.set(WAIFU_REQUEST_LAYER_DECOMPOSITION_RESOLUTION, count: request.resolution)
+            }
+            try c.set(WAIFU_REQUEST_LAYER_DECOMPOSITION_SPLIT_PAIRS, flag: request.splitPairs)
+            try c.set(WAIFU_REQUEST_LAYER_DECOMPOSITION_STRATIFY_LAYERS, flag: request.stratifyLayers)
+            try c.set(WAIFU_REQUEST_LAYER_DECOMPOSITION_SEED, seed: request.seed)
+            return c
         }
     }
 }
@@ -1293,13 +1507,13 @@ public enum ModelManager {
         let handle = Handle()
         let fetched: Void? = try await call(
             progress: progress,
-            cancel: { _ in waifu_modelmanager_fetch_cancel(handle.fetch) },
+            cancel: { waifu_modelmanager_fetch_cancel(handle.fetch) },
             refused: { .refused(modelManagerLastError()) },
             submit: { userData in
                 handle.fetch = model.withCString {
                     waifu_modelmanager_fetch_async($0, userData, onFetchProgress, onFetchComplete)
                 }
-                return handle.fetch == nil ? 0 : 1
+                return handle.fetch != nil
             })
         waifu_modelmanager_fetch_free(handle.fetch)
         if fetched == nil { throw CancellationError() }
@@ -1315,11 +1529,11 @@ public enum ModelManager {
         let handle = Handle()
         let fetched: Void? = try await call(
             progress: progress,
-            cancel: { _ in waifu_modelmanager_fetch_cancel(handle.fetch) },
+            cancel: { waifu_modelmanager_fetch_cancel(handle.fetch) },
             refused: { .refused(modelManagerLastError()) },
             submit: { userData in
                 handle.fetch = waifu_modelmanager_fetch_manifests_async(userData, onFetchProgress, onFetchComplete)
-                return handle.fetch == nil ? 0 : 1
+                return handle.fetch != nil
             })
         waifu_modelmanager_fetch_free(handle.fetch)
         if fetched == nil { throw CancellationError() }

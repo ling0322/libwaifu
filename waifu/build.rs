@@ -85,22 +85,26 @@ fn stamp_revision(manifest: &Path) {
     println!("cargo:rustc-env=WAIFU_REVISION={revision}");
 }
 
-/// waifu.h, from the `extern "C"` functions and `#[repr(C)]` types in src/c_api.rs and
-/// src/c_api/support.rs, with their doc comments. Written beside the source, where a change to the
+/// waifu.h, from the `extern "C"` functions and `#[repr(C)]` types in src/c_api.rs and the
+/// modules under src/c_api/ but its tests, with their doc comments. Written beside the source, where a change to the
 /// ABI shows up in a diff.
 fn write_header(manifest: &Path) {
     println!("cargo:rerun-if-changed=src/c_api.rs");
-    println!("cargo:rerun-if-changed=src/c_api/support.rs");
+    let modules = ["support.rs", "request.rs", "task.rs"];
+    for module in modules {
+        println!("cargo:rerun-if-changed=src/c_api/{module}");
+    }
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
     let config =
         cbindgen::Config::from_file(manifest.join("cbindgen.toml")).expect("waifu/cbindgen.toml");
-    match cbindgen::Builder::new()
+    let mut builder = cbindgen::Builder::new()
         .with_config(config)
-        .with_src(manifest.join("src/c_api.rs"))
-        .with_src(manifest.join("src/c_api/support.rs"))
-        .generate()
-    {
+        .with_src(manifest.join("src/c_api.rs"));
+    for module in modules {
+        builder = builder.with_src(manifest.join("src/c_api").join(module));
+    }
+    match builder.generate() {
         Ok(bindings) => {
             bindings.write_to_file(manifest.join("include/waifu.h"));
         }

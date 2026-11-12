@@ -111,11 +111,16 @@ namespace Libwaifu.Gui.Engine
 
                 Path = found;
 
-                var abi = Native.waifu_abi_version();
-                if (abi != Native.AbiVersion)
+                // (major << 16) | minor: a library of the same major runs this program if its
+                // minor is at least the one it was built for.
+                var version = Native.waifu_abi_version();
+                var major = version >> 16;
+                var minor = version & 0xFFFFu;
+                var abi = major + "." + minor;
+                if (major != Native.AbiVersionMajor || minor < Native.AbiVersionMinor)
                 {
                     Missing = found + " is ABI " + abi + " and this program was built for " +
-                              Native.AbiVersion + ".";
+                              Native.AbiVersionMajor + "." + Native.AbiVersionMinor + ".";
                     Log.Write("error", "library", Missing);
                     return false;
                 }

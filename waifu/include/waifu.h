@@ -9,20 +9,41 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// What a caller compiled against this header expects. Bumped when anything in it changes in a
-// way an older caller would misread.
+// The major version: bumped for whatever an older caller would misread -- a number that means
+// something else, a function or a type that changed or went, an attribute's default.
 //
-// 4: pipelines made for one task, models and devices asked about by property, no JSON.
+// 4: pipelines made for one pipeline type, models and devices asked about by attribute, no JSON.
 // 5: the text-to-speech requests' reference_transcript, after reference.
-#define WAIFU_ABI_VERSION 5
+// 6: requests set an attribute at a time, tasks read rather than callbacks, a minor version.
+#define WAIFU_ABI_VERSION_MAJOR 6
+
+// The minor version: bumped for what an older caller never uses -- an attribute, a stage, an event
+// a request has to ask for, a function. Back to 0 with each major.
+#define WAIFU_ABI_VERSION_MINOR 0
+
+// (major << 16) | minor, as waifu_abi_version says it.
+#define WAIFU_ABI_VERSION ((WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR)
+
+// waifu_task_next_event and waifu_task_wait: no timeout.
+#define WAIFU_WAIT_FOREVER UINT32_MAX
 
 // A model's manifest, read, and what can be asked of it, answered once when it is opened.
 typedef struct WaifuModel WaifuModel;
 
-// One task, one thread, at most one model: jobs run on it one at a time, in the order asked.
+// One pipeline type, one thread, at most one model: its tasks run one at a time, in the order
+// asked.
 typedef struct WaifuPipeline WaifuPipeline;
 
-// What a refused call or a job came to.
+// What one run on a pipeline of one type is asked to do. Not shared between threads while it is
+// being set; run as often as liked, with attributes changed in between: waifu_pipeline_run copies
+// it.
+typedef struct WaifuRequest WaifuRequest;
+
+// One load, unload or run on a pipeline, as the caller holds it: its events are read with
+// waifu_task_next_event, and its status and result with the getters, on any thread.
+typedef struct WaifuTask WaifuTask;
+
+// What a refused call or a task came to.
 typedef int32_t WaifuStatusCode;
 
 typedef int32_t WaifuLogLevel;
@@ -45,52 +66,21 @@ typedef int32_t WaifuDevice;
 
 // What can be asked of a device. All of it is this process's, not the card as other programs see
 // it.
-typedef int32_t WaifuDeviceProperty;
+typedef int32_t WaifuDeviceAttribute;
 
-// What can be asked of a model. SUPPORTS_ properties are integers, 1 or 0; where 0, the string
-// property of the same number is why, in words to show, and is never NULL. A SUPPORTS_ property
+// What can be asked of a model. SUPPORTS_ attributes are integers, 1 or 0; where 0, the string
+// attribute of the same number is why, in words to show, and is never NULL. A SUPPORTS_ attribute
 // this library does not know is absent, which is neither 1 nor 0. The rest are an integer or a
-// string, as marked. SUPPORTS_<task> has the number of WAIFU_PIPELINE_<task>.
-typedef int32_t WaifuModelProperty;
+// string, as marked. SUPPORTS_<type> has the number of WAIFU_PIPELINE_<type>.
+typedef int32_t WaifuModelAttribute;
 
 // What a pipeline is made for.
 typedef int32_t WaifuPipelineType;
 
-// 0: refused at the call, with waifu_last_error and _code, and no callback is ever called. Any
-// other id: on_progress any number of times, then on_complete exactly once. Callbacks run on the
-// pipeline's thread and may start before the _async call has returned: keep a job's state in
-// user_data, not under its id. They must return quickly, and may call nothing but
-// waifu_pipeline_cancel.
-typedef uint64_t WaifuJob;
-
-// What a job is doing. Ranges by task; done/total count what the comment says, 0, 0 otherwise.
-typedef int32_t WaifuStage;
-
-typedef struct {
-  WaifuStage stage;
-  // 0..1 of the whole job, or -1 where nothing can say.
-  double fraction;
-  // Of the stage, done already.
-  uint64_t done;
-  uint64_t total;
-  // Since the job started.
-  double seconds;
-} WaifuProgress;
-
-typedef void (*WaifuProgressCallback)(void *user_data, const WaifuProgress *progress);
-
-typedef struct {
-  WaifuStatusCode code;
-  // Why, or NULL for WAIFU_OK.
-  const char *message;
-} WaifuStatus;
-
-// Every pointer in a result is valid until the callback returns.
-typedef struct {
-  WaifuStatus status;
-} WaifuResult;
-
-typedef void (*WaifuCallback)(void *user_data, const WaifuResult *result);
+// A request's attributes, numbered by pipeline type as the stages are. The type after each is the
+// setter it takes; "required" is refused at waifu_pipeline_run when unset. A boolean is an int, 0
+// or 1.
+typedef int32_t WaifuRequestAttribute;
 
 typedef struct {
   uint32_t width;
@@ -101,109 +91,6 @@ typedef struct {
 } WaifuImage;
 
 typedef struct {
-  // The <|key|> the prompt names it by: letters, digits and _.
-  const char *key;
-  const WaifuImage *image;
-} WaifuPromptImage;
-
-typedef struct {
-  uint32_t struct_size;
-  const char *prompt;
-  // NULL or "" for none.
-  const char *negative;
-  // 64..2048, a multiple of IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF.
-  uint32_t width;
-  uint32_t height;
-  uint32_t steps;
-  float guidance;
-  uint64_t seed;
-  // img2img; NULL for none.
-  const WaifuImage *start_image;
-  // How far it walks away from it, 0..1.
-  float start_image_strength;
-  // A ControlNet's condition; NULL for none.
-  const WaifuImage *control_image;
-  // How hard it holds to it.
-  float control_image_scale;
-  const WaifuPromptImage *prompt_images;
-  size_t prompt_image_count;
-} WaifuImageGenerationRequest;
-
-typedef struct {
-  WaifuStatus status;
-  // NULL unless WAIFU_OK.
-  const WaifuImage *image;
-} WaifuImageGenerationResult;
-
-typedef void (*WaifuImageGenerationCallback)(void *user_data,
-                                             const WaifuImageGenerationResult *result);
-
-typedef struct {
-  // Mono, -1..1.
-  const float *samples;
-  size_t count;
-  uint32_t sample_rate;
-} WaifuAudio;
-
-typedef struct {
-  uint32_t struct_size;
-  const char *text;
-  // A recording to sound like, or NULL.
-  const WaifuAudio *reference;
-  // What reference says, word for word; NULL or "" where it is not known. CosyVoice3 reads on
-  // from it, as upstream's zero-shot does, and takes it or a style, not both; a model that
-  // reads none ignores it.
-  const char *reference_transcript;
-  float speed;
-  float temperature;
-  // Any instruction; NULL or "" for the voice's own way. CosyVoice3 takes a style or a
-  // reference_transcript, not both: upstream's instruct2 reads no transcript.
-  const char *style;
-  uint64_t seed;
-} WaifuTextToSpeechRequest;
-
-// Both speech tasks make audio.
-typedef struct {
-  WaifuStatus status;
-  // NULL unless WAIFU_OK.
-  const WaifuAudio *audio;
-} WaifuAudioResult;
-
-typedef void (*WaifuAudioCallback)(void *user_data, const WaifuAudioResult *result);
-
-typedef struct {
-  uint32_t struct_size;
-  // What is said, and how.
-  const WaifuAudio *source;
-  // Whose voice to say it in.
-  const WaifuAudio *reference;
-  uint32_t steps;
-  bool convert_style;
-  uint64_t seed;
-} WaifuVoiceConversionRequest;
-
-// Text to speech with the audio handed over while the rest is said -- CosyVoice3's a hop of
-// tokens at a time, as upstream's stream=True -- for a caller that plays the start at once. A
-// load is refused at the call for a model that does not stream, and ends with WAIFU_ERR_MODEL
-// where the device cannot: anywhere but CUDA at half, on Ampere or later, and Metal.
-typedef struct {
-  uint32_t struct_size;
-  const char *text;
-  // A recording to sound like, or NULL.
-  const WaifuAudio *reference;
-  // As WaifuTextToSpeechRequest's.
-  const char *reference_transcript;
-  float temperature;
-  // As WaifuTextToSpeechRequest's.
-  const char *style;
-  // No speed: a streaming reading is at the speed it is said, as upstream's is.
-  uint64_t seed;
-} WaifuStreamingTextToSpeechRequest;
-
-// A part of the reading's audio, in order; the samples are valid until it returns.
-typedef void (*WaifuAudioPartCallback)(void *user_data, const WaifuAudio *part);
-
-typedef struct {
   uint32_t width;
   uint32_t height;
   // width * height * 4, not premultiplied.
@@ -212,85 +99,25 @@ typedef struct {
 } WaifuRgbaImage;
 
 typedef struct {
-  uint32_t struct_size;
-  // Any size, centred and scaled by the engine; transparent is fine.
-  const WaifuRgbaImage *image;
-  // 0 for the model's own.
-  uint32_t steps;
-  // 0 for the model's own.
-  uint32_t depth_steps;
-  // A multiple of LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF; 0 for 1280.
-  uint32_t resolution;
-  // Hands, eyes, eyebrows, ears into a -l and a -r layer.
-  bool split_pairs;
-  // Hair, hands, top and bottom also cut into a near and a far half.
-  bool stratify_layers;
-  uint64_t seed;
-} WaifuLayerDecompositionRequest;
+  // Mono, -1..1.
+  const float *samples;
+  size_t count;
+  uint32_t sample_rate;
+} WaifuAudio;
+
+// What waifu_task_next_event says happened. A task is sent only the types its request asked for
+// or that were there in 6.0, so a caller is never handed one it does not know.
+typedef int32_t WaifuEventType;
+
+// What a task can be asked. The type after each is the getter that reads it; "indexed" ones are
+// read with the _at getters, 0 .. LAYER_DECOMPOSITION_LAYER_COUNT - 1.
+typedef int32_t WaifuTaskAttribute;
 
 typedef int32_t WaifuLayerType;
 
-typedef struct {
-  WaifuLayerType type;
-  // Unique within the result, from 1; it means nothing else.
-  uint32_t id;
-  // "topwear"; its halves "topwear-0" and "topwear-1"; its depth "topwear_depth".
-  const char *name;
-  // Where its top left corner is on the canvas.
-  int32_t left;
-  int32_t top;
-  // Only as large as what is drawn. A depth layer: the same size and place as its layer, R, G
-  // and B the depth, 0 nearest to 255 farthest, under its layer's alpha.
-  WaifuRgbaImage image;
-  // How far away it is: 0 nearest, 1 farthest. A near half has its part's depth, not its
-  // pixels': that is what keeps it in its part's place in the stratified stack (see the
-  // result). A depth layer has its layer's.
-  float depth;
-  // The id of the layer this one is made from: a half's part, a depth layer's layer; 0 for a
-  // part.
-  uint32_t derived_from_id;
-} WaifuLayer;
-
-// `layers` is in one order, which the library never changes: each part, bottom first -- which is
-// the stack, unstratified -- then, with stratify_layers, each part's halves, near before far;
-// then a depth layer for each of those, in their order. A part a half names in derived_from_id
-// is a split part.
-//
-// The stratified stack is every part that was not split and every half, bottom first: from the
-// largest depth to the smallest; at one depth, a far half under a near one; then by their order
-// in `layers`. No depth layer is in either stack.
-typedef struct {
-  WaifuStatus status;
-  // The side of the square canvas; 0 unless WAIFU_OK.
-  uint32_t canvas;
-  const WaifuLayer *layers;
-  size_t layer_count;
-} WaifuLayerDecompositionResult;
-
-typedef void (*WaifuLayerDecompositionCallback)(void *user_data,
-                                                const WaifuLayerDecompositionResult *result);
-
-typedef struct {
-  uint32_t struct_size;
-  // Any rate, any length; resampled and cut into pieces by the engine.
-  const WaifuAudio *audio;
-  // The language it is in, one of SPEECH_TO_TEXT_LANGUAGES -- "English", "chinese" -- or NULL
-  // or "" for the model to tell.
-  const char *language;
-  // Words that help it hear: names, terms, the subject; NULL or "".
-  const char *context;
-} WaifuSpeechToTextRequest;
-
-typedef struct {
-  WaifuStatus status;
-  // What was said; "" for nothing said; NULL unless WAIFU_OK.
-  const char *text;
-  // The language it was said in, as the model names it -- "Chinese" -- or several, comma
-  // separated, for a recording that changes; "" where none was heard. NULL unless WAIFU_OK.
-  const char *language;
-} WaifuSpeechToTextResult;
-
-typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTextResult *result);
+// What a task is doing. Ranges by pipeline type; done/total count what the comment says, 0, 0
+// otherwise.
+typedef int32_t WaifuStage;
 
 #define WAIFU_DEVICE_AUTO 0
 
@@ -401,8 +228,8 @@ typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTe
 #define WAIFU_CANCELLED 1
 
 // What a request cannot be run with. Most of it is refused at the call instead -- a NULL, a
-// string that is not UTF-8, a size out of range, a model the pipeline's task is not supported by,
-// another task's run -- which a job never sees.
+// string that is not UTF-8, a size out of range, a model the pipeline's type is not supported by,
+// a request of another pipeline type -- which a task never sees.
 #define WAIFU_ERR_INVALID_ARGUMENT 2
 
 // No manifest at the path.
@@ -419,6 +246,10 @@ typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTe
 
 // A pipeline asked for on a device this build or machine cannot use.
 #define WAIFU_ERR_DEVICE_UNAVAILABLE 8
+
+// A request attribute this library does not know, or one of another pipeline type's. A task's
+// getter asked about an attribute it does not know says false, and sets nothing.
+#define WAIFU_ERR_UNKNOWN_ATTRIBUTE 9
 
 #define WAIFU_LOG_DEBUG 0
 
@@ -501,10 +332,226 @@ typedef void (*WaifuSpeechToTextCallback)(void *user_data, const WaifuSpeechToTe
 // Parts handed over.
 #define WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_SYNTHESIZING_AUDIO 602
 
+// String, required.
+#define WAIFU_REQUEST_IMAGE_GENERATION_PROMPT 100
+
+// String; none.
+#define WAIFU_REQUEST_IMAGE_GENERATION_NEGATIVE 101
+
+// Int, 64..2048, a multiple of the model's IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF; 1024.
+#define WAIFU_REQUEST_IMAGE_GENERATION_WIDTH 102
+
+// Int, as WIDTH; 1024.
+#define WAIFU_REQUEST_IMAGE_GENERATION_HEIGHT 103
+
+// Int, 1..; 20.
+#define WAIFU_REQUEST_IMAGE_GENERATION_STEPS 104
+
+// Float, 0..; 5.0, ignored by a model without guidance.
+#define WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE 105
+
+// Int, read as uint64; 0.
+#define WAIFU_REQUEST_IMAGE_GENERATION_SEED 106
+
+// Image; none (img2img).
+#define WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE 107
+
+// Float, 0..1, how far it walks away from it; 0.8.
+#define WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE_STRENGTH 108
+
+// Image; none (a ControlNet's condition).
+#define WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE 109
+
+// Float, 0.., how hard it holds to it; 1.0.
+#define WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE_SCALE 110
+
+// waifu_request_add_prompt_image; none.
+#define WAIFU_REQUEST_IMAGE_GENERATION_PROMPT_IMAGES 111
+
+// String, required.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_TEXT 200
+
+// Audio, a recording to sound like; none.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE 201
+
+// String, what REFERENCE says, word for word; none. CosyVoice3 reads on from it, as upstream's
+// zero-shot does, and takes it or a style, not both; a model that reads none ignores it.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT 202
+
+// Float, above 0; 1.0.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED 203
+
+// Float, 0..; 1.0.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE 204
+
+// String, any instruction; the voice's own way.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE 205
+
+// Int, read as uint64; 0.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_SEED 206
+
+// Audio, what is said and how; required.
+#define WAIFU_REQUEST_VOICE_CONVERSION_SOURCE 300
+
+// Audio, whose voice to say it in; required.
+#define WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE 301
+
+// Int, 1..; 10.
+#define WAIFU_REQUEST_VOICE_CONVERSION_STEPS 302
+
+// Boolean; 0.
+#define WAIFU_REQUEST_VOICE_CONVERSION_CONVERT_STYLE 303
+
+// Int, read as uint64; 0.
+#define WAIFU_REQUEST_VOICE_CONVERSION_SEED 304
+
+// RGBA image, any size, centred and scaled by the engine; required.
+#define WAIFU_REQUEST_LAYER_DECOMPOSITION_IMAGE 400
+
+// Int, 1..; the model's own.
+#define WAIFU_REQUEST_LAYER_DECOMPOSITION_STEPS 401
+
+// Int, 1..; the model's own.
+#define WAIFU_REQUEST_LAYER_DECOMPOSITION_DEPTH_STEPS 402
+
+// Int, a multiple of the model's LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF; 1280.
+#define WAIFU_REQUEST_LAYER_DECOMPOSITION_RESOLUTION 403
+
+// Boolean, hands, eyes, eyebrows, ears into a -l and a -r layer; 0.
+#define WAIFU_REQUEST_LAYER_DECOMPOSITION_SPLIT_PAIRS 404
+
+// Boolean, hair, hands, top and bottom also cut into a near and a far half; 0.
+#define WAIFU_REQUEST_LAYER_DECOMPOSITION_STRATIFY_LAYERS 405
+
+// Int, read as uint64; 0.
+#define WAIFU_REQUEST_LAYER_DECOMPOSITION_SEED 406
+
+// Audio, any rate and length; required.
+#define WAIFU_REQUEST_SPEECH_TO_TEXT_AUDIO 500
+
+// String, one of the model's SPEECH_TO_TEXT_LANGUAGES -- "English", "chinese"; the model tells.
+#define WAIFU_REQUEST_SPEECH_TO_TEXT_LANGUAGE 501
+
+// String, words that help it hear: names, terms, the subject; none.
+#define WAIFU_REQUEST_SPEECH_TO_TEXT_CONTEXT 502
+
+// String, required.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEXT 600
+
+// Audio; none.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE 601
+
+// String, as TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT; none.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT 602
+
+// Float, 0..; 1.0.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE 603
+
+// String; the voice's own way. No speed: a streaming reading is at the speed it is said, as
+// upstream's is.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE 604
+
+// Int, read as uint64; 0.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED 605
+
+// Nothing before the timeout.
+#define WAIFU_EVENT_NONE 0
+
+// The PROGRESS_ attributes say where the task is now.
+#define WAIFU_EVENT_PROGRESS 1
+
+// Streaming text to speech: STREAMING_TEXT_TO_SPEECH_AUDIO_PART is the next part.
+#define WAIFU_EVENT_AUDIO_PART 2
+
+// STATUS is there; and the result, for WAIFU_OK.
+#define WAIFU_EVENT_END 3
+
+// Int, a WaifuStatusCode; absent until the task has ended.
+#define WAIFU_TASK_STATUS 1
+
+// String, why; absent for WAIFU_OK and WAIFU_CANCELLED.
+#define WAIFU_TASK_STATUS_MESSAGE 2
+
+// Int, a WaifuStage: the progress the last PROGRESS event said; absent before one.
+#define WAIFU_TASK_PROGRESS_STAGE 10
+
+// Int, of the stage, done already.
+#define WAIFU_TASK_PROGRESS_DONE 11
+
+// Int.
+#define WAIFU_TASK_PROGRESS_TOTAL 12
+
+// Float, 0..1 of the whole task; absent where nothing can say.
+#define WAIFU_TASK_PROGRESS_FRACTION 13
+
+// Float, seconds since the task started.
+#define WAIFU_TASK_PROGRESS_SECONDS 14
+
+// Image: there once STATUS is WAIFU_OK, as each task's result is.
+#define WAIFU_TASK_IMAGE_GENERATION_IMAGE 100
+
+// Audio.
+#define WAIFU_TASK_TEXT_TO_SPEECH_AUDIO 200
+
+// Audio.
+#define WAIFU_TASK_VOICE_CONVERSION_AUDIO 300
+
+// Int, the side of the square canvas.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_CANVAS 400
+
+// Int. The layers are in one order, which the library never changes: each part, bottom first --
+// which is the stack, unstratified -- then, with STRATIFY_LAYERS, each part's halves, near before
+// far; then a depth layer for each of those, in their order. The stratified stack is every part
+// that was not split and every half, bottom first: from the largest depth to the smallest; at one
+// depth, a far half under a near one; then by their order. No depth layer is in either stack.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_COUNT 401
+
+// Int, indexed: a WaifuLayerType.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TYPE 402
+
+// Int, indexed: unique within the result, from 1; it means nothing else.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_ID 403
+
+// String, indexed: "topwear"; its halves "topwear-0" and "topwear-1"; its depth "topwear_depth".
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_NAME 404
+
+// Int, indexed: where its top left corner is on the canvas.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_LEFT 405
+
+// Int, indexed.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TOP 406
+
+// RGBA image, indexed: only as large as what is drawn. A depth layer: the same size and place as
+// its layer, R, G and B the depth, 0 nearest to 255 farthest, under its layer's alpha.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_IMAGE 407
+
+// Float, indexed: 0 nearest, 1 farthest. A near half has its part's depth, not its pixels': that
+// is what keeps it in its part's place in the stratified stack. A depth layer has its layer's.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DEPTH 408
+
+// Int, indexed: the id of the layer this one is made from -- a half's part, a depth layer's
+// layer; 0 for a part.
+#define WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DERIVED_FROM_ID 409
+
+// String: what was said; "" for nothing said.
+#define WAIFU_TASK_SPEECH_TO_TEXT_TEXT 500
+
+// String: the language it was said in, as the model names it -- "Chinese" -- or several, comma
+// separated, for a recording that changes; "" where none was heard.
+#define WAIFU_TASK_SPEECH_TO_TEXT_LANGUAGE 501
+
+// Audio: the part the last AUDIO_PART event said, from the moment it is said, before the task
+// ends.
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART 600
+
+// Audio: every part, end to end.
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO 601
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
+// (major << 16) | minor. A caller built against 6.m runs on any 6.n with n >= m.
 uint32_t waifu_abi_version(void);
 
 // This thread's last refused call, as a sentence and as a code; both are set together by a
@@ -529,11 +576,11 @@ void waifu_set_log_level(WaifuLogLevel level);
 
 bool waifu_device_is_available(WaifuDevice device);
 
-// false for the processor, a device that cannot be used, or a property this library does not
+// false for the processor, a device that cannot be used, or an attribute this library does not
 // know. Asking CUDA builds a context on the card, a few hundred megabytes of it.
-bool waifu_device_get_int_property(WaifuDevice device,
-                                   WaifuDeviceProperty property,
-                                   int64_t *value);
+bool waifu_device_get_int_attribute(WaifuDevice device,
+                                    WaifuDeviceAttribute attribute,
+                                    int64_t *value);
 
 // For the whole process, one per device, shared by every pipeline on it: set it before a model
 // is loaded. 0 for no limit but the device's. The processor has none, and is refused.
@@ -547,20 +594,22 @@ WaifuModel *waifu_model_open(const char *manifest_path);
 // NULL is fine.
 void waifu_model_free(WaifuModel *model);
 
-// false where the model has no such property or this library does not know it; *value untouched.
-bool waifu_model_get_int_property(const WaifuModel *model,
-                                  WaifuModelProperty property,
-                                  int64_t *value);
+// false where the model has no such attribute or this library does not know it; *value untouched.
+bool waifu_model_get_int_attribute(const WaifuModel *model,
+                                   WaifuModelAttribute attribute,
+                                   int64_t *value);
 
 // NULL where there is none; valid until waifu_model_free.
-const char *waifu_model_get_string_property(const WaifuModel *model, WaifuModelProperty property);
+const char *waifu_model_get_string_attribute(const WaifuModel *model,
+                                             WaifuModelAttribute attribute);
 
 // Starts the pipeline's thread, with no model. Refused -- NULL, WAIFU_ERR_DEVICE_UNAVAILABLE --
 // where the device is not available.
 WaifuPipeline *waifu_pipeline_new(WaifuPipelineType type, WaifuDevice device);
 
 // Stops what runs, cancels what waits, drops the model and joins the thread. Returns once every
-// job has had its on_complete. Must not be called from one of its own callbacks. NULL is fine.
+// task of the pipeline has ended -- WAIFU_CANCELLED for what had not -- and the tasks are still
+// the caller's to free. NULL is fine.
 void waifu_pipeline_free(WaifuPipeline *pipeline);
 
 // 0 for a NULL pipeline.
@@ -569,65 +618,151 @@ WaifuPipelineType waifu_pipeline_get_type(const WaifuPipeline *pipeline);
 // Never AUTO, which is settled when it starts; AUTO only for a NULL pipeline.
 WaifuDevice waifu_pipeline_get_device(const WaifuPipeline *pipeline);
 
-// After the step it is on, or before it starts.
-void waifu_pipeline_cancel(WaifuPipeline *pipeline, WaifuJob job);
-
+// Every task of the pipeline, waiting or running, is cancelled.
 void waifu_pipeline_cancel_all(WaifuPipeline *pipeline);
 
 // Reads the model's weights onto the pipeline's device, dropping the model before first, so two
-// are never on it at once. Refused at the call for a model the pipeline's task is not supported
-// by (WAIFU_MODEL_SUPPORTS_<task>). The call copies the manifest, not the weights, which the
+// are never on it at once. Refused -- NULL -- for a model the pipeline's type is not supported by
+// (WAIFU_MODEL_SUPPORTS_<type>). The call copies the manifest, not the weights, which the
 // pipeline's thread reads from the files: `model` may be freed as soon as it returns. A run may
 // be asked for straight after; it waits its turn. "tones", the stand-in voice the tests use,
 // opens as a model too.
-WaifuJob waifu_pipeline_load_model_async(WaifuPipeline *pipeline,
-                                         const WaifuModel *model,
-                                         void *user_data,
-                                         WaifuProgressCallback on_progress,
-                                         WaifuCallback on_complete);
+WaifuTask *waifu_pipeline_load_model(WaifuPipeline *pipeline, const WaifuModel *model);
 
-WaifuJob waifu_pipeline_unload_model_async(WaifuPipeline *pipeline,
-                                           void *user_data,
-                                           WaifuCallback on_complete);
+// Drops the model; the pipeline then has none.
+WaifuTask *waifu_pipeline_unload_model(WaifuPipeline *pipeline);
 
-// Each run function is refused at the call on a pipeline made for another task.
-WaifuJob waifu_pipeline_run_image_generation_async(WaifuPipeline *pipeline,
-                                                   const WaifuImageGenerationRequest *request,
-                                                   void *user_data,
-                                                   WaifuProgressCallback on_progress,
-                                                   WaifuImageGenerationCallback on_complete);
+// Runs the request on the pipeline's thread, in its turn, and returns at once. Refused -- NULL,
+// with the last error and its code -- for a request of another pipeline type, a required attribute
+// unset, or an attribute that contradicts another; a run with no model loaded is not refused, and
+// ends with WAIFU_ERR_NOT_LOADED.
+WaifuTask *waifu_pipeline_run(WaifuPipeline *pipeline, const WaifuRequest *request);
 
-WaifuJob waifu_pipeline_run_text_to_speech_async(WaifuPipeline *pipeline,
-                                                 const WaifuTextToSpeechRequest *request,
-                                                 void *user_data,
-                                                 WaifuProgressCallback on_progress,
-                                                 WaifuAudioCallback on_complete);
+// A request for a pipeline of `type`, with every attribute unset. Refused -- NULL,
+// WAIFU_ERR_INVALID_ARGUMENT -- for a type this library does not know.
+WaifuRequest *waifu_request_new(WaifuPipelineType type);
 
-WaifuJob waifu_pipeline_run_voice_conversion_async(WaifuPipeline *pipeline,
-                                                   const WaifuVoiceConversionRequest *request,
-                                                   void *user_data,
-                                                   WaifuProgressCallback on_progress,
-                                                   WaifuAudioCallback on_complete);
+// NULL is fine.
+void waifu_request_free(WaifuRequest *request);
 
-// on_part for each part as it is made; on_complete with the whole of it, the parts end to end.
-WaifuJob waifu_pipeline_run_streaming_text_to_speech_async(WaifuPipeline *pipeline,
-                                                           const WaifuStreamingTextToSpeechRequest *request,
-                                                           void *user_data,
-                                                           WaifuProgressCallback on_progress,
-                                                           WaifuAudioPartCallback on_part,
-                                                           WaifuAudioCallback on_complete);
+// 0 for NULL.
+WaifuPipelineType waifu_request_get_type(const WaifuRequest *request);
 
-WaifuJob waifu_pipeline_run_layer_decomposition_async(WaifuPipeline *pipeline,
-                                                      const WaifuLayerDecompositionRequest *request,
-                                                      void *user_data,
-                                                      WaifuProgressCallback on_progress,
-                                                      WaifuLayerDecompositionCallback on_complete);
+// Each sets one attribute and copies what it is handed: a string, an image's pixels, a recording's
+// samples. false, with the last error and its code, for an attribute this library does not know or
+// that is another pipeline type's (WAIFU_ERR_UNKNOWN_ATTRIBUTE), and for a value of another type,
+// out of the attribute's range, or a string that is not UTF-8 (WAIFU_ERR_INVALID_ARGUMENT); the
+// attribute is then as it was. A NULL string, image or audio unsets the attribute.
+bool waifu_request_set_int_attribute(WaifuRequest *request,
+                                     WaifuRequestAttribute attribute,
+                                     int64_t value);
 
-WaifuJob waifu_pipeline_run_speech_to_text_async(WaifuPipeline *pipeline,
-                                                 const WaifuSpeechToTextRequest *request,
-                                                 void *user_data,
-                                                 WaifuProgressCallback on_progress,
-                                                 WaifuSpeechToTextCallback on_complete);
+// As waifu_request_set_int_attribute. The value is kept, and checked against the attribute's
+// range, as the float the model is handed: one too large for a float is refused, not infinity.
+bool waifu_request_set_float_attribute(WaifuRequest *request,
+                                       WaifuRequestAttribute attribute,
+                                       double value);
+
+// As waifu_request_set_int_attribute.
+bool waifu_request_set_string_attribute(WaifuRequest *request,
+                                        WaifuRequestAttribute attribute,
+                                        const char *value);
+
+// As waifu_request_set_int_attribute.
+bool waifu_request_set_image_attribute(WaifuRequest *request,
+                                       WaifuRequestAttribute attribute,
+                                       const WaifuImage *value);
+
+// As waifu_request_set_int_attribute.
+bool waifu_request_set_rgba_image_attribute(WaifuRequest *request,
+                                            WaifuRequestAttribute attribute,
+                                            const WaifuRgbaImage *value);
+
+// As waifu_request_set_int_attribute.
+bool waifu_request_set_audio_attribute(WaifuRequest *request,
+                                       WaifuRequestAttribute attribute,
+                                       const WaifuAudio *value);
+
+// IMAGE_GENERATION_PROMPT_IMAGES: one more image the prompt names as <|key|>; key is letters,
+// digits and _. A key given twice is refused. Unsetting the attribute drops them all.
+bool waifu_request_add_prompt_image(WaifuRequest *request,
+                                    const char *key,
+                                    const WaifuImage *image);
+
+// Back to the attribute's default. false, as a setter's, for an attribute this library does not
+// know.
+bool waifu_request_unset_attribute(WaifuRequest *request, WaifuRequestAttribute attribute);
+
+// The next thing that happened to the task, in order, waiting up to timeout_ms for it: 0 only
+// looks. NONE where nothing did in time. END once it has ended, and END for every call after.
+// Progress not yet read is one event, the latest; audio parts are never merged or dropped. One
+// thread at a time asks a task for events.
+WaifuEventType waifu_task_next_event(WaifuTask *task, uint32_t timeout_ms);
+
+// Waits up to timeout_ms for the task to end, without reading its events: true once it has. Any
+// number of threads may wait on one task.
+bool waifu_task_wait(WaifuTask *task, uint32_t timeout_ms);
+
+// After the step it is on, or before it starts; it then ends with WAIFU_CANCELLED, waking anyone
+// waiting. Nothing once it has ended.
+void waifu_task_cancel(WaifuTask *task);
+
+// A task that has not ended is cancelled, and the library lets it go when it does; this returns
+// at once. Every pointer the task handed out is then gone. NULL is fine.
+void waifu_task_free(WaifuTask *task);
+
+// false, or NULL, where the attribute is not there -- not yet, of another pipeline type, or not
+// known to this library -- and *value untouched; nothing is set. A pointer, and every pointer in
+// what an image or audio getter fills in, is valid until waifu_task_free.
+bool waifu_task_get_int_attribute(const WaifuTask *task,
+                                  WaifuTaskAttribute attribute,
+                                  int64_t *value);
+
+// As waifu_task_get_int_attribute.
+bool waifu_task_get_float_attribute(const WaifuTask *task,
+                                    WaifuTaskAttribute attribute,
+                                    double *value);
+
+// As waifu_task_get_int_attribute.
+const char *waifu_task_get_string_attribute(const WaifuTask *task, WaifuTaskAttribute attribute);
+
+// As waifu_task_get_int_attribute.
+bool waifu_task_get_image_attribute(const WaifuTask *task,
+                                    WaifuTaskAttribute attribute,
+                                    WaifuImage *value);
+
+// As waifu_task_get_int_attribute.
+bool waifu_task_get_rgba_image_attribute(const WaifuTask *task,
+                                         WaifuTaskAttribute attribute,
+                                         WaifuRgbaImage *value);
+
+// As waifu_task_get_int_attribute.
+bool waifu_task_get_audio_attribute(const WaifuTask *task,
+                                    WaifuTaskAttribute attribute,
+                                    WaifuAudio *value);
+
+// The indexed attributes: the layers of a decomposition. false, or NULL, past the count as well.
+bool waifu_task_get_int_attribute_at(const WaifuTask *task,
+                                     WaifuTaskAttribute attribute,
+                                     size_t index,
+                                     int64_t *value);
+
+// As waifu_task_get_int_attribute_at.
+bool waifu_task_get_float_attribute_at(const WaifuTask *task,
+                                       WaifuTaskAttribute attribute,
+                                       size_t index,
+                                       double *value);
+
+// As waifu_task_get_int_attribute_at.
+const char *waifu_task_get_string_attribute_at(const WaifuTask *task,
+                                               WaifuTaskAttribute attribute,
+                                               size_t index);
+
+// As waifu_task_get_int_attribute_at.
+bool waifu_task_get_rgba_image_attribute_at(const WaifuTask *task,
+                                            WaifuTaskAttribute attribute,
+                                            size_t index,
+                                            WaifuRgbaImage *value);
 
 #ifdef __cplusplus
 }  // extern "C"
