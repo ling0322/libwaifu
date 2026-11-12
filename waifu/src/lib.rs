@@ -119,7 +119,7 @@ pub use sdxl::{
 };
 pub use speech::{
     ConversionDefaults, ConversionOptions, ConversionProgress, Converter, SpeechDefaults,
-    SpeechOptions, SpeechProgress, Style, Tones, Voice,
+    SpeechOptions, SpeechProgress, Style, Tones, Viseme, Voice,
 };
 pub use tensor_file::read_safetensors;
 pub use tokenizer::Tokenizer;

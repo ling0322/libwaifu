@@ -84,7 +84,10 @@ use crate::Device;
 pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
 /// The minor version: bumped for what an older caller never uses -- an attribute, a stage, an event
 /// a request has to ask for, a function. Back to 0 with each major.
-pub const WAIFU_ABI_VERSION_MINOR: u32 = 0;
+///
+/// 6.1: the text-to-speech readings' visemes -- the VISEMES request and task attributes,
+/// SUPPORTS_TEXT_TO_SPEECH_VISEMES, WaifuViseme, waifu_task_get_int_array_attribute.
+pub const WAIFU_ABI_VERSION_MINOR: u32 = 1;
 /// (major << 16) | minor, as waifu_abi_version says it.
 pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
 
@@ -134,6 +137,9 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelAttribute = 
 /// A reference without its reference_transcript: CosyVoice3 does not, unless a style is given.
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelAttribute =
     203;
+/// The visemes of what it says, with TEXT_TO_SPEECH_VISEMES or STREAMING_TEXT_TO_SPEECH_VISEMES:
+/// a CosyVoice3 package with the viseme model. Since 6.1.
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES: WaifuModelAttribute = 204;
 /// The manner as well as the voice.
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 300;
 /// Integer, bytes; absent until every file is here.
@@ -172,6 +178,22 @@ pub const WAIFU_LAYER_STRATIFIED_NEAR: WaifuLayerType = 1;
 pub const WAIFU_LAYER_STRATIFIED_FAR: WaifuLayerType = 2;
 /// The depth of the layer derived_from_id names, pixel by pixel.
 pub const WAIFU_LAYER_DEPTH: WaifuLayerType = 3;
+
+/// A mouth shape, one for each frame of a reading's VISEMES: the sounds a face cannot tell apart
+/// by looking are one.
+pub type WaifuViseme = i32;
+/// The five open vowels, as a Japanese face draws them.
+pub const WAIFU_VISEME_A: WaifuViseme = 0;
+pub const WAIFU_VISEME_E: WaifuViseme = 1;
+pub const WAIFU_VISEME_I: WaifuViseme = 2;
+pub const WAIFU_VISEME_O: WaifuViseme = 3;
+pub const WAIFU_VISEME_U: WaifuViseme = 4;
+/// The schwa, @: half open and not spread -- Mandarin's e and en, English's unstressed vowel.
+pub const WAIFU_VISEME_SCHWA: WaifuViseme = 5;
+/// The lips pressed shut: b, p and m.
+pub const WAIFU_VISEME_MBP: WaifuViseme = 6;
+/// Relaxed and lightly closed. A shape, not silence: whether anybody is speaking is the sound's.
+pub const WAIFU_VISEME_REST: WaifuViseme = 7;
 
 // -- the library -----------------------------------------------------------------------------
 
@@ -405,6 +427,10 @@ impl WaifuModel {
         model.supports(
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE,
             &detail(speaking.map(|s| &s.with_style), &speech),
+        );
+        model.supports(
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES,
+            &detail(speaking.map(|s| &s.with_visemes), &speech),
         );
 
         model.supports(
@@ -760,13 +786,18 @@ pub unsafe extern "C" fn waifu_pipeline_run(
             WAIFU_PIPELINE_IMAGE_GENERATION => {
                 engine.draw(request.draw()?, progress, started.on_image())?
             }
-            WAIFU_PIPELINE_TEXT_TO_SPEECH => {
-                engine.speak(request.speak()?, progress, started.on_audio())?
-            }
-            WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH => engine.speak_streaming(
+            WAIFU_PIPELINE_TEXT_TO_SPEECH => engine.speak_with(
+                request.speak()?,
+                progress,
+                None,
+                request.wants_visemes().then(|| started.on_visemes()),
+                started.on_audio(),
+            )?,
+            WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH => engine.speak_with(
                 request.speak_streaming()?,
                 progress,
-                started.on_part(),
+                Some(started.on_part()),
+                request.wants_visemes().then(|| started.on_visemes()),
                 started.on_audio(),
             )?,
             WAIFU_PIPELINE_VOICE_CONVERSION => engine.voice_conversion(

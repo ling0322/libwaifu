@@ -19,7 +19,10 @@
 
 // The minor version: bumped for what an older caller never uses -- an attribute, a stage, an event
 // a request has to ask for, a function. Back to 0 with each major.
-#define WAIFU_ABI_VERSION_MINOR 0
+//
+// 6.1: the text-to-speech readings' visemes -- the VISEMES request and task attributes,
+// SUPPORTS_TEXT_TO_SPEECH_VISEMES, WaifuViseme, waifu_task_get_int_array_attribute.
+#define WAIFU_ABI_VERSION_MINOR 1
 
 // (major << 16) | minor, as waifu_abi_version says it.
 #define WAIFU_ABI_VERSION ((WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR)
@@ -115,6 +118,10 @@ typedef int32_t WaifuTaskAttribute;
 
 typedef int32_t WaifuLayerType;
 
+// A mouth shape, one for each frame of a reading's VISEMES: the sounds a face cannot tell apart
+// by looking are one.
+typedef int32_t WaifuViseme;
+
 // What a task is doing. Ranges by pipeline type; done/total count what the comment says, 0, 0
 // otherwise.
 typedef int32_t WaifuStage;
@@ -175,6 +182,10 @@ typedef int32_t WaifuStage;
 // A reference without its reference_transcript: CosyVoice3 does not, unless a style is given.
 #define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT 203
 
+// The visemes of what it says, with TEXT_TO_SPEECH_VISEMES or STREAMING_TEXT_TO_SPEECH_VISEMES:
+// a CosyVoice3 package with the viseme model. Since 6.1.
+#define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES 204
+
 // The manner as well as the voice.
 #define WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE 300
 
@@ -222,6 +233,26 @@ typedef int32_t WaifuStage;
 
 // The depth of the layer derived_from_id names, pixel by pixel.
 #define WAIFU_LAYER_DEPTH 3
+
+// The five open vowels, as a Japanese face draws them.
+#define WAIFU_VISEME_A 0
+
+#define WAIFU_VISEME_E 1
+
+#define WAIFU_VISEME_I 2
+
+#define WAIFU_VISEME_O 3
+
+#define WAIFU_VISEME_U 4
+
+// The schwa, @: half open and not spread -- Mandarin's e and en, English's unstressed vowel.
+#define WAIFU_VISEME_SCHWA 5
+
+// The lips pressed shut: b, p and m.
+#define WAIFU_VISEME_MBP 6
+
+// Relaxed and lightly closed. A shape, not silence: whether anybody is speaking is the sound's.
+#define WAIFU_VISEME_REST 7
 
 #define WAIFU_OK 0
 
@@ -390,6 +421,10 @@ typedef int32_t WaifuStage;
 // Int, read as uint64; 0.
 #define WAIFU_REQUEST_TEXT_TO_SPEECH_SEED 206
 
+// Boolean, the visemes as well, TEXT_TO_SPEECH_VISEMES; 0. A model without
+// SUPPORTS_TEXT_TO_SPEECH_VISEMES ends the task with WAIFU_ERR_MODEL. Since 6.1.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES 207
+
 // Audio, what is said and how; required.
 #define WAIFU_REQUEST_VOICE_CONVERSION_SOURCE 300
 
@@ -454,6 +489,10 @@ typedef int32_t WaifuStage;
 // Int, read as uint64; 0.
 #define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED 605
 
+// Boolean, as TEXT_TO_SPEECH_VISEMES: STREAMING_TEXT_TO_SPEECH_VISEMES with each part; 0.
+// Since 6.1.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES 606
+
 // Nothing before the timeout.
 #define WAIFU_EVENT_NONE 0
 
@@ -492,6 +531,15 @@ typedef int32_t WaifuStage;
 
 // Audio.
 #define WAIFU_TASK_TEXT_TO_SPEECH_AUDIO 200
+
+// Int array, read with waifu_task_get_int_array_attribute: a WaifuViseme for each
+// TEXT_TO_SPEECH_VISEME_FRAME_MS of AUDIO, frame i being milliseconds [i, i + 1) * FRAME_MS of it,
+// ceil(milliseconds / FRAME_MS) of them; for a request with TEXT_TO_SPEECH_VISEMES. Since 6.1.
+#define WAIFU_TASK_TEXT_TO_SPEECH_VISEMES 201
+
+// Int: how many milliseconds a frame of VISEMES holds -- 40 for CosyVoice3, a speech token's.
+// Since 6.1.
+#define WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS 202
 
 // Audio.
 #define WAIFU_TASK_VOICE_CONVERSION_AUDIO 300
@@ -546,6 +594,15 @@ typedef int32_t WaifuStage;
 
 // Audio: every part, end to end.
 #define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO 601
+
+// Int array, as TEXT_TO_SPEECH_VISEMES, frame 0 the start of the first part: the frames settled
+// by the part the last AUDIO_PART event said, from the moment it is said -- never past the end of
+// that part, and only ever more of them with each part -- and every frame once the task has ended
+// well. For a request with STREAMING_TEXT_TO_SPEECH_VISEMES. Since 6.1.
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES 602
+
+// Int, as TEXT_TO_SPEECH_VISEME_FRAME_MS. Since 6.1.
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS 603
 
 #ifdef __cplusplus
 extern "C" {
@@ -740,6 +797,12 @@ bool waifu_task_get_rgba_image_attribute(const WaifuTask *task,
 bool waifu_task_get_audio_attribute(const WaifuTask *task,
                                     WaifuTaskAttribute attribute,
                                     WaifuAudio *value);
+
+// The arrays: a pointer to *count values, valid until waifu_task_free, or NULL and *count
+// untouched where the attribute is not there, as waifu_task_get_int_attribute. Since 6.1.
+const int32_t *waifu_task_get_int_array_attribute(const WaifuTask *task,
+                                                  WaifuTaskAttribute attribute,
+                                                  size_t *count);
 
 // The indexed attributes: the layers of a decomposition. false, or NULL, past the count as well.
 bool waifu_task_get_int_attribute_at(const WaifuTask *task,

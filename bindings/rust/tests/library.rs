@@ -57,7 +57,7 @@ fn the_library_is_found_once_and_says_what_it_is() {
         ErrorCode::Library
     );
 
-    assert_eq!(waifu::ABI_VERSION, 6 << 16);
+    assert_eq!(waifu::ABI_VERSION, 6 << 16 | 1);
     assert!(!waifu::version().unwrap().is_empty());
     let _ = waifu::revision().unwrap();
 }

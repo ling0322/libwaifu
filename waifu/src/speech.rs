@@ -151,6 +151,54 @@ pub enum SpeechProgress {
     Sounding,
 }
 
+/// A mouth shape: what a face shows while a sound is made, so that the sounds it cannot tell apart
+/// by looking are one -- b, p and m are [`Viseme::Mbp`].
+///
+/// Five open vowels as a Japanese face draws them; the schwa, which is Mandarin's e and en and
+/// English's unstressed vowel, half open and not spread; the lips pressed shut; and the mouth at
+/// rest, relaxed and lightly closed. `Rest` is a shape, not silence: whether anybody is speaking is
+/// the sound's, not the mouth's. The numbers are the C API's `WAIFU_VISEME_*` and never change.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(i32)]
+pub enum Viseme {
+    A = 0,
+    E = 1,
+    I = 2,
+    O = 3,
+    U = 4,
+    Schwa = 5,
+    Mbp = 6,
+    Rest = 7,
+}
+
+impl Viseme {
+    /// Every one, in the order of their numbers.
+    pub const ALL: [Viseme; 8] = [
+        Viseme::A,
+        Viseme::E,
+        Viseme::I,
+        Viseme::O,
+        Viseme::U,
+        Viseme::Schwa,
+        Viseme::Mbp,
+        Viseme::Rest,
+    ];
+
+    /// As a model's package spells it: `A`, ..., `@`, `MBP`, `REST`.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Viseme::A => "A",
+            Viseme::E => "E",
+            Viseme::I => "I",
+            Viseme::O => "O",
+            Viseme::U => "U",
+            Viseme::Schwa => "@",
+            Viseme::Mbp => "MBP",
+            Viseme::Rest => "REST",
+        }
+    }
+}
+
 /// Something that can be asked to say a sentence.
 ///
 /// The one seam between the screen and whatever ends up speaking. Everything above it -- the
@@ -199,6 +247,37 @@ pub trait Voice {
     ) -> Result<Option<Sound>> {
         Err(Error::model(format!(
             "{} does not stream: it hands over a reading only when the whole of it is made",
+            self.name()
+        )))
+    }
+
+    /// How many milliseconds each of its visemes holds, where it says which mouth shape goes with
+    /// what it says -- see [`speak_with_visemes`](Voice::speak_with_visemes) -- and `None` where it
+    /// does not.
+    fn viseme_frame_ms(&self) -> Option<u32> {
+        None
+    }
+
+    /// Says `text` as [`speak`](Voice::speak) does -- or, with `heard`, as
+    /// [`speak_streaming`](Voice::speak_streaming) does -- and hands `visemes` the mouth shape of
+    /// each [`viseme_frame_ms`](Voice::viseme_frame_ms) of the audio, in order, frame 0 being the
+    /// first milliseconds of the reading.
+    ///
+    /// Streaming, the frames come before the part they lie in, and never past the audio handed
+    /// over so far: what `visemes` has been given lies within what `heard` has. Once the reading
+    /// is over it has been given `ceil(milliseconds / viseme_frame_ms)` of them. This default
+    /// refuses, for a voice that does not say them.
+    fn speak_with_visemes(
+        &self,
+        _text: &str,
+        _like: Option<&Sound>,
+        _options: &SpeechOptions,
+        _report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        _heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>>,
+        _visemes: &mut dyn FnMut(&[Viseme]),
+    ) -> Result<Option<Sound>> {
+        Err(Error::model(format!(
+            "{} does not say which mouth shape goes with what it says",
             self.name()
         )))
     }

@@ -31,7 +31,7 @@ use std::ffi::{c_char, c_int, c_void};
 /// The major version this crate speaks: a library of another major is refused.
 pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
 /// The minor version this crate was written against: a library of an older minor is refused.
-pub const WAIFU_ABI_VERSION_MINOR: u32 = 0;
+pub const WAIFU_ABI_VERSION_MINOR: u32 = 1;
 pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
 
 // -- enums -----------------------------------------------------------------------------------
@@ -112,6 +112,7 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE: WaifuModelAttri
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelAttribute = 202;
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelAttribute =
     203;
+pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES: WaifuModelAttribute = 204;
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 300;
 pub const WAIFU_MODEL_SIZE_ON_DISK: WaifuModelAttribute = 1000;
 pub const WAIFU_MODEL_SAMPLE_RATE: WaifuModelAttribute = 1001;
@@ -132,6 +133,16 @@ pub const WAIFU_LAYER_PART: WaifuLayerType = 0;
 pub const WAIFU_LAYER_STRATIFIED_NEAR: WaifuLayerType = 1;
 pub const WAIFU_LAYER_STRATIFIED_FAR: WaifuLayerType = 2;
 pub const WAIFU_LAYER_DEPTH: WaifuLayerType = 3;
+
+pub type WaifuViseme = c_int;
+pub const WAIFU_VISEME_A: WaifuViseme = 0;
+pub const WAIFU_VISEME_E: WaifuViseme = 1;
+pub const WAIFU_VISEME_I: WaifuViseme = 2;
+pub const WAIFU_VISEME_O: WaifuViseme = 3;
+pub const WAIFU_VISEME_U: WaifuViseme = 4;
+pub const WAIFU_VISEME_SCHWA: WaifuViseme = 5;
+pub const WAIFU_VISEME_MBP: WaifuViseme = 6;
+pub const WAIFU_VISEME_REST: WaifuViseme = 7;
 
 pub type WaifuEventType = c_int;
 pub const WAIFU_EVENT_NONE: WaifuEventType = 0;
@@ -161,6 +172,7 @@ pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED: WaifuRequestAttribute = 203;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttribute = 204;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 205;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 206;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 207;
 pub const WAIFU_REQUEST_VOICE_CONVERSION_SOURCE: WaifuRequestAttribute = 300;
 pub const WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE: WaifuRequestAttribute = 301;
 pub const WAIFU_REQUEST_VOICE_CONVERSION_STEPS: WaifuRequestAttribute = 302;
@@ -182,6 +194,7 @@ pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT: WaifuRequ
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttribute = 603;
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 604;
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 605;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 606;
 
 pub type WaifuTaskAttribute = c_int;
 pub const WAIFU_TASK_STATUS: WaifuTaskAttribute = 1;
@@ -193,6 +206,8 @@ pub const WAIFU_TASK_PROGRESS_FRACTION: WaifuTaskAttribute = 13;
 pub const WAIFU_TASK_PROGRESS_SECONDS: WaifuTaskAttribute = 14;
 pub const WAIFU_TASK_IMAGE_GENERATION_IMAGE: WaifuTaskAttribute = 100;
 pub const WAIFU_TASK_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 200;
+pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 201;
+pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 202;
 pub const WAIFU_TASK_VOICE_CONVERSION_AUDIO: WaifuTaskAttribute = 300;
 pub const WAIFU_TASK_LAYER_DECOMPOSITION_CANVAS: WaifuTaskAttribute = 400;
 pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_COUNT: WaifuTaskAttribute = 401;
@@ -208,6 +223,8 @@ pub const WAIFU_TASK_SPEECH_TO_TEXT_TEXT: WaifuTaskAttribute = 500;
 pub const WAIFU_TASK_SPEECH_TO_TEXT_LANGUAGE: WaifuTaskAttribute = 501;
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART: WaifuTaskAttribute = 600;
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 601;
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 602;
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 603;
 
 // -- the four structs ------------------------------------------------------------------------
 
@@ -382,6 +399,11 @@ functions! {
         usize,
         *mut WaifuRgbaImage
     ) -> bool;
+    waifu_task_get_int_array_attribute: fn(
+        *const WaifuTask,
+        WaifuTaskAttribute,
+        *mut usize
+    ) -> *const i32;
 }
 
 /// The functions of the library [`crate::init`] loaded, or why there are none.

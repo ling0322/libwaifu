@@ -282,6 +282,73 @@ In half, on the RTX 5060 Ti, against the float32 package in the same build: the 
 takes 5.9 ms a token where float32 takes 12.8, and the flow draws 11.9 s of audio in 339 ms where
 float32 takes 861.
 
+## Visemes
+
+A package can also say the mouth shape of every 40 ms of what it reads -- one of `A E I O U @ MBP
+REST` for each speech token the flow is handed, laid on the audio that token became -- for a face
+to move to as it plays: the C API's `TEXT_TO_SPEECH_VISEMES` ([ffi-abi6.md](ffi-abi6.md#what-61-adds)),
+`Voice::speak_with_visemes` in Rust. `waifu/src/cosyvoice3/visemes.rs` is all of it.
+
+The model is small and runs on the host: a token and the token either side, as the flow's
+`input_embedding` reads them (3 × 80), through one hidden layer of 256 to the eight. It is one more
+weights file, `cosyvoice3-visemes.safetensors` (`cosyvoice3.visemes.*`, 0.5 MB), and the manifest
+lists it and names the classes in order:
+
+```yaml
+weights:
+  - cosyvoice3-00001-of-00002.safetensors
+  - cosyvoice3-00002-of-00002.safetensors
+  - cosyvoice3-visemes.safetensors
+config:
+  cosyvoice3:
+    visemes: [A, E, I, O, U, "@", MBP, REST]
+```
+
+which is how `SUPPORTS_TEXT_TO_SPEECH_VISEMES` is answered without a weight being read. A package
+without them reads as before.
+
+### How it was trained
+
+Nothing labels speech tokens with mouth shapes, so the labels are made from text. CosyVoice3 reads
+sentences in several voices; S3Tokenizer hears each reading again, which gives its tokens at 25 a
+second, lined up with the audio by construction; Qwen3-ForcedAligner puts each unit of the text on
+the audio -- a Chinese character, a Japanese mora, an English word -- and the unit is spelled into
+mouth shapes: pypinyin's initial and final, a kana table, CMUdict. Vowels, m/b/p and pauses are
+anchors; any other consonant's frames run from the anchor before to the one after, which is what a
+mouth does while it says one. A sound between two shapes is a mixture -- cat's æ is A 0.7 + E 0.3 --
+so the labels are distributions, and the model is fitted to them.
+
+```bash
+# The readings: each sentence in each voice, and S3Tokenizer's tokens of it.
+cargo run --release -p waifu-tools --bin viseme_corpus -- models/cosyvoice3.yaml zh.txt c_zh voice*.wav
+# The labels: pypinyin, nagisa and Qwen3-ASR's aligner on the path (Qwen/Qwen3-ForcedAligner-0.6B).
+python tools/cosyvoice3_visemes.py align c_zh -language Chinese        # Japanese, or English -cmudict
+# Every voice group held out in turn, then the file.
+python tools/cosyvoice3_visemes.py train c_zh c_ja c_en -package models/ -output cosyvoice3-visemes.safetensors
+```
+
+The file in use came from 442 sentences -- 200 Chinese, 120 Japanese in kana, 122 English -- in
+eight voices, four recordings and a pitch-shifted copy of each: 216 430 tokens, 5 555 of the 6 561.
+Each recording with its copy held out in turn, on tokens whose label is at least 0.8 one class:
+
+| | top-1 | Chinese / Japanese / English | m, b, p shut | vowels shut |
+| --- | --- | --- | --- | --- |
+| a token alone (`cosyvoice3.visemes.table`) | 0.59 | 0.62 / 0.60 / 0.50 | 0.90 | 1.7 % |
+| with a token either side (what runs) | 0.68 | 0.71 / 0.69 / 0.59 | 0.81 | 1.9 % |
+
+A, I and REST are right about four times in five; E, O, U and @ about half the time, mostly for
+each other's neighbours. English is the weakest because the aligner times only its words, and a
+word's sounds share its span by rule. The labels are made by rule and never checked by eye, so the
+scores are of a model against labels that are themselves rough.
+
+### Not yet
+
+`VisemeSmoother` takes each frame's likeliest viseme, which flickers where two are close; Viterbi
+over a transition matrix learnt from the labels, with a fixed lag for streaming, is the next step.
+The tokens the model was trained on are S3Tokenizer's of the finished audio, not the language
+model's own, which are what it reads at run time; the two are the same vocabulary for the same
+sounds, but how far they agree is not measured.
+
 ## Not here
 
 Streaming on the processor, whose attention has no block mask. A DiT that draws

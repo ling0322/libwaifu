@@ -211,7 +211,7 @@ unsafe fn string_attribute(
 
 #[test]
 fn the_library_says_what_it_is() {
-    assert_eq!(waifu_abi_version(), 6 << 16);
+    assert_eq!(waifu_abi_version(), 6 << 16 | 1);
     assert_eq!(waifu_abi_version() >> 16, WAIFU_ABI_VERSION_MAJOR);
     assert_eq!(waifu_abi_version() & 0xffff, WAIFU_ABI_VERSION_MINOR);
     assert_eq!(waifu_abi_version(), WAIFU_ABI_VERSION);
@@ -1111,5 +1111,145 @@ fn a_memory_limit_is_for_a_device_that_has_one() {
         assert!(unsafe {
             !waifu_device_get_int_attribute(device, WAIFU_DEVICE_MEMORY_LIMIT, &mut value)
         });
+    }
+}
+
+/// The int array `attribute` of `task`, or None.
+unsafe fn ints(task: *const WaifuTask, attribute: WaifuTaskAttribute) -> Option<Vec<i32>> {
+    let mut count = usize::MAX;
+    let values = waifu_task_get_int_array_attribute(task, attribute, &mut count);
+    match values.is_null() {
+        true => {
+            assert_eq!(
+                count,
+                usize::MAX,
+                "*count is touched only where there is an array"
+            );
+            None
+        }
+        false => Some(std::slice::from_raw_parts(values, count).to_vec()),
+    }
+}
+
+#[test]
+fn a_voice_without_visemes_says_so_and_ends_a_reading_that_asks_for_them() {
+    unsafe {
+        let tones = a_model("tones");
+        assert_eq!(
+            int_attribute(tones, WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES),
+            Some(0)
+        );
+        let why = string_attribute(tones, WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES);
+        assert!(why.is_some_and(|why| !why.is_empty()));
+        waifu_model_free(tones);
+
+        for (r#type, attribute, visemes) in [
+            (
+                WAIFU_PIPELINE_TEXT_TO_SPEECH,
+                WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES,
+                WAIFU_TASK_TEXT_TO_SPEECH_VISEMES,
+            ),
+            (
+                WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH,
+                WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES,
+                WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES,
+            ),
+        ] {
+            let pipeline = a_pipeline(r#type);
+            with_tones(pipeline);
+
+            // A boolean: 0 and 1, nothing else.
+            let request = a_speech_request(r#type, c"hello there");
+            assert!(!waifu_request_set_int_attribute(request, attribute, 2));
+            assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+            assert!(waifu_request_set_int_attribute(request, attribute, 1));
+            let task = run(pipeline, request);
+            assert!(!task.is_null(), "{}", last_error());
+            let (code, message) = ended(task);
+            assert_eq!(code, WAIFU_ERR_MODEL);
+            assert!(message.unwrap().contains("mouth shape"));
+            assert_eq!(ints(task, visemes), None);
+            waifu_task_free(task);
+
+            // Not asked for: the reading is as it was, with no visemes.
+            let task = run(pipeline, a_speech_request(r#type, c"hello there"));
+            assert_eq!(ended(task).0, WAIFU_OK);
+            assert_eq!(ints(task, visemes), None);
+            let mut ms = 0;
+            assert!(!waifu_task_get_int_attribute(
+                task,
+                WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS,
+                &mut ms
+            ));
+            // An attribute that is not an array is not read as one.
+            assert_eq!(ints(task, WAIFU_TASK_STATUS), None);
+            waifu_task_free(task);
+
+            waifu_pipeline_free(pipeline);
+        }
+        // Another pipeline type's attribute is refused by the setter.
+        let request = a_request(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        assert!(!waifu_request_set_int_attribute(
+            request,
+            WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES,
+            1
+        ));
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_UNKNOWN_ATTRIBUTE);
+        waifu_request_free(request);
+    }
+}
+
+#[test]
+fn a_streaming_reading_hands_over_the_visemes_its_parts_settle() {
+    use crate::speech::Viseme;
+    unsafe {
+        let pipeline = a_pipeline(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH);
+        let canceller = (*pipeline).engine.canceller();
+        // What the engine does for a reading with visemes, without a voice that says them: the
+        // visemes of a part, then the part, and the whole at the end.
+        let started = task::Started::new();
+        let (mut said, mut part) = (started.on_visemes(), started.on_part());
+        let on_audio = started.on_audio();
+        let task = started.task(0, canceller, Some(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH));
+        let attribute = WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES;
+
+        said(40, &[Viseme::A, Viseme::Mbp]);
+        part(&Sound::new(vec![0.0; 1920], 24000));
+        said(40, &[Viseme::Rest]);
+        part(&Sound::new(vec![0.0; 960], 24000));
+        // Nothing is there until a part's event is read.
+        assert_eq!(ints(task, attribute), None);
+
+        assert_eq!(waifu_task_next_event(task, 0), WAIFU_EVENT_AUDIO_PART);
+        let mut count = 0;
+        let first = waifu_task_get_int_array_attribute(task, attribute, &mut count);
+        assert_eq!(std::slice::from_raw_parts(first, count), [0, 6]);
+        let mut ms = 0;
+        assert!(waifu_task_get_int_attribute(
+            task,
+            WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS,
+            &mut ms
+        ));
+        assert_eq!(ms, 40);
+        // Not the other pipeline type's.
+        assert!(!waifu_task_get_int_attribute(
+            task,
+            WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS,
+            &mut ms
+        ));
+
+        assert_eq!(waifu_task_next_event(task, 0), WAIFU_EVENT_AUDIO_PART);
+        assert_eq!(ints(task, attribute), Some(vec![0, 6, 7]));
+        // What the first part's read handed out is still there, and still what it was.
+        assert_eq!(std::slice::from_raw_parts(first, 2), [0, 6]);
+
+        said(40, &[Viseme::I]);
+        on_audio(engine::Ended::Done(Sound::new(vec![0.0; 3000], 24000)));
+        assert_eq!(waifu_task_next_event(task, 0), WAIFU_EVENT_END);
+        // Every frame, the last after the last part, once the reading is over.
+        assert_eq!(ints(task, attribute), Some(vec![0, 6, 7, 2]));
+        assert_eq!(std::slice::from_raw_parts(first, 2), [0, 6]);
+        waifu_task_free(task);
+        waifu_pipeline_free(pipeline);
     }
 }
