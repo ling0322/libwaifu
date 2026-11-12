@@ -56,71 +56,11 @@ fn every_struct_is_the_header_s() {
         message,
         time
     });
-    same_layout!(WaifuProgress {
-        stage,
-        fraction,
-        done,
-        total,
-        seconds
-    });
-    same_layout!(WaifuStatus { code, message });
-    same_layout!(WaifuResult { status });
     same_layout!(WaifuImage {
         width,
         height,
         rgb,
         len
-    });
-    same_layout!(WaifuPromptImage { key, image });
-    same_layout!(WaifuImageGenerationRequest {
-        struct_size,
-        prompt,
-        negative,
-        width,
-        height,
-        steps,
-        guidance,
-        seed,
-        start_image,
-        start_image_strength,
-        control_image,
-        control_image_scale,
-        prompt_images,
-        prompt_image_count,
-    });
-    same_layout!(WaifuImageGenerationResult { status, image });
-    same_layout!(WaifuAudio {
-        samples,
-        count,
-        sample_rate
-    });
-    same_layout!(WaifuTextToSpeechRequest {
-        struct_size,
-        text,
-        reference,
-        reference_transcript,
-        speed,
-        temperature,
-        style,
-        seed,
-    });
-    same_layout!(WaifuVoiceConversionRequest {
-        struct_size,
-        source,
-        reference,
-        steps,
-        convert_style,
-        seed,
-    });
-    same_layout!(WaifuAudioResult { status, audio });
-    same_layout!(WaifuStreamingTextToSpeechRequest {
-        struct_size,
-        text,
-        reference,
-        reference_transcript,
-        temperature,
-        style,
-        seed,
     });
     same_layout!(WaifuRgbaImage {
         width,
@@ -128,48 +68,24 @@ fn every_struct_is_the_header_s() {
         rgba,
         len
     });
-    same_layout!(WaifuLayerDecompositionRequest {
-        struct_size,
-        image,
-        steps,
-        depth_steps,
-        resolution,
-        split_pairs,
-        stratify_layers,
-        seed,
-    });
-    same_layout!(WaifuLayer {
-        r#type,
-        id,
-        name,
-        left,
-        top,
-        image,
-        depth,
-        derived_from_id,
-    });
-    same_layout!(WaifuLayerDecompositionResult {
-        status,
-        canvas,
-        layers,
-        layer_count
-    });
-    same_layout!(WaifuSpeechToTextRequest {
-        struct_size,
-        audio,
-        language,
-        context
-    });
-    same_layout!(WaifuSpeechToTextResult {
-        status,
-        text,
-        language
+    same_layout!(WaifuAudio {
+        samples,
+        count,
+        sample_rate
     });
 }
 
 #[test]
 fn every_number_is_the_header_s() {
     assert_eq!(mine::WAIFU_ABI_VERSION, theirs::WAIFU_ABI_VERSION);
+    assert_eq!(
+        mine::WAIFU_ABI_VERSION_MAJOR,
+        theirs::WAIFU_ABI_VERSION_MAJOR
+    );
+    assert_eq!(
+        mine::WAIFU_ABI_VERSION_MINOR,
+        theirs::WAIFU_ABI_VERSION_MINOR
+    );
     same_numbers!(
         WAIFU_LOG_DEBUG,
         WAIFU_LOG_INFO,
@@ -195,6 +111,7 @@ fn every_number_is_the_header_s() {
         WAIFU_ERR_NOT_LOADED,
         WAIFU_ERR_INTERNAL,
         WAIFU_ERR_DEVICE_UNAVAILABLE,
+        WAIFU_ERR_UNKNOWN_ATTRIBUTE,
         WAIFU_STAGE_LOADING_WEIGHTS,
         WAIFU_STAGE_IMAGE_GENERATION_ENCODING_PROMPT,
         WAIFU_STAGE_IMAGE_GENERATION_DENOISING,
@@ -232,8 +149,8 @@ fn every_number_is_the_header_s() {
         WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION_WITH_PROMPT_IMAGES,
         WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_LIKE_REFERENCE,
         WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE,
-        WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT,
         WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE,
+        WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT,
         WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE,
         WAIFU_MODEL_SIZE_ON_DISK,
         WAIFU_MODEL_SAMPLE_RATE,
@@ -250,5 +167,74 @@ fn every_number_is_the_header_s() {
         WAIFU_LAYER_STRATIFIED_NEAR,
         WAIFU_LAYER_STRATIFIED_FAR,
         WAIFU_LAYER_DEPTH,
+        WAIFU_EVENT_NONE,
+        WAIFU_EVENT_PROGRESS,
+        WAIFU_EVENT_AUDIO_PART,
+        WAIFU_EVENT_END,
+        WAIFU_WAIT_FOREVER,
+        WAIFU_REQUEST_IMAGE_GENERATION_PROMPT,
+        WAIFU_REQUEST_IMAGE_GENERATION_NEGATIVE,
+        WAIFU_REQUEST_IMAGE_GENERATION_WIDTH,
+        WAIFU_REQUEST_IMAGE_GENERATION_HEIGHT,
+        WAIFU_REQUEST_IMAGE_GENERATION_STEPS,
+        WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE,
+        WAIFU_REQUEST_IMAGE_GENERATION_SEED,
+        WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE,
+        WAIFU_REQUEST_IMAGE_GENERATION_START_IMAGE_STRENGTH,
+        WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE,
+        WAIFU_REQUEST_IMAGE_GENERATION_CONTROL_IMAGE_SCALE,
+        WAIFU_REQUEST_IMAGE_GENERATION_PROMPT_IMAGES,
+        WAIFU_REQUEST_TEXT_TO_SPEECH_TEXT,
+        WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE,
+        WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT,
+        WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED,
+        WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE,
+        WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE,
+        WAIFU_REQUEST_TEXT_TO_SPEECH_SEED,
+        WAIFU_REQUEST_VOICE_CONVERSION_SOURCE,
+        WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE,
+        WAIFU_REQUEST_VOICE_CONVERSION_STEPS,
+        WAIFU_REQUEST_VOICE_CONVERSION_CONVERT_STYLE,
+        WAIFU_REQUEST_VOICE_CONVERSION_SEED,
+        WAIFU_REQUEST_LAYER_DECOMPOSITION_IMAGE,
+        WAIFU_REQUEST_LAYER_DECOMPOSITION_STEPS,
+        WAIFU_REQUEST_LAYER_DECOMPOSITION_DEPTH_STEPS,
+        WAIFU_REQUEST_LAYER_DECOMPOSITION_RESOLUTION,
+        WAIFU_REQUEST_LAYER_DECOMPOSITION_SPLIT_PAIRS,
+        WAIFU_REQUEST_LAYER_DECOMPOSITION_STRATIFY_LAYERS,
+        WAIFU_REQUEST_LAYER_DECOMPOSITION_SEED,
+        WAIFU_REQUEST_SPEECH_TO_TEXT_AUDIO,
+        WAIFU_REQUEST_SPEECH_TO_TEXT_LANGUAGE,
+        WAIFU_REQUEST_SPEECH_TO_TEXT_CONTEXT,
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEXT,
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE,
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT,
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE,
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE,
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED,
+        WAIFU_TASK_STATUS,
+        WAIFU_TASK_STATUS_MESSAGE,
+        WAIFU_TASK_PROGRESS_STAGE,
+        WAIFU_TASK_PROGRESS_DONE,
+        WAIFU_TASK_PROGRESS_TOTAL,
+        WAIFU_TASK_PROGRESS_FRACTION,
+        WAIFU_TASK_PROGRESS_SECONDS,
+        WAIFU_TASK_IMAGE_GENERATION_IMAGE,
+        WAIFU_TASK_TEXT_TO_SPEECH_AUDIO,
+        WAIFU_TASK_VOICE_CONVERSION_AUDIO,
+        WAIFU_TASK_LAYER_DECOMPOSITION_CANVAS,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_COUNT,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TYPE,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_ID,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_NAME,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_LEFT,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TOP,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_IMAGE,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DEPTH,
+        WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DERIVED_FROM_ID,
+        WAIFU_TASK_SPEECH_TO_TEXT_TEXT,
+        WAIFU_TASK_SPEECH_TO_TEXT_LANGUAGE,
+        WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART,
+        WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO,
     );
 }

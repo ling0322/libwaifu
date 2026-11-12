@@ -141,7 +141,7 @@ of, and upstream never combines them.
 
 [`CosyVoice3::say_streaming`](../waifu/src/cosyvoice3/mod.rs) -- under it `Voice::speak_streaming`,
 `Engine::speak_streaming` and a `WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH` pipeline's
-`waifu_pipeline_run_streaming_text_to_speech_async` ([ffi-abi5.md](ffi-abi5.md)) -- is
+`waifu_pipeline_run`, read as `WAIFU_EVENT_AUDIO_PART` events ([ffi-abi6.md](ffi-abi6.md)) -- is
 upstream's `stream=True`: the audio is handed over a hop of tokens at a time while the language
 model goes on saying the rest, and the whole reading at the end.
 [`stream`](../waifu/src/cosyvoice3/stream.rs) says when:
@@ -188,8 +188,8 @@ The same package converts one recording into the voice of another, as upstream's
 does: the source's speech tokens are what is said, and the flow draws them continuing the
 reference -- its tokens, its mel, its speaker -- so the words and their timing are the source's and
 the voice is the reference's. The language model is not run. It is `impl Converter for
-CosyVoice3`, which the engine runs for `waifu_pipeline_run_voice_conversion_async` in the C API
-([ffi-abi5.md](ffi-abi5.md)). The terminal's `waifu` draws only; the speech2speech page that ran this was
+CosyVoice3`, which the engine runs for `waifu_pipeline_run` on a voice conversion pipeline
+([ffi-abi6.md](ffi-abi6.md)). The terminal's `waifu` draws only; the speech2speech page that ran this was
 removed with the rest of the web page.
 
 Upstream refuses a source over thirty seconds, which is as far as the speech tokenizer reads. A

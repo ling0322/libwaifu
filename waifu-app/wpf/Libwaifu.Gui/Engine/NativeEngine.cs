@@ -23,6 +23,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Threading;
 
 namespace Libwaifu.Gui.Engine
@@ -34,14 +35,15 @@ namespace Libwaifu.Gui.Engine
     /// <remarks>
     /// Three rules shape all of this, and they are the library's rather than this program's.
     ///
-    /// * **Every callback arrives on a thread of the library's.** Nothing here touches the screen
-    ///   from one: a callback copies what it was handed -- the strings, the pixels, the samples,
-    ///   all of which stop being valid when it returns -- and hands the copy to the dispatcher.
-    /// * **A callback must not call back into the library** (bar <c>waifu_pipeline_cancel</c>).
-    ///   So the next step of a job is always taken on the UI thread, after the hand-off, and
-    ///   never inside the completion that asked for it.
-    /// * **A delegate the library holds has to outlive the call**, which is why the four of them
-    ///   are fields and not lambdas written at the call site.
+    /// * **A task is read on a thread of its own.** Every load and run hands back a
+    ///   <c>WaifuTask</c>, and a background thread blocks in <c>waifu_task_next_event</c> until
+    ///   it ends. Nothing there touches the screen: it copies what the task says -- the progress,
+    ///   the pixels, the samples -- and hands the copy to the dispatcher.
+    /// * **A task is freed once, and never while another call is on it.** The reader frees it
+    ///   after END, having copied the result out, under the same lock a cancel takes.
+    /// * **The next step of a job is always taken on the UI thread**, after the hand-off, and
+    ///   never on the reader's thread: so the library is only ever asked for a new task from
+    ///   here, one at a time.
     ///
     /// A pipeline is made for one task, so a picture, a reading and a conversion each run on a
     /// pipeline of their own, all on one device. One model is on the device at a time, as it was
@@ -53,10 +55,6 @@ namespace Libwaifu.Gui.Engine
     public sealed class NativeEngine : IEngine
     {
         private readonly Dispatcher ui;
-        private readonly Native.ProgressCallback onProgress;
-        private readonly Native.ResultCallback onLoaded;
-        private readonly Native.ImageGenerationCallback onDrawn;
-        private readonly Native.AudioCallback onSounded;
         private readonly Stopwatch clock = new Stopwatch();
 
         /// <summary>The pipelines made so far, one per task, every one of them on <see cref="device"/>.</summary>
@@ -65,7 +63,10 @@ namespace Libwaifu.Gui.Engine
 
         private string device;
         private Pipeline running;
-        private ulong job;
+
+        /// <summary>The task of the load or run under way, or null between them.</summary>
+        private TaskReader reader;
+
         private Fetch fetching;
         private JobRequest current;
         private string reading;
@@ -75,10 +76,6 @@ namespace Libwaifu.Gui.Engine
         public NativeEngine()
         {
             ui = Dispatcher.CurrentDispatcher;
-            onProgress = Advanced;
-            onLoaded = Loaded;
-            onDrawn = Drawn;
-            onSounded = Sounded;
         }
 
         public string LoadedModel { get; private set; }
@@ -135,9 +132,9 @@ namespace Libwaifu.Gui.Engine
                 fetching.Cancel();
             }
 
-            if (running != null && running.Handle != IntPtr.Zero && job != 0)
+            if (reader != null)
             {
-                Native.waifu_pipeline_cancel(running.Handle, job);
+                reader.Cancel();
             }
         }
 
@@ -202,7 +199,7 @@ namespace Libwaifu.Gui.Engine
             {
                 // Asked before the load, which would refuse it at the call: the model says why
                 // in words to show. SUPPORTS_<task> has the number of the task's pipeline type.
-                var supports = (Native.ModelProperty)(int)running.Type;
+                var supports = (Native.ModelAttribute)(int)running.Type;
                 if (!NativeModels.Supports(model, supports))
                 {
                     End(new JobOutcome
@@ -221,13 +218,16 @@ namespace Libwaifu.Gui.Engine
                 running.Model = null;
                 reading = request.Model;
                 Say(Stage.Reading, null, "reading " + request.Model);
-                job = Native.waifu_pipeline_load_model_async(
-                    running.Handle, model, IntPtr.Zero, onProgress, onLoaded);
-
-                if (job == 0)
+                var loading = Native.waifu_pipeline_load_model(running.Handle, model);
+                if (loading == IntPtr.Zero)
                 {
                     End(new JobOutcome { Ending = Ending.Failed, Error = Library.LastError() });
+                    return;
                 }
+
+                var name = request.Model;
+                var on = request.Device;
+                reader = Follow(loading, null, end => Loaded(end, name, on));
             }
             finally
             {
@@ -345,321 +345,480 @@ namespace Libwaifu.Gui.Engine
 
         private void Work()
         {
+            IntPtr task;
+            Func<IntPtr, object> output;
+            Action<TaskEnd> ended;
+
             switch (Tasks.CategoryOf(current.Kind))
             {
                 case Category.Image:
-                    Draw();
+                    task = Run(Native.PipelineType.ImageGeneration, Draw);
+                    output = ReadPicture;
+                    ended = Drawn;
                     break;
                 case Category.Speech:
-                    Speak();
+                    task = Run(Native.PipelineType.TextToSpeech, Speak);
+                    output = ReadSound(Native.TaskAttribute.TextToSpeechAudio);
+                    ended = Sounded;
                     break;
                 default:
-                    Convert();
+                    task = Run(Native.PipelineType.VoiceConversion, Convert);
+                    output = ReadSound(Native.TaskAttribute.VoiceConversionAudio);
+                    ended = Sounded;
                     break;
             }
 
-            if (job == 0)
+            if (task == IntPtr.Zero)
             {
                 End(new JobOutcome { Ending = Ending.Failed, Error = Library.LastError() });
+                return;
             }
+
+            reader = Follow(task, output, ended);
         }
 
-        private void Draw()
+        /// <summary>
+        /// A request of the pipeline's type, set by <paramref name="set"/> and run. Zero where a
+        /// setter or the run refused, with the reason in <see cref="Library.LastError"/>: the
+        /// request is freed either way, which leaves the last error as it was.
+        /// </summary>
+        private IntPtr Run(Native.PipelineType type, Func<IntPtr, bool> set)
         {
-            var prompt = Utf8.Bytes(current.Prompt ?? string.Empty);
-            var negative = Utf8.Bytes(current.Negative ?? string.Empty);
-
-            var pinnedPrompt = GCHandle.Alloc(prompt, GCHandleType.Pinned);
-            var pinnedNegative = GCHandle.Alloc(negative, GCHandleType.Pinned);
-            var pinnedPixels = default(GCHandle);
-            var picture = IntPtr.Zero;
+            var request = Native.waifu_request_new(type);
+            if (request == IntPtr.Zero)
+            {
+                return IntPtr.Zero;
+            }
 
             try
             {
-                var request = new Native.ImageGenerationRequest
-                {
-                    StructSize = (uint)Marshal.SizeOf(typeof(Native.ImageGenerationRequest)),
-                    Prompt = pinnedPrompt.AddrOfPinnedObject(),
-                    Negative = pinnedNegative.AddrOfPinnedObject(),
-                    Width = (uint)current.Width,
-                    Height = (uint)current.Height,
-                    Steps = (uint)current.Steps,
-                    Guidance = (float)(current.Guidance ?? 1.0),
-                    Seed = (ulong)seed,
-                    StartImage = IntPtr.Zero,
-                    StartImageStrength = (float)(current.Strength ?? 0.8),
-                    ControlImage = IntPtr.Zero,
-                    ControlImageScale = 1.0f,
-                    PromptImages = IntPtr.Zero,
-                    PromptImageCount = UIntPtr.Zero,
-                };
-
-                // The picture img2img starts from.
-                if (current.SourceRgb != null)
-                {
-                    pinnedPixels = GCHandle.Alloc(current.SourceRgb, GCHandleType.Pinned);
-                    var image = new Native.Image
-                    {
-                        Width = (uint)current.SourceWidth,
-                        Height = (uint)current.SourceHeight,
-                        Rgb = pinnedPixels.AddrOfPinnedObject(),
-                        Length = (UIntPtr)(uint)current.SourceRgb.Length,
-                    };
-
-                    picture = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Native.Image)));
-                    Marshal.StructureToPtr(image, picture, false);
-                    request.StartImage = picture;
-                }
-
-                job = Native.waifu_pipeline_run_image_generation_async(
-                    running.Handle, ref request, IntPtr.Zero, onProgress, onDrawn);
+                // The setters copy what they are handed and the run copies the request, so
+                // nothing here has to outlive the call.
+                return set(request) ? Native.waifu_pipeline_run(running.Handle, request) : IntPtr.Zero;
             }
             finally
             {
-                // Everything above is borrowed only for the length of the call: by the time it
-                // has returned the library has copied what it keeps.
-                if (picture != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(picture);
-                }
-
-                if (pinnedPixels.IsAllocated)
-                {
-                    pinnedPixels.Free();
-                }
-
-                pinnedNegative.Free();
-                pinnedPrompt.Free();
+                Native.waifu_request_free(request);
             }
         }
 
-        private void Speak()
+        private bool Draw(IntPtr request)
         {
-            var text = Utf8.Bytes(current.Text ?? string.Empty);
-            var style = Utf8.Bytes(current.Style ?? string.Empty);
-            var pinnedText = GCHandle.Alloc(text, GCHandleType.Pinned);
-            var pinnedStyle = GCHandle.Alloc(style, GCHandleType.Pinned);
-            var reference = Hold(current.Reference);
+            if (!SetText(request, Native.RequestAttribute.ImageGenerationPrompt, current.Prompt ?? string.Empty) ||
+                !SetText(request, Native.RequestAttribute.ImageGenerationNegative, current.Negative ?? string.Empty) ||
+                !SetInt(request, Native.RequestAttribute.ImageGenerationWidth, current.Width) ||
+                !SetInt(request, Native.RequestAttribute.ImageGenerationHeight, current.Height) ||
+                !SetInt(request, Native.RequestAttribute.ImageGenerationSteps, current.Steps) ||
+                !SetFloat(request, Native.RequestAttribute.ImageGenerationGuidance, current.Guidance ?? 1.0) ||
+                // Read as a uint64: the same 64 bits the seed always was.
+                !SetInt(request, Native.RequestAttribute.ImageGenerationSeed, seed))
+            {
+                return false;
+            }
 
+            // The picture img2img starts from, and how far it walks away from it: the strength
+            // means nothing without one, and is left to the library's default.
+            if (current.SourceRgb != null)
+            {
+                return SetImage(request, Native.RequestAttribute.ImageGenerationStartImage,
+                           current.SourceRgb, current.SourceWidth, current.SourceHeight) &&
+                       SetFloat(request, Native.RequestAttribute.ImageGenerationStartImageStrength,
+                           current.Strength ?? 0.8);
+            }
+
+            return true;
+        }
+
+        private bool Speak(IntPtr request)
+        {
+            return SetText(request, Native.RequestAttribute.TextToSpeechText, current.Text ?? string.Empty) &&
+                   SetAudio(request, Native.RequestAttribute.TextToSpeechReference, current.Reference) &&
+                   SetFloat(request, Native.RequestAttribute.TextToSpeechSpeed, current.Speed ?? 1.0) &&
+                   SetFloat(request, Native.RequestAttribute.TextToSpeechTemperature, current.Temperature ?? 1.0) &&
+                   SetText(request, Native.RequestAttribute.TextToSpeechStyle, current.Style ?? string.Empty) &&
+                   SetInt(request, Native.RequestAttribute.TextToSpeechSeed, seed);
+        }
+
+        private bool Convert(IntPtr request)
+        {
+            return SetAudio(request, Native.RequestAttribute.VoiceConversionSource, current.Source) &&
+                   SetAudio(request, Native.RequestAttribute.VoiceConversionReference, current.Reference) &&
+                   SetInt(request, Native.RequestAttribute.VoiceConversionSteps, current.Steps) &&
+                   SetInt(request, Native.RequestAttribute.VoiceConversionConvertStyle,
+                       (current.ConvertStyle ?? false) ? 1 : 0) &&
+                   SetInt(request, Native.RequestAttribute.VoiceConversionSeed, seed);
+        }
+
+        // -- setting a request ---------------------------------------------------------------------
+
+        private static bool SetInt(IntPtr request, Native.RequestAttribute attribute, long value)
+        {
+            return Native.waifu_request_set_int_attribute(request, attribute, value);
+        }
+
+        private static bool SetFloat(IntPtr request, Native.RequestAttribute attribute, double value)
+        {
+            return Native.waifu_request_set_float_attribute(request, attribute, value);
+        }
+
+        private static bool SetText(IntPtr request, Native.RequestAttribute attribute, string value)
+        {
+            return Native.waifu_request_set_string_attribute(request, attribute, Utf8.Bytes(value));
+        }
+
+        /// <summary>An image's pixels, pinned for the length of the call, which copies them.</summary>
+        private static bool SetImage(
+            IntPtr request, Native.RequestAttribute attribute, byte[] rgb, int width, int height)
+        {
+            var pinned = GCHandle.Alloc(rgb, GCHandleType.Pinned);
             try
             {
-                var request = new Native.TextToSpeechRequest
+                var image = new Native.Image
                 {
-                    StructSize = (uint)Marshal.SizeOf(typeof(Native.TextToSpeechRequest)),
-                    Text = pinnedText.AddrOfPinnedObject(),
-                    Reference = reference.Pointer,
-                    Speed = (float)(current.Speed ?? 1.0),
-                    Temperature = (float)(current.Temperature ?? 1.0),
-                    Style = pinnedStyle.AddrOfPinnedObject(),
-                    Seed = (ulong)seed,
+                    Width = (uint)width,
+                    Height = (uint)height,
+                    Rgb = pinned.AddrOfPinnedObject(),
+                    Length = (UIntPtr)(uint)rgb.Length,
                 };
 
-                job = Native.waifu_pipeline_run_text_to_speech_async(
-                    running.Handle, ref request, IntPtr.Zero, onProgress, onSounded);
+                return Native.waifu_request_set_image_attribute(request, attribute, ref image);
             }
             finally
             {
-                reference.Free();
-                pinnedStyle.Free();
-                pinnedText.Free();
+                pinned.Free();
             }
         }
 
-        private void Convert()
-        {
-            var source = Hold(current.Source);
-            var reference = Hold(current.Reference);
-
-            try
-            {
-                var request = new Native.VoiceConversionRequest
-                {
-                    StructSize = (uint)Marshal.SizeOf(typeof(Native.VoiceConversionRequest)),
-                    Source = source.Pointer,
-                    Reference = reference.Pointer,
-                    Steps = (uint)current.Steps,
-                    ConvertStyle = current.ConvertStyle ?? false,
-                    Seed = (ulong)seed,
-                };
-
-                job = Native.waifu_pipeline_run_voice_conversion_async(
-                    running.Handle, ref request, IntPtr.Zero, onProgress, onSounded);
-            }
-            finally
-            {
-                reference.Free();
-                source.Free();
-            }
-        }
-
-        /// <summary>A recording, pinned and wrapped, for the length of one call.</summary>
-        private struct Held
-        {
-            public GCHandle Pinned;
-            public IntPtr Pointer;
-
-            public void Free()
-            {
-                if (Pointer != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(Pointer);
-                }
-
-                if (Pinned.IsAllocated)
-                {
-                    Pinned.Free();
-                }
-            }
-        }
-
-        private static Held Hold(Recording recording)
+        /// <summary>
+        /// A recording, pinned for the length of the call, which copies it. One that is missing or
+        /// empty leaves the attribute unset, as a null pointer always did.
+        /// </summary>
+        private static bool SetAudio(IntPtr request, Native.RequestAttribute attribute, Recording recording)
         {
             if (recording == null || recording.Samples == null || recording.Samples.Length == 0)
             {
-                return new Held();
+                return true;
             }
 
-            var held = new Held
+            var pinned = GCHandle.Alloc(recording.Samples, GCHandleType.Pinned);
+            try
             {
-                Pinned = GCHandle.Alloc(recording.Samples, GCHandleType.Pinned),
+                var audio = new Native.Audio
+                {
+                    Samples = pinned.AddrOfPinnedObject(),
+                    Count = (UIntPtr)(uint)recording.Samples.Length,
+                    SampleRate = (uint)recording.Rate,
+                };
+
+                return Native.waifu_request_set_audio_attribute(request, attribute, ref audio);
+            }
+            finally
+            {
+                pinned.Free();
+            }
+        }
+
+        // -- reading a task -----------------------------------------------------------------------
+
+        /// <summary>
+        /// A task of the library's, until its reader has read it to the end and freed it. A
+        /// cancel and the free both take the lock: a task must not be freed while another call
+        /// is on it.
+        /// </summary>
+        private sealed class TaskReader
+        {
+            private readonly object gate = new object();
+            private IntPtr task;
+
+            public TaskReader(IntPtr task)
+            {
+                this.task = task;
+            }
+
+            /// <summary>Takes effect after the step it is on; nothing once the task has been freed.</summary>
+            public void Cancel()
+            {
+                lock (gate)
+                {
+                    if (task != IntPtr.Zero)
+                    {
+                        Native.waifu_task_cancel(task);
+                    }
+                }
+            }
+
+            /// <summary>Called by the reader alone, once it has copied out what it needs.</summary>
+            public void Free()
+            {
+                lock (gate)
+                {
+                    if (task != IntPtr.Zero)
+                    {
+                        Native.waifu_task_free(task);
+                        task = IntPtr.Zero;
+                    }
+                }
+            }
+        }
+
+        /// <summary>How a task ended, copied out of it before it was freed.</summary>
+        private sealed class TaskEnd
+        {
+            public Native.Status Code;
+            public string Message;
+
+            /// <summary>What the task's output reader copied, for WAIFU_OK; null otherwise.</summary>
+            public object Output;
+
+            /// <summary>The clock when the end was read, as each completion used to take it.</summary>
+            public double Seconds;
+        }
+
+        private sealed class CopiedPicture
+        {
+            public int Width;
+            public int Height;
+            public byte[] Rgb;
+        }
+
+        private sealed class CopiedSound
+        {
+            public float[] Samples;
+            public int Rate;
+        }
+
+        /// <summary>
+        /// Starts a background thread that reads <paramref name="task"/> to its end, hands its
+        /// progress to the dispatcher as it comes, copies its output with
+        /// <paramref name="output"/> (on that thread, for WAIFU_OK), frees it, and hands
+        /// <paramref name="ended"/> what it came to on the UI thread.
+        /// </summary>
+        private TaskReader Follow(IntPtr task, Func<IntPtr, object> output, Action<TaskEnd> ended)
+        {
+            var following = new TaskReader(task);
+            var thread = new Thread(() => Read(following, task, output, ended))
+            {
+                IsBackground = true,
+                Name = "waifu task",
             };
 
-            var audio = new Native.Audio
+            try
             {
-                Samples = held.Pinned.AddrOfPinnedObject(),
-                Count = (UIntPtr)(uint)recording.Samples.Length,
-                SampleRate = (uint)recording.Rate,
-            };
+                thread.Start();
+            }
+            catch (Exception error)
+            {
+                // Without a reader the job would never be told its end: it is told now, and the
+                // task let go of.
+                following.Cancel();
+                following.Free();
+                var end = new TaskEnd
+                {
+                    Code = Native.Status.Internal,
+                    Message = "could not start a thread to wait on the job: " + error.Message,
+                    Seconds = clock.Elapsed.TotalSeconds,
+                };
+                ui.BeginInvoke((Action)delegate { ended(end); });
+            }
 
-            held.Pointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Native.Audio)));
-            Marshal.StructureToPtr(audio, held.Pointer, false);
-            return held;
+            return following;
+        }
+
+        /// <summary>The reader's thread: nothing here touches the screen.</summary>
+        private void Read(TaskReader following, IntPtr task, Func<IntPtr, object> output, Action<TaskEnd> ended)
+        {
+            var end = new TaskEnd();
+            try
+            {
+                while (true)
+                {
+                    var happened = Native.waifu_task_next_event(task, Native.WaitForever);
+                    if (happened == Native.EventType.End)
+                    {
+                        break;
+                    }
+
+                    if (happened == Native.EventType.Progress)
+                    {
+                        Advanced(task);
+                    }
+
+                    // NONE never comes without a timeout; anything else is an event this program
+                    // did not ask for, and is let go of.
+                }
+
+                long code;
+                if (Native.waifu_task_get_int_attribute(task, Native.TaskAttribute.Status, out code))
+                {
+                    end.Code = (Native.Status)(int)code;
+                    end.Message = Utf8.Read(
+                        Native.waifu_task_get_string_attribute(task, Native.TaskAttribute.StatusMessage));
+                }
+                else
+                {
+                    end.Code = Native.Status.Internal;
+                    end.Message = "the library said the job had ended, and had no status for it";
+                }
+
+                // Everything the task hands out is valid until it is freed, so it is copied now.
+                if (end.Code == Native.Status.Ok && output != null)
+                {
+                    end.Output = output(task);
+                }
+            }
+            catch (Exception error)
+            {
+                // This thread is the program's own, and an exception that left it would take the
+                // process down with it.
+                end.Code = Native.Status.Internal;
+                end.Message = error.Message;
+                end.Output = null;
+            }
+            finally
+            {
+                following.Free();
+            }
+
+            end.Seconds = clock.Elapsed.TotalSeconds;
+            ui.BeginInvoke((Action)delegate { ended(end); });
+        }
+
+        /// <summary>What the last PROGRESS event said, copied and handed to the dispatcher.</summary>
+        private void Advanced(IntPtr task)
+        {
+            long stage;
+            if (!Native.waifu_task_get_int_attribute(task, Native.TaskAttribute.ProgressStage, out stage))
+            {
+                return;
+            }
+
+            long done, total;
+            double fraction, seconds;
+            var at = (int)stage;
+            var doneSoFar = Native.waifu_task_get_int_attribute(task, Native.TaskAttribute.ProgressDone, out done)
+                ? (ulong)done
+                : 0UL;
+            var ofTotal = Native.waifu_task_get_int_attribute(task, Native.TaskAttribute.ProgressTotal, out total)
+                ? (ulong)total
+                : 0UL;
+            var part = Native.waifu_task_get_float_attribute(task, Native.TaskAttribute.ProgressFraction, out fraction) &&
+                       fraction >= 0
+                ? (double?)fraction
+                : null;
+            var since = Native.waifu_task_get_float_attribute(task, Native.TaskAttribute.ProgressSeconds, out seconds)
+                ? (double?)seconds
+                : null;
+
+            ui.BeginInvoke((Action)delegate
+            {
+                Say(Gathered(at), part, Words(at, doneSoFar, ofTotal, reading), since);
+            });
+        }
+
+        /// <summary>The picture a run drew, copied out of the task; null where it handed over none.</summary>
+        private static object ReadPicture(IntPtr task)
+        {
+            Native.Image image;
+            if (!Native.waifu_task_get_image_attribute(task, Native.TaskAttribute.ImageGenerationImage, out image))
+            {
+                return null;
+            }
+
+            var rgb = new byte[(int)image.Length.ToUInt64()];
+            if (rgb.Length > 0)
+            {
+                Marshal.Copy(image.Rgb, rgb, 0, rgb.Length);
+            }
+
+            return new CopiedPicture { Width = (int)image.Width, Height = (int)image.Height, Rgb = rgb };
+        }
+
+        /// <summary>The recording a run made, copied out of the task; null where it handed over none.</summary>
+        private static Func<IntPtr, object> ReadSound(Native.TaskAttribute attribute)
+        {
+            return task =>
+            {
+                Native.Audio audio;
+                if (!Native.waifu_task_get_audio_attribute(task, attribute, out audio))
+                {
+                    return null;
+                }
+
+                var samples = new float[(int)audio.Count.ToUInt64()];
+                if (samples.Length > 0)
+                {
+                    Marshal.Copy(audio.Samples, samples, 0, samples.Length);
+                }
+
+                return new CopiedSound { Samples = samples, Rate = (int)audio.SampleRate };
+            };
         }
 
         // -- what comes back ----------------------------------------------------------------------
 
-        private void Advanced(IntPtr user, ref Native.ProgressInfo e)
+        private void Loaded(TaskEnd end, string model, string on)
         {
-            // On a thread of the library's. Everything is copied before it returns.
-            var stage = e.Stage;
-            var fraction = e.Fraction >= 0 ? (double?)e.Fraction : null;
-            var done = e.Done;
-            var total = e.Total;
-            var seconds = e.Seconds;
-
-            ui.BeginInvoke((Action)delegate
+            if (end.Code != Native.Status.Ok)
             {
-                Say(Gathered(stage), fraction, Words(stage, done, total, reading), seconds);
-            });
-        }
-
-        private void Loaded(IntPtr user, ref Native.Result e)
-        {
-            var code = e.Status.Code;
-            var message = Utf8.Read(e.Status.Message);
-            var model = current == null ? null : current.Model;
-            var on = current == null ? null : current.Device;
-
-            ui.BeginInvoke((Action)delegate
-            {
-                if (code != Native.Status.Ok)
-                {
-                    End(Ended(code, message));
-                    return;
-                }
-
-                if (running != null)
-                {
-                    running.Model = model;
-                }
-
-                LoadedModel = model;
-                LoadedDevice = on;
-
-                // The next call is made here rather than in the callback: nothing may call back
-                // into the library from one of its own threads.
-                Work();
-            });
-        }
-
-        private void Drawn(IntPtr user, ref Native.ImageGenerationResult e)
-        {
-            var code = e.Status.Code;
-            var message = Utf8.Read(e.Status.Message);
-            byte[] rgb = null;
-            var width = 0;
-            var height = 0;
-
-            if (code == Native.Status.Ok && e.Image != IntPtr.Zero)
-            {
-                // Valid only until this returns, so it is copied now rather than remembered.
-                var image = (Native.Image)Marshal.PtrToStructure(e.Image, typeof(Native.Image));
-                width = (int)image.Width;
-                height = (int)image.Height;
-                rgb = new byte[(int)image.Length];
-                Marshal.Copy(image.Rgb, rgb, 0, rgb.Length);
+                End(Ended(end.Code, end.Message));
+                return;
             }
 
-            var seconds = clock.Elapsed.TotalSeconds;
-            ui.BeginInvoke((Action)delegate
+            if (running != null)
             {
-                if (code != Native.Status.Ok || rgb == null)
-                {
-                    End(Ended(code, message));
-                    return;
-                }
-
-                try
-                {
-                    var record = Output.Picture(current, seed, started, seconds, width, height, rgb);
-                    End(new JobOutcome { Ending = Ending.Done, Result = record });
-                }
-                catch (Exception error)
-                {
-                    Log.Write("error", "engine", error.Message);
-                    End(new JobOutcome { Ending = Ending.Failed, Error = error.Message });
-                }
-            });
-        }
-
-        private void Sounded(IntPtr user, ref Native.AudioResult e)
-        {
-            var code = e.Status.Code;
-            var message = Utf8.Read(e.Status.Message);
-            float[] samples = null;
-            var rate = 0;
-
-            if (code == Native.Status.Ok && e.Audio != IntPtr.Zero)
-            {
-                var audio = (Native.Audio)Marshal.PtrToStructure(e.Audio, typeof(Native.Audio));
-                rate = (int)audio.SampleRate;
-                samples = new float[(int)audio.Count];
-                Marshal.Copy(audio.Samples, samples, 0, samples.Length);
+                running.Model = model;
             }
 
-            var seconds = clock.Elapsed.TotalSeconds;
-            var category = Tasks.CategoryOf(current.Kind);
+            LoadedModel = model;
+            LoadedDevice = on;
 
-            ui.BeginInvoke((Action)delegate
+            // The next step is taken here, on the UI thread, and never on the reader's.
+            Work();
+        }
+
+        private void Drawn(TaskEnd end)
+        {
+            var picture = end.Output as CopiedPicture;
+            if (end.Code != Native.Status.Ok || picture == null)
             {
-                if (code != Native.Status.Ok || samples == null)
-                {
-                    End(Ended(code, message));
-                    return;
-                }
+                End(Ended(end.Code, end.Message));
+                return;
+            }
 
-                try
-                {
-                    var record = Output.Sound(
-                        current, category, seed, started, seconds, samples, rate);
-                    End(new JobOutcome { Ending = Ending.Done, Result = record });
-                }
-                catch (Exception error)
-                {
-                    Log.Write("error", "engine", error.Message);
-                    End(new JobOutcome { Ending = Ending.Failed, Error = error.Message });
-                }
-            });
+            try
+            {
+                var record = Output.Picture(
+                    current, seed, started, end.Seconds, picture.Width, picture.Height, picture.Rgb);
+                End(new JobOutcome { Ending = Ending.Done, Result = record });
+            }
+            catch (Exception error)
+            {
+                Log.Write("error", "engine", error.Message);
+                End(new JobOutcome { Ending = Ending.Failed, Error = error.Message });
+            }
+        }
+
+        private void Sounded(TaskEnd end)
+        {
+            var sound = end.Output as CopiedSound;
+            if (end.Code != Native.Status.Ok || sound == null)
+            {
+                End(Ended(end.Code, end.Message));
+                return;
+            }
+
+            try
+            {
+                var record = Output.Sound(
+                    current, Tasks.CategoryOf(current.Kind), seed, started, end.Seconds,
+                    sound.Samples, sound.Rate);
+                End(new JobOutcome { Ending = Ending.Done, Result = record });
+            }
+            catch (Exception error)
+            {
+                Log.Write("error", "engine", error.Message);
+                End(new JobOutcome { Ending = Ending.Failed, Error = error.Message });
+            }
         }
 
         private JobOutcome Ended(Native.Status code, string message)
@@ -678,7 +837,7 @@ namespace Libwaifu.Gui.Engine
 
         private void End(JobOutcome outcome)
         {
-            job = 0;
+            reader = null;
             clock.Stop();
 
             var handler = Finished;

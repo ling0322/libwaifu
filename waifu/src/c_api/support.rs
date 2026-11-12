@@ -18,7 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //! What the C API is made of besides its functions: the types every part of it takes and hands
-//! back -- status, the log, progress and results -- and the helpers that convert to and from
+//! back -- status codes, the log and the stages -- and the helpers that convert to and from
 //! them. Written into waifu.h with the functions.
 //!
 //! Every enum of the header is an `int32_t` and a `#define` for each value, not a C enum: a number
@@ -31,20 +31,18 @@
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{self, AssertUnwindSafe};
-use std::ptr;
-use std::sync::{Arc, Condvar, Mutex};
 
 use crate::log::{Level, Sink};
 
 // -- status ----------------------------------------------------------------------------------
 
-/// What a refused call or a job came to.
+/// What a refused call or a task came to.
 pub type WaifuStatusCode = i32;
 pub const WAIFU_OK: WaifuStatusCode = 0;
 pub const WAIFU_CANCELLED: WaifuStatusCode = 1;
 /// What a request cannot be run with. Most of it is refused at the call instead -- a NULL, a
-/// string that is not UTF-8, a size out of range, a model the pipeline's task is not supported by,
-/// another task's run -- which a job never sees.
+/// string that is not UTF-8, a size out of range, a model the pipeline's type is not supported by,
+/// a request of another pipeline type -- which a task never sees.
 pub const WAIFU_ERR_INVALID_ARGUMENT: WaifuStatusCode = 2;
 /// No manifest at the path.
 pub const WAIFU_ERR_UNKNOWN_MODEL: WaifuStatusCode = 3;
@@ -57,13 +55,9 @@ pub const WAIFU_ERR_NOT_LOADED: WaifuStatusCode = 6;
 pub const WAIFU_ERR_INTERNAL: WaifuStatusCode = 7;
 /// A pipeline asked for on a device this build or machine cannot use.
 pub const WAIFU_ERR_DEVICE_UNAVAILABLE: WaifuStatusCode = 8;
-
-#[repr(C)]
-pub struct WaifuStatus {
-    pub code: WaifuStatusCode,
-    /// Why, or NULL for WAIFU_OK.
-    pub message: *const c_char,
-}
+/// A request attribute this library does not know, or one of another pipeline type's. A task's
+/// getter asked about an attribute it does not know says false, and sets nothing.
+pub const WAIFU_ERR_UNKNOWN_ATTRIBUTE: WaifuStatusCode = 9;
 
 /// Why a call was refused: what `waifu_last_error` and `waifu_last_error_code` are set to.
 #[derive(Debug)]
@@ -235,7 +229,8 @@ pub fn log_level(level: WaifuLogLevel) -> Option<Level> {
 
 // -- progress --------------------------------------------------------------------------------
 
-/// What a job is doing. Ranges by task; done/total count what the comment says, 0, 0 otherwise.
+/// What a task is doing. Ranges by pipeline type; done/total count what the comment says, 0, 0
+/// otherwise.
 pub type WaifuStage = i32;
 pub const WAIFU_STAGE_LOADING_WEIGHTS: WaifuStage = 1;
 
@@ -287,64 +282,3 @@ pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_READING_TEXT: WaifuStage = 600;
 pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_GENERATING_TOKENS: WaifuStage = 601;
 /// Parts handed over.
 pub const WAIFU_STAGE_STREAMING_TEXT_TO_SPEECH_SYNTHESIZING_AUDIO: WaifuStage = 602;
-
-#[repr(C)]
-pub struct WaifuProgress {
-    pub stage: WaifuStage,
-    /// 0..1 of the whole job, or -1 where nothing can say.
-    pub fraction: f64,
-    /// Of the stage, done already.
-    pub done: u64,
-    pub total: u64,
-    /// Since the job started.
-    pub seconds: f64,
-}
-
-pub type WaifuProgressCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, progress: *const WaifuProgress)>;
-
-/// Every pointer in a result is valid until the callback returns.
-#[repr(C)]
-pub struct WaifuResult {
-    pub status: WaifuStatus,
-}
-
-pub type WaifuCallback =
-    Option<unsafe extern "C" fn(user_data: *mut c_void, result: *const WaifuResult)>;
-
-/// A status whose message lives as long as `message` does.
-pub fn status(code: WaifuStatusCode, message: &Option<CString>) -> WaifuStatus {
-    WaifuStatus {
-        code,
-        message: message
-            .as_ref()
-            .map_or(ptr::null(), |message| message.as_ptr()),
-    }
-}
-
-// -- keeping the promises about when a callback can arrive ---------------------------------------
-
-/// Shut until the `_async` call that made it has its job's id, which is when it opens: a callback
-/// that arrives before then waits, so that no callback runs for a call that may yet be refused.
-/// It does not hold callbacks back until the call has returned -- nothing can know when the caller
-/// has the id -- which is why a job's state is its `user_data` (docs/ffi-abi5.md).
-#[derive(Clone, Default)]
-pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
-
-impl Gate {
-    pub fn open(&self) {
-        let (open, opened) = &*self.0;
-        *open.lock().unwrap_or_else(|held| held.into_inner()) = true;
-        opened.notify_all();
-    }
-
-    pub fn wait(&self) {
-        let (open, opened) = &*self.0;
-        let mut is_open = open.lock().unwrap_or_else(|held| held.into_inner());
-        while !*is_open {
-            is_open = opened
-                .wait(is_open)
-                .unwrap_or_else(|held| held.into_inner());
-        }
-    }
-}

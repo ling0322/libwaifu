@@ -1,6 +1,6 @@
 # The Rust binding: `waifu`
 
-Status: implemented, in `bindings/rust`, against the C API's ABI 5 ([ffi-abi5.md](ffi-abi5.md)).
+Status: implemented, in `bindings/rust`, against the C API's ABI 6 ([ffi-abi6.md](ffi-abi6.md)).
 
 `bindings/rust` is a Rust crate over libwaifu that compiles none of it: it opens a built
 `libwaifu.so` (`libwaifu.dylib`, `waifu.dll`) when asked to, finds the functions `waifu.h`
@@ -157,7 +157,7 @@ pub fn init() -> Result<()>;                                           // finds 
 pub fn init_from_path(library_path: impl AsRef<Path>) -> Result<()>;  // loads this file, and looks nowhere else
 pub fn is_initialized() -> bool;                                       // whether init has loaded a library
 pub fn library_path() -> Option<&'static Path>;                        // the file loaded; None before init
-pub const ABI_VERSION: u32 = 5;
+pub const ABI_VERSION: u32 = 6 << 16;   // major << 16 | minor: another major, or an older minor, is not loaded
 pub fn version() -> Result<&'static str>;
 pub fn revision() -> Result<Option<&'static str>>;
 
@@ -189,7 +189,7 @@ impl Model {
     pub fn image_generation_sampler(&self) -> Option<String>;
     pub fn image_generation_max_prompt_images(&self) -> Option<u32>;
     pub fn layer_decomposition_resolution_multiple_of(&self) -> Option<u32>;
-    pub fn speech_to_text_languages(&self) -> Vec<String>;   // the comma-separated property, split
+    pub fn speech_to_text_languages(&self) -> Vec<String>;   // the comma-separated attribute, split
 }
 
 pub enum Capability {                 // WAIFU_MODEL_SUPPORTS_*
@@ -201,7 +201,7 @@ pub enum Capability {                 // WAIFU_MODEL_SUPPORTS_*
 }
 pub enum Support {
     Yes,                              // the C API's 1
-    No(String),                       // 0, and the string property of the same number: why
+    No(String),                       // 0, and the string attribute of the same number: why
     Unknown,                          // absent: a capability this library is too old to know
 }
 
@@ -276,7 +276,7 @@ with values a run takes -- `ImageGenerationRequest::new(prompt)` (1024 x 1024, 2
 Option<ControlImage>` and `prompt_images: Vec<PromptImage>`. A model's own sizes and steps are
 the caller's to read, not the request's to guess.
 
-Results are owned too, copied out of the callback: `Image`, `RgbaImage`, `Audio`,
+Results are owned too, copied out of the task before it is freed: `Image`, `RgbaImage`, `Audio`,
 `Transcript { text, language }`, `DecomposedImage { canvas, layers }`. Each `Layer` has its
 `LayerType` (`Depth` among them), `id`, `depth` and `derived_from_id: Option<u32>`;
 `DecomposedImage::stack()` and `stratified_stack()` give the two stacks as indices into `layers`,
@@ -295,30 +295,30 @@ does not wrap. **Every C enum in it is a `c_int`**, never a Rust `enum`: a numbe
 returns that a Rust enum has no variant for would be undefined behaviour before anything could
 map it to `Other`. The safe types convert from the integer.
 
-## Jobs, callbacks and memory
+## Jobs, tasks and memory
 
-**A job's state outlives its `Job`.** Each run hands the library a box: the sending end of the
-job's channel. The library calls back into it until `on_complete`, which takes the box back and
-frees it -- a cancelled job and one that was still waiting included, since every job given an id
-gets exactly one `on_complete`. Dropping a `Job` asks for a cancel and drops the receiving end;
-the box lives on until the library is done with it. `Pipeline::drop`, for the last handle, calls
-`waifu_pipeline_free`, which returns only once every job has had its `on_complete`.
+**A job is a task read by a thread of the crate's.** The C API calls nothing of a caller's: a run
+returns a `WaifuTask *`, which is waited on and read. Each `Job` starts a thread that blocks in
+`waifu_task_next_event`, reads each event's attributes, hands the event to the job and wakes its
+`Waker`; on `END` it reads the status and the result, frees the task, and hands over `Done`. A
+pipeline runs one job at a time, so all but one of those threads are asleep.
 
-**No caller code runs on a pipeline's thread.** The callbacks the crate hands the library only
-copy what they are given and send it down the job's channel; nothing of the caller's -- no
-closure, no `Pipeline`, no `Job` -- is reached from them. So a pipeline is never freed from its
-own thread, and freeing it cannot wait on itself. The log callback is the one caller closure the
-library calls, from any thread; it must not call into the crate.
+**Cancelling and freeing are ordered.** A task must not be freed while another call is on it.
+The task's pointer is kept under a lock that `Job::cancel` and the reader's free both take, so a
+cancel is never on a task that has gone. Dropping a `Job` before its end cancels it; its reader
+still reads the end, and frees the task. `Pipeline::drop`, for the last handle, calls
+`waifu_pipeline_free`, which returns once every task has ended.
 
-**What waits for `next()`.** The library's callbacks must return at once, so a job keeps what
-they hand it until the caller asks:
+**No caller code runs on a pipeline's thread**, nor on a reader's: a reader only copies what the
+task holds into the job. The log callback is the one caller closure the library calls, from any
+thread; it must not call into the crate.
+
+**What waits for `next()`.** A job keeps what its reader hands it until the caller asks:
 
 - progress is kept as the latest one only: a `Progress` replaces the one not yet read;
 - a streaming reading's parts are all kept, in order -- they are what was asked for, and together
   are no more than the whole reading, which `Done` hands over anyway;
 - a job that is awaited (`IntoFuture`) rather than walked keeps neither: only its end.
-
-A callback never blocks on a slow reader.
 
 ## Why
 
@@ -333,7 +333,7 @@ takes a library handle to carry around. It is `init`, not `open`: nothing is clo
 every such function returns a `Result` -- and never a panic, nor a `None` that would look like an
 answer.
 
-**Async, and `block_on`.** The C API hands a job's end to a callback; a future is that, and works
+**Async, and `block_on`.** A job's end is woken by its reader; a future is that, and works
 under any runtime, since only the standard library's `Waker` is involved. One set of methods, and
 a program with no runtime blocks on them, rather than a second set that blocks.
 

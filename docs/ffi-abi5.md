@@ -1,9 +1,10 @@
 # libwaifu's C API, ABI 5
 
-Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs`, is ABI 5: ABI 4
-with the one change under [What changes from ABI 4](#what-changes-from-abi-4). The rest of this
-document was written for ABI 4, and holds for ABI 5. What is still open is under
-[Not decided](#not-decided).
+Status: replaced by ABI 6 ([ffi-abi6.md](ffi-abi6.md)), which sets requests a property at a time
+and reads tasks rather than calling back. What ABI 6 keeps -- the pipelines, the models, the
+devices, the stages, the status codes, the log, the stratification rule -- is described here, and
+ffi-abi6.md refers to it. ABI 5 was ABI 4 with the one change under
+[What changes from ABI 4](#what-changes-from-abi-4); the rest was written for ABI 4.
 
 In the header every enum is an `int32_t` and a `#define` for each value -- `typedef int32_t
 WaifuStage;` and `#define WAIFU_STAGE_LOADING_WEIGHTS 1` -- rather than the `typedef enum` the

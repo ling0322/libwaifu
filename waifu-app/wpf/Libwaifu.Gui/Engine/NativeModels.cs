@@ -28,7 +28,7 @@ namespace Libwaifu.Gui.Engine
     /// <summary>
     /// What the libraries say about models: the model manager's catalogue and defaults, read out
     /// of the JSON documents it answers with, and what waifu.dll says a model can do, asked of a
-    /// <c>WaifuModel</c> one property at a time.
+    /// <c>WaifuModel</c> one attribute at a time.
     /// </summary>
     public static class NativeModels
     {
@@ -145,7 +145,7 @@ namespace Libwaifu.Gui.Engine
                     // and anything else by its manifest's file name.
                     FullName = PublishedFullName(model) ?? Path.GetFileName(manifest) ?? model,
                     Category = CategoryOf(handle),
-                    OnDisk = Has(handle, Native.ModelProperty.SizeOnDisk),
+                    OnDisk = Has(handle, Native.ModelAttribute.SizeOnDisk),
                     InMemory = false,
                 };
 
@@ -158,12 +158,12 @@ namespace Libwaifu.Gui.Engine
                     ReadPicture(handle, defaults, description);
                 }
 
-                if (Supports(handle, Native.ModelProperty.SupportsTextToSpeech))
+                if (Supports(handle, Native.ModelAttribute.SupportsTextToSpeech))
                 {
                     ReadVoice(handle, defaults, description);
                 }
 
-                if (Supports(handle, Native.ModelProperty.SupportsVoiceConversion))
+                if (Supports(handle, Native.ModelAttribute.SupportsVoiceConversion))
                 {
                     ReadConverter(handle, defaults, description);
                 }
@@ -196,12 +196,12 @@ namespace Libwaifu.Gui.Engine
         /// </summary>
         private static Category CategoryOf(IntPtr model)
         {
-            if (Supports(model, Native.ModelProperty.SupportsTextToSpeech))
+            if (Supports(model, Native.ModelAttribute.SupportsTextToSpeech))
             {
                 return Category.Speech;
             }
 
-            if (Supports(model, Native.ModelProperty.SupportsVoiceConversion))
+            if (Supports(model, Native.ModelAttribute.SupportsVoiceConversion))
             {
                 return Category.Conversion;
             }
@@ -211,29 +211,29 @@ namespace Libwaifu.Gui.Engine
 
         // -- asking a WaifuModel -----------------------------------------------------------------
 
-        /// <summary>Whether a SUPPORTS_ property is 1. Absent -- a library that does not know it -- is not.</summary>
-        public static bool Supports(IntPtr model, Native.ModelProperty property)
+        /// <summary>Whether a SUPPORTS_ attribute is 1. Absent -- a library that does not know it -- is not.</summary>
+        public static bool Supports(IntPtr model, Native.ModelAttribute attribute)
         {
             long value;
-            return Native.waifu_model_get_int_property(model, property, out value) && value == 1;
+            return Native.waifu_model_get_int_attribute(model, attribute, out value) && value == 1;
         }
 
-        /// <summary>Why a SUPPORTS_ property is 0, in words to show; null where nothing says.</summary>
-        public static string WhyNot(IntPtr model, Native.ModelProperty property)
+        /// <summary>Why a SUPPORTS_ attribute is 0, in words to show; null where nothing says.</summary>
+        public static string WhyNot(IntPtr model, Native.ModelAttribute attribute)
         {
-            return Utf8.Read(Native.waifu_model_get_string_property(model, property));
+            return Utf8.Read(Native.waifu_model_get_string_attribute(model, attribute));
         }
 
-        private static bool Has(IntPtr model, Native.ModelProperty property)
-        {
-            long value;
-            return Native.waifu_model_get_int_property(model, property, out value);
-        }
-
-        private static int Integer(IntPtr model, Native.ModelProperty property, int fallback)
+        private static bool Has(IntPtr model, Native.ModelAttribute attribute)
         {
             long value;
-            return Native.waifu_model_get_int_property(model, property, out value) &&
+            return Native.waifu_model_get_int_attribute(model, attribute, out value);
+        }
+
+        private static int Integer(IntPtr model, Native.ModelAttribute attribute, int fallback)
+        {
+            long value;
+            return Native.waifu_model_get_int_attribute(model, attribute, out value) &&
                    value > 0 && value <= int.MaxValue
                 ? (int)value
                 : fallback;
@@ -245,7 +245,7 @@ namespace Libwaifu.Gui.Engine
             description.Guidance = Json.Number(node, "guidance", 5.0);
             description.TakesGuidance = Json.Flag(node, "takes_guidance", true);
             description.Alignment = Integer(
-                model, Native.ModelProperty.ImageGenerationWidthHeightMultipleOf, 16);
+                model, Native.ModelAttribute.ImageGenerationWidthHeightMultipleOf, 16);
             description.Prompt = Json.Text(node, "prompt");
             description.Avoid = Json.Text(node, "avoid");
 
@@ -272,26 +272,26 @@ namespace Libwaifu.Gui.Engine
             // What it can be given an image for is said here rather than found out from a job
             // that fails, so the box is shown only where it does something.
             description.CanStartFromPicture = Supports(
-                model, Native.ModelProperty.SupportsImageGenerationFromStartImage);
+                model, Native.ModelAttribute.SupportsImageGenerationFromStartImage);
             description.WhyNotFromPicture = description.CanStartFromPicture
                 ? null
-                : WhyNot(model, Native.ModelProperty.SupportsImageGenerationFromStartImage);
+                : WhyNot(model, Native.ModelAttribute.SupportsImageGenerationFromStartImage);
         }
 
         private static void ReadVoice(IntPtr model, object node, ModelDescription description)
         {
             description.Speed = Json.Number(node, "speed", 1.0);
             description.Temperature = Json.Number(node, "temperature", 1.0);
-            description.Rate = Integer(model, Native.ModelProperty.SampleRate, 24000);
+            description.Rate = Integer(model, Native.ModelAttribute.SampleRate, 24000);
             description.TakesARecording = Supports(
-                model, Native.ModelProperty.SupportsTextToSpeechLikeReference);
+                model, Native.ModelAttribute.SupportsTextToSpeechLikeReference);
             description.WhyNotARecording = description.TakesARecording
                 ? null
-                : WhyNot(model, Native.ModelProperty.SupportsTextToSpeechLikeReference);
+                : WhyNot(model, Native.ModelAttribute.SupportsTextToSpeechLikeReference);
 
             // Whether it follows an instruction at all; what is offered is the app's own list.
             description.FollowsStyle = Supports(
-                model, Native.ModelProperty.SupportsTextToSpeechWithStyle);
+                model, Native.ModelAttribute.SupportsTextToSpeechWithStyle);
         }
 
         private static void ReadConverter(IntPtr model, object node, ModelDescription description)
@@ -299,12 +299,12 @@ namespace Libwaifu.Gui.Engine
             // A model that is a voice as well keeps its converter's defaults under "conversion".
             description.Steps = Json.Count(
                 Json.Field(node, "conversion"), "steps", Json.Count(node, "steps", 30));
-            description.Rate = Integer(model, Native.ModelProperty.SampleRate, 24000);
+            description.Rate = Integer(model, Native.ModelAttribute.SampleRate, 24000);
             description.ConvertsStyle = Supports(
-                model, Native.ModelProperty.SupportsVoiceConversionOfStyle);
+                model, Native.ModelAttribute.SupportsVoiceConversionOfStyle);
             description.WhyNotStyle = description.ConvertsStyle
                 ? null
-                : WhyNot(model, Native.ModelProperty.SupportsVoiceConversionOfStyle);
+                : WhyNot(model, Native.ModelAttribute.SupportsVoiceConversionOfStyle);
         }
 
         public static Category CategoryNamed(string kind)
