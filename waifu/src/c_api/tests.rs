@@ -667,12 +667,11 @@ fn a_voice_is_loaded_and_speaks_through_the_c_api() {
         );
         assert!(!task.is_null(), "{}", last_error());
 
-        // Progress before the end, in text to speech's stages, and the end with the samples.
+        // Progress before the end, in text to speech's stages, and the end with the samples. Which
+        // stages are read is not fixed: progress not yet read is the latest, and the stand-in voice
+        // can be through reading the text before this reads anything. At least the last is there.
         let heard = events(task);
-        assert_eq!(
-            heard.first(),
-            Some(&Heard::Progress(WAIFU_STAGE_TEXT_TO_SPEECH_READING_TEXT))
-        );
+        assert!(!heard.is_empty(), "no progress before the end");
         assert!(
             heard
                 .iter()
