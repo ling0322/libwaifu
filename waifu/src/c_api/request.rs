@@ -577,17 +577,27 @@ pub unsafe extern "C" fn waifu_request_set_int_attribute(
     })
 }
 
-/// As waifu_request_set_int_attribute.
+/// As waifu_request_set_int_attribute. The value is kept, and checked against the attribute's
+/// range, as the float the model is handed: one too large for a float is refused, not infinity.
 #[no_mangle]
 pub unsafe extern "C" fn waifu_request_set_float_attribute(
     request: *mut WaifuRequest,
     attribute: WaifuRequestAttribute,
     value: f64,
 ) -> bool {
+    // The engine is handed an f32, so that is what is checked and kept: a double too large for one
+    // would be handed over as infinity, and one too small as 0.
+    let narrow = value as f32;
+    let kept = narrow as f64;
     setter(request, attribute, |name, kind| match kind {
-        Kind::Float { min, max } if value.is_finite() && value >= min && value <= max => {
-            Ok(Some(Value::Float(value)))
+        Kind::Float { min, max } if narrow.is_finite() && kept >= min && kept <= max => {
+            Ok(Some(Value::Float(kept)))
         }
+        Kind::Float { .. } if value.is_finite() && !narrow.is_finite() => Err(format!(
+            "{name} is {value}: it has to be a float's, at most {:e}",
+            f32::MAX
+        )
+        .into()),
         Kind::Float { min, .. } if min == f64::MIN_POSITIVE => {
             Err(format!("{name} is {value}: it has to be above 0").into())
         }

@@ -657,7 +657,8 @@ bool waifu_request_set_int_attribute(WaifuRequest *request,
                                      WaifuRequestAttribute attribute,
                                      int64_t value);
 
-// As waifu_request_set_int_attribute.
+// As waifu_request_set_int_attribute. The value is kept, and checked against the attribute's
+// range, as the float the model is handed: one too large for a float is refused, not infinity.
 bool waifu_request_set_float_attribute(WaifuRequest *request,
                                        WaifuRequestAttribute attribute,
                                        double value);

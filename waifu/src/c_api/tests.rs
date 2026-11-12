@@ -424,6 +424,47 @@ fn a_request_takes_its_own_type_s_attributes_each_of_its_type_and_range() {
                 value
             ));
         }
+
+        // A float is checked as the f32 the engine is handed: a double too large for one would be
+        // infinity, and one too small for a positive minimum would be 0.
+        for value in [1e100, f64::MAX, f64::INFINITY, -1e100] {
+            assert!(!waifu_request_set_float_attribute(
+                request,
+                WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE,
+                value
+            ));
+            assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+        }
+        assert!(waifu_request_set_float_attribute(
+            request,
+            WAIFU_REQUEST_IMAGE_GENERATION_GUIDANCE,
+            f32::MAX as f64
+        ));
+        let speech = a_request(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        for value in [1e-100, 0.0, -1.0] {
+            assert!(!waifu_request_set_float_attribute(
+                speech,
+                WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED,
+                value
+            ));
+            assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+        }
+        // What is kept is the f32, and what the engine is handed is finite and above 0.
+        set_string(speech, WAIFU_REQUEST_TEXT_TO_SPEECH_TEXT, c"hello");
+        assert!(waifu_request_set_float_attribute(
+            speech,
+            WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED,
+            1e-40
+        ));
+        let speed = (*speech).speak().unwrap().speed;
+        assert!(speed > 0.0 && speed.is_finite(), "{speed}");
+        assert!(waifu_request_set_float_attribute(
+            speech,
+            WAIFU_REQUEST_TEXT_TO_SPEECH_SPEED,
+            1.1
+        ));
+        assert_eq!((*speech).speak().unwrap().speed, 1.1f32);
+        waifu_request_free(speech);
         assert!(!waifu_request_set_string_attribute(
             request,
             WAIFU_REQUEST_IMAGE_GENERATION_PROMPT,
