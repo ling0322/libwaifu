@@ -85,6 +85,9 @@ pub const WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttribute = 204;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 205;
 /// Int, read as uint64; 0.
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 206;
+/// Boolean, the visemes as well, TEXT_TO_SPEECH_VISEMES; 0. A model without
+/// SUPPORTS_TEXT_TO_SPEECH_VISEMES ends the task with WAIFU_ERR_MODEL. Since 6.1.
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 207;
 
 /// Audio, what is said and how; required.
 pub const WAIFU_REQUEST_VOICE_CONVERSION_SOURCE: WaifuRequestAttribute = 300;
@@ -132,6 +135,9 @@ pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttrib
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 604;
 /// Int, read as uint64; 0.
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 605;
+/// Boolean, as TEXT_TO_SPEECH_VISEMES: STREAMING_TEXT_TO_SPEECH_VISEMES with each part; 0.
+/// Since 6.1.
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 606;
 
 /// What an attribute holds, and what it may hold.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -235,6 +241,7 @@ fn attribute(attribute: WaifuRequestAttribute) -> Option<(WaifuPipelineType, &'s
         }
         WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE => (speech, "TEXT_TO_SPEECH_STYLE", Text),
         WAIFU_REQUEST_TEXT_TO_SPEECH_SEED => (speech, "TEXT_TO_SPEECH_SEED", Seed),
+        WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES => (speech, "TEXT_TO_SPEECH_VISEMES", Bool),
 
         WAIFU_REQUEST_VOICE_CONVERSION_SOURCE => (conversion, "VOICE_CONVERSION_SOURCE", Audio),
         WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE => {
@@ -287,6 +294,9 @@ fn attribute(attribute: WaifuRequestAttribute) -> Option<(WaifuPipelineType, &'s
         }
         WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED => {
             (streaming, "STREAMING_TEXT_TO_SPEECH_SEED", Seed)
+        }
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES => {
+            (streaming, "STREAMING_TEXT_TO_SPEECH_VISEMES", Bool)
         }
         _ => return None,
     })
@@ -450,6 +460,12 @@ impl WaifuRequest {
             reference_transcript: self.text(WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE_TRANSCRIPT),
             seed: self.seed(WAIFU_REQUEST_TEXT_TO_SPEECH_SEED),
         })
+    }
+
+    /// Whether a reading asked for its visemes.
+    pub fn wants_visemes(&self) -> bool {
+        self.flag(WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES)
+            || self.flag(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES)
     }
 
     pub fn speak_streaming(&self) -> Result<SpeakRequest, Refused> {

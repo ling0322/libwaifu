@@ -55,7 +55,7 @@ use crate::wav::Sound;
 use crate::{
     from_rgb8, to_rgb8, ConversionOptions, ConversionProgress, Converter, Device,
     GenerationOptions, GenerationProgress, Manifest, SpeechOptions, SpeechProgress, Tones,
-    Transcriber, Transcript, TranscriptionOptions, TranscriptionProgress, Voice,
+    Transcriber, Transcript, TranscriptionOptions, TranscriptionProgress, Viseme, Voice,
 };
 
 /// A job, as the engine numbers them. Never 0, which the C API keeps for a refusal.
@@ -341,6 +341,9 @@ pub type OnProgress = Box<dyn FnMut(&Progress) + Send>;
 pub type OnComplete<T> = Box<dyn FnOnce(Ended<T>) + Send>;
 /// A part of a reading's audio as soon as it is made: see [`Engine::speak_streaming`].
 pub type OnAudio = Box<dyn FnMut(&Sound) + Send>;
+/// The next of a reading's visemes, and how many milliseconds each holds: see
+/// [`Engine::speak_with`].
+pub type OnVisemes = Box<dyn FnMut(u32, &[Viseme]) + Send>;
 
 /// The engine: a thread, a queue to it, and how to stop what is on it.
 ///
@@ -395,6 +398,8 @@ enum Work {
         on_progress: OnProgress,
         /// Where each part goes as it is made, for a streaming reading.
         on_audio: Option<OnAudio>,
+        /// Where the visemes go, for a reading asked for them.
+        on_visemes: Option<OnVisemes>,
         on_complete: OnComplete<Sound>,
     },
     VoiceConversion {
@@ -542,13 +547,30 @@ impl Engine {
         on_progress: OnProgress,
         on_complete: OnComplete<Sound>,
     ) -> Result<JobId, String> {
+        self.speak_with(request, on_progress, None, None, on_complete)
+    }
+
+    /// [`speak`](Engine::speak), streamed to `on_audio` where there is one -- as
+    /// [`speak_streaming`](Engine::speak_streaming) -- and with the mouth shape of every frame of
+    /// the audio handed to `on_visemes` where there is one, in order, frame 0 the reading's first
+    /// milliseconds: see [`Voice::speak_with_visemes`]. Streaming, the visemes of a part come just
+    /// before it. A voice that does not say them ends the job with [`Failure::Model`].
+    pub fn speak_with(
+        &self,
+        request: SpeakRequest,
+        on_progress: OnProgress,
+        on_audio: Option<OnAudio>,
+        on_visemes: Option<OnVisemes>,
+        on_complete: OnComplete<Sound>,
+    ) -> Result<JobId, String> {
         if request.text.trim().is_empty() {
             return Err("there is nothing to say: the text is empty".to_string());
         }
         Ok(self.submit(Work::Speak {
             request,
             on_progress,
-            on_audio: None,
+            on_audio,
+            on_visemes,
             on_complete,
         }))
     }
@@ -565,15 +587,7 @@ impl Engine {
         on_audio: OnAudio,
         on_complete: OnComplete<Sound>,
     ) -> Result<JobId, String> {
-        if request.text.trim().is_empty() {
-            return Err("there is nothing to say: the text is empty".to_string());
-        }
-        Ok(self.submit(Work::Speak {
-            request,
-            on_progress,
-            on_audio: Some(on_audio),
-            on_complete,
-        }))
+        self.speak_with(request, on_progress, Some(on_audio), None, on_complete)
     }
 
     pub fn voice_conversion(
@@ -1054,10 +1068,18 @@ impl Worker {
                 request,
                 mut on_progress,
                 mut on_audio,
+                mut on_visemes,
                 on_complete,
             } => {
-                let ended =
-                    guarded(|| self.speak(&request, &mut on_progress, on_audio.as_mut(), &stop));
+                let ended = guarded(|| {
+                    self.speak(
+                        &request,
+                        &mut on_progress,
+                        on_audio.as_mut(),
+                        on_visemes.as_mut(),
+                        &stop,
+                    )
+                });
                 on_complete(ended);
             }
             Work::VoiceConversion {
@@ -1602,12 +1624,23 @@ impl Worker {
         request: &SpeakRequest,
         on_progress: &mut OnProgress,
         on_audio: Option<&mut OnAudio>,
+        on_visemes: Option<&mut OnVisemes>,
         stop: &dyn Fn() -> bool,
     ) -> Ended<Sound> {
         let ratio = self.vocoder_ratio;
         let Some(voice) = self.voice() else {
             return Ended::failed(Failure::NotLoaded, "no voice is loaded");
         };
+        let frame_ms = voice.viseme_frame_ms();
+        if on_visemes.is_some() && frame_ms.is_none() {
+            return Ended::failed(
+                Failure::Model,
+                format!(
+                    "{} does not say which mouth shape goes with what it says",
+                    voice.name()
+                ),
+            );
+        }
         if request.like.is_some() {
             if let Some(why) = voice.no_likeness_because() {
                 return Ended::failed(Failure::Model, why);
@@ -1669,18 +1702,37 @@ impl Worker {
         };
 
         let like = request.like.as_ref();
-        let spoken = match on_audio {
-            None => voice.speak(&request.text, like, &options, &mut report),
-            Some(on_audio) => {
-                let mut heard = |part: &Sound| {
-                    on_audio(part);
-                    parts.set(parts.get() + 1);
-                    match stop() {
-                        true => ControlFlow::Break(()),
-                        false => ControlFlow::Continue(()),
-                    }
-                };
+        let mut on_audio = on_audio;
+        let mut heard = |part: &Sound| {
+            if let Some(on_audio) = on_audio.as_mut() {
+                on_audio(part);
+            }
+            parts.set(parts.get() + 1);
+            match stop() {
+                true => ControlFlow::Break(()),
+                false => ControlFlow::Continue(()),
+            }
+        };
+        let spoken = match (on_visemes, streaming) {
+            (None, false) => voice.speak(&request.text, like, &options, &mut report),
+            (None, true) => {
                 voice.speak_streaming(&request.text, like, &options, &mut report, &mut heard)
+            }
+            (Some(on_visemes), _) => {
+                let frame_ms = frame_ms.unwrap_or_default();
+                let mut visemes = |said: &[Viseme]| on_visemes(frame_ms, said);
+                let heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>> = match streaming {
+                    true => Some(&mut heard),
+                    false => None,
+                };
+                voice.speak_with_visemes(
+                    &request.text,
+                    like,
+                    &options,
+                    &mut report,
+                    heard,
+                    &mut visemes,
+                )
             }
         };
         let measured = say.measured_ratio(Instant::now());

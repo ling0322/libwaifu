@@ -85,6 +85,8 @@ pub mod lm;
 pub mod speech_tokenizer;
 /// When a streaming reading sounds what it has said, and which tokens the flow is handed.
 pub mod stream;
+/// The mouth shape of every 40 ms of a reading, out of the tokens the flow is handed.
+pub mod visemes;
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -98,18 +100,21 @@ use crate::flint::{
 use crate::indextts::{campplus, features::resample};
 use crate::{
     ConversionDefaults, ConversionOptions, ConversionProgress, Converter, Error, Manifest, Result,
-    Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Style, Tokenizer, Voice,
+    Sound, SpeechDefaults, SpeechOptions, SpeechProgress, Style, Tokenizer, Viseme, Voice,
 };
 
 use self::flow::Flow;
 use self::hift::Hift;
 use self::lm::{Lm, Sampler, Sampling};
 use self::stream::{Hops, Sentence, Silence, LOOKAHEAD};
+use self::visemes::{VisemeModel, VisemeTrack};
 
 const LM: &str = "cosyvoice3.lm";
 const FLOW: &str = "cosyvoice3.flow";
 const HIFT: &str = "cosyvoice3.hift";
 const SPEECH_TOKENIZER: &str = "cosyvoice3.speech_tokenizer";
+/// The samples a speech token becomes at speed one: two mel frames, each the vocoder's hop.
+const TOKEN_SAMPLES: u64 = 2 * hift::HOP as u64;
 const CAMPPLUS: &str = "cosyvoice3.campplus";
 
 /// The rate of what comes out.
@@ -213,6 +218,8 @@ pub struct CosyVoice3 {
     tokenizer_rotary: (Tensor, Tensor),
     /// The last recording listened to, by fingerprint, and what was heard in it.
     heard: RefCell<Option<(u64, Reference)>>,
+    /// The mouth shapes of what it says, where the package has them.
+    visemes: Option<VisemeModel>,
 }
 
 impl CosyVoice3 {
@@ -239,6 +246,10 @@ impl CosyVoice3 {
 
     pub const NEEDS_A_RECORDING: &'static str = "CosyVoice3 speaks in the voice of a recording -- \
          drop one on the page, a few seconds of somebody speaking, and say the sentence again";
+
+    /// For a package without the viseme model: see [`visemes`].
+    pub const NO_VISEMES: &'static str = "this CosyVoice3 package does not say which mouth \
+         shape goes with what it says: its manifest names no visemes under config: cosyvoice3:";
 
     /// The instructions it was taught: upstream's `instruct_list` (`cosyvoice/utils/common.py`),
     /// word for word, without the system prompt around each. Reordered for a list -- the manner
@@ -294,6 +305,10 @@ impl CosyVoice3 {
 
         let precision = Self::precision(&weights)?;
         let dtype = DType::Float;
+        let visemes = match Self::lists_visemes(manifest)? {
+            true => Some(VisemeModel::build(&weights)?),
+            false => None,
+        };
 
         Ok(CosyVoice3 {
             settings: Settings::from_manifest(manifest),
@@ -314,7 +329,23 @@ impl CosyVoice3 {
             dtype,
             precision,
             heard: RefCell::new(None),
+            visemes,
         })
+    }
+
+    /// Whether the package `manifest` describes says the mouth shapes of what it says: it names
+    /// them, in the order [`visemes`] reads them, under `config: cosyvoice3: visemes:` -- and has
+    /// [`visemes::NAMESPACE`]'s weights, which only a read of them tells. Asked of the manifest
+    /// alone, before any of the weights are.
+    pub fn lists_visemes(manifest: &Manifest) -> Result<bool> {
+        let Ok(section) = manifest.section(Self::MODEL_TYPE) else {
+            return Ok(false);
+        };
+        if !section.has(visemes::MANIFEST_KEY) {
+            return Ok(false);
+        }
+        visemes::check_classes(section.get_str(visemes::MANIFEST_KEY)?)?;
+        Ok(true)
     }
 
     /// What the language model and the DiT run at: the type the package holds them in, float32 as
@@ -460,7 +491,7 @@ impl CosyVoice3 {
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
-        self.read(text, None, reference, options, report, None)
+        self.read(text, None, reference, options, report, None, None)
     }
 
     /// `text` continuing `reference`, whose words were `transcript`: upstream's zero-shot reading.
@@ -473,7 +504,15 @@ impl CosyVoice3 {
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
-        self.read(text, Some(transcript), reference, options, report, None)
+        self.read(
+            text,
+            Some(transcript),
+            reference,
+            options,
+            report,
+            None,
+            None,
+        )
     }
 
     /// [`say`](CosyVoice3::say), or [`say_after`](CosyVoice3::say_after) where there is a
@@ -511,7 +550,15 @@ impl CosyVoice3 {
             ));
         }
         self.streams()?;
-        self.read(text, transcript, reference, options, report, Some(heard))
+        self.read(
+            text,
+            transcript,
+            reference,
+            options,
+            report,
+            Some(heard),
+            None,
+        )
     }
 
     /// Whether the DiT's attention in blocks runs here, tried on a block of nothing at the type
@@ -540,6 +587,7 @@ impl CosyVoice3 {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn read(
         &self,
         text: &str,
@@ -548,7 +596,11 @@ impl CosyVoice3 {
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
         heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>>,
+        mut visemes: Option<&mut dyn FnMut(&[Viseme])>,
     ) -> Result<Option<Sound>> {
+        if visemes.is_some() && self.visemes.is_none() {
+            return Err(Error::model(Self::NO_VISEMES));
+        }
         if report(SpeechProgress::Reading).is_break() {
             return Ok(None);
         }
@@ -648,15 +700,25 @@ impl CosyVoice3 {
             if report(SpeechProgress::Sounding).is_break() {
                 return Ok(None);
             }
+            // Each sentence's tokens an equal share of its audio, which is the share the flow drew
+            // each of them as, before the vocoder stretched the whole to `speed`.
+            let mut track = VisemeTrack::new(RATE);
             for said in &said_all {
                 let kept = Silence::kept(said);
                 if kept.is_empty() {
                     continue;
                 }
+                let start = samples.len() as u64;
                 samples.extend(self.sound(&kept, reference, options.speed)?);
+                if let (Some(model), Some(_)) = (&self.visemes, &visemes) {
+                    track.lay_sentence(start, samples.len() as u64, &model.shapes(&kept));
+                }
                 if report(SpeechProgress::Sounding).is_break() {
                     return Ok(None);
                 }
+            }
+            if let Some(visemes) = visemes {
+                visemes(&track.finish(samples.len() as u64));
             }
             return Ok(Some(Sound::new(samples, RATE)));
         };
@@ -665,10 +727,19 @@ impl CosyVoice3 {
         // model has said enough for one, inside its report, and the rest once it stops. The hop
         // is kept from one piece to the next. The sampler draws from the host's generator and the
         // vocoder's noise from the device's, so neither moves the other by going first.
+        //
+        // A streaming reading is at speed one, so each token the flow is handed is its own
+        // TOKEN_SAMPLES of the audio, the sentences end to end. A token's viseme is read once the
+        // token after it is said, or its sentence is over; and a frame is handed over just before
+        // the part that finishes it, never past the audio handed over so far.
         let mut hops = Hops::default();
+        let mut track = VisemeTrack::new(RATE);
         for (ids, own) in &readings {
             let mut part = Streaming::new(self, reference, &hops);
             let mut seen = 0;
+            let start = samples.len() as u64;
+            // The sentence's tokens laid on the track so far.
+            let mut shaped = 0;
             let mut failed: Option<Error> = None;
             let said =
                 self.lm
@@ -695,6 +766,20 @@ impl CosyVoice3 {
                         match part.hop(reads, &mut hops) {
                             Ok(sound) => {
                                 samples.extend_from_slice(&sound.samples);
+                                if let (Some(model), Some(visemes)) = (&self.visemes, &mut visemes)
+                                {
+                                    let kept = part.kept();
+                                    while shaped + 1 < kept.len() {
+                                        let at = start + shaped as u64 * TOKEN_SAMPLES;
+                                        let shape = model.shape_at(kept, shaped);
+                                        track.lay(at, at + TOKEN_SAMPLES, shape);
+                                        shaped += 1;
+                                    }
+                                    let settled = track.settle(samples.len() as u64);
+                                    if !settled.is_empty() {
+                                        visemes(&settled);
+                                    }
+                                }
                                 heard(&sound)
                             }
                             Err(error) => {
@@ -719,8 +804,26 @@ impl CosyVoice3 {
             }
             let sound = part.finish()?;
             samples.extend_from_slice(&sound.samples);
+            if let (Some(model), Some(visemes)) = (&self.visemes, &mut visemes) {
+                let kept = part.kept();
+                while shaped < kept.len() {
+                    let at = start + shaped as u64 * TOKEN_SAMPLES;
+                    track.lay(at, at + TOKEN_SAMPLES, model.shape_at(kept, shaped));
+                    shaped += 1;
+                }
+                let settled = track.settle(samples.len() as u64);
+                if !settled.is_empty() {
+                    visemes(&settled);
+                }
+            }
             if heard(&sound).is_break() {
                 return Ok(None);
+            }
+        }
+        if let Some(visemes) = visemes {
+            let rest = track.finish(samples.len() as u64);
+            if !rest.is_empty() {
+                visemes(&rest);
             }
         }
         Ok(Some(Sound::new(samples, RATE)))
@@ -996,17 +1099,24 @@ fn stretch(mel: &Tensor, speed: f32, device: Device) -> Result<Tensor> {
     Ok(stretched.view(&[1, 80, out as i32])?)
 }
 
-impl Voice for CosyVoice3 {
-    fn speak(
+impl CosyVoice3 {
+    /// What [`Voice::speak`], [`Voice::speak_streaming`] and [`Voice::speak_with_visemes`] are:
+    /// streamed where there is `heard`, the visemes said where there is `visemes`.
+    fn speak_with(
         &self,
         text: &str,
         like: Option<&Sound>,
         options: &SpeechOptions,
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>>,
+        visemes: Option<&mut dyn FnMut(&[Viseme])>,
     ) -> Result<Option<Sound>> {
         let Some(like) = like else {
             return Err(Error::model(Self::NEEDS_A_RECORDING));
         };
+        if visemes.is_some() && self.visemes.is_none() {
+            return Err(Error::model(Self::NO_VISEMES));
+        }
         // Before the recording is listened to: a request that cannot be read is told so at once.
         let words = transcript_of(options);
         check_prompt(words, style_of(options))?;
@@ -1015,10 +1125,37 @@ impl Voice for CosyVoice3 {
         }
 
         let reference = self.hear(like)?;
-        match words {
-            Some(words) => self.say_after(text, words, &reference, options, report),
-            None => self.say(text, &reference, options, report),
+        match heard {
+            None => self.read(text, words, &reference, options, report, None, visemes),
+            Some(heard) => {
+                // As say_streaming refuses: a hop is at the speed it is said.
+                if !options.speed.is_finite() || (options.speed - 1.0).abs() > 1e-6 {
+                    return self.say_streaming(text, words, &reference, options, report, heard);
+                }
+                self.streams()?;
+                self.read(
+                    text,
+                    words,
+                    &reference,
+                    options,
+                    report,
+                    Some(heard),
+                    visemes,
+                )
+            }
         }
+    }
+}
+
+impl Voice for CosyVoice3 {
+    fn speak(
+        &self,
+        text: &str,
+        like: Option<&Sound>,
+        options: &SpeechOptions,
+        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+    ) -> Result<Option<Sound>> {
+        self.speak_with(text, like, options, report, None, None)
     }
 
     /// A hop of tokens at a time: see [`CosyVoice3::say_streaming`].
@@ -1030,17 +1167,24 @@ impl Voice for CosyVoice3 {
         report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
         heard: &mut dyn FnMut(&Sound) -> ControlFlow<()>,
     ) -> Result<Option<Sound>> {
-        let Some(like) = like else {
-            return Err(Error::model(Self::NEEDS_A_RECORDING));
-        };
-        let words = transcript_of(options);
-        check_prompt(words, style_of(options))?;
-        if report(SpeechProgress::Reading).is_break() {
-            return Ok(None);
-        }
+        self.speak_with(text, like, options, report, Some(heard), None)
+    }
 
-        let reference = self.hear(like)?;
-        self.say_streaming(text, words, &reference, options, report, heard)
+    /// A viseme a speech token, where the package has the model: see [`visemes`].
+    fn viseme_frame_ms(&self) -> Option<u32> {
+        self.visemes.as_ref().map(|_| visemes::FRAME_MS)
+    }
+
+    fn speak_with_visemes(
+        &self,
+        text: &str,
+        like: Option<&Sound>,
+        options: &SpeechOptions,
+        report: &mut dyn FnMut(SpeechProgress) -> ControlFlow<()>,
+        heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>>,
+        visemes: &mut dyn FnMut(&[Viseme]),
+    ) -> Result<Option<Sound>> {
+        self.speak_with(text, like, options, report, heard, Some(visemes))
     }
 
     fn rate(&self) -> u32 {

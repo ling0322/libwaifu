@@ -66,6 +66,8 @@ pub struct TextToSpeech {
     /// A recording without its words: CosyVoice3 does not, unless a style is given.
     pub without_reference_transcript: Support,
     pub with_style: Support,
+    /// The mouth shape of every frame of what it says: a CosyVoice3 package with the viseme model.
+    pub with_visemes: Support,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -255,6 +257,13 @@ fn text_to_speech(voice: &describe::Spoken) -> TextToSpeech {
             )),
             false => Ok(()),
         },
+        with_visemes: match voice.says_visemes {
+            true => Ok(()),
+            false => Err(format!(
+                "{} does not say which mouth shape goes with what it says",
+                voice.full_name
+            )),
+        },
     }
 }
 
@@ -304,6 +313,39 @@ mod tests {
         assert_eq!(voice.streaming_text_to_speech, Ok(()));
         assert!(voice.voice_conversion.is_ok());
         assert!(voice.image_generation.is_err());
+        // A package without the viseme model does not say them.
+        assert!(speech.with_visemes.is_err());
+    }
+
+    #[test]
+    fn a_cosyvoice3_package_with_the_viseme_model_says_so_in_its_manifest() {
+        let with = |stem: &str, listed: &str| {
+            let path = a_manifest(stem, CosyVoice3::MODEL_TYPE);
+            let text = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(
+                &path,
+                format!("{text}  cosyvoice3:\n    sample_rate: 24000\n    visemes: {listed}\n"),
+            )
+            .unwrap();
+            model_info(&path)
+                .unwrap()
+                .text_to_speech
+                .unwrap()
+                .with_visemes
+        };
+        assert_eq!(
+            with("info-visemes", r#"[A, E, I, O, U, "@", MBP, REST]"#),
+            Ok(())
+        );
+        // Classes in another order are another model's, which this does not read.
+        assert!(with(
+            "info-visemes-reordered",
+            r#"[E, A, I, O, U, "@", MBP, REST]"#
+        )
+        .is_err());
+        // Tones says none.
+        let tones = model_info(TONES).unwrap();
+        assert!(tones.text_to_speech.unwrap().with_visemes.is_err());
     }
 
     #[test]

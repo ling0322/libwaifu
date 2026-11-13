@@ -39,6 +39,7 @@ use super::{
     WAIFU_PIPELINE_TEXT_TO_SPEECH, WAIFU_PIPELINE_VOICE_CONVERSION,
 };
 use crate::engine::{self, Canceller, Ended, JobId, LayerKind, Progress};
+use crate::speech::Viseme;
 use crate::wav::Sound;
 use crate::Transcript;
 
@@ -81,6 +82,13 @@ pub const WAIFU_TASK_IMAGE_GENERATION_IMAGE: WaifuTaskAttribute = 100;
 
 /// Audio.
 pub const WAIFU_TASK_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 200;
+/// Int array, read with waifu_task_get_int_array_attribute: a WaifuViseme for each
+/// TEXT_TO_SPEECH_VISEME_FRAME_MS of AUDIO, frame i being milliseconds [i, i + 1) * FRAME_MS of it,
+/// ceil(milliseconds / FRAME_MS) of them; for a request with TEXT_TO_SPEECH_VISEMES. Since 6.1.
+pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 201;
+/// Int: how many milliseconds a frame of VISEMES holds -- 40 for CosyVoice3, a speech token's.
+/// Since 6.1.
+pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 202;
 
 /// Audio.
 pub const WAIFU_TASK_VOICE_CONVERSION_AUDIO: WaifuTaskAttribute = 300;
@@ -124,6 +132,13 @@ pub const WAIFU_TASK_SPEECH_TO_TEXT_LANGUAGE: WaifuTaskAttribute = 501;
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART: WaifuTaskAttribute = 600;
 /// Audio: every part, end to end.
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 601;
+/// Int array, as TEXT_TO_SPEECH_VISEMES, frame 0 the start of the first part: the frames settled
+/// by the part the last AUDIO_PART event said, from the moment it is said -- never past the end of
+/// that part, and only ever more of them with each part -- and every frame once the task has ended
+/// well. For a request with STREAMING_TEXT_TO_SPEECH_VISEMES. Since 6.1.
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 602;
+/// Int, as TEXT_TO_SPEECH_VISEME_FRAME_MS. Since 6.1.
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 603;
 
 /// A progress report, as the PROGRESS_ attributes read it.
 #[derive(Clone, Copy, Debug)]
@@ -170,13 +185,28 @@ struct End {
     output: Output,
 }
 
+/// A part of a streaming reading, and how many of the reading's visemes were settled when it came.
+struct Part {
+    sound: Sound,
+    settled: usize,
+    /// Those visemes, copied out the first time this part's are asked for, and kept as long as the
+    /// task so that the pointer handed out is: what is not asked for is never copied. Its own
+    /// allocation, which moving the Part does not move.
+    visemes: Option<Box<[i32]>>,
+}
+
 #[derive(Default)]
 struct State {
     queue: VecDeque<Pending>,
     /// The progress the last PROGRESS event read said.
     progress: Option<Report>,
     /// Every part handed over, in order: each lives as long as the task.
-    parts: Vec<Sound>,
+    parts: Vec<Part>,
+    /// Every viseme handed over so far, as WaifuVisemes; read through once the task has ended,
+    /// when nothing moves it any more.
+    visemes: Vec<i32>,
+    /// What a frame of them holds, once the first has come.
+    viseme_frame_ms: Option<u32>,
     /// The part the last AUDIO_PART event read said.
     part: Option<usize>,
     end: Option<End>,
@@ -269,10 +299,27 @@ impl Started {
         let shared = Arc::clone(&self.shared);
         Box::new(move |part: &Sound| {
             let mut state = shared.lock();
-            state.parts.push(part.clone());
+            let settled = state.visemes.len();
+            state.parts.push(Part {
+                sound: part.clone(),
+                settled,
+                visemes: None,
+            });
             let index = state.parts.len() - 1;
             drop(state);
             shared.push(Pending::Part(index));
+        })
+    }
+
+    /// The visemes, as they come: before the part they lie in, for a streaming reading.
+    pub fn on_visemes(&self) -> engine::OnVisemes {
+        let shared = Arc::clone(&self.shared);
+        Box::new(move |frame_ms: u32, said: &[Viseme]| {
+            let mut state = shared.lock();
+            state.viseme_frame_ms = Some(frame_ms);
+            state
+                .visemes
+                .extend(said.iter().map(|viseme| *viseme as i32));
         })
     }
 
@@ -456,6 +503,11 @@ enum Found {
     Image(WaifuImage),
     Rgba(WaifuRgbaImage),
     Audio(WaifuAudio),
+    Ints(*const i32, usize),
+}
+
+fn ints_found(values: &[i32]) -> Found {
+    Found::Ints(values.as_ptr(), values.len())
 }
 
 fn audio_found(sound: &Sound) -> Found {
@@ -478,7 +530,7 @@ fn rgba_found(image: &engine::RgbaImage) -> Found {
 impl WaifuTask {
     /// What `attribute` is now, or None; `index` for the indexed ones, None for the rest.
     fn find(&self, attribute: WaifuTaskAttribute, index: Option<usize>) -> Option<Found> {
-        let state = self.shared.lock();
+        let mut state = self.shared.lock();
         let indexed = (WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TYPE
             ..=WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DERIVED_FROM_ID)
             .contains(&attribute);
@@ -506,7 +558,38 @@ impl WaifuTask {
                 if self.run != Some(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH) {
                     return None;
                 }
-                return state.part.map(|index| audio_found(&state.parts[index]));
+                return state
+                    .part
+                    .map(|index| audio_found(&state.parts[index].sound));
+            }
+            WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS
+            | WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS => {
+                let streaming = attribute == WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS;
+                let run = match streaming {
+                    true => WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH,
+                    false => WAIFU_PIPELINE_TEXT_TO_SPEECH,
+                };
+                if self.run != Some(run) {
+                    return None;
+                }
+                return state.viseme_frame_ms.map(|ms| Found::Int(ms as i64));
+            }
+            WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES => {
+                if self.run != Some(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH) {
+                    return None;
+                }
+                state.viseme_frame_ms?;
+                if state.end.as_ref().is_some_and(|end| end.code == WAIFU_OK) {
+                    return Some(ints_found(&state.visemes));
+                }
+                let index = state.part?;
+                let State { parts, visemes, .. } = &mut *state;
+                let part = &mut parts[index];
+                let settled = part.settled;
+                let kept = part
+                    .visemes
+                    .get_or_insert_with(|| visemes[..settled].into());
+                return Some(ints_found(kept));
             }
             _ => {}
         }
@@ -540,6 +623,14 @@ impl WaifuTask {
                 WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO,
                 Output::Audio(sound),
             ) => Some(audio_found(sound)),
+            (
+                WAIFU_PIPELINE_TEXT_TO_SPEECH,
+                WAIFU_TASK_TEXT_TO_SPEECH_VISEMES,
+                Output::Audio(_),
+            ) => {
+                state.viseme_frame_ms?;
+                Some(ints_found(&state.visemes))
+            }
             (
                 WAIFU_PIPELINE_SPEECH_TO_TEXT,
                 WAIFU_TASK_SPEECH_TO_TEXT_TEXT,
@@ -703,6 +794,31 @@ pub unsafe extern "C" fn waifu_task_get_audio_attribute(
         _ => None,
     });
     put(value, found)
+}
+
+/// The arrays: a pointer to *count values, valid until waifu_task_free, or NULL and *count
+/// untouched where the attribute is not there, as waifu_task_get_int_attribute. Since 6.1.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_task_get_int_array_attribute(
+    task: *const WaifuTask,
+    attribute: WaifuTaskAttribute,
+    count: *mut usize,
+) -> *const i32 {
+    let found = getter(task, attribute, None, None, |found| match found {
+        Found::Ints(values, len) => Some(Some((values, len))),
+        _ => None,
+    });
+    match (count.is_null(), found) {
+        (false, Some((values, len))) => {
+            *count = len;
+            // An empty array is there, and is not NULL.
+            match values.is_null() {
+                true => ptr::NonNull::<i32>::dangling().as_ptr(),
+                false => values,
+            }
+        }
+        _ => ptr::null(),
+    }
 }
 
 /// The indexed attributes: the layers of a decomposition. false, or NULL, past the count as well.
