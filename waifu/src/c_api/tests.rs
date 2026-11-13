@@ -1224,6 +1224,11 @@ fn a_streaming_reading_hands_over_the_visemes_its_parts_settle() {
         let mut count = 0;
         let first = waifu_task_get_int_array_attribute(task, attribute, &mut count);
         assert_eq!(std::slice::from_raw_parts(first, count), [0, 6]);
+        // Asked again, the same array: a part's visemes are copied out once, when first asked for.
+        assert_eq!(
+            waifu_task_get_int_array_attribute(task, attribute, &mut count),
+            first
+        );
         let mut ms = 0;
         assert!(waifu_task_get_int_attribute(
             task,

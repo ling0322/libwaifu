@@ -185,14 +185,23 @@ struct End {
     output: Output,
 }
 
+/// A part of a streaming reading, and how many of the reading's visemes were settled when it came.
+struct Part {
+    sound: Sound,
+    settled: usize,
+    /// Those visemes, copied out the first time this part's are asked for, and kept as long as the
+    /// task so that the pointer handed out is: what is not asked for is never copied. Its own
+    /// allocation, which moving the Part does not move.
+    visemes: Option<Box<[i32]>>,
+}
+
 #[derive(Default)]
 struct State {
     queue: VecDeque<Pending>,
     /// The progress the last PROGRESS event read said.
     progress: Option<Report>,
-    /// Every part handed over, in order, with the visemes settled by then: each lives as long as
-    /// the task, the visemes a copy of their own so that a pointer into them does too.
-    parts: Vec<(Sound, Vec<i32>)>,
+    /// Every part handed over, in order: each lives as long as the task.
+    parts: Vec<Part>,
     /// Every viseme handed over so far, as WaifuVisemes; read through once the task has ended,
     /// when nothing moves it any more.
     visemes: Vec<i32>,
@@ -290,8 +299,12 @@ impl Started {
         let shared = Arc::clone(&self.shared);
         Box::new(move |part: &Sound| {
             let mut state = shared.lock();
-            let settled = state.visemes.clone();
-            state.parts.push((part.clone(), settled));
+            let settled = state.visemes.len();
+            state.parts.push(Part {
+                sound: part.clone(),
+                settled,
+                visemes: None,
+            });
             let index = state.parts.len() - 1;
             drop(state);
             shared.push(Pending::Part(index));
@@ -517,7 +530,7 @@ fn rgba_found(image: &engine::RgbaImage) -> Found {
 impl WaifuTask {
     /// What `attribute` is now, or None; `index` for the indexed ones, None for the rest.
     fn find(&self, attribute: WaifuTaskAttribute, index: Option<usize>) -> Option<Found> {
-        let state = self.shared.lock();
+        let mut state = self.shared.lock();
         let indexed = (WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_TYPE
             ..=WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_DERIVED_FROM_ID)
             .contains(&attribute);
@@ -545,7 +558,9 @@ impl WaifuTask {
                 if self.run != Some(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH) {
                     return None;
                 }
-                return state.part.map(|index| audio_found(&state.parts[index].0));
+                return state
+                    .part
+                    .map(|index| audio_found(&state.parts[index].sound));
             }
             WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS
             | WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS => {
@@ -567,7 +582,14 @@ impl WaifuTask {
                 if state.end.as_ref().is_some_and(|end| end.code == WAIFU_OK) {
                     return Some(ints_found(&state.visemes));
                 }
-                return state.part.map(|index| ints_found(&state.parts[index].1));
+                let index = state.part?;
+                let State { parts, visemes, .. } = &mut *state;
+                let part = &mut parts[index];
+                let settled = part.settled;
+                let kept = part
+                    .visemes
+                    .get_or_insert_with(|| visemes[..settled].into());
+                return Some(ints_found(kept));
             }
             _ => {}
         }
