@@ -116,6 +116,7 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES: WaifuModelAttribute = 204
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 300;
 pub const WAIFU_MODEL_SIZE_ON_DISK: WaifuModelAttribute = 1000;
 pub const WAIFU_MODEL_SAMPLE_RATE: WaifuModelAttribute = 1001;
+pub const WAIFU_MODEL_ATTACHES_AS: WaifuModelAttribute = 1002;
 pub const WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF: WaifuModelAttribute = 1100;
 pub const WAIFU_MODEL_IMAGE_GENERATION_SAMPLER: WaifuModelAttribute = 1101;
 pub const WAIFU_MODEL_IMAGE_GENERATION_MAX_PROMPT_IMAGES: WaifuModelAttribute = 1102;
@@ -143,6 +144,9 @@ pub const WAIFU_VISEME_U: WaifuViseme = 4;
 pub const WAIFU_VISEME_SCHWA: WaifuViseme = 5;
 pub const WAIFU_VISEME_MBP: WaifuViseme = 6;
 pub const WAIFU_VISEME_REST: WaifuViseme = 7;
+
+pub type WaifuAttachedModelType = c_int;
+pub const WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES: WaifuAttachedModelType = 1;
 
 pub type WaifuEventType = c_int;
 pub const WAIFU_EVENT_NONE: WaifuEventType = 0;
@@ -399,6 +403,17 @@ functions! {
         usize,
         *mut WaifuRgbaImage
     ) -> bool;
+    waifu_pipeline_attach_model: fn(
+        *mut WaifuPipeline,
+        WaifuAttachedModelType,
+        *const c_char,
+        *const WaifuModel
+    ) -> *mut WaifuTask;
+    waifu_pipeline_detach_model: fn(
+        *mut WaifuPipeline,
+        WaifuAttachedModelType,
+        *const c_char
+    ) -> *mut WaifuTask;
     waifu_task_get_int_array_attribute: fn(
         *const WaifuTask,
         WaifuTaskAttribute,

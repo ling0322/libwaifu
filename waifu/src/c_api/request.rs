@@ -85,8 +85,9 @@ pub const WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttribute = 204;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 205;
 /// Int, read as uint64; 0.
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 206;
-/// Boolean, the visemes as well, TEXT_TO_SPEECH_VISEMES; 0. A model without
-/// SUPPORTS_TEXT_TO_SPEECH_VISEMES ends the task with WAIFU_ERR_MODEL. Since 6.1.
+/// Boolean, the visemes as well, TEXT_TO_SPEECH_VISEMES; 0. With no
+/// WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES model attached the task ends with WAIFU_ERR_MODEL.
+/// Since 6.1.
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 207;
 
 /// Audio, what is said and how; required.
