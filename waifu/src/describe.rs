@@ -96,9 +96,9 @@ pub struct Spoken {
     /// The ways of saying something it was taught, for the page to list. Empty where it takes no
     /// style, which is where the page offers none.
     pub styles: &'static [Style],
-    /// Whether it says which mouth shape goes with what it says: a CosyVoice3 package with the
-    /// viseme model. See [`Voice::speak_with_visemes`].
-    pub says_visemes: bool,
+    /// Whether a viseme model can be attached to it, to say which mouth shape goes with what it
+    /// says: CosyVoice3. See [`Voice::takes_visemes`].
+    pub takes_visemes: bool,
     /// Why what comes out is not speech, for as long as that is true.
     ///
     /// The one sentence this whole tab is built around saying. It comes out of the voice itself
@@ -173,13 +173,7 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         return describe_voice(asked, &Tones::new(), false);
     }
 
-    let manifest = manifest_of(asked);
-    let kind = manifest.as_deref().and_then(voice_kind);
-    let says_visemes = kind == Some(VoiceKind::CosyVoice3)
-        && manifest
-            .as_deref()
-            .and_then(|path| Manifest::open(path).ok())
-            .is_some_and(|manifest| CosyVoice3::lists_visemes(&manifest).unwrap_or(false));
+    let kind = manifest_of(asked).as_deref().and_then(voice_kind);
     let (kind_name, rate, styles) = match kind {
         Some(VoiceKind::CosyVoice3) => (CosyVoice3::NAME, cosyvoice3::RATE, CosyVoice3::STYLES),
         _ => (IndexTts::NAME, indextts::RATE, &[][..]),
@@ -198,7 +192,7 @@ pub fn look_at_voice(asked: &str) -> Spoken {
         // CosyVoice3 reads on from the recording's words; IndexTTS reads none.
         needs_a_reference_transcript: kind == Some(VoiceKind::CosyVoice3),
         styles,
-        says_visemes,
+        takes_visemes: kind == Some(VoiceKind::CosyVoice3),
         not_a_voice_because: None,
     }
 }
@@ -240,7 +234,7 @@ pub fn describe_voice(name: &str, voice: &dyn Voice, in_memory: bool) -> Spoken 
         needs_a_recording: voice.needs_a_recording(),
         needs_a_reference_transcript: voice.needs_a_reference_transcript(),
         styles: voice.styles(),
-        says_visemes: voice.viseme_frame_ms().is_some(),
+        takes_visemes: voice.takes_visemes(),
         not_a_voice_because: voice.not_a_voice_because().map(str::to_string),
     }
 }

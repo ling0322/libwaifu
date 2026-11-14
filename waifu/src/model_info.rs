@@ -25,6 +25,7 @@
 
 use std::path::Path;
 
+use crate::cosyvoice3::visemes::VisemeModel;
 use crate::describe::{self, ConverterKind, TranscriberKind, VoiceKind, TONES};
 use crate::engine::Failure;
 use crate::see_through::SeeThrough;
@@ -47,6 +48,16 @@ pub struct ModelInfo {
     pub speech_to_text: Result<SpeechToText, String>,
     pub voice_conversion: Result<VoiceConversion, String>,
     pub layer_decomposition: Result<LayerDecomposition, String>,
+    /// What it is attached to a pipeline as, for a model that is not loaded as one's own: a viseme
+    /// model. `None` for every model a pipeline loads.
+    pub attaches_as: Option<AttachedModel>,
+}
+
+/// The kinds of model attached to the model a pipeline has loaded, rather than loaded as its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachedModel {
+    /// Which mouth shape goes with each frame of a reading: CosyVoice3's, `cosyvoice3_visemes`.
+    TextToSpeechVisemes,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +115,7 @@ pub fn model_info(asked: &str) -> Result<ModelInfo, (Failure, String)> {
             streaming_text_to_speech: Ok(()),
             speech_to_text: not("speech to text", &voice.full_name),
             voice_conversion: not("voice conversion", &voice.full_name),
+            attaches_as: None,
             layer_decomposition: not("layer decomposition", &voice.full_name),
         });
     }
@@ -114,6 +126,22 @@ pub fn model_info(asked: &str) -> Result<ModelInfo, (Failure, String)> {
     }
     let manifest = Manifest::open(path).map_err(|error| (Failure::Model, error.to_string()))?;
     let size_on_disk = describe::bytes_on_disk(asked);
+
+    if VisemeModel::is_one(&manifest) {
+        let why = "a viseme model is not loaded on its own: attach it to a pipeline that has \
+                   CosyVoice3 loaded";
+        return Ok(ModelInfo {
+            size_on_disk,
+            sample_rate: None,
+            image_generation: Err(why.to_string()),
+            text_to_speech: Err(why.to_string()),
+            streaming_text_to_speech: Err(why.to_string()),
+            speech_to_text: Err(why.to_string()),
+            voice_conversion: Err(why.to_string()),
+            layer_decomposition: Err(why.to_string()),
+            attaches_as: Some(AttachedModel::TextToSpeechVisemes),
+        });
+    }
 
     if let Some(kind) = describe::voice_kind(path) {
         let voice = describe::look_at_voice(asked);
@@ -138,6 +166,7 @@ pub fn model_info(asked: &str) -> Result<ModelInfo, (Failure, String)> {
                 }),
                 None => not("voice conversion", &name),
             },
+            attaches_as: None,
             layer_decomposition: not("layer decomposition", &name),
         });
     }
@@ -155,6 +184,7 @@ pub fn model_info(asked: &str) -> Result<ModelInfo, (Failure, String)> {
                 languages: transcriber.languages,
             }),
             voice_conversion: not("voice conversion", &name),
+            attaches_as: None,
             layer_decomposition: not("layer decomposition", &name),
         });
     }
@@ -173,6 +203,7 @@ pub fn model_info(asked: &str) -> Result<ModelInfo, (Failure, String)> {
             streaming_text_to_speech: not("streaming text to speech", &name),
             speech_to_text: not("speech to text", &name),
             voice_conversion: not("voice conversion", &name),
+            attaches_as: None,
             layer_decomposition: Ok(LayerDecomposition {
                 resolution_multiple_of: LAYER_DECOMPOSITION_RESOLUTION_MULTIPLE_OF,
             }),
@@ -192,6 +223,7 @@ pub fn model_info(asked: &str) -> Result<ModelInfo, (Failure, String)> {
             voice_conversion: Ok(VoiceConversion {
                 of_style: support(converter.no_style_because),
             }),
+            attaches_as: None,
             layer_decomposition: not("layer decomposition", &name),
         });
     }
@@ -217,6 +249,7 @@ pub fn model_info(asked: &str) -> Result<ModelInfo, (Failure, String)> {
         streaming_text_to_speech: not("streaming text to speech", &name),
         speech_to_text: not("speech to text", &name),
         voice_conversion: not("voice conversion", &name),
+        attaches_as: None,
         layer_decomposition: not("layer decomposition", &name),
     })
 }
@@ -257,10 +290,10 @@ fn text_to_speech(voice: &describe::Spoken) -> TextToSpeech {
             )),
             false => Ok(()),
         },
-        with_visemes: match voice.says_visemes {
+        with_visemes: match voice.takes_visemes {
             true => Ok(()),
             false => Err(format!(
-                "{} does not say which mouth shape goes with what it says",
+                "{} takes no viseme model: nothing says which mouth shape goes with what it says",
                 voice.full_name
             )),
         },
@@ -313,39 +346,25 @@ mod tests {
         assert_eq!(voice.streaming_text_to_speech, Ok(()));
         assert!(voice.voice_conversion.is_ok());
         assert!(voice.image_generation.is_err());
-        // A package without the viseme model does not say them.
-        assert!(speech.with_visemes.is_err());
+        // Its own package is unchanged: the visemes are a model attached to it.
+        assert_eq!(speech.with_visemes, Ok(()));
+        assert_eq!(voice.attaches_as, None);
     }
 
     #[test]
-    fn a_cosyvoice3_package_with_the_viseme_model_says_so_in_its_manifest() {
-        let with = |stem: &str, listed: &str| {
-            let path = a_manifest(stem, CosyVoice3::MODEL_TYPE);
-            let text = std::fs::read_to_string(&path).unwrap();
-            std::fs::write(
-                &path,
-                format!("{text}  cosyvoice3:\n    sample_rate: 24000\n    visemes: {listed}\n"),
-            )
-            .unwrap();
-            model_info(&path)
-                .unwrap()
-                .text_to_speech
-                .unwrap()
-                .with_visemes
-        };
+    fn a_viseme_model_is_attached_and_does_nothing_on_its_own() {
+        let visemes = model_info(&a_manifest("info-visemes", "cosyvoice3_visemes")).unwrap();
         assert_eq!(
-            with("info-visemes", r#"[A, E, I, O, U, "@", MBP, REST]"#),
-            Ok(())
+            visemes.attaches_as,
+            Some(AttachedModel::TextToSpeechVisemes)
         );
-        // Classes in another order are another model's, which this does not read.
-        assert!(with(
-            "info-visemes-reordered",
-            r#"[E, A, I, O, U, "@", MBP, REST]"#
-        )
-        .is_err());
-        // Tones says none.
+        assert!(visemes.text_to_speech.unwrap_err().contains("attach"));
+        assert!(visemes.streaming_text_to_speech.is_err());
+        assert!(visemes.image_generation.is_err());
+        // Tones takes none.
         let tones = model_info(TONES).unwrap();
         assert!(tones.text_to_speech.unwrap().with_visemes.is_err());
+        assert_eq!(tones.attaches_as, None);
     }
 
     #[test]

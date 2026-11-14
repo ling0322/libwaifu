@@ -1258,3 +1258,66 @@ fn a_streaming_reading_hands_over_the_visemes_its_parts_settle() {
         waifu_pipeline_free(pipeline);
     }
 }
+
+#[test]
+fn a_viseme_model_is_attached_to_a_voice_and_never_loaded_as_one() {
+    unsafe {
+        let visemes = a_model(&crate::engine::tests::a_manifest(
+            "c-api-visemes",
+            "cosyvoice3_visemes",
+        ));
+        assert_eq!(
+            int_attribute(visemes, WAIFU_MODEL_ATTACHES_AS),
+            Some(WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES as i64)
+        );
+        // It does nothing a pipeline loads a model for, and says why.
+        for attribute in [
+            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH,
+            WAIFU_MODEL_SUPPORTS_STREAMING_TEXT_TO_SPEECH,
+            WAIFU_MODEL_SUPPORTS_IMAGE_GENERATION,
+        ] {
+            assert_eq!(int_attribute(visemes, attribute), Some(0), "{attribute}");
+            assert!(string_attribute(visemes, attribute).is_some_and(|why| why.contains("attach")));
+        }
+        let tones = a_model("tones");
+        assert_eq!(int_attribute(tones, WAIFU_MODEL_ATTACHES_AS), None);
+
+        let pipeline = a_pipeline(WAIFU_PIPELINE_TEXT_TO_SPEECH);
+        // Not loaded as a pipeline's own model.
+        assert!(waifu_pipeline_load_model(pipeline, visemes).is_null());
+        let kind = WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES;
+
+        // Refused at the call: a type this library does not know, a model that is not of the type,
+        // a key the type does not take, and another pipeline type's.
+        assert!(waifu_pipeline_attach_model(pipeline, 99, ptr::null(), visemes).is_null());
+        assert_eq!(waifu_last_error_code(), WAIFU_ERR_INVALID_ARGUMENT);
+        assert!(waifu_pipeline_attach_model(pipeline, kind, ptr::null(), tones).is_null());
+        assert!(last_error().contains("ATTACHES_AS"), "{}", last_error());
+        assert!(waifu_pipeline_attach_model(pipeline, kind, c"a".as_ptr(), visemes).is_null());
+        assert!(waifu_pipeline_detach_model(pipeline, kind, c"a".as_ptr()).is_null());
+        let images = a_pipeline(WAIFU_PIPELINE_IMAGE_GENERATION);
+        assert!(waifu_pipeline_attach_model(images, kind, ptr::null(), visemes).is_null());
+        waifu_pipeline_free(images);
+
+        // Nothing loaded to attach it to; then a voice that takes none. Both end the task.
+        let task = waifu_pipeline_attach_model(pipeline, kind, ptr::null(), visemes);
+        assert!(!task.is_null(), "{}", last_error());
+        assert_eq!(ended(task).0, WAIFU_ERR_MODEL);
+        waifu_task_free(task);
+        with_tones(pipeline);
+        let task = waifu_pipeline_attach_model(pipeline, kind, c"".as_ptr(), visemes);
+        let (code, message) = ended(task);
+        assert_eq!(code, WAIFU_ERR_MODEL);
+        assert!(message.unwrap().contains("takes no viseme model"));
+        waifu_task_free(task);
+
+        // Detaching what is not there is done.
+        let task = waifu_pipeline_detach_model(pipeline, kind, ptr::null());
+        assert_eq!(ended(task), (WAIFU_OK, None));
+        waifu_task_free(task);
+
+        waifu_pipeline_free(pipeline);
+        waifu_model_free(tones);
+        waifu_model_free(visemes);
+    }
+}

@@ -70,7 +70,7 @@ pub use task::*;
 
 use crate::engine::{self, Engine, EngineOptions, Failure, RgbaImage, Stage};
 use crate::flint::MemoryBudget;
-use crate::model_info::{self, ModelInfo, Support};
+use crate::model_info::{self, AttachedModel, ModelInfo, Support};
 use crate::runtime::{self, DeviceOption, Runtime};
 use crate::wav::Sound;
 use crate::Device;
@@ -85,8 +85,10 @@ pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
 /// The minor version: bumped for what an older caller never uses -- an attribute, a stage, an event
 /// a request has to ask for, a function. Back to 0 with each major.
 ///
-/// 6.1: the text-to-speech readings' visemes -- the VISEMES request and task attributes,
-/// SUPPORTS_TEXT_TO_SPEECH_VISEMES, WaifuViseme, waifu_task_get_int_array_attribute.
+/// 6.1: models attached to the one a pipeline has loaded -- waifu_pipeline_attach_model and
+/// _detach_model, WaifuAttachedModelType, MODEL_ATTACHES_AS -- and the text-to-speech readings'
+/// visemes: the VISEMES request and task attributes, SUPPORTS_TEXT_TO_SPEECH_VISEMES, WaifuViseme,
+/// waifu_task_get_int_array_attribute.
 pub const WAIFU_ABI_VERSION_MINOR: u32 = 1;
 /// (major << 16) | minor, as waifu_abi_version says it.
 pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
@@ -137,8 +139,9 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE: WaifuModelAttribute = 
 /// A reference without its reference_transcript: CosyVoice3 does not, unless a style is given.
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: WaifuModelAttribute =
     203;
-/// The visemes of what it says, with TEXT_TO_SPEECH_VISEMES or STREAMING_TEXT_TO_SPEECH_VISEMES:
-/// a CosyVoice3 package with the viseme model. Since 6.1.
+/// Takes a WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES model, and with one attached says the
+/// visemes of what it says, with TEXT_TO_SPEECH_VISEMES or STREAMING_TEXT_TO_SPEECH_VISEMES:
+/// CosyVoice3. Since 6.1.
 pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES: WaifuModelAttribute = 204;
 /// The manner as well as the voice.
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 300;
@@ -146,6 +149,9 @@ pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 
 pub const WAIFU_MODEL_SIZE_ON_DISK: WaifuModelAttribute = 1000;
 /// Integer, of what it says or converts.
 pub const WAIFU_MODEL_SAMPLE_RATE: WaifuModelAttribute = 1001;
+/// Integer, a WaifuAttachedModelType: what it is attached to a pipeline's model as -- a model that
+/// is not loaded as one's own. Absent for every model a pipeline loads. Since 6.1.
+pub const WAIFU_MODEL_ATTACHES_AS: WaifuModelAttribute = 1002;
 /// Integer: 16, or 32 for SDXL and Qwen-Image.
 pub const WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF: WaifuModelAttribute = 1100;
 /// String: "Euler".
@@ -194,6 +200,14 @@ pub const WAIFU_VISEME_SCHWA: WaifuViseme = 5;
 pub const WAIFU_VISEME_MBP: WaifuViseme = 6;
 /// Relaxed and lightly closed. A shape, not silence: whether anybody is speaking is the sound's.
 pub const WAIFU_VISEME_REST: WaifuViseme = 7;
+
+/// What a model is attached to the one a pipeline has loaded as: waifu_pipeline_attach_model.
+/// Each is for one pipeline type's model, which its name says. Since 6.1.
+pub type WaifuAttachedModelType = i32;
+/// Which mouth shape goes with each frame of a reading, for TEXT_TO_SPEECH_VISEMES: a
+/// cosyvoice3_visemes package, attached to CosyVoice3 on a text to speech or streaming text to
+/// speech pipeline, with no key.
+pub const WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES: WaifuAttachedModelType = 1;
 
 // -- the library -----------------------------------------------------------------------------
 
@@ -406,6 +420,17 @@ impl WaifuModel {
             model.int(
                 WAIFU_MODEL_IMAGE_GENERATION_MAX_PROMPT_IMAGES,
                 generation.max_prompt_images as i64,
+            );
+        }
+
+        if let Some(attaches_as) = info.attaches_as {
+            model.int(
+                WAIFU_MODEL_ATTACHES_AS,
+                match attaches_as {
+                    AttachedModel::TextToSpeechVisemes => {
+                        WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES as i64
+                    }
+                },
             );
         }
 
@@ -744,6 +769,103 @@ pub unsafe extern "C" fn waifu_pipeline_load_model(
         };
         Ok(started.task(id, pipeline.engine.canceller(), None))
     })
+}
+
+/// Attaches `model` to the model the pipeline has loaded, as `type`, under `key` -- NULL or "" for
+/// the one of its type that has no key -- replacing what was attached as that type under that key.
+/// It stays for every run until it is detached, or the pipeline's model is unloaded or another is
+/// loaded, which let it go with the model it was attached to. Refused for a type this library does
+/// not know, a model whose ATTACHES_AS is not `type`, a type that is not for this pipeline type, or
+/// a key the type does not take: TEXT_TO_SPEECH_VISEMES takes none. The task ends with
+/// WAIFU_ERR_MODEL where the pipeline has no model, or one that does not take it. As a load, the
+/// call copies the manifest and not the weights, and `model` may be freed as soon as it returns.
+/// Since 6.1.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_pipeline_attach_model(
+    pipeline: *mut WaifuPipeline,
+    r#type: WaifuAttachedModelType,
+    key: *const c_char,
+    model: *const WaifuModel,
+) -> *mut WaifuTask {
+    refusable(ptr::null_mut(), || {
+        let pipeline = pipeline.as_ref().ok_or("the pipeline is NULL")?;
+        let kind = attached_kind(pipeline, r#type, key)?;
+        let model = model.as_ref().ok_or("the model is NULL")?;
+        if model.ints.get(&WAIFU_MODEL_ATTACHES_AS) != Some(&(r#type as i64)) {
+            return Err(format!(
+                "this model is not attached as a {}: see its WAIFU_MODEL_ATTACHES_AS",
+                attached_name(r#type)
+            )
+            .into());
+        }
+        let started = task::Started::new();
+        let id = pipeline
+            .engine
+            .attach(kind, &model.path, started.on_loaded());
+        Ok(started.task(id, pipeline.engine.canceller(), None))
+    })
+}
+
+/// Lets go of what is attached to the pipeline's model as `type` under `key`; done where nothing
+/// is. Refused as waifu_pipeline_attach_model is for the type and the key. Since 6.1.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_pipeline_detach_model(
+    pipeline: *mut WaifuPipeline,
+    r#type: WaifuAttachedModelType,
+    key: *const c_char,
+) -> *mut WaifuTask {
+    refusable(ptr::null_mut(), || {
+        let pipeline = pipeline.as_ref().ok_or("the pipeline is NULL")?;
+        let kind = attached_kind(pipeline, r#type, key)?;
+        let started = task::Started::new();
+        let id = pipeline.engine.detach(kind, started.on_loaded());
+        Ok(started.task(id, pipeline.engine.canceller(), None))
+    })
+}
+
+/// An attached model type as a sentence names it.
+fn attached_name(r#type: WaifuAttachedModelType) -> &'static str {
+    match r#type {
+        WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES => "text to speech viseme model",
+        _ => "model of a type this library does not know",
+    }
+}
+
+/// What `type` and `key` attach to a pipeline of its type, or why they cannot.
+unsafe fn attached_kind(
+    pipeline: &WaifuPipeline,
+    r#type: WaifuAttachedModelType,
+    key: *const c_char,
+) -> Result<AttachedModel, Refused> {
+    let key = support::string_in(key, "the key")?.unwrap_or_default();
+    match r#type {
+        WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES => {
+            if !matches!(
+                pipeline.task,
+                WAIFU_PIPELINE_TEXT_TO_SPEECH | WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH
+            ) {
+                return Err(format!(
+                    "a text to speech viseme model is attached to text to speech, and this \
+                     pipeline is made for {}",
+                    task_name(pipeline.task)
+                )
+                .into());
+            }
+            if !key.is_empty() {
+                return Err(format!(
+                    "a text to speech viseme model takes no key, and was given {key:?}: there is \
+                     one at a time"
+                )
+                .into());
+            }
+            Ok(AttachedModel::TextToSpeechVisemes)
+        }
+        _ => Err(format!(
+            "{} is not an attached model type this library knows",
+            r#type
+        )
+        .into()),
+    }
 }
 
 /// Drops the model; the pipeline then has none.

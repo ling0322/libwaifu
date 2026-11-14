@@ -284,28 +284,32 @@ float32 takes 861.
 
 ## Visemes
 
-A package can also say the mouth shape of every 40 ms of what it reads -- one of `A E I O U @ MBP
-REST` for each speech token the flow is handed, laid on the audio that token became -- for a face
-to move to as it plays: the C API's `TEXT_TO_SPEECH_VISEMES` ([ffi-abi6.md](ffi-abi6.md#what-61-adds)),
+CosyVoice3 can also say the mouth shape of every 40 ms of what it reads -- one of `A E I O U @
+MBP REST` for each speech token the flow is handed, laid on the audio that token became -- for a
+face to move to as it plays: the C API's `TEXT_TO_SPEECH_VISEMES` ([ffi-abi6.md](ffi-abi6.md#what-61-adds)),
 `Voice::speak_with_visemes` in Rust. `waifu/src/cosyvoice3/visemes.rs` is all of it.
 
-The model is small and runs on the host: a token and the token either side, as the flow's
-`input_embedding` reads them (3 × 80), through one hidden layer of 256 to the eight. It is one more
-weights file, `cosyvoice3-visemes.safetensors` (`cosyvoice3.visemes.*`, 0.5 MB), and the manifest
-lists it and names the classes in order:
+What says them is a model of its own, attached to a pipeline that has CosyVoice3 loaded --
+`waifu_pipeline_attach_model(pipeline, WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES, NULL, model)`,
+`CosyVoice3::attach_visemes` in Rust -- so CosyVoice3's own package is not changed, and a better
+viseme model is a few megabytes to fetch rather than the voice again. It is small and runs on the
+host: a token and the token either side, as the flow's `input_embedding` reads them (3 × 80),
+through one hidden layer of 256 to the eight. Its package is two files:
 
 ```yaml
+# cosyvoice3-visemes.yaml
 weights:
-  - cosyvoice3-00001-of-00002.safetensors
-  - cosyvoice3-00002-of-00002.safetensors
-  - cosyvoice3-visemes.safetensors
+  - cosyvoice3-visemes.safetensors     # 2.5 MB: the model, and a copy of the flow's input_embedding
 config:
-  cosyvoice3:
+  model:
+    type: cosyvoice3_visemes
+  cosyvoice3_visemes:
+    speech_token_size: 6561
     visemes: [A, E, I, O, U, "@", MBP, REST]
 ```
 
-which is how `SUPPORTS_TEXT_TO_SPEECH_VISEMES` is answered without a weight being read. A package
-without them reads as before.
+The copy of the embedding is what lets it read nothing of CosyVoice3's weights. A package whose
+classes are in another order, or for another number of tokens, is refused when it is attached.
 
 ### How it was trained
 
@@ -324,7 +328,7 @@ cargo run --release -p waifu-tools --bin viseme_corpus -- models/cosyvoice3.yaml
 # The labels: pypinyin, nagisa and Qwen3-ASR's aligner on the path (Qwen/Qwen3-ForcedAligner-0.6B).
 python tools/cosyvoice3_visemes.py align c_zh -language Chinese        # Japanese, or English -cmudict
 # Every voice group held out in turn, then the file.
-python tools/cosyvoice3_visemes.py train c_zh c_ja c_en -package models/ -output cosyvoice3-visemes.safetensors
+python tools/cosyvoice3_visemes.py train c_zh c_ja c_en -package models/ -output models/cosyvoice3-visemes
 ```
 
 The file in use came from 442 sentences -- 200 Chinese, 120 Japanese in kana, 122 English -- in
@@ -333,7 +337,7 @@ Each recording with its copy held out in turn, on tokens whose label is at least
 
 | | top-1 | Chinese / Japanese / English | m, b, p shut | vowels shut |
 | --- | --- | --- | --- | --- |
-| a token alone (`cosyvoice3.visemes.table`) | 0.59 | 0.62 / 0.60 / 0.50 | 0.90 | 1.7 % |
+| a token alone (`cosyvoice3_visemes.table`) | 0.59 | 0.62 / 0.60 / 0.50 | 0.90 | 1.7 % |
 | with a token either side (what runs) | 0.68 | 0.71 / 0.69 / 0.59 | 0.81 | 1.9 % |
 
 A, I and REST are right about four times in five; E, O, U and @ about half the time, mostly for
