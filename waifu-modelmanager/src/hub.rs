@@ -325,7 +325,7 @@ const CATALOG: &[Published] = &[
     // Named `<family>:<version>` as a voice is. Attached to `cosyvoice:v3`, whose package it does
     // not change: a better one is a few megabytes to fetch rather than the voice again.
     Published {
-        name: "cosyvoice-visemes:v1",
+        name: "cosyvoice3-visemes:v1",
         full_name: "Fun-CosyVoice3 visemes",
         repo: "ling0322/libwaifu-cosyvoice-3-visemes",
         manifest: "cosyvoice3-visemes.yaml",
@@ -467,7 +467,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("cosyvoice", "cosyvoice:v3"),
     ("see-through", "see-through:v0.0.2"),
     ("qwen3-asr", "qwen3-asr:0.6b"),
-    ("cosyvoice-visemes", "cosyvoice-visemes:v1"),
+    ("cosyvoice3-visemes", "cosyvoice3-visemes:v1"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1996,15 +1996,15 @@ mod tests {
     fn a_viseme_model_is_fetched_by_name_and_listed_nowhere() {
         // It is attached to a voice, not loaded as one, so no picker offers it, and the catalogue
         // the apps read has no kind for it yet.
-        let model = published("cosyvoice-visemes").expect("an alias resolves");
-        assert_eq!(model.name, "cosyvoice-visemes:v1");
+        let model = published("cosyvoice3-visemes").expect("an alias resolves");
+        assert_eq!(model.name, "cosyvoice3-visemes:v1");
         assert_eq!(model.repo, "ling0322/libwaifu-cosyvoice-3-visemes");
         assert_eq!(model.manifest, "cosyvoice3-visemes.yaml");
         assert_eq!(
-            full_name("cosyvoice-visemes"),
+            full_name("cosyvoice3-visemes"),
             Some("Fun-CosyVoice3 visemes")
         );
-        assert!(!is_voice("cosyvoice-visemes") && !is_conversion("cosyvoice-visemes"));
+        assert!(!is_voice("cosyvoice3-visemes") && !is_conversion("cosyvoice3-visemes"));
         let offered = listed()
             .into_iter()
             .chain(listed_voices())
@@ -2013,13 +2013,13 @@ mod tests {
             .chain(listed_transcriptions());
         assert!(!offered
             .into_iter()
-            .any(|one| one.name == "cosyvoice-visemes"));
+            .any(|one| one.name == "cosyvoice3-visemes"));
         let catalogue = crate::fetch::catalog_json();
         assert!(!catalogue["models"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|model| model["name"] == "cosyvoice-visemes"));
+            .any(|model| model["name"] == "cosyvoice3-visemes"));
     }
 
     #[test]
@@ -2075,7 +2075,7 @@ mod tests {
             "cosyvoice",
             "see-through",
             "qwen3-asr",
-            "cosyvoice-visemes",
+            "cosyvoice3-visemes",
         ];
 
         for model in CATALOG {
