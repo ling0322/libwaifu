@@ -17,87 +17,73 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// A rig moving, every frame the screen draws: RigMotion moves it, RigRenderer draws it, after the
-// pointer where it is over the drawing.
+// A rig moving, every frame the screen draws. libwaifu2d moves it and draws it into this view's
+// CAMetalLayer; the view only tells it what the settings say, where the pointer is, and how much
+// time has gone by.
 
-import MetalKit
+import QuartzCore
 import SwiftUI
+import WaifuKit
 
 struct RigView: NSViewRepresentable {
-    var rig: Rig
+    var rig: Waifu2D.Rig
     var stage: RigStage
 
-    func makeCoordinator() -> Driver { Driver(rig: rig, stage: stage) }
-
-    func makeNSView(context: Context) -> PointerView {
-        let view = PointerView()
-        view.device = context.coordinator.renderer?.device
-        view.colorPixelFormat = .bgra8Unorm
-        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        view.layer?.isOpaque = false
-        view.preferredFramesPerSecond = 60
-        view.delegate = context.coordinator
-        view.canvas = CGSize(width: rig.width, height: rig.height)
-        context.coordinator.view = view
-        return view
+    func makeNSView(context: Context) -> RigCanvas {
+        RigCanvas(rig: rig, settings: stage)
     }
 
-    func updateNSView(_ view: PointerView, context: Context) {
-        context.coordinator.stage = stage
+    func updateNSView(_ view: RigCanvas, context: Context) {
+        view.settings = stage
     }
 
-    /// Moves the rig on and draws it, each frame.
-    final class Driver: NSObject, MTKViewDelegate {
-        let rig: Rig
-        var stage: RigStage
-        let renderer: RigRenderer?
-        weak var view: PointerView?
-        private var motion: RigMotion
-        private var last: CFTimeInterval?
-        private var blinks: Int
-
-        init(rig: Rig, stage: RigStage) {
-            self.rig = rig
-            self.stage = stage
-            renderer = RigRenderer()
-            renderer?.load(rig)
-            motion = RigMotion(rig)
-            blinks = MainActor.assumeIsolated { stage.blinks }
-        }
-
-        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-
-        func draw(in view: MTKView) {
-            MainActor.assumeIsolated { frame(view) }
-        }
-
-        @MainActor private func frame(_ view: MTKView) {
-            let now = CACurrentMediaTime()
-            let dt = last.map { now - $0 } ?? 0
-            last = now
-            if stage.blinks != blinks {
-                blinks = stage.blinks
-                motion.blinker.blinkNow()
-            }
-            motion.step(
-                by: dt, rig: rig, switches: stage.switches, mouse: (view as? PointerView)?.pointer, open: stage.open,
-                ease: stage.ease, nod: stage.nod, follow: stage.follow)
-            guard let renderer, let drawable = view.currentDrawable, let commands = renderer.queue.makeCommandBuffer() else {
-                return
-            }
-            renderer.encode(
-                motion.frame(rig, physics: stage.switches.physics), to: drawable.texture, in: commands, clear: view.clearColor)
-            commands.present(drawable)
-            commands.commit()
-        }
+    static func dismantleNSView(_ view: RigCanvas, coordinator: ()) {
+        view.stop()
     }
 }
 
-/// An MTKView that knows where the pointer is over the drawing in it: -1 to 1 across it and down
-/// it, as far as 1.5 beyond it, or nil when it is out of the view.
-final class PointerView: MTKView {
-    var canvas = CGSize(width: 1, height: 1)
-    private(set) var pointer: SIMD2<Float>?
+/// A view backed by a CAMetalLayer the library draws into, a frame each time the display shows
+/// one.
+@MainActor
+final class RigCanvas: NSView {
+    var settings: RigStage
+    private let stage: Waifu2D.Stage?
+    private var renderer: Waifu2D.Renderer?
+    private var link: CADisplayLink?
+    private var last: CFTimeInterval?
+    private var blinks: Int
+    private let metalLayer = CAMetalLayer()
+
+    init(rig: Waifu2D.Rig, settings: RigStage) {
+        self.settings = settings
+        stage = try? Waifu2D.Stage(rig: rig)
+        blinks = settings.blinks
+        super.init(frame: .zero)
+        wantsLayer = true
+        metalLayer.isOpaque = false
+        metalLayer.framebufferOnly = true
+        renderer = try? Waifu2D.Renderer(layer: metalLayer)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not from a nib") }
+
+    override func makeBackingLayer() -> CALayer { metalLayer }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        link?.invalidate()
+        link = nil
+        guard window != nil else { return }
+        let link = displayLink(target: self, selector: #selector(frame(_:)))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -108,17 +94,48 @@ final class PointerView: MTKView {
                 owner: self))
     }
 
+    /// The pointer as the library takes it: from the top left, y down.
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        let fitted = RigRenderer.fit(canvas: canvas, into: bounds.size)
-        guard fitted.width > 0, fitted.height > 0 else { return }
-        let x = (p.x - fitted.minX) / fitted.width * 2 - 1
-        // Down the drawing: the view's y is up.
-        let y = (1 - (p.y - fitted.minY) / fitted.height) * 2 - 1
-        pointer = SIMD2(Float(min(max(x, -1.5), 1.5)), Float(min(max(y, -1.5), 1.5)))
+        stage?.pointerMoved(to: CGPoint(x: p.x, y: bounds.height - p.y))
     }
 
     override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
 
-    override func mouseExited(with event: NSEvent) { pointer = nil }
+    override func mouseExited(with event: NSEvent) { stage?.pointerLeft() }
+
+    @objc private func frame(_ link: CADisplayLink) {
+        guard let stage, let renderer else { return }
+        let now = link.timestamp
+        let dt = last.map { now - $0 } ?? 0
+        last = now
+        apply(settings, to: stage)
+        stage.setViewSize(bounds.size)
+        stage.step(by: dt)
+
+        let scale = window?.backingScaleFactor ?? 1
+        metalLayer.contentsScale = scale
+        let (w, h) = (Int((bounds.width * scale).rounded()), Int((bounds.height * scale).rounded()))
+        guard w > 0, h > 0, (try? renderer.resize(width: w, height: h)) != nil else { return }
+        try? renderer.draw(stage)
+    }
+
+    /// The page's settings, as the stage has them: the wind with the sway, as the Mac always had it.
+    private func apply(_ settings: RigStage, to stage: Waifu2D.Stage) {
+        let s = settings.switches
+        stage.set(.followPointer, s.followMouse)
+        stage.set(.idle, s.idle)
+        stage.set(.wind, s.idle)
+        stage.set(.lookAround, s.lookAround)
+        stage.set(.physics, s.physics)
+        stage.set(.blink, s.blink)
+        try? stage.set(.eyesOpen, settings.open)
+        try? stage.set(.closesAt, settings.ease)
+        try? stage.set(.nod, settings.nod)
+        try? stage.set(.bodyFollows, settings.follow)
+        if settings.blinks != blinks {
+            blinks = settings.blinks
+            stage.act(.blink)
+        }
+    }
 }

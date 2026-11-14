@@ -654,8 +654,9 @@ set(waifu_CARGO_OUT "${waifu_CARGO_DIR}/release")
 #
 #   libwaifu               the engine: libwaifu.dylib, libwaifu.so or waifu.dll
 #   libwaifu_modelmanager  the catalogue and fetching, with no engine and no flint behind it
+#   libwaifu2d             waifu2d's rig, motion and renderers, with no engine behind it either
 #
-# Each is copied beside the executables with its header under include/. The two share nothing,
+# Each is copied beside the executables with its header under include/. They share nothing,
 # headers included. On Windows the import library goes too, which is what a program linking the
 # DLL is linked against.
 if (APPLE)
@@ -711,6 +712,26 @@ add_custom_target(waifu-modelmanager ALL
     COMMENT "cargo build -p waifu-modelmanager --lib --release"
     VERBATIM)
 
+# waifu2d: a drawing in layers rigged to move, and drawn by Metal, Direct3D 11 or Vulkan. Like
+# the model manager it needs nothing CMake built -- no engine, no flint -- but the GLSL compiler
+# flint's Vulkan kernels are compiled with, which its build script compiles its own shaders with
+# where there is one. See docs/waifu2d.md.
+set(waifu2d_ENV "CARGO_TARGET_DIR=${waifu_CARGO_DIR}")
+set(waifu2d_DEPENDS "")
+if (GLSLANG_VALIDATOR)
+    list(APPEND waifu2d_ENV "WAIFU2D_GLSLANG=${GLSLANG_VALIDATOR}")
+    set(waifu2d_DEPENDS ${GLSLANG_DEPENDS})
+endif()
+waifu_copy_commands(waifu_WAIFU2D_COPY waifu2d waifu2d/include waifu2d.h)
+add_custom_target(waifu2d ALL
+    COMMAND ${CMAKE_COMMAND} -E env ${waifu2d_ENV}
+            ${CARGO_EXECUTABLE} build -p waifu2d --lib --release
+    ${waifu_WAIFU2D_COPY}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS ${waifu2d_DEPENDS}
+    COMMENT "cargo build -p waifu2d --lib --release"
+    VERBATIM)
+
 # The command line, `waifu`, which calls the two libraries above through nothing but their C APIs,
 # with both linked into it statically: one file, which needs neither library beside it.
 set(waifu_CLI "${waifu_CARGO_OUT}/waifu${CMAKE_EXECUTABLE_SUFFIX}")
@@ -727,7 +748,8 @@ add_custom_target(waifu-cli ALL
 # One cargo at a time in one target directory: two would wait on each other's lock anyway, and
 # this way each reuses what the one before built.
 add_dependencies(waifu-modelmanager waifu-engine)
-add_dependencies(waifu-cli waifu-engine waifu-modelmanager)
+add_dependencies(waifu2d waifu-modelmanager)
+add_dependencies(waifu-cli waifu-engine waifu-modelmanager waifu2d)
 
 set(unittest_LIBADD
     flint_test

@@ -19,16 +19,28 @@
 
 // The waifu2d page: a drawing in layers, as a Photoshop document, made to move. Nothing here runs
 // a model -- the engine is not asked for anything -- so it is a page of its own beside the tasks,
-// as the Model Manager is.
+// as the Model Manager is. libwaifu2d reads, rigs, moves and draws it; this page is its settings.
 
 import SwiftUI
 import UniformTypeIdentifiers
+import WaifuKit
+
+/// What moves on its own, as the page's switches have it.
+struct RigSwitches: Equatable {
+    var blink = true
+    /// Sways a little, all the time, and lets the hair drift in the wind.
+    var idle = true
+    /// Looks somewhere else now and then.
+    var lookAround = true
+    var physics = true
+    var followMouse = true
+}
 
 /// The document on the page and how it moves.
 @MainActor @Observable
 final class RigStage {
     private(set) var file: URL?
-    private(set) var rig: Rig?
+    private(set) var rig: Waifu2D.Rig?
     private(set) var reading = false
     /// Why the last document could not be read.
     private(set) var complaint: String?
@@ -53,7 +65,7 @@ final class RigStage {
         reading = true
         complaint = nil
         Task {
-            let made = await Task.detached { Result { Rig.build(try PSDDocument.read(Data(contentsOf: url))) } }.value
+            let made = await Task.detached { Result { try Waifu2D.Rig(contentsOf: url) } }.value
             reading = false
             switch made {
             case .success(let rig):
@@ -125,7 +137,7 @@ struct PSDDrop: View {
             if let file = stage.file, let rig = stage.rig {
                 VStack(spacing: 4) {
                     Label(file.lastPathComponent, systemImage: "square.3.layers.3d")
-                    Text("\(rig.parts.count) layers, \(rig.width) × \(rig.height); \(rig.eyes.count) of 2 eyes blink. Drop or choose another.")
+                    Text("\(rig.partCount) layers, \(rig.width) × \(rig.height); \(rig.eyeCount) of 2 eyes blink. Drop or choose another.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

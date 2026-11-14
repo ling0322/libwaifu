@@ -17,8 +17,10 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-// The C API is libwaifu.dylib's and libwaifu_modelmanager.dylib's; this target only makes their
-// headers a module Swift can import. Each header stands alone and the two share no type. A C target
+// The C API is libwaifu.dylib's, libwaifu_modelmanager.dylib's and libwaifu2d.dylib's; this target
+// only makes their headers a module Swift can import. Each header stands alone and they share no
+// type. A C target
 // needs one source file to be a target at all, and this is it.
 #include "waifu.h"
 #include "waifu_modelmanager.h"
+#include "waifu2d.h"

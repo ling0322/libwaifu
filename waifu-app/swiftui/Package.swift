@@ -1,10 +1,10 @@
 // swift-tools-version: 5.10
 
-// The macOS app: native controls over libwaifu and libwaifu_modelmanager, which it links. WaifuKit
-// is the Swift face of the C APIs in waifu (docs/ffi-abi6.md) and waifu-modelmanager (docs/ffi.md);
-// CWaifu is their headers, as a module Swift can import.
+// The macOS app: native controls over libwaifu, libwaifu_modelmanager and libwaifu2d, which it
+// links. WaifuKit is the Swift face of the C APIs in waifu (docs/ffi-abi6.md), waifu-modelmanager
+// (docs/ffi.md) and waifu2d (docs/waifu2d.md); CWaifu is their headers, as a module Swift can import.
 //
-// Both dylibs are CMake's to build, into build/ at the top of the repository: this links them from
+// The dylibs are CMake's to build, into build/ at the top of the repository: this links them from
 // there, and finds them there at run time while the app runs unbundled. Inside libwaifu-gui.app
 // they are in Contents/Frameworks, which the second rpath is for.
 
@@ -26,6 +26,7 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("waifu"),
                 .linkedLibrary("waifu_modelmanager"),
+                .linkedLibrary("waifu2d"),
                 .unsafeFlags(["-L", build]),
             ]
         ),
