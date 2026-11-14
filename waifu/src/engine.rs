@@ -45,6 +45,7 @@ use crate::describe::{
 };
 use crate::image_model::ImageModel;
 use crate::indextts::IndexTts;
+use crate::model_info::AttachedModel;
 use crate::progress::{Convert, Doing, Run, Say, Transcribing, VOCODER_RATIO};
 use crate::qwen3_asr::Qwen3Asr;
 use crate::runtime::{DeviceOption, Runtime};
@@ -388,6 +389,12 @@ enum Work {
     Unload {
         on_complete: OnComplete<()>,
     },
+    /// A model attached to the one loaded, or with `model` None, the attached one let go of.
+    Attach {
+        kind: AttachedModel,
+        model: Option<String>,
+        on_complete: OnComplete<()>,
+    },
     Draw {
         request: DrawRequest,
         on_progress: OnProgress,
@@ -423,9 +430,9 @@ impl Work {
     /// Ends this job without running it.
     fn cancel(self) {
         match self {
-            Work::Load { on_complete, .. } | Work::Unload { on_complete } => {
-                on_complete(Ended::Cancelled)
-            }
+            Work::Load { on_complete, .. }
+            | Work::Unload { on_complete }
+            | Work::Attach { on_complete, .. } => on_complete(Ended::Cancelled),
             Work::Draw { on_complete, .. } => on_complete(Ended::Cancelled),
             Work::Speak { on_complete, .. } | Work::VoiceConversion { on_complete, .. } => {
                 on_complete(Ended::Cancelled)
@@ -523,6 +530,28 @@ impl Engine {
 
     pub fn unload(&self, on_complete: OnComplete<()>) -> JobId {
         self.submit(Work::Unload { on_complete })
+    }
+
+    /// Attaches the model whose manifest is at `model` to the one loaded, as `kind`, replacing the
+    /// one attached as `kind` before. It stays until it is detached or another model is loaded --
+    /// [`unload`](Engine::unload) or [`load`](Engine::load) lets it go with the model it was
+    /// attached to. Ends with [`Failure::Model`] where nothing is loaded that takes it, or it is
+    /// not a model of `kind`.
+    pub fn attach(&self, kind: AttachedModel, model: &str, on_complete: OnComplete<()>) -> JobId {
+        self.submit(Work::Attach {
+            kind,
+            model: Some(model.to_string()),
+            on_complete,
+        })
+    }
+
+    /// Lets go of the model attached as `kind`; done where there is none.
+    pub fn detach(&self, kind: AttachedModel, on_complete: OnComplete<()>) -> JobId {
+        self.submit(Work::Attach {
+            kind,
+            model: None,
+            on_complete,
+        })
     }
 
     /// Refused at the call, with the reason, for a request no model could run: see
@@ -1051,6 +1080,14 @@ impl Worker {
             Work::Unload { on_complete } => {
                 self.let_go();
                 on_complete(Ended::Done(()));
+            }
+            Work::Attach {
+                kind,
+                model,
+                on_complete,
+            } => {
+                let ended = guarded(|| self.attach(kind, model.as_deref()));
+                on_complete(ended);
             }
             Work::Draw {
                 request,
@@ -1611,6 +1648,43 @@ impl Worker {
         }
     }
 
+    /// What [`Engine::attach`] and [`Engine::detach`] do, on the engine's thread.
+    fn attach(&mut self, kind: AttachedModel, model: Option<&str>) -> Ended<()> {
+        match kind {
+            AttachedModel::TextToSpeechVisemes => {
+                let Loaded::CosyVoice(voice) = &self.loaded else {
+                    if model.is_none() {
+                        return Ended::Done(());
+                    }
+                    return match self.voice() {
+                        Some(voice) => Ended::failed(
+                            Failure::Model,
+                            format!("{} takes no viseme model", voice.name()),
+                        ),
+                        None => Ended::failed(
+                            Failure::Model,
+                            "a viseme model is attached to the voice loaded, and none is",
+                        ),
+                    };
+                };
+                let Some(path) = model else {
+                    voice.attach_visemes(None);
+                    return Ended::Done(());
+                };
+                let read = Manifest::open(path).and_then(|manifest| {
+                    crate::cosyvoice3::visemes::VisemeModel::from_manifest(&manifest)
+                });
+                match read {
+                    Ok(visemes) => {
+                        voice.attach_visemes(Some(visemes));
+                        Ended::Done(())
+                    }
+                    Err(error) => Ended::failed(Failure::Model, error.to_string()),
+                }
+            }
+        }
+    }
+
     fn voice(&self) -> Option<&dyn Voice> {
         match &self.loaded {
             Loaded::Voice(voice) => Some(voice.as_ref()),
@@ -1633,13 +1707,19 @@ impl Worker {
         };
         let frame_ms = voice.viseme_frame_ms();
         if on_visemes.is_some() && frame_ms.is_none() {
-            return Ended::failed(
-                Failure::Model,
-                format!(
-                    "{} does not say which mouth shape goes with what it says",
+            let why = match voice.takes_visemes() {
+                true => format!(
+                    "no viseme model is attached to {}: attach one to say which mouth shape goes \
+                     with what it says",
                     voice.name()
                 ),
-            );
+                false => format!(
+                    "{} takes no viseme model: nothing says which mouth shape goes with what it \
+                     says",
+                    voice.name()
+                ),
+            };
+            return Ended::failed(Failure::Model, why);
         }
         if request.like.is_some() {
             if let Some(why) = voice.no_likeness_because() {

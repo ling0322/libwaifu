@@ -251,9 +251,15 @@ pub trait Voice {
         )))
     }
 
+    /// Whether a viseme model -- a package of its own, for this voice's tokens -- can be attached
+    /// to it, after which [`speak_with_visemes`](Voice::speak_with_visemes) says them. CosyVoice3's.
+    fn takes_visemes(&self) -> bool {
+        false
+    }
+
     /// How many milliseconds each of its visemes holds, where it says which mouth shape goes with
     /// what it says -- see [`speak_with_visemes`](Voice::speak_with_visemes) -- and `None` where it
-    /// does not.
+    /// does not: a voice that takes none, or one with no viseme model attached.
     fn viseme_frame_ms(&self) -> Option<u32> {
         None
     }

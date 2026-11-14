@@ -25,31 +25,30 @@
 //! - [`VisemeModel`]: a token and the token either side of it -- the flow's `input_embedding` of
 //!   each, 240 numbers -- to a distribution over the eight visemes, through one hidden layer of
 //!   256. `tools/cosyvoice3_visemes.py` trained it on readings in Chinese, Japanese and English,
-//!   labelled from their text, and writes it as one more weights file of the package.
+//!   labelled from their text, and writes it as a package of its own.
 //! - [`VisemeTrack`]: those distributions laid on the reading's samples -- token `j` of a sentence
 //!   is the `j`-th equal share of the sentence's audio -- and read back a frame of [`FRAME_MS`] at
 //!   a time. At speed one a frame is a token; at another speed a frame is the tokens under it.
 //! - [`VisemeSmoother`]: each frame's distribution to one viseme.
 //!
-//! A package that has it lists the file under `weights:` and names the classes, in order, under
-//! `config: cosyvoice3: visemes:` -- `[A, E, I, O, U, "@", MBP, REST]` -- which is how a manifest
-//! says it can without its weights being read.
+//! The package is a model of type [`MODEL_TYPE`], attached to a pipeline that has CosyVoice3 loaded
+//! (the C API's `WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES`); CosyVoice3's own package is not
+//! changed. It holds a copy of the flow's `input_embedding`, so it reads none of CosyVoice3's
+//! weights, and names its classes, in order, under `config: cosyvoice3_visemes: visemes:` --
+//! `[A, E, I, O, U, "@", MBP, REST]`.
 
-use crate::flint::{DType, Device, Weights};
+use crate::flint::DType;
 use crate::speech::Viseme;
-use crate::{Error, Result};
+use crate::{read_safetensors, Error, Manifest, Result};
 
 /// How many milliseconds a frame holds: a speech token's, at 25 a second.
 pub const FRAME_MS: u32 = 40;
 
-/// What the package's `config: cosyvoice3:` names the classes under.
-pub const MANIFEST_KEY: &str = "visemes";
+/// The package's `model.type`, and the namespace of its weights.
+pub const MODEL_TYPE: &str = "cosyvoice3_visemes";
 
-/// Where its weights are.
-pub const NAMESPACE: &str = "cosyvoice3.visemes";
-
-/// What it reads each token as: the flow's own embedding of it.
-const EMBEDDING: &str = "cosyvoice3.flow.input_embedding.weight";
+/// What its `config: cosyvoice3_visemes:` names the classes under.
+const CLASSES_KEY: &str = "visemes";
 
 const CLASSES: usize = Viseme::ALL.len();
 const TOKENS: usize = 6561;
@@ -90,23 +89,54 @@ pub struct VisemeModel {
 }
 
 impl VisemeModel {
-    /// Out of a package's weights, onto the host.
-    pub fn build(weights: &Weights) -> Result<VisemeModel> {
-        let host = |name: &str, shape: &[i32]| -> Result<Vec<f32>> {
-            let tensor = weights.load(name, shape)?.to_device(Device::Cpu)?;
+    /// Whether `manifest` is a viseme model's package, said from the manifest alone.
+    pub fn is_one(manifest: &Manifest) -> bool {
+        manifest
+            .section("model")
+            .and_then(|model| model.get_str("type"))
+            .is_ok_and(|kind| kind == MODEL_TYPE)
+    }
+
+    /// The package `manifest` describes, read onto the host: a few megabytes.
+    pub fn from_manifest(manifest: &Manifest) -> Result<VisemeModel> {
+        if !VisemeModel::is_one(manifest) {
+            return Err(Error::model(format!(
+                "this manifest does not describe a viseme model: its model.type is not {MODEL_TYPE:?}"
+            )));
+        }
+        let section = manifest.section(MODEL_TYPE)?;
+        check_classes(section.get_str(CLASSES_KEY)?)?;
+        let tokens: usize = section.get("speech_token_size")?;
+        if tokens != TOKENS {
+            return Err(Error::model(format!(
+                "this viseme model reads {tokens} speech tokens, and CosyVoice3 says {TOKENS}"
+            )));
+        }
+
+        let tensors = read_safetensors(&manifest.weight_paths()?)?;
+        let host = |part: &str, shape: &[i32]| -> Result<Vec<f32>> {
+            let name = format!("{MODEL_TYPE}.{part}");
+            let tensor = tensors
+                .get(&name)
+                .ok_or_else(|| Error::model(format!("the viseme model has no {name}")))?;
+            if tensor.shape() != shape {
+                return Err(Error::model(format!(
+                    "{name} is {:?}, not {shape:?}",
+                    tensor.shape()
+                )));
+            }
             Ok(match tensor.dtype() {
                 DType::Float => tensor.to_vec_f32()?,
                 _ => tensor.cast(DType::Float)?.to_vec_f32()?,
             })
         };
-        let at = |part: &str| format!("{NAMESPACE}.{part}");
         let (hidden, input) = (HIDDEN as i32, (WINDOW * WIDTH) as i32);
         VisemeModel::new(
-            host(EMBEDDING, &[TOKENS as i32, WIDTH as i32])?,
-            host(&at("w1"), &[hidden, input])?,
-            host(&at("b1"), &[hidden])?,
-            host(&at("w2"), &[CLASSES as i32, hidden])?,
-            host(&at("b2"), &[CLASSES as i32])?,
+            host("embedding", &[TOKENS as i32, WIDTH as i32])?,
+            host("w1", &[hidden, input])?,
+            host("b1", &[hidden])?,
+            host("w2", &[CLASSES as i32, hidden])?,
+            host("b2", &[CLASSES as i32])?,
         )
     }
 

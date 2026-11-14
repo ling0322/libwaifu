@@ -40,17 +40,20 @@ S3Tokenizer's tokens of them, 25 a second. `align` labels each token's 40 ms:
 A 5 ms timeline is drawn of that and each token labelled with the mean of its eight frames.
 
 `train` fits a softmax with one hidden layer on the flow's `input_embedding`, holding one voice
-group (a recording and its pitch-shifted copy) out at a time, then fits on everything and writes:
+group (a recording and its pitch-shifted copy) out at a time, then fits on everything and writes a
+package of its own -- `cosyvoice3-visemes.yaml` and `cosyvoice3-visemes.safetensors`, model type
+`cosyvoice3_visemes` -- which a pipeline with CosyVoice3 loaded attaches:
 
-- `visemes.table`, `(6561, 8)`: every token's distribution over the eight, from a model of the
-  token's own 80 numbers, so that a token never seen in the readings has one too.
-- `visemes.context.*`: the same with a token either side as well, which is better (see the
-  held-out scores `train` prints) and needs the neighbours, so it is a model and not a table.
+- `cosyvoice3_visemes.{w1,b1,w2,b2}`: a token with a token either side, which is what runs.
+- `cosyvoice3_visemes.embedding`: the flow's `input_embedding`, copied, so the package needs
+  nothing of CosyVoice3's weights.
+- `cosyvoice3_visemes.table`, `(6561, 8)`: each token's distribution alone, from a model of its own
+  80 numbers, so that a token never seen in the readings has one too.
 
     PYTHONPATH=<pypinyin, nagisa>:<Qwen3-ASR> .venv-qwen3-asr/bin/python tools/cosyvoice3_visemes.py \\
         align <corpus_dir> -language Chinese|Japanese|English [-cmudict cmudict.dict]
     ... tools/cosyvoice3_visemes.py train <corpus_dir>... -package <cosyvoice3 package> \\
-        -output <visemes.safetensors>
+        -output <package directory>
 """
 
 import argparse
@@ -512,7 +515,7 @@ def train(corpus_dirs, package, output, hold_out):
     alone = Probe(table, 0).fit(readings)
     context = Probe(table, 1).fit(readings)
     counts = sightings(readings, len(table))
-    write(output, alone.predict_rows(table), counts, context)
+    write(output, alone.predict_rows(table), table, context)
     print(f"\nwrote {output}: {len(table)} tokens, {int((counts > 0).sum())} seen at least once")
 
 
@@ -548,34 +551,50 @@ def evaluate(readings, table, groups, languages):
             show(name, scores(merged, lambda r: predictors[id(r)](r)))
 
 
-def write(output, token_table, counts, context):
+STEM = "cosyvoice3-visemes"
+MODEL_TYPE = "cosyvoice3_visemes"
+
+MANIFEST = f"""# A viseme model for CosyVoice3: attached to a pipeline that has CosyVoice3 loaded, with
+# waifu_pipeline_attach_model(pipeline, WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES, NULL, model).
+# Written by tools/cosyvoice3_visemes.py; docs/cosyvoice3.md#visemes says what it is.
+
+weights:
+  - {STEM}.safetensors
+
+config:
+  model:
+    type: {MODEL_TYPE}
+  {MODEL_TYPE}:
+    speech_token_size: 6561
+    visemes: [A, E, I, O, U, "@", MBP, REST]
+"""
+
+
+def write(output, token_table, embedding_table, context):
+    """A package of its own in the directory `output`: the weights and their manifest."""
     import torch
     from safetensors.torch import save_file
 
-    # A weights file of the CosyVoice3 package, beside its other shards: listed under `weights:`
-    # in its manifest, with `visemes:` under `config: cosyvoice3:` naming the classes in order.
+    output.mkdir(parents=True, exist_ok=True)
     w1, b1, w2, b2 = context.folded()
     tensors = {
-        # softmax(w2 @ gelu(w1 @ concat(E[t-1], E[t], E[t+1]) + b1) + b2), with E the flow's
-        # input_embedding, zeros past either end of a sentence, and gelu the exact (erf) one.
-        "cosyvoice3.visemes.w1": w1,
-        "cosyvoice3.visemes.b1": b1,
-        "cosyvoice3.visemes.w2": w2,
-        "cosyvoice3.visemes.b2": b2,
+        # The flow's input_embedding, a copy: the package reads nothing of CosyVoice3's.
+        f"{MODEL_TYPE}.embedding": embedding_table,
+        # softmax(w2 @ gelu(w1 @ concat(E[t-1], E[t], E[t+1]) + b1) + b2), E the embedding, zeros
+        # past either end of a sentence, and gelu the exact (erf) one.
+        f"{MODEL_TYPE}.w1": w1,
+        f"{MODEL_TYPE}.b1": b1,
+        f"{MODEL_TYPE}.w2": w2,
+        f"{MODEL_TYPE}.b2": b2,
         # Each token's distribution alone, for a caller with no neighbours to hand.
-        "cosyvoice3.visemes.table": token_table,
+        f"{MODEL_TYPE}.table": token_table,
     }
-    del counts
     save_file(
         {k: torch.from_numpy(np.ascontiguousarray(v, dtype=np.float32)) for k, v in tensors.items()},
-        str(output),
-        metadata={
-            "classes": " ".join(CLASSES),
-            "token_seconds": str(TOKEN_SECONDS),
-            "context": "1",
-            "embedding": "cosyvoice3.flow.input_embedding.weight",
-        },
+        str(output / f"{STEM}.safetensors"),
+        metadata={"classes": " ".join(CLASSES), "token_seconds": str(TOKEN_SECONDS)},
     )
+    (output / f"{STEM}.yaml").write_text(MANIFEST)
 
 
 def main():

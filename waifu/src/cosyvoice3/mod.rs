@@ -218,8 +218,8 @@ pub struct CosyVoice3 {
     tokenizer_rotary: (Tensor, Tensor),
     /// The last recording listened to, by fingerprint, and what was heard in it.
     heard: RefCell<Option<(u64, Reference)>>,
-    /// The mouth shapes of what it says, where the package has them.
-    visemes: Option<VisemeModel>,
+    /// The viseme model attached to it, if one is: see [`CosyVoice3::attach_visemes`].
+    visemes: RefCell<Option<Rc<VisemeModel>>>,
 }
 
 impl CosyVoice3 {
@@ -247,9 +247,9 @@ impl CosyVoice3 {
     pub const NEEDS_A_RECORDING: &'static str = "CosyVoice3 speaks in the voice of a recording -- \
          drop one on the page, a few seconds of somebody speaking, and say the sentence again";
 
-    /// For a package without the viseme model: see [`visemes`].
-    pub const NO_VISEMES: &'static str = "this CosyVoice3 package does not say which mouth \
-         shape goes with what it says: its manifest names no visemes under config: cosyvoice3:";
+    /// For a reading asked for its visemes with no viseme model attached: see [`visemes`].
+    pub const NO_VISEMES: &'static str = "no viseme model is attached to CosyVoice3: attach a \
+         cosyvoice3_visemes package first (WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES)";
 
     /// The instructions it was taught: upstream's `instruct_list` (`cosyvoice/utils/common.py`),
     /// word for word, without the system prompt around each. Reordered for a list -- the manner
@@ -305,10 +305,6 @@ impl CosyVoice3 {
 
         let precision = Self::precision(&weights)?;
         let dtype = DType::Float;
-        let visemes = match Self::lists_visemes(manifest)? {
-            true => Some(VisemeModel::build(&weights)?),
-            false => None,
-        };
 
         Ok(CosyVoice3 {
             settings: Settings::from_manifest(manifest),
@@ -329,23 +325,15 @@ impl CosyVoice3 {
             dtype,
             precision,
             heard: RefCell::new(None),
-            visemes,
+            visemes: RefCell::new(None),
         })
     }
 
-    /// Whether the package `manifest` describes says the mouth shapes of what it says: it names
-    /// them, in the order [`visemes`] reads them, under `config: cosyvoice3: visemes:` -- and has
-    /// [`visemes::NAMESPACE`]'s weights, which only a read of them tells. Asked of the manifest
-    /// alone, before any of the weights are.
-    pub fn lists_visemes(manifest: &Manifest) -> Result<bool> {
-        let Ok(section) = manifest.section(Self::MODEL_TYPE) else {
-            return Ok(false);
-        };
-        if !section.has(visemes::MANIFEST_KEY) {
-            return Ok(false);
-        }
-        visemes::check_classes(section.get_str(visemes::MANIFEST_KEY)?)?;
-        Ok(true)
+    /// Attaches `model` -- a [`visemes::MODEL_TYPE`] package, read with
+    /// [`VisemeModel::from_manifest`] -- or, with `None`, lets the attached one go. A reading that
+    /// has already begun keeps the one it began with.
+    pub fn attach_visemes(&self, model: Option<VisemeModel>) {
+        *self.visemes.borrow_mut() = model.map(Rc::new);
     }
 
     /// What the language model and the DiT run at: the type the package holds them in, float32 as
@@ -598,7 +586,9 @@ impl CosyVoice3 {
         heard: Option<&mut dyn FnMut(&Sound) -> ControlFlow<()>>,
         mut visemes: Option<&mut dyn FnMut(&[Viseme])>,
     ) -> Result<Option<Sound>> {
-        if visemes.is_some() && self.visemes.is_none() {
+        // The one attached now, for the whole of the reading.
+        let viseme_model = self.visemes.borrow().clone();
+        if visemes.is_some() && viseme_model.is_none() {
             return Err(Error::model(Self::NO_VISEMES));
         }
         if report(SpeechProgress::Reading).is_break() {
@@ -710,7 +700,7 @@ impl CosyVoice3 {
                 }
                 let start = samples.len() as u64;
                 samples.extend(self.sound(&kept, reference, options.speed)?);
-                if let (Some(model), Some(_)) = (&self.visemes, &visemes) {
+                if let (Some(model), Some(_)) = (&viseme_model, &visemes) {
                     track.lay_sentence(start, samples.len() as u64, &model.shapes(&kept));
                 }
                 if report(SpeechProgress::Sounding).is_break() {
@@ -766,7 +756,7 @@ impl CosyVoice3 {
                         match part.hop(reads, &mut hops) {
                             Ok(sound) => {
                                 samples.extend_from_slice(&sound.samples);
-                                if let (Some(model), Some(visemes)) = (&self.visemes, &mut visemes)
+                                if let (Some(model), Some(visemes)) = (&viseme_model, &mut visemes)
                                 {
                                     let kept = part.kept();
                                     while shaped + 1 < kept.len() {
@@ -804,7 +794,7 @@ impl CosyVoice3 {
             }
             let sound = part.finish()?;
             samples.extend_from_slice(&sound.samples);
-            if let (Some(model), Some(visemes)) = (&self.visemes, &mut visemes) {
+            if let (Some(model), Some(visemes)) = (&viseme_model, &mut visemes) {
                 let kept = part.kept();
                 while shaped < kept.len() {
                     let at = start + shaped as u64 * TOKEN_SAMPLES;
@@ -1114,7 +1104,7 @@ impl CosyVoice3 {
         let Some(like) = like else {
             return Err(Error::model(Self::NEEDS_A_RECORDING));
         };
-        if visemes.is_some() && self.visemes.is_none() {
+        if visemes.is_some() && self.visemes.borrow().is_none() {
             return Err(Error::model(Self::NO_VISEMES));
         }
         // Before the recording is listened to: a request that cannot be read is told so at once.
@@ -1170,9 +1160,14 @@ impl Voice for CosyVoice3 {
         self.speak_with(text, like, options, report, Some(heard), None)
     }
 
-    /// A viseme a speech token, where the package has the model: see [`visemes`].
+    /// A viseme model can be attached: see [`CosyVoice3::attach_visemes`].
+    fn takes_visemes(&self) -> bool {
+        true
+    }
+
+    /// A viseme a speech token, once a viseme model is attached: see [`visemes`].
     fn viseme_frame_ms(&self) -> Option<u32> {
-        self.visemes.as_ref().map(|_| visemes::FRAME_MS)
+        self.visemes.borrow().as_ref().map(|_| visemes::FRAME_MS)
     }
 
     fn speak_with_visemes(
