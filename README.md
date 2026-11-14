@@ -33,6 +33,12 @@ of a recording.
 | `indextts` | IndexTTS 2.5 | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-indextts-2.5)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-indextts-2.5)\] |
 | `cosyvoice` | Fun-CosyVoice3 0.5B | \[🤗 [HF](https://huggingface.co/ling0322/libwaifu-cosyvoice-3)\] \[[MS](https://modelscope.cn/models/ling0322/libwaifu-cosyvoice-3)\] |
 
+`cosyvoice-visemes` is not a voice but a model attached to `cosyvoice`: the mouth shape of every
+40 ms of what it says, one of `A E I O U @ MBP REST`, for a face to move to as it plays
+(\[🤗 [HF](https://huggingface.co/ling0322/libwaifu-cosyvoice-3-visemes)\]
+\[[MS](https://modelscope.cn/models/ling0322/libwaifu-cosyvoice-3-visemes)\]; see
+[docs/cosyvoice3.md](docs/cosyvoice3.md#visemes)).
+
 ## Voice conversion
 
 **Fun-CosyVoice3** turns one recording into another voice: a recording to convert, a recording of
@@ -117,6 +123,9 @@ model_dir = 'D:\models'
 
 ## Recent updates
 
+- [2026-11-14] Fun-CosyVoice3 says the mouth shape of every 40 ms of what it reads, through a
+  model attached to it: published as `cosyvoice-visemes`, attached with the C API's
+  `waifu_pipeline_attach_model`. See [docs/cosyvoice3.md](docs/cosyvoice3.md#visemes).
 - [2026-11-08] Qwen3-ASR 0.6B is published as `qwen3-asr`, and its reference tensors beside the
   other models' in `ling0322/libwaifu_test_data`.
 - [2026-10-28] See-through (`img2layers`): a picture taken apart into a layered, depth-sorted

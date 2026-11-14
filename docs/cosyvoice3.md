@@ -308,7 +308,9 @@ config:
     visemes: [A, E, I, O, U, "@", MBP, REST]
 ```
 
-The copy of the embedding is what lets it read nothing of CosyVoice3's weights. A package whose
+It is published as `cosyvoice-visemes:v1` (`ling0322/libwaifu-cosyvoice-3-visemes` on Hugging
+Face and ModelScope), so `cosyvoice-visemes` fetches it by name; the catalogue the apps read does
+not list it yet. The copy of the embedding is what lets it read nothing of CosyVoice3's weights. A package whose
 classes are in another order, or for another number of tokens, is refused when it is attached.
 
 ### How it was trained
