@@ -78,7 +78,7 @@ pub struct TextToSpeech {
     pub without_reference_transcript: Support,
     pub with_style: Support,
     /// The mouth shape of every frame of what it says: a CosyVoice3 package with the viseme model.
-    pub with_visemes: Support,
+    pub with_attached_visemes: Support,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -290,7 +290,7 @@ fn text_to_speech(voice: &describe::Spoken) -> TextToSpeech {
             )),
             false => Ok(()),
         },
-        with_visemes: match voice.takes_visemes {
+        with_attached_visemes: match voice.takes_visemes {
             true => Ok(()),
             false => Err(format!(
                 "{} takes no viseme model: nothing says which mouth shape goes with what it says",
@@ -347,7 +347,7 @@ mod tests {
         assert!(voice.voice_conversion.is_ok());
         assert!(voice.image_generation.is_err());
         // Its own package is unchanged: the visemes are a model attached to it.
-        assert_eq!(speech.with_visemes, Ok(()));
+        assert_eq!(speech.with_attached_visemes, Ok(()));
         assert_eq!(voice.attaches_as, None);
     }
 
@@ -363,7 +363,7 @@ mod tests {
         assert!(visemes.image_generation.is_err());
         // Tones takes none.
         let tones = model_info(TONES).unwrap();
-        assert!(tones.text_to_speech.unwrap().with_visemes.is_err());
+        assert!(tones.text_to_speech.unwrap().with_attached_visemes.is_err());
         assert_eq!(tones.attaches_as, None);
     }
 

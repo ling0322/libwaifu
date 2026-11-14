@@ -86,9 +86,11 @@ pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
 /// a request has to ask for, a function. Back to 0 with each major.
 ///
 /// 6.1: models attached to the one a pipeline has loaded -- waifu_pipeline_attach_model and
-/// _detach_model, WaifuAttachedModelType, MODEL_ATTACHES_AS -- and the text-to-speech readings'
-/// visemes: the VISEMES request and task attributes, SUPPORTS_TEXT_TO_SPEECH_VISEMES, WaifuViseme,
-/// waifu_task_get_int_array_attribute.
+/// _detach_model, WaifuAttachedModelType, MODEL_ATTACHES_AS,
+/// SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES -- and the text-to-speech readings' visemes:
+/// the VISEMES request and task attributes, WaifuViseme, waifu_task_get_int_array_attribute.
+/// Revised before any release had it: 204 was SUPPORTS_TEXT_TO_SPEECH_VISEMES, a package that
+/// held a viseme model, and there were no attached models.
 pub const WAIFU_ABI_VERSION_MINOR: u32 = 1;
 /// (major << 16) | minor, as waifu_abi_version says it.
 pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
@@ -141,8 +143,8 @@ pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT: Waif
     203;
 /// Takes a WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES model, and with one attached says the
 /// visemes of what it says, with TEXT_TO_SPEECH_VISEMES or STREAMING_TEXT_TO_SPEECH_VISEMES:
-/// CosyVoice3. Since 6.1.
-pub const WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES: WaifuModelAttribute = 204;
+/// CosyVoice3. Whether one is attached is the pipeline's, not the model's. Since 6.1.
+pub const WAIFU_MODEL_SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES: WaifuModelAttribute = 204;
 /// The manner as well as the voice.
 pub const WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE: WaifuModelAttribute = 300;
 /// Integer, bytes; absent until every file is here.
@@ -454,8 +456,8 @@ impl WaifuModel {
             &detail(speaking.map(|s| &s.with_style), &speech),
         );
         model.supports(
-            WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES,
-            &detail(speaking.map(|s| &s.with_visemes), &speech),
+            WAIFU_MODEL_SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES,
+            &detail(speaking.map(|s| &s.with_attached_visemes), &speech),
         );
 
         model.supports(

@@ -1136,10 +1136,16 @@ fn a_voice_without_visemes_says_so_and_ends_a_reading_that_asks_for_them() {
     unsafe {
         let tones = a_model("tones");
         assert_eq!(
-            int_attribute(tones, WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES),
+            int_attribute(
+                tones,
+                WAIFU_MODEL_SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES
+            ),
             Some(0)
         );
-        let why = string_attribute(tones, WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES);
+        let why = string_attribute(
+            tones,
+            WAIFU_MODEL_SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES,
+        );
         assert!(why.is_some_and(|why| !why.is_empty()));
         waifu_model_free(tones);
 

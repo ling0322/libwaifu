@@ -241,6 +241,14 @@ No number that was there is reused.
 **Attached models**, and a reading's **visemes**. A minor version: an older caller never calls the
 two functions or sets the request attributes, and is never handed any of it.
 
+6.1 was revised once before any release had it (#186, after #185 on `main`). In #185 the viseme
+model was one more weights file of CosyVoice3's package, and 204 was
+`SUPPORTS_TEXT_TO_SPEECH_VISEMES`, true of a package that held one. It is now a model attached to
+the pipeline's, and 204 is `SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES`, true of a voice that
+takes one: the name changed with the meaning, so code written against #185 no longer compiles
+rather than reading the number the old way. A library built from #185 has no
+`waifu_pipeline_attach_model`, and a caller of it does not load one.
+
 An attached model is a model a pipeline does not load as its own but attaches to the one it has
 loaded: a small package that adds to what that model does. The first is a viseme model; a LoRA
 would be the next, which is why there is a key.
@@ -262,7 +270,7 @@ WaifuTask *waifu_pipeline_detach_model(WaifuPipeline *, WaifuAttachedModelType, 
 #define WAIFU_VISEME_MBP 6    // the lips pressed shut
 #define WAIFU_VISEME_REST 7   // relaxed and lightly closed; a shape, not silence
 
-#define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES 204           // takes a viseme model: CosyVoice3
+#define WAIFU_MODEL_SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES 204  // takes a viseme model: CosyVoice3
 
 #define WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES 207                  // boolean; 0
 #define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES 606        // boolean; 0
