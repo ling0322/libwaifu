@@ -167,6 +167,11 @@ enum Kind {
     /// terminal's, as [`Kind::Layers`] is, and for the same reason; the catalogue a screen reads
     /// has it, under a kind of its own, `transcription`.
     Transcription,
+    /// Which mouth shape goes with each frame of a voice's reading: a model attached to a voice
+    /// rather than loaded as one (libwaifu's `waifu_pipeline_attach_model`). Fetched by name, and
+    /// in no list yet -- neither the terminal's, which reads no sentence, nor the catalogue a
+    /// screen reads, which has no kind to put it under.
+    Visemes,
 }
 
 /// A model that has a name, and where it is published.
@@ -317,6 +322,16 @@ const CATALOG: &[Published] = &[
         explicit: false,
         kind: Kind::Transcription,
     },
+    // Named `<family>:<version>` as a voice is. Attached to `cosyvoice:v3`, whose package it does
+    // not change: a better one is a few megabytes to fetch rather than the voice again.
+    Published {
+        name: "cosyvoice3-visemes:v1",
+        full_name: "Fun-CosyVoice3 visemes",
+        repo: "ling0322/libwaifu-cosyvoice-3-visemes",
+        manifest: "cosyvoice3-visemes.yaml",
+        explicit: false,
+        kind: Kind::Visemes,
+    },
 ];
 
 /// Where a package is fetched from.
@@ -452,6 +467,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("cosyvoice", "cosyvoice:v3"),
     ("see-through", "see-through:v0.0.2"),
     ("qwen3-asr", "qwen3-asr:0.6b"),
+    ("cosyvoice3-visemes", "cosyvoice3-visemes:v1"),
 ];
 
 /// The spellings these names had before a version carried its dot.
@@ -1977,6 +1993,36 @@ mod tests {
     }
 
     #[test]
+    fn a_viseme_model_is_fetched_by_name_and_listed_nowhere() {
+        // It is attached to a voice, not loaded as one, so no picker offers it, and the catalogue
+        // the apps read has no kind for it yet.
+        let model = published("cosyvoice3-visemes").expect("an alias resolves");
+        assert_eq!(model.name, "cosyvoice3-visemes:v1");
+        assert_eq!(model.repo, "ling0322/libwaifu-cosyvoice-3-visemes");
+        assert_eq!(model.manifest, "cosyvoice3-visemes.yaml");
+        assert_eq!(
+            full_name("cosyvoice3-visemes"),
+            Some("Fun-CosyVoice3 visemes")
+        );
+        assert!(!is_voice("cosyvoice3-visemes") && !is_conversion("cosyvoice3-visemes"));
+        let offered = listed()
+            .into_iter()
+            .chain(listed_voices())
+            .chain(listed_conversions())
+            .chain(listed_layers())
+            .chain(listed_transcriptions());
+        assert!(!offered
+            .into_iter()
+            .any(|one| one.name == "cosyvoice3-visemes"));
+        let catalogue = crate::fetch::catalog_json();
+        assert!(!catalogue["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["name"] == "cosyvoice3-visemes"));
+    }
+
+    #[test]
     fn the_name_a_model_used_to_have_still_finds_it() {
         // `sdxl:noob:v11` went out in the README and is in scripts by now. It has to keep meaning
         // NoobAI-XL v1.1, whatever the catalogue calls that today.
@@ -2020,7 +2066,7 @@ mod tests {
         // all: a name is what someone types before they have the model, so it should say what
         // they are about to fetch. Add to this list when the runtime learns another -- of a
         // picture model or, as `indextts` and `cosyvoice` did, of a voice.
-        const FAMILIES: [&str; 8] = [
+        const FAMILIES: [&str; 9] = [
             "sdxl",
             "anima",
             "krea2",
@@ -2029,13 +2075,14 @@ mod tests {
             "cosyvoice",
             "see-through",
             "qwen3-asr",
+            "cosyvoice3-visemes",
         ];
 
         for model in CATALOG {
             let fields: Vec<&str> = model.name.split(':').collect();
             let expected = match model.kind {
                 Kind::Picture => 3,
-                Kind::Voice | Kind::Layers | Kind::Transcription => 2,
+                Kind::Voice | Kind::Layers | Kind::Transcription | Kind::Visemes => 2,
             };
             assert_eq!(
                 fields.len(),
