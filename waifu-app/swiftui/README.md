@@ -114,10 +114,12 @@ Nothing of it is kept: the recording is only ever in memory, the words are shown
 ones are, and neither is written to the output folder.
 
 **waifu2d** makes a drawing in layers move, as [Anime2.5DRig](https://github.com/852wa/Anime2.5DRig)
-does (MIT; its stock closed eyes are in `Sources/Waifu/ClosedParts.swift` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers
+does (MIT; its stock closed eyes are in `waifu2d/src/closed_parts.rs` under its licence). Drop a `.psd` on it -- version 1, 8-bit RGB, which is what Photoshop saves and img2layers
 writes. Layers are known by See-through's names and Anime2.5DRig's English and Japanese ones
 (`前髪`, `白目`, `口`, ...), each with how far in front of the face it is and whether it moves with
-the head or the body. Every layer is a grid of triangles drawn with Metal and moved vertex by vertex:
+the head or the body. Every layer is a grid of triangles drawn with Metal and moved vertex by vertex.
+The rig, its motion and the drawing are libwaifu2d's (`waifu2d/`, docs/waifu2d.md), which the
+Windows app is to share; the page is its settings and the view it draws into:
 
 - **Blink.** The eyes are squashed toward a line 62 % of the way down each white and fade into the
   closed eye when they are a quarter open; the irises are cut by the whites. An eye layer drawn as

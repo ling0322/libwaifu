@@ -1,13 +1,13 @@
 #!/bin/sh
-# Builds libwaifu-gui.app: the SwiftUI app, with libwaifu.dylib and libwaifu_modelmanager.dylib in
-# its Frameworks, where the app's rpath looks for them. The executable is called libwaifu-gui, as
+# Builds libwaifu-gui.app: the SwiftUI app, with libwaifu.dylib, libwaifu_modelmanager.dylib and
+# libwaifu2d.dylib in its Frameworks, where the app's rpath looks for them. The executable is called libwaifu-gui, as
 # the app is.
 #
 #   waifu-app/swiftui/build-app.sh [path/to/libwaifu.dylib]
 #
 # The library defaults to build/libwaifu.dylib, which the CMake build at the top of the repository
-# makes (its waifu-engine target); libwaifu_modelmanager.dylib is taken from beside it (the
-# waifu-modelmanager target). The app is written to waifu-app/swiftui/build/libwaifu-gui.app.
+# makes (its waifu-engine target); libwaifu_modelmanager.dylib and libwaifu2d.dylib are taken from
+# beside it (the waifu-modelmanager and waifu2d targets). The app is written to waifu-app/swiftui/build/libwaifu-gui.app.
 #
 # WAIFU_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" signs it with that identity and the
 # hardened runtime, which notarization asks for; without it the app is signed for this machine only.
@@ -27,6 +27,11 @@ fi
 manager="$(dirname "$library")/libwaifu_modelmanager.dylib"
 if [ ! -f "$manager" ]; then
     echo "no libwaifu_modelmanager.dylib beside $library: build it with cmake first" >&2
+    exit 1
+fi
+waifu2d="$(dirname "$library")/libwaifu2d.dylib"
+if [ ! -f "$waifu2d" ]; then
+    echo "no libwaifu2d.dylib beside $library: build it with cmake first" >&2
     exit 1
 fi
 
@@ -61,6 +66,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resourc
 cp "$binary" "$app/Contents/MacOS/libwaifu-gui"
 cp "$library" "$app/Contents/Frameworks/libwaifu.dylib"
 cp "$manager" "$app/Contents/Frameworks/libwaifu_modelmanager.dylib"
+cp "$waifu2d" "$app/Contents/Frameworks/libwaifu2d.dylib"
 cp -R "$manifests" "$app/Contents/Resources/manifests"
 # The icon, in the format macOS 26 draws as its own rather than on a grey plate: an Icon Composer
 # .icon, compiled into Assets.car, with an AppIcon.icns beside it for older systems.
@@ -111,6 +117,7 @@ else
 fi
 codesign "$@" "$app/Contents/Frameworks/libwaifu.dylib"
 codesign "$@" "$app/Contents/Frameworks/libwaifu_modelmanager.dylib"
+codesign "$@" "$app/Contents/Frameworks/libwaifu2d.dylib"
 codesign "$@" "$app"
 codesign --verify --strict "$app"
 echo "$app"

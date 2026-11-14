@@ -27,6 +27,7 @@
 // "Photoshop File Formats Specification", big-endian throughout; PSDWriter.swift writes the
 // same format, which img2layers keeps.
 
+import CoreGraphics
 import Foundation
 import WaifuKit
 
@@ -298,5 +299,20 @@ private struct PSDReader {
         default:
             throw PSDError(message: "a layer is compressed with ZIP, which is not read here: save it without")
         }
+    }
+}
+
+/// What a picture's pixels are for the screen: the layers the Mac shows of a document it made.
+enum Pixels {
+    /// `image` as a CGImage, its alpha not premultiplied; nil for one with no pixels.
+    static func cgImage(_ image: RGBAImage) -> CGImage? {
+        guard image.width > 0, image.height > 0,
+            let provider = CGDataProvider(data: Data(image.rgba) as CFData)
+        else { return nil }
+        return CGImage(
+            width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue), provider: provider,
+            decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
 }

@@ -4,6 +4,7 @@ members = [
     "waifu-cli",
     "waifu-modelmanager",
     "waifu-tools",
+    "waifu2d",
 ]
 # The Rust binding is a workspace of its own: it compiles none of the engine.
 exclude = ["bindings/rust"]
