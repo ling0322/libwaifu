@@ -20,8 +20,10 @@
 // The minor version: bumped for what an older caller never uses -- an attribute, a stage, an event
 // a request has to ask for, a function. Back to 0 with each major.
 //
-// 6.1: the text-to-speech readings' visemes -- the VISEMES request and task attributes,
-// SUPPORTS_TEXT_TO_SPEECH_VISEMES, WaifuViseme, waifu_task_get_int_array_attribute.
+// 6.1: models attached to the one a pipeline has loaded -- waifu_pipeline_attach_model and
+// _detach_model, WaifuAttachedModelType, MODEL_ATTACHES_AS -- and the text-to-speech readings'
+// visemes: the VISEMES request and task attributes, SUPPORTS_TEXT_TO_SPEECH_VISEMES, WaifuViseme,
+// waifu_task_get_int_array_attribute.
 #define WAIFU_ABI_VERSION_MINOR 1
 
 // (major << 16) | minor, as waifu_abi_version says it.
@@ -79,6 +81,10 @@ typedef int32_t WaifuModelAttribute;
 
 // What a pipeline is made for.
 typedef int32_t WaifuPipelineType;
+
+// What a model is attached to the one a pipeline has loaded as: waifu_pipeline_attach_model.
+// Each is for one pipeline type's model, which its name says. Since 6.1.
+typedef int32_t WaifuAttachedModelType;
 
 // A request's attributes, numbered by pipeline type as the stages are. The type after each is the
 // setter it takes; "required" is refused at waifu_pipeline_run when unset. A boolean is an int, 0
@@ -182,8 +188,9 @@ typedef int32_t WaifuStage;
 // A reference without its reference_transcript: CosyVoice3 does not, unless a style is given.
 #define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT 203
 
-// The visemes of what it says, with TEXT_TO_SPEECH_VISEMES or STREAMING_TEXT_TO_SPEECH_VISEMES:
-// a CosyVoice3 package with the viseme model. Since 6.1.
+// Takes a WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES model, and with one attached says the
+// visemes of what it says, with TEXT_TO_SPEECH_VISEMES or STREAMING_TEXT_TO_SPEECH_VISEMES:
+// CosyVoice3. Since 6.1.
 #define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES 204
 
 // The manner as well as the voice.
@@ -194,6 +201,10 @@ typedef int32_t WaifuStage;
 
 // Integer, of what it says or converts.
 #define WAIFU_MODEL_SAMPLE_RATE 1001
+
+// Integer, a WaifuAttachedModelType: what it is attached to a pipeline's model as -- a model that
+// is not loaded as one's own. Absent for every model a pipeline loads. Since 6.1.
+#define WAIFU_MODEL_ATTACHES_AS 1002
 
 // Integer: 16, or 32 for SDXL and Qwen-Image.
 #define WAIFU_MODEL_IMAGE_GENERATION_WIDTH_HEIGHT_MULTIPLE_OF 1100
@@ -253,6 +264,11 @@ typedef int32_t WaifuStage;
 
 // Relaxed and lightly closed. A shape, not silence: whether anybody is speaking is the sound's.
 #define WAIFU_VISEME_REST 7
+
+// Which mouth shape goes with each frame of a reading, for TEXT_TO_SPEECH_VISEMES: a
+// cosyvoice3_visemes package, attached to CosyVoice3 on a text to speech or streaming text to
+// speech pipeline, with no key.
+#define WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES 1
 
 #define WAIFU_OK 0
 
@@ -421,8 +437,9 @@ typedef int32_t WaifuStage;
 // Int, read as uint64; 0.
 #define WAIFU_REQUEST_TEXT_TO_SPEECH_SEED 206
 
-// Boolean, the visemes as well, TEXT_TO_SPEECH_VISEMES; 0. A model without
-// SUPPORTS_TEXT_TO_SPEECH_VISEMES ends the task with WAIFU_ERR_MODEL. Since 6.1.
+// Boolean, the visemes as well, TEXT_TO_SPEECH_VISEMES; 0. With no
+// WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES model attached the task ends with WAIFU_ERR_MODEL.
+// Since 6.1.
 #define WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES 207
 
 // Audio, what is said and how; required.
@@ -685,6 +702,26 @@ void waifu_pipeline_cancel_all(WaifuPipeline *pipeline);
 // be asked for straight after; it waits its turn. "tones", the stand-in voice the tests use,
 // opens as a model too.
 WaifuTask *waifu_pipeline_load_model(WaifuPipeline *pipeline, const WaifuModel *model);
+
+// Attaches `model` to the model the pipeline has loaded, as `type`, under `key` -- NULL or "" for
+// the one of its type that has no key -- replacing what was attached as that type under that key.
+// It stays for every run until it is detached, or the pipeline's model is unloaded or another is
+// loaded, which let it go with the model it was attached to. Refused for a type this library does
+// not know, a model whose ATTACHES_AS is not `type`, a type that is not for this pipeline type, or
+// a key the type does not take: TEXT_TO_SPEECH_VISEMES takes none. The task ends with
+// WAIFU_ERR_MODEL where the pipeline has no model, or one that does not take it. As a load, the
+// call copies the manifest and not the weights, and `model` may be freed as soon as it returns.
+// Since 6.1.
+WaifuTask *waifu_pipeline_attach_model(WaifuPipeline *pipeline,
+                                       WaifuAttachedModelType type,
+                                       const char *key,
+                                       const WaifuModel *model);
+
+// Lets go of what is attached to the pipeline's model as `type` under `key`; done where nothing
+// is. Refused as waifu_pipeline_attach_model is for the type and the key. Since 6.1.
+WaifuTask *waifu_pipeline_detach_model(WaifuPipeline *pipeline,
+                                       WaifuAttachedModelType type,
+                                       const char *key);
 
 // Drops the model; the pipeline then has none.
 WaifuTask *waifu_pipeline_unload_model(WaifuPipeline *pipeline);

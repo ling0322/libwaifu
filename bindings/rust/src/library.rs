@@ -170,13 +170,12 @@ fn search() -> std::result::Result<Loaded, String> {
 }
 
 fn found(handle: platform::Handle, path: PathBuf) -> std::result::Result<Loaded, String> {
-    let functions = Functions::find(|name| platform::symbol(handle, name))
-        .map_err(|missing| {
-            format!(
-                "it has no {missing}: it is not libwaifu, or older than ABI \
+    let functions = Functions::find(|name| platform::symbol(handle, name)).map_err(|missing| {
+        format!(
+            "it has no {missing}: it is not libwaifu, or older than ABI \
                  {WAIFU_ABI_VERSION_MAJOR}.{WAIFU_ABI_VERSION_MINOR}"
-            )
-        })?;
+        )
+    })?;
     checked(functions, path)
 }
 

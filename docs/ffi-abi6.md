@@ -1,8 +1,8 @@
 # libwaifu's C API, ABI 6
 
 Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs` and
-`waifu/src/c_api/{support,request,task}.rs`, is ABI 6.1: 6.0, and the visemes of
-[What 6.1 adds](#what-61-adds). What is still open is under [Not decided](#not-decided).
+`waifu/src/c_api/{support,request,task}.rs`, is ABI 6.1: 6.0, and the attached models and
+visemes of [What 6.1 adds](#what-61-adds). What is still open is under [Not decided](#not-decided).
 
 ABI 6 changes how a caller talks to a pipeline, and nothing about what a pipeline does. A request
 is a handle the caller sets attributes on, one at a time, instead of a struct; a run, a load and an
@@ -238,18 +238,31 @@ No number that was there is reused.
 
 ## What 6.1 adds
 
-A reading's **visemes**: the mouth shape of each frame of its audio, for a face to move to as it
-plays -- `A E I O U @ MBP REST` (`WAIFU_VISEME_A` 0 .. `WAIFU_VISEME_REST` 7). A minor version: an
-older caller never sets the request attribute, and is never handed any of it.
+**Attached models**, and a reading's **visemes**. A minor version: an older caller never calls the
+two functions or sets the request attributes, and is never handed any of it.
+
+An attached model is a model a pipeline does not load as its own but attaches to the one it has
+loaded: a small package that adds to what that model does. The first is a viseme model; a LoRA
+would be the next, which is why there is a key.
 
 ```c
+// WaifuAttachedModelType: each is for one pipeline type's model, which its name says.
+#define WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES 1   // a cosyvoice3_visemes package; no key
+
+WaifuTask *waifu_pipeline_attach_model(WaifuPipeline *, WaifuAttachedModelType, const char *key,
+                                       const WaifuModel *);
+WaifuTask *waifu_pipeline_detach_model(WaifuPipeline *, WaifuAttachedModelType, const char *key);
+
+#define WAIFU_MODEL_ATTACHES_AS 1002                    // int: a WaifuAttachedModelType; absent
+                                                        // for every model a pipeline loads
+
 // WaifuViseme
 #define WAIFU_VISEME_A 0      // .. E 1, I 2, O 3, U 4
 #define WAIFU_VISEME_SCHWA 5  // @: half open, not spread -- Mandarin's e and en, English's schwa
 #define WAIFU_VISEME_MBP 6    // the lips pressed shut
 #define WAIFU_VISEME_REST 7   // relaxed and lightly closed; a shape, not silence
 
-#define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES 204           // a CosyVoice3 package with the model
+#define WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_VISEMES 204           // takes a viseme model: CosyVoice3
 
 #define WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES 207                  // boolean; 0
 #define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES 606        // boolean; 0
@@ -262,27 +275,56 @@ older caller never sets the request attribute, and is never handed any of it.
 const int32_t *waifu_task_get_int_array_attribute(const WaifuTask *, WaifuTaskAttribute, size_t *count);
 ```
 
+A reading with visemes, on a pipeline that has CosyVoice3 loaded:
+
+```c
+WaifuModel *visemes = waifu_model_open("cosyvoice3-visemes.yaml");
+WaifuTask *attach = waifu_pipeline_attach_model(pipeline, WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES,
+                                                NULL, visemes);
+waifu_model_free(visemes);                      // copied at the call, as a load's model is
+waifu_task_wait(attach, WAIFU_WAIT_FOREVER);    // STATUS WAIFU_OK, or why not
+waifu_task_free(attach);
+
+waifu_request_set_int_attribute(request, WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES, 1);
+WaifuTask *task = waifu_pipeline_run(pipeline, request);
+// ... once it has ended:
+size_t frames;
+int64_t frame_ms;
+const int32_t *visemes = waifu_task_get_int_array_attribute(task, WAIFU_TASK_TEXT_TO_SPEECH_VISEMES, &frames);
+waifu_task_get_int_attribute(task, WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS, &frame_ms);
+// the mouth at millisecond t of the audio is visemes[t / frame_ms]
+```
+
+**Attaching.**
+
+- **Refused at the call**: a type this library does not know; a model whose `ATTACHES_AS` is not the
+  type; a type that is not for this pipeline type (`TEXT_TO_SPEECH_VISEMES` is for text to speech
+  and streaming text to speech); a key the type does not take, or one that is not UTF-8.
+  `TEXT_TO_SPEECH_VISEMES` takes none: NULL or "".
+- **The task ends with `WAIFU_ERR_MODEL`** where the pipeline has no model, or one that takes no
+  model of the type: what a pipeline has loaded is known only on its thread, as for a style.
+- **It stays** for every run until it is detached -- or until the pipeline's model is unloaded or
+  another is loaded, which let it go with the model it was attached to. Attaching a type under a
+  key again replaces what was there. Detaching what is not there is done.
+- A model that attaches is not loaded as a pipeline's own: every `SUPPORTS_` of it is 0, saying so.
+
+**Visemes.**
+
 - **Frame `i` is milliseconds `[i, i + 1) * FRAME_MS` of the reading's audio**, and there are
-  `ceil(milliseconds / FRAME_MS)` of them: whatever the speed, and across sentences. The frame's
-  length is the task's to say, not the request's: it is the model's -- CosyVoice3's is a speech
-  token, 40 ms -- and a caller that indexes by `t / FRAME_MS` needs no change for a model whose is
-  not.
-- **One viseme a frame**, not a distribution: the library picks it, and is where smoothing a
-  flicker between two close ones belongs (`VisemeSmoother`, which for now takes each frame's
-  likeliest).
+  `ceil(milliseconds / FRAME_MS)` of them, whatever the speed and across sentences. The frame's
+  length is the task's to say: it is the model's -- CosyVoice3's is a speech token, 40 ms.
+- **One viseme a frame.** The library picks it, and is where smoothing a flicker between two close
+  ones belongs (`VisemeSmoother`, which for now takes each frame's likeliest).
 - **Streaming**, each `AUDIO_PART` event read makes `STREAMING_TEXT_TO_SPEECH_VISEMES` the frames
   that part settles, every one of them inside the audio handed over so far; it only grows, and each
-  array a read hands out stays as it was until `waifu_task_free`. Once the task has ended well it is
-  all of them. A frame may come a part late -- once there is a smoother that waits a few frames it
-  will -- never early.
-- **A model without them** answers `SUPPORTS_TEXT_TO_SPEECH_VISEMES` 0 with why, and a run that asks
-  for them ends with `WAIFU_ERR_MODEL`: what a pipeline has loaded is known only on its thread, as
-  for a style.
+  array a read hands out stays as it was until `waifu_task_free`. A part's array is copied out the
+  first time it is read, and not before. Once the task has ended well it is all of them.
+- **Asked for with no viseme model attached**, the run ends with `WAIFU_ERR_MODEL`, saying why.
 - **`waifu_task_get_int_array_attribute`** is the getter for an array: the values and `*count`,
   valid until `waifu_task_free`; NULL and `*count` untouched where it is not there. An empty array is
   not NULL.
 
-The package's side is in [cosyvoice3.md](cosyvoice3.md#visemes).
+The viseme package is in [cosyvoice3.md](cosyvoice3.md#visemes).
 
 ## Why
 
