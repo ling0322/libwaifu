@@ -569,8 +569,55 @@ the port carries: the pointer is no longer upside down (decision 1); a jump leav
 
 **Unchanged on purpose.** At its defaults the Windows-only controls do nothing, so the Mac
 draws what it draws now; the Mac's UI does not grow the Windows controls, and the mouth stays
-as the document draws it: no stock mouth, and no babble unless a host asks for it. The mouth
-is to come back from real mouth shapes, not from Anime2.5DRig's open and closed mouths.
+as the document draws it -- no stock mouth, and no babble unless a host asks for it -- until it
+is told a shape to make ("Mouth shapes", below), never Anime2.5DRig's open and closed mouths.
+
+## Mouth shapes (provisional)
+
+**An experiment, to be reviewed.** A document whose only mouth is its drawn one -- See-through's
+`mouth` layer, at rest -- is given a mouth that moves through the shapes libwaifu's text to speech
+says: `A E I O U @ MBP REST`, `WaifuViseme`'s numbers (docs/cosyvoice3.md, "Visemes").
+
+- **Drawn at load, deformed every frame.** `mouths::with_drawn_mouths` measures the drawn mouth --
+  where its line is, how wide, how thick, how much it smiles (a parabola fitted to it), its colour
+  -- and adds four parts over it: the inside (a fan), its line (a ring, the upper lip heavier),
+  the upper teeth and the tongue, the last two cut by the inside as an iris is by its white
+  (a `MaskDef` of its own). Their grids never change; their vertices are worked out each frame
+  from a shape's numbers -- width, opening, how square above and below, teeth, tongue, line
+  weight, and how much of the opening is above the line (the upper lip lifts a quarter to a
+  third as the jaw drops) -- mixed by how far the mouth is from each shape. It opens, rounds and
+  shuts; it does not cut between pictures. The backends are not touched: it is vertices.
+- **At rest it is the drawn mouth.** Shut, the made mouth is the drawn line, width, curve and
+  weight; the drawn mouth fades into it only in the last sixth before rest, where the two are
+  alike, and is never covered at rest.
+- **Told a shape, eased into it.** `Stage::set_viseme` / `waifu2d_stage_set_viseme`, -1 for none;
+  `Pose::visemes` eases toward it in about 50 ms. At rest nothing moves: the Mac's frames are
+  `tests/parity.rs`'s still.
+- **A reading: the sound says how open, the voice which shape** (`speech.rs`). The voice's
+  visemes say A or I or U, but not how far open: a consonant other than b, p or m is labelled as
+  the vowels either side of it, so on visemes alone the mouth never shuts between syllables --
+  measured on a 10-second reading, it was under half open at 47% of the dips between syllables,
+  while the sound fell and rose 5.5 times a second. So the stage is handed the reading's loudness
+  as well (`waifu2d_stage_speak`, `_speech_loudness`, `_speech_visemes`, `_speech_at`,
+  `_silence`) -- libwaifu's `TEXT_TO_SPEECH_LOUDNESS` (ABI 6.2), a dB for every 10 ms; or, from a
+  source that does not say it, the samples (`_speech_samples`), which it hears the same way -- and
+  opens the mouth as loud as the sound is -- from 30 dB under the loudest so far, shut, to 8 dB
+  under, whole -- in the viseme's shape; MBP
+  and REST shut it whatever the sound. A one-frame viseme between two others is smoothed away,
+  MBP's excepted, and the mouth reads the sound 40 ms ahead, for its easing. The same reading:
+  shut at 75% of the dips, a tenth as open there as at its syllables, best in step at 0 ms.
+  A voice that says no visemes, or a microphone, opens it in A's shape.
+- **In the app.** The text-to-speech page shows the waifu2d page's drawing over the output for a
+  voice that takes a viseme model (`SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES`):
+  `cosyvoice3-visemes:v1` is fetched by name and attached (`waifu_pipeline_attach_model`) before a
+  reading, the reading asks for its visemes and its loudness, and the stage is handed them as
+  they come and where the sound is heard -- a stream by the samples it has played, a clip
+  played again by its player's time, both less the output's latency. Without the viseme model the
+  reading goes on without, its mouth opening to the sound alone, and says why.
+
+Open: a document with no drawn mouth gets none (its place would have to be guessed from the
+face); the shapes' numbers are tuned by eye on one drawing; a drawing whose artist drew the
+shapes would want them deformed on a grid the artist made, not cross-faded.
 
 ## Tests
 

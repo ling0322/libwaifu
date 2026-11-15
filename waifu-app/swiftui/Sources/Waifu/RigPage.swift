@@ -57,6 +57,10 @@ final class RigStage {
     var follow = 1.0
     /// How many blinks have been asked for: the view blinks once each time it goes up.
     private(set) var blinks = 0
+    /// The mouth shape shown, the drawn mouth at rest; or, while `talking`, a sentence's shapes in
+    /// turn. An experiment: the shapes are drawn by libwaifu2d over the document's mouth.
+    var viseme = Waifu2D.Viseme.rest
+    var talking = false
 
     func blinkNow() { blinks += 1 }
 
@@ -207,6 +211,30 @@ struct RigSettings: View {
                     Footnote("Closed in 80 ms, held 340 ms, open in 160 ms, as Anime2.5DRig blinks.")
                 }
                 .disabled(stage.rig == nil)
+
+                FormGroup {
+                    LabeledContent("Shape") {
+                        Picker("Shape", selection: $stage.viseme) {
+                            ForEach(Waifu2D.Viseme.allCases, id: \.self) { v in
+                                Text(Self.name(v)).tag(v)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    .disabled(stage.talking)
+                    switchRow("Talk", help: "Say a sentence's mouth shapes, 40 ms a frame, over and over") {
+                        $stage.talking
+                    }
+                } header: {
+                    Header("Mouth (experiment)")
+                } footer: {
+                    Footnote(
+                        "Shapes drawn over the document's own mouth, which is the rest shape: A E I O U, @ half open, "
+                            + "MBP lips shut. Text to speech says one every 40 ms.")
+                }
+                .disabled(stage.rig == nil)
             }
             .padding([.horizontal, .bottom], 12)
             .padding(.top, Theme.top(12, from26: 1))
@@ -214,6 +242,28 @@ struct RigSettings: View {
         .environment(\.rowPadding, 5)
         .labeledContentStyle(SettingRowStyle())
         .textFieldStyle(.plain)
+    }
+
+    static func name(_ v: Waifu2D.Viseme) -> String {
+        switch v {
+        case .a: "A"
+        case .e: "E"
+        case .i: "I"
+        case .o: "O"
+        case .u: "U"
+        case .schwa: "@ (half open)"
+        case .mbp: "MBP (lips shut)"
+        case .rest: "Rest (as drawn)"
+        }
+    }
+
+    private func switchRow(_ label: String, help: String, _ binding: () -> Binding<Bool>) -> some View {
+        LabeledContent(label) {
+            Toggle(label, isOn: binding())
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .help(help)
     }
 
     private func switchRow(_ label: String, _ key: WritableKeyPath<RigSwitches, Bool>, help: String) -> some View {

@@ -30,6 +30,7 @@ use std::sync::Arc;
 use crate::motion::{Controls, Frame, Motion};
 use crate::render::{self, DrawList};
 use crate::rig::{PartId, Rig};
+use crate::speech::Speech;
 
 /// A part being dragged: which, and where on the canvas it was taken hold of and is now.
 #[derive(Clone, Copy, Debug)]
@@ -49,6 +50,9 @@ pub struct Stage {
     drag: Option<Drag>,
     /// Seconds stepped, for the babble.
     clock: f64,
+    /// The reading the mouth says, and where in it the sound being heard is; `None`, nowhere.
+    speech: Option<Speech>,
+    heard: Option<f64>,
 }
 
 impl Stage {
@@ -63,6 +67,8 @@ impl Stage {
             pointer: None,
             drag: None,
             clock: 0.0,
+            speech: None,
+            heard: None,
         }
     }
 
@@ -153,6 +159,59 @@ impl Stage {
         self.motion.nod_once();
     }
 
+    /// The mouth shape to make from now on; `None` is the drawn mouth, at rest.
+    pub fn set_viseme(&mut self, viseme: Option<crate::mouths::Viseme>) {
+        self.motion.set_viseme(viseme);
+    }
+
+    /// A reading for the mouth to say from now on, at `rate` samples a second, with none of its
+    /// sound yet: it says it as `speech_at` says the sound is heard. Replaces the one before.
+    pub fn speak(&mut self, rate: u32) {
+        self.speech = Some(Speech::new(rate));
+        self.heard = None;
+    }
+
+    /// The reading's next samples, mono, -1 to 1.
+    pub fn speech_samples(&mut self, samples: &[f32]) {
+        if let Some(speech) = &mut self.speech {
+            speech.push(samples);
+        }
+    }
+
+    /// How loud the reading is, in dB a frame of `frame_ms`: libwaifu's LOUDNESS, all of it so far.
+    /// Where it is given, the samples need not be.
+    pub fn speech_loudness(&mut self, db: &[f32], frame_ms: u32) {
+        if let Some(speech) = &mut self.speech {
+            speech.set_loudness(db, frame_ms);
+        }
+    }
+
+    /// The shapes its voice said, every one from its start, a frame of `frame_ms` each.
+    pub fn speech_visemes(&mut self, visemes: &[i32], frame_ms: u32) {
+        if let Some(speech) = &mut self.speech {
+            speech.set_visemes(visemes, frame_ms);
+        }
+    }
+
+    /// Where in the reading the sound being heard is, in seconds; `None` where none of it is --
+    /// paused, or not begun -- and the mouth is at rest.
+    pub fn speech_at(&mut self, seconds: Option<f64>) {
+        self.heard = seconds.filter(|s| s.is_finite());
+    }
+
+    /// No reading any more: the mouth at rest, and the page's own shape, if it sets one.
+    pub fn silence(&mut self) {
+        if self.speech.take().is_some() {
+            self.motion.set_mouth(None);
+        }
+        self.heard = None;
+    }
+
+    /// The reading the mouth says, if there is one.
+    pub fn speech(&self) -> Option<&Speech> {
+        self.speech.as_ref()
+    }
+
     /// Moves on by `dt` seconds: the drag, the babble, then the motion.
     pub fn step(&mut self, dt: f64) {
         let dt = dt.max(0.0);
@@ -164,6 +223,11 @@ impl Stage {
         let mut controls = self.controls;
         if controls.switches.auto_talk {
             controls.talk_level = controls.talk_level.max(babble(self.clock));
+        }
+        // A reading says the mouth: its shape as open as its sound, where the sound is heard.
+        if let Some(speech) = &self.speech {
+            self.motion
+                .set_mouth(self.heard.and_then(|at| speech.mouth(at)));
         }
         self.motion.step(&self.rig, &controls, self.pointer, dt);
     }

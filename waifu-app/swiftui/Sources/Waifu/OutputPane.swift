@@ -21,7 +21,9 @@
 // and everything else in a strip under it.
 
 import AVFoundation
+import CoreAudio
 import SwiftUI
+import WaifuKit
 
 struct OutputPane: View {
     @Bindable var session: Session
@@ -42,6 +44,10 @@ struct OutputPane: View {
                     .foregroundStyle(note.bad ? .red : .secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if session.tab.kind == "speech", session.model?.voice?.visemes == true {
+                SpeakerBox(session: session)
             }
 
             Group {
@@ -679,6 +685,37 @@ struct Thumbnail: View {
     }
 }
 
+/// The drawing on the waifu2d page, saying what the voice reads -- its mouth moving to the shapes
+/// the voice says, as the reading is heard, streamed or played again from below. Where no drawing
+/// is open yet, the place to open one.
+struct SpeakerBox: View {
+    var session: Session
+
+    static let height: CGFloat = 300
+
+    var body: some View {
+        Group {
+            if let rig = session.rig.rig {
+                RigView(rig: rig, stage: session.rig, lipsync: session.lipsync)
+                    .id(session.rig.file)
+                    .background(Checkerboard())
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .help("The drawing on the waifu2d page, saying what is read. Its settings are that page's.")
+            } else {
+                VStack(spacing: 8) {
+                    PSDDrop(stage: session.rig)
+                    Text("A drawing in layers to say it: the mouth moves to the voice's mouth shapes as it is heard.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: 520)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: Self.height)
+    }
+}
+
 struct ClipFrame: View {
     var session: Session
     var job: Job
@@ -686,7 +723,7 @@ struct ClipFrame: View {
     var body: some View {
         VStack(spacing: 16) {
             if let bytes = session.outputs[job.id] {
-                Player(bytes: bytes).id(job.id)
+                Player(bytes: bytes, spoken: session.spoken[job.id], lipsync: session.lipsync).id(job.id)
             } else {
                 ProgressView()
             }
@@ -787,11 +824,17 @@ func clock(_ seconds: Double) -> String {
 /// finishing, or a click on an old one in the strip, is not a reason to make a sound.
 struct Player: View {
     var bytes: Data
+    /// The reading the clip is, and what to say it through while it plays: the drawing on the
+    /// text-to-speech page.
+    var spoken: Spoken? = nil
+    var lipsync: Lipsync? = nil
 
     @State private var player: AVAudioPlayer?
     @State private var playing = false
     @State private var at = 0.0
     @State private var broken = false
+    /// The reading the drawing's mouth is saying, while it plays.
+    @State private var mouth: Int?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -826,8 +869,12 @@ struct Player: View {
                 }
                 try? await Task.sleep(for: .milliseconds(33))
             }
+            quiet()
         }
-        .onDisappear { player?.stop() }
+        .onDisappear {
+            player?.stop()
+            quiet()
+        }
     }
 
     private func toggle() {
@@ -835,10 +882,67 @@ struct Player: View {
         if player.isPlaying {
             player.pause()
             playing = false
+            quiet()
         } else {
             if player.currentTime >= player.duration - 0.01 { player.currentTime = 0 }
             player.play()
             playing = true
+            if let spoken, let lipsync {
+                let clock = PlayerClock(player: player, latency: PlayerClock.outputLatency())
+                mouth = lipsync.play(
+                    rate: spoken.clip.rate, samples: spoken.clip.samples, visemes: spoken.visemes,
+                    loudness: spoken.loudness
+                ) { clock.seconds }
+            }
         }
+    }
+
+    /// The drawing's mouth at rest again.
+    private func quiet() {
+        if let mouth { lipsync?.stop(mouth) }
+        mouth = nil
+    }
+}
+
+/// Where an AVAudioPlayer is, for the drawing's mouth to read each frame it draws -- on the main
+/// thread, as the player is used.
+private final class PlayerClock: @unchecked Sendable {
+    let player: AVAudioPlayer
+    /// How long after the player hands the device a sample it is heard.
+    let latency: Double
+
+    init(player: AVAudioPlayer, latency: Double) {
+        self.player = player
+        self.latency = latency
+    }
+
+    /// Where the sound coming out of the speakers is: the player's time, less the output's
+    /// latency, so that the mouth moves with what is heard and not with what is sent.
+    var seconds: Double? {
+        player.isPlaying ? max(0, player.currentTime - latency) : nil
+    }
+
+    /// The default output's latency now -- the device's own, a Bluetooth headset's included, its
+    /// safety offset and a buffer of it -- read from Core Audio when a clip starts, for the device
+    /// may have changed. Asked of the device, not of an audio engine made to ask: an engine let go
+    /// before its output node is read leaves the node pointing at nothing.
+    static func outputLatency() -> Double {
+        func property<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope, _ empty: T) -> T? {
+            var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+            var value = empty
+            var size = UInt32(MemoryLayout<T>.size)
+            return AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value) == noErr ? value : nil
+        }
+        let output = kAudioObjectPropertyScopeOutput
+        guard
+            let device = property(
+                AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice,
+                kAudioObjectPropertyScopeGlobal, AudioDeviceID(0)),
+            let rate = property(device, kAudioDevicePropertyNominalSampleRate, output, Float64(0)), rate > 0
+        else { return 0 }
+        let frames = [kAudioDevicePropertyLatency, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyBufferFrameSize]
+            .compactMap { property(device, $0, output, UInt32(0)) }
+            .reduce(0) { $0 + Double($1) }
+        return frames / rate
     }
 }

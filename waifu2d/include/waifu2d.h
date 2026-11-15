@@ -43,6 +43,10 @@ typedef int32_t Waifu2dControl;
 // What it can be told to do once.
 typedef int32_t Waifu2dAction;
 
+// A mouth shape, as libwaifu's text to speech says them: WaifuViseme, number for number.
+// **Provisional**: here to try the mouth shapes waifu2d draws; its design is still to be reviewed.
+typedef int32_t Waifu2dViseme;
+
 // Which API draws.
 typedef int32_t Waifu2dApi;
 
@@ -148,6 +152,26 @@ typedef struct {
 // Nods once.
 #define WAIFU2D_ACTION_NOD 3
 
+#define WAIFU2D_VISEME_A 0
+
+#define WAIFU2D_VISEME_E 1
+
+#define WAIFU2D_VISEME_I 2
+
+#define WAIFU2D_VISEME_O 3
+
+#define WAIFU2D_VISEME_U 4
+
+#define WAIFU2D_VISEME_SCHWA 5
+
+#define WAIFU2D_VISEME_MBP 6
+
+// The drawn mouth, as it is at rest.
+#define WAIFU2D_VISEME_REST 7
+
+// None: the mouth as at rest.
+#define WAIFU2D_VISEME_NONE -1
+
 // Metal on macOS, Direct3D 11 on Windows, Vulkan elsewhere.
 #define WAIFU2D_API_DEFAULT 0
 
@@ -240,6 +264,44 @@ bool waifu2d_stage_pointer_down(Waifu2dStage *stage, float x, float y);
 
 // Lets go of what a press took hold of.
 void waifu2d_stage_pointer_up(Waifu2dStage *stage);
+
+// The mouth shape to make from now on, eased into over about 50 ms; WAIFU2D_VISEME_NONE for the
+// drawn mouth. False for a number this library does not know. **Provisional.**
+bool waifu2d_stage_set_viseme(Waifu2dStage *stage, Waifu2dViseme viseme);
+
+// A reading for the mouth to say from now on, at `sample_rate` samples a second, with none of
+// its sound yet; it replaces the one before. The mouth is as open as the sound is loud, in the
+// shape its voice said, where waifu2d_stage_speech_at says the sound is heard. **Provisional.**
+bool waifu2d_stage_speak(Waifu2dStage *stage, uint32_t sample_rate);
+
+// The reading's next `count` samples, mono, -1 to 1: all of it at once, or a streaming reading's
+// parts as they come. Copied. **Provisional.**
+bool waifu2d_stage_speech_samples(Waifu2dStage *stage, const float *samples, size_t count);
+
+// How loud the reading is, in dB, a frame of `frame_ms` each, frame i the milliseconds
+// [i, i + 1) * frame_ms -- libwaifu's TEXT_TO_SPEECH_LOUDNESS, as it hands it over: all of it so
+// far, again as more is settled. Once it is given the samples are not listened to, and need not
+// be handed over; without it the loudness is heard from them. Copied. **Provisional.**
+bool waifu2d_stage_speech_loudness(Waifu2dStage *stage,
+                                   const float *db,
+                                   size_t count,
+                                   uint32_t frame_ms);
+
+// The shapes the reading's voice said -- WaifuViseme's numbers, as libwaifu's text to speech
+// hands them over -- every one from its start, a frame of `frame_ms` each: all of them so far,
+// again as more are settled. **Provisional.**
+bool waifu2d_stage_speech_visemes(Waifu2dStage *stage,
+                                  const int32_t *visemes,
+                                  size_t count,
+                                  uint32_t frame_ms);
+
+// Where in the reading the sound being heard is, in seconds -- what the speakers play now, their
+// latency taken off. Negative, or NaN, where none of it is: paused, or not begun, and the mouth
+// at rest. **Provisional.**
+void waifu2d_stage_speech_at(Waifu2dStage *stage, double seconds);
+
+// No reading any more: the mouth at rest. **Provisional.**
+void waifu2d_stage_silence(Waifu2dStage *stage);
 
 // Moves on by `dt` seconds, at most 0.05 of them counted: 0 for the first frame.
 void waifu2d_stage_step(Waifu2dStage *stage, double dt);

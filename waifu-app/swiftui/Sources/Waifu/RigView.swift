@@ -28,13 +28,19 @@ import WaifuKit
 struct RigView: NSViewRepresentable {
     var rig: Waifu2D.Rig
     var stage: RigStage
+    /// Where the mouth's shapes come from, if anywhere but the page's own settings: a reading
+    /// being heard.
+    var lipsync: Lipsync? = nil
 
     func makeNSView(context: Context) -> RigCanvas {
-        RigCanvas(rig: rig, settings: stage)
+        let view = RigCanvas(rig: rig, settings: stage)
+        view.lipsync = lipsync
+        return view
     }
 
     func updateNSView(_ view: RigCanvas, context: Context) {
         view.settings = stage
+        view.lipsync = lipsync
     }
 
     static func dismantleNSView(_ view: RigCanvas, coordinator: ()) {
@@ -47,6 +53,7 @@ struct RigView: NSViewRepresentable {
 @MainActor
 final class RigCanvas: NSView {
     var settings: RigStage
+    var lipsync: Lipsync?
     private let stage: Waifu2D.Stage?
     private var renderer: Waifu2D.Renderer?
     private var link: CADisplayLink?
@@ -109,6 +116,7 @@ final class RigCanvas: NSView {
         let now = link.timestamp
         let dt = last.map { now - $0 } ?? 0
         last = now
+        talked = settings.talking ? talked + dt : 0
         apply(settings, to: stage)
         stage.setViewSize(bounds.size)
         stage.step(by: dt)
@@ -137,5 +145,67 @@ final class RigCanvas: NSView {
             blinks = settings.blinks
             stage.act(.blink)
         }
+        if let lipsync {
+            say(lipsync, on: stage)
+        } else if settings.talking {
+            stage.setViseme(Self.spoken(at: talked))
+        } else {
+            stage.setViseme(settings.viseme == .rest ? nil : settings.viseme)
+        }
+    }
+
+    /// Seconds the mouth has talked for, while it talks.
+    private var talked = 0.0
+
+    /// The reading the stage has been handed, and how much of it.
+    private var saying: Lipsync.Had?
+
+    /// What is new of the reading being heard, handed to the stage, and where the sound is; at
+    /// rest between readings.
+    private func say(_ lipsync: Lipsync, on stage: Waifu2D.Stage) {
+        guard let news = lipsync.news(had: saying) else {
+            if saying != nil {
+                stage.silence()
+                saying = nil
+            }
+            return
+        }
+        if news.id != saying?.id {
+            stage.speak(rate: news.rate)
+            saying = Lipsync.Had(id: news.id)
+        }
+        if !news.samples.isEmpty {
+            stage.speechSamples(news.samples)
+            saying?.samples += news.samples.count
+        }
+        if let visemes = news.visemes {
+            stage.speechVisemes(visemes.values, frameMilliseconds: visemes.frameMilliseconds)
+            saying?.visemes = news.visemesSeen
+        }
+        if let loudness = news.loudness {
+            stage.speechLoudness(loudness.values, frameMilliseconds: loudness.frameMilliseconds)
+            saying?.loudness = news.loudnessSeen
+        }
+        stage.speechAt(news.seconds)
+    }
+
+    /// "こんにちは、わたしはワイフです。まま、パパ。" as text to speech would shape it: a viseme
+    /// and how many 40 ms frames it is held, then a breath.
+    private static let sentence: [(Waifu2D.Viseme, Int)] = [
+        (.o, 3), (.rest, 1), (.i, 2), (.i, 2), (.a, 4), (.rest, 4),
+        (.a, 3), (.a, 2), (.i, 2), (.a, 2), (.a, 3), (.i, 2), (.u, 2), (.schwa, 1), (.e, 2), (.u, 3), (.rest, 6),
+        (.mbp, 2), (.a, 3), (.mbp, 2), (.a, 4), (.rest, 3), (.mbp, 2), (.a, 3), (.mbp, 2), (.a, 4), (.rest, 12),
+    ]
+
+    private static let sentenceFrames = sentence.reduce(0) { $0 + $1.1 }
+
+    /// The sentence's viseme `seconds` into saying it, over and over.
+    private static func spoken(at seconds: Double) -> Waifu2D.Viseme {
+        var frame = Int(seconds / 0.04) % sentenceFrames
+        for (v, n) in sentence {
+            if frame < n { return v }
+            frame -= n
+        }
+        return .rest
     }
 }

@@ -37,6 +37,7 @@
 
 import CWaifu
 import Foundation
+import os
 
 // MARK: - errors
 
@@ -296,10 +297,16 @@ public struct SpeakRequest: Sendable {
     /// Any instruction; nil or "" for the voice's own way.
     public var style: String?
     public var seed: UInt64
+    /// The mouth shapes as well, from a model with a viseme model attached: one without
+    /// not ends the reading with an error.
+    public var visemes: Bool
+    /// How loud the audio is from moment to moment as well: any voice has it. ABI 6.2.
+    public var loudness: Bool
 
     public init(
         text: String, reference: AudioClip? = nil, referenceTranscript: String? = nil, speed: Double,
-        temperature: Double, style: String? = nil, seed: UInt64
+        temperature: Double, style: String? = nil, seed: UInt64, visemes: Bool = false,
+        loudness: Bool = false
     ) {
         self.text = text
         self.reference = reference
@@ -308,6 +315,8 @@ public struct SpeakRequest: Sendable {
         self.temperature = temperature
         self.style = style
         self.seed = seed
+        self.visemes = visemes
+        self.loudness = loudness
     }
 }
 
@@ -641,6 +650,77 @@ public typealias ProgressHandler = @Sendable (JobProgress) -> Void
 /// A part of a streaming reading, in order, on the task's reader thread as soon as it is made.
 public typealias AudioPartHandler = @Sendable (AudioClip) -> Void
 
+/// A reading's mouth shapes: a `WaifuViseme` -- A E I O U, @, MBP, REST, 0 to 7 -- for each
+/// `frameMilliseconds` of its audio, frame i the milliseconds [i, i + 1) * frameMilliseconds of it.
+/// Since ABI 6.1, from a model with `.textToSpeechVisemes` attached.
+public struct Visemes: Sendable, Equatable {
+    public var values: [Int32]
+    public var frameMilliseconds: Int
+
+    public init(values: [Int32], frameMilliseconds: Int) {
+        self.values = values
+        self.frameMilliseconds = frameMilliseconds
+    }
+
+    /// The shape `seconds` into the audio; nil before it or past the last frame known.
+    public func at(_ seconds: Double) -> Int32? {
+        guard seconds >= 0, frameMilliseconds > 0 else { return nil }
+        let i = Int(seconds * 1000 / Double(frameMilliseconds))
+        return i < values.count ? values[i] : nil
+    }
+}
+
+/// The visemes of a streaming reading settled so far, after each part: every one from its start,
+/// never past the audio handed over; and once more, all of them, when it ends well.
+public typealias VisemesHandler = @Sendable (Visemes) -> Void
+
+/// How loud a reading is from moment to moment: the dBFS of each `frameMilliseconds` of its audio,
+/// framed as the visemes are -- the RMS of the 20 ms about the frame's middle, a full-scale sine's
+/// being -3, and never under -100. ABI 6.2.
+public struct Loudness: Sendable, Equatable {
+    public var values: [Float]
+    public var frameMilliseconds: Int
+
+    public init(values: [Float], frameMilliseconds: Int) {
+        self.values = values
+        self.frameMilliseconds = frameMilliseconds
+    }
+
+    /// How loud it is `seconds` into the audio; nil before it or past the last frame known.
+    public func at(_ seconds: Double) -> Float? {
+        guard seconds >= 0, frameMilliseconds > 0 else { return nil }
+        let i = Int(seconds * 1000 / Double(frameMilliseconds))
+        return i < values.count ? values[i] : nil
+    }
+}
+
+/// The loudness of a streaming reading settled so far, after each part, as `VisemesHandler`.
+public typealias LoudnessHandler = @Sendable (Loudness) -> Void
+
+/// What a model is attached to the model a pipeline has loaded as: libwaifu's
+/// WaifuAttachedModelType. ABI 6.1.
+public enum AttachedModelType: Sendable, Hashable {
+    /// Which mouth shape goes with each frame of a reading: `cosyvoice3-visemes`, attached to
+    /// CosyVoice3 on a text-to-speech pipeline, streaming or not.
+    case textToSpeechVisemes
+
+    var c: WaifuAttachedModelType {
+        switch self {
+        case .textToSpeechVisemes: WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES
+        }
+    }
+}
+
+/// A reading and, where they were asked for, its mouth shapes and its loudness.
+public struct Reading: Sendable, Equatable {
+    public var audio: AudioClip
+    public var visemes: Visemes?
+    public var loudness: Loudness?
+}
+
+/// What is read of a task at each of its streaming parts, on its reader thread.
+typealias PartReader = @Sendable (OpaquePointer) -> Void
+
 /// A pointer the library handed over, moved to the thread that reads it: a task may be read,
 /// waited on and cancelled from any thread.
 struct TaskPointer: @unchecked Sendable {
@@ -701,6 +781,36 @@ enum TaskRead {
         guard waifu_task_get_image_attribute(task, attribute, &image) else { return nil }
         let rgb = image.rgb.map { Array(UnsafeBufferPointer(start: $0, count: image.len)) } ?? []
         return RGBImage(width: Int(image.width), height: Int(image.height), rgb: rgb)
+    }
+
+    static func ints(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> [Int32]? {
+        var count = 0
+        guard let values = waifu_task_get_int_array_attribute(task, attribute, &count) else { return nil }
+        return Array(UnsafeBufferPointer(start: values, count: count))
+    }
+
+    static func floats(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> [Float]? {
+        var count = 0
+        guard let values = waifu_task_get_float_array_attribute(task, attribute, &count) else { return nil }
+        return Array(UnsafeBufferPointer(start: values, count: count))
+    }
+
+    /// A reading's loudness, from the attribute that holds it and the one that says how long a
+    /// frame is.
+    static func loudness(
+        _ task: OpaquePointer, _ attribute: WaifuTaskAttribute, frame: WaifuTaskAttribute
+    ) -> Loudness? {
+        guard let values = floats(task, attribute), let ms = int(task, frame), ms > 0 else { return nil }
+        return Loudness(values: values, frameMilliseconds: Int(ms))
+    }
+
+    /// A reading's visemes, from the attribute that holds them and the one that says how long a
+    /// frame is.
+    static func visemes(
+        _ task: OpaquePointer, _ attribute: WaifuTaskAttribute, frame: WaifuTaskAttribute
+    ) -> Visemes? {
+        guard let values = ints(task, attribute), let ms = int(task, frame), ms > 0 else { return nil }
+        return Visemes(values: values, frameMilliseconds: Int(ms))
     }
 
     static func audio(_ task: OpaquePointer, _ attribute: WaifuTaskAttribute) -> AudioClip? {
@@ -785,7 +895,7 @@ private func readToTheEnd<T>(
     _ task: OpaquePointer,
     handle: TaskHandle,
     progress: ProgressHandler?,
-    heard: AudioPartHandler?,
+    parts: PartReader?,
     output: (OpaquePointer) throws -> T
 ) -> Result<T?, Error> {
     while true {
@@ -793,9 +903,7 @@ private func readToTheEnd<T>(
         case WAIFU_EVENT_PROGRESS:
             if let progress, let said = JobProgress(task: task) { progress(said) }
         case WAIFU_EVENT_AUDIO_PART:
-            if let heard, let part = TaskRead.audio(task, WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART) {
-                heard(part)
-            }
+            parts?(task)
         case WAIFU_EVENT_END:
             // Copied out before it is freed, which takes every pointer it handed out with it.
             let ended: Result<T?, Error>
@@ -819,7 +927,7 @@ private func readToTheEnd<T>(
 /// out of a task that ended well, on the task's reader thread.
 func runTask<T: Sendable>(
     progress: ProgressHandler?,
-    heard: AudioPartHandler? = nil,
+    parts: PartReader? = nil,
     output: @escaping @Sendable (OpaquePointer) throws -> T,
     start: () throws -> OpaquePointer
 ) async throws -> T? {
@@ -840,7 +948,7 @@ func runTask<T: Sendable>(
             let reader = Thread {
                 continuation.resume(
                     with: readToTheEnd(
-                        pointer.raw, handle: handle, progress: progress, heard: heard, output: output))
+                        pointer.raw, handle: handle, progress: progress, parts: parts, output: output))
             }
             reader.name = "waifu-task"
             reader.start()
@@ -1055,6 +1163,9 @@ public enum Capability: Sendable {
     case textToSpeechWithStyle
     /// The manner as well as the voice.
     case voiceConversionOfStyle
+    /// Takes a viseme model attached to it -- `AttachedModelType.textToSpeechVisemes` -- and with
+    /// one says the mouth shapes of what it reads: CosyVoice3. ABI 6.1.
+    case attachedTextToSpeechVisemes
 
     var c: WaifuModelAttribute {
         switch self {
@@ -1073,6 +1184,7 @@ public enum Capability: Sendable {
             WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITHOUT_REFERENCE_TRANSCRIPT
         case .textToSpeechWithStyle: WAIFU_MODEL_SUPPORTS_TEXT_TO_SPEECH_WITH_STYLE
         case .voiceConversionOfStyle: WAIFU_MODEL_SUPPORTS_VOICE_CONVERSION_OF_STYLE
+        case .attachedTextToSpeechVisemes: WAIFU_MODEL_SUPPORTS_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES
         }
     }
 }
@@ -1184,11 +1296,11 @@ public final class Pipeline: @unchecked Sendable {
     /// Runs `request` -- built here, and freed as soon as the run has copied it -- to its end.
     private func run<T: Sendable>(
         progress: ProgressHandler?,
-        heard: AudioPartHandler? = nil,
+        parts: PartReader? = nil,
         output: @escaping @Sendable (OpaquePointer) throws -> T,
         request: () throws -> RawRequest
     ) async throws -> T? {
-        try await runTask(progress: progress, heard: heard, output: output) {
+        try await runTask(progress: progress, parts: parts, output: output) {
             let raw = try request()
             return try withExtendedLifetime(raw) { try started(waifu_pipeline_run(handle, raw.handle)) }
         }
@@ -1202,6 +1314,8 @@ public final class Pipeline: @unchecked Sendable {
         let manifest = try await ModelManager.fetchedManifest(model, progress: progress)
         let opened = try Model(manifest: manifest)
         if case .no(let why)? = opened.supports(type.capability) { throw WaifuError.refused(why) }
+        // Whatever goes, what was attached to the model before goes with it.
+        attachments.withLock { $0 = [:] }
         let loaded: Void? = try await runTask(progress: progress, output: { _ in () }) {
             // The call copies the manifest: the model may go as soon as it has returned.
             try withExtendedLifetime(opened) { try started(waifu_pipeline_load_model(handle, opened.handle)) }
@@ -1210,9 +1324,38 @@ public final class Pipeline: @unchecked Sendable {
     }
 
     public func unload() async throws {
+        attachments.withLock { $0 = [:] }
         let _: Void? = try await runTask(progress: nil, output: { _ in () }) {
             try started(waifu_pipeline_unload_model(handle))
         }
+    }
+
+    /// What is attached to the loaded model now, by what it is attached as: the names it was
+    /// attached by. Emptied by every load and unload, which let what was attached go.
+    private let attachments = OSAllocatedUnfairLock<[AttachedModelType: String]>(initialState: [:])
+
+    /// The model attached to the loaded one as `type`, by the name it was attached by, if any.
+    public func attached(as type: AttachedModelType) -> String? {
+        attachments.withLock { $0[type] }
+    }
+
+    /// Fetches `model` if it has to, as `load` does, and attaches it to the model the pipeline has
+    /// loaded as `type`, replacing what was attached as that. Done at once where it already is.
+    /// It stays until the pipeline's model is unloaded or another is loaded. Throws `refused` where
+    /// the library will not -- a model that does not attach as `type` -- and the task's error where
+    /// the loaded model takes none.
+    public func attach(_ model: String, as type: AttachedModelType, progress: ProgressHandler? = nil) async throws {
+        if attached(as: type) == model { return }
+        let manifest = try await ModelManager.fetchedManifest(model, progress: progress)
+        let opened = try Model(manifest: manifest)
+        let done: Void? = try await runTask(progress: progress, output: { _ in () }) {
+            // No key: each type here has one model without.
+            try withExtendedLifetime(opened) {
+                try started(waifu_pipeline_attach_model(handle, type.c, nil, opened.handle))
+            }
+        }
+        if done == nil { throw CancellationError() }
+        attachments.withLock { $0[type] = model }
     }
 
     /// The image, or nil where it was cancelled.
@@ -1252,16 +1395,40 @@ public final class Pipeline: @unchecked Sendable {
 
     /// The reading, or nil where it was cancelled.
     public func speak(_ request: SpeakRequest, progress: ProgressHandler? = nil) async throws -> AudioClip? {
-        try await run(
+        try await speakReading(request, progress: progress)?.audio
+    }
+
+    /// The reading and, where the request asks for them, its mouth shapes; nil where it was
+    /// cancelled.
+    public func speakReading(_ request: SpeakRequest, progress: ProgressHandler? = nil) async throws -> Reading? {
+        let wantsVisemes = request.visemes
+        let wantsLoudness = request.loudness
+        return try await run(
             progress: progress,
             output: { task in
                 guard let audio = TaskRead.audio(task, WAIFU_TASK_TEXT_TO_SPEECH_AUDIO) else {
                     throw TaskRead.missing("audio")
                 }
-                return audio
+                let visemes =
+                    wantsVisemes
+                    ? TaskRead.visemes(
+                        task, WAIFU_TASK_TEXT_TO_SPEECH_VISEMES, frame: WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS)
+                    : nil
+                let loudness =
+                    wantsLoudness
+                    ? TaskRead.loudness(
+                        task, WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS, frame: WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS)
+                    : nil
+                return Reading(audio: audio, visemes: visemes, loudness: loudness)
             }
         ) {
             let c = try RawRequest(.textToSpeech)
+            if request.visemes {
+                try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES, flag: true)
+            }
+            if request.loudness {
+                try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS, flag: true)
+            }
             try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_TEXT, string: request.text)
             if let reference = request.reference {
                 try c.set(WAIFU_REQUEST_TEXT_TO_SPEECH_REFERENCE, audio: reference)
@@ -1285,20 +1452,50 @@ public final class Pipeline: @unchecked Sendable {
     /// made for `.streamingTextToSpeech`. A streaming reading is at the speed it is said, so the
     /// request's speed is not read; it is a reading of its own, not the samples `speak` makes of the
     /// same request. The parts come in order, on one thread, and all of them before this returns.
+    /// Where the request asks for visemes, `settled` is handed those settled after each part --
+    /// heard first -- and all of them once more at the end; where it asks for the loudness, `loud`
+    /// is handed it in the same way.
     public func speakStreaming(
-        _ request: SpeakRequest, progress: ProgressHandler? = nil, heard: @escaping AudioPartHandler
+        _ request: SpeakRequest, progress: ProgressHandler? = nil, heard: @escaping AudioPartHandler,
+        settled: VisemesHandler? = nil, loud: LoudnessHandler? = nil
     ) async throws -> AudioClip? {
-        try await run(
+        let settled = request.visemes ? settled : nil
+        let loud = request.loudness ? loud : nil
+        let visemes = { (task: OpaquePointer) in
+            TaskRead.visemes(
+                task, WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES,
+                frame: WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS)
+        }
+        let loudness = { (task: OpaquePointer) in
+            TaskRead.loudness(
+                task, WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS,
+                frame: WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS)
+        }
+        return try await run(
             progress: progress,
-            heard: heard,
+            parts: { task in
+                if let part = TaskRead.audio(task, WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART) {
+                    heard(part)
+                }
+                if let settled, let so = visemes(task) { settled(so) }
+                if let loud, let so = loudness(task) { loud(so) }
+            },
             output: { task in
                 guard let audio = TaskRead.audio(task, WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO) else {
                     throw TaskRead.missing("audio")
                 }
+                if let settled, let all = visemes(task) { settled(all) }
+                if let loud, let all = loudness(task) { loud(all) }
                 return audio
             }
         ) {
             let c = try RawRequest(.streamingTextToSpeech)
+            if request.visemes {
+                try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES, flag: true)
+            }
+            if request.loudness {
+                try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS, flag: true)
+            }
             try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEXT, string: request.text)
             if let reference = request.reference {
                 try c.set(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_REFERENCE, audio: reference)
@@ -1436,7 +1633,15 @@ public enum ModelManager {
     /// published model that is not all here. What a load is handed.
     static func fetchedManifest(_ model: String, progress: ProgressHandler?) async throws -> String {
         if model == tones || FileManager.default.fileExists(atPath: model) { return model }
-        if try !isCached(model) { try await fetch(model, progress: progress) }
+        // A model published but listed nowhere -- a viseme model, attached to a voice -- is not in
+        // the catalogue to say whether it is here: fetching one that is finishes at once.
+        let here: Bool
+        do {
+            here = try isCached(model)
+        } catch WaifuError.unknownModel {
+            here = false
+        }
+        if !here { try await fetch(model, progress: progress) }
         return try manifestPath(model)
     }
 

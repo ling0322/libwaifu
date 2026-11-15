@@ -135,6 +135,12 @@ public enum Waifu2D {
         }
     }
 
+    /// A mouth shape, as libwaifu's text to speech says them, number for number. Provisional: the
+    /// mouth shapes are an experiment.
+    public enum Viseme: Int32, CaseIterable, Sendable {
+        case a = 0, e, i, o, u, schwa, mbp, rest
+    }
+
     /// A rig moving. Used from one thread at a time.
     public final class Stage {
         let handle: OpaquePointer
@@ -160,6 +166,47 @@ public enum Waifu2D {
 
         public func act(_ action: Action) {
             _ = waifu2d_stage_act(handle, action.c)
+        }
+
+        /// The mouth shape to make from now on, eased into; nil for the drawn mouth.
+        public func setViseme(_ viseme: Viseme?) {
+            _ = waifu2d_stage_set_viseme(handle, viseme?.rawValue ?? WAIFU2D_VISEME_NONE)
+        }
+
+        /// A reading for the mouth to say from now on, at `rate` samples a second, with none of its
+        /// sound yet: as open as the sound is loud, in the shapes its voice said.
+        public func speak(rate: Int) {
+            _ = waifu2d_stage_speak(handle, UInt32(max(1, rate)))
+        }
+
+        /// The reading's next samples.
+        public func speechSamples(_ samples: ArraySlice<Float>) {
+            samples.withUnsafeBufferPointer { _ = waifu2d_stage_speech_samples(handle, $0.baseAddress, $0.count) }
+        }
+
+        /// How loud it is, in dB, every frame from its start: libwaifu's loudness. Once it is given,
+        /// the samples are not listened to.
+        public func speechLoudness(_ db: [Float], frameMilliseconds: Int) {
+            db.withUnsafeBufferPointer {
+                _ = waifu2d_stage_speech_loudness(handle, $0.baseAddress, $0.count, UInt32(max(1, frameMilliseconds)))
+            }
+        }
+
+        /// The shapes its voice said, every one from its start.
+        public func speechVisemes(_ visemes: [Int32], frameMilliseconds: Int) {
+            visemes.withUnsafeBufferPointer {
+                _ = waifu2d_stage_speech_visemes(handle, $0.baseAddress, $0.count, UInt32(max(1, frameMilliseconds)))
+            }
+        }
+
+        /// Where in the reading the sound being heard is, in seconds; nil where none of it is.
+        public func speechAt(_ seconds: Double?) {
+            waifu2d_stage_speech_at(handle, seconds ?? -1)
+        }
+
+        /// No reading any more: the mouth at rest.
+        public func silence() {
+            waifu2d_stage_silence(handle)
         }
 
         /// The view, in the unit the pointer comes in.

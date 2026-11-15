@@ -79,6 +79,24 @@ final class StreamPlayer: @unchecked Sendable {
         queue.sync { shared.withLock { $0?.buffer.underruns } ?? ranDry }
     }
 
+    /// How far into the reading the sound coming out of the speakers is, in seconds: what has been
+    /// pulled, less what the hardware has yet to play of it. Nil while nothing is playing -- before
+    /// the first part, and once it has played out or been stopped.
+    var heardSeconds: Double? {
+        let delay = latency.withLock { $0 }
+        return queue.sync {
+            let rate = self.rate
+            guard rate > 0 else { return nil }
+            return shared.withLock { shared -> Double? in
+                guard let shared, !shared.said else { return nil }
+                return max(0, Double(shared.buffer.played) / Double(rate) - delay)
+            }
+        }
+    }
+
+    /// The output's latency, read when the engine starts: the hardware's and the device's.
+    private let latency = OSAllocatedUnfairLock<Double>(initialState: 0)
+
     /// Why nothing more of the reading could be played -- the audio engine would not start -- or nil
     /// where every part handed over was.
     var couldNotPlay: String? {
@@ -174,6 +192,8 @@ final class StreamPlayer: @unchecked Sendable {
         }
         self.engine = engine
         self.rate = rate
+        let delay = engine.outputNode.presentationLatency
+        latency.withLock { $0 = delay.isFinite ? max(0, delay) : 0 }
         return nil
     }
 

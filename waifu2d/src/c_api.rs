@@ -34,6 +34,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
+use crate::mouths::Viseme;
 use crate::render::{self, Api, Renderer, Surface};
 use crate::rig::Rig;
 use crate::stage::Stage;
@@ -372,6 +373,126 @@ pub unsafe extern "C" fn waifu2d_stage_pointer_up(stage: *mut Waifu2dStage) {
     with_stage(stage, |stage| stage.pointer_up());
 }
 
+/// A mouth shape, as libwaifu's text to speech says them: WaifuViseme, number for number.
+/// **Provisional**: here to try the mouth shapes waifu2d draws; its design is still to be reviewed.
+pub type Waifu2dViseme = i32;
+pub const WAIFU2D_VISEME_A: Waifu2dViseme = 0;
+pub const WAIFU2D_VISEME_E: Waifu2dViseme = 1;
+pub const WAIFU2D_VISEME_I: Waifu2dViseme = 2;
+pub const WAIFU2D_VISEME_O: Waifu2dViseme = 3;
+pub const WAIFU2D_VISEME_U: Waifu2dViseme = 4;
+pub const WAIFU2D_VISEME_SCHWA: Waifu2dViseme = 5;
+pub const WAIFU2D_VISEME_MBP: Waifu2dViseme = 6;
+/// The drawn mouth, as it is at rest.
+pub const WAIFU2D_VISEME_REST: Waifu2dViseme = 7;
+/// None: the mouth as at rest.
+pub const WAIFU2D_VISEME_NONE: Waifu2dViseme = -1;
+
+/// The mouth shape to make from now on, eased into over about 50 ms; WAIFU2D_VISEME_NONE for the
+/// drawn mouth. False for a number this library does not know. **Provisional.**
+#[no_mangle]
+pub unsafe extern "C" fn waifu2d_stage_set_viseme(
+    stage: *mut Waifu2dStage,
+    viseme: Waifu2dViseme,
+) -> bool {
+    let shape = match viseme {
+        WAIFU2D_VISEME_NONE => None,
+        other => match Viseme::from_index(other) {
+            Some(v) => Some(v),
+            None => return fail(format!("no viseme {other}"), false),
+        },
+    };
+    with_stage(stage, |stage| stage.set_viseme(shape)).is_some()
+}
+
+/// A reading for the mouth to say from now on, at `sample_rate` samples a second, with none of
+/// its sound yet; it replaces the one before. The mouth is as open as the sound is loud, in the
+/// shape its voice said, where waifu2d_stage_speech_at says the sound is heard. **Provisional.**
+#[no_mangle]
+pub unsafe extern "C" fn waifu2d_stage_speak(stage: *mut Waifu2dStage, sample_rate: u32) -> bool {
+    if sample_rate == 0 {
+        return fail("a sample rate of 0".into(), false);
+    }
+    with_stage(stage, |stage| stage.speak(sample_rate)).is_some()
+}
+
+/// The reading's next `count` samples, mono, -1 to 1: all of it at once, or a streaming reading's
+/// parts as they come. Copied. **Provisional.**
+#[no_mangle]
+pub unsafe extern "C" fn waifu2d_stage_speech_samples(
+    stage: *mut Waifu2dStage,
+    samples: *const f32,
+    count: usize,
+) -> bool {
+    if samples.is_null() && count > 0 {
+        return fail("samples is NULL".into(), false);
+    }
+    let samples = if count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(samples, count)
+    };
+    with_stage(stage, |stage| stage.speech_samples(samples)).is_some()
+}
+
+/// How loud the reading is, in dB, a frame of `frame_ms` each, frame i the milliseconds
+/// [i, i + 1) * frame_ms -- libwaifu's TEXT_TO_SPEECH_LOUDNESS, as it hands it over: all of it so
+/// far, again as more is settled. Once it is given the samples are not listened to, and need not
+/// be handed over; without it the loudness is heard from them. Copied. **Provisional.**
+#[no_mangle]
+pub unsafe extern "C" fn waifu2d_stage_speech_loudness(
+    stage: *mut Waifu2dStage,
+    db: *const f32,
+    count: usize,
+    frame_ms: u32,
+) -> bool {
+    if (db.is_null() && count > 0) || frame_ms == 0 {
+        return fail("db is NULL, or a frame of 0 ms".into(), false);
+    }
+    let db = if count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(db, count)
+    };
+    with_stage(stage, |stage| stage.speech_loudness(db, frame_ms)).is_some()
+}
+
+/// The shapes the reading's voice said -- WaifuViseme's numbers, as libwaifu's text to speech
+/// hands them over -- every one from its start, a frame of `frame_ms` each: all of them so far,
+/// again as more are settled. **Provisional.**
+#[no_mangle]
+pub unsafe extern "C" fn waifu2d_stage_speech_visemes(
+    stage: *mut Waifu2dStage,
+    visemes: *const i32,
+    count: usize,
+    frame_ms: u32,
+) -> bool {
+    if (visemes.is_null() && count > 0) || frame_ms == 0 {
+        return fail("visemes is NULL, or a frame of 0 ms".into(), false);
+    }
+    let visemes = if count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(visemes, count)
+    };
+    with_stage(stage, |stage| stage.speech_visemes(visemes, frame_ms)).is_some()
+}
+
+/// Where in the reading the sound being heard is, in seconds -- what the speakers play now, their
+/// latency taken off. Negative, or NaN, where none of it is: paused, or not begun, and the mouth
+/// at rest. **Provisional.**
+#[no_mangle]
+pub unsafe extern "C" fn waifu2d_stage_speech_at(stage: *mut Waifu2dStage, seconds: f64) {
+    let at = (seconds.is_finite() && seconds >= 0.0).then_some(seconds);
+    with_stage(stage, |stage| stage.speech_at(at));
+}
+
+/// No reading any more: the mouth at rest. **Provisional.**
+#[no_mangle]
+pub unsafe extern "C" fn waifu2d_stage_silence(stage: *mut Waifu2dStage) {
+    with_stage(stage, |stage| stage.silence());
+}
+
 /// Moves on by `dt` seconds, at most 0.05 of them counted: 0 for the first frame.
 #[no_mangle]
 pub unsafe extern "C" fn waifu2d_stage_step(stage: *mut Waifu2dStage, dt: f64) {
@@ -604,6 +725,9 @@ unsafe fn string_in(pointer: *const c_char, what: &str) -> Result<String, String
 fn rig_out(rig: Result<Rig, crate::Error>) -> *mut Waifu2dRig {
     match rig {
         Ok(rig) => {
+            // The mouth shapes it has no layers for, drawn: hidden until a viseme is set.
+            // Provisional, with waifu2d_stage_set_viseme.
+            let rig = crate::mouths::with_drawn_mouths(rig);
             let notes = rig
                 .notes
                 .iter()

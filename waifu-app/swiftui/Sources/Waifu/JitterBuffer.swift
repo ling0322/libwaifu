@@ -56,6 +56,9 @@ struct JitterBuffer {
     private var fadeOutLength = 0
     /// How many times it ran dry while there was more to come.
     private(set) var underruns = 0
+    /// How many of the reading's samples have been played, from its first: where in it the sound
+    /// is, which the silence of a wait or a run dry does not move on.
+    private(set) var played = 0
 
     init(preroll: Int, fade: Int) {
         self.preroll = max(0, preroll)
@@ -152,6 +155,7 @@ struct JitterBuffer {
             }
             if fadedIn < fade { fadedIn += 1 }
             read += 1
+            played += 1
             at += 1
         }
     }
