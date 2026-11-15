@@ -31,7 +31,7 @@ use std::ffi::{c_char, c_int, c_void};
 /// The major version this crate speaks: a library of another major is refused.
 pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
 /// The minor version this crate was written against: a library of an older minor is refused.
-pub const WAIFU_ABI_VERSION_MINOR: u32 = 1;
+pub const WAIFU_ABI_VERSION_MINOR: u32 = 2;
 pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
 
 // -- enums -----------------------------------------------------------------------------------
@@ -177,6 +177,7 @@ pub const WAIFU_REQUEST_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttribute = 204;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 205;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 206;
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 207;
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS: WaifuRequestAttribute = 208;
 pub const WAIFU_REQUEST_VOICE_CONVERSION_SOURCE: WaifuRequestAttribute = 300;
 pub const WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE: WaifuRequestAttribute = 301;
 pub const WAIFU_REQUEST_VOICE_CONVERSION_STEPS: WaifuRequestAttribute = 302;
@@ -199,6 +200,7 @@ pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_TEMPERATURE: WaifuRequestAttrib
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_STYLE: WaifuRequestAttribute = 604;
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 605;
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 606;
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS: WaifuRequestAttribute = 607;
 
 pub type WaifuTaskAttribute = c_int;
 pub const WAIFU_TASK_STATUS: WaifuTaskAttribute = 1;
@@ -212,6 +214,8 @@ pub const WAIFU_TASK_IMAGE_GENERATION_IMAGE: WaifuTaskAttribute = 100;
 pub const WAIFU_TASK_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 200;
 pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 201;
 pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 202;
+pub const WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS: WaifuTaskAttribute = 203;
+pub const WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS: WaifuTaskAttribute = 204;
 pub const WAIFU_TASK_VOICE_CONVERSION_AUDIO: WaifuTaskAttribute = 300;
 pub const WAIFU_TASK_LAYER_DECOMPOSITION_CANVAS: WaifuTaskAttribute = 400;
 pub const WAIFU_TASK_LAYER_DECOMPOSITION_LAYER_COUNT: WaifuTaskAttribute = 401;
@@ -229,6 +233,8 @@ pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO_PART: WaifuTaskAttribute = 6
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 601;
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 602;
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 603;
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS: WaifuTaskAttribute = 604;
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS: WaifuTaskAttribute = 605;
 
 // -- the four structs ------------------------------------------------------------------------
 
@@ -419,6 +425,11 @@ functions! {
         WaifuTaskAttribute,
         *mut usize
     ) -> *const i32;
+    waifu_task_get_float_array_attribute: fn(
+        *const WaifuTask,
+        WaifuTaskAttribute,
+        *mut usize
+    ) -> *const f32;
 }
 
 /// The functions of the library [`crate::init`] loaded, or why there are none.

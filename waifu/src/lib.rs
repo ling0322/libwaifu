@@ -71,6 +71,7 @@ pub mod indextts;
 pub mod krea2;
 mod layers;
 pub mod log;
+pub mod loudness;
 mod manifest;
 mod mapping;
 pub mod model_info;

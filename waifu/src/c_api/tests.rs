@@ -211,7 +211,7 @@ unsafe fn string_attribute(
 
 #[test]
 fn the_library_says_what_it_is() {
-    assert_eq!(waifu_abi_version(), 6 << 16 | 1);
+    assert_eq!(waifu_abi_version(), 6 << 16 | 2);
     assert_eq!(waifu_abi_version() >> 16, WAIFU_ABI_VERSION_MAJOR);
     assert_eq!(waifu_abi_version() & 0xffff, WAIFU_ABI_VERSION_MINOR);
     assert_eq!(waifu_abi_version(), WAIFU_ABI_VERSION);
@@ -1325,5 +1325,160 @@ fn a_viseme_model_is_attached_to_a_voice_and_never_loaded_as_one() {
         waifu_pipeline_free(pipeline);
         waifu_model_free(tones);
         waifu_model_free(visemes);
+    }
+}
+
+/// A float array attribute, copied out, or None where it is not there.
+unsafe fn floats(task: *const WaifuTask, attribute: WaifuTaskAttribute) -> Option<Vec<f32>> {
+    let mut count = usize::MAX;
+    let values = waifu_task_get_float_array_attribute(task, attribute, &mut count);
+    match values.is_null() {
+        true => {
+            assert_eq!(
+                count,
+                usize::MAX,
+                "*count is touched only where there is an array"
+            );
+            None
+        }
+        false => Some(std::slice::from_raw_parts(values, count).to_vec()),
+    }
+}
+
+#[test]
+fn a_reading_says_how_loud_it_is_whole_and_streamed() {
+    unsafe {
+        for (r#type, ask, loudness, frame_ms, audio_attribute) in [
+            (
+                WAIFU_PIPELINE_TEXT_TO_SPEECH,
+                WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS,
+                WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS,
+                WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS,
+                WAIFU_TASK_TEXT_TO_SPEECH_AUDIO,
+            ),
+            (
+                WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH,
+                WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS,
+                WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS,
+                WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS,
+                WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO,
+            ),
+        ] {
+            let pipeline = a_pipeline(r#type);
+            with_tones(pipeline);
+
+            // Not asked for, not there.
+            let task = run(pipeline, a_speech_request(r#type, c"hello there"));
+            assert_eq!(ended(task).0, WAIFU_OK);
+            assert_eq!(floats(task, loudness), None);
+            let mut ms = 0;
+            assert!(!waifu_task_get_int_attribute(task, frame_ms, &mut ms));
+            waifu_task_free(task);
+
+            // Asked for: a frame each 10 ms of the audio, from any voice.
+            let request = a_speech_request(r#type, c"hello there");
+            assert!(!waifu_request_set_int_attribute(request, ask, 2));
+            set_int(request, ask, 1);
+            let task = run(pipeline, request);
+            assert_eq!(ended(task).0, WAIFU_OK);
+            assert!(waifu_task_get_int_attribute(task, frame_ms, &mut ms));
+            assert_eq!(ms, 10);
+            let (count, rate) = audio(task, audio_attribute).unwrap();
+            let frames = floats(task, loudness).expect("the loudness asked for");
+            assert_eq!(frames.len(), (count * 1000).div_ceil(rate as usize * 10));
+            assert!(
+                frames.iter().all(|&db| (-100.0..=0.0).contains(&db)),
+                "{frames:?}"
+            );
+            // The tones are heard: most of the reading is well over silence.
+            let loud = frames.iter().filter(|&&db| db > -40.0).count();
+            assert!(
+                loud * 2 > frames.len(),
+                "{loud} of {} frames over -40 dBFS",
+                frames.len()
+            );
+            // The other pipeline type's attribute is not this one's.
+            let other = match r#type {
+                WAIFU_PIPELINE_TEXT_TO_SPEECH => WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS,
+                _ => WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS,
+            };
+            assert_eq!(floats(task, other), None);
+            waifu_task_free(task);
+            waifu_pipeline_free(pipeline);
+        }
+        // A NULL task: NULL.
+        let mut count = 0;
+        assert!(waifu_task_get_float_array_attribute(
+            ptr::null(),
+            WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS,
+            &mut count
+        )
+        .is_null());
+    }
+}
+
+#[test]
+fn a_streaming_reading_hands_over_the_loudness_its_parts_settle() {
+    unsafe {
+        let pipeline = a_pipeline(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH);
+        let canceller = (*pipeline).engine.canceller();
+        // What the engine does for a streaming reading: its parts, and the whole at the end.
+        let started = task::Started::new();
+        started.wants_loudness(true);
+        let mut part = started.on_part();
+        let on_audio = started.on_audio();
+        let task = started.task(0, canceller, Some(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH));
+        let attribute = WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS;
+
+        let tone = |n: usize, loud: f32| -> Vec<f32> {
+            (0..n)
+                .map(|i| loud * (i as f32 * 2.0 * std::f32::consts::PI * 600.0 / 24000.0).sin())
+                .collect()
+        };
+        // 1000 samples of 24 kHz, then 1300 a tenth as loud.
+        let (a, b) = (tone(1000, 0.5), tone(1300, 0.05));
+        part(&Sound::new(a.clone(), 24000));
+        part(&Sound::new(b.clone(), 24000));
+        assert_eq!(
+            floats(task, attribute),
+            None,
+            "nothing until a part's event is read"
+        );
+
+        assert_eq!(waifu_task_next_event(task, 0), WAIFU_EVENT_AUDIO_PART);
+        let mut count = 0;
+        let first = waifu_task_get_float_array_attribute(task, attribute, &mut count);
+        // Frame i is settled once its window -- 240 samples, about its middle -- has all come:
+        // i * 240 + 120 + 240 <= 1000, frames 0 to 2.
+        assert_eq!(count, 3);
+        let first_frames = std::slice::from_raw_parts(first, count).to_vec();
+        assert!(
+            first_frames.iter().all(|&db| db > -10.0),
+            "{first_frames:?}"
+        );
+
+        assert_eq!(waifu_task_next_event(task, 0), WAIFU_EVENT_AUDIO_PART);
+        let second = floats(task, attribute).unwrap();
+        // 2300 samples: frames 0 to 8.
+        assert_eq!(second.len(), 9);
+        assert_eq!(&second[..3], first_frames.as_slice());
+        // The quieter part is 20 dB under the louder.
+        assert!((second[2] - second[7]).abs() > 15.0, "{second:?}");
+        // What the first read handed out is still there, and still what it was.
+        assert_eq!(
+            std::slice::from_raw_parts(first, 3),
+            first_frames.as_slice()
+        );
+
+        let mut whole = a.clone();
+        whole.extend(&b);
+        on_audio(engine::Ended::Done(Sound::new(whole.clone(), 24000)));
+        assert_eq!(waifu_task_next_event(task, 0), WAIFU_EVENT_END);
+        // Every frame once it has ended, the last cut at the end: ceil(2300 / 240).
+        let all = floats(task, attribute).unwrap();
+        assert_eq!(all, crate::loudness::Loudness::of(&whole, 24000));
+        assert_eq!(all.len(), 10);
+        waifu_task_free(task);
+        waifu_pipeline_free(pipeline);
     }
 }

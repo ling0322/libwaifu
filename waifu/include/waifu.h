@@ -26,7 +26,9 @@
 // the VISEMES request and task attributes, WaifuViseme, waifu_task_get_int_array_attribute.
 // Revised before any release had it: 204 was SUPPORTS_TEXT_TO_SPEECH_VISEMES, a package that
 // held a viseme model, and there were no attached models.
-#define WAIFU_ABI_VERSION_MINOR 1
+// 6.2: the text-to-speech readings' loudness -- the LOUDNESS request and task attributes,
+// waifu_task_get_float_array_attribute.
+#define WAIFU_ABI_VERSION_MINOR 2
 
 // (major << 16) | minor, as waifu_abi_version says it.
 #define WAIFU_ABI_VERSION ((WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR)
@@ -444,6 +446,10 @@ typedef int32_t WaifuStage;
 // Since 6.1.
 #define WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES 207
 
+// Boolean, how loud the reading is from moment to moment as well, TEXT_TO_SPEECH_LOUDNESS; 0.
+// Any voice. Since 6.2.
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS 208
+
 // Audio, what is said and how; required.
 #define WAIFU_REQUEST_VOICE_CONVERSION_SOURCE 300
 
@@ -512,6 +518,10 @@ typedef int32_t WaifuStage;
 // Since 6.1.
 #define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES 606
 
+// Boolean, as TEXT_TO_SPEECH_LOUDNESS: STREAMING_TEXT_TO_SPEECH_LOUDNESS with each part; 0.
+// Since 6.2.
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS 607
+
 // Nothing before the timeout.
 #define WAIFU_EVENT_NONE 0
 
@@ -559,6 +569,16 @@ typedef int32_t WaifuStage;
 // Int: how many milliseconds a frame of VISEMES holds -- 40 for CosyVoice3, a speech token's.
 // Since 6.1.
 #define WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS 202
+
+// Float array, read with waifu_task_get_float_array_attribute: how loud AUDIO is in each
+// TEXT_TO_SPEECH_LOUDNESS_FRAME_MS of it, frame i being milliseconds [i, i + 1) * FRAME_MS of it,
+// ceil(milliseconds / FRAME_MS) of them: the RMS of the 20 ms about the frame's middle, in dBFS
+// -- a full-scale sine's -3 -- and never under -100; for a request with TEXT_TO_SPEECH_LOUDNESS.
+// Since 6.2.
+#define WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS 203
+
+// Int: how many milliseconds a frame of LOUDNESS holds -- 10. Since 6.2.
+#define WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS 204
 
 // Audio.
 #define WAIFU_TASK_VOICE_CONVERSION_AUDIO 300
@@ -622,6 +642,15 @@ typedef int32_t WaifuStage;
 
 // Int, as TEXT_TO_SPEECH_VISEME_FRAME_MS. Since 6.1.
 #define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS 603
+
+// Float array, as TEXT_TO_SPEECH_LOUDNESS, frame 0 the start of the first part: the frames whose
+// 20 ms the part the last AUDIO_PART event said has completed, from the moment it is said --
+// never past the end of that part, and only ever more of them with each part -- and every frame
+// once the task has ended well. For a request with STREAMING_TEXT_TO_SPEECH_LOUDNESS. Since 6.2.
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS 604
+
+// Int, as TEXT_TO_SPEECH_LOUDNESS_FRAME_MS. Since 6.2.
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS 605
 
 #ifdef __cplusplus
 extern "C" {
@@ -840,6 +869,11 @@ bool waifu_task_get_audio_attribute(const WaifuTask *task,
 // The arrays: a pointer to *count values, valid until waifu_task_free, or NULL and *count
 // untouched where the attribute is not there, as waifu_task_get_int_attribute. Since 6.1.
 const int32_t *waifu_task_get_int_array_attribute(const WaifuTask *task,
+                                                  WaifuTaskAttribute attribute,
+                                                  size_t *count);
+
+// As waifu_task_get_int_array_attribute, for the arrays of floats: a reading's LOUDNESS. Since 6.2.
+const float *waifu_task_get_float_array_attribute(const WaifuTask *task,
                                                   WaifuTaskAttribute attribute,
                                                   size_t *count);
 

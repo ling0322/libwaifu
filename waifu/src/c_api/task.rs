@@ -39,6 +39,7 @@ use super::{
     WAIFU_PIPELINE_TEXT_TO_SPEECH, WAIFU_PIPELINE_VOICE_CONVERSION,
 };
 use crate::engine::{self, Canceller, Ended, JobId, LayerKind, Progress};
+use crate::loudness::{Loudness, FRAME_MS as LOUDNESS_FRAME_MS};
 use crate::speech::Viseme;
 use crate::wav::Sound;
 use crate::Transcript;
@@ -89,6 +90,14 @@ pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 201;
 /// Int: how many milliseconds a frame of VISEMES holds -- 40 for CosyVoice3, a speech token's.
 /// Since 6.1.
 pub const WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 202;
+/// Float array, read with waifu_task_get_float_array_attribute: how loud AUDIO is in each
+/// TEXT_TO_SPEECH_LOUDNESS_FRAME_MS of it, frame i being milliseconds [i, i + 1) * FRAME_MS of it,
+/// ceil(milliseconds / FRAME_MS) of them: the RMS of the 20 ms about the frame's middle, in dBFS
+/// -- a full-scale sine's -3 -- and never under -100; for a request with TEXT_TO_SPEECH_LOUDNESS.
+/// Since 6.2.
+pub const WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS: WaifuTaskAttribute = 203;
+/// Int: how many milliseconds a frame of LOUDNESS holds -- 10. Since 6.2.
+pub const WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS: WaifuTaskAttribute = 204;
 
 /// Audio.
 pub const WAIFU_TASK_VOICE_CONVERSION_AUDIO: WaifuTaskAttribute = 300;
@@ -139,6 +148,13 @@ pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_AUDIO: WaifuTaskAttribute = 601;
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuTaskAttribute = 602;
 /// Int, as TEXT_TO_SPEECH_VISEME_FRAME_MS. Since 6.1.
 pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEME_FRAME_MS: WaifuTaskAttribute = 603;
+/// Float array, as TEXT_TO_SPEECH_LOUDNESS, frame 0 the start of the first part: the frames whose
+/// 20 ms the part the last AUDIO_PART event said has completed, from the moment it is said --
+/// never past the end of that part, and only ever more of them with each part -- and every frame
+/// once the task has ended well. For a request with STREAMING_TEXT_TO_SPEECH_LOUDNESS. Since 6.2.
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS: WaifuTaskAttribute = 604;
+/// Int, as TEXT_TO_SPEECH_LOUDNESS_FRAME_MS. Since 6.2.
+pub const WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS: WaifuTaskAttribute = 605;
 
 /// A progress report, as the PROGRESS_ attributes read it.
 #[derive(Clone, Copy, Debug)]
@@ -185,7 +201,8 @@ struct End {
     output: Output,
 }
 
-/// A part of a streaming reading, and how many of the reading's visemes were settled when it came.
+/// A part of a streaming reading, and how many of the reading's visemes, and of its loudness's
+/// frames, were settled when it came.
 struct Part {
     sound: Sound,
     settled: usize,
@@ -193,6 +210,9 @@ struct Part {
     /// task so that the pointer handed out is: what is not asked for is never copied. Its own
     /// allocation, which moving the Part does not move.
     visemes: Option<Box<[i32]>>,
+    loud_settled: usize,
+    /// Those frames of loudness, as the visemes are.
+    loudness: Option<Box<[f32]>>,
 }
 
 #[derive(Default)]
@@ -207,6 +227,10 @@ struct State {
     visemes: Vec<i32>,
     /// What a frame of them holds, once the first has come.
     viseme_frame_ms: Option<u32>,
+    /// Whether the reading asked for its loudness, and its frames so far: a streaming reading's
+    /// as its parts come, every one once it has ended well.
+    wants_loudness: bool,
+    loudness: Option<Loudness>,
     /// The part the last AUDIO_PART event read said.
     part: Option<usize>,
     end: Option<End>,
@@ -295,15 +319,32 @@ impl Started {
         })
     }
 
+    /// Asks for the reading's loudness, before it is run.
+    pub fn wants_loudness(&self, wants: bool) {
+        self.shared.lock().wants_loudness = wants;
+    }
+
     pub fn on_part(&self) -> engine::OnAudio {
         let shared = Arc::clone(&self.shared);
         Box::new(move |part: &Sound| {
             let mut state = shared.lock();
             let settled = state.visemes.len();
+            let loud_settled = match state.wants_loudness {
+                true => {
+                    let loudness = state
+                        .loudness
+                        .get_or_insert_with(|| Loudness::new(part.rate));
+                    loudness.push(&part.samples);
+                    loudness.frames().len()
+                }
+                false => 0,
+            };
             state.parts.push(Part {
                 sound: part.clone(),
                 settled,
                 visemes: None,
+                loud_settled,
+                loudness: None,
             });
             let index = state.parts.len() - 1;
             drop(state);
@@ -335,7 +376,22 @@ impl Started {
 
     pub fn on_audio(&self) -> engine::OnComplete<Sound> {
         let shared = Arc::clone(&self.shared);
-        Box::new(move |ended| shared.end(ended, Output::Audio))
+        Box::new(move |ended| {
+            // The loudness to its end: a streaming reading's from the parts it has had, which end
+            // to end are the whole, and one read whole's from the whole, before the end is said.
+            if let engine::Ended::Done(sound) = &ended {
+                let mut state = shared.lock();
+                if state.wants_loudness {
+                    let loudness = state.loudness.get_or_insert_with(|| {
+                        let mut whole = Loudness::new(sound.rate);
+                        whole.push(&sound.samples);
+                        whole
+                    });
+                    loudness.finish();
+                }
+            }
+            shared.end(ended, Output::Audio)
+        })
     }
 
     pub fn on_layers(&self) -> engine::OnComplete<engine::Layers> {
@@ -504,10 +560,15 @@ enum Found {
     Rgba(WaifuRgbaImage),
     Audio(WaifuAudio),
     Ints(*const i32, usize),
+    Floats(*const f32, usize),
 }
 
 fn ints_found(values: &[i32]) -> Found {
     Found::Ints(values.as_ptr(), values.len())
+}
+
+fn floats_found(values: &[f32]) -> Found {
+    Found::Floats(values.as_ptr(), values.len())
 }
 
 fn audio_found(sound: &Sound) -> Found {
@@ -574,6 +635,39 @@ impl WaifuTask {
                 }
                 return state.viseme_frame_ms.map(|ms| Found::Int(ms as i64));
             }
+            WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS
+            | WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS => {
+                let streaming = attribute == WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS;
+                let run = match streaming {
+                    true => WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH,
+                    false => WAIFU_PIPELINE_TEXT_TO_SPEECH,
+                };
+                if self.run != Some(run) || !state.wants_loudness {
+                    return None;
+                }
+                return Some(Found::Int(LOUDNESS_FRAME_MS as i64));
+            }
+            WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS => {
+                if self.run != Some(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH)
+                    || !state.wants_loudness
+                {
+                    return None;
+                }
+                if state.end.as_ref().is_some_and(|end| end.code == WAIFU_OK) {
+                    return state.loudness.as_ref().map(|l| floats_found(l.frames()));
+                }
+                let index = state.part?;
+                let State {
+                    parts, loudness, ..
+                } = &mut *state;
+                let frames = loudness.as_ref()?.frames();
+                let part = &mut parts[index];
+                let settled = part.loud_settled;
+                let kept = part
+                    .loudness
+                    .get_or_insert_with(|| frames[..settled].into());
+                return Some(floats_found(kept));
+            }
             WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_VISEMES => {
                 if self.run != Some(WAIFU_PIPELINE_STREAMING_TEXT_TO_SPEECH) {
                     return None;
@@ -631,6 +725,15 @@ impl WaifuTask {
                 state.viseme_frame_ms?;
                 Some(ints_found(&state.visemes))
             }
+            (
+                WAIFU_PIPELINE_TEXT_TO_SPEECH,
+                WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS,
+                Output::Audio(_),
+            ) => state
+                .loudness
+                .as_ref()
+                .filter(|_| state.wants_loudness)
+                .map(|l| floats_found(l.frames())),
             (
                 WAIFU_PIPELINE_SPEECH_TO_TEXT,
                 WAIFU_TASK_SPEECH_TO_TEXT_TEXT,
@@ -814,6 +917,30 @@ pub unsafe extern "C" fn waifu_task_get_int_array_attribute(
             // An empty array is there, and is not NULL.
             match values.is_null() {
                 true => ptr::NonNull::<i32>::dangling().as_ptr(),
+                false => values,
+            }
+        }
+        _ => ptr::null(),
+    }
+}
+
+/// As waifu_task_get_int_array_attribute, for the arrays of floats: a reading's LOUDNESS. Since 6.2.
+#[no_mangle]
+pub unsafe extern "C" fn waifu_task_get_float_array_attribute(
+    task: *const WaifuTask,
+    attribute: WaifuTaskAttribute,
+    count: *mut usize,
+) -> *const f32 {
+    let found = getter(task, attribute, None, None, |found| match found {
+        Found::Floats(values, len) => Some(Some((values, len))),
+        _ => None,
+    });
+    match (count.is_null(), found) {
+        (false, Some((values, len))) => {
+            *count = len;
+            // An empty array is there, and is not NULL.
+            match values.is_null() {
+                true => ptr::NonNull::<f32>::dangling().as_ptr(),
                 false => values,
             }
         }
