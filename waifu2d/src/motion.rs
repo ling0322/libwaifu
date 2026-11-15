@@ -693,6 +693,20 @@ impl Motion {
         let neck_top = a.neck_top as f32;
         let neck_bottom = a.neck_bottom as f32;
         let is_top = part.slot == "topwear";
+        // A layer cut off by the canvas's foot -- a top, or hair, down to the bottom of a
+        // portrait -- would lift off it as the body breathes, the chest swings, the head turns or
+        // the body leans, and show what is behind it in a band along the bottom. Up and down, a
+        // vertex of one moves less the nearer its rest is to the foot, and not at all on it.
+        let foot_y = rig.height as f32;
+        let cut_at_foot = (part.rect.y + part.rect.height) as f32 >= foot_y - 1.0;
+        let foot_reach = reach[1].max(1.0);
+        let footing = |rest_y: f32| -> f32 {
+            if cut_at_foot {
+                smooth32((foot_y - rest_y) / foot_reach)
+            } else {
+                1.0
+            }
+        };
 
         // The mouth's own box, for opening and smiling: its mesh's rest bounds. Moved only while
         // it is open or smiling, so that at rest it is exactly where the Mac has it.
@@ -877,6 +891,10 @@ impl Motion {
                 x += self.hem_lag * edge;
             }
 
+            // Held to the canvas's foot, up and down: everything above, before the pull.
+            let rest_y = part.mesh.rest[i][1];
+            y = rest_y + (y - rest_y) * footing(rest_y);
+
             // A part being pulled: the tip of its strands goes all the way, the root not.
             if grabbed {
                 let gw = match swing {
@@ -889,13 +907,15 @@ impl Motion {
             out[i] = [x, y];
         }
 
-        // The body's lean about its foot, which everything leans with.
+        // The body's lean about its foot, which everything leans with; a layer cut off by the
+        // canvas's foot not lifted off it by the lean either.
         if ab.abs() > 1e-4 {
-            for p in out.iter_mut() {
+            for (p, rest) in out.iter_mut().zip(&part.mesh.rest) {
                 let r = [p[0] - bp[0], p[1] - bp[1]];
+                let y = bp[1] + (r[0] * sb + r[1] * cb);
                 *p = [
                     bp[0] + (r[0] * cb - r[1] * sb),
-                    bp[1] + (r[0] * sb + r[1] * cb),
+                    p[1] + (y - p[1]) * footing(rest[1]),
                 ];
             }
         }

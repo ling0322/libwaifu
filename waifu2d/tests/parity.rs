@@ -97,6 +97,8 @@ fn the_mac_app_moved_the_figure_as_this_does() {
         ..Controls::default()
     };
     let (mut worst, mut compared) = (0f32, 0usize);
+    // Vertices on the foot that the Mac lifted off it.
+    let mut lifted = 0usize;
     for i in 0..240 {
         let step = script(i);
         if step.blink {
@@ -127,6 +129,25 @@ fn the_mac_app_moved_the_figure_as_this_does() {
         let positions = expected["positions"].as_array().unwrap();
         assert_eq!(positions.len(), frame.positions.len() * 2, "step {i}");
         for (k, v) in frame.positions.iter().enumerate() {
+            // Where the Mac lifted a layer cut off by the canvas's foot off that foot, this holds
+            // it down: such a vertex goes no farther up or down than the Mac's, and not at all on
+            // the foot itself.
+            if let Some(rest_y) = held_at_foot(&rig, &frame.offsets, k) {
+                let theirs = positions[k * 2 + 1].as_f64().unwrap() as f32;
+                let (ours, mac) = (v[1] - rest_y, theirs - rest_y);
+                assert!(
+                    ours.abs() <= mac.abs() + 0.01 && ours * mac >= -1e-4,
+                    "step {i}: vertex {k} moved {ours} up or down, the Mac {mac}"
+                );
+                if rest_y >= rig.height as f32 {
+                    lifted += usize::from(mac.abs() > 0.1);
+                    assert_eq!(
+                        v[1], rest_y,
+                        "step {i}: vertex {k} is off the canvas's foot"
+                    );
+                }
+                continue;
+            }
             for (c, value) in v.iter().enumerate() {
                 let theirs = positions[k * 2 + c].as_f64().unwrap() as f32;
                 worst = worst.max((value - theirs).abs());
@@ -149,5 +170,21 @@ fn the_mac_app_moved_the_figure_as_this_does() {
         compared += 1;
     }
     assert_eq!(compared, 7, "every recorded frame compared");
+    assert!(lifted > 0, "the Mac lifted the top off the canvas's foot");
     println!("{compared} frames; the farthest a vertex was from the Mac's: {worst} px");
+}
+
+/// Vertex `k` of a frame's positions, if it is one Motion::deform holds to the canvas's foot and
+/// the Mac did not: of a layer cut off by the foot, as near it as the chest reaches down. Its
+/// rest, down the canvas.
+fn held_at_foot(rig: &Rig, offsets: &[u32], k: usize) -> Option<f32> {
+    let p = offsets
+        .windows(2)
+        .position(|w| (w[0] as usize..w[1] as usize).contains(&k))?;
+    let part = &rig.parts[p];
+    let foot = rig.height as f32;
+    let rest_y = part.mesh.rest[k - offsets[p] as usize][1];
+    let cut = (part.rect.y + part.rect.height) as f32 >= foot - 1.0;
+    let near = foot - rest_y < rig.anchors.chest_reach.height as f32;
+    (cut && near).then_some(rest_y)
 }

@@ -625,7 +625,12 @@ shapes would want them deformed on a grid the artist made, not cross-faded.
   strands, springs, the head turning, the blink), plus the Windows port's mouth, wink, jump and
   grab.
 - `waifu2d/tests/parity.rs`: frames from Rust against frames recorded from the Swift app
-  before it is switched over -- the same fixture, seed and inputs -- to 1e-4 a vertex.
+  before it is switched over -- the same fixture, seed and inputs -- to 1e-4 a vertex. Except
+  where the Mac was wrong: it lifted a layer cut off by the canvas's foot (a top or hair down to
+  the bottom of a portrait) off that foot as she breathed, her chest swung, her head turned or
+  she leaned, and showed a band of what was behind it along the bottom. `Motion::deform` holds
+  such a layer down, less the farther up it a vertex is (to the chest's reach); those vertices
+  are held to moving no farther up or down than the Mac's, and not at all on the foot.
 - `waifu2d/tests/render.rs`: the conformance test above. `Cpu` and `Metal` run here; `D3D11`
   and `Vulkan` where they are available.
 - `waifu2d/tests/c_api.rs`: the header's promises -- NULLs, unknown numbers, the rig outliving
