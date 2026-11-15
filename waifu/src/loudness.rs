@@ -23,7 +23,9 @@
 //! A frame a `FRAME_MS`, frame i the milliseconds [i, i + 1) * FRAME_MS of the audio, as the
 //! visemes are framed; each the RMS of the samples in the `WINDOW_MS` about the frame's middle --
 //! cut at the audio's start and end -- in dBFS, a full-scale sine's being -3, and never under
-//! `FLOOR`. A streaming reading's frames are settled as its parts come, a frame once its window has
+//! `FLOOR`. A time t ms is sample floor(t * rate / 1000), worked out for each frame rather than
+//! stepped by a whole number of samples, so that a rate a frame is not a whole number of samples
+//! of -- IndexTTS's 22,050 Hz, 220.5 to a frame -- keeps to the grid. A streaming reading's frames are settled as its parts come, a frame once its window has
 //! all been heard, so that none is ever past the audio handed over; `finish` settles the rest.
 
 /// How long a frame is: short enough to see the dips between syllables, which last 30 to 60 ms.
@@ -36,8 +38,7 @@ pub const FLOOR: f32 = -100.0;
 /// A reading's loudness, as its samples come.
 #[derive(Clone, Debug)]
 pub struct Loudness {
-    frame: usize,
-    half: usize,
+    rate: u64,
     /// The samples from `kept_from` on: what the frames still to settle reach back to.
     kept: Vec<f32>,
     kept_from: usize,
@@ -49,11 +50,8 @@ pub struct Loudness {
 impl Loudness {
     /// The loudness of a reading at `rate` samples a second.
     pub fn new(rate: u32) -> Loudness {
-        let frame = (rate as usize * FRAME_MS as usize / 1000).max(1);
-        let half = (rate as usize * WINDOW_MS as usize / 2000).max(1);
         Loudness {
-            frame,
-            half,
+            rate: rate.max(1) as u64,
             kept: Vec::new(),
             kept_from: 0,
             heard: 0,
@@ -78,12 +76,12 @@ impl Loudness {
     pub fn push(&mut self, samples: &[f32]) {
         self.kept.extend_from_slice(samples);
         self.heard += samples.len();
-        // Frame i's window ends at its middle and half a window: settled once that has come.
-        while self.middle(self.frames.len()) + self.half <= self.heard {
+        // A frame is settled once all of its window has come.
+        while self.window(self.frames.len()).1 <= self.heard {
             self.settle();
         }
         // What no frame still to settle reaches back to goes.
-        let need = self.middle(self.frames.len()).saturating_sub(self.half);
+        let need = self.window(self.frames.len()).0;
         if need > self.kept_from {
             self.kept.drain(..need - self.kept_from);
             self.kept_from = need;
@@ -93,21 +91,28 @@ impl Loudness {
     /// No more samples: the frames to the end, ceil(milliseconds / FRAME_MS) of them in all, their
     /// windows cut at the end of the audio.
     pub fn finish(&mut self) {
-        let total = self.heard.div_ceil(self.frame);
+        let total = (self.heard as u64 * 1000).div_ceil(self.rate * FRAME_MS as u64) as usize;
         while self.frames.len() < total {
             self.settle();
         }
     }
 
-    fn middle(&self, i: usize) -> usize {
-        i * self.frame + self.frame / 2
+    /// The samples of frame i's window, [from, to): from its middle, (i + 1/2) * FRAME_MS, half
+    /// a window either way, each the sample its time falls in -- before the audio's start, its
+    /// start.
+    fn window(&self, i: usize) -> (usize, usize) {
+        // Twice the milliseconds, to keep the middle whole.
+        let middle = (2 * i as u64 + 1) * FRAME_MS as u64;
+        let from = middle.saturating_sub(WINDOW_MS as u64) * self.rate / 2000;
+        let to = (middle + WINDOW_MS as u64) * self.rate / 2000;
+        (from as usize, to as usize)
     }
 
     /// The next frame, from what is kept of its window.
     fn settle(&mut self) {
-        let middle = self.middle(self.frames.len());
-        let from = middle.saturating_sub(self.half).max(self.kept_from);
-        let to = (middle + self.half).min(self.heard);
+        let (from, to) = self.window(self.frames.len());
+        let from = from.max(self.kept_from);
+        let to = to.min(self.heard);
         let window = &self.kept[from - self.kept_from..to.max(from) - self.kept_from];
         let power = if window.is_empty() {
             0.0
@@ -155,6 +160,39 @@ mod tests {
         assert_eq!(Loudness::of(&vec![0.1; 241], 24000).len(), 2);
         assert_eq!(Loudness::of(&vec![0.1; 240], 24000).len(), 1);
         assert!(Loudness::of(&[], 24000).is_empty());
+    }
+
+    /// 22,050 Hz is 220.5 samples a frame: the frames keep to the 10 ms grid all the same.
+    #[test]
+    fn a_rate_a_frame_is_not_whole_samples_of_keeps_to_the_grid() {
+        let rate = 22_050;
+        assert_eq!(
+            Loudness::of(&vec![0.1; 22_050], rate).len(),
+            100,
+            "one second"
+        );
+        assert_eq!(Loudness::of(&vec![0.1; 22_051], rate).len(), 101);
+        assert_eq!(
+            Loudness::of(&vec![0.1; 2_205_000], rate).len(),
+            10_000,
+            "100 seconds"
+        );
+        // A click at 99.995 s, frame 9999's middle, is heard in frame 9999 and its neighbours,
+        // not a frame off.
+        let mut samples = vec![0.0; 2_205_000];
+        samples[(99.995 * rate as f64) as usize] = 1.0;
+        let frames = Loudness::of(&samples, rate);
+        assert!(frames[9999] > FLOOR);
+        assert_eq!(frames[9997], FLOOR);
+        // Streamed, the same.
+        let samples = sine(1.3, 0.3, rate);
+        let whole = Loudness::of(&samples, rate);
+        let mut parts = Loudness::new(rate);
+        for part in samples.chunks(1001) {
+            parts.push(part);
+        }
+        parts.finish();
+        assert_eq!(parts.frames(), whole.as_slice());
     }
 
     #[test]
