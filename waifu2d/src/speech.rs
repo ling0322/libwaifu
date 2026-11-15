@@ -33,10 +33,10 @@
 
 use crate::mouths::Viseme;
 
-/// How much of a second a frame of the loudness heard from the samples is, and how much of one
-/// each is heard over: libwaifu's.
-const HOP: f64 = 0.010;
-const WINDOW: f64 = 0.020;
+/// How many milliseconds a frame of the loudness heard from the samples is, and how many of them
+/// each is heard over, about its middle: libwaifu's.
+const HOP_MS: u64 = 10;
+const WINDOW_MS: u64 = 20;
 /// How far ahead of the sound the mouth reads it: it is eased into its shapes over about 50 ms,
 /// and a mouth seen to move a little before it is heard reads as in time, one after as late.
 pub const LEAD: f64 = 0.040;
@@ -48,7 +48,12 @@ const OPEN_DB: f32 = 8.0;
 #[derive(Clone, Debug, Default)]
 pub struct Speech {
     rate: u32,
-    samples: Vec<f32>,
+    /// How many samples it has been handed, all told.
+    heard: usize,
+    /// The samples from `kept_from` on: what the frames still to hear reach back to, no more --
+    /// and none once the loudness is given.
+    kept: Vec<f32>,
+    kept_from: usize,
     /// The loudness, a frame of `step` seconds at a time, in dB: every frame whose window has been
     /// heard.
     loudness: Vec<f32>,
@@ -66,7 +71,7 @@ impl Speech {
         Speech {
             rate: rate.max(1),
             loudest: f32::MIN,
-            step: HOP,
+            step: HOP_MS as f64 / 1000.0,
             frame: 0.04,
             ..Speech::default()
         }
@@ -78,32 +83,56 @@ impl Speech {
 
     /// How many samples it has been handed.
     pub fn len(&self) -> usize {
-        self.samples.len()
+        self.heard
     }
 
     pub fn is_empty(&self) -> bool {
-        self.samples.is_empty()
+        self.heard == 0
+    }
+
+    /// How many of its samples it is keeping: no more than the frames still to hear reach back to.
+    pub fn kept(&self) -> usize {
+        self.kept.len()
+    }
+
+    /// The samples of frame i's window, [from, to): from its middle, (i + 1/2) * HOP_MS, half a
+    /// window either way, each the sample its time falls in -- worked out for each frame, so that a
+    /// rate a frame is not whole samples of keeps to the grid.
+    fn window(&self, i: usize) -> (usize, usize) {
+        let rate = self.rate as u64;
+        // Twice the milliseconds, to keep the middle whole.
+        let middle = (2 * i as u64 + 1) * HOP_MS;
+        let from = middle.saturating_sub(WINDOW_MS) * rate / 2000;
+        let to = (middle + WINDOW_MS) * rate / 2000;
+        (from as usize, to as usize)
     }
 
     /// The reading's next samples, mono, -1 to 1: a streaming reading's parts as they come. The
     /// loudness is heard from them unless it has been handed over.
     pub fn push(&mut self, samples: &[f32]) {
-        self.samples.extend_from_slice(samples);
+        self.heard += samples.len();
         if self.given {
             return;
         }
-        let hop = (self.rate as f64 * HOP).round().max(1.0) as usize;
-        let half = (self.rate as f64 * WINDOW / 2.0).round().max(1.0) as usize;
+        self.kept.extend_from_slice(samples);
         // Frame i is heard over the window about its middle, once all of that has come.
-        while self.loudness.len() * hop + hop / 2 + half <= self.samples.len() {
-            let centre = self.loudness.len() * hop + hop / 2;
-            let from = centre.saturating_sub(half);
-            let to = (centre + half).min(self.samples.len());
-            let s = &self.samples[from..to];
+        loop {
+            let (from, to) = self.window(self.loudness.len());
+            if to > self.heard {
+                break;
+            }
+            let s = &self.kept[from.max(self.kept_from) - self.kept_from..to - self.kept_from];
             let power = s.iter().map(|v| v * v).sum::<f32>() / s.len().max(1) as f32;
             let db = 10.0 * (power + 1e-10).log10();
             self.loudest = self.loudest.max(db);
             self.loudness.push(db);
+        }
+        // What no frame still to hear reaches back to goes.
+        let need = self.window(self.loudness.len()).0;
+        if need > self.kept_from {
+            self.kept
+                .drain(..(need - self.kept_from).min(self.kept.len()));
+            self.kept_from = need;
         }
     }
 
@@ -115,6 +144,7 @@ impl Speech {
         self.step = frame_ms.max(1) as f64 / 1000.0;
         self.given = true;
         self.loudest = db.iter().copied().fold(f32::MIN, f32::max);
+        self.kept = Vec::new();
     }
 
     /// The shapes the voice said, every one from the reading's start, a frame of `frame_ms` each:

@@ -37,9 +37,12 @@ public enum Waifu2D {
         Failure(message: waifu2d_last_error().map { String(cString: $0) } ?? "libwaifu2d refused")
     }
 
-    /// The version the library was built with, and whether it is one this was written for.
+    /// The version the library was built with, and whether it is one this was written for: the
+    /// same major, and the header's minor or a later one, which has every function this calls.
     public static var abiVersion: UInt32 { waifu2d_abi_version() }
-    public static var isCompatible: Bool { abiVersion >> 16 == UInt32(WAIFU2D_ABI_VERSION_MAJOR) }
+    public static var isCompatible: Bool {
+        abiVersion >> 16 == UInt32(WAIFU2D_ABI_VERSION_MAJOR) && abiVersion & 0xFFFF >= UInt32(WAIFU2D_ABI_VERSION_MINOR)
+    }
 
     /// A drawing in layers, read and rigged. Never changed, so it may be handed between threads.
     public final class Rig: @unchecked Sendable {

@@ -81,12 +81,51 @@ fn the_loudness_handed_over_opens_it_as_the_one_heard_does() {
     assert!(given.openness(0.5).is_none(), "past the last frame");
 }
 
+/// A long stream, a part at a time: what is kept of it stays a window's worth, and it is heard as
+/// the same stream handed over whole is; at 22,050 Hz, 220.5 samples a frame, it keeps to the
+/// 10 ms grid.
+#[test]
+fn a_long_stream_is_heard_without_keeping_it_all() {
+    let rate = 22_050;
+    let samples: Vec<f32> = (0..rate as usize * 60)
+        .map(|i| {
+            // Syllables: five a second, loud and quiet.
+            let loud = if (i * 10 / rate as usize) % 2 == 0 {
+                0.5
+            } else {
+                0.005
+            };
+            loud * (i as f32 * 2.0 * std::f32::consts::PI * 220.0 / rate as f32).sin()
+        })
+        .collect();
+    let mut whole = Speech::new(rate);
+    whole.push(&samples);
+    let mut parts = Speech::new(rate);
+    for part in samples.chunks(1001) {
+        parts.push(part);
+        assert!(
+            parts.kept() <= 2 * rate as usize / 100 + 1001,
+            "{} kept",
+            parts.kept()
+        );
+    }
+    assert_eq!(parts.len(), samples.len());
+    for at in [0.05, 0.15, 30.05, 30.15, 59.85] {
+        assert_eq!(parts.openness(at), whole.openness(at), "at {at}");
+    }
+    // A minute is 6000 frames, the last few still waiting on a window past the end.
+    assert!(whole.openness(59.98).is_some() && whole.openness(60.0).is_none());
+    assert!(whole.openness(59.95).unwrap() < 0.05, "a quiet syllable");
+    assert!(whole.openness(59.85).unwrap() > 0.95, "a loud one");
+}
+
 #[test]
 fn once_the_loudness_is_given_the_samples_are_not_listened_to() {
     let mut speech = Speech::new(RATE);
     speech.set_loudness(&[-9.0; 10], 10);
-    // Silence, which would shut it, were it heard.
+    // Silence, which would shut it, were it heard -- and is not kept.
     speech.push(&vec![0.0; RATE as usize]);
+    assert_eq!(speech.kept(), 0);
     assert!(speech.openness(0.05).unwrap() > 0.95);
     assert!(speech.openness(0.2).is_none());
 }

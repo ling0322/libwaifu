@@ -47,7 +47,11 @@ pub const WAIFU2D_ABI_VERSION_MAJOR: u32 = 1;
 
 /// The minor version: bumped for what an older caller never uses -- a switch, a control, an
 /// action, a function. Back to 0 with each major.
-pub const WAIFU2D_ABI_VERSION_MINOR: u32 = 0;
+///
+/// 1.1: the mouth shapes and a reading said -- waifu2d_stage_set_viseme, waifu2d_stage_speak and
+/// the waifu2d_stage_speech_ functions, waifu2d_stage_silence. Provisional: they may change in a
+/// later minor, before any release has them.
+pub const WAIFU2D_ABI_VERSION_MINOR: u32 = 1;
 
 /// (major << 16) | minor, as waifu2d_abi_version says it.
 pub const WAIFU2D_ABI_VERSION: u32 = (WAIFU2D_ABI_VERSION_MAJOR << 16) | WAIFU2D_ABI_VERSION_MINOR;
