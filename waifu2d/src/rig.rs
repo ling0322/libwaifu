@@ -152,6 +152,19 @@ pub struct RigMesh {
 impl RigMesh {
     pub fn grid(rect: Rect, canvas: u32, swings: bool) -> RigMesh {
         let cell = (if swings { 30.0 } else { 42.0 }) * f64::max(0.6, f64::from(canvas) / 768.0);
+        RigMesh::cells(rect, cell)
+    }
+
+    /// The grid hair is drawn on: [`RigMesh::grid`]'s, but at least 16 cells along its longer
+    /// side. Hair bends along its length from where it leaves the head, and a small drawing's few
+    /// cells of 30 bend it in a couple of straight pieces with a crease between.
+    fn hair_grid(rect: Rect, canvas: u32) -> RigMesh {
+        let cell = 30.0 * f64::max(0.6, f64::from(canvas) / 768.0);
+        RigMesh::cells(rect, f64::min(cell, rect.width.max(rect.height) / 16.0))
+    }
+
+    /// Cells of about `cell` over `rect`, at least two a side.
+    fn cells(rect: Rect, cell: f64) -> RigMesh {
         let nx = ((rect.width / cell).round() as i64).max(2) as usize;
         let ny = ((rect.height / cell).round() as i64).max(2) as usize;
         let mut rest = Vec::with_capacity((nx + 1) * (ny + 1));
@@ -904,6 +917,321 @@ impl Rig {
     }
 }
 
+// ---- where hair hangs from -----------------------------------------------------------------------
+
+/// The head, as hair hangs from it: the face as it is drawn, a little wider, and over it an ellipse
+/// from the top of the hair to the chin, 1.2 times as wide as the face -- the skull and the hair on
+/// it.
+///
+/// How far down hair a vertex is ([`Swing::along`]) is how far it is from where the hair leaves the
+/// head, walking inside the hair -- not straight down from a strand's root, which a lock that
+/// curves or a layer that holds both the back of the head and a tail hanging from it get wrong.
+/// Hair drawn behind the face hangs from what of it the head covers, and that does not swing: it
+/// is the back of the head. Hair drawn in front of it hangs from above the top of the face. A piece
+/// that touches neither hangs from its own top.
+///
+/// The face is the largest piece of the face layer: img2layers puts a stray ornament or a strand in
+/// it now and then, and that would move the head off it.
+struct Head {
+    /// The face, 3 % of its width wider all round, on cells `cell` across from `origin`.
+    face: Vec<bool>,
+    face_size: (usize, usize),
+    cell: f64,
+    origin: (f64, f64),
+    centre: Point,
+    radius: (f64, f64),
+    /// Hair drawn in front of the face hangs from above this: the top of the face.
+    hairline: f64,
+}
+
+impl Head {
+    /// `hair_top`: the top of the highest layer of hair.
+    fn new(face: &Piece, hair_top: f64) -> Head {
+        let image = &face.image;
+        let (w, h) = (image.width, image.height);
+        let cell = ((w.max(h) as f64 / 256.0).ceil() as usize).max(1);
+        let (gw, gh) = (w.div_ceil(cell), h.div_ceil(cell));
+        let mut drawn = vec![false; gw * gh];
+        for y in 0..h {
+            for x in 0..w {
+                if image.rgba[(y * w + x) * 4 + 3] > 16 {
+                    drawn[(y / cell) * gw + x / cell] = true;
+                }
+            }
+        }
+        // Its largest piece.
+        let mut seen = vec![false; gw * gh];
+        let mut largest: Vec<usize> = Vec::new();
+        for start in 0..gw * gh {
+            if !drawn[start] || seen[start] {
+                continue;
+            }
+            seen[start] = true;
+            let mut cells = vec![start];
+            let mut k = 0;
+            while k < cells.len() {
+                let g = cells[k];
+                k += 1;
+                for (n, _) in neighbours(g, gw, gh) {
+                    if drawn[n] && !seen[n] {
+                        seen[n] = true;
+                        cells.push(n);
+                    }
+                }
+            }
+            if cells.len() > largest.len() {
+                largest = cells;
+            }
+        }
+        let size = cell as f64;
+        let (left, top) = (face.left as f64, face.top as f64);
+        let (x0, x1) = largest
+            .iter()
+            .fold((gw, 0), |(a, b), &g| (a.min(g % gw), b.max(g % gw)));
+        let (y0, y1) = largest
+            .iter()
+            .fold((gh, 0), |(a, b), &g| (a.min(g / gw), b.max(g / gw)));
+        let face_box = Rect::new(
+            left + x0 as f64 * size,
+            top + y0 as f64 * size,
+            (x1 + 1).saturating_sub(x0) as f64 * size,
+            (y1 + 1).saturating_sub(y0) as f64 * size,
+        );
+        // A little wider.
+        let reach = (0.03 * face_box.width / size).ceil() as i64;
+        let mut wider = vec![false; gw * gh];
+        for &g in &largest {
+            let (gx, gy) = ((g % gw) as i64, (g / gw) as i64);
+            for dy in -reach..=reach {
+                for dx in -reach..=reach {
+                    let (nx, ny) = (gx + dx, gy + dy);
+                    if nx >= 0 && ny >= 0 && nx < gw as i64 && ny < gh as i64 {
+                        wider[ny as usize * gw + nx as usize] = true;
+                    }
+                }
+            }
+        }
+        let (crown, chin) = (hair_top.min(face_box.min_y()), face_box.max_y());
+        Head {
+            face: wider,
+            face_size: (gw, gh),
+            cell: size,
+            origin: (left, top),
+            centre: Point::new(face_box.mid_x(), (crown + chin) / 2.0),
+            radius: (
+                f64::max(1.0, 0.6 * face_box.width),
+                f64::max(1.0, (chin - crown) / 2.0),
+            ),
+            hairline: face_box.min_y(),
+        }
+    }
+
+    /// Whether the head covers canvas point (`x`, `y`).
+    fn covers(&self, x: f64, y: f64) -> bool {
+        let u = (x - self.centre.x) / self.radius.0;
+        let v = (y - self.centre.y) / self.radius.1;
+        if u * u + v * v <= 1.0 {
+            return true;
+        }
+        let gx = ((x - self.origin.0) / self.cell).floor();
+        let gy = ((y - self.origin.1) / self.cell).floor();
+        let (gw, gh) = self.face_size;
+        gx >= 0.0
+            && gy >= 0.0
+            && (gx as usize) < gw
+            && (gy as usize) < gh
+            && self.face[gy as usize * gw + gx as usize]
+    }
+
+    /// Each vertex of `mesh` -- over a layer of hair, `image` at (`left`, `top`) on the canvas --
+    /// as far down the hair as it is, 0 where it leaves the head to 1 at the farthest of it;
+    /// `behind` for hair drawn behind the face. Worked on cells of a few pixels: at most 320 across.
+    fn along(
+        &self,
+        image: &RgbaImage,
+        left: i64,
+        top: i64,
+        mesh: &RigMesh,
+        behind: bool,
+    ) -> Vec<f32> {
+        let (w, h) = (image.width, image.height);
+        let cell = ((w.max(h) as f64 / 320.0).ceil() as usize).max(1);
+        let (gw, gh) = (w.div_ceil(cell), h.div_ceil(cell));
+        let mut hair = vec![false; gw * gh];
+        for y in 0..h {
+            for x in 0..w {
+                if image.rgba[(y * w + x) * 4 + 3] > 16 {
+                    hair[(y / cell) * gw + x / cell] = true;
+                }
+            }
+        }
+        let size = cell as f64;
+        let centre = |g: usize| {
+            (
+                left as f64 + ((g % gw) as f64 + 0.5) * size,
+                top as f64 + ((g / gw) as f64 + 0.5) * size,
+            )
+        };
+        let mut seeds: Vec<bool> = (0..gw * gh)
+            .map(|g| {
+                hair[g] && {
+                    let (x, y) = centre(g);
+                    if behind {
+                        self.covers(x, y)
+                    } else {
+                        y < self.hairline
+                    }
+                }
+            })
+            .collect();
+        // A piece of hair the head does not reach hangs from its own top.
+        let mut piece = vec![usize::MAX; gw * gh];
+        for start in 0..gw * gh {
+            if !hair[start] || piece[start] != usize::MAX {
+                continue;
+            }
+            let mut cells = vec![start];
+            piece[start] = start;
+            let mut k = 0;
+            while k < cells.len() {
+                let g = cells[k];
+                k += 1;
+                for n in neighbours(g, gw, gh) {
+                    if hair[n.0] && piece[n.0] == usize::MAX {
+                        piece[n.0] = start;
+                        cells.push(n.0);
+                    }
+                }
+            }
+            if cells.iter().all(|&g| !seeds[g]) {
+                let first = cells.iter().map(|&g| g / gw).min().unwrap_or(0);
+                for &g in &cells {
+                    seeds[g] = g / gw <= first + 1;
+                }
+            }
+        }
+        let start: Vec<f64> = seeds
+            .iter()
+            .map(|&s| if s { 0.0 } else { f64::INFINITY })
+            .collect();
+        let inside = geodesic(gw, gh, &hair, start, size);
+        let longest = inside
+            .iter()
+            .zip(&hair)
+            .filter(|(d, &h)| h && d.is_finite())
+            .map(|(d, _)| *d)
+            .fold(1.0, f64::max);
+        // Beyond the hair, the nearest hair's own: what the grid's vertices between the locks are
+        // given, so that a triangle over a lock's edge has the edge's on both sides of it. The
+        // nearest, not the least far along plus the way to it, which would hand the gap beside a
+        // tail the back of the head's 0 from across the gap.
+        let everywhere = nearest_value(gw, gh, &hair, &inside);
+        let at = |gx: i64, gy: i64| {
+            everywhere
+                [gy.clamp(0, gh as i64 - 1) as usize * gw + gx.clamp(0, gw as i64 - 1) as usize]
+        };
+        mesh.rest
+            .iter()
+            .map(|p| {
+                let fx = (f64::from(p[0]) - left as f64) / size - 0.5;
+                let fy = (f64::from(p[1]) - top as f64) / size - 0.5;
+                let (x0, y0) = (fx.floor(), fy.floor());
+                let (tx, ty) = (fx - x0, fy - y0);
+                let (x0, y0) = (x0 as i64, y0 as i64);
+                let d = (at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx) * (1.0 - ty)
+                    + (at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+                (d / longest).clamp(0.0, 1.0) as f32
+            })
+            .collect()
+    }
+}
+
+/// The cells around cell `g` of a `gw` by `gh` grid, with how far each is in cells.
+fn neighbours(g: usize, gw: usize, gh: usize) -> impl Iterator<Item = (usize, f64)> {
+    let (x, y) = ((g % gw) as i64, (g / gw) as i64);
+    [
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ]
+    .into_iter()
+    .filter_map(move |(dx, dy): (i64, i64)| {
+        let (nx, ny) = (x + dx, y + dy);
+        (nx >= 0 && ny >= 0 && nx < gw as i64 && ny < gh as i64).then(|| {
+            let step = if dx != 0 && dy != 0 {
+                std::f64::consts::SQRT_2
+            } else {
+                1.0
+            };
+            (ny as usize * gw + nx as usize, step)
+        })
+    })
+}
+
+/// Distances over a `gw` by `gh` grid of cells `size` apart, through the cells `open` lets through,
+/// from what `distance` already holds: Dijkstra's, eight ways.
+fn geodesic(gw: usize, gh: usize, open: &[bool], mut distance: Vec<f64>, size: f64) -> Vec<f64> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    // A distance is never negative, so its bits order as it does.
+    let mut queue: BinaryHeap<Reverse<(u64, usize)>> = distance
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.is_finite())
+        .map(|(g, d)| Reverse((d.to_bits(), g)))
+        .collect();
+    while let Some(Reverse((bits, g))) = queue.pop() {
+        let d = f64::from_bits(bits);
+        if d > distance[g] {
+            continue;
+        }
+        for (n, step) in neighbours(g, gw, gh) {
+            let next = d + step * size;
+            if open[n] && next < distance[n] {
+                distance[n] = next;
+                queue.push(Reverse((next.to_bits(), n)));
+            }
+        }
+    }
+    distance
+}
+
+/// `value` over a `gw` by `gh` grid, and each cell `from` does not mark given the value of the
+/// nearest cell it does, walking eight ways.
+fn nearest_value(gw: usize, gh: usize, from: &[bool], value: &[f64]) -> Vec<f64> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let mut way = vec![f64::INFINITY; gw * gh];
+    let mut out = value.to_vec();
+    let mut queue: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::new();
+    for (g, &f) in from.iter().enumerate() {
+        if f {
+            way[g] = 0.0;
+            queue.push(Reverse((0f64.to_bits(), g)));
+        }
+    }
+    while let Some(Reverse((bits, g))) = queue.pop() {
+        let d = f64::from_bits(bits);
+        if d > way[g] {
+            continue;
+        }
+        for (n, step) in neighbours(g, gw, gh) {
+            let next = d + step;
+            if !from[n] && next < way[n] {
+                way[n] = next;
+                out[n] = out[g];
+                queue.push(Reverse((next.to_bits(), n)));
+            }
+        }
+    }
+    out
+}
+
 // ---- building ------------------------------------------------------------------------------------
 
 /// Each shown layer, trimmed to what is drawn.
@@ -1123,9 +1451,21 @@ fn build(document: &PsdDocument) -> Rig {
         pieces.splice(at..at, made);
     }
 
+    // The head hair hangs from, and which layers are drawn behind the face.
+    let face_at = pieces.iter().rposition(|p| p.slot == "face");
+    let head = face_at.map(|at| {
+        let hair_top = pieces
+            .iter()
+            .filter(|p| slot_named(&p.slot).and_then(|s| s.phys) == Some(Phys::Hair))
+            .map(|p| p.top as f64)
+            .fold(f64::INFINITY, f64::min);
+        Head::new(&pieces[at], hair_top)
+    });
+
     let parts: Vec<RigPart> = pieces
         .into_iter()
-        .map(|piece| {
+        .enumerate()
+        .map(|(index, piece)| {
             let rect = Rect::new(
                 piece.left as f64,
                 piece.top as f64,
@@ -1146,7 +1486,11 @@ fn build(document: &PsdDocument) -> Rig {
                 }
             });
             let phys = slot.and_then(|s| s.phys);
-            let mesh = RigMesh::grid(rect, document.width, phys.is_some());
+            let mesh = if phys == Some(Phys::Hair) && head.is_some() {
+                RigMesh::hair_grid(rect, document.width)
+            } else {
+                RigMesh::grid(rect, document.width, phys.is_some())
+            };
             let mut swing = None;
             if let Some(phys) = phys {
                 let width = piece.image.width as f64;
@@ -1175,7 +1519,13 @@ fn build(document: &PsdDocument) -> Rig {
                         .collect();
                 if !found.is_empty() {
                     let front = ["front hair", "side hair", "ahoge"].contains(&piece.slot.as_str());
-                    swing = Some(Rig::swing(phys, front, &found, &mesh));
+                    let mut s = Rig::swing(phys, front, &found, &mesh);
+                    // Hair hangs from the head: how far down it a vertex is, along the hair.
+                    if let (Phys::Hair, Some(head), Some(at)) = (phys, &head, face_at) {
+                        s.along =
+                            head.along(&piece.image, piece.left, piece.top, &mesh, index < at);
+                    }
+                    swing = Some(s);
                 }
             }
             RigPart {

@@ -583,7 +583,16 @@ is to come back from real mouth shapes, not from Anime2.5DRig's open and closed 
   the bottom of a portrait) off that foot as she breathed, her chest swung, her head turned or
   she leaned, and showed a band of what was behind it along the bottom. `Motion::deform` holds
   such a layer down, less the farther up it a vertex is (to the chest's reach); those vertices
-  are held to moving no farther up or down than the Mac's, and not at all on the foot.
+  are held to moving no farther up or down than the Mac's, and not at all on the foot. And
+  hair: the Mac took how far down hair a vertex is from the top and bottom of a single column of
+  pixels under each strand, which tore a tail into pieces that swung apart, swung the back of the
+  head drawn behind the face, and cut front hair off at 0.625 of the way down, moving all of it
+  below there as one. `Rig::build` now measures it walking inside the hair from where the hair
+  leaves the head (the largest piece of the face layer, a little wider, and an ellipse over it
+  from the top of the hair to the chin), draws hair on a grid of at least 16 cells along its longer side (a small drawing's
+  few cells of 30 bent it in a couple of straight pieces), and `Motion::deform` eases front hair
+  and the soft spring's share to their full rather than cutting them off. Hair is not held to
+  the Mac's frames; what of it is behind the head is held to not swinging at all.
 - `waifu2d/tests/render.rs`: the conformance test above. `Cpu` and `Metal` run here; `D3D11`
   and `Vulkan` where they are available.
 - `waifu2d/tests/c_api.rs`: the header's promises -- NULLs, unknown numbers, the rig outliving
