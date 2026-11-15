@@ -861,14 +861,17 @@ impl Motion {
             // The strands: a stiff root and a soft tip, more of the soft the farther down.
             if let Some(swing) = swing {
                 if !springs.is_empty() {
+                    // Front hair as far along at 0.6 of the way down as it is at the tip, nearly;
+                    // and the soft spring all there is by the tip. Both eased there, not cut off:
+                    // a cut is a crease in the hair, the rest of it below it moved as one.
                     let along = swing.along[i];
                     let u = if swing.front {
-                        (along * 1.6).min(1.0)
+                        ease_to_one(along * 1.6)
                     } else {
                         along
                     };
                     let amp = u.powf(power) * amp_k;
-                    let soft_mix = (u.powf(1.2) * soft_k).min(1.0);
+                    let soft_mix = ease_to_one(u.powf(1.2) * soft_k);
                     let mut dx: f32 = 0.0;
                     let n = springs.len();
                     for (s, strand) in springs.iter().enumerate() {
@@ -949,6 +952,12 @@ fn bounds(points: &[[f32; 2]]) -> ([f32; 2], [f32; 2]) {
         hi = [hi[0].max(p[0]), hi[1].max(p[1])];
     }
     (lo, hi)
+}
+
+/// `x`, eased to 1 by 2 rather than cut off at 1: as steep as `x` at 0, level at 2 and after.
+fn ease_to_one(x: f32) -> f32 {
+    let x = x.clamp(0.0, 2.0);
+    x - x * x / 4.0
 }
 
 /// Smoothstep of an `f32`, worked in `f64` as the Swift app's `smooth` is.

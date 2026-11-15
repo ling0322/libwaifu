@@ -424,6 +424,45 @@ fn the_hair_swings_after_the_head() {
 }
 
 #[test]
+fn a_lock_bends_down_its_length_without_a_crease() {
+    // A long lock of side hair, swung as front hair is: it was as far along at 0.625 of the way
+    // down as at its tip, so the rest of it below there moved as one, creased where it began to.
+    let lock = swinging(
+        part("side hair", (30.0, 40.0, 30.0, 270.0), 1.1, Group::Head),
+        Phys::Hair,
+        true,
+        1,
+    );
+    let rig = head_with(vec![lock]);
+    let lock = find(&rig, "side hair");
+    let mut motion = Motion::new(&rig, 1);
+    let swinging = Controls {
+        switches: Switches {
+            physics: true,
+            ..still().switches
+        },
+        ..still()
+    };
+    run(&mut motion, &rig, &swinging, Some([1.5, 0.0]), 6);
+    let swung = motion.deform(&rig, lock, true);
+    let unswung = motion.deform(&rig, lock, false);
+    let rest = &rig.part(lock).mesh.rest;
+    let cols = rest.iter().take_while(|p| p[1] == rest[0][1]).count();
+    let dx: Vec<f32> = (0..rest.len() / cols)
+        .map(|r| swung[r * cols + cols / 2][0] - unswung[r * cols + cols / 2][0])
+        .collect();
+    let slopes: Vec<f32> = dx.windows(2).map(|w| w[1] - w[0]).collect();
+    let steepest = slopes.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(steepest > 0.5, "it swung: {dx:?}");
+    for w in slopes.windows(2) {
+        assert!(
+            (w[1] - w[0]).abs() <= 0.35 * steepest,
+            "a crease down the lock: {dx:?}"
+        );
+    }
+}
+
+#[test]
 fn a_blink_closes_holds_and_opens() {
     assert_eq!(Blinker::shape(0.0), Some(1.0));
     assert!((Blinker::shape(0.04).unwrap() - 0.5).abs() < 1e-9);

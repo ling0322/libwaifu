@@ -419,6 +419,120 @@ fn one_strand_takes_every_vertex() {
     assert_eq!(swing.along[0], 0.0);
 }
 
+/// Hair as img2layers draws it behind a face: the back of the head, a tail hanging from either
+/// side of it, and a wisp off the left one, out and down to the foot of the canvas -- where the
+/// column it ends in has nothing else in it.
+fn twin_tails() -> Rig {
+    twin_tails_with(false)
+}
+
+/// [`twin_tails`], and with `stray` a speck of something else in the face layer, up and to the
+/// left of the face, as img2layers leaves an ornament in it now and then.
+fn twin_tails_with(stray: bool) -> Rig {
+    // On the canvas: the head a disc about (200, 150), 85 across; the tails x 70 to 120 and 280 to
+    // 330, from 110 down to 580; the wisp 12 wide, from the left tail at 300 out to x 45 at 585.
+    let back = |x: i64, y: i64| {
+        let (x, y) = (x + 40, y + 50);
+        let head = (x - 200).pow(2) + (y - 150).pow(2) <= 85 * 85;
+        let tail = (110..580).contains(&y) && ((70..120).contains(&x) || (280..330).contains(&x));
+        let wisp_x = 70 - (y - 300) * 25 / 285;
+        let wisp = (300..586).contains(&y) && (x - wisp_x).abs() <= 6;
+        head || tail || wisp
+    };
+    Rig::build(&read(
+        400,
+        600,
+        &[
+            layer_where("back hair", (40, 50, 320, 540), [60, 40, 40, 255], back),
+            // The face an ellipse 100 by 130 about (200, 145); the speck a dot about (110, 40).
+            layer_where("face", (100, 30, 150, 180), [250, 220, 200, 255], |x, y| {
+                let (x, y) = (x + 100, y + 30);
+                let face =
+                    (x - 200).pow(2) * 65 * 65 + (y - 145).pow(2) * 50 * 50 <= 50 * 50 * 65 * 65;
+                let speck = stray && (x - 110).pow(2) + (y - 40).pow(2) <= 64;
+                face || speck
+            }),
+            layer("front hair", (130, 60, 140, 50), [60, 40, 40, 255]),
+        ],
+    ))
+}
+
+/// The `along` of the vertex of `part` nearest canvas point (`x`, `y`).
+fn along_at(rig: &Rig, slot: &str, x: f32, y: f32) -> f32 {
+    let part = rig.parts.iter().find(|p| p.slot == slot).expect(slot);
+    let swing = part.swing.as_ref().expect("it swings");
+    let nearest = (0..part.mesh.rest.len())
+        .min_by(|&a, &b| {
+            let d = |i: usize| {
+                let p = part.mesh.rest[i];
+                (p[0] - x).powi(2) + (p[1] - y).powi(2)
+            };
+            d(a).partial_cmp(&d(b)).unwrap()
+        })
+        .unwrap();
+    swing.along[nearest]
+}
+
+#[test]
+fn hair_hangs_from_where_it_leaves_the_head() {
+    let rig = twin_tails();
+    let hair = rig.parts.iter().find(|p| p.slot == "back hair").unwrap();
+    let swing = hair.swing.as_ref().unwrap();
+    // Behind the face it is the back of the head: it does not swing.
+    for (p, &along) in hair.mesh.rest.iter().zip(&swing.along) {
+        if (165.0..235.0).contains(&p[0]) && (95.0..195.0).contains(&p[1]) {
+            assert_eq!(along, 0.0, "behind the face at {p:?}");
+        }
+    }
+    // Down a tail it is farther and farther along, and nearly all the way at its foot.
+    let down: Vec<f32> = (0..18)
+        .map(|k| along_at(&rig, "back hair", 95.0, 250.0 + k as f32 * 18.0))
+        .collect();
+    assert!(down.windows(2).all(|w| w[1] >= w[0]), "{down:?}");
+    assert!(along_at(&rig, "back hair", 95.0, 575.0) >= 0.8, "{down:?}");
+    // Across a tail, side by side, as far along as each other.
+    for y in [250.0, 400.0, 550.0] {
+        let (a, b) = (
+            along_at(&rig, "back hair", 75.0, y),
+            along_at(&rig, "back hair", 115.0, y),
+        );
+        assert!((a - b).abs() <= 0.1, "at {y}: {a} and {b}");
+    }
+    // Just off a tail's inner edge, between the tails, as far along as the edge: a triangle over
+    // the edge is not pulled toward the back of the head, which is nearer by the gap but not by
+    // the hair.
+    for y in [400.0, 500.0] {
+        let (edge, off) = (
+            along_at(&rig, "back hair", 111.0, y),
+            along_at(&rig, "back hair", 129.0, y),
+        );
+        assert!(
+            (edge - off).abs() <= 0.05,
+            "at {y}: {edge} on the edge, {off} off it"
+        );
+    }
+    // The wisp is as far along as the hair it hangs from: not taken for a root where its column
+    // begins, at its tip.
+    assert!(along_at(&rig, "back hair", 47.0, 580.0) >= 0.7);
+    // And front hair hangs from above the face.
+    assert!(along_at(&rig, "front hair", 200.0, 60.0) <= 0.1);
+    assert!(along_at(&rig, "front hair", 200.0, 108.0) >= 0.5);
+}
+
+#[test]
+fn a_speck_in_the_face_layer_does_not_move_the_head() {
+    let along = |rig: &Rig| {
+        let hair = rig.parts.iter().find(|p| p.slot == "back hair").unwrap();
+        hair.swing.as_ref().unwrap().along.clone()
+    };
+    let (clean, specked) = (twin_tails_with(false), twin_tails_with(true));
+    assert_ne!(
+        clean.anchors.face, specked.anchors.face,
+        "the speck is in the face's box"
+    );
+    assert_eq!(along(&clean), along(&specked));
+}
+
 /// A face with a mouth, a neck under it, hair in front and behind.
 fn head() -> Rig {
     Rig::build(&read(

@@ -28,8 +28,8 @@
 mod common;
 
 use serde_json::Value;
-use waifu2d::rig::Rig;
-use waifu2d::{Controls, Motion, Switches};
+use waifu2d::rig::{Phys, Rig};
+use waifu2d::{Controls, Motion, PartId, Switches};
 
 /// What one step of the script does: the pointer, how open the eyes may be, how far the head
 /// nods, how far the body follows.
@@ -99,6 +99,8 @@ fn the_mac_app_moved_the_figure_as_this_does() {
     let (mut worst, mut compared) = (0f32, 0usize);
     // Vertices on the foot that the Mac lifted off it.
     let mut lifted = 0usize;
+    // Vertices of hair, and of them the back of the head's.
+    let (mut hair, mut still) = (0usize, 0usize);
     for i in 0..240 {
         let step = script(i);
         if step.blink {
@@ -113,50 +115,71 @@ fn the_mac_app_moved_the_figure_as_this_does() {
             continue;
         };
         let frame = motion.frame(&rig, controls.switches.physics);
-        let counts: Vec<u64> = expected["counts"]
+        let counts: Vec<usize> = expected["counts"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|c| c.as_u64().unwrap())
+            .map(|c| c.as_u64().unwrap() as usize)
             .collect();
-        let ours: Vec<u64> = frame
-            .offsets
-            .windows(2)
-            .map(|w| (w[1] - w[0]) as u64)
-            .collect();
-        assert_eq!(ours, counts, "step {i}: the parts' vertex counts");
-
+        assert_eq!(counts.len(), rig.parts.len(), "step {i}: the parts");
+        // Where each part's vertices begin among the Mac's.
+        let mut theirs_at = vec![0usize];
+        for c in &counts {
+            theirs_at.push(theirs_at.last().unwrap() + c);
+        }
         let positions = expected["positions"].as_array().unwrap();
-        assert_eq!(positions.len(), frame.positions.len() * 2, "step {i}");
-        for (k, v) in frame.positions.iter().enumerate() {
-            // Where the Mac lifted a layer cut off by the canvas's foot off that foot, this holds
-            // it down: such a vertex goes no farther up or down than the Mac's, and not at all on
-            // the foot itself.
-            if let Some(rest_y) = held_at_foot(&rig, &frame.offsets, k) {
-                let theirs = positions[k * 2 + 1].as_f64().unwrap() as f32;
-                let (ours, mac) = (v[1] - rest_y, theirs - rest_y);
-                assert!(
-                    ours.abs() <= mac.abs() + 0.01 && ours * mac >= -1e-4,
-                    "step {i}: vertex {k} moved {ours} up or down, the Mac {mac}"
-                );
-                if rest_y >= rig.height as f32 {
-                    lifted += usize::from(mac.abs() > 0.1);
-                    assert_eq!(
-                        v[1], rest_y,
-                        "step {i}: vertex {k} is off the canvas's foot"
-                    );
+        assert_eq!(positions.len(), theirs_at[counts.len()] * 2, "step {i}");
+        let unswung = motion.frame(&rig, false);
+        for (p, part) in rig.parts.iter().enumerate() {
+            let id = PartId(p as u32);
+            let ours = frame.vertices(id);
+            // Hair is drawn on a finer grid and swings from where it leaves the head, by how far
+            // along the hair it is (Rig::build); the Mac swung it from the top of each strand's
+            // column, and swung the back of the head with it. Where it does not swing now, it is
+            // where the head took it.
+            if let Some(swing) = part.swing.as_ref().filter(|s| s.kind == Phys::Hair) {
+                for (j, v) in ours.iter().enumerate() {
+                    hair += 1;
+                    if swing.along[j] == 0.0 {
+                        assert_eq!(*v, unswung.vertices(id)[j], "step {i}: part {p} swung");
+                        still += 1;
+                    }
                 }
                 continue;
             }
-            for (c, value) in v.iter().enumerate() {
-                let theirs = positions[k * 2 + c].as_f64().unwrap() as f32;
-                worst = worst.max((value - theirs).abs());
-                assert!(
-                    // The two differ by a rounding step of an f32 at most: 3e-5 at a few hundred.
-                    (value - theirs).abs() <= 1e-4,
-                    "step {i}: vertex {k} {} is {value}, the Mac had {theirs}",
-                    ["x", "y"][c]
-                );
+            assert_eq!(ours.len(), counts[p], "step {i}: part {p}'s vertex count");
+            for (j, v) in ours.iter().enumerate() {
+                let k = theirs_at[p] + j;
+                let theirs = |c: usize| positions[k * 2 + c].as_f64().unwrap() as f32;
+                // Where the Mac lifted a layer cut off by the canvas's foot off that foot, this
+                // holds it down: such a vertex goes no farther up or down than the Mac's, and not
+                // at all on the foot itself.
+                if let Some(rest_y) = held_at_foot(&rig, p, j) {
+                    let (ours, mac) = (v[1] - rest_y, theirs(1) - rest_y);
+                    assert!(
+                        ours.abs() <= mac.abs() + 0.01 && ours * mac >= -1e-4,
+                        "step {i}: part {p} vertex {j} moved {ours} up or down, the Mac {mac}"
+                    );
+                    if rest_y >= rig.height as f32 {
+                        lifted += usize::from(mac.abs() > 0.1);
+                        assert_eq!(
+                            v[1], rest_y,
+                            "step {i}: part {p} vertex {j} is off the canvas's foot"
+                        );
+                    }
+                    continue;
+                }
+                for (c, value) in v.iter().enumerate() {
+                    worst = worst.max((value - theirs(c)).abs());
+                    assert!(
+                        // The two differ by a rounding step of an f32 at most: 3e-5 at a few
+                        // hundred.
+                        (value - theirs(c)).abs() <= 1e-4,
+                        "step {i}: part {p} vertex {j} {} is {value}, the Mac had {}",
+                        ["x", "y"][c],
+                        theirs(c)
+                    );
+                }
             }
         }
         let alphas = expected["alphas"].as_array().unwrap();
@@ -171,19 +194,20 @@ fn the_mac_app_moved_the_figure_as_this_does() {
     }
     assert_eq!(compared, 7, "every recorded frame compared");
     assert!(lifted > 0, "the Mac lifted the top off the canvas's foot");
+    assert!(
+        hair > 0 && still > 0,
+        "{hair} vertices of hair, {still} of them not swinging"
+    );
     println!("{compared} frames; the farthest a vertex was from the Mac's: {worst} px");
 }
 
-/// Vertex `k` of a frame's positions, if it is one Motion::deform holds to the canvas's foot and
-/// the Mac did not: of a layer cut off by the foot, as near it as the chest reaches down. Its
-/// rest, down the canvas.
-fn held_at_foot(rig: &Rig, offsets: &[u32], k: usize) -> Option<f32> {
-    let p = offsets
-        .windows(2)
-        .position(|w| (w[0] as usize..w[1] as usize).contains(&k))?;
+/// Vertex `j` of part `p`, if it is one Motion::deform holds to the canvas's foot and the Mac did
+/// not: of a layer cut off by the foot, as near it as the chest reaches down. Its rest, down the
+/// canvas.
+fn held_at_foot(rig: &Rig, p: usize, j: usize) -> Option<f32> {
     let part = &rig.parts[p];
     let foot = rig.height as f32;
-    let rest_y = part.mesh.rest[k - offsets[p] as usize][1];
+    let rest_y = part.mesh.rest[j][1];
     let cut = (part.rect.y + part.rect.height) as f32 >= foot - 1.0;
     let near = foot - rest_y < rig.anchors.chest_reach.height as f32;
     (cut && near).then_some(rest_y)
