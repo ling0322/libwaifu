@@ -28,6 +28,7 @@
 import AppKit
 import Foundation
 import Observation
+import os
 import WaifuKit
 
 /// The tabs, which what the model does decides.
@@ -191,6 +192,14 @@ final class Session {
     var showingRig = false
     /// The waifu2d page's document and how it blinks.
     let rig = RigStage()
+    /// The mouth shapes of the reading being heard, for the drawing on the text-to-speech page.
+    let lipsync = Lipsync()
+    /// The model that says a reading's mouth shapes, attached to a voice that takes one: published
+    /// by name and listed nowhere, as it is not a voice of its own.
+    nonisolated static let visemeModel = "cosyvoice3-visemes:v1"
+    /// Each reading made since the app opened, its sound and the mouth shapes its voice said, by
+    /// job: for it to be played again with the drawing's mouth moving. Held only while it is open.
+    private(set) var spoken: [String: Spoken] = [:]
     var form = JobForm()
 
     /// The picture in the big frame and the clip in the player, until something new comes in.
@@ -887,9 +896,12 @@ final class Session {
         let asr = transcriber
         if transcribing { words.text = heardHere }
         let writing = transcribing && words.text == nil ? recording : nil
-        // No style: the page offers none, and a reading is in the reference's own manner.
+        // No style: the page offers none, and a reading is in the reference's own manner. The mouth
+        // shapes too, where the voice says them, and how loud it is, for the drawing on the page.
         let request = SpeakRequest(
-            text: form.text, reference: recording?.clip, speed: form.speed, temperature: form.temperature, seed: seed)
+            text: form.text, reference: recording?.clip, speed: form.speed, temperature: form.temperature, seed: seed,
+            visemes: voice.visemes, loudness: voice.visemes)
+        let lipsync = lipsync
 
         // As a picture's record names its model: the published name with its version, or the
         // path of the manifest it was asked for by.
@@ -926,6 +938,19 @@ final class Session {
             // The reference's words, as they are by now: typed, heard before, or just written down.
             var request = request
             request.referenceTranscript = words.text
+            // The mouth shapes come from a model of their own, attached to the voice -- fetched the
+            // first time, attached again after each load. Without it the reading goes on as one
+            // with no mouth shapes, and says why.
+            if request.visemes {
+                do {
+                    try await pipeline.attach(Self.visemeModel, as: .textToSpeechVisemes, progress: report)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    request.visemes = false
+                    self?.noteRunning("no mouth shapes: \(error.localizedDescription)")
+                }
+            }
             let started = Date()
             // The pipeline the load gave: a streaming one, or, where the device refused it, one
             // that reads whole.
@@ -936,29 +961,54 @@ final class Session {
                 // The job lasts until the reading has been heard: a Stop silences it until the last
                 // of it, and the next reading, which waits for this job, does not play over it.
                 let player = StreamPlayer()
+                // The drawing's mouth follows the sound as it is heard: the shapes and the loudness
+                // settled with each part; the last word on them is kept with the reading.
+                let mouth = lipsync.play(rate: voice.rate) { player.heardSeconds }
+                let shapes = OSAllocatedUnfairLock<(Visemes?, Loudness?)>(initialState: (nil, nil))
                 (said, took) = try await withTaskCancellationHandler {
                     let said: AudioClip?
                     do {
-                        said = try await pipeline.speakStreaming(request, progress: report) { player.play($0) }
+                        said = try await pipeline.speakStreaming(
+                            request, progress: report,
+                            heard: { part in player.play(part) },
+                            settled: { so in
+                                shapes.withLock { $0.0 = so }
+                                lipsync.settled(so, for: mouth)
+                            },
+                            loud: { so in
+                                shapes.withLock { $0.1 = so }
+                                lipsync.loud(so, for: mouth)
+                            })
                     } catch {
                         player.stop()
+                        lipsync.stop(mouth)
                         throw error
                     }
                     // How long it took to make, not to hear: what a reading read whole is timed by.
                     let took = Date().timeIntervalSince(started)
                     player.finish()
                     await player.playedOut()
+                    lipsync.stop(mouth)
                     return (said, took)
                 } onCancel: {
                     player.stop()
+                    lipsync.stop(mouth)
+                }
+                if let said {
+                    let (visemes, loudness) = shapes.withLock { $0 }
+                    self?.keepSpoken(Spoken(clip: said, visemes: visemes, loudness: loudness))
                 }
                 // Made but not heard: kept all the same, to be played from the output.
                 if let why = player.couldNotPlay, said != nil {
                     self?.noteRunning("not heard as it was said -- \(why) -- but kept: play it below")
                 }
             } else {
-                said = try await pipeline.speak(request, progress: report)
+                let reading = try await pipeline.speakReading(request, progress: report)
+                said = reading?.audio
                 took = Date().timeIntervalSince(started)
+                if let reading {
+                    self?.keepSpoken(Spoken(clip: reading.audio, visemes: reading.visemes, loudness: reading.loudness))
+                }
             }
             guard let clip = said else { return nil }
             var made = made
@@ -978,6 +1028,13 @@ final class Session {
             }
             return (Media.wav(clip.samples, rate: clip.rate), made, [:])
         }
+    }
+
+    /// Keeps the running job's reading, its sound and its mouth shapes, for it to be played again
+    /// with the drawing's mouth moving.
+    private func keepSpoken(_ said: Spoken) {
+        guard let job = jobs.first(where: { $0.status == .running }) else { return }
+        spoken[job.id] = said
     }
 
     /// A notice about the job running now, of which there is one at a time.
@@ -1181,6 +1238,7 @@ final class Session {
         jobs.removeAll { $0.id == job.id }
         outputs[job.id] = nil
         images[job.id] = nil
+        spoken[job.id] = nil
         // The copies of pasted pictures it was drawn from, once nothing else names them.
         let held = Set(([picture?.url] + named.map(\.held.url)).compactMap { $0?.path })
         for input in Self.inputPaths(of: job.made) where input.hasPrefix(inputs.path + "/") {

@@ -115,6 +115,7 @@ fn rig(width: u32, height: u32, parts: Vec<RigPart>, masks: Vec<MaskDef>) -> Rig
         face_scale: 1.0,
         notes: Vec::new(),
         masks,
+        mouth: None,
     }
 }
 

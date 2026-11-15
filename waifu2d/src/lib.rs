@@ -33,10 +33,12 @@ pub mod closed_parts;
 pub mod error;
 pub mod geom;
 pub mod motion;
+pub mod mouths;
 pub mod psd;
 pub mod render;
 pub mod rig;
 pub mod rng;
+pub mod speech;
 pub mod stage;
 
 pub use error::Error;

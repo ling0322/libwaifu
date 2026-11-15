@@ -77,6 +77,9 @@ struct Voice {
     /// Whether it can be played as it is said, a part at a time: a model that streams, on a device
     /// the load then checks.
     var streams: Bool = false
+    /// Whether it says the mouth shapes of what it reads, for a drawing on the page to move to:
+    /// a CosyVoice3 package with the viseme model.
+    var visemes: Bool = false
 }
 
 struct Converter {
@@ -205,7 +208,8 @@ struct ModelInfo {
                 noLikenessBecause: opened.whyNot(.textToSpeechLikeReference),
                 needsARecording: opened.supports(.textToSpeechWithoutReference).map { $0 != .yes },
                 needsATranscript: opened.supports(.textToSpeechWithoutReferenceTranscript).map { $0 != .yes } ?? false,
-                streams: opened.does(.streamingTextToSpeech))
+                streams: opened.does(.streamingTextToSpeech),
+                visemes: opened.does(.attachedTextToSpeechVisemes))
             if kinds.contains("conversion") { info.converter = converter }
         default:
             info.converter = converter

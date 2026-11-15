@@ -153,6 +153,7 @@ fn rig(
         anchors,
         notes: Vec::new(),
         masks: Vec::new(),
+        mouth: None,
     }
 }
 

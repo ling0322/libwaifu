@@ -57,6 +57,8 @@ objc2-quartz-core = { version = "0.3", default-features = false, features = [
 [dev-dependencies]
 # The Mac app's frames, recorded as JSON, for tests/parity.rs to read.
 serde_json = "1"
+# The examples' pictures.
+png = "0.18"
 
 [build-dependencies]
 cbindgen = { version = "0.29", default-features = false }

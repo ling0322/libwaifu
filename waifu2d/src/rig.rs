@@ -253,6 +253,9 @@ pub struct Rig {
     /// What it could not do, to say under the picture.
     pub notes: Vec<String>,
     pub masks: Vec<MaskDef>,
+    /// The mouth made over the drawn one, which moves through the shapes speech makes; `None`
+    /// until [`crate::mouths::with_drawn_mouths`] makes one.
+    pub mouth: Option<crate::mouths::MouthRig>,
 }
 
 static NEXT_RIG_ID: AtomicU64 = AtomicU64::new(1);
@@ -1246,6 +1249,7 @@ fn build(document: &PsdDocument) -> Rig {
         face_scale: face_width.unwrap_or(width / 3.0) / 333.0,
         notes,
         masks,
+        mouth: None,
     }
 }
 

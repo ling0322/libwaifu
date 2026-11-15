@@ -35,6 +35,7 @@ use std::f32::consts::PI;
 
 use crate::blinker::Blinker;
 use crate::geom::smooth;
+use crate::mouths::Viseme;
 use crate::rig::{Group, PartId, Phys, Rig, Role, Side};
 use crate::rng::Rng;
 
@@ -156,6 +157,9 @@ pub struct Pose {
     pub jump_y: f32,
     pub squash: f32,
     pub grab: [f32; 2],
+    /// How much each mouth shape shows, by `Viseme as usize`: eased after the one it is told to
+    /// make, and all `Rest` -- the drawn mouth -- until it is told one.
+    pub visemes: [f32; 8],
 }
 
 impl Default for Pose {
@@ -183,6 +187,7 @@ impl Default for Pose {
             jump_y: 0.0,
             squash: 1.0,
             grab: [0.0, 0.0],
+            visemes: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
         }
     }
 }
@@ -275,6 +280,9 @@ pub struct Motion {
     /// A part being dragged about, and the pull in canvas pixels.
     grabbed: Option<PartId>,
     grab_pull: [f32; 2],
+    /// The mouth it is told to make, as each shape's weight by `Viseme as usize`; `None` is the
+    /// drawn mouth, at rest.
+    mouth: Option<[f32; 8]>,
 }
 
 impl Motion {
@@ -313,6 +321,7 @@ impl Motion {
             nod_t: -1.0,
             grabbed: None,
             grab_pull: [0.0, 0.0],
+            mouth: None,
         }
     }
 
@@ -394,6 +403,21 @@ impl Motion {
         pose.breath_head = 0.5 + 0.5 * (t * 2.0 * PI / 3.4 - 0.6).sin();
         pose.ease = controls.closes_at;
         pose.nod = controls.nod;
+
+        // The mouth's shape, eased into in about 50 ms: a viseme lasts 40, so a shape held for two
+        // shows whole and one held for one shows mostly. Exact at rest: nothing is told, nothing
+        // moves.
+        if self.mouth.is_some() || pose.visemes != Pose::default().visemes {
+            let want = self.mouth.unwrap_or(Viseme::Rest.alone());
+            let k = 1.0 - (-dt * 40.0).exp();
+            for (i, w) in pose.visemes.iter_mut().enumerate() {
+                let target = want[i];
+                *w += (target - *w) * k;
+                if (*w - target).abs() < 1e-4 {
+                    *w = target;
+                }
+            }
+        }
 
         // The mouth, as loud as the talk is unless set by hand: fast to open, slow to shut.
         let mouth_target = controls.talk_level.max(controls.mouth_open);
@@ -534,6 +558,17 @@ impl Motion {
         self.blinker.blink_now();
     }
 
+    /// The mouth shape to make from now on; `None`, or `Rest`, the drawn mouth.
+    pub fn set_viseme(&mut self, viseme: Option<Viseme>) {
+        self.mouth = viseme.map(Viseme::alone);
+    }
+
+    /// The mouth to make from now on, as each shape's weight by `Viseme as usize` -- a shape and
+    /// the drawn mouth mixed, say, as open as the sound is loud; `None`, the drawn mouth.
+    pub fn set_mouth(&mut self, weights: Option<[f32; 8]>) {
+        self.mouth = weights;
+    }
+
     /// Told to jump: an upward speed, which gravity turns into a hop with a squashy landing.
     pub fn jump(&mut self) {
         if self.jump_y >= 0.0 {
@@ -582,11 +617,14 @@ impl Motion {
     /// Every part where it is now, and how much of it shows.
     pub fn frame(&self, rig: &Rig, physics: bool) -> Frame {
         let ids = (0..rig.parts.len()).map(|i| PartId(i as u32));
+        let mut alphas: Vec<f32> = ids
+            .clone()
+            .map(|id| Motion::alpha(rig, id, &self.pose))
+            .collect();
+        crate::mouths::weigh(rig, &mut alphas, &self.pose.visemes);
         Frame::from_parts(
-            ids.clone()
-                .map(|id| self.deform(rig, id, physics))
-                .collect(),
-            ids.map(|id| Motion::alpha(rig, id, &self.pose)).collect(),
+            ids.map(|id| self.deform(rig, id, physics)).collect(),
+            alphas,
         )
     }
 
@@ -703,7 +741,10 @@ impl Motion {
         };
         let grabbed = self.grabbed.map(PartId::index) == Some(index);
 
-        let mut out = part.mesh.rest.clone();
+        // The made mouth's parts are where its shapes say, worked out again each frame; every
+        // other part starts from its grid at rest.
+        let mut out = crate::mouths::shaped(rig, PartId(index as u32), &e.visemes)
+            .unwrap_or_else(|| part.mesh.rest.clone());
         for i in 0..out.len() {
             let [mut x, mut y] = out[i];
 
