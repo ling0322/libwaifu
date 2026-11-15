@@ -89,6 +89,9 @@ pub const WAIFU_REQUEST_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 206;
 /// WAIFU_ATTACHED_MODEL_TEXT_TO_SPEECH_VISEMES model attached the task ends with WAIFU_ERR_MODEL.
 /// Since 6.1.
 pub const WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 207;
+/// Boolean, how loud the reading is from moment to moment as well, TEXT_TO_SPEECH_LOUDNESS; 0.
+/// Any voice. Since 6.2.
+pub const WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS: WaifuRequestAttribute = 208;
 
 /// Audio, what is said and how; required.
 pub const WAIFU_REQUEST_VOICE_CONVERSION_SOURCE: WaifuRequestAttribute = 300;
@@ -139,6 +142,9 @@ pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_SEED: WaifuRequestAttribute = 6
 /// Boolean, as TEXT_TO_SPEECH_VISEMES: STREAMING_TEXT_TO_SPEECH_VISEMES with each part; 0.
 /// Since 6.1.
 pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES: WaifuRequestAttribute = 606;
+/// Boolean, as TEXT_TO_SPEECH_LOUDNESS: STREAMING_TEXT_TO_SPEECH_LOUDNESS with each part; 0.
+/// Since 6.2.
+pub const WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS: WaifuRequestAttribute = 607;
 
 /// What an attribute holds, and what it may hold.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -243,6 +249,7 @@ fn attribute(attribute: WaifuRequestAttribute) -> Option<(WaifuPipelineType, &'s
         WAIFU_REQUEST_TEXT_TO_SPEECH_STYLE => (speech, "TEXT_TO_SPEECH_STYLE", Text),
         WAIFU_REQUEST_TEXT_TO_SPEECH_SEED => (speech, "TEXT_TO_SPEECH_SEED", Seed),
         WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES => (speech, "TEXT_TO_SPEECH_VISEMES", Bool),
+        WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS => (speech, "TEXT_TO_SPEECH_LOUDNESS", Bool),
 
         WAIFU_REQUEST_VOICE_CONVERSION_SOURCE => (conversion, "VOICE_CONVERSION_SOURCE", Audio),
         WAIFU_REQUEST_VOICE_CONVERSION_REFERENCE => {
@@ -298,6 +305,9 @@ fn attribute(attribute: WaifuRequestAttribute) -> Option<(WaifuPipelineType, &'s
         }
         WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES => {
             (streaming, "STREAMING_TEXT_TO_SPEECH_VISEMES", Bool)
+        }
+        WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS => {
+            (streaming, "STREAMING_TEXT_TO_SPEECH_LOUDNESS", Bool)
         }
         _ => return None,
     })
@@ -467,6 +477,12 @@ impl WaifuRequest {
     pub fn wants_visemes(&self) -> bool {
         self.flag(WAIFU_REQUEST_TEXT_TO_SPEECH_VISEMES)
             || self.flag(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_VISEMES)
+    }
+
+    /// Whether a reading asked for its loudness.
+    pub fn wants_loudness(&self) -> bool {
+        self.flag(WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS)
+            || self.flag(WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS)
     }
 
     pub fn speak_streaming(&self) -> Result<SpeakRequest, Refused> {

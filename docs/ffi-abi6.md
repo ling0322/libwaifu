@@ -1,8 +1,9 @@
 # libwaifu's C API, ABI 6
 
 Status: implemented. `waifu/include/waifu.h`, generated from `waifu/src/c_api.rs` and
-`waifu/src/c_api/{support,request,task}.rs`, is ABI 6.1: 6.0, and the attached models and
-visemes of [What 6.1 adds](#what-61-adds). What is still open is under [Not decided](#not-decided).
+`waifu/src/c_api/{support,request,task}.rs`, is ABI 6.2: 6.0, the attached models and
+visemes of [What 6.1 adds](#what-61-adds), and the loudness of [What 6.2 adds](#what-62-adds).
+What is still open is under [Not decided](#not-decided).
 
 ABI 6 changes how a caller talks to a pipeline, and nothing about what a pipeline does. A request
 is a handle the caller sets attributes on, one at a time, instead of a struct; a run, a load and an
@@ -333,6 +334,39 @@ waifu_task_get_int_attribute(task, WAIFU_TASK_TEXT_TO_SPEECH_VISEME_FRAME_MS, &f
   not NULL.
 
 The viseme package is in [cosyvoice3.md](cosyvoice3.md#visemes).
+
+## What 6.2 adds
+
+A reading's **loudness**: how loud its audio is from moment to moment, for a face to open its mouth
+as wide as the sound is loud. Visemes say which shape the mouth takes, but the frames of a
+consonant between two vowels are labelled with the vowels, so a mouth that only reads them never
+closes between syllables; the loudness dips there. A minor version, as 6.1 was.
+
+```c
+#define WAIFU_REQUEST_TEXT_TO_SPEECH_LOUDNESS 208               // boolean; 0
+#define WAIFU_REQUEST_STREAMING_TEXT_TO_SPEECH_LOUDNESS 607     // boolean; 0
+
+#define WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS 203                  // float array: dBFS a frame
+#define WAIFU_TASK_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS 204         // int: 10
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS 604        // as of the last AUDIO_PART read
+#define WAIFU_TASK_STREAMING_TEXT_TO_SPEECH_LOUDNESS_FRAME_MS 605
+
+const float *waifu_task_get_float_array_attribute(const WaifuTask *, WaifuTaskAttribute, size_t *count);
+```
+
+- **Frame `i` is milliseconds `[i, i + 1) * FRAME_MS` of the audio**, framed as the visemes are, and
+  there are `ceil(milliseconds / FRAME_MS)` of them. `FRAME_MS` is 10, short enough to see the dips
+  between syllables, which last 30 to 60 ms.
+- **Each is the RMS of the samples in the 20 ms about the frame's middle** -- cut at the start and
+  the end of the audio -- across the whole band, in dBFS: a full-scale sine is -3, and silence, or
+  what is as good as, is -100, never less. Only the samples go into it, so any voice has it, with no
+  model attached; and it is the audio's own, what the speaker plays.
+- **Streaming**, as the visemes: each `AUDIO_PART` event read makes `STREAMING_TEXT_TO_SPEECH_LOUDNESS`
+  the frames settled so far, a frame once all of its window has been handed over -- so that none is
+  past the audio -- and the array only grows. Once the task has ended well it is all of them.
+- **`waifu_task_get_float_array_attribute`** is `waifu_task_get_int_array_attribute` for floats: the
+  values and `*count`, valid until `waifu_task_free`; NULL and `*count` untouched where it is not
+  there. The `FRAME_MS` attributes are there only where the loudness was asked for.
 
 ## Why
 

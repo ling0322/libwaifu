@@ -91,7 +91,9 @@ pub const WAIFU_ABI_VERSION_MAJOR: u32 = 6;
 /// the VISEMES request and task attributes, WaifuViseme, waifu_task_get_int_array_attribute.
 /// Revised before any release had it: 204 was SUPPORTS_TEXT_TO_SPEECH_VISEMES, a package that
 /// held a viseme model, and there were no attached models.
-pub const WAIFU_ABI_VERSION_MINOR: u32 = 1;
+/// 6.2: the text-to-speech readings' loudness -- the LOUDNESS request and task attributes,
+/// waifu_task_get_float_array_attribute.
+pub const WAIFU_ABI_VERSION_MINOR: u32 = 2;
 /// (major << 16) | minor, as waifu_abi_version says it.
 pub const WAIFU_ABI_VERSION: u32 = (WAIFU_ABI_VERSION_MAJOR << 16) | WAIFU_ABI_VERSION_MINOR;
 
@@ -905,6 +907,7 @@ pub unsafe extern "C" fn waifu_pipeline_run(
         }
         let engine = &pipeline.engine;
         let started = task::Started::new();
+        started.wants_loudness(request.wants_loudness());
         let progress = started.on_progress();
         let id = match pipeline.task {
             WAIFU_PIPELINE_IMAGE_GENERATION => {
