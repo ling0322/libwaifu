@@ -19,10 +19,7 @@
 // 1.1: the mouth shapes and a reading said -- waifu2d_stage_set_viseme, waifu2d_stage_speak and
 // the waifu2d_stage_speech_ functions, waifu2d_stage_silence. Provisional: they may change in a
 // later minor, before any release has them.
-//
-// 1.2: waifu2d_rig_open and waifu2d_rig_read take a package (`.waifu2d`,
-// docs/waifu2d-package.md) as well as a Photoshop document, told apart by how it starts.
-#define WAIFU2D_ABI_VERSION_MINOR 2
+#define WAIFU2D_ABI_VERSION_MINOR 1
 
 // (major << 16) | minor, as waifu2d_abi_version says it.
 #define WAIFU2D_ABI_VERSION ((WAIFU2D_ABI_VERSION_MAJOR << 16) | WAIFU2D_ABI_VERSION_MINOR)
@@ -217,14 +214,12 @@ uint32_t waifu2d_abi_version(void);
 // none has.
 const char *waifu2d_last_error(void);
 
-// Reads the drawing at `path` (UTF-8) and rigs it: a package (`.waifu2d`) or a Photoshop
-// document, told apart by how the file starts rather than by its name -- a package since 1.2.
-// Slow -- it reads every layer -- so call it off the UI thread. NULL, with waifu2d_last_error
-// saying why, where it cannot.
-Waifu2dRig *waifu2d_rig_open(const char *path);
+// Reads the Photoshop document at `psd_path` (UTF-8) and rigs it. Slow -- it reads every layer
+// -- so call it off the UI thread. NULL, with waifu2d_last_error saying why, where it cannot.
+Waifu2dRig *waifu2d_rig_open(const char *psd_path);
 
-// A drawing already in memory, `length` bytes at `bytes` -- a package or a Photoshop document,
-// as waifu2d_rig_open takes -- read and rigged. The bytes are the caller's again once it returns.
+// A Photoshop document already in memory, `length` bytes at `bytes`, read and rigged; as
+// waifu2d_rig_open. The bytes are the caller's again once it returns.
 Waifu2dRig *waifu2d_rig_read(const uint8_t *bytes, size_t length);
 
 // NULL is fine.

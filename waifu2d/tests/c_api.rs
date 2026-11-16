@@ -104,43 +104,6 @@ fn a_rig_without_eyes_has_a_note_to_show() {
 }
 
 #[test]
-fn a_package_opens_as_its_document_does() {
-    let psd = common::face_psd();
-    let document = waifu2d::psd::PsdDocument::read(&psd).unwrap();
-    let package = waifu2d::Package::from_psd(&document).write().unwrap();
-    let path = std::env::temp_dir().join(format!("waifu2d-c-api-{}.waifu2d", std::process::id()));
-    std::fs::write(&path, &package).unwrap();
-    let c_path = CString::new(path.to_str().unwrap()).unwrap();
-
-    let from_psd = face();
-    let read = unsafe { waifu2d_rig_read(package.as_ptr(), package.len()) };
-    let opened = unsafe { waifu2d_rig_open(c_path.as_ptr()) };
-    std::fs::remove_file(&path).unwrap();
-    for rig in [read, opened] {
-        assert!(!rig.is_null(), "{}", last_error());
-        for which in [
-            WAIFU2D_RIG_WIDTH,
-            WAIFU2D_RIG_HEIGHT,
-            WAIFU2D_RIG_PART_COUNT,
-            WAIFU2D_RIG_EYE_COUNT,
-        ] {
-            assert_eq!(attribute(rig, which), attribute(from_psd, which));
-        }
-        unsafe { waifu2d_rig_free(rig) };
-    }
-    unsafe { waifu2d_rig_free(from_psd) };
-
-    // A zip that is not a package says so, not that it is no Photoshop document.
-    let zip = b"PK\x03\x04 and nothing a package has";
-    assert!(unsafe { waifu2d_rig_read(zip.as_ptr(), zip.len()) }.is_null());
-    assert!(
-        last_error().contains("not a waifu2d package"),
-        "{}",
-        last_error()
-    );
-}
-
-#[test]
 fn what_cannot_be_read_is_null_and_says_why() {
     let junk = b"not a document";
     assert!(unsafe { waifu2d_rig_read(junk.as_ptr(), junk.len()) }.is_null());

@@ -19,8 +19,6 @@
 
 //! What the tools in src/bin share.
 
-pub mod drawing;
-
 use waifu::GenerationOptions;
 
 /// How many bytes of the weights to keep on the device, taken out of `arguments` wherever it was
