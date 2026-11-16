@@ -35,6 +35,10 @@ struct OutputPane: View {
     /// Whether what is on show is a transcription: the last one's words alone, to be copied, and
     /// nothing kept to save, reuse or delete.
     private var transcripts: Bool { session.tab.kind == "transcription" }
+    /// Whether what is on show is text2speech: a player, and nothing under it.
+    private var reading: Bool { session.tab.kind == "speech" }
+    /// Whether the drawing that says a reading is above it.
+    private var speaker: Bool { reading && session.model?.voice?.visemes == true }
 
     var body: some View {
         VStack(spacing: 10) {
@@ -46,7 +50,7 @@ struct OutputPane: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if session.tab.kind == "speech", session.model?.voice?.visemes == true {
+            if speaker {
                 SpeakerBox(session: session)
             }
 
@@ -65,7 +69,10 @@ struct OutputPane: View {
                     Text(nothing).foregroundStyle(.secondary)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // A reading is its player and the words under it, at their own height: the drawing over
+            // them takes the room there is, and without one it is left below them.
+            .frame(maxWidth: .infinity, maxHeight: reading ? nil : .infinity)
+            if reading && !speaker { Spacer(minLength: 0) }
 
             if !transcripts {
                 if let job = session.shown { actions(job) }
@@ -691,7 +698,7 @@ struct Thumbnail: View {
 struct SpeakerBox: View {
     var session: Session
 
-    static let height: CGFloat = 300
+    static let height: CGFloat = 160
 
     var body: some View {
         Group {
@@ -699,20 +706,26 @@ struct SpeakerBox: View {
                 RigView(rig: rig, stage: session.rig, lipsync: session.lipsync)
                     .id(session.rig.file)
                     .background(Checkerboard())
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                     .help("The drawing on the waifu2d page, saying what is read. Its settings are that page's.")
             } else {
-                VStack(spacing: 8) {
-                    PSDDrop(stage: session.rig)
-                    Text("A drawing in layers to say it: the mouth moves to the voice's mouth shapes as it is heard.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: 520)
+                // The box to drop a drawing on is the drawing's own box, so that nothing moves
+                // when one is dropped; what it is for is said inside it.
+                PSDDrop(stage: session.rig)
+                    .environment(\.groupFillsHeight, true)
+                    .overlay(alignment: .bottom) {
+                        Text("A drawing in layers to say it: the mouth moves to the voice's mouth shapes as it is heard.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(10)
+                            .allowsHitTesting(false)
+                    }
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: Self.height)
+        // At least this, and whatever room the player and the words under it leave.
+        .frame(minHeight: Self.height, maxHeight: .infinity)
     }
 }
 
@@ -720,19 +733,36 @@ struct ClipFrame: View {
     var session: Session
     var job: Job
 
+    /// A text2speech reading, rather than a conversion.
+    private var reading: Bool { job.kind == "speech" }
+
     var body: some View {
-        VStack(spacing: 16) {
-            if let bytes = session.outputs[job.id] {
-                Player(bytes: bytes, spoken: session.spoken[job.id], lipsync: session.lipsync).id(job.id)
-            } else {
-                ProgressView()
+        VStack(spacing: reading ? 10 : 16) {
+            Group {
+                if let bytes = session.outputs[job.id] {
+                    Player(bytes: bytes, spoken: session.spoken[job.id], lipsync: session.lipsync).id(job.id)
+                } else {
+                    ProgressView()
+                }
             }
-            Text(said(job)).font(.title3).multilineTextAlignment(.center).textSelection(.enabled)
-            if let parameters = job.made?.parameters {
-                Text(parameters).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            // A reading's settings run to a paragraph, so it keeps them to the player's tooltip.
+            .help(reading ? job.made?.parameters ?? "" : "")
+            if reading {
+                // The words read, under the player, as tall as they are.
+                Text(said(job))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text(said(job)).font(.title3).multilineTextAlignment(.center).textSelection(.enabled)
+                if let parameters = job.made?.parameters {
+                    Text(parameters).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
             }
         }
-        .frame(maxWidth: 560)
+        // A reading runs the width of the drawing over it and the buttons under it, and is as tall
+        // as the player and the words are: the drawing takes the rest.
+        .frame(maxWidth: reading ? .infinity : 560)
+        .fixedSize(horizontal: false, vertical: reading)
         .task(id: job.id) { await session.load(job) }
     }
 }

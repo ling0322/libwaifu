@@ -403,6 +403,11 @@ final class Session {
         folder.appendingPathComponent("\(id).json")
     }
 
+    /// A reading's mouth shapes and loudness, beside its WAV, for the drawing to say it again.
+    private func lipsyncFile(_ id: String) -> URL {
+        folder.appendingPathComponent("\(id)\(LipsyncRecord.suffix)")
+    }
+
     /// Where pictures pasted or dropped as bytes are kept once a job is drawn from them, so that
     /// its record has a path to name.
     private var inputs: URL { folder.appendingPathComponent("inputs") }
@@ -413,7 +418,7 @@ final class Session {
     private func readHistory() {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         let decoder = JSONDecoder()
-        jobs = names.filter { $0.hasSuffix(".json") }.compactMap { name -> Job? in
+        jobs = names.filter { $0.hasSuffix(".json") && !$0.hasSuffix(LipsyncRecord.suffix) }.compactMap { name -> Job? in
             let url = folder.appendingPathComponent(name)
             guard let data = try? Data(contentsOf: url) else { return nil }
             if let record = try? decoder.decode(ImageRecord.self, from: data),
@@ -443,6 +448,18 @@ final class Session {
             let composite = besideFolder(job.id).appendingPathComponent(Self.composite)
             let png = await Task.detached { try? Data(contentsOf: composite) }.value
             images[job.id] = png.flatMap(NSImage.init(data:))
+        }
+        // A reading made before this run: its mouth shapes from beside it, and its samples from
+        // the WAV, for the drawing to say it as it plays.
+        if job.kind == "speech", spoken[job.id] == nil {
+            let lipsync = lipsyncFile(job.id)
+            let said = await Task.detached { () -> Spoken? in
+                guard let data = try? Data(contentsOf: lipsync), let record = LipsyncRecord.read(data),
+                    let clip = try? Media.clip(from: url, seconds: .infinity)
+                else { return nil }
+                return record.spoken(clip)
+            }.value
+            if let said { spoken[job.id] = said }
         }
     }
 
@@ -499,6 +516,11 @@ final class Session {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             record = try? encoder.encode(Record(id: id, kind: kind, created: job.created, finished: finished, made: made))
         }
+        // A reading's mouth shapes, beside it, for it to be said again when it is played later.
+        let lipsync = kind == "speech"
+            ? spoken[id].flatMap { LipsyncRecord($0, audio: output.lastPathComponent) }.flatMap { try? $0.json() }
+            : nil
+        let lipsyncURL = lipsyncFile(id)
 
         let failed = await Task.detached { () -> String? in
             do {
@@ -508,6 +530,7 @@ final class Session {
                     for (name, data) in beside { try data.write(to: besides.appendingPathComponent(name)) }
                 }
                 try bytes.write(to: output)
+                try lipsync?.write(to: lipsyncURL)
                 try record?.write(to: recordFile)
                 return nil
             } catch {
@@ -1234,6 +1257,7 @@ final class Session {
     func forget(_ job: Job) {
         try? FileManager.default.removeItem(at: file(job.id, kind: job.kind))
         try? FileManager.default.removeItem(at: recordFile(job.id))
+        try? FileManager.default.removeItem(at: lipsyncFile(job.id))
         if job.kind == "layers" { try? FileManager.default.removeItem(at: besideFolder(job.id)) }
         jobs.removeAll { $0.id == job.id }
         outputs[job.id] = nil
@@ -1339,7 +1363,20 @@ final class Session {
                 return
             }
         }
-        Media.save(bytes, suggesting: Media.fileName(created: job.finished ?? job.created, kind: job.kind))
+        guard let url = Media.save(bytes, suggesting: Media.fileName(created: job.finished ?? job.created, kind: job.kind))
+        else { return }
+        // A reading goes with its mouth shapes, beside it under its new name, so that what plays
+        // it later can say it too.
+        if job.kind == "speech", let data = try? Data(contentsOf: lipsyncFile(job.id)),
+            let record = LipsyncRecord.read(data)
+        {
+            let beside = url.deletingPathExtension().appendingPathExtension(String(LipsyncRecord.suffix.dropFirst()))
+            do {
+                try record.renamed(url.lastPathComponent).json().write(to: beside)
+            } catch {
+                complaint = "saved the reading, but not its mouth shapes beside it: \(error.localizedDescription)"
+            }
+        }
     }
 
     /// The document of the halves img2layers keeps beside a picture taken apart, where it still is.

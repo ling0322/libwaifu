@@ -270,18 +270,20 @@ enum Media {
 
     static let psd = UTType(filenameExtension: "psd") ?? .data
 
-    /// Asks where to save `bytes`, and saves them there.
-    @MainActor
-    static func save(_ bytes: Data, suggesting name: String) {
+    /// Asks where to save `bytes`, and saves them there: where, or nil where they were not.
+    @MainActor @discardableResult
+    static func save(_ bytes: Data, suggesting name: String) -> URL? {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = name
         panel.allowedContentTypes = [name.hasSuffix(".png") ? .png : name.hasSuffix(".psd") ? psd : .wav]
         panel.canCreateDirectories = true
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
         do {
             try bytes.write(to: url)
+            return url
         } catch {
             NSAlert(error: error).runModal()
+            return nil
         }
     }
 
