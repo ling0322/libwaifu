@@ -33,10 +33,10 @@
 //! ```
 
 use waifu::see_through::stratify;
-use waifu2d::package::DepthMap;
 use waifu2d::psd::PsdDocument;
 use waifu_tools::drawing::{
-    depth_layers_package, package_depth_layers, read_drawing, write_drawing,
+    attach_depth_document, depth_layers_package, lacks_depth, package_depth_layers, read_drawing,
+    write_drawing,
 };
 
 fn main() {
@@ -56,14 +56,7 @@ fn main() {
 fn run(drawing: &str, out: &str, depth: Option<&str>) -> Result<(), String> {
     waifu_tools::drawing::Format::of(out)?;
     let mut package = read_drawing(drawing)?;
-    let shown = package.layers.iter().filter(|l| l.visible).count();
-    let kept = package
-        .layers
-        .iter()
-        .filter(|l| l.depth_map.is_some())
-        .count();
-    if kept < shown {
-        // Each layer's depth from the depth document, in order.
+    if lacks_depth(&package) {
         let Some(depth) = depth else {
             return Err(format!(
                 "{drawing} keeps no depth of its own: name its depth document too"
@@ -71,24 +64,7 @@ fn run(drawing: &str, out: &str, depth: Option<&str>) -> Result<(), String> {
         };
         let bytes = std::fs::read(depth).map_err(|e| format!("{depth}: {e}"))?;
         let document = PsdDocument::read(&bytes).map_err(|e| format!("{depth}: {e}"))?;
-        if document.layers.len() != shown {
-            return Err(format!(
-                "the depth document is not the depth of the drawing's {shown} layers"
-            ));
-        }
-        let layers = package.layers.iter_mut().filter(|l| l.visible);
-        for (layer, d) in layers.zip(&document.layers) {
-            if (d.width(), d.height()) != (layer.image.width, layer.image.height) {
-                return Err(format!("{}'s depth is not the same size as it", layer.name));
-            }
-            let map = DepthMap {
-                width: d.width(),
-                height: d.height(),
-                gray: d.image.rgba.chunks(4).map(|p| p[0]).collect(),
-            };
-            layer.depth = map.median(&layer.image);
-            layer.depth_map = Some(map);
-        }
+        attach_depth_document(&mut package, &document).map_err(|e| format!("{depth}: {e}"))?;
     }
 
     let given = package_depth_layers(&package).map_err(|e| format!("{drawing}: {e}"))?;

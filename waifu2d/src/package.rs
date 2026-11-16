@@ -63,6 +63,9 @@ const INDEX: &str = "index.yaml";
 const PREVIEW: &str = "preview.png";
 const SOURCE: &str = "source.png";
 
+/// The longest side `preview.png` has: a larger canvas's preview is scaled down to it.
+pub const PREVIEW_SIDE: usize = 2048;
+
 /// The most one entry may unpack to, whatever the archive claims: a 16384 square of RGBA.
 const MAX_ENTRY: u64 = 4 * (MAX_SIDE as u64) * (MAX_SIDE as u64);
 
@@ -373,28 +376,47 @@ impl Package {
     }
 
     /// The layers that are shown laid over each other on the canvas, each at its opacity: RGBA,
-    /// not premultiplied, what `preview.png` holds.
+    /// not premultiplied, what `preview.png` holds. The canvas itself where neither side is over
+    /// [`PREVIEW_SIDE`]; past that, scaled down to it, each pixel the canvas pixel under its
+    /// middle -- a thumbnail, so that a large canvas does not take gigabytes to write.
     pub fn preview(&self) -> RgbaImage {
-        let (w, h) = (self.width as usize, self.height as usize);
+        let (canvas_w, canvas_h) = (self.width as usize, self.height as usize);
+        let long = canvas_w.max(canvas_h);
+        let (w, h) = match long <= PREVIEW_SIDE {
+            true => (canvas_w, canvas_h),
+            false => (
+                (canvas_w * PREVIEW_SIDE / long).max(1),
+                (canvas_h * PREVIEW_SIDE / long).max(1),
+            ),
+        };
+        // The canvas column and row each preview pixel shows; the identity at full size.
+        let under = |n: usize, canvas: usize| -> Vec<i64> {
+            (0..n)
+                .map(|p| ((2 * p + 1) * canvas / (2 * n)) as i64)
+                .collect()
+        };
+        let (xs, ys) = (under(w, canvas_w), under(h, canvas_h));
+        // The preview pixels whose canvas pixel is in `start..start + len`: they are in order.
+        let within = |under: &[i64], start: i64, len: usize| {
+            let first = under.partition_point(|&c| c < start);
+            let end = under.partition_point(|&c| c < start + len as i64);
+            first..end
+        };
+
         let mut out = vec![0f32; w * h * 4];
         for layer in self.layers.iter().filter(|l| l.visible) {
             let image = &layer.image;
-            for y in 0..image.height {
-                let cy = i64::from(layer.top) + y as i64;
-                if !(0..h as i64).contains(&cy) {
-                    continue;
-                }
-                for x in 0..image.width {
-                    let cx = i64::from(layer.left) + x as i64;
-                    if !(0..w as i64).contains(&cx) {
-                        continue;
-                    }
+            let (left, top) = (i64::from(layer.left), i64::from(layer.top));
+            for py in within(&ys, top, image.height) {
+                let y = (ys[py] - top) as usize;
+                for px in within(&xs, left, image.width) {
+                    let x = (xs[px] - left) as usize;
                     let s = &image.rgba[(y * image.width + x) * 4..][..4];
                     let sa = f32::from(s[3]) / 255.0 * layer.opacity as f32;
                     if sa <= 0.0 {
                         continue;
                     }
-                    let d = &mut out[(cy as usize * w + cx as usize) * 4..][..4];
+                    let d = &mut out[(py * w + px) * 4..][..4];
                     let da = d[3] * (1.0 - sa);
                     let a = sa + da;
                     for c in 0..3 {
@@ -915,6 +937,28 @@ mod tests {
             error.contains("index.yaml") && error.contains("checksum"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_large_canvas_has_a_thumbnail_for_a_preview() {
+        // The largest canvas there is, with one small layer: the preview is no larger than
+        // PREVIEW_SIDE, so it costs megabytes and not the gigabytes the canvas would.
+        let mut package = Package::new(MAX_SIDE, MAX_SIDE / 2);
+        let red = RgbaImage::new(16, 16, [255, 0, 0, 255].repeat(256));
+        package.layers = vec![Layer::new("dot", 8192, 4096, red)];
+        let preview = package.preview();
+        assert_eq!(
+            (preview.width, preview.height),
+            (PREVIEW_SIDE, PREVIEW_SIDE / 2)
+        );
+        // 8 canvas pixels a preview pixel: the 16 square is 2 by 2, at 1024, 512.
+        let at = |x: usize, y: usize| &preview.rgba[(y * preview.width + x) * 4..][..4];
+        for (x, y) in [(1024, 512), (1025, 512), (1024, 513), (1025, 513)] {
+            assert_eq!(at(x, y), [255, 0, 0, 255], "{x}, {y}");
+        }
+        for (x, y) in [(1023, 512), (1026, 512), (1024, 511), (1024, 514), (0, 0)] {
+            assert_eq!(at(x, y), [0, 0, 0, 0], "{x}, {y}");
+        }
     }
 
     #[test]

@@ -137,6 +137,9 @@ The rules:
   - A reader also takes 16 bits, keeping the high byte, and colour, taking red, which is how a
     depth from a Photoshop document's group arrives.
 - **The preview** is the shown layers laid over each other at their opacity, on the canvas.
+  - It is at most 2048 on its longer side. A larger canvas's preview is scaled down to that, each
+    pixel the canvas pixel under its middle.
+  - It is a thumbnail, so writing one never needs memory the size of a 16384 canvas.
 - **The source** is the picture as it was handed to img2layers, at its own size.
 
 ## Reading one safely

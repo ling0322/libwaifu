@@ -135,6 +135,42 @@ pub fn depth_layers_package(
     package
 }
 
+/// Whether a layer that is shown has no depth map: what a separate depth document is for. A
+/// hidden layer's depth, which stratifying never reads, does not count.
+pub fn lacks_depth(package: &waifu2d::package::Package) -> bool {
+    (package.layers.iter()).any(|l| l.visible && l.depth_map.is_none())
+}
+
+/// Gives each shown layer of `package` its depth from `document`: a depth document as img2layers
+/// once wrote one beside its document, a layer for each shown layer in their order, the depth in
+/// its gray (red, as it is read).
+pub fn attach_depth_document(
+    package: &mut waifu2d::package::Package,
+    document: &waifu2d::psd::PsdDocument,
+) -> Result<(), String> {
+    let shown = package.layers.iter().filter(|l| l.visible).count();
+    if document.layers.len() != shown {
+        return Err(format!(
+            "the depth document has {} layers, not one for each of the drawing's {shown}",
+            document.layers.len()
+        ));
+    }
+    let layers = package.layers.iter_mut().filter(|l| l.visible);
+    for (layer, d) in layers.zip(&document.layers) {
+        if (d.width(), d.height()) != (layer.image.width, layer.image.height) {
+            return Err(format!("{}'s depth is not the same size as it", layer.name));
+        }
+        let map = DepthMap {
+            width: d.width(),
+            height: d.height(),
+            gray: d.image.rgba.chunks(4).map(|p| p[0]).collect(),
+        };
+        layer.depth = map.median(&layer.image);
+        layer.depth_map = Some(map);
+    }
+    Ok(())
+}
+
 /// A package's shown layers with their depth, for stratifying; an error naming a layer that has
 /// none.
 pub fn package_depth_layers(
@@ -292,6 +328,56 @@ mod tests {
         let document = waifu2d::psd::PsdDocument::read(&bytes).unwrap();
         let (shown, _) = document.split_depth();
         assert_eq!(shown.len(), 1);
+    }
+
+    #[test]
+    fn a_hidden_layer_s_depth_does_not_stand_for_a_shown_one_s() {
+        // One shown layer without its depth and one hidden with: as many maps as shown layers,
+        // and still the depth document is needed, and is used.
+        let mut package = package();
+        let mut hidden = package.layers[0].clone();
+        hidden.name = "hidden".into();
+        hidden.visible = false;
+        package.layers[0].depth = None;
+        package.layers[0].depth_map = None;
+        package.layers.push(hidden);
+        assert!(lacks_depth(&package));
+        assert_eq!(
+            package_depth_layers(&package).unwrap_err(),
+            "face has no depth"
+        );
+
+        let gray = RgbaImage::new(2, 1, vec![90, 90, 90, 255, 90, 90, 90, 255]);
+        let document = waifu2d::psd::PsdDocument {
+            width: 4,
+            height: 4,
+            layers: vec![waifu2d::psd::PsdLayer {
+                name: "face".into(),
+                left: 1,
+                top: 2,
+                image: gray,
+                opacity: 1.0,
+                visible: true,
+            }],
+        };
+        attach_depth_document(&mut package, &document).unwrap();
+        assert!(!lacks_depth(&package));
+        assert_eq!(package.layers[0].depth, Some(90.0 / 255.0));
+        let layers = package_depth_layers(&package).unwrap();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].depth.data, [90, 90]);
+    }
+
+    #[test]
+    fn a_depth_document_must_be_one_layer_a_shown_layer() {
+        let mut package = package();
+        let document = waifu2d::psd::PsdDocument {
+            width: 4,
+            height: 4,
+            layers: Vec::new(),
+        };
+        let error = attach_depth_document(&mut package, &document).unwrap_err();
+        assert!(error.contains("has 0 layers"), "{error}");
     }
 
     #[test]
