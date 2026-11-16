@@ -17,14 +17,16 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! A package: the drawing in layers, as waifu2d keeps it -- a `.waifu2d` file.
+//! A package: a character as waifu2d keeps it -- a `.waifu2d` file.
 //!
-//! A zip of PNGs and an index, `index.yaml`: every layer's picture, where it is, how it is shown
-//! and how far away it is, and the depth of each pixel of it as a picture of its own. It carries
-//! what a Photoshop document from img2layers has and what one cannot say -- a layer's median
-//! depth, which layers are the near and far halves of one part, where the picture is on the
-//! canvas, what made it -- and any zip tool opens it. docs/waifu2d-package.md is the format;
-//! "package" here is this file, not one of libwaifu's model packages.
+//! A zip of PNGs and one index, `index.yaml`, which says everything about the character in a
+//! section a subject: today its name and its `appearance` -- every layer's picture, where it
+//! is, how it is shown, how far away it is, and the depth of each pixel of it as a picture of its
+//! own. It carries what a Photoshop document from img2layers has and what one cannot say -- a
+//! layer's median depth, which layers are the near and far halves of one part and the part they
+//! were cut from, the picture they were taken from, what made it -- and any zip tool opens it.
+//! docs/waifu2d-package.md is the format; "package" here is this file, not one of libwaifu's
+//! model packages.
 //!
 //! ```text
 //! girl.waifu2d
@@ -52,9 +54,14 @@ pub const MIMETYPE: &str = "application/vnd.libwaifu.waifu2d+zip";
 /// `format:` in the index.
 pub const FORMAT: &str = "waifu2d";
 
-/// The version this writes and the newest it reads. It goes up only for a change a reader of the
-/// last one would get wrong; a key it does not know, a reader leaves alone.
+/// The version of the index's own layout this writes and the newest it reads. It goes up only
+/// for a change a reader of the last one would get wrong; a key it does not know, a reader leaves
+/// alone.
 pub const VERSION: u32 = 1;
+
+/// The same, for the `appearance:` block: each section has its own, so that a newer one of
+/// something else does not stop a reader from drawing the character.
+pub const APPEARANCE_VERSION: u32 = 1;
 
 /// The widest and tallest canvas, and layer, a package may have.
 pub const MAX_SIDE: u32 = 16384;
@@ -69,22 +76,26 @@ pub const PREVIEW_SIDE: usize = 2048;
 /// The most one entry may unpack to, whatever the archive claims: a 16384 square of RGBA.
 const MAX_ENTRY: u64 = 4 * (MAX_SIDE as u64) * (MAX_SIDE as u64);
 
-/// What a layer is: a part as the model drew it, or one of the two halves a part was cut into by
-/// its depth (docs/see_through.md, "Stratification") -- the near one in front, the far one under it.
+/// What a layer is: the C API's WaifuLayerType, less its depth, which a layer here carries.
+///
+/// A part as the model drew it, or one of the two halves a part was cut into by its depth
+/// (docs/see_through.md, "Stratification"): the near one in front, the far one under it. A part
+/// some half names in `of` is a split part. A stratified package keeps it, hidden, in its near
+/// half's place, so that showing the split parts and hiding the halves is the drawing as it was.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
     #[default]
     Part,
-    Near,
-    Far,
+    StratifiedNear,
+    StratifiedFar,
 }
 
 impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Part => "part",
-            Kind::Near => "near",
-            Kind::Far => "far",
+            Kind::StratifiedNear => "stratified_near",
+            Kind::StratifiedFar => "stratified_far",
         }
     }
 }
@@ -136,22 +147,22 @@ impl Layer {
     }
 }
 
-/// Where the picture the layers were taken from is on the canvas, in canvas pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Area {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
-
+/// A character, as `index.yaml` has it: its name and what it looks like. What else a character
+/// is -- how it speaks, what it is like -- will be sections of its own beside `appearance`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Package {
+    /// The name to show, where the package gives one.
+    pub name: Option<String>,
+    pub appearance: Appearance,
+}
+
+/// What the character looks like, `appearance:` in the index: a drawing in layers on a canvas.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Appearance {
     pub width: u32,
     pub height: u32,
     /// Bottom first, as they are drawn.
     pub layers: Vec<Layer>,
-    pub picture: Option<Area>,
     /// What made it, as its maker says: `name: img2layers`, `seed: 7`.
     pub generator: BTreeMap<String, String>,
     /// The picture the layers were taken from, as it was handed over.
@@ -163,15 +174,11 @@ fn fail<T>(message: impl Into<String>) -> Result<T, Error> {
 }
 
 impl Package {
-    /// An empty canvas.
-    pub fn new(width: u32, height: u32) -> Package {
+    /// A character of no name that looks like `appearance`.
+    pub fn new(appearance: Appearance) -> Package {
         Package {
-            width,
-            height,
-            layers: Vec::new(),
-            picture: None,
-            generator: BTreeMap::new(),
-            source: None,
+            name: None,
+            appearance,
         }
     }
 
@@ -216,6 +223,72 @@ impl Package {
                 update waifu2d"
             ));
         }
+        let name = match index.has("name") {
+            true => Some(index.text("name")?),
+            false => None,
+        };
+        let appearance = index.need("appearance")?.into_map("appearance")?;
+        let appearance = Appearance::read(&mut Index(appearance), &mut archive)
+            .map_err(|e| within("appearance", e))?;
+        Ok(Package { name, appearance })
+    }
+
+    pub fn write(&self) -> Result<Vec<u8>, Error> {
+        let mut index = String::new();
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        index.push_str(&format!("format: {}\n", quote(FORMAT)?));
+        index.push_str(&format!("version: {VERSION}\n"));
+        if let Some(name) = &self.name {
+            index.push_str(&format!("name: {}\n", quote(name)?));
+        }
+        index.push_str("appearance:\n");
+        let mut section = String::new();
+        self.appearance.write(&mut section, &mut files)?;
+        for line in section.lines() {
+            index.push_str("  ");
+            index.push_str(line);
+            index.push('\n');
+        }
+
+        let package = |e: zip::result::ZipError| Error::Package(e.to_string());
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        // Stored: what is in a package is PNG, deflated already. Dated 1980-01-01 so that the
+        // same package is the same bytes.
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(zip::DateTime::DEFAULT);
+        zip.start_file("mimetype", options).map_err(package)?;
+        zip.write_all(MIMETYPE.as_bytes())?;
+        zip.start_file(INDEX, options).map_err(package)?;
+        zip.write_all(index.as_bytes())?;
+        for (name, data) in files {
+            zip.start_file(name, options).map_err(package)?;
+            zip.write_all(&data)?;
+        }
+        Ok(zip.finish().map_err(package)?.into_inner())
+    }
+}
+
+impl Appearance {
+    /// An empty canvas.
+    pub fn new(width: u32, height: u32) -> Appearance {
+        Appearance {
+            width,
+            height,
+            layers: Vec::new(),
+            generator: BTreeMap::new(),
+            source: None,
+        }
+    }
+
+    /// The `appearance:` block, its pictures out of `archive`.
+    fn read(index: &mut Index, archive: &mut Archive) -> Result<Appearance, Error> {
+        let version: u32 = index.number("version")?;
+        if version > APPEARANCE_VERSION {
+            return fail(format!(
+                "version {version}, newer than this reads ({APPEARANCE_VERSION}): update waifu2d"
+            ));
+        }
         let [width, height] = index.numbers::<u32, 2>("canvas")?;
         if !(1..=MAX_SIDE).contains(&width) || !(1..=MAX_SIDE).contains(&height) {
             return fail(format!(
@@ -223,18 +296,6 @@ impl Package {
             ));
         }
 
-        let picture = match index.has("picture") {
-            true => {
-                let [x, y, width, height] = index.numbers::<u32, 4>("picture")?;
-                Some(Area {
-                    x,
-                    y,
-                    width,
-                    height,
-                })
-            }
-            false => None,
-        };
         // Only what is one value: a maker's nested notes are its own to read.
         let generator = match index.0.remove("generator") {
             Some(node) => node
@@ -263,36 +324,27 @@ impl Package {
             let mut fields = Index(node.into_map(&what)?);
             let name = fields.text("name").map_err(|e| within(&what, e))?;
             let what = format!("layer {i} ({name})");
-            layers.push(layer(name, &mut fields, &mut archive).map_err(|e| within(&what, e))?);
+            layers.push(layer(name, &mut fields, archive).map_err(|e| within(&what, e))?);
         }
-        Ok(Package {
+        Ok(Appearance {
             width,
             height,
             layers,
-            picture,
             generator,
             source,
         })
     }
 
-    pub fn write(&self) -> Result<Vec<u8>, Error> {
+    /// The `appearance:` block, unindented, into `index`, and its pictures into `files`.
+    fn write(&self, index: &mut String, files: &mut Vec<(String, Vec<u8>)>) -> Result<(), Error> {
         if !(1..=MAX_SIDE).contains(&self.width) || !(1..=MAX_SIDE).contains(&self.height) {
             return fail(format!(
                 "a {} by {} canvas: each side is 1 to {MAX_SIDE}",
                 self.width, self.height
             ));
         }
-        let mut index = String::new();
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        index.push_str(&format!("format: {}\n", quote(FORMAT)?));
-        index.push_str(&format!("version: {VERSION}\n"));
+        index.push_str(&format!("version: {APPEARANCE_VERSION}\n"));
         index.push_str(&format!("canvas: [{}, {}]\n", self.width, self.height));
-        if let Some(a) = self.picture {
-            index.push_str(&format!(
-                "picture: [{}, {}, {}, {}]\n",
-                a.x, a.y, a.width, a.height
-            ));
-        }
         index.push_str(&format!("preview: {}\n", quote(PREVIEW)?));
         files.push((PREVIEW.into(), encode_rgba(&self.preview())?));
         if let Some(source) = &self.source {
@@ -356,23 +408,7 @@ impl Package {
                 files.push((file, encode_gray(map)?));
             }
         }
-
-        let package = |e: zip::result::ZipError| Error::Package(e.to_string());
-        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        // Stored: what is in a package is PNG, deflated already. Dated 1980-01-01 so that the
-        // same package is the same bytes.
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored)
-            .last_modified_time(zip::DateTime::DEFAULT);
-        zip.start_file("mimetype", options).map_err(package)?;
-        zip.write_all(MIMETYPE.as_bytes())?;
-        zip.start_file(INDEX, options).map_err(package)?;
-        zip.write_all(index.as_bytes())?;
-        for (name, data) in files {
-            zip.start_file(name, options).map_err(package)?;
-            zip.write_all(&data)?;
-        }
-        Ok(zip.finish().map_err(package)?.into_inner())
+        Ok(())
     }
 
     /// The layers that are shown laid over each other on the canvas, each at its opacity: RGBA,
@@ -444,8 +480,8 @@ impl Package {
                 continue;
             };
             let kind = match n {
-                "0" => Kind::Near,
-                "1" => Kind::Far,
+                "0" => Kind::StratifiedNear,
+                "1" => Kind::StratifiedFar,
                 _ => continue,
             };
             if layer.kind == Kind::Part && has(format!("{part}-0")) && has(format!("{part}-1")) {
@@ -458,7 +494,7 @@ impl Package {
     /// A Photoshop document img2layers wrote, as a package: its layers, each with its depth from
     /// the hidden group `depth` where the document keeps one and its median depth from that, and
     /// its halves marked ([`Package::mark_halves`]).
-    pub fn from_psd(document: &PsdDocument) -> Package {
+    pub fn from_psd(document: &PsdDocument) -> Appearance {
         let (shown, _) = document.split_depth();
         let layers = shown
             .iter()
@@ -482,12 +518,12 @@ impl Package {
                 layer
             })
             .collect();
-        let mut package = Package {
+        let mut appearance = Appearance {
             layers,
-            ..Package::new(document.width, document.height)
+            ..Appearance::new(document.width, document.height)
         };
-        package.mark_halves();
-        package
+        appearance.mark_halves();
+        appearance
     }
 }
 
@@ -534,9 +570,13 @@ fn layer(name: String, fields: &mut Index, archive: &mut Archive) -> Result<Laye
     if fields.has("kind") {
         layer.kind = match fields.text("kind")?.as_str() {
             "part" => Kind::Part,
-            "near" => Kind::Near,
-            "far" => Kind::Far,
-            other => return fail(format!("kind is {other:?}: part, near or far")),
+            "stratified_near" => Kind::StratifiedNear,
+            "stratified_far" => Kind::StratifiedFar,
+            other => {
+                return fail(format!(
+                    "kind is {other:?}: part, stratified_near or stratified_far"
+                ))
+            }
         };
     }
     if fields.has("of") {
@@ -768,16 +808,12 @@ mod tests {
     }
 
     fn package() -> Package {
-        let mut package = Package::new(8, 6);
-        package.picture = Some(Area {
-            x: 0,
-            y: 1,
-            width: 8,
-            height: 4,
-        });
-        package.generator.insert("name".into(), "img2layers".into());
-        package.generator.insert("seed".into(), "7".into());
-        package.source = Some(image(8, 6, 1));
+        let mut appearance = Appearance::new(8, 6);
+        appearance
+            .generator
+            .insert("name".into(), "img2layers".into());
+        appearance.generator.insert("seed".into(), "7".into());
+        appearance.source = Some(image(8, 6, 1));
 
         let mut hair = Layer::new("back hair", 1, -1, image(3, 2, 2));
         hair.depth = Some(0.83);
@@ -787,14 +823,20 @@ mod tests {
             gray: vec![0, 50, 100, 150, 200, 255],
         });
         let mut near = Layer::new("topwear-0", 0, 2, image(4, 3, 3));
-        near.kind = Kind::Near;
+        near.kind = Kind::StratifiedNear;
         near.of = Some("topwear".into());
         near.depth = Some(0.5);
         let mut fringe = Layer::new("前髪 \"2\": \\ #", 2, 0, image(2, 2, 4));
         fringe.opacity = 0.25;
         fringe.visible = false;
-        package.layers = vec![hair, near, fringe];
-        package
+        // The part topwear-0 is a half of, hidden.
+        let mut whole = Layer::new("topwear", 0, 2, image(4, 3, 5));
+        whole.visible = false;
+        appearance.layers = vec![hair, whole, near, fringe];
+        Package {
+            name: Some("初音ミク".into()),
+            appearance,
+        }
     }
 
     #[test]
@@ -828,6 +870,7 @@ mod tests {
                 "depth/000.png",
                 "layers/001.png",
                 "layers/002.png",
+                "layers/003.png",
             ]
         );
     }
@@ -838,17 +881,27 @@ mod tests {
         let mut archive = Archive::new(&bytes).unwrap();
         let index = String::from_utf8(archive.need(INDEX).unwrap()).unwrap();
         assert!(
-            index.starts_with("format: \"waifu2d\"\nversion: 1\ncanvas: [8, 6]\n"),
-            "{index}"
-        );
-        assert!(
-            index.contains(
-                "  - name: \"back hair\"\n    image: \"layers/000.png\"\n    at: [1, -1]\n"
+            index.starts_with(
+                "format: \"waifu2d\"\nversion: 1\nname: \"初音ミク\"\nappearance:\n  \
+                version: 1\n  canvas: [8, 6]\n"
             ),
             "{index}"
         );
         assert!(
-            index.contains("    kind: near\n    of: \"topwear\"\n"),
+            index.contains(
+                "    - name: \"back hair\"\n      image: \"layers/000.png\"\n      at: [1, -1]\n"
+            ),
+            "{index}"
+        );
+        assert!(
+            index.contains(
+                "    - name: \"topwear\"\n      image: \"layers/001.png\"\n      at: [0, 2]\n      \
+                visible: false\n    - name: \"topwear-0\"\n"
+            ),
+            "{index}"
+        );
+        assert!(
+            index.contains("      kind: stratified_near\n      of: \"topwear\"\n"),
             "{index}"
         );
     }
@@ -876,9 +929,11 @@ mod tests {
 
     #[test]
     fn a_reader_takes_what_another_tool_wrote() {
-        // Keys it does not know, deflated entries, a layer with only what it must have.
-        let index = "# by hand\nformat: waifu2d\nversion: 1\ncanvas: [4, 4]\nfuture: [1, 2]\n\
-            layers:\n  - name: face\n    image: a.png\n    at: [1, 1]\n    sparkle: yes\n";
+        // Keys and sections it does not know, deflated entries, no name, a layer with only what
+        // it must have.
+        let index = "# by hand\nformat: waifu2d\nversion: 1\nvoice:\n  version: 9\n\
+            appearance:\n  version: 1\n  canvas: [4, 4]\n  future: [1, 2]\n  layers:\n    \
+            - name: face\n      image: a.png\n      at: [1, 1]\n      sparkle: yes\n";
         let png = encode_rgba(&image(2, 2, 9)).unwrap();
         let bytes = archive(&[
             ("index.yaml", index.as_bytes(), true),
@@ -886,8 +941,13 @@ mod tests {
         ]);
 
         let package = Package::read(&bytes).unwrap();
-        assert_eq!(package.layers, [Layer::new("face", 1, 1, image(2, 2, 9))]);
-        assert_eq!((package.picture, package.source), (None, None));
+        assert_eq!(package.name, None);
+        let appearance = package.appearance;
+        assert_eq!(
+            appearance.layers,
+            [Layer::new("face", 1, 1, image(2, 2, 9))]
+        );
+        assert_eq!(appearance.source, None);
     }
 
     #[test]
@@ -904,25 +964,33 @@ mod tests {
             error(&other)
         );
 
-        let newer = "format: waifu2d\nversion: 2\ncanvas: [4, 4]\nlayers: []\n";
-        let newer = archive(&[("index.yaml", newer.as_bytes(), false)]);
-        assert!(
-            error(&newer).contains("version 2, newer than this reads (1)"),
-            "{}",
-            error(&newer)
-        );
+        let appearance = "appearance:\n  version: 1\n  canvas: [4, 4]\n  layers: []\n";
+        let read = |index: String| error(&archive(&[("index.yaml", index.as_bytes(), false)]));
 
-        let psd = "format: psd\nversion: 1\ncanvas: [4, 4]\nlayers: []\n";
-        let psd = archive(&[("index.yaml", psd.as_bytes(), false)]);
-        assert!(error(&psd).contains("of format \"psd\""), "{}", error(&psd));
+        let newer = read(format!("format: waifu2d\nversion: 2\n{appearance}"));
+        assert!(
+            newer.contains("version 2, newer than this reads (1)"),
+            "{newer}"
+        );
+        // A newer appearance alone says which section it is.
+        let newer = read("format: waifu2d\nversion: 1\nappearance:\n  version: 2\n".into());
+        assert!(newer.starts_with("appearance: version 2, newer"), "{newer}");
+
+        let psd = read(format!("format: psd\nversion: 1\n{appearance}"));
+        assert!(psd.contains("of format \"psd\""), "{psd}");
+        let none = read("format: waifu2d\nversion: 1\n".into());
+        assert_eq!(none, "appearance is missing");
     }
 
     #[test]
     fn a_missing_picture_names_its_layer() {
-        let index = "format: waifu2d\nversion: 1\ncanvas: [4, 4]\nlayers:\n  - name: face\n    \
-            image: nowhere.png\n    at: [0, 0]\n";
+        let index = "format: waifu2d\nversion: 1\nappearance:\n  version: 1\n  canvas: [4, 4]\n  \
+            layers:\n    - name: face\n      image: nowhere.png\n      at: [0, 0]\n";
         let bytes = archive(&[("index.yaml", index.as_bytes(), false)]);
-        assert_eq!(error(&bytes), "layer 0 (face): nowhere.png is missing");
+        assert_eq!(
+            error(&bytes),
+            "appearance: layer 0 (face): nowhere.png is missing"
+        );
     }
 
     #[test]
@@ -943,7 +1011,7 @@ mod tests {
     fn a_large_canvas_has_a_thumbnail_for_a_preview() {
         // The largest canvas there is, with one small layer: the preview is no larger than
         // PREVIEW_SIDE, so it costs megabytes and not the gigabytes the canvas would.
-        let mut package = Package::new(MAX_SIDE, MAX_SIDE / 2);
+        let mut package = Appearance::new(MAX_SIDE, MAX_SIDE / 2);
         let red = RgbaImage::new(16, 16, [255, 0, 0, 255].repeat(256));
         package.layers = vec![Layer::new("dot", 8192, 4096, red)];
         let preview = package.preview();
@@ -963,7 +1031,7 @@ mod tests {
 
     #[test]
     fn the_preview_lays_what_is_shown_over_each_other() {
-        let mut package = Package::new(2, 1);
+        let mut package = Appearance::new(2, 1);
         let red = RgbaImage::new(2, 1, vec![255, 0, 0, 255, 255, 0, 0, 255]);
         let blue = RgbaImage::new(1, 1, vec![0, 0, 255, 255]);
         let mut half = Layer::new("half", 1, 0, blue.clone());

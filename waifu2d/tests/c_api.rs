@@ -107,7 +107,9 @@ fn a_rig_without_eyes_has_a_note_to_show() {
 fn a_package_opens_as_its_document_does() {
     let psd = common::face_psd();
     let document = waifu2d::psd::PsdDocument::read(&psd).unwrap();
-    let package = waifu2d::Package::from_psd(&document).write().unwrap();
+    let package = waifu2d::Package::new(waifu2d::package::Appearance::from_psd(&document))
+        .write()
+        .unwrap();
     let path = std::env::temp_dir().join(format!("waifu2d-c-api-{}.waifu2d", std::process::id()));
     std::fs::write(&path, &package).unwrap();
     let c_path = CString::new(path.to_str().unwrap()).unwrap();

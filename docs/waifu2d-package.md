@@ -1,19 +1,22 @@
 # The waifu2d package: `.waifu2d`
 
-A drawing in layers as waifu2d keeps it: what img2layers writes and what waifu2d rigs. A zip of
-PNGs and an index. "Package" here means this file. It has nothing to do with libwaifu's model
-packages (safetensors and a manifest).
+A character as waifu2d keeps it: a zip of PNGs and one index, `index.yaml`, which says
+everything about the character. Today that is its name and its appearance: the drawing in layers
+that img2layers writes and waifu2d rigs. What else a character is will be sections of the same
+index beside `appearance`.
 
-It carries everything a Photoshop document from img2layers has. It also carries what a document
-cannot say:
+"Package" here means this file. It has nothing to do with libwaifu's model packages
+(safetensors and a manifest).
+
+The appearance carries everything a Photoshop document from img2layers has. It also carries what
+a document cannot say:
 
 - each layer's median depth;
-- which layers are the near and far halves of one part;
-- where the picture is on the canvas;
-- the picture itself;
+- which layers are the near and far halves of one part, and the part they were cut from;
+- the picture the layers were taken from;
 - what made it.
 
-Any zip tool opens it, and any picture viewer opens what is inside.
+Any zip tool opens a package, and any picture viewer opens what is inside.
 
 The code is `waifu2d::package` (`waifu2d/src/package.rs`). The tools are `img2layers`,
 `see_through_stratify` and `waifu2d_convert` in `waifu-tools`.
@@ -21,11 +24,11 @@ The code is `waifu2d::package` (`waifu2d/src/package.rs`). The tools are `img2la
 ## The archive
 
 ```
-girl.waifu2d
+miku.waifu2d
 ├── mimetype         application/vnd.libwaifu.waifu2d+zip
-├── index.yaml
+├── index.yaml       everything about the character
 ├── preview.png      the shown layers laid over each other
-├── source.png       the picture they were taken from (optional)
+├── source.png       the picture the layers were taken from (optional)
 ├── layers/000.png   one per layer
 └── depth/000.png    one per layer that has a depth map
 ```
@@ -46,51 +49,79 @@ girl.waifu2d
   `/`, and zip tools disagree about a name's encoding. The index maps a layer to its files.
   - Writers number from `000`, bottom first; past 999 the number just grows wider.
   - A reader goes by what the index says, never by the numbering.
+- **Paths in the index are from the package's root**, and never hold `..`.
 - **waifu2d writes the same bytes for the same package.** Every entry is dated 1980-01-01, and
   the PNG encoder is deterministic.
 
 ## index.yaml
 
+A stratified package, `topwear` cut in two:
+
 ```yaml
 format: "waifu2d"
 version: 1
-canvas: [1280, 1280]
-picture: [0, 140, 1280, 1000]
-preview: "preview.png"
-source: "source.png"
-generator:
-  "model": "see-through"
-  "name": "img2layers"
-  "seed": "7"
-  "split_pairs": "true"
-layers:
-  - name: "back hair"
-    image: "layers/000.png"
-    at: [312, 80]
-    depth: 0.83
-    depth_map: "depth/000.png"
-  - name: "topwear-1"
-    image: "layers/007.png"
-    at: [402, 610]
-    kind: far
-    of: "topwear"
-    depth: 0.41
-    depth_map: "depth/007.png"
-  - name: "前髪"
-    image: "layers/012.png"
-    at: [300, 60]
-    opacity: 0.5
-    visible: false
+name: "初音ミク"
+appearance:
+  version: 1
+  canvas: [1280, 1280]
+  preview: "preview.png"
+  source: "source.png"
+  generator:
+    "model": "see-through"
+    "name": "img2layers"
+    "seed": "7"
+    "split_pairs": "true"
+    "stratified_by": "see_through_stratify"
+  layers:
+    - name: "back hair"
+      image: "layers/000.png"
+      at: [551, 17]
+      depth: 0.83
+      depth_map: "depth/000.png"
+    - name: "topwear-1"
+      image: "layers/001.png"
+      at: [402, 610]
+      kind: stratified_far
+      of: "topwear"
+      depth: 0.47
+      depth_map: "depth/001.png"
+    - name: "face"
+      image: "layers/002.png"
+      at: [500, 200]
+      depth: 0.40
+      depth_map: "depth/002.png"
+    - name: "topwear"
+      image: "layers/003.png"
+      at: [402, 610]
+      visible: false
+      depth: 0.41
+      depth_map: "depth/003.png"
+    - name: "topwear-0"
+      image: "layers/004.png"
+      at: [430, 640]
+      kind: stratified_near
+      of: "topwear"
+      depth: 0.41
+      depth_map: "depth/004.png"
 ```
+
+The top level:
 
 | key | | what |
 |---|---|---|
 | `format` | required | `waifu2d` |
-| `version` | required | `1`. A reader refuses a version newer than its own |
+| `version` | required | `1`: the version of this top level's layout. A reader refuses a newer one |
+| `name` | | the character's name, to show |
+| `appearance` | required | what the character looks like |
+
+`appearance`:
+
+| key | | what |
+|---|---|---|
+| `version` | required | `1`. A reader refuses a newer one, and says it is the appearance's |
 | `canvas` | required | `[width, height]`, each 1 to 16384 |
-| `picture` | | `[x, y, width, height]`: where the source picture is on the canvas |
 | `preview` | | the preview's entry. Readers need not read it: it is the layers again |
-| `source` | | the source picture's entry |
+| `source` | | the entry of the picture the layers were taken from |
 | `generator` | | what made it, one value per key, as its maker says |
 | `layers` | required | bottom first: the order they are drawn in |
 
@@ -103,10 +134,24 @@ Each layer:
 | `at` | required | `[left, top]`: where its top left corner is on the canvas. Either may be negative |
 | `opacity` | 1 | 0 to 1 |
 | `visible` | true | `true` or `false` |
-| `kind` | `part` | `part`, as the model drew it; `near` or `far`, a half a part was cut into by its depth (docs/see_through.md, "Stratification") |
+| `kind` | `part` | `part`, `stratified_near` or `stratified_far`: the C API's `WaifuLayerType`, less its depth, which a layer here carries |
 | `of` | | a half's part: `topwear` for `topwear-0` |
 | `depth` | | the median depth of what it draws: 0 nearest, 1 farthest |
 | `depth_map` | | its depth map's entry |
+
+### Stratified layers
+
+A part cut into a near and a far half by its depth (docs/see_through.md, "Stratification")
+keeps all three:
+
+- **The halves** are `stratified_near` and `stratified_far`, shown. Each names its part in `of`.
+- **The part** stays a `part`, whole and hidden, right under its near half, which is its own
+  place in the stack. That a half names it is what makes it a split part, as `derived_from_id`
+  does in the C API.
+
+Drawing every shown layer draws the stratified character, which is what waifu2d does. Showing the
+split parts and hiding the halves draws it as it was before, in its old order, without moving
+anything. A package img2layers wrote has only parts.
 
 ### The rules for the YAML
 
@@ -120,12 +165,16 @@ with list items that are mappings added. That means:
 The rules:
 
 - **A writer quotes every string**, in double quotes, escaping `"` and `\`. Unquoted, YAML reads
-  `no`, `on` or `1e3` as something else, and a name with ` #` in it as a comment. Numbers and
-  `true`/`false` are written plain.
-- **A reader ignores a key it does not know**, at any level. A writer adds keys without changing
-  `version`. `version` goes up only for a change that a reader of the last version would get
-  wrong.
+  `no`, `on` or `1e3` as something else, and a name with ` #` in it as a comment. Numbers, `kind`
+  and `true`/`false` are written plain.
+- **A reader ignores a key or a section it does not know**, at any level. A writer adds keys
+  without changing a `version`.
+- **Each section has its own `version`**, which goes up only for a change that a reader of the
+  last one would get wrong. A newer section that a reader does not need stops nothing: a reader
+  that only draws reads `appearance` and nothing else.
 - **Sizes are not in the index.** A PNG's header has them, and two places would one day disagree.
+  Neither is where the picture sits on the canvas: img2layers centres it, scaled to fit, so its
+  size and the canvas's say where.
 
 ## The pictures
 
@@ -165,10 +214,27 @@ cargo run --release -p waifu-tools --bin waifu2d_convert -- old.psd old.waifu2d
 - Each writes what its output's name says, `.waifu2d` or `.psd`, and refuses any other name.
 - A tool that reads a drawing reads either format, told apart by how the file starts rather than
   by its name.
-- `waifu2d_convert` turns a document's hidden `depth` group into depth maps and medians, and its
-  `<part>-0`/`<part>-1` into marked halves.
-- The other way round, it says which layers a document from here cannot keep as they were: a
-  hidden layer, or one under full opacity.
+- `see_through_stratify` keeps the package's name, picture and generator, and each part it
+  splits, hidden.
+
+### To and from a Photoshop document
+
+A document becomes a package losing nothing:
+
+- its hidden `depth` group becomes depth maps and medians;
+- its `<part>-0`/`<part>-1` become marked halves.
+
+A package becomes a document losing what a document from here has no place for:
+
+| | in the document | back as a package |
+|---|---|---|
+| shown layers, their pixels and places | kept | kept |
+| depth maps | the hidden group `depth` | kept |
+| halves (`kind`, `of`) | only their names, `-0`/`-1` | read again from the names |
+| split parts | left out: the document is the stratified drawing | lost |
+| other hidden layers, opacity | left out, or drawn at full opacity; the tool says which | lost |
+| `name`, `generator`, `source` | nowhere | lost |
+| `depth` | not kept | worked out again from the 8-bit depth map |
 
 In Rust, `Rig::read_package` and `Rig::from_package` rig a package, and `Rig::read` takes either
 format. A package and a Photoshop document of the same layers make the same rig

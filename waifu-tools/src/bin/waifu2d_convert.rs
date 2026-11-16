@@ -39,12 +39,16 @@ fn main() {
     let run = || -> Result<(), String> {
         let package = read_drawing(from)?;
         write_drawing(&package, to)?;
-        let depths = package.layers.iter().filter(|l| l.depth_map.is_some());
+        let depths = package
+            .appearance
+            .layers
+            .iter()
+            .filter(|l| l.depth_map.is_some());
         eprintln!(
             "wrote {to}: {} layers on a {} by {} canvas, {} with their depth",
-            package.layers.len(),
-            package.width,
-            package.height,
+            package.appearance.layers.len(),
+            package.appearance.width,
+            package.appearance.height,
             depths.count()
         );
         Ok(())

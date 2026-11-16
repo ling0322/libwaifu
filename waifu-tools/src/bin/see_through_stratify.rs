@@ -25,7 +25,7 @@
 //! what the out file's name says. The depth is the drawing's own: each layer's depth map in a
 //! package, the hidden group `depth` in a document. A document from before it kept one is read
 //! with its depth document, `<id>.layers/depth.psd`, beside it. What is written keeps its depth,
-//! and a package says which layers are whose halves.
+//! and a package says which layers are whose halves and keeps each part it split, hidden.
 //!
 //! ```bash
 //! cargo run --release -p waifu-tools --bin see_through_stratify -- \
@@ -35,7 +35,7 @@
 use waifu::see_through::stratify;
 use waifu2d::psd::PsdDocument;
 use waifu_tools::drawing::{
-    attach_depth_document, depth_layers_package, lacks_depth, package_depth_layers, read_drawing,
+    attach_depth_document, depth_layers, lacks_depth, read_drawing, stratified_package,
     write_drawing,
 };
 
@@ -56,7 +56,7 @@ fn main() {
 fn run(drawing: &str, out: &str, depth: Option<&str>) -> Result<(), String> {
     waifu_tools::drawing::Format::of(out)?;
     let mut package = read_drawing(drawing)?;
-    if lacks_depth(&package) {
+    if lacks_depth(&package.appearance) {
         let Some(depth) = depth else {
             return Err(format!(
                 "{drawing} keeps no depth of its own: name its depth document too"
@@ -64,28 +64,20 @@ fn run(drawing: &str, out: &str, depth: Option<&str>) -> Result<(), String> {
         };
         let bytes = std::fs::read(depth).map_err(|e| format!("{depth}: {e}"))?;
         let document = PsdDocument::read(&bytes).map_err(|e| format!("{depth}: {e}"))?;
-        attach_depth_document(&mut package, &document).map_err(|e| format!("{depth}: {e}"))?;
+        attach_depth_document(&mut package.appearance, &document)
+            .map_err(|e| format!("{depth}: {e}"))?;
     }
 
-    let given = package_depth_layers(&package).map_err(|e| format!("{drawing}: {e}"))?;
-    let before: Vec<String> = given.iter().map(|l| l.name.clone()).collect();
-    let layers = stratify(given);
-    eprintln!("before: {}", before.join(", "));
-    eprintln!(
-        "after:  {}",
+    let given = depth_layers(&package.appearance).map_err(|e| format!("{drawing}: {e}"))?;
+    let layers = stratify(given.clone());
+    let names = |layers: &[waifu::see_through::DepthLayer]| {
         layers
             .iter()
             .map(|l| l.name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
-    );
-
-    let mut stratified = depth_layers_package(&layers, package.width, package.height);
-    stratified.picture = package.picture;
-    stratified.source = package.source.take();
-    stratified.generator = std::mem::take(&mut package.generator);
-    stratified
-        .generator
-        .insert("stratified_by".into(), "see_through_stratify".into());
-    write_drawing(&stratified, out)
+    };
+    eprintln!("before: {}", names(&given));
+    eprintln!("after:  {}", names(&layers));
+    write_drawing(&stratified_package(&package, &given, &layers), out)
 }

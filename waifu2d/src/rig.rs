@@ -311,7 +311,7 @@ impl Rig {
 
     /// Rigs a package, as [`Rig::build`] does a Photoshop document of the same layers.
     pub fn from_package(package: &Package) -> Rig {
-        let shown: Vec<Shown> = (package.layers.iter().filter(|l| l.visible))
+        let shown: Vec<Shown> = (package.appearance.layers.iter().filter(|l| l.visible))
             .map(|l| Shown {
                 name: &l.name,
                 left: l.left,
@@ -320,7 +320,7 @@ impl Rig {
                 opacity: l.opacity,
             })
             .collect();
-        build(package.width, package.height, &shown)
+        build(package.appearance.width, package.appearance.height, &shown)
     }
 
     /// Reads a Photoshop document and rigs it.

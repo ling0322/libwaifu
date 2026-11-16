@@ -24,8 +24,7 @@
 //! ```
 //!
 //! `out.waifu2d` is a package (docs/waifu2d-package.md), what waifu2d reads: every part with its
-//! depth and its median depth, where the picture is on the canvas, the picture, and how it was
-//! made. `out.psd` is the Photoshop document this wrote before, each part's depth in a hidden
+//! depth and its median depth, the picture they were taken from, and how it was made. `out.psd` is the Photoshop document this wrote before, each part's depth in a hidden
 //! group (`depth/<tag>`), and with it `<out>.layers/`, a PNG of every part numbered bottom first
 //! as the app numbers them (`00-<tag>.png` is the lowest) and a list of them in `.img2layers`. A
 //! rerun removes the PNGs that list names and nothing else, so a PNG somebody put there survives
