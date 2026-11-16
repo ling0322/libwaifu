@@ -772,22 +772,23 @@ struct ClipFrame: View {
                 }
             }
         }
-        // A reading runs the width of the drawing over it and the buttons under it, and is as tall
-        // as the player and the words are: the drawing takes the rest.
+        // A reading runs the width of the drawing over it and the buttons under it, and is no taller
+        // than the player and the words are: the drawing takes the rest. Nothing in it grows, so in a
+        // short window it gives way -- the words scroll in less -- rather than push the buttons off.
         .frame(maxWidth: reading ? .infinity : 560)
-        .fixedSize(horizontal: false, vertical: reading)
         .task(id: job.id) { await session.load(job) }
     }
 }
 
-/// Its content offered `height` -- whatever it is offered itself -- and as tall as the content takes
-/// of that. Unlike `.frame(maxHeight:)`, which grows to its most where there is the room, words
-/// shorter than `height` keep to their own height, and nothing is left empty under them.
+/// Its content offered `height`, or less where it is itself offered less, and as tall as the
+/// content takes of that. Unlike `.frame(maxHeight:)`, which grows to its most where there is the
+/// room, words shorter than `height` keep to their own height, and nothing is left empty under them.
 struct OfferHeight: Layout {
     var height: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        subviews.first?.sizeThatFits(ProposedViewSize(width: proposal.width, height: height)) ?? .zero
+        let offered = min(height, proposal.height ?? height)
+        return subviews.first?.sizeThatFits(ProposedViewSize(width: proposal.width, height: offered)) ?? .zero
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
