@@ -19,24 +19,32 @@
 
 //! Stratifies a picture img2layers took apart: its hair, hands, top and bottom each cut into a
 //! near and a far layer by their own depth (see `waifu::see_through::stratify`), as upstream's
-//! `heuristic_partseg.py seg_wdepth` does to a document it wrote. The depth is the document's own,
-//! in its hidden group `depth`; a document from before it kept one is read with its depth document,
-//! `<id>.layers/depth.psd`, beside it. What is written keeps its depth in the group too.
+//! `heuristic_partseg.py seg_wdepth` does to a document it wrote.
+//!
+//! It reads a package (`.waifu2d`) or a Photoshop document, whichever it is handed, and writes
+//! what the out file's name says. The depth is the drawing's own: each layer's depth map in a
+//! package, the hidden group `depth` in a document. A document from before it kept one is read
+//! with its depth document, `<id>.layers/depth.psd`, beside it. What is written keeps its depth,
+//! and a package says which layers are whose halves.
 //!
 //! ```bash
 //! cargo run --release -p waifu-tools --bin see_through_stratify -- \
-//!     picture.psd stratified.psd [depth.psd]
+//!     picture.waifu2d stratified.waifu2d [depth.psd]
 //! ```
 
-use waifu::see_through::{
-    depth_layer_name, read_psd, stratify, write_psd_with_hidden, DepthLayer, Image, PsdHiddenGroup,
-    PsdLayer, PsdMode, DEPTH_GROUP,
+use waifu::see_through::stratify;
+use waifu2d::package::DepthMap;
+use waifu2d::psd::PsdDocument;
+use waifu_tools::drawing::{
+    depth_layers_package, package_depth_layers, read_drawing, write_drawing,
 };
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
-        eprintln!("usage: see_through_stratify <document.psd> <out.psd> [depth.psd]");
+        eprintln!(
+            "usage: see_through_stratify <drawing.waifu2d|.psd> <out.waifu2d|.psd> [depth.psd]"
+        );
         std::process::exit(2);
     }
     if let Err(error) = run(&args[0], &args[1], args.get(2).map(String::as_str)) {
@@ -45,77 +53,45 @@ fn main() {
     }
 }
 
-fn run(document: &str, out: &str, depth: Option<&str>) -> Result<(), String> {
-    let read = |path: &str| {
-        std::fs::read(path)
-            .map_err(|e| format!("{path}: {e}"))
-            .and_then(|bytes| read_psd(&bytes).map_err(|e| format!("{path}: {e}")))
-    };
-    let picture = read(document)?;
-    if picture.mode != PsdMode::Rgb {
-        return Err(format!("{document} is not an RGB document"));
-    }
-    let prefix = depth_layer_name("");
-    let (depths, layers): (Vec<PsdLayer>, Vec<PsdLayer>) = picture
+fn run(drawing: &str, out: &str, depth: Option<&str>) -> Result<(), String> {
+    waifu_tools::drawing::Format::of(out)?;
+    let mut package = read_drawing(drawing)?;
+    let shown = package.layers.iter().filter(|l| l.visible).count();
+    let kept = package
         .layers
-        .into_iter()
-        .partition(|layer| layer.name.starts_with(&prefix));
-
-    // Each layer's depth, gray: its own from the group, or the depth document's in order.
-    let grays: Vec<Image<u8>> = if depths.len() == layers.len() {
-        depths
-            .iter()
-            .map(|d| {
-                let n = d.pixels.width * d.pixels.height;
-                Image::from_data(
-                    d.pixels.width,
-                    d.pixels.height,
-                    1,
-                    (0..n).map(|p| d.pixels.data[p * 4]).collect(),
-                )
-            })
-            .collect()
-    } else {
+        .iter()
+        .filter(|l| l.depth_map.is_some())
+        .count();
+    if kept < shown {
+        // Each layer's depth from the depth document, in order.
         let Some(depth) = depth else {
             return Err(format!(
-                "{document} keeps no depth of its own: name its depth document too"
+                "{drawing} keeps no depth of its own: name its depth document too"
             ));
         };
-        let depth = read(depth)?;
-        if depth.mode != PsdMode::Grayscale || depth.layers.len() != layers.len() {
+        let bytes = std::fs::read(depth).map_err(|e| format!("{depth}: {e}"))?;
+        let document = PsdDocument::read(&bytes).map_err(|e| format!("{depth}: {e}"))?;
+        if document.layers.len() != shown {
             return Err(format!(
-                "the depth document is not the grayscale depth of the document's {} layers",
-                layers.len()
+                "the depth document is not the depth of the drawing's {shown} layers"
             ));
         }
-        depth
-            .layers
-            .iter()
-            .map(|d| {
-                let n = d.pixels.width * d.pixels.height;
-                Image::from_data(
-                    d.pixels.width,
-                    d.pixels.height,
-                    1,
-                    (0..n).map(|p| d.pixels.data[p * 2]).collect(),
-                )
-            })
-            .collect()
-    };
-
-    let mut given = Vec::with_capacity(layers.len());
-    for (layer, gray) in layers.into_iter().zip(grays) {
-        if (gray.width, gray.height) != (layer.pixels.width, layer.pixels.height) {
-            return Err(format!("{}'s depth is not the same size as it", layer.name));
+        let layers = package.layers.iter_mut().filter(|l| l.visible);
+        for (layer, d) in layers.zip(&document.layers) {
+            if (d.width(), d.height()) != (layer.image.width, layer.image.height) {
+                return Err(format!("{}'s depth is not the same size as it", layer.name));
+            }
+            let map = DepthMap {
+                width: d.width(),
+                height: d.height(),
+                gray: d.image.rgba.chunks(4).map(|p| p[0]).collect(),
+            };
+            layer.depth = map.median(&layer.image);
+            layer.depth_map = Some(map);
         }
-        given.push(DepthLayer {
-            name: layer.name,
-            left: layer.left,
-            top: layer.top,
-            pixels: layer.pixels,
-            depth: gray,
-        });
     }
+
+    let given = package_depth_layers(&package).map_err(|e| format!("{drawing}: {e}"))?;
     let before: Vec<String> = given.iter().map(|l| l.name.clone()).collect();
     let layers = stratify(given);
     eprintln!("before: {}", before.join(", "));
@@ -128,42 +104,12 @@ fn run(document: &str, out: &str, depth: Option<&str>) -> Result<(), String> {
             .join(", ")
     );
 
-    let shown: Vec<PsdLayer> = layers
-        .iter()
-        .map(|l| PsdLayer {
-            name: l.name.clone(),
-            left: l.left,
-            top: l.top,
-            pixels: l.pixels.clone(),
-        })
-        .collect();
-    let depths: Vec<PsdLayer> = layers
-        .iter()
-        .map(|l| {
-            let n = l.depth.width * l.depth.height;
-            let mut pixels = Image::new(l.depth.width, l.depth.height, 4);
-            for p in 0..n {
-                pixels.data[p * 4..p * 4 + 3].fill(l.depth.data[p]);
-                pixels.data[p * 4 + 3] = l.pixels.data[p * 4 + 3];
-            }
-            PsdLayer {
-                name: depth_layer_name(&l.name),
-                left: l.left,
-                top: l.top,
-                pixels,
-            }
-        })
-        .collect();
-    let group = PsdHiddenGroup {
-        name: DEPTH_GROUP,
-        layers: &depths,
-    };
-    let bytes = write_psd_with_hidden(
-        &shown,
-        Some(group),
-        picture.width,
-        picture.height,
-        PsdMode::Rgb,
-    );
-    std::fs::write(out, bytes).map_err(|e| format!("{out}: {e}"))
+    let mut stratified = depth_layers_package(&layers, package.width, package.height);
+    stratified.picture = package.picture;
+    stratified.source = package.source.take();
+    stratified.generator = std::mem::take(&mut package.generator);
+    stratified
+        .generator
+        .insert("stratified_by".into(), "see_through_stratify".into());
+    write_drawing(&stratified, out)
 }

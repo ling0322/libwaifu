@@ -17,17 +17,17 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! What a document's rig is made of, part by part:
+//! What a drawing's rig is made of, part by part, from a package (.waifu2d) or a PSD:
 //!
-//!     cargo run -p waifu2d --example rig_info -- drawing.psd
+//!     cargo run -p waifu2d --example rig_info -- drawing.waifu2d
 
 use waifu2d::rig::Rig;
 
 fn main() {
     let path = std::env::args()
         .nth(1)
-        .expect("usage: rig_info DRAWING.psd");
-    let rig = Rig::read_psd(&std::fs::read(&path).expect("read the document")).expect("rig it");
+        .expect("usage: rig_info DRAWING.waifu2d|DRAWING.psd");
+    let rig = Rig::read(&std::fs::read(&path).expect("read the drawing")).expect("rig it");
     println!(
         "{} x {}, face scale {:.3}",
         rig.width, rig.height, rig.face_scale

@@ -5,6 +5,9 @@ libwaifu. It takes an anime illustration apart into the layers it was drawn in -
 twenty-four of them, hair, face, eyes, clothing, what is held -- with what each hides drawn in, and
 stacks them by depth into a Photoshop document. The task is `img2layers`; the code is
 `waifu/src/see_through/`, and what it does is upstream's `inference/scripts/inference_psd.py`.
+The `img2layers` tool writes a package (`.waifu2d`, docs/waifu2d-package.md), waifu2d's own
+format, which keeps each part's depth and median depth and which layers are halves; it writes
+the Photoshop document when its output is named `.psd`.
 
 ## What is published
 
@@ -170,12 +173,13 @@ shows only when the near layer is hidden or moved. The rest that differs from up
   its colour, which where the near cluster reaches the part's edge brings the transparency around
   the part in, and leaves a faint ghost of it.
 
-From a terminal, a document is stratified into another, its depth kept in its group; one written
-before documents kept their depth is read with its depth document:
+From a terminal, a drawing is stratified into another, a package or a document as the names say,
+its depth kept; a document written before documents kept their depth is read with its depth
+document:
 
 ```bash
 cargo run --release -p waifu-tools --bin see_through_stratify -- \
-    picture.psd stratified.psd [depth.psd]
+    picture.waifu2d stratified.waifu2d [depth.psd]
 ```
 
 On a Hatsune Miku bust with a V collar it cut only `topwear`, its far eighth -- the collar's back,

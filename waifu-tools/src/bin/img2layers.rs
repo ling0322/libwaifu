@@ -17,29 +17,34 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! Takes a picture apart into a layered Photoshop document, as the app's img2layers does.
+//! Takes a picture apart into a drawing in layers, as the app's img2layers does.
 //!
 //! ```text
-//! cargo run --release -p waifu-tools --bin img2layers -- models/see-through.yaml picture.png out.psd
+//! cargo run --release -p waifu-tools --bin img2layers -- models/see-through.yaml picture.png out.waifu2d
 //! ```
 //!
-//! The document carries each part's depth in a hidden group (`depth/<tag>`), which is what
-//! `see_through_stratify` and the waifu2d page read. `<out>.layers/` gets a PNG of every part,
-//! numbered bottom first as the app numbers them (`00-<tag>.png` is the lowest), and a list of them
-//! in `.img2layers`. A rerun removes the PNGs that list names and nothing else, so a PNG somebody
-//! put there survives -- unless it has a name this run writes itself.
+//! `out.waifu2d` is a package (docs/waifu2d-package.md), what waifu2d reads: every part with its
+//! depth and its median depth, where the picture is on the canvas, the picture, and how it was
+//! made. `out.psd` is the Photoshop document this wrote before, each part's depth in a hidden
+//! group (`depth/<tag>`), and with it `<out>.layers/`, a PNG of every part numbered bottom first
+//! as the app numbers them (`00-<tag>.png` is the lowest) and a list of them in `.img2layers`. A
+//! rerun removes the PNGs that list names and nothing else, so a PNG somebody put there survives
+//! -- unless it has a name this run writes itself.
 //!
 //! Handwear, eyes and ears are split into a left and a right by default, as the rig wants -- unlike
 //! the app, whose box starts off -- and `no-pairs` keeps them whole. `seed=N` is 0 unless named;
 //! `steps=N`, `depth-steps=N` and `resolution=N` are the model's own unless named.
 
+use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use waifu::see_through::{Image, Rgba, SeeThrough, SeeThroughOptions, SeeThroughProgress};
 use waifu::{Device, Manifest};
+use waifu_tools::drawing::{decomposition_package, Format};
 
-const USAGE: &str = "usage: img2layers MODEL.yaml PICTURE.png OUT.psd [cpu|cuda|vulkan|metal] \\\n\
+const USAGE: &str = "usage: img2layers MODEL.yaml PICTURE.png OUT.waifu2d|OUT.psd \
+    [cpu|cuda|vulkan|metal] \\\n\
     \x20   [pairs (default)|no-pairs] [seed=N] [steps=N] [depth-steps=N] [resolution=N] \\\n\
     \x20   [lowvram|hybrid=GB]";
 
@@ -53,6 +58,8 @@ struct Arguments {
     model_path: String,
     picture_path: String,
     out_path: String,
+    /// What `out_path` names: a package or a Photoshop document.
+    format: Format,
     /// `None` for the best one there is.
     device: Option<Device>,
     options: SeeThroughOptions,
@@ -95,6 +102,7 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Arguments, String> {
     else {
         return Err(USAGE.to_string());
     };
+    let format = Format::of(&out_path)?;
     let device = match positional.next().as_deref() {
         None => None,
         Some("cpu") => Some(Device::Cpu),
@@ -115,9 +123,34 @@ fn parse_arguments(arguments: Vec<String>) -> Result<Arguments, String> {
         model_path,
         picture_path,
         out_path,
+        format,
         device,
         options,
     })
+}
+
+/// What a package says made it: this tool, the model, and every setting of the run.
+fn generator(model_path: &str, options: &SeeThroughOptions) -> BTreeMap<String, String> {
+    let model = Path::new(model_path)
+        .file_stem()
+        .map_or(model_path.into(), |s| s.to_string_lossy().into_owned());
+    let mut generator = BTreeMap::from([
+        ("name".to_string(), "img2layers".to_string()),
+        ("model".to_string(), model),
+        ("seed".to_string(), options.seed.to_string()),
+        ("split_pairs".to_string(), options.split_pairs.to_string()),
+    ]);
+    let optional = [
+        ("steps", options.steps.map(|v| v.to_string())),
+        ("depth_steps", options.depth_steps.map(|v| v.to_string())),
+        ("resolution", options.resolution.map(|v| v.to_string())),
+    ];
+    for (key, value) in optional {
+        if let Some(value) = value {
+            generator.insert(key.to_string(), value);
+        }
+    }
+    generator
 }
 
 fn steps(value: &str) -> Option<i32> {
@@ -187,6 +220,7 @@ fn main() -> Result<(), waifu::Error> {
         model_path,
         picture_path,
         out_path,
+        format,
         device,
         options,
     } = parse_arguments(arguments).unwrap_or_else(|message| {
@@ -223,6 +257,24 @@ fn main() -> Result<(), waifu::Error> {
         return Ok(());
     };
 
+    let (px, py, pw, ph) = decomposition.picture;
+    let placed = format!(
+        "{} parts on a {} canvas, the picture at {px},{py} {pw} by {ph}",
+        decomposition.parts.len(),
+        decomposition.canvas
+    );
+
+    if format == Format::Package {
+        let package =
+            decomposition_package(&decomposition, &picture, generator(&model_path, &options));
+        let bytes = package
+            .write()
+            .map_err(|e| waifu::Error::Model(format!("{out_path}: {e}")))?;
+        std::fs::write(&out_path, bytes)?;
+        eprintln!("wrote {out_path}: {placed}");
+        return Ok(());
+    }
+
     std::fs::write(&out_path, decomposition.to_psd())?;
 
     let layers_dir = PathBuf::from(&out_path).with_extension("layers");
@@ -241,12 +293,8 @@ fn main() -> Result<(), waifu::Error> {
         .map_err(|e| waifu::Error::Model(format!("{}: {e}", layers_dir.display())))?;
     }
 
-    let (px, py, pw, ph) = decomposition.picture;
     eprintln!(
-        "wrote {out_path}: {} parts on a {} canvas, the picture at {px},{py} {pw} by {ph}; \
-        a PNG a part in {}",
-        decomposition.parts.len(),
-        decomposition.canvas,
+        "wrote {out_path}: {placed}; a PNG a part in {}",
         layers_dir.display()
     );
     Ok(())
@@ -281,6 +329,40 @@ mod tests {
         assert_eq!(a.options.steps, Some(12));
         assert_eq!(a.options.depth_steps, Some(3));
         assert_eq!(a.options.resolution, Some(640));
+    }
+
+    #[test]
+    fn the_output_s_name_says_its_format() {
+        assert_eq!(
+            parse("m.yaml p.png o.waifu2d").unwrap().format,
+            Format::Package
+        );
+        assert_eq!(parse("m.yaml p.png o.psd").unwrap().format, Format::Psd);
+        // Said before a model is loaded, not after a run.
+        let error = parse("m.yaml p.png o.png").unwrap_err();
+        assert!(error.contains(".waifu2d package or a .psd"), "{error}");
+    }
+
+    #[test]
+    fn a_package_says_what_made_it() {
+        let options = SeeThroughOptions {
+            seed: 7,
+            steps: Some(12),
+            split_pairs: true,
+            ..Default::default()
+        };
+        let said = generator("models/see-through.yaml", &options);
+        let said: Vec<(&str, &str)> = said.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            said,
+            [
+                ("model", "see-through"),
+                ("name", "img2layers"),
+                ("seed", "7"),
+                ("split_pairs", "true"),
+                ("steps", "12"),
+            ]
+        );
     }
 
     #[test]
