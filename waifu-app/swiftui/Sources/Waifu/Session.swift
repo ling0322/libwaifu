@@ -441,7 +441,14 @@ final class Session {
     func load(_ job: Job) async {
         guard job.isDone, outputs[job.id] == nil else { return }
         let url = file(job.id, kind: job.kind)
-        guard let bytes = await Task.detached(operation: { try? Data(contentsOf: url) }).value else { return }
+        // A reading made before this run comes with its mouth shapes, read with it: both are handed
+        // over at once, for a player shown before them would play it with the drawing's mouth shut.
+        let lipsync = job.kind == "speech" && spoken[job.id] == nil ? lipsyncFile(job.id) : nil
+        guard let restored = await Task.detached(operation: { Self.restore(url, lipsync: lipsync) }).value,
+            outputs[job.id] == nil
+        else { return }
+        let bytes = restored.bytes
+        if let said = restored.spoken { spoken[job.id] = said }
         outputs[job.id] = bytes
         if job.kind == "image" { images[job.id] = NSImage(data: bytes) }
         if job.kind == "layers" {
@@ -449,18 +456,17 @@ final class Session {
             let png = await Task.detached { try? Data(contentsOf: composite) }.value
             images[job.id] = png.flatMap(NSImage.init(data:))
         }
-        // A reading made before this run: its mouth shapes from beside it, and its samples from
-        // the WAV, for the drawing to say it as it plays.
-        if job.kind == "speech", spoken[job.id] == nil {
-            let lipsync = lipsyncFile(job.id)
-            let said = await Task.detached { () -> Spoken? in
-                guard let data = try? Data(contentsOf: lipsync), let record = LipsyncRecord.read(data),
-                    let clip = try? Media.clip(from: url, seconds: .infinity)
-                else { return nil }
-                return record.spoken(clip)
-            }.value
-            if let said { spoken[job.id] = said }
-        }
+    }
+
+    /// What job's file at `url` holds, and -- given the `lipsync` file beside a reading -- what the
+    /// drawing says it with: the shapes from that file and the samples from the WAV. Nil where the
+    /// file cannot be read; no shapes where there are none beside it.
+    nonisolated static func restore(_ url: URL, lipsync: URL?) -> (bytes: Data, spoken: Spoken?)? {
+        guard let bytes = try? Data(contentsOf: url) else { return nil }
+        guard let lipsync, let data = try? Data(contentsOf: lipsync), let record = LipsyncRecord.read(data),
+            let clip = try? Media.clip(from: url, seconds: .infinity)
+        else { return (bytes, nil) }
+        return (bytes, record.spoken(clip))
     }
 
     /// Each layer of a picture taken apart, by its file, read off the disk.

@@ -736,6 +736,15 @@ struct ClipFrame: View {
     /// A text2speech reading, rather than a conversion.
     private var reading: Bool { job.kind == "speech" }
 
+    /// The most a reading's words take under its player, about eight lines.
+    static let wordsMost: CGFloat = 160
+
+    private var words: some View {
+        Text(said(job))
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     var body: some View {
         VStack(spacing: reading ? 10 : 16) {
             Group {
@@ -748,10 +757,14 @@ struct ClipFrame: View {
             // A reading's settings run to a paragraph, so it keeps them to the player's tooltip.
             .help(reading ? job.made?.parameters ?? "" : "")
             if reading {
-                // The words read, under the player, as tall as they are.
-                Text(said(job))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // The words read, under the player, as tall as they are -- up to `wordsMost`, past
+                // which they scroll in that much, so that a long reading leaves the buttons on screen.
+                OfferHeight(height: Self.wordsMost) {
+                    ViewThatFits(in: .vertical) {
+                        words
+                        ScrollView { words }
+                    }
+                }
             } else {
                 Text(said(job)).font(.title3).multilineTextAlignment(.center).textSelection(.enabled)
                 if let parameters = job.made?.parameters {
@@ -759,11 +772,27 @@ struct ClipFrame: View {
                 }
             }
         }
-        // A reading runs the width of the drawing over it and the buttons under it, and is as tall
-        // as the player and the words are: the drawing takes the rest.
+        // A reading runs the width of the drawing over it and the buttons under it, and is no taller
+        // than the player and the words are: the drawing takes the rest. Nothing in it grows, so in a
+        // short window it gives way -- the words scroll in less -- rather than push the buttons off.
         .frame(maxWidth: reading ? .infinity : 560)
-        .fixedSize(horizontal: false, vertical: reading)
         .task(id: job.id) { await session.load(job) }
+    }
+}
+
+/// Its content offered `height`, or less where it is itself offered less, and as tall as the
+/// content takes of that. Unlike `.frame(maxHeight:)`, which grows to its most where there is the
+/// room, words shorter than `height` keep to their own height, and nothing is left empty under them.
+struct OfferHeight: Layout {
+    var height: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let offered = min(height, proposal.height ?? height)
+        return subviews.first?.sizeThatFits(ProposedViewSize(width: proposal.width, height: offered)) ?? .zero
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
     }
 }
 

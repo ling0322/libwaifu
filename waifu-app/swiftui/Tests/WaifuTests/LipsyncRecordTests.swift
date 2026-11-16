@@ -73,6 +73,36 @@ final class LipsyncRecordTests: XCTestCase {
         XCTAssertEqual(clip.samples.count, samples.count)
     }
 
+    /// A reading made before this run is handed to its player with its shapes, never before them:
+    /// a player shown first would play it with the drawing's mouth shut.
+    func testAKeptReadingComesBackWithItsShapes() throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("waifu-restore-\(ProcessInfo.processInfo.processIdentifier)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let wav = folder.appendingPathComponent("a.wav")
+        let beside = folder.appendingPathComponent("a\(LipsyncRecord.suffix)")
+        let bytes = Media.wav([Float](repeating: 0.25, count: 2400), rate: 24000)
+        try bytes.write(to: wav)
+        let spoken = Spoken(
+            clip: clip, visemes: Visemes(values: [0, 6, 7], frameMilliseconds: 40),
+            loudness: Loudness(values: [-30, -20], frameMilliseconds: 10))
+        try XCTUnwrap(LipsyncRecord(spoken, audio: "a.wav")).json().write(to: beside)
+
+        let restored = try XCTUnwrap(Session.restore(wav, lipsync: beside))
+        XCTAssertEqual(restored.bytes, bytes)
+        let said = try XCTUnwrap(restored.spoken)
+        XCTAssertEqual(said.visemes, spoken.visemes)
+        XCTAssertEqual(said.loudness, spoken.loudness)
+        XCTAssertEqual(said.clip.samples.count, 2400)
+
+        // Without the file beside it, or asked for none, the reading is played all the same.
+        try FileManager.default.removeItem(at: beside)
+        XCTAssertNil(try XCTUnwrap(Session.restore(wav, lipsync: beside)).spoken)
+        XCTAssertNil(try XCTUnwrap(Session.restore(wav, lipsync: nil)).spoken)
+        XCTAssertNil(Session.restore(folder.appendingPathComponent("gone.wav"), lipsync: nil))
+    }
+
     func testAReadingWithNeitherKeepsNoFile() {
         XCTAssertNil(LipsyncRecord(Spoken(clip: clip, visemes: nil, loudness: nil), audio: "a.wav"))
     }
