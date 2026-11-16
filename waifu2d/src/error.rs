@@ -25,9 +25,6 @@ use std::fmt;
 pub enum Error {
     /// The document could not be read: "not a Photoshop document", "16-bit channels".
     Psd(String),
-    /// A package could not be read or written: "not a waifu2d package", "layers/003.png is
-    /// missing".
-    Package(String),
     /// Asked of something that cannot do it: read_rgba on a window, an API this build lacks.
     Unsupported(String),
     /// The GPU, or the API in front of it, refused.
@@ -41,7 +38,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Psd(m) | Error::Package(m) => write!(f, "{m}"),
+            Error::Psd(m) => write!(f, "{m}"),
             Error::Unsupported(m) => write!(f, "not supported: {m}"),
             Error::Gpu(m) => write!(f, "GPU: {m}"),
             Error::InvalidArgument(m) => write!(f, "invalid argument: {m}"),

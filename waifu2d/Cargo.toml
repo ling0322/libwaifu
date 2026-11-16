@@ -20,15 +20,6 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # MIT or Apache-2.0.
 unicode-normalization = "0.1"
 
-# A package, the drawing's own format (docs/waifu2d-package.md), is a zip of PNGs and an index.
-# zip (MIT) with nothing but deflate, which is what every other zip tool writes: no encryption,
-# no bzip2, zstd or lzma. Its deflate is flate2's, given the pure Rust backend (miniz_oxide, which
-# png already brings) rather than a C zlib. png (MIT or Apache-2.0) for the pictures in it, and
-# for the examples'.
-zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-png = "0.18"
-
 # Metal, through the objc2 bindings (MIT): the device, the pipelines, the layer the app hands
 # over. Nothing else on macOS needs Objective-C.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -66,6 +57,8 @@ objc2-quartz-core = { version = "0.3", default-features = false, features = [
 [dev-dependencies]
 # The Mac app's frames, recorded as JSON, for tests/parity.rs to read.
 serde_json = "1"
+# The examples' pictures.
+png = "0.18"
 
 [build-dependencies]
 cbindgen = { version = "0.29", default-features = false }

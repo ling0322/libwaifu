@@ -51,10 +51,7 @@ pub const WAIFU2D_ABI_VERSION_MAJOR: u32 = 1;
 /// 1.1: the mouth shapes and a reading said -- waifu2d_stage_set_viseme, waifu2d_stage_speak and
 /// the waifu2d_stage_speech_ functions, waifu2d_stage_silence. Provisional: they may change in a
 /// later minor, before any release has them.
-///
-/// 1.2: waifu2d_rig_open and waifu2d_rig_read take a package (`.waifu2d`,
-/// docs/waifu2d-package.md) as well as a Photoshop document, told apart by how it starts.
-pub const WAIFU2D_ABI_VERSION_MINOR: u32 = 2;
+pub const WAIFU2D_ABI_VERSION_MINOR: u32 = 1;
 
 /// (major << 16) | minor, as waifu2d_abi_version says it.
 pub const WAIFU2D_ABI_VERSION: u32 = (WAIFU2D_ABI_VERSION_MAJOR << 16) | WAIFU2D_ABI_VERSION_MINOR;
@@ -95,33 +92,31 @@ pub const WAIFU2D_RIG_EYE_COUNT: Waifu2dRigAttribute = 3;
 /// How many notes there are for waifu2d_rig_note.
 pub const WAIFU2D_RIG_NOTE_COUNT: Waifu2dRigAttribute = 4;
 
-/// Reads the drawing at `path` (UTF-8) and rigs it: a package (`.waifu2d`) or a Photoshop
-/// document, told apart by how the file starts rather than by its name -- a package since 1.2.
-/// Slow -- it reads every layer -- so call it off the UI thread. NULL, with waifu2d_last_error
-/// saying why, where it cannot.
+/// Reads the Photoshop document at `psd_path` (UTF-8) and rigs it. Slow -- it reads every layer
+/// -- so call it off the UI thread. NULL, with waifu2d_last_error saying why, where it cannot.
 #[no_mangle]
-pub unsafe extern "C" fn waifu2d_rig_open(path: *const c_char) -> *mut Waifu2dRig {
+pub unsafe extern "C" fn waifu2d_rig_open(psd_path: *const c_char) -> *mut Waifu2dRig {
     caught(ptr::null_mut(), || {
-        let path = match string_in(path, "path") {
+        let path = match string_in(psd_path, "psd_path") {
             Ok(path) => path,
             Err(why) => return fail(why, ptr::null_mut()),
         };
         match std::fs::read(&path) {
-            Ok(bytes) => rig_out(Rig::read(&bytes)),
+            Ok(bytes) => rig_out(Rig::read_psd(&bytes)),
             Err(error) => fail(format!("{path}: {error}"), ptr::null_mut()),
         }
     })
 }
 
-/// A drawing already in memory, `length` bytes at `bytes` -- a package or a Photoshop document,
-/// as waifu2d_rig_open takes -- read and rigged. The bytes are the caller's again once it returns.
+/// A Photoshop document already in memory, `length` bytes at `bytes`, read and rigged; as
+/// waifu2d_rig_open. The bytes are the caller's again once it returns.
 #[no_mangle]
 pub unsafe extern "C" fn waifu2d_rig_read(bytes: *const u8, length: usize) -> *mut Waifu2dRig {
     caught(ptr::null_mut(), || {
         if bytes.is_null() {
             return fail("bytes is NULL".into(), ptr::null_mut());
         }
-        rig_out(Rig::read(std::slice::from_raw_parts(bytes, length)))
+        rig_out(Rig::read_psd(std::slice::from_raw_parts(bytes, length)))
     })
 }
 

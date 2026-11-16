@@ -3,8 +3,7 @@
 **Status: reviewed. Implemented: the core, the C API, the CPU reference and Metal, and the Mac app
 moved onto them. Still to come: D3D11 and Vulkan, and the Windows app.**
 
-waifu2d moves a drawing in layers (a package, `.waifu2d`, as img2layers writes one --
-docs/waifu2d-package.md -- or a PSD, as See-through writes one): the eyes
+waifu2d moves a drawing in layers (a PSD, as img2layers or See-through writes one): the eyes
 blink, the head turns, the hair swings. Today it is written twice -- `waifu-app/swiftui`
 (`Rig.swift`, `RigMotion.swift`, `ClosedParts.swift`, `PSD.swift`, drawn by `RigMetal.swift`)
 and `waifu-app/wpf` (a C# port of the same, drawn by SkiaSharp on the CPU) -- and the two have
@@ -433,9 +432,8 @@ typedef int32_t Waifu2dRigAttribute;
 #define WAIFU2D_RIG_EYE_COUNT   3   /* int: eyes that blink, 0 to 2 */
 #define WAIFU2D_RIG_NOTE_COUNT  4   /* int */
 
-/* Slow: reads and rigs the whole drawing -- a package (.waifu2d, docs/waifu2d-package.md) or a
-   PSD, told apart by how it starts; a package since 1.2. Call it off the UI thread. */
-Waifu2dRig *waifu2d_rig_open(const char *path);
+/* Slow: reads and rigs the whole document. Call it off the UI thread. */
+Waifu2dRig *waifu2d_rig_open(const char *psd_path);
 Waifu2dRig *waifu2d_rig_read(const uint8_t *bytes, size_t length);
 /* A stage or a renderer that has it keeps it alive; the caller's handle may go at once. */
 void waifu2d_rig_free(Waifu2dRig *rig);
