@@ -105,6 +105,11 @@ for rather than heard as a click, and Stop silences it at once. A streaming read
 speed 1; at another, or on a device that cannot stream it, it is read whole, and the note over the
 output says why. What is kept is the whole reading either way, and its record says whether it was
 streamed, which Reuse turns the switch back to.
+A reading with mouth shapes (a voice with `cosyvoice3-visemes` attached) keeps them beside its WAV,
+as `<id>.visemes.json`: the `WaifuViseme` of every 40 ms and, from ABI 6.2, the dBFS of every
+10 ms. Played again later -- after the app has been quit, say -- the drawing over the player says
+it from that file as it did the first time. **Save…** writes it beside the saved WAV, named after
+it, for whatever plays the reading elsewhere. The format is `LipsyncRecord`'s, in `Lipsync.swift`.
 
 **speech2text** writes down what is said in a recording dropped on it, up to twenty minutes of
 anything this Mac can play, with Qwen3-ASR (docs/qwen3_asr.md); a longer one is refused rather than

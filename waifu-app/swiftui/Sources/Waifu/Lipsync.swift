@@ -35,6 +35,97 @@ struct Spoken: Sendable {
     var loudness: Loudness?
 }
 
+/// A reading's mouth shapes and loudness, kept beside its WAV as `<name>.visemes.json` so that the
+/// drawing says it again when it is played later, from the output or wherever it was saved:
+///
+///     {
+///       "version": 1,
+///       "audio": "waifu-20261115-101500.wav",
+///       "visemes": { "frame_ms": 40, "names": ["A", "E", "I", "O", "U", "@", "MBP", "REST"],
+///                    "values": [7, 7, 0, 6, ...] },
+///       "loudness": { "frame_ms": 10, "unit": "dBFS", "values": [-100, -42.5, ...] }
+///     }
+///
+/// `visemes.values` are `WaifuViseme`s, frame i the milliseconds [i, i + 1) * frame_ms of the
+/// audio, and `names` spells them in that order. `loudness` is libwaifu's, ABI 6.2, to 0.01 dB.
+/// Either is left out where the reading had none.
+struct LipsyncRecord: Codable, Equatable {
+    /// What the file beside a reading's WAV ends in, for `<name>.wav`: `<name>.visemes.json`.
+    static let suffix = ".visemes.json"
+    /// `WaifuViseme`, 0 to 7.
+    static let visemeNames = ["A", "E", "I", "O", "U", "@", "MBP", "REST"]
+
+    struct VisemeTrack: Codable, Equatable {
+        var frameMs: Int
+        var names: [String]
+        var values: [Int32]
+
+        enum CodingKeys: String, CodingKey {
+            case frameMs = "frame_ms"
+            case names, values
+        }
+    }
+
+    struct LoudnessTrack: Codable, Equatable {
+        var frameMs: Int
+        var unit: String
+        var values: [Float]
+
+        enum CodingKeys: String, CodingKey {
+            case frameMs = "frame_ms"
+            case unit, values
+        }
+    }
+
+    var version = 1
+    /// The WAV's file name, beside this file.
+    var audio: String
+    var visemes: VisemeTrack?
+    var loudness: LoudnessTrack?
+
+    /// The record of `spoken`, the reading in `audio`; nil where it has neither shapes nor loudness.
+    init?(_ spoken: Spoken, audio: String) {
+        guard spoken.visemes != nil || spoken.loudness != nil else { return nil }
+        self.audio = audio
+        visemes = spoken.visemes.map {
+            VisemeTrack(frameMs: $0.frameMilliseconds, names: Self.visemeNames, values: $0.values)
+        }
+        // To the hundredth of a dB: as finely as a mouth can follow, and a tenth of the digits.
+        loudness = spoken.loudness.map {
+            LoudnessTrack(
+                frameMs: $0.frameMilliseconds, unit: "dBFS",
+                values: $0.values.map { ($0 * 100).rounded() / 100 })
+        }
+    }
+
+    /// The same reading's record beside a WAV of another name.
+    func renamed(_ audio: String) -> LipsyncRecord {
+        var record = self
+        record.audio = audio
+        return record
+    }
+
+    /// The shapes and loudness again, for `clip`, the reading in `audio`.
+    func spoken(_ clip: AudioClip) -> Spoken {
+        Spoken(
+            clip: clip,
+            visemes: visemes.map { Visemes(values: $0.values, frameMilliseconds: $0.frameMs) },
+            loudness: loudness.map { Loudness(values: $0.values, frameMilliseconds: $0.frameMs) })
+    }
+
+    func json() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(self)
+    }
+
+    static func read(_ data: Data) -> LipsyncRecord? {
+        guard let record = try? JSONDecoder().decode(LipsyncRecord.self, from: data), record.version == 1
+        else { return nil }
+        return record
+    }
+}
+
 final class Lipsync: @unchecked Sendable {
     private struct Playing {
         var id: Int
