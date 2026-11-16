@@ -41,7 +41,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::closed_parts::{self, Drawing};
 use crate::geom::smooth;
 use crate::psd::PsdDocument;
-use crate::{Error, Point, Rect, RgbaImage, Size};
+use crate::{Error, Package, Point, Rect, RgbaImage, Size};
 
 /// A part, by its place in [`Rig::parts`] -- which is also its place in
 /// [`crate::render::Assets::parts`] and [`crate::Frame::offsets`]. A rig never changes, so neither
@@ -295,14 +295,50 @@ impl Rig {
             .map(|i| PartId(i as u32))
     }
 
-    /// Rigs a document: Rig.swift's `Rig.build`.
+    /// Rigs a Photoshop document: Rig.swift's `Rig.build`.
     pub fn build(document: &PsdDocument) -> Rig {
-        build(document)
+        let shown: Vec<Shown> = (document.layers.iter().filter(|l| l.visible))
+            .map(|l| Shown {
+                name: &l.name,
+                left: l.left,
+                top: l.top,
+                image: &l.image,
+                opacity: l.opacity,
+            })
+            .collect();
+        build(document.width, document.height, &shown)
     }
 
-    /// Reads a document and rigs it.
+    /// Rigs a package, as [`Rig::build`] does a Photoshop document of the same layers.
+    pub fn from_package(package: &Package) -> Rig {
+        let shown: Vec<Shown> = (package.layers.iter().filter(|l| l.visible))
+            .map(|l| Shown {
+                name: &l.name,
+                left: l.left,
+                top: l.top,
+                image: &l.image,
+                opacity: l.opacity,
+            })
+            .collect();
+        build(package.width, package.height, &shown)
+    }
+
+    /// Reads a Photoshop document and rigs it.
     pub fn read_psd(bytes: &[u8]) -> Result<Rig, Error> {
         Ok(Rig::build(&PsdDocument::read(bytes)?))
+    }
+
+    /// Reads a package (`.waifu2d`) and rigs it.
+    pub fn read_package(bytes: &[u8]) -> Result<Rig, Error> {
+        Ok(Rig::from_package(&Package::read(bytes)?))
+    }
+
+    /// Reads a drawing in either format, told apart by how it starts, and rigs it.
+    pub fn read(bytes: &[u8]) -> Result<Rig, Error> {
+        match Package::is_package(bytes) || bytes.starts_with(b"PK\x03\x04") {
+            true => Rig::read_package(bytes),
+            false => Rig::read_psd(bytes),
+        }
     }
 }
 
@@ -1257,21 +1293,30 @@ fn last<'a>(pieces: &'a [Piece], slot: &str, side: Option<Side>) -> Option<&'a P
         .find(|p| p.slot == slot && (side.is_none() || p.side == side))
 }
 
-/// What moves in `document`, and how. Anything it does not know is drawn as it is, with the head
-/// or the body by where it is.
-fn build(document: &PsdDocument) -> Rig {
-    let (width, height) = (f64::from(document.width), f64::from(document.height));
+/// A layer that is shown, whichever file it came from: what rigging reads of it.
+struct Shown<'a> {
+    name: &'a str,
+    left: i32,
+    top: i32,
+    image: &'a RgbaImage,
+    opacity: f64,
+}
+
+/// What moves in a `canvas_width` by `canvas_height` drawing of `layers`, bottom first, and how.
+/// Anything it does not know is drawn as it is, with the head or the body by where it is.
+fn build(canvas_width: u32, canvas_height: u32, layers: &[Shown]) -> Rig {
+    let (width, height) = (f64::from(canvas_width), f64::from(canvas_height));
     // Cleared of specks first, as Anime2.5DRig does, and trimmed to what is left above 16.
     let mut pieces: Vec<Piece> = Vec::new();
-    for layer in document.layers.iter().filter(|l| l.visible) {
+    for layer in layers {
         let mut image = layer.image.clone();
         Pixels::denoise(&mut image, 16, 40);
         let Some(bounds) = Pixels::bounds(&image, 16) else {
             continue;
         };
-        let (slot, side) = slot_of(&layer.name);
+        let (slot, side) = slot_of(layer.name);
         pieces.push(Piece {
-            name: layer.name.clone(),
+            name: layer.name.to_string(),
             slot,
             side,
             left: i64::from(layer.left) + bounds.min_x() as i64,
@@ -1490,9 +1535,9 @@ fn build(document: &PsdDocument) -> Rig {
             });
             let phys = slot.and_then(|s| s.phys);
             let mesh = if phys == Some(Phys::Hair) && head.is_some() {
-                RigMesh::hair_grid(rect, document.width)
+                RigMesh::hair_grid(rect, canvas_width)
             } else {
-                RigMesh::grid(rect, document.width, phys.is_some())
+                RigMesh::grid(rect, canvas_width, phys.is_some())
             };
             let mut swing = None;
             if let Some(phys) = phys {
@@ -1591,8 +1636,8 @@ fn build(document: &PsdDocument) -> Rig {
     };
     Rig {
         id: next_rig_id(),
-        width: document.width,
-        height: document.height,
+        width: canvas_width,
+        height: canvas_height,
         parts,
         eyes,
         anchors,

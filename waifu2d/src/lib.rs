@@ -17,11 +17,12 @@
 // DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-//! waifu2d: a drawing in layers -- a PSD, as img2layers or See-through writes one -- rigged to
-//! move, the way Anime2.5DRig (https://github.com/852wa/Anime2.5DRig, MIT, Copyright (c) 2026
-//! hakoniwa) rigs one, and drawn by whichever GPU API the platform has.
+//! waifu2d: a drawing in layers -- a package (`.waifu2d`, [`package`]) as img2layers writes one,
+//! or a PSD -- rigged to move, the way Anime2.5DRig (https://github.com/852wa/Anime2.5DRig, MIT,
+//! Copyright (c) 2026 hakoniwa) rigs one, and drawn by whichever GPU API the platform has.
 //!
-//! Everything but the window is here, once, for every app: reading the document ([`psd`]),
+//! Everything but the window is here, once, for every app: reading the drawing ([`package`],
+//! [`psd`]),
 //! rigging it ([`rig`]), moving it ([`motion`]), what an app's page does with the pointer and
 //! the clock ([`stage`]), and drawing it ([`render`]) through a [`render::Backend`] per API --
 //! Metal, Direct3D 11, Vulkan, and a CPU reference the others are held to. Apps reach it through
@@ -34,15 +35,18 @@ pub mod error;
 pub mod geom;
 pub mod motion;
 pub mod mouths;
+pub mod package;
 pub mod psd;
 pub mod render;
 pub mod rig;
 pub mod rng;
 pub mod speech;
 pub mod stage;
+mod yaml;
 
 pub use error::Error;
 pub use geom::{Point, Rect, RgbaImage, Size};
 pub use motion::{Controls, Frame, Motion, Pose, Switches};
+pub use package::Package;
 pub use rig::{PartId, Rig};
 pub use stage::Stage;
